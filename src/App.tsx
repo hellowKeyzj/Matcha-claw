@@ -12,7 +12,6 @@ import { TooltipProvider } from '@/components/ui/tooltip';
 import { useSettingsStore } from './stores/settings';
 import { useGatewayStore } from './stores/gateway';
 import { useProviderStore } from './stores/providers';
-import { applyGatewayTransportPreference } from './lib/api-client';
 import { hostApiFetch } from './lib/host-api';
 import { useDelayedFlag } from './lib/use-delayed-flag';
 import { TeamsRuntimeDaemon } from './components/runtime/TeamsRuntimeDaemon';
@@ -230,10 +229,6 @@ function App() {
       root.classList.add(theme);
     }
   }, [theme]);
-
-  useEffect(() => {
-    applyGatewayTransportPreference();
-  }, []);
 
   return (
     <ErrorBoundary>

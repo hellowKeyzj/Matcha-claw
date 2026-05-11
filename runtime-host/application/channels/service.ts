@@ -1,26 +1,25 @@
-import type { OpenClawBridge } from '../../openclaw-bridge';
-import type { ParentShellAction, ParentTransportUpstreamPayload } from '../../api/dispatch/parent-transport';
+import {
+  accepted,
+  applicationResponse,
+  badRequest,
+  ok,
+  type ApplicationResponse,
+} from '../common/application-response';
+import type { RuntimeClockPort } from '../common/runtime-ports';
+import type { GatewayChannelPort } from '../gateway/gateway-runtime-port';
+import type { ParentShellPort } from '../runtime-host/parent-shell-port';
 import { channelUsesLoginSession } from './channel-activation-strategy';
-
-type LocalDispatchResponse = {
-  status: number;
-  data: unknown;
-};
+import type { ChannelJobPort } from './channel-jobs';
+import type { ChannelConfigPort } from './channel-runtime';
+import type { ChannelLoginSessionService } from './channel-login-session-service';
 
 export interface ChannelServiceDeps {
-  readonly openclawBridge: Pick<
-    OpenClawBridge,
-    'channelsStatus' | 'channelsConnect' | 'channelsDisconnect' | 'channelsRequestQr'
-  >;
-  readonly listConfiguredChannels: () => Promise<unknown>;
-  readonly validateChannelConfig: (channelType: string) => Promise<Record<string, unknown>>;
-  readonly validateChannelCredentials: (channelType: string, config: Record<string, unknown>) => Promise<Record<string, unknown>>;
-  readonly requestParentShellAction: (action: ParentShellAction, payload?: unknown) => Promise<ParentTransportUpstreamPayload>;
-  readonly mapParentTransportResponse: (upstream: ParentTransportUpstreamPayload) => LocalDispatchResponse;
-  readonly saveChannelConfig: (payload: unknown) => Promise<void>;
-  readonly setChannelEnabled: (channelType: string, enabled: boolean) => Promise<void>;
-  readonly getChannelFormValues: (channelType: string, accountId?: string) => Promise<unknown>;
-  readonly deleteChannelConfig: (channelType: string) => Promise<void>;
+  readonly gateway: GatewayChannelPort;
+  readonly channelConfig: ChannelConfigPort;
+  readonly parentShell: ParentShellPort;
+  readonly loginSessions: Pick<ChannelLoginSessionService, 'start' | 'cancel'>;
+  readonly jobs: ChannelJobPort;
+  readonly clock: RuntimeClockPort;
 }
 
 function isRecord(value: unknown): value is Record<string, any> {
@@ -28,33 +27,90 @@ function isRecord(value: unknown): value is Record<string, any> {
 }
 
 export class ChannelService {
+  private snapshotValue: unknown = null;
+  private snapshotReady = false;
+  private snapshotError: string | null = null;
+  private snapshotUpdatedAt: number | null = null;
+  private snapshotRefreshTask: Promise<unknown> | null = null;
+
   constructor(private readonly deps: ChannelServiceDeps) {}
 
-  private async restartGateway(): Promise<LocalDispatchResponse> {
-    const restartResponse = await this.deps.requestParentShellAction('gateway_restart');
+  async restartGateway(): Promise<ApplicationResponse> {
+    const restartResponse = await this.deps.parentShell.request('gateway_restart');
     if (!restartResponse.success) {
-      return {
-        status: restartResponse.status,
-        data: { success: false, error: restartResponse.error.message },
-      };
+      return applicationResponse(restartResponse.status, { success: false, error: restartResponse.error.message });
     }
+    return applicationResponse(restartResponse.status, { success: true });
+  }
+
+  async activateDirect(payload: unknown): Promise<ApplicationResponse> {
+    await this.deps.channelConfig.saveChannelConfig(payload);
+    return await this.restartGateway();
+  }
+
+  async setEnabledDirect(channelType: string, enabled: boolean): Promise<ApplicationResponse> {
+    await this.deps.channelConfig.setChannelEnabled(channelType, enabled);
+    return await this.restartGateway();
+  }
+
+  async deleteConfigDirect(channelType: string): Promise<ApplicationResponse> {
+    await this.deps.channelConfig.deleteChannelConfig(channelType);
+    return await this.restartGateway();
+  }
+
+  snapshot() {
+    void this.refreshSnapshotInBackground();
     return {
-      status: restartResponse.status,
-      data: { success: true },
+      success: true,
+      snapshot: this.snapshotValue,
+      ready: this.snapshotReady,
+      refreshing: this.snapshotRefreshTask !== null,
+      updatedAt: this.snapshotUpdatedAt,
+      error: this.snapshotError,
     };
   }
 
-  async snapshot() {
-    return {
-      success: true,
-      snapshot: await this.deps.openclawBridge.channelsStatus(true),
-    };
+  private refreshSnapshotInBackground(): Promise<unknown> {
+    if (this.snapshotRefreshTask) {
+      return this.snapshotRefreshTask;
+    }
+    const task = this.refreshSnapshot()
+      .catch((error) => {
+        return {
+          success: false,
+          error: error instanceof Error ? error.message : String(error),
+        };
+      })
+      .finally(() => {
+        if (this.snapshotRefreshTask === task) {
+          this.snapshotRefreshTask = null;
+        }
+      });
+    this.snapshotRefreshTask = task;
+    return task;
+  }
+
+  async refreshSnapshot() {
+    try {
+      this.snapshotValue = await this.deps.gateway.channelsStatus(true);
+      this.snapshotReady = true;
+      this.snapshotError = null;
+      this.snapshotUpdatedAt = this.deps.clock.nowMs();
+      return {
+        success: true,
+        snapshot: this.snapshotValue,
+        updatedAt: this.snapshotUpdatedAt,
+      };
+    } catch (error) {
+      this.snapshotError = error instanceof Error ? error.message : String(error);
+      throw error;
+    }
   }
 
   async configured() {
     return {
       success: true,
-      channels: await this.deps.listConfiguredChannels(),
+      channels: await this.deps.channelConfig.listConfiguredChannels(),
     };
   }
 
@@ -63,7 +119,7 @@ export class ChannelService {
     const channelType = typeof body.channelType === 'string' ? body.channelType : '';
     return {
       success: true,
-      ...(await this.deps.validateChannelConfig(channelType)),
+      ...(await this.deps.channelConfig.validateChannelConfig(channelType)),
     };
   }
 
@@ -73,7 +129,7 @@ export class ChannelService {
     const config = isRecord(body.config) ? body.config : {};
     return {
       success: true,
-      ...(await this.deps.validateChannelCredentials(channelType, config)),
+      ...(await this.deps.channelConfig.validateChannelCredentials(channelType, config)),
     };
   }
 
@@ -81,121 +137,93 @@ export class ChannelService {
     const body = isRecord(payload) ? payload : {};
     const channelType = typeof body.channelType === 'string' ? body.channelType : '';
     if (!channelType) {
-      return {
-        status: 400,
-        data: { success: false, error: 'channelType is required' },
-      } satisfies LocalDispatchResponse;
+      return badRequest('channelType is required');
     }
 
     if (!channelUsesLoginSession(channelType)) {
-      await this.deps.saveChannelConfig(payload);
-      return await this.restartGateway();
+      return accepted(this.deps.jobs.submitActivateDirectChannel(payload));
     }
 
-    const shellResponse = await this.deps.requestParentShellAction('channel_session_start', {
+    const result = await this.deps.loginSessions.start({
       channelType,
       ...(typeof body.accountId === 'string' ? { accountId: body.accountId } : {}),
       ...(isRecord(body.config) ? { config: body.config } : {}),
     });
-    return this.deps.mapParentTransportResponse(shellResponse);
+    return ok({ success: true, ...result });
   }
 
   async cancelSession(payload: unknown) {
     const body = isRecord(payload) ? payload : {};
     const channelType = typeof body.channelType === 'string' ? body.channelType : '';
     if (!channelType) {
-      return {
-        status: 400,
-        data: { success: false, error: 'channelType is required' },
-      } satisfies LocalDispatchResponse;
+      return badRequest('channelType is required');
     }
     if (!channelUsesLoginSession(channelType)) {
-      return {
-        status: 400,
-        data: { success: false, error: `channel ${channelType} does not use login session` },
-      } satisfies LocalDispatchResponse;
+      return badRequest(`channel ${channelType} does not use login session`);
     }
 
-    const shellResponse = await this.deps.requestParentShellAction('channel_session_cancel', {
-      channelType,
-    });
-    return this.deps.mapParentTransportResponse(shellResponse);
+    await this.deps.loginSessions.cancel(channelType);
+    return ok({ success: true });
   }
 
   async setEnabled(payload: unknown) {
     const body = isRecord(payload) ? payload : {};
     const channelType = typeof body.channelType === 'string' ? body.channelType : '';
     if (!channelType) {
-      return {
-        status: 400,
-        data: { success: false, error: 'channelType is required' },
-      } satisfies LocalDispatchResponse;
+      return badRequest('channelType is required');
     }
-    await this.deps.setChannelEnabled(channelType, body.enabled === true);
-    return await this.restartGateway();
+    return accepted(this.deps.jobs.submitSetChannelEnabled({
+      channelType,
+      enabled: body.enabled === true,
+    }));
   }
 
   async connect(payload: unknown) {
     const body = isRecord(payload) ? payload : {};
     const channelId = typeof body.channelId === 'string' ? body.channelId : '';
     if (!channelId) {
-      return {
-        status: 400,
-        data: { success: false, error: 'channelId is required' },
-      } satisfies LocalDispatchResponse;
+      return badRequest('channelId is required');
     }
-    await this.deps.openclawBridge.channelsConnect(channelId);
-    return {
-      status: 200,
-      data: { success: true },
-    } satisfies LocalDispatchResponse;
+    await this.deps.gateway.channelsConnect(channelId);
+    await this.refreshSnapshot();
+    return ok({ success: true });
   }
 
   async disconnect(payload: unknown) {
     const body = isRecord(payload) ? payload : {};
     const channelId = typeof body.channelId === 'string' ? body.channelId : '';
     if (!channelId) {
-      return {
-        status: 400,
-        data: { success: false, error: 'channelId is required' },
-      } satisfies LocalDispatchResponse;
+      return badRequest('channelId is required');
     }
-    await this.deps.openclawBridge.channelsDisconnect(channelId);
-    return {
-      status: 200,
-      data: { success: true },
-    } satisfies LocalDispatchResponse;
+    await this.deps.gateway.channelsDisconnect(channelId);
+    await this.refreshSnapshot();
+    return ok({ success: true });
   }
 
   async requestQr(payload: unknown) {
     const body = isRecord(payload) ? payload : {};
     const channelType = typeof body.channelType === 'string' ? body.channelType : '';
     if (!channelType) {
-      return {
-        status: 400,
-        data: { success: false, error: 'channelType is required' },
-      } satisfies LocalDispatchResponse;
+      return badRequest('channelType is required');
     }
-    const result = await this.deps.openclawBridge.channelsRequestQr(channelType);
-    return {
-      status: 200,
-      data: {
-        success: true,
-        qrCode: typeof result?.qrCode === 'string' ? result.qrCode : '',
-        sessionId: typeof result?.sessionId === 'string' ? result.sessionId : '',
-      },
-    } satisfies LocalDispatchResponse;
+    const result = await this.deps.gateway.channelsRequestQr(channelType);
+    await this.refreshSnapshot();
+    const qrResult = isRecord(result) ? result : {};
+    return ok({
+      success: true,
+      qrCode: typeof qrResult.qrCode === 'string' ? qrResult.qrCode : '',
+      sessionId: typeof qrResult.sessionId === 'string' ? qrResult.sessionId : '',
+    });
   }
 
   async getConfigValues(channelType: string, accountId?: string) {
     return {
       success: true,
-      values: await this.deps.getChannelFormValues(channelType, accountId),
+      values: await this.deps.channelConfig.getChannelFormValues(channelType, accountId),
     };
   }
 
-  async deleteConfig(channelType: string) {
-    await this.deps.deleteChannelConfig(channelType);
-    return await this.restartGateway();
+  deleteConfig(channelType: string) {
+    return accepted(this.deps.jobs.submitDeleteChannelConfig({ channelType }));
   }
 }

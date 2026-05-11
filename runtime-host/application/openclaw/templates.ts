@@ -1,7 +1,6 @@
-import { existsSync, readFileSync, readdirSync } from 'node:fs';
-import { homedir } from 'node:os';
-import { join, resolve } from 'node:path';
-import { expandHomePath } from '../../api/storage/paths';
+import { join } from 'node:path';
+import type { RuntimeFileSystemPort } from '../common/runtime-ports';
+import type { OpenClawEnvironmentRepository } from './openclaw-environment-repository';
 
 type TemplateFileName = 'AGENTS.md' | 'SOUL.md' | 'TOOLS.md' | 'IDENTITY.md' | 'USER.md';
 
@@ -134,29 +133,16 @@ function normalizeOrder(value: unknown): number | undefined {
   return value;
 }
 
-function resolveCandidates() {
-  const cwd = process.cwd();
-  const resourcesPath = typeof process.resourcesPath === 'string' && process.resourcesPath.trim().length > 0
-    ? process.resourcesPath.trim()
-    : '';
-  const candidates = [
-    process.env.MATCHACLAW_SUBAGENT_TEMPLATE_DIR,
-    resourcesPath ? join(resourcesPath, 'resources', 'subagent-templates') : '',
-    join(cwd, 'src', 'features', 'subagents', 'templates'),
-    join(homedir(), '.openclaw', 'agency-agents'),
-  ]
-    .filter((value) => typeof value === 'string' && value.trim().length > 0)
-    .map((value) => resolve(expandHomePath(value)));
-  return [...new Set(candidates)];
-}
-
-function readTemplateCatalogMetadata(sourceDir: string): TemplateCatalogMetadata {
+async function readTemplateCatalogMetadata(
+  fileSystem: RuntimeFileSystemPort,
+  sourceDir: string,
+): Promise<TemplateCatalogMetadata> {
   const catalogPath = join(sourceDir, 'catalog.json');
-  if (!existsSync(catalogPath)) {
+  if (!(await fileSystem.exists(catalogPath))) {
     return { categories: [], templates: {} };
   }
   try {
-    const rawText = readFileSync(catalogPath, 'utf8');
+    const rawText = await fileSystem.readTextFile(catalogPath);
     const parsed = JSON.parse(rawText);
     if (!isRecord(parsed)) {
       return { categories: [], templates: {} };
@@ -230,16 +216,23 @@ function deriveTemplateCategories(
   return [...fromMetadata, ...fallback];
 }
 
-function listTemplatesFromSource(sourceDir: string): TemplateCatalogEntry[] {
-  const metadata = readTemplateCatalogMetadata(sourceDir);
-  const entries = readdirSync(sourceDir, { withFileTypes: true })
-    .filter((entry) => entry.isDirectory())
+async function listTemplatesFromSource(
+  fileSystem: RuntimeFileSystemPort,
+  sourceDir: string,
+): Promise<TemplateCatalogEntry[]> {
+  const metadata = await readTemplateCatalogMetadata(fileSystem, sourceDir);
+  const dirEntries = await fileSystem.listDirectory(sourceDir);
+  const entries = dirEntries
+    .filter((entry) => entry.isDirectory)
     .map((entry) => entry.name);
   const templates: TemplateCatalogEntry[] = [];
 
   for (const id of entries) {
     const templateDir = join(sourceDir, id);
-    const files = TEMPLATE_REQUIRED_FILES.filter((fileName) => existsSync(join(templateDir, fileName)));
+    const fileChecks = await Promise.all(TEMPLATE_REQUIRED_FILES.map(async (fileName) => (
+      (await fileSystem.exists(join(templateDir, fileName))) ? fileName : null
+    )));
+    const files = fileChecks.filter((fileName): fileName is TemplateFileName => Boolean(fileName));
     if (files.length === 0) {
       continue;
     }
@@ -248,9 +241,8 @@ function listTemplatesFromSource(sourceDir: string): TemplateCatalogEntry[] {
     const agentsPath = join(templateDir, 'AGENTS.md');
     const fallbackName = toDisplayNameFromSlug(id) || id;
     const templateMetadata = metadata.templates[id];
-
-    const identityContent = existsSync(identityPath) ? readFileSync(identityPath, 'utf8') : '';
-    const agentsContent = existsSync(agentsPath) ? readFileSync(agentsPath, 'utf8') : '';
+    const identityContent = await fileSystem.exists(identityPath) ? await fileSystem.readTextFile(identityPath) : '';
+    const agentsContent = await fileSystem.exists(agentsPath) ? await fileSystem.readTextFile(agentsPath) : '';
     const identity = parseIdentityMetadata(identityContent, fallbackName);
     const summary = identity.summary ?? getFirstBodyLine(agentsContent);
 
@@ -277,8 +269,12 @@ function listTemplatesFromSource(sourceDir: string): TemplateCatalogEntry[] {
   });
 }
 
-function readTemplateDetailFromSource(sourceDir: string, templateId: string): SubagentTemplateDetail | undefined {
-  const templates = listTemplatesFromSource(sourceDir);
+async function readTemplateDetailFromSource(
+  fileSystem: RuntimeFileSystemPort,
+  sourceDir: string,
+  templateId: string,
+): Promise<SubagentTemplateDetail | undefined> {
+  const templates = await listTemplatesFromSource(fileSystem, sourceDir);
   const base = templates.find((item) => item.id === templateId);
   if (!base) {
     return undefined;
@@ -287,10 +283,10 @@ function readTemplateDetailFromSource(sourceDir: string, templateId: string): Su
   const fileContents: Partial<Record<TemplateFileName, string>> = {};
   for (const fileName of TEMPLATE_REQUIRED_FILES) {
     const filePath = join(templateDir, fileName);
-    if (!existsSync(filePath)) {
+    if (!(await fileSystem.exists(filePath))) {
       continue;
     }
-    fileContents[fileName] = readFileSync(filePath, 'utf8');
+    fileContents[fileName] = await fileSystem.readTextFile(filePath);
   }
   return {
     sourceDir,
@@ -302,16 +298,21 @@ function readTemplateDetailFromSource(sourceDir: string, templateId: string): Su
 }
 
 export class SubagentTemplateService {
-  listCatalog(): SubagentTemplateCatalogResult {
-    const candidates = resolveCandidates();
+  constructor(
+    private readonly environment: OpenClawEnvironmentRepository,
+    private readonly fileSystem: RuntimeFileSystemPort,
+  ) {}
+
+  async listCatalog(): Promise<SubagentTemplateCatalogResult> {
+    const candidates = this.environment.getSubagentTemplateSourceCandidates();
     for (const candidate of candidates) {
-      if (!existsSync(candidate)) {
+      if (!(await this.fileSystem.exists(candidate))) {
         continue;
       }
       try {
-        const templates = listTemplatesFromSource(candidate);
+        const templates = await listTemplatesFromSource(this.fileSystem, candidate);
         if (templates.length > 0) {
-          const metadata = readTemplateCatalogMetadata(candidate);
+          const metadata = await readTemplateCatalogMetadata(this.fileSystem, candidate);
           const categories = deriveTemplateCategories(templates, metadata.categories);
           return {
             sourceDir: candidate,
@@ -329,18 +330,18 @@ export class SubagentTemplateService {
     };
   }
 
-  getTemplate(templateIdRaw: unknown): SubagentTemplateDetail | null {
+  async getTemplate(templateIdRaw: unknown): Promise<SubagentTemplateDetail | null> {
     const templateId = typeof templateIdRaw === 'string' ? templateIdRaw.trim() : '';
     if (!templateId) {
       return null;
     }
-    const candidates = resolveCandidates();
+    const candidates = this.environment.getSubagentTemplateSourceCandidates();
     for (const sourceDir of candidates) {
-      if (!existsSync(sourceDir)) {
+      if (!(await this.fileSystem.exists(sourceDir))) {
         continue;
       }
       try {
-        const detail = readTemplateDetailFromSource(sourceDir, templateId);
+        const detail = await readTemplateDetailFromSource(this.fileSystem, sourceDir, templateId);
         if (detail) {
           return detail;
         }

@@ -7,6 +7,7 @@ import type {
 } from '../../shared/platform-runtime-contracts';
 import type { GatewayPluginStateLedger } from './state/gateway-plugin-state-ledger';
 import type { LocalPluginStateLedger } from './state/local-plugin-state-ledger';
+import type { RuntimeClockPort } from '../common/runtime-ports';
 
 function collectById(tools: ToolDefinition[]): Map<string, ToolDefinition> {
   const map = new Map<string, ToolDefinition>();
@@ -26,6 +27,7 @@ export class ToolReconciler implements ReconcilerPort {
     private readonly localLedger: LocalPluginStateLedger,
     private readonly toolRegistry: ToolRegistryPort,
     private readonly auditSink: AuditSinkPort,
+    private readonly clock: RuntimeClockPort,
   ) {}
 
   async reconcileTools(): Promise<ReconcileReport> {
@@ -63,7 +65,7 @@ export class ToolReconciler implements ReconcilerPort {
     if (missing.length > 0 || conflicts.length > 0) {
       await this.auditSink.append({
         type: 'tool.reconcile.alert',
-        ts: Date.now(),
+        ts: this.clock.nowMs(),
         payload: {
           missing: missing.map((tool) => tool.id),
           conflicts: conflicts.map((tool) => tool.id),

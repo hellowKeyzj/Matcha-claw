@@ -14,7 +14,7 @@ import {
   resolveAgentAvatarStyle,
   type AgentAvatarStyle,
 } from '@/lib/agent-avatar';
-import { hostGatewayRpc, hostOpenClawGetConfigDir } from '@/lib/host-api';
+import { hostApiFetch, hostOpenClawGetConfigDir } from '@/lib/host-api';
 import { fetchProviderSnapshot } from '@/lib/provider-accounts';
 import { buildSelectableProviderModels } from '@/lib/provider-models';
 import {
@@ -57,6 +57,7 @@ const DRAFT_RPC_TIMEOUT_BUFFER_MS = 10000;
 const CREATE_AGENT_RUNTIME_BARRIER_TIMEOUT_MS = 3000;
 const CREATE_AGENT_RUNTIME_BARRIER_POLL_INTERVAL_MS = 120;
 const CONFIG_DISPLAY_CACHE_TTL_MS = 1000;
+const SUBAGENT_SNAPSHOT_NOT_READY_RETRY_MS = 1200;
 const SUBAGENT_AVATAR_STORAGE_KEY = 'clawx-subagent-avatar-presentations';
 let workspaceFallbackRootCache: string | undefined;
 let workspaceFallbackRootTask: Promise<string | undefined> | null = null;
@@ -67,6 +68,7 @@ let configDisplayReadTask: Promise<ConfigDisplaySnapshot> | null = null;
 let configDisplayReadTaskSeq = 0;
 let configDisplayReadSeq = 0;
 let queuedLoadAgentsTask: Promise<void> | null = null;
+let agentsSnapshotRetryTimer: ReturnType<typeof setTimeout> | null = null;
 
 function buildDraftSessionKey(agentId: string): string {
   return `agent:${agentId}:subagent-draft`;
@@ -164,7 +166,39 @@ interface SubagentsState {
 }
 
 async function rpc<T>(method: string, params?: unknown, timeoutMs?: number): Promise<T> {
-  return await hostGatewayRpc<T>(method, params, timeoutMs);
+  const endpoint = resolveSubagentRuntimeEndpoint(method);
+  return await hostApiFetch<T>(endpoint, {
+    method: 'POST',
+    body: JSON.stringify(params ?? {}),
+    timeoutMs,
+  });
+}
+
+function resolveSubagentRuntimeEndpoint(method: string): string {
+  switch (method) {
+    case 'agents.list':
+      return '/api/subagents/list';
+    case 'config.get':
+      return '/api/subagents/config/get';
+    case 'config.set':
+      return '/api/subagents/config/set';
+    case 'agents.create':
+      return '/api/subagents/create';
+    case 'agents.update':
+      return '/api/subagents/update';
+    case 'agents.delete':
+      return '/api/subagents/delete';
+    case 'agents.files.get':
+      return '/api/subagents/files/get';
+    case 'agents.files.set':
+      return '/api/subagents/files/set';
+    case 'agents.files.list':
+      return '/api/subagents/files/list';
+    case 'agent.wait':
+      return '/api/subagents/agent-wait';
+    default:
+      throw new Error(`Unsupported subagent runtime method: ${method}`);
+  }
 }
 
 function getOptionalString(value: unknown): string | undefined {
@@ -330,6 +364,20 @@ function buildConfigDisplaySnapshot(configGetResult: ConfigGetResult | undefined
   };
 }
 
+function isSnapshotReady(result: { ready?: boolean } | undefined): boolean {
+  return result?.ready !== false;
+}
+
+function scheduleAgentsSnapshotRetry(loadAgents: () => Promise<void>): void {
+  if (agentsSnapshotRetryTimer) {
+    return;
+  }
+  agentsSnapshotRetryTimer = setTimeout(() => {
+    agentsSnapshotRetryTimer = null;
+    void loadAgents();
+  }, SUBAGENT_SNAPSHOT_NOT_READY_RETRY_MS);
+}
+
 function createEmptyConfigDisplaySnapshot(): ConfigDisplaySnapshot {
   return {
     byAgentId: new Map(),
@@ -362,6 +410,13 @@ async function readConfigForDisplay(options?: ReadConfigForDisplayOptions): Prom
   const task = (async () => {
     try {
       const configGetResult = await rpc<ConfigGetResult>('config.get', {});
+      if (!isSnapshotReady(configGetResult)) {
+        scheduleAgentsSnapshotRetry(() => useSubagentsStore.getState().loadAgents({ silent: true }));
+        if (configDisplayCache) {
+          return configDisplayCache.snapshot;
+        }
+        return createEmptyConfigDisplaySnapshot();
+      }
       const snapshot = buildConfigDisplaySnapshot(configGetResult);
       if (!configDisplayCache || requestSeq >= configDisplayCache.requestSeq) {
         configDisplayCache = {
@@ -1117,6 +1172,21 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
           rpc<AgentsListResult>('agents.list', {}),
           readConfigForDisplay(),
         ]);
+        if (!isSnapshotReady(result)) {
+          if (requestId !== latestLoadAgentsRequestId) {
+            return;
+          }
+          const current = get().agentsResource;
+          set({
+            agentsResource: createLoadingResourceState({
+              ...current,
+              hasLoadedOnce: current.hasLoadedOnce || current.data.length > 0,
+            }),
+            error: result.error ?? null,
+          });
+          scheduleAgentsSnapshotRetry(() => get().loadAgents({ silent: true }));
+          return;
+        }
         settlePendingDeletedAgentIds(collectRuntimeAgentIdSet(result));
         try {
           pruneStoredAvatarPresentations(result.agents.map((agent) => agent.id));

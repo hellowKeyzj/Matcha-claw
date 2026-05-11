@@ -32,15 +32,19 @@ export class ContextAssembler implements ContextAssemblerPort {
 
     let allowedTools = tools;
     if (this.policyEngine) {
+      const policyEngine = this.policyEngine;
       const decisions = await Promise.all(
-        tools.map(async (tool) => ({
-          toolId: tool.id,
-          ...(await this.policyEngine.authorizeTool({
-            toolId: tool.id,
-            action: 'execute',
-            sessionId: req.sessionId,
-          })),
-        })),
+        tools.map(async (tool) => {
+          const toolId = tool.id ?? '';
+          return {
+            toolId,
+            ...(await policyEngine.authorizeTool({
+              toolId,
+              action: 'execute',
+              sessionId: req.sessionId,
+            })),
+          };
+        }),
       );
       allowedTools = filterAllowedTools(tools, decisions);
     }

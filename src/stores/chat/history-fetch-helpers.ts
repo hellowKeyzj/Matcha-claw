@@ -1,5 +1,8 @@
-import { hostSessionLoad } from '@/lib/host-api';
-import type { SessionStateSnapshot } from '../../../runtime-host/shared/session-adapter-types';
+import { hostSessionLoad, waitForRuntimeJobResult } from '@/lib/host-api';
+import type {
+  SessionLoadResult,
+  SessionStateSnapshot,
+} from '../../../runtime-host/shared/session-adapter-types';
 import { resolveSessionThinkingLevelFromList } from './session-helpers';
 import type { ChatSession } from './types';
 
@@ -33,11 +36,16 @@ export async function fetchHistoryWindow(
 
   void limit;
 
-  const data = await hostSessionLoad({
+  const initial = await hostSessionLoad({
     sessionKey: requestedSessionKey,
   }, {
     timeoutMs,
   });
+  const data = initial.hydrationJob
+    ? await waitForRuntimeJobResult<SessionLoadResult>(initial.hydrationJob.id, {
+        timeoutMs,
+      })
+    : initial;
   return {
     snapshot: data.snapshot,
     thinkingLevel: resolveSessionThinkingLevelFromList(sessions, requestedSessionKey),

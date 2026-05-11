@@ -6,12 +6,11 @@ import type { HostApiContext } from './context';
 import { handleAppRoutes } from './routes/app';
 import { handleGatewayRoutes } from './routes/gateway';
 import { handleRuntimeHostInternalRoutes } from './routes/runtime-host-internal';
-import { handleRuntimeHostRoutes } from './routes/runtime-host';
+import { handleRuntimeHostProcessRoutes } from './routes/runtime-host-process';
 import { handleLogRoutes } from './routes/logs';
 import { handleFileRoutes } from './routes/files';
 import { handleDiagnosticsRoutes } from './routes/diagnostics';
 import { handleRuntimeHostProxyRoutes } from './routes/runtime-host-proxy';
-import { handleSkillRoutes } from './routes/skills';
 import { isMainOwnedRoute } from './route-boundary';
 import { requireJsonContentType, sendJson, setCorsHeaders } from './route-utils';
 
@@ -24,11 +23,10 @@ type RouteHandler = (
 
 const mainOwnedHandlers: RouteHandler[] = [
   handleRuntimeHostInternalRoutes,
-  handleRuntimeHostRoutes,
+  handleRuntimeHostProcessRoutes,
   handleAppRoutes,
   handleGatewayRoutes,
   handleFileRoutes,
-  handleSkillRoutes,
   handleDiagnosticsRoutes,
   handleLogRoutes,
 ];

@@ -11,18 +11,13 @@ const GATEWAY_EVENT_PATH = '/internal/runtime-host/gateway-events';
 type RuntimeHostShellAction =
   | 'shell_open_path'
   | 'gateway_restart'
+  | 'host_diagnostics_snapshot'
   | 'provider_oauth_start'
   | 'provider_oauth_cancel'
-  | 'provider_oauth_submit'
-  | 'channel_session_start'
-  | 'channel_session_cancel'
-  | 'license_get_gate'
-  | 'license_get_stored_key'
-  | 'license_validate'
-  | 'license_revalidate'
-  | 'license_clear';
+  | 'provider_oauth_submit';
 
 type RuntimeHostGatewayForwardEventName =
+  | 'gateway:lifecycle'
   | 'gateway:notification'
   | 'session:update'
   | 'gateway:channel-status'
@@ -84,20 +79,15 @@ function asRecord(value: unknown): Record<string, unknown> | null {
 function isShellAction(value: unknown): value is RuntimeHostShellAction {
   return value === 'shell_open_path'
     || value === 'gateway_restart'
+    || value === 'host_diagnostics_snapshot'
     || value === 'provider_oauth_start'
     || value === 'provider_oauth_cancel'
-    || value === 'provider_oauth_submit'
-    || value === 'channel_session_start'
-    || value === 'channel_session_cancel'
-    || value === 'license_get_gate'
-    || value === 'license_get_stored_key'
-    || value === 'license_validate'
-    || value === 'license_revalidate'
-    || value === 'license_clear';
+    || value === 'provider_oauth_submit';
 }
 
 function isGatewayForwardEventName(value: unknown): value is RuntimeHostGatewayForwardEventName {
-  return value === 'gateway:notification'
+  return value === 'gateway:lifecycle'
+    || value === 'gateway:notification'
     || value === 'session:update'
     || value === 'gateway:channel-status'
     || value === 'gateway:error';

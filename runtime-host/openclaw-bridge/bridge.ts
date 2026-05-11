@@ -1,8 +1,16 @@
 import type { GatewayConnectionStatePayload } from './client';
+import type {
+  GatewayCapabilitiesSnapshot,
+  GatewayMethodReadiness,
+} from './capabilities';
 import { buildGatewayChatSendParams } from '../shared/gateway-chat-send-params';
+import type { RunContext, ToolSource } from '../shared/platform-runtime-contracts';
 
-interface OpenClawGatewayClient {
+export interface OpenClawGatewayClient {
   ensureGatewayReady: (timeoutMs?: number) => Promise<void>;
+  ensureGatewayMethods: (methods: readonly string[], timeoutMs?: number) => Promise<GatewayMethodReadiness>;
+  inspectGatewayMethodReadiness: (methods: readonly string[], timeoutMs?: number) => Promise<GatewayMethodReadiness>;
+  readGatewayCapabilities: (timeoutMs?: number) => Promise<GatewayCapabilitiesSnapshot | null>;
   gatewayRpc: (method: string, params: unknown, timeoutMs?: number) => Promise<unknown>;
   isGatewayRunning: (timeoutMs?: number) => Promise<boolean>;
   readGatewayConnectionState: (timeoutMs?: number) => Promise<GatewayConnectionStatePayload>;
@@ -11,6 +19,9 @@ interface OpenClawGatewayClient {
 
 export interface OpenClawBridge {
   ensureGatewayReady: (timeoutMs?: number) => Promise<void>;
+  ensureGatewayMethods: (methods: readonly string[], timeoutMs?: number) => Promise<GatewayMethodReadiness>;
+  inspectGatewayMethodReadiness: (methods: readonly string[], timeoutMs?: number) => Promise<GatewayMethodReadiness>;
+  readGatewayCapabilities: (timeoutMs?: number) => Promise<GatewayCapabilitiesSnapshot | null>;
   gatewayRpc: (method: string, params?: unknown, timeoutMs?: number) => Promise<unknown>;
   chatSend: (params: Record<string, unknown>) => Promise<unknown>;
   channelsStatus: (probe?: boolean) => Promise<unknown>;
@@ -19,12 +30,12 @@ export interface OpenClawBridge {
   channelsRequestQr: (channelType: string) => Promise<unknown>;
   readGatewayConnectionState: () => Promise<GatewayConnectionStatePayload>;
   isGatewayRunning: () => Promise<boolean>;
-  platformInstallTool: (source: Record<string, unknown>) => Promise<{ toolId?: string; id?: string }>;
+  platformInstallTool: (source: ToolSource) => Promise<{ toolId?: string; id?: string }>;
   platformUninstallTool: (toolId: string) => Promise<void>;
   platformEnableTool: (toolId: string) => Promise<void>;
   platformDisableTool: (toolId: string) => Promise<void>;
   platformListToolsCatalog: () => Promise<unknown>;
-  platformStartRun: (context: Record<string, unknown>, eventTx?: unknown) => Promise<{ runId?: string; id?: string }>;
+  platformStartRun: (context: RunContext, eventTx?: unknown) => Promise<{ runId?: string; id?: string }>;
   platformAbortRun: (runId: string) => Promise<void>;
   securityPolicySync: (policy: unknown) => Promise<unknown>;
   securityAuditQueryFromUrl: (url: URL) => Promise<unknown>;
@@ -47,6 +58,9 @@ export interface OpenClawBridge {
 export function createOpenClawBridge(client: OpenClawGatewayClient): OpenClawBridge {
   return {
     ensureGatewayReady: (timeoutMs) => client.ensureGatewayReady(timeoutMs),
+    ensureGatewayMethods: (methods, timeoutMs) => client.ensureGatewayMethods(methods, timeoutMs),
+    inspectGatewayMethodReadiness: (methods, timeoutMs) => client.inspectGatewayMethodReadiness(methods, timeoutMs),
+    readGatewayCapabilities: (timeoutMs) => client.readGatewayCapabilities(timeoutMs),
     gatewayRpc: (method, params = {}, timeoutMs) => client.gatewayRpc(method, params, timeoutMs),
     chatSend: (params) => client.gatewayRpc('chat.send', buildGatewayChatSendParams({
       sessionKey: typeof params.sessionKey === 'string' ? params.sessionKey : '',

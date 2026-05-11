@@ -2,6 +2,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { createTestOpenClawEnvironmentRepository } from './helpers/runtime-system-environment';
+import { createTestRuntimeFileSystem } from './helpers/runtime-file-system';
 
 describe('subagent template service', () => {
   let workspaceDir: string;
@@ -9,6 +11,7 @@ describe('subagent template service', () => {
   let previousCwd: string;
   let previousResourcesPath: string | undefined;
   let previousTemplateDir: string | undefined;
+  const fileSystem = createTestRuntimeFileSystem();
 
   beforeEach(() => {
     vi.resetModules();
@@ -56,8 +59,13 @@ describe('subagent template service', () => {
     process.resourcesPath = packagedResourcesDir;
 
     const { SubagentTemplateService } = await import('../../runtime-host/application/openclaw/templates');
-    const service = new SubagentTemplateService();
-    const catalog = service.listCatalog();
+    const service = new SubagentTemplateService(
+      createTestOpenClawEnvironmentRepository({
+        resourcesPath: packagedResourcesDir,
+      }),
+      fileSystem,
+    );
+    const catalog = await service.listCatalog();
 
     expect(catalog.sourceDir).toBe(packagedTemplateRoot);
     expect(catalog.templates.map((template) => template.id)).toEqual(['packaged-template']);
@@ -70,8 +78,13 @@ describe('subagent template service', () => {
     delete (process as NodeJS.Process & { resourcesPath?: string }).resourcesPath;
 
     const { SubagentTemplateService } = await import('../../runtime-host/application/openclaw/templates');
-    const service = new SubagentTemplateService();
-    const catalog = service.listCatalog();
+    const service = new SubagentTemplateService(
+      createTestOpenClawEnvironmentRepository({
+        resourcesPath: null,
+      }),
+      fileSystem,
+    );
+    const catalog = await service.listCatalog();
 
     expect(catalog.sourceDir).toBe(workspaceTemplateRoot);
     expect(catalog.templates.map((template) => template.id)).toEqual(['workspace-template']);

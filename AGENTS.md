@@ -42,8 +42,8 @@ Standard dev commands are in `package.json` scripts and `README.md`. Key ones:
 - **Renderer/Main API boundary (important)**:
   - Renderer must use `src/lib/host-api.ts` and `src/lib/api-client.ts` as the single entry for backend calls.
   - Do not add new direct `window.electron.ipcRenderer.invoke(...)` calls in pages/components; expose them through host-api/api-client instead.
-  - Do not call Gateway HTTP endpoints directly from renderer (`fetch('http://127.0.0.1:18789/...')` etc.). Use Main-process proxy channels (`hostapi:fetch`, `gateway:httpProxy`) to avoid CORS/env drift.
-  - Transport policy is Main-owned and fixed as `WS -> HTTP -> IPC fallback`; renderer should not implement protocol switching UI/business logic.
+  - Do not call Gateway HTTP/RPC endpoints directly from renderer (`fetch('http://127.0.0.1:18789/...')`, `gateway:rpc`, etc.). Expose product behavior as runtime-host domain APIs and call them through `hostapi:fetch`.
+  - Transport policy is Main-owned and fixed as `runtime-host -> IPC fallback`; renderer should not implement protocol switching UI/business logic.
 - **Doc sync rule**: After any functional or architecture change, review `README.md`, `README.zh-CN.md`, and `README.ja-JP.md` for required updates; if behavior/flows/interfaces changed, update docs in the same PR/commit.
 
 ## 全局开发策略

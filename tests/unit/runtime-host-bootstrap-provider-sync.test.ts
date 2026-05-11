@@ -1,64 +1,94 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const hoisted = vi.hoisted(() => ({
-  readProviderStoreLocalMock: vi.fn(),
-  writeProviderStoreLocalMock: vi.fn(async () => {}),
-  saveProviderKeyToOpenClawMock: vi.fn(async () => {}),
-  removeProviderKeyFromOpenClawMock: vi.fn(async () => {}),
+  readProviderStoreMock: vi.fn(),
+  writeProviderStoreMock: vi.fn(async () => {}),
+  saveProviderKeyMock: vi.fn(async () => {}),
+  removeProviderKeyMock: vi.fn(async () => {}),
   setOpenClawDefaultModelMock: vi.fn(async () => {}),
   setOpenClawDefaultModelWithOverrideMock: vi.fn(async () => {}),
-  syncProviderConfigToOpenClawMock: vi.fn(async () => {}),
-  sanitizeOpenClawConfigMock: vi.fn(async () => {}),
-  syncBrowserModeToOpenClawMock: vi.fn(async () => {}),
-  syncGatewayTokenToConfigMock: vi.fn(async () => {}),
-  syncSessionIdleMinutesToOpenClawMock: vi.fn(async () => {}),
-  syncProxyConfigToOpenClawMock: vi.fn(async () => {}),
-  listConfiguredChannelsLocalMock: vi.fn(async () => []),
+  syncProviderConfigMock: vi.fn(async () => {}),
+  runtimeConfigSyncProxyMock: vi.fn(async () => {}),
+  runtimeConfigSyncGatewayTokenMock: vi.fn(async () => {}),
+  runtimeConfigSanitizeMock: vi.fn(async () => {}),
+  runtimeConfigSyncBrowserModeMock: vi.fn(async () => {}),
+  runtimeConfigSyncSessionIdleMinutesMock: vi.fn(async () => {}),
   reconcileConfiguredChannelPluginsForGatewayLaunchMock: vi.fn(async () => []),
+  cleanupStaleBuiltinExtensionsForGatewayLaunchMock: vi.fn(async () => []),
   ensureConfiguredManagedPluginsForGatewayLaunchMock: vi.fn(async () => []),
-  getAllSettingsLocalMock: vi.fn(async () => ({ browserMode: 'relay', gatewayToken: '' })),
-  setSettingValueLocalMock: vi.fn(async () => {}),
+  getAllSettingsMock: vi.fn(async () => ({ browserMode: 'relay', gatewayToken: '' })),
+  setSettingValueMock: vi.fn(async () => {}),
+  ensureManagedPluginInstalledMock: vi.fn(async () => {}),
+  submitLongTaskMock: vi.fn(),
   getOpenClawProviderKeyForTypeMock: vi.fn((type: string, id: string) => `${type}-${id}`),
-}));
-
-vi.mock('../../runtime-host/api/storage/provider-store', () => ({
-  readProviderStoreLocal: (...args: unknown[]) => hoisted.readProviderStoreLocalMock(...args),
-  writeProviderStoreLocal: (...args: unknown[]) => hoisted.writeProviderStoreLocalMock(...args),
-}));
-
-vi.mock('../../runtime-host/application/openclaw/openclaw-auth-profile-store', () => ({
-  saveProviderKeyToOpenClaw: (...args: unknown[]) => hoisted.saveProviderKeyToOpenClawMock(...args),
-  removeProviderKeyFromOpenClaw: (...args: unknown[]) => hoisted.removeProviderKeyFromOpenClawMock(...args),
-}));
-
-vi.mock('../../runtime-host/application/openclaw/openclaw-provider-config-service', () => ({
-  sanitizeOpenClawConfig: (...args: unknown[]) => hoisted.sanitizeOpenClawConfigMock(...args),
-  setOpenClawDefaultModel: (...args: unknown[]) => hoisted.setOpenClawDefaultModelMock(...args),
-  setOpenClawDefaultModelWithOverride: (...args: unknown[]) => hoisted.setOpenClawDefaultModelWithOverrideMock(...args),
-  syncProviderConfigToOpenClaw: (...args: unknown[]) => hoisted.syncProviderConfigToOpenClawMock(...args),
-  normalizeBrowserMode: vi.fn((value: unknown) => value ?? 'relay'),
-  syncBrowserModeToOpenClaw: (...args: unknown[]) => hoisted.syncBrowserModeToOpenClawMock(...args),
-  syncGatewayTokenToConfig: (...args: unknown[]) => hoisted.syncGatewayTokenToConfigMock(...args),
-  syncSessionIdleMinutesToOpenClaw: (...args: unknown[]) => hoisted.syncSessionIdleMinutesToOpenClawMock(...args),
-}));
-
-vi.mock('../../runtime-host/application/openclaw/openclaw-proxy-sync', () => ({
-  syncProxyConfigToOpenClaw: (...args: unknown[]) => hoisted.syncProxyConfigToOpenClawMock(...args),
-}));
-
-vi.mock('../../runtime-host/application/channels/channel-runtime', () => ({
-  listConfiguredChannelsLocal: (...args: unknown[]) => hoisted.listConfiguredChannelsLocalMock(...args),
-}));
-
-vi.mock('../../runtime-host/application/runtime-host/prelaunch-plugin-maintenance', () => ({
-  reconcileConfiguredChannelPluginsForGatewayLaunch: (...args: unknown[]) => hoisted.reconcileConfiguredChannelPluginsForGatewayLaunchMock(...args),
-  ensureConfiguredManagedPluginsForGatewayLaunch: (...args: unknown[]) => hoisted.ensureConfiguredManagedPluginsForGatewayLaunchMock(...args),
 }));
 
 vi.mock('../../runtime-host/application/providers/provider-registry', () => ({
   getKeyableProviderTypes: vi.fn(() => []),
   getProviderEnvVar: vi.fn(() => undefined),
 }));
+
+function createProviderRuntimeSync() {
+  return {
+    syncProviderStore: async (store: import('../../runtime-host/application/providers/store-sync').ProviderStoreLike) => {
+      const { ProviderRuntimeSyncService } = await import('../../runtime-host/application/providers/store-sync');
+      return await new ProviderRuntimeSyncService(
+        {
+          saveProviderKey: hoisted.saveProviderKeyMock,
+          removeProviderKey: hoisted.removeProviderKeyMock,
+        },
+        {
+          setDefaultModel: hoisted.setOpenClawDefaultModelMock,
+          setDefaultModelWithOverride: hoisted.setOpenClawDefaultModelWithOverrideMock,
+          syncProviderConfig: hoisted.syncProviderConfigMock,
+        },
+      ).syncProviderStore(store);
+    },
+  };
+}
+
+function createBootstrapService(RuntimeHostBootstrapService: typeof import('../../runtime-host/application/runtime-host/bootstrap').RuntimeHostBootstrapService) {
+  return new RuntimeHostBootstrapService({
+    settingsRepository: {
+      getAll: hoisted.getAllSettingsMock,
+      setValue: hoisted.setSettingValueMock,
+    },
+    providerStoreRepository: {
+      read: hoisted.readProviderStoreMock,
+      write: hoisted.writeProviderStoreMock,
+    },
+    runtimeConfig: {
+      syncProxy: hoisted.runtimeConfigSyncProxyMock,
+      syncGatewayToken: hoisted.runtimeConfigSyncGatewayTokenMock,
+      sanitize: hoisted.runtimeConfigSanitizeMock,
+      syncBrowserMode: hoisted.runtimeConfigSyncBrowserModeMock,
+      syncSessionIdleMinutes: hoisted.runtimeConfigSyncSessionIdleMinutesMock,
+    },
+    runtimePlugins: {
+      ensureManagedPluginInstalled: hoisted.ensureManagedPluginInstalledMock,
+    },
+    prelaunchPluginMaintenance: {
+      cleanupStaleBuiltinExtensionsForGatewayLaunch: hoisted.cleanupStaleBuiltinExtensionsForGatewayLaunchMock,
+      reconcileConfiguredChannelPluginsForGatewayLaunch: hoisted.reconcileConfiguredChannelPluginsForGatewayLaunchMock,
+      ensureConfiguredManagedPluginsForGatewayLaunch: hoisted.ensureConfiguredManagedPluginsForGatewayLaunchMock,
+    },
+    providerRuntimeSync: createProviderRuntimeSync(),
+    workspace: {
+      migrateMainAgentTemplatesIfNeeded: vi.fn(async () => ({ migrated: 0 })),
+    },
+    securityJobs: {
+      submitPolicySync: vi.fn(),
+    },
+    idGenerator: {
+      randomHex: vi.fn(() => '1'.repeat(32)),
+    },
+    jobs: {
+      submitGatewayPrelaunch: hoisted.submitLongTaskMock,
+      submitProviderAuthBootstrap: hoisted.submitLongTaskMock,
+      submitWorkspaceTemplateMigration: hoisted.submitLongTaskMock,
+    },
+  });
+}
 
 vi.mock('../../runtime-host/application/providers/provider-runtime-rules', () => ({
   getOpenClawProviderKeyForType: (...args: unknown[]) => hoisted.getOpenClawProviderKeyForTypeMock(...args),
@@ -68,43 +98,72 @@ vi.mock('../../runtime-host/application/providers/provider-runtime-rules', () =>
   usesOAuthAuthHeader: vi.fn(() => false),
 }));
 
-vi.mock('../../runtime-host/application/settings/store', () => ({
-  getAllSettingsLocal: (...args: unknown[]) => hoisted.getAllSettingsLocalMock(...args),
-  setSettingValueLocal: (...args: unknown[]) => hoisted.setSettingValueLocalMock(...args),
-}));
-
 describe('runtime-host bootstrap provider sync', () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    hoisted.getAllSettingsLocalMock.mockResolvedValue({ browserMode: 'relay', gatewayToken: '' });
-    hoisted.listConfiguredChannelsLocalMock.mockResolvedValue([]);
+    hoisted.getAllSettingsMock.mockResolvedValue({ browserMode: 'relay', gatewayToken: '' });
+    hoisted.cleanupStaleBuiltinExtensionsForGatewayLaunchMock.mockResolvedValue([]);
     hoisted.reconcileConfiguredChannelPluginsForGatewayLaunchMock.mockResolvedValue([]);
     hoisted.ensureConfiguredManagedPluginsForGatewayLaunchMock.mockResolvedValue([]);
+    hoisted.submitLongTaskMock.mockReturnValue({
+      success: true,
+      job: {
+        id: 'job-1',
+        type: 'runtimeHost.gatewayPrelaunch',
+        status: 'queued',
+      },
+    });
   });
 
-  it('prepareGatewayLaunchLocal 会同时同步 runtime-host settings 与 openclaw.json 的 gateway token', async () => {
+  it('RuntimeHostBootstrapService 会把 gateway prelaunch 提交给任务系统', async () => {
+    const { RuntimeHostBootstrapService } = await import('../../runtime-host/application/runtime-host/bootstrap');
+    const service = createBootstrapService(RuntimeHostBootstrapService);
+    const result = service.submitGatewayPrelaunch({
+      gatewayToken: 'matchaclaw-token-1',
+      proxyEnabled: true,
+    });
+
+    expect(hoisted.submitLongTaskMock).toHaveBeenCalledWith({
+      gatewayToken: 'matchaclaw-token-1',
+      proxyEnabled: true,
+    });
+    expect(result.job.id).toBe('job-1');
+  });
+
+  it('RuntimeHostBootstrapService 会把 provider auth bootstrap 提交给任务系统', async () => {
+    const { RuntimeHostBootstrapService } = await import('../../runtime-host/application/runtime-host/bootstrap');
+    const service = createBootstrapService(RuntimeHostBootstrapService);
+    const result = service.submitProviderAuthBootstrap();
+
+    expect(hoisted.submitLongTaskMock).toHaveBeenCalledWith();
+    expect(result.job.id).toBe('job-1');
+  });
+
+  it('gateway prelaunch 任务会同时同步 runtime-host settings 与 openclaw.json 的 gateway token', async () => {
     hoisted.reconcileConfiguredChannelPluginsForGatewayLaunchMock.mockResolvedValue(['openclaw-weixin']);
 
-    const { prepareGatewayLaunchLocal } = await import('../../runtime-host/application/runtime-host/bootstrap');
-    const result = await prepareGatewayLaunchLocal({
+    const { RuntimeHostBootstrapService } = await import('../../runtime-host/application/runtime-host/bootstrap');
+    const service = createBootstrapService(RuntimeHostBootstrapService);
+    const result = await service.executeGatewayPrelaunch({
       gatewayToken: 'matchaclaw-token-1',
       proxyEnabled: true,
       proxyServer: 'http://127.0.0.1:7890',
       proxyBypassRules: '<local>',
     });
 
-    expect(hoisted.syncProxyConfigToOpenClawMock).toHaveBeenCalledWith({
+    expect(hoisted.runtimeConfigSyncProxyMock).toHaveBeenCalledWith({
       proxyEnabled: true,
       proxyServer: 'http://127.0.0.1:7890',
       proxyBypassRules: '<local>',
     }, {
       preserveExistingWhenDisabled: true,
     });
-    expect(hoisted.setSettingValueLocalMock).toHaveBeenCalledWith('gatewayToken', 'matchaclaw-token-1');
-    expect(hoisted.syncGatewayTokenToConfigMock).toHaveBeenCalledWith('matchaclaw-token-1');
-    expect(hoisted.sanitizeOpenClawConfigMock).toHaveBeenCalledTimes(1);
-    expect(hoisted.syncBrowserModeToOpenClawMock).toHaveBeenCalledWith('relay');
-    expect(hoisted.syncSessionIdleMinutesToOpenClawMock).toHaveBeenCalledTimes(1);
+    expect(hoisted.setSettingValueMock).toHaveBeenCalledWith('gatewayToken', 'matchaclaw-token-1');
+    expect(hoisted.runtimeConfigSyncGatewayTokenMock).toHaveBeenCalledWith('matchaclaw-token-1');
+    expect(hoisted.runtimeConfigSanitizeMock).toHaveBeenCalledTimes(1);
+    expect(hoisted.ensureManagedPluginInstalledMock).toHaveBeenCalledWith('browser-relay');
+    expect(hoisted.runtimeConfigSyncBrowserModeMock).toHaveBeenCalledWith('relay');
+    expect(hoisted.runtimeConfigSyncSessionIdleMinutesMock).toHaveBeenCalledTimes(1);
     expect(hoisted.reconcileConfiguredChannelPluginsForGatewayLaunchMock).toHaveBeenCalledTimes(1);
     expect(hoisted.ensureConfiguredManagedPluginsForGatewayLaunchMock).toHaveBeenCalledTimes(1);
     expect(result).toEqual({
@@ -113,7 +172,7 @@ describe('runtime-host bootstrap provider sync', () => {
   });
 
   it('默认 Ollama 账号会按 openai-completions 协议写入 runtime 覆盖配置', async () => {
-    hoisted.readProviderStoreLocalMock.mockResolvedValue({
+    hoisted.readProviderStoreMock.mockResolvedValue({
       defaultAccountId: 'ollama-main',
       accounts: {
         'ollama-main': {
@@ -128,11 +187,12 @@ describe('runtime-host bootstrap provider sync', () => {
       },
     });
 
-    const { syncProviderAuthBootstrapLocal } = await import('../../runtime-host/application/runtime-host/bootstrap');
-    await syncProviderAuthBootstrapLocal();
+    const { RuntimeHostBootstrapService } = await import('../../runtime-host/application/runtime-host/bootstrap');
+    const service = createBootstrapService(RuntimeHostBootstrapService);
+    await service.executeProviderAuthBootstrap();
 
-    expect(hoisted.saveProviderKeyToOpenClawMock).toHaveBeenCalledWith('ollama-ollama-main', 'ollama-local');
-    expect(hoisted.syncProviderConfigToOpenClawMock).toHaveBeenCalledWith(
+    expect(hoisted.saveProviderKeyMock).toHaveBeenCalledWith('ollama-ollama-main', 'ollama-local');
+    expect(hoisted.syncProviderConfigMock).toHaveBeenCalledWith(
       'ollama-ollama-main',
       expect.objectContaining({
         baseUrl: 'http://localhost:11434/v1',
@@ -158,7 +218,7 @@ describe('runtime-host bootstrap provider sync', () => {
   });
 
   it('custom/ollama 之外的默认账号继续走非 override 分支', async () => {
-    hoisted.readProviderStoreLocalMock.mockResolvedValue({
+    hoisted.readProviderStoreMock.mockResolvedValue({
       defaultAccountId: 'openai-main',
       accounts: {
         'openai-main': {
@@ -172,8 +232,9 @@ describe('runtime-host bootstrap provider sync', () => {
       },
     });
 
-    const { syncProviderAuthBootstrapLocal } = await import('../../runtime-host/application/runtime-host/bootstrap');
-    await syncProviderAuthBootstrapLocal();
+    const { RuntimeHostBootstrapService } = await import('../../runtime-host/application/runtime-host/bootstrap');
+    const service = createBootstrapService(RuntimeHostBootstrapService);
+    await service.executeProviderAuthBootstrap();
 
     expect(hoisted.setOpenClawDefaultModelMock).toHaveBeenCalledWith(
       'openai-openai-main',
@@ -181,6 +242,6 @@ describe('runtime-host bootstrap provider sync', () => {
       [],
     );
     expect(hoisted.setOpenClawDefaultModelWithOverrideMock).not.toHaveBeenCalled();
-    expect(hoisted.syncProviderConfigToOpenClawMock).not.toHaveBeenCalled();
+    expect(hoisted.syncProviderConfigMock).not.toHaveBeenCalled();
   });
 });

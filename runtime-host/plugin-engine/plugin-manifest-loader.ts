@@ -1,7 +1,7 @@
-import { readFile } from 'node:fs/promises';
 import { basename } from 'node:path';
 import type { RuntimeHostPluginManifest } from '../shared/types';
 import { resolvePluginId } from './plugin-id';
+import type { PluginFileSystemPort } from './plugin-file-system';
 
 export interface PluginManifestLoader {
   readonly load: (manifestPath: string) => Promise<RuntimeHostPluginManifest>;
@@ -11,10 +11,10 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 }
 
-export function createPluginManifestLoader(): PluginManifestLoader {
+export function createPluginManifestLoader(fileSystem: Pick<PluginFileSystemPort, 'readText'>): PluginManifestLoader {
   return {
     async load(manifestPath: string): Promise<RuntimeHostPluginManifest> {
-      const raw = await readFile(manifestPath, 'utf8');
+      const raw = await fileSystem.readText(manifestPath);
       const parsed = JSON.parse(raw) as Record<string, unknown>;
 
       const fallbackId = basename(manifestPath).toLowerCase() === 'package.json'

@@ -1,18 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const hostApiFetchMock = vi.fn();
-const rpcMock = vi.fn();
 
 vi.mock('@/lib/host-api', () => ({
   hostApiFetch: (...args: unknown[]) => hostApiFetchMock(...args),
-}));
-
-vi.mock('@/stores/gateway', () => ({
-  useGatewayStore: {
-    getState: () => ({
-      rpc: (...args: unknown[]) => rpcMock(...args),
-    }),
-  },
 }));
 
 describe('skills store error mapping', () => {
@@ -22,8 +13,10 @@ describe('skills store error mapping', () => {
   });
 
   it('maps fetchSkills rate-limit error by AppError code', async () => {
-    rpcMock.mockResolvedValueOnce({ skills: [] });
     hostApiFetchMock.mockImplementation(async (path: string) => {
+      if (path === '/api/skills/status') {
+        return { skills: [] };
+      }
       if (path === '/api/skills/configs') {
         throw new Error('rate limit exceeded');
       }
@@ -49,8 +42,10 @@ describe('skills store error mapping', () => {
   });
 
   it('preserves specific fetchSkills error messages when no mapped error code exists', async () => {
-    rpcMock.mockResolvedValueOnce({ skills: [] });
     hostApiFetchMock.mockImplementation(async (path: string) => {
+      if (path === '/api/skills/status') {
+        return { skills: [] };
+      }
       if (path === '/api/skills/configs') {
         throw new Error('custom fetch failure');
       }

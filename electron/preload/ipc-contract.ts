@@ -2,9 +2,6 @@ export const INFRASTRUCTURE_TRANSPORT_INVOKE_CHANNELS = [
   'hostapi:fetch',
   'hostapi:token',
   'gateway:status',
-  'gateway:rpc',
-  'gateway:httpProxy',
-  'gateway:getControlUiUrl',
 ] as const;
 
 export const SHELL_INVOKE_CHANNELS = [
@@ -64,8 +61,6 @@ export const RETAINED_EVENT_CHANNELS = [
   'update:downloaded',
   'update:error',
   'update:auto-install-countdown',
-  'openclaw:cli-installed',
-  'cron:updated',
 ] as const;
 
 export const RETAINED_ONCE_CHANNELS = [

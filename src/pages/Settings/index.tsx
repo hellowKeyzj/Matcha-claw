@@ -37,9 +37,7 @@ import { useGatewayStore } from '@/stores/gateway';
 import { useUpdateStore } from '@/stores/update';
 import { UpdateSettings } from '@/components/settings/UpdateSettings';
 import {
-  getGatewayWsDiagnosticEnabled,
   invokeIpc,
-  setGatewayWsDiagnosticEnabled,
   toUserMessage,
 } from '@/lib/api-client';
 import {
@@ -51,7 +49,13 @@ import {
 } from '@/lib/telemetry';
 import { useTranslation } from 'react-i18next';
 import { SUPPORTED_LANGUAGES } from '@/i18n';
-import { hostApiFetch, hostOpenClawGetCliCommand } from '@/lib/host-api';
+import {
+  hostApiFetch,
+  hostOpenClawGetCliCommand,
+  waitForRuntimeJobResult,
+  type RuntimeJobSubmission,
+} from '@/lib/host-api';
+import { subscribeHostEvent } from '@/lib/host-events';
 import {
   hostSettingsPutPatch,
 } from '@/lib/settings-runtime';
@@ -252,7 +256,6 @@ export function Settings() {
   const [proxySettingsExpanded, setProxySettingsExpanded] = useState(false);
   const [savingProxy, setSavingProxy] = useState(false);
   const [savingBrowserMode, setSavingBrowserMode] = useState(false);
-  const [wsDiagnosticEnabled, setWsDiagnosticEnabled] = useState(false);
   const [showTelemetryViewer, setShowTelemetryViewer] = useState(false);
   const [telemetryEntries, setTelemetryEntries] = useState<UiTelemetryEntry[]>([]);
   const [telemetryWindowMinutes, setTelemetryWindowMinutes] = useState<number>(15);
@@ -441,8 +444,11 @@ export function Settings() {
   const handleCollectDiagnosticsBundle = useCallback(async () => {
     setCollectingDiagnostics(true);
     try {
-      const result = await hostApiFetch<DiagnosticsBundleResponse>('/api/diagnostics/collect', {
+      const submission = await hostApiFetch<RuntimeJobSubmission<DiagnosticsBundleResponse>>('/api/diagnostics/collect', {
         method: 'POST',
+      });
+      const result = await waitForRuntimeJobResult<DiagnosticsBundleResponse>(submission.job.id, {
+        timeoutMs: 180000,
       });
       if (!result || typeof result.zipPath !== 'string' || !result.zipPath.trim()) {
         throw new Error('invalid diagnostics bundle result');
@@ -621,18 +627,14 @@ export function Settings() {
   };
 
   useEffect(() => {
-    const unsubscribe = window.electron.ipcRenderer.on(
+    const unsubscribe = subscribeHostEvent<{ path?: string }>(
       'openclaw:cli-installed',
-      (...args: unknown[]) => {
-        const installedPath = typeof args[0] === 'string' ? args[0] : '';
+      (payload) => {
+        const installedPath = typeof payload?.path === 'string' ? payload.path : '';
         toast.success(`openclaw CLI installed at ${installedPath}`);
       },
     );
-    return () => { unsubscribe?.(); };
-  }, []);
-
-  useEffect(() => {
-    setWsDiagnosticEnabled(getGatewayWsDiagnosticEnabled());
+    return unsubscribe;
   }, []);
 
   useEffect(() => {
@@ -952,16 +954,6 @@ export function Settings() {
   const handleHistoryStrategySampleMinBlur = useCallback(() => {
     setHistoryStrategySampleMinDraft(String(historyStrategySampleMin));
   }, [historyStrategySampleMin]);
-
-  const handleWsDiagnosticToggle = (enabled: boolean) => {
-    setGatewayWsDiagnosticEnabled(enabled);
-    setWsDiagnosticEnabled(enabled);
-    toast.success(
-      enabled
-        ? t('developer.wsDiagnosticEnabled')
-        : t('developer.wsDiagnosticDisabled'),
-    );
-  };
 
   const sectionItems: Array<{ key: SettingsSectionKey; label: string }> = [
     { key: 'gateway', label: t('gateway.title') },
@@ -1772,21 +1764,7 @@ export function Settings() {
               </>
             )}
 
-            <Separator />
             <div className="space-y-2">
-              <div className="flex items-center justify-between rounded-md border border-border/60 p-3">
-                <div>
-                  <Label>{t('developer.wsDiagnostic')}</Label>
-                  <p className="text-sm text-muted-foreground">
-                    {t('developer.wsDiagnosticDesc')}
-                  </p>
-                </div>
-                <Switch
-                  checked={wsDiagnosticEnabled}
-                  onCheckedChange={handleWsDiagnosticToggle}
-                />
-              </div>
-
               <div className="flex items-center justify-between">
                 <div>
                   <Label>{t('developer.telemetryViewer')}</Label>

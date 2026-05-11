@@ -2,6 +2,28 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { createTestPluginFileSystem } from './helpers/plugin-file-system';
+import { createTestRuntimeLogger } from './helpers/runtime-logger';
+
+function createConfigRepository(configDir: string, openclawDir: string) {
+  return {
+    read: async () => JSON.parse(readFileSync(join(configDir, 'openclaw.json'), 'utf8')) as Record<string, unknown>,
+    write: async (config: Record<string, unknown>) => {
+      writeFileSync(join(configDir, 'openclaw.json'), JSON.stringify(config, null, 2), 'utf8');
+    },
+    update: async <T>(mutate: (config: Record<string, unknown>) => Promise<T> | T) => await mutate(
+      JSON.parse(readFileSync(join(configDir, 'openclaw.json'), 'utf8')) as Record<string, unknown>,
+    ),
+    getConfigDir: () => configDir,
+    getConfigFilePath: () => join(configDir, 'openclaw.json'),
+    getOpenClawDirPath: () => openclawDir,
+  };
+}
+
+async function createPluginConfigService(configDir: string, openclawDir: string) {
+  const { OpenClawPluginConfigService } = await import('../../runtime-host/application/openclaw/openclaw-plugin-config-service');
+  return new OpenClawPluginConfigService(createConfigRepository(configDir, openclawDir), createTestPluginFileSystem());
+}
 
 describe('openclaw plugin config service', () => {
   let configDir: string;
@@ -69,9 +91,9 @@ describe('openclaw plugin config service', () => {
       },
     }, null, 2));
 
-    const { readEnabledPluginIdsFromOpenClawConfig } = await import('../../runtime-host/application/openclaw/openclaw-plugin-config-service');
+    const service = await createPluginConfigService(configDir, openclawDir);
 
-    expect(readEnabledPluginIdsFromOpenClawConfig()).toEqual(['task-manager']);
+    await expect(service.readEnabledPluginIds()).resolves.toEqual(['task-manager']);
   });
 
   it('bundled enabledByDefault 插件不会进入插件中心启用列表', async () => {
@@ -84,9 +106,9 @@ describe('openclaw plugin config service', () => {
 
     writeFileSync(join(configDir, 'openclaw.json'), JSON.stringify({}, null, 2));
 
-    const { readEnabledPluginIdsFromOpenClawConfig } = await import('../../runtime-host/application/openclaw/openclaw-plugin-config-service');
+    const service = await createPluginConfigService(configDir, openclawDir);
 
-    expect(readEnabledPluginIdsFromOpenClawConfig()).toEqual([]);
+    await expect(service.readEnabledPluginIds()).resolves.toEqual([]);
   });
 
   it('bundled enabledByDefault 插件显式禁用后也不会进入插件中心启用列表', async () => {
@@ -105,9 +127,9 @@ describe('openclaw plugin config service', () => {
       },
     }, null, 2));
 
-    const { readEnabledPluginIdsFromOpenClawConfig } = await import('../../runtime-host/application/openclaw/openclaw-plugin-config-service');
+    const service = await createPluginConfigService(configDir, openclawDir);
 
-    expect(readEnabledPluginIdsFromOpenClawConfig()).toEqual([]);
+    await expect(service.readEnabledPluginIds()).resolves.toEqual([]);
   });
 
   it('同步启用插件列表时会更新 allow/entries 并保留安装元数据', async () => {
@@ -140,9 +162,9 @@ describe('openclaw plugin config service', () => {
       },
     }, null, 2));
 
-    const { syncEnabledPluginIdsToOpenClawConfig } = await import('../../runtime-host/application/openclaw/openclaw-plugin-config-service');
+    const service = await createPluginConfigService(configDir, openclawDir);
 
-    await syncEnabledPluginIdsToOpenClawConfig(['plugin-b', 'unit-test-plugin']);
+    await service.syncEnabledPluginIds(['plugin-b', 'unit-test-plugin']);
 
     const nextConfig = JSON.parse(readFileSync(join(configDir, 'openclaw.json'), 'utf8')) as {
       plugins: {
@@ -200,9 +222,9 @@ describe('openclaw plugin config service', () => {
       },
     }, null, 2));
 
-    const { syncEnabledPluginIdsToOpenClawConfig } = await import('../../runtime-host/application/openclaw/openclaw-plugin-config-service');
+    const service = await createPluginConfigService(configDir, openclawDir);
 
-    await syncEnabledPluginIdsToOpenClawConfig(['task-manager', 'openai']);
+    await service.syncEnabledPluginIds(['task-manager', 'openai']);
 
     const nextConfig = JSON.parse(readFileSync(join(configDir, 'openclaw.json'), 'utf8')) as {
       plugins: {
@@ -239,9 +261,9 @@ describe('openclaw plugin config service', () => {
       },
     }, null, 2));
 
-    const { syncEnabledPluginIdsToOpenClawConfig } = await import('../../runtime-host/application/openclaw/openclaw-plugin-config-service');
+    const service = await createPluginConfigService(configDir, openclawDir);
 
-    const effectivePluginIds = await syncEnabledPluginIdsToOpenClawConfig(['task-manager']);
+    const effectivePluginIds = await service.syncEnabledPluginIds(['task-manager']);
 
     const nextConfig = JSON.parse(readFileSync(join(configDir, 'openclaw.json'), 'utf8')) as {
       plugins: {
@@ -278,9 +300,9 @@ describe('openclaw plugin config service', () => {
       },
     }, null, 2));
 
-    const { syncEnabledPluginIdsToOpenClawConfig } = await import('../../runtime-host/application/openclaw/openclaw-plugin-config-service');
+    const service = await createPluginConfigService(configDir, openclawDir);
 
-    await syncEnabledPluginIdsToOpenClawConfig(['task-manager']);
+    await service.syncEnabledPluginIds(['task-manager']);
 
     const nextConfig = JSON.parse(readFileSync(join(configDir, 'openclaw.json'), 'utf8')) as {
       plugins: {
@@ -309,9 +331,9 @@ describe('openclaw plugin config service', () => {
       },
     }, null, 2));
 
-    const { syncEnabledPluginIdsToOpenClawConfig } = await import('../../runtime-host/application/openclaw/openclaw-plugin-config-service');
+    const service = await createPluginConfigService(configDir, openclawDir);
 
-    await syncEnabledPluginIdsToOpenClawConfig(['task-manager']);
+    await service.syncEnabledPluginIds(['task-manager']);
 
     expect(() => readFileSync(join(taskManagerDir, 'openclaw.plugin.json'), 'utf8')).not.toThrow();
     expect(() => readFileSync(join(feishuPluginDir, 'openclaw.plugin.json'), 'utf8')).toThrow();
@@ -342,9 +364,9 @@ describe('openclaw plugin config service', () => {
       },
     }, null, 2));
 
-    const { syncEnabledPluginIdsToOpenClawConfig } = await import('../../runtime-host/application/openclaw/openclaw-plugin-config-service');
+    const service = await createPluginConfigService(configDir, openclawDir);
 
-    await syncEnabledPluginIdsToOpenClawConfig(['task-manager']);
+    await service.syncEnabledPluginIds(['task-manager']);
 
     expect(readFileSync(join(feishuPluginDir, 'openclaw.plugin.json'), 'utf8')).toContain('"openclaw-lark"');
   });
@@ -394,9 +416,14 @@ describe('openclaw plugin config service', () => {
       },
     }, null, 2));
 
-    const { syncBrowserModeToOpenClaw } = await import('../../runtime-host/application/openclaw/openclaw-provider-config-service');
+    const { syncBrowserModeToOpenClaw } = await import('../../runtime-host/application/openclaw/openclaw-runtime-config-sync');
 
-    await syncBrowserModeToOpenClaw('relay');
+    await syncBrowserModeToOpenClaw(
+      createConfigRepository(configDir, openclawDir),
+      createTestPluginFileSystem(),
+      'relay',
+      createTestRuntimeLogger('openclaw-plugin-config-test'),
+    );
 
     const nextConfig = JSON.parse(readFileSync(join(configDir, 'openclaw.json'), 'utf8')) as {
       browser: { enabled?: boolean; defaultProfile?: string };
@@ -418,10 +445,9 @@ describe('openclaw plugin config service', () => {
     expect(nextConfig.plugins.entries.browser).toMatchObject({ enabled: false });
     expect(nextConfig.plugins.entries['browser-relay']).toMatchObject({ enabled: true });
     expect(nextConfig.plugins.entries['task-manager']).toMatchObject({ enabled: true });
-    expect(readFileSync(join(configDir, 'extensions', 'browser-relay', 'openclaw.plugin.json'), 'utf8')).toContain('"id": "browser-relay"');
   });
 
-  it('同步 browserMode=relay 时已安装同版本 browser-relay 不会重复覆盖插件目录', async () => {
+  it('同步 browserMode=relay 只更新配置，不负责覆盖 browser-relay 插件目录', async () => {
     const relaySourceDir = join(workspaceDir, 'build', 'openclaw-plugins', 'browser-relay');
     const relayTargetDir = join(configDir, 'extensions', 'browser-relay');
     mkdirSync(relaySourceDir, { recursive: true });
@@ -459,9 +485,14 @@ describe('openclaw plugin config service', () => {
       },
     }, null, 2));
 
-    const { syncBrowserModeToOpenClaw } = await import('../../runtime-host/application/openclaw/openclaw-provider-config-service');
+    const { syncBrowserModeToOpenClaw } = await import('../../runtime-host/application/openclaw/openclaw-runtime-config-sync');
 
-    await syncBrowserModeToOpenClaw('relay');
+    await syncBrowserModeToOpenClaw(
+      createConfigRepository(configDir, openclawDir),
+      createTestPluginFileSystem(),
+      'relay',
+      createTestRuntimeLogger('openclaw-plugin-config-test'),
+    );
 
     const installedManifest = JSON.parse(readFileSync(join(relayTargetDir, 'openclaw.plugin.json'), 'utf8')) as {
       name: string;
@@ -469,3 +500,5 @@ describe('openclaw plugin config service', () => {
     expect(installedManifest.name).toBe('Installed Browser Relay');
   });
 });
+
+

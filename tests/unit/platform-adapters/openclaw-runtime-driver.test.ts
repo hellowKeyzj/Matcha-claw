@@ -1,5 +1,10 @@
 import { describe, expect, it, vi } from 'vitest';
-import { OpenClawRuntimeDriver } from '../../../runtime-host/api/platform/openclaw-runtime-driver';
+import { OpenClawRuntimeDriver } from '../../../runtime-host/application/platform-runtime/openclaw-runtime-driver';
+
+const idGenerator = {
+  randomId: () => 'runtime-id',
+  randomHex: () => 'runtime-id',
+};
 
 describe('openclaw runtime driver', () => {
   it('healthCheck 直接映射 bridge 的只读连接状态快照', async () => {
@@ -20,7 +25,7 @@ describe('openclaw runtime driver', () => {
       platformAbortRun: vi.fn(),
     };
 
-    const driver = new OpenClawRuntimeDriver(bridge as never);
+    const driver = new OpenClawRuntimeDriver(bridge as never, idGenerator);
     await expect(driver.healthCheck()).resolves.toEqual({
       status: 'running',
       detail: 'gateway control channel reconnecting',
@@ -50,7 +55,7 @@ describe('openclaw runtime driver', () => {
       platformAbortRun: vi.fn().mockResolvedValue(undefined),
     };
 
-    const driver = new OpenClawRuntimeDriver(bridge as never);
+    const driver = new OpenClawRuntimeDriver(bridge as never, idGenerator);
     await driver.installTool({ kind: 'package', spec: 'foo@1.0.0' });
     await driver.enableTool('tool-1');
     await driver.disableTool('tool-1');

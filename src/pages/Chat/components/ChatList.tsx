@@ -353,6 +353,7 @@ export const ChatListSurface = memo(function ChatListSurface({
         style={{
           overflowAnchor: 'none',
           scrollbarGutter: 'stable',
+          paddingTop: 'var(--chat-thread-top-padding, 0px)',
           paddingBottom: 'var(--chat-thread-bottom-padding, 0px)',
         }}
         onPointerDownCapture={onPointerDown}
@@ -434,6 +435,14 @@ export const ChatList = forwardRef<ChatListHandle, ChatListProps>(function ChatL
     new Map(artifactGroups.map((group) => [group.graphItemKey, group.files] as const))
   ), [artifactGroups]);
   const autoFollowSignal = buildChatAutoFollowSignal(items);
+  const viewportWindowSignal = [
+    viewport.windowStartOffset,
+    viewport.windowEndOffset,
+    viewport.totalItemCount,
+    viewport.hasMore ? '1' : '0',
+    viewport.hasNewer ? '1' : '0',
+    viewport.isAtLatest ? '1' : '0',
+  ].join('|');
   const tailActivityOpen = runtime.sending || runtime.pendingFinal || items.some((item) => item.kind === 'assistant-turn' && item.status !== 'final');
 
   const {
@@ -447,6 +456,8 @@ export const ChatList = forwardRef<ChatListHandle, ChatListProps>(function ChatL
   } = useChatScroll({
     enabled: isActive,
     scrollScopeKey: currentSessionKey,
+    viewportWindowSignal,
+    anchorItemKey: viewport.anchorItemKey,
     autoFollowSignal,
     tailActivityOpen,
     setScrollChromeBottomLocked: scrollChromeStore.setBottomLocked,

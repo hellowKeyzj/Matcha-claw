@@ -1,10 +1,12 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { CronJob } from '@/types/cron';
 
 const hostApiFetchMock = vi.fn();
+const waitForRuntimeJobResultMock = vi.fn();
 
 vi.mock('@/lib/host-api', () => ({
   hostApiFetch: (...args: unknown[]) => hostApiFetchMock(...args),
+  waitForRuntimeJobResult: (...args: unknown[]) => waitForRuntimeJobResultMock(...args),
 }));
 
 function buildJob(id: string): CronJob {
@@ -20,16 +22,32 @@ function buildJob(id: string): CronJob {
   };
 }
 
+function jobsSnapshot(jobs: CronJob[], ready = true) {
+  return {
+    success: true,
+    jobs,
+    ready,
+    refreshing: !ready,
+    updatedAt: ready ? 1 : null,
+    error: null,
+  };
+}
+
 describe('cron store', () => {
   beforeEach(() => {
     vi.resetModules();
     hostApiFetchMock.mockReset();
+    waitForRuntimeJobResultMock.mockReset();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
   });
 
   it('首次无快照时进入 initialLoading，成功后写入快照', async () => {
     const jobs = [buildJob('job-1')];
-    let resolveFetch: ((value: CronJob[]) => void) | null = null;
-    hostApiFetchMock.mockReturnValue(new Promise<CronJob[]>((resolve) => {
+    let resolveFetch: ((value: ReturnType<typeof jobsSnapshot>) => void) | null = null;
+    hostApiFetchMock.mockReturnValue(new Promise<ReturnType<typeof jobsSnapshot>>((resolve) => {
       resolveFetch = resolve;
     }));
 
@@ -39,7 +57,7 @@ describe('cron store', () => {
     expect(useCronStore.getState().initialLoading).toBe(true);
     expect(useCronStore.getState().refreshing).toBe(false);
 
-    resolveFetch?.(jobs);
+    resolveFetch?.(jobsSnapshot(jobs));
     await fetchPromise;
 
     const state = useCronStore.getState();
@@ -52,7 +70,7 @@ describe('cron store', () => {
 
   it('已有快照时刷新失败保留旧数据，不回退空白', async () => {
     const jobs = [buildJob('job-2')];
-    hostApiFetchMock.mockResolvedValueOnce(jobs);
+    hostApiFetchMock.mockResolvedValueOnce(jobsSnapshot(jobs));
 
     const { useCronStore } = await import('@/stores/cron');
     await useCronStore.getState().fetchJobs();
@@ -70,8 +88,8 @@ describe('cron store', () => {
 
   it('fetchJobs 并发请求会单飞去重', async () => {
     const jobs = [buildJob('job-3')];
-    let resolveFetch: ((value: CronJob[]) => void) | null = null;
-    hostApiFetchMock.mockReturnValue(new Promise<CronJob[]>((resolve) => {
+    let resolveFetch: ((value: ReturnType<typeof jobsSnapshot>) => void) | null = null;
+    hostApiFetchMock.mockReturnValue(new Promise<ReturnType<typeof jobsSnapshot>>((resolve) => {
       resolveFetch = resolve;
     }));
 
@@ -81,8 +99,33 @@ describe('cron store', () => {
 
     expect(hostApiFetchMock).toHaveBeenCalledTimes(1);
 
-    resolveFetch?.(jobs);
+    resolveFetch?.(jobsSnapshot(jobs));
     await Promise.all([first, second]);
+  });
+
+  it('jobs 快照未 ready 时保持加载并自动重试', async () => {
+    vi.useFakeTimers();
+    const jobs = [buildJob('job-ready-later')];
+    hostApiFetchMock
+      .mockResolvedValueOnce(jobsSnapshot([], false))
+      .mockResolvedValueOnce(jobsSnapshot(jobs));
+
+    const { useCronStore } = await import('@/stores/cron');
+    await useCronStore.getState().fetchJobs();
+
+    expect(useCronStore.getState().snapshotReady).toBe(false);
+    expect(useCronStore.getState().initialLoading).toBe(true);
+    expect(useCronStore.getState().refreshing).toBe(true);
+    expect(hostApiFetchMock).toHaveBeenCalledTimes(1);
+
+    await vi.advanceTimersByTimeAsync(1200);
+
+    const state = useCronStore.getState();
+    expect(hostApiFetchMock).toHaveBeenCalledTimes(2);
+    expect(state.snapshotReady).toBe(true);
+    expect(state.initialLoading).toBe(false);
+    expect(state.refreshing).toBe(false);
+    expect(state.jobs).toEqual(jobs);
   });
 
   it('updateJob 会维护 mutatingByJobId 生命周期', async () => {
@@ -96,10 +139,21 @@ describe('cron store', () => {
         await new Promise<void>((resolve) => {
           resolveUpdate = resolve;
         });
-        return {};
+        return {
+          success: true,
+          job: {
+            id: 'runtime-job-4',
+            type: 'cron.update',
+            status: 'queued',
+            queuedAt: 1,
+            attempts: 0,
+            maxAttempts: 1,
+          },
+        };
       }
       throw new Error(`unexpected path: ${path}`);
     });
+    waitForRuntimeJobResultMock.mockResolvedValueOnce({ status: 200, data: { success: true } });
 
     const updatePromise = useCronStore.getState().updateJob('job-4', { name: 'updated-name' });
     expect(useCronStore.getState().mutating).toBe(true);
@@ -112,11 +166,23 @@ describe('cron store', () => {
     expect(state.mutating).toBe(false);
     expect(state.mutatingByJobId['job-4']).toBeUndefined();
     expect(state.jobs[0]?.name).toBe('updated-name');
+    expect(waitForRuntimeJobResultMock).toHaveBeenCalledWith('runtime-job-4');
   });
 
   it('createJob 会保留返回的 agentId', async () => {
     const createdJob = { ...buildJob('job-5'), agentId: 'agent-alpha' };
-    hostApiFetchMock.mockResolvedValueOnce(createdJob);
+    hostApiFetchMock.mockResolvedValueOnce({
+      success: true,
+      job: {
+        id: 'runtime-job-5',
+        type: 'cron.create',
+        status: 'queued',
+        queuedAt: 1,
+        attempts: 0,
+        maxAttempts: 1,
+      },
+    });
+    waitForRuntimeJobResultMock.mockResolvedValueOnce({ status: 200, data: createdJob });
 
     const { useCronStore } = await import('@/stores/cron');
     const result = await useCronStore.getState().createJob({
@@ -139,5 +205,47 @@ describe('cron store', () => {
     }));
     expect(result.agentId).toBe('agent-alpha');
     expect(useCronStore.getState().jobs[0]?.agentId).toBe('agent-alpha');
+  });
+
+  it('triggerJob 提交后台任务并等待任务结果后刷新列表', async () => {
+    const job = buildJob('job-6');
+    const refreshedJob = { ...job, updatedAt: '2026-01-01T00:01:00.000Z' };
+    hostApiFetchMock.mockImplementation(async (path: string) => {
+      if (path === '/api/cron/trigger') {
+        return {
+          success: true,
+          job: {
+            id: 'runtime-job-6',
+            type: 'cron.trigger',
+            status: 'queued',
+            queuedAt: 1,
+            attempts: 0,
+            maxAttempts: 1,
+          },
+        };
+      }
+      if (path === '/api/cron/jobs') {
+        return jobsSnapshot([refreshedJob]);
+      }
+      throw new Error(`unexpected path: ${path}`);
+    });
+    waitForRuntimeJobResultMock.mockResolvedValueOnce({
+      status: 200,
+      data: { ok: true, ran: true },
+    });
+
+    const { useCronStore } = await import('@/stores/cron');
+    useCronStore.getState().setJobs([job]);
+
+    const result = await useCronStore.getState().triggerJob('job-6');
+
+    expect(hostApiFetchMock).toHaveBeenCalledWith('/api/cron/trigger', expect.objectContaining({
+      method: 'POST',
+      body: JSON.stringify({ id: 'job-6' }),
+    }));
+    expect(waitForRuntimeJobResultMock).toHaveBeenCalledWith('runtime-job-6');
+    expect(result).toEqual({ ran: true, reason: undefined });
+    expect(useCronStore.getState().jobs).toEqual([refreshedJob]);
+    expect(useCronStore.getState().mutating).toBe(false);
   });
 });

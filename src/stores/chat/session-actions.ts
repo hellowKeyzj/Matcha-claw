@@ -1,4 +1,10 @@
-import { hostApiFetch, hostSessionDelete, hostSessionList, hostSessionNew } from '@/lib/host-api';
+import {
+  hostApiFetch,
+  hostSessionDelete,
+  hostSessionList,
+  hostSessionNew,
+  waitForRuntimeJobResult,
+} from '@/lib/host-api';
 import {
   createErrorResourceStatusState,
   createLoadingResourceStatusState,
@@ -37,6 +43,29 @@ import type {
   ChatStoreState,
 } from './types';
 import type { SessionLoadResult } from '../../../runtime-host/shared/session-adapter-types';
+
+const SESSION_CATALOG_NOT_READY_RETRY_MS = 1200;
+
+let sessionCatalogRetryTimer: ReturnType<typeof setTimeout> | null = null;
+let inflightSessionCatalogLoad: Promise<void> | null = null;
+
+function clearSessionCatalogRetry(): void {
+  if (!sessionCatalogRetryTimer) {
+    return;
+  }
+  clearTimeout(sessionCatalogRetryTimer);
+  sessionCatalogRetryTimer = null;
+}
+
+function scheduleSessionCatalogRetry(loadSessions: () => Promise<void>): void {
+  if (sessionCatalogRetryTimer) {
+    return;
+  }
+  sessionCatalogRetryTimer = setTimeout(() => {
+    sessionCatalogRetryTimer = null;
+    void loadSessions();
+  }, SESSION_CATALOG_NOT_READY_RETRY_MS);
+}
 
 type ChatStoreSetFn = (
   partial: Partial<ChatStoreState> | ((state: ChatStoreState) => Partial<ChatStoreState> | ChatStoreState),
@@ -88,10 +117,15 @@ async function requestSessionLifecycleSnapshot(
   path: '/api/session/switch' | '/api/session/resume',
   sessionKey: string,
 ): Promise<SessionLoadResult> {
-  return await hostApiFetch(path, {
+  const result = await hostApiFetch<SessionLoadResult & {
+    hydrationJob?: { id: string };
+  }>(path, {
     method: 'POST',
     body: JSON.stringify({ sessionKey }),
   });
+  return result.hydrationJob
+    ? await waitForRuntimeJobResult<SessionLoadResult>(result.hydrationJob.id)
+    : result;
 }
 
 function applyBackendSessionSnapshot(
@@ -131,6 +165,22 @@ function shouldMarkSessionLoadingOnSwitch(
 }
 
 export async function executeLoadSessions(input: CreateStoreSessionActionsInput): Promise<void> {
+  if (inflightSessionCatalogLoad) {
+    await inflightSessionCatalogLoad;
+    return;
+  }
+  const task = executeLoadSessionsNow(input);
+  inflightSessionCatalogLoad = task;
+  try {
+    await task;
+  } finally {
+    if (inflightSessionCatalogLoad === task) {
+      inflightSessionCatalogLoad = null;
+    }
+  }
+}
+
+async function executeLoadSessionsNow(input: CreateStoreSessionActionsInput): Promise<void> {
   const {
     set,
     get,
@@ -144,6 +194,14 @@ export async function executeLoadSessions(input: CreateStoreSessionActionsInput)
   try {
     const data = await hostSessionList();
     if (data) {
+      if (data.ready === false) {
+        set((state) => ({
+          sessionCatalogStatus: createLoadingResourceStatusState(state.sessionCatalogStatus),
+        }));
+        scheduleSessionCatalogRetry(() => executeLoadSessions(input));
+        return;
+      }
+      clearSessionCatalogRetry();
       const rawSessions = Array.isArray(data.sessions) ? data.sessions : [];
       const sessions: ChatSession[] = rawSessions.map((session) => ({
         key: session.key || '',
@@ -239,6 +297,7 @@ export async function executeLoadSessions(input: CreateStoreSessionActionsInput)
       sessionCatalogStatus: createReadyResourceStatusState(),
     });
   } catch (error) {
+    clearSessionCatalogRetry();
     const stateSnapshot = get();
     const message = error instanceof Error ? error.message : 'Failed to load sessions';
     set({

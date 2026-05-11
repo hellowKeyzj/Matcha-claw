@@ -1,91 +1,46 @@
-import type { ParentShellAction, ParentTransportUpstreamPayload } from '../../api/dispatch/parent-transport';
-import { getOpenClawProviderKeyForType } from './provider-runtime-rules';
+import { accepted, badRequest, notFound, ok, type ApplicationResponse } from '../common/application-response';
+import type { ProviderAccountJobPort } from './provider-account-jobs';
+import type { ParentShellPort } from '../runtime-host/parent-shell-port';
+import type { RuntimeClockPort, RuntimeHttpClientPort } from '../common/runtime-ports';
+import type { ProviderOAuthCompletionPort } from './oauth-runtime';
+import type { ProviderAccountsRuntimePort } from './provider-accounts-runtime-port';
+import type { ProviderStorePort, ProviderStoreRecord } from './provider-store-repository';
 import {
-  getProviderApiKeyFromOpenClaw,
-  removeProviderKeyFromOpenClaw,
-} from '../openclaw/openclaw-auth-profile-store';
+  accountToStatusLocal,
+  normalizeProviderAccountLocal,
+  normalizeProviderFallbackAccountLocal,
+  sortProviderAccountsLocal,
+  validateProviderApiKeyLocal,
+} from './account-runtime';
+import { PROVIDER_VENDOR_DEFINITIONS } from './provider-registry';
 import {
-  removeProviderFromOpenClaw,
-} from '../openclaw/openclaw-provider-config-service';
-import {
+  isRecord,
   normalizeProviderStoreForRuntime,
-  syncProviderStoreToOpenClaw,
-} from './store-sync';
+} from './provider-store-model';
 
-type LocalDispatchResponse = {
-  status: number;
-  data: unknown;
-};
-
-type ProviderStore = {
-  defaultAccountId: string | null;
-  accounts: Record<string, any>;
-  apiKeys: Record<string, string>;
-};
+type ProviderStore = ProviderStoreRecord;
 
 export interface ProviderAccountsServiceDeps {
-  readonly readProviderStore: () => Promise<ProviderStore>;
-  readonly writeProviderStore: (store: ProviderStore) => Promise<void>;
-  readonly sortAccounts: (accounts: any[], defaultAccountId: string | null) => any[];
-  readonly accountToStatus: (account: any, apiKey: string | undefined) => any;
-  readonly normalizeAccount: (input: any, current?: any) => any;
-  readonly normalizeFallbackAccount: (accounts: any[], deletedId: string) => string | null;
-  readonly validateApiKey: (input: unknown) => Promise<unknown>;
-  readonly requestParentShellAction: (action: ParentShellAction, payload?: unknown) => Promise<ParentTransportUpstreamPayload>;
-  readonly mapParentTransportResponse: (upstream: ParentTransportUpstreamPayload) => LocalDispatchResponse;
-  readonly providerVendorDefinitions: unknown;
-  readonly completeBrowserOAuth: (input: {
-    providerType: 'google' | 'openai';
-    accountId: string;
-    accountLabel?: string | null;
-    runtimeProviderId: string;
-    token: {
-      access: string;
-      refresh: string;
-      expires: number;
-      email?: string;
-      projectId?: string;
-      accountId?: string;
-    };
-  }) => Promise<unknown>;
-  readonly completeDeviceOAuth: (input: {
-    providerType: 'minimax-portal' | 'minimax-portal-cn' | 'qwen-portal';
-    accountId: string;
-    accountLabel?: string | null;
-    token: {
-      access: string;
-      refresh: string;
-      expires: number;
-      resourceUrl?: string;
-      api: 'anthropic-messages' | 'openai-completions';
-    };
-  }) => Promise<unknown>;
-}
-
-function isRecord(value: unknown): value is Record<string, any> {
-  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
-}
-
-function resolveProviderCleanupKeys(accountId: string, account: Record<string, any> | null): string[] {
-  const providerType = typeof account?.vendorId === 'string' ? account.vendorId.trim() : '';
-  const runtimeProviderKey = providerType
-    ? getOpenClawProviderKeyForType(providerType, accountId)
-    : accountId;
-  return Array.from(new Set([runtimeProviderKey, accountId].filter((item) => item.trim().length > 0)));
-}
-
-function getStoredApiKey(store: ProviderStore, key: string): string | undefined {
-  const value = store.apiKeys[key];
-  return typeof value === 'string' && value.trim().length > 0 ? value.trim() : undefined;
+  readonly store: ProviderStorePort;
+  readonly parentShell: ParentShellPort;
+  readonly oauthCompletion: ProviderOAuthCompletionPort;
+  readonly runtime: ProviderAccountsRuntimePort;
+  readonly httpClient: RuntimeHttpClientPort;
+  readonly clock: RuntimeClockPort;
+  readonly jobs: ProviderAccountJobPort;
 }
 
 export class ProviderAccountsService {
-  constructor(private readonly deps: ProviderAccountsServiceDeps) {}
+  private readonly runtime: ProviderAccountsRuntimePort;
+
+  constructor(private readonly deps: ProviderAccountsServiceDeps) {
+    this.runtime = deps.runtime;
+  }
 
   private async syncStoreToOpenClaw(store: ProviderStore): Promise<void> {
-    const result = await syncProviderStoreToOpenClaw(store);
+    const result = await this.runtime.syncStoreToRuntime(store);
     if (result.storeModified) {
-      await this.deps.writeProviderStore(store);
+      await this.deps.store.write(store);
     }
   }
 
@@ -94,58 +49,44 @@ export class ProviderAccountsService {
     accountId: string,
     account: Record<string, any> | null,
   ): Promise<string | undefined> {
-    const providerType = typeof account?.vendorId === 'string' ? account.vendorId.trim() : '';
-    const runtimeProviderKey = providerType
-      ? getOpenClawProviderKeyForType(providerType, accountId)
-      : accountId;
-    const runtimeApiKey = await getProviderApiKeyFromOpenClaw(runtimeProviderKey);
-    if (runtimeApiKey) {
-      return runtimeApiKey;
-    }
-    const localApiKey = getStoredApiKey(store, accountId);
-    if (localApiKey) {
-      return localApiKey;
-    }
-    if (runtimeProviderKey !== accountId) {
-      return getStoredApiKey(store, runtimeProviderKey);
-    }
-    return undefined;
+    return await this.runtime.resolveAccountApiKey({ store, accountId, account });
   }
 
   async list() {
-    const store = await this.deps.readProviderStore();
+    const store = await this.deps.store.read();
     const { accounts: normalizedAccounts, storeModified } = normalizeProviderStoreForRuntime(store);
     if (storeModified) {
-      await this.deps.writeProviderStore(store);
+      await this.deps.store.write(store);
     }
 
-    const sortedAccounts = this.deps.sortAccounts(
+    const sortedAccounts = sortProviderAccountsLocal(
       normalizedAccounts.map((account) => account.account),
       store.defaultAccountId,
     );
     const statuses = await Promise.all(
       sortedAccounts.map(async (account) => (
-        this.deps.accountToStatus(account, await this.resolveAccountApiKey(store, account.id, account))
+        accountToStatusLocal(account, await this.resolveAccountApiKey(store, account.id, account))
       )),
     );
     return {
       accounts: sortedAccounts,
       statuses,
-      vendors: this.deps.providerVendorDefinitions,
+      vendors: PROVIDER_VENDOR_DEFINITIONS,
       defaultAccountId: store.defaultAccountId,
     };
   }
 
-  async create(payload: unknown): Promise<LocalDispatchResponse> {
+  create(payload: unknown): ApplicationResponse {
+    return accepted(this.deps.jobs.submitCreate(payload));
+  }
+
+  async executeCreate(payload: unknown): Promise<ApplicationResponse> {
     const body = isRecord(payload) ? payload : {};
-    const account = this.deps.normalizeAccount(body.account);
+    const account = normalizeProviderAccountLocal(body.account, null, this.deps.clock);
     if (!account) {
-      return {
-        status: 400,
-        data: { success: false, error: 'account 参数无效' },
-      };
+      return badRequest('account 参数无效');
     }
-    const store = await this.deps.readProviderStore();
+    const store = await this.deps.store.read();
     store.accounts[account.id] = account;
     const apiKey = typeof body.apiKey === 'string' ? body.apiKey.trim() : '';
     if (apiKey) {
@@ -155,80 +96,69 @@ export class ProviderAccountsService {
       store.defaultAccountId = account.id;
       store.accounts[account.id].isDefault = true;
     }
-    await this.deps.writeProviderStore(store);
+    await this.deps.store.write(store);
     await this.syncStoreToOpenClaw(store);
-    return {
-      status: 200,
-      data: {
-        success: true,
-        account: store.accounts[account.id],
-      },
-    };
+    return ok({
+      success: true,
+      account: store.accounts[account.id],
+    });
   }
 
-  async setDefault(payload: unknown): Promise<LocalDispatchResponse> {
+  setDefault(payload: unknown): ApplicationResponse {
+    return accepted(this.deps.jobs.submitSetDefault(payload));
+  }
+
+  async executeSetDefault(payload: unknown): Promise<ApplicationResponse> {
     const body = isRecord(payload) ? payload : {};
     const accountId = typeof body.accountId === 'string' ? body.accountId : '';
     if (!accountId) {
-      return {
-        status: 400,
-        data: { success: false, error: 'accountId 参数无效' },
-      };
+      return badRequest('accountId 参数无效');
     }
-    const store = await this.deps.readProviderStore();
+    const store = await this.deps.store.read();
     if (!store.accounts[accountId]) {
-      return {
-        status: 404,
-        data: { success: false, error: 'Provider account not found' },
-      };
+      return notFound('Provider account not found');
     }
     store.defaultAccountId = accountId;
     for (const account of Object.values(store.accounts)) {
       account.isDefault = account.id === accountId;
     }
-    await this.deps.writeProviderStore(store);
+    await this.deps.store.write(store);
     await this.syncStoreToOpenClaw(store);
-    return {
-      status: 200,
-      data: { success: true },
-    };
+    return ok({ success: true });
   }
 
   async validate(payload: unknown) {
-    return await this.deps.validateApiKey(payload);
+    return await validateProviderApiKeyLocal(payload, this.deps.httpClient);
   }
 
   async startOAuth(payload: unknown) {
     const body = isRecord(payload) ? payload : {};
     if (typeof body.provider !== 'string') {
-      return {
-        status: 400,
-        data: { success: false, error: 'provider-accounts/oauth/start 参数无效' },
-      } satisfies LocalDispatchResponse;
+      return badRequest('provider-accounts/oauth/start 参数无效');
     }
-    const shellResponse = await this.deps.requestParentShellAction('provider_oauth_start', {
+    const shellResponse = await this.deps.parentShell.request('provider_oauth_start', {
       provider: body.provider,
       ...((body.region === 'global' || body.region === 'cn') ? { region: body.region } : {}),
       ...(typeof body.accountId === 'string' ? { accountId: body.accountId } : {}),
       ...(typeof body.label === 'string' ? { label: body.label } : {}),
     });
-    return this.deps.mapParentTransportResponse(shellResponse);
+    return this.deps.parentShell.mapResponse(shellResponse);
   }
 
   async cancelOAuth() {
-    const shellResponse = await this.deps.requestParentShellAction('provider_oauth_cancel');
-    return this.deps.mapParentTransportResponse(shellResponse);
+    const shellResponse = await this.deps.parentShell.request('provider_oauth_cancel');
+    return this.deps.parentShell.mapResponse(shellResponse);
   }
 
   async submitOAuth(payload: unknown) {
     const body = isRecord(payload) ? payload : {};
-    const shellResponse = await this.deps.requestParentShellAction('provider_oauth_submit', {
+    const shellResponse = await this.deps.parentShell.request('provider_oauth_submit', {
       code: typeof body.code === 'string' ? body.code : '',
     });
-    return this.deps.mapParentTransportResponse(shellResponse);
+    return this.deps.parentShell.mapResponse(shellResponse);
   }
 
-  async completeBrowser(payload: unknown): Promise<LocalDispatchResponse> {
+  async completeBrowser(payload: unknown): Promise<ApplicationResponse> {
     const body = isRecord(payload) ? payload : {};
     const providerType = body.providerType === 'google' || body.providerType === 'openai'
       ? body.providerType
@@ -237,18 +167,12 @@ export class ProviderAccountsService {
     const runtimeProviderId = typeof body.runtimeProviderId === 'string' ? body.runtimeProviderId.trim() : '';
     const token = isRecord(body.token) ? body.token : null;
     if (!providerType || !accountId || !runtimeProviderId || !token) {
-      return {
-        status: 400,
-        data: { success: false, error: 'provider-accounts/oauth/complete-browser 参数无效' },
-      };
+      return badRequest('provider-accounts/oauth/complete-browser 参数无效');
     }
     if (typeof token.access !== 'string' || typeof token.refresh !== 'string' || typeof token.expires !== 'number') {
-      return {
-        status: 400,
-        data: { success: false, error: 'provider-accounts/oauth/complete-browser token 参数无效' },
-      };
+      return badRequest('provider-accounts/oauth/complete-browser token 参数无效');
     }
-    const account = await this.deps.completeBrowserOAuth({
+    const account = await this.deps.oauthCompletion.completeBrowser({
       providerType,
       accountId,
       ...(typeof body.accountLabel === 'string' ? { accountLabel: body.accountLabel } : {}),
@@ -262,13 +186,10 @@ export class ProviderAccountsService {
         ...(typeof token.accountId === 'string' ? { accountId: token.accountId } : {}),
       },
     });
-    return {
-      status: 200,
-      data: { success: true, account },
-    };
+    return ok({ success: true, account });
   }
 
-  async completeDevice(payload: unknown): Promise<LocalDispatchResponse> {
+  async completeDevice(payload: unknown): Promise<ApplicationResponse> {
     const body = isRecord(payload) ? payload : {};
     const providerType = body.providerType === 'minimax-portal'
       || body.providerType === 'minimax-portal-cn'
@@ -278,10 +199,7 @@ export class ProviderAccountsService {
     const accountId = typeof body.accountId === 'string' ? body.accountId.trim() : '';
     const token = isRecord(body.token) ? body.token : null;
     if (!providerType || !accountId || !token) {
-      return {
-        status: 400,
-        data: { success: false, error: 'provider-accounts/oauth/complete-device 参数无效' },
-      };
+      return badRequest('provider-accounts/oauth/complete-device 参数无效');
     }
     if (
       typeof token.access !== 'string'
@@ -289,12 +207,9 @@ export class ProviderAccountsService {
       || typeof token.expires !== 'number'
       || (token.api !== 'anthropic-messages' && token.api !== 'openai-completions')
     ) {
-      return {
-        status: 400,
-        data: { success: false, error: 'provider-accounts/oauth/complete-device token 参数无效' },
-      };
+      return badRequest('provider-accounts/oauth/complete-device token 参数无效');
     }
-    const account = await this.deps.completeDeviceOAuth({
+    const account = await this.deps.oauthCompletion.completeDevice({
       providerType,
       accountId,
       ...(typeof body.accountLabel === 'string' ? { accountLabel: body.accountLabel } : {}),
@@ -306,55 +221,47 @@ export class ProviderAccountsService {
         ...(typeof token.resourceUrl === 'string' ? { resourceUrl: token.resourceUrl } : {}),
       },
     });
-    return {
-      status: 200,
-      data: { success: true, account },
-    };
+    return ok({ success: true, account });
   }
 
   async getApiKey(accountId: string) {
-    const store = await this.deps.readProviderStore();
+    const store = await this.deps.store.read();
     return { apiKey: typeof store.apiKeys[accountId] === 'string' ? store.apiKeys[accountId] : null };
   }
 
   async hasApiKey(accountId: string) {
-    const store = await this.deps.readProviderStore();
+    const store = await this.deps.store.read();
     const account = isRecord(store.accounts[accountId]) ? store.accounts[accountId] : null;
     return { hasKey: Boolean(await this.resolveAccountApiKey(store, accountId, account)) };
   }
 
   async get(accountId: string) {
-    const store = await this.deps.readProviderStore();
+    const store = await this.deps.store.read();
     return store.accounts[accountId] || null;
   }
 
-  async update(accountId: string, payload: unknown): Promise<LocalDispatchResponse> {
-    const store = await this.deps.readProviderStore();
+  update(accountId: string, payload: unknown): ApplicationResponse {
+    return accepted(this.deps.jobs.submitUpdate(accountId, payload));
+  }
+
+  async executeUpdate(accountId: string, payload: unknown): Promise<ApplicationResponse> {
+    const store = await this.deps.store.read();
     const existing = isRecord(store.accounts[accountId]) ? store.accounts[accountId] : null;
     if (!existing) {
-      return {
-        status: 404,
-        data: { success: false, error: 'Provider account not found' },
-      };
+      return notFound('Provider account not found');
     }
     const body = isRecord(payload) ? payload : {};
     const updates = isRecord(body.updates) ? body.updates : null;
     if (!updates) {
-      return {
-        status: 400,
-        data: { success: false, error: 'updates 参数无效' },
-      };
+      return badRequest('updates 参数无效');
     }
-    const next = this.deps.normalizeAccount({
+    const next = normalizeProviderAccountLocal({
       ...existing,
       ...updates,
       id: accountId,
-    }, existing);
+    }, existing, this.deps.clock);
     if (!next) {
-      return {
-        status: 400,
-        data: { success: false, error: 'provider account 参数无效' },
-      };
+      return badRequest('provider account 参数无效');
     }
     store.accounts[accountId] = next;
     if (Object.prototype.hasOwnProperty.call(body, 'apiKey')) {
@@ -365,47 +272,45 @@ export class ProviderAccountsService {
         delete store.apiKeys[accountId];
       }
     }
-    await this.deps.writeProviderStore(store);
+    await this.deps.store.write(store);
     await this.syncStoreToOpenClaw(store);
-    return {
-      status: 200,
-      data: { success: true, account: next },
-    };
+    return ok({ success: true, account: next });
   }
 
-  async delete(accountId: string, apiKeyOnly: boolean): Promise<LocalDispatchResponse> {
-    const store = await this.deps.readProviderStore();
+  delete(accountId: string, apiKeyOnly: boolean): ApplicationResponse {
+    return accepted(this.deps.jobs.submitDelete(accountId, apiKeyOnly));
+  }
+
+  async executeDelete(accountId: string, apiKeyOnly: boolean): Promise<ApplicationResponse> {
+    const store = await this.deps.store.read();
     const existingAccount = isRecord(store.accounts[accountId]) ? store.accounts[accountId] : null;
-    const cleanupProviderKeys = resolveProviderCleanupKeys(accountId, existingAccount);
+    const cleanupProviderKeys = this.runtime.resolveCleanupProviderKeys({
+      accountId,
+      account: existingAccount,
+    });
 
     if (apiKeyOnly) {
       delete store.apiKeys[accountId];
       for (const providerKey of cleanupProviderKeys) {
-        await removeProviderKeyFromOpenClaw(providerKey);
+        await this.runtime.removeProviderKey(providerKey);
       }
-      await this.deps.writeProviderStore(store);
+      await this.deps.store.write(store);
       await this.syncStoreToOpenClaw(store);
-      return {
-        status: 200,
-        data: { success: true },
-      };
+      return ok({ success: true });
     }
     delete store.accounts[accountId];
     delete store.apiKeys[accountId];
     if (store.defaultAccountId === accountId) {
-      store.defaultAccountId = this.deps.normalizeFallbackAccount(Object.values(store.accounts), accountId);
+      store.defaultAccountId = normalizeProviderFallbackAccountLocal(Object.values(store.accounts), accountId);
       for (const account of Object.values(store.accounts)) {
         account.isDefault = Boolean(store.defaultAccountId) && account.id === store.defaultAccountId;
       }
     }
     for (const providerKey of cleanupProviderKeys) {
-      await removeProviderFromOpenClaw(providerKey);
+      await this.runtime.removeProviderConfig(providerKey);
     }
-    await this.deps.writeProviderStore(store);
+    await this.deps.store.write(store);
     await this.syncStoreToOpenClaw(store);
-    return {
-      status: 200,
-      data: { success: true },
-    };
+    return ok({ success: true });
   }
 }

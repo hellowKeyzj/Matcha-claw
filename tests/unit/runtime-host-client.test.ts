@@ -152,7 +152,7 @@ describe('runtime-host http client', () => {
     const setTimeoutSpy = vi.spyOn(globalThis, 'setTimeout');
     const client = createRuntimeHostHttpClient({ baseUrl: 'http://127.0.0.1:3211', timeoutMs: 15000 });
 
-    await client.request('POST', '/api/gateway/rpc', { method: 'chat.send' }, { timeoutMs: 45000 });
+    await client.request('POST', '/api/session/prompt', { sessionKey: 'agent:main:main' }, { timeoutMs: 45000 });
 
     expect(setTimeoutSpy).toHaveBeenCalledWith(expect.any(Function), 45000);
     setTimeoutSpy.mockRestore();

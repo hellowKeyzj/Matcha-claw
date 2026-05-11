@@ -6,7 +6,7 @@ import { waitFor } from '@testing-library/react';
 import { useLayoutStore } from '@/stores/layout';
 import { useSettingsStore } from '@/stores/settings';
 import { useGatewayStore } from '@/stores/gateway';
-import { gatewayClientRpcMock, hostApiFetchMock, resetGatewayClientMocks } from './helpers/mock-gateway-client';
+import { hostApiFetchMock, resetGatewayClientMocks } from './helpers/mock-gateway-client';
 
 describe('Settings Store', () => {
   beforeEach(() => {
@@ -191,15 +191,6 @@ describe('Gateway Store', () => {
     const state = useGatewayStore.getState();
     expect(state.status.processState).toBe('running');
     expect(state.status.pid).toBe(12345);
-  });
-
-  it('should proxy gateway rpc through host gateway transport', async () => {
-    gatewayClientRpcMock.mockResolvedValueOnce({ ok: true });
-
-    const result = await useGatewayStore.getState().rpc<{ ok: boolean }>('chat.history', { limit: 10 }, 5000);
-
-    expect(result.ok).toBe(true);
-    expect(gatewayClientRpcMock).toHaveBeenCalledWith('chat.history', { limit: 10 }, 5000);
   });
 
   it('should refresh gateway status from host after start command succeeds', async () => {

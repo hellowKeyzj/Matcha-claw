@@ -1,50 +1,31 @@
-import {
-  type RuntimeHostCatalogPlugin,
-  type RuntimeHostExecutionState,
-  type RuntimeHostRouteResult,
-} from './runtime-host-contract';
+import type { RuntimeHostRouteResult } from './runtime-host-contract';
 import type { GatewayManager } from '../gateway/manager';
 import { logger } from '../utils/logger';
 import { EventEmitter } from 'node:events';
-import { getSetting } from '../services/settings/settings-store';
-import { createChannelRuntimeService } from '../services/channels/channel-runtime-service';
 import { browserOAuthManager, type BrowserOAuthProviderType } from '../services/providers/oauth/browser-oauth-manager';
 import { deviceOAuthManager, type OAuthProviderType } from '../services/providers/oauth/device-oauth-manager';
-import {
-  clearStoredLicenseData,
-  forceRevalidateStoredLicense,
-  getLicenseGateSnapshot,
-  getStoredLicenseKey,
-  validateLicenseKey,
-  waitForLicenseGateBootstrap,
-} from '../services/license/license-gate-service';
 import { createRuntimeHostProcessManager } from './runtime-host-process-manager';
 import {
   createRuntimeHostHttpClient,
 } from './runtime-host-client';
 import { getPort } from '../utils/config';
-import { shell } from 'electron';
+import { app, shell } from 'electron';
 import { getOpenClawDir } from '../utils/paths';
 import type { GatewayTransportIssue } from '../../runtime-host/shared/gateway-error';
 
-type RuntimeHostLifecycle = 'idle' | 'starting' | 'running' | 'stopped' | 'error';
+type RuntimeHostLifecycle = 'idle' | 'starting' | 'running' | 'stopping' | 'stopped' | 'error';
 type RequestMethod = 'GET' | 'POST' | 'PUT' | 'DELETE';
-type RuntimeHealthLifecycle = 'idle' | 'booting' | 'running' | 'stopped' | 'error';
+type RuntimeHealthLifecycle = 'starting' | 'running' | 'stopping' | 'stopped' | 'error';
 export type RuntimeHostShellAction =
   | 'shell_open_path'
   | 'gateway_restart'
+  | 'host_diagnostics_snapshot'
   | 'provider_oauth_start'
   | 'provider_oauth_cancel'
-  | 'provider_oauth_submit'
-  | 'channel_session_start'
-  | 'channel_session_cancel'
-  | 'license_get_gate'
-  | 'license_get_stored_key'
-  | 'license_validate'
-  | 'license_revalidate'
-  | 'license_clear';
+  | 'provider_oauth_submit';
 
 export type RuntimeHostGatewayForwardEventName =
+  | 'gateway:lifecycle'
   | 'gateway:notification'
   | 'session:update'
   | 'gateway:channel-status'
@@ -84,7 +65,6 @@ export interface RuntimeHostManagerState {
   readonly runtimeLifecycle: RuntimeHealthLifecycle;
   readonly pid?: number;
   readonly activePluginCount: number;
-  readonly enabledPluginIds: readonly string[];
   readonly lastError?: string;
 }
 
@@ -92,14 +72,9 @@ export interface RuntimeHostManager {
   readonly start: () => Promise<void>;
   readonly stop: () => Promise<void>;
   readonly restart: () => Promise<void>;
-  readonly syncSecurityPolicyToGatewayIfRunning: () => Promise<boolean>;
   readonly checkHealth: () => Promise<RuntimeHostManagerHealth>;
   readonly readGatewayStatus: () => Promise<RuntimeHostGatewayStatusSnapshot | null>;
   readonly getState: () => RuntimeHostManagerState;
-  readonly getExecutionState: () => RuntimeHostExecutionState;
-  readonly refreshExecutionState: () => Promise<RuntimeHostExecutionState>;
-  readonly setEnabledPluginIds: (pluginIds: readonly string[]) => Promise<RuntimeHostExecutionState>;
-  readonly listAvailablePlugins: () => Promise<readonly RuntimeHostCatalogPlugin[]>;
   readonly request: <TResponse>(
     method: RequestMethod,
     route: string,
@@ -124,7 +99,6 @@ export interface RuntimeHostManager {
 
 export interface RuntimeHostManagerDeps {
   readonly gatewayManager: GatewayManager;
-  readonly enabledPluginIds?: readonly string[];
 }
 
 type RuntimeHostProviderOAuthInput = {
@@ -135,19 +109,10 @@ type RuntimeHostProviderOAuthInput = {
 };
 
 type RuntimeHostMainProcessCapabilities = {
-  readonly channel: ReturnType<typeof createChannelRuntimeService>;
   readonly providerOAuth: {
     readonly startOAuthFlow: (input: RuntimeHostProviderOAuthInput) => Promise<void>;
     readonly cancelOAuthFlow: () => Promise<void>;
     readonly submitManualOAuthCode: (code: string) => boolean;
-  };
-  readonly license: {
-    readonly waitForBootstrap: () => Promise<void>;
-    readonly getGateSnapshot: () => ReturnType<typeof getLicenseGateSnapshot>;
-    readonly getStoredKey: () => Promise<string | null>;
-    readonly validateKey: (key: string) => Promise<Awaited<ReturnType<typeof validateLicenseKey>>>;
-    readonly revalidateStored: () => Promise<Awaited<ReturnType<typeof forceRevalidateStoredLicense>>>;
-    readonly clearStored: () => Promise<void>;
   };
 };
 
@@ -180,50 +145,13 @@ export function createRuntimeHostManager(
     };
   }
 
-  let executionState: RuntimeHostExecutionState = {
-    enabledPluginIds: deps.enabledPluginIds?.length
-      ? Array.from(new Set(deps.enabledPluginIds))
-      : [],
-  };
-
   let lifecycle: RuntimeHostLifecycle = 'idle';
   let lastError: string | undefined;
-  let childPluginCatalogSnapshot: readonly RuntimeHostCatalogPlugin[] = [];
   let activePluginCount = 0;
   let childGatewayBridgeSnapshot: { port: number; token: string } = {
     port: getPort('OPENCLAW_GATEWAY'),
     token: '',
   };
-  try {
-    const rawCatalog = process.env.MATCHACLAW_RUNTIME_HOST_PLUGIN_CATALOG;
-    if (rawCatalog) {
-      const parsed = JSON.parse(rawCatalog) as unknown;
-      if (Array.isArray(parsed)) {
-        childPluginCatalogSnapshot = parsed.filter((item): item is RuntimeHostCatalogPlugin => {
-          if (!item || typeof item !== 'object') return false;
-          const candidate = item as Record<string, unknown>;
-        return typeof candidate.id === 'string'
-            && typeof candidate.name === 'string'
-            && typeof candidate.version === 'string'
-            && (candidate.kind === 'builtin' || candidate.kind === 'third-party')
-            && (candidate.platform === undefined || candidate.platform === 'openclaw' || candidate.platform === 'matchaclaw')
-            && typeof candidate.category === 'string';
-        }).map((item) => ({
-          ...item,
-          platform: item.platform === 'matchaclaw' ? 'matchaclaw' : 'openclaw',
-          ...(Array.isArray(item.companionSkillSlugs)
-            ? {
-              companionSkillSlugs: item.companionSkillSlugs.filter(
-                (slug): slug is string => typeof slug === 'string' && slug.trim().length > 0,
-              ),
-            }
-            : {}),
-        }));
-      }
-    }
-  } catch {
-    childPluginCatalogSnapshot = [];
-  }
   const internalDispatchToken = `runtime-host-dispatch-${Math.random().toString(36).slice(2)}-${Date.now()}`;
   const gatewayEventBus = new EventEmitter();
   const hostApiPort = getPort('MATCHACLAW_HOST_API');
@@ -232,11 +160,11 @@ export function createRuntimeHostManager(
     parentApiBaseUrl: `http://127.0.0.1:${hostApiPort}`,
     parentDispatchToken: internalDispatchToken,
     childEnv: () => ({
-      MATCHACLAW_RUNTIME_HOST_ENABLED_PLUGIN_IDS: JSON.stringify(executionState.enabledPluginIds),
-      MATCHACLAW_RUNTIME_HOST_PLUGIN_CATALOG: JSON.stringify(childPluginCatalogSnapshot),
       MATCHACLAW_RUNTIME_HOST_GATEWAY_PORT: String(childGatewayBridgeSnapshot.port),
-      MATCHACLAW_RUNTIME_HOST_GATEWAY_TOKEN: childGatewayBridgeSnapshot.token,
       MATCHACLAW_OPENCLAW_DIR: openClawDir,
+      MATCHACLAW_APP_PACKAGED: app.isPackaged ? '1' : '0',
+      MATCHACLAW_APP_VERSION: app.getVersion(),
+      MATCHACLAW_APP_USER_DATA_DIR: app.getPath('userData'),
     }),
     logger,
   });
@@ -248,77 +176,21 @@ export function createRuntimeHostManager(
     gatewayManager: deps.gatewayManager,
     processManager: runtimeHostProcess,
     httpClient: runtimeHostHttpClient,
-    settingsStore: {
-      get: getSetting,
-    },
   } as const;
 
   async function hydrateExecutionStateFromSources(): Promise<void> {
-    const [gatewayToken] = await Promise.all([
-      infrastructure.settingsStore.get('gatewayToken').catch(() => ''),
-    ]);
     const gatewayStatusPort = infrastructure.gatewayManager.getStatus().port;
     if (!Number.isFinite(gatewayStatusPort) || gatewayStatusPort <= 0) {
       throw new Error(`Invalid gateway port from gateway manager: ${String(gatewayStatusPort)}`);
     }
     childGatewayBridgeSnapshot = {
       port: gatewayStatusPort,
-      token: typeof gatewayToken === 'string' ? gatewayToken : '',
+      token: '',
     };
-  }
-
-  async function setEnabledPluginIdsInternal(pluginIds: readonly string[]): Promise<RuntimeHostExecutionState> {
-    const result = await infrastructure.httpClient.request<{
-      success?: boolean;
-      execution?: {
-        enabledPluginIds?: unknown;
-      };
-    }>('PUT', '/api/plugins/runtime/enabled-plugins', {
-      pluginIds: [...pluginIds],
-    });
-    const normalizedPluginIds = Array.isArray(result.data?.execution?.enabledPluginIds)
-      ? result.data.execution.enabledPluginIds.filter((item): item is string => typeof item === 'string')
-      : [...pluginIds];
-    executionState = {
-      ...executionState,
-      enabledPluginIds: normalizedPluginIds,
-    };
-    return executionState;
-  }
-
-  async function refreshExecutionStateInternal(): Promise<RuntimeHostExecutionState> {
-    const result = await infrastructure.httpClient.request<{
-      success?: boolean;
-      execution?: {
-        enabledPluginIds?: unknown;
-      };
-    }>('GET', '/api/plugins/runtime');
-    const enabledPluginIds = Array.isArray(result.data?.execution?.enabledPluginIds)
-      ? result.data.execution.enabledPluginIds.filter((item): item is string => typeof item === 'string')
-      : [];
-    executionState = {
-      ...executionState,
-      enabledPluginIds,
-    };
-    return executionState;
   }
 
   // 主进程保留能力：只有主进程才能执行，因此通过 shell action 暴露给子进程调用。
   const mainProcessCapabilities: RuntimeHostMainProcessCapabilities = {
-    channel: createChannelRuntimeService({
-      scheduleGatewayRestart: () => {
-        if (infrastructure.gatewayManager.getStatus().processState === 'stopped') {
-          return;
-        }
-        infrastructure.gatewayManager.debouncedRestart();
-      },
-      saveChannelConfig: async (payload) => {
-        const result = await infrastructure.httpClient.request('POST', '/api/channels/activate', payload);
-        if (result.status >= 400) {
-          throw new Error(`Failed to save channel config through runtime-host: HTTP ${String(result.status)}`);
-        }
-      },
-    }),
     providerOAuth: {
       startOAuthFlow: async (input) => {
         if (input.provider === 'google' || input.provider === 'openai') {
@@ -342,14 +214,6 @@ export function createRuntimeHostManager(
         await browserOAuthManager.stopFlow();
       },
       submitManualOAuthCode: (code) => browserOAuthManager.submitManualCode(code || ''),
-    },
-    license: {
-      waitForBootstrap: async () => await waitForLicenseGateBootstrap(),
-      getGateSnapshot: () => getLicenseGateSnapshot(),
-      getStoredKey: async () => await getStoredLicenseKey(),
-      validateKey: async (key) => await validateLicenseKey(key),
-      revalidateStored: async () => await forceRevalidateStoredLicense('manual'),
-      clearStored: async () => await clearStoredLicenseData(),
     },
   };
 
@@ -382,30 +246,6 @@ export function createRuntimeHostManager(
         return { status: 200, data: { success: true } };
       }
 
-      if (action === 'channel_session_start') {
-        const body = asRecord(payload);
-        const channelType = typeof body?.channelType === 'string' ? body.channelType : '';
-        if (!channelType) {
-          return { status: 400, data: { success: false, error: 'channelType is required' } };
-        }
-        const result = await mainProcessCapabilities.channel.startChannelSession({
-          channelType,
-          accountId: typeof body?.accountId === 'string' ? body.accountId : undefined,
-          config: asRecord(body?.config) ?? undefined,
-        });
-        return { status: 200, data: { success: true, ...result } };
-      }
-
-      if (action === 'channel_session_cancel') {
-        const body = asRecord(payload);
-        const channelType = typeof body?.channelType === 'string' ? body.channelType : '';
-        if (!channelType) {
-          return { status: 400, data: { success: false, error: 'channelType is required' } };
-        }
-        await mainProcessCapabilities.channel.cancelChannelSession(channelType);
-        return { status: 200, data: { success: true } };
-      }
-
       if (action === 'shell_open_path') {
         const body = asRecord(payload);
         const targetPath = typeof body?.path === 'string' ? body.path.trim() : '';
@@ -426,28 +266,29 @@ export function createRuntimeHostManager(
         return { status: 200, data: { success: true } };
       }
 
-      if (action === 'license_get_gate') {
-        await mainProcessCapabilities.license.waitForBootstrap();
-        return { status: 200, data: mainProcessCapabilities.license.getGateSnapshot() };
+      if (action === 'host_diagnostics_snapshot') {
+        return {
+          status: 200,
+          data: {
+            success: true,
+            snapshot: {
+              userDataDir: app.getPath('userData'),
+              appInfo: {
+                name: app.getName(),
+                version: app.getVersion(),
+                isPackaged: app.isPackaged,
+                platform: process.platform,
+                arch: process.arch,
+                electron: process.versions.electron,
+                node: process.versions.node,
+              },
+              gatewayStatus: infrastructure.gatewayManager.getStatus(),
+            },
+          },
+        };
       }
 
-      if (action === 'license_get_stored_key') {
-        await mainProcessCapabilities.license.waitForBootstrap();
-        return { status: 200, data: { key: await mainProcessCapabilities.license.getStoredKey() } };
-      }
-
-      if (action === 'license_validate') {
-        const body = asRecord(payload);
-        const key = typeof body?.key === 'string' ? body.key : '';
-        return { status: 200, data: await mainProcessCapabilities.license.validateKey(key) };
-      }
-
-      if (action === 'license_revalidate') {
-        return { status: 200, data: await mainProcessCapabilities.license.revalidateStored() };
-      }
-
-      await mainProcessCapabilities.license.clearStored();
-      return { status: 200, data: { success: true } };
+      return { status: 400, data: { success: false, error: `Unsupported shell action: ${action}` } };
     } catch (error) {
       return {
         status: 500,
@@ -464,7 +305,7 @@ export function createRuntimeHostManager(
   ): RuntimeHealthLifecycle {
     switch (processLifecycle) {
       case 'starting':
-        return 'booting';
+        return 'starting';
       case 'running':
         return 'running';
       case 'stopped':
@@ -473,7 +314,7 @@ export function createRuntimeHostManager(
         return 'error';
       case 'idle':
       default:
-        return 'idle';
+        return 'stopped';
     }
   }
 
@@ -493,51 +334,6 @@ export function createRuntimeHostManager(
       return error.message;
     }
     return String(error);
-  }
-
-  function normalizeCatalogPluginsFromPayload(payload: unknown): readonly RuntimeHostCatalogPlugin[] {
-    if (!payload || typeof payload !== 'object') {
-      return [];
-    }
-    const record = payload as Record<string, unknown>;
-    const plugins = record.plugins;
-    if (!Array.isArray(plugins)) {
-      return [];
-    }
-    return plugins
-      .map((item): RuntimeHostCatalogPlugin | null => {
-        if (!item || typeof item !== 'object') {
-          return null;
-        }
-        const plugin = item as Record<string, unknown>;
-        if (
-          typeof plugin.id !== 'string'
-          || typeof plugin.name !== 'string'
-          || typeof plugin.version !== 'string'
-          || (plugin.kind !== 'builtin' && plugin.kind !== 'third-party')
-          || (plugin.platform !== undefined && plugin.platform !== 'openclaw' && plugin.platform !== 'matchaclaw')
-          || typeof plugin.category !== 'string'
-        ) {
-          return null;
-        }
-        return {
-          id: plugin.id,
-          name: plugin.name,
-          version: plugin.version,
-          kind: plugin.kind,
-          platform: plugin.platform === 'matchaclaw' ? 'matchaclaw' : 'openclaw',
-          category: plugin.category,
-          ...(typeof plugin.description === 'string' ? { description: plugin.description } : {}),
-          ...(Array.isArray(plugin.companionSkillSlugs)
-            ? {
-              companionSkillSlugs: plugin.companionSkillSlugs.filter(
-                (slug): slug is string => typeof slug === 'string' && slug.trim().length > 0,
-              ),
-            }
-            : {}),
-        };
-      })
-      .filter((item): item is RuntimeHostCatalogPlugin => Boolean(item));
   }
 
   function emitGatewayEventInternal(
@@ -566,11 +362,8 @@ export function createRuntimeHostManager(
       try {
         await hydrateExecutionStateFromSources();
         await infrastructure.processManager.start();
-        await refreshExecutionStateInternal();
         lifecycle = 'running';
-        logger.info(
-          `Runtime Host started (plugins=${executionState.enabledPluginIds.join(', ') || 'none'})`,
-        );
+        logger.info('Runtime Host started');
       } catch (error) {
         lifecycle = 'error';
         lastError = error instanceof Error ? error.message : String(error);
@@ -583,6 +376,7 @@ export function createRuntimeHostManager(
       if (lifecycle === 'stopped' || lifecycle === 'idle') {
         return;
       }
+      lifecycle = 'stopping';
       await infrastructure.processManager.stop();
       lifecycle = 'stopped';
       logger.info('Runtime Host stopped');
@@ -591,20 +385,7 @@ export function createRuntimeHostManager(
     async restart() {
       await hydrateExecutionStateFromSources();
       await infrastructure.processManager.restart();
-      await refreshExecutionStateInternal();
       lifecycle = 'running';
-    },
-
-    async syncSecurityPolicyToGatewayIfRunning() {
-      try {
-        const result = await infrastructure.httpClient.request<{
-          readonly synced?: boolean;
-        }>('POST', '/api/security/sync-current-policy');
-        return result.data?.synced === true;
-      } catch (error) {
-        logger.warn(`Failed to sync security policy through runtime-host child: ${toErrorMessage(error)}`);
-        return false;
-      }
     },
 
     async checkHealth() {
@@ -661,30 +442,8 @@ export function createRuntimeHostManager(
         runtimeLifecycle,
         ...(processState.pid ? { pid: processState.pid } : {}),
         activePluginCount,
-        enabledPluginIds: executionState.enabledPluginIds,
         ...((lastError || processState.lastError) ? { lastError: processState.lastError ?? lastError } : {}),
       };
-    },
-
-    getExecutionState() {
-      return executionState;
-    },
-
-    async refreshExecutionState() {
-      return await refreshExecutionStateInternal();
-    },
-
-    async setEnabledPluginIds(pluginIds) {
-      return await setEnabledPluginIdsInternal(pluginIds);
-    },
-
-    async listAvailablePlugins() {
-      const result = await infrastructure.httpClient.request<{
-        readonly plugins?: unknown;
-      }>('GET', '/api/plugins/catalog');
-      const plugins = normalizeCatalogPluginsFromPayload(result.data);
-      childPluginCatalogSnapshot = plugins;
-      return plugins;
     },
 
     async request<TResponse>(

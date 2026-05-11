@@ -9,6 +9,7 @@ import type {
   HealthStatus,
   ReconcileReport,
 } from '../../shared/platform-runtime-contracts';
+import type { RuntimeClockPort } from '../common/runtime-ports';
 
 export class RuntimeManagerService implements RuntimeManagerPort {
   constructor(
@@ -16,6 +17,7 @@ export class RuntimeManagerService implements RuntimeManagerPort {
     private readonly toolRegistry: ToolRegistryPort,
     private readonly auditSink: AuditSinkPort,
     private readonly reconciler: ReconcilerPort,
+    private readonly clock: RuntimeClockPort,
   ) {}
 
   async runtimeHealth(): Promise<HealthStatus> {
@@ -28,7 +30,7 @@ export class RuntimeManagerService implements RuntimeManagerPort {
     await this.toolRegistry.upsertNative(installed);
     await this.auditSink.append({
       type: 'runtime.install_native_tool',
-      ts: Date.now(),
+      ts: this.clock.nowMs(),
       payload: { toolId, source: source.spec, kind: source.kind },
     });
     return toolId;
@@ -40,7 +42,7 @@ export class RuntimeManagerService implements RuntimeManagerPort {
     const report = await this.reconciler.reconcileTools();
     await this.auditSink.append({
       type: 'runtime.reconcile_native_tools',
-      ts: Date.now(),
+      ts: this.clock.nowMs(),
       payload: {
         discovered: report.discovered.length,
         missing: report.missing.length,

@@ -24,18 +24,6 @@ describe('plugin group mapping', () => {
     })).toBe('model');
   });
 
-  it('runtime 核心包归到 model 组', () => {
-    expect(pickCatalogGroup({
-      id: '@openclaw/image-generation-core',
-      category: 'general',
-      description: 'OpenClaw image generation runtime package',
-      groupHints: {
-        channel: false,
-        model: false,
-      },
-    })).toBe('model');
-  });
-
   it('voice-call 归到 channel 组', () => {
     expect(pickCatalogGroup({
       id: 'voice-call',

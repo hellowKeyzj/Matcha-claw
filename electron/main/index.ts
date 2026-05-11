@@ -179,9 +179,13 @@ if (gotTheLock) {
     const result = await runtimeHostManager.request<{
       success?: boolean;
       error?: string;
+      missingMethods?: string[];
     }>('POST', '/api/gateway/ready', { timeoutMs }, { timeoutMs: timeoutMs + 2000 });
     if (result.data?.success !== true) {
-      throw new Error(result.data?.error || 'Gateway control ready probe failed');
+      const missingMethods = Array.isArray(result.data?.missingMethods)
+        ? ` missingMethods=${result.data.missingMethods.join(',')}`
+        : '';
+      throw new Error(result.data?.error || `Gateway control ready probe failed${missingMethods}`);
     }
   });
 

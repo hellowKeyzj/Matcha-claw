@@ -1,89 +1,37 @@
-import { PlatformService } from '../../application/platform-runtime/service';
-import type { RuntimeHostPlatformFacade } from '../platform/runtime-root';
-
-interface LocalDispatchResponse {
-  status: number;
-  data: unknown;
-}
+import {
+  accepted,
+  routeResponder,
+  type ApplicationResponse,
+  type RuntimeRouteDefinition,
+} from './route-utils';
 
 interface PlatformRouteDeps {
-  readonly platformRuntime: RuntimeHostPlatformFacade;
+  readonly platformService: PlatformRouteService;
 }
 
-export async function handlePlatformRoute(
-  method: string,
-  routePath: string,
-  routeUrl: URL,
-  payload: unknown,
-  deps: PlatformRouteDeps,
-): Promise<LocalDispatchResponse | null> {
-  if (!(routePath === '/api/platform/runtime/health' || routePath.startsWith('/api/platform/'))) {
-    return null;
-  }
-  const service = new PlatformService({
-    platformRuntime: deps.platformRuntime,
-  });
-
-  if (method === 'GET' && routePath === '/api/platform/runtime/health') {
-    return {
-      status: 200,
-      data: await service.runtimeHealth(),
-    };
-  }
-
-  if (method === 'POST' && routePath === '/api/platform/runtime/start-run') {
-    return {
-      status: 200,
-      data: await service.startRun(payload),
-    };
-  }
-
-  if (method === 'POST' && routePath === '/api/platform/runtime/abort-run') {
-    return await service.abortRun(payload);
-  }
-
-  if (method === 'POST' && routePath === '/api/platform/tools/install-native') {
-    return await service.installNativeTool(payload);
-  }
-
-  if (method === 'POST' && routePath === '/api/platform/tools/reconcile') {
-    return {
-      status: 200,
-      data: await service.reconcileTools(),
-    };
-  }
-
-  if (method === 'GET' && routePath === '/api/platform/tools') {
-    return {
-      status: 200,
-      data: await service.listTools(routeUrl),
-    };
-  }
-
-  if (method === 'POST' && routePath === '/api/platform/tools/query') {
-    return {
-      status: 200,
-      data: await service.queryTools(payload),
-    };
-  }
-
-  if (method === 'POST' && routePath === '/api/platform/tools/upsert-platform') {
-    return {
-      status: 200,
-      data: await service.upsertPlatformTools(payload),
-    };
-  }
-
-  if (method === 'POST' && routePath === '/api/platform/tools/set-enabled') {
-    return await service.setToolEnabled(payload);
-  }
-
-  if (method === 'POST' && routePath === '/api/platform/tools/execute') {
-    return {
-      status: 200,
-      data: await service.executeTool(payload),
-    };
-  }
-
-  return null;
+interface PlatformRouteService {
+  runtimeHealth(): Promise<unknown>;
+  startRun(payload: unknown): Promise<unknown>;
+  abortRun(payload: unknown): Promise<ApplicationResponse>;
+  installNativeTool(payload: unknown): Promise<ApplicationResponse>;
+  reconcileTools(): unknown;
+  listTools(routeUrl: URL): Promise<unknown>;
+  queryTools(payload: unknown): Promise<unknown>;
+  upsertPlatformTools(payload: unknown): Promise<unknown>;
+  setToolEnabled(payload: unknown): Promise<ApplicationResponse>;
+  executeTool(payload: unknown): Promise<unknown>;
 }
+
+export const platformRoutes: readonly RuntimeRouteDefinition<PlatformRouteDeps>[] = [
+  { method: 'GET', path: '/api/platform/runtime/health', handle: (_context, deps) => routeResponder.value(() => deps.platformService.runtimeHealth()) },
+  { method: 'POST', path: '/api/platform/runtime/start-run', handle: (context, deps) => routeResponder.value(() => deps.platformService.startRun(context.payload)) },
+  { method: 'POST', path: '/api/platform/runtime/abort-run', handle: (context, deps) => routeResponder.result(() => deps.platformService.abortRun(context.payload)) },
+  { method: 'POST', path: '/api/platform/tools/install-native', handle: (context, deps) => routeResponder.result(() => deps.platformService.installNativeTool(context.payload)) },
+  { method: 'POST', path: '/api/platform/tools/reconcile', handle: (_context, deps) => accepted(deps.platformService.reconcileTools()) },
+  { method: 'GET', path: '/api/platform/tools', handle: (context, deps) => routeResponder.value(() => deps.platformService.listTools(context.routeUrl)) },
+  { method: 'POST', path: '/api/platform/tools/query', handle: (context, deps) => routeResponder.value(() => deps.platformService.queryTools(context.payload)) },
+  { method: 'POST', path: '/api/platform/tools/upsert-platform', handle: (context, deps) => routeResponder.value(() => deps.platformService.upsertPlatformTools(context.payload)) },
+  { method: 'POST', path: '/api/platform/tools/set-enabled', handle: (context, deps) => routeResponder.result(() => deps.platformService.setToolEnabled(context.payload)) },
+  { method: 'POST', path: '/api/platform/tools/execute', handle: (context, deps) => routeResponder.value(() => deps.platformService.executeTool(context.payload)) },
+] as const;
+

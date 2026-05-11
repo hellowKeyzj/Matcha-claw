@@ -1,10 +1,10 @@
 import type { IncomingMessage, ServerResponse } from 'http';
 import { PORTS } from '../../utils/config';
 import { buildOpenClawControlUiUrl } from '../../utils/openclaw-control-ui';
-import { getSetting } from '../../services/settings/settings-store';
+import { loadHostBootstrapSettings } from '../../gateway/config-sync';
 import { buildPublicGatewayStatus } from '../../gateway/public-status';
 import type { GatewayApiContext } from '../context';
-import { parseJsonBody, sendJson } from '../route-utils';
+import { sendJson } from '../route-utils';
 
 async function readPlatformHealth(ctx: GatewayApiContext): Promise<{
   state: 'connected' | 'reconnecting' | 'disconnected';
@@ -95,7 +95,7 @@ export async function handleGatewayRoutes(
   if (url.pathname === '/api/gateway/control-ui' && req.method === 'GET') {
     try {
       const status = ctx.gatewayManager.getStatus();
-      const token = await getSetting('gatewayToken');
+      const { gatewayToken: token } = await loadHostBootstrapSettings();
       const port = status.port || PORTS.OPENCLAW_GATEWAY;
       const urlValue = buildOpenClawControlUiUrl(port, token);
       sendJson(res, 200, { success: true, url: urlValue, token, port });
@@ -105,33 +105,5 @@ export async function handleGatewayRoutes(
     return true;
   }
 
-  if (url.pathname === '/api/gateway/rpc' && req.method === 'POST') {
-    try {
-      const body = await parseJsonBody<{
-        method?: string;
-        params?: unknown;
-        timeoutMs?: number;
-      }>(req);
-      if (!body.method || typeof body.method !== 'string') {
-        sendJson(res, 400, { success: false, error: 'method is required' });
-        return true;
-      }
-      const result = await ctx.runtimeHost.request<{
-        success?: boolean;
-        result?: unknown;
-        error?: string;
-      }>('POST', '/api/gateway/rpc', {
-        method: body.method,
-        ...(body.params !== undefined ? { params: body.params } : {}),
-        ...(typeof body.timeoutMs === 'number' ? { timeoutMs: body.timeoutMs } : {}),
-      }, {
-        ...(typeof body.timeoutMs === 'number' ? { timeoutMs: body.timeoutMs } : {}),
-      });
-      sendJson(res, result.status, result.data);
-    } catch (error) {
-      sendJson(res, 200, { success: false, error: String(error) });
-    }
-    return true;
-  }
   return false;
 }

@@ -1,4 +1,4 @@
-import { REQUEST_METHODS, TRANSPORT_VERSION } from '../common/constants';
+import { REQUEST_METHODS, TRANSPORT_VERSION } from '../../shared/runtime-host-constants';
 
 export interface DispatchEnvelope {
   method: string;

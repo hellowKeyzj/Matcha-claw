@@ -3,7 +3,35 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { SessionRuntimeService } from '../../runtime-host/application/sessions/service';
+import { createTestSessionRuntimeService } from './helpers/session-runtime-fixture';
+
+async function hydrateSessionWindow(
+  service: ReturnType<typeof createTestSessionRuntimeService>,
+  payload: {
+    sessionKey: string;
+    mode?: 'latest' | 'older' | 'newer';
+    limit?: number;
+    offset?: number;
+    includeCanonical?: boolean;
+  },
+) {
+  const response = await service.getSessionWindow(payload);
+  if (response.status !== 202) {
+    return response;
+  }
+  return {
+    status: 200,
+    data: await service.executeSessionHydration({
+      sessionKey: payload.sessionKey,
+      snapshot: {
+        kind: 'window',
+        mode: payload.mode ?? 'latest',
+        limit: payload.limit ?? 80,
+        offset: payload.offset ?? null,
+      },
+    }),
+  };
+}
 
 function buildTranscriptLine(index: number) {
   return JSON.stringify({
@@ -47,14 +75,14 @@ describe('session runtime service window', () => {
       buildTranscriptLine(5),
     ].join('\n'));
 
-    const service = new SessionRuntimeService({
-      getOpenClawConfigDir: () => configDir,
+    const service = createTestSessionRuntimeService({
+      workspace: { getConfigDir: () => configDir },
       openclawBridge: {
         chatSend: async () => ({}),
         gatewayRpc: async () => ({}),
       },
     });
-    const response = await service.getSessionWindow({
+    const response = await hydrateSessionWindow(service, {
       sessionKey: 'agent:main:session-a',
       mode: 'latest',
       limit: 3,
@@ -99,15 +127,15 @@ describe('session runtime service window', () => {
       buildTranscriptLine(6),
     ].join('\n'));
 
-    const service = new SessionRuntimeService({
-      getOpenClawConfigDir: () => configDir,
+    const service = createTestSessionRuntimeService({
+      workspace: { getConfigDir: () => configDir },
       openclawBridge: {
         chatSend: async () => ({}),
         gatewayRpc: async () => ({}),
       },
     });
 
-    const older = await service.getSessionWindow({
+    const older = await hydrateSessionWindow(service, {
       sessionKey: 'agent:main:session-a',
       mode: 'older',
       limit: 2,
@@ -132,7 +160,7 @@ describe('session runtime service window', () => {
       'session:agent:main:session-a|assistant-turn:main:entry:message-6:main',
     ]);
 
-    const newer = await service.getSessionWindow({
+    const newer = await hydrateSessionWindow(service, {
       sessionKey: 'agent:main:session-a',
       mode: 'newer',
       limit: 2,
@@ -173,14 +201,14 @@ describe('session runtime service window', () => {
       buildTranscriptLine(4),
     ].join('\n'));
 
-    const service = new SessionRuntimeService({
-      getOpenClawConfigDir: () => configDir,
+    const service = createTestSessionRuntimeService({
+      workspace: { getConfigDir: () => configDir },
       openclawBridge: {
         chatSend: async () => ({}),
         gatewayRpc: async () => ({}),
       },
     });
-    const response = await service.getSessionWindow({
+    const response = await hydrateSessionWindow(service, {
       sessionKey: 'agent:main:session-a',
       mode: 'latest',
       limit: 2,
@@ -218,14 +246,14 @@ describe('session runtime service window', () => {
       }),
     ].join('\n'));
 
-    const service = new SessionRuntimeService({
-      getOpenClawConfigDir: () => configDir,
+    const service = createTestSessionRuntimeService({
+      workspace: { getConfigDir: () => configDir },
       openclawBridge: {
         chatSend: async () => ({}),
         gatewayRpc: async () => ({}),
       },
     });
-    const response = await service.getSessionWindow({
+    const response = await hydrateSessionWindow(service, {
       sessionKey: 'agent:main:session-a',
       mode: 'latest',
       limit: 20,
@@ -254,8 +282,8 @@ describe('session runtime service window', () => {
     }, null, 2));
     writeFileSync(join(sessionsDir, 'session-a.jsonl'), buildTranscriptLine(1));
 
-    const service = new SessionRuntimeService({
-      getOpenClawConfigDir: () => configDir,
+    const service = createTestSessionRuntimeService({
+      workspace: { getConfigDir: () => configDir },
       openclawBridge: {
         chatSend: async () => ({}),
         gatewayRpc: async () => ({}),
@@ -291,15 +319,15 @@ describe('session runtime service window', () => {
       buildTranscriptLine(5),
     ].join('\n'));
 
-    const service = new SessionRuntimeService({
-      getOpenClawConfigDir: () => configDir,
+    const service = createTestSessionRuntimeService({
+      workspace: { getConfigDir: () => configDir },
       openclawBridge: {
         chatSend: async () => ({}),
         gatewayRpc: async () => ({}),
       },
     });
 
-    const older = await service.getSessionWindow({
+    const older = await hydrateSessionWindow(service, {
       sessionKey: 'agent:main:session-a',
       mode: 'older',
       limit: 2,

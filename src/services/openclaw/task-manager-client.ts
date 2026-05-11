@@ -1,7 +1,7 @@
 import {
+  hostApiFetch,
   hostOpenClawGetTaskWorkspaceDirs,
   hostOpenClawGetWorkspaceDir,
-  hostGatewayRpc,
 } from '@/lib/host-api';
 
 export type TaskStatus = 'pending' | 'in_progress' | 'completed';
@@ -23,10 +23,20 @@ export interface Task {
   sessionAffinityKey?: string;
 }
 
-const TASK_RPC_TIMEOUT_MS = 60_000;
+export interface TaskListSnapshot {
+  tasks: Task[];
+  ready: boolean;
+  refreshing: boolean;
+  updatedAt?: number | null;
+  error?: string | null;
+}
 
-async function gatewayRpc<T>(method: string, params?: unknown, timeoutMs = TASK_RPC_TIMEOUT_MS): Promise<T> {
-  return await hostGatewayRpc<T>(method, params, timeoutMs);
+async function taskApi<T>(path: string, payload?: unknown): Promise<T> {
+  return await hostApiFetch<T>(path, {
+    method: 'POST',
+    body: JSON.stringify(payload ?? {}),
+    timeoutMs: 60_000,
+  });
 }
 
 function normalizeStatus(raw: unknown): TaskStatus {
@@ -87,27 +97,39 @@ export async function getTaskWorkspaceDirs(): Promise<string[]> {
 }
 
 export async function listTasks(workspaceDir?: string, taskListId?: string): Promise<Task[]> {
-  const result = await gatewayRpc<{ tasks?: unknown[] }>(
-    'task_manager.list',
+  return (await listTaskSnapshot(workspaceDir, taskListId)).tasks;
+}
+
+export async function listTaskSnapshot(workspaceDir?: string, taskListId?: string): Promise<TaskListSnapshot> {
+  const result = await taskApi<{ tasks?: unknown[] }>(
+    '/api/tasks/list',
     {
       ...(workspaceDir ? { workspaceDir } : {}),
       ...(taskListId ? { taskListId } : {}),
     },
-    TASK_RPC_TIMEOUT_MS,
   );
   const rows = Array.isArray(result.tasks) ? result.tasks : [];
-  return rows.map((row) => normalizeTask(row, workspaceDir));
+  return {
+    tasks: rows.map((row) => normalizeTask(row, workspaceDir)),
+    ready: (result as { ready?: unknown }).ready !== false,
+    refreshing: (result as { refreshing?: unknown }).refreshing === true,
+    updatedAt: typeof (result as { updatedAt?: unknown }).updatedAt === 'number'
+      ? (result as { updatedAt: number }).updatedAt
+      : null,
+    error: typeof (result as { error?: unknown }).error === 'string'
+      ? (result as { error: string }).error
+      : null,
+  };
 }
 
 export async function getTask(taskId: string, workspaceDir?: string, taskListId?: string): Promise<Task | null> {
-  const result = await gatewayRpc<{ task?: unknown | null }>(
-    'task_manager.get',
+  const result = await taskApi<{ task?: unknown | null }>(
+    '/api/tasks/get',
     {
       taskId,
       ...(workspaceDir ? { workspaceDir } : {}),
       ...(taskListId ? { taskListId } : {}),
     },
-    TASK_RPC_TIMEOUT_MS,
   );
   if (!result.task) {
     return null;
@@ -123,8 +145,8 @@ export async function createTask(payload: {
   workspaceDir?: string;
   taskListId?: string;
 }): Promise<Task> {
-  const result = await gatewayRpc<{ task: unknown }>(
-    'task_manager.create',
+  const result = await taskApi<{ task: unknown }>(
+    '/api/tasks/create',
     {
       subject: payload.subject,
       description: payload.description,
@@ -133,7 +155,6 @@ export async function createTask(payload: {
       ...(payload.workspaceDir ? { workspaceDir: payload.workspaceDir } : {}),
       ...(payload.taskListId ? { taskListId: payload.taskListId } : {}),
     },
-    TASK_RPC_TIMEOUT_MS,
   );
   return normalizeTask(result.task, payload.workspaceDir);
 }
@@ -151,8 +172,8 @@ export async function updateTask(payload: {
   workspaceDir?: string;
   taskListId?: string;
 }): Promise<{ task: Task; updatedFields: string[]; statusChange?: { from: string; to: string } }> {
-  const result = await gatewayRpc<{ task: unknown; updatedFields?: string[]; statusChange?: { from: string; to: string } }>(
-    'task_manager.update',
+  const result = await taskApi<{ task: unknown; updatedFields?: string[]; statusChange?: { from: string; to: string } }>(
+    '/api/tasks/update',
     {
       taskId: payload.taskId,
       ...(payload.status ? { status: payload.status } : {}),
@@ -166,7 +187,6 @@ export async function updateTask(payload: {
       ...(payload.workspaceDir ? { workspaceDir: payload.workspaceDir } : {}),
       ...(payload.taskListId ? { taskListId: payload.taskListId } : {}),
     },
-    TASK_RPC_TIMEOUT_MS,
   );
   return {
     task: normalizeTask(result.task, payload.workspaceDir),
@@ -182,8 +202,8 @@ export async function claimTask(payload: {
   taskListId?: string;
   sessionKey?: string;
 }): Promise<Task> {
-  const result = await gatewayRpc<{ task: unknown }>(
-    'task_manager.claim',
+  const result = await taskApi<{ task: unknown }>(
+    '/api/tasks/claim',
     {
       taskId: payload.taskId,
       ...(payload.owner ? { owner: payload.owner } : {}),
@@ -191,7 +211,6 @@ export async function claimTask(payload: {
       ...(payload.taskListId ? { taskListId: payload.taskListId } : {}),
       ...(payload.sessionKey ? { sessionKey: payload.sessionKey } : {}),
     },
-    TASK_RPC_TIMEOUT_MS,
   );
   return normalizeTask(result.task, payload.workspaceDir);
 }

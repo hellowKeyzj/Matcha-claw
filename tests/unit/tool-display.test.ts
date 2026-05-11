@@ -4,7 +4,7 @@ import {
   formatToolSummary,
   resolveToolDisplay,
   resolveToolDisplaySummary,
-} from '../../runtime-host/shared/tool-display';
+} from '../../runtime-host/application/sessions/tool/tool-display';
 
 describe('tool display summary', () => {
   it('formats read detail with line range and path', () => {

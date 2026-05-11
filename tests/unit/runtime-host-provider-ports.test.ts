@@ -24,7 +24,6 @@ const hoisted = vi.hoisted(() => ({
       port: 3211,
     })),
   })),
-  getSettingMock: vi.fn(async () => undefined),
   getOpenClawDirMock: vi.fn(() => 'E:\\code\\Matcha-claw\\node_modules\\openclaw'),
 }));
 
@@ -41,30 +40,22 @@ vi.mock('../../electron/main/runtime-host-process-manager', () => ({
   createRuntimeHostProcessManager: hoisted.createRuntimeHostProcessManagerMock,
 }));
 
-vi.mock('../../electron/services/settings/settings-store', () => ({
-  getSetting: hoisted.getSettingMock,
-  setSetting: vi.fn(async () => {}),
-}));
-
 vi.mock('../../electron/utils/paths', () => ({
   getOpenClawDir: hoisted.getOpenClawDirMock,
 }));
 
-vi.mock('../../electron/services/channels/channel-runtime-service', () => ({
-  createChannelRuntimeService: vi.fn(() => ({
-    startChannelSession: vi.fn(async () => ({ queued: true, sessionKey: 'default' })),
-    cancelChannelSession: vi.fn(async () => {}),
-  })),
+vi.mock('electron', () => ({
+  app: {
+    isPackaged: false,
+    getVersion: () => '0.0.0-test',
+    getName: () => 'MatchaClaw',
+    getPath: () => 'E:\\code\\Matcha-claw\\.tmp-test-user-data',
+  },
+  shell: {
+    openPath: vi.fn(async () => ''),
+  },
 }));
 
-vi.mock('../../electron/services/license/license-gate-service', () => ({
-  waitForLicenseGateBootstrap: vi.fn(async () => {}),
-  getLicenseGateSnapshot: vi.fn(() => ({})),
-  getStoredLicenseKey: vi.fn(async () => null),
-  validateLicenseKey: vi.fn(async () => ({ success: true })),
-  forceRevalidateStoredLicense: vi.fn(async () => ({ success: true })),
-  clearStoredLicenseData: vi.fn(async () => {}),
-}));
 
 vi.mock('../../electron/services/providers/oauth/browser-oauth-manager', () => ({
   browserOAuthManager: {

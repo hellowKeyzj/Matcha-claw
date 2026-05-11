@@ -1,18 +1,16 @@
 import { buildWorkbenchBootstrapPayload } from './bootstrap';
-
-type RuntimeState = {
-  lifecycle: string;
-  plugins: Array<{ lifecycle?: string } & Record<string, any>>;
-};
+import type { RuntimeClockPort } from '../common/runtime-ports';
+import type { RuntimeHostStatePort } from '../runtime-host/runtime-state';
 
 export interface WorkbenchServiceDeps {
-  readonly buildLocalRuntimeState: () => RuntimeState;
+  readonly runtimeState: Pick<RuntimeHostStatePort, 'runtimeState'>;
+  readonly clock: RuntimeClockPort;
 }
 
 export class WorkbenchService {
   constructor(private readonly deps: WorkbenchServiceDeps) {}
 
   bootstrap() {
-    return buildWorkbenchBootstrapPayload(this.deps.buildLocalRuntimeState());
+    return buildWorkbenchBootstrapPayload(this.deps.runtimeState.runtimeState(), this.deps.clock.nowMs());
   }
 }

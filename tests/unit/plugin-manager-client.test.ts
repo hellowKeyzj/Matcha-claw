@@ -1,9 +1,20 @@
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { hostApiFetchMock } from './helpers/mock-gateway-client';
+
+const waitForRuntimeJobResultMock = vi.fn();
+
+vi.mock('@/lib/host-api', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/lib/host-api')>();
+  return {
+    ...actual,
+    waitForRuntimeJobResult: (...args: unknown[]) => waitForRuntimeJobResultMock(...args),
+  };
+});
 
 describe('plugin manager client', () => {
   beforeEach(() => {
     hostApiFetchMock.mockReset();
+    waitForRuntimeJobResultMock.mockReset();
   });
 
   it('getPluginCatalog/getPluginRuntime 走通用插件中心接口', async () => {
@@ -23,7 +34,21 @@ describe('plugin manager client', () => {
 
   it('setEnabledPluginIds 走通用插件写接口', async () => {
     hostApiFetchMock
-      .mockResolvedValueOnce({ success: true, execution: { enabledPluginIds: ['task-manager'] } });
+      .mockResolvedValueOnce({
+        success: true,
+        job: {
+          id: 'job-1',
+          type: 'plugins.setEnabled',
+          status: 'queued',
+          queuedAt: 1,
+          attempts: 0,
+          maxAttempts: 1,
+        },
+      });
+    waitForRuntimeJobResultMock.mockResolvedValue({
+      success: true,
+      execution: { enabledPluginIds: ['task-manager'] },
+    });
 
     const { setEnabledPluginIds } = await import('@/services/openclaw/plugin-manager-client');
     await setEnabledPluginIds(['task-manager']);
@@ -32,5 +57,6 @@ describe('plugin manager client', () => {
       method: 'PUT',
       body: JSON.stringify({ pluginIds: ['task-manager'] }),
     });
+    expect(waitForRuntimeJobResultMock).toHaveBeenCalledWith('job-1');
   });
 });

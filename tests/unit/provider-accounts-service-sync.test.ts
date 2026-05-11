@@ -1,82 +1,117 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const {
-  removeProviderFromOpenClawMock,
-  setOpenClawDefaultModelMock,
-  setOpenClawDefaultModelWithOverrideMock,
-  syncProviderConfigToOpenClawMock,
-  getProviderApiKeyFromOpenClawMock,
-  removeProviderKeyFromOpenClawMock,
-  saveProviderKeyToOpenClawMock,
+  removeProviderMock,
+  setDefaultModelMock,
+  setDefaultModelWithOverrideMock,
+  syncProviderConfigMock,
+  getProviderApiKeyMock,
+  removeProviderKeyMock,
+  saveProviderKeyMock,
 } = vi.hoisted(() => ({
-  removeProviderFromOpenClawMock: vi.fn(),
-  setOpenClawDefaultModelMock: vi.fn(),
-  setOpenClawDefaultModelWithOverrideMock: vi.fn(),
-  syncProviderConfigToOpenClawMock: vi.fn(),
-  getProviderApiKeyFromOpenClawMock: vi.fn(),
-  removeProviderKeyFromOpenClawMock: vi.fn(),
-  saveProviderKeyToOpenClawMock: vi.fn(),
-}));
-
-vi.mock('../../runtime-host/application/openclaw/openclaw-provider-config-service', () => ({
-  removeProviderFromOpenClaw: removeProviderFromOpenClawMock,
-  setOpenClawDefaultModel: setOpenClawDefaultModelMock,
-  setOpenClawDefaultModelWithOverride: setOpenClawDefaultModelWithOverrideMock,
-  syncProviderConfigToOpenClaw: syncProviderConfigToOpenClawMock,
-}));
-
-vi.mock('../../runtime-host/application/openclaw/openclaw-auth-profile-store', () => ({
-  getProviderApiKeyFromOpenClaw: getProviderApiKeyFromOpenClawMock,
-  removeProviderKeyFromOpenClaw: removeProviderKeyFromOpenClawMock,
-  saveProviderKeyToOpenClaw: saveProviderKeyToOpenClawMock,
+  removeProviderMock: vi.fn(),
+  setDefaultModelMock: vi.fn(),
+  setDefaultModelWithOverrideMock: vi.fn(),
+  syncProviderConfigMock: vi.fn(),
+  getProviderApiKeyMock: vi.fn(),
+  removeProviderKeyMock: vi.fn(),
+  saveProviderKeyMock: vi.fn(),
 }));
 
 import { ProviderAccountsService } from '../../runtime-host/application/providers/accounts';
+import { getOpenClawProviderKeyForType } from '../../runtime-host/application/providers/provider-runtime-rules';
+import { ProviderRuntimeSyncService } from '../../runtime-host/application/providers/store-sync';
 
 function createServiceWithStore(store: {
   defaultAccountId: string | null;
   accounts: Record<string, any>;
   apiKeys: Record<string, string>;
 }, overrides?: {
-  normalizeAccount?: (input: unknown, current?: Record<string, any> | null) => any;
-  normalizeFallbackAccount?: (accounts: any[], deletedId: string) => string | null;
 }) {
   const writeProviderStore = vi.fn(async () => {});
-  const service = new ProviderAccountsService({
-    readProviderStore: async () => store,
-    writeProviderStore,
-    sortAccounts: (accounts, defaultAccountId) => {
-      return [...accounts].sort((a, b) => {
-        if (a.id === defaultAccountId) return -1;
-        if (b.id === defaultAccountId) return 1;
-        const byUpdatedAt = String(b.updatedAt || '').localeCompare(String(a.updatedAt || ''));
-        if (byUpdatedAt !== 0) return byUpdatedAt;
-        return String(a.id).localeCompare(String(b.id));
-      });
+  const runtimeSync = new ProviderRuntimeSyncService(
+    {
+      saveProviderKey: saveProviderKeyMock,
+      removeProviderKey: removeProviderKeyMock,
     },
-    accountToStatus: (account, apiKey) => ({ id: account.id, hasKey: Boolean(apiKey) }),
-    normalizeAccount: overrides?.normalizeAccount || (() => null),
-    normalizeFallbackAccount: overrides?.normalizeFallbackAccount || (() => null),
-    validateApiKey: async () => ({}),
-    requestParentShellAction: async () => ({ status: 200, data: {} }),
-    mapParentTransportResponse: () => ({ status: 200, data: {} }),
-    providerVendorDefinitions: [],
-    completeBrowserOAuth: async () => ({}),
-    completeDeviceOAuth: async () => ({}),
+    {
+      setDefaultModel: setDefaultModelMock,
+      setDefaultModelWithOverride: setDefaultModelWithOverrideMock,
+      syncProviderConfig: syncProviderConfigMock,
+    },
+  );
+  const resolveRuntimeProviderKey = (accountId: string, account: Record<string, any> | null) => {
+    const providerType = typeof account?.vendorId === 'string' ? account.vendorId.trim() : '';
+    return providerType ? getOpenClawProviderKeyForType(providerType, accountId) : accountId;
+  };
+  const service = new ProviderAccountsService({
+    store: {
+      read: async () => store,
+      write: writeProviderStore,
+    },
+    parentShell: {
+      request: async () => ({ version: 1, success: true, status: 200, data: {} }),
+      mapResponse: () => ({ status: 200, data: {} }),
+    },
+    oauthCompletion: {
+      completeBrowser: async () => ({}),
+      completeDevice: async () => ({}),
+    },
+    httpClient: {
+      request: vi.fn(),
+    },
+    clock: {
+      nowMs: () => 1_700_000_000_000,
+      nowIso: () => '2023-11-14T22:13:20.000Z',
+    },
+    runtime: {
+      syncStoreToRuntime: async (runtimeStore) => await runtimeSync.syncProviderStore(runtimeStore),
+      resolveAccountApiKey: async ({ store: runtimeStore, accountId, account }) => {
+        const runtimeProviderKey = resolveRuntimeProviderKey(accountId, account as Record<string, any> | null);
+        const runtimeApiKey = await getProviderApiKeyMock(runtimeProviderKey);
+        if (runtimeApiKey) {
+          return runtimeApiKey;
+        }
+        const localApiKey = runtimeStore.apiKeys[accountId];
+        if (typeof localApiKey === 'string' && localApiKey.trim()) {
+          return localApiKey.trim();
+        }
+        if (runtimeProviderKey !== accountId) {
+          const aliasedApiKey = runtimeStore.apiKeys[runtimeProviderKey];
+          return typeof aliasedApiKey === 'string' && aliasedApiKey.trim() ? aliasedApiKey.trim() : undefined;
+        }
+        return undefined;
+      },
+      resolveCleanupProviderKeys: ({ accountId, account }) => (
+        Array.from(new Set([resolveRuntimeProviderKey(accountId, account as Record<string, any> | null), accountId]))
+      ),
+      removeProviderKey: async (providerKey) => {
+        await removeProviderKeyMock(providerKey);
+      },
+      removeProviderConfig: async (providerKey) => {
+        await removeProviderMock(providerKey);
+      },
+    },
+    jobs: {
+      submitCreate: vi.fn(() => ({ success: true, job: { id: 'job-create', type: 'providers.createAccount', status: 'queued', queuedAt: 1, attempts: 0, maxAttempts: 1 } })),
+      submitSetDefault: vi.fn(() => ({ success: true, job: { id: 'job-default', type: 'providers.setDefaultAccount', status: 'queued', queuedAt: 1, attempts: 0, maxAttempts: 1 } })),
+      submitUpdate: vi.fn(() => ({ success: true, job: { id: 'job-update', type: 'providers.updateAccount', status: 'queued', queuedAt: 1, attempts: 0, maxAttempts: 1 } })),
+      submitDelete: vi.fn(() => ({ success: true, job: { id: 'job-delete', type: 'providers.deleteAccount', status: 'queued', queuedAt: 1, attempts: 0, maxAttempts: 1 } })),
+    },
   });
   return { service, writeProviderStore };
 }
 
 describe('ProviderAccountsService list（provider-store 单一显示源）', () => {
   beforeEach(() => {
-    removeProviderFromOpenClawMock.mockReset();
-    setOpenClawDefaultModelMock.mockReset();
-    setOpenClawDefaultModelWithOverrideMock.mockReset();
-    syncProviderConfigToOpenClawMock.mockReset();
-    getProviderApiKeyFromOpenClawMock.mockReset();
-    removeProviderKeyFromOpenClawMock.mockReset();
-    saveProviderKeyToOpenClawMock.mockReset();
-    getProviderApiKeyFromOpenClawMock.mockResolvedValue(null);
+    removeProviderMock.mockReset();
+    setDefaultModelMock.mockReset();
+    setDefaultModelWithOverrideMock.mockReset();
+    syncProviderConfigMock.mockReset();
+    getProviderApiKeyMock.mockReset();
+    removeProviderKeyMock.mockReset();
+    saveProviderKeyMock.mockReset();
+    getProviderApiKeyMock.mockResolvedValue(null);
   });
 
   it('直接返回 provider-store 的账号列表，并保持 default 排序优先', async () => {
@@ -183,12 +218,12 @@ describe('ProviderAccountsService list（provider-store 单一显示源）', () 
       },
       apiKeys: {},
     };
-    getProviderApiKeyFromOpenClawMock.mockResolvedValueOnce('sk-openclaw');
+    getProviderApiKeyMock.mockResolvedValueOnce('sk-openclaw');
 
     const { service } = createServiceWithStore(store);
     const result = await service.list();
 
-    expect(getProviderApiKeyFromOpenClawMock).toHaveBeenCalledWith('custom-12345678');
+    expect(getProviderApiKeyMock).toHaveBeenCalledWith('custom-12345678');
     expect(result.statuses).toEqual([
       expect.objectContaining({ id: 'custom-12345678', hasKey: true }),
     ]);
@@ -206,22 +241,22 @@ describe('ProviderAccountsService list（provider-store 单一显示源）', () 
       },
       apiKeys: {},
     };
-    getProviderApiKeyFromOpenClawMock.mockResolvedValueOnce('sk-openclaw');
+    getProviderApiKeyMock.mockResolvedValueOnce('sk-openclaw');
 
     const { service } = createServiceWithStore(store);
     const result = await service.hasApiKey('custom-12345678');
 
-    expect(getProviderApiKeyFromOpenClawMock).toHaveBeenCalledWith('custom-12345678');
+    expect(getProviderApiKeyMock).toHaveBeenCalledWith('custom-12345678');
     expect(result).toEqual({ hasKey: true });
   });
 });
 
 describe('ProviderAccountsService create/setDefault（写入后立即同步 openclaw）', () => {
   beforeEach(() => {
-    setOpenClawDefaultModelMock.mockReset();
-    setOpenClawDefaultModelWithOverrideMock.mockReset();
-    syncProviderConfigToOpenClawMock.mockReset();
-    saveProviderKeyToOpenClawMock.mockReset();
+    setDefaultModelMock.mockReset();
+    setDefaultModelWithOverrideMock.mockReset();
+    syncProviderConfigMock.mockReset();
+    saveProviderKeyMock.mockReset();
   });
 
   it('新增第一个 custom 账号后，会同步 auth profile 与默认模型覆盖配置', async () => {
@@ -248,19 +283,17 @@ describe('ProviderAccountsService create/setDefault（写入后立即同步 open
       updatedAt: '2026-04-10T00:00:00.000Z',
     };
 
-    const { service, writeProviderStore } = createServiceWithStore(store, {
-      normalizeAccount: () => normalizedAccount,
-    });
+    const { service, writeProviderStore } = createServiceWithStore(store);
 
-    const result = await service.create({
+    const result = await service.executeCreate({
       account: normalizedAccount,
       apiKey: 'sk-custom',
     });
 
     expect(result.status).toBe(200);
     expect(writeProviderStore).toHaveBeenCalledTimes(1);
-    expect(saveProviderKeyToOpenClawMock).toHaveBeenCalledWith('custom-12345678', 'sk-custom');
-    expect(syncProviderConfigToOpenClawMock).toHaveBeenCalledWith(
+    expect(saveProviderKeyMock).toHaveBeenCalledWith('custom-12345678', 'sk-custom');
+    expect(syncProviderConfigMock).toHaveBeenCalledWith(
       'custom-12345678',
       expect.objectContaining({
         baseUrl: 'https://api.example.com/v1',
@@ -280,7 +313,7 @@ describe('ProviderAccountsService create/setDefault（写入后立即同步 open
         ],
       }),
     );
-    expect(setOpenClawDefaultModelWithOverrideMock).toHaveBeenCalledWith(
+    expect(setDefaultModelWithOverrideMock).toHaveBeenCalledWith(
       'custom-12345678',
       'my-model',
       expect.objectContaining({
@@ -302,7 +335,7 @@ describe('ProviderAccountsService create/setDefault（写入后立即同步 open
       }),
       ['custom-12345678/backup-model'],
     );
-    expect(setOpenClawDefaultModelMock).not.toHaveBeenCalled();
+    expect(setDefaultModelMock).not.toHaveBeenCalled();
   });
 
   it('新增非默认 custom 账号时也会同步 runtime provider 模型配置', async () => {
@@ -336,17 +369,15 @@ describe('ProviderAccountsService create/setDefault（写入后立即同步 open
       updatedAt: '2026-04-10T00:00:00.000Z',
     };
 
-    const { service } = createServiceWithStore(store, {
-      normalizeAccount: () => normalizedAccount,
-    });
+    const { service } = createServiceWithStore(store);
 
-    const result = await service.create({
+    const result = await service.executeCreate({
       account: normalizedAccount,
       apiKey: 'sk-custom',
     });
 
     expect(result.status).toBe(200);
-    expect(syncProviderConfigToOpenClawMock).toHaveBeenCalledWith(
+    expect(syncProviderConfigMock).toHaveBeenCalledWith(
       'custom-87654321',
       expect.objectContaining({
         baseUrl: 'https://custom.example.com/v1',
@@ -360,7 +391,7 @@ describe('ProviderAccountsService create/setDefault（写入后立即同步 open
         ],
       }),
     );
-    expect(setOpenClawDefaultModelMock).toHaveBeenCalledWith(
+    expect(setDefaultModelMock).toHaveBeenCalledWith(
       'openai',
       'gpt-5.4',
       [],
@@ -391,10 +422,10 @@ describe('ProviderAccountsService create/setDefault（写入后立即同步 open
     };
     const { service } = createServiceWithStore(store);
 
-    const result = await service.setDefault({ accountId: 'moonshot-main' });
+    const result = await service.executeSetDefault({ accountId: 'moonshot-main' });
 
     expect(result.status).toBe(200);
-    expect(setOpenClawDefaultModelMock).toHaveBeenCalledWith(
+    expect(setDefaultModelMock).toHaveBeenCalledWith(
       'moonshot',
       'kimi-k2.6',
       [],
@@ -418,10 +449,10 @@ describe('ProviderAccountsService create/setDefault（写入后立即同步 open
     };
     const { service } = createServiceWithStore(store);
 
-    const result = await service.setDefault({ accountId: 'moonshot-global-main' });
+    const result = await service.executeSetDefault({ accountId: 'moonshot-global-main' });
 
     expect(result.status).toBe(200);
-    expect(setOpenClawDefaultModelMock).toHaveBeenCalledWith(
+    expect(setDefaultModelMock).toHaveBeenCalledWith(
       'moonshot-global',
       'kimi-k2.6',
       [],
@@ -431,8 +462,8 @@ describe('ProviderAccountsService create/setDefault（写入后立即同步 open
 
 describe('ProviderAccountsService delete（删除后状态清理）', () => {
   beforeEach(() => {
-    removeProviderFromOpenClawMock.mockReset();
-    removeProviderKeyFromOpenClawMock.mockReset();
+    removeProviderMock.mockReset();
+    removeProviderKeyMock.mockReset();
   });
 
   it('删除 custom 账号时会同时清理 runtime key 与原账号 key', async () => {
@@ -451,12 +482,12 @@ describe('ProviderAccountsService delete（删除后状态清理）', () => {
     };
     const { service, writeProviderStore } = createServiceWithStore(store);
 
-    const result = await service.delete('moonshot-cn', false);
+    const result = await service.executeDelete('moonshot-cn', false);
 
     expect(result.status).toBe(200);
-    expect(removeProviderFromOpenClawMock).toHaveBeenCalledWith('custom-moonshot');
-    expect(removeProviderFromOpenClawMock).toHaveBeenCalledWith('moonshot-cn');
-    expect(removeProviderFromOpenClawMock).toHaveBeenCalledTimes(2);
+    expect(removeProviderMock).toHaveBeenCalledWith('custom-moonshot');
+    expect(removeProviderMock).toHaveBeenCalledWith('moonshot-cn');
+    expect(removeProviderMock).toHaveBeenCalledTimes(2);
     expect(writeProviderStore).toHaveBeenCalledTimes(1);
   });
 
@@ -476,13 +507,14 @@ describe('ProviderAccountsService delete（删除后状态清理）', () => {
     };
     const { service } = createServiceWithStore(store);
 
-    const result = await service.delete('openai-main', true);
+    const result = await service.executeDelete('openai-main', true);
 
     expect(result.status).toBe(200);
-    expect(removeProviderKeyFromOpenClawMock).toHaveBeenCalledWith('openai');
-    expect(removeProviderKeyFromOpenClawMock).toHaveBeenCalledWith('openai-main');
-    expect(removeProviderFromOpenClawMock).not.toHaveBeenCalled();
+    expect(removeProviderKeyMock).toHaveBeenCalledWith('openai');
+    expect(removeProviderKeyMock).toHaveBeenCalledWith('openai-main');
+    expect(removeProviderMock).not.toHaveBeenCalled();
     expect(store.accounts['openai-main']).toBeDefined();
     expect(store.apiKeys['openai-main']).toBeUndefined();
   });
 });
+

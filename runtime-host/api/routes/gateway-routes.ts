@@ -1,40 +1,20 @@
-import type { OpenClawBridge } from '../../openclaw-bridge';
-import { GatewayService } from '../../application/gateway/service';
-
-interface LocalDispatchResponse {
-  status: number;
-  data: unknown;
-}
+import { routeResponder, type ApplicationResponse, type RuntimeRouteDefinition } from './route-utils';
 
 interface GatewayRouteDeps {
-  openclawBridge: Pick<OpenClawBridge, 'chatSend' | 'gatewayRpc' | 'ensureGatewayReady' | 'readGatewayConnectionState'>;
+  gatewayService: GatewayRouteService;
 }
 
-export async function handleGatewayRoute(
-  method: string,
-  routePath: string,
-  payload: unknown,
-  deps: GatewayRouteDeps,
-): Promise<LocalDispatchResponse | null> {
-  const service = new GatewayService({
-    openclawBridge: deps.openclawBridge,
-  });
-
-  if (method === 'POST' && routePath === '/api/gateway/rpc') {
-    return await service.rpc(payload);
-  }
-
-  if (method === 'GET' && routePath === '/api/gateway/status') {
-    return await service.status();
-  }
-
-  if (method === 'POST' && routePath === '/api/gateway/ready') {
-    return await service.ready(payload);
-  }
-
-  if (!(method === 'POST' && routePath === '/api/chat/send-with-media')) {
-    return null;
-  }
-
-  return await service.sendMedia(payload);
+interface GatewayRouteService {
+  status(): Promise<ApplicationResponse>;
+  ready(payload: unknown): Promise<ApplicationResponse>;
+  sendMedia(payload: unknown): Promise<ApplicationResponse>;
+  agentWait(payload: unknown): Promise<ApplicationResponse>;
 }
+
+export const gatewayRoutes: readonly RuntimeRouteDefinition<GatewayRouteDeps>[] = [
+  { method: 'GET', path: '/api/gateway/status', handle: (_context, deps) => routeResponder.result(() => deps.gatewayService.status()) },
+  { method: 'POST', path: '/api/gateway/ready', handle: (context, deps) => routeResponder.result(() => deps.gatewayService.ready(context.payload)) },
+  { method: 'POST', path: '/api/gateway/agent-wait', handle: (context, deps) => routeResponder.result(() => deps.gatewayService.agentWait(context.payload)) },
+  { method: 'POST', path: '/api/chat/send-with-media', handle: (context, deps) => routeResponder.result(() => deps.gatewayService.sendMedia(context.payload)) },
+] as const;
+

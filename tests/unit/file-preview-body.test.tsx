@@ -11,6 +11,7 @@ const openArtifactPathExternallyMock = vi.fn();
 const revealArtifactPathInFileManagerMock = vi.fn();
 const createObjectUrlMock = vi.fn(() => 'blob:mock-image-url');
 const revokeObjectUrlMock = vi.fn();
+const NativeUrl = URL;
 
 vi.mock('react-i18next', () => ({
   useTranslation: () => ({
@@ -64,11 +65,10 @@ vi.mock('@/components/file-preview/SheetViewer', () => ({
 describe('file preview body', () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    vi.stubGlobal('URL', {
-      ...URL,
+    vi.stubGlobal('URL', Object.assign(NativeUrl, {
       createObjectURL: createObjectUrlMock,
       revokeObjectURL: revokeObjectUrlMock,
-    });
+    }));
     confirmAndOpenArtifactPathMock.mockResolvedValue(true);
     openArtifactPathExternallyMock.mockResolvedValue(null);
     revealArtifactPathInFileManagerMock.mockResolvedValue(true);

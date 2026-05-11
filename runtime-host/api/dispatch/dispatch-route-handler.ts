@@ -1,11 +1,12 @@
-import { TRANSPORT_VERSION } from '../common/constants';
-import { normalizeRoutePath, sendJson } from '../common/http';
+import { TRANSPORT_VERSION } from '../../shared/runtime-host-constants';
+import { normalizeRoutePath, sendJson, type RuntimeHttpResponsePort } from '../common/http';
 import { parseDispatchEnvelope } from './dispatch-envelope';
-import type { LocalDispatchResponse } from './local-business-dispatch-types';
+import type { RuntimeRouteResponse } from './runtime-route-dispatcher-types';
+import type { RuntimeHostLogger } from '../../shared/logger';
 
 interface TransportStats {
   totalDispatchRequests: number;
-  localBusinessHandled: number;
+  runtimeRouteHandled: number;
   unhandledRouteCount: number;
   badRequestRejected: number;
   dispatchInternalError: number;
@@ -13,14 +14,21 @@ interface TransportStats {
 
 interface DispatchRouteDeps {
   transportStats: TransportStats;
-  tryHandleLocalBusinessDispatch: (
+  logger?: RuntimeHostLogger;
+  dispatchRuntimeRoute: (
     method: string,
     route: string,
     payload: unknown,
-  ) => Promise<LocalDispatchResponse | null>;
+  ) => Promise<RuntimeRouteResponse | null>;
 }
 
-function readRequestBody(req: any): Promise<string> {
+interface RuntimeHttpRequestPort {
+  on(event: 'data', listener: (chunk: unknown) => void): unknown;
+  on(event: 'end', listener: () => void): unknown;
+  on(event: 'error', listener: (error: Error) => void): unknown;
+}
+
+function readRequestBody(req: RuntimeHttpRequestPort): Promise<string> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
     req.on('data', (chunk: unknown) => {
@@ -33,7 +41,36 @@ function readRequestBody(req: any): Promise<string> {
   });
 }
 
-export function handleDispatchRoute(req: any, res: any, deps: DispatchRouteDeps): void {
+function createDispatchTraceId(totalDispatchRequests: number): string {
+  return `dispatch-${String(totalDispatchRequests + 1)}-${Date.now().toString(36)}`;
+}
+
+function schedulePendingDispatchLog(
+  deps: DispatchRouteDeps,
+  traceId: string,
+  method: string,
+  route: string,
+  startedAt: number,
+  delayMs: number,
+): ReturnType<typeof setTimeout> {
+  const timer = setTimeout(() => {
+    deps.logger?.warn('[dispatch] pending', {
+      traceId,
+      method,
+      route: normalizeRoutePath(route),
+      elapsedMs: Date.now() - startedAt,
+      pendingMs: delayMs,
+    });
+  }, delayMs);
+  timer.unref?.();
+  return timer;
+}
+
+export function handleDispatchRoute(
+  req: RuntimeHttpRequestPort,
+  res: RuntimeHttpResponsePort,
+  deps: DispatchRouteDeps,
+): void {
   readRequestBody(req).then(async (rawBody) => {
     try {
       const envelope = parseDispatchEnvelope(rawBody);
@@ -49,20 +86,51 @@ export function handleDispatchRoute(req: any, res: any, deps: DispatchRouteDeps)
         return;
       }
       const parsed = envelope.value;
+      const traceId = createDispatchTraceId(deps.transportStats.totalDispatchRequests);
+      const startedAt = Date.now();
+      deps.logger?.traceDebug?.(2, '[dispatch] start', {
+        traceId,
+        method: parsed.method,
+        route: normalizeRoutePath(parsed.route),
+      });
+      const pendingTimers = [
+        schedulePendingDispatchLog(deps, traceId, parsed.method, parsed.route, startedAt, 5_000),
+        schedulePendingDispatchLog(deps, traceId, parsed.method, parsed.route, startedAt, 10_000),
+      ];
 
-      const localResponse = await deps.tryHandleLocalBusinessDispatch(parsed.method, parsed.route, parsed.payload);
-      if (localResponse) {
-        deps.transportStats.localBusinessHandled += 1;
-        sendJson(res, localResponse.status, {
+      let routeResponse: RuntimeRouteResponse | null;
+      try {
+        routeResponse = await deps.dispatchRuntimeRoute(parsed.method, parsed.route, parsed.payload);
+      } finally {
+        for (const timer of pendingTimers) {
+          clearTimeout(timer);
+        }
+      }
+      if (routeResponse) {
+        deps.transportStats.runtimeRouteHandled += 1;
+        deps.logger?.traceDebug?.(2, '[dispatch] finish', {
+          traceId,
+          method: parsed.method,
+          route: normalizeRoutePath(parsed.route),
+          status: routeResponse.status,
+          elapsedMs: Date.now() - startedAt,
+        });
+        sendJson(res, routeResponse.status, {
           version: TRANSPORT_VERSION,
           success: true,
-          status: localResponse.status,
-          data: localResponse.data,
+          status: routeResponse.status,
+          data: routeResponse.data,
         });
         return;
       }
 
       deps.transportStats.unhandledRouteCount += 1;
+      deps.logger?.warn('[dispatch] unhandled', {
+        traceId,
+        method: parsed.method,
+        route: normalizeRoutePath(parsed.route),
+        elapsedMs: Date.now() - startedAt,
+      });
       sendJson(res, 404, {
         version: TRANSPORT_VERSION,
         success: false,

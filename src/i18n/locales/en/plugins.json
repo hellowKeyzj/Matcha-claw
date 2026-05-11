@@ -46,11 +46,9 @@
       "error": "Host error"
     },
     "runtime": {
-      "idle": "Runtime idle",
-      "booting": "Runtime booting",
-      "ready": "Runtime ready",
+      "starting": "Runtime starting",
       "running": "Runtime running",
-      "degraded": "Runtime degraded",
+      "stopping": "Runtime stopping",
       "stopped": "Runtime stopped",
       "error": "Runtime error"
     }

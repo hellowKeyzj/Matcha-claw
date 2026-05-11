@@ -2,7 +2,6 @@ import { app } from 'electron';
 import { mkdir, rm, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { logger } from '../utils/logger';
-import { getSetting } from '../services/settings/settings-store';
 
 const LINUX_AUTOSTART_FILE = join('.config', 'autostart', 'clawx.desktop');
 
@@ -77,9 +76,4 @@ export async function applyLaunchAtStartupSetting(enabled: boolean): Promise<voi
   } catch (error) {
     logger.error(`Failed to apply launch-at-startup=${enabled}:`, error);
   }
-}
-
-export async function syncLaunchAtStartupSettingFromStore(): Promise<void> {
-  const launchAtStartup = await getSetting('launchAtStartup');
-  await applyLaunchAtStartupSetting(Boolean(launchAtStartup));
 }

@@ -1,12 +1,35 @@
 import { describe, expect, it, vi } from 'vitest';
-import { handleSettingsRoute } from '../../runtime-host/api/routes/settings-routes';
+import { settingsRoutes } from '../../runtime-host/api/routes/settings-routes';
+import { SettingsService } from '../../runtime-host/application/settings/service';
+import { dispatchRuntimeRouteDefinition } from './helpers/runtime-route';
+
+function createSettingsJobs() {
+  return {
+    submitRuntimeConfigSync: vi.fn((payload: unknown) => ({
+      success: true as const,
+      job: {
+        id: 'job-settings-runtime-config',
+        type: 'settings.syncRuntimeConfig',
+        status: 'queued' as const,
+        queuedAt: 1,
+        attempts: 0,
+        maxAttempts: 1,
+        payload,
+      },
+    })),
+  };
+}
 
 describe('settings route proxy sync', () => {
-  it('PUT /api/settings 显式提交代理字段时会触发 OpenClaw 代理同步（允许清空）', async () => {
-    const setSettingsPatchLocal = vi.fn(async () => ({}));
-    const syncProxyConfigToOpenClaw = vi.fn(async () => {});
+  it('PUT /api/settings 显式提交代理字段时只提交 OpenClaw 代理同步任务（允许清空）', async () => {
+    const patchSettings = vi.fn(async () => ({}));
+    const runtimeConfig = {
+      syncProxy: vi.fn(async () => {}),
+      syncBrowserMode: vi.fn(async () => {}),
+    };
+    const jobs = createSettingsJobs();
 
-    const result = await handleSettingsRoute(
+    const result = await dispatchRuntimeRouteDefinition(settingsRoutes, 
       'PUT',
       '/api/settings',
       {
@@ -15,127 +38,248 @@ describe('settings route proxy sync', () => {
         proxyBypassRules: '<local>',
       },
       {
-        getAllSettingsLocal: async () => ({
-          proxyEnabled: false,
-          proxyServer: '',
-          proxyBypassRules: '<local>',
+        settingsService: new SettingsService({
+          repository: {
+            getAll: async () => ({
+              proxyEnabled: false,
+              proxyServer: '',
+              proxyBypassRules: '<local>',
+            }),
+            patch: patchSettings,
+            reset: async () => ({}),
+            setValue: async () => ({}),
+          },
+          runtimeConfig,
+          jobs,
         }),
-        setSettingsPatchLocal,
-        resetSettingsLocal: async () => ({}),
-        setSettingValueLocal: async () => ({}),
-        syncProxyConfigToOpenClaw,
       },
     );
 
     expect(result).toEqual({
-      status: 200,
-      data: { success: true },
+      status: 202,
+      data: {
+        success: true,
+        job: expect.objectContaining({
+          id: 'job-settings-runtime-config',
+          type: 'settings.syncRuntimeConfig',
+        }),
+      },
     });
-    expect(setSettingsPatchLocal).toHaveBeenCalledWith({
+    expect(patchSettings).toHaveBeenCalledWith({
       proxyEnabled: false,
       proxyServer: '',
       proxyBypassRules: '<local>',
     });
-    expect(syncProxyConfigToOpenClaw).toHaveBeenCalledTimes(1);
-    expect(syncProxyConfigToOpenClaw).toHaveBeenCalledWith(
-      {
+    expect(runtimeConfig.syncProxy).not.toHaveBeenCalled();
+    expect(jobs.submitRuntimeConfigSync).toHaveBeenCalledWith({
+      settings: {
         proxyEnabled: false,
         proxyServer: '',
         proxyBypassRules: '<local>',
       },
-      { preserveExistingWhenDisabled: false },
-    );
+      syncProxy: true,
+      syncBrowserMode: false,
+    });
   });
 
   it('PUT /api/settings 未提交代理字段时不触发 OpenClaw 代理同步', async () => {
-    const syncProxyConfigToOpenClaw = vi.fn(async () => {});
+    const runtimeConfig = {
+      syncProxy: vi.fn(async () => {}),
+      syncBrowserMode: vi.fn(async () => {}),
+    };
+    const jobs = createSettingsJobs();
 
-    await handleSettingsRoute(
+    await dispatchRuntimeRouteDefinition(settingsRoutes, 
       'PUT',
       '/api/settings',
       {
         theme: 'dark',
       },
       {
-        getAllSettingsLocal: async () => ({
-          theme: 'dark',
-          proxyEnabled: true,
-          proxyServer: 'http://127.0.0.1:7890',
-          proxyBypassRules: '<local>',
+        settingsService: new SettingsService({
+          repository: {
+            getAll: async () => ({
+              theme: 'dark',
+              proxyEnabled: true,
+              proxyServer: 'http://127.0.0.1:7890',
+              proxyBypassRules: '<local>',
+            }),
+            patch: async () => ({}),
+            reset: async () => ({}),
+            setValue: async () => ({}),
+          },
+          runtimeConfig,
+          jobs,
         }),
-        setSettingsPatchLocal: async () => ({}),
-        resetSettingsLocal: async () => ({}),
-        setSettingValueLocal: async () => ({}),
-        syncProxyConfigToOpenClaw,
       },
     );
 
-    expect(syncProxyConfigToOpenClaw).not.toHaveBeenCalled();
+    expect(runtimeConfig.syncProxy).not.toHaveBeenCalled();
+    expect(jobs.submitRuntimeConfigSync).not.toHaveBeenCalled();
   });
 
-  it('PUT /api/settings 显式提交 browserMode 时会同步 OpenClaw 浏览器模式并重启 Gateway', async () => {
-    const syncBrowserModeToOpenClaw = vi.fn(async () => {});
+  it('PUT /api/settings 显式提交 browserMode 时只提交浏览器模式同步任务', async () => {
+    const runtimeConfig = {
+      syncProxy: vi.fn(async () => {}),
+      syncBrowserMode: vi.fn(async () => {}),
+    };
+    const ensureManagedPluginInstalled = vi.fn(async () => {});
     const requestParentShellAction = vi.fn(async () => ({
       success: true,
       status: 200,
     }));
+    const jobs = createSettingsJobs();
 
-    const result = await handleSettingsRoute(
+    const result = await dispatchRuntimeRouteDefinition(settingsRoutes, 
       'PUT',
       '/api/settings',
       {
         browserMode: 'native',
       },
       {
-        getAllSettingsLocal: async () => ({
-          browserMode: 'native',
+        settingsService: new SettingsService({
+          repository: {
+            getAll: async () => ({
+              browserMode: 'native',
+            }),
+            patch: async () => ({}),
+            reset: async () => ({}),
+            setValue: async () => ({}),
+          },
+          runtimeConfig,
+          runtimePlugins: {
+            ensureManagedPluginInstalled,
+          },
+          gatewayControl: {
+            restartGateway: async () => await requestParentShellAction('gateway_restart'),
+          },
+          jobs,
         }),
-        setSettingsPatchLocal: async () => ({}),
-        resetSettingsLocal: async () => ({}),
-        setSettingValueLocal: async () => ({}),
-        syncBrowserModeToOpenClaw,
-        requestParentShellAction,
       },
     );
 
     expect(result).toEqual({
-      status: 200,
-      data: { success: true },
+      status: 202,
+      data: {
+        success: true,
+        job: expect.objectContaining({
+          id: 'job-settings-runtime-config',
+          type: 'settings.syncRuntimeConfig',
+        }),
+      },
     });
-    expect(syncBrowserModeToOpenClaw).toHaveBeenCalledWith('native');
-    expect(requestParentShellAction).toHaveBeenCalledWith('gateway_restart');
+    expect(jobs.submitRuntimeConfigSync).toHaveBeenCalledWith({
+      settings: { browserMode: 'native' },
+      syncProxy: false,
+      syncBrowserMode: true,
+    });
+    expect(runtimeConfig.syncBrowserMode).not.toHaveBeenCalled();
+    expect(ensureManagedPluginInstalled).not.toHaveBeenCalled();
+    expect(requestParentShellAction).not.toHaveBeenCalled();
   });
 
-  it('PUT /api/settings/browserMode 也会同步 OpenClaw 浏览器模式并重启 Gateway', async () => {
-    const syncBrowserModeToOpenClaw = vi.fn(async () => {});
+  it('PUT /api/settings/browserMode 也只提交浏览器模式同步任务', async () => {
+    const runtimeConfig = {
+      syncProxy: vi.fn(async () => {}),
+      syncBrowserMode: vi.fn(async () => {}),
+    };
+    const ensureManagedPluginInstalled = vi.fn(async () => {});
     const requestParentShellAction = vi.fn(async () => ({
       success: true,
       status: 200,
     }));
+    const jobs = createSettingsJobs();
 
-    const result = await handleSettingsRoute(
+    const result = await dispatchRuntimeRouteDefinition(settingsRoutes, 
       'PUT',
       '/api/settings/browserMode',
       {
         value: 'off',
       },
       {
-        getAllSettingsLocal: async () => ({
-          browserMode: 'off',
+        settingsService: new SettingsService({
+          repository: {
+            getAll: async () => ({
+              browserMode: 'off',
+            }),
+            patch: async () => ({}),
+            reset: async () => ({}),
+            setValue: async () => ({}),
+          },
+          runtimeConfig,
+          runtimePlugins: {
+            ensureManagedPluginInstalled,
+          },
+          gatewayControl: {
+            restartGateway: async () => await requestParentShellAction('gateway_restart'),
+          },
+          jobs,
         }),
-        setSettingsPatchLocal: async () => ({}),
-        resetSettingsLocal: async () => ({}),
-        setSettingValueLocal: async () => ({}),
-        syncBrowserModeToOpenClaw,
-        requestParentShellAction,
       },
     );
+
+    expect(result).toEqual({
+      status: 202,
+      data: {
+        success: true,
+        job: expect.objectContaining({
+          id: 'job-settings-runtime-config',
+          type: 'settings.syncRuntimeConfig',
+        }),
+      },
+    });
+    expect(jobs.submitRuntimeConfigSync).toHaveBeenCalledWith({
+      settings: { browserMode: 'off' },
+      syncProxy: false,
+      syncBrowserMode: true,
+    });
+    expect(runtimeConfig.syncBrowserMode).not.toHaveBeenCalled();
+    expect(ensureManagedPluginInstalled).not.toHaveBeenCalled();
+    expect(requestParentShellAction).not.toHaveBeenCalled();
+  });
+
+  it('浏览器模式同步任务切到 relay 时先确保 browser-relay 插件可用', async () => {
+    const runtimeConfig = {
+      syncProxy: vi.fn(async () => {}),
+      syncBrowserMode: vi.fn(async () => {}),
+    };
+    const ensureManagedPluginInstalled = vi.fn(async () => {});
+    const requestParentShellAction = vi.fn(async () => ({
+      success: true,
+      status: 200,
+    }));
+    const jobs = createSettingsJobs();
+    const service = new SettingsService({
+      repository: {
+        getAll: async () => ({
+          browserMode: 'relay',
+        }),
+        patch: async () => ({}),
+        reset: async () => ({}),
+        setValue: async () => ({}),
+      },
+      runtimeConfig,
+      runtimePlugins: {
+        ensureManagedPluginInstalled,
+      },
+      gatewayControl: {
+        restartGateway: async () => await requestParentShellAction('gateway_restart'),
+      },
+      jobs,
+    });
+
+    const result = await service.executeRuntimeConfigSync({
+      settings: { browserMode: 'relay' },
+      syncProxy: false,
+      syncBrowserMode: true,
+    });
 
     expect(result).toEqual({
       status: 200,
       data: { success: true },
     });
-    expect(syncBrowserModeToOpenClaw).toHaveBeenCalledWith('off');
+    expect(ensureManagedPluginInstalled).toHaveBeenCalledWith('browser-relay');
+    expect(runtimeConfig.syncBrowserMode).toHaveBeenCalledWith('relay');
     expect(requestParentShellAction).toHaveBeenCalledWith('gateway_restart');
   });
 });

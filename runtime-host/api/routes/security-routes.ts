@@ -1,222 +1,45 @@
-import type { OpenClawBridge } from '../../openclaw-bridge';
-import { createSecurityRuntimeService } from '../../application/security/service';
-
-interface LocalDispatchResponse {
-  status: number;
-  data: unknown;
-}
+import {
+  accepted,
+  routeResponder,
+  type ApplicationResponse,
+  type RuntimeRouteDefinition,
+} from './route-utils';
 
 interface SecurityRouteDeps {
-  openclawBridge: Pick<
-    OpenClawBridge,
-    | 'isGatewayRunning'
-    | 'securityPolicySync'
-    | 'securityAuditQueryFromUrl'
-    | 'securityQuickAuditRun'
-    | 'securityEmergencyRun'
-    | 'securityIntegrityCheck'
-    | 'securityIntegrityRebaseline'
-    | 'securitySkillsScan'
-    | 'securityAdvisoriesCheck'
-    | 'securityRemediationPreview'
-    | 'securityRemediationApply'
-    | 'securityRemediationRollback'
-  >;
+  securityService: SecurityRouteService;
 }
 
-export async function handleSecurityRoute(
-  method: string,
-  routePath: string,
-  routeUrl: URL,
-  payload: unknown,
-  deps: SecurityRouteDeps,
-): Promise<LocalDispatchResponse | null> {
-  const service = createSecurityRuntimeService(deps.openclawBridge);
-
-  if (method === 'GET' && routePath === '/api/security') {
-    return {
-      status: 200,
-      data: service.readPolicy(),
-    };
-  }
-
-  if (method === 'PUT' && routePath === '/api/security') {
-    try {
-      return {
-        status: 200,
-        data: await service.writePolicy(payload),
-      };
-    } catch (error) {
-      return {
-        status: 500,
-        data: {
-          success: false,
-          error: String(error),
-        },
-      };
-    }
-  }
-
-  if (method === 'GET' && routePath === '/api/security/destructive-rule-catalog') {
-    return {
-      status: 200,
-      data: service.listRuleCatalog(routeUrl.searchParams.get('platform')),
-    };
-  }
-
-  if (method === 'GET' && routePath === '/api/security/audit') {
-    try {
-      return {
-        status: 200,
-        data: await service.queryAudit(routeUrl),
-      };
-    } catch (error) {
-      return {
-        status: 500,
-        data: { success: false, error: String(error) },
-      };
-    }
-  }
-
-  if (method === 'POST' && routePath === '/api/security/sync-current-policy') {
-    try {
-      return {
-        status: 200,
-        data: await service.syncCurrentPolicyToGatewayIfRunning(),
-      };
-    } catch (error) {
-      return {
-        status: 500,
-        data: { success: false, error: String(error) },
-      };
-    }
-  }
-
-  if (method === 'POST' && routePath === '/api/security/quick-audit') {
-    try {
-      return {
-        status: 200,
-        data: await service.runQuickAudit(),
-      };
-    } catch (error) {
-      return {
-        status: 500,
-        data: { success: false, error: String(error) },
-      };
-    }
-  }
-
-  if (method === 'POST' && routePath === '/api/security/emergency-response') {
-    try {
-      return {
-        status: 200,
-        data: await service.runEmergencyResponse(),
-      };
-    } catch (error) {
-      return {
-        status: 500,
-        data: { success: false, error: String(error) },
-      };
-    }
-  }
-
-  if (method === 'GET' && routePath === '/api/security/integrity') {
-    try {
-      return {
-        status: 200,
-        data: await service.checkIntegrity(),
-      };
-    } catch (error) {
-      return {
-        status: 500,
-        data: { success: false, error: String(error) },
-      };
-    }
-  }
-
-  if (method === 'POST' && routePath === '/api/security/integrity/rebaseline') {
-    try {
-      return {
-        status: 200,
-        data: await service.rebaselineIntegrity(),
-      };
-    } catch (error) {
-      return {
-        status: 500,
-        data: { success: false, error: String(error) },
-      };
-    }
-  }
-
-  if (method === 'POST' && routePath === '/api/security/skills/scan') {
-    try {
-      return {
-        status: 200,
-        data: await service.scanSkillsFromPayload(payload),
-      };
-    } catch (error) {
-      return {
-        status: 500,
-        data: { success: false, error: String(error) },
-      };
-    }
-  }
-
-  if (method === 'GET' && routePath === '/api/security/advisories') {
-    try {
-      return {
-        status: 200,
-        data: await service.checkAdvisoriesFromUrl(routeUrl),
-      };
-    } catch (error) {
-      return {
-        status: 500,
-        data: { success: false, error: String(error) },
-      };
-    }
-  }
-
-  if (method === 'GET' && routePath === '/api/security/remediation/preview') {
-    try {
-      return {
-        status: 200,
-        data: await service.previewRemediation(),
-      };
-    } catch (error) {
-      return {
-        status: 500,
-        data: { success: false, error: String(error) },
-      };
-    }
-  }
-
-  if (method === 'POST' && routePath === '/api/security/remediation/apply') {
-    try {
-      return {
-        status: 200,
-        data: await service.applyRemediationFromPayload(payload),
-      };
-    } catch (error) {
-      return {
-        status: 500,
-        data: { success: false, error: String(error) },
-      };
-    }
-  }
-
-  if (method === 'POST' && routePath === '/api/security/remediation/rollback') {
-    try {
-      return {
-        status: 200,
-        data: await service.rollbackRemediationFromPayload(payload),
-      };
-    } catch (error) {
-      return {
-        status: 500,
-        data: { success: false, error: String(error) },
-      };
-    }
-  }
-
-  return null;
+interface SecurityRouteService {
+  readPolicy(): Promise<unknown>;
+  writePolicy(payload: unknown): Promise<ApplicationResponse>;
+  listRuleCatalog(platform: string | null): unknown;
+  queryAudit(routeUrl: URL): Promise<unknown>;
+  syncCurrentPolicyToGatewayIfRunning(): ApplicationResponse;
+  runQuickAudit(): unknown;
+  runEmergencyResponse(): unknown;
+  checkIntegrity(): unknown;
+  rebaselineIntegrity(): unknown;
+  scanSkillsFromPayload(payload: unknown): unknown;
+  checkAdvisoriesFromUrl(routeUrl: URL): unknown;
+  previewRemediation(): unknown;
+  applyRemediationFromPayload(payload: unknown): unknown;
+  rollbackRemediationFromPayload(payload: unknown): unknown;
 }
+
+export const securityRoutes: readonly RuntimeRouteDefinition<SecurityRouteDeps>[] = [
+  { method: 'GET', path: '/api/security', handle: (_context, deps) => routeResponder.value(() => deps.securityService.readPolicy()) },
+  { method: 'PUT', path: '/api/security', handle: (context, deps) => routeResponder.result(() => deps.securityService.writePolicy(context.payload)) },
+  { method: 'GET', path: '/api/security/destructive-rule-catalog', handle: (context, deps) => routeResponder.ok(deps.securityService.listRuleCatalog(context.routeUrl.searchParams.get('platform'))) },
+  { method: 'GET', path: '/api/security/audit', handle: (context, deps) => routeResponder.value(() => deps.securityService.queryAudit(context.routeUrl)) },
+  { method: 'POST', path: '/api/security/sync-current-policy', handle: (_context, deps) => routeResponder.result(() => deps.securityService.syncCurrentPolicyToGatewayIfRunning()) },
+  { method: 'POST', path: '/api/security/quick-audit', handle: (_context, deps) => accepted(deps.securityService.runQuickAudit()) },
+  { method: 'POST', path: '/api/security/emergency-response', handle: (_context, deps) => accepted(deps.securityService.runEmergencyResponse()) },
+  { method: 'GET', path: '/api/security/integrity', handle: (_context, deps) => accepted(deps.securityService.checkIntegrity()) },
+  { method: 'POST', path: '/api/security/integrity/rebaseline', handle: (_context, deps) => accepted(deps.securityService.rebaselineIntegrity()) },
+  { method: 'POST', path: '/api/security/skills/scan', handle: (context, deps) => accepted(deps.securityService.scanSkillsFromPayload(context.payload)) },
+  { method: 'GET', path: '/api/security/advisories', handle: (context, deps) => accepted(deps.securityService.checkAdvisoriesFromUrl(context.routeUrl)) },
+  { method: 'GET', path: '/api/security/remediation/preview', handle: (_context, deps) => accepted(deps.securityService.previewRemediation()) },
+  { method: 'POST', path: '/api/security/remediation/apply', handle: (context, deps) => accepted(deps.securityService.applyRemediationFromPayload(context.payload)) },
+  { method: 'POST', path: '/api/security/remediation/rollback', handle: (context, deps) => accepted(deps.securityService.rollbackRemediationFromPayload(context.payload)) },
+] as const;
+

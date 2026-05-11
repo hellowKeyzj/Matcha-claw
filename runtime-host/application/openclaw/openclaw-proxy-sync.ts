@@ -1,8 +1,6 @@
-import { readOpenClawConfigJson, writeOpenClawConfigJson } from '../../api/storage/paths';
-import { createRuntimeLogger } from '../../shared/logger';
+import type { RuntimeHostLogger } from '../../shared/logger';
 import { withOpenClawConfigLock } from './openclaw-config-mutex';
-
-const logger = createRuntimeLogger('openclaw-proxy-sync');
+import type { OpenClawConfigRepositoryPort } from './openclaw-config-repository';
 
 export interface ProxySettings {
   proxyEnabled: boolean;
@@ -36,12 +34,15 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 export async function syncProxyConfigToOpenClaw(
+  configRepository: OpenClawConfigRepositoryPort,
   settings: ProxySettings,
+  logger: RuntimeHostLogger,
   options: SyncProxyOptions = {},
 ): Promise<void> {
   await withOpenClawConfigLock(async () => {
-    const config = readOpenClawConfigJson() as Record<string, unknown>;
-    const telegramSection = config.channels?.telegram;
+    const config = await configRepository.read();
+    const channels = isRecord(config.channels) ? config.channels : {};
+    const telegramSection = channels.telegram;
 
     if (!isRecord(telegramSection)) {
       return;
@@ -84,7 +85,7 @@ export async function syncProxyConfigToOpenClaw(
       delete telegramSection.proxy;
     }
 
-    await writeOpenClawConfigJson(config);
+    await configRepository.write(config);
     logger.info(`Synced Telegram proxy to OpenClaw config (${nextProxy || 'disabled'})`);
   });
 }

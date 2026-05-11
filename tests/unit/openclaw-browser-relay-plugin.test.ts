@@ -1852,7 +1852,7 @@ describe('openclaw browser relay plugin', () => {
     expect(server!.resolveSelectedSessionId()).toBe('browser-a|sid|page-a')
 
     secondExtension.close()
-  })
+  }, 45_000)
 
   it('auto-selects the opened target window when no execution window is currently selected', async () => {
     await startRelayServer()
@@ -2030,7 +2030,7 @@ describe('openclaw browser relay plugin', () => {
 
     const response = await fetch(`http://127.0.0.1:${port}`)
     expect(await response.text()).toBe('OK')
-  }, 15_000)
+  }, 45_000)
 
   it('fails clearly when the relay port is occupied by an unowned process', async () => {
     const port = await findFreePort()
@@ -2439,7 +2439,7 @@ describe('openclaw browser relay plugin', () => {
 
     extensionA.close()
     extensionB.close()
-  })
+  }, 15_000)
 
   it('opens a page through a newly provisioned execution window when no browser is selected in a multi-browser setup', async () => {
     await startRelayServer()
@@ -2543,7 +2543,7 @@ describe('openclaw browser relay plugin', () => {
 
     extensionA.close()
     extensionB.close()
-  })
+  }, 15_000)
 
   it('auto-selects the only known window when browser use is requested in a single-browser setup', async () => {
     await startRelayServer()

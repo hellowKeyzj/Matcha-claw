@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import { hostApiFetch } from '@/lib/host-api';
+import { hostApiFetch, waitForRuntimeJobResult, type RuntimeJobSubmission } from '@/lib/host-api';
 
 export type PluginCatalogItem = {
   id: string;
@@ -19,15 +19,15 @@ export type PluginCatalogItem = {
 export type RuntimePayload = {
   success: boolean;
   state: {
-    lifecycle: 'idle' | 'starting' | 'running' | 'stopped' | 'error';
-    runtimeLifecycle: 'idle' | 'booting' | 'ready' | 'degraded' | 'stopped';
+    lifecycle: 'starting' | 'running' | 'stopping' | 'stopped' | 'error';
+    runtimeLifecycle: 'starting' | 'running' | 'stopping' | 'stopped' | 'error';
     activePluginCount: number;
     enabledPluginIds: string[];
     lastError?: string;
   };
   health: {
     ok: boolean;
-    lifecycle: 'idle' | 'booting' | 'ready' | 'degraded' | 'stopped';
+    lifecycle: 'starting' | 'running' | 'stopping' | 'stopped' | 'error';
     activePluginCount: number;
     degradedPlugins: string[];
     error?: string;
@@ -303,7 +303,8 @@ export const usePluginsStore = create<PluginsStoreState>((set, get) => ({
   restartHost: async () => {
     set({ mutatingAction: 'restart', mutating: true, error: null });
     try {
-      const payload = await hostApiFetch<RuntimePayload>('/api/plugins/runtime/restart', { method: 'POST' });
+      await hostApiFetch<{ success: boolean }>('/api/runtime-host/restart', { method: 'POST' });
+      const payload = await hostApiFetch<RuntimePayload>('/api/plugins/runtime');
       set({
         runtime: writeRuntimeCache(payload),
         runtimeReady: true,
@@ -334,10 +335,11 @@ export const usePluginsStore = create<PluginsStoreState>((set, get) => ({
       : manuallyManagedEnabledPluginIds.filter((id) => id !== pluginId);
     set({ mutatingPluginId: pluginId, mutating: true, error: null });
     try {
-      const payload = await hostApiFetch<RuntimePayload>('/api/plugins/runtime/enabled-plugins', {
+      const submission = await hostApiFetch<RuntimeJobSubmission<RuntimePayload>>('/api/plugins/runtime/enabled-plugins', {
         method: 'PUT',
         body: JSON.stringify({ pluginIds: nextIds }),
       });
+      const payload = await waitForRuntimeJobResult<RuntimePayload>(submission.job.id);
       set({
         runtime: writeRuntimeCache(payload),
         runtimeReady: true,

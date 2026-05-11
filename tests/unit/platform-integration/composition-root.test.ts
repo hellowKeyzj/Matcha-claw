@@ -1,12 +1,17 @@
 import { describe, expect, it, vi } from 'vitest';
-import { createRuntimeHostPlatformRoot } from '../../../runtime-host/api/platform/runtime-root';
+import {
+  registerRuntimeHostPlatformRoot,
+  resolveRuntimeHostPlatformRoot,
+} from '../../../runtime-host/composition/modules/platform-runtime-module';
+import { createTestRuntimeHostContainer } from '../helpers/runtime-host-container';
 
 describe('runtime-host platform root', () => {
   it('在子进程内装配 runtime manager 和 run service', async () => {
+    const container = createTestRuntimeHostContainer();
     const platformEnableTool = vi.fn().mockResolvedValue(undefined);
     const platformDisableTool = vi.fn().mockResolvedValue(undefined);
     const platformListToolsCatalog = vi.fn().mockResolvedValue([{ id: 'p1', source: 'plugin', enabled: false }]);
-    const root = createRuntimeHostPlatformRoot({
+    registerRuntimeHostPlatformRoot(container, () => ({
       isGatewayRunning: vi.fn().mockResolvedValue(true),
       platformInstallTool: vi.fn(),
       platformUninstallTool: vi.fn(),
@@ -15,7 +20,8 @@ describe('runtime-host platform root', () => {
       platformListToolsCatalog,
       platformStartRun: vi.fn().mockResolvedValue({ runId: 'run-1' }),
       platformAbortRun: vi.fn(),
-    });
+    }));
+    const root = resolveRuntimeHostPlatformRoot(container);
 
     expect(root.runtimeManager).toBeDefined();
     expect(root.runSessionService).toBeDefined();

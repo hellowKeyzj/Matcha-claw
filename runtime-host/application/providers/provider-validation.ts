@@ -1,5 +1,6 @@
 import { getProviderConfig } from './provider-registry';
 import type { ProviderProtocol } from './provider-types';
+import type { RuntimeHttpClientPort } from '../common/runtime-ports';
 
 type ValidationProfile =
   | 'openai-completions'
@@ -19,6 +20,7 @@ interface ValidationOptions {
   baseUrl?: string;
   apiProtocol?: ProviderProtocol;
   headers?: Record<string, string>;
+  httpClient: RuntimeHttpClientPort;
 }
 
 function normalizeBaseUrl(baseUrl: string): string {
@@ -29,17 +31,13 @@ function normalizeHeaders(input: unknown): Record<string, string> | undefined {
   if (!input || typeof input !== 'object' || Array.isArray(input)) {
     return undefined;
   }
-  const normalized = Object.fromEntries(
-    Object.entries(input as Record<string, unknown>)
-      .filter(
-        ([key, value]): value is string =>
-          typeof key === 'string'
-          && key.trim().length > 0
-          && typeof value === 'string'
-          && value.trim().length > 0,
-      )
-      .map(([key, value]) => [key, value.trim()]),
-  );
+  const normalizedEntries: Array<[string, string]> = [];
+  for (const [key, value] of Object.entries(input as Record<string, unknown>)) {
+    if (key.trim().length > 0 && typeof value === 'string' && value.trim().length > 0) {
+      normalizedEntries.push([key, value.trim()]);
+    }
+  }
+  const normalized = Object.fromEntries(normalizedEntries);
   return Object.keys(normalized).length > 0 ? normalized : undefined;
 }
 
@@ -148,11 +146,12 @@ function classifyAuthResponse(
 }
 
 async function performProviderValidationRequest(
+  httpClient: RuntimeHttpClientPort,
   url: string,
   headers: Record<string, string>,
 ): Promise<ValidationResult> {
   try {
-    const response = await fetch(url, { headers });
+    const response = await httpClient.request(url, { headers });
     const data = await response.json().catch(() => ({}));
     const result = classifyAuthResponse(response.status, data);
     return { ...result, status: response.status };
@@ -195,11 +194,12 @@ function classifyProbeResponse(
 }
 
 async function performResponsesProbe(
+  httpClient: RuntimeHttpClientPort,
   url: string,
   headers: Record<string, string>,
 ): Promise<ValidationResult> {
   try {
-    const response = await fetch(url, {
+    const response = await httpClient.request(url, {
       method: 'POST',
       headers: { ...headers, 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -218,11 +218,12 @@ async function performResponsesProbe(
 }
 
 async function performChatCompletionsProbe(
+  httpClient: RuntimeHttpClientPort,
   url: string,
   headers: Record<string, string>,
 ): Promise<ValidationResult> {
   try {
-    const response = await fetch(url, {
+    const response = await httpClient.request(url, {
       method: 'POST',
       headers: { ...headers, 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -242,11 +243,12 @@ async function performChatCompletionsProbe(
 }
 
 async function performAnthropicMessagesProbe(
+  httpClient: RuntimeHttpClientPort,
   url: string,
   headers: Record<string, string>,
 ): Promise<ValidationResult> {
   try {
-    const response = await fetch(url, {
+    const response = await httpClient.request(url, {
       method: 'POST',
       headers: { ...headers, 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -266,6 +268,7 @@ async function performAnthropicMessagesProbe(
 }
 
 async function validateOpenAiCompatibleKey(
+  httpClient: RuntimeHttpClientPort,
   providerType: string,
   apiKey: string,
   apiProtocol: 'openai-completions' | 'openai-responses',
@@ -282,28 +285,30 @@ async function validateOpenAiCompatibleKey(
     ...(extraHeaders ?? {}),
   };
   const { modelsUrl, probeUrl } = resolveOpenAiProbeUrls(trimmedBaseUrl, apiProtocol);
-  const modelsResult = await performProviderValidationRequest(modelsUrl, headers);
+  const modelsResult = await performProviderValidationRequest(httpClient, modelsUrl, headers);
 
   if (shouldFallbackFromModelsProbe(modelsResult)) {
     if (apiProtocol === 'openai-responses') {
-      return await performResponsesProbe(probeUrl, headers);
+      return await performResponsesProbe(httpClient, probeUrl, headers);
     }
-    return await performChatCompletionsProbe(probeUrl, headers);
+    return await performChatCompletionsProbe(httpClient, probeUrl, headers);
   }
 
   return modelsResult;
 }
 
 async function validateGoogleQueryKey(
+  httpClient: RuntimeHttpClientPort,
   apiKey: string,
   baseUrl?: string,
 ): Promise<ValidationResult> {
   const base = normalizeBaseUrl(baseUrl || 'https://generativelanguage.googleapis.com/v1beta');
   const url = `${base}/models?pageSize=1&key=${encodeURIComponent(apiKey)}`;
-  return await performProviderValidationRequest(url, {});
+  return await performProviderValidationRequest(httpClient, url, {});
 }
 
 async function validateAnthropicHeaderKey(
+  httpClient: RuntimeHttpClientPort,
   providerType: string,
   apiKey: string,
   baseUrl?: string,
@@ -316,18 +321,22 @@ async function validateAnthropicHeaderKey(
     'anthropic-version': '2023-06-01',
   };
 
-  const modelsResult = await performProviderValidationRequest(url, headers);
+  const modelsResult = await performProviderValidationRequest(httpClient, url, headers);
   if (modelsResult.status === 404 || modelsResult.status === 400) {
     const messageBase = rawBase.endsWith('/v1') ? rawBase : `${rawBase}/v1`;
     const probeUrl = `${messageBase}/messages`;
-    return await performAnthropicMessagesProbe(probeUrl, headers);
+    return await performAnthropicMessagesProbe(httpClient, probeUrl, headers);
   }
 
   return modelsResult;
 }
 
-async function validateOpenRouterKey(apiKey: string): Promise<ValidationResult> {
+async function validateOpenRouterKey(
+  httpClient: RuntimeHttpClientPort,
+  apiKey: string,
+): Promise<ValidationResult> {
   return await performProviderValidationRequest(
+    httpClient,
     'https://openrouter.ai/api/v1/auth/key',
     { Authorization: `Bearer ${apiKey}` },
   );
@@ -338,6 +347,9 @@ export async function validateApiKeyWithProvider(
   apiKey: string,
   options?: ValidationOptions,
 ): Promise<ValidationResult> {
+  if (!options?.httpClient) {
+    return { valid: false, error: 'Runtime HTTP client is required' };
+  }
   const profile = getValidationProfile(providerType, options);
   const registryConfig = getProviderConfig(providerType);
   const resolvedBaseUrl = options?.baseUrl || registryConfig?.baseUrl;
@@ -356,6 +368,7 @@ export async function validateApiKeyWithProvider(
     switch (profile) {
       case 'openai-completions':
         return await validateOpenAiCompatibleKey(
+          options.httpClient,
           providerType,
           trimmedKey,
           'openai-completions',
@@ -364,6 +377,7 @@ export async function validateApiKeyWithProvider(
         );
       case 'openai-responses':
         return await validateOpenAiCompatibleKey(
+          options.httpClient,
           providerType,
           trimmedKey,
           'openai-responses',
@@ -371,12 +385,11 @@ export async function validateApiKeyWithProvider(
           mergedHeaders,
         );
       case 'google-query-key':
-        return await validateGoogleQueryKey(trimmedKey, resolvedBaseUrl);
+        return await validateGoogleQueryKey(options.httpClient, trimmedKey, resolvedBaseUrl);
       case 'anthropic-header':
-        return await validateAnthropicHeaderKey(providerType, trimmedKey, resolvedBaseUrl);
+        return await validateAnthropicHeaderKey(options.httpClient, providerType, trimmedKey, resolvedBaseUrl);
       case 'openrouter':
-        return await validateOpenRouterKey(trimmedKey);
-      case 'none':
+        return await validateOpenRouterKey(options.httpClient, trimmedKey);
       default:
         return { valid: true };
     }

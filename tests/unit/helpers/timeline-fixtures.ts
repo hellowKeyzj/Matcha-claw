@@ -23,7 +23,7 @@ import { assembleAuthoritativeAssistantTurns } from '../../../runtime-host/appli
 import {
   buildToolCardsFromMessage,
   mergeToolCards,
-} from '../../../runtime-host/shared/tool-card-render';
+} from '../../../runtime-host/application/sessions/tool/tool-card-render';
 
 export interface MessageTimelineMeta {
   entryId: string;

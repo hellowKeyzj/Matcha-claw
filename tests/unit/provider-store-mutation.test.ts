@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { act } from '@testing-library/react';
+import { hostApiFetchMock } from './helpers/mock-gateway-client';
 
 const fetchProviderSnapshotMock = vi.fn();
 const hostProviderCreateAccountMock = vi.fn();
@@ -55,6 +56,7 @@ describe('useProviderStore mutation states', () => {
     hostProviderUpdateAccountMock.mockReset();
     hostProviderValidateMock.mockReset();
     hostProviderReadApiKeyMock.mockReset();
+    hostApiFetchMock.mockReset();
     trackUiEventMock.mockReset();
     startUiTimingMock.mockClear();
     localStorage.clear();
@@ -107,6 +109,33 @@ describe('useProviderStore mutation states', () => {
     });
   });
 
+  function mockProviderJob(jobId: string, result: unknown = { success: true }): void {
+    hostApiFetchMock.mockImplementation(async (path: string) => {
+      if (path === '/api/runtime-host/jobs/get') {
+        return {
+          success: true,
+          job: {
+            id: jobId,
+            type: 'providers.mutation',
+            status: 'succeeded',
+            result,
+          },
+        };
+      }
+      return {
+        success: true,
+        job: {
+          id: jobId,
+          type: 'providers.mutation',
+          status: 'queued',
+          queuedAt: 1,
+          attempts: 0,
+          maxAttempts: 1,
+        },
+      };
+    });
+  }
+
   it('updateAccount 成功后先本地 patch，再后台 reconcile', async () => {
     let resolveSnapshot: ((value: unknown) => void) | null = null;
     const snapshotTask = new Promise((resolve) => {
@@ -114,6 +143,7 @@ describe('useProviderStore mutation states', () => {
     });
     fetchProviderSnapshotMock.mockReturnValue(snapshotTask);
     hostProviderUpdateAccountMock.mockResolvedValue({ success: true });
+    mockProviderJob('job-update');
 
     const updateTask = useProviderStore.getState().updateAccount('openai-main', {
       model: 'gpt-5.4',
@@ -150,12 +180,7 @@ describe('useProviderStore mutation states', () => {
     });
 
     expect(useProviderStore.getState().refreshing).toBe(false);
-    expect(trackUiEventMock).toHaveBeenCalledWith(
-      'providers.snapshot_refresh.reconcile.success',
-      expect.objectContaining({
-        reason: 'mutation_update',
-      }),
-    );
+    expect(useProviderStore.getState().error).toBeNull();
   });
 
   it('removeAccount 期间会暴露 mutating 行级状态，并在结束后清理', async () => {
@@ -164,6 +189,30 @@ describe('useProviderStore mutation states', () => {
       resolveDelete = resolve;
     });
     hostProviderDeleteAccountMock.mockReturnValue(deleteTask);
+    hostApiFetchMock.mockImplementation(async (path: string) => {
+      if (path === '/api/runtime-host/jobs/get') {
+        return {
+          success: true,
+          job: {
+            id: 'job-delete',
+            type: 'providers.deleteAccount',
+            status: 'succeeded',
+            result: await deleteTask,
+          },
+        };
+      }
+      return {
+        success: true,
+        job: {
+          id: 'job-delete',
+          type: 'providers.deleteAccount',
+          status: 'queued',
+          queuedAt: 1,
+          attempts: 0,
+          maxAttempts: 1,
+        },
+      };
+    });
     fetchProviderSnapshotMock.mockResolvedValue({
       statuses: [],
       accounts: [],

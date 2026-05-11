@@ -1,6 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { buildLineDiff } from '@/lib/line-diff';
-import { gatewayClientRpcMock, resetGatewayClientMocks } from './helpers/mock-gateway-client';
+import {
+  gatewayClientRpcMock,
+  hostSessionDeleteMock,
+  resetGatewayClientMocks,
+} from './helpers/mock-gateway-client';
 
 import { useSubagentsStore } from '@/stores/subagents';
 
@@ -102,19 +106,13 @@ describe('subagents diff and apply', () => {
   });
 
   it('deletes session and clears draft when cancelDraft is called', async () => {
-    const rpc = gatewayClientRpcMock;
-    rpc.mockResolvedValue({ success: true, result: {} });
+    hostSessionDeleteMock.mockResolvedValue({ success: true });
 
     await useSubagentsStore.getState().cancelDraft('writer');
 
-    expect(rpc).toHaveBeenCalledWith(
-      'sessions.delete',
-      {
-        key: 'agent:writer:subagent-draft-123',
-        deleteTranscript: true,
-      },
-      undefined,
-    );
+    expect(hostSessionDeleteMock).toHaveBeenCalledWith({
+      sessionKey: 'agent:writer:subagent-draft-123',
+    });
     const state = useSubagentsStore.getState();
     expect(state.draftByFile).toEqual({});
     expect(state.previewDiffByFile).toEqual({});

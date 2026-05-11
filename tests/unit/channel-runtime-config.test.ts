@@ -2,22 +2,35 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import {
-  deleteChannelConfigLocal,
-  getChannelFormValuesLocal,
-  listConfiguredChannelsLocal,
-  saveChannelConfigLocal,
-  setChannelEnabledLocal,
-} from '../../runtime-host/application/channels/channel-runtime';
+import { ChannelConfigRepository } from '../../runtime-host/application/channels/channel-runtime';
+import { OpenClawConfigRepository } from '../../runtime-host/application/openclaw/openclaw-config-repository';
+import { createTestOpenClawEnvironmentRepository } from './helpers/runtime-system-environment';
+import { ManagedPluginInstaller } from '../../runtime-host/application/plugins/managed-plugin-installer';
+import { PluginCompanionSkillService } from '../../runtime-host/application/plugins/plugin-companion-skill-service';
+import { createTestPluginFileSystem } from './helpers/plugin-file-system';
 
 describe('channel-runtime config save', () => {
   let tempDir = '';
   let previousConfigDir: string | undefined;
+  let repository: ChannelConfigRepository;
 
   beforeEach(async () => {
     tempDir = await mkdtemp(join(tmpdir(), 'matchaclaw-channel-config-'));
     previousConfigDir = process.env.OPENCLAW_CONFIG_DIR;
     process.env.OPENCLAW_CONFIG_DIR = tempDir;
+    const environmentRepository = createTestOpenClawEnvironmentRepository();
+    const configRepository = new OpenClawConfigRepository(environmentRepository);
+    const pluginFileSystem = createTestPluginFileSystem();
+    const companionSkills = new PluginCompanionSkillService(environmentRepository, configRepository, pluginFileSystem);
+    repository = new ChannelConfigRepository(
+      configRepository,
+      new ManagedPluginInstaller(environmentRepository, configRepository, companionSkills, pluginFileSystem),
+      pluginFileSystem,
+      {
+        nowMs: () => 1_700_000_000_000,
+        nowIso: () => '2023-11-14T22:13:20.000Z',
+      },
+    );
     await writeFile(
       join(tempDir, 'openclaw.json'),
       `${JSON.stringify({
@@ -57,7 +70,7 @@ describe('channel-runtime config save', () => {
   });
 
   it('保存 Feishu 配置时会迁移到 openclaw-lark 并禁用旧 feishu entry', async () => {
-    await saveChannelConfigLocal({
+    await repository.saveChannelConfig({
       channelType: 'feishu',
       accountId: 'acc2',
       config: {
@@ -79,7 +92,7 @@ describe('channel-runtime config save', () => {
   }, 15000);
 
   it('同一频道下不同账号禁止复用唯一凭证', async () => {
-    await expect(saveChannelConfigLocal({
+    await expect(repository.saveChannelConfig({
       channelType: 'feishu',
       accountId: 'acc2',
       config: {
@@ -91,7 +104,7 @@ describe('channel-runtime config save', () => {
   }, 15000);
 
   it('保存 WeCom 配置时会迁移到 wecom 插件 ID 并启用 entries.wecom', async () => {
-    await saveChannelConfigLocal({
+    await repository.saveChannelConfig({
       channelType: 'wecom',
       accountId: 'acc1',
       config: {
@@ -127,7 +140,7 @@ describe('channel-runtime config save', () => {
       'utf8',
     );
 
-    await saveChannelConfigLocal({
+    await repository.saveChannelConfig({
       channelType: 'qqbot',
       accountId: 'acc1',
       config: {
@@ -163,7 +176,7 @@ describe('channel-runtime config save', () => {
       'utf8',
     );
 
-    const channels = await listConfiguredChannelsLocal();
+    const channels = await repository.listConfiguredChannels();
     expect(channels).not.toContain('qqbot');
   });
 
@@ -184,12 +197,12 @@ describe('channel-runtime config save', () => {
       'utf8',
     );
 
-    const channels = await listConfiguredChannelsLocal();
+    const channels = await repository.listConfiguredChannels();
     expect(channels).not.toContain('feishu');
   });
 
   it('内置频道保存配置时保留已有信任白名单但不把 bundled channel 写进 allowlist', async () => {
-    await saveChannelConfigLocal({
+    await repository.saveChannelConfig({
       channelType: 'telegram',
       accountId: 'default',
       config: {
@@ -220,7 +233,7 @@ describe('channel-runtime config save', () => {
       'utf8',
     );
 
-    await saveChannelConfigLocal({
+    await repository.saveChannelConfig({
       channelType: 'whatsapp',
       accountId: 'default',
       config: {
@@ -237,7 +250,7 @@ describe('channel-runtime config save', () => {
   });
 
   it('禁用外部频道时会同步禁用对应插件', async () => {
-    await saveChannelConfigLocal({
+    await repository.saveChannelConfig({
       channelType: 'wecom',
       accountId: 'acc1',
       config: {
@@ -247,7 +260,7 @@ describe('channel-runtime config save', () => {
       enabled: true,
     });
 
-    await setChannelEnabledLocal('wecom', false);
+    await repository.setChannelEnabled('wecom', false);
 
     const config = JSON.parse(
       await readFile(join(tempDir, 'openclaw.json'), 'utf8'),
@@ -259,7 +272,7 @@ describe('channel-runtime config save', () => {
   });
 
   it('删除外部频道配置时会同步禁用对应插件', async () => {
-    await saveChannelConfigLocal({
+    await repository.saveChannelConfig({
       channelType: 'qqbot',
       accountId: 'acc1',
       config: {
@@ -269,7 +282,7 @@ describe('channel-runtime config save', () => {
       enabled: true,
     });
 
-    await deleteChannelConfigLocal('qqbot');
+    await repository.deleteChannelConfig('qqbot');
 
     const config = JSON.parse(
       await readFile(join(tempDir, 'openclaw.json'), 'utf8'),
@@ -281,7 +294,7 @@ describe('channel-runtime config save', () => {
   });
 
   it('保存 dingtalk 配置时使用 strict-schema 顶层结构，不写 accounts/defaultAccount', async () => {
-    await saveChannelConfigLocal({
+    await repository.saveChannelConfig({
       channelType: 'dingtalk',
       accountId: 'team-1',
       config: {
@@ -303,10 +316,10 @@ describe('channel-runtime config save', () => {
     expect(config.channels.dingtalk.accounts).toBeUndefined();
     expect(config.channels.dingtalk.defaultAccount).toBeUndefined();
 
-    const configuredChannels = await listConfiguredChannelsLocal();
+    const configuredChannels = await repository.listConfiguredChannels();
     expect(configuredChannels).toContain('dingtalk');
 
-    const values = await getChannelFormValuesLocal('dingtalk', 'team-1');
+    const values = await repository.getChannelFormValues('dingtalk', 'team-1');
     expect(values).toMatchObject({
       clientId: 'ding-client-id',
       clientSecret: 'ding-secret',

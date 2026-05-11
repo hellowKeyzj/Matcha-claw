@@ -11,48 +11,39 @@ describe('subagents default agent', () => {
           error: { message: `Unexpected channel: ${String(channel)}` },
         };
       }
-      const body = typeof (payload as { body?: unknown })?.body === 'string'
-        ? JSON.parse((payload as { body: string }).body)
-        : {};
-      const method = typeof body?.method === 'string' ? body.method : '';
-      if (method === 'agents.list') {
+      const path = (payload as { path?: string } | undefined)?.path;
+      if (path === '/api/subagents/list') {
         return {
           ok: true,
           data: {
             status: 200,
             ok: true,
             json: {
-              success: true,
-              result: {
-                agents: [
-                  { id: 'main', name: 'Main' },
-                  { id: 'writer', name: 'Writer' },
-                ],
-                defaultId: 'writer',
-                mainKey: 'main',
-                scope: 'per-sender',
-              },
+              agents: [
+                { id: 'main', name: 'Main' },
+                { id: 'writer', name: 'Writer' },
+              ],
+              defaultId: 'writer',
+              mainKey: 'main',
+              scope: 'per-sender',
             },
           },
         };
       }
-      if (method === 'config.get') {
+      if (path === '/api/subagents/config/get') {
         return {
           ok: true,
           data: {
             status: 200,
             ok: true,
             json: {
-              success: true,
-              result: {
-                hash: 'hash-default',
-                config: {
-                  agents: {
-                    list: [
-                      { id: 'main', name: 'Main', default: false },
-                      { id: 'writer', name: 'Writer', default: true },
-                    ],
-                  },
+              hash: 'hash-default',
+              config: {
+                agents: {
+                  list: [
+                    { id: 'main', name: 'Main', default: false },
+                    { id: 'writer', name: 'Writer', default: true },
+                  ],
                 },
               },
             },
@@ -61,7 +52,7 @@ describe('subagents default agent', () => {
       }
       return {
         ok: false,
-        error: { message: `Unexpected RPC method: ${method}` },
+        error: { message: `Unexpected host API path: ${String(path)}` },
       };
     });
 

@@ -2,8 +2,9 @@ import {
   GOOGLE_BROWSER_OAUTH_DEFAULT_MODEL_REF,
   OPENAI_BROWSER_OAUTH_DEFAULT_MODEL_REF,
 } from './provider-runtime-rules';
+import type { RuntimeClockPort } from '../common/runtime-ports';
 
-type ProviderAccountLike = {
+export type ProviderAccountLike = {
   id: string;
   vendorId: string;
   label: string;
@@ -95,8 +96,10 @@ export function buildBrowserOAuthAccount(input: {
   runtimeProviderId: string;
   oauthTokenEmail?: string;
   existingAccount?: ProviderAccountLike | null;
+  clock: RuntimeClockPort;
 }): ProviderAccountLike {
   const defaultLabel = input.providerType === 'google' ? 'Google Gemini' : 'OpenAI Codex';
+  const nowIso = input.clock.nowIso();
   return {
     id: input.accountId,
     vendorId: input.providerType,
@@ -115,8 +118,8 @@ export function buildBrowserOAuthAccount(input: {
       ...(input.oauthTokenEmail ? { email: input.oauthTokenEmail } : {}),
       resourceUrl: input.runtimeProviderId,
     },
-    createdAt: input.existingAccount?.createdAt || new Date().toISOString(),
-    updatedAt: new Date().toISOString(),
+    createdAt: input.existingAccount?.createdAt || nowIso,
+    updatedAt: nowIso,
   };
 }
 
@@ -127,6 +130,7 @@ export function buildDeviceOAuthAccount(input: {
   baseUrl: string;
   defaultModel: string | undefined;
   existingAccount?: ProviderAccountLike | null;
+  clock: RuntimeClockPort;
 }): ProviderAccountLike {
   const nameMap: Record<DeviceOAuthProviderType, string> = {
     'minimax-portal': 'MiniMax (Global)',
@@ -134,6 +138,7 @@ export function buildDeviceOAuthAccount(input: {
     'qwen-portal': 'Qwen',
   };
 
+  const nowIso = input.clock.nowIso();
   return {
     id: input.accountId,
     vendorId: input.providerType,
@@ -150,7 +155,7 @@ export function buildDeviceOAuthAccount(input: {
       ...input.existingAccount?.metadata,
       resourceUrl: input.baseUrl,
     },
-    createdAt: input.existingAccount?.createdAt || new Date().toISOString(),
-    updatedAt: new Date().toISOString(),
+    createdAt: input.existingAccount?.createdAt || nowIso,
+    updatedAt: nowIso,
   };
 }

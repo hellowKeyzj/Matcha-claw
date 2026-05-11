@@ -3,7 +3,7 @@
  * Manages scheduled task state
  */
 import { create } from 'zustand';
-import { hostApiFetch } from '@/lib/host-api';
+import { hostApiFetch, waitForRuntimeJobResult, type RuntimeJobSubmission } from '@/lib/host-api';
 import type { CronJob, CronJobCreateInput, CronJobUpdateInput } from '../types/cron';
 
 interface CronState {
@@ -25,14 +25,52 @@ interface CronState {
   setJobs: (jobs: CronJob[]) => void;
 }
 
-function decodeCronJobs(payload: unknown): CronJob[] {
-  if (!Array.isArray(payload)) {
-    throw new Error('Invalid /api/cron/jobs response: expected array');
-  }
-  return payload as CronJob[];
+interface CronJobsSnapshot {
+  success?: boolean;
+  jobs: CronJob[];
+  ready: boolean;
+  refreshing?: boolean;
+  updatedAt?: number | null;
+  error?: string | null;
 }
 
 let inflightCronFetchPromise: Promise<void> | null = null;
+let cronSnapshotRetryTimer: ReturnType<typeof setTimeout> | null = null;
+const CRON_SNAPSHOT_NOT_READY_RETRY_MS = 1_200;
+
+function clearCronSnapshotRetry(): void {
+  if (cronSnapshotRetryTimer) {
+    clearTimeout(cronSnapshotRetryTimer);
+    cronSnapshotRetryTimer = null;
+  }
+}
+
+function scheduleCronSnapshotRetry(fetchJobs: () => Promise<void>): void {
+  if (cronSnapshotRetryTimer) {
+    return;
+  }
+  cronSnapshotRetryTimer = setTimeout(() => {
+    cronSnapshotRetryTimer = null;
+    void fetchJobs();
+  }, CRON_SNAPSHOT_NOT_READY_RETRY_MS);
+}
+
+function decodeCronJobsSnapshot(payload: unknown): CronJobsSnapshot {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+    throw new Error('Invalid /api/cron/jobs response: expected snapshot object');
+  }
+  const snapshot = payload as { jobs?: unknown; ready?: unknown; refreshing?: unknown; updatedAt?: unknown; error?: unknown };
+  if (!Array.isArray(snapshot.jobs)) {
+    throw new Error('Invalid /api/cron/jobs response: expected jobs array');
+  }
+  return {
+    jobs: snapshot.jobs as CronJob[],
+    ready: snapshot.ready !== false,
+    refreshing: snapshot.refreshing === true,
+    updatedAt: typeof snapshot.updatedAt === 'number' ? snapshot.updatedAt : null,
+    error: typeof snapshot.error === 'string' ? snapshot.error : null,
+  };
+}
 
 function hasMutatingJobs(mutatingByJobId: Record<string, number>): boolean {
   return Object.keys(mutatingByJobId).length > 0;
@@ -85,9 +123,19 @@ export const useCronStore = create<CronState>((set, get) => ({
 
     const task = (async () => {
       try {
-        const jobs = decodeCronJobs(await hostApiFetch<unknown>('/api/cron/jobs'));
+        const snapshot = decodeCronJobsSnapshot(await hostApiFetch<unknown>('/api/cron/jobs'));
+        if (!snapshot.ready) {
+          set((state) => ({
+            initialLoading: !state.snapshotReady,
+            refreshing: true,
+            error: snapshot.error,
+          }));
+          scheduleCronSnapshotRetry(() => get().fetchJobs({ silent: true }));
+          return;
+        }
+        clearCronSnapshotRetry();
         set({
-          jobs,
+          jobs: snapshot.jobs,
           snapshotReady: true,
           initialLoading: false,
           refreshing: false,
@@ -115,10 +163,15 @@ export const useCronStore = create<CronState>((set, get) => ({
   createJob: async (input) => {
     set({ mutating: true });
     try {
-      const job = await hostApiFetch<CronJob>('/api/cron/jobs', {
+      const submission = await hostApiFetch<RuntimeJobSubmission<{ status?: number; data?: CronJob }>>('/api/cron/jobs', {
         method: 'POST',
         body: JSON.stringify(input),
       });
+      const response = await waitForRuntimeJobResult<{ status?: number; data?: CronJob }>(submission.job.id);
+      const job = response?.data;
+      if (!job || typeof job.id !== 'string') {
+        throw new Error('Invalid cron create job result');
+      }
       set((state) => ({ jobs: [...state.jobs, job], snapshotReady: true }));
       return job;
     } catch (error) {
@@ -138,10 +191,11 @@ export const useCronStore = create<CronState>((set, get) => ({
       };
     });
     try {
-      await hostApiFetch(`/api/cron/jobs/${encodeURIComponent(id)}`, {
+      const submission = await hostApiFetch<RuntimeJobSubmission>(`/api/cron/jobs/${encodeURIComponent(id)}`, {
         method: 'PUT',
         body: JSON.stringify(input),
       });
+      await waitForRuntimeJobResult(submission.job.id);
       set((state) => ({
         jobs: state.jobs.map((job) =>
           job.id === id
@@ -177,9 +231,10 @@ export const useCronStore = create<CronState>((set, get) => ({
       };
     });
     try {
-      await hostApiFetch(`/api/cron/jobs/${encodeURIComponent(id)}`, {
+      const submission = await hostApiFetch<RuntimeJobSubmission>(`/api/cron/jobs/${encodeURIComponent(id)}`, {
         method: 'DELETE',
       });
+      await waitForRuntimeJobResult(submission.job.id);
       set((state) => ({
         jobs: state.jobs.filter((job) => job.id !== id),
       }));
@@ -206,10 +261,11 @@ export const useCronStore = create<CronState>((set, get) => ({
       };
     });
     try {
-      await hostApiFetch('/api/cron/toggle', {
+      const submission = await hostApiFetch<RuntimeJobSubmission>('/api/cron/toggle', {
         method: 'POST',
         body: JSON.stringify({ id, enabled }),
       });
+      await waitForRuntimeJobResult(submission.job.id);
       set((state) => ({
         jobs: state.jobs.map((job) =>
           job.id === id ? { ...job, enabled } : job
@@ -238,18 +294,17 @@ export const useCronStore = create<CronState>((set, get) => ({
       };
     });
     try {
-      const result = await hostApiFetch<{ ok?: boolean; ran?: boolean; reason?: string }>('/api/cron/trigger', {
+      const submission = await hostApiFetch<RuntimeJobSubmission<{ status?: number; data?: { ok?: boolean; ran?: boolean; reason?: string } }>>('/api/cron/trigger', {
         method: 'POST',
         body: JSON.stringify({ id }),
       });
+      const response = await waitForRuntimeJobResult<{ status?: number; data?: { ok?: boolean; ran?: boolean; reason?: string } }>(
+        submission.job.id,
+      );
+      const result = response?.data ?? {};
       console.log('Cron trigger result:', result);
       // Refresh jobs after trigger to update lastRun/nextRun state
-      try {
-        const refreshed = decodeCronJobs(await hostApiFetch<unknown>('/api/cron/jobs'));
-        set({ jobs: refreshed });
-      } catch {
-        // Ignore refresh error
-      }
+      await get().fetchJobs({ silent: true });
       return {
         ran: result?.ran !== false,
         reason: typeof result?.reason === 'string' ? result.reason : undefined,

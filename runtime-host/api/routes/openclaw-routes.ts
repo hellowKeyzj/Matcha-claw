@@ -1,102 +1,40 @@
-import { OpenClawService } from '../../application/openclaw/service';
+import {
+  decodeRouteParam,
+  routeResponder,
+  type RuntimeRouteDefinition,
+} from './route-utils';
 
 interface OpenClawRouteDeps {
-  readOpenClawConfigJson: () => Record<string, unknown>;
-  getOpenClawStatus: () => {
-    packageExists: boolean;
-    isBuilt: boolean;
-    entryPath: string;
-    dir: string;
-    version?: string;
-  };
-  getOpenClawDirPath: () => string;
-  getOpenClawConfigDir: () => string;
-  getSubagentTemplateCatalogFromSources: () => unknown;
-  getSubagentTemplateFromSources: (templateId: string) => unknown;
+  openClawService: OpenClawRouteService;
 }
 
-interface LocalDispatchResponse {
-  status: number;
-  data: unknown;
+interface OpenClawRouteService {
+  status(): Promise<unknown>;
+  ready(): Promise<unknown>;
+  dir(): unknown;
+  configDir(): unknown;
+  subagentTemplates(): Promise<unknown>;
+  subagentTemplate(templateIdRaw: string): Promise<unknown>;
+  workspaceDir(): Promise<unknown>;
+  taskWorkspaceDirs(): Promise<unknown>;
+  skillsDir(): unknown;
+  cliCommand(): Promise<unknown>;
 }
 
-export function handleOpenClawRoute(
-  method: string,
-  routePath: string,
-  deps: OpenClawRouteDeps,
-): LocalDispatchResponse | null {
-  const service = new OpenClawService(deps);
+export const openClawRoutes: readonly RuntimeRouteDefinition<OpenClawRouteDeps>[] = [
+  { method: 'GET', path: '/api/openclaw/status', handle: (_context, deps) => routeResponder.value(() => deps.openClawService.status()) },
+  { method: 'GET', path: '/api/openclaw/ready', handle: (_context, deps) => routeResponder.value(() => deps.openClawService.ready()) },
+  { method: 'GET', path: '/api/openclaw/dir', handle: (_context, deps) => routeResponder.ok(deps.openClawService.dir()) },
+  { method: 'GET', path: '/api/openclaw/config-dir', handle: (_context, deps) => routeResponder.ok(deps.openClawService.configDir()) },
+  { method: 'GET', path: '/api/openclaw/subagent-templates', handle: (_context, deps) => routeResponder.value(() => deps.openClawService.subagentTemplates()) },
+  {
+    method: 'GET',
+    pattern: /^\/api\/openclaw\/subagent-templates\/(.+)$/,
+    handle: (_context, deps, match) => routeResponder.value(() => deps.openClawService.subagentTemplate(decodeRouteParam(match.params[0]))),
+  },
+  { method: 'GET', path: '/api/openclaw/workspace-dir', handle: (_context, deps) => routeResponder.value(() => deps.openClawService.workspaceDir()) },
+  { method: 'GET', path: '/api/openclaw/task-workspace-dirs', handle: (_context, deps) => routeResponder.value(() => deps.openClawService.taskWorkspaceDirs()) },
+  { method: 'GET', path: '/api/openclaw/skills-dir', handle: (_context, deps) => routeResponder.ok(deps.openClawService.skillsDir()) },
+  { method: 'GET', path: '/api/openclaw/cli-command', handle: (_context, deps) => routeResponder.value(() => deps.openClawService.cliCommand()) },
+] as const;
 
-  if (method === 'GET' && routePath === '/api/openclaw/status') {
-    return {
-      status: 200,
-      data: service.status(),
-    };
-  }
-
-  if (method === 'GET' && routePath === '/api/openclaw/ready') {
-    return {
-      status: 200,
-      data: service.ready(),
-    };
-  }
-
-  if (method === 'GET' && routePath === '/api/openclaw/dir') {
-    return {
-      status: 200,
-      data: service.dir(),
-    };
-  }
-
-  if (method === 'GET' && routePath === '/api/openclaw/config-dir') {
-    return {
-      status: 200,
-      data: service.configDir(),
-    };
-  }
-
-  if (method === 'GET' && routePath === '/api/openclaw/subagent-templates') {
-    return {
-      status: 200,
-      data: service.subagentTemplates(),
-    };
-  }
-
-  if (method === 'GET' && routePath.startsWith('/api/openclaw/subagent-templates/')) {
-    const templateIdRaw = routePath.slice('/api/openclaw/subagent-templates/'.length);
-    return {
-      status: 200,
-      data: service.subagentTemplate(templateIdRaw),
-    };
-  }
-
-  if (method === 'GET' && routePath === '/api/openclaw/workspace-dir') {
-    return {
-      status: 200,
-      data: service.workspaceDir(),
-    };
-  }
-
-  if (method === 'GET' && routePath === '/api/openclaw/task-workspace-dirs') {
-    return {
-      status: 200,
-      data: service.taskWorkspaceDirs(),
-    };
-  }
-
-  if (method === 'GET' && routePath === '/api/openclaw/skills-dir') {
-    return {
-      status: 200,
-      data: service.skillsDir(),
-    };
-  }
-
-  if (method === 'GET' && routePath === '/api/openclaw/cli-command') {
-    return {
-      status: 200,
-      data: service.cliCommand(),
-    };
-  }
-
-  return null;
-}

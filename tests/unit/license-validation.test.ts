@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { buildLicenseKey, validateLicenseKey, validateLicenseKeyLocally } from '@electron/services/license/license-gate-service';
+import { buildLicenseKey, validateLicenseKeyLocally } from '../../runtime-host/application/license/service';
 
 const originalAllowlistEnv = process.env.MATCHACLAW_LICENSE_KEYS;
 const originalEndpoint = process.env.MATCHACLAW_LICENSE_ENDPOINT;
@@ -65,7 +65,9 @@ describe('validateLicenseKeyLocally', () => {
   it('配置白名单后，白名单外 key 会被拒绝（即使校验码正确）', () => {
     process.env.MATCHACLAW_LICENSE_KEYS = 'MATCHACLAW-AAAA-BBBB-CCCC-DDDD';
     const checksumValidKey = buildLicenseKey('ZXCV5678BNMQ');
-    const result = validateLicenseKeyLocally(checksumValidKey);
+    const result = validateLicenseKeyLocally(checksumValidKey, {
+      allowlistEnv: process.env.MATCHACLAW_LICENSE_KEYS,
+    });
     expect(result.valid).toBe(false);
     expect(result.code).toBe('not_allowed');
     expect(result.mode).toBe('allowlist');
@@ -73,7 +75,9 @@ describe('validateLicenseKeyLocally', () => {
 
   it('配置白名单后，白名单内 key 可以通过（大小写不敏感）', () => {
     process.env.MATCHACLAW_LICENSE_KEYS = 'MATCHACLAW-AAAA-BBBB-CCCC-DDDD';
-    const result = validateLicenseKeyLocally('matchaclaw-aaaa-bbbb-cccc-dddd');
+    const result = validateLicenseKeyLocally('matchaclaw-aaaa-bbbb-cccc-dddd', {
+      allowlistEnv: process.env.MATCHACLAW_LICENSE_KEYS,
+    });
     expect(result.valid).toBe(true);
     expect(result.code).toBe('valid');
     expect(result.mode).toBe('allowlist');
@@ -88,7 +92,8 @@ describe('validateLicenseKey (policy)', () => {
     process.env.MATCHACLAW_LICENSE_TIMEOUT_MS = '100';
     const key = buildLicenseKey('ABCD1234EFGH');
 
-    const result = await validateLicenseKey(key, { packagedOverride: true });
+    const { NodeLicenseRuntime } = await import('../../runtime-host/composition/license-node-runtime');
+    const result = await new NodeLicenseRuntime().validate(key, { packagedOverride: true });
     expect(result.valid).toBe(false);
     expect(result.code).toBe('network_error');
   });
@@ -97,7 +102,8 @@ describe('validateLicenseKey (policy)', () => {
     process.env.MATCHACLAW_LICENSE_MODE = 'offline-local';
     const key = buildLicenseKey('QWER5678TYUI');
 
-    const result = await validateLicenseKey(key, { packagedOverride: false });
+    const { NodeLicenseRuntime } = await import('../../runtime-host/composition/license-node-runtime');
+    const result = await new NodeLicenseRuntime().validate(key, { packagedOverride: false });
     expect(result.valid).toBe(true);
     expect(result.code).toBe('valid');
     expect(result.mode).toBe('checksum');

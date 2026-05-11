@@ -1,3 +1,6 @@
-import { startRuntimeHostProcess } from './api/runtime-host-app';
+import { createRuntimeHostProcess } from './composition/runtime-host-composition';
 
-startRuntimeHostProcess();
+void createRuntimeHostProcess().start().catch((error) => {
+  console.error('[runtime-host] failed to start', error);
+  process.exit(1);
+});

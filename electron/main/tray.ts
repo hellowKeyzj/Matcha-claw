@@ -20,7 +20,12 @@ function getIconsDir(): string {
 /**
  * Create system tray icon and menu
  */
-export function createTray(mainWindow: BrowserWindow): Tray {
+export function createTray(
+  mainWindow: BrowserWindow,
+  deps: {
+    checkForUpdates: () => Promise<unknown>;
+  },
+): Tray {
   // Use platform-appropriate icon for system tray
   const iconsDir = getIconsDir();
   let iconPath: string;
@@ -113,9 +118,9 @@ export function createTray(mainWindow: BrowserWindow): Tray {
     },
     {
       label: 'Check for Updates...',
-      click: () => {
+      click: async () => {
         if (mainWindow.isDestroyed()) return;
-        mainWindow.webContents.send('update:check');
+        await deps.checkForUpdates();
       },
     },
     {

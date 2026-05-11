@@ -30,6 +30,7 @@ describe('validateApiKeyWithProvider', () => {
 
     const { validateApiKeyWithProvider } = await import('../../runtime-host/application/providers/provider-validation');
     const result = await validateApiKeyWithProvider('custom', 'sk-response-test', {
+      httpClient: { request: fetchMock },
       baseUrl: 'https://responses.example.com/v1',
       apiProtocol: 'openai-responses',
     });
@@ -70,6 +71,7 @@ describe('validateApiKeyWithProvider', () => {
 
     const { validateApiKeyWithProvider } = await import('../../runtime-host/application/providers/provider-validation');
     const result = await validateApiKeyWithProvider('custom', 'sk-chat-test', {
+      httpClient: { request: fetchMock },
       baseUrl: 'https://chat.example.com/v1',
       apiProtocol: 'openai-completions',
     });
@@ -101,6 +103,7 @@ describe('validateApiKeyWithProvider', () => {
 
     const { validateApiKeyWithProvider } = await import('../../runtime-host/application/providers/provider-validation');
     const result = await validateApiKeyWithProvider('custom', 'sk-endpoint-test', {
+      httpClient: { request: fetchMock },
       baseUrl: 'https://openrouter.ai/api/v1/responses',
       apiProtocol: 'openai-responses',
     });
@@ -128,6 +131,7 @@ describe('validateApiKeyWithProvider', () => {
 
     const { validateApiKeyWithProvider } = await import('../../runtime-host/application/providers/provider-validation');
     const result = await validateApiKeyWithProvider('custom', 'sk-custom-test', {
+      httpClient: { request: fetchMock },
       baseUrl: 'https://gateway.example.com/v1',
       apiProtocol: 'openai-completions',
       headers: { 'User-Agent': 'MatchaClaw/1.0' },
@@ -162,6 +166,7 @@ describe('validateApiKeyWithProvider', () => {
 
     const { validateApiKeyWithProvider } = await import('../../runtime-host/application/providers/provider-validation');
     const result = await validateApiKeyWithProvider('custom', 'sk-non-auth-fallback', {
+      httpClient: { request: fetchMock },
       baseUrl: 'https://fallback.example.com/v1',
       apiProtocol: 'openai-completions',
     });
@@ -186,6 +191,7 @@ describe('validateApiKeyWithProvider', () => {
 
     const { validateApiKeyWithProvider } = await import('../../runtime-host/application/providers/provider-validation');
     const result = await validateApiKeyWithProvider('custom', 'sk-bad-key', {
+      httpClient: { request: fetchMock },
       baseUrl: 'https://auth400.example.com/v1',
       apiProtocol: 'openai-completions',
     });

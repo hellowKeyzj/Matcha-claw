@@ -1,4 +1,4 @@
-import { hostSessionWindowFetch } from '@/lib/host-api';
+import { hostSessionWindowFetch, waitForRuntimeJobResult } from '@/lib/host-api';
 import { normalizeAppError } from '@/lib/error-model';
 import {
   hasPendingItemPreviewLoads,
@@ -30,7 +30,10 @@ import { readSessionsFromState } from './session-helpers';
 import { isHistoryLoadAbortError, throwIfHistoryLoadAborted } from './history-abort';
 import type { StoreHistoryCache } from './history-cache';
 import type { ChatHistoryLoadRequest, ChatStoreState } from './types';
-import type { SessionRenderItem } from '../../../runtime-host/shared/session-adapter-types';
+import type {
+  SessionRenderItem,
+  SessionWindowResult,
+} from '../../../runtime-host/shared/session-adapter-types';
 import type { GatewayStatus } from '@/types/gateway';
 
 type ChatStoreSetFn = (
@@ -311,13 +314,16 @@ export async function executeViewportWindowLoad(
   try {
     const currentState = deps.get();
     const currentItems = getSessionItems(currentState, sessionKey);
-    const payload = await hostSessionWindowFetch({
+    const initialPayload = await hostSessionWindowFetch({
       sessionKey,
       mode: request.mode,
       limit: resolveViewportFetchLimit(currentItems.length),
       ...(request.mode === 'older' ? { offset: beforeViewport.windowStartOffset } : {}),
       includeCanonical: true,
     });
+    const payload = initialPayload.hydrationJob
+      ? await waitForRuntimeJobResult<SessionWindowResult>(initialPayload.hydrationJob.id)
+      : initialPayload;
     const nextViewportRequestState = resolveViewportWindowRequestState({ payload });
     deps.set((state) => ({
       loadedSessions: patchSessionSnapshot(state, sessionKey, {

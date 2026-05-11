@@ -27,7 +27,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip
 import { SUPPORTED_LANGUAGES } from '@/i18n';
 import { invokeIpc } from '@/lib/api-client';
 import { isGatewayOperational, isGatewayRecovering, isGatewayUnavailable } from '@/lib/gateway-status';
-import { hostApiFetch, hostOpenClawGetStatus, hostUvInstallAll } from '@/lib/host-api';
+import { hostApiFetch, hostOpenClawGetStatus, hostUvInstallAll, waitForRuntimeJobResult } from '@/lib/host-api';
 import { cn } from '@/lib/utils';
 import { useGatewayStore } from '@/stores/gateway';
 import { useSettingsStore } from '@/stores/settings';
@@ -804,18 +804,15 @@ function InstallingContent({ skills, onComplete, onSkip }: InstallingContentProp
         setSkillStates((prev) => prev.map((skill) => ({ ...skill, status: 'installing' })));
         setOverallProgress(10);
 
-        const result = await hostUvInstallAll() as { success: boolean; error?: string };
-        if (result.success) {
-          setSkillStates((prev) => prev.map((skill) => ({ ...skill, status: 'completed' })));
-          setOverallProgress(100);
-          await new Promise((resolve) => setTimeout(resolve, 800));
-          onComplete(skills.map((skill) => skill.id));
-          return;
-        }
-
-        setSkillStates((prev) => prev.map((skill) => ({ ...skill, status: 'failed' })));
-        setErrorMessage(result.error || 'Unknown error during installation');
-        toast.error('Environment setup failed');
+        const submission = await hostUvInstallAll();
+        await waitForRuntimeJobResult(submission.job.id, {
+          timeoutMs: 120000,
+          intervalMs: 500,
+        });
+        setSkillStates((prev) => prev.map((skill) => ({ ...skill, status: 'completed' })));
+        setOverallProgress(100);
+        await new Promise((resolve) => setTimeout(resolve, 800));
+        onComplete(skills.map((skill) => skill.id));
       } catch (error) {
         setSkillStates((prev) => prev.map((skill) => ({ ...skill, status: 'failed' })));
         setErrorMessage(String(error));

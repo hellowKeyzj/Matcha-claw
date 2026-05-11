@@ -51,7 +51,7 @@ export function deriveExecutionGraphSteps(entries: SessionTimelineEntry[]): Sess
     };
   };
 
-  const relevantAssistantEntries = entries.filter((entry) => (
+  const relevantAssistantEntries = entries.filter((entry): entry is SessionTimelineMessageEntry | SessionTimelineToolActivityEntry => (
     isAssistantActivityEntry(entry)
     && (
       entry.toolUses.length > 0
@@ -86,7 +86,9 @@ export function deriveExecutionGraphSteps(entries: SessionTimelineEntry[]): Sess
     }
   }
 
-  const streamingEntry = [...entries].reverse().find((entry) => isAssistantActivityEntry(entry) && entry.status === 'streaming') ?? null;
+  const streamingEntry = [...entries].reverse().find((entry): entry is SessionTimelineMessageEntry | SessionTimelineToolActivityEntry => (
+    isAssistantActivityEntry(entry) && entry.status === 'streaming'
+  )) ?? null;
   const streamingStatuses = streamingEntry?.toolStatuses ?? [];
   const streamingToolCards = streamingEntry?.toolCards ?? [];
 

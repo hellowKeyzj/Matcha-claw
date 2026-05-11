@@ -1,5 +1,5 @@
 export const CHAT_LAYOUT_TOKENS = {
-  threadViewportPadding: 'px-3 pt-10 sm:px-4 sm:pt-10 md:px-5 md:pt-12 lg:px-6',
+  threadViewportPadding: 'px-3 sm:px-4 md:px-5 lg:px-6',
   threadRail: 'mx-auto flex w-full max-w-[56rem] flex-col',
   threadTopAffordanceRail: 'flex justify-center -mt-10 pb-0.5 md:-mt-11',
   threadMessageStackPaddingTop: 'pt-2.5 sm:pt-3 md:pt-3.5',
@@ -26,7 +26,7 @@ export const CHAT_LAYOUT_TOKENS = {
   runtimeDockRail: 'mx-auto w-full max-w-[56rem]',
   stageSurface: 'relative isolate flex min-h-0 min-w-0 flex-col overflow-hidden bg-card',
   stageBackdrop: 'pointer-events-none absolute inset-0 bg-[linear-gradient(180deg,rgba(255,255,255,0.08),transparent_16%,transparent_86%,rgba(15,23,42,0.012))] dark:bg-[linear-gradient(180deg,rgba(255,255,255,0.02),transparent_22%,transparent_86%,rgba(255,255,255,0.01))]',
-  stageHeaderOverlay: 'pointer-events-none absolute inset-x-0 top-0 z-20 px-3 pt-2.5 md:px-4 md:pt-3',
+  stageHeaderOverlay: 'pointer-events-none absolute inset-x-0 top-0 z-20 bg-[linear-gradient(180deg,hsl(var(--card))_0%,hsl(var(--card)/0.96)_38%,hsl(var(--card)/0.72)_60%,hsl(var(--card)/0.34)_82%,hsl(var(--card)/0)_100%)] px-3 pb-6 pt-2.5 md:px-4 md:pb-7 md:pt-3',
   stageHeaderRail: 'pointer-events-none flex w-full justify-end',
   stageFloatingRail: 'mx-auto flex w-full max-w-[56rem] justify-end',
   stageJumpToBottomRail: 'pointer-events-none absolute inset-x-0 z-10 px-3 md:px-4',

@@ -994,9 +994,12 @@ export const ChatInput = memo(function ChatInput({
           </div>
 
           <div className={cn(CHAT_LAYOUT_TOKENS.inputActionsRow, 'border-t border-border/35 pt-1.5')}>
-            <div className="flex w-full min-w-0 flex-wrap items-end justify-end gap-1.5">
+            <div className={cn(
+              'flex w-full min-w-0 items-end gap-1.5',
+              'justify-end',
+            )}>
               {modelPicker ? (
-                <div ref={modelPickerRef} className="relative w-[176px] min-w-0 max-w-[48vw] flex-none max-sm:w-[148px]">
+                <div ref={modelPickerRef} className="relative min-w-0 flex-none w-[clamp(0px,calc(100%-5.25rem),148px)] max-sm:w-[clamp(0px,calc(100%-5.25rem),132px)]">
                   <button
                     type="button"
                     aria-label={t('input.pickModel')}

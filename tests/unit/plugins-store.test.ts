@@ -1,9 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const hostApiFetchMock = vi.fn();
+const waitForRuntimeJobResultMock = vi.fn();
 
 vi.mock('@/lib/host-api', () => ({
   hostApiFetch: (...args: unknown[]) => hostApiFetchMock(...args),
+  waitForRuntimeJobResult: (...args: unknown[]) => waitForRuntimeJobResultMock(...args),
 }));
 
 function buildRuntimePayload(params?: { enabledPluginIds?: string[] }) {
@@ -12,13 +14,13 @@ function buildRuntimePayload(params?: { enabledPluginIds?: string[] }) {
     success: true,
     state: {
       lifecycle: 'running',
-      runtimeLifecycle: 'ready',
+      runtimeLifecycle: 'running',
       activePluginCount: enabledPluginIds.length,
       enabledPluginIds,
     },
     health: {
       ok: true,
-      lifecycle: 'ready',
+      lifecycle: 'running',
       activePluginCount: enabledPluginIds.length,
       degradedPlugins: [],
     },
@@ -53,6 +55,7 @@ describe('plugins store', () => {
   beforeEach(() => {
     vi.resetModules();
     hostApiFetchMock.mockReset();
+    waitForRuntimeJobResultMock.mockReset();
   });
 
   it('首次加载时 runtime 和 catalog 分层写入，不再等整份 snapshot', async () => {
@@ -139,10 +142,21 @@ describe('plugins store', () => {
         return buildCatalogPayload();
       }
       if (path === '/api/plugins/runtime/enabled-plugins') {
-        return buildRuntimePayload({ enabledPluginIds: [] });
+        return {
+          success: true,
+          job: {
+            id: 'job-1',
+            type: 'plugins.setEnabled',
+            status: 'queued',
+            queuedAt: 1,
+            attempts: 0,
+            maxAttempts: 1,
+          },
+        };
       }
       throw new Error(`unexpected path: ${path}`);
     });
+    waitForRuntimeJobResultMock.mockResolvedValue(buildRuntimePayload({ enabledPluginIds: [] }));
 
     const { usePluginsStore } = await import('@/stores/plugins-store');
     await usePluginsStore.getState().refreshSnapshot({ reason: 'initial', force: true });
@@ -156,5 +170,29 @@ describe('plugins store', () => {
       method: 'PUT',
       body: JSON.stringify({ pluginIds: [] }),
     });
+    expect(waitForRuntimeJobResultMock).toHaveBeenCalledWith('job-1');
+  });
+
+  it('restartHost 先请求宿主重启 runtime-host，再从 runtime-host 刷新插件业务快照', async () => {
+    hostApiFetchMock.mockImplementation(async (path: string) => {
+      if (path === '/api/runtime-host/restart') {
+        return { success: true };
+      }
+      if (path === '/api/plugins/runtime') {
+        return buildRuntimePayload({ enabledPluginIds: ['plugin-a'] });
+      }
+      if (path === '/api/plugins/catalog') {
+        return buildCatalogPayload();
+      }
+      throw new Error(`unexpected path: ${path}`);
+    });
+
+    const { usePluginsStore } = await import('@/stores/plugins-store');
+    await usePluginsStore.getState().restartHost();
+
+    expect(hostApiFetchMock).toHaveBeenNthCalledWith(1, '/api/runtime-host/restart', { method: 'POST' });
+    expect(hostApiFetchMock).toHaveBeenNthCalledWith(2, '/api/plugins/runtime');
+    expect(usePluginsStore.getState().runtime?.execution.enabledPluginIds).toEqual(['plugin-a']);
+    expect(usePluginsStore.getState().mutating).toBe(false);
   });
 });

@@ -1,12 +1,11 @@
-import { describe, expect, it, vi } from 'vitest';
-
-const hostApiFetchMock = vi.fn();
-
-vi.mock('../../src/lib/host-api', () => ({
-  hostApiFetch: (...args: unknown[]) => hostApiFetchMock(...args),
-}));
+import { beforeEach, describe, expect, it } from 'vitest';
+import { hostApiFetchMock } from './helpers/mock-gateway-client';
 
 describe('provider accounts helper', () => {
+  beforeEach(() => {
+    hostApiFetchMock.mockReset();
+  });
+
   it('fetchProviderSnapshot 直接消费 /api/provider-accounts snapshot', async () => {
     hostApiFetchMock.mockResolvedValue({
       accounts: [{ id: 'acc-1' }],
@@ -22,7 +21,7 @@ describe('provider accounts helper', () => {
       vendors: [{ id: 'openai' }],
       defaultAccountId: 'acc-1',
     });
-    expect(hostApiFetchMock).toHaveBeenCalledWith('/api/provider-accounts');
+    expect(hostApiFetchMock).toHaveBeenCalledWith('/api/provider-accounts', undefined);
   });
 
   it('fetchProviderSnapshot 会归一化异常返回结构，避免空值崩溃', async () => {

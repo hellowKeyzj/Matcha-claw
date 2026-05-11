@@ -1,7 +1,11 @@
-import { execFile } from 'node:child_process';
-import { access, copyFile, mkdir, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
-import type { Stats } from 'node:fs';
 import path from 'node:path';
+import type {
+  RuntimeClockPort,
+  RuntimeCommandExecutorPort,
+  RuntimeFileStat,
+  RuntimeFileSystemPort,
+  RuntimePlatform,
+} from '../common/runtime-ports';
 
 const DEFAULT_RECENT_WINDOW_MS = 72 * 60 * 60 * 1000;
 const WORKSPACE_FILE_WHITELIST = new Set(['AGENTS.md', 'SOUL.md', 'TOOLS.md', 'IDENTITY.md', 'USER.md']);
@@ -35,7 +39,7 @@ interface DiagnosticsAppInfo {
   name: string;
   version: string;
   isPackaged: boolean;
-  platform: NodeJS.Platform;
+  platform: RuntimePlatform;
   arch: string;
   electron?: string;
   node: string;
@@ -57,7 +61,11 @@ export interface CollectDiagnosticsBundleInput {
   gateway: DiagnosticsGatewayInfo;
   license?: DiagnosticsLicenseInfo;
   recentWindowMs?: number;
-  now?: Date;
+  processId?: number;
+  platform?: RuntimePlatform;
+  clock: RuntimeClockPort;
+  fileSystem: RuntimeFileSystemPort;
+  commandExecutor?: RuntimeCommandExecutorPort;
   compressor?: (stagingDir: string, outputZipPath: string) => Promise<void>;
 }
 
@@ -134,15 +142,6 @@ export function sanitizeStructuredValue(value: unknown, parentKey?: string): unk
   return value;
 }
 
-async function pathExists(pathname: string): Promise<boolean> {
-  try {
-    await access(pathname);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
 function normalizeBundleDestination(input: string): string {
   const normalized = input.replaceAll('\\', '/').replace(/^\/+/, '');
   return normalized;
@@ -163,37 +162,35 @@ function addDiagnosticsEntry(
   });
 }
 
-function isRecentFile(stats: Stats, cutoffMs: number): boolean {
+function isRecentFile(stats: RuntimeFileStat, cutoffMs: number): boolean {
   return stats.mtimeMs >= cutoffMs;
 }
 
 async function walkFilesRecursively(
+  fileSystem: RuntimeFileSystemPort,
   rootDir: string,
-  visit: (filePath: string, fileName: string, fileStats: Stats) => Promise<void>,
+  visit: (filePath: string, fileName: string, fileStats: RuntimeFileStat) => Promise<void>,
 ): Promise<void> {
-  let entries: Array<import('node:fs').Dirent>;
+  let entries: Awaited<ReturnType<RuntimeFileSystemPort['listDirectory']>>;
   try {
-    entries = await readdir(rootDir, { withFileTypes: true });
+    entries = await fileSystem.listDirectory(rootDir);
   } catch {
     return;
   }
 
   for (const entry of entries) {
     const fullPath = path.join(rootDir, entry.name);
-    if (entry.isSymbolicLink()) {
+    if (entry.isDirectory) {
+      await walkFilesRecursively(fileSystem, fullPath, visit);
       continue;
     }
-    if (entry.isDirectory()) {
-      await walkFilesRecursively(fullPath, visit);
-      continue;
-    }
-    if (!entry.isFile()) {
+    if (!entry.isFile) {
       continue;
     }
 
-    let fileStats: Stats;
+    let fileStats: RuntimeFileStat;
     try {
-      fileStats = await stat(fullPath);
+      fileStats = await fileSystem.stat(fullPath);
     } catch {
       continue;
     }
@@ -201,8 +198,11 @@ async function walkFilesRecursively(
   }
 }
 
-async function readAndMaskJsonFile(filePath: string): Promise<string> {
-  const raw = await readFile(filePath, 'utf8');
+async function readAndMaskJsonFile(
+  fileSystem: RuntimeFileSystemPort,
+  filePath: string,
+): Promise<string> {
+  const raw = await fileSystem.readTextFile(filePath);
   try {
     const parsed = JSON.parse(raw) as unknown;
     const masked = sanitizeStructuredValue(parsed);
@@ -213,67 +213,51 @@ async function readAndMaskJsonFile(filePath: string): Promise<string> {
 }
 
 async function copyDiagnosticsEntryToStaging(
+  fileSystem: RuntimeFileSystemPort,
   stagingDir: string,
   entry: DiagnosticsBundleEntry,
 ): Promise<void> {
   const destinationPath = path.join(stagingDir, entry.destinationPath);
-  await mkdir(path.dirname(destinationPath), { recursive: true });
+  await fileSystem.ensureDirectory(path.dirname(destinationPath));
 
   if (entry.redactJson) {
-    const maskedContent = await readAndMaskJsonFile(entry.sourcePath);
-    await writeFile(destinationPath, maskedContent, 'utf8');
+    const maskedContent = await readAndMaskJsonFile(fileSystem, entry.sourcePath);
+    await fileSystem.writeTextFile(destinationPath, maskedContent);
     return;
   }
 
-  await copyFile(entry.sourcePath, destinationPath);
+  await fileSystem.copyFile(entry.sourcePath, destinationPath);
 }
 
-function formatBundleTimestamp(date: Date): string {
-  const yyyy = date.getFullYear();
-  const mm = String(date.getMonth() + 1).padStart(2, '0');
-  const dd = String(date.getDate()).padStart(2, '0');
-  const hh = String(date.getHours()).padStart(2, '0');
-  const mi = String(date.getMinutes()).padStart(2, '0');
-  const ss = String(date.getSeconds()).padStart(2, '0');
+function formatBundleTimestamp(isoTimestamp: string): string {
+  const yyyy = isoTimestamp.slice(0, 4);
+  const mm = isoTimestamp.slice(5, 7);
+  const dd = isoTimestamp.slice(8, 10);
+  const hh = isoTimestamp.slice(11, 13);
+  const mi = isoTimestamp.slice(14, 16);
+  const ss = isoTimestamp.slice(17, 19);
   return `${yyyy}${mm}${dd}-${hh}${mi}${ss}`;
-}
-
-function execFileAsync(command: string, args: string[], cwd?: string): Promise<void> {
-  return new Promise((resolve, reject) => {
-    execFile(
-      command,
-      args,
-      {
-        cwd,
-        windowsHide: true,
-        encoding: 'utf8',
-        maxBuffer: 10 * 1024 * 1024,
-      },
-      (error, stdout, stderr) => {
-        if (error) {
-          const details = `${stderr || ''}\n${stdout || ''}`.trim();
-          reject(new Error(details ? `${error.message}\n${details}` : error.message));
-          return;
-        }
-        resolve();
-      },
-    );
-  });
 }
 
 function escapePowerShellLiteral(input: string): string {
   return input.replace(/'/g, "''");
 }
 
-async function compressDiagnosticsStagingDir(stagingDir: string, outputZipPath: string): Promise<void> {
-  await rm(outputZipPath, { force: true });
+async function compressDiagnosticsStagingDir(
+  fileSystem: RuntimeFileSystemPort,
+  stagingDir: string,
+  outputZipPath: string,
+  platform: RuntimePlatform,
+  commandExecutor: RuntimeCommandExecutorPort,
+): Promise<void> {
+  await fileSystem.removeFile(outputZipPath);
 
-  if (process.platform === 'win32') {
+  if (platform === 'win32') {
     const script = [
       "$ErrorActionPreference = 'Stop'",
       `Compress-Archive -Path '${escapePowerShellLiteral(path.join(stagingDir, '*'))}' -DestinationPath '${escapePowerShellLiteral(outputZipPath)}' -Force`,
     ].join('; ');
-    await execFileAsync('powershell.exe', [
+    await commandExecutor.execFile('powershell.exe', [
       '-NoProfile',
       '-NonInteractive',
       '-ExecutionPolicy',
@@ -284,23 +268,32 @@ async function compressDiagnosticsStagingDir(stagingDir: string, outputZipPath: 
     return;
   }
 
-  await execFileAsync('zip', ['-qr', outputZipPath, '.'], stagingDir);
+  await commandExecutor.execFile('zip', ['-qr', outputZipPath, '.'], {
+    cwd: stagingDir,
+    windowsHide: true,
+    encoding: 'utf8',
+    maxBuffer: 10 * 1024 * 1024,
+  });
 }
 
 export async function collectDiagnosticsBundle(input: CollectDiagnosticsBundleInput): Promise<DiagnosticsBundleResult> {
-  const now = input.now ?? new Date();
-  const generatedAt = now.toISOString();
-  const cutoffMs = now.getTime() - (input.recentWindowMs ?? DEFAULT_RECENT_WINDOW_MS);
+  const generatedAt = input.clock.nowIso();
+  const nowMs = input.clock.nowMs();
+  const cutoffMs = nowMs - (input.recentWindowMs ?? DEFAULT_RECENT_WINDOW_MS);
   const bundleRootDir = path.join(input.userDataDir, 'diagnostics-bundles');
-  const bundleStamp = formatBundleTimestamp(now);
-  const stagingDir = path.join(bundleRootDir, `staging-${bundleStamp}-${process.pid}`);
+  const bundleStamp = formatBundleTimestamp(generatedAt);
+  const stagingInstanceId = typeof input.processId === 'number'
+    ? String(input.processId)
+    : `${nowMs}`;
+  const stagingDir = path.join(bundleRootDir, `staging-${bundleStamp}-${stagingInstanceId}`);
   const outputZipPath = path.join(bundleRootDir, `matchaclaw-diagnostics-${bundleStamp}.zip`);
 
   const counts = createEmptyCounts();
   const entryMap = new Map<string, DiagnosticsBundleEntry>();
+  const { fileSystem } = input;
 
   const userDataLogsDir = path.join(input.userDataDir, 'logs');
-  await walkFilesRecursively(userDataLogsDir, async (filePath, _fileName, fileStats) => {
+  await walkFilesRecursively(fileSystem, userDataLogsDir, async (filePath, _fileName, fileStats) => {
     if (!isRecentFile(fileStats, cutoffMs)) {
       return;
     }
@@ -313,7 +306,7 @@ export async function collectDiagnosticsBundle(input: CollectDiagnosticsBundleIn
   });
 
   const openclawLogsDir = path.join(input.openclawConfigDir, 'logs');
-  await walkFilesRecursively(openclawLogsDir, async (filePath, _fileName, fileStats) => {
+  await walkFilesRecursively(fileSystem, openclawLogsDir, async (filePath, _fileName, fileStats) => {
     if (!isRecentFile(fileStats, cutoffMs)) {
       return;
     }
@@ -326,19 +319,19 @@ export async function collectDiagnosticsBundle(input: CollectDiagnosticsBundleIn
   });
 
   const agentsDir = path.join(input.openclawConfigDir, 'agents');
-  let agentEntries: Array<import('node:fs').Dirent> = [];
+  let agentEntries: Awaited<ReturnType<RuntimeFileSystemPort['listDirectory']>> = [];
   try {
-    agentEntries = await readdir(agentsDir, { withFileTypes: true });
+    agentEntries = await fileSystem.listDirectory(agentsDir);
   } catch {
     // ignore
   }
   for (const agentEntry of agentEntries) {
-    if (!agentEntry.isDirectory()) {
+    if (!agentEntry.isDirectory) {
       continue;
     }
     const sessionsDir = path.join(agentsDir, agentEntry.name, 'sessions');
     const sessionsIndexPath = path.join(sessionsDir, 'sessions.json');
-    if (await pathExists(sessionsIndexPath)) {
+    if (await fileSystem.exists(sessionsIndexPath)) {
       counts.sessionIndexes += 1;
       addDiagnosticsEntry(entryMap, {
         sourcePath: sessionsIndexPath,
@@ -347,7 +340,7 @@ export async function collectDiagnosticsBundle(input: CollectDiagnosticsBundleIn
       });
     }
 
-    await walkFilesRecursively(sessionsDir, async (filePath, fileName, fileStats) => {
+    await walkFilesRecursively(fileSystem, sessionsDir, async (filePath, fileName, fileStats) => {
       if (!fileName.endsWith('.jsonl')) {
         return;
       }
@@ -364,7 +357,7 @@ export async function collectDiagnosticsBundle(input: CollectDiagnosticsBundleIn
   }
 
   const workspaceDir = path.join(input.openclawConfigDir, 'workspace');
-  await walkFilesRecursively(workspaceDir, async (filePath, fileName) => {
+  await walkFilesRecursively(fileSystem, workspaceDir, async (filePath, fileName) => {
     if (!WORKSPACE_FILE_WHITELIST.has(fileName)) {
       return;
     }
@@ -377,7 +370,7 @@ export async function collectDiagnosticsBundle(input: CollectDiagnosticsBundleIn
   });
 
   const subagentsWorkspaceDir = path.join(input.openclawConfigDir, 'workspace-subagents');
-  await walkFilesRecursively(subagentsWorkspaceDir, async (filePath, fileName) => {
+  await walkFilesRecursively(fileSystem, subagentsWorkspaceDir, async (filePath, fileName) => {
     if (!WORKSPACE_FILE_WHITELIST.has(fileName)) {
       return;
     }
@@ -390,18 +383,18 @@ export async function collectDiagnosticsBundle(input: CollectDiagnosticsBundleIn
   });
 
   const extensionsDir = path.join(input.openclawConfigDir, 'extensions');
-  let extensionEntries: Array<import('node:fs').Dirent> = [];
+  let extensionEntries: Awaited<ReturnType<RuntimeFileSystemPort['listDirectory']>> = [];
   try {
-    extensionEntries = await readdir(extensionsDir, { withFileTypes: true });
+    extensionEntries = await fileSystem.listDirectory(extensionsDir);
   } catch {
     // ignore
   }
   for (const extensionEntry of extensionEntries) {
-    if (!extensionEntry.isDirectory()) {
+    if (!extensionEntry.isDirectory) {
       continue;
     }
     const manifestPath = path.join(extensionsDir, extensionEntry.name, 'openclaw.plugin.json');
-    if (!(await pathExists(manifestPath))) {
+    if (!(await fileSystem.exists(manifestPath))) {
       continue;
     }
     counts.pluginManifests += 1;
@@ -413,7 +406,7 @@ export async function collectDiagnosticsBundle(input: CollectDiagnosticsBundleIn
   }
 
   const settingsPath = path.join(input.userDataDir, 'settings.json');
-  if (await pathExists(settingsPath)) {
+  if (await fileSystem.exists(settingsPath)) {
     counts.settingsJson += 1;
     addDiagnosticsEntry(entryMap, {
       sourcePath: settingsPath,
@@ -423,7 +416,7 @@ export async function collectDiagnosticsBundle(input: CollectDiagnosticsBundleIn
   }
 
   const openclawConfigPath = path.join(input.openclawConfigDir, 'openclaw.json');
-  if (await pathExists(openclawConfigPath)) {
+  if (await fileSystem.exists(openclawConfigPath)) {
     counts.openclawJson += 1;
     addDiagnosticsEntry(entryMap, {
       sourcePath: openclawConfigPath,
@@ -433,13 +426,13 @@ export async function collectDiagnosticsBundle(input: CollectDiagnosticsBundleIn
   }
 
   const selectedEntries = Array.from(entryMap.values());
-  await mkdir(bundleRootDir, { recursive: true });
-  await rm(stagingDir, { recursive: true, force: true });
-  await mkdir(stagingDir, { recursive: true });
+  await fileSystem.ensureDirectory(bundleRootDir);
+  await fileSystem.removeDirectory(stagingDir);
+  await fileSystem.ensureDirectory(stagingDir);
 
   try {
     for (const entry of selectedEntries) {
-      await copyDiagnosticsEntryToStaging(stagingDir, entry);
+      await copyDiagnosticsEntryToStaging(fileSystem, stagingDir, entry);
     }
 
     const diagnosticsPayload = sanitizeStructuredValue({
@@ -448,7 +441,7 @@ export async function collectDiagnosticsBundle(input: CollectDiagnosticsBundleIn
       runtime: {
         userDataDir: input.userDataDir,
         openclawConfigDir: input.openclawConfigDir,
-        cutoffIso: new Date(cutoffMs).toISOString(),
+        cutoffIso: input.clock.toIsoString(cutoffMs),
       },
       gateway: {
         status: input.gateway.status,
@@ -462,12 +455,23 @@ export async function collectDiagnosticsBundle(input: CollectDiagnosticsBundleIn
         counts,
       },
     });
-    await writeFile(path.join(stagingDir, 'diagnostics.json'), `${JSON.stringify(diagnosticsPayload, null, 2)}\n`, 'utf8');
+    await fileSystem.writeTextFile(path.join(stagingDir, 'diagnostics.json'), `${JSON.stringify(diagnosticsPayload, null, 2)}\n`);
 
-    const compressor = input.compressor ?? compressDiagnosticsStagingDir;
+    const compressor = input.compressor ?? (async (sourceDir: string, targetZipPath: string) => {
+      if (!input.commandExecutor) {
+        throw new Error('Runtime command executor is required to collect diagnostics bundle');
+      }
+      await compressDiagnosticsStagingDir(
+        fileSystem,
+        sourceDir,
+        targetZipPath,
+        input.platform ?? input.appInfo.platform,
+        input.commandExecutor,
+      );
+    });
     await compressor(stagingDir, outputZipPath);
   } finally {
-    await rm(stagingDir, { recursive: true, force: true });
+    await fileSystem.removeDirectory(stagingDir);
   }
 
   return {

@@ -5,7 +5,6 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const {
   readOpenClawJsonMock,
-  readJsonFileMock,
   readAuthProfilesMock,
   discoverAgentIdsMock,
   writeAuthProfilesMock,
@@ -13,7 +12,6 @@ const {
   fileExistsMock,
 } = vi.hoisted(() => ({
   readOpenClawJsonMock: vi.fn(),
-  readJsonFileMock: vi.fn(),
   readAuthProfilesMock: vi.fn(async () => ({ version: 1, profiles: {} })),
   discoverAgentIdsMock: vi.fn(async () => ['main']),
   writeAuthProfilesMock: vi.fn(async () => {}),
@@ -23,17 +21,6 @@ const {
 
 vi.mock('../../runtime-host/application/openclaw/openclaw-config-mutex', () => ({
   withOpenClawConfigLock: async (handler: () => Promise<unknown>) => await handler(),
-}));
-
-vi.mock('../../runtime-host/application/openclaw/openclaw-auth-store', () => ({
-  discoverAgentIds: discoverAgentIdsMock,
-  fileExists: fileExistsMock,
-  OPENCLAW_CONFIG_PATH: '/mock/openclaw.json',
-  readJsonFile: readJsonFileMock,
-  readAuthProfiles: readAuthProfilesMock,
-  writeAuthProfiles: writeAuthProfilesMock,
-  readOpenClawJson: readOpenClawJsonMock,
-  writeOpenClawJson: writeOpenClawJsonMock,
 }));
 
 vi.mock('../../runtime-host/application/providers/provider-registry', () => ({
@@ -51,16 +38,74 @@ vi.mock('../../runtime-host/application/providers/provider-runtime-rules', () =>
   )),
 }));
 
+import { OpenClawProviderConfigService } from '../../runtime-host/application/openclaw/openclaw-provider-config-service';
+import { OpenClawProviderSnapshotService } from '../../runtime-host/application/openclaw/openclaw-provider-snapshot';
+import { sanitizeOpenClawConfig } from '../../runtime-host/application/openclaw/openclaw-config-sanitizer';
+import { OpenClawAgentModelRepository } from '../../runtime-host/application/openclaw/openclaw-agent-model-repository';
+import { createTestOpenClawEnvironmentRepository } from './helpers/runtime-system-environment';
+import { createTestRuntimeFileSystem } from './helpers/runtime-file-system';
 import {
-  getActiveOpenClawProviders,
-  getOpenClawProvidersConfig,
-  removeProviderFromOpenClaw,
-  sanitizeOpenClawConfig,
   syncBrowserConfigToOpenClaw,
   syncGatewayTokenToConfig,
-  syncProviderConfigToOpenClaw,
   syncSessionIdleMinutesToOpenClaw,
-} from '../../runtime-host/application/openclaw/openclaw-provider-config-service';
+} from '../../runtime-host/application/openclaw/openclaw-runtime-config-sync';
+import { createTestRuntimeLogger } from './helpers/runtime-logger';
+
+const testLogger = createTestRuntimeLogger('openclaw-provider-sanitize-test');
+
+function createMockConfigRepository() {
+  return {
+    read: async () => await readOpenClawJsonMock(),
+    write: async (config: Record<string, unknown>) => await writeOpenClawJsonMock(config),
+    update: async <T>(mutate: (config: Record<string, unknown>) => Promise<T> | T) => await mutate(await readOpenClawJsonMock()),
+    getConfigDir: () => '/mock',
+    getConfigFilePath: () => '/mock/openclaw.json',
+    getOpenClawDirPath: () => String(process.env.MATCHACLAW_OPENCLAW_DIR || '/mock/openclaw'),
+  };
+}
+
+const mockConfigRepository = createMockConfigRepository();
+const mockFileSystem = createTestRuntimeFileSystem();
+const mockAuthRepository = {
+  discoverAgentIds: async () => await discoverAgentIdsMock(),
+  readAuthProfiles: async (agentId = 'main') => await readAuthProfilesMock(agentId),
+  writeAuthProfiles: async (store: Record<string, unknown>, agentId = 'main') => await writeAuthProfilesMock(store, agentId),
+};
+const mockOAuthPlugins = {
+  discoverBundledPlugins: async () => {
+    const { OpenClawOAuthPluginRegistrationService } = await import('../../runtime-host/application/openclaw/openclaw-oauth-plugin-registration');
+    return await new OpenClawOAuthPluginRegistrationService(mockConfigRepository, mockFileSystem, testLogger).discoverBundledPlugins();
+  },
+  ensureOAuthPluginEnabled: async (config: Record<string, unknown>, provider: string) => {
+    const { OpenClawOAuthPluginRegistrationService } = await import('../../runtime-host/application/openclaw/openclaw-oauth-plugin-registration');
+    return await new OpenClawOAuthPluginRegistrationService(mockConfigRepository, mockFileSystem, testLogger).ensureOAuthPluginEnabled(config, provider);
+  },
+  removeOAuthPluginRegistrations: async (config: Record<string, unknown>, provider: string) => {
+    const { OpenClawOAuthPluginRegistrationService } = await import('../../runtime-host/application/openclaw/openclaw-oauth-plugin-registration');
+    return await new OpenClawOAuthPluginRegistrationService(mockConfigRepository, mockFileSystem, testLogger).removeOAuthPluginRegistrations(config, provider);
+  },
+};
+
+function createProviderConfigService() {
+  const environmentRepository = createTestOpenClawEnvironmentRepository();
+  return new OpenClawProviderConfigService(
+    mockConfigRepository,
+    mockAuthRepository,
+    mockOAuthPlugins,
+    new OpenClawAgentModelRepository(mockConfigRepository, mockFileSystem),
+    testLogger,
+  );
+}
+
+function createProviderSnapshotService() {
+  return new OpenClawProviderSnapshotService(mockConfigRepository, mockAuthRepository, testLogger);
+}
+
+async function sanitizeMockConfig() {
+  const environmentRepository = createTestOpenClawEnvironmentRepository();
+  environmentRepository.pathExists = async (pathname: string) => await fileExistsMock(pathname);
+  await sanitizeOpenClawConfig(mockConfigRepository, mockOAuthPlugins, environmentRepository, testLogger);
+}
 
 function createSanitizeNeutralConfig(): Record<string, unknown> {
   return {
@@ -110,7 +155,6 @@ async function writeBundledPluginManifests(
 describe('sanitizeOpenClawConfig feishu plugin migration', () => {
   beforeEach(() => {
     readOpenClawJsonMock.mockReset();
-    readJsonFileMock.mockReset();
     readAuthProfilesMock.mockReset();
     discoverAgentIdsMock.mockReset();
     writeAuthProfilesMock.mockReset();
@@ -119,11 +163,11 @@ describe('sanitizeOpenClawConfig feishu plugin migration', () => {
     fileExistsMock.mockResolvedValue(true);
     discoverAgentIdsMock.mockResolvedValue(['main']);
     readAuthProfilesMock.mockResolvedValue({ version: 1, profiles: {} });
-    readJsonFileMock.mockResolvedValue(createSanitizeNeutralConfig());
+    readOpenClawJsonMock.mockResolvedValue(createSanitizeNeutralConfig());
   });
 
   it('会把 feishu-openclaw-plugin 迁移为 openclaw-lark 并禁用冲突的 entries.feishu', async () => {
-    readJsonFileMock.mockResolvedValue({
+    readOpenClawJsonMock.mockResolvedValue({
       ...createSanitizeNeutralConfig(),
       plugins: {
         allow: ['feishu', 'feishu-openclaw-plugin'],
@@ -134,7 +178,7 @@ describe('sanitizeOpenClawConfig feishu plugin migration', () => {
       },
     });
 
-    await sanitizeOpenClawConfig();
+    await sanitizeMockConfig();
 
     expect(writeOpenClawJsonMock).toHaveBeenCalledTimes(1);
     const nextConfig = writeOpenClawJsonMock.mock.calls[0][0] as Record<string, any>;
@@ -146,7 +190,7 @@ describe('sanitizeOpenClawConfig feishu plugin migration', () => {
   });
 
   it('仅存在 entries.feishu 且未配置 openclaw-lark 时不会强制迁移到新插件 ID', async () => {
-    readJsonFileMock.mockResolvedValue({
+    readOpenClawJsonMock.mockResolvedValue({
       ...createSanitizeNeutralConfig(),
       plugins: {
         allow: [],
@@ -156,7 +200,7 @@ describe('sanitizeOpenClawConfig feishu plugin migration', () => {
       },
     });
 
-    await sanitizeOpenClawConfig();
+    await sanitizeMockConfig();
 
     expect(writeOpenClawJsonMock).toHaveBeenCalledTimes(1);
     const nextConfig = writeOpenClawJsonMock.mock.calls[0][0] as Record<string, any>;
@@ -165,7 +209,7 @@ describe('sanitizeOpenClawConfig feishu plugin migration', () => {
   });
 
   it('已配置 openclaw-lark 但缺少 entries.feishu 时也会补写 built-in feishu 禁用项', async () => {
-    readJsonFileMock.mockResolvedValue({
+    readOpenClawJsonMock.mockResolvedValue({
       ...createSanitizeNeutralConfig(),
       plugins: {
         allow: ['openclaw-lark'],
@@ -175,7 +219,7 @@ describe('sanitizeOpenClawConfig feishu plugin migration', () => {
       },
     });
 
-    await sanitizeOpenClawConfig();
+    await sanitizeMockConfig();
 
     expect(writeOpenClawJsonMock).toHaveBeenCalledTimes(1);
     const nextConfig = writeOpenClawJsonMock.mock.calls[0][0] as Record<string, any>;
@@ -184,7 +228,7 @@ describe('sanitizeOpenClawConfig feishu plugin migration', () => {
   });
 
   it('会把 wecom-openclaw-plugin 迁移为 wecom', async () => {
-    readJsonFileMock.mockResolvedValue({
+    readOpenClawJsonMock.mockResolvedValue({
       ...createSanitizeNeutralConfig(),
       plugins: {
         allow: ['wecom-openclaw-plugin'],
@@ -194,7 +238,7 @@ describe('sanitizeOpenClawConfig feishu plugin migration', () => {
       },
     });
 
-    await sanitizeOpenClawConfig();
+    await sanitizeMockConfig();
 
     expect(writeOpenClawJsonMock).toHaveBeenCalledTimes(1);
     const nextConfig = writeOpenClawJsonMock.mock.calls[0][0] as Record<string, any>;
@@ -205,7 +249,7 @@ describe('sanitizeOpenClawConfig feishu plugin migration', () => {
   });
 
   it('会把 legacy qqbot 插件 ID 迁移为 openclaw-qqbot', async () => {
-    readJsonFileMock.mockResolvedValue({
+    readOpenClawJsonMock.mockResolvedValue({
       ...createSanitizeNeutralConfig(),
       plugins: {
         allow: ['qqbot'],
@@ -215,7 +259,7 @@ describe('sanitizeOpenClawConfig feishu plugin migration', () => {
       },
     });
 
-    await sanitizeOpenClawConfig();
+    await sanitizeMockConfig();
 
     expect(writeOpenClawJsonMock).toHaveBeenCalledTimes(1);
     const nextConfig = writeOpenClawJsonMock.mock.calls[0][0] as Record<string, any>;
@@ -226,7 +270,7 @@ describe('sanitizeOpenClawConfig feishu plugin migration', () => {
   });
 
   it('会清理 legacy plugins.entries.whatsapp 并同步 built-in allowlist', async () => {
-    readJsonFileMock.mockResolvedValue({
+    readOpenClawJsonMock.mockResolvedValue({
       ...createSanitizeNeutralConfig(),
       plugins: {
         allow: ['dingtalk', 'whatsapp'],
@@ -247,7 +291,7 @@ describe('sanitizeOpenClawConfig feishu plugin migration', () => {
       },
     });
 
-    await sanitizeOpenClawConfig();
+    await sanitizeMockConfig();
 
     expect(writeOpenClawJsonMock).toHaveBeenCalledTimes(1);
     const nextConfig = writeOpenClawJsonMock.mock.calls[0][0] as Record<string, any>;
@@ -258,7 +302,7 @@ describe('sanitizeOpenClawConfig feishu plugin migration', () => {
   });
 
   it('会移除 dingtalk strict-schema 不兼容的 accounts/defaultAccount', async () => {
-    readJsonFileMock.mockResolvedValue({
+    readOpenClawJsonMock.mockResolvedValue({
       ...createSanitizeNeutralConfig(),
       channels: {
         dingtalk: {
@@ -274,7 +318,7 @@ describe('sanitizeOpenClawConfig feishu plugin migration', () => {
       },
     });
 
-    await sanitizeOpenClawConfig();
+    await sanitizeMockConfig();
 
     expect(writeOpenClawJsonMock).toHaveBeenCalledTimes(1);
     const nextConfig = writeOpenClawJsonMock.mock.calls[0][0] as Record<string, any>;
@@ -287,9 +331,9 @@ describe('sanitizeOpenClawConfig feishu plugin migration', () => {
     const retainedAbsolutePath = 'C:\\Users\\Mr.Key\\.openclaw\\plugins\\custom';
     const localBuildPluginPath = join(process.cwd(), 'build', 'openclaw-plugins', 'task-manager');
     fileExistsMock.mockImplementation(
-      async (pathname: string) => pathname === '/mock/openclaw.json' || pathname === retainedAbsolutePath,
+      async (pathname: string) => pathname.endsWith('openclaw.json') || pathname === retainedAbsolutePath,
     );
-    readJsonFileMock.mockResolvedValue({
+    readOpenClawJsonMock.mockResolvedValue({
       ...createSanitizeNeutralConfig(),
       plugins: {
         allow: [],
@@ -306,7 +350,7 @@ describe('sanitizeOpenClawConfig feishu plugin migration', () => {
       },
     });
 
-    await sanitizeOpenClawConfig();
+    await sanitizeMockConfig();
 
     expect(writeOpenClawJsonMock).toHaveBeenCalledTimes(1);
     const nextConfig = writeOpenClawJsonMock.mock.calls[0][0] as Record<string, any>;
@@ -325,7 +369,7 @@ describe('sanitizeOpenClawConfig feishu plugin migration', () => {
         { id: 'openai', enabledByDefault: true },
         { id: 'diffs', enabledByDefault: false },
       ]);
-      readJsonFileMock.mockResolvedValue({
+      readOpenClawJsonMock.mockResolvedValue({
         ...createSanitizeNeutralConfig(),
         plugins: {
           allow: ['custom-plugin'],
@@ -335,7 +379,7 @@ describe('sanitizeOpenClawConfig feishu plugin migration', () => {
         },
       });
 
-      await sanitizeOpenClawConfig();
+      await sanitizeMockConfig();
 
       expect(writeOpenClawJsonMock).not.toHaveBeenCalled();
     } finally {
@@ -353,7 +397,7 @@ describe('sanitizeOpenClawConfig feishu plugin migration', () => {
         { id: 'openai', enabledByDefault: true, providers: ['openai', 'openai-codex'] },
         { id: 'anthropic', enabledByDefault: true, providers: ['anthropic'] },
       ]);
-      readJsonFileMock.mockResolvedValue({
+      readOpenClawJsonMock.mockResolvedValue({
         ...createSanitizeNeutralConfig(),
         models: {
           providers: {
@@ -370,7 +414,7 @@ describe('sanitizeOpenClawConfig feishu plugin migration', () => {
         },
       });
 
-      await sanitizeOpenClawConfig();
+      await sanitizeMockConfig();
 
       expect(writeOpenClawJsonMock).not.toHaveBeenCalled();
     } finally {
@@ -387,7 +431,7 @@ describe('sanitizeOpenClawConfig feishu plugin migration', () => {
         { id: 'browser', enabledByDefault: true },
         { id: 'diffs', enabledByDefault: false },
       ]);
-      readJsonFileMock.mockResolvedValue({
+      readOpenClawJsonMock.mockResolvedValue({
         ...createSanitizeNeutralConfig(),
         plugins: {
           allow: ['custom-plugin', 'diffs'],
@@ -398,7 +442,7 @@ describe('sanitizeOpenClawConfig feishu plugin migration', () => {
         },
       });
 
-      await sanitizeOpenClawConfig();
+      await sanitizeMockConfig();
 
       expect(writeOpenClawJsonMock).not.toHaveBeenCalled();
     } finally {
@@ -415,7 +459,7 @@ describe('sanitizeOpenClawConfig feishu plugin migration', () => {
         { id: 'feishu', enabledByDefault: true },
         { id: 'browser', enabledByDefault: true },
       ]);
-      readJsonFileMock.mockResolvedValue({
+      readOpenClawJsonMock.mockResolvedValue({
         ...createSanitizeNeutralConfig(),
         plugins: {
           allow: ['custom-plugin', 'openclaw-lark'],
@@ -425,7 +469,7 @@ describe('sanitizeOpenClawConfig feishu plugin migration', () => {
         },
       });
 
-      await sanitizeOpenClawConfig();
+      await sanitizeMockConfig();
 
       expect(writeOpenClawJsonMock).toHaveBeenCalledTimes(1);
       const nextConfig = writeOpenClawJsonMock.mock.calls[0][0] as Record<string, any>;
@@ -450,14 +494,14 @@ describe('sanitizeOpenClawConfig feishu plugin migration', () => {
         { id: 'openai', enabledByDefault: true },
         { id: 'old-bundled', enabledByDefault: false },
       ]);
-      readJsonFileMock.mockResolvedValue({
+      readOpenClawJsonMock.mockResolvedValue({
         ...createSanitizeNeutralConfig(),
         plugins: {
           allow: ['custom-plugin', 'unknown-plugin', 'old-bundled', 'browser'],
         },
       });
 
-      await sanitizeOpenClawConfig();
+      await sanitizeMockConfig();
 
       expect(writeOpenClawJsonMock).not.toHaveBeenCalled();
     } finally {
@@ -473,7 +517,7 @@ describe('sanitizeOpenClawConfig feishu plugin migration', () => {
       await writeBundledPluginManifests(tempOpenClawDir, [
         { id: 'browser', enabledByDefault: true },
       ]);
-      readJsonFileMock.mockResolvedValue({
+      readOpenClawJsonMock.mockResolvedValue({
         ...createSanitizeNeutralConfig(),
         plugins: {
           allow: ['trusted-disabled-plugin'],
@@ -487,7 +531,7 @@ describe('sanitizeOpenClawConfig feishu plugin migration', () => {
         },
       });
 
-      await sanitizeOpenClawConfig();
+      await sanitizeMockConfig();
 
       expect(writeOpenClawJsonMock).toHaveBeenCalledTimes(1);
       const nextConfig = writeOpenClawJsonMock.mock.calls[0][0] as Record<string, any>;
@@ -514,7 +558,7 @@ describe('sanitizeOpenClawConfig feishu plugin migration', () => {
           legacyPluginIds: ['minimax-portal-auth'],
         },
       ]);
-      readJsonFileMock.mockResolvedValue({
+      readOpenClawJsonMock.mockResolvedValue({
         ...createSanitizeNeutralConfig(),
         models: {
           providers: {
@@ -532,7 +576,7 @@ describe('sanitizeOpenClawConfig feishu plugin migration', () => {
         },
       });
 
-      await sanitizeOpenClawConfig();
+      await sanitizeMockConfig();
 
       expect(writeOpenClawJsonMock).toHaveBeenCalledTimes(1);
       const nextConfig = writeOpenClawJsonMock.mock.calls[0][0] as Record<string, any>;
@@ -549,16 +593,16 @@ describe('sanitizeOpenClawConfig feishu plugin migration', () => {
   it('openclaw.json 缺失时跳过 sanitize，避免提前写入骨架配置', async () => {
     fileExistsMock.mockResolvedValue(false);
 
-    await sanitizeOpenClawConfig();
+    await sanitizeMockConfig();
 
-    expect(readJsonFileMock).not.toHaveBeenCalled();
+    expect(readOpenClawJsonMock).not.toHaveBeenCalled();
     expect(writeOpenClawJsonMock).not.toHaveBeenCalled();
   });
 
   it('openclaw.json 不可解析时跳过 sanitize，避免覆盖用户损坏文件', async () => {
-    readJsonFileMock.mockResolvedValue(null);
+    readOpenClawJsonMock.mockResolvedValue(null);
 
-    await sanitizeOpenClawConfig();
+    await sanitizeMockConfig();
 
     expect(writeOpenClawJsonMock).not.toHaveBeenCalled();
   });
@@ -573,7 +617,7 @@ describe('syncSessionIdleMinutesToOpenClaw', () => {
   it('默认会写入 7 天 idleMinutes', async () => {
     readOpenClawJsonMock.mockResolvedValue({});
 
-    await syncSessionIdleMinutesToOpenClaw();
+    await syncSessionIdleMinutesToOpenClaw(mockConfigRepository, testLogger);
 
     expect(writeOpenClawJsonMock).toHaveBeenCalledTimes(1);
     const nextConfig = writeOpenClawJsonMock.mock.calls[0][0] as Record<string, any>;
@@ -587,7 +631,7 @@ describe('syncSessionIdleMinutesToOpenClaw', () => {
       },
     });
 
-    await syncSessionIdleMinutesToOpenClaw();
+    await syncSessionIdleMinutesToOpenClaw(mockConfigRepository, testLogger);
 
     expect(writeOpenClawJsonMock).not.toHaveBeenCalled();
   });
@@ -598,7 +642,7 @@ describe('syncSessionIdleMinutesToOpenClaw', () => {
         reset: { daily: '04:00' },
       },
     });
-    await syncSessionIdleMinutesToOpenClaw();
+    await syncSessionIdleMinutesToOpenClaw(mockConfigRepository, testLogger);
     expect(writeOpenClawJsonMock).not.toHaveBeenCalled();
 
     readOpenClawJsonMock.mockResolvedValue({
@@ -606,7 +650,7 @@ describe('syncSessionIdleMinutesToOpenClaw', () => {
         resetByType: { main: '04:00' },
       },
     });
-    await syncSessionIdleMinutesToOpenClaw();
+    await syncSessionIdleMinutesToOpenClaw(mockConfigRepository, testLogger);
     expect(writeOpenClawJsonMock).not.toHaveBeenCalled();
 
     readOpenClawJsonMock.mockResolvedValue({
@@ -614,7 +658,7 @@ describe('syncSessionIdleMinutesToOpenClaw', () => {
         resetByChannel: { telegram: '04:00' },
       },
     });
-    await syncSessionIdleMinutesToOpenClaw();
+    await syncSessionIdleMinutesToOpenClaw(mockConfigRepository, testLogger);
     expect(writeOpenClawJsonMock).not.toHaveBeenCalled();
   });
 });
@@ -628,7 +672,7 @@ describe('syncBrowserConfigToOpenClaw', () => {
   it('默认补齐 browser.enabled/defaultProfile 与私网 SSRF 放行策略', async () => {
     readOpenClawJsonMock.mockResolvedValue({});
 
-    await syncBrowserConfigToOpenClaw();
+    await syncBrowserConfigToOpenClaw(mockConfigRepository, testLogger);
 
     expect(writeOpenClawJsonMock).toHaveBeenCalledTimes(1);
     const nextConfig = writeOpenClawJsonMock.mock.calls[0][0] as Record<string, any>;
@@ -652,7 +696,7 @@ describe('syncBrowserConfigToOpenClaw', () => {
       },
     });
 
-    await syncBrowserConfigToOpenClaw();
+    await syncBrowserConfigToOpenClaw(mockConfigRepository, testLogger);
 
     expect(writeOpenClawJsonMock).not.toHaveBeenCalled();
   });
@@ -673,7 +717,7 @@ describe('syncGatewayTokenToConfig', () => {
       },
     });
 
-    await syncGatewayTokenToConfig('gateway-token');
+    await syncGatewayTokenToConfig(mockConfigRepository, 'gateway-token', testLogger);
 
     expect(writeOpenClawJsonMock).toHaveBeenCalledTimes(1);
     const nextConfig = writeOpenClawJsonMock.mock.calls[0][0] as Record<string, any>;
@@ -720,7 +764,7 @@ describe('provider discovery from auth profiles', () => {
       return { version: 1, profiles: {} };
     });
 
-    const providers = await getActiveOpenClawProviders();
+    const providers = await createProviderSnapshotService().getActiveProviders();
     expect(providers).toEqual(new Set(['openai', 'anthropic', 'google']));
   });
 
@@ -755,7 +799,7 @@ describe('provider discovery from auth profiles', () => {
       return { version: 1, profiles: {} };
     });
 
-    const result = await getOpenClawProvidersConfig();
+    const result = await createProviderSnapshotService().getProvidersConfig();
     expect(result.defaultModel).toBe('openai/gpt-5.4');
     expect(result.providers).toMatchObject({
       openai: {},
@@ -807,7 +851,7 @@ describe('removeProviderFromOpenClaw', () => {
       },
     });
 
-    await removeProviderFromOpenClaw('custom-abc12345');
+    await createProviderConfigService().removeProvider('custom-abc12345');
 
     expect(writeAuthProfilesMock).toHaveBeenCalledTimes(1);
     expect(writeAuthProfilesMock.mock.calls[0][0]).toMatchObject({
@@ -852,7 +896,7 @@ describe('removeProviderFromOpenClaw', () => {
       },
     });
 
-    await removeProviderFromOpenClaw('openai');
+    await createProviderConfigService().removeProvider('openai');
 
     expect(writeAuthProfilesMock).toHaveBeenCalledTimes(1);
     expect(writeAuthProfilesMock.mock.calls[0][0]).toMatchObject({
@@ -897,7 +941,7 @@ describe('removeProviderFromOpenClaw', () => {
         },
       });
 
-      await removeProviderFromOpenClaw('minimax-portal');
+      await createProviderConfigService().removeProvider('minimax-portal');
 
       expect(writeOpenClawJsonMock).toHaveBeenCalledTimes(1);
       const config = writeOpenClawJsonMock.mock.calls[0][0] as Record<string, any>;
@@ -937,7 +981,7 @@ describe('syncProviderConfigToOpenClaw OAuth plugin compatibility', () => {
         },
       });
 
-      await syncProviderConfigToOpenClaw('minimax-portal', {
+      await createProviderConfigService().syncProviderConfig('minimax-portal', {
         baseUrl: 'https://api.minimax.io/anthropic',
         api: 'anthropic-messages',
         apiKeyEnv: 'minimax-oauth',
@@ -962,3 +1006,4 @@ describe('syncProviderConfigToOpenClaw OAuth plugin compatibility', () => {
     }
   });
 });
+

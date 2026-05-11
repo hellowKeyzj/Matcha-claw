@@ -1,17 +1,15 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const hostApiFetchMock = vi.fn();
-const rpcMock = vi.fn();
 
 vi.mock('@/lib/host-api', () => ({
   hostApiFetch: (...args: unknown[]) => hostApiFetchMock(...args),
-}));
-
-vi.mock('@/stores/gateway', () => ({
-  useGatewayStore: {
-    getState: () => ({
-      rpc: (...args: unknown[]) => rpcMock(...args),
-    }),
+  waitForRuntimeJobResult: async (jobId: string) => {
+    const response = await hostApiFetchMock('/api/runtime-host/jobs/get', {
+      method: 'POST',
+      body: JSON.stringify({ jobId }),
+    });
+    return response.job?.result;
   },
 }));
 
@@ -27,6 +25,9 @@ function createDeferred<T>() {
 
 function mockSkillsFetchDependencies() {
   hostApiFetchMock.mockImplementation(async (path: string) => {
+    if (path === '/api/skills/status') {
+      return { skills: [] };
+    }
     if (path === '/api/skills/configs') {
       return {};
     }
@@ -43,10 +44,24 @@ describe('skills store availability and search cache', () => {
     vi.clearAllMocks();
   });
 
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   it('首次无快照时进入 initialLoading，成功后写入快照', async () => {
-    const deferredRpc = createDeferred<{ skills: Array<{ skillKey: string; disabled?: boolean }> }>();
-    rpcMock.mockReturnValue(deferredRpc.promise);
-    mockSkillsFetchDependencies();
+    const deferredStatus = createDeferred<{ skills: Array<{ skillKey: string; disabled?: boolean }> }>();
+    hostApiFetchMock.mockImplementation(async (path: string) => {
+      if (path === '/api/skills/status') {
+        return await deferredStatus.promise;
+      }
+      if (path === '/api/skills/configs') {
+        return {};
+      }
+      if (path === '/api/clawhub/list') {
+        return { success: true, results: [] };
+      }
+      throw new Error(`Unexpected hostApiFetch path: ${path}`);
+    });
 
     const { useSkillsStore } = await import('@/stores/skills');
     const fetchPromise = useSkillsStore.getState().fetchSkills();
@@ -55,7 +70,7 @@ describe('skills store availability and search cache', () => {
     expect(useSkillsStore.getState().initialLoading).toBe(true);
     expect(useSkillsStore.getState().refreshing).toBe(false);
 
-    deferredRpc.resolve({ skills: [{ skillKey: 'demo-skill', disabled: false }] });
+    deferredStatus.resolve({ skills: [{ skillKey: 'demo-skill', disabled: false }] });
     await fetchPromise;
 
     const state = useSkillsStore.getState();
@@ -66,15 +81,34 @@ describe('skills store availability and search cache', () => {
   });
 
   it('已有快照时刷新失败保留旧数据，不回退空白', async () => {
-    rpcMock.mockResolvedValueOnce({
-      skills: [{ skillKey: 'demo-skill', disabled: false }],
+    hostApiFetchMock.mockImplementation(async (path: string) => {
+      if (path === '/api/skills/status') {
+        return { skills: [{ skillKey: 'demo-skill', disabled: false }] };
+      }
+      if (path === '/api/skills/configs') {
+        return {};
+      }
+      if (path === '/api/clawhub/list') {
+        return { success: true, results: [] };
+      }
+      throw new Error(`Unexpected hostApiFetch path: ${path}`);
     });
-    mockSkillsFetchDependencies();
 
     const { useSkillsStore } = await import('@/stores/skills');
     await useSkillsStore.getState().fetchSkills();
 
-    rpcMock.mockRejectedValueOnce(new Error('rate limit exceeded'));
+    hostApiFetchMock.mockImplementation(async (path: string) => {
+      if (path === '/api/skills/status') {
+        throw new Error('rate limit exceeded');
+      }
+      if (path === '/api/skills/configs') {
+        return {};
+      }
+      if (path === '/api/clawhub/list') {
+        return { success: true, results: [] };
+      }
+      throw new Error(`Unexpected hostApiFetch path: ${path}`);
+    });
     const refreshPromise = useSkillsStore.getState().fetchSkills({ force: true });
 
     expect(useSkillsStore.getState().refreshing).toBe(true);
@@ -90,23 +124,101 @@ describe('skills store availability and search cache', () => {
   });
 
   it('fetchSkills 并发请求会单飞去重', async () => {
-    const deferredRpc = createDeferred<{ skills: Array<{ skillKey: string; disabled?: boolean }> }>();
-    rpcMock.mockReturnValue(deferredRpc.promise);
-    mockSkillsFetchDependencies();
+    const deferredStatus = createDeferred<{ skills: Array<{ skillKey: string; disabled?: boolean }> }>();
+    hostApiFetchMock.mockImplementation(async (path: string) => {
+      if (path === '/api/skills/status') {
+        return await deferredStatus.promise;
+      }
+      if (path === '/api/skills/configs') {
+        return {};
+      }
+      if (path === '/api/clawhub/list') {
+        return { success: true, results: [] };
+      }
+      throw new Error(`Unexpected hostApiFetch path: ${path}`);
+    });
 
     const { useSkillsStore } = await import('@/stores/skills');
     const first = useSkillsStore.getState().fetchSkills();
     const second = useSkillsStore.getState().fetchSkills();
 
-    expect(rpcMock).toHaveBeenCalledTimes(1);
+    expect(hostApiFetchMock).toHaveBeenCalledWith('/api/skills/status');
+    expect(hostApiFetchMock.mock.calls.filter((call) => call[0] === '/api/skills/status')).toHaveLength(1);
 
-    deferredRpc.resolve({ skills: [{ skillKey: 'singleflight-skill', disabled: false }] });
+    deferredStatus.resolve({ skills: [{ skillKey: 'singleflight-skill', disabled: false }] });
     await Promise.all([first, second]);
   });
 
+  it('skills.status 未 ready 时不把空列表当作最终快照，并自动重试', async () => {
+    vi.useFakeTimers();
+    hostApiFetchMock.mockImplementation(async (path: string) => {
+      if (path === '/api/skills/status') {
+        const statusCallCount = hostApiFetchMock.mock.calls.filter((call) => call[0] === '/api/skills/status').length;
+        if (statusCallCount === 1) {
+          return { ready: false, refreshing: true, skills: [] };
+        }
+        return { ready: true, skills: [{ skillKey: 'demo-skill', disabled: false }] };
+      }
+      if (path === '/api/skills/configs') {
+        return {};
+      }
+      if (path === '/api/clawhub/list') {
+        return { success: true, results: [] };
+      }
+      throw new Error(`Unexpected hostApiFetch path: ${path}`);
+    });
+
+    const { useSkillsStore } = await import('@/stores/skills');
+    await useSkillsStore.getState().fetchSkills();
+
+    expect(useSkillsStore.getState().snapshotReady).toBe(false);
+    expect(useSkillsStore.getState().initialLoading).toBe(true);
+    expect(useSkillsStore.getState().refreshing).toBe(true);
+    expect(useSkillsStore.getState().skills).toEqual([]);
+
+    await vi.advanceTimersByTimeAsync(1200);
+
+    const state = useSkillsStore.getState();
+    expect(hostApiFetchMock.mock.calls.filter((call) => call[0] === '/api/skills/status')).toHaveLength(2);
+    expect(state.snapshotReady).toBe(true);
+    expect(state.initialLoading).toBe(false);
+    expect(state.refreshing).toBe(false);
+    expect(state.skills[0]?.id).toBe('demo-skill');
+  });
+
   it('enableSkill 会维护 mutatingBySkillId 生命周期', async () => {
-    const deferredRpc = createDeferred<{ success: boolean }>();
-    rpcMock.mockReturnValue(deferredRpc.promise);
+    const deferredJob = createDeferred<{ success: boolean }>();
+    hostApiFetchMock.mockImplementation(async (path: string) => {
+      if (path === '/api/skills/state') {
+        return {
+          success: true,
+          job: {
+            id: 'job-demo-skill',
+            type: 'skills.syncGatewayUpdate',
+            status: 'queued',
+            queuedAt: 1,
+            attempts: 0,
+            maxAttempts: 1,
+          },
+        };
+      }
+      if (path === '/api/runtime-host/jobs/get') {
+        await deferredJob.promise;
+        return {
+          success: true,
+          job: {
+            id: 'job-demo-skill',
+            type: 'skills.syncGatewayUpdate',
+            status: 'succeeded',
+            queuedAt: 1,
+            attempts: 1,
+            maxAttempts: 1,
+            result: { success: true },
+          },
+        };
+      }
+      throw new Error(`Unexpected hostApiFetch path: ${path}`);
+    });
 
     const { useSkillsStore } = await import('@/stores/skills');
     useSkillsStore.getState().setSkills([
@@ -124,7 +236,7 @@ describe('skills store availability and search cache', () => {
     expect(useSkillsStore.getState().mutating).toBe(true);
     expect(useSkillsStore.getState().mutatingBySkillId['demo-skill']).toBe(1);
 
-    deferredRpc.resolve({ success: true });
+    deferredJob.resolve({ success: true });
     await enablePromise;
 
     const state = useSkillsStore.getState();
@@ -134,8 +246,10 @@ describe('skills store availability and search cache', () => {
   });
 
   it('maps skills.status availability fields into Skill model', async () => {
-    rpcMock.mockResolvedValueOnce({
-      skills: [
+    hostApiFetchMock.mockImplementation(async (path: string) => {
+      if (path === '/api/skills/status') {
+        return {
+          skills: [
         {
           skillKey: 'foo-skill',
           name: 'Foo Skill',
@@ -154,10 +268,9 @@ describe('skills store availability and search cache', () => {
           baseDir: '/tmp/openclaw/workspace/skills/foo-skill',
           filePath: '/tmp/openclaw/workspace/skills/foo-skill/SKILL.md',
         },
-      ],
-    });
-
-    hostApiFetchMock.mockImplementation(async (path: string) => {
+          ],
+        };
+      }
       if (path === '/api/skills/configs') {
         return {};
       }
@@ -189,18 +302,19 @@ describe('skills store availability and search cache', () => {
   });
 
   it('fills source/baseDir from clawhub list when gateway status entry is incomplete', async () => {
-    rpcMock.mockResolvedValueOnce({
-      skills: [
+    hostApiFetchMock.mockImplementation(async (path: string) => {
+      if (path === '/api/skills/status') {
+        return {
+          skills: [
         {
           skillKey: 'git-helper',
           name: 'Git Helper',
           description: 'helper',
           disabled: false,
         },
-      ],
-    });
-
-    hostApiFetchMock.mockImplementation(async (path: string) => {
+          ],
+        };
+      }
       if (path === '/api/skills/configs') {
         return {};
       }

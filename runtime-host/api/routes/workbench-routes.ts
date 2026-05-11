@@ -1,30 +1,21 @@
-import { WorkbenchService } from '../../application/workbench/service';
-
-interface LocalDispatchResponse {
-  status: number;
-  data: unknown;
-}
+import {
+  routeResponder,
+  type RuntimeRouteDefinition,
+} from './route-utils';
 
 interface WorkbenchRouteDeps {
-  buildLocalRuntimeState: () => {
-    lifecycle: string;
-    plugins: Array<{ lifecycle?: string } & Record<string, any>>;
-  };
+  workbenchService: WorkbenchRouteService;
 }
 
-export function handleWorkbenchRoute(
-  method: string,
-  routePath: string,
-  deps: WorkbenchRouteDeps,
-): LocalDispatchResponse | null {
-  if (!(method === 'GET' && routePath === '/api/workbench/bootstrap')) {
-    return null;
-  }
-  const service = new WorkbenchService({
-    buildLocalRuntimeState: deps.buildLocalRuntimeState,
-  });
-  return {
-    status: 200,
-    data: service.bootstrap(),
-  };
+interface WorkbenchRouteService {
+  bootstrap(): unknown;
 }
+
+export const workbenchRoutes: readonly RuntimeRouteDefinition<WorkbenchRouteDeps>[] = [
+  {
+    method: 'GET',
+    path: '/api/workbench/bootstrap',
+    handle: (_context, deps) => routeResponder.ok(deps.workbenchService.bootstrap()),
+  },
+] as const;
+

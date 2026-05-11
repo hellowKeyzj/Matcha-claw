@@ -1,20 +1,81 @@
 import { mkdtemp, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { describe, expect, it } from 'vitest';
-import { SessionRuntimeService } from '../../runtime-host/application/sessions/service';
+import { describe, expect, it, vi } from 'vitest';
+import { createTestSessionRuntimeService } from './helpers/session-runtime-fixture';
+import { SessionStorageRepository } from '../../runtime-host/application/sessions/session-storage-repository';
 import { buildSessionUpdateEventsFromGatewayConversationEvent } from '../../runtime-host/application/sessions/gateway-ingress';
-import { materializeTranscriptTimelineEntries, parseTranscriptMessages } from '../../runtime-host/application/sessions/transcript-utils';
+import { parseTranscriptMessages } from '../../runtime-host/application/sessions/transcript-parser';
+import { materializeTranscriptTimelineEntries } from '../../runtime-host/application/sessions/transcript-timeline-materializer';
+import { createTestRuntimeFileSystem } from './helpers/runtime-file-system';
 
 async function createRuntimeConfigDir() {
   return await mkdtemp(join(tmpdir(), 'matcha-session-runtime-'));
 }
 
+type TestSessionRuntimeService = ReturnType<typeof createTestSessionRuntimeService>;
+
+const testClock = {
+  nowMs: () => 1_700_000_000_000,
+  nowIso: () => '2023-11-14T22:13:20.000Z',
+};
+
+async function loadHydratedSession(
+  service: TestSessionRuntimeService,
+  sessionKey: string,
+) {
+  const response = await service.loadSession({ sessionKey });
+  if (response.status !== 202) {
+    return response;
+  }
+  return {
+    status: 200,
+    data: await service.executeSessionHydration({
+      sessionKey,
+      snapshot: { kind: 'latest' },
+    }),
+  };
+}
+
+async function resumeHydratedSession(
+  service: TestSessionRuntimeService,
+  sessionKey: string,
+) {
+  const response = await service.resumeSession({ sessionKey });
+  if (response.status !== 202) {
+    return response;
+  }
+  return {
+    status: 200,
+    data: await service.executeSessionHydration({
+      sessionKey,
+      snapshot: { kind: 'state' },
+    }),
+  };
+}
+
+async function getHydratedSessionState(
+  service: TestSessionRuntimeService,
+  sessionKey: string,
+) {
+  const response = await service.getSessionStateSnapshot({ sessionKey });
+  if (response.status !== 202) {
+    return response;
+  }
+  return {
+    status: 200,
+    data: await service.executeSessionHydration({
+      sessionKey,
+      snapshot: { kind: 'state' },
+    }),
+  };
+}
+
 describe('session runtime service', () => {
   it('createSession returns an empty authoritative render-item snapshot', async () => {
     const configDir = await createRuntimeConfigDir();
-    const service = new SessionRuntimeService({
-      getOpenClawConfigDir: () => configDir,
+    const service = createTestSessionRuntimeService({
+      workspace: { getConfigDir: () => configDir },
       openclawBridge: {
         chatSend: async () => ({ runId: 'run-unused' }),
         gatewayRpc: async () => ({}),
@@ -50,10 +111,75 @@ describe('session runtime service', () => {
     });
   });
 
+  it('submits session hydration jobs instead of parsing transcript in HTTP load path', async () => {
+    const configDir = await createRuntimeConfigDir();
+    const storage = new SessionStorageRepository({
+      workspace: { getConfigDir: () => configDir },
+      fileSystem: createTestRuntimeFileSystem(),
+    });
+    const readTranscriptContent = vi
+      .spyOn(storage, 'readTranscriptContent')
+      .mockResolvedValue(JSON.stringify({
+        timestamp: '2026-05-10T10:00:00.000Z',
+        message: {
+          id: 'message-1',
+          role: 'user',
+          content: 'async hydrate path',
+        },
+      }));
+    vi.spyOn(storage, 'findStorageDescriptor')
+      .mockResolvedValue({
+        sessionKey: 'agent:main:main',
+        agentId: 'main',
+        sessionsDir: configDir,
+        sessionsJsonPath: null,
+        sessionsJson: null,
+        sessionStoreEntry: null,
+        transcriptPath: join(configDir, 'main.jsonl'),
+      });
+
+    const service = createTestSessionRuntimeService({
+      workspace: { getConfigDir: () => configDir },
+      sessionStorage: storage,
+      openclawBridge: {
+        chatSend: async () => ({ runId: 'run-unused' }),
+        gatewayRpc: async () => ({}),
+      },
+    });
+
+    const response = await service.loadSession({ sessionKey: 'agent:main:main' });
+
+    expect(response.status).toBe(202);
+    expect(readTranscriptContent).not.toHaveBeenCalled();
+    expect('readTranscriptContentSync' in storage).toBe(false);
+    expect('findStorageDescriptorSync' in storage).toBe(false);
+    expect(response.data).toMatchObject({
+      hydrationJob: {
+        type: 'sessions.hydrateTimeline',
+      },
+      snapshot: {
+        replayComplete: false,
+        items: [],
+      },
+    });
+
+    const hydrated = await service.executeSessionHydration({
+      sessionKey: 'agent:main:main',
+      snapshot: { kind: 'latest' },
+    });
+    expect(readTranscriptContent).toHaveBeenCalledWith('agent:main:main');
+    expect(hydrated.snapshot.items).toEqual([
+      expect.objectContaining({
+        kind: 'user-message',
+        text: 'async hydrate path',
+      }),
+    ]);
+  });
+
   it('does not restore transient live output runtime after process restart', async () => {
     const configDir = await createRuntimeConfigDir();
-    const service = new SessionRuntimeService({
-      getOpenClawConfigDir: () => configDir,
+    const service = createTestSessionRuntimeService({
+      workspace: { getConfigDir: () => configDir },
       openclawBridge: {
         chatSend: async () => ({ runId: 'run-stale-live' }),
         gatewayRpc: async () => ({}),
@@ -68,14 +194,14 @@ describe('session runtime service', () => {
     expect(promptResponse.status).toBe(200);
     expect(promptResponse.data.snapshot.runtime.sending).toBe(true);
 
-    const restarted = new SessionRuntimeService({
-      getOpenClawConfigDir: () => configDir,
+    const restarted = createTestSessionRuntimeService({
+      workspace: { getConfigDir: () => configDir },
       openclawBridge: {
         chatSend: async () => ({ runId: 'run-unused' }),
         gatewayRpc: async () => ({}),
       },
     });
-    const response = await restarted.getSessionStateSnapshot({ sessionKey: 'agent:main:main' });
+    const response = await getHydratedSessionState(restarted, 'agent:main:main');
 
     expect(response.status).toBe(200);
     expect(response.data.snapshot.runtime).toMatchObject({
@@ -103,6 +229,8 @@ describe('session runtime service', () => {
           content: 'hello',
         },
       },
+    }, {
+      clock: testClock,
     });
 
     expect(event).toMatchObject({
@@ -131,6 +259,8 @@ describe('session runtime service', () => {
       errorMessage: 'model unavailable',
       errorCode: 'MODEL_UNAVAILABLE',
       errorDetails: { provider: 'anthropic' },
+    }, {
+      clock: testClock,
     });
 
     expect(event).toMatchObject({
@@ -201,8 +331,8 @@ describe('session runtime service', () => {
 
   it('same-run assistant deltas merge into one assistant-turn item', () => {
     const configDir = join(tmpdir(), `matcha-session-runtime-${Date.now()}`);
-    const service = new SessionRuntimeService({
-      getOpenClawConfigDir: () => configDir,
+    const service = createTestSessionRuntimeService({
+      workspace: { getConfigDir: () => configDir },
       openclawBridge: {
         chatSend: async () => ({ runId: 'run-unused' }),
         gatewayRpc: async () => ({}),
@@ -256,8 +386,8 @@ describe('session runtime service', () => {
 
   it('same-run assistant delta and final reuse the same message segment key', () => {
     const configDir = join(tmpdir(), `matcha-session-runtime-${Date.now()}`);
-    const service = new SessionRuntimeService({
-      getOpenClawConfigDir: () => configDir,
+    const service = createTestSessionRuntimeService({
+      workspace: { getConfigDir: () => configDir },
       openclawBridge: {
         chatSend: async () => ({ runId: 'run-unused' }),
         gatewayRpc: async () => ({}),
@@ -315,8 +445,8 @@ describe('session runtime service', () => {
 
   it('same-run assistant final with messageId still reuses the live message segment key', () => {
     const configDir = join(tmpdir(), `matcha-session-runtime-${Date.now()}`);
-    const service = new SessionRuntimeService({
-      getOpenClawConfigDir: () => configDir,
+    const service = createTestSessionRuntimeService({
+      workspace: { getConfigDir: () => configDir },
       openclawBridge: {
         chatSend: async () => ({ runId: 'run-unused' }),
         gatewayRpc: async () => ({}),
@@ -376,8 +506,8 @@ describe('session runtime service', () => {
   it('new prompt must not reactivate the previous assistant turn as a second streaming shell', async () => {
     const configDir = await createRuntimeConfigDir();
     let nextRunId = 'run-old-final';
-    const service = new SessionRuntimeService({
-      getOpenClawConfigDir: () => configDir,
+    const service = createTestSessionRuntimeService({
+      workspace: { getConfigDir: () => configDir },
       openclawBridge: {
         chatSend: async () => ({ runId: nextRunId }),
         gatewayRpc: async () => ({}),
@@ -431,8 +561,8 @@ describe('session runtime service', () => {
         model: 'claude-opus-4-6',
       },
     }));
-    const service = new SessionRuntimeService({
-      getOpenClawConfigDir: () => configDir,
+    const service = createTestSessionRuntimeService({
+      workspace: { getConfigDir: () => configDir },
       openclawBridge: {
         chatSend: async () => ({ runId: 'run-unused' }),
         gatewayRpc,
@@ -462,8 +592,8 @@ describe('session runtime service', () => {
 
   it('patchSession clears stale runtime error from previous failed run', async () => {
     const configDir = await createRuntimeConfigDir();
-    const service = new SessionRuntimeService({
-      getOpenClawConfigDir: () => configDir,
+    const service = createTestSessionRuntimeService({
+      workspace: { getConfigDir: () => configDir },
       openclawBridge: {
         chatSend: async () => ({ runId: 'run-unused' }),
         gatewayRpc: async () => ({}),
@@ -505,6 +635,8 @@ describe('session runtime service', () => {
           content: 'done',
         },
       },
+    }, {
+      clock: testClock,
     });
 
     expect(event).toMatchObject({
@@ -558,6 +690,8 @@ describe('session runtime service', () => {
           ],
         },
       },
+    }, {
+      clock: testClock,
     });
 
     expect(event).toMatchObject({
@@ -582,6 +716,8 @@ describe('session runtime service', () => {
         name: 'memory_store',
         args: { text: '记住偏好' },
       },
+    }, {
+      clock: testClock,
     });
 
     expect(event).toMatchObject({
@@ -606,8 +742,8 @@ describe('session runtime service', () => {
 
   it('same toolCallId live stream stays inside the same assistant-turn item', () => {
     const configDir = join(tmpdir(), `matcha-session-runtime-${Date.now()}`);
-    const service = new SessionRuntimeService({
-      getOpenClawConfigDir: () => configDir,
+    const service = createTestSessionRuntimeService({
+      workspace: { getConfigDir: () => configDir },
       openclawBridge: {
         chatSend: async () => ({ runId: 'run-unused' }),
         gatewayRpc: async () => ({}),
@@ -675,8 +811,8 @@ describe('session runtime service', () => {
 
   it('live tool.lifecycle result with output immediately populates the assistant-turn tool segment output', () => {
     const configDir = join(tmpdir(), `matcha-session-runtime-${Date.now()}`);
-    const service = new SessionRuntimeService({
-      getOpenClawConfigDir: () => configDir,
+    const service = createTestSessionRuntimeService({
+      workspace: { getConfigDir: () => configDir },
       openclawBridge: {
         chatSend: async () => ({ runId: 'run-unused' }),
         gatewayRpc: async () => ({}),
@@ -731,7 +867,7 @@ describe('session runtime service', () => {
     });
   });
 
-  it('final run phase reconciles transcript tool output into the live assistant turn without appending transcript user or assistant rows', async () => {
+  it('final run phase does not block on transcript IO while preserving the live assistant turn shape', async () => {
     const rootDir = await mkdtemp(join(tmpdir(), 'matcha-session-runtime-'));
     const transcriptDir = join(rootDir, 'agents', 'main', 'sessions');
     await mkdir(transcriptDir, { recursive: true });
@@ -748,8 +884,8 @@ describe('session runtime service', () => {
     );
     await writeFile(join(transcriptDir, 'main.jsonl'), '', 'utf8');
 
-    const service = new SessionRuntimeService({
-      getOpenClawConfigDir: () => rootDir,
+    const service = createTestSessionRuntimeService({
+      workspace: { getConfigDir: () => rootDir },
       openclawBridge: {
         chatSend: async () => ({ runId: 'run-unused' }),
         gatewayRpc: async () => ({}),
@@ -866,10 +1002,25 @@ describe('session runtime service', () => {
       tools: [{
         toolCallId: 'tool-final-output',
         name: 'web_fetch',
-        status: 'completed',
+        status: 'running',
         result: {
-          kind: 'json',
-          bodyText: expect.stringContaining('ok from transcript'),
+          kind: 'none',
+        },
+      }],
+    });
+
+    await loadHydratedSession(service, 'agent:coder:child-1');
+    const loadResponse = await loadHydratedSession(service, 'agent:main:main');
+    expect(loadResponse.status).toBe(200);
+    expect(loadResponse.data.snapshot.items[1]).toMatchObject({
+      kind: 'assistant-turn',
+      text: 'live reply',
+      tools: [{
+        toolCallId: 'tool-final-output',
+        name: 'web_fetch',
+        status: 'running',
+        result: {
+          kind: 'none',
         },
       }],
     });
@@ -892,8 +1043,8 @@ describe('session runtime service', () => {
     );
     await writeFile(join(transcriptDir, 'main.jsonl'), '', 'utf8');
 
-    const service = new SessionRuntimeService({
-      getOpenClawConfigDir: () => rootDir,
+    const service = createTestSessionRuntimeService({
+      workspace: { getConfigDir: () => rootDir },
       openclawBridge: {
         chatSend: async () => ({ runId: 'run-unused' }),
         gatewayRpc: async () => ({}),
@@ -1002,8 +1153,8 @@ describe('session runtime service', () => {
       'utf8',
     );
 
-    const service = new SessionRuntimeService({
-      getOpenClawConfigDir: () => rootDir,
+    const service = createTestSessionRuntimeService({
+      workspace: { getConfigDir: () => rootDir },
       openclawBridge: {
         chatSend: async () => ({ runId: 'run-orphan-1' }),
         gatewayRpc: async () => ({}),
@@ -1022,7 +1173,7 @@ describe('session runtime service', () => {
       pendingTurnKey: 'main:run-orphan-1',
     });
 
-    const resumed = await service.resumeSession({ sessionKey: 'agent:main:main' });
+    const resumed = await resumeHydratedSession(service, 'agent:main:main');
     expect(resumed.status).toBe(200);
     expect(resumed.data.snapshot.runtime).toMatchObject({
       sending: true,
@@ -1038,8 +1189,8 @@ describe('session runtime service', () => {
 
   it('新 transport epoch 连上后，会清理旧 epoch 上悬空的 active run', async () => {
     const rootDir = await mkdtemp(join(tmpdir(), 'matcha-session-runtime-'));
-    const service = new SessionRuntimeService({
-      getOpenClawConfigDir: () => rootDir,
+    const service = createTestSessionRuntimeService({
+      workspace: { getConfigDir: () => rootDir },
       openclawBridge: {
         chatSend: async () => ({ runId: 'run-orphan-cleanup-1' }),
         gatewayRpc: async () => ({}),
@@ -1062,7 +1213,7 @@ describe('session runtime service', () => {
 
     service.notifyTransportConnected(2);
 
-    const resumed = await service.resumeSession({ sessionKey: 'agent:main:main' });
+    const resumed = await resumeHydratedSession(service, 'agent:main:main');
     expect(resumed.status).toBe(200);
     expect(resumed.data.snapshot.runtime).toMatchObject({
       sending: false,
@@ -1075,8 +1226,8 @@ describe('session runtime service', () => {
 
   it('multiple tool lifecycle updates in one run stay as three completed cards on one assistant-turn', async () => {
     const configDir = join(tmpdir(), `matcha-session-runtime-${Date.now()}`);
-    const service = new SessionRuntimeService({
-      getOpenClawConfigDir: () => configDir,
+    const service = createTestSessionRuntimeService({
+      workspace: { getConfigDir: () => configDir },
       openclawBridge: {
         chatSend: async () => ({ runId: 'run-unused' }),
         gatewayRpc: async () => ({}),
@@ -1116,7 +1267,7 @@ describe('session runtime service', () => {
       });
     }
 
-    const snapshotResponse = service.getSessionStateSnapshot({ sessionKey: 'agent:main:main' });
+    const snapshotResponse = getHydratedSessionState(service, 'agent:main:main');
     await expect(snapshotResponse).resolves.toMatchObject({
       data: {
         snapshot: {
@@ -1138,8 +1289,8 @@ describe('session runtime service', () => {
 
   it('tool activity keeps one assistant-turn while final answer reuses the live message segment', async () => {
     const configDir = join(tmpdir(), `matcha-session-runtime-${Date.now()}`);
-    const service = new SessionRuntimeService({
-      getOpenClawConfigDir: () => configDir,
+    const service = createTestSessionRuntimeService({
+      workspace: { getConfigDir: () => configDir },
       openclawBridge: {
         chatSend: async () => ({ runId: 'run-unused' }),
         gatewayRpc: async () => ({}),
@@ -1187,7 +1338,7 @@ describe('session runtime service', () => {
     });
 
     expect(finalEvent.snapshot.window.totalItemCount).toBe(1);
-    await expect(service.getSessionStateSnapshot({ sessionKey: 'agent:main:main' })).resolves.toMatchObject({
+    await expect(getHydratedSessionState(service, 'agent:main:main')).resolves.toMatchObject({
       data: {
         snapshot: {
           items: [
@@ -1317,15 +1468,16 @@ describe('session runtime service', () => {
       'utf8',
     );
 
-    const service = new SessionRuntimeService({
-      getOpenClawConfigDir: () => rootDir,
+    const service = createTestSessionRuntimeService({
+      workspace: { getConfigDir: () => rootDir },
       openclawBridge: {
         chatSend: async () => ({ runId: 'run-unused' }),
         gatewayRpc: async () => ({}),
       },
     });
 
-    const loadResponse = await service.loadSession({ sessionKey: 'agent:main:main' });
+    await loadHydratedSession(service, 'agent:coder:child-1');
+    const loadResponse = await loadHydratedSession(service, 'agent:main:main');
 
     expect(loadResponse.status).toBe(200);
     expect(loadResponse.data.snapshot.items).toEqual(expect.arrayContaining([
@@ -1353,8 +1505,8 @@ describe('session runtime service', () => {
 
   it('promptSession returns and caches authoritative user-message items', async () => {
     const configDir = await createRuntimeConfigDir();
-    const service = new SessionRuntimeService({
-      getOpenClawConfigDir: () => configDir,
+    const service = createTestSessionRuntimeService({
+      workspace: { getConfigDir: () => configDir },
       openclawBridge: {
         chatSend: async () => ({ runId: 'run-prompt-1' }),
         gatewayRpc: async () => ({}),
@@ -1412,7 +1564,7 @@ describe('session runtime service', () => {
       },
     });
 
-    const loadResponse = await service.loadSession({ sessionKey: 'agent:main:main' });
+    const loadResponse = await loadHydratedSession(service, 'agent:main:main');
     expect(loadResponse.status).toBe(200);
     expect(loadResponse.data).toMatchObject({
       snapshot: {
@@ -1482,8 +1634,8 @@ describe('session runtime service', () => {
 
   it('canonical transcript catch-up keeps live assistant final item', async () => {
     const configDir = await createRuntimeConfigDir();
-    const service = new SessionRuntimeService({
-      getOpenClawConfigDir: () => configDir,
+    const service = createTestSessionRuntimeService({
+      workspace: { getConfigDir: () => configDir },
       openclawBridge: {
         chatSend: async () => ({ runId: 'run-unused' }),
         gatewayRpc: async () => ({}),
@@ -1512,7 +1664,7 @@ describe('session runtime service', () => {
       },
     });
 
-    const loadResponse = await service.loadSession({ sessionKey: 'agent:main:main' });
+    const loadResponse = await loadHydratedSession(service, 'agent:main:main');
     expect(loadResponse.status).toBe(200);
     expect(loadResponse.data).toMatchObject({
       snapshot: {
@@ -1579,15 +1731,15 @@ describe('session runtime service', () => {
       'utf8',
     );
 
-    const service = new SessionRuntimeService({
-      getOpenClawConfigDir: () => rootDir,
+    const service = createTestSessionRuntimeService({
+      workspace: { getConfigDir: () => rootDir },
       openclawBridge: {
         chatSend: async () => ({ runId: 'run-unused' }),
         gatewayRpc: async () => ({}),
       },
     });
 
-    const loadResponse = await service.loadSession({ sessionKey: 'agent:main:main' });
+    const loadResponse = await loadHydratedSession(service, 'agent:main:main');
 
     expect(loadResponse.status).toBe(200);
     expect(loadResponse.data.snapshot.items).toHaveLength(2);
@@ -1632,15 +1784,15 @@ describe('session runtime service', () => {
       'utf8',
     );
 
-    const service = new SessionRuntimeService({
-      getOpenClawConfigDir: () => rootDir,
+    const service = createTestSessionRuntimeService({
+      workspace: { getConfigDir: () => rootDir },
       openclawBridge: {
         chatSend: async () => ({ runId: 'run-unused' }),
         gatewayRpc: async () => ({}),
       },
     });
 
-    const loadResponse = await service.loadSession({ sessionKey: 'agent:main:main' });
+    const loadResponse = await loadHydratedSession(service, 'agent:main:main');
     expect(loadResponse.status).toBe(200);
     expect(loadResponse.data.snapshot.items).toMatchObject([
       {
@@ -1698,15 +1850,15 @@ describe('session runtime service', () => {
       'utf8',
     );
 
-    const service = new SessionRuntimeService({
-      getOpenClawConfigDir: () => rootDir,
+    const service = createTestSessionRuntimeService({
+      workspace: { getConfigDir: () => rootDir },
       openclawBridge: {
         chatSend: async () => ({ runId: 'run-unused' }),
         gatewayRpc: async () => ({}),
       },
     });
 
-    const loadResponse = await service.loadSession({ sessionKey: 'agent:main:main' });
+    const loadResponse = await loadHydratedSession(service, 'agent:main:main');
     expect(loadResponse.status).toBe(200);
     expect(loadResponse.data.snapshot.items).toMatchObject([
       {
@@ -1770,15 +1922,15 @@ describe('session runtime service', () => {
       'utf8',
     );
 
-    const service = new SessionRuntimeService({
-      getOpenClawConfigDir: () => rootDir,
+    const service = createTestSessionRuntimeService({
+      workspace: { getConfigDir: () => rootDir },
       openclawBridge: {
         chatSend: async () => ({ runId: 'run-unused' }),
         gatewayRpc: async () => ({}),
       },
     });
 
-    const loadResponse = await service.loadSession({ sessionKey: 'agent:main:main' });
+    const loadResponse = await loadHydratedSession(service, 'agent:main:main');
     expect(loadResponse.status).toBe(200);
     expect(loadResponse.data.snapshot.items).toMatchObject([
       {
@@ -1848,15 +2000,15 @@ describe('session runtime service', () => {
       'utf8',
     );
 
-    const service = new SessionRuntimeService({
-      getOpenClawConfigDir: () => rootDir,
+    const service = createTestSessionRuntimeService({
+      workspace: { getConfigDir: () => rootDir },
       openclawBridge: {
         chatSend: async () => ({ runId: 'run-unused' }),
         gatewayRpc: async () => ({}),
       },
     });
 
-    const loadResponse = await service.loadSession({ sessionKey: 'agent:main:main' });
+    const loadResponse = await loadHydratedSession(service, 'agent:main:main');
     expect(loadResponse.status).toBe(200);
     expect(loadResponse.data.snapshot.items).toMatchObject([
       {
@@ -1939,15 +2091,15 @@ describe('session runtime service', () => {
       'utf8',
     );
 
-    const service = new SessionRuntimeService({
-      getOpenClawConfigDir: () => rootDir,
+    const service = createTestSessionRuntimeService({
+      workspace: { getConfigDir: () => rootDir },
       openclawBridge: {
         chatSend: async () => ({ runId: 'run-unused' }),
         gatewayRpc: async () => ({}),
       },
     });
 
-    const loadResponse = await service.loadSession({ sessionKey: 'agent:main:main' });
+    const loadResponse = await loadHydratedSession(service, 'agent:main:main');
     expect(loadResponse.status).toBe(200);
     expect(loadResponse.data.snapshot.items).toMatchObject([
       {
@@ -2041,15 +2193,15 @@ describe('session runtime service', () => {
       'utf8',
     );
 
-    const service = new SessionRuntimeService({
-      getOpenClawConfigDir: () => rootDir,
+    const service = createTestSessionRuntimeService({
+      workspace: { getConfigDir: () => rootDir },
       openclawBridge: {
         chatSend: async () => ({ runId: 'run-unused' }),
         gatewayRpc: async () => ({}),
       },
     });
 
-    const loadResponse = await service.loadSession({ sessionKey: 'agent:main:main' });
+    const loadResponse = await loadHydratedSession(service, 'agent:main:main');
     expect(loadResponse.status).toBe(200);
     expect(loadResponse.data.snapshot.items).toMatchObject([
       {
@@ -2071,8 +2223,8 @@ describe('session runtime service', () => {
 
   it('live chat.message toolResult updates stay out of assistant-turn text and only update tool cards', async () => {
     const configDir = join(tmpdir(), `matcha-session-runtime-${Date.now()}`);
-    const service = new SessionRuntimeService({
-      getOpenClawConfigDir: () => configDir,
+    const service = createTestSessionRuntimeService({
+      workspace: { getConfigDir: () => configDir },
       openclawBridge: {
         chatSend: async () => ({ runId: 'run-unused' }),
         gatewayRpc: async () => ({}),
@@ -2191,15 +2343,15 @@ describe('session runtime service', () => {
       'utf8',
     );
 
-    const service = new SessionRuntimeService({
-      getOpenClawConfigDir: () => rootDir,
+    const service = createTestSessionRuntimeService({
+      workspace: { getConfigDir: () => rootDir },
       openclawBridge: {
         chatSend: async () => ({ runId: 'run-unused' }),
         gatewayRpc: async () => ({}),
       },
     });
 
-    const response = await service.loadSession({ sessionKey: 'agent:main:main' });
+    const response = await loadHydratedSession(service, 'agent:main:main');
     expect(response.status).toBe(200);
     expect(response.data.snapshot.items).toMatchObject([
       {
@@ -2255,8 +2407,8 @@ describe('session runtime service', () => {
       'utf8',
     );
 
-    const service = new SessionRuntimeService({
-      getOpenClawConfigDir: () => rootDir,
+    const service = createTestSessionRuntimeService({
+      workspace: { getConfigDir: () => rootDir },
       openclawBridge: {
         chatSend: async () => ({ runId: 'run-prompt-2' }),
         gatewayRpc: async () => ({}),
@@ -2270,7 +2422,7 @@ describe('session runtime service', () => {
     });
     expect(promptResponse.status).toBe(200);
 
-    const loadResponse = await service.loadSession({ sessionKey: 'agent:main:main' });
+    const loadResponse = await loadHydratedSession(service, 'agent:main:main');
     expect(loadResponse.status).toBe(200);
     expect(loadResponse.data.snapshot.items[0]).toMatchObject({
       kind: 'user-message',
@@ -2281,8 +2433,8 @@ describe('session runtime service', () => {
 
   it('runtime store v3 persists no transient live runtime metadata', async () => {
     const configDir = await createRuntimeConfigDir();
-    const service = new SessionRuntimeService({
-      getOpenClawConfigDir: () => configDir,
+    const service = createTestSessionRuntimeService({
+      workspace: { getConfigDir: () => configDir },
       openclawBridge: {
         chatSend: async () => ({ runId: 'run-prompt-3' }),
         gatewayRpc: async () => ({}),
@@ -2312,8 +2464,8 @@ describe('session runtime service', () => {
 
   it('promptSession clears stale runtime error before starting a new run', async () => {
     const configDir = await createRuntimeConfigDir();
-    const service = new SessionRuntimeService({
-      getOpenClawConfigDir: () => configDir,
+    const service = createTestSessionRuntimeService({
+      workspace: { getConfigDir: () => configDir },
       openclawBridge: {
         chatSend: async () => ({ runId: 'run-fresh-1' }),
         gatewayRpc: async () => ({}),
@@ -2344,3 +2496,4 @@ describe('session runtime service', () => {
     });
   });
 });
+

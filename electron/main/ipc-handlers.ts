@@ -9,7 +9,6 @@ import { registerHostApiProxyHandlers } from './ipc/hostapi-proxy-ipc';
 import { registerShellHandlers } from './ipc/shell-ipc';
 import { registerDialogHandlers } from './ipc/dialog-ipc';
 import { registerAppHandlers } from './ipc/app-ipc';
-import { registerUsageHandlers } from './ipc/usage-ipc';
 import { registerWindowHandlers } from './ipc/window-ipc';
 import { registerGatewayHandlers } from './ipc/gateway-ipc';
 
@@ -35,9 +34,6 @@ export function registerIpcHandlers(
 
   // App handlers
   registerAppHandlers();
-
-  // Usage handlers
-  registerUsageHandlers(runtimeHost);
 
   // Window control handlers (for custom title bar on Windows)
   registerWindowHandlers(getMainWindow);

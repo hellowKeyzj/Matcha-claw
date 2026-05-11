@@ -38,13 +38,13 @@ function buildRuntimePayload(params?: { enabledPluginIds?: string[] }) {
     success: true,
     state: {
       lifecycle: 'running',
-      runtimeLifecycle: 'ready',
+      runtimeLifecycle: 'running',
       activePluginCount: enabledPluginIds.length,
       enabledPluginIds,
     },
     health: {
       ok: true,
-      lifecycle: 'ready',
+      lifecycle: 'running',
       activePluginCount: enabledPluginIds.length,
       degradedPlugins: [],
     },
@@ -292,9 +292,9 @@ describe('plugins page', () => {
     );
 
     expect(await screen.findAllByText('Host running')).toHaveLength(2);
-    expect(screen.getByText('Runtime ready')).toBeInTheDocument();
+    expect(screen.getByText('Runtime running')).toBeInTheDocument();
     expect(screen.queryByText('host:running')).not.toBeInTheDocument();
-    expect(screen.queryByText('runtime:ready')).not.toBeInTheDocument();
+    expect(screen.queryByText('runtime:running')).not.toBeInTheDocument();
   });
 
   it('切换插件时只提交 catalog 中的能力插件 ID，不带回渠道或 bundled 运行态 ID', async () => {

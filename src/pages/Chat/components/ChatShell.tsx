@@ -5,10 +5,13 @@ import { CHAT_WORKSPACE_LAYOUT } from '../chat-workspace-layout';
 import type { ChatSidePanelMode } from '../chat-workspace-layout';
 
 const CHAT_THREAD_BOTTOM_GAP_PX = 12;
+const CHAT_THREAD_TOP_GAP_PX = 8;
 
 const CHAT_STAGE_CSS_VARS = {
   '--chat-composer-safe-offset': '0px',
   '--chat-thread-bottom-padding': `${CHAT_THREAD_BOTTOM_GAP_PX}px`,
+  '--chat-header-safe-offset': '0px',
+  '--chat-thread-top-padding': `${CHAT_THREAD_TOP_GAP_PX}px`,
 } as CSSProperties;
 
 interface ChatShellProps {
@@ -45,6 +48,7 @@ export function ChatShell({
   input,
 }: ChatShellProps) {
   const stageRef = useRef<HTMLDivElement>(null);
+  const headerOverlayRef = useRef<HTMLDivElement>(null);
   const composerOverlayRef = useRef<HTMLDivElement>(null);
   const resizePointerIdRef = useRef<number | null>(null);
 
@@ -54,37 +58,44 @@ export function ChatShell({
       return;
     }
 
-    const resetComposerOffset = () => {
+    const resetOverlayOffsets = () => {
+      stageNode.style.setProperty('--chat-header-safe-offset', '0px');
+      stageNode.style.setProperty('--chat-thread-top-padding', `${CHAT_THREAD_TOP_GAP_PX}px`);
       stageNode.style.setProperty('--chat-composer-safe-offset', '0px');
       stageNode.style.setProperty('--chat-thread-bottom-padding', `${CHAT_THREAD_BOTTOM_GAP_PX}px`);
     };
 
+    const headerNode = headerOverlayRef.current;
     const composerNode = composerOverlayRef.current;
-    if (!composerNode) {
-      resetComposerOffset();
+    if (!headerNode || !composerNode) {
+      resetOverlayOffsets();
       return;
     }
 
-    const syncComposerOffset = () => {
+    const syncOverlayOffsets = () => {
+      const headerHeight = Math.ceil(headerNode.getBoundingClientRect().height);
       const composerHeight = Math.ceil(composerNode.getBoundingClientRect().height);
+      stageNode.style.setProperty('--chat-header-safe-offset', `${headerHeight}px`);
+      stageNode.style.setProperty('--chat-thread-top-padding', `${headerHeight + CHAT_THREAD_TOP_GAP_PX}px`);
       stageNode.style.setProperty('--chat-composer-safe-offset', `${composerHeight}px`);
       stageNode.style.setProperty('--chat-thread-bottom-padding', `${composerHeight + CHAT_THREAD_BOTTOM_GAP_PX}px`);
     };
 
-    syncComposerOffset();
+    syncOverlayOffsets();
 
     if (typeof ResizeObserver !== 'function') {
-      return resetComposerOffset;
+      return resetOverlayOffsets;
     }
 
     const observer = new ResizeObserver(() => {
-      syncComposerOffset();
+      syncOverlayOffsets();
     });
+    observer.observe(headerNode);
     observer.observe(composerNode);
 
     return () => {
       observer.disconnect();
-      resetComposerOffset();
+      resetOverlayOffsets();
     };
   }, [isEmptyState]);
 
@@ -154,6 +165,7 @@ export function ChatShell({
 
           <div
             data-testid="chat-stage-header-overlay"
+            ref={headerOverlayRef}
             className={CHAT_LAYOUT_TOKENS.stageHeaderOverlay}
           >
             <div className={CHAT_LAYOUT_TOKENS.stageHeaderRail}>

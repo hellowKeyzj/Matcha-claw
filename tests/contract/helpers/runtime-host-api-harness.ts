@@ -31,6 +31,7 @@ export interface RuntimeHostApiHarness {
     route: string,
     payload?: unknown,
   ) => Promise<TData>;
+  readonly waitForJob: <TResult = unknown>(jobId: string | undefined) => Promise<TResult>;
   readonly stop: () => Promise<void>;
 }
 
@@ -67,6 +68,21 @@ async function findFreePort(): Promise<number> {
       });
     });
   });
+}
+
+async function waitForCondition(
+  predicate: () => boolean | Promise<boolean>,
+  timeoutMs = 8000,
+  intervalMs = 80,
+): Promise<void> {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeoutMs) {
+    if (await predicate()) {
+      return;
+    }
+    await new Promise<void>((resolve) => setTimeout(resolve, intervalMs));
+  }
+  throw new Error('waitForCondition timeout');
 }
 
 function createParentResponse(res: ServerResponse, payload: unknown, statusCode = 200): void {
@@ -242,6 +258,33 @@ export async function createRuntimeHostApiHarness(
     return envelope.data as TData;
   };
 
+  const waitForJob = async <TResult = unknown>(jobId: string | undefined): Promise<TResult> => {
+    if (!jobId) {
+      throw new Error('runtime-host jobId is required');
+    }
+    let result: unknown;
+    await waitForCondition(async () => {
+      const data = await dispatchOk<{ job: { status?: string; result?: unknown; error?: string } | null }>(
+        'POST',
+        '/api/runtime-host/jobs/get',
+        { jobId },
+      );
+      const job = data.job;
+      if (!job) {
+        return false;
+      }
+      if (job.status === 'failed') {
+        throw new Error(job.error || `Runtime host job failed: ${jobId}`);
+      }
+      if (job.status === 'succeeded') {
+        result = job.result;
+        return true;
+      }
+      return false;
+    });
+    return result as TResult;
+  };
+
   return {
     port: runtimeHostPort,
     paths: {
@@ -251,6 +294,7 @@ export async function createRuntimeHostApiHarness(
     },
     dispatch,
     dispatchOk,
+    waitForJob,
     stop: async () => {
       await manager.stop();
       await parentApiServer.close();

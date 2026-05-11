@@ -46,11 +46,9 @@
       "error": "宿主错误"
     },
     "runtime": {
-      "idle": "运行时空闲",
-      "booting": "运行时启动中",
-      "ready": "运行时就绪",
+      "starting": "运行时启动中",
       "running": "运行时运行中",
-      "degraded": "运行时降级",
+      "stopping": "运行时停止中",
       "stopped": "运行时已停止",
       "error": "运行时错误"
     }

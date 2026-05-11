@@ -1,12 +1,14 @@
-import { DEFAULT_ACCOUNT_ID } from '../../api/common/constants';
-import { readOpenClawConfigJson, writeOpenClawConfigJson } from '../../api/storage/paths';
+import { DEFAULT_ACCOUNT_ID } from '../../shared/runtime-host-constants';
+import type { PluginFileSystemPort } from '../../plugin-engine/plugin-file-system';
 import {
   applyManuallyManagedPluginIdsToOpenClawConfig,
   readManuallyManagedPluginIdsFromConfig,
 } from '../openclaw/openclaw-plugin-config-service';
 import { findChannelOpenClawPluginDefinition } from '../plugins/managed-plugin-definitions';
-import { ensureManagedPluginDefinitionInstalled } from '../plugins/runtime-plugin-service';
+import type { ManagedPluginInstaller } from '../plugins/managed-plugin-installer';
 import { withOpenClawConfigLock } from '../openclaw/openclaw-config-mutex';
+import type { OpenClawConfigRepositoryPort } from '../openclaw/openclaw-config-repository';
+import type { RuntimeClockPort } from '../common/runtime-ports';
 import {
   LEGACY_BUILTIN_CHANNEL_PLUGIN_IDS,
   getExternalChannelPluginId,
@@ -136,26 +138,228 @@ function channelHasAnyAccount(channelType: string, channelSection: Record<string
   ));
 }
 
-async function reconcileChannelDerivedPluginStateLocal(config: Record<string, any>): Promise<Record<string, any>> {
+async function reconcileChannelDerivedPluginStateLocal(
+  configRepository: OpenClawConfigRepositoryPort,
+  pluginFileSystem: Pick<PluginFileSystemPort, 'pathExists' | 'readJsonRecord' | 'listDirectoryEntries'>,
+  config: Record<string, any>,
+): Promise<Record<string, any>> {
   return await applyManuallyManagedPluginIdsToOpenClawConfig(
+    configRepository,
+    pluginFileSystem,
     config,
-    readManuallyManagedPluginIdsFromConfig(config),
+    await readManuallyManagedPluginIdsFromConfig(configRepository, pluginFileSystem, config),
   ) as Record<string, any>;
 }
 
-async function ensureChannelPluginInstalledLocal(
-  pluginId: string,
-  options: { force?: boolean } = {},
-): Promise<void> {
-  const definition = findChannelOpenClawPluginDefinition(pluginId);
-  if (!definition) {
-    return;
+export class ChannelConfigRepository {
+  constructor(
+    private readonly configRepository: OpenClawConfigRepositoryPort,
+    private readonly pluginInstaller: ManagedPluginInstaller,
+    private readonly pluginFileSystem: Pick<PluginFileSystemPort, 'pathExists' | 'readJsonRecord' | 'listDirectoryEntries'>,
+    private readonly clock: RuntimeClockPort,
+  ) {}
+
+  async listConfiguredChannels() {
+    const config = await this.configRepository.read();
+    return listConfiguredChannelsFromConfig(config);
   }
-  await ensureManagedPluginDefinitionInstalled(definition, options);
+
+  async reconcileConfiguredChannelPlugins(
+    configuredChannelsInput?: readonly string[],
+    options: { forceInstall?: boolean } = {},
+  ): Promise<string[]> {
+    const configuredChannels = configuredChannelsInput
+      ? [...new Set(configuredChannelsInput)]
+      : await this.listConfiguredChannels();
+
+    for (const channelType of configuredChannels) {
+      const externalPluginId = getExternalChannelPluginId(channelType);
+      if (externalPluginId) {
+        await this.ensureChannelPluginInstalled(externalPluginId, { force: options.forceInstall === true });
+      }
+    }
+
+    await withOpenClawConfigLock(async () => {
+      const config = await reconcileChannelDerivedPluginStateLocal(this.configRepository, this.pluginFileSystem, await this.configRepository.read());
+      await this.configRepository.write(config);
+    });
+
+    return configuredChannels;
+  }
+
+  async saveChannelConfig(input: unknown) {
+    if (!isRecord(input)) {
+      throw new Error('Invalid channel config payload');
+    }
+    const channelType = typeof input.channelType === 'string' ? input.channelType.trim() : '';
+    if (!channelType) {
+      throw new Error('channelType is required');
+    }
+
+    await withOpenClawConfigLock(async () => {
+      const accountId = typeof input.accountId === 'string' && input.accountId.trim()
+        ? input.accountId.trim()
+        : DEFAULT_ACCOUNT_ID;
+      let config = await this.configRepository.read();
+      cleanupLegacyBuiltInChannelPluginRegistrationLocal(config, channelType);
+      if (!isRecord(config.channels)) {
+        config.channels = {};
+      }
+      const channels = config.channels as Record<string, any>;
+      if (!isRecord(channels[channelType])) {
+        channels[channelType] = {};
+      }
+
+      const section = channels[channelType] as Record<string, any>;
+      const bodyConfig = isRecord(input.config) ? input.config : {};
+      if (isStrictSchemaChannel(channelType)) {
+        const nextAccountConfig = {
+          ...section,
+          ...bodyConfig,
+        };
+        assertNoDuplicateCredential(channelType, section, accountId, nextAccountConfig);
+        delete section.accounts;
+        delete section.defaultAccount;
+        delete nextAccountConfig.accounts;
+        delete nextAccountConfig.defaultAccount;
+        Object.assign(section, nextAccountConfig, {
+          enabled: input.enabled !== false,
+          updatedAt: this.clock.nowIso(),
+        });
+      } else {
+        const accounts = ensureChannelAccountsMap(section);
+        const previous = isRecord(accounts[accountId]) ? accounts[accountId] : {};
+        const nextAccountConfig = {
+          ...previous,
+          ...bodyConfig,
+        };
+        assertNoDuplicateCredential(channelType, section, accountId, nextAccountConfig);
+        accounts[accountId] = {
+          ...nextAccountConfig,
+          enabled: input.enabled !== false,
+          updatedAt: this.clock.nowIso(),
+        };
+        section.defaultAccount = typeof section.defaultAccount === 'string' && section.defaultAccount.trim()
+          ? section.defaultAccount
+          : accountId;
+        section.enabled = input.enabled !== false;
+      }
+      config = await reconcileChannelDerivedPluginStateLocal(this.configRepository, this.pluginFileSystem, config);
+      await this.configRepository.write(config);
+    });
+  }
+
+  async setChannelEnabled(channelType: string, enabled: boolean) {
+    await withOpenClawConfigLock(async () => {
+      if (!channelType) {
+        throw new Error('channelType is required');
+      }
+      let config = await this.configRepository.read();
+      if (!isRecord(config.channels)) {
+        config.channels = {};
+      }
+      const channels = config.channels as Record<string, any>;
+      if (!isRecord(channels[channelType])) {
+        channels[channelType] = {};
+      }
+      const section = channels[channelType] as Record<string, any>;
+      section.enabled = enabled;
+      const accounts = getChannelAccountsMap(section);
+      if (accounts) {
+        for (const account of Object.values(accounts)) {
+          if (!isRecord(account)) {
+            continue;
+          }
+          account.enabled = enabled;
+          account.updatedAt = this.clock.nowIso();
+        }
+      }
+      config = await reconcileChannelDerivedPluginStateLocal(this.configRepository, this.pluginFileSystem, config);
+      await this.configRepository.write(config);
+    });
+  }
+
+  async getChannelFormValues(channelType: string, accountId?: string) {
+    if (!channelType) {
+      return {};
+    }
+    const config = await this.configRepository.read();
+    const channels = isRecord(config.channels) ? config.channels : {};
+    const section = isRecord(channels[channelType]) ? channels[channelType] : {};
+    const selected = getChannelAccountConfigLocal(channelType, section, accountId || DEFAULT_ACCOUNT_ID);
+    const values: Record<string, string> = {};
+    for (const [key, value] of Object.entries(selected)) {
+      if (key === 'enabled' || key === 'updatedAt') {
+        continue;
+      }
+      const normalized = normalizeChannelConfigValueLocal(value);
+      if (normalized) {
+        values[key] = normalized;
+      }
+    }
+    return values;
+  }
+
+  async deleteChannelConfig(channelType: string) {
+    await withOpenClawConfigLock(async () => {
+      if (!channelType) {
+        throw new Error('channelType is required');
+      }
+      let config = await this.configRepository.read();
+      if (isRecord(config.channels) && Object.prototype.hasOwnProperty.call(config.channels, channelType)) {
+        delete config.channels[channelType];
+      }
+      config = await reconcileChannelDerivedPluginStateLocal(this.configRepository, this.pluginFileSystem, config);
+      await this.configRepository.write(config);
+    });
+  }
+
+  async validateChannelConfig(channelType: string) {
+    const configuredChannels = await this.listConfiguredChannels();
+    const normalizedType = typeof channelType === 'string' ? channelType.trim() : '';
+    if (!normalizedType) {
+      return { valid: false, errors: ['channelType is required'], warnings: [] };
+    }
+    const valid = configuredChannels.includes(normalizedType);
+    return {
+      valid,
+      errors: valid ? [] : [`Channel ${normalizedType} is not configured`],
+      warnings: [],
+    };
+  }
+
+  async validateChannelCredentials(_channelType: string, _config: Record<string, unknown>) {
+    return {
+      valid: true,
+      errors: [],
+      warnings: [],
+    };
+  }
+
+  private async ensureChannelPluginInstalled(
+    pluginId: string,
+    options: { force?: boolean } = {},
+  ): Promise<void> {
+    const definition = findChannelOpenClawPluginDefinition(pluginId);
+    if (!definition) {
+      return;
+    }
+    await this.pluginInstaller.ensureDefinitionInstalled(definition, options);
+  }
 }
 
-export async function listConfiguredChannelsLocal() {
-  const config = readOpenClawConfigJson();
+export interface ChannelConfigPort extends Pick<
+  ChannelConfigRepository,
+  | 'listConfiguredChannels'
+  | 'validateChannelConfig'
+  | 'validateChannelCredentials'
+  | 'saveChannelConfig'
+  | 'setChannelEnabled'
+  | 'getChannelFormValues'
+  | 'deleteChannelConfig'
+> {}
+
+function listConfiguredChannelsFromConfig(config: Record<string, unknown>) {
   const channels: string[] = [];
   const channelsSection = isRecord(config.channels) ? config.channels : {};
   for (const [channelType, sectionRaw] of Object.entries(channelsSection)) {
@@ -171,29 +375,6 @@ export async function listConfiguredChannelsLocal() {
   }
 
   return [...new Set(channels)];
-}
-
-export async function reconcileConfiguredChannelPluginsLocal(
-  configuredChannelsInput?: readonly string[],
-  options: { forceInstall?: boolean } = {},
-): Promise<string[]> {
-  const configuredChannels = configuredChannelsInput
-    ? [...new Set(configuredChannelsInput)]
-    : await listConfiguredChannelsLocal();
-
-  for (const channelType of configuredChannels) {
-    const externalPluginId = getExternalChannelPluginId(channelType);
-    if (externalPluginId) {
-      await ensureChannelPluginInstalledLocal(externalPluginId, { force: options.forceInstall === true });
-    }
-  }
-
-  await withOpenClawConfigLock(async () => {
-    const config = await reconcileChannelDerivedPluginStateLocal(readOpenClawConfigJson());
-    await writeOpenClawConfigJson(config);
-  });
-
-  return configuredChannels;
 }
 
 function normalizeCredentialString(value: unknown): string {
@@ -246,159 +427,4 @@ function getChannelAccountConfigLocal(channelType: string, channelSection: Recor
   }
   const firstEntry = Object.values(accounts).find((entry) => isRecord(entry));
   return isRecord(firstEntry) ? firstEntry : {};
-}
-
-export async function saveChannelConfigLocal(input: unknown) {
-  if (!isRecord(input)) {
-    throw new Error('Invalid channel config payload');
-  }
-  const channelType = typeof input.channelType === 'string' ? input.channelType.trim() : '';
-  if (!channelType) {
-    throw new Error('channelType is required');
-  }
-  const externalPluginId = getExternalChannelPluginId(channelType);
-  if (externalPluginId && input.enabled !== false) {
-    await ensureChannelPluginInstalledLocal(externalPluginId);
-  }
-
-  await withOpenClawConfigLock(async () => {
-    const accountId = typeof input.accountId === 'string' && input.accountId.trim()
-      ? input.accountId.trim()
-      : DEFAULT_ACCOUNT_ID;
-    let config = readOpenClawConfigJson();
-    cleanupLegacyBuiltInChannelPluginRegistrationLocal(config, channelType);
-    if (!isRecord(config.channels)) {
-      config.channels = {};
-    }
-    if (!isRecord(config.channels[channelType])) {
-      config.channels[channelType] = {};
-    }
-
-    const section = config.channels[channelType];
-    const bodyConfig = isRecord(input.config) ? input.config : {};
-    if (isStrictSchemaChannel(channelType)) {
-      const nextAccountConfig = {
-        ...section,
-        ...bodyConfig,
-      };
-      assertNoDuplicateCredential(channelType, section, accountId, nextAccountConfig);
-      delete section.accounts;
-      delete section.defaultAccount;
-      delete nextAccountConfig.accounts;
-      delete nextAccountConfig.defaultAccount;
-      Object.assign(section, nextAccountConfig, {
-        enabled: input.enabled !== false,
-        updatedAt: new Date().toISOString(),
-      });
-    } else {
-      const accounts = ensureChannelAccountsMap(section);
-      const previous = isRecord(accounts[accountId]) ? accounts[accountId] : {};
-      const nextAccountConfig = {
-        ...previous,
-        ...bodyConfig,
-      };
-      assertNoDuplicateCredential(channelType, section, accountId, nextAccountConfig);
-      accounts[accountId] = {
-        ...nextAccountConfig,
-        enabled: input.enabled !== false,
-        updatedAt: new Date().toISOString(),
-      };
-      section.defaultAccount = typeof section.defaultAccount === 'string' && section.defaultAccount.trim()
-        ? section.defaultAccount
-        : accountId;
-      section.enabled = input.enabled !== false;
-    }
-    config = await reconcileChannelDerivedPluginStateLocal(config);
-    await writeOpenClawConfigJson(config);
-  });
-}
-
-export async function setChannelEnabledLocal(channelType: string, enabled: boolean) {
-  const externalPluginId = getExternalChannelPluginId(channelType);
-  if (enabled && externalPluginId) {
-    await ensureChannelPluginInstalledLocal(externalPluginId);
-  }
-  await withOpenClawConfigLock(async () => {
-    if (!channelType) {
-      throw new Error('channelType is required');
-    }
-    let config = readOpenClawConfigJson();
-    if (!isRecord(config.channels)) {
-      config.channels = {};
-    }
-    if (!isRecord(config.channels[channelType])) {
-      config.channels[channelType] = {};
-    }
-    const section = config.channels[channelType];
-    section.enabled = enabled;
-    const accounts = getChannelAccountsMap(section);
-    if (accounts) {
-      for (const account of Object.values(accounts)) {
-        if (!isRecord(account)) {
-          continue;
-        }
-        account.enabled = enabled;
-        account.updatedAt = new Date().toISOString();
-      }
-    }
-    config = await reconcileChannelDerivedPluginStateLocal(config);
-    await writeOpenClawConfigJson(config);
-  });
-}
-
-export async function getChannelFormValuesLocal(channelType: string, accountId?: string) {
-  if (!channelType) {
-    return {};
-  }
-  const config = readOpenClawConfigJson();
-  const channels = isRecord(config.channels) ? config.channels : {};
-  const section = isRecord(channels[channelType]) ? channels[channelType] : {};
-  const selected = getChannelAccountConfigLocal(channelType, section, accountId || DEFAULT_ACCOUNT_ID);
-  const values: Record<string, string> = {};
-  for (const [key, value] of Object.entries(selected)) {
-    if (key === 'enabled' || key === 'updatedAt') {
-      continue;
-    }
-    const normalized = normalizeChannelConfigValueLocal(value);
-    if (normalized) {
-      values[key] = normalized;
-    }
-  }
-  return values;
-}
-
-export async function deleteChannelConfigLocal(channelType: string) {
-  await withOpenClawConfigLock(async () => {
-    if (!channelType) {
-      throw new Error('channelType is required');
-    }
-    let config = readOpenClawConfigJson();
-    if (isRecord(config.channels) && Object.prototype.hasOwnProperty.call(config.channels, channelType)) {
-      delete config.channels[channelType];
-    }
-    config = await reconcileChannelDerivedPluginStateLocal(config);
-    await writeOpenClawConfigJson(config);
-  });
-}
-
-export async function validateChannelConfigLocal(channelType: string) {
-  const configuredChannels = await listConfiguredChannelsLocal();
-  const normalizedType = typeof channelType === 'string' ? channelType.trim() : '';
-  if (!normalizedType) {
-    return { valid: false, errors: ['channelType is required'], warnings: [] };
-  }
-  const valid = configuredChannels.includes(normalizedType);
-  return {
-    valid,
-    errors: valid ? [] : [`Channel ${normalizedType} is not configured`],
-    warnings: [],
-  };
-}
-
-export async function validateChannelCredentialsLocal(_channelType: string, _config: Record<string, unknown>) {
-  return {
-    valid: true,
-    errors: [],
-    warnings: [],
-  };
 }

@@ -1,9 +1,9 @@
 import { dialog, ipcMain } from 'electron';
-import { getE2EDialogOpenResult } from './e2e-chat';
+import { getE2EDialogOpenResult } from '../e2e-fixture-loader';
 
 export function registerDialogHandlers(): void {
   ipcMain.handle('dialog:open', async (_, options: Electron.OpenDialogOptions) => {
-    const e2eResult = getE2EDialogOpenResult();
+    const e2eResult = await getE2EDialogOpenResult();
     if (e2eResult) {
       return e2eResult;
     }

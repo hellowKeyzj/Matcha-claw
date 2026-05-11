@@ -90,36 +90,6 @@ describe('host-api', () => {
     await expect(hostApiFetch('/api/test')).rejects.toThrow('Invalid IPC channel: hostapi:fetch');
   });
 
-  it('hostGatewayRequest 默认使用统一的 gateway RPC 超时预算', async () => {
-    invokeIpcMock.mockResolvedValueOnce({
-      ok: true,
-      data: {
-        status: 200,
-        ok: true,
-        json: { success: true, result: { value: 1 } },
-      },
-    });
-
-    const { hostGatewayRequest } = await import('@/lib/host-api');
-    const result = await hostGatewayRequest<{ value: number }>('models.list', {});
-
-    expect(result).toEqual({ success: true, result: { value: 1 } });
-    expect(invokeIpcMock).toHaveBeenCalledWith(
-      'hostapi:fetch',
-      expect.objectContaining({
-        path: '/api/gateway/rpc',
-        method: 'POST',
-        timeoutMs: 45000,
-      }),
-    );
-    const [, payload] = invokeIpcMock.mock.calls[0] as [string, { body?: string }];
-    expect(payload.body).toBeTypeOf('string');
-    expect(JSON.parse(payload.body ?? '{}')).toMatchObject({
-      method: 'models.list',
-      timeoutMs: 45000,
-    });
-  });
-
   it('hostFileReadText uses main-owned preview route', async () => {
     invokeIpcMock.mockResolvedValueOnce({
       ok: true,
@@ -191,34 +161,6 @@ describe('host-api', () => {
         timeoutMs: 60000,
       }),
     );
-  });
-
-  it('hostGatewayRequest 透传调用方指定的 timeoutMs', async () => {
-    invokeIpcMock.mockResolvedValueOnce({
-      ok: true,
-      data: {
-        status: 200,
-        ok: true,
-        json: { success: true, result: { ok: true } },
-      },
-    });
-
-    const { hostGatewayRequest } = await import('@/lib/host-api');
-    await hostGatewayRequest<{ ok: boolean }>('chat.send', { message: 'hello' }, 120000);
-
-    expect(invokeIpcMock).toHaveBeenCalledWith(
-      'hostapi:fetch',
-      expect.objectContaining({
-        path: '/api/gateway/rpc',
-        method: 'POST',
-        timeoutMs: 120000,
-      }),
-    );
-    const [, payload] = invokeIpcMock.mock.calls[0] as [string, { body?: string }];
-    expect(JSON.parse(payload.body ?? '{}')).toMatchObject({
-      method: 'chat.send',
-      timeoutMs: 120000,
-    });
   });
 
   it('hostSessionLoad 透传调用方指定的 timeoutMs', async () => {

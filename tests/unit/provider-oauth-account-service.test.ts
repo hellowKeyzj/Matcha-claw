@@ -4,6 +4,11 @@ import {
   buildDeviceOAuthAccount,
 } from '../../runtime-host/application/providers/provider-oauth-account-service';
 
+const clock = {
+  nowMs: () => 1_700_000_000_000,
+  nowIso: () => '2023-11-14T22:13:20.000Z',
+};
+
 describe('provider-oauth-account-service', () => {
   it('MiniMax 旧默认模型会在 OAuth 重登后迁移到新默认模型', () => {
     const account = buildDeviceOAuthAccount({
@@ -11,6 +16,7 @@ describe('provider-oauth-account-service', () => {
       accountId: 'minimax-default',
       baseUrl: 'https://api.minimax.io/anthropic',
       defaultModel: 'MiniMax-M2.7',
+      clock,
       existingAccount: {
         id: 'minimax-default',
         vendorId: 'minimax-portal',
@@ -33,6 +39,7 @@ describe('provider-oauth-account-service', () => {
       accountId: 'minimax-cn-custom',
       baseUrl: 'https://api.minimaxi.com/anthropic',
       defaultModel: 'MiniMax-M2.7',
+      clock,
       existingAccount: {
         id: 'minimax-cn-custom',
         vendorId: 'minimax-portal-cn',
@@ -55,6 +62,7 @@ describe('provider-oauth-account-service', () => {
       accountId: 'minimax-new',
       baseUrl: 'https://api.minimax.io/anthropic',
       defaultModel: 'MiniMax-M2.7',
+      clock,
     });
 
     expect(account.model).toBe('MiniMax-M2.7');
@@ -65,6 +73,7 @@ describe('provider-oauth-account-service', () => {
       providerType: 'openai',
       accountId: 'openai-main',
       runtimeProviderId: 'openai-codex',
+      clock,
     });
 
     expect(account.model).toBe('gpt-5.4');

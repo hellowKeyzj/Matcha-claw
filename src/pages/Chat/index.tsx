@@ -1,8 +1,6 @@
 /**
  * Chat Page
- * Native React implementation communicating with OpenClaw Gateway
- * via gateway:rpc IPC. Session selector, thinking toggle, and refresh
- * are in the toolbar; messages render with markdown + streaming.
+ * Native React implementation using runtime-host session APIs.
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';

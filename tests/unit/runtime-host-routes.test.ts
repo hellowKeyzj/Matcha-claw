@@ -12,7 +12,7 @@ describe('runtime-host main routes', () => {
     vi.resetAllMocks();
   });
 
-  it('plugins/runtime/restart 由主进程重启 runtime-host，再读取最新 runtime payload 返回', async () => {
+  it('runtime-host/restart 由主进程执行宿主子进程重启，不承载插件业务 payload', async () => {
     const restart = vi.fn(async () => {});
     const request = vi.fn(async () => ({
       status: 200,
@@ -36,13 +36,13 @@ describe('runtime-host main routes', () => {
       },
     }));
 
-    const { handleRuntimeHostRoutes } = await import('../../electron/api/routes/runtime-host');
-    const handled = await handleRuntimeHostRoutes(
+    const { handleRuntimeHostProcessRoutes } = await import('../../electron/api/routes/runtime-host-process');
+    const handled = await handleRuntimeHostProcessRoutes(
       {
         method: 'POST',
       } as IncomingMessage,
       {} as ServerResponse,
-      new URL('http://127.0.0.1:3210/api/plugins/runtime/restart'),
+      new URL('http://127.0.0.1:3210/api/runtime-host/restart'),
       {
         runtimeHost: {
           restart,
@@ -53,12 +53,7 @@ describe('runtime-host main routes', () => {
 
     expect(handled).toBe(true);
     expect(restart).toHaveBeenCalledTimes(1);
-    expect(request).toHaveBeenCalledWith('GET', '/api/plugins/runtime');
-    expect(sendJsonMock).toHaveBeenCalledWith(expect.anything(), 200, expect.objectContaining({
-      success: true,
-      execution: {
-        enabledPluginIds: ['security-core'],
-      },
-    }));
+    expect(request).not.toHaveBeenCalled();
+    expect(sendJsonMock).toHaveBeenCalledWith(expect.anything(), 200, { success: true });
   });
 });

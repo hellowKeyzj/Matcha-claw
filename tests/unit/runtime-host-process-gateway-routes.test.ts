@@ -1,32 +1,38 @@
 import { describe, expect, it, vi } from 'vitest';
-import { handleGatewayRoute } from '../../runtime-host/api/routes/gateway-routes';
+import { gatewayRoutes } from '../../runtime-host/api/routes/gateway-routes';
+import { GatewayService } from '../../runtime-host/application/gateway/service';
+import { DEFAULT_GATEWAY_BASE_METHODS } from '../../runtime-host/application/gateway/gateway-runtime-port';
+import { dispatchRuntimeRouteDefinition } from './helpers/runtime-route';
 
 function createDeps() {
+  const openclawBridge = {
+    gatewayRpc: vi.fn(async () => ({ ok: true })),
+    ensureGatewayReady: vi.fn(async () => undefined),
+    readGatewayConnectionState: vi.fn(async () => ({
+      state: 'connected',
+      portReachable: true,
+      gatewayReady: true,
+      healthSummary: 'healthy',
+      diagnostics: {
+        consecutiveHeartbeatMisses: 0,
+        consecutiveRpcFailures: 0,
+      },
+      updatedAt: 1,
+    })),
+    chatSend: vi.fn(async () => ({ id: 'msg-1' })),
+  };
   return {
-    openclawBridge: {
-      gatewayRpc: vi.fn(async () => ({ ok: true })),
-      ensureGatewayReady: vi.fn(async () => undefined),
-      readGatewayConnectionState: vi.fn(async () => ({
-        state: 'connected',
-        portReachable: true,
-        gatewayReady: true,
-        healthSummary: 'healthy',
-        diagnostics: {
-          consecutiveHeartbeatMisses: 0,
-          consecutiveRpcFailures: 0,
-        },
-        updatedAt: 1,
-      })),
-      chatSend: vi.fn(async () => ({ id: 'msg-1' })),
-    },
+    openclawBridge,
+    gatewayService: new GatewayService({ gateway: openclawBridge }),
   };
 }
 
 describe('runtime-host process gateway routes', () => {
-  it('POST /api/gateway/rpc 通过 openclawBridge.gatewayRpc 转发', async () => {
+  it('POST /api/gateway/rpc 不再作为通用 Gateway 后门处理', async () => {
     const deps = createDeps();
 
-    const result = await handleGatewayRoute(
+    const result = await dispatchRuntimeRouteDefinition(
+      gatewayRoutes,
       'POST',
       '/api/gateway/rpc',
       {
@@ -37,64 +43,15 @@ describe('runtime-host process gateway routes', () => {
       deps,
     );
 
-    expect(deps.openclawBridge.gatewayRpc).toHaveBeenCalledWith(
-      'chat.history',
-      { sessionKey: 'agent:main:main' },
-      9000,
-    );
-    expect(result).toEqual({
-      status: 200,
-      data: {
-        success: true,
-        result: { ok: true },
-      },
-    });
-  });
-
-  it('POST /api/gateway/rpc 缺少 method 时返回 400', async () => {
-    const deps = createDeps();
-
-    const result = await handleGatewayRoute(
-      'POST',
-      '/api/gateway/rpc',
-      { params: {} },
-      deps,
-    );
-
     expect(deps.openclawBridge.gatewayRpc).not.toHaveBeenCalled();
-    expect(result).toEqual({
-      status: 400,
-      data: {
-        success: false,
-        error: 'method is required',
-      },
-    });
-  });
-
-  it('POST /api/gateway/rpc 网关失败时保持 success=false 语义', async () => {
-    const deps = createDeps();
-    deps.openclawBridge.gatewayRpc.mockRejectedValueOnce(new Error('gateway unavailable'));
-
-    const result = await handleGatewayRoute(
-      'POST',
-      '/api/gateway/rpc',
-      { method: 'chat.send', params: {} },
-      deps,
-    );
-
-    expect(result).toEqual({
-      status: 200,
-      data: {
-        success: false,
-        error: 'Error: gateway unavailable',
-      },
-    });
+    expect(result).toBeNull();
   });
 
   it('POST /api/gateway/ready 会显式探测控制面 ready', async () => {
     const deps = createDeps();
 
-    const result = await handleGatewayRoute(
+    const result = await dispatchRuntimeRouteDefinition(
+      gatewayRoutes,
       'POST',
       '/api/gateway/ready',
       { timeoutMs: 8000 },
@@ -106,6 +63,53 @@ describe('runtime-host process gateway routes', () => {
       status: 200,
       data: {
         success: true,
+        requiredMethods: DEFAULT_GATEWAY_BASE_METHODS,
+      },
+    });
+  });
+
+  it('POST /api/gateway/agent-wait 只允许等待 agent.wait', async () => {
+    const deps = createDeps();
+
+    const result = await dispatchRuntimeRouteDefinition(
+      gatewayRoutes,
+      'POST',
+      '/api/gateway/agent-wait',
+      {
+        method: 'agent.wait',
+        params: { runId: 'run-1', timeoutMs: 30000 },
+      },
+      deps,
+    );
+
+    expect(deps.openclawBridge.gatewayRpc).toHaveBeenCalledWith(
+      'agent.wait',
+      { runId: 'run-1', timeoutMs: 30000 },
+      40000,
+    );
+    expect(result).toEqual({
+      status: 200,
+      data: { ok: true },
+    });
+  });
+
+  it('POST /api/gateway/agent-wait 拒绝非 agent.wait 方法', async () => {
+    const deps = createDeps();
+
+    const result = await dispatchRuntimeRouteDefinition(
+      gatewayRoutes,
+      'POST',
+      '/api/gateway/agent-wait',
+      { method: 'chat.history', params: {} },
+      deps,
+    );
+
+    expect(deps.openclawBridge.gatewayRpc).not.toHaveBeenCalled();
+    expect(result).toEqual({
+      status: 400,
+      data: {
+        success: false,
+        error: 'Only agent.wait is allowed',
       },
     });
   });
@@ -113,7 +117,8 @@ describe('runtime-host process gateway routes', () => {
   it('GET /api/gateway/status 返回 transport 真相快照', async () => {
     const deps = createDeps();
 
-    const result = await handleGatewayRoute(
+    const result = await dispatchRuntimeRouteDefinition(
+      gatewayRoutes,
       'GET',
       '/api/gateway/status',
       undefined,

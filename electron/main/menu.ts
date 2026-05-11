@@ -134,11 +134,11 @@ export function createMenu(): void {
           },
         },
         {
-          label: 'Cron Tasks',
+          label: 'Task Center',
           accelerator: 'CmdOrCtrl+5',
           click: () => {
             const win = BrowserWindow.getFocusedWindow();
-            win?.webContents.send('navigate', '/cron');
+            win?.webContents.send('navigate', '/tasks');
           },
         },
         {

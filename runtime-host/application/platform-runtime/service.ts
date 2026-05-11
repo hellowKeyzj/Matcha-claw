@@ -3,11 +3,15 @@ import type {
   RegistryQuery,
   ToolDefinition,
   ToolExecRequest,
+  ToolSource,
 } from '../../shared/platform-runtime-contracts';
-import type { RuntimeHostPlatformFacade } from '../../api/platform/runtime-root';
+import { accepted, badRequest, ok } from '../common/application-response';
+import type { PlatformJobPort } from './platform-jobs';
+import type { RuntimeHostPlatformFacade } from './platform-runtime-port';
 
 interface PlatformServiceDeps {
   readonly platformRuntime: RuntimeHostPlatformFacade;
+  readonly jobs: PlatformJobPort;
 }
 
 function isRecord(value: unknown): value is Record<string, any> {
@@ -52,59 +56,41 @@ export class PlatformService {
     const body = isRecord(payload) ? payload : {};
     const runId = typeof body.runId === 'string' ? body.runId : '';
     if (!runId) {
-      return {
-        status: 400,
-        data: { success: false, error: 'runId is required' },
-      };
+      return badRequest('runId is required');
     }
     await this.deps.platformRuntime.abortRun(runId);
-    return {
-      status: 200,
-      data: { success: true },
-    };
+    return ok({ success: true });
   }
 
   async installNativeTool(payload: unknown) {
     const body = isRecord(payload) ? payload : {};
     if (!isRecord(body.source)) {
-      return {
-        status: 400,
-        data: { success: false, error: 'source is required' },
-      };
+      return badRequest('source is required');
     }
-    return {
-      status: 200,
-      data: {
-        success: true,
-        toolId: await this.deps.platformRuntime.installNativeTool(body.source as never),
-      },
-    };
+    return accepted(this.deps.jobs.submitInstallNativeTool(body.source as ToolSource));
   }
 
-  async reconcileTools() {
-    return {
-      success: true,
-      report: await this.deps.platformRuntime.reconcileNativeTools(),
-    };
+  reconcileTools() {
+    return this.deps.jobs.submitReconcileTools();
   }
 
   async listTools(routeUrl: URL) {
     const includeDisabled = routeUrl.searchParams.get('includeDisabled') === 'true';
-    const refresh = routeUrl.searchParams.get('refresh') !== 'false';
-    if (refresh) {
-      try {
-        const health = await this.deps.platformRuntime.runtimeHealth();
-        if (health.status === 'running') {
-          await this.deps.platformRuntime.reconcileNativeTools();
-        }
-      } catch {
-        // 保持返回当前快照
-      }
-    }
     return {
       success: true,
       tools: await this.deps.platformRuntime.listEffectiveTools({ includeDisabled }),
-      refreshed: refresh,
+    };
+  }
+
+  async executeInstallNativeTool(source: ToolSource) {
+    return {
+      toolId: await this.deps.platformRuntime.installNativeTool(source),
+    };
+  }
+
+  async executeReconcileTools() {
+    return {
+      report: await this.deps.platformRuntime.reconcileNativeTools(),
     };
   }
 
@@ -128,16 +114,10 @@ export class PlatformService {
     const body = isRecord(payload) ? payload : {};
     const toolId = typeof body.toolId === 'string' ? body.toolId : '';
     if (!toolId) {
-      return {
-        status: 400,
-        data: { success: false, error: 'toolId is required' },
-      };
+      return badRequest('toolId is required');
     }
     await this.deps.platformRuntime.setToolEnabled(toolId, body.enabled === true);
-    return {
-      status: 200,
-      data: { success: true },
-    };
+    return ok({ success: true });
   }
 
   async executeTool(payload: unknown) {

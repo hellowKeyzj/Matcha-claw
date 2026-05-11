@@ -1,5 +1,6 @@
 import { PROVIDER_VENDOR_DEFINITIONS } from './provider-registry';
 import { validateApiKeyWithProvider } from './provider-validation';
+import type { RuntimeClockPort, RuntimeHttpClientPort } from '../common/runtime-ports';
 
 function isRecord(value: unknown): value is Record<string, any> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
@@ -10,17 +11,13 @@ function normalizeHeadersRecord(input: unknown): Record<string, string> | undefi
     return undefined;
   }
 
-  const normalized = Object.fromEntries(
-    Object.entries(input)
-      .filter(
-        ([key, value]): value is string =>
-          typeof key === 'string'
-          && key.trim().length > 0
-          && typeof value === 'string'
-          && value.trim().length > 0,
-      )
-      .map(([key, value]) => [key, value.trim()]),
-  );
+  const normalizedEntries: Array<[string, string]> = [];
+  for (const [key, value] of Object.entries(input)) {
+    if (key.trim().length > 0 && typeof value === 'string' && value.trim().length > 0) {
+      normalizedEntries.push([key, value.trim()]);
+    }
+  }
+  const normalized = Object.fromEntries(normalizedEntries);
 
   return Object.keys(normalized).length > 0 ? normalized : undefined;
 }
@@ -33,7 +30,11 @@ function normalizePositiveInteger(value: unknown): number | undefined {
   return normalized > 0 ? normalized : undefined;
 }
 
-export function normalizeProviderAccountLocal(input: unknown, current?: Record<string, any> | null) {
+export function normalizeProviderAccountLocal(
+  input: unknown,
+  current: Record<string, any> | null | undefined,
+  clock: RuntimeClockPort,
+) {
   if (!isRecord(input)) {
     return null;
   }
@@ -46,7 +47,7 @@ export function normalizeProviderAccountLocal(input: unknown, current?: Record<s
   if (!id || !vendorId) {
     return null;
   }
-  const nowIso = new Date().toISOString();
+  const nowIso = clock.nowIso();
   const headers = Object.prototype.hasOwnProperty.call(input, 'headers')
     ? normalizeHeadersRecord(input.headers)
     : normalizeHeadersRecord(current?.headers);
@@ -144,7 +145,7 @@ function getVendorDefaultBaseUrl(vendorId: string): string | undefined {
   return typeof vendor?.defaultBaseUrl === 'string' ? vendor.defaultBaseUrl : undefined;
 }
 
-export async function validateProviderApiKeyLocal(input: unknown) {
+export async function validateProviderApiKeyLocal(input: unknown, httpClient: RuntimeHttpClientPort) {
   if (!isRecord(input)) {
     return { valid: false, error: 'Invalid provider validate payload' };
   }
@@ -170,6 +171,7 @@ export async function validateProviderApiKeyLocal(input: unknown) {
   }
 
   return await validateApiKeyWithProvider(vendorId, apiKey, {
+    httpClient,
     baseUrl,
     apiProtocol,
     ...(headers ? { headers } : {}),

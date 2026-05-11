@@ -1,6 +1,6 @@
-import { access, readFile } from 'node:fs/promises';
-import type { OpenClawBridge } from '../../openclaw-bridge';
 import { buildGatewayChatSendParams } from '../../shared/gateway-chat-send-params';
+import type { RuntimeFileSystemPort } from '../common/runtime-ports';
+import type { GatewayChatPort } from '../gateway/gateway-runtime-port';
 
 const VISION_MIME_TYPES = new Set([
   'image/png',
@@ -23,6 +23,8 @@ export type SendWithMediaInput = {
   }>;
 };
 
+type SendWithMediaItem = NonNullable<SendWithMediaInput['media']>[number];
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 }
@@ -40,7 +42,7 @@ export function normalizeSendWithMediaInput(value: unknown): SendWithMediaInput 
   }
 
   const media = Array.isArray(value.media)
-    ? value.media.filter((item): item is SendWithMediaInput['media'][number] => {
+    ? value.media.filter((item): item is SendWithMediaItem => {
       return isRecord(item)
         && typeof item.filePath === 'string'
         && typeof item.mimeType === 'string'
@@ -57,7 +59,10 @@ export function normalizeSendWithMediaInput(value: unknown): SendWithMediaInput 
   };
 }
 
-async function buildSendWithMediaGatewayParams(input: SendWithMediaInput): Promise<Record<string, unknown>> {
+async function buildSendWithMediaGatewayParams(
+  fileSystem: RuntimeFileSystemPort,
+  input: SendWithMediaInput,
+): Promise<Record<string, unknown>> {
   let message = input.message;
   const imageAttachments: Array<Record<string, string>> = [];
   const fileReferences: string[] = [];
@@ -70,10 +75,12 @@ async function buildSendWithMediaGatewayParams(input: SendWithMediaInput): Promi
       }
 
       try {
-        await access(item.filePath);
-        const fileBuffer = await readFile(item.filePath);
+        if (!(await fileSystem.exists(item.filePath))) {
+          continue;
+        }
+        const fileBuffer = await fileSystem.readBinaryFile(item.filePath);
         imageAttachments.push({
-          content: fileBuffer.toString('base64'),
+          content: Buffer.from(fileBuffer).toString('base64'),
           mimeType: item.mimeType,
           fileName: item.fileName,
         });
@@ -97,13 +104,14 @@ async function buildSendWithMediaGatewayParams(input: SendWithMediaInput): Promi
   });
 }
 
-export async function sendWithMediaViaOpenClawBridge(
-  openclawBridge: Pick<OpenClawBridge, 'chatSend'>,
+export async function sendWithMediaViaGateway(
+  fileSystem: RuntimeFileSystemPort,
+  gateway: GatewayChatPort,
   input: SendWithMediaInput,
 ): Promise<{ success: boolean; result?: unknown; error?: string }> {
   try {
-    const rpcParams = await buildSendWithMediaGatewayParams(input);
-    const result = await openclawBridge.chatSend(rpcParams);
+    const rpcParams = await buildSendWithMediaGatewayParams(fileSystem, input);
+    const result = await gateway.chatSend(rpcParams);
     return {
       success: true,
       result,

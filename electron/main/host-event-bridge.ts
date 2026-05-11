@@ -1,6 +1,5 @@
 import type { BrowserWindow } from 'electron';
 import type { GatewayManager } from '../gateway/manager';
-import type { GatewayStatus } from '../gateway/manager';
 import type { HostEventBus } from '../api/event-bus';
 import type {
   RuntimeHostManager,
@@ -11,9 +10,7 @@ import type {
 import { buildPublicGatewayStatus } from '../gateway/public-status';
 import { browserOAuthManager } from '../services/providers/oauth/browser-oauth-manager';
 import { deviceOAuthManager } from '../services/providers/oauth/device-oauth-manager';
-import { whatsAppLoginManager } from '../services/channels/whatsapp-login-manager';
-import { weixinLoginManager } from '../services/channels/weixin-login-manager';
-import { getE2EGatewayStatus } from './ipc/e2e-chat';
+import { getE2EGatewayStatus } from './e2e-fixture-loader';
 
 type HostEventName =
   | 'gateway:status'
@@ -25,16 +22,11 @@ type HostEventName =
   | 'runtime-host:status'
   | 'runtime-host:error'
   | 'runtime-host:restart'
+  | 'openclaw:cli-installed'
   | 'oauth:code'
   | 'oauth:start'
   | 'oauth:success'
-  | 'oauth:error'
-  | 'channel:whatsapp-qr'
-  | 'channel:whatsapp-success'
-  | 'channel:whatsapp-error'
-  | 'channel:weixin-qr'
-  | 'channel:weixin-success'
-  | 'channel:weixin-error';
+  | 'oauth:error';
 
 type EmitHostEvent = (eventName: HostEventName, payload: unknown) => void;
 
@@ -50,7 +42,6 @@ type RuntimeHostStatusPayload = {
   hostLifecycle: RuntimeHostManagerState['lifecycle'];
   runtimeLifecycle: RuntimeHostManagerState['runtimeLifecycle'];
   activePluginCount: number;
-  enabledPluginIds: readonly string[];
   pid?: number;
   error?: string;
   updatedAt: number;
@@ -61,7 +52,7 @@ function asRuntimeHostStatus(
   health: RuntimeHostManagerHealth,
 ): RuntimeHostStatusPayload {
   const stopped = state.lifecycle === 'stopped' || state.runtimeLifecycle === 'stopped';
-  const starting = state.lifecycle === 'starting' || state.runtimeLifecycle === 'booting';
+  const starting = state.lifecycle === 'starting' || state.runtimeLifecycle === 'starting';
   const hardError = state.lifecycle === 'error' || state.runtimeLifecycle === 'error';
   const running = state.lifecycle === 'running' && state.runtimeLifecycle === 'running' && health.ok;
   const degraded = state.runtimeLifecycle === 'running' && !health.ok;
@@ -85,7 +76,6 @@ function asRuntimeHostStatus(
     hostLifecycle: state.lifecycle,
     runtimeLifecycle: state.runtimeLifecycle,
     activePluginCount: state.activePluginCount,
-    enabledPluginIds: state.enabledPluginIds,
     ...(typeof state.pid === 'number' ? { pid: state.pid } : {}),
     ...(typeof mergedError === 'string' && mergedError.trim() ? { error: mergedError } : {}),
     updatedAt: Date.now(),
@@ -112,14 +102,13 @@ export function registerHostEventBridge(deps: {
     emitHostEvent(deps.hostEventBus, deps.getMainWindow(), eventName, payload);
   };
 
-  let previousGatewayProcessState: GatewayStatus['processState'] = deps.gatewayManager.getStatus().processState;
   let previousRuntimeHostStatus: RuntimeHostLifecycleStatus | null = null;
   let previousRuntimeHostPid: number | undefined;
   let previousRuntimeHostError: string | undefined;
   let runtimeHostPollingBusy = false;
 
   const publishGatewaySnapshot = async () => {
-    const e2eStatus = getE2EGatewayStatus();
+    const e2eStatus = await getE2EGatewayStatus<ReturnType<typeof buildPublicGatewayStatus>>();
     if (e2eStatus) {
       emit('gateway:status', e2eStatus);
       return;
@@ -182,13 +171,8 @@ export function registerHostEventBridge(deps: {
     }
   };
 
-  deps.gatewayManager.on('status', (status: GatewayStatus) => {
+  deps.gatewayManager.on('status', () => {
     void publishGatewaySnapshot();
-    const transitionedToRunning = status.processState === 'running' && previousGatewayProcessState !== 'running';
-    previousGatewayProcessState = status.processState;
-    if (transitionedToRunning) {
-      void deps.runtimeHostManager.syncSecurityPolicyToGatewayIfRunning();
-    }
   });
 
   deps.gatewayManager.on('error', (error) => {
@@ -247,30 +231,6 @@ export function registerHostEventBridge(deps: {
 
   browserOAuthManager.on('oauth:error', (error) => {
     emit('oauth:error', error);
-  });
-
-  whatsAppLoginManager.on('qr', (data) => {
-    emit('channel:whatsapp-qr', data);
-  });
-
-  whatsAppLoginManager.on('success', (data) => {
-    emit('channel:whatsapp-success', data);
-  });
-
-  whatsAppLoginManager.on('error', (error) => {
-    emit('channel:whatsapp-error', error);
-  });
-
-  weixinLoginManager.on('qr', (data) => {
-    emit('channel:weixin-qr', data);
-  });
-
-  weixinLoginManager.on('success', (data) => {
-    emit('channel:weixin-success', data);
-  });
-
-  weixinLoginManager.on('error', (error) => {
-    emit('channel:weixin-error', error);
   });
 
   void publishGatewaySnapshot();

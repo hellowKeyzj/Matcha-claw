@@ -4,8 +4,9 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   extractSessionIdFromTranscriptFileName,
-  getRecentTokenUsageHistory,
+  TokenUsageHistoryRepository,
 } from '../../runtime-host/application/usage/token-usage-history';
+import { createTestRuntimeFileSystem } from './helpers/runtime-file-system';
 
 describe('token usage history scan', () => {
   let configDir = '';
@@ -53,9 +54,18 @@ describe('token usage history scan', () => {
       'utf8',
     );
 
-    const entries = await getRecentTokenUsageHistory({
-      openclawConfigDir: configDir,
+    const repository = new TokenUsageHistoryRepository({
+      configRepository: {
+        getConfigDir: () => configDir,
+        read: async () => ({}),
+        write: async () => {},
+        update: async (mutate) => await mutate({}),
+        getConfigFilePath: () => join(configDir, 'openclaw.json'),
+        getOpenClawDirPath: () => '',
+      },
+      fileSystem: createTestRuntimeFileSystem(),
     });
+    const entries = await repository.scanRecent();
 
     expect(entries).toEqual(expect.arrayContaining([
       expect.objectContaining({
@@ -65,5 +75,54 @@ describe('token usage history scan', () => {
         totalTokens: 17756,
       }),
     ]));
+  });
+
+  it('recent 只读取缓存快照，refreshCache 才扫描磁盘', async () => {
+    await writeFile(join(configDir, 'openclaw.json'), JSON.stringify({
+      agents: {
+        list: [{ id: 'main', name: 'Main' }],
+      },
+    }, null, 2), 'utf8');
+    const sessionsDir = join(configDir, 'agents', 'main', 'sessions');
+    await mkdir(sessionsDir, { recursive: true });
+    await writeFile(
+      join(sessionsDir, 'session-1.jsonl'),
+      `${JSON.stringify({
+        type: 'message',
+        timestamp: '2026-03-12T12:19:00.000Z',
+        message: {
+          role: 'assistant',
+          model: 'gpt-5.2-2025-12-11',
+          provider: 'openai',
+          usage: {
+            input: 1,
+            output: 2,
+            total: 3,
+          },
+        },
+      })}\n`,
+      'utf8',
+    );
+
+    const repository = new TokenUsageHistoryRepository({
+      configRepository: {
+        getConfigDir: () => configDir,
+        read: async () => ({}),
+        write: async () => {},
+        update: async (mutate) => await mutate({}),
+        getConfigFilePath: () => join(configDir, 'openclaw.json'),
+        getOpenClawDirPath: () => '',
+      },
+      fileSystem: createTestRuntimeFileSystem(),
+    });
+
+    expect(repository.recent()).toEqual([]);
+    await repository.refreshCache();
+    expect(repository.recent()).toEqual([
+      expect.objectContaining({
+        sessionId: 'session-1',
+        totalTokens: 3,
+      }),
+    ]);
   });
 });

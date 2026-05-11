@@ -1,5 +1,4 @@
-import { hostSessionAbortRuntime } from '@/lib/host-api';
-import { useGatewayStore } from '../gateway';
+import { hostSessionAbort } from '@/lib/host-api';
 import { reduceSessionRuntime } from './runtime-state-reducer';
 import { UNKNOWN_ABORTED_RUN_MARKER, type StoreSessionRunCache } from './session-run-cache';
 import { getSessionRuntime, patchSessionRecord, patchSessionSnapshot } from './store-state-helpers';
@@ -55,23 +54,16 @@ export async function executeStoreAbortRun(params: ExecuteStoreAbortRunParams): 
 
   onBeginMutating();
   try {
-    for (const approval of pendingApprovals) {
-      await useGatewayStore.getState().rpc(
-        'exec.approval.resolve',
-        { id: approval.id, decision: 'deny' },
-      );
-    }
     set((state) => ({
       pendingApprovalsBySession: {
         ...state.pendingApprovalsBySession,
         [sessionKey]: [],
       },
     }));
-    await useGatewayStore.getState().rpc(
-      'chat.abort',
-      { sessionKey },
-    );
-    const abortRuntime = await hostSessionAbortRuntime({ sessionKey });
+    const abortRuntime = await hostSessionAbort({
+      sessionKey,
+      approvalIds: pendingApprovals.map((approval) => approval.id),
+    });
     set((state) => ({
       loadedSessions: patchSessionSnapshot(state, sessionKey, abortRuntime.snapshot),
     }));

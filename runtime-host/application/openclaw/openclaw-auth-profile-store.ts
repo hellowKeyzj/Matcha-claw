@@ -1,15 +1,11 @@
 import {
   type AuthProfileEntry,
   type AuthProfilesStore,
-  discoverAgentIds,
-  readAuthProfiles,
+  type OpenClawAuthRepository,
   type OAuthProfileEntry,
-  writeAuthProfiles,
 } from './openclaw-auth-store';
 import { isOAuthProviderType } from '../providers/provider-runtime-rules';
-import { createRuntimeLogger } from '../../shared/logger';
-
-const logger = createRuntimeLogger('openclaw-auth-profile-store');
+import type { RuntimeHostLogger } from '../../shared/logger';
 
 export function removeProfilesForProvider(store: AuthProfilesStore, provider: string): boolean {
   const removedProfileIds = new Set<string>();
@@ -88,60 +84,136 @@ export function removeProfileFromStore(
   return changed;
 }
 
-export async function saveOAuthTokenToOpenClaw(
-  provider: string,
-  token: { access: string; refresh: string; expires: number; email?: string; projectId?: string },
-  agentId?: string,
-): Promise<void> {
-  const agentIds = agentId ? [agentId] : await discoverAgentIds();
-  if (agentIds.length === 0) {
-    agentIds.push('main');
+export class OpenClawAuthProfileService {
+  constructor(
+    private readonly repository: Pick<OpenClawAuthRepository, 'discoverAgentIds' | 'readAuthProfiles' | 'writeAuthProfiles'>,
+    private readonly logger: RuntimeHostLogger,
+  ) {}
+
+  async saveOAuthToken(
+    provider: string,
+    token: { access: string; refresh: string; expires: number; email?: string; projectId?: string },
+    agentId?: string,
+  ): Promise<void> {
+    const agentIds = await this.resolveAgentIds(agentId);
+
+    for (const id of agentIds) {
+      const store = await this.repository.readAuthProfiles(id);
+      const profileId = `${provider}:default`;
+
+      store.profiles[profileId] = {
+        type: 'oauth',
+        provider,
+        access: token.access,
+        refresh: token.refresh,
+        expires: token.expires,
+        email: token.email,
+        projectId: token.projectId,
+      };
+
+      if (!store.order) store.order = {};
+      if (!store.order[provider]) store.order[provider] = [];
+      if (!store.order[provider].includes(profileId)) {
+        store.order[provider].push(profileId);
+      }
+
+      if (!store.lastGood) store.lastGood = {};
+      store.lastGood[provider] = profileId;
+
+      await this.repository.writeAuthProfiles(store, id);
+    }
+    this.logger.info(`Saved OAuth token for provider "${provider}" to OpenClaw auth-profiles (agents: ${agentIds.join(', ')})`);
   }
 
-  for (const id of agentIds) {
-    const store = await readAuthProfiles(id);
-    const profileId = `${provider}:default`;
+  async getOAuthToken(
+    provider: string,
+    agentId = 'main',
+  ): Promise<string | null> {
+    try {
+      const store = await this.repository.readAuthProfiles(agentId);
+      const profileId = `${provider}:default`;
+      const profile = store.profiles[profileId];
 
-    store.profiles[profileId] = {
-      type: 'oauth',
-      provider,
-      access: token.access,
-      refresh: token.refresh,
-      expires: token.expires,
-      email: token.email,
-      projectId: token.projectId,
-    };
+      if (profile && profile.type === 'oauth' && 'access' in profile) {
+        return (profile as OAuthProfileEntry).access;
+      }
+    } catch (error) {
+      this.logger.warn(`[getOAuthToken] Failed to read token for ${provider}:`, error);
+    }
+    return null;
+  }
 
-    if (!store.order) store.order = {};
-    if (!store.order[provider]) store.order[provider] = [];
-    if (!store.order[provider].includes(profileId)) {
-      store.order[provider].push(profileId);
+  async getProviderApiKey(
+    provider: string,
+    agentId?: string,
+  ): Promise<string | null> {
+    const agentIds = await this.resolveAgentIds(agentId);
+
+    for (const id of agentIds) {
+      const store = await this.repository.readAuthProfiles(id);
+      const apiKey = getApiKeyFromAuthProfilesStore(store, provider);
+      if (apiKey) {
+        return apiKey;
+      }
     }
 
-    if (!store.lastGood) store.lastGood = {};
-    store.lastGood[provider] = profileId;
-
-    await writeAuthProfiles(store, id);
+    return null;
   }
-  logger.info(`Saved OAuth token for provider "${provider}" to OpenClaw auth-profiles (agents: ${agentIds.join(', ')})`);
-}
 
-export async function getOAuthTokenFromOpenClaw(
-  provider: string,
-  agentId = 'main',
-): Promise<string | null> {
-  try {
-    const store = await readAuthProfiles(agentId);
-    const profileId = `${provider}:default`;
-    const profile = store.profiles[profileId];
-
-    if (profile && profile.type === 'oauth' && 'access' in profile) {
-      return (profile as OAuthProfileEntry).access;
+  async saveProviderKey(
+    provider: string,
+    apiKey: string,
+    agentId?: string,
+  ): Promise<void> {
+    if (isOAuthProviderType(provider) && !apiKey) {
+      this.logger.info(`Skipping auth-profiles write for OAuth provider "${provider}" (no API key provided, using OAuth)`);
+      return;
     }
-  } catch (error) {
-    logger.warn(`[getOAuthToken] Failed to read token for ${provider}:`, error);
+
+    const agentIds = await this.resolveAgentIds(agentId);
+
+    for (const id of agentIds) {
+      const store = await this.repository.readAuthProfiles(id);
+      const profileId = `${provider}:default`;
+
+      store.profiles[profileId] = { type: 'api_key', provider, key: apiKey };
+
+      if (!store.order) store.order = {};
+      if (!store.order[provider]) store.order[provider] = [];
+      if (!store.order[provider].includes(profileId)) {
+        store.order[provider].push(profileId);
+      }
+
+      if (!store.lastGood) store.lastGood = {};
+      store.lastGood[provider] = profileId;
+
+      await this.repository.writeAuthProfiles(store, id);
+    }
+    this.logger.info(`Saved API key for provider "${provider}" to OpenClaw auth-profiles (agents: ${agentIds.join(', ')})`);
   }
-  return null;
+
+  async removeProviderKey(
+    provider: string,
+    agentId?: string,
+  ): Promise<void> {
+    const agentIds = await this.resolveAgentIds(agentId);
+
+    for (const id of agentIds) {
+      const store = await this.repository.readAuthProfiles(id);
+      if (removeProfileFromStore(store, `${provider}:default`, 'api_key')) {
+        await this.repository.writeAuthProfiles(store, id);
+      }
+    }
+    this.logger.info(`Removed API key for provider "${provider}" from OpenClaw auth-profiles (agents: ${agentIds.join(', ')})`);
+  }
+
+  private async resolveAgentIds(agentId?: string): Promise<string[]> {
+    const agentIds = agentId ? [agentId] : await this.repository.discoverAgentIds();
+    if (agentIds.length === 0) {
+      agentIds.push('main');
+    }
+    return agentIds;
+  }
 }
 
 function getApiKeyFromAuthProfilesStore(
@@ -168,77 +240,4 @@ function getApiKeyFromAuthProfilesStore(
   }
 
   return null;
-}
-
-export async function getProviderApiKeyFromOpenClaw(
-  provider: string,
-  agentId?: string,
-): Promise<string | null> {
-  const agentIds = agentId ? [agentId] : await discoverAgentIds();
-  if (agentIds.length === 0) {
-    agentIds.push('main');
-  }
-
-  for (const id of agentIds) {
-    const store = await readAuthProfiles(id);
-    const apiKey = getApiKeyFromAuthProfilesStore(store, provider);
-    if (apiKey) {
-      return apiKey;
-    }
-  }
-
-  return null;
-}
-
-export async function saveProviderKeyToOpenClaw(
-  provider: string,
-  apiKey: string,
-  agentId?: string,
-): Promise<void> {
-  if (isOAuthProviderType(provider) && !apiKey) {
-    logger.info(`Skipping auth-profiles write for OAuth provider "${provider}" (no API key provided, using OAuth)`);
-    return;
-  }
-
-  const agentIds = agentId ? [agentId] : await discoverAgentIds();
-  if (agentIds.length === 0) {
-    agentIds.push('main');
-  }
-
-  for (const id of agentIds) {
-    const store = await readAuthProfiles(id);
-    const profileId = `${provider}:default`;
-
-    store.profiles[profileId] = { type: 'api_key', provider, key: apiKey };
-
-    if (!store.order) store.order = {};
-    if (!store.order[provider]) store.order[provider] = [];
-    if (!store.order[provider].includes(profileId)) {
-      store.order[provider].push(profileId);
-    }
-
-    if (!store.lastGood) store.lastGood = {};
-    store.lastGood[provider] = profileId;
-
-    await writeAuthProfiles(store, id);
-  }
-  logger.info(`Saved API key for provider "${provider}" to OpenClaw auth-profiles (agents: ${agentIds.join(', ')})`);
-}
-
-export async function removeProviderKeyFromOpenClaw(
-  provider: string,
-  agentId?: string,
-): Promise<void> {
-  const agentIds = agentId ? [agentId] : await discoverAgentIds();
-  if (agentIds.length === 0) {
-    agentIds.push('main');
-  }
-
-  for (const id of agentIds) {
-    const store = await readAuthProfiles(id);
-    if (removeProfileFromStore(store, `${provider}:default`, 'api_key')) {
-      await writeAuthProfiles(store, id);
-    }
-  }
-  logger.info(`Removed API key for provider "${provider}" from OpenClaw auth-profiles (agents: ${agentIds.join(', ')})`);
 }

@@ -1,84 +1,22 @@
-import type { ParentShellAction, ParentTransportUpstreamPayload } from '../dispatch/parent-transport';
-import { LicenseService } from '../../application/license/service';
-
-interface LocalDispatchResponse {
-  status: number;
-  data: unknown;
-}
+import { routeResponder, type ApplicationResponse, type RuntimeRouteDefinition } from './route-utils';
 
 interface LicenseRouteDeps {
-  requestParentShellAction: (action: ParentShellAction, payload?: unknown) => Promise<ParentTransportUpstreamPayload>;
-  mapParentTransportResponse: (upstream: ParentTransportUpstreamPayload) => LocalDispatchResponse;
+  licenseService: LicenseRouteService;
 }
 
-export async function handleLicenseRoute(
-  method: string,
-  routePath: string,
-  payload: unknown,
-  deps: LicenseRouteDeps,
-): Promise<LocalDispatchResponse | null> {
-  if (!routePath.startsWith('/api/license/')) {
-    return null;
-  }
-  const service = new LicenseService({
-    requestParentShellAction: deps.requestParentShellAction,
-    mapParentTransportResponse: deps.mapParentTransportResponse,
-  });
-
-  if (method === 'GET' && routePath === '/api/license/gate') {
-    try {
-      return await service.gate();
-    } catch (error) {
-      return {
-        status: 500,
-        data: { success: false, error: String(error) },
-      };
-    }
-  }
-
-  if (method === 'GET' && routePath === '/api/license/stored-key') {
-    try {
-      return await service.storedKey();
-    } catch (error) {
-      return {
-        status: 500,
-        data: { success: false, error: String(error) },
-      };
-    }
-  }
-
-  if (method === 'POST' && routePath === '/api/license/validate') {
-    try {
-      return await service.validate(payload);
-    } catch (error) {
-      return {
-        status: 500,
-        data: { success: false, error: String(error) },
-      };
-    }
-  }
-
-  if (method === 'POST' && routePath === '/api/license/revalidate') {
-    try {
-      return await service.revalidate();
-    } catch (error) {
-      return {
-        status: 500,
-        data: { success: false, error: String(error) },
-      };
-    }
-  }
-
-  if (method === 'POST' && routePath === '/api/license/clear') {
-    try {
-      return await service.clear();
-    } catch (error) {
-      return {
-        status: 500,
-        data: { success: false, error: String(error) },
-      };
-    }
-  }
-
-  return null;
+interface LicenseRouteService {
+  gate(): Promise<ApplicationResponse>;
+  storedKey(): Promise<ApplicationResponse>;
+  validate(payload: unknown): Promise<ApplicationResponse>;
+  revalidate(): Promise<ApplicationResponse>;
+  clear(): Promise<ApplicationResponse>;
 }
+
+export const licenseRoutes: readonly RuntimeRouteDefinition<LicenseRouteDeps>[] = [
+  { method: 'GET', path: '/api/license/gate', handle: (_context, deps) => routeResponder.result(() => deps.licenseService.gate()) },
+  { method: 'GET', path: '/api/license/stored-key', handle: (_context, deps) => routeResponder.result(() => deps.licenseService.storedKey()) },
+  { method: 'POST', path: '/api/license/validate', handle: (context, deps) => routeResponder.result(() => deps.licenseService.validate(context.payload)) },
+  { method: 'POST', path: '/api/license/revalidate', handle: (_context, deps) => routeResponder.result(() => deps.licenseService.revalidate()) },
+  { method: 'POST', path: '/api/license/clear', handle: (_context, deps) => routeResponder.result(() => deps.licenseService.clear()) },
+] as const;
+

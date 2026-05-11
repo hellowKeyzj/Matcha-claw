@@ -60,6 +60,10 @@ export interface AgentsListResult {
   defaultId?: string;
   mainKey?: string;
   scope?: string;
+  ready?: boolean;
+  refreshing?: boolean;
+  updatedAt?: number | null;
+  error?: string | null;
 }
 
 export interface ModelCatalogEntry {
@@ -101,6 +105,10 @@ export interface ConfigGetResult {
   baseHash?: string;
   hash?: string;
   path?: string;
+  ready?: boolean;
+  refreshing?: boolean;
+  updatedAt?: number | null;
+  error?: string | null;
   config: {
     agents?: {
       defaults?: {

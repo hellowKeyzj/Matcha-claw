@@ -1,58 +1,38 @@
-import type { OpenClawBridge } from '../../openclaw-bridge';
 import {
   normalizeSendWithMediaInput,
-  sendWithMediaViaOpenClawBridge,
+  sendWithMediaViaGateway,
 } from '../chat/send-media';
+import {
+  badRequest,
+  ok,
+  serverError,
+} from '../common/application-response';
+import type { RuntimeFileSystemPort } from '../common/runtime-ports';
+import {
+  DEFAULT_GATEWAY_BASE_METHODS,
+  normalizeGatewayMethods,
+  type GatewayChatPort,
+  type GatewayConnectionPort,
+  type GatewayRpcPort,
+} from './gateway-runtime-port';
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 }
 
 export interface GatewayServiceDeps {
-  readonly openclawBridge: Pick<OpenClawBridge, 'chatSend' | 'gatewayRpc' | 'ensureGatewayReady' | 'readGatewayConnectionState'>;
+  readonly gateway: GatewayChatPort & Pick<GatewayRpcPort, 'gatewayRpc'> & Pick<GatewayConnectionPort, 'ensureGatewayReady' | 'inspectGatewayMethodReadiness' | 'readGatewayConnectionState'>;
+  readonly fileSystem: RuntimeFileSystemPort;
 }
 
 export class GatewayService {
   constructor(private readonly deps: GatewayServiceDeps) {}
 
   async status() {
-    return {
-      status: 200,
-      data: {
-        success: true,
-        status: await this.deps.openclawBridge.readGatewayConnectionState(),
-      },
-    };
-  }
-
-  async rpc(payload: unknown) {
-    const body = isRecord(payload) ? payload : {};
-    const rpcMethod = typeof body.method === 'string' ? body.method.trim() : '';
-    if (!rpcMethod) {
-      return {
-        status: 400,
-        data: { success: false, error: 'method is required' },
-      };
-    }
-    try {
-      const timeoutMs = typeof body.timeoutMs === 'number' && body.timeoutMs > 0
-        ? body.timeoutMs
-        : undefined;
-      const result = await this.deps.openclawBridge.gatewayRpc(
-        rpcMethod,
-        body.params,
-        timeoutMs,
-      );
-      return {
-        status: 200,
-        data: { success: true, result },
-      };
-    } catch (error) {
-      return {
-        status: 200,
-        data: { success: false, error: String(error) },
-      };
-    }
+    return ok({
+      success: true,
+      status: await this.deps.gateway.readGatewayConnectionState(),
+    });
   }
 
   async ready(payload: unknown) {
@@ -60,38 +40,55 @@ export class GatewayService {
     const timeoutMs = typeof body.timeoutMs === 'number' && body.timeoutMs > 0
       ? body.timeoutMs
       : undefined;
+    const requiredMethods = normalizeGatewayMethods(body.requiredMethods);
     try {
-      await this.deps.openclawBridge.ensureGatewayReady(timeoutMs);
-      return {
-        status: 200,
-        data: { success: true },
-      };
+      if (requiredMethods.length > 0) {
+        const readiness = await this.deps.gateway.inspectGatewayMethodReadiness(requiredMethods, timeoutMs);
+        if (!readiness.ready) {
+          return ok({
+            success: false,
+            code: 'GATEWAY_METHODS_UNAVAILABLE',
+            missingMethods: readiness.missingMethods,
+          });
+        }
+      } else {
+        await this.deps.gateway.ensureGatewayReady(timeoutMs);
+      }
+      return ok({
+        success: true,
+        requiredMethods: requiredMethods.length > 0 ? requiredMethods : DEFAULT_GATEWAY_BASE_METHODS,
+      });
     } catch (error) {
-      return {
-        status: 200,
-        data: { success: false, error: String(error) },
-      };
+      return ok({ success: false, error: String(error) });
     }
   }
 
   async sendMedia(payload: unknown) {
     const input = normalizeSendWithMediaInput(payload);
     if (!input) {
-      return {
-        status: 400,
-        data: { success: false, error: 'Invalid send-with-media payload' },
-      };
+      return badRequest('Invalid send-with-media payload');
     }
-    const result = await sendWithMediaViaOpenClawBridge(this.deps.openclawBridge, input);
+    const result = await sendWithMediaViaGateway(this.deps.fileSystem, this.deps.gateway, input);
     if (!result.success) {
-      return {
-        status: 500,
-        data: { success: false, error: result.error ?? 'Send-with-media failed' },
-      };
+      return serverError(result.error ?? 'Send-with-media failed');
     }
-    return {
-      status: 200,
-      data: { success: true, result: result.result },
-    };
+    return ok({ success: true, result: result.result });
+  }
+
+  async agentWait(payload: unknown) {
+    const body = payload && typeof payload === 'object' && !Array.isArray(payload)
+      ? payload as Record<string, unknown>
+      : {};
+    const method = typeof body.method === 'string' ? body.method.trim() : '';
+    if (method !== 'agent.wait') {
+      return badRequest('Only agent.wait is allowed');
+    }
+    const params = body.params && typeof body.params === 'object' && !Array.isArray(body.params)
+      ? body.params as Record<string, unknown>
+      : {};
+    const timeoutMs = typeof params.timeoutMs === 'number' && Number.isFinite(params.timeoutMs)
+      ? Math.max(1000, Math.floor(params.timeoutMs)) + 10000
+      : 40000;
+    return ok(await this.deps.gateway.gatewayRpc('agent.wait', params, timeoutMs));
   }
 }

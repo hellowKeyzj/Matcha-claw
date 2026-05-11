@@ -3,9 +3,8 @@
  * Manages skill/plugin state
  */
 import { create } from 'zustand';
-import { hostApiFetch } from '@/lib/host-api';
+import { hostApiFetch, waitForRuntimeJobResult, type RuntimeJobSubmission } from '@/lib/host-api';
 import { AppError, normalizeAppError } from '@/lib/error-model';
-import { useGatewayStore } from './gateway';
 import type { Skill, MarketplaceSkill, SkillMissingRequirements } from '../types/skill';
 
 type GatewaySkillMissing = {
@@ -38,6 +37,10 @@ type GatewaySkillStatus = {
 
 type GatewaySkillsStatusResult = {
   skills?: GatewaySkillStatus[];
+  ready?: boolean;
+  refreshing?: boolean;
+  updatedAt?: number | null;
+  error?: string | null;
 };
 
 type MarketplaceSearchResult = {
@@ -55,6 +58,7 @@ type ClawHubListResult = {
 
 const MARKETPLACE_SEARCH_CACHE_TTL_MS = 2500;
 const SKILLS_FETCH_MIN_INTERVAL_MS = 30000;
+const SKILLS_SNAPSHOT_NOT_READY_RETRY_MS = 1200;
 const marketplaceSearchCache = new Map<string, {
   timestamp: number;
   results: MarketplaceSkill[];
@@ -62,6 +66,24 @@ const marketplaceSearchCache = new Map<string, {
 const inflightMarketplaceSearch = new Map<string, Promise<MarketplaceSearchResult>>();
 let inflightSkillsFetch: Promise<void> | null = null;
 let lastSkillsFetchAt = 0;
+let skillsSnapshotRetryTimer: ReturnType<typeof setTimeout> | null = null;
+
+function clearSkillsSnapshotRetry(): void {
+  if (skillsSnapshotRetryTimer) {
+    clearTimeout(skillsSnapshotRetryTimer);
+    skillsSnapshotRetryTimer = null;
+  }
+}
+
+function scheduleSkillsSnapshotRetry(fetchSkills: () => Promise<void>): void {
+  if (skillsSnapshotRetryTimer) {
+    return;
+  }
+  skillsSnapshotRetryTimer = setTimeout(() => {
+    skillsSnapshotRetryTimer = null;
+    void fetchSkills();
+  }, SKILLS_SNAPSHOT_NOT_READY_RETRY_MS);
+}
 
 function normalizeMissingRequirements(missing?: GatewaySkillMissing): SkillMissingRequirements | undefined {
   if (!missing) {
@@ -205,7 +227,7 @@ export const useSkillsStore = create<SkillsState>((set, get) => ({
 
     inflightSkillsFetch = (async () => {
       try {
-        const gatewayPromise = useGatewayStore.getState().rpc<GatewaySkillsStatusResult>('skills.status');
+        const gatewayPromise = hostApiFetch<GatewaySkillsStatusResult>('/api/skills/status');
         const configPromise = hostApiFetch<Record<string, { apiKey?: string; env?: Record<string, string> }>>('/api/skills/configs');
         const clawhubListPromise = hostApiFetch<{ success: boolean; results?: ClawHubListResult[] }>('/api/clawhub/list')
           .catch(() => ({ success: false, results: [] }));
@@ -218,6 +240,20 @@ export const useSkillsStore = create<SkillsState>((set, get) => ({
 
         let combinedSkills: Skill[] = [];
         const currentSkills = get().skills;
+
+        if (gatewayData.ready === false) {
+          set((state) => ({
+            ...state,
+            snapshotReady: state.snapshotReady,
+            initialLoading: !state.snapshotReady,
+            refreshing: true,
+            error: gatewayData.error ?? null,
+          }));
+          scheduleSkillsSnapshotRetry(() => get().fetchSkills({ force: true, silent: true }));
+          return;
+        }
+
+        clearSkillsSnapshotRetry();
 
         // Map gateway skills info
         if (gatewayData.skills) {
@@ -366,7 +402,7 @@ export const useSkillsStore = create<SkillsState>((set, get) => ({
       };
     });
     try {
-      const result = await hostApiFetch<{ success: boolean; error?: string }>('/api/clawhub/install', {
+      const result = await hostApiFetch<RuntimeJobSubmission<{ success: boolean }> | { success: false; error?: string }>('/api/clawhub/install', {
         method: 'POST',
         body: JSON.stringify({ slug, version }),
       });
@@ -378,6 +414,7 @@ export const useSkillsStore = create<SkillsState>((set, get) => ({
         const errorKey = mapErrorCodeToSkillErrorKey(appError.code, 'install');
         throw new Error(errorKey ?? appError.message);
       }
+      await waitForRuntimeJobResult<{ success: boolean }>(result.job.id);
       // Refresh skills after install
       await get().fetchSkills({ force: true });
     } catch (error) {
@@ -407,13 +444,14 @@ export const useSkillsStore = create<SkillsState>((set, get) => ({
       };
     });
     try {
-      const result = await hostApiFetch<{ success: boolean; error?: string }>('/api/clawhub/uninstall', {
+      const result = await hostApiFetch<RuntimeJobSubmission<{ success: boolean }>>('/api/clawhub/uninstall', {
         method: 'POST',
         body: JSON.stringify({ slug }),
       });
       if (!result.success) {
-        throw new Error(result.error || 'Uninstall failed');
+        throw new Error('Uninstall failed');
       }
+      await waitForRuntimeJobResult<{ success: boolean }>(result.job.id);
       // Refresh skills after uninstall
       await get().fetchSkills({ force: true });
     } catch (error) {
@@ -444,13 +482,11 @@ export const useSkillsStore = create<SkillsState>((set, get) => ({
     });
 
     try {
-      const result = await hostApiFetch<{ success: boolean; error?: string }>('/api/skills/state', {
+      const result = await hostApiFetch<RuntimeJobSubmission<{ success: boolean; error?: string }>>('/api/skills/state', {
         method: 'PUT',
         body: JSON.stringify({ skillKey: skillId, enabled: true }),
       });
-      if (!result.success) {
-        throw new Error(result.error || 'Failed to enable skill');
-      }
+      await waitForRuntimeJobResult<{ success: boolean; error?: string }>(result.job.id);
       updateSkill(skillId, { enabled: true });
     } catch (error) {
       console.error('Failed to enable skill:', error);
@@ -482,13 +518,11 @@ export const useSkillsStore = create<SkillsState>((set, get) => ({
     });
 
     try {
-      const result = await hostApiFetch<{ success: boolean; error?: string }>('/api/skills/state', {
+      const result = await hostApiFetch<RuntimeJobSubmission<{ success: boolean; error?: string }>>('/api/skills/state', {
         method: 'PUT',
         body: JSON.stringify({ skillKey: skillId, enabled: false }),
       });
-      if (!result.success) {
-        throw new Error(result.error || 'Failed to disable skill');
-      }
+      await waitForRuntimeJobResult<{ success: boolean; error?: string }>(result.job.id);
       updateSkill(skillId, { enabled: false });
     } catch (error) {
       console.error('Failed to disable skill:', error);

@@ -1,8 +1,33 @@
 import { EventEmitter } from 'node:events';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import {
+  NodeGatewayDeviceCrypto,
+  NodeGatewayDeviceIdentityRepository,
+} from '../../runtime-host/composition/gateway-device-identity-adapters';
+import { createTestRuntimeClock } from './helpers/runtime-clock';
+import { createTestRuntimeIdGenerator } from './helpers/runtime-id-generator';
+import { createTestRuntimeScheduler } from './helpers/runtime-scheduler';
+import { createTestRuntimeTcpProbe } from './helpers/runtime-tcp-probe';
 
 const originalGatewayPort = process.env.MATCHACLAW_RUNTIME_HOST_GATEWAY_PORT;
-const originalGatewayToken = process.env.MATCHACLAW_RUNTIME_HOST_GATEWAY_TOKEN;
+let gatewayToken = '';
+
+function createTestGatewayClient(createGatewayClient: typeof import('../../runtime-host/openclaw-bridge/client').createGatewayClient) {
+  const deviceCrypto = new NodeGatewayDeviceCrypto();
+  const clock = createTestRuntimeClock();
+  return createGatewayClient({
+    runtimeHostDataDir: process.cwd(),
+    gatewayPort: 18789,
+    readGatewayToken: async () => gatewayToken,
+    platform: process.platform,
+    clock,
+    idGenerator: createTestRuntimeIdGenerator(),
+    identityRepository: new NodeGatewayDeviceIdentityRepository(deviceCrypto, clock),
+    deviceCrypto,
+    scheduler: createTestRuntimeScheduler(),
+    tcpProbe: createTestRuntimeTcpProbe(),
+  });
+}
 
 class FakeWebSocket extends EventEmitter {
   static readonly OPEN = 1;
@@ -42,11 +67,7 @@ afterEach(() => {
   } else {
     process.env.MATCHACLAW_RUNTIME_HOST_GATEWAY_PORT = originalGatewayPort;
   }
-  if (originalGatewayToken === undefined) {
-    delete process.env.MATCHACLAW_RUNTIME_HOST_GATEWAY_TOKEN;
-  } else {
-    process.env.MATCHACLAW_RUNTIME_HOST_GATEWAY_TOKEN = originalGatewayToken;
-  }
+  gatewayToken = '';
 });
 
 describe('runtime-host process gateway rpc client reconnect', () => {
@@ -55,9 +76,9 @@ describe('runtime-host process gateway rpc client reconnect', () => {
 
     const { createGatewayClient } = await import('../../runtime-host/openclaw-bridge/client');
     process.env.MATCHACLAW_RUNTIME_HOST_GATEWAY_PORT = '18789';
-    process.env.MATCHACLAW_RUNTIME_HOST_GATEWAY_TOKEN = 'reconnect-token';
+    gatewayToken = 'reconnect-token';
 
-    const client = createGatewayClient();
+    const client = createTestGatewayClient(createGatewayClient);
 
     const firstConnect = client.gatewayRpc('channels.status', { probe: true });
     const firstSocket = FakeWebSocket.instances[0];
@@ -70,8 +91,10 @@ describe('runtime-host process gateway rpc client reconnect', () => {
       payload: { nonce: 'nonce-1' },
     });
 
+    await vi.waitFor(() => {
+      expect(firstSocket.sentMessages.find((message) => message.method === 'connect')).toBeTruthy();
+    });
     const firstConnectRequest = firstSocket.sentMessages.find((message) => message.method === 'connect');
-    expect(firstConnectRequest).toBeTruthy();
 
     firstSocket.emitJson({
       type: 'res',
@@ -109,8 +132,10 @@ describe('runtime-host process gateway rpc client reconnect', () => {
       payload: { nonce: 'nonce-2' },
     });
 
+    await vi.waitFor(() => {
+      expect(secondSocket.sentMessages.find((message) => message.method === 'connect')).toBeTruthy();
+    });
     const secondConnectRequest = secondSocket.sentMessages.find((message) => message.method === 'connect');
-    expect(secondConnectRequest).toBeTruthy();
 
     secondSocket.emitJson({
       type: 'res',
@@ -136,3 +161,4 @@ describe('runtime-host process gateway rpc client reconnect', () => {
     client.close();
   });
 });
+

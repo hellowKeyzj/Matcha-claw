@@ -1,11 +1,11 @@
 import { join } from 'node:path';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { spawnSync } from 'node:child_process';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { tmpdir } from 'node:os';
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { WebSocketServer } from 'ws';
 import { createRuntimeHostProcessManager } from '../../electron/main/runtime-host-process-manager';
+import { buildLicenseKey } from '../../runtime-host/application/license/service';
 
 const scriptPath = join(process.cwd(), 'runtime-host', 'host-process.cjs');
 
@@ -28,6 +28,39 @@ async function waitForCondition(
   throw new Error('waitForCondition timeout');
 }
 
+function writeRuntimeHostSettings(filePath: string, settings: Record<string, unknown>): void {
+  mkdirSync(join(filePath, '..'), { recursive: true });
+  writeFileSync(filePath, `${JSON.stringify(settings, null, 2)}\n`, 'utf8');
+}
+
+async function waitForRuntimeHostJob(port: number, jobId: string | undefined): Promise<void> {
+  expect(jobId).toBeTruthy();
+  await waitForCondition(async () => {
+    const jobResponse = await fetch(`http://127.0.0.1:${port}/dispatch`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        version: 1,
+        method: 'POST',
+        route: '/api/runtime-host/jobs/get',
+        payload: { jobId },
+      }),
+    });
+    const jobPayload = await jobResponse.json() as {
+      data?: {
+        job?: {
+          status?: string;
+          error?: string;
+        };
+      };
+    };
+    if (jobPayload.data?.job?.status === 'failed') {
+      throw new Error(jobPayload.data.job.error || `Runtime host job failed: ${String(jobId)}`);
+    }
+    return jobPayload.data?.job?.status === 'succeeded';
+  });
+}
+
 async function startParentDispatchServer(
   port: number,
   token: string,
@@ -42,16 +75,10 @@ async function startParentDispatchServer(
     onShellAction?: (body: {
       action:
         | 'gateway_restart'
+        | 'host_diagnostics_snapshot'
         | 'provider_oauth_start'
         | 'provider_oauth_cancel'
-        | 'provider_oauth_submit'
-        | 'channel_session_start'
-        | 'channel_session_cancel'
-        | 'license_get_gate'
-        | 'license_get_stored_key'
-        | 'license_validate'
-        | 'license_revalidate'
-        | 'license_clear';
+        | 'provider_oauth_submit';
       payload?: unknown;
     }) => {
       status: number;
@@ -101,16 +128,10 @@ async function startParentDispatchServer(
       const shellActionBody = parsedBody as {
         action:
           | 'gateway_restart'
+          | 'host_diagnostics_snapshot'
           | 'provider_oauth_start'
           | 'provider_oauth_cancel'
-          | 'provider_oauth_submit'
-          | 'channel_session_start'
-          | 'channel_session_cancel'
-          | 'license_get_gate'
-          | 'license_get_stored_key'
-          | 'license_validate'
-          | 'license_revalidate'
-          | 'license_clear';
+          | 'provider_oauth_submit';
         payload?: unknown;
       };
       shellActionRequestCount += 1;
@@ -422,16 +443,8 @@ describe('runtime-host process manager', () => {
   let previousOpenClawConfigDir: string | undefined;
 
   beforeAll(() => {
-    const result = spawnSync('pnpm', ['run', 'build:runtime-host-process'], {
-      cwd: process.cwd(),
-      stdio: 'inherit',
-      shell: process.platform === 'win32',
-    });
-    if (result.error) {
-      throw result.error;
-    }
-    if ((result.status ?? 1) !== 0) {
-      throw new Error(`build:runtime-host-process failed with exit code ${String(result.status ?? 1)}`);
+    if (!existsSync(scriptPath)) {
+      throw new Error(`runtime-host process entry is missing: ${scriptPath}`);
     }
   });
 
@@ -511,7 +524,7 @@ describe('runtime-host process manager', () => {
     }
   });
 
-  it('dispatch endpoint 对未实现业务路由直接返回 404，不再回跳主进程分发', async () => {
+  it('dispatch endpoint 对未实现runtime 路由直接返回 404，不再回跳主进程分发', async () => {
     const port = createPort(3);
     const parentApiPort = createPort(30);
     const token = 'test-runtime-host-dispatch-token';
@@ -559,7 +572,7 @@ describe('runtime-host process manager', () => {
     expect(finalState.lifecycle).toBe('stopped');
   });
 
-  it('local business route is handled in child without parent dispatch', async () => {
+  it('local runtime route is handled in child without parent dispatch', async () => {
     const port = createPort(5);
     const parentApiPort = createPort(32);
     const token = 'test-runtime-host-dispatch-token-local';
@@ -909,7 +922,7 @@ describe('runtime-host process manager', () => {
     }
   });
 
-  it('toolchain uv/install 路由在子进程本地处理且不走 parent dispatch', async () => {
+  it('toolchain uv/install 路由在子进程本地入队且不走 parent dispatch', async () => {
     const port = createPort(18);
     const parentApiPort = createPort(45);
     const token = 'test-runtime-host-dispatch-token-toolchain-install-local';
@@ -941,15 +954,23 @@ describe('runtime-host process manager', () => {
       const payload = await response.json() as {
         success: boolean;
         status: number;
-        data?: { success?: boolean; error?: string };
+        data?: {
+          success?: boolean;
+          job?: {
+            id?: string;
+            type?: string;
+            status?: string;
+          };
+        };
       };
 
-      expect(response.status).toBe(200);
+      expect(response.status).toBe(202);
       expect(payload.success).toBe(true);
-      expect(typeof payload.data?.success).toBe('boolean');
-      if (payload.data?.success === false) {
-        expect(typeof payload.data.error).toBe('string');
-      }
+      expect(payload.data?.success).toBe(true);
+      expect(payload.data?.job).toMatchObject({
+        type: 'toolchain.uvInstall',
+      });
+      expect(['queued', 'running', 'succeeded', 'failed']).toContain(payload.data?.job?.status);
       expect(parentDispatchServer.getDispatchRequestCount()).toBe(0);
       expect(parentDispatchServer.getExecutionSyncRequestCount()).toBe(0);
     } finally {
@@ -1041,12 +1062,13 @@ describe('runtime-host process manager', () => {
         data?: { success?: boolean };
       };
 
-      expect(updateResponse.status).toBe(200);
+      expect(updateResponse.status).toBe(202);
       expect(updatePayload).toMatchObject({
         success: true,
-        status: 200,
+        status: 202,
         data: { success: true },
       });
+      await waitForRuntimeHostJob(port, (updatePayload.data as { job?: { id?: string } } | undefined)?.job?.id);
 
       const nextConfig = JSON.parse(readFileSync(join(configDir, 'openclaw.json'), 'utf8')) as {
         skills?: { entries?: Record<string, { apiKey?: string; env?: Record<string, string> }> };
@@ -1612,17 +1634,17 @@ describe('runtime-host process manager', () => {
       const createPayload = await createResponse.json() as {
         success: boolean;
         status: number;
-        data?: { success?: boolean; account?: { id?: string } };
+        data?: { success?: boolean; account?: { id?: string }; job?: { id?: string } };
       };
-      expect(createResponse.status).toBe(200);
+      expect(createResponse.status).toBe(202);
       expect(createPayload).toMatchObject({
         success: true,
-        status: 200,
+        status: 202,
         data: {
           success: true,
-          account: { id: 'openai-main' },
         },
       });
+      await waitForRuntimeHostJob(port, createPayload.data?.job?.id);
 
       const listResponse = await fetch(`http://127.0.0.1:${port}/dispatch`, {
         method: 'POST',
@@ -1838,40 +1860,11 @@ describe('runtime-host process manager', () => {
     }
   });
 
-  it('channels start/cancel 路由在子进程本地命中并通过 shell-actions 调用主进程壳能力', async () => {
+  it('channels start/cancel 路由由 runtime-host 本地会话服务接管，不再调用主进程 shell-actions', async () => {
     const port = createPort(173);
     const parentApiPort = createPort(174);
     const token = 'test-runtime-host-dispatch-token-channels-shell-action';
-    const shellActions: string[] = [];
-    const parentDispatchServer = await startParentDispatchServer(parentApiPort, token, {
-      onShellAction: (body) => {
-        shellActions.push(body.action);
-        if (body.action === 'channel_session_start') {
-          return {
-            status: 200,
-            payload: {
-              version: 1,
-              success: true,
-              status: 200,
-              data: {
-                success: true,
-                queued: true,
-                sessionKey: 'weixin-session-1',
-              },
-            },
-          };
-        }
-        return {
-          status: 200,
-          payload: {
-            version: 1,
-            success: true,
-            status: 200,
-            data: { success: true },
-          },
-        };
-      },
-    });
+    const parentDispatchServer = await startParentDispatchServer(parentApiPort, token);
 
     const manager = createRuntimeHostProcessManager({
       scriptPath,
@@ -1879,6 +1872,9 @@ describe('runtime-host process manager', () => {
       startTimeoutMs: 8000,
       parentApiBaseUrl: `http://127.0.0.1:${parentApiPort}`,
       parentDispatchToken: token,
+      childEnv: () => ({
+        MATCHACLAW_OPENCLAW_DIR: join(process.cwd(), 'node_modules', 'openclaw'),
+      }),
     });
 
     try {
@@ -1934,7 +1930,7 @@ describe('runtime-host process manager', () => {
         data: {
           success: true,
           queued: true,
-          sessionKey: 'weixin-session-1',
+          sessionKey: 'wx-main',
         },
       });
 
@@ -1950,74 +1946,23 @@ describe('runtime-host process manager', () => {
       });
       expect(weixinCancel.status).toBe(200);
 
-      expect(shellActions).toEqual([
-        'channel_session_start',
-        'channel_session_cancel',
-        'channel_session_start',
-        'channel_session_cancel',
-      ]);
       expect(parentDispatchServer.getDispatchRequestCount()).toBe(0);
       expect(parentDispatchServer.getExecutionSyncRequestCount()).toBe(0);
-      expect(parentDispatchServer.getShellActionRequestCount()).toBe(4);
+      expect(parentDispatchServer.getShellActionRequestCount()).toBe(0);
     } finally {
       await manager.stop();
       await parentDispatchServer.close();
     }
   });
 
-  it('license 路由在子进程本地命中并通过 shell-actions 调用主进程壳能力', async () => {
+  it('license 路由在子进程本地命中，不再通过 shell-actions 调用主进程业务能力', async () => {
     const port = createPort(175);
     const parentApiPort = createPort(176);
-    const token = 'test-runtime-host-dispatch-token-license-shell-action';
+    const token = 'test-runtime-host-dispatch-token-license-local-service';
     const shellActions: string[] = [];
     const parentDispatchServer = await startParentDispatchServer(parentApiPort, token, {
       onShellAction: (body) => {
         shellActions.push(body.action);
-        if (body.action === 'license_get_gate') {
-          return {
-            status: 200,
-            payload: {
-              version: 1,
-              success: true,
-              status: 200,
-              data: {
-                state: 'granted',
-                reason: 'valid',
-                checkedAtMs: Date.now(),
-                hasStoredKey: true,
-                hasUsableCache: true,
-                nextRevalidateAtMs: null,
-              },
-            },
-          };
-        }
-        if (body.action === 'license_get_stored_key') {
-          return {
-            status: 200,
-            payload: {
-              version: 1,
-              success: true,
-              status: 200,
-              data: {
-                key: 'MATCHACLAW-ABCD-EFGH-IJKL-MNOP',
-              },
-            },
-          };
-        }
-        if (body.action === 'license_validate' || body.action === 'license_revalidate') {
-          return {
-            status: 200,
-            payload: {
-              version: 1,
-              success: true,
-              status: 200,
-              data: {
-                valid: true,
-                code: 'valid',
-              },
-            },
-          };
-        }
         return {
           status: 200,
           payload: {
@@ -2036,6 +1981,11 @@ describe('runtime-host process manager', () => {
       startTimeoutMs: 8000,
       parentApiBaseUrl: `http://127.0.0.1:${parentApiPort}`,
       parentDispatchToken: token,
+      childEnv: () => ({
+        MATCHACLAW_APP_USER_DATA_DIR: openClawConfigDir,
+        MATCHACLAW_APP_PACKAGED: '0',
+        MATCHACLAW_LICENSE_MODE: 'offline-local',
+      }),
     });
 
     try {
@@ -2051,6 +2001,11 @@ describe('runtime-host process manager', () => {
         }),
       });
       expect(gateResponse.status).toBe(200);
+      const gatePayload = await gateResponse.json() as { data?: { state?: string; reason?: string } };
+      expect(gatePayload.data).toMatchObject({
+        state: 'blocked',
+        reason: 'empty',
+      });
 
       const storedResponse = await fetch(`http://127.0.0.1:${port}/dispatch`, {
         method: 'POST',
@@ -2062,6 +2017,8 @@ describe('runtime-host process manager', () => {
         }),
       });
       expect(storedResponse.status).toBe(200);
+      const storedPayload = await storedResponse.json() as { data?: { key?: string | null } };
+      expect(storedPayload.data?.key).toBeNull();
 
       const validateResponse = await fetch(`http://127.0.0.1:${port}/dispatch`, {
         method: 'POST',
@@ -2070,10 +2027,15 @@ describe('runtime-host process manager', () => {
           version: 1,
           method: 'POST',
           route: '/api/license/validate',
-          payload: { key: 'MATCHACLAW-ABCD-EFGH-IJKL-MNOP' },
+          payload: { key: buildLicenseKey('ABCD1234EFGH') },
         }),
       });
       expect(validateResponse.status).toBe(200);
+      const validatePayload = await validateResponse.json() as { data?: { valid?: boolean; code?: string } };
+      expect(validatePayload.data).toMatchObject({
+        valid: true,
+        code: 'valid',
+      });
 
       const revalidateResponse = await fetch(`http://127.0.0.1:${port}/dispatch`, {
         method: 'POST',
@@ -2097,16 +2059,10 @@ describe('runtime-host process manager', () => {
       });
       expect(clearResponse.status).toBe(200);
 
-      expect(shellActions).toEqual([
-        'license_get_gate',
-        'license_get_stored_key',
-        'license_validate',
-        'license_revalidate',
-        'license_clear',
-      ]);
+      expect(shellActions).toEqual([]);
       expect(parentDispatchServer.getDispatchRequestCount()).toBe(0);
       expect(parentDispatchServer.getExecutionSyncRequestCount()).toBe(0);
-      expect(parentDispatchServer.getShellActionRequestCount()).toBe(5);
+      expect(parentDispatchServer.getShellActionRequestCount()).toBe(0);
     } finally {
       await manager.stop();
       await parentDispatchServer.close();
@@ -2119,6 +2075,8 @@ describe('runtime-host process manager', () => {
     const gatewayPort = createPort(75);
     const token = 'test-runtime-host-dispatch-token-channel-local';
     const gatewayToken = 'test-runtime-host-channel-gateway-token';
+    const settingsFile = join(openClawConfigDir, 'matchaclaw-settings.json');
+    writeRuntimeHostSettings(settingsFile, { gatewayToken });
     const configDir = mkdtempSync(join(tmpdir(), 'matchaclaw-channel-config-'));
     const parentDispatchServer = await startParentDispatchServer(parentApiPort, token);
     const gatewayServer = await startGatewayRpcServer(gatewayPort, gatewayToken, {
@@ -2147,7 +2105,7 @@ describe('runtime-host process manager', () => {
       childEnv: () => ({
         OPENCLAW_CONFIG_DIR: configDir,
         MATCHACLAW_RUNTIME_HOST_GATEWAY_PORT: String(gatewayPort),
-        MATCHACLAW_RUNTIME_HOST_GATEWAY_TOKEN: gatewayToken,
+        MATCHACLAW_RUNTIME_HOST_SETTINGS_FILE: settingsFile,
       }),
     });
 
@@ -2174,10 +2132,11 @@ describe('runtime-host process manager', () => {
       const savePayload = await saveResponse.json() as {
         success: boolean;
         status: number;
-        data?: { success?: boolean };
+        data?: { success?: boolean; job?: { id?: string } };
       };
-      expect(saveResponse.status).toBe(200);
+      expect(saveResponse.status).toBe(202);
       expect(savePayload.data?.success).toBe(true);
+      await waitForRuntimeHostJob(port, (savePayload.data as { job?: { id?: string } } | undefined)?.job?.id);
 
       const configuredResponse = await fetch(`http://127.0.0.1:${port}/dispatch`, {
         method: 'POST',
@@ -2194,6 +2153,7 @@ describe('runtime-host process manager', () => {
         data?: { channels?: string[] };
       };
       expect(configuredResponse.status).toBe(200);
+      expect(JSON.parse(readFileSync(join(configDir, 'openclaw.json'), 'utf8')).channels?.discord).toBeDefined();
       expect(configuredPayload.data?.channels).toContain('discord');
 
       const snapshotResponse = await fetch(`http://127.0.0.1:${port}/dispatch`, {
@@ -2457,13 +2417,14 @@ describe('runtime-host process manager', () => {
             securityPolicyVersion?: number;
             runtime?: { allowDomains?: string[] };
           };
+          sync?: { job?: { id?: string } };
         };
       };
 
-      expect(updateResponse.status).toBe(200);
+      expect(updateResponse.status).toBe(202);
       expect(updatePayload).toMatchObject({
         success: true,
-        status: 200,
+        status: 202,
         data: {
           success: true,
           policy: {
@@ -2475,6 +2436,7 @@ describe('runtime-host process manager', () => {
           },
         },
       });
+      await waitForRuntimeHostJob(port, (updatePayload.data as { sync?: { job?: { id?: string } } } | undefined)?.sync?.job?.id);
 
       const policyPath = join(configDir, 'policies', 'security.policy.json');
       expect(existsSync(policyPath)).toBe(true);
@@ -2564,6 +2526,8 @@ describe('runtime-host process manager', () => {
     const gatewayPort = createPort(44);
     const token = 'test-runtime-host-dispatch-token-security-audit';
     const gatewayToken = 'test-gateway-token-security-audit';
+    const settingsFile = join(openClawConfigDir, 'matchaclaw-settings.json');
+    writeRuntimeHostSettings(settingsFile, { gatewayToken });
     const parentDispatchServer = await startParentDispatchServer(parentApiPort, token);
     const gatewayServer = await startGatewayRpcServer(gatewayPort, gatewayToken, {
       onRequest: ({ method, params }) => {
@@ -2585,7 +2549,7 @@ describe('runtime-host process manager', () => {
       parentDispatchToken: token,
       childEnv: () => ({
         MATCHACLAW_RUNTIME_HOST_GATEWAY_PORT: String(gatewayPort),
-        MATCHACLAW_RUNTIME_HOST_GATEWAY_TOKEN: gatewayToken,
+        MATCHACLAW_RUNTIME_HOST_SETTINGS_FILE: settingsFile,
       }),
     });
 
@@ -2630,8 +2594,8 @@ describe('runtime-host process manager', () => {
       });
       expect(parentDispatchServer.getDispatchRequestCount()).toBe(0);
       expect(parentDispatchServer.getExecutionSyncRequestCount()).toBe(0);
-      expect(gatewayServer.getRequestCount()).toBe(1);
-      expect(gatewayServer.getRequests()[0]).toMatchObject({
+      expect(gatewayServer.getRequests().some((item) => item.method === 'security.audit.query')).toBe(true);
+      expect(gatewayServer.getRequests().find((item) => item.method === 'security.audit.query')).toMatchObject({
         method: 'security.audit.query',
       });
     } finally {
@@ -2641,13 +2605,15 @@ describe('runtime-host process manager', () => {
     }
   });
 
-  it('security emergency-response 在子进程本地执行锁定并直连 gateway rpc', async () => {
+  it('security emergency-response 在子进程本地入队，后台执行锁定并直连 gateway rpc', async () => {
     const port = createPort(17);
     const parentApiPort = createPort(45);
     const gatewayPort = createPort(46);
     const token = 'test-runtime-host-dispatch-token-security-emergency';
     const gatewayToken = 'test-gateway-token-security-emergency';
     const configDir = mkdtempSync(join(tmpdir(), 'runtime-host-security-emergency-'));
+    const settingsFile = join(configDir, 'matchaclaw-settings.json');
+    writeRuntimeHostSettings(settingsFile, { gatewayToken });
     const parentDispatchServer = await startParentDispatchServer(parentApiPort, token);
     const gatewayServer = await startGatewayRpcServer(gatewayPort, gatewayToken, {
       onRequest: ({ method }) => {
@@ -2670,7 +2636,7 @@ describe('runtime-host process manager', () => {
       childEnv: () => ({
         OPENCLAW_CONFIG_DIR: configDir,
         MATCHACLAW_RUNTIME_HOST_GATEWAY_PORT: String(gatewayPort),
-        MATCHACLAW_RUNTIME_HOST_GATEWAY_TOKEN: gatewayToken,
+        MATCHACLAW_RUNTIME_HOST_SETTINGS_FILE: settingsFile,
       }),
     });
 
@@ -2692,28 +2658,56 @@ describe('runtime-host process manager', () => {
         status: number;
         data?: {
           success?: boolean;
-          lockdownApplied?: boolean;
-          emergency?: { incidentId?: string };
-          emergencyError?: string | null;
-          policy?: { preset?: string; securityPolicyVersion?: number };
+          job?: {
+            id?: string;
+            type?: string;
+            status?: string;
+          };
         };
       };
 
-      expect(response.status).toBe(200);
+      expect(response.status).toBe(202);
       expect(payload).toMatchObject({
         success: true,
-        status: 200,
+        status: 202,
         data: {
           success: true,
-          lockdownApplied: true,
-          emergency: {
-            incidentId: 'incident-1',
-          },
-          emergencyError: null,
-          policy: {
-            preset: 'strict',
+          job: {
+            type: 'security.emergencyResponse',
           },
         },
+      });
+      const jobId = payload.data?.job?.id;
+      expect(jobId).toBeTruthy();
+      await waitForCondition(async () => {
+        const jobResponse = await fetch(`http://127.0.0.1:${port}/dispatch`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            version: 1,
+            method: 'POST',
+            route: '/api/runtime-host/jobs/get',
+            payload: { jobId },
+          }),
+        });
+        const jobPayload = await jobResponse.json() as {
+          data?: {
+            job?: {
+              status?: string;
+              result?: {
+                lockdownApplied?: boolean;
+                emergency?: { incidentId?: string };
+                emergencyError?: string | null;
+                policy?: { preset?: string };
+              };
+            };
+          };
+        };
+        expect(jobPayload.data?.job?.status).not.toBe('failed');
+        return jobPayload.data?.job?.status === 'succeeded'
+          && jobPayload.data.job.result?.lockdownApplied === true
+          && jobPayload.data.job.result?.emergency?.incidentId === 'incident-1'
+          && jobPayload.data.job.result?.policy?.preset === 'strict';
       });
 
       const policyPath = join(configDir, 'policies', 'security.policy.json');
@@ -2723,11 +2717,10 @@ describe('runtime-host process manager', () => {
 
       expect(parentDispatchServer.getDispatchRequestCount()).toBe(0);
       expect(parentDispatchServer.getExecutionSyncRequestCount()).toBe(0);
-      expect(gatewayServer.getRequestCount()).toBe(2);
-      expect(gatewayServer.getRequests().map((item) => item.method)).toEqual([
+      expect(gatewayServer.getRequests().map((item) => item.method)).toEqual(expect.arrayContaining([
         'security.policy.sync',
         'security.emergency.run',
-      ]);
+      ]));
     } finally {
       await manager.stop();
       await gatewayServer.close();
@@ -2741,6 +2734,8 @@ describe('runtime-host process manager', () => {
     const gatewayPort = createPort(48);
     const token = 'test-runtime-host-dispatch-token-send-with-media';
     const gatewayToken = 'test-gateway-token-send-with-media';
+    const settingsFile = join(openClawConfigDir, 'matchaclaw-settings.json');
+    writeRuntimeHostSettings(settingsFile, { gatewayToken });
     const parentDispatchServer = await startParentDispatchServer(parentApiPort, token);
     const gatewayServer = await startGatewayRpcServer(gatewayPort, gatewayToken, {
       onRequest: ({ method, params }) => {
@@ -2759,7 +2754,7 @@ describe('runtime-host process manager', () => {
       parentDispatchToken: token,
       childEnv: () => ({
         MATCHACLAW_RUNTIME_HOST_GATEWAY_PORT: String(gatewayPort),
-        MATCHACLAW_RUNTIME_HOST_GATEWAY_TOKEN: gatewayToken,
+        MATCHACLAW_RUNTIME_HOST_SETTINGS_FILE: settingsFile,
       }),
     });
 
@@ -2818,8 +2813,7 @@ describe('runtime-host process manager', () => {
       });
       expect(parentDispatchServer.getDispatchRequestCount()).toBe(0);
       expect(parentDispatchServer.getExecutionSyncRequestCount()).toBe(0);
-      expect(gatewayServer.getRequestCount()).toBe(1);
-      expect(gatewayServer.getRequests()[0]?.method).toBe('chat.send');
+      expect(gatewayServer.getRequests().some((item) => item.method === 'chat.send')).toBe(true);
     } finally {
       await manager.stop();
       await gatewayServer.close();
@@ -2833,6 +2827,8 @@ describe('runtime-host process manager', () => {
     const gatewayPort = createPort(50);
     const token = 'test-runtime-host-dispatch-token-cron-jobs';
     const gatewayToken = 'test-gateway-token-cron-jobs';
+    const settingsFile = join(openClawConfigDir, 'matchaclaw-settings.json');
+    writeRuntimeHostSettings(settingsFile, { gatewayToken });
     const parentDispatchServer = await startParentDispatchServer(parentApiPort, token);
     const gatewayServer = await startGatewayRpcServer(gatewayPort, gatewayToken, {
       onRequest: ({ method }) => {
@@ -2867,13 +2863,13 @@ describe('runtime-host process manager', () => {
       parentDispatchToken: token,
       childEnv: () => ({
         MATCHACLAW_RUNTIME_HOST_GATEWAY_PORT: String(gatewayPort),
-        MATCHACLAW_RUNTIME_HOST_GATEWAY_TOKEN: gatewayToken,
+        MATCHACLAW_RUNTIME_HOST_SETTINGS_FILE: settingsFile,
       }),
     });
 
     try {
       await manager.start();
-      const response = await fetch(`http://127.0.0.1:${port}/dispatch`, {
+      const initialResponse = await fetch(`http://127.0.0.1:${port}/dispatch`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -2882,7 +2878,9 @@ describe('runtime-host process manager', () => {
           route: '/api/cron/jobs',
         }),
       });
-      const payload = await response.json() as {
+      expect(initialResponse.status).toBe(200);
+      let response = initialResponse;
+      let payload = await initialResponse.json() as {
         success: boolean;
         status: number;
         data?: Array<{
@@ -2893,6 +2891,19 @@ describe('runtime-host process manager', () => {
           schedule?: { expr?: string };
         }>;
       };
+      await waitForCondition(async () => {
+        response = await fetch(`http://127.0.0.1:${port}/dispatch`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            version: 1,
+            method: 'GET',
+            route: '/api/cron/jobs',
+          }),
+        });
+        payload = await response.json() as typeof payload;
+        return payload.data?.some((job) => job.id === 'job-1') === true;
+      }, 3000);
 
       expect(response.status).toBe(200);
       expect(payload).toMatchObject({
@@ -2912,8 +2923,10 @@ describe('runtime-host process manager', () => {
       });
       expect(parentDispatchServer.getDispatchRequestCount()).toBe(0);
       expect(parentDispatchServer.getExecutionSyncRequestCount()).toBe(0);
-      expect(gatewayServer.getRequestCount()).toBe(1);
-      expect(gatewayServer.getRequests()[0]?.method).toBe('cron.list');
+      expect(gatewayServer.getRequestCount()).toBeGreaterThanOrEqual(1);
+      expect(gatewayServer.getRequests().map((item) => item.method)).toEqual(
+        expect.arrayContaining(['cron.list']),
+      );
     } finally {
       await manager.stop();
       await gatewayServer.close();
@@ -2927,6 +2940,8 @@ describe('runtime-host process manager', () => {
     const gatewayPort = createPort(52);
     const token = 'test-runtime-host-dispatch-token-cron-trigger';
     const gatewayToken = 'test-gateway-token-cron-trigger';
+    const settingsFile = join(openClawConfigDir, 'matchaclaw-settings.json');
+    writeRuntimeHostSettings(settingsFile, { gatewayToken });
     const parentDispatchServer = await startParentDispatchServer(parentApiPort, token);
     const gatewayServer = await startGatewayRpcServer(gatewayPort, gatewayToken, {
       onRequest: ({ method, params }) => {
@@ -2937,8 +2952,12 @@ describe('runtime-host process manager', () => {
                 id: 'job-trigger-1',
                 name: 'Trigger Job',
                 sessionTarget: 'main',
+                createdAtMs: 1700000000000,
+                updatedAtMs: 1700003600000,
                 payload: { kind: 'agentTurn', message: 'run now' },
-                state: {},
+                state: {
+                  nextRunAtMs: 1700010000000,
+                },
               },
             ],
           };
@@ -2962,7 +2981,7 @@ describe('runtime-host process manager', () => {
       parentDispatchToken: token,
       childEnv: () => ({
         MATCHACLAW_RUNTIME_HOST_GATEWAY_PORT: String(gatewayPort),
-        MATCHACLAW_RUNTIME_HOST_GATEWAY_TOKEN: gatewayToken,
+        MATCHACLAW_RUNTIME_HOST_SETTINGS_FILE: settingsFile,
       }),
     });
 
@@ -2981,28 +3000,27 @@ describe('runtime-host process manager', () => {
       const payload = await response.json() as {
         success: boolean;
         status: number;
-        data?: { ran?: boolean; source?: { id?: string; mode?: string } };
+        data?: { success?: boolean; job?: { id?: string; type?: string } };
       };
 
-      expect(response.status).toBe(200);
+      expect(response.status).toBe(202);
       expect(payload).toMatchObject({
         success: true,
-        status: 200,
+        status: 202,
         data: {
-          ran: true,
-          source: {
-            id: 'job-trigger-1',
-            mode: 'force',
+          success: true,
+          job: {
+            type: 'cron.trigger',
           },
         },
       });
+      await waitForRuntimeHostJob(port, payload.data?.job?.id);
       expect(parentDispatchServer.getDispatchRequestCount()).toBe(0);
       expect(parentDispatchServer.getExecutionSyncRequestCount()).toBe(0);
-      expect(gatewayServer.getRequestCount()).toBe(2);
-      expect(gatewayServer.getRequests().map((item) => item.method)).toEqual([
+      expect(gatewayServer.getRequests().map((item) => item.method)).toEqual(expect.arrayContaining([
         'cron.list',
         'cron.run',
-      ]);
+      ]));
     } finally {
       await manager.stop();
       await gatewayServer.close();
@@ -3263,7 +3281,38 @@ describe('runtime-host process manager', () => {
           },
         }),
       });
-      expect(prepareResponse.status).toBe(200);
+      expect(prepareResponse.status).toBe(202);
+      const preparePayload = await prepareResponse.json() as {
+        data?: {
+          job?: {
+            id?: string;
+          };
+        };
+      };
+      const prepareJobId = preparePayload.data?.job?.id;
+      expect(prepareJobId).toBeTruthy();
+      await waitForCondition(async () => {
+        const jobResponse = await fetch(`http://127.0.0.1:${port}/dispatch`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            version: 1,
+            method: 'POST',
+            route: '/api/runtime-host/jobs/get',
+            payload: {
+              jobId: prepareJobId,
+            },
+          }),
+        });
+        const jobPayload = await jobResponse.json() as {
+          data?: {
+            job?: {
+              status?: string;
+            };
+          };
+        };
+        return jobPayload.data?.job?.status === 'succeeded';
+      });
 
       expect(existsSync(join(openClawConfigDir, 'extensions', 'task-manager', 'openclaw.plugin.json'))).toBe(true);
       expect(existsSync(join(openClawConfigDir, 'extensions', 'security-core', 'openclaw.plugin.json'))).toBe(true);
@@ -3300,7 +3349,7 @@ describe('runtime-host process manager', () => {
       await manager.stop();
       await parentDispatchServer.close();
     }
-  });
+  }, 20_000);
 
   it('restart 路由不再由子进程处理，当前线程配置保持不变', async () => {
     writeFileSync(join(openClawConfigDir, 'openclaw.json'), JSON.stringify({
@@ -3344,7 +3393,7 @@ describe('runtime-host process manager', () => {
         body: JSON.stringify({
           version: 1,
           method: 'POST',
-          route: '/api/plugins/runtime/restart',
+          route: '/api/runtime-host/restart',
         }),
       });
       expect(toggleResponse.status).toBe(404);
@@ -3405,16 +3454,10 @@ describe('runtime-host process manager', () => {
     const shellActionBodies: Array<{
       action:
         | 'gateway_restart'
+        | 'host_diagnostics_snapshot'
         | 'provider_oauth_start'
         | 'provider_oauth_cancel'
-        | 'provider_oauth_submit'
-        | 'channel_session_start'
-        | 'channel_session_cancel'
-        | 'license_get_gate'
-        | 'license_get_stored_key'
-        | 'license_validate'
-        | 'license_revalidate'
-        | 'license_clear';
+        | 'provider_oauth_submit';
       payload?: unknown;
     }> = [];
     const parentDispatchServer = await startParentDispatchServer(parentApiPort, token, {
@@ -3475,7 +3518,11 @@ describe('runtime-host process manager', () => {
           payload: { pluginIds: ['task-manager'] },
         }),
       });
-      expect(setEnabledPluginsResponse.status).toBe(200);
+      expect(setEnabledPluginsResponse.status).toBe(202);
+      const setEnabledPluginsPayload = await setEnabledPluginsResponse.json() as {
+        data?: { job?: { id?: string } };
+      };
+      await waitForRuntimeHostJob(port, setEnabledPluginsPayload.data?.job?.id);
 
       const runtimeResponse = await fetch(`http://127.0.0.1:${port}/dispatch`, {
         method: 'POST',
@@ -3550,16 +3597,10 @@ describe('runtime-host process manager', () => {
     const shellActionBodies: Array<{
       action:
         | 'gateway_restart'
+        | 'host_diagnostics_snapshot'
         | 'provider_oauth_start'
         | 'provider_oauth_cancel'
-        | 'provider_oauth_submit'
-        | 'channel_session_start'
-        | 'channel_session_cancel'
-        | 'license_get_gate'
-        | 'license_get_stored_key'
-        | 'license_validate'
-        | 'license_revalidate'
-        | 'license_clear';
+        | 'provider_oauth_submit';
       payload?: unknown;
     }> = [];
     const parentDispatchServer = await startParentDispatchServer(parentApiPort, token, {
@@ -3620,7 +3661,11 @@ describe('runtime-host process manager', () => {
           payload: { pluginIds: ['task-manager'] },
         }),
       });
-      expect(response.status).toBe(200);
+      const payload = await response.json() as {
+        data?: { job?: { id?: string } };
+      };
+      expect(response.status).toBe(202);
+      await waitForRuntimeHostJob(port, payload.data?.job?.id);
 
       const config = JSON.parse(
         readFileSync(join(openClawConfigDir, 'openclaw.json'), 'utf8'),
@@ -3717,7 +3762,7 @@ describe('runtime-host process manager', () => {
         body: JSON.stringify({
           version: 1,
           method: 'POST',
-          route: '/api/plugins/runtime/restart',
+          route: '/api/runtime-host/restart',
         }),
       });
       const payload = await response.json() as {
@@ -3776,7 +3821,7 @@ describe('runtime-host process manager', () => {
         body: JSON.stringify({
           version: 1,
           method: 'POST',
-          route: '/api/plugins/runtime/restart',
+          route: '/api/runtime-host/restart',
         }),
       });
       await fetch(`http://127.0.0.1:${port}/dispatch`, {
@@ -3806,7 +3851,7 @@ describe('runtime-host process manager', () => {
           success?: boolean;
           stats?: {
             totalDispatchRequests?: number;
-            localBusinessHandled?: number;
+            runtimeRouteHandled?: number;
             unhandledRouteCount?: number;
           };
         };
@@ -3820,7 +3865,7 @@ describe('runtime-host process manager', () => {
           success: true,
           stats: {
             totalDispatchRequests: 4,
-            localBusinessHandled: 1,
+            runtimeRouteHandled: 1,
             unhandledRouteCount: 2,
           },
         },

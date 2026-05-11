@@ -50,12 +50,15 @@ describe('setup navigation', () => {
       }
       if (path === '/api/license/gate') {
         return {
-          state: 'granted',
-          lastValidation: {
-            valid: true,
-            code: 'valid',
-            normalizedKey: 'MATCHACLAW-TEST-KEY-0000-0000-0000',
-          },
+          state: 'blocked',
+          lastValidation: null,
+        };
+      }
+      if (path === '/api/license/validate') {
+        return {
+          valid: true,
+          code: 'valid',
+          normalizedKey: 'MATCHACLAW-TEST-KEY-0000-0000-0000',
         };
       }
       if (path === '/api/logs') {
@@ -83,6 +86,16 @@ describe('setup navigation', () => {
         <Setup />
       </MemoryRouter>,
     );
+
+    fireEvent.change(await screen.findByLabelText('License Key'), {
+      target: { value: 'MATCHACLAW-TEST-KEY-0000-0000-0000' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Validate' }));
+    const welcomeNextButton = screen.getByRole('button', { name: 'Next' });
+    await waitFor(() => {
+      expect(welcomeNextButton).toBeEnabled();
+    });
+    fireEvent.click(welcomeNextButton);
 
     expect(await screen.findByRole('heading', { name: 'Environment Check' })).toBeInTheDocument();
     expect(screen.queryByRole('heading', { name: 'AI Provider' })).not.toBeInTheDocument();

@@ -126,7 +126,7 @@ Environment variables for bundled search skills:
 - `find-skills` does not require API keys
 
 ### 🔐 Secure Provider Integration
-Connect to multiple AI providers (OpenAI, Anthropic, and more) with credentials stored securely in your system's native keychain. OpenAI supports both API key and browser OAuth (Codex subscription) sign-in.
+Connect to multiple AI providers (OpenAI, Anthropic, and more) with credentials managed by the runtime-host local backend. OpenAI supports both API key and browser OAuth (Codex subscription) sign-in.
 For OpenAI-compatible gateways configured via **Custom** provider, **Settings → Models → Edit Provider** now supports model-level `Context Window` and `Max Tokens` overrides.
 
 ### 🌐 Browser Relay Window Targeting
@@ -212,7 +212,7 @@ Notes:
 
 ## Architecture
 
-MatchaClaw employs a **dual-process architecture** with a unified host API layer. The renderer talks to a single client abstraction, while Electron Main owns protocol selection and process lifecycle:
+MatchaClaw employs a **desktop shell + local backend** architecture. The renderer talks to a single client abstraction; Electron Main only owns desktop host capabilities and process lifecycle, while `runtime-host` is the only local business backend:
 
 ```┌─────────────────────────────────────────────────────────────────┐
 │                        MatchaClaw Desktop App                         │
@@ -220,8 +220,8 @@ MatchaClaw employs a **dual-process architecture** with a unified host API layer
 │  ┌────────────────────────────────────────────────────────────┐  │
 │  │              Electron Main Process                          │  │
 │  │  • Window & application lifecycle management               │  │
-│  │  • Gateway process supervision                              │  │
-│  │  • System integration (tray, notifications, keychain)       │  │
+│  │  • Runtime-host and Gateway process supervision             │  │
+│  │  • System integration (tray, dialogs, shell, OAuth)         │  │
 │  │  • Auto-update orchestration                                │  │
 │  └────────────────────────────────────────────────────────────┘  │
 │                              │                                    │
@@ -236,18 +236,28 @@ MatchaClaw employs a **dual-process architecture** with a unified host API layer
 │  └────────────────────────────────────────────────────────────┘  │
 └──────────────────────────────┬──────────────────────────────────┘
                                │
-                               │ Main-owned transport strategy
-                               │ (WS first, HTTP then IPC fallback)
+                               │ hostapi:fetch
+                               │ (always forwarded to runtime-host for business APIs)
                                ▼
 ┌─────────────────────────────────────────────────────────────────┐
-│                Host API & Main Process Proxies                  │
+│                 Host API & Desktop Host Boundary                │
 │                                                                  │
-│  • hostapi:fetch (Main proxy, avoids CORS in dev/prod)          │
-│  • gateway:httpProxy (Renderer never calls Gateway HTTP direct)  │
-│  • Unified error mapping & retry/backoff                         │
+│  • hostapi:fetch (single renderer backend entry)                │
+│  • Host-only routes for files, dialogs, logs, Gateway process    │
+│  • Internal routes for runtime-host to call shell/OAuth actions  │
 └──────────────────────────────┬──────────────────────────────────┘
                                │
-                               │ WS / HTTP / IPC fallback
+                               │ Local runtime API
+                               ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                    Runtime Host Local Service                    │
+│                                                                  │
+│  • Composition root, lifecycle, registries, and job queue        │
+│  • Thin API routes with application services behind ports        │
+│  • Settings, providers, security, sessions, tasks, plugins       │
+└──────────────────────────────┬──────────────────────────────────┘
+                               │
+                               │ Gateway bridge
                                ▼
 ┌─────────────────────────────────────────────────────────────────┐
 │                     OpenClaw Gateway                             │
@@ -261,11 +271,12 @@ MatchaClaw employs a **dual-process architecture** with a unified host API layer
 ### Design Principles
 
 - **Process Isolation**: The AI runtime operates in a separate process, ensuring UI responsiveness even during heavy computation
-- **Single Entry for Frontend Calls**: Renderer requests go through host-api/api-client; protocol details are hidden behind a stable interface
-- **Main-Process Transport Ownership**: Electron Main controls WS/HTTP usage and fallback to IPC for reliability
+- **Local Service Boundary**: Runtime Host owns local application services, background jobs, lifecycle, and cached query snapshots
+- **Single Entry for Frontend Calls**: Renderer requests go through host-api/api-client; business APIs are forwarded to runtime-host
+- **Electron as Host Shell**: Main owns windows, IPC, native dialogs, shell/OAuth, updates, and child process supervision
 - **Graceful Recovery**: Built-in reconnect, timeout, and backoff logic handles transient failures automatically
-- **Secure Storage**: API keys and sensitive data leverage the operating system's native secure storage mechanisms
-- **CORS-Safe by Design**: Local HTTP access is proxied by Main, preventing renderer-side CORS issues
+- **Single Business Backend**: Settings, providers, security policy, sessions, tasks, plugins, and diagnostics bundles live in runtime-host
+- **CORS-Safe by Design**: Renderer never talks to local HTTP services directly; backend calls enter through `hostapi:fetch`
 
 ---
 
@@ -296,22 +307,18 @@ Chain multiple skills together to create sophisticated automation pipelines. Pro
 
 ```MatchaClaw/
 ├── electron/                 # Electron Main Process
-│   ├── api/                 # Main-side API router and handlers
-│   │   └── routes/          # RPC/HTTP proxy route modules
-│   ├── services/            # Provider, secrets and runtime services
-│   │   ├── providers/       # Provider/account model sync logic
-│   │   └── secrets/         # OS keychain and secret storage
-│   ├── shared/              # Shared provider schemas/constants
-│   │   └── providers/
+│   ├── api/                 # Host API router and runtime-host proxy
+│   │   └── routes/          # Host-owned routes and internal shell routes
+│   ├── services/            # Host-only services (OpenClaw CLI, OAuth browser/device flow)
 │   ├── main/                # App entry, windows, IPC registration
 │   ├── gateway/             # OpenClaw Gateway process manager
 │   ├── preload/             # Secure IPC bridge
-│   └── utils/               # Utilities (storage, auth, paths)
+│   └── utils/               # Utilities (paths, proxy, packaged runtime resolution)
 ├── src/                      # React Renderer Process
 │   ├── lib/                 # Unified frontend API + error model
 │   ├── stores/              # Zustand stores (settings/chat/gateway/tasks)
 │   ├── components/          # Reusable UI components
-│   ├── pages/               # Setup/Dashboard/Chat/Tasks/Teams/SubAgents/Channels/Skills/Cron/Settings
+│   ├── pages/               # Setup/Dashboard/Chat/Tasks/Teams/SubAgents/Channels/Skills/Settings
 │   ├── i18n/                # Localization resources
 │   └── types/               # TypeScript type definitions
 ├── tests/

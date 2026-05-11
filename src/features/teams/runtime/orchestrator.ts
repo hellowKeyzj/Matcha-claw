@@ -1,4 +1,4 @@
-import { hostGatewayRpc } from '@/lib/host-api';
+import { hostApiFetch } from '@/lib/host-api';
 import { waitAgentRunWithProgress } from '@/services/openclaw/agent-runtime';
 import {
   fetchChatTimeline,
@@ -75,7 +75,11 @@ async function callGatewayRpc<T>(
   params: unknown,
   timeoutMs: number,
 ): Promise<T> {
-  return await hostGatewayRpc<T>(method, params, timeoutMs);
+  return await hostApiFetch<T>('/api/gateway/agent-wait', {
+    method: 'POST',
+    body: JSON.stringify({ method, params }),
+    timeoutMs,
+  });
 }
 
 async function gatewayRpc<T>(method: string, params?: unknown, timeoutMs?: number): Promise<T> {

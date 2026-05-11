@@ -1,8 +1,14 @@
 import { mkdirSync, writeFileSync, rmSync, mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
-import { SessionRuntimeService } from '../../runtime-host/application/sessions/service';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { SessionMetadataRepository } from '../../runtime-host/application/sessions/session-metadata-repository';
+import { SessionStorageRepository } from '../../runtime-host/application/sessions/session-storage-repository';
+import {
+  createTestSessionCatalogService,
+  createTestSessionRuntimeService,
+} from './helpers/session-runtime-fixture';
+import { createTestRuntimeFileSystem } from './helpers/runtime-file-system';
 
 function buildTranscriptLine(input: {
   timestamp: string;
@@ -27,6 +33,259 @@ describe('session adapter service catalog', () => {
     while (tempDirs.length > 0) {
       rmSync(tempDirs.pop()!, { recursive: true, force: true });
     }
+  });
+
+  it('catalog service can list persisted sessions without constructing runtime service', async () => {
+    const configDir = mkdtempSync(join(tmpdir(), 'matchaclaw-session-catalog-'));
+    tempDirs.push(configDir);
+
+    const sessionsDir = join(configDir, 'agents', 'alpha', 'sessions');
+    mkdirSync(sessionsDir, { recursive: true });
+    writeFileSync(join(sessionsDir, 'sessions.json'), JSON.stringify({
+      sessions: [
+        { key: 'agent:alpha:main', id: 'main' },
+      ],
+    }, null, 2));
+    writeFileSync(join(sessionsDir, 'main.jsonl'), [
+      buildTranscriptLine({
+        timestamp: '2026-04-10T10:00:00.000Z',
+        role: 'user',
+        content: '独立 catalog service',
+        id: 'message-1',
+      }),
+    ].join('\n'));
+
+    const service = createTestSessionCatalogService({
+      workspace: { getConfigDir: () => configDir },
+    });
+
+    await service.refreshCache();
+    await expect(service.listSessions()).resolves.toEqual({
+      ready: true,
+      refreshing: false,
+      updatedAt: expect.any(Number),
+      error: null,
+      sessions: [
+        {
+          agentId: 'alpha',
+          key: 'agent:alpha:main',
+          kind: 'main',
+          label: '独立 catalog service',
+          preferred: true,
+          titleSource: 'user',
+          displayName: 'agent:alpha:main',
+          updatedAt: Date.parse('2026-04-10T10:00:00.000Z'),
+        },
+      ],
+    });
+  });
+
+  it('uses the shared session metadata repository for catalog model resolution', async () => {
+    const configDir = mkdtempSync(join(tmpdir(), 'matchaclaw-session-catalog-'));
+    tempDirs.push(configDir);
+
+    const sessionsDir = join(configDir, 'agents', 'alpha', 'sessions');
+    mkdirSync(sessionsDir, { recursive: true });
+    writeFileSync(join(sessionsDir, 'sessions.json'), JSON.stringify({
+      sessions: [
+        { key: 'agent:alpha:main', id: 'main' },
+      ],
+    }, null, 2));
+    writeFileSync(join(sessionsDir, 'main.jsonl'), [
+      buildTranscriptLine({
+        timestamp: '2026-04-10T10:00:00.000Z',
+        role: 'user',
+        content: 'shared metadata model',
+        id: 'message-1',
+      }),
+    ].join('\n'));
+
+    class TestSessionMetadataRepository extends SessionMetadataRepository {
+      override async resolveSessionModel(): Promise<string | null> {
+        return 'test/shared-model';
+      }
+    }
+
+    const service = createTestSessionCatalogService({
+      workspace: { getConfigDir: () => configDir },
+      metadataRepository: new TestSessionMetadataRepository({
+        workspace: { getConfigDir: () => configDir },
+        fileSystem: createTestRuntimeFileSystem(),
+      }),
+    });
+
+    await service.refreshCache();
+    const response = await service.listSessions();
+
+    expect(response.sessions[0]).toMatchObject({
+      key: 'agent:alpha:main',
+      model: 'test/shared-model',
+    });
+  });
+
+  it('reuses parsed transcript timelines while the transcript fingerprint is unchanged', async () => {
+    const configDir = mkdtempSync(join(tmpdir(), 'matchaclaw-session-catalog-'));
+    tempDirs.push(configDir);
+
+    const sessionsDir = join(configDir, 'agents', 'alpha', 'sessions');
+    const transcriptPath = join(sessionsDir, 'main.jsonl');
+    mkdirSync(sessionsDir, { recursive: true });
+    writeFileSync(join(sessionsDir, 'sessions.json'), JSON.stringify({
+      sessions: [
+        { key: 'agent:alpha:main', id: 'main' },
+      ],
+    }, null, 2));
+    writeFileSync(transcriptPath, [
+      buildTranscriptLine({
+        timestamp: '2026-04-10T10:00:00.000Z',
+        role: 'user',
+        content: 'cached title',
+        id: 'message-1',
+      }),
+    ].join('\n'));
+
+    class CountingSessionStorageRepository extends SessionStorageRepository {
+      readCount = 0;
+
+      override async readTranscriptDescriptorContent(descriptor: Parameters<SessionStorageRepository['readTranscriptDescriptorContent']>[0]) {
+        this.readCount += 1;
+        return await super.readTranscriptDescriptorContent(descriptor);
+      }
+    }
+
+    const storageRepository = new CountingSessionStorageRepository({
+      workspace: { getConfigDir: () => configDir },
+      fileSystem: createTestRuntimeFileSystem(),
+    });
+    const service = createTestSessionCatalogService({
+      workspace: { getConfigDir: () => configDir },
+      storageRepository,
+    });
+
+    await service.refreshCache();
+    await service.listSessions();
+    expect(storageRepository.readCount).toBe(1);
+
+    writeFileSync(transcriptPath, [
+      buildTranscriptLine({
+        timestamp: '2026-04-10T10:00:00.000Z',
+        role: 'user',
+        content: 'cached title changed',
+        id: 'message-1',
+      }),
+    ].join('\n'));
+    await service.refreshCache();
+    await expect(service.listSessions()).resolves.toMatchObject({
+      sessions: [
+        {
+          label: 'cached title changed',
+        },
+      ],
+    });
+    expect(storageRepository.readCount).toBe(2);
+  });
+
+  it('listSessions reads the cached catalog snapshot without rescanning transcripts', async () => {
+    const configDir = mkdtempSync(join(tmpdir(), 'matchaclaw-session-catalog-'));
+    tempDirs.push(configDir);
+
+    const sessionsDir = join(configDir, 'agents', 'alpha', 'sessions');
+    mkdirSync(sessionsDir, { recursive: true });
+    writeFileSync(join(sessionsDir, 'sessions.json'), JSON.stringify({
+      sessions: [
+        { key: 'agent:alpha:main', id: 'main' },
+      ],
+    }, null, 2));
+    writeFileSync(join(sessionsDir, 'main.jsonl'), [
+      buildTranscriptLine({
+        timestamp: '2026-04-10T10:00:00.000Z',
+        role: 'user',
+        content: 'cached snapshot',
+        id: 'message-1',
+      }),
+    ].join('\n'));
+
+    class CountingSessionStorageRepository extends SessionStorageRepository {
+      readCount = 0;
+
+      override async readTranscriptDescriptorContent(descriptor: Parameters<SessionStorageRepository['readTranscriptDescriptorContent']>[0]) {
+        this.readCount += 1;
+        return await super.readTranscriptDescriptorContent(descriptor);
+      }
+    }
+
+    const storageRepository = new CountingSessionStorageRepository({
+      workspace: { getConfigDir: () => configDir },
+      fileSystem: createTestRuntimeFileSystem(),
+    });
+    const service = createTestSessionCatalogService({
+      workspace: { getConfigDir: () => configDir },
+      storageRepository,
+    });
+
+    await service.refreshCache();
+    expect(storageRepository.readCount).toBe(1);
+    await expect(service.listSessions()).resolves.toMatchObject({
+      sessions: [
+        {
+          label: 'cached snapshot',
+        },
+      ],
+    });
+    await service.listSessions();
+    expect(storageRepository.readCount).toBe(1);
+  });
+
+  it('runtime listSessions returns a refreshing snapshot until the catalog cache is ready', async () => {
+    const configDir = mkdtempSync(join(tmpdir(), 'matchaclaw-session-catalog-'));
+    tempDirs.push(configDir);
+    const submitRefreshCatalog = vi.fn(() => ({
+      success: true as const,
+      job: {
+        id: 'job-refresh-session-catalog',
+        type: 'sessions.refreshCatalog',
+        queue: 'low' as const,
+        status: 'queued' as const,
+        queuedAt: 1_700_000_000_000,
+        attempts: 0,
+        maxAttempts: 1,
+      },
+    }));
+    const getRefreshCatalogJob = vi.fn(() => ({
+      id: 'job-refresh-session-catalog',
+      type: 'sessions.refreshCatalog',
+      queue: 'low' as const,
+      status: 'queued' as const,
+      queuedAt: 1_700_000_000_000,
+      attempts: 0,
+      maxAttempts: 1,
+    }));
+    const service = createTestSessionRuntimeService({
+      workspace: { getConfigDir: () => configDir },
+      sessionCatalogJobs: {
+        submitRefreshCatalog,
+        getRefreshCatalogJob,
+      },
+      openclawBridge: {
+        chatSend: async () => ({}),
+        gatewayRpc: async () => ({}),
+      },
+    });
+
+    const response = await service.listSessions();
+
+    expect(submitRefreshCatalog).toHaveBeenCalledTimes(1);
+    expect(getRefreshCatalogJob).toHaveBeenCalledTimes(1);
+    expect(response).toEqual({
+      status: 200,
+      data: {
+        sessions: [],
+        ready: false,
+        refreshing: true,
+        updatedAt: null,
+        error: null,
+      },
+    });
   });
 
   it('lists only sessions backed by real transcripts and resolves labels from the transcript content', async () => {
@@ -75,18 +334,19 @@ describe('session adapter service catalog', () => {
       }),
     ].join('\n'));
 
-    const service = new SessionRuntimeService({
-      getOpenClawConfigDir: () => configDir,
+    const service = createTestSessionRuntimeService({
+      workspace: { getConfigDir: () => configDir },
       openclawBridge: {
         chatSend: async () => ({}),
         gatewayRpc: async () => ({}),
       },
     });
 
+    await service.refreshSessionCatalog();
     const response = await service.listSessions();
 
     expect(response.status).toBe(200);
-    expect(response.data).toEqual({
+    expect(response.data).toMatchObject({
       sessions: [
         {
           agentId: 'alpha',
@@ -155,18 +415,19 @@ describe('session adapter service catalog', () => {
       }),
     ].join('\n'));
 
-    const service = new SessionRuntimeService({
-      getOpenClawConfigDir: () => configDir,
+    const service = createTestSessionRuntimeService({
+      workspace: { getConfigDir: () => configDir },
       openclawBridge: {
         chatSend: async () => ({}),
         gatewayRpc: async () => ({}),
       },
     });
 
+    await service.refreshSessionCatalog();
     const response = await service.listSessions();
 
     expect(response.status).toBe(200);
-    expect(response.data).toEqual({
+    expect(response.data).toMatchObject({
       sessions: [
         {
           agentId: 'alpha',
@@ -228,14 +489,15 @@ describe('session adapter service catalog', () => {
       }),
     ].join('\n'));
 
-    const service = new SessionRuntimeService({
-      getOpenClawConfigDir: () => configDir,
+    const service = createTestSessionRuntimeService({
+      workspace: { getConfigDir: () => configDir },
       openclawBridge: {
         chatSend: async () => ({}),
         gatewayRpc: async () => ({}),
       },
     });
 
+    await service.refreshSessionCatalog();
     const response = await service.listSessions();
 
     expect(response.status).toBe(200);
@@ -260,18 +522,19 @@ describe('session adapter service catalog', () => {
       }),
     ].join('\n'));
 
-    const service = new SessionRuntimeService({
-      getOpenClawConfigDir: () => configDir,
+    const service = createTestSessionRuntimeService({
+      workspace: { getConfigDir: () => configDir },
       openclawBridge: {
         chatSend: async () => ({}),
         gatewayRpc: async () => ({}),
       },
     });
 
+    await service.refreshSessionCatalog();
     const response = await service.listSessions();
 
     expect(response.status).toBe(200);
-    expect(response.data).toEqual({
+    expect(response.data).toMatchObject({
       sessions: [
         {
           agentId: 'orphan-agent',

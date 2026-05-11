@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { assembleAuthoritativeAssistantTurns } from '../../runtime-host/application/sessions/assistant-turn-assembler';
-import { buildTimelineEntriesFromTranscriptMessage } from '../../runtime-host/application/sessions/transcript-utils';
+import { buildTimelineEntriesFromTranscriptMessage } from '../../runtime-host/application/sessions/transcript-timeline-materializer';
 
 describe('transcript utils gateway media', () => {
   it('keeps assistant gateway media bubbles as renderable assistant turns', () => {

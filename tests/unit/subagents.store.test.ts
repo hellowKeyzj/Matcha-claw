@@ -65,6 +65,33 @@ describe('subagents store', () => {
     expect(state.agents).toEqual([]);
   });
 
+  it('loadAgents 遇到 runtime-host not-ready 时保持 loading 并等待重试', async () => {
+    vi.useFakeTimers();
+    try {
+      gatewayClientRpcMock.mockResolvedValueOnce({
+        success: true,
+        result: {
+          success: true,
+          agents: [],
+          ready: false,
+          refreshing: true,
+          updatedAt: null,
+          error: null,
+        },
+      });
+
+      await useSubagentsStore.getState().loadAgents();
+
+      const state = useSubagentsStore.getState();
+      expect(state.agentsResource.status).toBe('loading');
+      expect(state.agentsResource.hasLoadedOnce).toBe(false);
+      expect(state.agents).toEqual([]);
+      expect(gatewayClientRpcMock).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('loadAgents 与 loadAvailableModels 并发时，只有 loadAgents 会读取 config.get', async () => {
     const rpc = gatewayClientRpcMock;
     let resolveConfigGet: ((value: unknown) => void) | null = null;

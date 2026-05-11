@@ -35,7 +35,7 @@ describe('diagnostics routes', () => {
     vi.clearAllMocks();
   });
 
-  it('GET /api/diagnostics/gateway-snapshot 返回网关、频道快照和日志尾部', async () => {
+  it('GET /api/diagnostics/gateway-snapshot 只返回宿主网关诊断和日志尾部', async () => {
     const tempDir = await mkdtemp(join(tmpdir(), 'matchaclaw-diagnostics-'));
     hoisted.openClawConfigDir = tempDir;
     await mkdir(join(tempDir, 'logs'), { recursive: true });
@@ -66,16 +66,7 @@ describe('diagnostics routes', () => {
             },
             updatedAt: 200,
           })),
-          request: vi.fn(async () => ({
-            status: 200,
-            data: {
-              success: true,
-              snapshot: {
-                channelOrder: ['wecom'],
-                channels: { wecom: { configured: true } },
-              },
-            },
-          })),
+          request: vi.fn(),
         },
       };
 
@@ -88,7 +79,7 @@ describe('diagnostics routes', () => {
       );
 
       expect(handled).toBe(true);
-      expect(ctx.runtimeHost.request).toHaveBeenCalledWith('GET', '/api/channels/snapshot');
+      expect(ctx.runtimeHost.request).not.toHaveBeenCalled();
       expect(hoisted.readLogFileMock).toHaveBeenCalledWith(200);
       expect(hoisted.sendJsonMock).toHaveBeenCalledWith(
         expect.anything(),
@@ -101,10 +92,6 @@ describe('diagnostics routes', () => {
             healthSummary: 'healthy',
             transportState: 'connected',
           }),
-          channelSnapshot: {
-            channelOrder: ['wecom'],
-            channels: { wecom: { configured: true } },
-          },
           clawxLogTail: 'matchaclaw-log-tail',
           gatewayLogTail: 'g1\ng2\ng3\n',
           gatewayErrLogTail: 'e1\ne2\n',

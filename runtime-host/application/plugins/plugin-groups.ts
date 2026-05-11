@@ -3,7 +3,6 @@ import type { RuntimeHostPluginManifest } from '../../shared/types';
 
 const CHANNEL_GROUP_CATEGORIES = new Set(['channel', 'channels']);
 const CHANNEL_GROUP_PLUGIN_IDS = new Set(['voice-call']);
-const MODEL_RUNTIME_DESCRIPTION_PATTERN = /runtime package/i;
 
 function normalizeCategory(value: string): string {
   return value.trim().toLowerCase();
@@ -30,15 +29,6 @@ export function pickCatalogGroup(params: {
   }
 
   if (params.groupHints?.model) {
-    return 'model';
-  }
-
-  if (
-    typeof params.id === 'string'
-    && params.id.startsWith('@openclaw/')
-    && typeof params.description === 'string'
-    && MODEL_RUNTIME_DESCRIPTION_PATTERN.test(params.description)
-  ) {
     return 'model';
   }
 

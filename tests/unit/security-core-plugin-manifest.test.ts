@@ -39,7 +39,7 @@ describe('security-core 插件规范对齐', () => {
   it('package 扩展入口仍指向规范的单一入口文件', () => {
     const openclawMeta = packageJson.openclaw as { extensions?: unknown } | undefined;
     expect(Array.isArray(openclawMeta?.extensions)).toBe(true);
-    expect(openclawMeta?.extensions).toContain('./src/index.ts');
+    expect(openclawMeta?.extensions).toContain('./dist/index.js');
     expect(typeof plugin.register).toBe('function');
   });
 });

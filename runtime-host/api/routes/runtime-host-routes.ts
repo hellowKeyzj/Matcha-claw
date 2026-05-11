@@ -1,98 +1,36 @@
-import { RuntimeHostService } from '../../application/runtime-host/service';
+import { routeResponder, type ApplicationResponse, type RuntimeRouteDefinition } from './route-utils';
 
-interface RuntimeHostRoutesDeps {
-  createHealthPayload: () => unknown;
-  buildTransportStatsSnapshot: () => unknown;
-  prepareGatewayLaunchLocal: (input: {
-    gatewayToken?: string;
-    proxyEnabled?: boolean;
-    proxyServer?: string;
-    proxyBypassRules?: string;
-  }) => Promise<{ configuredChannels: string[] }>;
-  buildProviderEnvMap: () => {
-    keyableProviderTypes: string[];
-    envVarByProviderType: Record<string, string>;
-  };
-  syncProviderAuthBootstrapLocal: () => Promise<{
-    syncedApiKeyCount: number;
-    defaultProviderId?: string;
-  }>;
-  collectDiagnosticsBundleLocal: (input: {
-    userDataDir: string;
-    openclawConfigDir: string;
-    appInfo: {
-      name: string;
-      version: string;
-      isPackaged: boolean;
-      platform: NodeJS.Platform;
-      arch: string;
-      electron?: string;
-      node: string;
-    };
-    gatewayStatus?: unknown;
-    gatewayRuntimePaths?: unknown;
-    licenseGateSnapshot?: unknown;
-  }) => Promise<unknown>;
+interface RuntimeHostRouteService {
+  health: () => unknown;
+  transportStats: () => unknown;
+  prepareGatewayLaunch: (payload: unknown) => Promise<ApplicationResponse>;
+  providerEnvMap: () => unknown;
+  hostBootstrapSettings: () => Promise<ApplicationResponse>;
+  gatewayLaunchPlan: () => Promise<ApplicationResponse>;
+  syncProviderAuthBootstrap: () => ApplicationResponse;
+  gatewayLifecycle: (payload: unknown) => ApplicationResponse | unknown;
+  collectDiagnostics: (payload: unknown) => Promise<ApplicationResponse>;
+  runtimeJobs: (payload: unknown) => unknown;
+  runtimeJob: (payload: unknown) => ApplicationResponse | unknown;
 }
 
-interface LocalDispatchResponse {
-  status: number;
-  data: unknown;
-}
+export const runtimeHostRoutes: readonly RuntimeRouteDefinition<RuntimeHostRouteService>[] = [
+  { method: 'GET', path: '/api/runtime-host/health', handle: (_context, service) => routeResponder.ok(service.health()) },
+  { method: 'GET', path: '/api/runtime-host/transport-stats', handle: (_context, service) => routeResponder.ok(service.transportStats()) },
+  { method: 'POST', path: '/api/runtime-host/prepare-gateway-launch', handle: (context, service) => routeResponder.result(() => service.prepareGatewayLaunch(context.payload)) },
+  { method: 'GET', path: '/api/runtime-host/provider-env-map', handle: (_context, service) => routeResponder.ok(service.providerEnvMap()) },
+  { method: 'GET', path: '/api/runtime-host/host-bootstrap-settings', handle: (_context, service) => routeResponder.result(() => service.hostBootstrapSettings()) },
+  { method: 'GET', path: '/api/runtime-host/gateway-launch-plan', handle: (_context, service) => routeResponder.result(() => service.gatewayLaunchPlan()) },
+  { method: 'POST', path: '/api/runtime-host/sync-provider-auth-bootstrap', handle: (_context, service) => routeResponder.result(() => service.syncProviderAuthBootstrap()) },
+  { method: 'POST', path: '/api/runtime-host/gateway-lifecycle', handle: (context, service) => routeResponder.result(() => service.gatewayLifecycle(context.payload)) },
+  {
+    method: 'GET',
+    path: '/api/runtime-host/jobs',
+    handle: (context, service) => routeResponder.ok(service.runtimeJobs({
+      type: context.routeUrl.searchParams.get('type') ?? undefined,
+    })),
+  },
+  { method: 'POST', path: '/api/runtime-host/jobs/get', handle: (context, service) => routeResponder.result(() => service.runtimeJob(context.payload)) },
+  { method: 'POST', path: '/api/diagnostics/collect', handle: (context, service) => routeResponder.result(() => service.collectDiagnostics(context.payload)) },
+] as const;
 
-export async function handleRuntimeHostRoute(
-  method: string,
-  routePath: string,
-  payload: unknown,
-  deps: RuntimeHostRoutesDeps,
-): Promise<LocalDispatchResponse | null> {
-  const service = new RuntimeHostService({
-    createHealthPayload: deps.createHealthPayload,
-    buildTransportStatsSnapshot: deps.buildTransportStatsSnapshot,
-    prepareGatewayLaunch: deps.prepareGatewayLaunchLocal,
-    buildProviderEnvMap: deps.buildProviderEnvMap,
-    syncProviderAuthBootstrap: deps.syncProviderAuthBootstrapLocal,
-    collectDiagnostics: deps.collectDiagnosticsBundleLocal,
-  });
-
-  if (method === 'GET' && routePath === '/api/runtime-host/health') {
-    return {
-      status: 200,
-      data: service.health(),
-    };
-  }
-
-  if (method === 'GET' && routePath === '/api/runtime-host/transport-stats') {
-    return {
-      status: 200,
-      data: service.transportStats(),
-    };
-  }
-
-  if (method === 'POST' && routePath === '/api/runtime-host/prepare-gateway-launch') {
-    return {
-      status: 200,
-      data: await service.prepareGatewayLaunch(payload),
-    };
-  }
-
-  if (method === 'GET' && routePath === '/api/runtime-host/provider-env-map') {
-    return {
-      status: 200,
-      data: service.providerEnvMap(),
-    };
-  }
-
-  if (method === 'POST' && routePath === '/api/runtime-host/sync-provider-auth-bootstrap') {
-    return {
-      status: 200,
-      data: await service.syncProviderAuthBootstrap(),
-    };
-  }
-
-  if (method === 'POST' && routePath === '/api/diagnostics/collect') {
-    return await service.collectDiagnostics(payload);
-  }
-
-  return null;
-}

@@ -26,7 +26,7 @@ describe('runtime-host API 真实链路 contract', () => {
   });
 
   it('provider accounts 通过 /dispatch 完成增删查与校验', async () => {
-    const created = await harness.dispatchOk<{ success: boolean; account: { id: string; vendorId: string } }>(
+    const created = await harness.dispatchOk<{ success: boolean; job: { id: string } }>(
       'POST',
       '/api/provider-accounts',
       {
@@ -40,7 +40,8 @@ describe('runtime-host API 真实链路 contract', () => {
       },
     );
     expect(created.success).toBe(true);
-    expect(created.account.id).toBe('openai-main');
+    const createResult = await harness.waitForJob<{ data?: { account?: { id: string } } }>(created.job.id);
+    expect(createResult.data?.account?.id).toBe('openai-main');
 
     const listed = await harness.dispatchOk<{
       accounts: Array<{ id: string }>;
@@ -60,7 +61,7 @@ describe('runtime-host API 真实链路 contract', () => {
   });
 
   it('channels 配置链路通过 /dispatch 生效并可读回', async () => {
-    const saved = await harness.dispatchOk<{ success: boolean }>(
+    const saved = await harness.dispatchOk<{ success: boolean; job: { id: string } }>(
       'POST',
       '/api/channels/activate',
       {
@@ -74,6 +75,7 @@ describe('runtime-host API 真实链路 contract', () => {
       },
     );
     expect(saved.success).toBe(true);
+    await harness.waitForJob(saved.job.id);
 
     const configured = await harness.dispatchOk<{ success: boolean; channels: string[] }>(
       'GET',
@@ -258,6 +260,7 @@ describe('runtime-host API 真实链路 contract', () => {
       join(sessionsDir, 'session-1.jsonl'),
       [
         JSON.stringify({
+          type: 'message',
           timestamp: '2026-04-06T10:00:00.000Z',
           message: {
             role: 'assistant',
@@ -275,6 +278,17 @@ describe('runtime-host API 真实链路 contract', () => {
       'utf8',
     );
 
+    await harness.dispatchOk<Array<{ totalTokens: number; provider?: string }>>(
+      'GET',
+      '/api/runtime-host/usage/recent?limit=5',
+    );
+    const usageJobs = await harness.dispatchOk<{ jobs: Array<{ id: string; type: string }> }>(
+      'GET',
+      '/api/runtime-host/jobs?type=usage.refreshHistory',
+    );
+    const refreshJob = usageJobs.jobs.at(-1);
+    expect(refreshJob?.id).toBeTruthy();
+    await harness.waitForJob(refreshJob?.id);
     const usage = await harness.dispatchOk<Array<{ totalTokens: number; provider?: string }>>(
       'GET',
       '/api/runtime-host/usage/recent?limit=5',
@@ -300,18 +314,22 @@ describe('runtime-host API 真实链路 contract', () => {
       join(sessionsDir, 'session-window.jsonl'),
       [
         JSON.stringify({
+          type: 'message',
           timestamp: '2026-04-06T10:00:00.000Z',
           message: { role: 'user', id: 'm1', content: 'hello-1' },
         }),
         JSON.stringify({
+          type: 'message',
           timestamp: '2026-04-06T10:01:00.000Z',
           message: { role: 'assistant', id: 'm2', content: 'hello-2' },
         }),
         JSON.stringify({
+          type: 'message',
           timestamp: '2026-04-06T10:02:00.000Z',
           message: { role: 'user', id: 'm3', content: 'hello-3' },
         }),
         JSON.stringify({
+          type: 'message',
           timestamp: '2026-04-06T10:03:00.000Z',
           message: { role: 'assistant', id: 'm4', content: 'hello-4' },
         }),
@@ -319,7 +337,7 @@ describe('runtime-host API 真实链路 contract', () => {
       'utf8',
     );
 
-    const latest = await harness.dispatchOk<{
+    const initialLatest = await harness.dispatchOk<{
       snapshot: {
         items: Array<{ key: string; kind: string; messageId?: string; turnKey?: string }>;
         window: {
@@ -331,11 +349,15 @@ describe('runtime-host API 真实链路 contract', () => {
           isAtLatest: boolean;
         };
       };
+      hydrationJob?: { id: string };
     }>('POST', '/api/sessions/window', {
       sessionKey: 'agent:main:session-window',
       mode: 'latest',
       limit: 2,
     });
+    const latest = initialLatest.hydrationJob
+      ? await harness.waitForJob<typeof initialLatest>(initialLatest.hydrationJob.id)
+      : initialLatest;
     expect(latest.snapshot.window.totalItemCount).toBe(4);
     expect(latest.snapshot.window.windowStartOffset).toBe(2);
     expect(latest.snapshot.window.windowEndOffset).toBe(4);

@@ -48,7 +48,7 @@ class FakeResponse {
 function createTransportStats() {
   return {
     totalDispatchRequests: 0,
-    localBusinessHandled: 0,
+    runtimeRouteHandled: 0,
     unhandledRouteCount: 0,
     badRequestRejected: 0,
     dispatchInternalError: 0,
@@ -58,7 +58,8 @@ function createTransportStats() {
 async function runDispatch(
   requestPayload: unknown,
   overrides?: Partial<{
-    tryHandleLocalBusinessDispatch: (
+    logger: Parameters<typeof handleDispatchRoute>[2]['logger'];
+    dispatchRuntimeRoute: (
       method: string,
       route: string,
       payload: unknown,
@@ -66,7 +67,7 @@ async function runDispatch(
   }>,
 ) {
   const transportStats = createTransportStats();
-  const tryHandleLocalBusinessDispatch = overrides?.tryHandleLocalBusinessDispatch
+  const dispatchRuntimeRoute = overrides?.dispatchRuntimeRoute
     || vi.fn(async () => null);
 
   const req = new FakeRequest(JSON.stringify(requestPayload));
@@ -74,7 +75,8 @@ async function runDispatch(
 
   handleDispatchRoute(req, res, {
     transportStats,
-    tryHandleLocalBusinessDispatch,
+    logger: overrides?.logger,
+    dispatchRuntimeRoute,
   });
   req.start();
   await res.done;
@@ -84,13 +86,13 @@ async function runDispatch(
     body: JSON.parse(res.bodyText || '{}') as Record<string, unknown>,
     transportStats,
     mocks: {
-      tryHandleLocalBusinessDispatch,
+      dispatchRuntimeRoute,
     },
   };
 }
 
 describe('runtime-host process dispatch route handler', () => {
-  it('本地业务命中时返回 local response 并累计统计', async () => {
+  it('runtime 路由命中时返回 runtime route response 并累计统计', async () => {
     const result = await runDispatch(
       {
         version: 1,
@@ -98,18 +100,18 @@ describe('runtime-host process dispatch route handler', () => {
         route: '/api/workbench/bootstrap',
       },
       {
-        tryHandleLocalBusinessDispatch: vi.fn(async () => ({
+        dispatchRuntimeRoute: vi.fn(async () => ({
           status: 200,
-          data: { success: true, source: 'local' },
+          data: { success: true, source: 'runtime-route' },
         })),
       },
     );
 
     expect(result.statusCode).toBe(200);
     expect(result.body.success).toBe(true);
-    expect(result.body.data).toEqual({ success: true, source: 'local' });
+    expect(result.body.data).toEqual({ success: true, source: 'runtime-route' });
     expect(result.transportStats.totalDispatchRequests).toBe(1);
-    expect(result.transportStats.localBusinessHandled).toBe(1);
+    expect(result.transportStats.runtimeRouteHandled).toBe(1);
   });
 
   it('transport version 不匹配时返回 BAD_REQUEST', async () => {
@@ -133,7 +135,7 @@ describe('runtime-host process dispatch route handler', () => {
     const result = await runDispatch({
       version: 1,
       method: 'POST',
-      route: '/api/plugins/runtime/restart',
+      route: '/api/runtime-host/restart',
     });
 
     expect(result.statusCode).toBe(404);
@@ -144,5 +146,34 @@ describe('runtime-host process dispatch route handler', () => {
       }),
     );
     expect(result.transportStats.unhandledRouteCount).toBe(1);
+  });
+
+  it('链路调测日志只走 traceDebug，不走普通 debug', async () => {
+    const logger = {
+      debug: vi.fn(),
+      traceDebug: vi.fn(),
+      info: vi.fn(),
+      warn: vi.fn(),
+      error: vi.fn(),
+    };
+
+    await runDispatch(
+      {
+        version: 1,
+        method: 'GET',
+        route: '/api/workbench/bootstrap',
+      },
+      {
+        logger,
+        dispatchRuntimeRoute: vi.fn(async () => ({
+          status: 200,
+          data: { success: true },
+        })),
+      },
+    );
+
+    expect(logger.debug).not.toHaveBeenCalled();
+    expect(logger.traceDebug).toHaveBeenCalledWith(2, '[dispatch] start', expect.any(Object));
+    expect(logger.traceDebug).toHaveBeenCalledWith(2, '[dispatch] finish', expect.any(Object));
   });
 });

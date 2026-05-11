@@ -9,14 +9,6 @@ vi.mock('../../electron/services/providers/oauth/device-oauth-manager', () => ({
   deviceOAuthManager: new EventEmitter(),
 }));
 
-vi.mock('../../electron/services/channels/whatsapp-login-manager', () => ({
-  whatsAppLoginManager: new EventEmitter(),
-}));
-
-vi.mock('../../electron/services/channels/weixin-login-manager', () => ({
-  weixinLoginManager: new EventEmitter(),
-}));
-
 class FakeGatewayManager extends EventEmitter {
   private status: { processState: 'stopped' | 'starting' | 'control_connecting' | 'running' | 'error' | 'reconnecting'; port: number };
 
@@ -38,7 +30,6 @@ describe('host event bridge runtime-host lifecycle', () => {
 
   it('会透传 runtime-host status/error/restart 事件到 host event 通道', async () => {
     const gatewayManager = new FakeGatewayManager();
-    const syncSecurityPolicyToGatewayIfRunning = vi.fn(async () => true);
     let gatewayEventHandler: ((eventName: string, payload: unknown) => void) | null = null;
 
     let runtimeState = {
@@ -46,7 +37,6 @@ describe('host event bridge runtime-host lifecycle', () => {
       runtimeLifecycle: 'running' as const,
       pid: 1111,
       activePluginCount: 2,
-      enabledPluginIds: ['security-core'],
     };
     let runtimeHealth = {
       ok: true,
@@ -69,7 +59,7 @@ describe('host event bridge runtime-host lifecycle', () => {
         },
         updatedAt: 123,
       })),
-      syncSecurityPolicyToGatewayIfRunning,
+      emitGatewayEvent: vi.fn(),
       onGatewayEvent: vi.fn((handler: (eventName: string, payload: unknown) => void) => {
         gatewayEventHandler = handler;
         return () => {
@@ -164,5 +154,53 @@ describe('host event bridge runtime-host lifecycle', () => {
         phase: 'started',
       }),
     );
+
+    gatewayEventHandler?.('gateway:channel-status', {
+      eventName: 'channel:weixin-qr',
+      payload: { qrDataUrl: 'data:image/png;base64,abc' },
+      updatedAt: 1234,
+    });
+
+    expect(eventBus.emit).toHaveBeenCalledWith(
+      'gateway:channel-status',
+      expect.objectContaining({
+        eventName: 'channel:weixin-qr',
+      }),
+    );
+    expect(eventBus.emit).not.toHaveBeenCalledWith('channel:weixin-qr', expect.anything());
+  });
+
+  it('Gateway 状态变化只发布宿主可见状态，不触发业务同步', async () => {
+    const gatewayManager = new FakeGatewayManager();
+    const emitGatewayEvent = vi.fn();
+    const runtimeHostManager = {
+      getState: vi.fn(() => ({
+        lifecycle: 'running',
+        runtimeLifecycle: 'running',
+        activePluginCount: 0,
+      })),
+      checkHealth: vi.fn(async () => ({
+        ok: true,
+        lifecycle: 'running',
+        activePluginCount: 0,
+        degradedPlugins: [],
+      })),
+      readGatewayStatus: vi.fn(async () => null),
+      emitGatewayEvent,
+      onGatewayEvent: vi.fn(() => () => {}),
+    };
+
+    const { registerHostEventBridge } = await import('../../electron/main/host-event-bridge');
+    registerHostEventBridge({
+      gatewayManager: gatewayManager as never,
+      runtimeHostManager: runtimeHostManager as never,
+      hostEventBus: { emit: vi.fn() } as never,
+      getMainWindow: () => null,
+    });
+
+    gatewayManager['status'] = { processState: 'running', port: 18789 };
+    gatewayManager.emit('status', gatewayManager.getStatus());
+
+    expect(emitGatewayEvent).not.toHaveBeenCalled();
   });
 });

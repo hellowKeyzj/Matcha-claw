@@ -31,22 +31,27 @@ const hoisted = vi.hoisted(() => {
       ...(processStateRef.lastError ? { lastError: processStateRef.lastError } : {}),
     })),
   }));
-  const setSettingMock = vi.fn(async () => {});
   const shellOpenPathMock = vi.fn(async () => '');
-  const getSettingMock = vi.fn(async () => undefined);
   const getOpenClawDirMock = vi.fn(() => 'E:\\code\\Matcha-claw\\node_modules\\openclaw');
+  const gatewayStatusMock = vi.fn(() => ({ processState: 'running', port: 18789 }));
   return {
     childRequestMock,
     childHealthMock,
     createRuntimeHostHttpClientMock,
     createRuntimeHostProcessManagerMock,
-    setSettingMock,
     shellOpenPathMock,
-    getSettingMock,
     getOpenClawDirMock,
+    gatewayStatusMock,
     processStateRef,
   };
 });
+
+function createGatewayManagerMock() {
+  return {
+    getStatus: hoisted.gatewayStatusMock,
+    debouncedRestart: vi.fn(),
+  } as never;
+}
 
 vi.mock('../../electron/main/runtime-host-client', () => {
   class RuntimeHostClientRequestError extends Error {
@@ -72,26 +77,20 @@ vi.mock('../../electron/main/runtime-host-process-manager', () => ({
   createRuntimeHostProcessManager: hoisted.createRuntimeHostProcessManagerMock,
 }));
 
-vi.mock('../../electron/services/settings/settings-store', () => ({
-  getSetting: hoisted.getSettingMock,
-  setSetting: hoisted.setSettingMock,
-}));
-
 vi.mock('../../electron/utils/paths', () => ({
   getOpenClawDir: hoisted.getOpenClawDirMock,
 }));
 
 vi.mock('electron', () => ({
+  app: {
+    isPackaged: false,
+    getVersion: () => '0.0.0-test',
+    getName: () => 'MatchaClaw',
+    getPath: (name: string) => name === 'userData' ? 'E:\\code\\Matcha-claw\\.tmp-test-user-data' : '',
+  },
   shell: {
     openPath: (...args: unknown[]) => hoisted.shellOpenPathMock(...args),
   },
-}));
-
-vi.mock('../../electron/services/channels/channel-runtime-service', () => ({
-  createChannelRuntimeService: vi.fn(() => ({
-    startChannelSession: vi.fn(async () => ({ queued: true, sessionKey: 'default' })),
-    cancelChannelSession: vi.fn(async () => {}),
-  })),
 }));
 
 vi.mock('../../electron/services/providers/oauth/browser-oauth-manager', () => ({
@@ -109,14 +108,6 @@ vi.mock('../../electron/services/providers/oauth/device-oauth-manager', () => ({
   },
 }));
 
-vi.mock('../../electron/services/license/license-gate-service', () => ({
-  waitForLicenseGateBootstrap: vi.fn(async () => {}),
-  getLicenseGateSnapshot: vi.fn(() => ({})),
-  getStoredLicenseKey: vi.fn(async () => null),
-  validateLicenseKey: vi.fn(async () => ({ success: true })),
-  forceRevalidateStoredLicense: vi.fn(async () => ({ success: true })),
-  clearStoredLicenseData: vi.fn(async () => {}),
-}));
 
 vi.mock('../../electron/utils/logger', () => ({
   logger: {
@@ -164,6 +155,8 @@ describe('runtime-host manager request transport policy', () => {
     }));
     hoisted.shellOpenPathMock.mockReset();
     hoisted.shellOpenPathMock.mockResolvedValue('');
+    hoisted.gatewayStatusMock.mockReset();
+    hoisted.gatewayStatusMock.mockReturnValue({ processState: 'running', port: 18789 });
     hoisted.processStateRef.lifecycle = 'idle';
     delete hoisted.processStateRef.lastError;
   });
@@ -187,7 +180,7 @@ describe('runtime-host manager request transport policy', () => {
 
     const { createRuntimeHostManager } = await import('../../electron/main/runtime-host-manager');
     const manager = createRuntimeHostManager({
-      gatewayManager: {} as never,
+      gatewayManager: createGatewayManagerMock(),
     });
 
     const result = await manager.request<{ source: string }>('GET', '/api/workbench/bootstrap');
@@ -203,7 +196,7 @@ describe('runtime-host manager request transport policy', () => {
 
     const { createRuntimeHostManager } = await import('../../electron/main/runtime-host-manager');
     const manager = createRuntimeHostManager({
-      gatewayManager: {} as never,
+      gatewayManager: createGatewayManagerMock(),
     });
 
     const result = await manager.request<{ source: string }>('GET', '/api/workbench/bootstrap');
@@ -222,7 +215,7 @@ describe('runtime-host manager request transport policy', () => {
 
     const { createRuntimeHostManager } = await import('../../electron/main/runtime-host-manager');
     const manager = createRuntimeHostManager({
-      gatewayManager: {} as never,
+      gatewayManager: createGatewayManagerMock(),
     });
 
     await expect(
@@ -240,7 +233,7 @@ describe('runtime-host manager request transport policy', () => {
     });
     const { createRuntimeHostManager } = await import('../../electron/main/runtime-host-manager');
     const manager = createRuntimeHostManager({
-      gatewayManager: {} as never,
+      gatewayManager: createGatewayManagerMock(),
     });
 
     const result = await manager.request<{ source: string }>('GET', '/api/workbench/bootstrap');
@@ -264,7 +257,7 @@ describe('runtime-host manager request transport policy', () => {
 
     const { createRuntimeHostManager } = await import('../../electron/main/runtime-host-manager');
     const manager = createRuntimeHostManager({
-      gatewayManager: {} as never,
+      gatewayManager: createGatewayManagerMock(),
     });
 
     const health = await manager.checkHealth();
@@ -277,16 +270,16 @@ describe('runtime-host manager request transport policy', () => {
     });
   });
 
-  it('getState.runtimeLifecycle 跟随子进程 lifecycle 映射', async () => {
+  it('getState.runtimeLifecycle 直接跟随子进程 lifecycle', async () => {
     hoisted.processStateRef.lifecycle = 'starting';
 
     const { createRuntimeHostManager } = await import('../../electron/main/runtime-host-manager');
     const manager = createRuntimeHostManager({
-      gatewayManager: {} as never,
+      gatewayManager: createGatewayManagerMock(),
     });
 
     const state = manager.getState();
-    expect(state.runtimeLifecycle).toBe('booting');
+    expect(state.runtimeLifecycle).toBe('starting');
   });
 
   it('启动时 gateway 端口仅来自 gatewayManager，不再读取 settings.gatewayPort', async () => {
@@ -304,9 +297,8 @@ describe('runtime-host manager request transport policy', () => {
       | undefined;
     const childEnv = processManagerOptions?.childEnv?.() ?? {};
     expect(childEnv.MATCHACLAW_RUNTIME_HOST_GATEWAY_PORT).toBe('19876');
-    expect(childEnv.MATCHACLAW_RUNTIME_HOST_GATEWAY_TOKEN).toBe('');
+    expect(childEnv.MATCHACLAW_RUNTIME_HOST_GATEWAY_TOKEN).toBeUndefined();
     expect(childEnv.MATCHACLAW_OPENCLAW_DIR).toBe('E:\\code\\Matcha-claw\\node_modules\\openclaw');
-    expect(hoisted.getSettingMock.mock.calls.some((args) => args[0] === 'gatewayPort')).toBe(false);
   });
 
   it('gatewayManager 返回非法端口时 start 直接失败，不再回退默认端口', async () => {
@@ -320,56 +312,11 @@ describe('runtime-host manager request transport policy', () => {
     await expect(manager.start()).rejects.toThrow('Invalid gateway port from gateway manager: 0');
   });
 
-  it('setEnabledPluginIds 通过 runtime-host 子进程路由持久化 execution state，不直接重启子进程', async () => {
-    const gatewayManager = {
-      getStatus: vi.fn(() => ({ state: 'running', port: 19876 })),
-    } as never;
-    hoisted.childRequestMock.mockImplementation(async (method: string, route: string) => {
-      if (method === 'GET' && route === '/api/plugins/runtime') {
-        return {
-          status: 200,
-          data: {
-            success: true,
-            execution: { enabledPluginIds: ['security-core'] },
-          },
-        };
-      }
-      if (method === 'PUT' && route === '/api/plugins/runtime/enabled-plugins') {
-        return {
-          status: 200,
-          data: {
-            success: true,
-            execution: { enabledPluginIds: ['task-manager'] },
-          },
-        };
-      }
-      return { status: 200, data: {} };
-    });
-
-    const { createRuntimeHostManager } = await import('../../electron/main/runtime-host-manager');
-    const manager = createRuntimeHostManager({ gatewayManager });
-
-    await manager.start();
-    const processManager = hoisted.createRuntimeHostProcessManagerMock.mock.results[0]?.value as
-      | { restart: ReturnType<typeof vi.fn> }
-      | undefined;
-
-    const result = await manager.setEnabledPluginIds(['task-manager']);
-
-    expect(result).toEqual({
-      enabledPluginIds: ['task-manager'],
-    });
-    expect(hoisted.childRequestMock).toHaveBeenCalledWith('PUT', '/api/plugins/runtime/enabled-plugins', {
-      pluginIds: ['task-manager'],
-    });
-    expect(processManager?.restart).not.toHaveBeenCalled();
-  });
-
   it('executeShellAction(shell_open_path) 通过主进程 shell.openPath 打开目录', async () => {
     hoisted.shellOpenPathMock.mockResolvedValueOnce('');
     const { createRuntimeHostManager } = await import('../../electron/main/runtime-host-manager');
     const manager = createRuntimeHostManager({
-      gatewayManager: {} as never,
+      gatewayManager: createGatewayManagerMock(),
     });
 
     const result = await manager.executeShellAction('shell_open_path', {
@@ -387,7 +334,7 @@ describe('runtime-host manager request transport policy', () => {
     hoisted.shellOpenPathMock.mockResolvedValueOnce('Access is denied');
     const { createRuntimeHostManager } = await import('../../electron/main/runtime-host-manager');
     const manager = createRuntimeHostManager({
-      gatewayManager: {} as never,
+      gatewayManager: createGatewayManagerMock(),
     });
 
     const result = await manager.executeShellAction('shell_open_path', {
@@ -416,6 +363,39 @@ describe('runtime-host manager request transport policy', () => {
     expect(result).toEqual({
       status: 200,
       data: { success: true },
+    });
+  });
+
+  it('executeShellAction(host_diagnostics_snapshot) 只返回宿主诊断上下文', async () => {
+    hoisted.gatewayStatusMock.mockReturnValueOnce({ processState: 'running', port: 19876, pid: 1234 });
+    const { createRuntimeHostManager } = await import('../../electron/main/runtime-host-manager');
+    const manager = createRuntimeHostManager({
+      gatewayManager: {
+        getStatus: hoisted.gatewayStatusMock,
+        debouncedRestart: vi.fn(),
+      } as never,
+    });
+
+    const result = await manager.executeShellAction('host_diagnostics_snapshot');
+
+    expect(result).toEqual({
+      status: 200,
+      data: {
+        success: true,
+        snapshot: {
+          userDataDir: 'E:\\code\\Matcha-claw\\.tmp-test-user-data',
+          appInfo: {
+            name: 'MatchaClaw',
+            version: '0.0.0-test',
+            isPackaged: false,
+            platform: process.platform,
+            arch: process.arch,
+            electron: process.versions.electron,
+            node: process.versions.node,
+          },
+          gatewayStatus: { processState: 'running', port: 19876, pid: 1234 },
+        },
+      },
     });
   });
 });

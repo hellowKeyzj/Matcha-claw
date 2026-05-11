@@ -38,7 +38,7 @@ export function isTaskStatusTransitionAllowed(from: TeamTaskStatus, to: TeamTask
 
 export function sanitizeTaskRecord(
   input: Partial<TeamTaskRecord> & { taskId: string; instruction: string },
-  nowMs = Date.now(),
+  nowMs: number,
 ): TeamTaskRecord {
   const taskId = normalizeText(input.taskId);
   const instruction = normalizeText(input.instruction);
@@ -74,7 +74,7 @@ export function sanitizeTaskRecord(
 
 export function sanitizeMailboxMessage(
   input: Partial<TeamMailboxMessage> & { msgId: string; fromAgentId: string; content: string },
-  nowMs = Date.now(),
+  nowMs: number,
 ): TeamMailboxMessage {
   const msgId = normalizeText(input.msgId);
   const fromAgentId = normalizeText(input.fromAgentId);

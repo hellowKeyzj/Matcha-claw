@@ -1,86 +1,89 @@
-import { existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { resolveMainWorkspaceDir, resolveTaskWorkspaceDirs } from './openclaw-workspace-rules';
-
-interface OpenClawStatus {
-  packageExists: boolean;
-  isBuilt: boolean;
-  entryPath: string;
-  dir: string;
-  version?: string;
-}
+import type { OpenClawEnvironmentRepository } from './openclaw-environment-repository';
+import type { OpenClawProviderSnapshotService } from './openclaw-provider-snapshot';
+import type { OpenClawConfigRepositoryPort } from './openclaw-config-repository';
+import type { OpenClawWorkspacePort } from './openclaw-workspace-service';
+import type { SubagentTemplateService } from './templates';
 
 export interface OpenClawServiceDeps {
-  readonly readOpenClawConfigJson: () => Record<string, unknown>;
-  readonly getOpenClawStatus: () => OpenClawStatus;
-  readonly getOpenClawDirPath: () => string;
-  readonly getOpenClawConfigDir: () => string;
-  readonly getSubagentTemplateCatalogFromSources: () => unknown;
-  readonly getSubagentTemplateFromSources: (templateId: string) => unknown;
+  readonly config: Pick<OpenClawConfigRepositoryPort, 'getOpenClawDirPath'>;
+  readonly environment: Pick<OpenClawEnvironmentRepository, 'getOpenClawStatus' | 'getPlatform' | 'pathExists'>;
+  readonly workspace: OpenClawWorkspacePort;
+  readonly subagentTemplates: Pick<SubagentTemplateService, 'listCatalog' | 'getTemplate'>;
+  readonly providerSnapshot: Pick<OpenClawProviderSnapshotService, 'getActiveProviders' | 'getProvidersConfig'>;
 }
 
 export class OpenClawService {
   constructor(private readonly deps: OpenClawServiceDeps) {}
 
-  status() {
-    return this.deps.getOpenClawStatus();
+  async status() {
+    return await this.deps.environment.getOpenClawStatus();
   }
 
-  ready() {
-    return this.deps.getOpenClawStatus().packageExists;
+  async ready() {
+    return (await this.deps.environment.getOpenClawStatus()).packageExists;
   }
 
   dir() {
-    return this.deps.getOpenClawDirPath();
+    return this.deps.config.getOpenClawDirPath();
   }
 
   configDir() {
-    return this.deps.getOpenClawConfigDir();
+    return this.deps.workspace.getConfigDir();
   }
 
-  subagentTemplates() {
-    return this.deps.getSubagentTemplateCatalogFromSources();
+  async subagentTemplates() {
+    return await this.deps.subagentTemplates.listCatalog();
   }
 
-  subagentTemplate(templateIdRaw: string) {
+  async subagentTemplate(templateIdRaw: string) {
     let templateId = '';
     try {
       templateId = decodeURIComponent(templateIdRaw);
     } catch {
       templateId = templateIdRaw;
     }
-    return this.deps.getSubagentTemplateFromSources(templateId);
+    return await this.deps.subagentTemplates.getTemplate(templateId);
   }
 
-  workspaceDir() {
-    return resolveMainWorkspaceDir(this.deps.readOpenClawConfigJson(), this.deps.getOpenClawConfigDir());
+  async workspaceDir() {
+    return await this.deps.workspace.getMainWorkspaceDir();
   }
 
-  taskWorkspaceDirs() {
-    return resolveTaskWorkspaceDirs(this.deps.readOpenClawConfigJson(), this.deps.getOpenClawConfigDir());
+  async taskWorkspaceDirs() {
+    return await this.deps.workspace.getTaskWorkspaceDirs();
+  }
+
+  async activeProviders() {
+    return await this.deps.providerSnapshot.getActiveProviders();
+  }
+
+  async providersConfig() {
+    return await this.deps.providerSnapshot.getProvidersConfig();
   }
 
   skillsDir() {
-    return join(this.deps.getOpenClawConfigDir(), 'skills');
+    return this.deps.workspace.getSkillsDir();
   }
 
-  cliCommand() {
-    const status = this.deps.getOpenClawStatus();
+  async cliCommand() {
+    const status = await this.deps.environment.getOpenClawStatus();
     if (!status.packageExists) {
       return { success: false, error: `OpenClaw package not found at: ${status.dir}` };
     }
-    if (!existsSync(status.entryPath)) {
+    if (!(await this.deps.environment.pathExists(status.entryPath))) {
       return { success: false, error: `OpenClaw entry script not found at: ${status.entryPath}` };
     }
-    const binName = process.platform === 'win32' ? 'openclaw.cmd' : 'openclaw';
+    const platform = this.deps.environment.getPlatform();
+    const binName = platform === 'win32' ? 'openclaw.cmd' : 'openclaw';
     const binPath = join(dirname(status.dir), '.bin', binName);
-    if (existsSync(binPath)) {
-      if (process.platform === 'win32') {
+    if (await this.deps.environment.pathExists(binPath)) {
+      if (platform === 'win32') {
         return { success: true, command: `& '${binPath}'` };
       }
       return { success: true, command: `"${binPath}"` };
     }
-    if (process.platform === 'win32') {
+    if (platform === 'win32') {
       return { success: true, command: `node '${status.entryPath}'` };
     }
     return { success: true, command: `node "${status.entryPath}"` };

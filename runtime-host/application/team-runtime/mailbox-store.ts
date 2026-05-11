@@ -1,6 +1,6 @@
-import { mkdir, open, readFile, readdir, rename, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { sanitizeMailboxMessage } from './schema';
+import { atomicWriteJson, readJsonFile, type TeamRuntimeStorageContext } from './storage-context';
 import type { TeamMailboxMessage } from './types';
 
 function mailboxDir(runtimeRoot: string): string {
@@ -34,63 +34,52 @@ function compareCursor(a: TeamMailboxMessage, b: { createdAt: number; msgId: str
   return a.msgId.localeCompare(b.msgId);
 }
 
-function tmpPath(pathname: string): string {
-  return `${pathname}.${process.pid}.${Date.now()}.tmp`;
-}
-
-async function atomicWriteJson(pathname: string, payload: unknown): Promise<void> {
-  await mkdir(dirname(pathname), { recursive: true });
-  const tmp = tmpPath(pathname);
-  await writeFile(tmp, `${JSON.stringify(payload, null, 2)}\n`, 'utf8');
-  await rename(tmp, pathname);
-}
-
-export async function ensureMailboxStore(runtimeRoot: string): Promise<void> {
-  await mkdir(mailboxDir(runtimeRoot), { recursive: true });
+export async function ensureMailboxStore(
+  context: TeamRuntimeStorageContext,
+  runtimeRoot: string,
+): Promise<void> {
+  await context.fileSystem.ensureDirectory(mailboxDir(runtimeRoot));
 }
 
 export async function mailboxPost(input: {
+  context: TeamRuntimeStorageContext;
   runtimeRoot: string;
   message: Partial<TeamMailboxMessage> & { msgId: string; fromAgentId: string; content: string };
   nowMs?: number;
 }): Promise<{ created: boolean; message: TeamMailboxMessage }> {
-  const message = sanitizeMailboxMessage(input.message, input.nowMs ?? Date.now());
+  const message = sanitizeMailboxMessage(input.message, input.nowMs ?? input.context.clock.nowMs());
   const pathname = mailboxPath(input.runtimeRoot, message.msgId);
-  await mkdir(dirname(pathname), { recursive: true });
+  await input.context.fileSystem.ensureDirectory(dirname(pathname));
 
-  try {
-    const handle = await open(pathname, 'wx');
-    await handle.writeFile(`${JSON.stringify(message, null, 2)}\n`, 'utf8');
-    await handle.close();
+  if (await input.context.fileSystem.writeTextFileExclusive(pathname, `${JSON.stringify(message, null, 2)}\n`)) {
     return { created: true, message };
-  } catch {
-    try {
-      const raw = await readFile(pathname, 'utf8');
-      return { created: false, message: JSON.parse(raw) as TeamMailboxMessage };
-    } catch {
-      await atomicWriteJson(pathname, message);
-      return { created: true, message };
-    }
   }
+  const existing = await readJsonFile<TeamMailboxMessage>(input.context, pathname);
+  if (existing) {
+    return { created: false, message: existing };
+  }
+  await atomicWriteJson(input.context, pathname, message);
+  return { created: true, message };
 }
 
 export async function mailboxPull(input: {
+  context: TeamRuntimeStorageContext;
   runtimeRoot: string;
   cursor?: string;
   limit?: number;
 }): Promise<{ messages: TeamMailboxMessage[]; nextCursor?: string }> {
-  await ensureMailboxStore(input.runtimeRoot);
+  await ensureMailboxStore(input.context, input.runtimeRoot);
   const limit = Math.max(1, Math.min(500, input.limit ?? 100));
-  const entries = await readdir(mailboxDir(input.runtimeRoot), { withFileTypes: true });
+  const entries = await input.context.fileSystem.listDirectory(mailboxDir(input.runtimeRoot));
   const rows: TeamMailboxMessage[] = [];
   for (const entry of entries) {
-    if (!entry.isFile() || !entry.name.endsWith('.json')) {
+    if (!entry.isFile || !entry.name.endsWith('.json')) {
       continue;
     }
-    try {
-      const raw = await readFile(join(mailboxDir(input.runtimeRoot), entry.name), 'utf8');
-      rows.push(JSON.parse(raw) as TeamMailboxMessage);
-    } catch {
+    const message = await readJsonFile<TeamMailboxMessage>(input.context, join(mailboxDir(input.runtimeRoot), entry.name));
+    if (message) {
+      rows.push(message);
+    } else {
       // Skip malformed mailbox files.
     }
   }

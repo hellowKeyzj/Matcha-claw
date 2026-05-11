@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { pruneProviderModelRefsInAgentsConfig } from '../../runtime-host/application/openclaw/openclaw-provider-config-service';
+import { pruneProviderModelRefsInAgentsConfig } from '../../runtime-host/application/openclaw/openclaw-provider-model-pruning';
 
 describe('openclaw auth model prune', () => {
   it('prunes provider model refs from agents.defaults and agents.list', () => {

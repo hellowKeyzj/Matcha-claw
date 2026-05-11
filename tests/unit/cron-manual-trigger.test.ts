@@ -1,7 +1,8 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   buildManualRunPatches,
   shouldUseManualRunProfileSwitch,
+  triggerCronJobWithSplitProfiles,
   type GatewayCronJobForTrigger,
 } from '../../runtime-host/application/cron/manual-trigger';
 
@@ -57,5 +58,56 @@ describe('cron 手动触发配置切换', () => {
       },
       delivery: { mode: 'none' },
     });
+  });
+
+  it('手动触发会在同一个任务链路内等待完成并恢复配置', async () => {
+    let currentJob = buildJob({
+      state: {
+        lastRunAtMs: 100,
+      },
+    });
+    const gateway = {
+      listCronJobs: vi.fn(async () => ({ jobs: [currentJob] })),
+      updateCronJob: vi.fn(async (_id: string, patch: Record<string, unknown>) => {
+        currentJob = {
+          ...currentJob,
+          ...patch,
+        };
+        return { success: true };
+      }),
+      runCronJob: vi.fn(async () => {
+        currentJob = {
+          ...currentJob,
+          state: {
+            lastRunAtMs: 200,
+          },
+        };
+        return { ran: true };
+      }),
+    };
+
+    const result = await triggerCronJobWithSplitProfiles({
+      gateway,
+      id: 'job-1',
+      clock: {
+        nowMs: () => 1000,
+        nowIso: () => '1970-01-01T00:00:01.000Z',
+      },
+      timer: {
+        sleep: vi.fn(async () => undefined),
+      },
+    });
+
+    expect(result).toEqual({ ran: true });
+    expect(gateway.updateCronJob).toHaveBeenNthCalledWith(1, 'job-1', expect.objectContaining({
+      sessionTarget: 'main',
+      wakeMode: 'now',
+    }));
+    expect(gateway.runCronJob).toHaveBeenCalledWith('job-1', 'force');
+    expect(gateway.updateCronJob).toHaveBeenLastCalledWith('job-1', expect.objectContaining({
+      sessionTarget: 'isolated',
+      wakeMode: 'next-heartbeat',
+    }));
+    expect(gateway.listCronJobs).toHaveBeenCalledTimes(2);
   });
 });

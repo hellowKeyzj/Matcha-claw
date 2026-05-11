@@ -6,6 +6,7 @@ import type {
   EventBusPort,
   RunId,
 } from '../../shared/platform-runtime-contracts';
+import type { RuntimeClockPort } from '../common/runtime-ports';
 
 export class RunSessionService {
   constructor(
@@ -13,6 +14,7 @@ export class RunSessionService {
     private readonly runtimeDriver: AgentRuntimeDriver,
     private readonly eventBus: EventBusPort,
     private readonly auditSink: AuditSinkPort,
+    private readonly clock: RuntimeClockPort,
   ) {}
 
   async start(req: AssembleRequest, eventTx?: unknown): Promise<RunId> {
@@ -20,14 +22,14 @@ export class RunSessionService {
     const runId = await this.runtimeDriver.execute(context, eventTx);
     await this.eventBus.publish({
       type: 'run.started',
-      ts: Date.now(),
+      ts: this.clock.nowMs(),
       runId,
       sessionId: context.sessionId,
       payload: { enabledToolCount: context.enabledTools.length },
     });
     await this.auditSink.append({
       type: 'run.started',
-      ts: Date.now(),
+      ts: this.clock.nowMs(),
       payload: { runId, sessionId: context.sessionId },
     });
     return runId;
@@ -37,12 +39,12 @@ export class RunSessionService {
     await this.runtimeDriver.abort(runId);
     await this.eventBus.publish({
       type: 'run.aborted',
-      ts: Date.now(),
+      ts: this.clock.nowMs(),
       runId,
     });
     await this.auditSink.append({
       type: 'run.aborted',
-      ts: Date.now(),
+      ts: this.clock.nowMs(),
       payload: { runId },
     });
   }

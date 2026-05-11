@@ -1,40 +1,146 @@
+import { normalizeBrowserMode } from '../../shared/browser-mode';
+import type { OpenClawRuntimeConfigService } from '../openclaw/openclaw-runtime-config-service';
+import {
+  accepted,
+  applicationResponse,
+  ok,
+  type ApplicationResponse,
+} from '../common/application-response';
+import type { RuntimePluginRepositoryPort } from '../plugins/runtime-plugin-service';
+import type { GatewayControlPort } from '../runtime-host/parent-shell-port';
+import type { SettingsJobPort, SettingsRuntimeConfigSyncPayload } from './settings-jobs';
+import type { SettingsRepository } from './store';
+
 interface SettingsServiceDeps {
-  getAllSettings: () => Promise<Record<string, unknown>>;
-  setSettingsPatch: (patch: Record<string, unknown>) => Promise<unknown>;
-  resetSettings: () => Promise<Record<string, unknown>>;
-  setSettingValue: (key: string, value: unknown) => Promise<unknown>;
+  repository: Pick<SettingsRepository, 'getAll' | 'patch' | 'reset' | 'setValue'>;
+  runtimeConfig?: Pick<OpenClawRuntimeConfigService, 'syncProxy' | 'syncBrowserMode'>;
+  runtimePlugins?: Pick<RuntimePluginRepositoryPort, 'ensureManagedPluginInstalled'>;
+  gatewayControl?: GatewayControlPort;
+  jobs: SettingsJobPort;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 }
 
+function hasExplicitProxyPatch(payload: unknown): boolean {
+  if (!isRecord(payload)) {
+    return false;
+  }
+  return Object.prototype.hasOwnProperty.call(payload, 'proxyEnabled')
+    || Object.prototype.hasOwnProperty.call(payload, 'proxyServer')
+    || Object.prototype.hasOwnProperty.call(payload, 'proxyBypassRules');
+}
+
+function hasExplicitBrowserModePatch(payload: unknown): boolean {
+  return isRecord(payload) && Object.prototype.hasOwnProperty.call(payload, 'browserMode');
+}
+
+function hasRuntimeConfigSyncWork(payload: Pick<SettingsRuntimeConfigSyncPayload, 'syncProxy' | 'syncBrowserMode'>): boolean {
+  return payload.syncProxy || payload.syncBrowserMode;
+}
+
+function toProxySettings(settings: Record<string, unknown>): {
+  proxyEnabled: boolean;
+  proxyServer: string;
+  proxyBypassRules: string;
+} {
+  return {
+    proxyEnabled: settings.proxyEnabled === true,
+    proxyServer: typeof settings.proxyServer === 'string' ? settings.proxyServer : '',
+    proxyBypassRules: typeof settings.proxyBypassRules === 'string' ? settings.proxyBypassRules : '',
+  };
+}
+
 export class SettingsService {
   constructor(private readonly deps: SettingsServiceDeps) {}
 
   async getAll() {
-    return await this.deps.getAllSettings();
+    return await this.deps.repository.getAll();
   }
 
-  async patch(payload: unknown) {
+  async patch(payload: unknown): Promise<ApplicationResponse> {
     const patch = isRecord(payload) ? payload : {};
-    await this.deps.setSettingsPatch(patch);
-    return { success: true };
+    const shouldSyncProxy = hasExplicitProxyPatch(patch);
+    const shouldSyncBrowserMode = hasExplicitBrowserModePatch(patch);
+    await this.deps.repository.patch(patch);
+    const latestSettings = shouldSyncProxy || shouldSyncBrowserMode
+      ? await this.deps.repository.getAll()
+      : null;
+    const syncPayload = {
+      settings: latestSettings ?? {},
+      syncProxy: shouldSyncProxy,
+      syncBrowserMode: shouldSyncBrowserMode,
+    };
+    if (hasRuntimeConfigSyncWork(syncPayload)) {
+      return accepted(this.deps.jobs.submitRuntimeConfigSync(syncPayload));
+    }
+    return ok({ success: true });
   }
 
-  async reset() {
-    const settings = await this.deps.resetSettings();
-    return { success: true, settings };
+  async reset(): Promise<ApplicationResponse> {
+    const settings = await this.deps.repository.reset();
+    return ok({ success: true, settings });
   }
 
   async getValue(key: string) {
-    const settings = await this.deps.getAllSettings();
+    const settings = await this.deps.repository.getAll();
     return { value: settings[key] };
   }
 
-  async setValue(key: string, payload: unknown) {
+  async setValue(key: string, payload: unknown): Promise<ApplicationResponse> {
     const body = isRecord(payload) ? payload : {};
-    await this.deps.setSettingValue(key, body.value);
-    return { success: true };
+    await this.deps.repository.setValue(key, body.value);
+    const shouldSyncProxy = key === 'proxyEnabled' || key === 'proxyServer' || key === 'proxyBypassRules';
+    const shouldSyncBrowserMode = key === 'browserMode';
+    if (shouldSyncProxy || shouldSyncBrowserMode) {
+      const latestSettings = await this.deps.repository.getAll();
+      return accepted(this.deps.jobs.submitRuntimeConfigSync({
+          settings: latestSettings,
+          syncProxy: shouldSyncProxy,
+          syncBrowserMode: shouldSyncBrowserMode,
+        }));
+    }
+    return ok({ success: true });
+  }
+
+  async executeRuntimeConfigSync(payload: SettingsRuntimeConfigSyncPayload): Promise<ApplicationResponse> {
+    if (payload.syncProxy && this.deps.runtimeConfig) {
+      await this.deps.runtimeConfig.syncProxy(
+        toProxySettings(payload.settings),
+        { preserveExistingWhenDisabled: false },
+      );
+    }
+    const restartFailure = payload.syncBrowserMode
+      ? await this.syncBrowserModeAndRestart(payload.settings)
+      : null;
+    return restartFailure ?? {
+      ...ok({ success: true }),
+    };
+  }
+
+  private async syncBrowserModeAndRestart(settings: Record<string, unknown>): Promise<ApplicationResponse | null> {
+    if (!this.deps.runtimeConfig) {
+      return null;
+    }
+    const browserMode = normalizeBrowserMode(settings.browserMode);
+    if (browserMode === 'relay') {
+      await this.deps.runtimePlugins?.ensureManagedPluginInstalled('browser-relay');
+    }
+    await this.deps.runtimeConfig.syncBrowserMode(browserMode);
+    if (!this.deps.gatewayControl) {
+      return null;
+    }
+    const restartResponse = await this.deps.gatewayControl.restartGateway();
+    if (restartResponse.success) {
+      return null;
+    }
+    return applicationResponse(
+      restartResponse.status,
+      {
+        success: false,
+        error: restartResponse.error?.message ?? 'gateway restart failed',
+      },
+    );
   }
 }

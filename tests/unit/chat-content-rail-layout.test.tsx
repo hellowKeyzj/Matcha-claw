@@ -182,7 +182,9 @@ describe('chat content rail layout', () => {
     expect(classNames.some((value) => value.includes(CHAT_LAYOUT_TOKENS.threadViewportPadding))).toBe(true);
     expect(CHAT_LAYOUT_TOKENS.threadRail).toContain('mx-auto');
     expect(CHAT_LAYOUT_TOKENS.threadRail).toContain('max-w-');
+    expect(CHAT_LAYOUT_TOKENS.threadViewportPadding).not.toContain('pt-');
     expect(CHAT_LAYOUT_TOKENS.threadViewportPadding).not.toContain('pb-');
+    expect(viewport?.style.paddingTop).toContain('--chat-thread-top-padding');
     expect(viewport?.style.paddingBottom).toContain('--chat-thread-bottom-padding');
   });
 
@@ -634,11 +636,12 @@ describe('chat content rail layout', () => {
     const controlsRow = pickerWrap?.parentElement as HTMLElement | null;
     const statusRow = controlsRow?.nextElementSibling as HTMLElement | null;
 
-    expect(pickerWrap?.className).toContain('w-[176px]');
+    expect(pickerWrap?.className).toContain('w-[clamp(0px,calc(100%-5.25rem),148px)]');
+    expect(pickerWrap?.className).toContain('max-sm:w-[clamp(0px,calc(100%-5.25rem),132px)]');
     expect(pickerWrap?.className).toContain('flex-none');
     expect(controlsRow?.className).toContain('w-full');
     expect(controlsRow?.className).toContain('min-w-0');
-    expect(controlsRow?.className).toContain('flex-wrap');
+    expect(controlsRow?.className).not.toContain('flex-wrap');
     expect(controlsRow?.className).toContain('items-end');
     expect(controlsRow?.className).toContain('gap-1.5');
     expect(statusRow).toBeNull();

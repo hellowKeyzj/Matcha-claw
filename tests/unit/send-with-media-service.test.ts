@@ -2,10 +2,12 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { sendWithMediaViaOpenClawBridge } from '../../runtime-host/application/chat/send-media';
+import { sendWithMediaViaGateway } from '../../runtime-host/application/chat/send-media';
+import { createTestRuntimeFileSystem } from './helpers/runtime-file-system';
 
 describe('chat send-media', () => {
   const tempDirs: string[] = [];
+  const fileSystem = createTestRuntimeFileSystem();
 
   afterEach(async () => {
     await Promise.all(tempDirs.map(async (dir) => {
@@ -21,7 +23,7 @@ describe('chat send-media', () => {
     await writeFile(filePath, 'hello text', 'utf8');
 
     const chatSend = vi.fn(async () => ({ runId: 'run-text' }));
-    const result = await sendWithMediaViaOpenClawBridge({ chatSend } as never, {
+    const result = await sendWithMediaViaGateway(fileSystem, { chatSend }, {
       sessionKey: 'agent:main:session-1',
       message: 'process this',
       idempotencyKey: 'id-text',
@@ -51,7 +53,7 @@ describe('chat send-media', () => {
     await writeFile(filePath, Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x00, 0x01]));
 
     const chatSend = vi.fn(async () => ({ runId: 'run-image' }));
-    const result = await sendWithMediaViaOpenClawBridge({ chatSend } as never, {
+    const result = await sendWithMediaViaGateway(fileSystem, { chatSend }, {
       sessionKey: 'agent:main:session-2',
       message: 'process image',
       idempotencyKey: 'id-image',

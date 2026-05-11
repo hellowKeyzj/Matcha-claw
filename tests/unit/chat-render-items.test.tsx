@@ -57,7 +57,7 @@ describe('chat render item fixtures', () => {
       kind: 'assistant-turn',
       key: 'session:agent:main:main|assistant-turn:entry:assistant-stream-1:main',
       text: 'hello world',
-      status: 'streaming',
+      status: 'final',
     });
   });
 

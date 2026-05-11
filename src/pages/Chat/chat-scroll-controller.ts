@@ -5,6 +5,7 @@ type ScopeTransitionMode = 'restore-anchor' | 'force-bottom';
 
 const INITIAL_ALIGN_RETRY_MS = 150;
 const FOLLOW_RETRY_MS = 120;
+const ANCHOR_RESTORE_RETRY_MS = 50;
 const DETACHED_ANCHOR_CAPTURE_IDLE_MS = 90;
 
 export interface ChatViewportMetrics {
@@ -17,6 +18,7 @@ export interface ChatViewportMetrics {
 interface ViewportAnchor {
   itemKey?: string;
   timestamp?: number;
+  followingItemKey?: string;
   offsetWithinViewport: number;
 }
 
@@ -29,6 +31,12 @@ interface PendingScopeTransition {
   targetScopeKey: string;
   mode: ScopeTransitionMode;
   anchor?: ViewportAnchor;
+}
+
+interface PendingPrependScrollCommand {
+  targetScopeKey: string;
+  previousScrollHeight: number;
+  previousScrollTop: number;
 }
 
 interface FollowSnapshot {
@@ -48,6 +56,7 @@ interface ScrollScopeState {
 export interface ChatScrollControllerConfig {
   enabled: boolean;
   scrollScopeKey: string;
+  anchorItemKey: string | null;
   tailActivityOpen: boolean;
   setScrollChromeBottomLocked: (isBottomLocked: boolean) => void;
   viewportRef: RefObject<HTMLDivElement | null>;
@@ -80,8 +89,11 @@ interface ScrollControllerState {
   scrollFrameId: number | null;
   scrollRetryTimerId: number | null;
   anchorRestoreFrameId: number | null;
+  anchorRestoreRetryTimerId: number | null;
   anchorCaptureTimerId: number | null;
   programmaticScroll: boolean;
+  pendingPrependScroll: PendingPrependScrollCommand | null;
+  pendingPrependFrameId: number | null;
 }
 
 const EMPTY_FOLLOW_SNAPSHOT: FollowSnapshot = {
@@ -133,8 +145,8 @@ function sampleViewportAnchor(viewport: HTMLDivElement | null): ViewportAnchor |
     return null;
   }
   const viewportRect = viewport.getBoundingClientRect();
-  const items = viewport.querySelectorAll<HTMLElement>('[data-chat-item-key]');
-  for (const item of items) {
+  const items = Array.from(viewport.querySelectorAll<HTMLElement>('[data-chat-item-key]'));
+  for (const [index, item] of items.entries()) {
     const rect = item.getBoundingClientRect();
     const intersectsViewport = rect.bottom > viewportRect.top && rect.top < viewportRect.bottom;
     if (!intersectsViewport) {
@@ -147,11 +159,13 @@ function sampleViewportAnchor(viewport: HTMLDivElement | null): ViewportAnchor |
     const timestamp = typeof timestampText === 'string' && timestampText.trim()
       ? Number(timestampText)
       : undefined;
-    return {
+    const anchor = {
       itemKey,
       timestamp: Number.isFinite(timestamp) ? timestamp : undefined,
+      followingItemKey: items[index + 1]?.dataset.chatItemKey,
       offsetWithinViewport: rect.top - viewportRect.top,
     };
+    return anchor;
   }
   return null;
 }
@@ -204,8 +218,11 @@ export function createChatScrollController(
     scrollFrameId: null,
     scrollRetryTimerId: null,
     anchorRestoreFrameId: null,
+    anchorRestoreRetryTimerId: null,
     anchorCaptureTimerId: null,
     programmaticScroll: false,
+    pendingPrependScroll: null,
+    pendingPrependFrameId: null,
   };
 
   const ensureScopeState = (scopeKey: string): ScrollScopeState => {
@@ -281,10 +298,27 @@ export function createChatScrollController(
   };
 
   const clearScheduledAnchorRestore = () => {
-    if (typeof window !== 'undefined' && state.anchorRestoreFrameId != null && typeof window.cancelAnimationFrame === 'function') {
-      window.cancelAnimationFrame(state.anchorRestoreFrameId);
+    if (typeof window !== 'undefined') {
+      if (state.anchorRestoreFrameId != null && typeof window.cancelAnimationFrame === 'function') {
+        window.cancelAnimationFrame(state.anchorRestoreFrameId);
+      }
+      if (state.anchorRestoreRetryTimerId != null) {
+        window.clearTimeout(state.anchorRestoreRetryTimerId);
+      }
     }
     state.anchorRestoreFrameId = null;
+    state.anchorRestoreRetryTimerId = null;
+  };
+
+  const clearScheduledPrependOffset = () => {
+    if (
+      typeof window !== 'undefined'
+      && state.pendingPrependFrameId != null
+      && typeof window.cancelAnimationFrame === 'function'
+    ) {
+      window.cancelAnimationFrame(state.pendingPrependFrameId);
+    }
+    state.pendingPrependFrameId = null;
   };
 
   const scheduleProgrammaticScrollCleanup = (onComplete?: () => void) => {
@@ -330,6 +364,13 @@ export function createChatScrollController(
     let target: HTMLElement | undefined;
     if (anchor.itemKey) {
       target = messageItems.find((element) => element.dataset.chatItemKey === anchor.itemKey);
+      if (target && anchor.followingItemKey) {
+        const targetIndex = messageItems.indexOf(target);
+        const followingItem = targetIndex >= 0 ? messageItems[targetIndex + 1] : null;
+        if (followingItem?.dataset.chatItemKey !== anchor.followingItemKey) {
+          target = undefined;
+        }
+      }
     }
     if (!target && typeof anchor.timestamp === 'number') {
       let nearestDistance = Number.POSITIVE_INFINITY;
@@ -459,6 +500,12 @@ export function createChatScrollController(
       syncDetachedViewportAnchor();
       syncFollowSnapshot();
       syncScrollContainerState();
+      if (state.anchorRestoreRetryTimerId == null && typeof window !== 'undefined') {
+        state.anchorRestoreRetryTimerId = window.setTimeout(() => {
+          state.anchorRestoreRetryTimerId = null;
+          run();
+        }, ANCHOR_RESTORE_RETRY_MS);
+      }
     };
 
     if (typeof window !== 'undefined' && typeof window.requestAnimationFrame === 'function') {
@@ -505,6 +552,49 @@ export function createChatScrollController(
     return false;
   };
 
+  const applyPendingPrependOffset = () => {
+    const config = getConfig();
+    const viewport = config.viewportRef.current;
+    const pending = state.pendingPrependScroll;
+    if (!pending || pending.targetScopeKey !== config.scrollScopeKey || !viewport) {
+      return false;
+    }
+    const delta = viewport.scrollHeight - pending.previousScrollHeight;
+    if (delta <= 0) {
+      return false;
+    }
+    state.pendingPrependScroll = null;
+    clearScheduledPrependOffset();
+    state.programmaticScroll = true;
+    viewport.scrollTop = pending.previousScrollTop + delta;
+    scheduleProgrammaticScrollCleanup(() => {
+      syncFollowSnapshot();
+      syncScrollContainerState();
+    });
+    return true;
+  };
+
+  const schedulePendingPrependOffset = () => {
+    if (state.pendingPrependScroll == null) {
+      return false;
+    }
+    if (applyPendingPrependOffset()) {
+      return true;
+    }
+    if (
+      state.pendingPrependFrameId == null
+      && typeof window !== 'undefined'
+      && typeof window.requestAnimationFrame === 'function'
+    ) {
+      state.pendingPrependFrameId = window.requestAnimationFrame(() => {
+        state.pendingPrependFrameId = null;
+        schedulePendingPrependOffset();
+      });
+      return true;
+    }
+    return false;
+  };
+
   const detachFromBottom = () => {
     const config = getConfig();
     cancelPendingTransitionForScope(config.scrollScopeKey);
@@ -539,6 +629,7 @@ export function createChatScrollController(
     clearScheduledBottomAlign();
     clearScheduledAnchorRestore();
     clearScheduledDetachedAnchorCapture();
+    clearScheduledPrependOffset();
     state.followSnapshot = EMPTY_FOLLOW_SNAPSHOT;
 
     if (handlePendingTransitionForCurrentScope()) {
@@ -581,6 +672,16 @@ export function createChatScrollController(
     if (!hasRenderableChatItems(config.contentRef.current, config.viewportRef.current)) {
       return;
     }
+    if (!scopeState.isBottomLocked && schedulePendingPrependOffset()) {
+      return;
+    }
+    if (!scopeState.isBottomLocked && config.anchorItemKey) {
+      scheduleAnchorRestore({
+        itemKey: config.anchorItemKey,
+        offsetWithinViewport: 0,
+      });
+      return;
+    }
     if (!scopeState.hasLoaded) {
       scheduleBottomAlign({ force: true, retry: true });
       return;
@@ -599,6 +700,9 @@ export function createChatScrollController(
     const viewportNode = config.viewportRef.current;
     const contentNode = config.contentRef.current;
     const scopeState = ensureScopeState(config.scrollScopeKey);
+    if (!scopeState.isBottomLocked && schedulePendingPrependOffset()) {
+      return;
+    }
     const nextSnapshot: FollowSnapshot = {
       viewportHeight: viewportNode?.clientHeight ?? null,
       viewportWidth: viewportNode?.clientWidth ?? null,
@@ -736,6 +840,8 @@ export function createChatScrollController(
     }
     cancelPendingTransitionForScope(config.scrollScopeKey);
     clearScheduledDetachedAnchorCapture();
+    state.pendingPrependScroll = null;
+    clearScheduledPrependOffset();
     scheduleBottomAlign({ force: true, retry: true, immediate: true });
   };
 
@@ -745,6 +851,19 @@ export function createChatScrollController(
     }
     const anchor = syncDetachedViewportAnchor();
     if (!anchor) {
+      return;
+    }
+    const config = getConfig();
+    if (nextScopeKey === config.scrollScopeKey) {
+      const viewport = config.viewportRef.current;
+      if (viewport) {
+        state.pendingPrependScroll = {
+          targetScopeKey: nextScopeKey,
+          previousScrollHeight: viewport.scrollHeight,
+          previousScrollTop: viewport.scrollTop,
+        };
+        schedulePendingPrependOffset();
+      }
       return;
     }
     state.pendingScopeTransition = {
@@ -762,12 +881,16 @@ export function createChatScrollController(
       targetScopeKey: nextScopeKey,
       mode: 'force-bottom',
     };
+    if (nextScopeKey === getConfig().scrollScopeKey) {
+      scheduleBottomAlign({ force: true, retry: true, immediate: true });
+    }
   };
 
   const cleanup = () => {
     clearScheduledBottomAlign();
     clearScheduledAnchorRestore();
     clearScheduledDetachedAnchorCapture();
+    clearScheduledPrependOffset();
   };
 
   return {

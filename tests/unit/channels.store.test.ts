@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const hostChannelsFetchSnapshotMock = vi.fn();
 const hostChannelsDeleteConfigMock = vi.fn();
@@ -34,6 +34,10 @@ describe('channels store', () => {
     hostChannelsConnectMock.mockReset();
     hostChannelsDisconnectMock.mockReset();
     hostChannelsRequestQrCodeMock.mockReset();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
   });
 
   it('首次无快照时进入 initialLoading，成功后写入快照', async () => {
@@ -113,6 +117,30 @@ describe('channels store', () => {
 
     resolveFetch?.(buildSnapshot('wecom'));
     await Promise.all([first, second]);
+  });
+
+  it('快照未 ready 时保持加载并自动重试', async () => {
+    vi.useFakeTimers();
+    hostChannelsFetchSnapshotMock
+      .mockResolvedValueOnce({ success: true, ready: false })
+      .mockResolvedValueOnce(buildSnapshot('wecom'));
+
+    const { useChannelsStore } = await import('../../src/stores/channels');
+    await useChannelsStore.getState().fetchChannels();
+
+    expect(useChannelsStore.getState().snapshotReady).toBe(false);
+    expect(useChannelsStore.getState().initialLoading).toBe(true);
+    expect(useChannelsStore.getState().refreshing).toBe(true);
+    expect(hostChannelsFetchSnapshotMock).toHaveBeenCalledTimes(1);
+
+    await vi.advanceTimersByTimeAsync(1200);
+
+    const state = useChannelsStore.getState();
+    expect(hostChannelsFetchSnapshotMock).toHaveBeenCalledTimes(2);
+    expect(state.snapshotReady).toBe(true);
+    expect(state.initialLoading).toBe(false);
+    expect(state.refreshing).toBe(false);
+    expect(state.channels[0]?.id).toBe('wecom-main');
   });
 
   it('deleteChannel 会维护 mutatingByChannelId 生命周期', async () => {

@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { SessionRuntimeService } from '../../runtime-host/application/sessions/service';
+import { createTestSessionRuntimeService } from './helpers/session-runtime-fixture';
 
 describe('session adapter service delete', () => {
   const tempDirs: string[] = [];
@@ -27,8 +27,8 @@ describe('session adapter service delete', () => {
     }, null, 2));
     writeFileSync(join(sessionsDir, 'session-a.jsonl'), '{"hello":"world"}\n', 'utf8');
 
-    const service = new SessionRuntimeService({
-      getOpenClawConfigDir: () => configDir,
+    const service = createTestSessionRuntimeService({
+      workspace: { getConfigDir: () => configDir },
       resolveDeletedPath: (path) => path.replace(/\.jsonl$/, '.deleted.jsonl'),
       openclawBridge: {
         chatSend: async () => ({}),
@@ -68,8 +68,8 @@ describe('session adapter service delete', () => {
     }, null, 2));
     writeFileSync(join(sessionsDir, 'session-main.jsonl'), '{"hello":"world"}\n', 'utf8');
 
-    const service = new SessionRuntimeService({
-      getOpenClawConfigDir: () => configDir,
+    const service = createTestSessionRuntimeService({
+      workspace: { getConfigDir: () => configDir },
       resolveDeletedPath: (path) => path.replace(/\.jsonl$/, '.deleted.jsonl'),
       openclawBridge: {
         chatSend: async () => ({}),

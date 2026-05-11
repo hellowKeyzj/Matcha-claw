@@ -44,7 +44,7 @@ export type RuntimeHostTransportResponse<TData = unknown> =
 export interface RuntimeHostTransportHealth {
   readonly version: typeof RUNTIME_HOST_TRANSPORT_VERSION;
   readonly ok: boolean;
-  readonly lifecycle: 'idle' | 'starting' | 'running' | 'stopped' | 'error';
+  readonly lifecycle: 'starting' | 'running' | 'stopping' | 'stopped' | 'error';
   readonly pid?: number;
   readonly uptimeSec?: number;
   readonly error?: string;

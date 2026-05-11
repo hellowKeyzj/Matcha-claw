@@ -1,4 +1,4 @@
-import { hostApiFetch } from '@/lib/host-api';
+import { hostApiFetch, waitForRuntimeJobResult, type RuntimeJobSubmission } from '@/lib/host-api';
 
 export type RuntimePluginCatalogItem = {
   id: string;
@@ -39,10 +39,11 @@ export async function getPluginRuntime(): Promise<PluginRuntimePayload> {
 }
 
 export async function setEnabledPluginIds(pluginIds: string[]): Promise<PluginRuntimePayload> {
-  return await hostApiFetch<PluginRuntimePayload>('/api/plugins/runtime/enabled-plugins', {
+  const submission = await hostApiFetch<RuntimeJobSubmission<PluginRuntimePayload>>('/api/plugins/runtime/enabled-plugins', {
     method: 'PUT',
     body: JSON.stringify({ pluginIds }),
   });
+  return await waitForRuntimeJobResult<PluginRuntimePayload>(submission.job.id);
 }
 
 export async function ensurePluginEnabled(pluginId: string): Promise<PluginRuntimePayload> {

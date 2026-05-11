@@ -1,8 +1,7 @@
-import { mkdir, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises';
-import { dirname, join } from 'node:path';
-import crypto from 'node:crypto';
+import { join } from 'node:path';
 import { listTasks } from './task-store';
 import { mailboxPull } from './mailbox-store';
+import { atomicWriteJson, readJsonFile, type TeamRuntimeStorageContext } from './storage-context';
 import type { TeamEventRecord, TeamRunRecord } from './types';
 
 function runPath(runtimeRoot: string): string {
@@ -13,43 +12,34 @@ function eventsDir(runtimeRoot: string): string {
   return join(runtimeRoot, 'events');
 }
 
-function tmpPath(pathname: string): string {
-  return `${pathname}.${process.pid}.${Date.now()}.tmp`;
+export async function ensureRuntimeLayout(
+  context: TeamRuntimeStorageContext,
+  runtimeRoot: string,
+): Promise<void> {
+  await context.fileSystem.ensureDirectory(runtimeRoot);
+  await context.fileSystem.ensureDirectory(join(runtimeRoot, 'tasks'));
+  await context.fileSystem.ensureDirectory(join(runtimeRoot, 'claims'));
+  await context.fileSystem.ensureDirectory(join(runtimeRoot, 'mailbox'));
+  await context.fileSystem.ensureDirectory(join(runtimeRoot, 'events'));
 }
 
-async function atomicWriteJson(pathname: string, payload: unknown): Promise<void> {
-  await mkdir(dirname(pathname), { recursive: true });
-  const tmp = tmpPath(pathname);
-  await writeFile(tmp, `${JSON.stringify(payload, null, 2)}\n`, 'utf8');
-  await rename(tmp, pathname);
-}
-
-export async function ensureRuntimeLayout(runtimeRoot: string): Promise<void> {
-  await mkdir(runtimeRoot, { recursive: true });
-  await mkdir(join(runtimeRoot, 'tasks'), { recursive: true });
-  await mkdir(join(runtimeRoot, 'claims'), { recursive: true });
-  await mkdir(join(runtimeRoot, 'mailbox'), { recursive: true });
-  await mkdir(join(runtimeRoot, 'events'), { recursive: true });
-}
-
-export async function readTeamRun(runtimeRoot: string): Promise<TeamRunRecord | null> {
-  try {
-    const raw = await readFile(runPath(runtimeRoot), 'utf8');
-    return JSON.parse(raw) as TeamRunRecord;
-  } catch {
-    return null;
-  }
+export async function readTeamRun(
+  context: TeamRuntimeStorageContext,
+  runtimeRoot: string,
+): Promise<TeamRunRecord | null> {
+  return await readJsonFile<TeamRunRecord>(context, runPath(runtimeRoot));
 }
 
 export async function initTeamRun(input: {
+  context: TeamRuntimeStorageContext;
   runtimeRoot: string;
   teamId: string;
   leadAgentId: string;
   nowMs?: number;
 }): Promise<TeamRunRecord> {
-  await ensureRuntimeLayout(input.runtimeRoot);
-  const now = input.nowMs ?? Date.now();
-  const existing = await readTeamRun(input.runtimeRoot);
+  await ensureRuntimeLayout(input.context, input.runtimeRoot);
+  const now = input.nowMs ?? input.context.clock.nowMs();
+  const existing = await readTeamRun(input.context, input.runtimeRoot);
   if (existing) {
     return existing;
   }
@@ -61,17 +51,18 @@ export async function initTeamRun(input: {
     createdAt: now,
     updatedAt: now,
   };
-  await atomicWriteJson(runPath(input.runtimeRoot), created);
+  await atomicWriteJson(input.context, runPath(input.runtimeRoot), created);
   return created;
 }
 
 export async function updateTeamRun(input: {
+  context: TeamRuntimeStorageContext;
   runtimeRoot: string;
   patch: Partial<Omit<TeamRunRecord, 'teamId' | 'createdAt'>>;
   nowMs?: number;
 }): Promise<TeamRunRecord> {
-  const now = input.nowMs ?? Date.now();
-  const current = await readTeamRun(input.runtimeRoot);
+  const now = input.nowMs ?? input.context.clock.nowMs();
+  const current = await readTeamRun(input.context, input.runtimeRoot);
   if (!current) {
     throw new Error('Team run not initialized');
   }
@@ -81,45 +72,50 @@ export async function updateTeamRun(input: {
     revision: current.revision + 1,
     updatedAt: now,
   };
-  await atomicWriteJson(runPath(input.runtimeRoot), next);
+  await atomicWriteJson(input.context, runPath(input.runtimeRoot), next);
   return next;
 }
 
 export async function appendTeamEvent(input: {
+  context: TeamRuntimeStorageContext;
   runtimeRoot: string;
   teamId: string;
   type: string;
   payload: Record<string, unknown>;
   nowMs?: number;
 }): Promise<TeamEventRecord> {
-  const now = input.nowMs ?? Date.now();
+  const now = input.nowMs ?? input.context.clock.nowMs();
   const event: TeamEventRecord = {
-    id: crypto.randomUUID(),
+    id: input.context.idGenerator.randomId(),
     teamId: input.teamId,
     type: input.type,
     createdAt: now,
     payload: input.payload,
   };
-  await mkdir(eventsDir(input.runtimeRoot), { recursive: true });
+  await input.context.fileSystem.ensureDirectory(eventsDir(input.runtimeRoot));
   const pathname = join(eventsDir(input.runtimeRoot), `${now}-${event.id}.json`);
-  await atomicWriteJson(pathname, event);
+  await atomicWriteJson(input.context, pathname, event);
   return event;
 }
 
-export async function readRecentEvents(runtimeRoot: string, limit = 200): Promise<TeamEventRecord[]> {
-  await mkdir(eventsDir(runtimeRoot), { recursive: true });
-  const entries = await readdir(eventsDir(runtimeRoot), { withFileTypes: true });
+export async function readRecentEvents(
+  context: TeamRuntimeStorageContext,
+  runtimeRoot: string,
+  limit = 200,
+): Promise<TeamEventRecord[]> {
+  await context.fileSystem.ensureDirectory(eventsDir(runtimeRoot));
+  const entries = await context.fileSystem.listDirectory(eventsDir(runtimeRoot));
   const files = entries
-    .filter((entry) => entry.isFile() && entry.name.endsWith('.json'))
+    .filter((entry) => entry.isFile && entry.name.endsWith('.json'))
     .map((entry) => entry.name)
     .sort()
     .slice(-Math.max(1, Math.min(2000, limit)));
   const rows: TeamEventRecord[] = [];
   for (const file of files) {
-    try {
-      const raw = await readFile(join(eventsDir(runtimeRoot), file), 'utf8');
-      rows.push(JSON.parse(raw) as TeamEventRecord);
-    } catch {
+    const event = await readJsonFile<TeamEventRecord>(context, join(eventsDir(runtimeRoot), file));
+    if (event) {
+      rows.push(event);
+    } else {
       // Ignore malformed event files.
     }
   }
@@ -127,6 +123,7 @@ export async function readRecentEvents(runtimeRoot: string, limit = 200): Promis
 }
 
 export async function buildTeamSnapshot(input: {
+  context: TeamRuntimeStorageContext;
   runtimeRoot: string;
   mailboxCursor?: string;
   mailboxLimit?: number;
@@ -137,14 +134,15 @@ export async function buildTeamSnapshot(input: {
   events: TeamEventRecord[];
 }> {
   const [run, tasks, mailbox, events] = await Promise.all([
-    readTeamRun(input.runtimeRoot),
-    listTasks(input.runtimeRoot),
+    readTeamRun(input.context, input.runtimeRoot),
+    listTasks(input.context, input.runtimeRoot),
     mailboxPull({
+      context: input.context,
       runtimeRoot: input.runtimeRoot,
       cursor: input.mailboxCursor,
       limit: input.mailboxLimit ?? 100,
     }),
-    readRecentEvents(input.runtimeRoot, 200),
+    readRecentEvents(input.context, input.runtimeRoot, 200),
   ]);
   return {
     run,
@@ -154,6 +152,9 @@ export async function buildTeamSnapshot(input: {
   };
 }
 
-export async function clearTeamRuntime(runtimeRoot: string): Promise<void> {
-  await rm(runtimeRoot, { recursive: true, force: true });
+export async function clearTeamRuntime(
+  context: TeamRuntimeStorageContext,
+  runtimeRoot: string,
+): Promise<void> {
+  await context.fileSystem.removeDirectory(runtimeRoot);
 }

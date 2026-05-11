@@ -1,4 +1,11 @@
-export { createOpenClawBridge, type OpenClawBridge } from './bridge';
+export { createOpenClawBridge, type OpenClawBridge, type OpenClawGatewayClient } from './bridge';
+export {
+  DEFAULT_GATEWAY_BASE_METHODS,
+  inspectGatewayMethods,
+  normalizeGatewayMethods,
+  type GatewayCapabilitiesSnapshot,
+  type GatewayMethodReadiness,
+} from './capabilities';
 export { createGatewayClient, type GatewayConnectionState, type GatewayConnectionStatePayload, type GatewayClientOptions } from './client';
 export {
   __resetGatewayChatEventDedupStateForTest,

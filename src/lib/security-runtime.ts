@@ -1,14 +1,26 @@
-import { hostApiFetch } from '@/lib/host-api';
+import {
+  hostApiFetch,
+  waitForRuntimeJobResult,
+  type RuntimeJobSubmission,
+} from '@/lib/host-api';
 
 export async function hostSecurityReadPolicy<TPolicy = unknown>() {
   return await hostApiFetch<TPolicy>('/api/security');
 }
 
 export async function hostSecurityWritePolicy<TResult = unknown>(policy: unknown) {
-  return await hostApiFetch<TResult>('/api/security', {
+  const response = await hostApiFetch<RuntimeJobSubmission<TResult> & {
+    policy?: unknown;
+    sync?: RuntimeJobSubmission<TResult>;
+  }>('/api/security', {
     method: 'PUT',
     body: JSON.stringify(policy),
   });
+  const jobId = response.sync?.job?.id ?? response.job?.id;
+  if (jobId) {
+    await waitForRuntimeJobResult<TResult>(jobId);
+  }
+  return response as TResult;
 }
 
 export async function hostSecurityReadAudit<TResult = unknown>(params?: Record<string, string | number | undefined>) {
@@ -22,48 +34,59 @@ export async function hostSecurityReadAudit<TResult = unknown>(params?: Record<s
 }
 
 export async function hostSecurityRunQuickAudit<TResult = unknown>() {
-  return await hostApiFetch<TResult>('/api/security/quick-audit', { method: 'POST' });
+  const submission = await hostApiFetch<RuntimeJobSubmission<TResult>>('/api/security/quick-audit', { method: 'POST' });
+  return await waitForRuntimeJobResult<TResult>(submission.job.id);
 }
 
 export async function hostSecurityRunEmergencyResponse<TResult = unknown>() {
-  return await hostApiFetch<TResult>('/api/security/emergency-response', { method: 'POST' });
+  const submission = await hostApiFetch<RuntimeJobSubmission<TResult>>('/api/security/emergency-response', { method: 'POST' });
+  return await waitForRuntimeJobResult<TResult>(submission.job.id);
 }
 
 export async function hostSecurityCheckIntegrity<TResult = unknown>() {
-  return await hostApiFetch<TResult>('/api/security/integrity');
+  const submission = await hostApiFetch<RuntimeJobSubmission<TResult>>('/api/security/integrity');
+  return await waitForRuntimeJobResult<TResult>(submission.job.id);
 }
 
 export async function hostSecurityRebaselineIntegrity<TResult = unknown>() {
-  return await hostApiFetch<TResult>('/api/security/integrity/rebaseline', { method: 'POST' });
+  const submission = await hostApiFetch<RuntimeJobSubmission<TResult>>('/api/security/integrity/rebaseline', { method: 'POST' });
+  return await waitForRuntimeJobResult<TResult>(submission.job.id);
 }
 
 export async function hostSecurityScanSkills<TResult = unknown>(scanPath?: string) {
-  return await hostApiFetch<TResult>('/api/security/skills/scan', {
+  const submission = await hostApiFetch<RuntimeJobSubmission<TResult>>('/api/security/skills/scan', {
     method: 'POST',
     body: JSON.stringify(scanPath ? { scanPath } : {}),
+  });
+  return await waitForRuntimeJobResult<TResult>(submission.job.id, {
+    timeoutMs: 120000,
   });
 }
 
 export async function hostSecurityCheckAdvisories<TResult = unknown>() {
-  return await hostApiFetch<TResult>('/api/security/advisories');
+  const submission = await hostApiFetch<RuntimeJobSubmission<TResult>>('/api/security/advisories');
+  return await waitForRuntimeJobResult<TResult>(submission.job.id);
 }
 
 export async function hostSecurityPreviewRemediation<TResult = unknown>() {
-  return await hostApiFetch<TResult>('/api/security/remediation/preview');
+  const submission = await hostApiFetch<RuntimeJobSubmission<TResult>>('/api/security/remediation/preview');
+  return await waitForRuntimeJobResult<TResult>(submission.job.id);
 }
 
 export async function hostSecurityApplyRemediation<TResult = unknown>(actions?: string[]) {
-  return await hostApiFetch<TResult>('/api/security/remediation/apply', {
+  const submission = await hostApiFetch<RuntimeJobSubmission<TResult>>('/api/security/remediation/apply', {
     method: 'POST',
     body: JSON.stringify(actions && actions.length > 0 ? { actions } : {}),
   });
+  return await waitForRuntimeJobResult<TResult>(submission.job.id);
 }
 
 export async function hostSecurityRollbackRemediation<TResult = unknown>(snapshotId?: string | null) {
-  return await hostApiFetch<TResult>('/api/security/remediation/rollback', {
+  const submission = await hostApiFetch<RuntimeJobSubmission<TResult>>('/api/security/remediation/rollback', {
     method: 'POST',
     body: JSON.stringify(snapshotId ? { snapshotId } : {}),
   });
+  return await waitForRuntimeJobResult<TResult>(submission.job.id);
 }
 
 export async function hostSecurityFetchRuleCatalog<TResult = { success?: boolean; items?: unknown[] }>() {

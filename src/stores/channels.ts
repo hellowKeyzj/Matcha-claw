@@ -43,8 +43,27 @@ interface ChannelsState {
 }
 
 const CHANNELS_SILENT_REFRESH_MIN_GAP_MS = 1200;
+const CHANNELS_SNAPSHOT_NOT_READY_RETRY_MS = 1200;
 let inflightChannelsFetchPromise: Promise<void> | null = null;
 let channelsLastFetchAtMs = 0;
+let channelsSnapshotRetryTimer: ReturnType<typeof setTimeout> | null = null;
+
+function clearChannelsSnapshotRetry(): void {
+  if (channelsSnapshotRetryTimer) {
+    clearTimeout(channelsSnapshotRetryTimer);
+    channelsSnapshotRetryTimer = null;
+  }
+}
+
+function scheduleChannelsSnapshotRetry(fetchChannels: () => Promise<void>): void {
+  if (channelsSnapshotRetryTimer) {
+    return;
+  }
+  channelsSnapshotRetryTimer = setTimeout(() => {
+    channelsSnapshotRetryTimer = null;
+    void fetchChannels();
+  }, CHANNELS_SNAPSHOT_NOT_READY_RETRY_MS);
+}
 
 function hasMutatingChannels(mutatingByChannelId: Record<string, number>): boolean {
   return Object.keys(mutatingByChannelId).length > 0;
@@ -152,7 +171,20 @@ export const useChannelsStore = create<ChannelsState>((set, get) => ({
             }>>;
             channelDefaultAccountId?: Record<string, string>;
         } | undefined;
+        if (result.success && result.ready === false) {
+          set((state) => ({
+            ...state,
+            snapshotReady: state.snapshotReady,
+            initialLoading: !state.snapshotReady,
+            refreshing: true,
+            error: null,
+          }));
+          scheduleChannelsSnapshotRetry(() => get().fetchChannels({ silent: true }));
+          return;
+        }
+
         if (result.success && data) {
+          clearChannelsSnapshotRetry();
           const channels: Channel[] = [];
 
           // Parse the complex channels.status response into simple Channel objects

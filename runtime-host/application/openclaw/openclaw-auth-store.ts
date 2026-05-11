@@ -1,10 +1,7 @@
-import { constants, type Dirent } from 'fs';
-import { access, mkdir, readFile, readdir, writeFile } from 'fs/promises';
 import { join } from 'path';
-import { createRuntimeLogger } from '../../shared/logger';
-import { getOpenClawConfigDir, getOpenClawConfigFilePath } from '../../api/storage/paths';
-
-const logger = createRuntimeLogger('openclaw-auth-store');
+import type { RuntimeHostLogger } from '../../shared/logger';
+import type { RuntimeFileSystemPort } from '../common/runtime-ports';
+import type { OpenClawConfigRepositoryPort } from './openclaw-config-repository';
 
 export const AUTH_STORE_VERSION = 1;
 export const AUTH_PROFILE_FILENAME = 'auth-profiles.json';
@@ -32,89 +29,89 @@ export interface AuthProfilesStore {
   lastGood?: Record<string, string>;
 }
 
-export async function fileExists(filePath: string): Promise<boolean> {
+export async function readJsonFile<T>(
+  fileSystem: RuntimeFileSystemPort,
+  filePath: string,
+): Promise<T | null> {
   try {
-    await access(filePath, constants.F_OK);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-export async function ensureDir(dirPath: string): Promise<void> {
-  if (!(await fileExists(dirPath))) {
-    await mkdir(dirPath, { recursive: true });
-  }
-}
-
-export async function readJsonFile<T>(filePath: string): Promise<T | null> {
-  try {
-    if (!(await fileExists(filePath))) {
+    if (!(await fileSystem.exists(filePath))) {
       return null;
     }
-    const raw = await readFile(filePath, 'utf-8');
+    const raw = await fileSystem.readTextFile(filePath);
     return JSON.parse(raw) as T;
   } catch {
     return null;
   }
 }
 
-export async function writeJsonFile(filePath: string, data: unknown): Promise<void> {
-  await ensureDir(join(filePath, '..'));
-  await writeFile(filePath, JSON.stringify(data, null, 2), 'utf-8');
+export async function writeJsonFile(
+  fileSystem: RuntimeFileSystemPort,
+  filePath: string,
+  data: unknown,
+): Promise<void> {
+  await fileSystem.ensureDirectory(join(filePath, '..'));
+  await fileSystem.writeTextFile(filePath, JSON.stringify(data, null, 2));
 }
 
-export function getAuthProfilesPath(agentId = 'main'): string {
-  return join(getOpenClawConfigDir(), 'agents', agentId, 'agent', AUTH_PROFILE_FILENAME);
-}
+export class OpenClawAuthRepository {
+  constructor(
+    private readonly configRepository: OpenClawConfigRepositoryPort,
+    private readonly fileSystem: RuntimeFileSystemPort,
+    private readonly logger: RuntimeHostLogger,
+  ) {}
 
-export async function readAuthProfiles(agentId = 'main'): Promise<AuthProfilesStore> {
-  const filePath = getAuthProfilesPath(agentId);
-  try {
-    const data = await readJsonFile<AuthProfilesStore>(filePath);
-    if (data?.version && data.profiles && typeof data.profiles === 'object') {
-      return data;
-    }
-  } catch (error) {
-    logger.warn('Failed to read auth-profiles.json, creating fresh store:', error);
+  getAuthProfilesPath(agentId = 'main'): string {
+    return join(this.configRepository.getConfigDir(), 'agents', agentId, 'agent', AUTH_PROFILE_FILENAME);
   }
-  return { version: AUTH_STORE_VERSION, profiles: {} };
-}
 
-export async function writeAuthProfiles(store: AuthProfilesStore, agentId = 'main'): Promise<void> {
-  await writeJsonFile(getAuthProfilesPath(agentId), store);
-}
+  async readAuthProfiles(agentId = 'main'): Promise<AuthProfilesStore> {
+    const filePath = this.getAuthProfilesPath(agentId);
+    try {
+      const data = await readJsonFile<AuthProfilesStore>(this.fileSystem, filePath);
+      if (data?.version && data.profiles && typeof data.profiles === 'object') {
+        return data;
+      }
+    } catch (error) {
+      this.logger.warn('Failed to read auth-profiles.json, creating fresh store:', error);
+    }
+    return { version: AUTH_STORE_VERSION, profiles: {} };
+  }
 
-export async function discoverAgentIds(): Promise<string[]> {
-  const agentsDir = join(getOpenClawConfigDir(), 'agents');
-  try {
-    if (!(await fileExists(agentsDir))) {
+  async writeAuthProfiles(store: AuthProfilesStore, agentId = 'main'): Promise<void> {
+    await writeJsonFile(this.fileSystem, this.getAuthProfilesPath(agentId), store);
+  }
+
+  async discoverAgentIds(): Promise<string[]> {
+    const agentsDir = join(this.configRepository.getConfigDir(), 'agents');
+    try {
+      if (!(await this.fileSystem.exists(agentsDir))) {
+        return ['main'];
+      }
+      const entries = await this.fileSystem.listDirectory(agentsDir);
+      const ids: string[] = [];
+      for (const entry of entries) {
+        if (entry.isDirectory && await this.fileSystem.exists(join(agentsDir, entry.name, 'agent'))) {
+          ids.push(entry.name);
+        }
+      }
+      return ids.length > 0 ? ids : ['main'];
+    } catch {
       return ['main'];
     }
-    const entries: Dirent[] = await readdir(agentsDir, { withFileTypes: true });
-    const ids: string[] = [];
-    for (const entry of entries) {
-      if (entry.isDirectory() && await fileExists(join(agentsDir, entry.name, 'agent'))) {
-        ids.push(entry.name);
-      }
-    }
-    return ids.length > 0 ? ids : ['main'];
-  } catch {
-    return ['main'];
   }
-}
 
-export async function readOpenClawJson(): Promise<Record<string, unknown>> {
-  return (await readJsonFile<Record<string, unknown>>(getOpenClawConfigFilePath())) ?? {};
-}
+  async readOpenClawJson(): Promise<Record<string, unknown>> {
+    return await this.configRepository.read();
+  }
 
-export async function writeOpenClawJson(config: Record<string, unknown>): Promise<void> {
-  const commands = (
-    config.commands && typeof config.commands === 'object'
-      ? { ...(config.commands as Record<string, unknown>) }
-      : {}
-  ) as Record<string, unknown>;
-  commands.restart = true;
-  config.commands = commands;
-  await writeJsonFile(getOpenClawConfigFilePath(), config);
+  async writeOpenClawJson(config: Record<string, unknown>): Promise<void> {
+    const commands = (
+      config.commands && typeof config.commands === 'object'
+        ? { ...(config.commands as Record<string, unknown>) }
+        : {}
+    ) as Record<string, unknown>;
+    commands.restart = true;
+    config.commands = commands;
+    await this.configRepository.write(config);
+  }
 }

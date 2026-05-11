@@ -1,10 +1,24 @@
+import { isTraceLogLevelEnabled, type TraceLogLevel } from './trace-log-level';
+
 const ANSI_ESCAPE_PATTERN = /\u001b\[[0-9;?]*[ -/]*[@-~]/g;
 
 export interface RuntimeHostLogger {
   readonly debug: (message: string, ...args: unknown[]) => void;
+  readonly traceDebug?: (level: TraceLogLevel, message: string, ...args: unknown[]) => void;
   readonly info: (message: string, ...args: unknown[]) => void;
   readonly warn: (message: string, ...args: unknown[]) => void;
   readonly error: (message: string, ...args: unknown[]) => void;
+}
+
+export interface RuntimeLoggerClock {
+  nowIso(): string;
+}
+
+export interface RuntimeLogSink {
+  debug(message: string): void;
+  info(message: string): void;
+  warn(message: string): void;
+  error(message: string): void;
 }
 
 function sanitizeLogFragment(input: string): string {
@@ -42,10 +56,12 @@ function serializeLogValue(value: unknown): string {
 function writeLog(
   level: 'DEBUG' | 'INFO' | 'WARN' | 'ERROR',
   scope: string,
+  clock: RuntimeLoggerClock,
+  sink: RuntimeLogSink,
   message: string,
   args: unknown[],
 ): void {
-  const timestamp = new Date().toISOString();
+  const timestamp = clock.nowIso();
   const normalizedMessage = serializeLogValue(message);
   const normalizedArgs = args
     .map((value) => serializeLogValue(value))
@@ -55,27 +71,30 @@ function writeLog(
   const formatted = `[${timestamp}] [${level.padEnd(5)}] [runtime-host:${scope}] ${normalizedMessage}${suffix}`;
 
   if (level === 'DEBUG') {
-    console.debug(formatted);
+    sink.debug(formatted);
     return;
   }
   if (level === 'INFO') {
-    console.info(formatted);
+    sink.info(formatted);
     return;
   }
   if (level === 'WARN') {
-    console.warn(formatted);
+    sink.warn(formatted);
     return;
   }
-  console.error(formatted);
+  sink.error(formatted);
 }
 
-export function createRuntimeLogger(scope: string): RuntimeHostLogger {
+export function createRuntimeLogger(scope: string, clock: RuntimeLoggerClock, sink: RuntimeLogSink): RuntimeHostLogger {
   return {
-    debug: (message, ...args) => writeLog('DEBUG', scope, message, args),
-    info: (message, ...args) => writeLog('INFO', scope, message, args),
-    warn: (message, ...args) => writeLog('WARN', scope, message, args),
-    error: (message, ...args) => writeLog('ERROR', scope, message, args),
+    debug: (message, ...args) => writeLog('DEBUG', scope, clock, sink, message, args),
+    traceDebug: (level, message, ...args) => {
+      if (isTraceLogLevelEnabled(process.env.MATCHACLAW_TRACE_LOG_LEVEL, level)) {
+        writeLog('DEBUG', scope, clock, sink, message, args);
+      }
+    },
+    info: (message, ...args) => writeLog('INFO', scope, clock, sink, message, args),
+    warn: (message, ...args) => writeLog('WARN', scope, clock, sink, message, args),
+    error: (message, ...args) => writeLog('ERROR', scope, clock, sink, message, args),
   };
 }
-
-export const runtimeLogger = createRuntimeLogger('core');

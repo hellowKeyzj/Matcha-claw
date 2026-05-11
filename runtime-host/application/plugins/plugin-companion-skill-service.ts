@@ -1,7 +1,7 @@
-import { access, cp, mkdir } from 'node:fs/promises';
-import { existsSync } from 'node:fs';
 import { join } from 'node:path';
-import { getOpenClawConfigDir } from '../../api/storage/paths';
+import type { PluginFileSystemPort } from '../../plugin-engine/plugin-file-system';
+import type { OpenClawEnvironmentRepository } from '../openclaw/openclaw-environment-repository';
+import type { OpenClawConfigRepositoryPort } from '../openclaw/openclaw-config-repository';
 import {
   CAPABILITY_OPENCLAW_PLUGIN_DEFINITIONS,
   findCapabilityOpenClawPluginDefinition,
@@ -10,10 +10,6 @@ import {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
-}
-
-function pathExists(pathname: string): Promise<boolean> {
-  return access(pathname).then(() => true).catch(() => false);
 }
 
 function ensureRecord(target: Record<string, unknown>, key: string): Record<string, unknown> {
@@ -26,27 +22,14 @@ function ensureRecord(target: Record<string, unknown>, key: string): Record<stri
   return nextValue;
 }
 
-function getCompanionSkillsRootCandidates(): string[] {
-  const roots = [
-    join(process.cwd(), 'resources', 'skills', 'plugin-companion-skills'),
-  ];
-
-  if (typeof process.resourcesPath === 'string' && process.resourcesPath.trim()) {
-    roots.push(
-      join(process.resourcesPath, 'resources', 'skills', 'plugin-companion-skills'),
-      join(process.resourcesPath, 'skills', 'plugin-companion-skills'),
-    );
-  }
-
-  return [...new Set(roots)];
-}
-
 async function resolveCompanionSkillSourceDir(
+  environment: OpenClawEnvironmentRepository,
+  fileSystem: Pick<PluginFileSystemPort, 'pathExists'>,
   definition: ManagedPluginCompanionSkillDefinition,
 ): Promise<string | null> {
-  for (const root of getCompanionSkillsRootCandidates()) {
+  for (const root of environment.getCompanionSkillRootCandidates()) {
     const candidate = join(root, definition.sourceDir);
-    if (await pathExists(join(candidate, 'SKILL.md'))) {
+    if (await fileSystem.pathExists(join(candidate, 'SKILL.md'))) {
       return candidate;
     }
   }
@@ -57,67 +40,75 @@ function resolveCompanionSkillDefinitions(pluginId: string): readonly ManagedPlu
   return findCapabilityOpenClawPluginDefinition(pluginId)?.companionSkills ?? [];
 }
 
-export function getCompanionSkillSlugsForPlugin(pluginId: string): readonly string[] {
-  return resolveCompanionSkillDefinitions(pluginId).map((definition) => definition.slug);
-}
+export class PluginCompanionSkillService {
+  constructor(
+    private readonly environment: OpenClawEnvironmentRepository,
+    private readonly configRepository: OpenClawConfigRepositoryPort,
+    private readonly fileSystem: Pick<PluginFileSystemPort, 'pathExists' | 'ensureDirectory' | 'copyDirectory'>,
+  ) {}
 
-export function applyCompanionSkillConfigState(
+  getSlugsForPlugin(pluginId: string): readonly string[] {
+    return resolveCompanionSkillDefinitions(pluginId).map((definition) => definition.slug);
+  }
+
+  applyConfigState(
   config: Record<string, unknown>,
   pluginId: string,
   enabled: boolean,
 ): Record<string, unknown> {
-  const definitions = resolveCompanionSkillDefinitions(pluginId).filter((definition) => definition.autoEnable);
-  if (definitions.length === 0) {
+    const definitions = resolveCompanionSkillDefinitions(pluginId).filter((definition) => definition.autoEnable);
+    if (definitions.length === 0) {
+      return config;
+    }
+
+    const skills = ensureRecord(config, 'skills');
+    const entries = ensureRecord(skills, 'entries');
+
+    for (const definition of definitions) {
+      const currentEntry = isRecord(entries[definition.slug]) ? entries[definition.slug] as Record<string, unknown> : {};
+      entries[definition.slug] = {
+        ...currentEntry,
+        enabled,
+      };
+    }
+
     return config;
   }
 
-  const skills = ensureRecord(config, 'skills');
-  const entries = ensureRecord(skills, 'entries');
+  reconcileConfigStates(
+    config: Record<string, unknown>,
+    enabledPluginIds: readonly string[],
+  ): Record<string, unknown> {
+    const enabledPluginIdSet = new Set(enabledPluginIds);
 
-  for (const definition of definitions) {
-    const currentEntry = isRecord(entries[definition.slug]) ? entries[definition.slug] as Record<string, unknown> : {};
-    entries[definition.slug] = {
-      ...currentEntry,
-      enabled,
-    };
-  }
-
-  return config;
-}
-
-export function reconcileCompanionSkillConfigStates(
-  config: Record<string, unknown>,
-  enabledPluginIds: readonly string[],
-): Record<string, unknown> {
-  const enabledPluginIdSet = new Set(enabledPluginIds);
-
-  for (const definition of CAPABILITY_OPENCLAW_PLUGIN_DEFINITIONS) {
-    applyCompanionSkillConfigState(config, definition.id, enabledPluginIdSet.has(definition.id));
-  }
-
-  return config;
-}
-
-export async function ensureCompanionSkillsInstalled(pluginId: string): Promise<void> {
-  const definitions = resolveCompanionSkillDefinitions(pluginId);
-  if (definitions.length === 0) {
-    return;
-  }
-
-  const skillsRoot = join(getOpenClawConfigDir(), 'skills');
-  await mkdir(skillsRoot, { recursive: true });
-
-  for (const definition of definitions) {
-    const targetDir = join(skillsRoot, definition.slug);
-    if (existsSync(join(targetDir, 'SKILL.md'))) {
-      continue;
+    for (const definition of CAPABILITY_OPENCLAW_PLUGIN_DEFINITIONS) {
+      this.applyConfigState(config, definition.id, enabledPluginIdSet.has(definition.id));
     }
 
-    const sourceDir = await resolveCompanionSkillSourceDir(definition);
-    if (!sourceDir) {
-      throw new Error(`Companion skill source not found for ${pluginId}: ${definition.slug}`);
+    return config;
+  }
+
+  async ensureInstalled(pluginId: string): Promise<void> {
+    const definitions = resolveCompanionSkillDefinitions(pluginId);
+    if (definitions.length === 0) {
+      return;
     }
 
-    await cp(sourceDir, targetDir, { recursive: true, force: true });
+    const skillsRoot = join(this.configRepository.getConfigDir(), 'skills');
+    await this.fileSystem.ensureDirectory(skillsRoot);
+
+    for (const definition of definitions) {
+      const targetDir = join(skillsRoot, definition.slug);
+      if (await this.fileSystem.pathExists(join(targetDir, 'SKILL.md'))) {
+        continue;
+      }
+
+      const sourceDir = await resolveCompanionSkillSourceDir(this.environment, this.fileSystem, definition);
+      if (!sourceDir) {
+        throw new Error(`Companion skill source not found for ${pluginId}: ${definition.slug}`);
+      }
+
+      await this.fileSystem.copyDirectory(sourceDir, targetDir);
+    }
   }
 }

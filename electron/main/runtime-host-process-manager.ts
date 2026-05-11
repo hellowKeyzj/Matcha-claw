@@ -101,6 +101,15 @@ function resolveRuntimeHostDirFromScriptPath(scriptPath: string | null): string 
   return scriptDir;
 }
 
+function resolveRuntimeHostDirForBuild(scriptPath: string | null): string | null {
+  const runtimeHostDirFromScript = resolveRuntimeHostDirFromScriptPath(scriptPath);
+  if (runtimeHostDirFromScript) {
+    return runtimeHostDirFromScript;
+  }
+  const projectRoot = resolveProjectRootForRuntimeHostBuild();
+  return projectRoot ? join(projectRoot, 'runtime-host') : null;
+}
+
 function resolveProjectRootForRuntimeHostBuild(): string | null {
   const candidates = [
     resolve(__dirname, '../..'),
@@ -176,11 +185,26 @@ function shouldAutoRebuildRuntimeHost(scriptPath: string | null, explicitScriptP
   if (process.env.VITEST) {
     return false;
   }
-  const runtimeHostDir = resolveRuntimeHostDirFromScriptPath(scriptPath);
-  if (!runtimeHostDir) {
+  const runtimeHostDir = resolveRuntimeHostDirForBuild(scriptPath);
+  if (!runtimeHostDir || !existsSync(runtimeHostDir)) {
     return false;
   }
   return true;
+}
+
+function ensureRuntimeHostBuildCurrent(
+  scriptPath: string | null,
+  explicitScriptPath: string | undefined,
+  logger?: RuntimeHostProcessLogger,
+): string | null {
+  if (!shouldAutoRebuildRuntimeHost(scriptPath, explicitScriptPath)) {
+    return scriptPath;
+  }
+  const runtimeHostDir = resolveRuntimeHostDirForBuild(scriptPath);
+  if (runtimeHostDir && runtimeHostBuildArtifactStale(runtimeHostDir)) {
+    rebuildRuntimeHostProcess(logger);
+  }
+  return resolveScriptPath(explicitScriptPath);
 }
 
 function normalizeProcessOutputChunk(output: string | Buffer | null | undefined): string[] {
@@ -391,13 +415,7 @@ export function createRuntimeHostProcessManager(
   async function start(): Promise<void> {
     shouldKeepAlive = true;
     clearAutoRestartTimer();
-    if (shouldAutoRebuildRuntimeHost(scriptPath, options.scriptPath)) {
-      const runtimeHostDir = resolveRuntimeHostDirFromScriptPath(scriptPath);
-      if (runtimeHostDir && runtimeHostBuildArtifactStale(runtimeHostDir)) {
-        rebuildRuntimeHostProcess(logger);
-        scriptPath = resolveScriptPath(options.scriptPath);
-      }
-    }
+    scriptPath = ensureRuntimeHostBuildCurrent(scriptPath, options.scriptPath, logger);
     if (!scriptPath) {
       markError('runtime-host child script not found');
       throw new Error(lastError);
@@ -413,6 +431,9 @@ export function createRuntimeHostProcessManager(
       MATCHACLAW_RUNTIME_HOST_PORT: String(port),
       ELECTRON_RUN_AS_NODE: '1',
       MATCHACLAW_RUNTIME_HOST_CHILD: '1',
+      MATCHACLAW_APP_PACKAGED: process.env.MATCHACLAW_APP_PACKAGED ?? '0',
+      MATCHACLAW_APP_VERSION: process.env.MATCHACLAW_APP_VERSION ?? process.env.npm_package_version ?? '0.0.0',
+      MATCHACLAW_APP_USER_DATA_DIR: process.env.MATCHACLAW_APP_USER_DATA_DIR ?? '',
       ...(childEnv ? childEnv() : {}),
       MATCHACLAW_RUNTIME_HOST_PARENT_API_BASE_URL: parentApiBaseUrl,
       MATCHACLAW_RUNTIME_HOST_PARENT_DISPATCH_TOKEN: parentDispatchToken,

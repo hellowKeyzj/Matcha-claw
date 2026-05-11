@@ -6,6 +6,7 @@
 import { create } from 'zustand';
 import type { GatewayStatus } from '@/types/gateway';
 import { createIdleResourceStatusState } from '@/lib/resource-state';
+import { hostSessionApprovals, hostSessionResolveApproval } from '@/lib/host-api';
 import { useGatewayStore } from '../gateway';
 import { executeStoreAbortRun } from './abort-handlers';
 import {
@@ -133,7 +134,7 @@ export const useChatStore = create<ChatStoreState>((set, get) => {
     },
     syncPendingApprovals: async (sessionKeyHint) => {
       try {
-        const payload = await useGatewayStore.getState().rpc<unknown>('exec.approvals.get', {});
+        const payload = await hostSessionApprovals();
         const parsed = parseGatewayApprovalResponse(payload);
         if (!parsed.recognized) return;
 
@@ -189,10 +190,7 @@ export const useChatStore = create<ChatStoreState>((set, get) => {
       if (!approvalId) return;
       beginMutating();
       try {
-        await useGatewayStore.getState().rpc(
-          'exec.approval.resolve',
-          { id: approvalId, decision },
-        );
+        await hostSessionResolveApproval({ id: approvalId, decision });
         get().handleApprovalResolved({
           id: approvalId,
           decision,

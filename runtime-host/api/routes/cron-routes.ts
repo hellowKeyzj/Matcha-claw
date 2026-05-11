@@ -1,127 +1,70 @@
-import type { OpenClawBridge } from '../../openclaw-bridge';
-import { getOpenClawConfigDir } from '../storage/paths';
-import { CronService } from '../../application/cron/service';
-
-interface LocalDispatchResponse {
-  status: number;
-  data: unknown;
-}
+import {
+  decodeRouteParam,
+  routeResponder,
+  type ApplicationResponse,
+  type RuntimeRouteDefinition,
+} from './route-utils';
 
 interface CronRouteDeps {
-  openclawBridge: Pick<
-    OpenClawBridge,
-    'listCronJobs' | 'addCronJob' | 'updateCronJob' | 'removeCronJob' | 'runCronJob'
-  >;
+  cronService: CronRouteService;
 }
 
-export async function handleCronAndUsageRoute(
-  method: string,
-  routePath: string,
-  routeUrl: URL,
-  payload: unknown,
-  deps: CronRouteDeps,
-): Promise<LocalDispatchResponse | null> {
-  const service = new CronService({
-    openclawBridge: deps.openclawBridge,
-    getOpenClawConfigDir,
-  });
-
-  if (method === 'GET' && routePath === '/api/runtime-host/usage/recent') {
-    try {
-      return {
-        status: 200,
-        data: await service.usageRecent(payload, routeUrl),
-      };
-    } catch (error) {
-      return {
-        status: 500,
-        data: { success: false, error: String(error) },
-      };
-    }
-  }
-
-  if (method === 'GET' && routePath === '/api/cron/jobs') {
-    try {
-      return {
-        status: 200,
-        data: await service.listJobs(),
-      };
-    } catch (error) {
-      return {
-        status: 500,
-        data: { success: false, error: String(error) },
-      };
-    }
-  }
-
-  if (method === 'GET' && routePath === '/api/cron/session-history') {
-    try {
-      return await service.sessionHistory(routeUrl);
-    } catch (error) {
-      return {
-        status: 500,
-        data: { success: false, error: String(error) },
-      };
-    }
-  }
-
-  if (method === 'POST' && routePath === '/api/cron/jobs') {
-    try {
-      return await service.createJob(payload);
-    } catch (error) {
-      return {
-        status: 500,
-        data: { success: false, error: String(error) },
-      };
-    }
-  }
-
-  const cronJobRouteMatch = routePath.match(/^\/api\/cron\/jobs\/([^/]+)$/);
-  if (method === 'PUT' && cronJobRouteMatch) {
-    try {
-      const id = decodeURIComponent(cronJobRouteMatch[1]);
-      return await service.updateJob(id, payload);
-    } catch (error) {
-      return {
-        status: 500,
-        data: { success: false, error: String(error) },
-      };
-    }
-  }
-
-  if (method === 'DELETE' && cronJobRouteMatch) {
-    try {
-      const id = decodeURIComponent(cronJobRouteMatch[1]);
-      return await service.deleteJob(id);
-    } catch (error) {
-      return {
-        status: 500,
-        data: { success: false, error: String(error) },
-      };
-    }
-  }
-
-  if (method === 'POST' && routePath === '/api/cron/toggle') {
-    try {
-      return await service.toggleJob(payload);
-    } catch (error) {
-      return {
-        status: 500,
-        data: { success: false, error: String(error) },
-      };
-    }
-  }
-
-  if (method === 'POST' && routePath === '/api/cron/trigger') {
-    try {
-      return await service.trigger(payload);
-    } catch (error) {
-      return {
-        status: 500,
-        data: { success: false, error: String(error) },
-      };
-    }
-  }
-
-  return null;
+interface CronRouteService {
+  usageRecent(payload: unknown, routeUrl: URL): Promise<unknown>;
+  listJobs(): unknown;
+  sessionHistory(routeUrl: URL): Promise<ApplicationResponse>;
+  createJob(payload: unknown): Promise<ApplicationResponse>;
+  updateJob(jobId: string, payload: unknown): Promise<ApplicationResponse>;
+  deleteJob(jobId: string): Promise<ApplicationResponse>;
+  toggleJob(payload: unknown): ApplicationResponse;
+  trigger(payload: unknown): ApplicationResponse;
 }
+
+export const cronRoutes: readonly RuntimeRouteDefinition<CronRouteDeps>[] = [
+  {
+    method: 'GET',
+    path: '/api/runtime-host/usage/recent',
+    handle: (context, deps) => routeResponder.value(() => deps.cronService.usageRecent(context.payload, context.routeUrl)),
+  },
+  {
+    method: 'GET',
+    path: '/api/cron/jobs',
+    handle: (_context, deps) => routeResponder.value(() => deps.cronService.listJobs()),
+  },
+  {
+    method: 'GET',
+    path: '/api/cron/session-history',
+    handle: (context, deps) => routeResponder.result(() => deps.cronService.sessionHistory(context.routeUrl)),
+  },
+  {
+    method: 'POST',
+    path: '/api/cron/jobs',
+    handle: (context, deps) => routeResponder.result(() => deps.cronService.createJob(context.payload)),
+  },
+  {
+    method: 'PUT',
+    pattern: /^\/api\/cron\/jobs\/([^/]+)$/,
+    handle: (context, deps, match) => routeResponder.result(() => deps.cronService.updateJob(
+      decodeRouteParam(match.params[0]),
+      context.payload,
+    )),
+  },
+  {
+    method: 'DELETE',
+    pattern: /^\/api\/cron\/jobs\/([^/]+)$/,
+    handle: (_context, deps, match) => routeResponder.result(() => deps.cronService.deleteJob(
+      decodeRouteParam(match.params[0]),
+    )),
+  },
+  {
+    method: 'POST',
+    path: '/api/cron/toggle',
+    handle: (context, deps) => routeResponder.result(() => deps.cronService.toggleJob(context.payload)),
+  },
+  {
+    method: 'POST',
+    path: '/api/cron/trigger',
+    handle: (context, deps) => routeResponder.result(() => deps.cronService.trigger(context.payload)),
+  },
+] as const;
+

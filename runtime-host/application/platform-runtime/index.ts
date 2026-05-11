@@ -7,6 +7,7 @@ export { RuntimeManagerService } from './runtime-manager-service';
 export { ToolCatalogService } from './tool-catalog-service';
 export { ToolReconciler } from './tool-reconciler';
 export { ToolRegistryStore } from './state/tool-registry-store';
+export type { RuntimeHostPlatformFacade } from './platform-runtime-port';
 export type {
   AssembleRequest,
   HealthStatus,

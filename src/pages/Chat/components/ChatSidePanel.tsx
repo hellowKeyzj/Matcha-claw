@@ -72,7 +72,7 @@ const SIDE_PANEL_SECTION_MIN_ITEM_WIDTH = 76;
 const SIDE_PANEL_CONTENT_PAD_X = 'px-3';
 const SIDE_PANEL_CONTENT_PAD_Y = 'py-3';
 const SIDE_PANEL_ROW_HOVER_CLASSNAME = 'transition-colors hover:bg-secondary hover:text-foreground';
-const SIDE_PANEL_SEGMENT_TRIGGER_CLASSNAME = 'min-w-0 rounded-md border-0 bg-transparent text-xs font-medium text-muted-foreground shadow-none transition-colors hover:bg-secondary hover:text-foreground focus-visible:ring-0 focus-visible:ring-offset-0 data-[state=active]:bg-secondary data-[state=active]:text-foreground data-[state=active]:shadow-none';
+const SIDE_PANEL_SEGMENT_TRIGGER_CLASSNAME = 'min-w-0 rounded-full border-0 bg-transparent text-xs font-medium text-muted-foreground !shadow-none transition-colors hover:bg-secondary hover:text-foreground focus-visible:!ring-0 focus-visible:!ring-offset-0 data-[state=active]:bg-secondary data-[state=active]:text-foreground data-[state=active]:!shadow-none';
 
 function statusVariant(status: string): 'default' | 'secondary' | 'destructive' | 'success' {
   if (status === 'in_progress') {
@@ -651,6 +651,7 @@ export const ChatSidePanel = memo(function ChatSidePanel({
               <button
                 type="button"
                 data-testid="chat-artifact-section-changes"
+                data-state={artifactActiveSection === 'changes' ? 'active' : 'inactive'}
                 disabled={!artifactCanShowChanges}
                 onClick={() => {
                   if (!artifactCanShowChanges) {
@@ -673,6 +674,7 @@ export const ChatSidePanel = memo(function ChatSidePanel({
               <button
                 type="button"
                 data-testid="chat-artifact-section-preview"
+                data-state={artifactActiveSection === 'preview' ? 'active' : 'inactive'}
                 onClick={() => {
                   onArtifactSectionChange('preview');
                   onArtifactViewModeChange('preview');
@@ -690,6 +692,7 @@ export const ChatSidePanel = memo(function ChatSidePanel({
               <button
                 type="button"
                 data-testid="chat-artifact-section-workspace"
+                data-state={artifactActiveSection === 'workspace' ? 'active' : 'inactive'}
                 onClick={() => onArtifactSectionChange('workspace')}
                 className={cn(
                   `inline-flex ${SIDE_PANEL_SEGMENT_TRIGGER_CLASSNAME} items-center py-1.5`,

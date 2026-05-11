@@ -1,95 +1,73 @@
-import { ClawHubService, listInstalledClawHubSkills } from '../../application/skills/clawhub';
-import type { ParentShellAction, ParentTransportUpstreamPayload } from '../dispatch/parent-transport';
-
-function isRecord(value: unknown): value is Record<string, any> {
-  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
-}
-
-interface LocalDispatchResponse {
-  status: number;
-  data: unknown;
-}
+import {
+  accepted,
+  readRecord,
+  routeResponder,
+  type RuntimeRouteDefinition,
+} from './route-utils';
 
 interface ClawHubRouteDeps {
-  requestParentShellAction: (action: ParentShellAction, payload?: unknown) => Promise<ParentTransportUpstreamPayload>;
-  mapParentTransportResponse: (upstream: ParentTransportUpstreamPayload) => LocalDispatchResponse;
+  clawHubService: ClawHubRouteService;
 }
 
-async function handleClawHubRouteLocal(method, routePath, payload, deps?: ClawHubRouteDeps) {
-  const service = new ClawHubService(deps ? {
-    requestParentShellAction: deps.requestParentShellAction,
-    mapParentTransportResponse: deps.mapParentTransportResponse,
-  } : undefined);
-
-  if (method === 'POST' && routePath === '/api/clawhub/search') {
-    const body = isRecord(payload) ? payload : {};
-    return {
-      status: 200,
-      data: {
-        success: true,
-        results: await service.search(body),
-      },
-    };
-  }
-
-  if (method === 'POST' && routePath === '/api/clawhub/auth/login') {
-    return {
-      status: 200,
-      data: await service.login(),
-    };
-  }
-
-  if (method === 'POST' && routePath === '/api/clawhub/install') {
-    const body = isRecord(payload) ? payload : {};
-    return {
-      status: 200,
-      data: await service.install(body),
-    };
-  }
-
-  if (method === 'POST' && routePath === '/api/clawhub/uninstall') {
-    const body = isRecord(payload) ? payload : {};
-    return {
-      status: 200,
-      data: await service.uninstall(body),
-    };
-  }
-
-  if (method === 'GET' && routePath === '/api/clawhub/list') {
-    return {
-      status: 200,
-      data: {
-        success: true,
-        results: await service.list(),
-      },
-    };
-  }
-
-  if (method === 'POST' && routePath === '/api/clawhub/open-readme') {
-    const body = isRecord(payload) ? payload : {};
-    const skillKeyOrSlug = typeof body.skillKey === 'string'
-      ? body.skillKey
-      : (typeof body.slug === 'string' ? body.slug : '');
-    const baseDir = typeof body.baseDir === 'string' ? body.baseDir : undefined;
-    return {
-      status: 200,
-      data: await service.openReadme(skillKeyOrSlug, typeof body.slug === 'string' ? body.slug : undefined, baseDir),
-    };
-  }
-
-  if (method === 'POST' && routePath === '/api/clawhub/open-path') {
-    const body = isRecord(payload) ? payload : {};
-    const skillKeyOrSlug = typeof body.skillKey === 'string'
-      ? body.skillKey
-      : (typeof body.slug === 'string' ? body.slug : '');
-    const baseDir = typeof body.baseDir === 'string' ? body.baseDir : undefined;
-    return {
-      status: 200,
-      data: await service.openPath(skillKeyOrSlug, typeof body.slug === 'string' ? body.slug : undefined, baseDir),
-    };
-  }
-
-  return null;
+interface ClawHubRouteService {
+  search(body: Record<string, unknown>): Promise<unknown>;
+  login(): Promise<unknown>;
+  install(body: Record<string, unknown>): unknown;
+  uninstall(body: Record<string, unknown>): unknown;
+  list(): Promise<unknown>;
+  openReadme(skillKeyOrSlug: string, slug?: string, baseDir?: string): Promise<unknown>;
+  openPath(skillKeyOrSlug: string, slug?: string, baseDir?: string): Promise<unknown>;
 }
 
-export { handleClawHubRouteLocal as handleClawHubRoute, listInstalledClawHubSkills };
+function readSkillLocator(payload: unknown): {
+  readonly skillKeyOrSlug: string;
+  readonly slug?: string;
+  readonly baseDir?: string;
+} {
+  const body = readRecord(payload);
+  const slug = typeof body.slug === 'string' ? body.slug : undefined;
+  return {
+    skillKeyOrSlug: typeof body.skillKey === 'string' ? body.skillKey : (slug ?? ''),
+    ...(slug ? { slug } : {}),
+    ...(typeof body.baseDir === 'string' ? { baseDir: body.baseDir } : {}),
+  };
+}
+
+export const clawHubRoutes: readonly RuntimeRouteDefinition<ClawHubRouteDeps>[] = [
+  {
+    method: 'POST',
+    path: '/api/clawhub/search',
+    handle: async (context, deps) => routeResponder.ok({
+      success: true,
+      results: await deps.clawHubService.search(readRecord(context.payload)),
+    }),
+  },
+  { method: 'POST', path: '/api/clawhub/auth/login', handle: (_context, deps) => routeResponder.value(() => deps.clawHubService.login()) },
+  { method: 'POST', path: '/api/clawhub/install', handle: (context, deps) => accepted(deps.clawHubService.install(readRecord(context.payload))) },
+  { method: 'POST', path: '/api/clawhub/uninstall', handle: (context, deps) => accepted(deps.clawHubService.uninstall(readRecord(context.payload))) },
+  {
+    method: 'GET',
+    path: '/api/clawhub/list',
+    handle: async (_context, deps) => routeResponder.ok({
+      success: true,
+      results: await deps.clawHubService.list(),
+    }),
+  },
+  {
+    method: 'POST',
+    path: '/api/clawhub/open-readme',
+    handle: (context, deps) => {
+      const locator = readSkillLocator(context.payload);
+      return routeResponder.value(() => deps.clawHubService.openReadme(locator.skillKeyOrSlug, locator.slug, locator.baseDir));
+    },
+  },
+  {
+    method: 'POST',
+    path: '/api/clawhub/open-path',
+    handle: (context, deps) => {
+      const locator = readSkillLocator(context.payload);
+      return routeResponder.value(() => deps.clawHubService.openPath(locator.skillKeyOrSlug, locator.slug, locator.baseDir));
+    },
+  },
+] as const;
+

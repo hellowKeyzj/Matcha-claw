@@ -1,25 +1,13 @@
-import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { RuntimeHostCatalogPlugin } from '../../bootstrap/runtime-config';
 import { createPluginDiscovery } from '../../plugin-engine/plugin-discovery';
 import { createPluginManifestLoader } from '../../plugin-engine/plugin-manifest-loader';
+import type { PluginFileSystemPort } from '../../plugin-engine/plugin-file-system';
 import type { RuntimeHostDiscoveredPlugin } from '../../shared/types';
-import { getCompanionSkillSlugsForPlugin } from './plugin-companion-skill-service';
+import type { OpenClawConfigRepositoryPort } from '../openclaw/openclaw-config-repository';
+import type { OpenClawEnvironmentRepository } from '../openclaw/openclaw-environment-repository';
+import type { PluginCompanionSkillService } from './plugin-companion-skill-service';
 import { pickCatalogGroup } from './plugin-groups';
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
-}
-
-async function tryReadPackageJson(pluginDir: string): Promise<Record<string, unknown> | null> {
-  try {
-    const raw = await readFile(join(pluginDir, 'package.json'), 'utf8');
-    const parsed = JSON.parse(raw) as unknown;
-    return isRecord(parsed) ? parsed : null;
-  } catch {
-    return null;
-  }
-}
 
 function inferPluginKind(
   discovered: RuntimeHostDiscoveredPlugin,
@@ -88,39 +76,56 @@ export function mergePluginCatalogSnapshots(
   return Array.from(merged.values()).sort(compareCatalogPlugins);
 }
 
-export async function discoverPluginCatalogLocal(): Promise<RuntimeHostCatalogPlugin[]> {
-  const discovery = createPluginDiscovery();
-  const manifestLoader = createPluginManifestLoader();
-  const discovered = await discovery.discover();
+export class PluginCatalogRepository {
+  constructor(
+    private readonly configRepository: Pick<OpenClawConfigRepositoryPort, 'getConfigDir' | 'getOpenClawDirPath'>,
+    private readonly companionSkills: Pick<PluginCompanionSkillService, 'getSlugsForPlugin'>,
+    private readonly environment: Pick<OpenClawEnvironmentRepository, 'getWorkingDir' | 'getUserMatchaClawPluginDir'>,
+    private readonly fileSystem: Pick<PluginFileSystemPort, 'pathExists' | 'readJsonRecord' | 'readText' | 'listDirectoryEntries'>,
+  ) {}
 
-  const catalog = await Promise.all(
-    discovered.map(async (plugin) => {
-      const [manifest, packageJson] = await Promise.all([
-        manifestLoader.load(plugin.manifestPath),
-        tryReadPackageJson(plugin.rootDir),
-      ]);
-      const description = pickCatalogDescription(manifest.description, packageJson);
-      const companionSkillSlugs = getCompanionSkillSlugsForPlugin(manifest.id);
-      return {
-        id: manifest.id,
-        name: manifest.name,
-        version: pickCatalogVersion(manifest.version, packageJson),
-        kind: inferPluginKind(plugin, packageJson),
-        platform: plugin.platform,
-        source: plugin.source,
-        category: manifest.category,
-        group: pickCatalogGroup({
+  async discover(): Promise<RuntimeHostCatalogPlugin[]> {
+    const discovery = createPluginDiscovery({
+      locationContext: {
+        openClawConfigDir: this.configRepository.getConfigDir(),
+        openClawDirPath: this.configRepository.getOpenClawDirPath(),
+        workingDir: this.environment.getWorkingDir(),
+        matchaClawPluginsDir: this.environment.getUserMatchaClawPluginDir(),
+      },
+      fileSystem: this.fileSystem,
+    });
+    const manifestLoader = createPluginManifestLoader(this.fileSystem);
+    const discovered = await discovery.discover();
+
+    const catalog = await Promise.all(
+      discovered.map(async (plugin) => {
+        const [manifest, packageJson] = await Promise.all([
+          manifestLoader.load(plugin.manifestPath),
+          this.fileSystem.readJsonRecord(join(plugin.rootDir, 'package.json')),
+        ]);
+        const description = pickCatalogDescription(manifest.description, packageJson);
+        const companionSkillSlugs = this.companionSkills.getSlugsForPlugin(manifest.id);
+        return {
           id: manifest.id,
+          name: manifest.name,
+          version: pickCatalogVersion(manifest.version, packageJson),
+          kind: inferPluginKind(plugin, packageJson),
+          platform: plugin.platform,
+          source: plugin.source,
           category: manifest.category,
-          description: manifest.description,
-          groupHints: manifest.groupHints,
-        }),
-        controlMode: plugin.source === 'bundled' ? 'openclaw-managed' : 'manual',
-        ...(description ? { description } : {}),
-        ...(companionSkillSlugs.length > 0 ? { companionSkillSlugs: [...companionSkillSlugs] } : {}),
-      } satisfies RuntimeHostCatalogPlugin;
-    }),
-  );
+          group: pickCatalogGroup({
+            id: manifest.id,
+            category: manifest.category,
+            description: manifest.description,
+            groupHints: manifest.groupHints,
+          }),
+          controlMode: plugin.source === 'bundled' ? 'openclaw-managed' : 'manual',
+          ...(description ? { description } : {}),
+          ...(companionSkillSlugs.length > 0 ? { companionSkillSlugs: [...companionSkillSlugs] } : {}),
+        } satisfies RuntimeHostCatalogPlugin;
+      }),
+    );
 
-  return catalog.sort(compareCatalogPlugins);
+    return catalog.sort(compareCatalogPlugins);
+  }
 }

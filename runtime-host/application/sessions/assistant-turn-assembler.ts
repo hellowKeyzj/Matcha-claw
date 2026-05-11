@@ -1,10 +1,6 @@
 import type {
   SessionAssistantTurnSegment,
   SessionAssistantTurnItem,
-  SessionRenderAssistantBubbleToolResult,
-  SessionRenderAttachedFile,
-  SessionRenderImage,
-  SessionRenderToolCard,
   SessionRuntimeStateSnapshot,
   SessionTimelineEntry,
   SessionTimelineMessageEntry,
@@ -16,6 +12,14 @@ import type {
 import {
   mergeAssistantSegmentStream,
 } from './assistant-turn-segments';
+import {
+  buildEmbeddedToolResults,
+  deriveAttachedFilesFromSegments,
+  deriveImagesFromSegments,
+  deriveTextFromSegments,
+  deriveThinkingFromSegments,
+  deriveToolsFromSegments,
+} from './assistant-turn-summary';
 
 interface AssistantTurnAccumulator {
   key: string;
@@ -52,7 +56,7 @@ function isAssistantTimelineEntry(
 }
 
 function cloneSegments(segments: ReadonlyArray<SessionAssistantTurnSegment>): SessionAssistantTurnSegment[] {
-  return structuredClone(segments);
+  return [...structuredClone(segments)];
 }
 
 function mergeOrderedSegments(
@@ -67,59 +71,6 @@ function mergeOrderedSegments(
     existingSegments,
     incomingSegments,
   });
-}
-
-function buildEmbeddedToolResults(
-  tools: ReadonlyArray<SessionRenderToolCard>,
-): ReadonlyArray<SessionRenderAssistantBubbleToolResult> {
-  const embedded: SessionRenderAssistantBubbleToolResult[] = [];
-  for (const tool of tools) {
-    if (tool.result.kind !== 'canvas' || tool.result.surface !== 'assistant-bubble' || tool.result.preview.surface !== 'assistant_message') {
-      continue;
-    }
-    embedded.push({
-      key: tool.toolCallId || tool.id || `${tool.name}:${embedded.length}`,
-      ...(tool.toolCallId ? { toolCallId: tool.toolCallId } : {}),
-      toolName: tool.name,
-      preview: structuredClone(tool.result.preview),
-      ...(tool.result.rawText ? { rawText: tool.result.rawText } : {}),
-    });
-  }
-  return embedded;
-}
-
-function deriveThinkingFromSegments(segments: ReadonlyArray<SessionAssistantTurnSegment>): string | null {
-  const parts = segments
-    .filter((segment): segment is Extract<SessionAssistantTurnSegment, { kind: 'thinking' }> => segment.kind === 'thinking')
-    .map((segment) => segment.text.trim())
-    .filter(Boolean);
-  return parts.length > 0 ? parts.join('\n\n') : null;
-}
-
-function deriveToolsFromSegments(segments: ReadonlyArray<SessionAssistantTurnSegment>): ReadonlyArray<SessionRenderToolCard> {
-  return segments
-    .filter((segment): segment is Extract<SessionAssistantTurnSegment, { kind: 'tool' }> => segment.kind === 'tool')
-    .map((segment) => structuredClone(segment.tool));
-}
-
-function deriveTextFromSegments(segments: ReadonlyArray<SessionAssistantTurnSegment>): string {
-  return segments
-    .filter((segment): segment is Extract<SessionAssistantTurnSegment, { kind: 'message' }> => segment.kind === 'message')
-    .map((segment) => segment.text)
-    .filter((text) => text.trim().length > 0)
-    .join('\n');
-}
-
-function deriveImagesFromSegments(segments: ReadonlyArray<SessionAssistantTurnSegment>): ReadonlyArray<SessionRenderImage> {
-  return segments
-    .filter((segment): segment is Extract<SessionAssistantTurnSegment, { kind: 'media' }> => segment.kind === 'media')
-    .flatMap((segment) => structuredClone(segment.images));
-}
-
-function deriveAttachedFilesFromSegments(segments: ReadonlyArray<SessionAssistantTurnSegment>): ReadonlyArray<SessionRenderAttachedFile> {
-  return segments
-    .filter((segment): segment is Extract<SessionAssistantTurnSegment, { kind: 'media' }> => segment.kind === 'media')
-    .flatMap((segment) => structuredClone(segment.attachedFiles));
 }
 
 function resolveAssistantTurnPendingState(input: {
@@ -386,7 +337,7 @@ export function assembleAuthoritativeAssistantTurns(input: {
       previousFallbackAssistantLaneKey = null;
       continue;
     }
-    const matchKey = (
+    const matchKey: string = (
       accumulatorSeed.identityConfidence === 'fallback'
       && previousFallbackAssistantMatchKey
       && previousFallbackAssistantLaneKey === accumulatorSeed.laneKey

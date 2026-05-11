@@ -1,25 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-const {
-  discoverAgentIdsMock,
-  readAuthProfilesMock,
-  writeAuthProfilesMock,
-} = vi.hoisted(() => ({
-  discoverAgentIdsMock: vi.fn(async () => ['main']),
-  readAuthProfilesMock: vi.fn(),
-  writeAuthProfilesMock: vi.fn(async () => {}),
-}));
-
-vi.mock('../../runtime-host/application/openclaw/openclaw-auth-store', () => ({
-  discoverAgentIds: discoverAgentIdsMock,
-  readAuthProfiles: readAuthProfilesMock,
-  writeAuthProfiles: writeAuthProfilesMock,
-}));
-
 import {
-  removeProviderKeyFromOpenClaw,
-  saveProviderKeyToOpenClaw,
+  OpenClawAuthProfileService,
 } from '../../runtime-host/application/openclaw/openclaw-auth-profile-store';
+import { createTestRuntimeLogger } from './helpers/runtime-logger';
 
 type AuthStoreShape = {
   version: number;
@@ -32,21 +16,26 @@ function cloneStore(store: AuthStoreShape): AuthStoreShape {
   return JSON.parse(JSON.stringify(store)) as AuthStoreShape;
 }
 
+function createAuthProfileService(stores: Map<string, AuthStoreShape>, writeAuthProfilesMock: ReturnType<typeof vi.fn>) {
+  return new OpenClawAuthProfileService({
+    discoverAgentIds: async () => ['main'],
+    readAuthProfiles: async (agentId = 'main') => cloneStore(stores.get(agentId) ?? { version: 1, profiles: {} }),
+    writeAuthProfiles: async (store: AuthStoreShape, agentId = 'main') => {
+      writeAuthProfilesMock(store, agentId);
+      stores.set(agentId, cloneStore(store));
+    },
+  }, createTestRuntimeLogger('openclaw-auth-profile-store-test'));
+}
+
 describe('removeProviderKeyFromOpenClaw', () => {
   const stores = new Map<string, AuthStoreShape>();
+  const writeAuthProfilesMock = vi.fn();
+  let service: OpenClawAuthProfileService;
 
   beforeEach(() => {
     stores.clear();
-    discoverAgentIdsMock.mockReset();
-    readAuthProfilesMock.mockReset();
     writeAuthProfilesMock.mockReset();
-    discoverAgentIdsMock.mockResolvedValue(['main']);
-    readAuthProfilesMock.mockImplementation(async (agentId = 'main') => {
-      return cloneStore(stores.get(agentId) ?? { version: 1, profiles: {} });
-    });
-    writeAuthProfilesMock.mockImplementation(async (store: AuthStoreShape, agentId = 'main') => {
-      stores.set(agentId, cloneStore(store));
-    });
+    service = createAuthProfileService(stores, writeAuthProfilesMock);
   });
 
   it('仅删除 default 的 api_key profile，并清理 order/lastGood 引用', async () => {
@@ -64,7 +53,7 @@ describe('removeProviderKeyFromOpenClaw', () => {
       },
     });
 
-    await removeProviderKeyFromOpenClaw('custom-abc12345', 'main');
+    await service.removeProviderKey('custom-abc12345', 'main');
 
     expect(stores.get('main')).toEqual({
       version: 1,
@@ -92,7 +81,7 @@ describe('removeProviderKeyFromOpenClaw', () => {
       },
     });
 
-    await removeProviderKeyFromOpenClaw('custom-abc12345', 'main');
+    await service.removeProviderKey('custom-abc12345', 'main');
 
     expect(stores.get('main')).toEqual({
       version: 1,
@@ -126,7 +115,7 @@ describe('removeProviderKeyFromOpenClaw', () => {
       },
     });
 
-    await removeProviderKeyFromOpenClaw('openai-codex', 'main');
+    await service.removeProviderKey('openai-codex', 'main');
 
     expect(stores.get('main')).toEqual({
       version: 1,
@@ -151,19 +140,13 @@ describe('removeProviderKeyFromOpenClaw', () => {
 
 describe('saveProviderKeyToOpenClaw', () => {
   const stores = new Map<string, AuthStoreShape>();
+  const writeAuthProfilesMock = vi.fn();
+  let service: OpenClawAuthProfileService;
 
   beforeEach(() => {
     stores.clear();
-    discoverAgentIdsMock.mockReset();
-    readAuthProfilesMock.mockReset();
     writeAuthProfilesMock.mockReset();
-    discoverAgentIdsMock.mockResolvedValue(['main']);
-    readAuthProfilesMock.mockImplementation(async (agentId = 'main') => {
-      return cloneStore(stores.get(agentId) ?? { version: 1, profiles: {} });
-    });
-    writeAuthProfilesMock.mockImplementation(async (store: AuthStoreShape, agentId = 'main') => {
-      stores.set(agentId, cloneStore(store));
-    });
+    service = createAuthProfileService(stores, writeAuthProfilesMock);
   });
 
   it('OAuth provider 且 apiKey 为空时跳过写入', async () => {
@@ -174,7 +157,7 @@ describe('saveProviderKeyToOpenClaw', () => {
       lastGood: {},
     });
 
-    await saveProviderKeyToOpenClaw('minimax-portal', '', 'main');
+    await service.saveProviderKey('minimax-portal', '', 'main');
 
     expect(writeAuthProfilesMock).not.toHaveBeenCalled();
     expect(stores.get('main')).toEqual({

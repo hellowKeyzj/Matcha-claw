@@ -474,6 +474,10 @@ export interface SessionCatalogItem {
 
 export interface SessionListResult {
   sessions: SessionCatalogItem[];
+  ready: boolean;
+  refreshing: boolean;
+  updatedAt: number | null;
+  error: string | null;
 }
 
 export interface SessionWindowResult {

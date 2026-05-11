@@ -1,4 +1,4 @@
-export type RuntimeHostLifecycle = 'idle' | 'booting' | 'running' | 'stopped' | 'error';
+export type RuntimeHostLifecycle = 'starting' | 'running' | 'stopping' | 'stopped' | 'error';
 
 export type RuntimeHostPluginKind = 'builtin' | 'third-party';
 export type RuntimeHostPluginPlatform = 'openclaw' | 'matchaclaw';

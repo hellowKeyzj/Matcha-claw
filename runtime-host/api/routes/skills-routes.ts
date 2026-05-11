@@ -1,90 +1,26 @@
-import type { OpenClawBridge } from '../../openclaw-bridge';
-import { SkillsService } from '../../application/skills/service';
-
-interface LocalDispatchResponse {
-  status: number;
-  data: unknown;
-}
+import { routeResponder, type ApplicationResponse, type RuntimeRouteDefinition } from './route-utils';
 
 interface SkillsRouteDeps {
-  getAllSkillConfigsLocal: () => Record<string, unknown>;
-  updateSkillConfigLocal: (skillKey: string, updates: Record<string, unknown>) => Promise<unknown>;
-  setSkillEnabledLocal: (skillKey: string, enabled: boolean) => Promise<unknown>;
-  listEffectiveSkillsLocal: () => Promise<unknown>;
-  getOpenClawConfigDir: () => string;
-  readOpenClawConfigJson: () => Record<string, unknown>;
-  openclawBridge: Pick<OpenClawBridge, 'gatewayRpc' | 'isGatewayRunning'>;
+  skillsService: SkillsRouteService;
 }
 
-export async function handleSkillsRoute(
-  method: string,
-  routePath: string,
-  payload: unknown,
-  deps: SkillsRouteDeps,
-): Promise<LocalDispatchResponse | null> {
-  const service = new SkillsService({
-    getAllSkillConfigs: deps.getAllSkillConfigsLocal,
-    updateSkillConfig: deps.updateSkillConfigLocal,
-    setSkillEnabled: deps.setSkillEnabledLocal,
-    listEffectiveSkills: deps.listEffectiveSkillsLocal,
-    getOpenClawConfigDir: deps.getOpenClawConfigDir,
-    readOpenClawConfigJson: deps.readOpenClawConfigJson,
-    openclawBridge: deps.openclawBridge,
-  });
-
-  if (method === 'GET' && routePath === '/api/skills/configs') {
-    return {
-      status: 200,
-      data: service.configs(),
-    };
-  }
-
-  if (method === 'PUT' && routePath === '/api/skills/config') {
-    try {
-      return await service.updateConfig(payload);
-    } catch (error) {
-      return {
-        status: 500,
-        data: { success: false, error: String(error) },
-      };
-    }
-  }
-
-  if (method === 'PUT' && routePath === '/api/skills/state') {
-    try {
-      return await service.updateState(payload);
-    } catch (error) {
-      return {
-        status: 500,
-        data: { success: false, error: String(error) },
-      };
-    }
-  }
-
-  if (method === 'GET' && routePath === '/api/skills/effective') {
-    try {
-      return {
-        status: 200,
-        data: await service.effective(),
-      };
-    } catch (error) {
-      return {
-        status: 500,
-        data: { success: false, error: String(error) },
-      };
-    }
-  }
-
-  if (method === 'POST' && routePath === '/api/skills/readme') {
-    try {
-      return await service.readmePreview(payload);
-    } catch (error) {
-      return {
-        status: 500,
-        data: { success: false, error: String(error) },
-      };
-    }
-  }
-
-  return null;
+interface SkillsRouteService {
+  status(): unknown;
+  configs(): Promise<unknown>;
+  updateConfig(payload: unknown): Promise<ApplicationResponse>;
+  updateState(payload: unknown): Promise<ApplicationResponse>;
+  importLocal(payload: unknown): ApplicationResponse;
+  effective(): Promise<unknown>;
+  readmePreview(payload: unknown): Promise<ApplicationResponse>;
 }
+
+export const skillsRoutes: readonly RuntimeRouteDefinition<SkillsRouteDeps>[] = [
+  { method: 'GET', path: '/api/skills/status', handle: (_context, deps) => routeResponder.value(() => deps.skillsService.status()) },
+  { method: 'GET', path: '/api/skills/configs', handle: (_context, deps) => routeResponder.value(() => deps.skillsService.configs()) },
+  { method: 'PUT', path: '/api/skills/config', handle: (context, deps) => routeResponder.result(() => deps.skillsService.updateConfig(context.payload)) },
+  { method: 'PUT', path: '/api/skills/state', handle: (context, deps) => routeResponder.result(() => deps.skillsService.updateState(context.payload)) },
+  { method: 'POST', path: '/api/skills/import-local', handle: (context, deps) => routeResponder.result(() => deps.skillsService.importLocal(context.payload)) },
+  { method: 'GET', path: '/api/skills/effective', handle: (_context, deps) => routeResponder.value(() => deps.skillsService.effective()) },
+  { method: 'POST', path: '/api/skills/readme', handle: (context, deps) => routeResponder.result(() => deps.skillsService.readmePreview(context.payload)) },
+] as const;
+

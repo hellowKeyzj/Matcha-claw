@@ -9,19 +9,26 @@ import { logger } from '../utils/logger';
 import { warmupNetworkOptimization } from '../utils/uv-env';
 import { autoInstallCliIfNeeded, generateCompletionCache, installCompletionToProfile } from '../services/openclaw/openclaw-cli-service';
 import { applyProxySettings } from './proxy';
-import { syncLaunchAtStartupSettingFromStore } from './launch-at-startup';
-import { getSetting } from '../services/settings/settings-store';
-import { ensureBuiltinSkillsInstalled, ensurePreinstalledSkillsInstalled } from '../services/skills/skill-config-service';
-import { migrateMainAgentWorkspaceTemplatesIfNeeded } from '../services/openclaw/main-agent-workspace-service';
+import { applyLaunchAtStartupSetting } from './launch-at-startup';
+import { loadHostBootstrapSettings } from '../gateway/config-sync';
 import { startHostApiServer, waitForHostApiServerListening } from '../api/server';
 import type { HostEventBus } from '../api/event-bus';
-import { ensureLicenseGateBootstrapped } from '../services/license/license-gate-service';
 import type { RuntimeHostManager } from './runtime-host-manager';
 import { emitHostEvent, registerHostEventBridge } from './host-event-bridge';
 import { createMainWindow, loadMainWindowContent } from './main-window';
 import { isQuitting } from './app-state';
+import { waitForRuntimeHostJob, type RuntimeHostJobSnapshot } from './runtime-host-jobs';
 
 const isE2EMode = process.env.CLAWX_E2E === '1';
+
+type HostBootstrapSettings = {
+  launchAtStartup: boolean;
+  gatewayAutoStart: boolean;
+  gatewayToken: string;
+  proxyEnabled: boolean;
+  proxyServer: string;
+  proxyBypassRules: string;
+};
 
 function registerGatewayControlUiSecurityHeaders(): void {
   session.defaultSession.webRequest.onHeadersReceived(
@@ -61,17 +68,12 @@ function registerMainWindowLifecycle(deps: {
   });
 }
 
-function startNonBlockingBootstrapTasks(mainWindow: BrowserWindow): void {
-  void ensureBuiltinSkillsInstalled().catch((error) => {
-    logger.warn('Failed to install built-in skills:', error);
-  });
-
-  void ensurePreinstalledSkillsInstalled().catch((error) => {
-    logger.warn('Failed to install preinstalled skills:', error);
-  });
-
+function startNonBlockingBootstrapTasks(deps: {
+  mainWindow: BrowserWindow;
+  hostEventBus: HostEventBus;
+}): void {
   void autoInstallCliIfNeeded((installedPath) => {
-    mainWindow.webContents.send('openclaw:cli-installed', installedPath);
+    emitHostEvent(deps.hostEventBus, deps.mainWindow, 'openclaw:cli-installed', { path: installedPath });
   }).then(() => {
     generateCompletionCache();
     installCompletionToProfile();
@@ -85,15 +87,26 @@ async function autoStartGatewayIfEnabled(deps: {
   gatewayManager: GatewayManager;
   runtimeHostManager: RuntimeHostManager;
   hostEventBus: HostEventBus;
+  settings: Pick<HostBootstrapSettings, 'gatewayAutoStart'>;
 }): Promise<void> {
-  const gatewayAutoStart = await getSetting('gatewayAutoStart');
-  if (!gatewayAutoStart) {
+  if (!deps.settings.gatewayAutoStart) {
     logger.info('Gateway auto-start disabled in settings');
     return;
   }
 
   try {
-    await deps.runtimeHostManager.request('POST', '/api/runtime-host/sync-provider-auth-bootstrap');
+    const response = await deps.runtimeHostManager.request<{
+      success?: boolean;
+      job?: RuntimeHostJobSnapshot;
+    }>('POST', '/api/runtime-host/sync-provider-auth-bootstrap');
+    const job = response.data?.job;
+    if (!job?.id) {
+      throw new Error('Runtime Host did not return a provider auth bootstrap job');
+    }
+    await waitForRuntimeHostJob(deps.runtimeHostManager, job.id, {
+      timeoutMs: 120_000,
+      intervalMs: 200,
+    });
     logger.debug('Auto-starting Gateway...');
     await deps.gatewayManager.start();
     logger.info('Gateway auto-start succeeded');
@@ -122,29 +135,22 @@ export async function bootstrapMainApplication(deps: {
     logger.info('E2E mode enabled: startup side effects are minimized');
   }
 
-  await applyProxySettings();
-  if (!isE2EMode) {
-    await syncLaunchAtStartupSettingFromStore();
-  }
-
   createMenu();
 
   const mainWindow = createMainWindow();
   deps.setMainWindow(mainWindow);
   if (!isE2EMode) {
-    createTray(mainWindow);
+    createTray(mainWindow, {
+      checkForUpdates: () => appUpdater.checkForUpdates(),
+    });
   }
 
-  try {
-    await deps.runtimeHostManager.start();
-  } catch (error) {
-    logger.warn('Runtime Host start failed, app will continue without plugin runtime:', error);
-  }
+  await deps.runtimeHostManager.start();
 
-  try {
-    await migrateMainAgentWorkspaceTemplatesIfNeeded();
-  } catch (error) {
-    logger.warn('Failed to migrate main-agent workspace templates:', error);
+  const hostBootstrapSettings = await loadHostBootstrapSettings();
+  await applyProxySettings(hostBootstrapSettings);
+  if (!isE2EMode) {
+    await applyLaunchAtStartupSetting(hostBootstrapSettings.launchAtStartup);
   }
 
   registerGatewayControlUiSecurityHeaders();
@@ -154,8 +160,6 @@ export async function bootstrapMainApplication(deps: {
     deps.getMainWindow,
     deps.runtimeHostManager,
   );
-  ensureLicenseGateBootstrapped();
-
   const hostApiServer = await waitForHostApiServerListening(startHostApiServer({
     gatewayManager: deps.gatewayManager,
     eventBus: deps.hostEventBus,
@@ -181,7 +185,10 @@ export async function bootstrapMainApplication(deps: {
   });
 
   if (!isE2EMode) {
-    startNonBlockingBootstrapTasks(mainWindow);
+    startNonBlockingBootstrapTasks({
+      mainWindow,
+      hostEventBus: deps.hostEventBus,
+    });
   }
 
   if (!isE2EMode) {
@@ -190,6 +197,7 @@ export async function bootstrapMainApplication(deps: {
       gatewayManager: deps.gatewayManager,
       runtimeHostManager: deps.runtimeHostManager,
       hostEventBus: deps.hostEventBus,
+      settings: hostBootstrapSettings,
     });
   } else {
     logger.info('E2E mode: skip gateway auto-start');

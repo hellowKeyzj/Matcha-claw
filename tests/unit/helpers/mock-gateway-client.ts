@@ -7,6 +7,12 @@ type GatewayRpcEnvelope<TResult = unknown> = {
   error?: string;
 };
 
+type RpcCall = {
+  method: string;
+  params: unknown;
+  timeoutMs?: number;
+};
+
 function isGatewayRpcEnvelope(value: unknown): value is GatewayRpcEnvelope {
   return Boolean(
     value
@@ -15,7 +21,6 @@ function isGatewayRpcEnvelope(value: unknown): value is GatewayRpcEnvelope {
   );
 }
 
-export const gatewayClientRequestMock = vi.fn();
 export const gatewayClientRpcMock = vi.fn();
 export const hostApiFetchMock = vi.fn();
 export const hostSessionPromptMock = vi.fn();
@@ -24,26 +29,61 @@ export const hostSessionDeleteMock = vi.fn();
 export const hostSessionListMock = vi.fn();
 export const hostSessionPatchMock = vi.fn();
 
-vi.spyOn(hostApiModule, 'hostGatewayRequest').mockImplementation(async <TResult = unknown>(
-  method: string,
-  params?: unknown,
-  timeoutMs?: number,
-) => {
-  const response = await gatewayClientRequestMock(method, params, timeoutMs);
-  if (isGatewayRpcEnvelope(response)) {
-    return response as GatewayRpcEnvelope<TResult>;
+const subagentRuntimeRoutes: Record<string, string> = {
+  '/api/subagents/list': 'agents.list',
+  '/api/subagents/config/get': 'config.get',
+  '/api/subagents/config/set': 'config.set',
+  '/api/subagents/create': 'agents.create',
+  '/api/subagents/update': 'agents.update',
+  '/api/subagents/delete': 'agents.delete',
+  '/api/subagents/files/get': 'agents.files.get',
+  '/api/subagents/files/set': 'agents.files.set',
+  '/api/subagents/files/list': 'agents.files.list',
+  '/api/subagents/agent-wait': 'agent.wait',
+};
+
+function parseJsonBody(init?: RequestInit & { timeoutMs?: number }): unknown {
+  if (typeof init?.body !== 'string' || !init.body) {
+    return {};
+  }
+  try {
+    return JSON.parse(init.body) as unknown;
+  } catch {
+    return {};
+  }
+}
+
+function buildSubagentRpcCall(path: string, init?: RequestInit & { timeoutMs?: number }): RpcCall | undefined {
+  const method = subagentRuntimeRoutes[path];
+  if (!method) {
+    return undefined;
+  }
+  const body = parseJsonBody(init);
+  if (method === 'agent.wait') {
+    const payload = body && typeof body === 'object' && !Array.isArray(body)
+      ? body as Record<string, unknown>
+      : {};
+    const timeoutMs = typeof payload.timeoutMs === 'number'
+      ? Math.max(1000, Math.floor(payload.timeoutMs)) + 10000
+      : init?.timeoutMs;
+    return {
+      method,
+      params: body,
+      timeoutMs,
+    };
   }
   return {
-    success: true,
-    result: response as TResult,
+    method,
+    params: body,
+    timeoutMs: init?.timeoutMs,
   };
-});
+}
 
-vi.spyOn(hostApiModule, 'hostGatewayRpc').mockImplementation(async <TResult = unknown>(
+async function invokeMockedGatewayRpc<TResult>(
   method: string,
-  params?: unknown,
+  params: unknown,
   timeoutMs?: number,
-) => {
+): Promise<TResult> {
   const response = await gatewayClientRpcMock(method, params, timeoutMs);
   if (isGatewayRpcEnvelope(response)) {
     if (!response.success) {
@@ -52,36 +92,19 @@ vi.spyOn(hostApiModule, 'hostGatewayRpc').mockImplementation(async <TResult = un
     return response.result as TResult;
   }
   return response as TResult;
-});
+}
 
 vi.spyOn(hostApiModule, 'hostApiFetch').mockImplementation(async <TResult = unknown>(
   path: string,
   init?: RequestInit & { timeoutMs?: number },
 ) => {
-  if (path === '/api/gateway/rpc') {
-    const bodyText = typeof init?.body === 'string' ? init.body : '';
-    let parsedBody: { method?: string; params?: unknown; timeoutMs?: number } = {};
-    try {
-      parsedBody = bodyText ? JSON.parse(bodyText) as { method?: string; params?: unknown; timeoutMs?: number } : {};
-    } catch {
-      parsedBody = {};
-    }
-    const method = typeof parsedBody.method === 'string' ? parsedBody.method : '';
-    const params = parsedBody.params;
-    const timeoutMs = parsedBody.timeoutMs;
-
-    if (gatewayClientRequestMock.getMockImplementation()) {
-      return await gatewayClientRequestMock(method, params, timeoutMs) as TResult;
-    }
-
-    const rpcResponse = await gatewayClientRpcMock(method, params, timeoutMs);
-    if (isGatewayRpcEnvelope(rpcResponse)) {
-      return rpcResponse as TResult;
-    }
-    return {
-      success: true,
-      result: rpcResponse,
-    } as TResult;
+  const subagentRpcCall = buildSubagentRpcCall(path, init);
+  if (subagentRpcCall) {
+    return await invokeMockedGatewayRpc<TResult>(
+      subagentRpcCall.method,
+      subagentRpcCall.params,
+      subagentRpcCall.timeoutMs,
+    );
   }
   return await hostApiFetchMock(path, init) as TResult;
 });
@@ -125,7 +148,6 @@ vi.spyOn(hostApiModule, 'hostSessionPatch').mockImplementation(async (
 ) => await hostSessionPatchMock(payload));
 
 export function resetGatewayClientMocks(): void {
-  gatewayClientRequestMock.mockReset();
   gatewayClientRpcMock.mockReset();
   hostApiFetchMock.mockReset();
   hostSessionPromptMock.mockReset();

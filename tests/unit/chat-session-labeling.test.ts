@@ -9,7 +9,7 @@ import {
   buildRenderItemsFromMessages,
   buildRenderableTimelineEntriesFromMessages,
 } from './helpers/timeline-fixtures';
-import { resolveSessionLabelDetailsFromTimelineEntries } from '../../runtime-host/application/sessions/transcript-utils';
+import { resolveSessionLabelDetailsFromTimelineEntries } from '../../runtime-host/application/sessions/transcript-labels';
 
 const hostApiFetchMock = vi.fn();
 const hostSessionLoadMock = vi.fn();
@@ -115,6 +115,7 @@ function loadCurrentHistory(mode: 'active' | 'quiet' = 'active') {
 
 describe('chat session labeling', () => {
   beforeEach(() => {
+    vi.useRealTimers();
     vi.clearAllMocks();
     hostApiFetchMock.mockReset();
     hostSessionLoadMock.mockReset();
@@ -415,6 +416,50 @@ describe('chat session labeling', () => {
     expect(state.sessionCatalogStatus.hasLoadedOnce).toBe(false);
   });
 
+  it('loadSessions 收到 ready:false 时保持加载态并自动重试 snapshot', async () => {
+    vi.useFakeTimers();
+    try {
+      resetChatStoreState();
+      hostApiFetchMock
+        .mockResolvedValueOnce({
+          sessions: [],
+          ready: false,
+          refreshing: true,
+          updatedAt: null,
+          error: null,
+        })
+        .mockResolvedValueOnce({
+          sessions: [
+            {
+              key: 'agent:alpha:session-ready',
+              label: '刷新后的会话',
+              updatedAt: 1_800_000_444_000,
+            },
+          ],
+          ready: true,
+          refreshing: false,
+          updatedAt: 1_800_000_444_000,
+          error: null,
+        });
+
+      await useChatStore.getState().loadSessions();
+
+      expect(hostApiFetchMock).toHaveBeenCalledTimes(1);
+      expect(useChatStore.getState().sessionCatalogStatus.status).toBe('loading');
+      expect(useChatStore.getState().sessionCatalogStatus.hasLoadedOnce).toBe(false);
+      expect(useChatStore.getState().loadedSessions['agent:alpha:session-ready']).toBeUndefined();
+
+      await vi.advanceTimersByTimeAsync(1200);
+
+      expect(hostApiFetchMock).toHaveBeenCalledTimes(2);
+      const state = useChatStore.getState();
+      expect(state.sessionCatalogStatus.status).toBe('ready');
+      expect(state.loadedSessions['agent:alpha:session-ready']?.meta.label).toBe('刷新后的会话');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('loadSessions 不应保留无本地痕迹且后端不存在的 canonical main 会话 key', async () => {
     resetChatStoreState();
     useChatStore.setState({
@@ -565,7 +610,7 @@ describe('chat session labeling', () => {
 
     expect(hostSessionLoadMock).toHaveBeenCalledWith({
       sessionKey: 'agent:alpha:session-1',
-    });
+    }, { timeoutMs: undefined });
     const state = useChatStore.getState();
     expect(getSessionItems(state, 'agent:alpha:session-1')).toMatchObject([
       {

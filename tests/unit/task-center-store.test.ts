@@ -1,15 +1,15 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
-import type { Task } from '@/services/openclaw/task-manager-client';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { Task, TaskListSnapshot } from '@/services/openclaw/task-manager-client';
 
 const getWorkspaceDirMock = vi.fn<() => Promise<string | null>>();
 const getTaskWorkspaceDirsMock = vi.fn<() => Promise<string[]>>();
-const listTasksMock = vi.fn<(workspaceDir?: string) => Promise<Task[]>>();
+const listTaskSnapshotMock = vi.fn<(workspaceDir?: string) => Promise<TaskListSnapshot>>();
 const updateTaskMock = vi.fn();
 
 vi.mock('@/services/openclaw/task-manager-client', () => ({
   getWorkspaceDir: (...args: unknown[]) => getWorkspaceDirMock(...args),
   getTaskWorkspaceDirs: (...args: unknown[]) => getTaskWorkspaceDirsMock(...args),
-  listTasks: (...args: unknown[]) => listTasksMock(...args),
+  listTaskSnapshot: (...args: unknown[]) => listTaskSnapshotMock(...args),
   updateTask: (...args: unknown[]) => updateTaskMock(...args),
 }));
 
@@ -27,22 +27,36 @@ function task(overrides: Partial<Task>): Task {
   };
 }
 
+function readySnapshot(tasks: Task[]): TaskListSnapshot {
+  return {
+    tasks,
+    ready: true,
+    refreshing: false,
+    updatedAt: 1,
+    error: null,
+  };
+}
+
 describe('task center store', () => {
   beforeEach(() => {
     vi.resetModules();
     getWorkspaceDirMock.mockReset();
     getTaskWorkspaceDirsMock.mockReset();
-    listTasksMock.mockReset();
+    listTaskSnapshotMock.mockReset();
     updateTaskMock.mockReset();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
   });
 
   it('init 在插件可用时加载任务列表', async () => {
     getWorkspaceDirMock.mockResolvedValue('E:/workspace/main');
     getTaskWorkspaceDirsMock.mockResolvedValue(['E:/workspace/main']);
-    listTasksMock.mockResolvedValue([
+    listTaskSnapshotMock.mockResolvedValue(readySnapshot([
       task({ id: 'pending-1', status: 'pending' }),
       task({ id: 'running-1', status: 'in_progress' }),
-    ]);
+    ]));
     const { useTaskCenterStore } = await import('@/stores/task-center-store');
 
     await useTaskCenterStore.getState().init();
@@ -59,8 +73,8 @@ describe('task center store', () => {
   it('首次 init 进入 initialLoading，完成后不再阻塞', async () => {
     getWorkspaceDirMock.mockResolvedValue('E:/workspace/main');
     getTaskWorkspaceDirsMock.mockResolvedValue(['E:/workspace/main']);
-    let resolveListTasks: ((value: Task[]) => void) | null = null;
-    listTasksMock.mockReturnValue(new Promise<Task[]>((resolve) => {
+    let resolveListTasks: ((value: TaskListSnapshot) => void) | null = null;
+    listTaskSnapshotMock.mockReturnValue(new Promise<TaskListSnapshot>((resolve) => {
       resolveListTasks = resolve;
     }));
     const { useTaskCenterStore } = await import('@/stores/task-center-store');
@@ -69,7 +83,7 @@ describe('task center store', () => {
     expect(useTaskCenterStore.getState().initialLoading).toBe(true);
     expect(useTaskCenterStore.getState().refreshing).toBe(false);
 
-    resolveListTasks?.([task({ id: 'task-init-1', status: 'pending' })]);
+    resolveListTasks?.(readySnapshot([task({ id: 'task-init-1', status: 'pending' })]));
     await initPromise;
 
     const state = useTaskCenterStore.getState();
@@ -79,12 +93,44 @@ describe('task center store', () => {
     expect(state.tasks.map((item) => item.id)).toEqual(['task-init-1']);
   });
 
+  it('首次 init 遇到 not-ready 时保持加载并自动重试', async () => {
+    vi.useFakeTimers();
+    getWorkspaceDirMock.mockResolvedValue('E:/workspace/main');
+    getTaskWorkspaceDirsMock.mockResolvedValue(['E:/workspace/main']);
+    listTaskSnapshotMock
+      .mockResolvedValueOnce({
+        tasks: [],
+        ready: false,
+        refreshing: true,
+        updatedAt: null,
+        error: null,
+      })
+      .mockResolvedValueOnce(readySnapshot([task({ id: 'task-ready-later', status: 'pending' })]));
+    const { useTaskCenterStore } = await import('@/stores/task-center-store');
+
+    await useTaskCenterStore.getState().init();
+
+    expect(useTaskCenterStore.getState().snapshotReady).toBe(false);
+    expect(useTaskCenterStore.getState().initialLoading).toBe(true);
+    expect(useTaskCenterStore.getState().refreshing).toBe(true);
+    expect(listTaskSnapshotMock).toHaveBeenCalledTimes(1);
+
+    await vi.advanceTimersByTimeAsync(1200);
+
+    const state = useTaskCenterStore.getState();
+    expect(listTaskSnapshotMock).toHaveBeenCalledTimes(2);
+    expect(state.snapshotReady).toBe(true);
+    expect(state.initialLoading).toBe(false);
+    expect(state.refreshing).toBe(false);
+    expect(state.tasks.map((item) => item.id)).toEqual(['task-ready-later']);
+  });
+
   it('refreshTasks 会重新拉取 scope 内任务', async () => {
     getWorkspaceDirMock.mockResolvedValue('E:/workspace/main');
     getTaskWorkspaceDirsMock.mockResolvedValue(['E:/workspace/main']);
-    listTasksMock
-      .mockResolvedValueOnce([task({ id: 'task-1', status: 'pending' })])
-      .mockResolvedValueOnce([task({ id: 'task-2', status: 'in_progress' })]);
+    listTaskSnapshotMock
+      .mockResolvedValueOnce(readySnapshot([task({ id: 'task-1', status: 'pending' })]))
+      .mockResolvedValueOnce(readySnapshot([task({ id: 'task-2', status: 'in_progress' })]));
     const { useTaskCenterStore } = await import('@/stores/task-center-store');
     await useTaskCenterStore.getState().init();
 
@@ -96,11 +142,11 @@ describe('task center store', () => {
   it('已有快照时 refresh 失败保留旧任务列表', async () => {
     getWorkspaceDirMock.mockResolvedValue('E:/workspace/main');
     getTaskWorkspaceDirsMock.mockResolvedValue(['E:/workspace/main']);
-    listTasksMock.mockResolvedValueOnce([task({ id: 'task-keep-1', status: 'pending' })]);
+    listTaskSnapshotMock.mockResolvedValueOnce(readySnapshot([task({ id: 'task-keep-1', status: 'pending' })]));
     const { useTaskCenterStore } = await import('@/stores/task-center-store');
     await useTaskCenterStore.getState().init();
 
-    listTasksMock.mockRejectedValueOnce(new Error('refresh failed'));
+    listTaskSnapshotMock.mockRejectedValueOnce(new Error('refresh failed'));
     await useTaskCenterStore.getState().refreshTasks();
 
     const state = useTaskCenterStore.getState();
@@ -113,7 +159,7 @@ describe('task center store', () => {
   it('deleteTaskById 会映射为 updateTask(status=completed)', async () => {
     getWorkspaceDirMock.mockResolvedValue('E:/workspace/main');
     getTaskWorkspaceDirsMock.mockResolvedValue(['E:/workspace/main']);
-    listTasksMock.mockResolvedValue([task({ id: 'task-delete-1', status: 'in_progress', workspaceDir: 'E:/workspace/main' })]);
+    listTaskSnapshotMock.mockResolvedValue(readySnapshot([task({ id: 'task-delete-1', status: 'in_progress', workspaceDir: 'E:/workspace/main' })]));
     updateTaskMock.mockResolvedValue({
       task: task({ id: 'task-delete-1', status: 'completed' }),
       updatedFields: ['status'],
@@ -136,7 +182,7 @@ describe('task center store', () => {
   it('deleteTaskById 期间仅切换 mutating，不触发刷新阻塞', async () => {
     getWorkspaceDirMock.mockResolvedValue('E:/workspace/main');
     getTaskWorkspaceDirsMock.mockResolvedValue(['E:/workspace/main']);
-    listTasksMock.mockResolvedValue([task({ id: 'task-delete-2', status: 'in_progress', workspaceDir: 'E:/workspace/main' })]);
+    listTaskSnapshotMock.mockResolvedValue(readySnapshot([task({ id: 'task-delete-2', status: 'in_progress', workspaceDir: 'E:/workspace/main' })]));
     let resolveUpdateTask: (() => void) | null = null;
     updateTaskMock.mockImplementation(async () => {
       await new Promise<void>((resolve) => {
@@ -193,7 +239,7 @@ describe('task center store', () => {
   it('task_manager 方法不可用时标记插件不可用且不展示错误', async () => {
     getWorkspaceDirMock.mockResolvedValue('E:/workspace/main');
     getTaskWorkspaceDirsMock.mockResolvedValue(['E:/workspace/main']);
-    listTasksMock.mockRejectedValue(new Error('gateway method not found: task_manager.list'));
+    listTaskSnapshotMock.mockRejectedValue(new Error('gateway method not found: task_manager.list'));
     const { useTaskCenterStore } = await import('@/stores/task-center-store');
 
     await useTaskCenterStore.getState().init();

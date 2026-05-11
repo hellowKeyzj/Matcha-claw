@@ -17,18 +17,39 @@ import type {
 
 const HOST_API_PORT = 13210;
 const HOST_API_BASE = `http://127.0.0.1:${HOST_API_PORT}`;
-const DEFAULT_HOST_GATEWAY_RPC_TIMEOUT_MS = 45000;
 let cachedHostApiToken: string | null = null;
 
 type HostApiRequestInit = RequestInit & {
   timeoutMs?: number;
 };
 
-export type HostGatewayRpcResult<TResult = unknown> = {
-  success: boolean;
+export interface RuntimeJobSnapshot<TResult = unknown> {
+  id: string;
+  type: string;
+  status: 'queued' | 'running' | 'succeeded' | 'failed';
+  queuedAt: number;
+  startedAt?: number;
+  finishedAt?: number;
+  attempts: number;
+  maxAttempts: number;
+  progress?: {
+    updatedAt: number;
+    percent?: number;
+    message?: string;
+  };
   result?: TResult;
   error?: string;
-};
+}
+
+export interface RuntimeJobSubmission<TResult = unknown> {
+  success: true;
+  job: RuntimeJobSnapshot<TResult>;
+}
+
+export interface RuntimeJobLookupResult<TResult = unknown> {
+  success: true;
+  job: RuntimeJobSnapshot<TResult> | null;
+}
 
 export interface OpenClawStatusPayload {
   packageExists: boolean;
@@ -92,6 +113,14 @@ export interface OpenClawCliCommandPayload {
 }
 
 export type HostSessionCatalogItem = SessionCatalogItem;
+
+export type HostSessionLoadResult = SessionLoadResult & {
+  hydrationJob?: RuntimeJobSnapshot<SessionLoadResult>;
+};
+
+export type HostSessionWindowResult = SessionWindowResult & {
+  hydrationJob?: RuntimeJobSnapshot<SessionWindowResult>;
+};
 
 function headersToRecord(headers?: HeadersInit): Record<string, string> {
   if (!headers) return {};
@@ -169,38 +198,6 @@ export async function hostApiFetchDecoded<T>(
   return decode(payload);
 }
 
-export async function hostGatewayRequest<TResult = unknown>(
-  method: string,
-  payload?: unknown,
-  timeoutMs?: number,
-): Promise<HostGatewayRpcResult<TResult>> {
-  const resolvedTimeoutMs =
-    typeof timeoutMs === 'number' && timeoutMs > 0
-      ? timeoutMs
-      : DEFAULT_HOST_GATEWAY_RPC_TIMEOUT_MS;
-  return await hostApiFetch<HostGatewayRpcResult<TResult>>('/api/gateway/rpc', {
-    method: 'POST',
-    body: JSON.stringify({
-      method,
-      ...(payload !== undefined ? { params: payload } : {}),
-      timeoutMs: resolvedTimeoutMs,
-    }),
-    timeoutMs: resolvedTimeoutMs,
-  });
-}
-
-export async function hostGatewayRpc<TResult = unknown>(
-  method: string,
-  payload?: unknown,
-  timeoutMs?: number,
-): Promise<TResult> {
-  const response = await hostGatewayRequest<TResult>(method, payload, timeoutMs);
-  if (!response.success) {
-    throw new Error(response.error || `Gateway RPC failed: ${method}`);
-  }
-  return response.result as TResult;
-}
-
 export async function createHostEventSource(path = '/api/events'): Promise<EventSource> {
   const token = await getHostApiToken();
   const url = new URL(path, HOST_API_BASE);
@@ -256,7 +253,7 @@ export async function hostUvCheck(): Promise<boolean> {
   return hostApiFetch('/api/toolchain/uv/check');
 }
 
-export async function hostUvInstallAll(): Promise<{ success: boolean; error?: string }> {
+export async function hostUvInstallAll(): Promise<RuntimeJobSubmission> {
   return hostApiFetch('/api/toolchain/uv/install', {
     method: 'POST',
   });
@@ -317,6 +314,42 @@ export async function hostSessionList(): Promise<SessionListResult> {
   return hostApiFetch('/api/sessions/list');
 }
 
+export async function hostRuntimeJobGet<TResult = unknown>(jobId: string): Promise<RuntimeJobLookupResult<TResult>> {
+  return hostApiFetch('/api/runtime-host/jobs/get', {
+    method: 'POST',
+    body: JSON.stringify({ jobId }),
+  });
+}
+
+export async function waitForRuntimeJobResult<TResult>(
+  jobId: string,
+  options: {
+    timeoutMs?: number;
+    intervalMs?: number;
+  } = {},
+): Promise<TResult> {
+  const timeoutMs = options.timeoutMs ?? 120000;
+  const intervalMs = options.intervalMs ?? 500;
+  const startedAt = Date.now();
+  for (;;) {
+    const response = await hostRuntimeJobGet<TResult>(jobId);
+    const job = response.job;
+    if (!job) {
+      throw new Error(`runtime job not found: ${jobId}`);
+    }
+    if (job.status === 'succeeded') {
+      return job.result as TResult;
+    }
+    if (job.status === 'failed') {
+      throw new Error(job.error || `runtime job failed: ${job.type}`);
+    }
+    if (Date.now() - startedAt >= timeoutMs) {
+      throw new Error(`runtime job timed out: ${job.type}`);
+    }
+    await new Promise((resolve) => window.setTimeout(resolve, intervalMs));
+  }
+}
+
 export async function hostSessionWindowFetch(
   payload: {
     sessionKey: string;
@@ -325,7 +358,7 @@ export async function hostSessionWindowFetch(
     offset?: number;
     includeCanonical?: boolean;
   },
-): Promise<SessionWindowResult> {
+): Promise<HostSessionWindowResult> {
   return hostApiFetch('/api/sessions/window', {
     method: 'POST',
     body: JSON.stringify(payload),
@@ -363,7 +396,7 @@ export async function hostSessionLoad(
   options?: {
     timeoutMs?: number;
   },
-): Promise<SessionLoadResult> {
+): Promise<HostSessionLoadResult> {
   return hostApiFetch('/api/session/load', {
     method: 'POST',
     body: JSON.stringify(payload),
@@ -375,7 +408,7 @@ export async function hostSessionSwitch(
   payload: {
     sessionKey: string;
   },
-): Promise<SessionLoadResult> {
+): Promise<HostSessionLoadResult> {
   return hostApiFetch('/api/session/switch', {
     method: 'POST',
     body: JSON.stringify(payload),
@@ -386,7 +419,7 @@ export async function hostSessionResume(
   payload: {
     sessionKey: string;
   },
-): Promise<SessionLoadResult> {
+): Promise<HostSessionLoadResult> {
   return hostApiFetch('/api/session/resume', {
     method: 'POST',
     body: JSON.stringify(payload),
@@ -397,7 +430,7 @@ export async function hostSessionState(
   payload: {
     sessionKey?: string;
   } = {},
-): Promise<SessionLoadResult> {
+): Promise<HostSessionLoadResult> {
   return hostApiFetch('/api/session/state', {
     method: 'POST',
     body: JSON.stringify(payload),
@@ -410,6 +443,34 @@ export async function hostSessionAbortRuntime(
   },
 ): Promise<SessionLoadResult & { success?: boolean }> {
   return hostApiFetch('/api/session/abort-runtime', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function hostSessionAbort(
+  payload: {
+    sessionKey: string;
+    approvalIds?: string[];
+  },
+): Promise<SessionLoadResult & { success?: boolean }> {
+  return hostApiFetch('/api/session/abort', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function hostSessionApprovals(): Promise<unknown> {
+  return hostApiFetch('/api/session/approvals');
+}
+
+export async function hostSessionResolveApproval(
+  payload: {
+    id: string;
+    decision: string;
+  },
+): Promise<unknown> {
+  return hostApiFetch('/api/session/approval/resolve', {
     method: 'POST',
     body: JSON.stringify(payload),
   });

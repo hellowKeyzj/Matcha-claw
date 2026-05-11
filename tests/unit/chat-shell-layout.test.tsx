@@ -1018,6 +1018,14 @@ describe('chat shell task inbox layout', () => {
 
   it('recomputes composer safe offset when the stage switches from empty state back to normal chat mode', () => {
     const rectSpy = vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function mockRect(this: HTMLElement) {
+      if (this.dataset.testid === 'chat-stage-header-overlay') {
+        return DOMRect.fromRect({
+          x: 0,
+          y: 0,
+          width: 640,
+          height: 56,
+        });
+      }
       if (typeof this.className === 'string' && this.className.includes('absolute inset-x-0 bottom-0 z-20')) {
         return DOMRect.fromRect({
           x: 0,
@@ -1054,6 +1062,8 @@ describe('chat shell task inbox layout', () => {
       );
 
       const stage = container.querySelector('.chat-scroll-sync') as HTMLElement | null;
+      expect(stage?.style.getPropertyValue('--chat-header-safe-offset')).toBe('0px');
+      expect(stage?.style.getPropertyValue('--chat-thread-top-padding')).toBe('8px');
       expect(stage?.style.getPropertyValue('--chat-composer-safe-offset')).toBe('0px');
       expect(stage?.style.getPropertyValue('--chat-thread-bottom-padding')).toBe('12px');
 
@@ -1075,6 +1085,8 @@ describe('chat shell task inbox layout', () => {
         />,
       );
 
+      expect(stage?.style.getPropertyValue('--chat-header-safe-offset')).toBe('56px');
+      expect(stage?.style.getPropertyValue('--chat-thread-top-padding')).toBe('64px');
       expect(stage?.style.getPropertyValue('--chat-composer-safe-offset')).toBe('132px');
       expect(stage?.style.getPropertyValue('--chat-thread-bottom-padding')).toBe('144px');
     } finally {

@@ -1,89 +1,30 @@
-import { createTeamRuntimeRootResolver, createTeamRuntimeService } from '../../application/team-runtime/service';
-import { getOpenClawConfigDir } from '../storage/paths';
+import { routeResponder, type RuntimeRouteDefinition } from './route-utils';
 
-export async function handleTeamRuntimeRoute(method: string, routePath: string, payload: unknown) {
-  if (method !== 'POST') {
-    return null;
-  }
-
-  const service = createTeamRuntimeService(createTeamRuntimeRootResolver(getOpenClawConfigDir));
-
-  if (routePath === '/api/team-runtime/init') {
-    return {
-      status: 200,
-      data: await service.init(payload),
-    };
-  }
-
-  if (routePath === '/api/team-runtime/snapshot') {
-    return {
-      status: 200,
-      data: await service.snapshot(payload),
-    };
-  }
-
-  if (routePath === '/api/team-runtime/plan-upsert') {
-    return {
-      status: 200,
-      data: await service.planUpsert(payload),
-    };
-  }
-
-  if (routePath === '/api/team-runtime/claim-next') {
-    return {
-      status: 200,
-      data: await service.claimNext(payload),
-    };
-  }
-
-  if (routePath === '/api/team-runtime/heartbeat') {
-    return {
-      status: 200,
-      data: await service.heartbeat(payload),
-    };
-  }
-
-  if (routePath === '/api/team-runtime/task-update') {
-    return {
-      status: 200,
-      data: await service.taskUpdate(payload),
-    };
-  }
-
-  if (routePath === '/api/team-runtime/mailbox-post') {
-    return {
-      status: 200,
-      data: await service.mailboxPost(payload),
-    };
-  }
-
-  if (routePath === '/api/team-runtime/mailbox-pull') {
-    return {
-      status: 200,
-      data: await service.mailboxPull(payload),
-    };
-  }
-
-  if (routePath === '/api/team-runtime/release-claim') {
-    return {
-      status: 200,
-      data: await service.releaseClaim(payload),
-    };
-  }
-
-  if (routePath === '/api/team-runtime/reset') {
-    return {
-      status: 200,
-      data: await service.reset(payload),
-    };
-  }
-
-  if (routePath === '/api/team-runtime/list-tasks') {
-    return {
-      status: 200,
-      data: await service.listTasks(payload),
-    };
-  }
-
-  return null;
+interface TeamRuntimeRouteService {
+  init(payload: unknown): Promise<unknown>;
+  snapshot(payload: unknown): Promise<unknown>;
+  planUpsert(payload: unknown): Promise<unknown>;
+  claimNext(payload: unknown): Promise<unknown>;
+  heartbeat(payload: unknown): Promise<unknown>;
+  taskUpdate(payload: unknown): Promise<unknown>;
+  mailboxPost(payload: unknown): Promise<unknown>;
+  mailboxPull(payload: unknown): Promise<unknown>;
+  releaseClaim(payload: unknown): Promise<unknown>;
+  reset(payload: unknown): Promise<unknown>;
+  listTasks(payload: unknown): Promise<unknown>;
 }
+
+export const teamRuntimeRoutes: readonly RuntimeRouteDefinition<TeamRuntimeRouteService>[] = [
+  { method: 'POST', path: '/api/team-runtime/init', handle: (context, service) => routeResponder.value(() => service.init(context.payload)) },
+  { method: 'POST', path: '/api/team-runtime/snapshot', handle: (context, service) => routeResponder.value(() => service.snapshot(context.payload)) },
+  { method: 'POST', path: '/api/team-runtime/plan-upsert', handle: (context, service) => routeResponder.value(() => service.planUpsert(context.payload)) },
+  { method: 'POST', path: '/api/team-runtime/claim-next', handle: (context, service) => routeResponder.value(() => service.claimNext(context.payload)) },
+  { method: 'POST', path: '/api/team-runtime/heartbeat', handle: (context, service) => routeResponder.value(() => service.heartbeat(context.payload)) },
+  { method: 'POST', path: '/api/team-runtime/task-update', handle: (context, service) => routeResponder.value(() => service.taskUpdate(context.payload)) },
+  { method: 'POST', path: '/api/team-runtime/mailbox-post', handle: (context, service) => routeResponder.value(() => service.mailboxPost(context.payload)) },
+  { method: 'POST', path: '/api/team-runtime/mailbox-pull', handle: (context, service) => routeResponder.value(() => service.mailboxPull(context.payload)) },
+  { method: 'POST', path: '/api/team-runtime/release-claim', handle: (context, service) => routeResponder.value(() => service.releaseClaim(context.payload)) },
+  { method: 'POST', path: '/api/team-runtime/reset', handle: (context, service) => routeResponder.value(() => service.reset(context.payload)) },
+  { method: 'POST', path: '/api/team-runtime/list-tasks', handle: (context, service) => routeResponder.value(() => service.listTasks(context.payload)) },
+] as const;
+

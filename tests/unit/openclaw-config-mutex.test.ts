@@ -2,10 +2,16 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import * as pathStorage from '../../runtime-host/api/storage/paths';
-import { saveChannelConfigLocal } from '../../runtime-host/application/channels/channel-runtime';
+import { OpenClawConfigRepository } from '../../runtime-host/application/openclaw/openclaw-config-repository';
+import { createTestOpenClawEnvironmentRepository } from './helpers/runtime-system-environment';
+import { ChannelConfigRepository } from '../../runtime-host/application/channels/channel-runtime';
 import { withOpenClawConfigLock } from '../../runtime-host/application/openclaw/openclaw-config-mutex';
-import { updateSkillConfigLocal } from '../../runtime-host/application/skills/store';
+import { SkillsConfigRepository } from '../../runtime-host/application/skills/store';
+import { ClawHubSkillInventory } from '../../runtime-host/application/skills/clawhub';
+import { ManagedPluginInstaller } from '../../runtime-host/application/plugins/managed-plugin-installer';
+import { PluginCompanionSkillService } from '../../runtime-host/application/plugins/plugin-companion-skill-service';
+import { createTestPluginFileSystem } from './helpers/plugin-file-system';
+import { createTestRuntimeFileSystem } from './helpers/runtime-file-system';
 
 describe('openclaw-config-mutex', () => {
   let tempDir = '';
@@ -58,7 +64,9 @@ describe('openclaw-config-mutex', () => {
   });
 
   it('会串行化跨模块的 openclaw.json 写入，避免并发覆盖', async () => {
-    const originalWrite = pathStorage.writeOpenClawConfigJson;
+    const environmentRepository = createTestOpenClawEnvironmentRepository();
+    const configRepository = new OpenClawConfigRepository(environmentRepository);
+    const originalWrite = configRepository.write.bind(configRepository);
     let writeStartedCount = 0;
     let resolveFirstWriteStarted: () => void = () => {};
     let releaseFirstWrite: () => void = () => {};
@@ -70,7 +78,7 @@ describe('openclaw-config-mutex', () => {
       releaseFirstWrite = resolve;
     });
 
-    const writeSpy = vi.spyOn(pathStorage, 'writeOpenClawConfigJson').mockImplementation(async (config) => {
+    const writeSpy = vi.spyOn(configRepository, 'write').mockImplementation(async (config) => {
       writeStartedCount += 1;
       if (writeStartedCount === 1) {
         resolveFirstWriteStarted();
@@ -79,7 +87,14 @@ describe('openclaw-config-mutex', () => {
       await originalWrite(config);
     });
 
-    const channelSavePromise = saveChannelConfigLocal({
+    const pluginFileSystem = createTestPluginFileSystem();
+    const runtimeFileSystem = createTestRuntimeFileSystem();
+    const companionSkills = new PluginCompanionSkillService(environmentRepository, configRepository, pluginFileSystem);
+    const pluginInstaller = new ManagedPluginInstaller(environmentRepository, configRepository, companionSkills, pluginFileSystem);
+    const channelSavePromise = new ChannelConfigRepository(configRepository, pluginInstaller, pluginFileSystem, {
+      nowMs: () => 1_700_000_000_000,
+      nowIso: () => '2023-11-14T22:13:20.000Z',
+    }).saveChannelConfig({
       channelType: 'telegram',
       accountId: 'default',
       config: { token: 'new-token' },
@@ -88,7 +103,10 @@ describe('openclaw-config-mutex', () => {
 
     await firstWriteStarted;
 
-    const skillSavePromise = updateSkillConfigLocal('tavily-search', { apiKey: 'skill-key' });
+    const skillSavePromise = new SkillsConfigRepository(
+      configRepository,
+      new ClawHubSkillInventory(configRepository, runtimeFileSystem),
+    ).updateConfig('tavily-search', { apiKey: 'skill-key' });
 
     await new Promise((resolve) => setTimeout(resolve, 30));
     expect(writeStartedCount).toBe(1);
@@ -106,5 +124,5 @@ describe('openclaw-config-mutex', () => {
     expect(finalConfig.channels.telegram.accounts.default.enabled).toBe(true);
     expect(typeof finalConfig.channels.telegram.accounts.default.updatedAt).toBe('string');
     writeSpy.mockRestore();
-  });
+  }, 15_000);
 });

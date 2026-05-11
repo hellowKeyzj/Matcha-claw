@@ -9,7 +9,7 @@ export interface UpsertPluginInstallRecordParams {
   sourcePath?: string;
   spec?: string;
   version?: string;
-  now?: () => string;
+  now: () => string;
 }
 
 function isRecord(value: unknown): value is JsonRecord {
@@ -52,8 +52,7 @@ export function upsertPluginInstallRecord(
   const currentRaw = installs[pluginId];
   const current = isRecord(currentRaw) ? currentRaw : {};
 
-  const now = params.now ?? (() => new Date().toISOString());
-  const timestamp = now();
+  const timestamp = params.now();
 
   const nextRecord: JsonRecord = {
     ...current,

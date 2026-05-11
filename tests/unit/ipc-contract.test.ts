@@ -1,4 +1,6 @@
 import { describe, expect, it } from 'vitest';
+import { readFile } from 'node:fs/promises';
+import path from 'node:path';
 import {
   INFRASTRUCTURE_TRANSPORT_INVOKE_CHANNELS,
   RETAINED_EVENT_CHANNELS,
@@ -26,7 +28,7 @@ describe('ipc contract', () => {
 
   it('保留 IPC invoke 清单覆盖当前仍应保留的壳层/基础设施通道', () => {
     expect(INFRASTRUCTURE_TRANSPORT_INVOKE_CHANNELS).toContain('hostapi:fetch');
-    expect(INFRASTRUCTURE_TRANSPORT_INVOKE_CHANNELS).toContain('gateway:rpc');
+    expect(INFRASTRUCTURE_TRANSPORT_INVOKE_CHANNELS).not.toContain('gateway:rpc');
     expect(SHELL_INVOKE_CHANNELS).toContain('dialog:open');
     expect(SHELL_INVOKE_CHANNELS).toContain('shell:showItemInFolder');
     expect(SHELL_INVOKE_CHANNELS).toContain('window:minimize');
@@ -59,13 +61,49 @@ describe('ipc contract', () => {
     expect(new Set(RETAINED_ONCE_CHANNELS).size).toBe(RETAINED_ONCE_CHANNELS.length);
 
     expect(isRetainedEventChannel('navigate')).toBe(true);
+    expect(isRetainedEventChannel('openclaw:cli-installed')).toBe(false);
+    expect(isRetainedEventChannel('cron:updated')).toBe(false);
     expect(isRetainedEventChannel('oauth:success')).toBe(false);
     expect(isRetainedEventChannel('log:getRecent')).toBe(false);
 
     expect(isRetainedOnceChannel('update:error')).toBe(true);
     expect(isRetainedOnceChannel('openclaw:cli-installed')).toBe(false);
 
-    expect(isRetainedInvokeChannel('gateway:rpc')).toBe(true);
+    expect(isRetainedInvokeChannel('gateway:rpc')).toBe(false);
     expect(isRetainedInvokeChannel('settings:getAll')).toBe(false);
+  });
+
+  it('源码不再暴露通用 Gateway RPC 传输后门', async () => {
+    const root = process.cwd();
+    const files = [
+      'src/lib/api-client.ts',
+      'src/lib/host-api.ts',
+      'src/stores/gateway.ts',
+      'electron/preload/ipc-contract.ts',
+      'electron/main/ipc/gateway-ipc.ts',
+      'electron/api/routes/gateway.ts',
+      'runtime-host/api/routes/gateway-routes.ts',
+      'runtime-host/application/gateway/service.ts',
+    ];
+    const forbidden = [
+      'gateway:rpc',
+      'gateway:httpProxy',
+      'gateway:getControlUiUrl',
+      '/api/gateway/rpc',
+      'hostGatewayRpc',
+      'hostGatewayRequest',
+    ];
+    const violations: string[] = [];
+
+    for (const file of files) {
+      const content = await readFile(path.join(root, file), 'utf8');
+      for (const token of forbidden) {
+        if (content.includes(token)) {
+          violations.push(`${file}: ${token}`);
+        }
+      }
+    }
+
+    expect(violations).toEqual([]);
   });
 });

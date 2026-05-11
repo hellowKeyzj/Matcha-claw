@@ -1,15 +1,19 @@
-import { SETTINGS_DEFAULTS } from '../../api/settings-defaults';
-import { ensureParentDir, getRuntimeHostSettingsFilePath } from '../../api/storage/paths';
-import { promises as fsPromises } from 'node:fs';
+import { SETTINGS_DEFAULTS } from './defaults';
+import type { RuntimeFileSystemPort } from '../common/runtime-ports';
+import type { OpenClawEnvironmentRepository } from '../openclaw/openclaw-environment-repository';
+import { normalizeBrowserMode } from '../../shared/browser-mode';
 
 function isRecord(value: unknown): value is Record<string, any> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 }
 
-async function readSettingsStore() {
-  const filePath = getRuntimeHostSettingsFilePath();
+async function readSettingsStore(
+  environment: OpenClawEnvironmentRepository,
+  fileSystem: RuntimeFileSystemPort,
+) {
+  const filePath = environment.getRuntimeHostSettingsFilePath();
   try {
-    const raw = await fsPromises.readFile(filePath, 'utf8');
+    const raw = await fileSystem.readTextFile(filePath);
     const parsed = JSON.parse(raw);
     return isRecord(parsed) ? parsed : {};
   } catch {
@@ -17,17 +21,14 @@ async function readSettingsStore() {
   }
 }
 
-async function writeSettingsStore(settings: Record<string, unknown>) {
-  const filePath = getRuntimeHostSettingsFilePath();
-  await ensureParentDir(filePath);
-  await fsPromises.writeFile(filePath, `${JSON.stringify(settings, null, 2)}\n`, 'utf8');
-}
-
-function normalizeBrowserMode(value: unknown): 'off' | 'relay' | 'native' {
-  if (value === 'off' || value === 'relay' || value === 'native') {
-    return value;
-  }
-  return 'native';
+async function writeSettingsStore(
+  environment: OpenClawEnvironmentRepository,
+  fileSystem: RuntimeFileSystemPort,
+  settings: Record<string, unknown>,
+) {
+  const filePath = environment.getRuntimeHostSettingsFilePath();
+  await environment.ensureParentDir(filePath);
+  await fileSystem.writeTextFile(filePath, `${JSON.stringify(settings, null, 2)}\n`);
 }
 
 function normalizeSettingsValueForKey(key: string, value: unknown) {
@@ -71,58 +72,58 @@ function resolveSupportedLanguage(locale: string | null | undefined, fallback = 
   return SUPPORTED_LANGUAGE_CODES.has(baseLanguage) ? baseLanguage : fallback;
 }
 
-function detectSystemLocale(): string {
-  const candidates = [
-    process.env.LC_ALL,
-    process.env.LC_MESSAGES,
-    process.env.LANG,
-    Intl.DateTimeFormat().resolvedOptions().locale,
-  ];
+function detectSystemLocale(environment: OpenClawEnvironmentRepository): string {
+  const candidates = environment.getSystemLocaleCandidates();
   for (const candidate of candidates) {
-    if (typeof candidate === 'string' && candidate.trim().length > 0) {
-      return candidate;
-    }
+    return candidate;
   }
   return 'en';
 }
 
-function createSettingsDefaults() {
+function createSettingsDefaults(environment: OpenClawEnvironmentRepository) {
   return {
     ...SETTINGS_DEFAULTS,
-    language: resolveSupportedLanguage(detectSystemLocale()),
+    language: resolveSupportedLanguage(detectSystemLocale(environment)),
   };
 }
 
-export async function getAllSettingsLocal() {
-  const raw = await readSettingsStore();
-  const settings = createSettingsDefaults() as Record<string, unknown>;
-  for (const [key, value] of Object.entries(raw)) {
-    settings[key] = normalizeSettingsValueForKey(key, value);
+export class SettingsRepository {
+  constructor(
+    private readonly environment: OpenClawEnvironmentRepository,
+    private readonly fileSystem: RuntimeFileSystemPort,
+  ) {}
+
+  async getAll() {
+    const raw = await readSettingsStore(this.environment, this.fileSystem);
+    const settings = createSettingsDefaults(this.environment) as Record<string, unknown>;
+    for (const [key, value] of Object.entries(raw)) {
+      settings[key] = normalizeSettingsValueForKey(key, value);
+    }
+    settings.language = resolveSupportedLanguage(
+      typeof settings.language === 'string' ? settings.language : undefined,
+    );
+    return settings;
   }
-  settings.language = resolveSupportedLanguage(
-    typeof settings.language === 'string' ? settings.language : undefined,
-  );
-  return settings;
-}
 
-export async function setSettingsPatchLocal(patch: unknown) {
-  const current = await getAllSettingsLocal();
-  for (const [key, value] of Object.entries(isRecord(patch) ? patch : {})) {
-    current[key] = normalizeSettingsValueForKey(key, value);
+  async patch(patch: unknown) {
+    const current = await this.getAll();
+    for (const [key, value] of Object.entries(isRecord(patch) ? patch : {})) {
+      current[key] = normalizeSettingsValueForKey(key, value);
+    }
+    await writeSettingsStore(this.environment, this.fileSystem, current);
+    return current;
   }
-  await writeSettingsStore(current);
-  return current;
-}
 
-export async function setSettingValueLocal(key: string, value: unknown) {
-  const patch: Record<string, unknown> = {};
-  patch[key] = value;
-  const next = await setSettingsPatchLocal(patch);
-  return next[key];
-}
+  async setValue(key: string, value: unknown) {
+    const patch: Record<string, unknown> = {};
+    patch[key] = value;
+    const next = await this.patch(patch);
+    return next[key];
+  }
 
-export async function resetSettingsLocal() {
-  const reset = createSettingsDefaults();
-  await writeSettingsStore(reset);
-  return reset;
+  async reset() {
+    const reset = createSettingsDefaults(this.environment);
+    await writeSettingsStore(this.environment, this.fileSystem, reset);
+    return reset;
+  }
 }

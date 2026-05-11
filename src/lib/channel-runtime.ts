@@ -1,12 +1,29 @@
-import { hostApiFetch } from '@/lib/host-api';
+import { hostApiFetch, waitForRuntimeJobResult, type RuntimeJobSubmission } from '@/lib/host-api';
 import type { ChannelType } from '@/types/channel';
+
+async function submitChannelJob<TResult = unknown>(
+  path: string,
+  init: RequestInit,
+): Promise<TResult> {
+  const submission = await hostApiFetch<RuntimeJobSubmission<TResult>>(path, init);
+  return await waitForRuntimeJobResult<TResult>(submission.job.id);
+}
 
 export async function hostChannelsFetchConfiguredTypes(): Promise<{ success: boolean; channels?: string[] }> {
   return await hostApiFetch<{ success: boolean; channels?: string[] }>('/api/channels/configured');
 }
 
-export async function hostChannelsFetchSnapshot(): Promise<{ success: boolean; snapshot?: unknown }> {
-  return await hostApiFetch<{ success: boolean; snapshot?: unknown }>('/api/channels/snapshot');
+export interface ChannelSnapshotFetchResult {
+  success: boolean;
+  snapshot?: unknown;
+  ready?: boolean;
+  refreshing?: boolean;
+  updatedAt?: number | null;
+  error?: string | null;
+}
+
+export async function hostChannelsFetchSnapshot(): Promise<ChannelSnapshotFetchResult> {
+  return await hostApiFetch<ChannelSnapshotFetchResult>('/api/channels/snapshot');
 }
 
 export async function hostChannelsReadConfig(
@@ -24,7 +41,16 @@ export async function hostChannelsActivate(input: {
   config: Record<string, unknown>;
   accountId?: string;
 }): Promise<{ success?: boolean; error?: string; warning?: string; pluginInstalled?: boolean }> {
-  return await hostApiFetch<{ success?: boolean; error?: string; warning?: string; pluginInstalled?: boolean }>(
+  if (input.channelType === 'whatsapp' || input.channelType === 'openclaw-weixin') {
+    return await hostApiFetch<{ success?: boolean; error?: string; warning?: string; pluginInstalled?: boolean }>(
+      '/api/channels/activate',
+      {
+        method: 'POST',
+        body: JSON.stringify(input),
+      },
+    );
+  }
+  return await submitChannelJob<{ success?: boolean; error?: string; warning?: string; pluginInstalled?: boolean }>(
     '/api/channels/activate',
     {
       method: 'POST',
@@ -56,7 +82,7 @@ export async function hostChannelsValidateCredentials(
 }
 
 export async function hostChannelsDeleteConfig(channelType: ChannelType): Promise<unknown> {
-  return await hostApiFetch(`/api/channels/config/${encodeURIComponent(channelType)}`, {
+  return await submitChannelJob(`/api/channels/config/${encodeURIComponent(channelType)}`, {
     method: 'DELETE',
   });
 }

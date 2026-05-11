@@ -13,6 +13,7 @@ const hostSessionLoadMock = vi.fn();
 vi.mock('@/lib/host-api', () => ({
   hostApiFetch: vi.fn(),
   hostSessionLoad: (...args: unknown[]) => hostSessionLoadMock(...args),
+  waitForRuntimeJobResult: vi.fn(),
 }));
 
 describe('chat history fetch pipeline helpers', () => {
@@ -65,12 +66,6 @@ describe('chat history fetch pipeline helpers', () => {
     expect(result.snapshot?.items).toMatchObject([
       {
         role: 'assistant',
-        text: 'a',
-        laneKey: 'main',
-        turnKey: expect.any(String),
-      },
-      {
-        role: 'assistant',
         text: 'b',
         laneKey: 'main',
         turnKey: expect.any(String),
@@ -116,6 +111,8 @@ describe('chat history fetch pipeline helpers', () => {
 
     expect(hostSessionLoadMock).toHaveBeenCalledWith({
       sessionKey: requestedSessionKey,
+    }, {
+      timeoutMs: undefined,
     });
     expect(result.snapshot?.items).toEqual([]);
     expect(result.totalItemCount).toBe(0);

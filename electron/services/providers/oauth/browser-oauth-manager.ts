@@ -1,7 +1,6 @@
 import { EventEmitter } from 'events';
 import { shell } from 'electron';
 import { logger } from '../../../utils/logger';
-import { setProviderSecret } from '../../secrets/secret-store';
 import { createDefaultRuntimeHostHttpClient } from '../../../main/runtime-host-client';
 import { loginGeminiCliOAuth, type GeminiCliOAuthCredentials } from './gemini-cli-oauth';
 import { loginOpenAICodexOAuth, type OpenAICodexOAuthCredentials } from './openai-codex-oauth';
@@ -154,16 +153,6 @@ class BrowserOAuthManager extends EventEmitter {
     const oauthTokenSubject = typeof token.projectId === 'string'
       ? token.projectId
       : (typeof token.accountId === 'string' ? token.accountId : undefined);
-
-    await setProviderSecret({
-      type: 'oauth',
-      accountId,
-      accessToken: token.access,
-      refreshToken: token.refresh,
-      expiresAt: token.expires,
-      ...(oauthTokenEmail ? { email: oauthTokenEmail } : {}),
-      ...(oauthTokenSubject ? { subject: oauthTokenSubject } : {}),
-    });
 
     const response = await runtimeHostClient.request<{ account?: { id?: unknown } }>(
       'POST',

@@ -2,6 +2,13 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { OpenClawConfigRepository } from '../../runtime-host/application/openclaw/openclaw-config-repository';
+import { createTestOpenClawEnvironmentRepository } from './helpers/runtime-system-environment';
+import { ManagedPluginInstaller } from '../../runtime-host/application/plugins/managed-plugin-installer';
+import { PluginCompanionSkillService } from '../../runtime-host/application/plugins/plugin-companion-skill-service';
+import { RuntimePluginLifecycleRunner } from '../../runtime-host/application/plugins/plugin-lifecycle-registry';
+import { RuntimePluginRepository } from '../../runtime-host/application/plugins/runtime-plugin-service';
+import { createTestPluginFileSystem } from './helpers/plugin-file-system';
 
 describe('runtime plugin service', () => {
   let configDir: string;
@@ -69,6 +76,19 @@ describe('runtime plugin service', () => {
     }, null, 2));
   }
 
+  function createRuntimePluginRepository(): RuntimePluginRepository {
+    const environmentRepository = createTestOpenClawEnvironmentRepository();
+    const configRepository = new OpenClawConfigRepository(environmentRepository);
+    const pluginFileSystem = createTestPluginFileSystem();
+    const companionSkills = new PluginCompanionSkillService(environmentRepository, configRepository, pluginFileSystem);
+    return new RuntimePluginRepository(
+      configRepository,
+      new ManagedPluginInstaller(environmentRepository, configRepository, companionSkills, pluginFileSystem),
+      new RuntimePluginLifecycleRunner(companionSkills),
+      pluginFileSystem,
+    );
+  }
+
   it('已安装的托管插件版本一致时在非 force 模式下不会重复覆盖', async () => {
     const installedDir = join(configDir, 'extensions', 'browser-relay');
     writeManagedPluginSource('browser-relay');
@@ -80,9 +100,7 @@ describe('runtime plugin service', () => {
       category: 'runtime',
     }, null, 2));
 
-    const { ensureManagedPluginInstalled } = await import('../../runtime-host/application/plugins/runtime-plugin-service');
-
-    await ensureManagedPluginInstalled('browser-relay');
+    await createRuntimePluginRepository().ensureManagedPluginInstalled('browser-relay');
 
     const installedManifest = JSON.parse(readFileSync(join(installedDir, 'openclaw.plugin.json'), 'utf8')) as {
       name: string;
@@ -101,9 +119,7 @@ describe('runtime plugin service', () => {
       category: 'runtime',
     }, null, 2));
 
-    const { ensureManagedPluginInstalled } = await import('../../runtime-host/application/plugins/runtime-plugin-service');
-
-    await ensureManagedPluginInstalled('browser-relay');
+    await createRuntimePluginRepository().ensureManagedPluginInstalled('browser-relay');
 
     const installedManifest = JSON.parse(readFileSync(join(installedDir, 'openclaw.plugin.json'), 'utf8')) as {
       id: string;
@@ -124,9 +140,7 @@ describe('runtime plugin service', () => {
   it('渠道插件不能通过插件中心安装入口安装', async () => {
     writeManagedPluginSource('openclaw-lark');
 
-    const { ensureManagedPluginInstalled } = await import('../../runtime-host/application/plugins/runtime-plugin-service');
-
-    await expect(ensureManagedPluginInstalled('openclaw-lark')).rejects.toThrow(
+    await expect(createRuntimePluginRepository().ensureManagedPluginInstalled('openclaw-lark')).rejects.toThrow(
       'not managed by the MatchaClaw plugin center',
     );
   });
@@ -142,9 +156,7 @@ describe('runtime plugin service', () => {
       },
     }, null, 2));
 
-    const { setRuntimeEnabledPluginIds } = await import('../../runtime-host/application/plugins/runtime-plugin-service');
-
-    const enabledPluginIds = await setRuntimeEnabledPluginIds(['plugin-a', 'memory-lancedb-pro']);
+    const enabledPluginIds = await createRuntimePluginRepository().setEnabledPluginIds(['plugin-a', 'memory-lancedb-pro']);
     const nextConfig = JSON.parse(readFileSync(join(configDir, 'openclaw.json'), 'utf8')) as {
       plugins?: {
         allow?: string[];
@@ -206,9 +218,7 @@ describe('runtime plugin service', () => {
       },
     }, null, 2));
 
-    const { setRuntimeEnabledPluginIds } = await import('../../runtime-host/application/plugins/runtime-plugin-service');
-
-    const enabledPluginIds = await setRuntimeEnabledPluginIds([]);
+    const enabledPluginIds = await createRuntimePluginRepository().setEnabledPluginIds([]);
     const nextConfig = JSON.parse(readFileSync(join(configDir, 'openclaw.json'), 'utf8')) as {
       plugins?: {
         allow?: string[];
@@ -258,9 +268,7 @@ describe('runtime plugin service', () => {
       },
     }, null, 2));
 
-    const { setRuntimeEnabledPluginIds } = await import('../../runtime-host/application/plugins/runtime-plugin-service');
-
-    await setRuntimeEnabledPluginIds(['memory-lancedb-pro']);
+    await createRuntimePluginRepository().setEnabledPluginIds(['memory-lancedb-pro']);
 
     const nextConfig = JSON.parse(readFileSync(join(configDir, 'openclaw.json'), 'utf8')) as {
       plugins?: {
@@ -299,9 +307,7 @@ describe('runtime plugin service', () => {
       },
     }, null, 2));
 
-    const { setRuntimeEnabledPluginIds } = await import('../../runtime-host/application/plugins/runtime-plugin-service');
-
-    await setRuntimeEnabledPluginIds(['memory-lancedb-pro']);
+    await createRuntimePluginRepository().setEnabledPluginIds(['memory-lancedb-pro']);
 
     const nextConfig = JSON.parse(readFileSync(join(configDir, 'openclaw.json'), 'utf8')) as {
       plugins?: {
@@ -330,9 +336,7 @@ describe('runtime plugin service', () => {
       },
     }, null, 2));
 
-    const { ensureConfiguredManagedPluginsInstalled } = await import('../../runtime-host/application/plugins/runtime-plugin-service');
-
-    const enabledPluginIds = await ensureConfiguredManagedPluginsInstalled();
+    const enabledPluginIds = await createRuntimePluginRepository().ensureConfiguredManagedPluginsInstalled();
     const nextConfig = JSON.parse(readFileSync(join(configDir, 'openclaw.json'), 'utf8')) as {
       plugins?: {
         slots?: { memory?: string };
@@ -368,5 +372,24 @@ describe('runtime plugin service', () => {
         },
       },
     });
+  });
+
+  it('插件中心目录只返回 MatchaClaw 管理的能力插件，不展示 OpenClaw bundled 运行态插件', async () => {
+    writeManagedPluginSource('task-manager', 'task-manager', '1.1.0');
+
+    const bundledCoreDir = join(workspaceDir, 'plugins', '@openclaw-image-generation-core');
+    mkdirSync(bundledCoreDir, { recursive: true });
+    writeFileSync(join(bundledCoreDir, 'openclaw.plugin.json'), JSON.stringify({
+      id: '@openclaw/image-generation-core',
+      name: '@openclaw/image-generation-core',
+      version: '2026.4.20',
+      category: 'general',
+      description: 'OpenClaw image generation runtime package',
+    }, null, 2));
+
+    const catalog = await createRuntimePluginRepository().listRuntimePluginCatalog();
+
+    expect(catalog.map((plugin) => plugin.id)).toEqual(['task-manager']);
+    expect(catalog.some((plugin) => plugin.id.startsWith('@openclaw/'))).toBe(false);
   });
 });

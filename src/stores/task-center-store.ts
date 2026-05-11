@@ -2,9 +2,10 @@ import { create } from 'zustand';
 import {
   getWorkspaceDir,
   getTaskWorkspaceDirs,
-  listTasks,
+  listTaskSnapshot,
   updateTask,
   type Task,
+  type TaskListSnapshot,
 } from '@/services/openclaw/task-manager-client';
 
 interface TaskCenterState {
@@ -74,9 +75,28 @@ function areTaskListsEquivalent(left: Task[], right: Task[]): boolean {
 }
 
 const TASK_CENTER_REFRESH_MIN_GAP_MS = 1_200;
+const TASK_CENTER_SNAPSHOT_NOT_READY_RETRY_MS = 1_200;
 let taskCenterInitPromise: Promise<void> | null = null;
 let taskCenterRefreshPromise: Promise<void> | null = null;
 let taskCenterLastRefreshAtMs = 0;
+let taskCenterSnapshotRetryTimer: ReturnType<typeof setTimeout> | null = null;
+
+function clearTaskCenterSnapshotRetry(): void {
+  if (taskCenterSnapshotRetryTimer) {
+    clearTimeout(taskCenterSnapshotRetryTimer);
+    taskCenterSnapshotRetryTimer = null;
+  }
+}
+
+function scheduleTaskCenterSnapshotRetry(refreshTasks: () => Promise<void>): void {
+  if (taskCenterSnapshotRetryTimer) {
+    return;
+  }
+  taskCenterSnapshotRetryTimer = setTimeout(() => {
+    taskCenterSnapshotRetryTimer = null;
+    void refreshTasks();
+  }, TASK_CENTER_SNAPSHOT_NOT_READY_RETRY_MS);
+}
 
 function isTaskManagerUnavailableError(error: unknown): boolean {
   const message = (error instanceof Error ? error.message : String(error)).toLowerCase();
@@ -94,21 +114,31 @@ function isTaskManagerUnavailableError(error: unknown): boolean {
   );
 }
 
-async function listTasksFromWorkspaceScope(scope: string[]): Promise<Task[]> {
+async function listTasksFromWorkspaceScope(scope: string[]): Promise<TaskListSnapshot> {
   if (scope.length === 0) {
-    const single = await listTasks();
-    return sortTasksByTime(single);
+    const single = await listTaskSnapshot();
+    return {
+      ...single,
+      tasks: sortTasksByTime(single.tasks),
+    };
   }
 
   const results = await Promise.allSettled(
     scope.map(async (workspaceDir) => {
-      const tasks = await listTasks(workspaceDir);
-      return tasks.map((task) => ({ ...task, workspaceDir }));
+      const snapshot = await listTaskSnapshot(workspaceDir);
+      return {
+        ...snapshot,
+        tasks: snapshot.tasks.map((task) => ({ ...task, workspaceDir })),
+      };
     }),
   );
 
   const merged = new Map<string, Task>();
   let fulfilledCount = 0;
+  let readyCount = 0;
+  let refreshing = false;
+  let latestUpdatedAt: number | null = null;
+  let firstSnapshotError: string | null = null;
   let firstError: unknown = null;
   for (const item of results) {
     if (item.status !== 'fulfilled') {
@@ -118,7 +148,19 @@ async function listTasksFromWorkspaceScope(scope: string[]): Promise<Task[]> {
       continue;
     }
     fulfilledCount += 1;
-    for (const task of item.value) {
+    if (item.value.ready) {
+      readyCount += 1;
+    }
+    refreshing = refreshing || item.value.refreshing;
+    if (typeof item.value.updatedAt === 'number') {
+      latestUpdatedAt = latestUpdatedAt == null
+        ? item.value.updatedAt
+        : Math.max(latestUpdatedAt, item.value.updatedAt);
+    }
+    if (!firstSnapshotError && item.value.error) {
+      firstSnapshotError = item.value.error;
+    }
+    for (const task of item.value.tasks) {
       const key = `${task.id}@@${task.workspaceDir || ''}`;
       merged.set(key, task);
     }
@@ -131,7 +173,13 @@ async function listTasksFromWorkspaceScope(scope: string[]): Promise<Task[]> {
     throw new Error(firstError ? String(firstError) : 'Failed to load tasks from workspace scope');
   }
 
-  return sortTasksByTime(Array.from(merged.values()));
+  return {
+    tasks: sortTasksByTime(Array.from(merged.values())),
+    ready: readyCount > 0,
+    refreshing,
+    updatedAt: latestUpdatedAt,
+    error: firstSnapshotError,
+  };
 }
 
 export const useTaskCenterStore = create<TaskCenterState>((set, get) => ({
@@ -188,7 +236,20 @@ export const useTaskCenterStore = create<TaskCenterState>((set, get) => ({
           error: null,
         });
 
-        const tasks = await listTasksFromWorkspaceScope(scope);
+        const snapshot = await listTasksFromWorkspaceScope(scope);
+        if (!snapshot.ready) {
+          set({
+            snapshotReady: false,
+            initialized: true,
+            initialLoading: true,
+            refreshing: true,
+            error: snapshot.error,
+          });
+          scheduleTaskCenterSnapshotRetry(() => get().refreshTasks({ silent: true }));
+          return;
+        }
+        clearTaskCenterSnapshotRetry();
+        const tasks = snapshot.tasks;
         set((state) => {
           if (areTaskListsEquivalent(state.tasks, tasks)) {
             return {
@@ -219,8 +280,10 @@ export const useTaskCenterStore = create<TaskCenterState>((set, get) => ({
             refreshing: false,
             error: null,
           });
+          clearTaskCenterSnapshotRetry();
           return;
         }
+        clearTaskCenterSnapshotRetry();
         set({
           snapshotReady: true,
           initialized: true,
@@ -268,7 +331,18 @@ export const useTaskCenterStore = create<TaskCenterState>((set, get) => ({
     }
     taskCenterRefreshPromise = (async () => {
       try {
-        const tasks = await listTasksFromWorkspaceScope(get().workspaceDirs);
+        const snapshot = await listTasksFromWorkspaceScope(get().workspaceDirs);
+        if (!snapshot.ready) {
+          set({
+            refreshing: true,
+            initialLoading: !get().snapshotReady,
+            error: snapshot.error,
+          });
+          scheduleTaskCenterSnapshotRetry(() => get().refreshTasks({ silent: true }));
+          return;
+        }
+        clearTaskCenterSnapshotRetry();
+        const tasks = snapshot.tasks;
         set((state) => {
           if (areTaskListsEquivalent(state.tasks, tasks)) {
             return {

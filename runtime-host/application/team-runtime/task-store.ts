@@ -1,7 +1,7 @@
-import { mkdir, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises';
-import { dirname, join } from 'node:path';
+import { join } from 'node:path';
 import { claimTaskLock, heartbeatTaskLock, releaseTaskLock } from './claim-lock';
 import { isTaskStatusTransitionAllowed, sanitizeTaskRecord } from './schema';
+import { atomicWriteJson, readJsonFile, type TeamRuntimeStorageContext } from './storage-context';
 import type { TeamTaskRecord, TeamTaskStatus } from './types';
 
 function tasksDir(runtimeRoot: string): string {
@@ -12,47 +12,44 @@ function taskPath(runtimeRoot: string, taskId: string): string {
   return join(tasksDir(runtimeRoot), `${taskId}.json`);
 }
 
-function tmpPath(pathname: string): string {
-  return `${pathname}.${process.pid}.${Date.now()}.tmp`;
+export async function ensureTaskStore(
+  context: TeamRuntimeStorageContext,
+  runtimeRoot: string,
+): Promise<void> {
+  await context.fileSystem.ensureDirectory(tasksDir(runtimeRoot));
 }
 
-async function atomicWriteJson(pathname: string, payload: unknown): Promise<void> {
-  await mkdir(dirname(pathname), { recursive: true });
-  const tmp = tmpPath(pathname);
-  await writeFile(tmp, `${JSON.stringify(payload, null, 2)}\n`, 'utf8');
-  await rename(tmp, pathname);
+export async function readTask(
+  context: TeamRuntimeStorageContext,
+  runtimeRoot: string,
+  taskId: string,
+): Promise<TeamTaskRecord | null> {
+  return await readJsonFile<TeamTaskRecord>(context, taskPath(runtimeRoot, taskId));
 }
 
-export async function ensureTaskStore(runtimeRoot: string): Promise<void> {
-  await mkdir(tasksDir(runtimeRoot), { recursive: true });
+export async function writeTask(
+  context: TeamRuntimeStorageContext,
+  runtimeRoot: string,
+  task: TeamTaskRecord,
+): Promise<void> {
+  await atomicWriteJson(context, taskPath(runtimeRoot, task.taskId), task);
 }
 
-export async function readTask(runtimeRoot: string, taskId: string): Promise<TeamTaskRecord | null> {
-  const pathname = taskPath(runtimeRoot, taskId);
-  try {
-    const raw = await readFile(pathname, 'utf8');
-    return JSON.parse(raw) as TeamTaskRecord;
-  } catch {
-    return null;
-  }
-}
-
-export async function writeTask(runtimeRoot: string, task: TeamTaskRecord): Promise<void> {
-  await atomicWriteJson(taskPath(runtimeRoot, task.taskId), task);
-}
-
-export async function listTasks(runtimeRoot: string): Promise<TeamTaskRecord[]> {
-  await ensureTaskStore(runtimeRoot);
-  const entries = await readdir(tasksDir(runtimeRoot), { withFileTypes: true });
+export async function listTasks(
+  context: TeamRuntimeStorageContext,
+  runtimeRoot: string,
+): Promise<TeamTaskRecord[]> {
+  await ensureTaskStore(context, runtimeRoot);
+  const entries = await context.fileSystem.listDirectory(tasksDir(runtimeRoot));
   const tasks: TeamTaskRecord[] = [];
   for (const entry of entries) {
-    if (!entry.isFile() || !entry.name.endsWith('.json')) {
+    if (!entry.isFile || !entry.name.endsWith('.json')) {
       continue;
     }
-    try {
-      const raw = await readFile(join(tasksDir(runtimeRoot), entry.name), 'utf8');
-      tasks.push(JSON.parse(raw) as TeamTaskRecord);
-    } catch {
+    const task = await readJsonFile<TeamTaskRecord>(context, join(tasksDir(runtimeRoot), entry.name));
+    if (task) {
+      tasks.push(task);
+    } else {
       // Ignore malformed task files and continue loading remaining files.
     }
   }
@@ -60,12 +57,13 @@ export async function listTasks(runtimeRoot: string): Promise<TeamTaskRecord[]> 
 }
 
 export async function upsertPlanTasks(input: {
+  context: TeamRuntimeStorageContext;
   runtimeRoot: string;
   tasks: Array<Partial<TeamTaskRecord> & { taskId: string; instruction: string }>;
   nowMs?: number;
 }): Promise<TeamTaskRecord[]> {
-  const now = input.nowMs ?? Date.now();
-  const existing = await listTasks(input.runtimeRoot);
+  const now = input.nowMs ?? input.context.clock.nowMs();
+  const existing = await listTasks(input.context, input.runtimeRoot);
   const existingById = new Map(existing.map((task) => [task.taskId, task]));
   const next: TeamTaskRecord[] = [];
   for (const row of input.tasks) {
@@ -86,7 +84,7 @@ export async function upsertPlanTasks(input: {
       },
       now,
     );
-    await writeTask(input.runtimeRoot, normalized);
+    await writeTask(input.context, input.runtimeRoot, normalized);
     next.push(normalized);
   }
   return next.sort((a, b) => a.createdAt - b.createdAt || a.taskId.localeCompare(b.taskId));
@@ -103,14 +101,15 @@ function canClaimTask(task: TeamTaskRecord, doneSet: Set<string>): boolean {
 }
 
 export async function claimNextTask(input: {
+  context: TeamRuntimeStorageContext;
   runtimeRoot: string;
   agentId: string;
   sessionKey: string;
   leaseMs: number;
   nowMs?: number;
 }): Promise<TeamTaskRecord | null> {
-  const now = input.nowMs ?? Date.now();
-  const tasks = await listTasks(input.runtimeRoot);
+  const now = input.nowMs ?? input.context.clock.nowMs();
+  const tasks = await listTasks(input.context, input.runtimeRoot);
   const doneSet = new Set(tasks.filter((task) => task.status === 'done').map((task) => task.taskId));
 
   for (const task of tasks) {
@@ -118,6 +117,7 @@ export async function claimNextTask(input: {
       continue;
     }
     const claim = await claimTaskLock({
+      context: input.context,
       runtimeRoot: input.runtimeRoot,
       taskId: task.taskId,
       ownerAgentId: input.agentId,
@@ -137,13 +137,14 @@ export async function claimNextTask(input: {
       leaseUntil: claim.lock.leaseUntil,
       updatedAt: now,
     };
-    await writeTask(input.runtimeRoot, claimed);
+    await writeTask(input.context, input.runtimeRoot, claimed);
     return claimed;
   }
   return null;
 }
 
 export async function heartbeatTaskClaim(input: {
+  context: TeamRuntimeStorageContext;
   runtimeRoot: string;
   taskId: string;
   agentId: string;
@@ -151,8 +152,9 @@ export async function heartbeatTaskClaim(input: {
   leaseMs: number;
   nowMs?: number;
 }): Promise<{ ok: boolean; task?: TeamTaskRecord }> {
-  const now = input.nowMs ?? Date.now();
+  const now = input.nowMs ?? input.context.clock.nowMs();
   const heartbeat = await heartbeatTaskLock({
+    context: input.context,
     runtimeRoot: input.runtimeRoot,
     taskId: input.taskId,
     ownerAgentId: input.agentId,
@@ -163,7 +165,7 @@ export async function heartbeatTaskClaim(input: {
   if (!heartbeat.ok || !heartbeat.lock) {
     return { ok: false };
   }
-  const task = await readTask(input.runtimeRoot, input.taskId);
+  const task = await readTask(input.context, input.runtimeRoot, input.taskId);
   if (!task) {
     return { ok: false };
   }
@@ -175,11 +177,12 @@ export async function heartbeatTaskClaim(input: {
     claimedAt: task.claimedAt ?? now,
     updatedAt: now,
   };
-  await writeTask(input.runtimeRoot, next);
+  await writeTask(input.context, input.runtimeRoot, next);
   return { ok: true, task: next };
 }
 
 export async function updateTaskStatus(input: {
+  context: TeamRuntimeStorageContext;
   runtimeRoot: string;
   taskId: string;
   nextStatus: TeamTaskStatus;
@@ -187,8 +190,8 @@ export async function updateTaskStatus(input: {
   error?: string;
   nowMs?: number;
 }): Promise<TeamTaskRecord> {
-  const now = input.nowMs ?? Date.now();
-  const task = await readTask(input.runtimeRoot, input.taskId);
+  const now = input.nowMs ?? input.context.clock.nowMs();
+  const task = await readTask(input.context, input.runtimeRoot, input.taskId);
   if (!task) {
     throw new Error(`Task not found: ${input.taskId}`);
   }
@@ -218,19 +221,21 @@ export async function updateTaskStatus(input: {
     next.claimedAt = undefined;
     next.leaseUntil = undefined;
   }
-  await writeTask(input.runtimeRoot, next);
+  await writeTask(input.context, input.runtimeRoot, next);
   return next;
 }
 
 export async function releaseTaskClaim(input: {
+  context: TeamRuntimeStorageContext;
   runtimeRoot: string;
   taskId: string;
   agentId: string;
   sessionKey: string;
   nowMs?: number;
 }): Promise<{ ok: boolean; task?: TeamTaskRecord }> {
-  const now = input.nowMs ?? Date.now();
+  const now = input.nowMs ?? input.context.clock.nowMs();
   const released = await releaseTaskLock({
+    context: input.context,
     runtimeRoot: input.runtimeRoot,
     taskId: input.taskId,
     ownerAgentId: input.agentId,
@@ -239,7 +244,7 @@ export async function releaseTaskClaim(input: {
   if (!released.ok) {
     return { ok: false };
   }
-  const task = await readTask(input.runtimeRoot, input.taskId);
+  const task = await readTask(input.context, input.runtimeRoot, input.taskId);
   if (!task) {
     return { ok: true };
   }
@@ -252,10 +257,13 @@ export async function releaseTaskClaim(input: {
     status: task.status === 'claimed' ? 'todo' : task.status,
     updatedAt: now,
   };
-  await writeTask(input.runtimeRoot, next);
+  await writeTask(input.context, input.runtimeRoot, next);
   return { ok: true, task: next };
 }
 
-export async function clearTaskStore(runtimeRoot: string): Promise<void> {
-  await rm(tasksDir(runtimeRoot), { recursive: true, force: true });
+export async function clearTaskStore(
+  context: TeamRuntimeStorageContext,
+  runtimeRoot: string,
+): Promise<void> {
+  await context.fileSystem.removeDirectory(tasksDir(runtimeRoot));
 }

@@ -9,6 +9,8 @@ import {
 interface UseChatScrollInput {
   enabled: boolean;
   scrollScopeKey: string;
+  viewportWindowSignal: string;
+  anchorItemKey: string | null;
   autoFollowSignal: string;
   tailActivityOpen: boolean;
   setScrollChromeBottomLocked: (isBottomLocked: boolean) => void;
@@ -22,6 +24,8 @@ export { computeBottomLockedScrollTopOnResize, isChatViewportNearBottom };
 export function useChatScroll({
   enabled,
   scrollScopeKey,
+  viewportWindowSignal,
+  anchorItemKey,
   autoFollowSignal,
   tailActivityOpen,
   setScrollChromeBottomLocked,
@@ -32,6 +36,7 @@ export function useChatScroll({
   const configRef = useRef<ChatScrollControllerConfig>({
     enabled,
     scrollScopeKey,
+    anchorItemKey,
     tailActivityOpen,
     setScrollChromeBottomLocked,
     viewportRef,
@@ -41,6 +46,7 @@ export function useChatScroll({
   configRef.current = {
     enabled,
     scrollScopeKey,
+    anchorItemKey,
     tailActivityOpen,
     setScrollChromeBottomLocked,
     viewportRef,
@@ -64,7 +70,7 @@ export function useChatScroll({
 
   useLayoutEffect(() => {
     controller.onAutoFollowRenderSync();
-  }, [autoFollowSignal, controller, enabled, tailActivityOpen]);
+  }, [anchorItemKey, autoFollowSignal, controller, enabled, tailActivityOpen, viewportWindowSignal]);
 
   useLayoutEffect(() => {
     if (!enabled) {

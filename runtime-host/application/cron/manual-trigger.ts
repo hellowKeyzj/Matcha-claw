@@ -1,4 +1,5 @@
-import type { OpenClawBridge } from '../../openclaw-bridge';
+import type { RuntimeClockPort, RuntimeTimerPort } from '../common/runtime-ports';
+import type { GatewayCronPort } from '../gateway/gateway-runtime-port';
 
 type CronPayload = {
   kind?: string;
@@ -27,8 +28,6 @@ export interface GatewayCronJobForTrigger {
   delivery?: CronDelivery;
   state?: CronState;
 }
-
-type CronTriggerBridge = Pick<OpenClawBridge, 'listCronJobs' | 'updateCronJob' | 'runCronJob'>;
 
 type CronTriggerLogger = {
   warn?: (...args: unknown[]) => void;
@@ -60,10 +59,10 @@ function parseCronJobs(value: unknown): GatewayCronJobForTrigger[] {
 }
 
 async function findCronJobById(
-  openclawBridge: CronTriggerBridge,
+  gateway: Pick<GatewayCronPort, 'listCronJobs'>,
   id: string,
 ): Promise<GatewayCronJobForTrigger | null> {
-  const result = await openclawBridge.listCronJobs(true);
+  const result = await gateway.listCronJobs(true);
   const jobs = parseCronJobs(result);
   return jobs.find((job) => job.id === id) ?? null;
 }
@@ -127,22 +126,18 @@ function isSkippedRun(result: unknown): boolean {
   return reason === 'already-running' || reason === 'not-due';
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => {
-    setTimeout(resolve, ms);
-  });
-}
-
 async function waitForRunCompletion(params: {
-  openclawBridge: CronTriggerBridge;
+  gateway: Pick<GatewayCronPort, 'listCronJobs'>;
   id: string;
   baselineLastRunAtMs: number;
+  clock: RuntimeClockPort;
+  timer: RuntimeTimerPort;
 }): Promise<void> {
-  const deadline = Date.now() + MANUAL_RESTORE_MAX_WAIT_MS;
+  const deadline = params.clock.nowMs() + MANUAL_RESTORE_MAX_WAIT_MS;
 
-  while (Date.now() < deadline) {
-    await sleep(MANUAL_RESTORE_POLL_MS);
-    const job = await findCronJobById(params.openclawBridge, params.id);
+  while (params.clock.nowMs() < deadline) {
+    await params.timer.sleep(MANUAL_RESTORE_POLL_MS);
+    const job = await findCronJobById(params.gateway, params.id);
     if (!job) return;
 
     const state = job.state ?? {};
@@ -156,75 +151,50 @@ async function waitForRunCompletion(params: {
 }
 
 async function restoreCronJobConfig(params: {
-  openclawBridge: CronTriggerBridge;
+  gateway: Pick<GatewayCronPort, 'updateCronJob'>;
   id: string;
   restorePatch: Record<string, unknown>;
   logger?: CronTriggerLogger;
 }): Promise<void> {
   try {
-    await params.openclawBridge.updateCronJob(params.id, params.restorePatch);
+    await params.gateway.updateCronJob(params.id, params.restorePatch);
   } catch (error) {
     params.logger?.warn?.(`[cron] 手动执行后恢复任务配置失败: ${params.id}`, error);
   }
 }
 
-function scheduleRestoreAfterRun(params: {
-  openclawBridge: CronTriggerBridge;
-  id: string;
-  baselineLastRunAtMs: number;
-  restorePatch: Record<string, unknown>;
-  logger?: CronTriggerLogger;
-}): void {
-  void (async () => {
-    try {
-      await waitForRunCompletion({
-        openclawBridge: params.openclawBridge,
-        id: params.id,
-        baselineLastRunAtMs: params.baselineLastRunAtMs,
-      });
-    } catch (error) {
-      params.logger?.warn?.(`[cron] 等待手动执行完成时出错: ${params.id}`, error);
-    } finally {
-      await restoreCronJobConfig({
-        openclawBridge: params.openclawBridge,
-        id: params.id,
-        restorePatch: params.restorePatch,
-        logger: params.logger,
-      });
-    }
-  })();
-}
-
 export async function triggerCronJobWithSplitProfiles(params: {
-  openclawBridge: CronTriggerBridge;
+  gateway: Pick<GatewayCronPort, 'listCronJobs' | 'updateCronJob' | 'runCronJob'>;
   id: string;
+  clock: RuntimeClockPort;
+  timer: RuntimeTimerPort;
   logger?: CronTriggerLogger;
 }): Promise<unknown> {
-  const job = await findCronJobById(params.openclawBridge, params.id);
+  const job = await findCronJobById(params.gateway, params.id);
   if (!job) {
     throw new Error(`Cron job not found: ${params.id}`);
   }
 
   if (!shouldUseManualRunProfileSwitch(job)) {
-    return await params.openclawBridge.runCronJob(params.id, 'force');
+    return await params.gateway.runCronJob(params.id, 'force');
   }
 
   const { manualPatch, restorePatch } = buildManualRunPatches(job);
   const baselineLastRunAtMs = typeof job.state?.lastRunAtMs === 'number' ? job.state.lastRunAtMs : 0;
 
   try {
-    await params.openclawBridge.updateCronJob(params.id, manualPatch);
+    await params.gateway.updateCronJob(params.id, manualPatch);
   } catch (error) {
     params.logger?.warn?.(`[cron] 手动执行配置切换失败，回退为原生 cron.run: ${params.id}`, error);
-    return await params.openclawBridge.runCronJob(params.id, 'force');
+    return await params.gateway.runCronJob(params.id, 'force');
   }
 
   let runResult: unknown;
   try {
-    runResult = await params.openclawBridge.runCronJob(params.id, 'force') as CronRunResult;
+    runResult = await params.gateway.runCronJob(params.id, 'force') as CronRunResult;
   } catch (error) {
     await restoreCronJobConfig({
-      openclawBridge: params.openclawBridge,
+      gateway: params.gateway,
       id: params.id,
       restorePatch,
       logger: params.logger,
@@ -234,7 +204,7 @@ export async function triggerCronJobWithSplitProfiles(params: {
 
   if (isSkippedRun(runResult)) {
     await restoreCronJobConfig({
-      openclawBridge: params.openclawBridge,
+      gateway: params.gateway,
       id: params.id,
       restorePatch,
       logger: params.logger,
@@ -242,13 +212,24 @@ export async function triggerCronJobWithSplitProfiles(params: {
     return runResult;
   }
 
-  scheduleRestoreAfterRun({
-    openclawBridge: params.openclawBridge,
-    id: params.id,
-    baselineLastRunAtMs,
-    restorePatch,
-    logger: params.logger,
-  });
+  try {
+    await waitForRunCompletion({
+      gateway: params.gateway,
+      id: params.id,
+      baselineLastRunAtMs,
+      clock: params.clock,
+      timer: params.timer,
+    });
+  } catch (error) {
+    params.logger?.warn?.(`[cron] 等待手动执行完成时出错: ${params.id}`, error);
+  } finally {
+    await restoreCronJobConfig({
+      gateway: params.gateway,
+      id: params.id,
+      restorePatch,
+      logger: params.logger,
+    });
+  }
 
   return runResult;
 }

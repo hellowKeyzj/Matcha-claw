@@ -1,17 +1,20 @@
-import { readdir, readFile, stat } from 'node:fs/promises';
 import { join } from 'node:path';
-import { getOpenClawConfigDir } from '../../api/storage/paths';
+import type { RuntimeFileSystemPort } from '../common/runtime-ports';
+import type { OpenClawConfigRepositoryPort } from '../openclaw/openclaw-config-repository';
 import { parseUsageEntriesFromJsonl, type TokenUsageHistoryEntry } from './token-usage-parser';
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 }
 
-async function listConfiguredAgentIds(openclawConfigDir: string): Promise<string[]> {
+async function listConfiguredAgentIds(
+  openclawConfigDir: string,
+  fileSystem: RuntimeFileSystemPort,
+): Promise<string[]> {
   const configPath = join(openclawConfigDir, 'openclaw.json');
   const normalizedIds = new Set<string>();
   try {
-    const raw = await readFile(configPath, 'utf8');
+    const raw = await fileSystem.readTextFile(configPath);
     const parsed = JSON.parse(raw);
     if (!isRecord(parsed)) {
       return [];
@@ -43,10 +46,13 @@ export function extractSessionIdFromTranscriptFileName(fileName: string): string
     .replace(/\.jsonl$/, '');
 }
 
-async function listAgentIdsWithSessionDirs(openclawConfigDir: string): Promise<string[]> {
+async function listAgentIdsWithSessionDirs(
+  openclawConfigDir: string,
+  fileSystem: RuntimeFileSystemPort,
+): Promise<string[]> {
   const agentIds = new Set<string>();
   const agentsDir = join(openclawConfigDir, 'agents');
-  for (const agentId of await listConfiguredAgentIds(openclawConfigDir)) {
+  for (const agentId of await listConfiguredAgentIds(openclawConfigDir, fileSystem)) {
     const normalized = agentId.trim();
     if (normalized) {
       agentIds.add(normalized);
@@ -54,9 +60,9 @@ async function listAgentIdsWithSessionDirs(openclawConfigDir: string): Promise<s
   }
 
   try {
-    const agentEntries = await readdir(agentsDir, { withFileTypes: true });
+    const agentEntries = await fileSystem.listDirectory(agentsDir);
     for (const entry of agentEntries) {
-      if (!entry.isDirectory()) {
+      if (!entry.isDirectory) {
         continue;
       }
       const normalized = entry.name.trim();
@@ -71,20 +77,23 @@ async function listAgentIdsWithSessionDirs(openclawConfigDir: string): Promise<s
   return [...agentIds];
 }
 
-async function listRecentSessionFiles(openclawConfigDir: string): Promise<Array<{ filePath: string; sessionId: string; agentId: string; mtimeMs: number }>> {
+async function listRecentSessionFiles(
+  openclawConfigDir: string,
+  fileSystem: RuntimeFileSystemPort,
+): Promise<Array<{ filePath: string; sessionId: string; agentId: string; mtimeMs: number }>> {
   const openclawDir = openclawConfigDir;
   const agentsDir = join(openclawDir, 'agents');
   try {
-    const agentEntries = await listAgentIdsWithSessionDirs(openclawDir);
+    const agentEntries = await listAgentIdsWithSessionDirs(openclawDir, fileSystem);
     const files: Array<{ filePath: string; sessionId: string; agentId: string; mtimeMs: number }> = [];
 
     for (const agentId of agentEntries) {
       const sessionsDir = join(agentsDir, agentId, 'sessions');
       try {
-        const sessionEntries = await readdir(sessionsDir, { withFileTypes: true });
+        const sessionEntries = await fileSystem.listDirectory(sessionsDir);
 
         for (const sessionEntry of sessionEntries) {
-          if (!sessionEntry.isFile()) {
+          if (!sessionEntry.isFile) {
             continue;
           }
           const fileName = sessionEntry.name;
@@ -94,7 +103,7 @@ async function listRecentSessionFiles(openclawConfigDir: string): Promise<Array<
           }
           const filePath = join(sessionsDir, fileName);
           try {
-            const fileStat = await stat(filePath);
+            const fileStat = await fileSystem.stat(filePath);
             files.push({
               filePath,
               sessionId,
@@ -119,35 +128,68 @@ async function listRecentSessionFiles(openclawConfigDir: string): Promise<Array<
 
 export interface TokenUsageHistoryQueryOptions {
   limit?: number;
-  openclawConfigDir?: string;
 }
 
-export async function getRecentTokenUsageHistory(options: TokenUsageHistoryQueryOptions = {}): Promise<TokenUsageHistoryEntry[]> {
-  const maxEntries = typeof options.limit === 'number' && Number.isFinite(options.limit)
-    ? Math.max(Math.floor(options.limit), 0)
-    : Number.POSITIVE_INFINITY;
-  if (maxEntries === 0) {
-    return [];
-  }
+export interface TokenUsageHistoryRepositoryDeps {
+  configRepository: OpenClawConfigRepositoryPort;
+  fileSystem: RuntimeFileSystemPort;
+}
 
-  const openclawConfigDir = options.openclawConfigDir || getOpenClawConfigDir();
-  const files = await listRecentSessionFiles(openclawConfigDir);
-  const results: TokenUsageHistoryEntry[] = [];
+export class TokenUsageHistoryRepository {
+  private cachedEntries: TokenUsageHistoryEntry[] = [];
+  private cacheReady = false;
 
-  for (const file of files) {
-    if (results.length >= maxEntries) break;
-    try {
-      const content = await readFile(file.filePath, 'utf8');
-      const entries = parseUsageEntriesFromJsonl(content, {
-        sessionId: file.sessionId,
-        agentId: file.agentId,
-      }, Number.isFinite(maxEntries) ? maxEntries - results.length : undefined);
-      results.push(...entries);
-    } catch {
-      // Skip malformed transcript files.
+  constructor(private readonly deps: TokenUsageHistoryRepositoryDeps) {}
+
+  recent(options: TokenUsageHistoryQueryOptions = {}): TokenUsageHistoryEntry[] {
+    const maxEntries = typeof options.limit === 'number' && Number.isFinite(options.limit)
+      ? Math.max(Math.floor(options.limit), 0)
+      : Number.POSITIVE_INFINITY;
+    if (maxEntries === 0) {
+      return [];
     }
+
+    return Number.isFinite(maxEntries)
+      ? this.cachedEntries.slice(0, maxEntries)
+      : [...this.cachedEntries];
   }
 
-  results.sort((a, b) => Date.parse(b.timestamp) - Date.parse(a.timestamp));
-  return Number.isFinite(maxEntries) ? results.slice(0, maxEntries) : results;
+  async refreshCache(options: TokenUsageHistoryQueryOptions = {}): Promise<void> {
+    this.cachedEntries = await this.scanRecent(options);
+    this.cacheReady = true;
+  }
+
+  isReady(): boolean {
+    return this.cacheReady;
+  }
+
+  async scanRecent(options: TokenUsageHistoryQueryOptions = {}): Promise<TokenUsageHistoryEntry[]> {
+    const maxEntries = typeof options.limit === 'number' && Number.isFinite(options.limit)
+      ? Math.max(Math.floor(options.limit), 0)
+      : Number.POSITIVE_INFINITY;
+    if (maxEntries === 0) {
+      return [];
+    }
+
+    const openclawConfigDir = this.deps.configRepository.getConfigDir();
+    const files = await listRecentSessionFiles(openclawConfigDir, this.deps.fileSystem);
+    const results: TokenUsageHistoryEntry[] = [];
+
+    for (const file of files) {
+      if (results.length >= maxEntries) break;
+      try {
+        const content = await this.deps.fileSystem.readTextFile(file.filePath);
+        const entries = parseUsageEntriesFromJsonl(content, {
+          sessionId: file.sessionId,
+          agentId: file.agentId,
+        }, Number.isFinite(maxEntries) ? maxEntries - results.length : undefined);
+        results.push(...entries);
+      } catch {
+        // Skip malformed transcript files.
+      }
+    }
+
+    results.sort((a, b) => Date.parse(b.timestamp) - Date.parse(a.timestamp));
+    return Number.isFinite(maxEntries) ? results.slice(0, maxEntries) : results;
+  }
 }

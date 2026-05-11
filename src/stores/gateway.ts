@@ -1,9 +1,9 @@
 /**
  * Gateway State Store
- * Uses Host API + SSE for lifecycle/status and a direct renderer WebSocket for runtime RPC.
+ * Uses Host API + SSE for lifecycle/status. Domain runtime calls live behind runtime-host application routes.
  */
 import { create } from 'zustand';
-import { hostApiFetch, hostGatewayRpc } from '@/lib/host-api';
+import { hostApiFetch } from '@/lib/host-api';
 import { subscribeHostEvent } from '@/lib/host-events';
 import type { SessionUpdateEvent } from '../../runtime-host/shared/session-adapter-types';
 import type { GatewayStatus } from '../types/gateway';
@@ -74,7 +74,6 @@ interface GatewayState {
   stop: () => Promise<void>;
   restart: () => Promise<void>;
   checkHealth: () => Promise<GatewayHealth>;
-  rpc: <T>(method: string, params?: unknown, timeoutMs?: number) => Promise<T>;
   setStatus: (status: GatewayStatus) => void;
   clearError: () => void;
 }
@@ -437,10 +436,6 @@ export const useGatewayStore = create<GatewayState>((set, get) => ({
       set({ health });
       return health;
     }
-  },
-
-  rpc: async <T>(method: string, params?: unknown, timeoutMs?: number): Promise<T> => {
-    return await hostGatewayRpc<T>(method, params, timeoutMs);
   },
 
   setStatus: (status) => set({ status }),

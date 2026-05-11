@@ -32,7 +32,7 @@ describe('runtime-host proxy routes', () => {
     );
 
     expect(handled).toBe(true);
-    expect(runtimeHostRequest).toHaveBeenCalledWith('GET', '/api/security/audit?limit=20', undefined);
+    expect(runtimeHostRequest).toHaveBeenCalledWith('GET', '/api/security/audit?limit=20', undefined, undefined);
     expect(sendJsonMock).toHaveBeenCalledWith(expect.anything(), 200, { success: true });
   });
 
@@ -51,7 +51,7 @@ describe('runtime-host proxy routes', () => {
     );
 
     expect(handled).toBe(true);
-    expect(runtimeHostRequest).toHaveBeenCalledWith('GET', '/api/platform/tools?includeDisabled=true', undefined);
+    expect(runtimeHostRequest).toHaveBeenCalledWith('GET', '/api/platform/tools?includeDisabled=true', undefined, undefined);
     expect(sendJsonMock).toHaveBeenCalledWith(expect.anything(), 200, { success: true, tools: [] });
   });
 
@@ -71,7 +71,7 @@ describe('runtime-host proxy routes', () => {
     );
 
     expect(handled).toBe(true);
-    expect(runtimeHostRequest).toHaveBeenCalledWith('POST', '/api/cron/trigger', { id: 'job-1' });
+    expect(runtimeHostRequest).toHaveBeenCalledWith('POST', '/api/cron/trigger', { id: 'job-1' }, undefined);
     expect(sendJsonMock).toHaveBeenCalledWith(expect.anything(), 200, { success: true });
   });
 
@@ -127,7 +127,61 @@ describe('runtime-host proxy routes', () => {
       'PUT',
       '/api/plugins/runtime/enabled-plugins',
       { pluginIds: ['task-manager'] },
+      undefined,
     );
     expect(sendJsonMock).toHaveBeenCalledWith(expect.anything(), 200, { success: true });
+  });
+
+  it('diagnostics collect 业务入口会走 runtime-host-proxy 转发', async () => {
+    const runtimeHostRequest = vi.fn().mockResolvedValue({
+      status: 202,
+      data: { success: true, job: { id: 'job-1', type: 'diagnostics.collect' } },
+    } satisfies RuntimeHostRouteResult);
+    parseJsonBodyMock.mockResolvedValueOnce(undefined);
+
+    const { handleRuntimeHostProxyRoutes } = await import('../../electron/api/routes/runtime-host-proxy');
+    const handled = await handleRuntimeHostProxyRoutes(
+      { method: 'POST' } as IncomingMessage,
+      {} as ServerResponse,
+      new URL('http://127.0.0.1:3210/api/diagnostics/collect'),
+      { runtimeHost: { request: runtimeHostRequest } } as never,
+    );
+
+    expect(handled).toBe(true);
+    expect(runtimeHostRequest).toHaveBeenCalledWith('POST', '/api/diagnostics/collect', undefined, undefined);
+    expect(sendJsonMock).toHaveBeenCalledWith(
+      expect.anything(),
+      202,
+      { success: true, job: { id: 'job-1', type: 'diagnostics.collect' } },
+    );
+  });
+
+  it('透传 renderer 指定的 timeoutMs 到 runtime-host transport', async () => {
+    parseJsonBodyMock.mockResolvedValueOnce({});
+    const runtimeHostRequest = vi.fn().mockResolvedValue({
+      status: 200,
+      data: { success: true, tasks: [] },
+    } satisfies RuntimeHostRouteResult);
+
+    const { handleRuntimeHostProxyRoutes } = await import('../../electron/api/routes/runtime-host-proxy');
+    const handled = await handleRuntimeHostProxyRoutes(
+      {
+        method: 'POST',
+        headers: {
+          'x-matchaclaw-request-timeout-ms': '60000',
+        },
+      } as unknown as IncomingMessage,
+      {} as ServerResponse,
+      new URL('http://127.0.0.1:3210/api/tasks/list'),
+      { runtimeHost: { request: runtimeHostRequest } } as never,
+    );
+
+    expect(handled).toBe(true);
+    expect(runtimeHostRequest).toHaveBeenCalledWith(
+      'POST',
+      '/api/tasks/list',
+      {},
+      { timeoutMs: 60000 },
+    );
   });
 });
