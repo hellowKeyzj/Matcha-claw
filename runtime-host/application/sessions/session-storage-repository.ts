@@ -1,4 +1,4 @@
-import { dirname, join } from 'node:path';
+import { join } from 'node:path';
 import type { RuntimeFileSystemPort } from '../common/runtime-ports';
 import type { OpenClawWorkspacePort } from '../openclaw/openclaw-workspace-service';
 
@@ -29,10 +29,7 @@ export interface SessionStoragePort {
   getTranscriptFingerprint(pathname: string): Promise<SessionTranscriptFingerprint | null>;
   readTranscriptContent(sessionKey: string): Promise<string | null>;
   readTranscriptDescriptorContent(descriptor: SessionStorageDescriptor): Promise<string | null>;
-  deleteSessionStorage(
-    sessionKey: string,
-    resolveDeletedPath?: (path: string) => string,
-  ): Promise<boolean>;
+  updateSessionStatus(sessionKey: string, status: 'active' | 'completed' | 'archived' | 'deleted'): Promise<boolean>;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -205,26 +202,40 @@ function listTranscriptStorageDescriptors(input: {
   return descriptors;
 }
 
-function pruneStorageIndex(
+function updateStorageIndexStatus(
   sessionsJson: Record<string, unknown>,
   sessionKey: string,
+  status: 'active' | 'completed' | 'archived' | 'deleted',
 ): Record<string, unknown> {
   if (Array.isArray(sessionsJson.sessions)) {
     return {
       ...sessionsJson,
-      sessions: sessionsJson.sessions.filter((candidate) => {
+      sessions: sessionsJson.sessions.map((candidate) => {
         if (!isRecord(candidate)) {
-          return true;
+          return candidate;
         }
         const candidateKey = normalizeString(candidate.key ?? candidate.sessionKey);
-        return candidateKey !== sessionKey;
+        return candidateKey === sessionKey ? { ...candidate, status } : candidate;
       }),
     };
   }
-
-  return Object.fromEntries(
-    Object.entries(sessionsJson).filter(([candidateKey]) => candidateKey !== sessionKey),
-  );
+  const current = sessionsJson[sessionKey];
+  if (isRecord(current)) {
+    return {
+      ...sessionsJson,
+      [sessionKey]: { ...current, status },
+    };
+  }
+  if (typeof current === 'string') {
+    return {
+      ...sessionsJson,
+      [sessionKey]: { file: current, status },
+    };
+  }
+  return {
+    ...sessionsJson,
+    [sessionKey]: { key: sessionKey, status },
+  };
 }
 
 export class SessionStorageRepository implements SessionStoragePort {
@@ -321,33 +332,18 @@ export class SessionStorageRepository implements SessionStoragePort {
     }
   }
 
-  async deleteSessionStorage(
+  async updateSessionStatus(
     sessionKey: string,
-    resolveDeletedPath?: (path: string) => string,
+    status: 'active' | 'completed' | 'archived' | 'deleted',
   ): Promise<boolean> {
     const descriptor = await this.findStorageDescriptor(sessionKey);
-    if (!descriptor) {
+    if (!descriptor?.sessionsJson || !descriptor.sessionsJsonPath) {
       return false;
     }
-
-    if (descriptor.transcriptPath && await this.deps.fileSystem.exists(descriptor.transcriptPath)) {
-      const deletedPath = resolveDeletedPath?.(descriptor.transcriptPath);
-      if (deletedPath && deletedPath !== descriptor.transcriptPath) {
-        await this.deps.fileSystem.ensureDirectory(dirname(deletedPath));
-        await this.deps.fileSystem.rename(descriptor.transcriptPath, deletedPath);
-      } else {
-        await this.deps.fileSystem.removeFile(descriptor.transcriptPath);
-      }
-    }
-
-    if (descriptor.sessionsJson && descriptor.sessionsJsonPath) {
-      const nextSessionsJson = pruneStorageIndex(descriptor.sessionsJson, sessionKey);
-      await this.deps.fileSystem.writeTextFile(
-        descriptor.sessionsJsonPath,
-        JSON.stringify(nextSessionsJson, null, 2),
-      );
-    }
-
+    await this.deps.fileSystem.writeTextFile(
+      descriptor.sessionsJsonPath,
+      JSON.stringify(updateStorageIndexStatus(descriptor.sessionsJson, sessionKey, status), null, 2),
+    );
     return true;
   }
 

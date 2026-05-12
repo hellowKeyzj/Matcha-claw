@@ -8,7 +8,7 @@ import { useChatStore } from '@/stores/chat';
 import { useGatewayStore } from '@/stores/gateway';
 import { useSkillsStore } from '@/stores/skills';
 import { useSubagentsStore } from '@/stores/subagents';
-import { useTaskInboxStore } from '@/stores/task-inbox-store';
+import { useTaskCenterStore } from '@/stores/task-center-store';
 import { createEmptySessionRecord } from '@/stores/chat/store-state-helpers';
 import i18n from '@/i18n';
 
@@ -56,7 +56,7 @@ describe('chat agent skill configuration', () => {
       updateAgent,
     } as never);
 
-    useTaskInboxStore.setState({
+    useTaskCenterStore.setState({
       tasks: [],
       loading: false,
       initialized: true,

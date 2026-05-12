@@ -12,8 +12,8 @@ describe('runtime-host gateway ready service', () => {
       ensureGatewayReady: vi.fn(),
       inspectGatewayMethodReadiness: vi.fn(async () => ({
         ready: false,
-        methods: ['task_manager.list'],
-        missingMethods: ['task_manager.list'],
+        methods: ['TaskList'],
+        missingMethods: ['TaskList'],
       })),
       readGatewayConnectionState: vi.fn(),
       chatSend: vi.fn(),
@@ -22,16 +22,16 @@ describe('runtime-host gateway ready service', () => {
 
     await expect(service.ready({
       timeoutMs: 3000,
-      requiredMethods: ['task_manager.list'],
+      requiredMethods: ['TaskList'],
     })).resolves.toEqual({
       status: 200,
       data: {
         success: false,
         code: 'GATEWAY_METHODS_UNAVAILABLE',
-        missingMethods: ['task_manager.list'],
+        missingMethods: ['TaskList'],
       },
     });
-    expect(gateway.inspectGatewayMethodReadiness).toHaveBeenCalledWith(['task_manager.list'], 3000);
+    expect(gateway.inspectGatewayMethodReadiness).toHaveBeenCalledWith(['TaskList'], 3000);
     expect(gateway.ensureGatewayReady).not.toHaveBeenCalled();
   });
 

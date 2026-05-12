@@ -4,6 +4,7 @@
     "port": "ポート: {{port}}",
     "pid": "PID: {{pid}}",
     "sinceRestart": "前回の再起動から",
+    "gatewayPreparing": "ゲートウェイを起動中",
     "gatewayNotRunning": "ゲートウェイが停止中",
     "recentTokenHistory": {
         "title": "最近のトークン使用量",

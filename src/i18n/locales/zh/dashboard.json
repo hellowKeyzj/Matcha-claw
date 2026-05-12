@@ -4,6 +4,7 @@
     "port": "端口: {{port}}",
     "pid": "PID: {{pid}}",
     "sinceRestart": "自上次重启",
+    "gatewayPreparing": "网关正在启动",
     "gatewayNotRunning": "网关未运行",
     "recentTokenHistory": {
         "title": "最近 Token 消耗",

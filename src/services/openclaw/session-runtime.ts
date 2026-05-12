@@ -1,5 +1,8 @@
 import {
   hostSessionDelete,
+  hostSessionArchive,
+  hostSessionUnarchive,
+  hostSessionUpdateStatus,
   hostSessionList,
   hostSessionPrompt,
   hostSessionWindowFetch,
@@ -99,6 +102,28 @@ export async function deleteSession(
 ): Promise<void> {
   await hostSessionDelete({
     sessionKey: input.key,
+  });
+}
+
+export async function archiveSession(input: DeleteSessionInput): Promise<void> {
+  await hostSessionArchive({
+    sessionKey: input.key,
+  });
+}
+
+export async function unarchiveSession(input: DeleteSessionInput): Promise<void> {
+  await hostSessionUnarchive({
+    sessionKey: input.key,
+  });
+}
+
+export async function updateSessionStatus(input: {
+  key: string;
+  status: 'active' | 'completed' | 'archived' | 'deleted';
+}): Promise<void> {
+  await hostSessionUpdateStatus({
+    sessionKey: input.key,
+    status: input.status,
   });
 }
 

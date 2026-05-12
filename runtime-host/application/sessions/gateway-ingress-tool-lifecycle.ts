@@ -10,9 +10,13 @@ import {
 import {
   normalizeTimelineEntryStatus,
 } from './gateway-ingress-message';
+import {
+  normalizeTaskArtifactSnapshot,
+  normalizeTaskToolSnapshot,
+} from './task-snapshot-normalizer';
 import type {
   GatewayConversationToolLifecyclePayload,
-  SessionTimelineIngressEvent,
+  GatewaySessionIngressEvent,
 } from './gateway-ingress-types';
 
 function normalizeToolLifecyclePhase(value: unknown): 'start' | 'update' | 'result' | null {
@@ -161,7 +165,7 @@ export function buildToolLifecycleIngressEvents(
   options: {
     existingEntries?: SessionTimelineEntry[];
   } = {},
-): SessionTimelineIngressEvent[] {
+): GatewaySessionIngressEvent[] {
   const toolLifecycle = normalizeToolLifecyclePayload(payload, {
     existingEntries: options.existingEntries,
   });
@@ -184,11 +188,30 @@ export function buildToolLifecycleIngressEvents(
   if (entries.length === 0) {
     return [];
   }
-  return [{
+  const events: GatewaySessionIngressEvent[] = [{
     sessionUpdate: 'agent_message_chunk',
     sessionKey: toolLifecycle.sessionKey,
     runId: toolLifecycle.runId,
     laneKey: entries[0]?.laneKey ?? 'main',
     entries,
   }];
+  const resultSnapshot = normalizeTaskToolSnapshot(toolLifecycle.message.toolName, payload.result, toolLifecycle.sessionKey);
+  if (resultSnapshot) {
+    events.push({
+      sessionUpdate: 'plan',
+      sessionKey: resultSnapshot.sessionKey,
+      runId: toolLifecycle.runId,
+      taskSnapshot: resultSnapshot,
+    });
+  }
+  const artifactSnapshot = resultSnapshot ? null : normalizeTaskArtifactSnapshot(payload.result, toolLifecycle.sessionKey);
+  if (artifactSnapshot) {
+    events.push({
+      sessionUpdate: 'plan',
+      sessionKey: artifactSnapshot.sessionKey,
+      runId: toolLifecycle.runId,
+      taskSnapshot: artifactSnapshot,
+    });
+  }
+  return events;
 }

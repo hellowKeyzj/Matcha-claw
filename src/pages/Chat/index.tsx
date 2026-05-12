@@ -12,7 +12,7 @@ import { useSkillsStore } from '@/stores/skills';
 import { useSubagentsStore } from '@/stores/subagents';
 import { useSettingsStore } from '@/stores/settings';
 import type { GatewayTransportIssue } from '../../../runtime-host/shared/gateway-error';
-import { isGatewayOperational } from '@/lib/gateway-status';
+import { isGatewayOperational, isGatewayPreparing as resolveGatewayPreparing } from '@/lib/gateway-status';
 import {
   createEmptySessionRecord,
   getPendingApprovals,
@@ -254,7 +254,9 @@ export function Chat({ isActive = true }: ChatProps) {
   const location = useLocation();
   const navigate = useNavigate();
   const gatewayStatus = useGatewayStore((state) => state.status);
+  const gatewayInitialized = useGatewayStore((state) => state.isInitialized);
   const isGatewayRunning = isGatewayOperational(gatewayStatus);
+  const isGatewayPreparing = resolveGatewayPreparing(gatewayStatus, gatewayInitialized);
   const localizedGatewayIssue = useMemo(() => {
     return localizeGatewayIssue(gatewayStatus.lastIssue, t)
       ?? gatewayStatus.lastError
@@ -332,6 +334,7 @@ export function Chat({ isActive = true }: ChatProps) {
     activeSidePanelTab,
     artifactWorkbenchFullscreen,
     unfinishedTaskCount,
+    derivedPlanStatus,
     toggleSidePanel,
     setActiveSidePanelTab,
     closeSidePanel,
@@ -644,6 +647,12 @@ export function Chat({ isActive = true }: ChatProps) {
     viewportPaneRef.current?.prepareCurrentLatestBottomAlign();
     await sendMessage(text, attachments);
   }, [sendMessage]);
+  const handleComposerWheel = useCallback((deltaY: number) => {
+    viewportPaneRef.current?.scrollByWheelDelta(deltaY);
+  }, []);
+  const handleComposerGeometryChange = useCallback(() => {
+    viewportPaneRef.current?.notifyComposerGeometryChanged();
+  }, []);
   const handleSelectModel = useCallback(async (nextModelId: string) => {
     const normalizedNextModelId = nextModelId.trim();
     const currentModelId = effectiveCurrentModelId;
@@ -761,6 +770,16 @@ export function Chat({ isActive = true }: ChatProps) {
     />
   );
 
+  if (!isGatewayRunning && isGatewayPreparing) {
+    return (
+      <ChatOffline
+        title={t('gatewayPreparing.title')}
+        description={t('gatewayPreparing.description')}
+        tone="loading"
+      />
+    );
+  }
+
   if (!isGatewayRunning) {
     return (
       <ChatOffline
@@ -779,6 +798,8 @@ export function Chat({ isActive = true }: ChatProps) {
         sidePanelWidth={sidePanelWidth}
         artifactWorkbenchFullscreen={artifactWorkbenchFullscreen}
         onSidePanelResize={setSidePanelWidth}
+        onComposerWheel={handleComposerWheel}
+        onComposerGeometryChange={handleComposerGeometryChange}
         isEmptyState={liveView.isEmptyState}
         emptyState={<WelcomeScreen input={inputNode} />}
         sidePanel={(
@@ -791,6 +812,7 @@ export function Chat({ isActive = true }: ChatProps) {
             onClose={closeSidePanel}
             onToggleArtifactWorkbenchFullscreen={toggleArtifactWorkbenchFullscreen}
             unfinishedTaskCount={unfinishedTaskCount}
+            derivedPlanStatus={derivedPlanStatus}
             skillConfigLabel={t('toolbar.skillConfig')}
             skillConfigTitle={t('skillConfigDialog.titleWithAgent', { agent: currentAgent?.name || currentAgentId })}
             skillOptions={availableSkillOptions}

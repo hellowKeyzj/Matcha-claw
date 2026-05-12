@@ -83,6 +83,23 @@ export class SessionGatewayIngressService {
         };
       }
 
+      if (event.sessionUpdate === 'plan') {
+        const snapshot = this.deps.snapshotService.buildSnapshot(sessionKey, this.deps.stateStore.getSessionState(sessionKey), {
+          replayComplete: true,
+        });
+        return {
+          sessionUpdate: 'plan',
+          sessionKey: event.sessionKey,
+          runId: event.runId,
+          taskSnapshot: event.taskSnapshot,
+          snapshot: {
+            ...snapshot,
+            taskSnapshot: event.taskSnapshot,
+          },
+          ...(event._meta ? { _meta: event._meta } : {}),
+        };
+      }
+
       const state = this.deps.stateStore.getSessionState(sessionKey);
       this.deps.stateStore.setActiveSessionKey(sessionKey);
       const mergedEntries = this.deps.timelineRuntime.upsertTimelineEntries(sessionKey, event.entries);

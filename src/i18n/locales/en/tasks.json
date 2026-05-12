@@ -8,6 +8,7 @@
         "long": "Long Tasks",
         "scheduled": "Scheduled Tasks"
     },
+    "gatewayPreparing": "Gateway is starting. Task data will refresh shortly.",
     "gatewayNotRunning": "Gateway is not running",
     "plugin": {
         "title": "Task Manager Plugin Required",

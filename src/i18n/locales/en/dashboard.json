@@ -4,6 +4,7 @@
     "port": "Port: {{port}}",
     "pid": "PID: {{pid}}",
     "sinceRestart": "Since last restart",
+    "gatewayPreparing": "Gateway is starting",
     "gatewayNotRunning": "Gateway not running",
     "recentTokenHistory": {
         "title": "Recent Token Usage",

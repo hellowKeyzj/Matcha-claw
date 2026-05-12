@@ -1185,7 +1185,7 @@ describe('gateway store event wiring', () => {
     }));
   });
 
-  it('task_manager.* 通知会进入 task center，并按 taskId 合并批量更新', async () => {
+  it('WorkBuddy task 通知会进入 task center，并按 taskId 合并批量更新', async () => {
     hostApiFetchMock.mockResolvedValueOnce(createRunningGatewayStatus());
     const handlers = new Map<string, (payload: unknown) => void>();
     subscribeHostEventMock.mockImplementation((eventName: string, handler: (payload: unknown) => void) => {
@@ -1193,30 +1193,23 @@ describe('gateway store event wiring', () => {
       return () => {};
     });
 
-    const { useTaskCenterStore } = await import('@/stores/task-center-store');
-    const handleGatewayNotificationMock = vi.fn();
-    useTaskCenterStore.setState({
-      handleGatewayNotification: handleGatewayNotificationMock,
-    } as never);
-
     const { useGatewayStore } = await import('@/stores/gateway');
+    const { useTaskSnapshotStore } = await import('@/stores/chat/task-snapshot-store');
     await useGatewayStore.getState().init();
 
     handlers.get('gateway:notification')?.({
-      method: 'task_manager.updated',
+      method: 'TaskUpdate',
       params: { task: { id: 'task-1', status: 'pending' } },
     });
     handlers.get('gateway:notification')?.({
-      method: 'task_manager.updated',
+      method: 'TaskUpdate',
       params: { task: { id: 'task-1', status: 'in_progress' } },
     });
 
     await new Promise((resolve) => setTimeout(resolve, 80));
 
-    expect(handleGatewayNotificationMock).toHaveBeenCalledTimes(1);
-    expect(handleGatewayNotificationMock).toHaveBeenCalledWith({
-      method: 'task_manager.updated',
-      params: { task: { id: 'task-1', status: 'in_progress' } },
-    });
+    expect(useTaskSnapshotStore.getState().getTaskDataList('agent:main:main')).toEqual([
+      expect.objectContaining({ id: 'task-1', status: 'in_progress' }),
+    ]);
   });
 });

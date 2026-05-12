@@ -1,6 +1,10 @@
 {
   "gatewayNotRunning": "Шлюз не запущен",
   "gatewayRequired": "Для использования чата требуется запущенный шлюз OpenClaw. Он запустится автоматически, или вы можете запустить его в Настройках.",
+  "gatewayPreparing": {
+    "title": "Preparing workspace",
+    "description": "Starting and connecting OpenClaw. You can start chatting in a moment."
+  },
   "welcome": {
     "title": "Чат MatchaClaw",
     "subtitle": "Чем могу помочь?",
@@ -159,6 +163,7 @@
     "unfinishedCount": "{{count}} unfinished tasks",
     "refresh": "Refresh tasks",
     "workspaceScope": "Scope: {{scope}}",
+    "gatewayPreparing": "Шлюз запускается; список задач скоро станет доступен",
     "gatewayStopped": "Gateway is stopped; task list and resume actions are unavailable",
     "empty": "No unfinished tasks in current workspace",
     "unboundSession": "No bound session yet, resume task first",
@@ -175,11 +180,18 @@
     "expand": "Expand task inbox",
     "status": {
       "pending": "Pending",
+      "in_progress": "In Progress",
       "running": "Running",
       "waiting_for_input": "Waiting Input",
       "waiting_approval": "Waiting Approval",
       "completed": "Completed",
+      "deleted": "Deleted",
       "failed": "Failed"
+    },
+    "planStatus": {
+      "finished": "Finished",
+      "building": "Building",
+      "ready": "Ready"
     },
     "toast": {
       "resumed": "Task resumed"

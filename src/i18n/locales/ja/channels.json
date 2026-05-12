@@ -18,6 +18,7 @@
         "starting": "起動中",
         "reconnecting": "再接続中"
     },
+    "gatewayPreparing": "ゲートウェイを起動中です。チャンネル接続はまもなく復旧します。",
     "gatewayWarning": "ゲートウェイサービスが実行されていないため、チャンネルに接続できません。",
     "available": "利用可能なチャンネル",
     "availableDesc": "新しいチャンネルを接続",

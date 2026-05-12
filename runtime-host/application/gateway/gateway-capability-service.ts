@@ -4,11 +4,14 @@ import type { GatewayConnectionPort } from './gateway-runtime-port';
 export const TASK_MANAGER_GATEWAY_PLUGIN = {
   pluginId: 'task-manager',
   methods: [
-    'task_manager.list',
-    'task_manager.get',
-    'task_manager.create',
-    'task_manager.update',
-    'task_manager.claim',
+    'TaskList',
+    'TaskGet',
+    'TaskCreate',
+    'TaskUpdate',
+    'TodoWrite',
+    'TodoGet',
+    'TaskOutput',
+    'TaskStop',
   ],
 } as const;
 

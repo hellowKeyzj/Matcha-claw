@@ -31,7 +31,7 @@ import {
   type RuleCatalogPlatform,
   type SecuritySectionKey,
 } from '@/stores/security-support-store';
-import { isGatewayOperational } from '@/lib/gateway-status';
+import { isGatewayOperational, isGatewayPreparing } from '@/lib/gateway-status';
 import { useTranslation } from 'react-i18next';
 
 type Preset = 'strict' | 'balanced' | 'relaxed';
@@ -136,7 +136,10 @@ function normalizeRuleReasonText(reason: string): string {
 export function SecurityPage() {
   const { t, i18n } = useTranslation('security');
   const gatewayStatus = useGatewayStore((state) => state.status);
+  const gatewayInitialized = useGatewayStore((state) => state.isInitialized);
   const gatewayProcessState = gatewayStatus.processState;
+  const gatewayOperational = isGatewayOperational(gatewayStatus);
+  const gatewayPreparing = isGatewayPreparing(gatewayStatus, gatewayInitialized);
 
   const policyReady = useSecurityPolicyStore((state) => state.policyReady);
   const initialLoading = useSecurityPolicyStore((state) => state.initialLoading);
@@ -214,8 +217,8 @@ export function SecurityPage() {
   }, [loadRuleCatalog]);
 
   const runSecurityOp = useCallback(async (name: string, runner: () => Promise<unknown>) => {
-    if (!isGatewayOperational(gatewayStatus)) {
-      toast.error(t('actionCenter.gatewayNotRunning'));
+    if (!gatewayOperational) {
+      toast.error(gatewayPreparing ? t('actionCenter.gatewayPreparing') : t('actionCenter.gatewayNotRunning'));
       return;
     }
     setSecurityOpBusy(name);
@@ -230,7 +233,7 @@ export function SecurityPage() {
     } finally {
       setSecurityOpBusy(null);
     }
-  }, [gatewayStatus, setSecurityOpBusy, setSecurityOpResult, t]);
+  }, [gatewayOperational, gatewayPreparing, setSecurityOpBusy, setSecurityOpResult, t]);
 
   const runtime = policy.runtime;
   const isDirty = useMemo(
@@ -877,7 +880,7 @@ export function SecurityPage() {
           <Button variant="outline" size="sm" onClick={() => void loadRecentAudits({ gatewayProcessState, page: 1, pageSize: 8 })}>{t('audit.refresh')}</Button>
         </CardHeader>
         <CardContent>
-          {!isGatewayOperational(gatewayStatus) ? <p className="text-sm text-muted-foreground">{t('audit.gatewayStopped')}</p> : loadingAudit ? <p className="text-sm text-muted-foreground">{t('audit.loading')}</p> : auditItems.length === 0 ? <p className="text-sm text-muted-foreground">{t('audit.empty')}</p> : (
+          {!gatewayOperational ? <p className="text-sm text-muted-foreground">{gatewayPreparing ? t('audit.gatewayPreparing') : t('audit.gatewayStopped')}</p> : loadingAudit ? <p className="text-sm text-muted-foreground">{t('audit.loading')}</p> : auditItems.length === 0 ? <p className="text-sm text-muted-foreground">{t('audit.empty')}</p> : (
             <div className="space-y-2">
               {auditItems.map((item, index) => (
                 <div key={`${item.ts}-${index}`} className="rounded-md border p-3">

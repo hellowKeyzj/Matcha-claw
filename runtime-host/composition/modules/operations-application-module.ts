@@ -69,6 +69,7 @@ import {
 import type { RuntimeHostApplicationServicesContext } from '../application-services';
 import type { RuntimeHostContainer } from '../container';
 import type { RuntimeLongTaskSubmissionPort } from '../../application/runtime-host/runtime-task-ports';
+import type { BackgroundTaskManager } from '../../services/background-task-manager';
 import type {
   RuntimeClockPort,
   RuntimeCommandExecutorPort,
@@ -165,6 +166,10 @@ export function registerOperationsApplicationServices(
     gateway: context.openclawBridge,
     capabilities: scope.resolve<GatewayPluginCapabilityPort>('gateway.capabilities'),
     clock: scope.resolve<RuntimeClockPort>('runtime.clock'),
+    backgroundTasks: scope.resolve<BackgroundTaskManager>('runtime.backgroundTasks'),
+    emitTaskSnapshot: (event) => {
+      void context.parentGatewayEvents.emit('task:snapshot', event).catch(() => undefined);
+    },
   }));
   container.register('toolchainUv.service', (scope) => new ToolchainUvService(
     scope.resolve<OpenClawEnvironmentRepository>('openclaw.environmentRepository'),
@@ -379,7 +384,7 @@ export function registerOperationsLifecycle(
       {
         name: 'cron.jobs-refresh',
         start: () => {
-          container.resolve<CronRuntimeJobPort>('cron.jobs').submitRefreshJobs();
+          void container.resolve<CronService>('cron.service').listJobs();
         },
       },
     ],

@@ -1,8 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type RefObject } from 'react';
 import { useGatewayStore } from '@/stores/gateway';
 import { useLayoutStore } from '@/stores/layout';
-import { useTaskInboxStore } from '@/stores/task-inbox-store';
+import { useChatStore } from '@/stores/chat';
+import { useTaskCenterStore } from '@/stores/task-center-store';
+import { useTaskSnapshotStore } from '@/stores/chat/task-snapshot-store';
 import { isGatewayOperational } from '@/lib/gateway-status';
+import { filterUnfinishedTasks } from '@/lib/task-domain';
 import {
   clampChatSidePanelWidth,
   getDefaultChatSidePanelWidth,
@@ -66,17 +69,19 @@ export function useChatSidePanelController(
   const chatTakeoverMode = useLayoutStore((state) => state.chatTakeoverMode);
   const setChatTakeoverMode = useLayoutStore((state) => state.setChatTakeoverMode);
   const clearChatTakeoverMode = useLayoutStore((state) => state.clearChatTakeoverMode);
-  const tasks = useTaskInboxStore((state) => state.tasks);
-  const initialized = useTaskInboxStore((state) => state.initialized);
-  const init = useTaskInboxStore((state) => state.init);
-  const refreshTasks = useTaskInboxStore((state) => state.refreshTasks);
+  const currentSessionKey = useChatStore((state) => state.currentSessionKey);
+  const tasks = useTaskSnapshotStore((state) => state.getTaskDataList(currentSessionKey));
+  const derivedPlanStatus = useTaskSnapshotStore((state) => state.getDerivedPlanStatus(currentSessionKey));
+  const initialized = useTaskCenterStore((state) => state.initialized);
+  const init = useTaskCenterStore((state) => state.init);
+  const refreshTasks = useTaskCenterStore((state) => state.refreshTasks);
   const resizeRafRef = useRef<number | null>(null);
   const [panelState, setPanelState] = useState<ChatSidePanelState>(() => readStoredPanelState());
   const [containerWidth, setContainerWidth] = useState<number>(() => (
     typeof window === 'undefined' ? 0 : readContainerWidth(chatLayoutRef)
   ));
   const isGatewayRunning = isGatewayOperational(gatewayStatus);
-  const unfinishedTaskCount = tasks.length;
+  const unfinishedTaskCount = useMemo(() => filterUnfinishedTasks(tasks).length, [tasks]);
   const hasActiveTasks = useMemo(
     () => tasks.some((task) => task.status === 'pending' || task.status === 'in_progress'),
     [tasks],
@@ -162,11 +167,11 @@ export function useChatSidePanelController(
       return;
     }
     if (!initialized) {
-      void init();
+      void init(currentSessionKey);
       return;
     }
-    void refreshTasks();
-  }, [enabled, init, initialized, isGatewayRunning, refreshTasks]);
+    void refreshTasks({ sessionKey: currentSessionKey });
+  }, [currentSessionKey, enabled, init, initialized, isGatewayRunning, refreshTasks]);
 
   useEffect(() => {
     if (!enabled || !isGatewayRunning || !initialized) {
@@ -196,7 +201,7 @@ export function useChatSidePanelController(
       }
       clearTimer();
       timer = window.setTimeout(() => {
-        void refreshTasks().finally(() => {
+          void refreshTasks({ sessionKey: currentSessionKey }).finally(() => {
           scheduleNext();
         });
       }, resolveDelay());
@@ -208,7 +213,7 @@ export function useChatSidePanelController(
       }
       clearTimer();
       if (document.visibilityState === 'visible') {
-        void refreshTasks().finally(() => {
+        void refreshTasks({ sessionKey: currentSessionKey }).finally(() => {
           scheduleNext();
         });
         return;
@@ -223,7 +228,7 @@ export function useChatSidePanelController(
       clearTimer();
       document.removeEventListener('visibilitychange', handleVisibilityChange);
     };
-  }, [enabled, hasActiveTasks, initialized, isGatewayRunning, refreshTasks]);
+  }, [currentSessionKey, enabled, hasActiveTasks, initialized, isGatewayRunning, refreshTasks]);
 
   const toggleSidePanel = useCallback(() => {
     setPanelState((prev) => ({
@@ -300,6 +305,7 @@ export function useChatSidePanelController(
     activeSidePanelTab: panelState.activeTab,
     artifactWorkbenchFullscreen,
     unfinishedTaskCount,
+    derivedPlanStatus,
     toggleSidePanel,
     setActiveSidePanelTab,
     closeSidePanel,

@@ -98,6 +98,12 @@ async function buildSessionCatalogItem(input: {
     agentId,
     kind,
     preferred: kind === 'main',
+    status: input.storageDescriptor?.sessionStoreEntry?.status === 'archived'
+      || input.storageDescriptor?.sessionStoreEntry?.status === 'deleted'
+      || input.storageDescriptor?.sessionStoreEntry?.status === 'completed'
+      || input.storageDescriptor?.sessionStoreEntry?.status === 'active'
+      ? input.storageDescriptor.sessionStoreEntry.status
+      : 'completed',
     ...(label.label ? { label: label.label } : {}),
     ...(label.titleSource !== 'none' ? { titleSource: label.titleSource } : {}),
     displayName: input.sessionKey,
@@ -185,7 +191,8 @@ export class SessionCatalogService implements SessionCatalogPort {
       sessionsByKey.set(overlay.sessionKey, this.buildOverlayCatalogItem(overlay, cached));
     }
 
-    const sessions = Array.from(sessionsByKey.values());
+    const sessions = Array.from(sessionsByKey.values())
+      .filter((session) => session.status !== 'archived' && session.status !== 'deleted');
     this.sortSessions(sessions);
     return {
       sessions,
@@ -246,6 +253,7 @@ export class SessionCatalogService implements SessionCatalogPort {
       kind,
       preferred: kind === 'main',
       ...(cached ?? {}),
+      status: cached?.status ?? 'completed',
       ...(label.label ? { label: label.label } : {}),
       ...(label.titleSource !== 'none' ? { titleSource: label.titleSource } : {}),
       displayName: cached?.displayName ?? overlay.sessionKey,

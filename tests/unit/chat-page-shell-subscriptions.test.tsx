@@ -107,11 +107,13 @@ vi.mock('@/pages/Chat/components/ChatOffline', () => ({
   ChatOffline: ({
     title,
     description,
+    tone,
   }: {
     title: string;
     description: string;
+    tone?: string;
   }) => (
-    <div data-testid="chat-offline">
+    <div data-testid="chat-offline" data-tone={tone ?? 'error'}>
       <div data-testid="chat-offline-title">{title}</div>
       <div data-testid="chat-offline-description">{description}</div>
     </div>
@@ -179,6 +181,7 @@ describe('chat 顶层订阅收口', () => {
         },
         updatedAt: 1,
       },
+      isInitialized: true,
       rpc: vi.fn(),
     } as never);
 
@@ -347,8 +350,9 @@ describe('chat 顶层订阅收口', () => {
     expect(screen.getByTestId('chat-error-banner')).toHaveTextContent('errors.activeRunDisconnected');
   });
 
-  it('gateway transport 断开时，离线页应显示具体 transport 错误原因', () => {
+  it('gateway 进程仍在恢复时，socket 1006 不应显示为断连错误', () => {
     useGatewayStore.setState({
+      isInitialized: true,
       status: {
         processState: 'running',
         port: 18789,
@@ -379,9 +383,76 @@ describe('chat 顶层订阅收口', () => {
     );
 
     expect(screen.getByTestId('chat-offline')).toBeInTheDocument();
-    expect(screen.getByTestId('chat-offline-description')).toHaveTextContent(
-      'errors.gatewaySocketClosed',
+    expect(screen.getByTestId('chat-offline')).toHaveAttribute('data-tone', 'loading');
+    expect(screen.getByTestId('chat-offline-title')).toHaveTextContent('gatewayPreparing.title');
+    expect(screen.getByTestId('chat-offline-description')).toHaveTextContent('gatewayPreparing.description');
+  });
+
+  it('gateway 进程停止后，离线页应显示具体 transport 错误原因', () => {
+    useGatewayStore.setState({
+      isInitialized: true,
+      status: {
+        processState: 'stopped',
+        port: 18789,
+        gatewayReady: false,
+        healthSummary: 'unresponsive',
+        transportState: 'disconnected',
+        portReachable: false,
+        lastError: 'Gateway socket closed: code=1006 reason=network down',
+        lastIssue: {
+          message: 'Gateway socket closed: code=1006 reason=network down',
+          source: 'socket-close',
+          at: 1,
+          code: '1006',
+          details: { reason: 'network down' },
+        },
+        diagnostics: {
+          consecutiveHeartbeatMisses: 1,
+          consecutiveRpcFailures: 0,
+        },
+        updatedAt: 2,
+      },
+    } as never);
+
+    render(
+      <MemoryRouter>
+        <Chat isActive={false} />
+      </MemoryRouter>,
     );
+
+    expect(screen.getByTestId('chat-offline')).toBeInTheDocument();
+    expect(screen.getByTestId('chat-offline')).toHaveAttribute('data-tone', 'error');
+    expect(screen.getByTestId('chat-offline-description')).toHaveTextContent('errors.gatewaySocketClosed');
+  });
+
+  it('应用刚启动、gateway 状态尚未初始化时，应显示准备中而不是断连错误', () => {
+    useGatewayStore.setState({
+      isInitialized: false,
+      status: {
+        processState: 'stopped',
+        port: 18789,
+        gatewayReady: false,
+        healthSummary: 'unresponsive',
+        transportState: 'disconnected',
+        portReachable: false,
+        lastError: 'Gateway socket closed: code=1006 reason=unknown',
+        diagnostics: {
+          consecutiveHeartbeatMisses: 0,
+          consecutiveRpcFailures: 0,
+        },
+        updatedAt: 2,
+      },
+    } as never);
+
+    render(
+      <MemoryRouter>
+        <Chat isActive={false} />
+      </MemoryRouter>,
+    );
+
+    expect(screen.getByTestId('chat-offline')).toHaveAttribute('data-tone', 'loading');
+    expect(screen.getByTestId('chat-offline-title')).toHaveTextContent('gatewayPreparing.title');
+    expect(screen.getByTestId('chat-offline-description')).toHaveTextContent('gatewayPreparing.description');
   });
 
   it('当前会话仍在发送时，应优先把 gateway transport issue 映射为本地化错误 banner', () => {

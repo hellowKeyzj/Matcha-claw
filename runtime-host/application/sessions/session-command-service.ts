@@ -13,7 +13,6 @@ import {
 import {
   readAbortSessionKey,
   readCreateSessionRequest,
-  readDeleteSessionKey,
   readPatchSessionRequest,
   readRequiredSessionKey,
   readSessionWindowRequest,
@@ -39,9 +38,9 @@ import type {
   SessionHydrationJobSubmission,
 } from './session-hydration-jobs';
 import type { SessionCatalogJobPort } from './session-catalog-jobs';
+import type { TaskSnapshotEvent } from '../../shared/session-adapter-types';
 
 export interface SessionCommandServiceDeps {
-  resolveDeletedPath?: (path: string) => string;
   sessionCatalog: SessionCatalogPort;
   sessionCatalogJobs: Pick<SessionCatalogJobPort, 'submitRefreshCatalog' | 'getRefreshCatalogJob'>;
   sessionStorage: SessionStoragePort;
@@ -52,6 +51,8 @@ export interface SessionCommandServiceDeps {
   clock: RuntimeClockPort;
   idGenerator: RuntimeIdGeneratorPort;
   sessionHydrationJobs: SessionHydrationJobPort;
+  readTaskSnapshot?: (sessionKey: string) => Promise<TaskSnapshotEvent | null>;
+  emitTaskSnapshot?: (event: TaskSnapshotEvent) => void;
 }
 
 type SessionHydratingLoadResult = SessionLoadResult & {
@@ -75,23 +76,40 @@ export class SessionCommandService {
     }).job;
   }
 
+  private withTaskSnapshot<T extends { snapshot: SessionLoadResult['snapshot'] }>(
+    sessionKey: string,
+    result: T,
+  ): T {
+    if (!this.deps.readTaskSnapshot) {
+      return result;
+    }
+    void this.deps.readTaskSnapshot(sessionKey)
+      .then((taskSnapshot) => {
+        if (taskSnapshot) {
+          this.deps.emitTaskSnapshot?.(taskSnapshot);
+        }
+      })
+      .catch(() => undefined);
+    return result;
+  }
+
   async createSession(payload: unknown): Promise<ApplicationResponseOf<SessionNewResult>> {
     const { explicitSessionKey, canonicalPrefix } = readCreateSessionRequest(payload);
     const sessionKey = explicitSessionKey || `${canonicalPrefix}:session-${this.deps.clock.nowMs()}-${this.deps.idGenerator.randomId()}`;
     const state = await this.deps.timelineRuntime.activateSession(sessionKey, {
       resetWindowToLatest: true,
     });
-    const result: SessionNewResult = {
+    const result: SessionNewResult = this.withTaskSnapshot(sessionKey, {
       success: true,
       sessionKey,
       snapshot: await this.deps.snapshotService.buildLatestSnapshotAsync(sessionKey, state),
-    };
+    });
     await this.deps.stateStore.flushPersistedStore();
     return ok(result);
   }
 
   async deleteSession(payload: unknown): Promise<ApplicationResponseOf> {
-    const sessionKey = readDeleteSessionKey(payload);
+    const sessionKey = readRequiredSessionKey(payload);
     if (!sessionKey || !sessionKey.startsWith('agent:')) {
       return badRequest(`Invalid sessionKey: ${sessionKey}`);
     }
@@ -100,11 +118,52 @@ export class SessionCommandService {
       return notFound(`Unknown sessionKey: ${sessionKey}`);
     }
 
-    await this.deps.sessionStorage.deleteSessionStorage(sessionKey, this.deps.resolveDeletedPath);
+    await this.deps.sessionStorage.updateSessionStatus(sessionKey, 'deleted');
     this.deps.stateStore.deleteSessionState(sessionKey);
     this.deps.stateStore.persistStore();
     await this.deps.stateStore.flushPersistedStore();
     return ok({ success: true });
+  }
+
+  async archiveSession(payload: unknown): Promise<ApplicationResponseOf> {
+    return await this.updateSessionStatus(payload, 'archived');
+  }
+
+  async unarchiveSession(payload: unknown): Promise<ApplicationResponseOf> {
+    return await this.updateSessionStatus(payload, 'completed');
+  }
+
+  async updateSessionStatus(
+    payload: unknown,
+    forcedStatus?: 'active' | 'completed' | 'archived' | 'deleted',
+  ): Promise<ApplicationResponseOf> {
+    const sessionKey = readRequiredSessionKey(payload);
+    if (!sessionKey) {
+      return badRequest('sessionKey is required');
+    }
+    const body = payload && typeof payload === 'object' && !Array.isArray(payload)
+      ? payload as Record<string, unknown>
+      : {};
+    const status = forcedStatus ?? (
+      body.status === 'active'
+      || body.status === 'completed'
+      || body.status === 'archived'
+      || body.status === 'deleted'
+        ? body.status
+        : null
+    );
+    if (!status) {
+      return badRequest('status is required');
+    }
+    const updated = await this.deps.sessionStorage.updateSessionStatus(sessionKey, status);
+    if (!updated) {
+      return notFound(`Unknown sessionKey: ${sessionKey}`);
+    }
+    if (status === 'deleted') {
+      this.deps.stateStore.deleteSessionState(sessionKey);
+    }
+    await this.deps.sessionCatalog.refreshCache().catch(() => undefined);
+    return ok({ success: true, sessionKey, status });
   }
 
   async listSessions(): Promise<ApplicationResponseOf<SessionListResult>> {
@@ -133,11 +192,11 @@ export class SessionCommandService {
     const state = await this.deps.timelineRuntime.activateSession(sessionKey, {
       resetWindowToLatest: true,
     });
-    const result: SessionLoadResult = {
+    const result: SessionLoadResult = this.withTaskSnapshot(sessionKey, {
       snapshot: await this.deps.snapshotService.buildLatestSnapshotAsync(sessionKey, state, {
         replayComplete: state.hydrated,
       }),
-    };
+    });
     await this.deps.stateStore.flushPersistedStore();
     if (!state.hydrated) {
       return accepted({
@@ -160,14 +219,14 @@ export class SessionCommandService {
     const state = await this.deps.timelineRuntime.activateSession(sessionKey, {
       resetWindowToLatest: false,
     });
-    const result: SessionLoadResult = {
+    const result: SessionLoadResult = this.withTaskSnapshot(sessionKey, {
       snapshot: await this.deps.snapshotService.buildSnapshotAsync(sessionKey, state, {
         window: state.window.totalItemCount > 0
           ? state.window
           : createLatestWindowState(state.renderItems.length),
         replayComplete: state.hydrated,
       }),
-    };
+    });
     await this.deps.stateStore.flushPersistedStore();
     if (!state.hydrated) {
       return accepted({
@@ -220,14 +279,14 @@ export class SessionCommandService {
       return badRequest('sessionKey is required');
     }
     const state = await this.deps.timelineRuntime.activateSession(sessionKey);
-    const data: SessionLoadResult = {
+    const data: SessionLoadResult = this.withTaskSnapshot(sessionKey, {
       snapshot: await this.deps.snapshotService.buildSnapshotAsync(sessionKey, state, {
         window: state.window.totalItemCount > 0
           ? state.window
           : createLatestWindowState(state.renderItems.length),
         replayComplete: state.hydrated,
       }),
-    };
+    });
     await this.deps.stateStore.flushPersistedStore();
     if (!state.hydrated) {
       return accepted({
@@ -258,14 +317,14 @@ export class SessionCommandService {
 
     const state = await this.deps.timelineRuntime.activateSession(sessionKey);
     if (!state.hydrated) {
-      const result: SessionWindowResult = {
+      const result: SessionWindowResult = this.withTaskSnapshot(sessionKey, {
         snapshot: await this.deps.snapshotService.buildSnapshotAsync(sessionKey, state, {
           window: state.window.totalItemCount > 0
             ? state.window
             : createLatestWindowState(state.renderItems.length),
           replayComplete: false,
         }),
-      };
+      });
       await this.deps.stateStore.flushPersistedStore();
       return accepted({
         ...result,
@@ -280,13 +339,13 @@ export class SessionCommandService {
         }),
       });
     }
-    const result: SessionWindowResult = {
+    const result: SessionWindowResult = this.withTaskSnapshot(sessionKey, {
       snapshot: await this.deps.snapshotService.buildWindowSnapshotAsync(sessionKey, state, {
         mode,
         limit,
         offset,
       }),
-    };
+    });
     await this.deps.stateStore.flushPersistedStore();
     return ok(result);
   }
@@ -383,7 +442,7 @@ export class SessionCommandService {
             replayComplete: true,
           });
     await this.deps.stateStore.flushPersistedStore();
-    return { snapshot };
+    return this.withTaskSnapshot(sessionKey, { snapshot });
   }
 
   private readHydrationSnapshotRequest(payload: unknown): {

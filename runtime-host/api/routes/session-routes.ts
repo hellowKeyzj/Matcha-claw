@@ -8,6 +8,9 @@ interface SessionRouteService {
   promptSession: (payload: unknown) => Promise<ApplicationResponse>;
   patchSession: (payload: unknown) => Promise<ApplicationResponse>;
   deleteSession: (payload: unknown) => Promise<ApplicationResponse>;
+  archiveSession: (payload: unknown) => Promise<ApplicationResponse>;
+  unarchiveSession: (payload: unknown) => Promise<ApplicationResponse>;
+  updateSessionStatus: (payload: unknown) => Promise<ApplicationResponse>;
   switchSession: (payload: unknown) => Promise<ApplicationResponse>;
   resumeSession: (payload: unknown) => Promise<ApplicationResponse>;
   getSessionStateSnapshot: (payload: unknown) => Promise<ApplicationResponse>;
@@ -25,6 +28,9 @@ export const sessionRoutes: readonly RuntimeRouteDefinition<SessionRouteService>
   { method: 'POST', path: '/api/session/prompt', handle: (context, service) => routeResponder.result(() => service.promptSession(context.payload)) },
   { method: 'POST', path: '/api/session/patch', handle: (context, service) => routeResponder.result(() => service.patchSession(context.payload)) },
   { method: 'POST', path: '/api/sessions/delete', handle: (context, service) => routeResponder.result(() => service.deleteSession(context.payload)) },
+  { method: 'POST', path: '/api/sessions/archive', handle: (context, service) => routeResponder.result(() => service.archiveSession(context.payload)) },
+  { method: 'POST', path: '/api/sessions/unarchive', handle: (context, service) => routeResponder.result(() => service.unarchiveSession(context.payload)) },
+  { method: 'POST', path: '/api/sessions/status', handle: (context, service) => routeResponder.result(() => service.updateSessionStatus(context.payload)) },
   { method: 'POST', path: '/api/session/switch', handle: (context, service) => routeResponder.result(() => service.switchSession(context.payload)) },
   { method: 'POST', path: '/api/session/resume', handle: (context, service) => routeResponder.result(() => service.resumeSession(context.payload)) },
   { method: 'POST', path: '/api/session/state', handle: (context, service) => routeResponder.result(() => service.getSessionStateSnapshot(context.payload)) },

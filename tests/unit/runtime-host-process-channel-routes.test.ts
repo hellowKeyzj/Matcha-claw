@@ -16,6 +16,11 @@ function createDeps() {
       channelsConnect: vi.fn(async () => ({ success: true })),
       channelsDisconnect: vi.fn(async () => ({ success: true })),
       channelsRequestQr: vi.fn(async () => ({ qrCode: 'qr-code', sessionId: 'session-1' })),
+      readGatewayConnectionState: vi.fn(async () => ({
+        state: 'connected',
+        gatewayReady: true,
+        portReachable: true,
+      })),
     },
     listConfiguredChannels: vi.fn(async () => []),
     validateChannelConfig: vi.fn(async () => ({ valid: true, errors: [], warnings: [] })),
@@ -115,8 +120,13 @@ describe('runtime-host process channel routes', () => {
     vi.clearAllMocks();
   });
 
-  it('snapshot 只返回本地快照并提交后台刷新任务', async () => {
+  it('snapshot 在 Gateway 未 ready 时只返回未就绪状态，不提交刷新任务', async () => {
     const deps = createDeps();
+    deps.openclawBridge.readGatewayConnectionState.mockResolvedValueOnce({
+      state: 'disconnected',
+      gatewayReady: false,
+      portReachable: false,
+    });
 
     const snapshotResult = await dispatchRuntimeRouteDefinition(channelRoutes, 
       'GET',
@@ -127,7 +137,33 @@ describe('runtime-host process channel routes', () => {
     );
 
     expect(deps.submitRefreshSnapshot).not.toHaveBeenCalled();
-    expect(deps.openclawBridge.channelsStatus).toHaveBeenCalledTimes(1);
+    expect(deps.openclawBridge.channelsStatus).not.toHaveBeenCalled();
+    expect(snapshotResult).toEqual({
+      status: 200,
+      data: {
+        success: true,
+        snapshot: null,
+        ready: false,
+        refreshing: false,
+        updatedAt: null,
+        error: null,
+      },
+    });
+  });
+
+  it('snapshot 在 Gateway ready 后提交后台刷新任务并立即返回本地快照', async () => {
+    const deps = createDeps();
+
+    const snapshotResult = await dispatchRuntimeRouteDefinition(channelRoutes,
+      'GET',
+      '/api/channels/snapshot',
+      new URL('http://127.0.0.1/api/channels/snapshot'),
+      undefined,
+      deps.routeDeps,
+    );
+
+    expect(deps.submitRefreshSnapshot).toHaveBeenCalledTimes(1);
+    expect(deps.openclawBridge.channelsStatus).not.toHaveBeenCalled();
     expect(snapshotResult).toEqual({
       status: 200,
       data: {

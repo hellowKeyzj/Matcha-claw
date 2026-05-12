@@ -9,7 +9,7 @@ const jiti = jitiFactory(import.meta.url, { interopDefault: true });
 const plugin = jiti("../index.ts");
 
 function createMockApi(pluginConfig, openclawConfig, logs, runtimeAuthResolver) {
-  return {
+  const api = {
     config: openclawConfig,
     pluginConfig,
     hooks: {},
@@ -38,12 +38,32 @@ function createMockApi(pluginConfig, openclawConfig, logs, runtimeAuthResolver) 
       this.services.push(service);
     },
     on(name, handler) {
-      this.hooks[name] = handler;
+      const existing = this.hooks[name];
+      if (!existing) {
+        this.hooks[name] = handler;
+        return;
+      }
+
+      const handlers = existing.__handlers || [existing];
+      handlers.push(handler);
+      const composite = (...args) => {
+        for (const current of handlers) {
+          current(...args);
+        }
+        composite.__lastRun = Promise.all(
+          handlers
+            .map((current) => current.__lastRun)
+            .filter(Boolean),
+        );
+      };
+      composite.__handlers = handlers;
+      this.hooks[name] = composite;
     },
     registerHook(name, handler) {
-      this.hooks[name] = handler;
+      this.on(name, handler);
     },
   };
+  return api;
 }
 
 test("smart extraction inherits OpenClaw default LLM through runtime modelAuth for custom providers", async () => {

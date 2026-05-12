@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
-  buildTaskInboxBridgeState,
-  normalizeTaskInboxSessionKey,
+  buildTaskBridgeState,
+  normalizeTaskSessionKey,
   parseSessionUpdatedAtMs,
   readSessionsFromState,
   resolvePreferredSessionKeyForAgent,
@@ -169,9 +169,9 @@ describe('chat session helpers', () => {
     expect(keepLocalEmptyDraft).toBe(true);
   });
 
-  it('builds task inbox bridge state from current session runtime flags', () => {
-    expect(normalizeTaskInboxSessionKey(' ', 'agent:main:main')).toBe('agent:main:main');
-    const bridge = buildTaskInboxBridgeState(
+  it('builds task bridge state from current session runtime flags', () => {
+    expect(normalizeTaskSessionKey(' ', 'agent:main:main')).toBe('agent:main:main');
+    const bridge = buildTaskBridgeState(
       {
         currentSessionKey: 'agent:foo:main',
         loadedSessions: {

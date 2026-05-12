@@ -1,4 +1,4 @@
-import type { ChatSession, ChatStoreState, TaskInboxChatBridgeState } from './types';
+import type { ChatSession, ChatStoreState, TaskChatBridgeState } from './types';
 import {
   getSessionMeta,
   getSessionItemCount,
@@ -213,7 +213,7 @@ export function parseSessionCreatedAtMs(sessionKey: string): number | null {
   return Number.isFinite(createdAtMs) && createdAtMs > 0 ? createdAtMs : null;
 }
 
-export function normalizeTaskInboxSessionKey(sessionKey: string | undefined, fallback: string): string {
+export function normalizeTaskSessionKey(sessionKey: string | undefined, fallback: string): string {
   const normalized = typeof sessionKey === 'string' ? sessionKey.trim() : '';
   if (normalized.length > 0) {
     return normalized;
@@ -222,11 +222,11 @@ export function normalizeTaskInboxSessionKey(sessionKey: string | undefined, fal
   return fallbackNormalized || fallback;
 }
 
-export function buildTaskInboxBridgeState(
+export function buildTaskBridgeState(
   state: Pick<ChatStoreState, 'currentSessionKey' | 'loadedSessions'>,
   defaultSessionKey: string,
-): TaskInboxChatBridgeState {
-  const sessionKey = normalizeTaskInboxSessionKey(state.currentSessionKey, defaultSessionKey);
+): TaskChatBridgeState {
+  const sessionKey = normalizeTaskSessionKey(state.currentSessionKey, defaultSessionKey);
   const runtime = getSessionRuntime(state, sessionKey);
   return {
     sessionKey,

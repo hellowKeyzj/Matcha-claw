@@ -5,9 +5,7 @@ import { normalizeStringList } from '../shared/params.js'
 export const taskListParameters = {
   type: 'object',
   additionalProperties: false,
-  properties: {
-    taskListId: { type: 'string' },
-  },
+  properties: {},
 } as const
 
 export const taskGetParameters = {
@@ -15,19 +13,28 @@ export const taskGetParameters = {
   additionalProperties: false,
   required: ['taskId'],
   properties: {
-    taskListId: { type: 'string' },
     taskId: { type: 'string' },
   },
 } as const
 
-export const taskClaimParameters = {
+export const backgroundTaskParameters = {
   type: 'object',
   additionalProperties: false,
   required: ['taskId'],
   properties: {
-    taskListId: { type: 'string' },
     taskId: { type: 'string' },
-    owner: { type: 'string' },
+    wait: { type: 'boolean' },
+    timeoutMs: { type: 'number' },
+  },
+} as const
+
+export const todoWriteParameters = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['newTodos'],
+  properties: {
+    oldTodos: { type: 'array', items: { type: 'object', additionalProperties: true } },
+    newTodos: { type: 'array', items: { type: 'object', additionalProperties: true } },
   },
 } as const
 

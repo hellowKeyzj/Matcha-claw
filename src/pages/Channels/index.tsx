@@ -42,7 +42,7 @@ import {
   hostChannelsValidateCredentials,
 } from '@/lib/channel-runtime';
 import { subscribeHostEvent } from '@/lib/host-events';
-import { isGatewayOperational } from '@/lib/gateway-status';
+import { isGatewayOperational, isGatewayPreparing } from '@/lib/gateway-status';
 import { useDelayedFlag } from '@/lib/use-delayed-flag';
 import { cn } from '@/lib/utils';
 import {
@@ -123,6 +123,7 @@ export function Channels() {
   const fetchChannels = useChannelsStore((state) => state.fetchChannels);
   const deleteChannel = useChannelsStore((state) => state.deleteChannel);
   const gatewayStatus = useGatewayStore((state) => state.status);
+  const gatewayInitialized = useGatewayStore((state) => state.isInitialized);
 
   const [showAddDialog, setShowAddDialog] = useState(false);
   const [selectedChannelType, setSelectedChannelType] = useState<ChannelType | null>(null);
@@ -213,6 +214,8 @@ export function Channels() {
 
   // Connected/disconnected channel counts
   const connectedCount = configuredChannels.filter((c) => c.status === 'connected').length;
+  const gatewayOperational = isGatewayOperational(gatewayStatus);
+  const gatewayPreparing = isGatewayPreparing(gatewayStatus, gatewayInitialized);
   const showInitialLoading = !snapshotReady && initialLoading;
   const manualRefreshBusy = refreshing || mutating;
   const showRefreshingHint = useDelayedFlag(refreshing && snapshotReady, 180);
@@ -285,12 +288,16 @@ export function Channels() {
       )}
 
       {/* Gateway Warning */}
-      {!isGatewayOperational(gatewayStatus) && (
-        <Card className="border-yellow-500 bg-yellow-50 dark:bg-yellow-900/10">
+      {!gatewayOperational && (
+        <Card className={gatewayPreparing ? 'border-border bg-muted/30' : 'border-yellow-500 bg-yellow-50 dark:bg-yellow-900/10'}>
           <CardContent className="py-4 flex items-center gap-3">
-            <AlertCircle className="h-5 w-5 text-yellow-500" />
-            <span className="text-yellow-700 dark:text-yellow-400">
-              {t('gatewayWarning')}
+            {gatewayPreparing ? (
+              <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
+            ) : (
+              <AlertCircle className="h-5 w-5 text-yellow-500" />
+            )}
+            <span className={gatewayPreparing ? 'text-muted-foreground' : 'text-yellow-700 dark:text-yellow-400'}>
+              {gatewayPreparing ? t('gatewayPreparing') : t('gatewayWarning')}
             </span>
           </CardContent>
         </Card>

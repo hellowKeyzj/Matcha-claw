@@ -8,6 +8,7 @@
     "long": "Long Tasks",
     "scheduled": "Scheduled Tasks"
   },
+  "gatewayPreparing": "Шлюз запускается. Данные задач скоро обновятся.",
   "gatewayNotRunning": "Gateway is not running",
   "plugin": {
     "title": "Task Manager Plugin Required",

@@ -1,5 +1,6 @@
 import { basename, dirname, extname, join } from 'node:path';
 import type { GatewayRpcPort } from '../gateway/gateway-runtime-port';
+import { isGatewayReadyForSnapshot, isGatewayStartupConnectionError } from '../gateway/gateway-readiness';
 import {
   accepted,
   badRequest,
@@ -71,8 +72,10 @@ export class SkillsService {
 
   constructor(private readonly deps: SkillsServiceDeps) {}
 
-  status() {
-    this.deps.jobs.submitRefreshStatus();
+  async status() {
+    if (await isGatewayReadyForSnapshot(this.deps.gateway)) {
+      this.deps.jobs.submitRefreshStatus();
+    }
     return {
       success: true,
       ...(isRecord(this.statusSnapshot) ? this.statusSnapshot : { result: this.statusSnapshot }),
@@ -83,6 +86,15 @@ export class SkillsService {
   }
 
   async refreshStatus() {
+    if (!(await isGatewayReadyForSnapshot(this.deps.gateway))) {
+      return {
+        success: true,
+        ...(isRecord(this.statusSnapshot) ? this.statusSnapshot : { result: this.statusSnapshot }),
+        ready: this.statusSnapshotReady,
+        updatedAt: this.statusSnapshotUpdatedAt,
+        error: this.statusSnapshotError,
+      };
+    }
     try {
       this.statusSnapshot = await this.deps.gateway.gatewayRpc('skills.status');
       this.statusSnapshotReady = true;
@@ -94,6 +106,15 @@ export class SkillsService {
         updatedAt: this.statusSnapshotUpdatedAt,
       };
     } catch (error) {
+      if (isGatewayStartupConnectionError(error)) {
+        return {
+          success: true,
+          ...(isRecord(this.statusSnapshot) ? this.statusSnapshot : { result: this.statusSnapshot }),
+          ready: this.statusSnapshotReady,
+          updatedAt: this.statusSnapshotUpdatedAt,
+          error: this.statusSnapshotError,
+        };
+      }
       this.statusSnapshotError = error instanceof Error ? error.message : String(error);
       throw error;
     }

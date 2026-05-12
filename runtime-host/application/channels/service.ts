@@ -7,6 +7,7 @@ import {
 } from '../common/application-response';
 import type { RuntimeClockPort } from '../common/runtime-ports';
 import type { GatewayChannelPort } from '../gateway/gateway-runtime-port';
+import { isGatewayReadyForSnapshot } from '../gateway/gateway-readiness';
 import type { ParentShellPort } from '../runtime-host/parent-shell-port';
 import { channelUsesLoginSession } from './channel-activation-strategy';
 import type { ChannelJobPort } from './channel-jobs';
@@ -58,13 +59,17 @@ export class ChannelService {
     return await this.restartGateway();
   }
 
-  snapshot() {
-    void this.refreshSnapshotInBackground();
+  async snapshot() {
+    let refreshSubmitted = false;
+    if (await isGatewayReadyForSnapshot(this.deps.gateway)) {
+      this.deps.jobs.submitRefreshSnapshot();
+      refreshSubmitted = true;
+    }
     return {
       success: true,
       snapshot: this.snapshotValue,
       ready: this.snapshotReady,
-      refreshing: this.snapshotRefreshTask !== null,
+      refreshing: refreshSubmitted || this.snapshotRefreshTask !== null,
       updatedAt: this.snapshotUpdatedAt,
       error: this.snapshotError,
     };

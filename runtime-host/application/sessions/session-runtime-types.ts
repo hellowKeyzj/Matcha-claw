@@ -16,10 +16,6 @@ export interface SessionLoadPayload {
   sessionKey?: unknown;
 }
 
-export interface SessionDeletePayload {
-  sessionKey?: unknown;
-}
-
 export interface SessionWindowPayload {
   sessionKey?: unknown;
   mode?: unknown;

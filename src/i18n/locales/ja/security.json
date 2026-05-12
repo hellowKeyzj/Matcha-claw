@@ -227,6 +227,7 @@
   "actionCenter": {
     "title": "セキュリティ操作センター",
     "description": "デスクトップからワンクリックで安全点検と緊急対応を実行",
+    "gatewayPreparing": "Gateway を起動中です。セキュリティ操作はまもなく利用できます",
     "gatewayNotRunning": "Gateway が停止中のためセキュリティ操作を実行できません",
     "runSuccess": "{{name}} の実行に成功しました",
     "runFailed": "{{name}} の実行に失敗しました",
@@ -300,6 +301,7 @@
     "description": "最近命中したルールを表示し、実際の有効ソースを確認します。",
     "expand": "監査を表示",
     "collapse": "監査を隠す",
+    "gatewayPreparing": "Gateway を起動中です。監査データはまもなく利用できます。",
     "gatewayStopped": "Gateway が停止中のため監査データを取得できません。",
     "loading": "監査データを読み込み中...",
     "empty": "最近の命中記録はありません。",

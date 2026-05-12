@@ -1,6 +1,10 @@
 {
     "gatewayNotRunning": "网关未运行",
     "gatewayRequired": "OpenClaw 网关需要运行才能使用聊天。它将自动启动，或者您可以从设置中启动。",
+    "gatewayPreparing": {
+        "title": "正在准备工作区",
+        "description": "正在启动并连接 OpenClaw，马上就可以开始对话。"
+    },
     "welcome": {
         "title": "MatchaClaw 聊天",
         "subtitle": "您的 AI 助手已就绪。在下方开始对话。",
@@ -161,6 +165,7 @@
         "unfinishedCount": "{{count}} 个未完成任务",
         "refresh": "刷新任务",
         "workspaceScope": "范围：{{scope}}",
+        "gatewayPreparing": "网关正在启动，任务列表稍后可用",
         "gatewayStopped": "网关未运行，任务列表与恢复操作已禁用",
         "empty": "当前工作区无未完成任务",
         "unboundSession": "未绑定会话，先恢复任务",
@@ -177,11 +182,18 @@
         "expand": "展开任务收件箱",
         "status": {
             "pending": "待处理",
+            "in_progress": "进行中",
             "running": "执行中",
             "waiting_for_input": "等待输入",
             "waiting_approval": "等待审批",
             "completed": "已完成",
+            "deleted": "已删除",
             "failed": "已失败"
+        },
+        "planStatus": {
+            "finished": "已完成",
+            "building": "执行中",
+            "ready": "待确认"
         },
         "toast": {
             "resumed": "任务已恢复执行"

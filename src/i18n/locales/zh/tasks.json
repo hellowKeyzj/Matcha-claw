@@ -8,6 +8,7 @@
         "long": "长任务",
         "scheduled": "定时任务"
     },
+    "gatewayPreparing": "网关正在启动，任务数据稍后自动刷新",
     "gatewayNotRunning": "网关未运行",
     "plugin": {
         "title": "需要启用 Task Manager 插件",

@@ -1,9 +1,10 @@
 import type { OpenClawPluginApi } from 'openclaw/plugin-sdk'
 import { TaskStoreError, mapTaskStoreError } from '../shared/errors.js'
 import { toNonEmptyString } from '../shared/params.js'
-import { toTaskCreateInput, toTaskUpdateInput, resolveClaimOwner } from './task-inputs.js'
-import { asTaskDetailPayload, asTaskSummaryPayload } from './task-payloads.js'
-import { getStore } from './task-store-context.js'
+import { executeTaskOutput, executeTaskStop } from './background-task-tools.js'
+import { toTaskCreateInput, toTaskUpdateInput } from './task-inputs.js'
+import { asTaskDetailPayload } from './task-payloads.js'
+import { getStore, getTodoStore, resolveScopeKey } from './task-store-context.js'
 
 type GatewayParams = Record<string, unknown>
 type GatewayOptions = {
@@ -21,40 +22,50 @@ async function withGatewayGuard(options: GatewayOptions, task: () => Promise<unk
   }
 }
 
+function normalizeTodos(value: unknown) {
+  return Array.isArray(value) ? value : []
+}
+
+function gatewayToolContext(params: GatewayParams) {
+  const sessionKey = typeof params.sessionKey === 'string' && params.sessionKey.trim()
+    ? params.sessionKey.trim()
+    : undefined
+  const deliveryContext = params.deliveryContext
+  return {
+    ...(sessionKey ? { sessionKey } : {}),
+    ...(deliveryContext ? { deliveryContext } : {}),
+  }
+}
+
+async function loadStoredTodos(api: OpenClawPluginApi, workspaceDir: unknown, scopeKey: string) {
+  return (await getTodoStore({ api, workspaceDir }).load(scopeKey)).todos
+}
+
 export function registerTaskGatewayMethods(api: OpenClawPluginApi): void {
-  api.registerGatewayMethod('task_manager.create', async (options: GatewayOptions) => {
+  api.registerGatewayMethod('TaskCreate', async (options: GatewayOptions) => {
     await withGatewayGuard(options, async () => {
-      const store = getStore({
-        api,
-        workspaceDir: options.params.workspaceDir,
-        taskListId: options.params.taskListId,
-      })
-      const task = await store.createTask(toTaskCreateInput(options.params))
-      return { task: asTaskDetailPayload(task) }
+      const scopeKey = resolveScopeKey({ params: options.params, sessionKey: options.params.sessionKey as string | undefined })
+      const store = getStore({ api, workspaceDir: options.params.workspaceDir })
+      const task = await store.create(scopeKey, toTaskCreateInput(options.params))
+      const todos = await loadStoredTodos(api, options.params.workspaceDir, scopeKey)
+      return { task: asTaskDetailPayload(task), todos }
     })
   })
 
-  api.registerGatewayMethod('task_manager.list', async (options: GatewayOptions) => {
+  api.registerGatewayMethod('TaskList', async (options: GatewayOptions) => {
     await withGatewayGuard(options, async () => {
-      const store = getStore({
-        api,
-        workspaceDir: options.params.workspaceDir,
-        taskListId: options.params.taskListId,
-      })
-      const tasks = await store.listTaskSummaries()
-      return { tasks: tasks.map(asTaskSummaryPayload) }
+      const scopeKey = resolveScopeKey({ params: options.params, sessionKey: options.params.sessionKey as string | undefined })
+      const store = getStore({ api, workspaceDir: options.params.workspaceDir })
+      const tasks = await store.list(scopeKey)
+      return { tasks: tasks.map(asTaskDetailPayload), todos: await loadStoredTodos(api, options.params.workspaceDir, scopeKey) }
     })
   })
 
-  api.registerGatewayMethod('task_manager.get', async (options: GatewayOptions) => {
+  api.registerGatewayMethod('TaskGet', async (options: GatewayOptions) => {
     await withGatewayGuard(options, async () => {
-      const store = getStore({
-        api,
-        workspaceDir: options.params.workspaceDir,
-        taskListId: options.params.taskListId,
-      })
+      const scopeKey = resolveScopeKey({ params: options.params, sessionKey: options.params.sessionKey as string | undefined })
       const taskId = toNonEmptyString(options.params.taskId, 'taskId')
-      const task = await store.getTask(taskId)
+      const task = await getStore({ api, workspaceDir: options.params.workspaceDir }).get(scopeKey, taskId)
       if (!task) {
         throw new TaskStoreError('task_not_found', `Task not found: ${taskId}`)
       }
@@ -62,43 +73,105 @@ export function registerTaskGatewayMethods(api: OpenClawPluginApi): void {
     })
   })
 
-  api.registerGatewayMethod('task_manager.update', async (options: GatewayOptions) => {
+  api.registerGatewayMethod('TaskUpdate', async (options: GatewayOptions) => {
     await withGatewayGuard(options, async () => {
-      const store = getStore({
-        api,
-        workspaceDir: options.params.workspaceDir,
-        taskListId: options.params.taskListId,
-      })
-      const result = await store.updateTask(toTaskUpdateInput(options.params))
-      return {
-        success: true,
-        taskId: result.task.id,
-        updatedFields: result.updatedFields,
-        ...(result.statusChange ? { statusChange: result.statusChange } : {}),
-        task: asTaskDetailPayload(result.task),
+      const scopeKey = resolveScopeKey({ params: options.params, sessionKey: options.params.sessionKey as string | undefined })
+      const store = getStore({ api, workspaceDir: options.params.workspaceDir })
+      const input = toTaskUpdateInput(options.params)
+      const taskId = toNonEmptyString(options.params.taskId, 'taskId')
+      if (input.status === 'deleted') {
+        const deleted = await store.delete(scopeKey, taskId)
+        if (!deleted) {
+          throw new TaskStoreError('task_not_found', `Task not found: ${taskId}`)
+        }
+        return { taskId, deleted: true, todos: await loadStoredTodos(api, options.params.workspaceDir, scopeKey) }
       }
+      const task = await store.update(scopeKey, taskId, input)
+      if (!task) {
+        throw new TaskStoreError('task_not_found', `Task not found: ${taskId}`)
+      }
+      return { task: asTaskDetailPayload(task), todos: await loadStoredTodos(api, options.params.workspaceDir, scopeKey) }
     })
   })
 
-  api.registerGatewayMethod('task_manager.claim', async (options: GatewayOptions) => {
+  api.registerGatewayMethod('TodoWrite', async (options: GatewayOptions) => {
     await withGatewayGuard(options, async () => {
-      const store = getStore({
-        api,
-        workspaceDir: options.params.workspaceDir,
-        taskListId: options.params.taskListId,
+      const scopeKey = resolveScopeKey({ params: options.params, sessionKey: options.params.sessionKey as string | undefined })
+      const result = await getTodoStore({ api, workspaceDir: options.params.workspaceDir }).save(scopeKey, normalizeTodos(options.params.newTodos) as never)
+      return { todos: result.todos, updatedAt: result.updatedAt }
+    })
+  })
+
+  api.registerGatewayMethod('TodoGet', async (options: GatewayOptions) => {
+    await withGatewayGuard(options, async () => {
+      const scopeKey = resolveScopeKey({ params: options.params, sessionKey: options.params.sessionKey as string | undefined })
+      const result = await getTodoStore({ api, workspaceDir: options.params.workspaceDir }).load(scopeKey)
+      return { todos: result.todos, updatedAt: result.updatedAt }
+    })
+  })
+
+  api.registerGatewayMethod('TaskOutput', async (options: GatewayOptions) => {
+    await withGatewayGuard(options, async () => {
+      const result = await executeTaskOutput(api, gatewayToolContext(options.params), options.params)
+      return result.rawResponse
+    })
+  })
+
+  api.registerGatewayMethod('TaskStop', async (options: GatewayOptions) => {
+    await withGatewayGuard(options, async () => {
+      const result = await executeTaskStop(api, gatewayToolContext(options.params), options.params)
+      return result.rawResponse
+    })
+  })
+
+  api.registerGatewayMethod('task_create', async (options: GatewayOptions) => {
+    await withGatewayGuard(options, async () => {
+      const scopeKey = resolveScopeKey({ params: options.params, sessionKey: options.params.sessionKey as string | undefined })
+      const store = getStore({ api, workspaceDir: options.params.workspaceDir })
+      const task = await store.create(scopeKey, toTaskCreateInput(options.params))
+      return { task: asTaskDetailPayload(task), todos: await loadStoredTodos(api, options.params.workspaceDir, scopeKey) }
+    })
+  })
+
+  api.registerGatewayMethod('task_update', async (options: GatewayOptions) => {
+    await withGatewayGuard(options, async () => {
+      const scopeKey = resolveScopeKey({ params: options.params, sessionKey: options.params.sessionKey as string | undefined })
+      const taskId = toNonEmptyString(options.params.taskId, 'taskId')
+      const task = await getStore({ api, workspaceDir: options.params.workspaceDir }).update(scopeKey, taskId, toTaskUpdateInput(options.params))
+      if (!task) throw new TaskStoreError('task_not_found', `Task not found: ${taskId}`)
+      return { task: asTaskDetailPayload(task), todos: await loadStoredTodos(api, options.params.workspaceDir, scopeKey) }
+    })
+  })
+
+  api.registerGatewayMethod('task_list', async (options: GatewayOptions) => {
+    await withGatewayGuard(options, async () => {
+      const scopeKey = resolveScopeKey({ params: options.params, sessionKey: options.params.sessionKey as string | undefined })
+      const tasks = await getStore({ api, workspaceDir: options.params.workspaceDir }).list(scopeKey)
+      return { tasks: tasks.map(asTaskDetailPayload), todos: await loadStoredTodos(api, options.params.workspaceDir, scopeKey) }
+    })
+  })
+
+  api.registerGatewayMethod('task_get', async (options: GatewayOptions) => {
+    await withGatewayGuard(options, async () => {
+      const scopeKey = resolveScopeKey({ params: options.params, sessionKey: options.params.sessionKey as string | undefined })
+      const taskId = toNonEmptyString(options.params.taskId, 'taskId')
+      const task = await getStore({ api, workspaceDir: options.params.workspaceDir }).get(scopeKey, taskId)
+      if (!task) throw new TaskStoreError('task_not_found', `Task not found: ${taskId}`)
+      return { task: asTaskDetailPayload(task) }
+    })
+  })
+
+  api.registerGatewayMethod('task_claim', async (options: GatewayOptions) => {
+    await withGatewayGuard(options, async () => {
+      const scopeKey = resolveScopeKey({ params: options.params, sessionKey: options.params.sessionKey as string | undefined })
+      const taskId = toNonEmptyString(options.params.taskId, 'taskId')
+      const task = await getStore({ api, workspaceDir: options.params.workspaceDir }).update(scopeKey, taskId, {
+        ...toTaskUpdateInput(options.params),
+        taskId,
+        status: 'in_progress',
       })
-      const owner = resolveClaimOwner({
-        owner: options.params.owner,
-        sessionKey: typeof options.params.sessionKey === 'string' ? options.params.sessionKey : undefined,
-      })
-      const task = await store.claimTask({
-        taskId: toNonEmptyString(options.params.taskId, 'taskId'),
-        owner,
-      })
-      return {
-        success: true,
-        task: asTaskDetailPayload(task),
-      }
+      if (!task) throw new TaskStoreError('task_not_found', `Task not found: ${taskId}`)
+      return { task: asTaskDetailPayload(task), todos: await loadStoredTodos(api, options.params.workspaceDir, scopeKey) }
     })
   })
 }

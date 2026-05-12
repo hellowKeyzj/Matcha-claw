@@ -227,6 +227,7 @@
   "actionCenter": {
     "title": "Security Action Center",
     "description": "Run security checks and emergency response with one click from desktop",
+    "gatewayPreparing": "Gateway is starting, security actions will be available shortly",
     "gatewayNotRunning": "Gateway is not running, security actions are unavailable",
     "runSuccess": "{{name}} succeeded",
     "runFailed": "{{name}} failed",
@@ -300,6 +301,7 @@
     "description": "Recent matched rules to verify effective source and behavior.",
     "expand": "Expand audit",
     "collapse": "Collapse audit",
+    "gatewayPreparing": "Gateway is starting, audit data will be available shortly.",
     "gatewayStopped": "Gateway is not running, audit data is unavailable.",
     "loading": "Loading audits...",
     "empty": "No recent hit records.",

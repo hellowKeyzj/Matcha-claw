@@ -1,4 +1,4 @@
-import { useLayoutEffect, useRef, type CSSProperties, type ReactNode, type RefObject } from 'react';
+import { useLayoutEffect, useRef, type CSSProperties, type ReactNode, type RefObject, type WheelEvent } from 'react';
 import { cn } from '@/lib/utils';
 import { CHAT_LAYOUT_TOKENS } from '../chat-layout-tokens';
 import { CHAT_WORKSPACE_LAYOUT } from '../chat-workspace-layout';
@@ -21,6 +21,8 @@ interface ChatShellProps {
   sidePanelWidth: number;
   artifactWorkbenchFullscreen?: boolean;
   onSidePanelResize?: (nextWidth: number) => void;
+  onComposerWheel?: (deltaY: number) => void;
+  onComposerGeometryChange?: () => void;
   isEmptyState?: boolean;
   emptyState?: ReactNode;
   sidePanel: ReactNode;
@@ -38,6 +40,8 @@ export function ChatShell({
   sidePanelWidth,
   artifactWorkbenchFullscreen = false,
   onSidePanelResize,
+  onComposerWheel,
+  onComposerGeometryChange,
   isEmptyState = false,
   emptyState = null,
   sidePanel,
@@ -51,6 +55,38 @@ export function ChatShell({
   const headerOverlayRef = useRef<HTMLDivElement>(null);
   const composerOverlayRef = useRef<HTMLDivElement>(null);
   const resizePointerIdRef = useRef<number | null>(null);
+
+  const shouldLetNestedScrollableConsumeWheel = (event: WheelEvent<HTMLElement>): boolean => {
+    const target = event.target;
+    if (!(target instanceof HTMLElement)) {
+      return false;
+    }
+    const scrollable = target.closest<HTMLElement>(
+      'textarea, [data-radix-scroll-area-viewport], [data-tool-output-scroll="true"], [data-chat-composer-wheel-local="true"]',
+    );
+    if (!scrollable) {
+      return false;
+    }
+    const canScroll = scrollable.scrollHeight > scrollable.clientHeight;
+    if (!canScroll) {
+      return false;
+    }
+    if (event.deltaY > 0) {
+      return scrollable.scrollTop + scrollable.clientHeight < scrollable.scrollHeight - 1;
+    }
+    if (event.deltaY < 0) {
+      return scrollable.scrollTop > 0;
+    }
+    return false;
+  };
+
+  const handleComposerWheelCapture = (event: WheelEvent<HTMLElement>) => {
+    if (!onComposerWheel || event.defaultPrevented || shouldLetNestedScrollableConsumeWheel(event)) {
+      return;
+    }
+    event.preventDefault();
+    onComposerWheel(event.deltaY);
+  };
 
   useLayoutEffect(() => {
     const stageNode = stageRef.current;
@@ -79,6 +115,7 @@ export function ChatShell({
       stageNode.style.setProperty('--chat-thread-top-padding', `${headerHeight + CHAT_THREAD_TOP_GAP_PX}px`);
       stageNode.style.setProperty('--chat-composer-safe-offset', `${composerHeight}px`);
       stageNode.style.setProperty('--chat-thread-bottom-padding', `${composerHeight + CHAT_THREAD_BOTTOM_GAP_PX}px`);
+      onComposerGeometryChange?.();
     };
 
     syncOverlayOffsets();
@@ -97,7 +134,7 @@ export function ChatShell({
       observer.disconnect();
       resetOverlayOffsets();
     };
-  }, [isEmptyState]);
+  }, [isEmptyState, onComposerGeometryChange]);
 
   const handleSidePanelResizeStart = (event: React.PointerEvent<HTMLDivElement>) => {
     if (!onSidePanelResize) {
@@ -206,7 +243,10 @@ export function ChatShell({
                       </div>
                     ) : null}
 
-                    <div className="pointer-events-auto chat-scroll-sync-input">
+                    <div
+                      className="pointer-events-auto chat-scroll-sync-input"
+                      onWheelCapture={handleComposerWheelCapture}
+                    >
                       {input}
                     </div>
                   </div>

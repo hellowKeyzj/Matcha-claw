@@ -1,5 +1,5 @@
 import type { GatewayTransportIssue } from '../../shared/gateway-error';
-import type { SessionTimelineEntry } from '../../shared/session-adapter-types';
+import type { SessionTimelineEntry, TaskSnapshotEvent } from '../../shared/session-adapter-types';
 
 export interface GatewayConversationMessagePayload {
   state?: unknown;
@@ -32,6 +32,14 @@ export interface GatewayConversationToolLifecyclePayload {
   isError?: unknown;
 }
 
+export interface SessionPlanIngressEvent {
+  sessionUpdate: 'plan';
+  sessionKey: string | null;
+  runId: string | null;
+  taskSnapshot: TaskSnapshotEvent;
+  _meta?: Record<string, unknown>;
+}
+
 export interface SessionInfoIngressEvent {
   sessionUpdate: 'session_info_update';
   sessionKey: string | null;
@@ -53,4 +61,5 @@ export interface SessionTimelineIngressEvent {
 
 export type GatewaySessionIngressEvent =
   | SessionInfoIngressEvent
-  | SessionTimelineIngressEvent;
+  | SessionTimelineIngressEvent
+  | SessionPlanIngressEvent;

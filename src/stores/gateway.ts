@@ -5,14 +5,14 @@
 import { create } from 'zustand';
 import { hostApiFetch } from '@/lib/host-api';
 import { subscribeHostEvent } from '@/lib/host-events';
-import type { SessionUpdateEvent } from '../../runtime-host/shared/session-adapter-types';
+import type { SessionUpdateEvent, TaskSnapshotEvent } from '../../runtime-host/shared/session-adapter-types';
 import type { GatewayStatus } from '../types/gateway';
 import {
   normalizeGatewayNotificationEvent,
   type ChatDomainEvent,
 } from './chat/event-normalizer';
 import { useChatStore } from './chat';
-import { useTaskCenterStore } from './task-center-store';
+import { useTaskSnapshotStore } from './chat/task-snapshot-store';
 import { useChannelsStore } from './channels';
 import { isGatewayOperational } from '@/lib/gateway-status';
 import type { GatewayTransportIssue } from '../../runtime-host/shared/gateway-error';
@@ -99,10 +99,7 @@ function coalesceTaskNotifications(
   const byTaskId = new Map<string, { method?: string; params?: Record<string, unknown> }>();
 
   for (const payload of notifications) {
-    const method = payload.method;
-    const isTaskNotification = typeof method === 'string'
-      && (method.startsWith('task_') || method.startsWith('task_manager.'));
-    if (!isTaskNotification) {
+    if (!isTaskNotificationMethod(payload.method)) {
       passthrough.push(payload);
       continue;
     }
@@ -123,6 +120,19 @@ function coalesceTaskNotifications(
   return [...passthrough, ...byTaskId.values()];
 }
 
+function isTaskNotificationMethod(method: unknown): method is string {
+  if (typeof method !== 'string') {
+    return false;
+  }
+  return method === 'TaskCreate'
+    || method === 'TaskUpdate'
+    || method === 'TaskList'
+    || method === 'TaskGet'
+    || method === 'TodoWrite'
+    || method === 'TaskSnapshot'
+    || method.startsWith('task_');
+}
+
 function flushTaskNotifications(): void {
   if (taskNotificationFlushTimer) {
     clearTimeout(taskNotificationFlushTimer);
@@ -137,7 +147,10 @@ function flushTaskNotifications(): void {
 
   for (const payload of compacted) {
     try {
-      useTaskCenterStore.getState().handleGatewayNotification(payload);
+      useTaskSnapshotStore.getState().reportGatewayNotification(
+        payload,
+        useChatStore.getState().currentSessionKey,
+      );
     } catch {
       // ignore
     }
@@ -172,10 +185,7 @@ function handleGatewayNotification(notification: { method?: string; params?: Rec
     return;
   }
 
-  if (
-    typeof payload.method === 'string'
-    && (payload.method.startsWith('task_') || payload.method.startsWith('task_manager.'))
-  ) {
+  if (isTaskNotificationMethod(payload.method)) {
     enqueueTaskNotification(payload);
   }
 }
@@ -281,6 +291,12 @@ export const useGatewayStore = create<GatewayState>((set, get) => ({
           unsubscribers.push(subscribeHostEvent<SessionUpdateEvent>('session:update', (payload) => {
             handleSessionUpdateEvent(payload);
           }));
+          unsubscribers.push(subscribeHostEvent<TaskSnapshotEvent>(
+            'task:snapshot',
+            (payload) => {
+              useTaskSnapshotStore.getState().reportSnapshotEvent(payload);
+            },
+          ));
           unsubscribers.push(subscribeHostEvent<{ channelId?: string; status?: string }>(
             'gateway:channel-status',
             (update) => {

@@ -8,6 +8,7 @@
         "long": "長期タスク",
         "scheduled": "定期タスク"
     },
+    "gatewayPreparing": "ゲートウェイを起動中です。タスクデータはまもなく更新されます。",
     "gatewayNotRunning": "ゲートウェイが停止中です",
     "plugin": {
         "title": "Task Manager プラグインが必要です",

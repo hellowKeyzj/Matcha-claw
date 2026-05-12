@@ -8,6 +8,7 @@ import {
 } from './transcript-turn-identity';
 import type { SessionTranscriptMessage } from './transcript-types';
 import { normalizeTaskCompletionEvents } from './task-completion-events';
+import { normalizeTaskArtifactSnapshot } from './task-snapshot-normalizer';
 import {
   isRecord,
   normalizeFiniteNumber,
@@ -114,6 +115,15 @@ export function buildMessageIngressEvents(
   const conversation = normalizeConversationMessagePayload(payload);
   if (!conversation.message) {
     return [];
+  }
+  const artifactSnapshot = normalizeTaskArtifactSnapshot(conversation.message.content, conversation.sessionKey);
+  if (artifactSnapshot) {
+    return [{
+      sessionUpdate: 'plan',
+      sessionKey: artifactSnapshot.sessionKey,
+      runId: conversation.runId,
+      taskSnapshot: artifactSnapshot,
+    }];
   }
   const laneKey = resolveSessionLaneKey(normalizeString(conversation.message.agentId));
   const entries = buildTimelineEntriesFromTranscriptMessage(

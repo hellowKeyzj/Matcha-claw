@@ -25,6 +25,7 @@ const origCreateEmbedder = embedderModuleForMock.createEmbedder;
 
 const pluginModule = jiti("../index.ts");
 const memoryLanceDBProPlugin = pluginModule.default || pluginModule;
+const resetRegistration = pluginModule.resetRegistration ?? (() => {});
 const { registerMemoryRecallTool, registerMemoryStoreTool } = jiti("../src/tools.ts");
 const { MemoryRetriever } = jiti("../src/retriever.js");
 const { buildSmartMetadata, stringifySmartMetadata } = jiti("../src/smart-metadata.ts");
@@ -71,6 +72,13 @@ function createPluginApiHarness({ pluginConfig, resolveRoot }) {
   };
 
   return { api, eventHandlers };
+}
+
+function getAutoRecallHook(eventHandlers) {
+  const hooks = eventHandlers.get("before_prompt_build") || [];
+  const autoRecallHook = hooks.find(({ meta }) => meta?.priority === 10)?.handler;
+  assert.equal(typeof autoRecallHook, "function", "expected an auto-recall before_prompt_build hook");
+  return autoRecallHook;
 }
 
 function makeResults() {
@@ -329,6 +337,7 @@ describe("recall text cleanup", () => {
   beforeEach(() => {
     workspaceDir = mkdtempSync(path.join(tmpdir(), "recall-text-cleanup-test-"));
     originalRetrieve = MemoryRetriever.prototype.retrieve;
+    resetRegistration();
   });
 
   afterEach(() => {
@@ -336,6 +345,7 @@ describe("recall text cleanup", () => {
     // Restore factory functions on the .js module (same cache as index.ts uses)
     retrieverModuleForMock.createRetriever = origCreateRetriever;
     embedderModuleForMock.createEmbedder = origCreateEmbedder;
+    resetRegistration();
     rmSync(workspaceDir, { recursive: true, force: true });
   });
 
@@ -417,10 +427,7 @@ describe("recall text cleanup", () => {
 
     memoryLanceDBProPlugin.register(harness.api);
 
-    const hooks = harness.eventHandlers.get("before_prompt_build") || [];
-    assert.equal(hooks.length, 1, "expected at least one before_prompt_build hook for this config");
-    const [{ handler: autoRecallHook }] = hooks;
-    assert.equal(typeof autoRecallHook, "function");
+    const autoRecallHook = getAutoRecallHook(harness.eventHandlers);
 
     const output = await autoRecallHook(
       { prompt: "Please recall what I mentioned before about this task." },
@@ -634,8 +641,7 @@ describe("recall text cleanup", () => {
     });
 
     memoryLanceDBProPlugin.register(harness.api);
-    const hooks = harness.eventHandlers.get("before_prompt_build") || [];
-    const [{ handler: autoRecallHook }] = hooks;
+    const autoRecallHook = getAutoRecallHook(harness.eventHandlers);
     const output = await autoRecallHook(
       { prompt: "Please recall what I mentioned before about this task." },
       { sessionId: "auto-budget", sessionKey: "agent:main:session:auto-budget", agentId: "main" }
@@ -692,8 +698,7 @@ describe("recall text cleanup", () => {
       },
     });
     memoryLanceDBProPlugin.register(harness.api);
-    const hooks = harness.eventHandlers.get("before_prompt_build") || [];
-    const [{ handler: autoRecallHook }] = hooks;
+    const autoRecallHook = getAutoRecallHook(harness.eventHandlers);
     const output = await autoRecallHook(
       { prompt: "Please recall what I mentioned before about this task." },
       { sessionId: "auto-governance", sessionKey: "agent:main:session:auto-governance", agentId: "main" }
@@ -813,9 +818,7 @@ describe("recall text cleanup", () => {
 
     memoryLanceDBProPlugin.register(harness.api);
 
-    const hooks = harness.eventHandlers.get("before_prompt_build") || [];
-    assert.equal(hooks.length, 1);
-    const [{ handler: autoRecallHook }] = hooks;
+    const autoRecallHook = getAutoRecallHook(harness.eventHandlers);
 
     const output = await autoRecallHook(
       { prompt: "Please recall what I mentioned before about this task." },
@@ -895,9 +898,7 @@ describe("recall text cleanup", () => {
 
     memoryLanceDBProPlugin.register(harness.api);
 
-    const hooks = harness.eventHandlers.get("before_prompt_build") || [];
-    assert.equal(hooks.length, 1);
-    const [{ handler: autoRecallHook }] = hooks;
+    const autoRecallHook = getAutoRecallHook(harness.eventHandlers);
 
     const output = await autoRecallHook(
       { prompt: "Please recall what I mentioned before about this task." },
@@ -958,8 +959,7 @@ describe("recall text cleanup", () => {
       },
     });
     memoryLanceDBProPlugin.register(harness.api);
-    const [{ handler: autoRecallHook }] = harness.eventHandlers.get("before_prompt_build") || [];
-    return autoRecallHook;
+    return getAutoRecallHook(harness.eventHandlers);
   }
 
   it("uses configured categoryField as display category when field is present in metadata", async () => {
@@ -1096,4 +1096,3 @@ describe("recall text cleanup", () => {
     }
   });
 });
-

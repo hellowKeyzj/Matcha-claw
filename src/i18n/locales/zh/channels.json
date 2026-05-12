@@ -18,6 +18,7 @@
         "starting": "启动中",
         "reconnecting": "重连中"
     },
+    "gatewayPreparing": "网关正在启动，频道连接稍后恢复。",
     "gatewayWarning": "网关服务未运行，频道无法连接。",
     "available": "可用频道",
     "availableDesc": "连接一个新的频道",

@@ -75,6 +75,11 @@ describe('runtime-host cron routes', () => {
         updateCronJob: vi.fn(),
         removeCronJob: vi.fn(),
         runCronJob: vi.fn(),
+        readGatewayConnectionState: vi.fn(async () => ({
+          state: 'connected',
+          gatewayReady: true,
+          portReachable: true,
+        })),
       },
       sessionHistory: { read: vi.fn() },
       usageHistory: usageHistory as any,
@@ -114,5 +119,88 @@ describe('runtime-host cron routes', () => {
 
     expect(response).toEqual({ status: 200, data: snapshot });
     expect(cronService.listJobs).toHaveBeenCalledTimes(1);
+  });
+
+  it('cron jobs 在 Gateway 未 ready 时不提交刷新任务', async () => {
+    const jobs = createCronJobsMock();
+    const service = new CronService({
+      gateway: {
+        listCronJobs: vi.fn(),
+        addCronJob: vi.fn(),
+        updateCronJob: vi.fn(),
+        removeCronJob: vi.fn(),
+        runCronJob: vi.fn(),
+        readGatewayConnectionState: vi.fn(async () => ({
+          state: 'disconnected',
+          gatewayReady: false,
+          portReachable: false,
+        })),
+      },
+      sessionHistory: { read: vi.fn() },
+      usageHistory: {
+        isReady: vi.fn(() => true),
+        refreshCache: vi.fn(),
+        recent: vi.fn(() => []),
+      } as any,
+      timer: createImmediateRuntimeTimer(),
+      clock,
+      jobs,
+    });
+
+    await expect(service.listJobs()).resolves.toEqual({
+      success: true,
+      ready: false,
+      refreshing: false,
+      updatedAt: null,
+      error: null,
+      jobs: [],
+    });
+    expect(jobs.submitRefreshJobs).not.toHaveBeenCalled();
+  });
+
+  it('cron refresh 后台任务在 Gateway 未 ready 时不调用 RPC，也不缓存连接错误', async () => {
+    const listCronJobs = vi.fn(async () => {
+      throw new Error('connect ECONNREFUSED 127.0.0.1:18789');
+    });
+    const service = new CronService({
+      gateway: {
+        listCronJobs,
+        addCronJob: vi.fn(),
+        updateCronJob: vi.fn(),
+        removeCronJob: vi.fn(),
+        runCronJob: vi.fn(),
+        readGatewayConnectionState: vi.fn(async () => ({
+          state: 'disconnected',
+          gatewayReady: false,
+          portReachable: false,
+        })),
+      },
+      sessionHistory: { read: vi.fn() },
+      usageHistory: {
+        isReady: vi.fn(() => true),
+        refreshCache: vi.fn(),
+        recent: vi.fn(() => []),
+      } as any,
+      timer: createImmediateRuntimeTimer(),
+      clock,
+      jobs: createCronJobsMock(),
+    });
+
+    await expect(service.refreshJobsSnapshot()).resolves.toEqual({
+      success: true,
+      jobs: [],
+      ready: false,
+      refreshing: false,
+      updatedAt: null,
+      error: null,
+    });
+
+    await expect(service.listJobs()).resolves.toMatchObject({
+      success: true,
+      ready: false,
+      error: null,
+      jobs: [],
+    });
+    expect(listCronJobs).not.toHaveBeenCalled();
   });
 });

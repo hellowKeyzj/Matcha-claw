@@ -21,3 +21,11 @@ export interface TaskSummary {
   owner?: string
   blockedBy: string[]
 }
+
+export interface TodoItem {
+  id?: string
+  content: string
+  activeForm?: string
+  status: TaskStatus
+  owner?: string
+}

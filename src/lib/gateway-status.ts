@@ -29,6 +29,16 @@ export function isGatewayRecovering(status: GatewayStatus): boolean {
   return !isGatewayOperational(status) || status.healthSummary === 'degraded';
 }
 
+export function isGatewayPreparing(status: GatewayStatus, initialized: boolean): boolean {
+  if (!initialized) {
+    return true;
+  }
+  if (!isGatewayProcessActive(status)) {
+    return false;
+  }
+  return !isGatewayOperational(status);
+}
+
 export function isGatewayUnavailable(status: GatewayStatus): boolean {
   return status.processState === 'stopped'
     || status.processState === 'error'

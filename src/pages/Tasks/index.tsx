@@ -3,14 +3,14 @@ import {
   AlertCircle,
   Calendar,
   CheckCircle2,
+  Loader2,
   PauseCircle,
   PlayCircle,
   RefreshCw,
   Trash2,
-  Wrench,
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
-import { useNavigate, useSearchParams } from 'react-router-dom';
+import { useSearchParams } from 'react-router-dom';
 import { toast } from 'sonner';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -22,12 +22,14 @@ import { TaskCenterStatCard } from '@/components/task-center/stat-card';
 import { TASK_CENTER_SURFACE_CARD_CLASS } from '@/components/task-center/styles';
 import { useGatewayStore } from '@/stores/gateway';
 import { useTaskCenterStore } from '@/stores/task-center-store';
-import { isGatewayOperational } from '@/lib/gateway-status';
+import { useTaskSnapshotStore } from '@/stores/chat/task-snapshot-store';
+import { isGatewayOperational, isGatewayPreparing } from '@/lib/gateway-status';
 import { scheduleIdleReady } from '@/lib/idle-ready';
 import { useDelayedFlag } from '@/lib/use-delayed-flag';
 import { cn } from '@/lib/utils';
 import { Cron } from '@/pages/Cron';
 import type { Task } from '@/services/openclaw/task-manager-client';
+import { useChatStore } from '@/stores/chat';
 
 function statusVariant(status: string): 'default' | 'secondary' | 'destructive' | 'success' {
   if (status === 'completed') return 'success';
@@ -114,19 +116,17 @@ function formatDateTime(value: number | undefined): string {
 
 export function TasksPage() {
   const { t } = useTranslation('tasks');
-  const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
   const gatewayStatus = useGatewayStore((state) => state.status);
+  const gatewayInitialized = useGatewayStore((state) => state.isInitialized);
+  const currentSessionKey = useChatStore((state) => state.currentSessionKey);
+  const tasks = useTaskSnapshotStore((state) => state.getTaskDataList(currentSessionKey)) as Task[];
   const {
-    tasks,
-    snapshotReady,
     initialLoading,
     refreshing,
     mutating,
     initialized,
     error,
-    pluginInstalled,
-    pluginEnabled,
     init,
     refreshTasks,
     deleteTaskById,
@@ -139,15 +139,17 @@ export function TasksPage() {
   const [dateTo, setDateTo] = useState('');
   const [statsNowMs, setStatsNowMs] = useState<number>(() => Date.now());
   const [visibleTaskCount, setVisibleTaskCount] = useState(INITIAL_TASK_LIST_BATCH);
-  const [taskHeavyContentReady, setTaskHeavyContentReady] = useState(() => tasks.length > 0 || snapshotReady);
+  const [taskHeavyContentReady, setTaskHeavyContentReady] = useState(() => tasks.length > 0 || initialized);
   const [taskToDelete, setTaskToDelete] = useState<{ id: string } | null>(null);
   const [taskListScrollTop, setTaskListScrollTop] = useState(0);
   const [taskListViewportHeight, setTaskListViewportHeight] = useState(0);
   const taskListScrollRef = useRef<HTMLDivElement | null>(null);
   const activeTab = resolveTaskCenterTab(searchParams.get('tab'));
+  const gatewayOperational = isGatewayOperational(gatewayStatus);
+  const gatewayPreparing = isGatewayPreparing(gatewayStatus, gatewayInitialized);
   const manualRefreshBusy = refreshing || mutating;
-  const showInitialLoading = !snapshotReady && initialLoading;
-  const showRefreshingHint = useDelayedFlag(refreshing && snapshotReady, 180);
+  const showInitialLoading = initialLoading;
+  const showRefreshingHint = useDelayedFlag(refreshing && initialized, 180);
   const tasksForView = useMemo(
     () => (taskHeavyContentReady ? tasks : []),
     [taskHeavyContentReady, tasks],
@@ -155,11 +157,11 @@ export function TasksPage() {
 
   useEffect(() => {
     if (!initialized) {
-      void init();
+      void init(currentSessionKey);
       return;
     }
-    void refreshTasks({ silent: true });
-  }, [init, initialized, refreshTasks]);
+    void refreshTasks({ sessionKey: currentSessionKey, silent: true });
+  }, [currentSessionKey, init, initialized, refreshTasks]);
 
   useEffect(() => {
     const updateNow = () => {
@@ -191,7 +193,7 @@ export function TasksPage() {
     if (taskHeavyContentReady) {
       return;
     }
-    if (snapshotReady && tasks.length <= TASK_LIST_VIRTUAL_THRESHOLD) {
+    if (initialized && tasks.length <= TASK_LIST_VIRTUAL_THRESHOLD) {
       setTaskHeavyContentReady(true);
       return;
     }
@@ -203,7 +205,7 @@ export function TasksPage() {
       useAnimationFrame: true,
     });
     return cancel;
-  }, [snapshotReady, taskHeavyContentReady, tasks.length]);
+  }, [initialized, taskHeavyContentReady, tasks.length]);
 
   const hasActiveTasks = useMemo(
     () => tasks.some((task) => task.status === 'pending' || task.status === 'in_progress'),
@@ -211,7 +213,7 @@ export function TasksPage() {
   );
 
   useEffect(() => {
-    if (!pluginInstalled || !pluginEnabled || !isGatewayOperational(gatewayStatus)) {
+    if (!gatewayOperational) {
       return;
     }
 
@@ -265,7 +267,7 @@ export function TasksPage() {
       clearTimer();
       document.removeEventListener('visibilitychange', handleVisibilityChange);
     };
-  }, [hasActiveTasks, pluginEnabled, pluginInstalled, gatewayStatus, refreshTasks]);
+  }, [gatewayOperational, hasActiveTasks, refreshTasks]);
 
   const dateRange = useMemo(() => resolveDateRangeMs(dateFrom, dateTo), [dateFrom, dateTo]);
   const longTasks = useMemo(() => {
@@ -558,12 +560,6 @@ export function TasksPage() {
               </Button>
             </div>
             <div className="ml-auto flex flex-wrap items-center gap-2">
-              {!pluginInstalled || !pluginEnabled ? (
-                <Button type="button" size="sm" onClick={() => navigate('/plugins')} disabled={mutating}>
-                  <Wrench className="mr-2 h-4 w-4" />
-                  {t('openPluginCenter')}
-                </Button>
-              ) : null}
               <label htmlFor="tasks-date-from" className="relative h-9 w-40 cursor-pointer">
                 <div className="flex h-9 items-center justify-between rounded-md border border-input bg-background px-3 text-sm">
                   <span className={cn('truncate', !dateFrom && 'text-muted-foreground')}>
@@ -613,33 +609,21 @@ export function TasksPage() {
                 aria-label={t('refresh')}
                 title={t('refresh')}
                 onClick={() => void refreshTasks()}
-                disabled={manualRefreshBusy || !pluginInstalled || !pluginEnabled}
+                disabled={manualRefreshBusy}
               >
                 <RefreshCw className={cn('h-4 w-4', refreshing && 'animate-spin')} />
               </Button>
             </div>
           </div>
 
-          {!isGatewayOperational(gatewayStatus) && (
-            <Card className="border-yellow-500 bg-yellow-50 dark:bg-yellow-900/10">
-              <CardContent className="flex items-center gap-3 py-4 text-yellow-700 dark:text-yellow-300">
-                <AlertCircle className="h-5 w-5" />
-                {t('gatewayNotRunning')}
-              </CardContent>
-            </Card>
-          )}
-
-          {initialized && (!pluginInstalled || !pluginEnabled) && (
-            <Card className="border-blue-500 bg-blue-50 dark:bg-blue-900/10">
-              <CardHeader>
-                <CardTitle className="text-lg">{t('plugin.title')}</CardTitle>
-                <CardDescription>{t('plugin.description')}</CardDescription>
-              </CardHeader>
-              <CardContent>
-                <Button onClick={() => navigate('/plugins')} disabled={mutating}>
-                  <Wrench className="mr-2 h-4 w-4" />
-                  {t('openPluginCenter')}
-                </Button>
+          {!gatewayOperational && (
+            <Card className={gatewayPreparing ? 'border-border bg-muted/30' : 'border-yellow-500 bg-yellow-50 dark:bg-yellow-900/10'}>
+              <CardContent className={cn(
+                'flex items-center gap-3 py-4',
+                gatewayPreparing ? 'text-muted-foreground' : 'text-yellow-700 dark:text-yellow-300',
+              )}>
+                {gatewayPreparing ? <Loader2 className="h-5 w-5 animate-spin" /> : <AlertCircle className="h-5 w-5" />}
+                {gatewayPreparing ? t('gatewayPreparing') : t('gatewayNotRunning')}
               </CardContent>
             </Card>
           )}
@@ -802,7 +786,7 @@ export function TasksPage() {
                         size="sm"
                         variant="ghost"
                         className="shrink-0"
-                      onClick={() => void handleDeleteTask(selectedTask.id)}
+                        onClick={() => void handleDeleteTask(selectedTask.id)}
                         disabled={mutating}
                       >
                         <Trash2 className="h-4 w-4 text-destructive" />

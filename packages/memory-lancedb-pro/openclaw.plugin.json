@@ -1,4 +1,22 @@
 {
+  "contracts": {
+    "tools": [
+      "memory_recall",
+      "memory_store",
+      "memory_forget",
+      "memory_update",
+      "memory_stats",
+      "memory_debug",
+      "memory_list",
+      "memory_promote",
+      "memory_archive",
+      "memory_compact",
+      "memory_explain_rank",
+      "self_improvement_log",
+      "self_improvement_extract_skill",
+      "self_improvement_review"
+    ]
+  },
   "id": "memory-lancedb-pro",
   "name": "Memory (LanceDB Pro)",
   "description": "Enhanced LanceDB-backed long-term memory with hybrid retrieval, multi-scope isolation, long-context chunking, and management CLI",
@@ -49,11 +67,17 @@
           },
           "dimensions": {
             "type": "integer",
-            "minimum": 1
+            "minimum": 1,
+            "description": "Internal vector dimensions for LanceDB schema sizing and local embedding validation"
+          },
+          "requestDimensions": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "Optional dimensions/output_dimension value to send to embedding providers that support variable output sizes"
           },
           "omitDimensions": {
             "type": "boolean",
-            "description": "When true, omit the dimensions parameter from embedding requests even if dimensions is configured"
+            "description": "When true, omit dimensions/output_dimension from embedding requests even if requestDimensions is configured"
           },
           "taskQuery": {
             "type": "string",
@@ -118,6 +142,20 @@
         "default": 8,
         "description": "Minimum number of turns before the same memory can be recalled again in the same session. Set to 0 to disable deduplication."
       },
+      "autoRecallBadRecallDecayMs": {
+        "type": "integer",
+        "minimum": 0,
+        "default": 86400000,
+        "$comment": "No maximum: 0 disables decay; very large values also effectively disable. Unlike sibling autoRecall* integers, this is a time window with no natural upper bound.",
+        "description": "If a memory's last auto-recall injection was more than this many ms ago, its bad_recall_count is reset to 0 on the next injection. 0 disables decay. Default: 86400000 (24 hours)."
+      },
+      "autoRecallSuppressionDurationMs": {
+        "type": "integer",
+        "minimum": 0,
+        "default": 1800000,
+        "$comment": "No maximum: 0 effectively disables suppression; large values allow long quarantine windows.",
+        "description": "When bad_recall_count reaches the suppression threshold, the memory is suppressed from auto-recall for this many ms from now. Default: 1800000 (30 minutes)."
+      },
       "autoRecallTimeoutMs": {
         "type": "integer",
         "minimum": 500,
@@ -162,7 +200,12 @@
       },
       "recallMode": {
         "type": "string",
-        "enum": ["full", "summary", "adaptive", "off"],
+        "enum": [
+          "full",
+          "summary",
+          "adaptive",
+          "off"
+        ],
         "default": "full",
         "description": "Auto-recall depth mode. 'full': inject with configured per-item budget. 'summary': L0 abstracts only (compact). 'adaptive': analyze query intent to auto-select category and depth. 'off': disable auto-recall injection."
       },
@@ -273,23 +316,78 @@
             "type": "object",
             "additionalProperties": false,
             "properties": {
-              "utility": { "type": "number", "minimum": 0, "maximum": 1, "default": 0.1 },
-              "confidence": { "type": "number", "minimum": 0, "maximum": 1, "default": 0.1 },
-              "novelty": { "type": "number", "minimum": 0, "maximum": 1, "default": 0.1 },
-              "recency": { "type": "number", "minimum": 0, "maximum": 1, "default": 0.1 },
-              "typePrior": { "type": "number", "minimum": 0, "maximum": 1, "default": 0.6 }
+              "utility": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1,
+                "default": 0.1
+              },
+              "confidence": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1,
+                "default": 0.1
+              },
+              "novelty": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1,
+                "default": 0.1
+              },
+              "recency": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1,
+                "default": 0.1
+              },
+              "typePrior": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1,
+                "default": 0.6
+              }
             }
           },
           "typePriors": {
             "type": "object",
             "additionalProperties": false,
             "properties": {
-              "profile": { "type": "number", "minimum": 0, "maximum": 1, "default": 0.95 },
-              "preferences": { "type": "number", "minimum": 0, "maximum": 1, "default": 0.9 },
-              "entities": { "type": "number", "minimum": 0, "maximum": 1, "default": 0.75 },
-              "events": { "type": "number", "minimum": 0, "maximum": 1, "default": 0.45 },
-              "cases": { "type": "number", "minimum": 0, "maximum": 1, "default": 0.8 },
-              "patterns": { "type": "number", "minimum": 0, "maximum": 1, "default": 0.85 }
+              "profile": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1,
+                "default": 0.95
+              },
+              "preferences": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1,
+                "default": 0.9
+              },
+              "entities": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1,
+                "default": 0.75
+              },
+              "events": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1,
+                "default": 0.45
+              },
+              "cases": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1,
+                "default": 0.8
+              },
+              "patterns": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1,
+                "default": 0.85
+              }
             }
           }
         }
@@ -663,6 +761,18 @@
           "dedupeErrorSignals": {
             "type": "boolean",
             "default": true
+          },
+          "serialCooldownMs": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Cooldown in ms between reflection triggers for the same session. Default: 120000 (2 min). Set to 0 to disable."
+          },
+          "excludeAgents": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Agent/session patterns excluded from reflection injection. Supports exact match, wildcard prefix (e.g. pi-), and temp:*."
           }
         }
       },
@@ -866,6 +976,13 @@
             "description": "Maximum number of auto-capture extractions allowed per hour"
           }
         }
+      },
+      "autoRecallExcludeAgents": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        },
+        "description": "Agent/session patterns excluded from auto-recall and reflection injection. Supports exact match, wildcard prefix (e.g. pi-), and temp:*."
       }
     },
     "required": [
@@ -895,14 +1012,20 @@
       "advanced": true
     },
     "embedding.dimensions": {
-      "label": "Vector Dimensions",
+      "label": "Schema Dimensions",
       "placeholder": "auto-detected from model",
-      "help": "Override vector dimensions for custom models not in the built-in lookup table",
+      "help": "Internal vector dimensions used for LanceDB schema sizing and local embedding validation. Override this for custom models not in the built-in lookup table.",
+      "advanced": true
+    },
+    "embedding.requestDimensions": {
+      "label": "Request Dimensions",
+      "placeholder": "omit by default",
+      "help": "Optional dimensions/output_dimension value to send to the embedding API. If unset, no request-side dimensions field is sent.",
       "advanced": true
     },
     "embedding.omitDimensions": {
       "label": "Omit Request Dimensions",
-      "help": "Do not send the dimensions parameter to the embedding API even if embedding.dimensions is configured. Useful for local models like Qwen3-Embedding that reject the field.",
+      "help": "Do not send dimensions/output_dimension to the embedding API even if embedding.requestDimensions is configured. Useful for local models like Qwen3-Embedding that reject the field.",
       "advanced": true
     },
     "embedding.taskQuery": {

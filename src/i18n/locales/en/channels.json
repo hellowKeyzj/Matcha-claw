@@ -18,6 +18,7 @@
         "starting": "Starting",
         "reconnecting": "Reconnecting"
     },
+    "gatewayPreparing": "Gateway is starting. Channel connections will resume shortly.",
     "gatewayWarning": "Gateway service is not running. Channels cannot connect.",
     "available": "Available Channels",
     "availableDesc": "Connect a new channel",

@@ -41,6 +41,7 @@ const gatewayState = {
     },
     updatedAt: Date.now(),
   },
+  isInitialized: true,
 };
 
 vi.mock('@/stores/gateway', () => ({
@@ -64,6 +65,17 @@ vi.mock('react-i18next', () => ({
 describe('dashboard page', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    gatewayState.isInitialized = true;
+    gatewayState.status = {
+      ...gatewayState.status,
+      processState: 'running',
+      pid: 1234,
+      connectedAt: Date.now(),
+      gatewayReady: true,
+      healthSummary: 'healthy',
+      transportState: 'connected',
+      portReachable: true,
+    };
     useDashboardUiStore.setState({
       dashboardHeavyContentReady: true,
       usageGroupBy: 'model',
@@ -107,5 +119,27 @@ describe('dashboard page', () => {
     await waitFor(() => {
       expect(screen.getAllByText('demo-model').length).toBeGreaterThan(0);
     });
+  });
+
+  it('启动初始化前显示准备中，不显示未运行', () => {
+    gatewayState.isInitialized = false;
+    gatewayState.status = {
+      ...gatewayState.status,
+      processState: 'stopped',
+      gatewayReady: false,
+      healthSummary: 'unresponsive',
+      transportState: 'disconnected',
+      portReachable: false,
+      connectedAt: undefined,
+    } as typeof gatewayState.status;
+
+    render(
+      <MemoryRouter>
+        <Dashboard />
+      </MemoryRouter>,
+    );
+
+    expect(screen.getByText('gatewayPreparing')).toBeInTheDocument();
+    expect(screen.queryByText('gatewayNotRunning')).not.toBeInTheDocument();
   });
 });

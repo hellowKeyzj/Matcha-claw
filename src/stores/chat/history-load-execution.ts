@@ -27,6 +27,7 @@ import {
   patchSessionViewportState,
 } from './store-state-helpers';
 import { readSessionsFromState } from './session-helpers';
+import { useTaskSnapshotStore } from './task-snapshot-store';
 import { isHistoryLoadAbortError, throwIfHistoryLoadAborted } from './history-abort';
 import type { StoreHistoryCache } from './history-cache';
 import type { ChatHistoryLoadRequest, ChatStoreState } from './types';
@@ -324,6 +325,7 @@ export async function executeViewportWindowLoad(
     const payload = initialPayload.hydrationJob
       ? await waitForRuntimeJobResult<SessionWindowResult>(initialPayload.hydrationJob.id)
       : initialPayload;
+    useTaskSnapshotStore.getState().reportSessionSnapshot(payload.snapshot, 'replay');
     const nextViewportRequestState = resolveViewportWindowRequestState({ payload });
     deps.set((state) => ({
       loadedSessions: patchSessionSnapshot(state, sessionKey, {
@@ -402,6 +404,7 @@ export function createApplyLoadedMessagesPipeline(
     if (!snapshot) {
       return;
     }
+    useTaskSnapshotStore.getState().reportSessionSnapshot(snapshot, 'replay');
 
     const hydratedItems = hydrateAttachedFilesFromItems(snapshot.items);
     const renderFingerprint = buildItemRenderFingerprint(hydratedItems);

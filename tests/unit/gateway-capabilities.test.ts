@@ -21,10 +21,10 @@ describe('gateway capabilities', () => {
     expect(inspectGatewayMethods({
       methods: ['status', 'config.get'],
       updatedAt: 123,
-    }, ['status', 'task_manager.list'])).toEqual({
+    }, ['status', 'TaskList'])).toEqual({
       ready: false,
-      methods: ['status', 'task_manager.list'],
-      missingMethods: ['task_manager.list'],
+      methods: ['status', 'TaskList'],
+      missingMethods: ['TaskList'],
       capabilities: {
         methods: ['status', 'config.get'],
         updatedAt: 123,
@@ -37,15 +37,15 @@ describe('gateway capabilities', () => {
       gateway: {
         inspectGatewayMethodReadiness: async () => ({
           ready: false,
-          methods: ['task_manager.list'],
-          missingMethods: ['task_manager.list'],
+          methods: ['TaskList'],
+          missingMethods: ['TaskList'],
         }),
       },
     });
 
     await expect(service.requirePluginMethod(
       TASK_MANAGER_GATEWAY_PLUGIN,
-      'task_manager.list',
+      'TaskList',
       5000,
     )).resolves.toEqual({
       status: 503,
@@ -53,7 +53,7 @@ describe('gateway capabilities', () => {
         success: false,
         code: 'PLUGIN_CAPABILITY_UNAVAILABLE',
         pluginId: 'task-manager',
-        missingMethods: ['task_manager.list'],
+        missingMethods: ['TaskList'],
         message: 'task-manager plugin is not enabled or did not register required Gateway methods.',
       },
     });
@@ -64,7 +64,7 @@ describe('gateway capabilities', () => {
       gateway: {
         inspectGatewayMethodReadiness: async () => ({
           ready: true,
-          methods: ['task_manager.list'],
+          methods: ['TaskList'],
           missingMethods: [],
         }),
       },
@@ -72,8 +72,8 @@ describe('gateway capabilities', () => {
 
     await expect(service.requirePluginMethod(
       SUBAGENT_GATEWAY_PLUGIN,
-      'task_manager.list',
+      'TaskList',
       5000,
-    )).rejects.toThrow('Unsupported subagents Gateway method: task_manager.list');
+    )).rejects.toThrow('Unsupported subagents Gateway method: TaskList');
   });
 });

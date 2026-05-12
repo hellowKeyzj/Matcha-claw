@@ -3,154 +3,142 @@ import { taskRoutes } from '../../runtime-host/api/routes/task-routes';
 import { GatewayCapabilityService } from '../../runtime-host/application/gateway/gateway-capability-service';
 import { TaskManagerService } from '../../runtime-host/application/tasks/service';
 import { dispatchRuntimeRouteDefinition } from './helpers/runtime-route';
-import type { RuntimeClockPort } from '../../runtime-host/application/common/runtime-ports';
 
-function clock(nowMs: number): RuntimeClockPort {
+function taskServiceWith(gatewayRpc = vi.fn(async () => ({})), inspectGatewayMethodReadiness = vi.fn(async () => ({
+  ready: true,
+  methods: ['TaskList', 'TaskGet', 'TaskCreate', 'TaskUpdate', 'TodoWrite'],
+  missingMethods: [],
+}))) {
   return {
-    nowMs: () => nowMs,
-    nowIso: () => new Date(nowMs).toISOString(),
-    toIsoString: (ms) => new Date(ms).toISOString(),
+    taskService: new TaskManagerService({
+      gateway: { gatewayRpc },
+      capabilities: new GatewayCapabilityService({ gateway: { inspectGatewayMethodReadiness } }),
+    }),
+    gatewayRpc,
+    inspectGatewayMethodReadiness,
   };
 }
 
 describe('runtime-host task routes', () => {
-  it('routes task list through TaskManagerService and gateway task_manager.list', async () => {
+  it('routes session task list through WorkBuddy TaskList gateway method', async () => {
     const gatewayRpc = vi.fn(async () => ({
-      tasks: [{ id: 'task-1', subject: '整理需求' }],
+      tasks: [{ id: '1', subject: '整理需求' }],
+      todos: [],
     }));
-    const inspectGatewayMethodReadiness = vi.fn(async () => ({
-      ready: true,
-      methods: ['task_manager.list'],
-      missingMethods: [],
-    }));
-    const taskService = new TaskManagerService({
-      gateway: { gatewayRpc },
-      capabilities: new GatewayCapabilityService({ gateway: { inspectGatewayMethodReadiness } }),
-      clock: clock(1000),
-    });
+    const deps = taskServiceWith(gatewayRpc);
 
     const response = await dispatchRuntimeRouteDefinition(
       taskRoutes,
       'POST',
       '/api/tasks/list',
-      { workspaceDir: 'E:/workspace/main' },
-      { taskService },
+      { sessionKey: 'agent:main:main' },
+      { taskService: deps.taskService },
     );
 
     expect(response).toEqual({
       status: 200,
       data: {
-        success: true,
-        tasks: [],
-        ready: false,
-        refreshing: true,
-        updatedAt: null,
-        error: null,
+        tasks: [{ id: '1', subject: '整理需求' }],
+        todos: [],
       },
     });
     expect(gatewayRpc).toHaveBeenCalledWith(
-      'task_manager.list',
-      { workspaceDir: 'E:/workspace/main' },
+      'TaskList',
+      { sessionKey: 'agent:main:main' },
       60000,
     );
-    expect(inspectGatewayMethodReadiness).toHaveBeenCalledWith(['task_manager.list'], 5000);
+    expect(deps.inspectGatewayMethodReadiness).toHaveBeenCalledWith(['TaskList'], 5000);
   });
 
-  it('validates task id before update and claim', async () => {
-    const gatewayRpc = vi.fn(async () => ({}));
-    const inspectGatewayMethodReadiness = vi.fn(async () => ({
-      ready: true,
-      methods: ['task_manager.update'],
-      missingMethods: [],
-    }));
-    const taskService = new TaskManagerService({
-      gateway: { gatewayRpc },
-      capabilities: new GatewayCapabilityService({ gateway: { inspectGatewayMethodReadiness } }),
-      clock: clock(1000),
+  it('validates required sessionKey and taskId before forwarding', async () => {
+    const deps = taskServiceWith();
+
+    await expect(dispatchRuntimeRouteDefinition(taskRoutes, 'POST', '/api/tasks/list', {}, { taskService: deps.taskService }))
+      .resolves.toEqual({ status: 400, data: { success: false, error: 'sessionKey is required' } });
+    await expect(dispatchRuntimeRouteDefinition(taskRoutes, 'POST', '/api/tasks/update', { sessionKey: 'agent:main:main' }, { taskService: deps.taskService }))
+      .resolves.toEqual({ status: 400, data: { success: false, error: 'taskId is required' } });
+    expect(deps.gatewayRpc).not.toHaveBeenCalled();
+  });
+
+  it('routes create, update, get and TodoWrite to uppercase gateway methods', async () => {
+    const gatewayRpc = vi.fn(async () => ({ ok: true }));
+    const deps = taskServiceWith(gatewayRpc);
+
+    await dispatchRuntimeRouteDefinition(taskRoutes, 'POST', '/api/tasks/create', {
+      sessionKey: 'agent:main:main',
+      subject: '实现接口',
+      description: '接入 TaskCreate',
+    }, { taskService: deps.taskService });
+    await dispatchRuntimeRouteDefinition(taskRoutes, 'POST', '/api/tasks/get', {
+      sessionKey: 'agent:main:main',
+      taskId: '1',
+    }, { taskService: deps.taskService });
+    await dispatchRuntimeRouteDefinition(taskRoutes, 'POST', '/api/tasks/update', {
+      sessionKey: 'agent:main:main',
+      taskId: '1',
+      status: 'deleted',
+    }, { taskService: deps.taskService });
+    await dispatchRuntimeRouteDefinition(taskRoutes, 'POST', '/api/tasks/todos/write', {
+      sessionKey: 'agent:main:main',
+      newTodos: [{ content: 'done', status: 'completed' }],
+    }, { taskService: deps.taskService });
+    await dispatchRuntimeRouteDefinition(taskRoutes, 'POST', '/api/tasks/todos/get', {
+      sessionKey: 'agent:main:main',
+    }, { taskService: deps.taskService });
+
+    expect(gatewayRpc.mock.calls.map((call) => call[0])).toEqual([
+      'TaskCreate',
+      'TaskGet',
+      'TaskUpdate',
+      'TodoWrite',
+      'TodoGet',
+    ]);
+  });
+
+  it('returns background task output and stop results without renderer gateway access', async () => {
+    const taskService = {
+      output: vi.fn(async () => ({ status: 200, data: { success: true, task: { id: 'job-1' } } })),
+      stop: vi.fn(async () => ({ status: 200, data: { success: true, task: { id: 'job-1', status: 'cancelled' } } })),
+    } as never;
+
+    await expect(dispatchRuntimeRouteDefinition(taskRoutes, 'POST', '/api/tasks/output', {
+      taskId: 'job-1',
+      wait: true,
+    }, { taskService })).resolves.toEqual({
+      status: 200,
+      data: { success: true, task: { id: 'job-1' } },
     });
 
-    await expect(dispatchRuntimeRouteDefinition(taskRoutes, 'POST', '/api/tasks/update', {}, { taskService }))
-      .resolves.toEqual({ status: 400, data: { success: false, error: 'taskId is required' } });
-    await expect(dispatchRuntimeRouteDefinition(taskRoutes, 'POST', '/api/tasks/claim', {}, { taskService }))
-      .resolves.toEqual({ status: 400, data: { success: false, error: 'taskId is required' } });
-    expect(gatewayRpc).not.toHaveBeenCalled();
-    expect(inspectGatewayMethodReadiness).not.toHaveBeenCalled();
+    await expect(dispatchRuntimeRouteDefinition(taskRoutes, 'POST', '/api/tasks/stop', {
+      taskId: 'job-1',
+    }, { taskService })).resolves.toEqual({
+      status: 200,
+      data: { success: true, task: { id: 'job-1', status: 'cancelled' } },
+    });
   });
 
-  it('returns structured 503 when task-manager gateway method is absent', async () => {
+  it('returns structured 503 when required gateway method is absent', async () => {
     const gatewayRpc = vi.fn(async () => ({}));
     const inspectGatewayMethodReadiness = vi.fn(async () => ({
       ready: false,
-      methods: ['task_manager.list'],
-      missingMethods: ['task_manager.list'],
+      methods: [],
+      missingMethods: ['TaskList'],
     }));
-    const taskService = new TaskManagerService({
-      gateway: { gatewayRpc },
-      capabilities: new GatewayCapabilityService({ gateway: { inspectGatewayMethodReadiness } }),
-      clock: clock(1000),
-    });
+    const deps = taskServiceWith(gatewayRpc, inspectGatewayMethodReadiness);
 
-    await expect(dispatchRuntimeRouteDefinition(taskRoutes, 'POST', '/api/tasks/list', {}, { taskService }))
+    await expect(dispatchRuntimeRouteDefinition(taskRoutes, 'POST', '/api/tasks/list', {
+      sessionKey: 'agent:main:main',
+    }, { taskService: deps.taskService }))
       .resolves.toEqual({
         status: 503,
         data: {
           success: false,
           code: 'PLUGIN_CAPABILITY_UNAVAILABLE',
           pluginId: 'task-manager',
-          missingMethods: ['task_manager.list'],
+          missingMethods: ['TaskList'],
           message: 'task-manager plugin is not enabled or did not register required Gateway methods.',
         },
       });
     expect(gatewayRpc).not.toHaveBeenCalled();
-  });
-
-  it('task list cold start uses one background gateway rpc for concurrent reads', async () => {
-    let resolveGatewayRpc: ((value: unknown) => void) | null = null;
-    const gatewayRpc = vi.fn(() => new Promise<unknown>((resolve) => {
-      resolveGatewayRpc = resolve;
-    }));
-    const inspectGatewayMethodReadiness = vi.fn(async () => ({
-      ready: true,
-      methods: ['task_manager.list'],
-      missingMethods: [],
-    }));
-    const taskService = new TaskManagerService({
-      gateway: { gatewayRpc },
-      capabilities: new GatewayCapabilityService({ gateway: { inspectGatewayMethodReadiness } }),
-      clock: clock(2000),
-    });
-
-    const first = await dispatchRuntimeRouteDefinition(taskRoutes, 'POST', '/api/tasks/list', {}, { taskService });
-    const second = await dispatchRuntimeRouteDefinition(taskRoutes, 'POST', '/api/tasks/list', {}, { taskService });
-
-    expect(first).toEqual({
-      status: 200,
-      data: {
-        success: true,
-        tasks: [],
-        ready: false,
-        refreshing: true,
-        updatedAt: null,
-        error: null,
-      },
-    });
-    expect(second).toEqual(first);
-    expect(gatewayRpc).toHaveBeenCalledTimes(1);
-
-    resolveGatewayRpc?.({ tasks: [{ id: 'task-1', subject: '整理需求' }] });
-    await Promise.resolve();
-
-    await expect(dispatchRuntimeRouteDefinition(taskRoutes, 'POST', '/api/tasks/list', {}, { taskService }))
-      .resolves.toEqual({
-        status: 200,
-        data: {
-          success: true,
-          tasks: [{ id: 'task-1', subject: '整理需求' }],
-          ready: true,
-          refreshing: true,
-          updatedAt: 2000,
-          error: null,
-        },
-      });
   });
 });

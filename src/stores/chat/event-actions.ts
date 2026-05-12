@@ -15,6 +15,7 @@ import {
   getSessionRuntime,
   patchSessionSnapshot,
 } from './store-state-helpers';
+import { useTaskSnapshotStore } from './task-snapshot-store';
 import {
   UNKNOWN_ABORTED_RUN_MARKER,
   type StoreSessionRunCache,
@@ -236,6 +237,7 @@ export function handleStoreSessionUpdateEvent(
   }
 
   if (sessionUpdate.sessionUpdate === 'session_info_update') {
+    useTaskSnapshotStore.getState().reportSessionUpdate(sessionUpdate);
     if (eventRunId && targetRuntime.activeRunId && targetRuntime.activeRunId !== eventRunId) {
       return;
     }
@@ -256,6 +258,7 @@ export function handleStoreSessionUpdateEvent(
   ) {
     return;
   }
+  useTaskSnapshotStore.getState().reportSessionUpdate(sessionUpdate);
 
   if (eventRunId && targetRuntime.activeRunId && targetRuntime.activeRunId !== eventRunId) {
     return;

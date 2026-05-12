@@ -1,7 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { MemoryRouter } from 'react-router-dom';
-import { render, waitFor } from '@testing-library/react';
+import { render, screen, waitFor } from '@testing-library/react';
 import { SecurityPage } from '@/pages/Security';
+import { useSecuritySupportStore } from '@/stores/security-support-store';
 
 const hostApiFetchMock = vi.fn();
 const gatewayRpcMock = vi.fn();
@@ -26,6 +27,7 @@ const gatewayState = {
     },
     updatedAt: 1,
   },
+  isInitialized: true,
   rpc: gatewayRpcMock,
 };
 
@@ -51,6 +53,25 @@ vi.mock('react-i18next', () => ({
 describe('SecurityPage API 接入', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    gatewayState.isInitialized = true;
+    gatewayState.status = {
+      ...gatewayState.status,
+      processState: 'running',
+      gatewayReady: true,
+      healthSummary: 'healthy',
+      transportState: 'connected',
+      portReachable: true,
+    };
+    useSecuritySupportStore.setState({
+      activeSection: 'runtime',
+      auditItems: [],
+      loadingAudit: false,
+      ruleCatalog: [],
+      loadingRuleCatalog: false,
+      ruleCatalogError: null,
+      securityOpBusy: null,
+      securityOpResult: '',
+    });
     hostApiFetchMock.mockImplementation(async (path: string) => {
       if (path === '/api/security') {
         return {
@@ -93,5 +114,27 @@ describe('SecurityPage API 接入', () => {
     });
     expect(hostApiFetchMock).toHaveBeenCalledWith('/api/security/audit?page=1&pageSize=8');
     expect(gatewayRpcMock).not.toHaveBeenCalled();
+  });
+
+  it('初始化前审计区显示准备中，不显示停止文案', () => {
+    gatewayState.isInitialized = false;
+    gatewayState.status = {
+      ...gatewayState.status,
+      processState: 'stopped',
+      gatewayReady: false,
+      healthSummary: 'unresponsive',
+      transportState: 'disconnected',
+      portReachable: false,
+    };
+    useSecuritySupportStore.setState({ activeSection: 'auditHits' });
+
+    render(
+      <MemoryRouter>
+        <SecurityPage />
+      </MemoryRouter>,
+    );
+
+    expect(screen.getByText('audit.gatewayPreparing')).toBeInTheDocument();
+    expect(screen.queryByText('audit.gatewayStopped')).not.toBeInTheDocument();
   });
 });

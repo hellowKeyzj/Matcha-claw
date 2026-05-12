@@ -26,7 +26,7 @@ vi.mock('@/components/ui/tooltip', () => ({
   ),
 }));
 
-describe('chat header bar task inbox toggle', () => {
+describe('chat header bar task panel toggle', () => {
   it('shows unfinished task count and uses one header button to toggle the shared side panel', () => {
     const onToggleSidePanel = vi.fn();
 

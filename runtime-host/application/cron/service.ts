@@ -2,6 +2,7 @@ import { triggerCronJobWithSplitProfiles } from './manual-trigger';
 import { accepted, badRequest, ok, type ApplicationResponse } from '../common/application-response';
 import type { RuntimeClockPort, RuntimeTimerPort } from '../common/runtime-ports';
 import type { GatewayCronPort } from '../gateway/gateway-runtime-port';
+import { isGatewayReadyForSnapshot, isGatewayStartupConnectionError } from '../gateway/gateway-readiness';
 import type { CronRuntimeJobPort } from './cron-jobs';
 import type { TokenUsageHistoryRepository } from '../usage/token-usage-history';
 import {
@@ -62,12 +63,16 @@ export class CronService {
     return this.deps.usageHistory.recent({ limit });
   }
 
-  listJobs() {
-    this.deps.jobs.submitRefreshJobs();
+  async listJobs() {
+    let refreshSubmitted = false;
+    if (await isGatewayReadyForSnapshot(this.deps.gateway)) {
+      this.deps.jobs.submitRefreshJobs();
+      refreshSubmitted = true;
+    }
     return {
       success: true,
       ready: this.jobsSnapshotReady,
-      refreshing: !this.jobsSnapshotReady,
+      refreshing: refreshSubmitted,
       updatedAt: this.jobsSnapshotUpdatedAt,
       error: this.jobsSnapshotError,
       jobs: this.jobsSnapshot,
@@ -75,6 +80,16 @@ export class CronService {
   }
 
   async refreshJobsSnapshot() {
+    if (!(await isGatewayReadyForSnapshot(this.deps.gateway))) {
+      return {
+        success: true,
+        ready: this.jobsSnapshotReady,
+        refreshing: false,
+        updatedAt: this.jobsSnapshotUpdatedAt,
+        error: this.jobsSnapshotError,
+        jobs: this.jobsSnapshot,
+      };
+    }
     try {
       const listResult = await this.deps.gateway.listCronJobs(true);
       const jobs = parseGatewayCronJobs(listResult);
@@ -91,6 +106,16 @@ export class CronService {
         updatedAt: this.jobsSnapshotUpdatedAt,
       };
     } catch (error) {
+      if (isGatewayStartupConnectionError(error)) {
+        return {
+          success: true,
+          ready: this.jobsSnapshotReady,
+          refreshing: false,
+          updatedAt: this.jobsSnapshotUpdatedAt,
+          error: this.jobsSnapshotError,
+          jobs: this.jobsSnapshot,
+        };
+      }
       this.jobsSnapshotError = error instanceof Error ? error.message : String(error);
       throw error;
     }

@@ -36,7 +36,7 @@ import {
   executeSetViewportAnchorItemKey,
   executeSwitchSession,
 } from './session-actions';
-import { buildTaskInboxBridgeState, normalizeTaskInboxSessionKey } from './session-helpers';
+import { buildTaskBridgeState, normalizeTaskSessionKey } from './session-helpers';
 import { createChatStoreKernel } from './store-kernel';
 import {
   DEFAULT_CANONICAL_PREFIX,
@@ -211,23 +211,23 @@ export const useChatStore = create<ChatStoreState>((set, get) => {
         finishMutating();
       }
     },
-    getTaskInboxBridgeState: () => buildTaskInboxBridgeState(get(), DEFAULT_SESSION_KEY),
-    openTaskInboxSession: (sessionKey) => {
+    getTaskBridgeState: () => buildTaskBridgeState(get(), DEFAULT_SESSION_KEY),
+    openTaskSession: (sessionKey) => {
       const { currentSessionKey, switchSession } = get();
-      const targetSessionKey = normalizeTaskInboxSessionKey(sessionKey, currentSessionKey || DEFAULT_SESSION_KEY);
+      const targetSessionKey = normalizeTaskSessionKey(sessionKey, currentSessionKey || DEFAULT_SESSION_KEY);
       if (targetSessionKey !== currentSessionKey) {
         switchSession(targetSessionKey);
       }
       return targetSessionKey;
     },
-    sendTaskInboxRecoveryPrompt: async (sessionKey, prompt) => {
+    sendTaskRecoveryPrompt: async (sessionKey, prompt) => {
       const text = typeof prompt === 'string' ? prompt.trim() : '';
       if (!text) {
         return false;
       }
       const state = get();
-      const targetSessionKey = normalizeTaskInboxSessionKey(sessionKey, state.currentSessionKey || DEFAULT_SESSION_KEY);
-      const bridge = buildTaskInboxBridgeState(state, DEFAULT_SESSION_KEY);
+      const targetSessionKey = normalizeTaskSessionKey(sessionKey, state.currentSessionKey || DEFAULT_SESSION_KEY);
+      const bridge = buildTaskBridgeState(state, DEFAULT_SESSION_KEY);
       if (bridge.sessionKey !== targetSessionKey || !bridge.canSendRecoveryPrompt) {
         return false;
       }

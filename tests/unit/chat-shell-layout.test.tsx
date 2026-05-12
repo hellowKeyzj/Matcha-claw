@@ -13,6 +13,9 @@ vi.mock('react-i18next', () => ({
       if (key === 'taskInbox.shortTitle') {
         return '任务';
       }
+      if (key === 'taskInbox.planStatus.building') {
+        return '执行中';
+      }
       if (key === 'toolbar.skillShortLabel') {
         return '技能';
       }
@@ -24,23 +27,37 @@ vi.mock('react-i18next', () => ({
   }),
 }));
 
-vi.mock('@/stores/task-inbox-store', () => ({
-  useTaskInboxStore: (selector: (state: {
-    tasks: Array<{ id: string; subject?: string; status: string; workspaceDir?: string }>;
-    loading: boolean;
+vi.mock('@/stores/chat', () => ({
+  useChatStore: (selector: (state: {
+    currentSessionKey: string;
+    openTaskSession: () => string;
+  }) => unknown) => selector({
+    currentSessionKey: 'agent:main:main',
+    openTaskSession: vi.fn(() => 'agent:main:main'),
+  }),
+}));
+
+vi.mock('@/stores/chat/task-snapshot-store', () => ({
+  useTaskSnapshotStore: (selector: (state: {
+    getTaskDataList: () => Array<{ id: string; subject?: string; status: string }>;
+  }) => unknown) => selector({
+    getTaskDataList: () => [],
+  }),
+}));
+
+vi.mock('@/stores/task-center-store', () => ({
+  useTaskCenterStore: (selector: (state: {
+    initialLoading: boolean;
+    refreshing: boolean;
     initialized: boolean;
     error: string | null;
-    workspaceLabel: string | null;
-    openTaskSession: () => { switched: boolean };
     clearError: () => void;
     refreshTasks: () => Promise<void>;
   }) => unknown) => selector({
-    tasks: [],
-    loading: false,
+    initialLoading: false,
+    refreshing: false,
     initialized: true,
     error: null,
-    workspaceLabel: 'C:/Users/Mr.Key/.openclaw/workspace (+5)',
-    openTaskSession: vi.fn(() => ({ switched: true })),
     clearError: vi.fn(),
     refreshTasks: vi.fn().mockResolvedValue(undefined),
   }),
@@ -122,7 +139,7 @@ vi.mock('@/components/file-preview/WorkspaceBrowserBody', () => ({
   ),
 }));
 
-describe('chat shell task inbox layout', () => {
+describe('chat shell task panel layout', () => {
   beforeEach(() => {
     mockShowItemInFolder.mockClear();
   });
@@ -141,6 +158,7 @@ describe('chat shell task inbox layout', () => {
     skillPreview: null,
     onClearSkillPreview: vi.fn(),
     onToggleArtifactWorkbenchFullscreen: vi.fn(),
+    derivedPlanStatus: null,
     artifactGroups: [],
     artifactFocusedGroupFiles: [],
     artifactFocusedFile: null,
@@ -261,7 +279,7 @@ describe('chat shell task inbox layout', () => {
     expect(onTabChange).toHaveBeenCalledWith('skills');
   });
 
-  it('renders the task refresh action inside the task inbox header instead of the top bar', () => {
+  it('renders the task refresh action inside the task panel header instead of the top bar', () => {
     render(
       <ChatSidePanel
         mode="docked"
@@ -276,6 +294,24 @@ describe('chat shell task inbox layout', () => {
 
     const taskPanel = screen.getByRole('tabpanel');
     expect(within(taskPanel).getByRole('button', { name: 'taskInbox.refresh' })).toBeInTheDocument();
+  });
+
+  it('renders derived plan status from the task snapshot pipeline', () => {
+    render(
+      <ChatSidePanel
+        mode="docked"
+        width={520}
+        activeTab="tasks"
+        onTabChange={vi.fn()}
+        onClose={vi.fn()}
+        unfinishedTaskCount={0}
+        {...skillConfigProps}
+        derivedPlanStatus="building"
+      />,
+    );
+
+    const taskPanel = screen.getByRole('tabpanel');
+    expect(within(taskPanel).getByText('执行中')).toBeInTheDocument();
   });
 
   it('switches the top tab strip to icon-only mode when per-tab space is not enough for labels', () => {

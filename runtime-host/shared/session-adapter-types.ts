@@ -451,6 +451,7 @@ export interface SessionStateSnapshot {
   sessionKey: string;
   catalog: SessionCatalogItem;
   items: SessionRenderItem[];
+  taskSnapshot?: TaskSnapshotEvent;
   replayComplete: boolean;
   runtime: SessionRuntimeStateSnapshot;
   window: SessionWindowStateSnapshot;
@@ -465,6 +466,7 @@ export interface SessionCatalogItem {
   agentId: string;
   kind: SessionCatalogKind;
   preferred: boolean;
+  status?: 'active' | 'completed' | 'archived' | 'deleted';
   label?: string;
   titleSource?: SessionCatalogTitleSource;
   displayName?: string;
@@ -513,10 +515,20 @@ export interface SessionItemUpdateEvent {
   _meta?: Record<string, unknown>;
 }
 
+export interface SessionPlanUpdateEvent {
+  sessionUpdate: 'plan';
+  sessionKey: string | null;
+  runId: string | null;
+  taskSnapshot: TaskSnapshotEvent;
+  snapshot: SessionStateSnapshot;
+  _meta?: Record<string, unknown>;
+}
+
 export type SessionUpdateEvent =
   | SessionInfoUpdateEvent
   | SessionItemChunkUpdateEvent
-  | SessionItemUpdateEvent;
+  | SessionItemUpdateEvent
+  | SessionPlanUpdateEvent;
 
 export interface SessionPromptResult {
   success: boolean;
@@ -531,4 +543,39 @@ export interface SessionNewResult {
   success: boolean;
   sessionKey: string;
   snapshot: SessionStateSnapshot;
+}
+
+export type TaskDataStatus = 'pending' | 'in_progress' | 'completed' | 'deleted';
+
+export interface TaskData {
+  id: string;
+  subject: string;
+  description: string;
+  activeForm?: string;
+  status: TaskDataStatus;
+  metadata?: Record<string, unknown>;
+  owner?: string;
+  blocks: string[];
+  blockedBy: string[];
+  createdAt?: number;
+  updatedAt?: number;
+  content?: string;
+  dependencies?: string[];
+}
+
+export interface TodoItem {
+  id?: string;
+  content: string;
+  activeForm?: string;
+  status: TaskDataStatus;
+  owner?: string;
+}
+
+export interface TaskSnapshotEvent {
+  sessionKey: string;
+  tasks: TaskData[];
+  todos?: TodoItem[];
+  source: 'tool' | 'todo' | 'plan' | 'artifact' | 'replay';
+  enableEdit?: boolean;
+  uri?: string;
 }

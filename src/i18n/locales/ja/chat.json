@@ -1,6 +1,10 @@
 {
     "gatewayNotRunning": "ゲートウェイが停止中",
     "gatewayRequired": "チャットを使用するには OpenClaw ゲートウェイが実行されている必要があります。自動的に起動するか、設定から起動できます。",
+    "gatewayPreparing": {
+        "title": "ワークスペースを準備中",
+        "description": "OpenClaw を起動して接続しています。まもなく会話を開始できます。"
+    },
     "welcome": {
         "title": "MatchaClaw チャット",
         "subtitle": "AI アシスタントの準備ができました。下の入力欄から会話を始めましょう。",
@@ -159,6 +163,7 @@
         "unfinishedCount": "未完了タスク {{count}} 件",
         "refresh": "タスクを更新",
         "workspaceScope": "対象: {{scope}}",
+        "gatewayPreparing": "ゲートウェイを起動中です。タスク一覧はまもなく利用できます",
         "gatewayStopped": "ゲートウェイ停止中のため、タスク一覧と再開操作は利用できません",
         "empty": "現在のワークスペースに未完了タスクはありません",
         "unboundSession": "セッション未紐付けです。先にタスクを再開してください",
@@ -175,11 +180,18 @@
         "expand": "タスク受信箱を展開",
         "status": {
             "pending": "保留",
+            "in_progress": "進行中",
             "running": "実行中",
             "waiting_for_input": "入力待ち",
             "waiting_approval": "承認待ち",
             "completed": "完了",
+            "deleted": "削除済み",
             "failed": "失敗"
+        },
+        "planStatus": {
+            "finished": "完了",
+            "building": "進行中",
+            "ready": "確認待ち"
         },
         "toast": {
             "resumed": "タスクを再開しました"

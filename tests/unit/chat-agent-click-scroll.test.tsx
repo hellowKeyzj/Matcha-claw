@@ -7,7 +7,7 @@ import { TooltipProvider } from '@/components/ui/tooltip';
 import { useChatStore } from '@/stores/chat';
 import { useGatewayStore } from '@/stores/gateway';
 import { useSubagentsStore } from '@/stores/subagents';
-import { useTaskInboxStore } from '@/stores/task-inbox-store';
+import { useTaskCenterStore } from '@/stores/task-center-store';
 import i18n from '@/i18n';
 import { createEmptySessionRecord } from '@/stores/chat/store-state-helpers';
 import { buildRenderItemsFromMessages } from './helpers/timeline-fixtures';
@@ -101,18 +101,16 @@ describe('chat 左侧点击链路回归', () => {
       loadAgents: vi.fn().mockResolvedValue(undefined),
     } as never);
 
-    useTaskInboxStore.setState({
+    useTaskCenterStore.setState({
       tasks: [],
       loading: false,
+      initialLoading: false,
+      refreshing: false,
+      mutating: false,
       initialized: true,
       error: null,
-      workspaceDirs: [],
-      workspaceLabel: null,
-      submittingTaskIds: [],
       init: vi.fn().mockResolvedValue(undefined),
       refreshTasks: vi.fn().mockResolvedValue(undefined),
-      submitDecision: vi.fn().mockResolvedValue(undefined),
-      submitFreeText: vi.fn().mockResolvedValue(undefined),
       openTaskSession: vi.fn().mockReturnValue({ switched: false, reason: 'task_not_found' }),
       handleGatewayNotification: vi.fn(),
       clearError: vi.fn(),

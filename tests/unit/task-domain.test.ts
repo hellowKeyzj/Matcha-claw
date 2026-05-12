@@ -1,8 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   filterUnfinishedTasks,
-  parseAgentIdFromSessionKey,
-} from '@/lib/task-inbox';
+} from '@/lib/task-domain';
 import type { Task } from '@/services/openclaw/task-manager-client';
 
 function buildTask(overrides: Partial<Task>): Task {
@@ -19,7 +18,7 @@ function buildTask(overrides: Partial<Task>): Task {
   };
 }
 
-describe('task inbox domain helpers', () => {
+describe('task domain helpers', () => {
   it('只保留未完成任务状态', () => {
     const tasks: Task[] = [
       buildTask({ id: 'pending', status: 'pending' }),
@@ -33,10 +32,10 @@ describe('task inbox domain helpers', () => {
     ]);
   });
 
-  it('能从 session key 解析 agentId', () => {
-    expect(parseAgentIdFromSessionKey('agent:alpha:main')).toBe('alpha');
-    expect(parseAgentIdFromSessionKey('agent:beta:session-1')).toBe('beta');
-    expect(parseAgentIdFromSessionKey('')).toBeNull();
-    expect(parseAgentIdFromSessionKey(undefined)).toBeNull();
+  it('deleted 不会进入未完成任务', () => {
+    expect(filterUnfinishedTasks([
+      buildTask({ id: 'deleted', status: 'deleted' }),
+      buildTask({ id: 'pending', status: 'pending' }),
+    ]).map((item) => item.id)).toEqual(['pending']);
   });
 });

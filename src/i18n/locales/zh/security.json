@@ -227,6 +227,7 @@
   "actionCenter": {
     "title": "安全动作中心",
     "description": "桌面一键执行安全检查与应急处置",
+    "gatewayPreparing": "Gateway 正在启动，安全动作稍后可用",
     "gatewayNotRunning": "Gateway 未运行，无法执行安全动作",
     "runSuccess": "{{name}} 执行成功",
     "runFailed": "{{name}} 执行失败",
@@ -303,6 +304,7 @@
     "decisionLabel": "decision",
     "expand": "展开审计",
     "collapse": "收起审计",
+    "gatewayPreparing": "Gateway 正在启动，审计数据稍后可用。",
     "gatewayStopped": "Gateway 未运行，无法读取审计。",
     "loading": "正在加载审计...",
     "empty": "暂无命中记录。",

@@ -8,12 +8,6 @@
     "properties": {
       "storageRoot": {
         "type": "string"
-      },
-      "defaultTaskListStrategy": {
-        "type": "string"
-      },
-      "enableAutoClaim": {
-        "type": "boolean"
       }
     }
   }

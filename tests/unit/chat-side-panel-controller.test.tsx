@@ -3,7 +3,8 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { useChatSidePanelController } from '@/pages/Chat/useChatSidePanelController';
 import { useGatewayStore } from '@/stores/gateway';
 import { useLayoutStore } from '@/stores/layout';
-import { useTaskInboxStore } from '@/stores/task-inbox-store';
+import { useTaskCenterStore } from '@/stores/task-center-store';
+import { useTaskSnapshotStore } from '@/stores/chat/task-snapshot-store';
 
 describe('chat side panel controller', () => {
   beforeEach(() => {
@@ -24,7 +25,7 @@ describe('chat side panel controller', () => {
       },
     } as never);
 
-    useTaskInboxStore.setState({
+    useTaskCenterStore.setState({
       tasks: [],
       initialized: true,
       loading: false,
@@ -32,6 +33,7 @@ describe('chat side panel controller', () => {
       init: vi.fn().mockResolvedValue(undefined),
       refreshTasks: vi.fn().mockResolvedValue(undefined),
     } as never);
+    useTaskSnapshotStore.getState().cleanup('agent:main:main');
 
     useLayoutStore.setState({
       chatTakeoverMode: 'none',
@@ -126,5 +128,41 @@ describe('chat side panel controller', () => {
     expect(result.current.activeSidePanelTab).toBe('tasks');
     expect(result.current.artifactWorkbenchFullscreen).toBe(false);
     expect(result.current.sidePanelWidth).toBe(360);
+  });
+
+  it('counts only pending and in-progress tasks for the header badge', () => {
+    useTaskSnapshotStore.getState().reportTaskData('agent:main:main', [
+      { id: '1', subject: '待做', description: '', status: 'pending', blocks: [], blockedBy: [] },
+      { id: '2', subject: '进行中', description: '', status: 'in_progress', blocks: [], blockedBy: [] },
+      { id: '3', subject: '已完成', description: '', status: 'completed', blocks: [], blockedBy: [] },
+      { id: '4', subject: '已删除', description: '', status: 'deleted', blocks: [], blockedBy: [] },
+    ], { source: 'replay' });
+
+    const layoutNode = document.createElement('div');
+    Object.defineProperty(layoutNode, 'clientWidth', {
+      configurable: true,
+      value: 900,
+    });
+
+    const { result } = renderHook(() => useChatSidePanelController(true, { current: layoutNode }));
+
+    expect(result.current.unfinishedTaskCount).toBe(2);
+  });
+
+  it('exposes derived plan status from the task snapshot store', () => {
+    useTaskSnapshotStore.getState().reportTaskData('agent:main:main', [
+      { id: '1', subject: '进行中', description: '', status: 'in_progress', blocks: [], blockedBy: [] },
+    ], { source: 'replay' });
+    useTaskSnapshotStore.getState().notifyChatStarted('agent:main:main');
+
+    const layoutNode = document.createElement('div');
+    Object.defineProperty(layoutNode, 'clientWidth', {
+      configurable: true,
+      value: 900,
+    });
+
+    const { result } = renderHook(() => useChatSidePanelController(true, { current: layoutNode }));
+
+    expect(result.current.derivedPlanStatus).toBe('building');
   });
 });

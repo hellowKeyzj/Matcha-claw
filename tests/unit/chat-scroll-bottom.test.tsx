@@ -6,7 +6,7 @@ import { TooltipProvider } from '@/components/ui/tooltip';
 import { useChatStore } from '@/stores/chat';
 import { useGatewayStore } from '@/stores/gateway';
 import { useSubagentsStore } from '@/stores/subagents';
-import { useTaskInboxStore } from '@/stores/task-inbox-store';
+import { useTaskCenterStore } from '@/stores/task-center-store';
 import { createEmptySessionRecord } from '@/stores/chat/store-state-helpers';
 import { buildRenderItemsFromMessages, type RawMessage } from './helpers/timeline-fixtures';
 import { createViewportWindowState } from '@/stores/chat/viewport-state';
@@ -101,18 +101,16 @@ function setupCommonStores() {
     updateAgent: vi.fn().mockResolvedValue(undefined),
   } as never);
 
-  useTaskInboxStore.setState({
+  useTaskCenterStore.setState({
     tasks: [],
     loading: false,
+    initialLoading: false,
+    refreshing: false,
+    mutating: false,
     initialized: true,
     error: null,
-    workspaceDirs: [],
-    workspaceLabel: null,
-    submittingTaskIds: [],
     init: vi.fn().mockResolvedValue(undefined),
     refreshTasks: vi.fn().mockResolvedValue(undefined),
-    submitDecision: vi.fn().mockResolvedValue(undefined),
-    submitFreeText: vi.fn().mockResolvedValue(undefined),
     openTaskSession: vi.fn().mockReturnValue({ switched: false, reason: 'task_not_found' }),
     handleGatewayNotification: vi.fn(),
     clearError: vi.fn(),
@@ -1459,6 +1457,54 @@ describe('chat 主线程滚动锁', () => {
     await waitFor(() => {
       expect(metrics.scrollTop).toBe(900);
     });
+  });
+
+  it('鼠标停在底部输入框浮层时，滚轮仍应滚动消息列表', async () => {
+    const { container } = renderChat();
+    const viewport = container.querySelector('.chat-scroll-sync-viewport') as HTMLDivElement;
+    const composerInput = container.querySelector('.chat-scroll-sync-input') as HTMLDivElement;
+    const metrics = {
+      scrollHeight: 1200,
+      clientHeight: 320,
+      scrollTop: 500,
+    };
+    installViewportMetrics(viewport, metrics);
+
+    act(() => {
+      fireEvent.wheel(composerInput, { deltaY: 160 });
+    });
+
+    expect(metrics.scrollTop).toBe(660);
+  });
+
+  it('输入框内部自己还能滚时，不抢它的滚轮', async () => {
+    const { container } = renderChat();
+    const viewport = container.querySelector('.chat-scroll-sync-viewport') as HTMLDivElement;
+    const textarea = container.querySelector('textarea') as HTMLTextAreaElement;
+    const metrics = {
+      scrollHeight: 1200,
+      clientHeight: 320,
+      scrollTop: 500,
+    };
+    installViewportMetrics(viewport, metrics);
+    Object.defineProperty(textarea, 'scrollHeight', {
+      configurable: true,
+      get: () => 400,
+    });
+    Object.defineProperty(textarea, 'clientHeight', {
+      configurable: true,
+      get: () => 80,
+    });
+    Object.defineProperty(textarea, 'scrollTop', {
+      configurable: true,
+      get: () => 40,
+    });
+
+    act(() => {
+      fireEvent.wheel(textarea, { deltaY: 160 });
+    });
+
+    expect(metrics.scrollTop).toBe(500);
   });
 
   it('helper 只按真实布局量判断近底和目标滚动位', () => {

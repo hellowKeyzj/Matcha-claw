@@ -84,7 +84,7 @@ export interface ApprovalItem {
   decision?: ApprovalDecision;
 }
 
-export interface TaskInboxChatBridgeState {
+export interface TaskChatBridgeState {
   sessionKey: string;
   owner: string;
   canSendRecoveryPrompt: boolean;
@@ -199,9 +199,9 @@ export interface ChatStoreActions {
   handleApprovalResolved: (payload: Record<string, unknown>) => void;
   resolveApproval: (id: string, decision: ApprovalDecision) => Promise<void>;
   syncPendingApprovals: (sessionKeyHint?: string) => Promise<void>;
-  getTaskInboxBridgeState: () => TaskInboxChatBridgeState;
-  openTaskInboxSession: (sessionKey: string) => string;
-  sendTaskInboxRecoveryPrompt: (sessionKey: string, prompt: string) => Promise<boolean>;
+  getTaskBridgeState: () => TaskChatBridgeState;
+  openTaskSession: (sessionKey: string) => string;
+  sendTaskRecoveryPrompt: (sessionKey: string, prompt: string) => Promise<boolean>;
   handleSessionUpdateEvent: (event: SessionUpdateEvent) => void;
   toggleThinking: () => void;
   refresh: () => Promise<void>;

@@ -389,6 +389,40 @@ export async function hostSessionDelete(
   });
 }
 
+export async function hostSessionArchive(
+  payload: {
+    sessionKey: string;
+  },
+): Promise<{ success: boolean; sessionKey?: string; status?: string; error?: string }> {
+  return hostApiFetch('/api/sessions/archive', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function hostSessionUnarchive(
+  payload: {
+    sessionKey: string;
+  },
+): Promise<{ success: boolean; sessionKey?: string; status?: string; error?: string }> {
+  return hostApiFetch('/api/sessions/unarchive', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function hostSessionUpdateStatus(
+  payload: {
+    sessionKey: string;
+    status: 'active' | 'completed' | 'archived' | 'deleted';
+  },
+): Promise<{ success: boolean; sessionKey?: string; status?: string; error?: string }> {
+  return hostApiFetch('/api/sessions/status', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
 export async function hostSessionLoad(
   payload: {
     sessionKey: string;

@@ -14,6 +14,16 @@ function createFakeApi() {
   const api = {
     config: {},
     pluginConfig: {},
+    runtime: {
+      tasks: {
+        runs: {
+          fromToolContext: () => ({
+            resolve: () => undefined,
+            cancel: async () => ({ found: false, cancelled: false }),
+          }),
+        },
+      },
+    },
     logger: {
       info: () => {},
       warn: () => {},
@@ -40,19 +50,35 @@ describe('task-manager task-list 插件入口注册', () => {
     const { tools, gatewayMethods } = createFakeApi()
 
     expect(tools).toEqual([
+      'TaskCreate',
+      'TaskUpdate',
+      'TaskList',
+      'TaskGet',
+      'TodoWrite',
+      'TodoGet',
       'task_create',
+      'task_update',
       'task_list',
       'task_get',
-      'task_update',
       'task_claim',
+      'TaskOutput',
+      'TaskStop',
     ])
 
     expect(gatewayMethods).toEqual([
-      'task_manager.create',
-      'task_manager.list',
-      'task_manager.get',
-      'task_manager.update',
-      'task_manager.claim',
+      'TaskCreate',
+      'TaskList',
+      'TaskGet',
+      'TaskUpdate',
+      'TodoWrite',
+      'TodoGet',
+      'TaskOutput',
+      'TaskStop',
+      'task_create',
+      'task_update',
+      'task_list',
+      'task_get',
+      'task_claim',
     ])
   })
 

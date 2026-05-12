@@ -17,6 +17,7 @@ function createSkillsService(input: {
   listEffectiveSkills?: () => Promise<unknown>;
   gateway: {
     isGatewayRunning: () => Promise<boolean>;
+    readGatewayConnectionState?: () => Promise<unknown>;
     gatewayRpc: (method: string, params?: unknown) => Promise<unknown>;
   };
   getPreviewRoots?: () => Promise<string[]>;
@@ -105,13 +106,18 @@ function createSkillsService(input: {
 }
 
 describe('skills route state sync', () => {
-  it('GET /api/skills/status 只读 runtime-host 快照并提交刷新任务', async () => {
+  it('GET /api/skills/status 在 Gateway 未 ready 时只读快照，不提交刷新任务', async () => {
     const gatewayRpc = vi.fn(async () => ({
       skills: [{ skillKey: 'demo-skill', disabled: false }],
     }));
     const skillsService = createSkillsService({
       gateway: {
         isGatewayRunning: async () => true,
+        readGatewayConnectionState: async () => ({
+          state: 'disconnected',
+          gatewayReady: false,
+          portReachable: false,
+        }),
         gatewayRpc,
       },
     });
@@ -134,6 +140,38 @@ describe('skills route state sync', () => {
       },
     });
     expect(gatewayRpc).not.toHaveBeenCalled();
+    expect((skillsService as any).deps.jobs.submitRefreshStatus).not.toHaveBeenCalled();
+  });
+
+  it('GET /api/skills/status 在 Gateway ready 后只提交后台刷新任务', async () => {
+    const gatewayRpc = vi.fn(async () => ({
+      skills: [{ skillKey: 'demo-skill', disabled: false }],
+    }));
+    const skillsService = createSkillsService({
+      gateway: {
+        isGatewayRunning: async () => true,
+        readGatewayConnectionState: async () => ({
+          state: 'connected',
+          gatewayReady: true,
+          portReachable: true,
+        }),
+        gatewayRpc,
+      },
+    });
+
+    const response = await dispatchRuntimeRouteDefinition(skillsRoutes,
+      'GET',
+      '/api/skills/status',
+      undefined,
+      { skillsService },
+    );
+
+    expect(response.data).toMatchObject({
+      success: true,
+      ready: false,
+      error: null,
+    });
+    expect(gatewayRpc).not.toHaveBeenCalled();
     expect((skillsService as any).deps.jobs.submitRefreshStatus).toHaveBeenCalledTimes(1);
   });
 
@@ -144,6 +182,11 @@ describe('skills route state sync', () => {
     const skillsService = createSkillsService({
       gateway: {
         isGatewayRunning: async () => true,
+        readGatewayConnectionState: async () => ({
+          state: 'connected',
+          gatewayReady: true,
+          portReachable: true,
+        }),
         gatewayRpc,
       },
     });
@@ -168,6 +211,45 @@ describe('skills route state sync', () => {
     });
     expect(gatewayRpc).toHaveBeenCalledTimes(1);
     expect(gatewayRpc).toHaveBeenCalledWith('skills.status');
+  });
+
+  it('refreshStatus 后台任务在 Gateway 未 ready 时不调用 RPC，也不缓存连接错误', async () => {
+    const gatewayRpc = vi.fn(async () => {
+      throw new Error('connect ECONNREFUSED 127.0.0.1:18789');
+    });
+    const skillsService = createSkillsService({
+      gateway: {
+        isGatewayRunning: async () => true,
+        readGatewayConnectionState: async () => ({
+          state: 'disconnected',
+          gatewayReady: false,
+          portReachable: false,
+        }),
+        gatewayRpc,
+      },
+    });
+
+    await expect(skillsService.refreshStatus()).resolves.toEqual({
+      success: true,
+      skills: [],
+      ready: false,
+      updatedAt: null,
+      error: null,
+    });
+
+    const response = await dispatchRuntimeRouteDefinition(skillsRoutes,
+      'GET',
+      '/api/skills/status',
+      undefined,
+      { skillsService },
+    );
+
+    expect(response.data).toMatchObject({
+      success: true,
+      ready: false,
+      error: null,
+    });
+    expect(gatewayRpc).not.toHaveBeenCalled();
   });
 
   it('PUT /api/skills/state 会先本地写 enabled，再提交 skills.update 后台同步任务', async () => {

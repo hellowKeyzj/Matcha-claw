@@ -63,7 +63,7 @@ describe('chat event normalizer', () => {
 
   it('returns null for non-chat notification methods', () => {
     const normalized = normalizeGatewayNotificationEvent({
-      method: 'task_manager.updated',
+      method: 'TaskUpdate',
       params: {
         task: {
           id: 'task-1',

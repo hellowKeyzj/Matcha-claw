@@ -3,6 +3,7 @@
     "subtitle": "Automate AI workflows with scheduled tasks",
     "newTask": "New Task",
     "refresh": "Refresh",
+    "gatewayPreparing": "Gateway is starting. Scheduled tasks will be available shortly.",
     "gatewayWarning": "Gateway is not running. Scheduled tasks cannot be managed without an active Gateway.",
     "stats": {
         "total": "Total Tasks",

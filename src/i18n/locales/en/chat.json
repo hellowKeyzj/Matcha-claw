@@ -1,6 +1,10 @@
 {
     "gatewayNotRunning": "Gateway Not Running",
     "gatewayRequired": "The OpenClaw Gateway needs to be running to use chat. It will start automatically, or you can start it from Settings.",
+    "gatewayPreparing": {
+        "title": "Preparing workspace",
+        "description": "Starting and connecting OpenClaw. You can start chatting in a moment."
+    },
     "welcome": {
         "title": "MatchaClaw Chat",
         "subtitle": "Your AI assistant is ready. Start a conversation below.",
@@ -161,6 +165,7 @@
         "unfinishedCount": "{{count}} unfinished tasks",
         "refresh": "Refresh tasks",
         "workspaceScope": "Scope: {{scope}}",
+        "gatewayPreparing": "Gateway is starting; task list will be available shortly",
         "gatewayStopped": "Gateway is stopped; task list and resume actions are unavailable",
         "empty": "No unfinished tasks in current workspace",
         "unboundSession": "No bound session yet, resume task first",
@@ -177,11 +182,18 @@
         "expand": "Expand task inbox",
         "status": {
             "pending": "Pending",
+            "in_progress": "In Progress",
             "running": "Running",
             "waiting_for_input": "Waiting Input",
             "waiting_approval": "Waiting Approval",
             "completed": "Completed",
+            "deleted": "Deleted",
             "failed": "Failed"
+        },
+        "planStatus": {
+            "finished": "Finished",
+            "building": "Building",
+            "ready": "Ready"
         },
         "toast": {
             "resumed": "Task resumed"

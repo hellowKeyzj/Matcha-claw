@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import { createTestSessionRuntimeService } from './helpers/session-runtime-fixture';
+import { SessionCommandService } from '../../runtime-host/application/sessions/session-command-service';
 import { SessionStorageRepository } from '../../runtime-host/application/sessions/session-storage-repository';
 import { buildSessionUpdateEventsFromGatewayConversationEvent } from '../../runtime-host/application/sessions/gateway-ingress';
 import { parseTranscriptMessages } from '../../runtime-host/application/sessions/transcript-parser';
@@ -72,6 +73,67 @@ async function getHydratedSessionState(
 }
 
 describe('session runtime service', () => {
+  it('loadSession does not wait for task snapshot replay', async () => {
+    const readTaskSnapshot = vi.fn(() => new Promise(() => undefined));
+    const timelineRuntime = {
+      activateSession: vi.fn(async () => ({ hydrated: true })),
+    };
+    const snapshot = {
+      sessionKey: 'agent:main:main',
+      catalog: { key: 'agent:main:main', agentId: 'main', kind: 'main', preferred: true },
+      items: [],
+      replayComplete: true,
+      runtime: {
+        sending: false,
+        activeRunId: null,
+        runPhase: 'idle',
+        activeTurnItemKey: null,
+        pendingTurnKey: null,
+        pendingTurnLaneKey: null,
+        pendingFinal: false,
+        lastUserMessageAt: null,
+        lastError: null,
+        lastIssue: null,
+        updatedAt: null,
+      },
+      window: {
+        totalItemCount: 0,
+        windowStartOffset: 0,
+        windowEndOffset: 0,
+        hasMore: false,
+        hasNewer: false,
+        isAtLatest: true,
+      },
+    };
+    const service = new SessionCommandService({
+      sessionCatalog: {} as never,
+      sessionCatalogJobs: {
+        submitRefreshCatalog: vi.fn(),
+        getRefreshCatalogJob: vi.fn(() => null),
+      },
+      sessionStorage: {} as never,
+      stateStore: {
+        flushPersistedStore: vi.fn(async () => undefined),
+      } as never,
+      timelineRuntime: timelineRuntime as never,
+      snapshotService: {
+        buildLatestSnapshotAsync: vi.fn(async () => snapshot),
+      } as never,
+      gateway: { gatewayRpc: vi.fn() },
+      clock: testClock,
+      idGenerator: { randomId: () => 'id' },
+      sessionHydrationJobs: {} as never,
+      readTaskSnapshot,
+      emitTaskSnapshot: vi.fn(),
+    });
+
+    await expect(service.loadSession({ sessionKey: 'agent:main:main' })).resolves.toEqual({
+      status: 200,
+      data: { snapshot },
+    });
+    expect(readTaskSnapshot).toHaveBeenCalledWith('agent:main:main');
+  });
+
   it('createSession returns an empty authoritative render-item snapshot', async () => {
     const configDir = await createRuntimeConfigDir();
     const service = createTestSessionRuntimeService({
@@ -807,6 +869,106 @@ describe('session runtime service', () => {
       }],
     });
     expect(resultEvent.snapshot.window.totalItemCount).toBe(1);
+  });
+
+  it('tool lifecycle task results emit a plan task snapshot event', () => {
+    const configDir = join(tmpdir(), `matcha-session-runtime-${Date.now()}`);
+    const service = createTestSessionRuntimeService({
+      workspace: { getConfigDir: () => configDir },
+      openclawBridge: {
+        chatSend: async () => ({ runId: 'run-unused' }),
+        gatewayRpc: async () => ({}),
+      },
+    });
+
+    service.consumeGatewayConversationEvent({
+      type: 'tool.lifecycle',
+      event: {
+        runId: 'run-task-plan',
+        sessionKey: 'agent:main:main',
+        sequenceId: 10,
+        timestamp: 1_700_000_000_000,
+        phase: 'start',
+        toolCallId: 'tool-task-1',
+        name: 'TaskList',
+      },
+    });
+
+    const events = service.consumeGatewayConversationEvent({
+      type: 'tool.lifecycle',
+      event: {
+        runId: 'run-task-plan',
+        sessionKey: 'agent:main:main',
+        sequenceId: 11,
+        timestamp: 1_700_000_000_001,
+        phase: 'result',
+        toolCallId: 'tool-task-1',
+        name: 'TaskList',
+        result: {
+          tasks: [{ id: '1', subject: '迁移 task 语义', status: 'in_progress' }],
+        },
+        isError: false,
+      },
+    });
+
+    const planEvent = events.find((event) => event.sessionUpdate === 'plan');
+    expect(planEvent).toMatchObject({
+      sessionUpdate: 'plan',
+      sessionKey: 'agent:main:main',
+      taskSnapshot: {
+        source: 'tool',
+        tasks: [{
+          id: '1',
+          subject: '迁移 task 语义',
+          status: 'in_progress',
+        }],
+      },
+    });
+  });
+
+  it('tasks artifact messages emit an artifact task snapshot event', () => {
+    const configDir = join(tmpdir(), `matcha-session-runtime-${Date.now()}`);
+    const service = createTestSessionRuntimeService({
+      workspace: { getConfigDir: () => configDir },
+      openclawBridge: {
+        chatSend: async () => ({ runId: 'run-unused' }),
+        gatewayRpc: async () => ({}),
+      },
+    });
+
+    const [planEvent] = service.consumeGatewayConversationEvent({
+      type: 'chat.message',
+      event: {
+        state: 'final',
+        runId: 'run-task-artifact',
+        sessionKey: 'agent:main:main',
+        sequenceId: 1,
+        message: {
+          role: 'assistant',
+          content: {
+            type: 'tasks',
+            uri: 'agent:///agent:main:main/tasks/agent:main:main',
+            tasks: [{ id: '2', content: '历史任务', status: 'completed' }],
+            enableEdit: false,
+          },
+        },
+      },
+    });
+
+    expect(planEvent).toMatchObject({
+      sessionUpdate: 'plan',
+      sessionKey: 'agent:main:main',
+      taskSnapshot: {
+        source: 'artifact',
+        uri: 'agent:///agent:main:main/tasks/agent:main:main',
+        enableEdit: false,
+        tasks: [{
+          id: '2',
+          subject: '历史任务',
+          status: 'completed',
+        }],
+      },
+    });
   });
 
   it('live tool.lifecycle result with output immediately populates the assistant-turn tool segment output', () => {

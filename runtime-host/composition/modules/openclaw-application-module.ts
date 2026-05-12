@@ -399,7 +399,7 @@ export function registerOpenClawApplicationLifecycle(
       {
         name: 'skills.status-refresh',
         start: () => {
-          container.resolve<SkillsJobPort>('skills.jobs').submitRefreshStatus();
+          void container.resolve<SkillsService>('skills.service').status();
         },
       },
       {

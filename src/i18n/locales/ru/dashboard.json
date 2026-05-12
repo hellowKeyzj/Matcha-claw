@@ -4,6 +4,7 @@
   "port": "Порт: {{port}}",
   "pid": "PID: {{pid}}",
   "sinceRestart": "С последнего перезапуска",
+  "gatewayPreparing": "Шлюз запускается",
   "gatewayNotRunning": "Шлюз не запущен",
   "recentTokenHistory": {
     "title": "Недавнее использование токенов",

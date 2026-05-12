@@ -1,4 +1,3 @@
-import { resolveDeletedPath } from '../../application/sessions/deleted-path';
 import { SessionCommandService } from '../../application/sessions/session-command-service';
 import { SessionGatewayIngressService } from '../../application/sessions/session-gateway-ingress-service';
 import { SessionRuntimeService } from '../../application/sessions/service';
@@ -24,6 +23,7 @@ import { SessionStorageRepository } from '../../application/sessions/session-sto
 import { SessionExecutionGraphRuntime } from '../../application/sessions/session-execution-graph-runtime';
 import { SessionTimelineRuntime } from '../../application/sessions/session-timeline-runtime';
 import { SessionTranscriptTimelineLoader } from '../../application/sessions/session-transcript-timeline-loader';
+import type { TaskManagerService } from '../../application/tasks/service';
 import type { OpenClawWorkspacePort } from '../../application/openclaw/openclaw-workspace-service';
 import type { RuntimeClockPort, RuntimeFileSystemPort, RuntimeIdGeneratorPort } from '../../application/common/runtime-ports';
 import type { GatewayChatPort, GatewayRpcPort } from '../../application/gateway/gateway-runtime-port';
@@ -102,7 +102,6 @@ export function registerSessionRuntimeModule(
     scope.resolve<RuntimeLongTaskSubmissionPort>('runtime.tasks'),
   ));
   container.register('sessionCommandService', (scope) => new SessionCommandService({
-    resolveDeletedPath,
     sessionCatalog: scope.resolve('sessionCatalogService'),
     sessionCatalogJobs: scope.resolve<SessionCatalogJobPort>('sessionCatalogJobs'),
     sessionStorage: scope.resolve('sessionStorageRepository'),
@@ -113,6 +112,16 @@ export function registerSessionRuntimeModule(
     clock: scope.resolve<RuntimeClockPort>('runtime.clock'),
     idGenerator: scope.resolve<RuntimeIdGeneratorPort>('runtime.idGenerator'),
     sessionHydrationJobs: scope.resolve('sessionHydrationJobAdapter'),
+    readTaskSnapshot: async (sessionKey) => {
+      try {
+        return await scope.resolve<TaskManagerService>('task.service').buildTaskSnapshot(sessionKey);
+      } catch {
+        return null;
+      }
+    },
+    emitTaskSnapshot: (event) => {
+      void scope.resolve<TaskManagerService>('task.service').emitSnapshot(event);
+    },
   }));
   container.register('sessionPromptService', (scope) => new SessionPromptService({
     stateStore: scope.resolve('sessionRuntimeStateStore'),

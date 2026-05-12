@@ -1,299 +1,57 @@
 import { create } from 'zustand';
 import {
-  getWorkspaceDir,
-  getTaskWorkspaceDirs,
   listTaskSnapshot,
   updateTask,
-  type Task,
-  type TaskListSnapshot,
 } from '@/services/openclaw/task-manager-client';
+import { useTaskSnapshotStore } from '@/stores/chat/task-snapshot-store';
 
 interface TaskCenterState {
-  tasks: Task[];
-  snapshotReady: boolean;
+  sessionKey: string | null;
   initialLoading: boolean;
   refreshing: boolean;
   mutating: boolean;
   initialized: boolean;
   error: string | null;
-  workspaceDir: string | null;
-  workspaceDirs: string[];
-  pluginInstalled: boolean;
-  pluginEnabled: boolean;
-  pluginVersion?: string;
-  init: () => Promise<void>;
-  refreshTasks: (options?: { silent?: boolean }) => Promise<void>;
-  deleteTaskById: (payload: { taskId: string }) => Promise<void>;
+  init: (sessionKey?: string) => Promise<void>;
+  refreshTasks: (options?: { sessionKey?: string; silent?: boolean }) => Promise<void>;
+  deleteTaskById: (payload: { taskId: string; sessionKey?: string }) => Promise<void>;
   handleGatewayNotification: (notification: unknown) => void;
+  clearError: () => void;
 }
 
-function patchTask(list: Task[], nextTask: Task | undefined): Task[] {
-  if (!nextTask) {
-    return list;
-  }
-  const idx = list.findIndex((row) => row.id === nextTask.id && (row.workspaceDir || '') === (nextTask.workspaceDir || ''));
-  if (idx < 0) {
-    return [nextTask, ...list];
-  }
-  const cloned = [...list];
-  cloned[idx] = { ...cloned[idx], ...nextTask };
-  return cloned;
-}
-
-function sortTasksByTime(tasks: Task[]): Task[] {
-  return [...tasks].sort((a, b) => {
-    const left = typeof a.updatedAt === 'number' ? a.updatedAt : (a.createdAt ?? 0);
-    const right = typeof b.updatedAt === 'number' ? b.updatedAt : (b.createdAt ?? 0);
-    return right - left;
-  });
-}
-
-function areTaskListsEquivalent(left: Task[], right: Task[]): boolean {
-  if (left === right) {
-    return true;
-  }
-  if (left.length !== right.length) {
-    return false;
-  }
-  for (let index = 0; index < left.length; index += 1) {
-    const a = left[index];
-    const b = right[index];
-    if (a.id !== b.id) {
-      return false;
-    }
-    if ((a.workspaceDir || '') !== (b.workspaceDir || '')) {
-      return false;
-    }
-    if (a.status !== b.status) {
-      return false;
-    }
-    if ((a.updatedAt || 0) !== (b.updatedAt || 0)) {
-      return false;
-    }
-  }
-  return true;
-}
-
-const TASK_CENTER_REFRESH_MIN_GAP_MS = 1_200;
-const TASK_CENTER_SNAPSHOT_NOT_READY_RETRY_MS = 1_200;
 let taskCenterInitPromise: Promise<void> | null = null;
 let taskCenterRefreshPromise: Promise<void> | null = null;
-let taskCenterLastRefreshAtMs = 0;
-let taskCenterSnapshotRetryTimer: ReturnType<typeof setTimeout> | null = null;
 
-function clearTaskCenterSnapshotRetry(): void {
-  if (taskCenterSnapshotRetryTimer) {
-    clearTimeout(taskCenterSnapshotRetryTimer);
-    taskCenterSnapshotRetryTimer = null;
+function resolveSessionKey(current: string | null, next?: string): string | null {
+  if (typeof next === 'string' && next.trim().length > 0) {
+    return next.trim();
   }
-}
-
-function scheduleTaskCenterSnapshotRetry(refreshTasks: () => Promise<void>): void {
-  if (taskCenterSnapshotRetryTimer) {
-    return;
-  }
-  taskCenterSnapshotRetryTimer = setTimeout(() => {
-    taskCenterSnapshotRetryTimer = null;
-    void refreshTasks();
-  }, TASK_CENTER_SNAPSHOT_NOT_READY_RETRY_MS);
-}
-
-function isTaskManagerUnavailableError(error: unknown): boolean {
-  const message = (error instanceof Error ? error.message : String(error)).toLowerCase();
-  const referencesTaskManager = message.includes('task_manager') || message.includes('task-manager');
-  if (!referencesTaskManager) {
-    return false;
-  }
-  return (
-    message.includes('not found')
-    || message.includes('unknown')
-    || message.includes('unsupported')
-    || message.includes('disabled')
-    || message.includes('not enabled')
-    || message.includes('unavailable')
-  );
-}
-
-async function listTasksFromWorkspaceScope(scope: string[]): Promise<TaskListSnapshot> {
-  if (scope.length === 0) {
-    const single = await listTaskSnapshot();
-    return {
-      ...single,
-      tasks: sortTasksByTime(single.tasks),
-    };
-  }
-
-  const results = await Promise.allSettled(
-    scope.map(async (workspaceDir) => {
-      const snapshot = await listTaskSnapshot(workspaceDir);
-      return {
-        ...snapshot,
-        tasks: snapshot.tasks.map((task) => ({ ...task, workspaceDir })),
-      };
-    }),
-  );
-
-  const merged = new Map<string, Task>();
-  let fulfilledCount = 0;
-  let readyCount = 0;
-  let refreshing = false;
-  let latestUpdatedAt: number | null = null;
-  let firstSnapshotError: string | null = null;
-  let firstError: unknown = null;
-  for (const item of results) {
-    if (item.status !== 'fulfilled') {
-      if (firstError == null) {
-        firstError = item.reason;
-      }
-      continue;
-    }
-    fulfilledCount += 1;
-    if (item.value.ready) {
-      readyCount += 1;
-    }
-    refreshing = refreshing || item.value.refreshing;
-    if (typeof item.value.updatedAt === 'number') {
-      latestUpdatedAt = latestUpdatedAt == null
-        ? item.value.updatedAt
-        : Math.max(latestUpdatedAt, item.value.updatedAt);
-    }
-    if (!firstSnapshotError && item.value.error) {
-      firstSnapshotError = item.value.error;
-    }
-    for (const task of item.value.tasks) {
-      const key = `${task.id}@@${task.workspaceDir || ''}`;
-      merged.set(key, task);
-    }
-  }
-
-  if (scope.length > 0 && fulfilledCount === 0) {
-    if (firstError instanceof Error) {
-      throw firstError;
-    }
-    throw new Error(firstError ? String(firstError) : 'Failed to load tasks from workspace scope');
-  }
-
-  return {
-    tasks: sortTasksByTime(Array.from(merged.values())),
-    ready: readyCount > 0,
-    refreshing,
-    updatedAt: latestUpdatedAt,
-    error: firstSnapshotError,
-  };
+  return current;
 }
 
 export const useTaskCenterStore = create<TaskCenterState>((set, get) => ({
-  tasks: [],
-  snapshotReady: false,
+  sessionKey: null,
   initialLoading: false,
   refreshing: false,
   mutating: false,
   initialized: false,
   error: null,
-  workspaceDir: null,
-  workspaceDirs: [],
-  pluginInstalled: false,
-  pluginEnabled: false,
-  pluginVersion: undefined,
 
-  init: async () => {
+  init: async (sessionKey) => {
+    const resolvedSessionKey = resolveSessionKey(get().sessionKey, sessionKey);
+    if (!resolvedSessionKey) {
+      set({ initialized: true, initialLoading: false, refreshing: false, error: null });
+      return;
+    }
     if (taskCenterInitPromise) {
       await taskCenterInitPromise;
       return;
     }
-    const hasSnapshot = get().snapshotReady;
-    if (hasSnapshot) {
-      set({ refreshing: true, initialLoading: false, error: null });
-    } else {
-      set({ initialLoading: true, refreshing: false, error: null });
-    }
-
-    const task = (async () => {
-      let scope: string[] = [];
-      let workspaceLabel: string | null = null;
-      try {
-        const workspaceDirs = await getTaskWorkspaceDirs();
-        const workspace = workspaceDirs.length === 0
-          ? await getWorkspaceDir()
-          : null;
-        scope = workspaceDirs.length > 0
-          ? workspaceDirs
-          : (workspace ? [workspace] : []);
-        workspaceLabel = scope.length <= 1
-          ? (scope[0] || workspace)
-          : `${scope[0]} (+${scope.length - 1})`;
-
-        set({
-          workspaceDir: workspaceLabel || null,
-          workspaceDirs: scope,
-          pluginInstalled: true,
-          pluginEnabled: true,
-          pluginVersion: undefined,
-          snapshotReady: true,
-          initialized: true,
-          initialLoading: false,
-          refreshing: true,
-          error: null,
-        });
-
-        const snapshot = await listTasksFromWorkspaceScope(scope);
-        if (!snapshot.ready) {
-          set({
-            snapshotReady: false,
-            initialized: true,
-            initialLoading: true,
-            refreshing: true,
-            error: snapshot.error,
-          });
-          scheduleTaskCenterSnapshotRetry(() => get().refreshTasks({ silent: true }));
-          return;
-        }
-        clearTaskCenterSnapshotRetry();
-        const tasks = snapshot.tasks;
-        set((state) => {
-          if (areTaskListsEquivalent(state.tasks, tasks)) {
-            return {
-              ...state,
-              refreshing: false,
-              error: null,
-            };
-          }
-          return {
-            ...state,
-            tasks,
-            refreshing: false,
-            error: null,
-          };
-        });
-      } catch (error) {
-        if (isTaskManagerUnavailableError(error)) {
-          set({
-            workspaceDir: workspaceLabel,
-            workspaceDirs: scope,
-            tasks: [],
-            pluginInstalled: false,
-            pluginEnabled: false,
-            pluginVersion: undefined,
-            snapshotReady: true,
-            initialized: true,
-            initialLoading: false,
-            refreshing: false,
-            error: null,
-          });
-          clearTaskCenterSnapshotRetry();
-          return;
-        }
-        clearTaskCenterSnapshotRetry();
-        set({
-          snapshotReady: true,
-          initialized: true,
-          initialLoading: false,
-          refreshing: false,
-          error: error instanceof Error ? error.message : String(error),
-        });
-      }
-    })();
-
+    set({ sessionKey: resolvedSessionKey, initialLoading: true, refreshing: false, error: null });
+    const task = get().refreshTasks({ sessionKey: resolvedSessionKey, silent: true })
+      .finally(() => {
+        set({ initialized: true, initialLoading: false });
+      });
     taskCenterInitPromise = task;
     try {
       await task;
@@ -305,66 +63,35 @@ export const useTaskCenterStore = create<TaskCenterState>((set, get) => ({
   },
 
   refreshTasks: async (options) => {
-    const silent = options?.silent === true;
-    if (!get().snapshotReady) {
-      await get().init();
-      return;
-    }
-    if (taskCenterInitPromise) {
-      await taskCenterInitPromise;
-      return;
-    }
-    if (!get().pluginInstalled || !get().pluginEnabled) {
-      set({ refreshing: false, initialLoading: false, error: null, tasks: [] });
-      taskCenterLastRefreshAtMs = Date.now();
+    const resolvedSessionKey = resolveSessionKey(get().sessionKey, options?.sessionKey);
+    if (!resolvedSessionKey) {
+      set({ sessionKey: null, refreshing: false, error: null });
       return;
     }
     if (taskCenterRefreshPromise) {
       await taskCenterRefreshPromise;
       return;
     }
-    if (Date.now() - taskCenterLastRefreshAtMs < TASK_CENTER_REFRESH_MIN_GAP_MS) {
-      return;
-    }
-    if (!silent) {
-      set({ refreshing: true, initialLoading: false, error: null });
+    if (!options?.silent) {
+      set({ refreshing: true, error: null });
     }
     taskCenterRefreshPromise = (async () => {
       try {
-        const snapshot = await listTasksFromWorkspaceScope(get().workspaceDirs);
-        if (!snapshot.ready) {
-          set({
-            refreshing: true,
-            initialLoading: !get().snapshotReady,
-            error: snapshot.error,
-          });
-          scheduleTaskCenterSnapshotRetry(() => get().refreshTasks({ silent: true }));
-          return;
-        }
-        clearTaskCenterSnapshotRetry();
-        const tasks = snapshot.tasks;
-        set((state) => {
-          if (areTaskListsEquivalent(state.tasks, tasks)) {
-            return {
-              ...state,
-              refreshing: false,
-              error: null,
-            };
-          }
-          return {
-            ...state,
-            tasks,
-            refreshing: false,
-            error: null,
-          };
+        const snapshot = await listTaskSnapshot(resolvedSessionKey);
+        useTaskSnapshotStore.getState().reportTaskData(resolvedSessionKey, snapshot.tasks, { source: 'replay' });
+        useTaskSnapshotStore.getState().reportTodos(resolvedSessionKey, snapshot.todos);
+        set({
+          sessionKey: resolvedSessionKey,
+          refreshing: false,
+          error: null,
+          initialized: true,
         });
       } catch (error) {
         set({
           refreshing: false,
           error: error instanceof Error ? error.message : String(error),
+          initialized: true,
         });
-      } finally {
-        taskCenterLastRefreshAtMs = Date.now();
       }
     })();
     try {
@@ -374,23 +101,25 @@ export const useTaskCenterStore = create<TaskCenterState>((set, get) => ({
     }
   },
 
-  deleteTaskById: async ({ taskId }) => {
-    if (!taskId) {
+  deleteTaskById: async ({ taskId, sessionKey }) => {
+    const resolvedSessionKey = resolveSessionKey(get().sessionKey, sessionKey);
+    if (!taskId || !resolvedSessionKey) {
       return;
     }
     set({ mutating: true, error: null });
     try {
-      const taskWorkspace = get().tasks.find((row) => row.id === taskId)?.workspaceDir;
-      await updateTask({
+      const result = await updateTask({
+        sessionKey: resolvedSessionKey,
         taskId,
-        status: 'completed',
-        ...(typeof taskWorkspace === 'string' && taskWorkspace.trim().length > 0
-          ? { workspaceDir: taskWorkspace }
-          : {}),
+        status: 'deleted',
       });
-      set((state) => ({
-        tasks: state.tasks.map((task) => task.id === taskId ? { ...task, status: 'completed' } : task),
-      }));
+      if (result.deleted) {
+        useTaskSnapshotStore.getState().reportTaskData(resolvedSessionKey, [], {
+          merge: true,
+          deletedTaskIds: [taskId],
+          source: 'tool',
+        });
+      }
     } catch (error) {
       set({ error: error instanceof Error ? error.message : String(error) });
     } finally {
@@ -398,32 +127,10 @@ export const useTaskCenterStore = create<TaskCenterState>((set, get) => ({
     }
   },
 
-  handleGatewayNotification: (notification: unknown) => {
-    if (!notification || typeof notification !== 'object') {
-      return;
-    }
-    const payload = notification as { method?: unknown; params?: unknown };
-    if (typeof payload.method !== 'string') {
-      return;
-    }
-    const params = (payload.params && typeof payload.params === 'object') ? payload.params as Record<string, unknown> : {};
-    const task = params.task as Task | undefined;
-
-    if (task) {
-      set((state) => ({
-        tasks: patchTask(state.tasks, task),
-      }));
-      return;
-    }
-
-    if (payload.method === 'task_deleted' || payload.method === 'task_manager.deleted') {
-      const taskId = typeof params.taskId === 'string' ? params.taskId : '';
-      if (!taskId) {
-        return;
-      }
-      set((state) => ({
-        tasks: state.tasks.filter((row) => row.id !== taskId),
-      }));
-    }
+  handleGatewayNotification: (notification) => {
+    const sessionKey = get().sessionKey ?? undefined;
+    useTaskSnapshotStore.getState().reportGatewayNotification(notification, sessionKey);
   },
+
+  clearError: () => set({ error: null }),
 }));

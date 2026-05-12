@@ -37,6 +37,7 @@ import {
   removeSessionRecord,
   resolveSessionRecord,
 } from './store-state-helpers';
+import { useTaskSnapshotStore } from './task-snapshot-store';
 import type { StoreHistoryCache } from './history-cache';
 import type {
   ChatSession,
@@ -135,6 +136,7 @@ function applyBackendSessionSnapshot(
     snapshot: SessionLoadResult['snapshot'];
   },
 ): void {
+  useTaskSnapshotStore.getState().reportSessionSnapshot(input.snapshot, 'replay');
   input.set((state) => {
     const loadedSessions = patchSessionMeta(
       {
@@ -530,6 +532,7 @@ export async function executeNewSession(input: CreateStoreSessionActionsInput, a
       canonicalPrefix: prefix,
     });
     const newKey = created.sessionKey;
+    useTaskSnapshotStore.getState().reportSessionSnapshot(created.snapshot, 'replay');
     set((stateValue) => {
       const baseLoadedSessions = leavingEmpty
         ? removeSessionRecord(stateValue, currentSessionKey)

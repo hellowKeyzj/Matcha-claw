@@ -43,6 +43,8 @@ const CHAT_BOTTOM_FOLLOW_THRESHOLD_PX = 96;
 
 export interface ChatListHandle {
   prepareCurrentLatestBottomAlign: () => void;
+  scrollByWheelDelta: (deltaY: number) => void;
+  notifyComposerGeometryChanged: () => void;
 }
 
 export interface ChatListProps {
@@ -450,6 +452,7 @@ export const ChatList = forwardRef<ChatListHandle, ChatListProps>(function ChatL
     handleViewportTouchMove,
     handleViewportWheel,
     handleViewportScroll,
+    notifyViewportGeometryChanged,
     prepareScopeAnchorRestore,
     prepareScopeBottomAlign,
     jumpToBottom,
@@ -532,7 +535,18 @@ export const ChatList = forwardRef<ChatListHandle, ChatListProps>(function ChatL
       }
       prepareScopeBottomAlign(currentSessionKey);
     },
-  }), [currentSessionKey, prepareScopeBottomAlign]);
+    scrollByWheelDelta: (deltaY) => {
+      const viewportNode = messagesViewportRef.current;
+      if (!viewportNode || !Number.isFinite(deltaY) || deltaY === 0) {
+        return;
+      }
+      viewportNode.scrollTop += deltaY;
+      handleViewportScroll();
+    },
+    notifyComposerGeometryChanged: () => {
+      notifyViewportGeometryChanged();
+    },
+  }), [currentSessionKey, handleViewportScroll, notifyViewportGeometryChanged, prepareScopeBottomAlign]);
 
   return (
     <ChatListSurface

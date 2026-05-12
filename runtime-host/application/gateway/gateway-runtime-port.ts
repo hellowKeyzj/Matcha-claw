@@ -61,6 +61,7 @@ export interface GatewayConnectionPort {
 }
 
 export interface GatewayChannelPort {
+  readGatewayConnectionState(timeoutMs?: number): Promise<unknown>;
   channelsStatus(probe?: boolean): Promise<unknown>;
   channelsConnect(channelId: string): Promise<unknown>;
   channelsDisconnect(channelId: string): Promise<unknown>;
@@ -68,6 +69,7 @@ export interface GatewayChannelPort {
 }
 
 export interface GatewayCronPort {
+  readGatewayConnectionState(timeoutMs?: number): Promise<unknown>;
   listCronJobs(includeDisabled?: boolean): Promise<unknown>;
   addCronJob(payload: Record<string, unknown>): Promise<unknown>;
   updateCronJob(id: string, patch: Record<string, unknown>): Promise<unknown>;

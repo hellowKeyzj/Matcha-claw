@@ -46,6 +46,7 @@ import {
 } from '../runtime-host-infrastructure-adapters';
 import { RuntimeJobsService } from '../../application/runtime-host/runtime-jobs-service';
 import { RuntimeLongTaskService } from '../../application/runtime-host/runtime-long-task-service';
+import { BackgroundTaskManager } from '../../services/background-task-manager';
 import type {
   RuntimeJobQueryPort,
   RuntimeLongTaskLookupPort,
@@ -113,6 +114,11 @@ export function registerRuntimeHostInfrastructure(container: RuntimeHostContaine
   container.register('runtime.tasks', (scope) => scope.resolve<RuntimeLongTaskSubmissionPort>('runtimeHost.longTaskService'));
   container.register('runtime.taskLookup', (scope) => scope.resolve<RuntimeLongTaskLookupPort>('jobQueue'));
   container.register('runtime.jobQueries', (scope) => scope.resolve<RuntimeJobQueryPort>('jobQueue'));
+  container.register('runtime.backgroundTasks', (scope) => new BackgroundTaskManager({
+    jobQueries: scope.resolve<RuntimeJobQueryPort>('runtime.jobQueries'),
+    timer: scope.resolve<RuntimeTimerPort>('runtime.timer'),
+    nowMs: () => scope.resolve<RuntimeClockPort>('runtime.clock').nowMs(),
+  }));
   container.registerValue('transportStats', createTransportStats());
 }
 

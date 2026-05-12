@@ -53,6 +53,18 @@ export class SessionRuntimeService {
     return await this.deps.commandService.deleteSession(payload);
   }
 
+  async archiveSession(payload: unknown) {
+    return await this.deps.commandService.archiveSession(payload);
+  }
+
+  async unarchiveSession(payload: unknown) {
+    return await this.deps.commandService.unarchiveSession(payload);
+  }
+
+  async updateSessionStatus(payload: unknown) {
+    return await this.deps.commandService.updateSessionStatus(payload);
+  }
+
   async listSessions() {
     return await this.deps.commandService.listSessions();
   }

@@ -1,0 +1,694 @@
+From c16a7b4f11d080e8ef478036273e5fc22285c0d8 Mon Sep 17 00:00:00 2001
+From: zhujin <15868159436@163.com>
+Date: Sun, 10 May 2026 11:27:05 +0800
+Subject: [PATCH] =?utf-8?q?fix(chat):=20=E6=94=B6=E5=8F=A3=E4=BC=9A?=
+ =?utf-8?q?=E8=AF=9D=E8=BF=90=E8=A1=8C=E6=97=B6=E6=97=A7=E9=94=99=E8=AF=AF?=
+ =?utf-8?q?=E5=A4=8D=E6=B4=BB=E9=93=BE=E8=B7=AF?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=utf-8
+Content-Transfer-Encoding: 8bit
+
+新增会话运行时错误派生与忽略标记，避免切换模型后旧错误再次弹出。
+
+前端接入 runtime.updatedAt 并阻止旧 snapshot 覆盖新状态，同时清理 patchSession/promptSession 启动新轮次前的旧错误。
+
+补充聊天页与 session runtime service 回归测试，覆盖同次错误不复活与新错误可重新显示。
+---
+ runtime-host/application/sessions/service.ts  |  12 ++
+ src/pages/Chat/chat-runtime-error-view.ts     |  31 +++++
+ src/pages/Chat/index.tsx                      |  23 ++--
+ src/stores/chat.ts                            |   1 +
+ src/stores/chat/runtime-error-view.ts         |  73 +++++++++++
+ src/stores/chat/store-state-helpers.ts        |  42 ++++--
+ src/stores/chat/store.ts                      |  19 ++-
+ src/stores/chat/types.ts                      |   8 ++
+ .../chat-page-shell-subscriptions.test.tsx    | 122 +++++++++++++++++-
+ tests/unit/session-adapter-service.test.ts    |  64 +++++++++
+ 10 files changed, 350 insertions(+), 45 deletions(-)
+ create mode 100644 src/pages/Chat/chat-runtime-error-view.ts
+ create mode 100644 src/stores/chat/runtime-error-view.ts
+
+diff --git a/runtime-host/application/sessions/service.ts b/runtime-host/application/sessions/service.ts
+index 3b51e88b..3273d2d3 100644
+--- a/runtime-host/application/sessions/service.ts
++++ b/runtime-host/application/sessions/service.ts
+@@ -1380,6 +1380,15 @@ export class SessionRuntimeService {
+     });
+   }
+ 
++  private clearSessionRuntimeErrorState(sessionKey: string): SessionRuntimeStateSnapshot {
++    const state = this.getSessionState(sessionKey);
++    return this.setSessionRuntime(sessionKey, {
++      runPhase: state.runtime.runPhase === 'error' ? 'idle' : state.runtime.runPhase,
++      lastError: null,
++      lastIssue: null,
++    });
++  }
++
+   notifyTransportConnected(transportEpoch: number): void {
+     if (!Number.isFinite(transportEpoch) || transportEpoch <= 0) {
+       return;
+@@ -1885,6 +1894,7 @@ export class SessionRuntimeService {
+       hydrate: true,
+       resetWindowToLatest: false,
+     });
++    this.clearSessionRuntimeErrorState(sessionKey);
+ 
+     return {
+       status: 200,
+@@ -2084,6 +2094,8 @@ export class SessionRuntimeService {
+       pendingTurnLaneKey: 'main',
+       pendingFinal: false,
+       lastUserMessageAt: entry?.createdAt ?? Date.now(),
++      lastError: null,
++      lastIssue: null,
+     });
+     state.activeTransportEpoch = this.latestConnectedTransportEpoch || 1;
+     state.window = createLatestWindowState(state.renderItems.length);
+diff --git a/src/pages/Chat/chat-runtime-error-view.ts b/src/pages/Chat/chat-runtime-error-view.ts
+new file mode 100644
+index 00000000..6a4a535d
+--- /dev/null
++++ b/src/pages/Chat/chat-runtime-error-view.ts
+@@ -0,0 +1,31 @@
++import type { TFunction } from 'i18next';
++import { localizeGatewayIssue } from './chat-gateway-status-view';
++import { hasVisibleRuntimeError } from '@/stores/chat/runtime-error-view';
++import type {
++  ChatRuntimeErrorDismissMarker,
++  ChatSessionRuntimeState,
++} from '@/stores/chat';
++
++const ACTIVE_RUN_DISCONNECTED_ERROR = 'The active run disconnected before a terminal event was received.';
++
++export function resolveVisibleChatRuntimeError(input: {
++  runtime: Pick<ChatSessionRuntimeState, 'lastError' | 'lastIssue' | 'updatedAt'>;
++  dismissedMarker: ChatRuntimeErrorDismissMarker | undefined;
++  t: TFunction<'chat'>;
++}): string | null {
++  if (!hasVisibleRuntimeError({
++    runtime: input.runtime,
++    dismissedMarker: input.dismissedMarker,
++  })) {
++    return null;
++  }
++  const localizedRuntimeIssue = localizeGatewayIssue(input.runtime.lastIssue ?? undefined, input.t);
++  const effectiveRuntimeError = localizedRuntimeIssue ?? input.runtime.lastError;
++  if (!effectiveRuntimeError) {
++    return null;
++  }
++  if (effectiveRuntimeError === ACTIVE_RUN_DISCONNECTED_ERROR) {
++    return input.t('errors.activeRunDisconnected');
++  }
++  return effectiveRuntimeError;
++}
+diff --git a/src/pages/Chat/index.tsx b/src/pages/Chat/index.tsx
+index 8609b7b2..8267144c 100644
+--- a/src/pages/Chat/index.tsx
++++ b/src/pages/Chat/index.tsx
+@@ -33,6 +33,7 @@ import { useSkillConfig } from './useSkillConfig';
+ import { useChatView } from './useChatView';
+ import { resolveChatCurrentModelView } from './chat-model-view';
+ import { localizeGatewayIssue, resolveChatGatewayBannerView } from './chat-gateway-status-view';
++import { resolveVisibleChatRuntimeError } from './chat-runtime-error-view';
+ import {
+   applyAssistantPresentationToItems,
+   type ChatAssistantCatalogAgent,
+@@ -80,7 +81,6 @@ interface ChatProps {
+ const EMPTY_AGENTS: never[] = [];
+ const EMPTY_CHAT_PAGE_SESSION = createEmptySessionRecord();
+ const EMPTY_APPROVAL_ITEMS: ApprovalItem[] = [];
+-const ACTIVE_RUN_DISCONNECTED_ERROR = 'The active run disconnected before a terminal event was received.';
+ 
+ function selectChatPageState(state: ChatStoreState) {
+   const currentSessionKey = state.currentSessionKey;
+@@ -88,11 +88,11 @@ function selectChatPageState(state: ChatStoreState) {
+   return {
+     currentSessionKey,
+     currentSession,
++    dismissedRuntimeError: state.dismissedRuntimeErrorBySession[currentSessionKey],
+     approvalStatus: getSessionApprovalStatus(state, currentSessionKey),
+     currentPendingApprovals: getPendingApprovals(state, currentSessionKey) ?? EMPTY_APPROVAL_ITEMS,
+     foregroundHistorySessionKey: state.foregroundHistorySessionKey,
+     sessionsLoading: state.sessionCatalogStatus.status === 'loading',
+-    runtimeError: currentSession.runtime.lastError,
+     showThinking: state.showThinking,
+     refresh: state.refresh,
+     toggleThinking: state.toggleThinking,
+@@ -125,11 +125,11 @@ export function Chat({ isActive = true }: ChatProps) {
+   const {
+     currentSessionKey,
+     currentSession,
++    dismissedRuntimeError,
+     approvalStatus,
+     currentPendingApprovals,
+     foregroundHistorySessionKey,
+     sessionsLoading,
+-    runtimeError,
+     showThinking,
+     refresh,
+     toggleThinking,
+@@ -429,18 +429,11 @@ export function Chat({ isActive = true }: ChatProps) {
+     setArtifactActiveSection('preview');
+     setArtifactViewMode('preview');
+   }, [artifactActiveSection, artifactFocusedFile]);
+-  const localizedRuntimeError = useMemo(() => {
+-    const localizedRuntimeIssue = localizeGatewayIssue(currentSession.runtime.lastIssue ?? undefined, t);
+-    const effectiveRuntimeError = localizedRuntimeIssue
+-      ?? runtimeError;
+-    if (!effectiveRuntimeError) {
+-      return null;
+-    }
+-    if (effectiveRuntimeError === ACTIVE_RUN_DISCONNECTED_ERROR) {
+-      return t('errors.activeRunDisconnected');
+-    }
+-    return effectiveRuntimeError;
+-  }, [currentSession.runtime.lastIssue, runtimeError, t]);
++  const localizedRuntimeError = useMemo(() => resolveVisibleChatRuntimeError({
++    runtime: currentSession.runtime,
++    dismissedMarker: dismissedRuntimeError,
++    t,
++  }), [currentSession.runtime, dismissedRuntimeError, t]);
+   const handleSendMessage = useCallback(async (
+     text: string,
+     attachments?: Parameters<typeof sendMessage>[1],
+diff --git a/src/stores/chat.ts b/src/stores/chat.ts
+index 1963b531..1863706b 100644
+--- a/src/stores/chat.ts
++++ b/src/stores/chat.ts
+@@ -16,6 +16,7 @@ export type {
+   ApprovalDecision,
+   ApprovalItem,
+   TaskInboxChatBridgeState,
++  ChatRuntimeErrorDismissMarker,
+   ChatSessionRuntimeState,
+   ChatSessionMetaState,
+   ChatSessionViewportState,
+diff --git a/src/stores/chat/runtime-error-view.ts b/src/stores/chat/runtime-error-view.ts
+new file mode 100644
+index 00000000..37a906b1
+--- /dev/null
++++ b/src/stores/chat/runtime-error-view.ts
+@@ -0,0 +1,73 @@
++import type {
++  ChatRuntimeErrorDismissMarker,
++  ChatSessionRuntimeState,
++} from './types';
++
++function normalizeText(value: string | null | undefined): string | null {
++  if (typeof value !== 'string') {
++    return null;
++  }
++  const trimmed = value.trim();
++  return trimmed.length > 0 ? trimmed : null;
++}
++
++function stableStringify(value: unknown): string {
++  if (value == null || typeof value !== 'object') {
++    return JSON.stringify(value) ?? String(value);
++  }
++  if (Array.isArray(value)) {
++    return `[${value.map((item) => stableStringify(item)).join(',')}]`;
++  }
++  const record = value as Record<string, unknown>;
++  const keys = Object.keys(record).sort();
++  return `{${keys.map((key) => `${JSON.stringify(key)}:${stableStringify(record[key])}`).join(',')}}`;
++}
++
++export function buildRuntimeErrorFingerprint(runtime: Pick<ChatSessionRuntimeState, 'lastError' | 'lastIssue'>): string | null {
++  const lastError = normalizeText(runtime.lastError);
++  const issue = runtime.lastIssue;
++  if (!lastError && !issue) {
++    return null;
++  }
++  if (!issue) {
++    return `error:${lastError}`;
++  }
++  return [
++    `error:${lastError ?? ''}`,
++    `issue-source:${normalizeText(issue.source) ?? ''}`,
++    `issue-code:${normalizeText(issue.code) ?? ''}`,
++    `issue-message:${normalizeText(issue.message) ?? ''}`,
++    `issue-details:${stableStringify(issue.details ?? null)}`,
++  ].join('|');
++}
++
++export function buildRuntimeErrorDismissMarker(
++  runtime: Pick<ChatSessionRuntimeState, 'lastError' | 'lastIssue' | 'updatedAt'>,
++): ChatRuntimeErrorDismissMarker | null {
++  const fingerprint = buildRuntimeErrorFingerprint(runtime);
++  if (!fingerprint) {
++    return null;
++  }
++  return {
++    updatedAt: typeof runtime.updatedAt === 'number' ? runtime.updatedAt : null,
++    fingerprint,
++  };
++}
++
++export function hasVisibleRuntimeError(input: {
++  runtime: Pick<ChatSessionRuntimeState, 'lastError' | 'lastIssue' | 'updatedAt'>;
++  dismissedMarker: ChatRuntimeErrorDismissMarker | undefined;
++}): boolean {
++  const nextMarker = buildRuntimeErrorDismissMarker(input.runtime);
++  if (!nextMarker) {
++    return false;
++  }
++  const dismissedMarker = input.dismissedMarker;
++  if (!dismissedMarker) {
++    return true;
++  }
++  return !(
++    dismissedMarker.updatedAt === nextMarker.updatedAt
++    && dismissedMarker.fingerprint === nextMarker.fingerprint
++  );
++}
+diff --git a/src/stores/chat/store-state-helpers.ts b/src/stores/chat/store-state-helpers.ts
+index 5b9274b4..bf68fa21 100644
+--- a/src/stores/chat/store-state-helpers.ts
++++ b/src/stores/chat/store-state-helpers.ts
+@@ -394,6 +394,7 @@ export function createEmptySessionRuntime(): ChatSessionRuntimeState {
+     lastUserMessageAt: null,
+     lastError: null,
+     lastIssue: null,
++    updatedAt: null,
+   };
+ }
+ 
+@@ -564,14 +565,15 @@ export function patchSessionRuntime(
+   patch: Partial<ChatSessionRuntimeState>,
+ ): Record<string, ChatSessionRecord> {
+   const current = getSessionRecord(state, sessionKey);
++  const nextRuntime = {
++    ...current.runtime,
++    ...patch,
++  };
+   return {
+     ...state.loadedSessions,
+     [sessionKey]: {
+       ...current,
+-      runtime: {
+-        ...current.runtime,
+-        ...patch,
+-      },
++      runtime: nextRuntime,
+     },
+   };
+ }
+@@ -660,6 +662,15 @@ export function patchSessionSnapshot(
+   const current = getSessionRecord(state, sessionKey);
+   const catalog = snapshot.catalog;
+   const nextItems = reconcileSessionItems(current.items, snapshot.items);
++  const incomingRuntimeUpdatedAt = typeof snapshot.runtime.updatedAt === 'number'
++    ? snapshot.runtime.updatedAt
++    : null;
++  const currentRuntimeUpdatedAt = typeof current.runtime.updatedAt === 'number'
++    ? current.runtime.updatedAt
++    : null;
++  const shouldApplyRuntimeSnapshot = currentRuntimeUpdatedAt == null
++    || incomingRuntimeUpdatedAt == null
++    || incomingRuntimeUpdatedAt >= currentRuntimeUpdatedAt;
+   return patchSessionRecord(state, sessionKey, {
+     meta: {
+       ...current.meta,
+@@ -675,16 +686,19 @@ export function patchSessionSnapshot(
+     items: nextItems,
+     runtime: {
+       ...current.runtime,
+-      sending: snapshot.runtime.sending,
+-      activeRunId: snapshot.runtime.activeRunId,
+-      runPhase: snapshot.runtime.runPhase,
+-      activeTurnItemKey: snapshot.runtime.activeTurnItemKey,
+-      pendingTurnKey: snapshot.runtime.pendingTurnKey,
+-      pendingTurnLaneKey: snapshot.runtime.pendingTurnLaneKey,
+-      pendingFinal: snapshot.runtime.pendingFinal,
+-      lastUserMessageAt: snapshot.runtime.lastUserMessageAt,
+-      lastError: snapshot.runtime.lastError,
+-      lastIssue: snapshot.runtime.lastIssue,
++      ...(shouldApplyRuntimeSnapshot ? {
++        sending: snapshot.runtime.sending,
++        activeRunId: snapshot.runtime.activeRunId,
++        runPhase: snapshot.runtime.runPhase,
++        activeTurnItemKey: snapshot.runtime.activeTurnItemKey,
++        pendingTurnKey: snapshot.runtime.pendingTurnKey,
++        pendingTurnLaneKey: snapshot.runtime.pendingTurnLaneKey,
++        pendingFinal: snapshot.runtime.pendingFinal,
++        lastUserMessageAt: snapshot.runtime.lastUserMessageAt,
++        lastError: snapshot.runtime.lastError,
++        lastIssue: snapshot.runtime.lastIssue,
++        updatedAt: incomingRuntimeUpdatedAt,
++      } : {}),
+     },
+     window: syncViewportState(current.window, {
+       totalItemCount: snapshot.window.totalItemCount,
+diff --git a/src/stores/chat/store.ts b/src/stores/chat/store.ts
+index 4dee944e..5172f108 100644
+--- a/src/stores/chat/store.ts
++++ b/src/stores/chat/store.ts
+@@ -43,8 +43,9 @@ import {
+   DEFAULT_SESSION_KEY,
+   type ChatStoreState,
+ } from './types';
+-import { createEmptySessionRecord, getSessionRuntime, patchSessionRecord } from './store-state-helpers';
++import { createEmptySessionRecord, getSessionRuntime } from './store-state-helpers';
+ import { finishChatRunTelemetry } from './telemetry';
++import { buildRuntimeErrorDismissMarker } from './runtime-error-view';
+ 
+ function isStaleApprovalResolveError(message: string): boolean {
+   return /not found|expired|already resolved|unknown approval|invalid approval/i.test(message);
+@@ -69,6 +70,7 @@ export const useChatStore = create<ChatStoreState>((set, get) => {
+       [DEFAULT_SESSION_KEY]: createEmptySessionRecord(),
+     },
+     pendingApprovalsBySession: {},
++    dismissedRuntimeErrorBySession: {},
+     foregroundHistorySessionKey: null,
+     sessionCatalogStatus: createIdleResourceStatusState(),
+     mutating: false,
+@@ -262,18 +264,13 @@ export const useChatStore = create<ChatStoreState>((set, get) => {
+     },
+     clearError: () => set((state) => {
+       const runtime = getSessionRuntime(state, state.currentSessionKey);
++      const marker = buildRuntimeErrorDismissMarker(runtime);
+       return {
+         error: null,
+-        loadedSessions: patchSessionRecord(state, state.currentSessionKey, {
+-          runtime: {
+-            ...runtime,
+-            lastError: null,
+-            lastIssue: null,
+-            ...(runtime.runPhase === 'error' && !runtime.sending && !runtime.pendingFinal
+-              ? { runPhase: 'idle' as const }
+-              : {}),
+-          },
+-        }),
++        dismissedRuntimeErrorBySession: {
++          ...state.dismissedRuntimeErrorBySession,
++          [state.currentSessionKey]: marker ?? undefined,
++        },
+       };
+     }),
+   };
+diff --git a/src/stores/chat/types.ts b/src/stores/chat/types.ts
+index 83463d39..b5d10f68 100644
+--- a/src/stores/chat/types.ts
++++ b/src/stores/chat/types.ts
+@@ -101,6 +101,12 @@ export interface ChatSessionRuntimeState {
+   lastUserMessageAt: number | null;
+   lastError: string | null;
+   lastIssue: GatewayTransportIssue | null;
++  updatedAt: number | null;
++}
++
++export interface ChatRuntimeErrorDismissMarker {
++  updatedAt: number | null;
++  fingerprint: string | null;
+ }
+ 
+ export interface ChatSessionMetaState {
+@@ -147,6 +153,7 @@ export interface ChatStoreBaseState extends ChatViewState {
+   currentSessionKey: string;
+   loadedSessions: Record<string, ChatSessionRecord>;
+   pendingApprovalsBySession: Record<string, ApprovalItem[]>;
++  dismissedRuntimeErrorBySession: Record<string, ChatRuntimeErrorDismissMarker | undefined>;
+ }
+ 
+ export interface ChatSendAttachment {
+@@ -208,6 +215,7 @@ export const CHAT_BASE_STATE_KEYS = [
+   'currentSessionKey',
+   'loadedSessions',
+   'pendingApprovalsBySession',
++  'dismissedRuntimeErrorBySession',
+   'foregroundHistorySessionKey',
+   'sessionCatalogStatus',
+   'mutating',
+diff --git a/tests/unit/chat-page-shell-subscriptions.test.tsx b/tests/unit/chat-page-shell-subscriptions.test.tsx
+index dd7e74c1..1e7b2672 100644
+--- a/tests/unit/chat-page-shell-subscriptions.test.tsx
++++ b/tests/unit/chat-page-shell-subscriptions.test.tsx
+@@ -1,9 +1,9 @@
+-import { act, render, screen } from '@testing-library/react';
++import { act, fireEvent, render, screen } from '@testing-library/react';
+ import { forwardRef, type ReactNode, useImperativeHandle } from 'react';
+ import { MemoryRouter } from 'react-router-dom';
+ import { beforeEach, describe, expect, it, vi } from 'vitest';
+ import Chat from '@/pages/Chat';
+-import { useChatStore } from '@/stores/chat';
++import { useChatStore as realUseChatStore } from '@/stores/chat';
+ import { useGatewayStore } from '@/stores/gateway';
+ import { useSubagentsStore } from '@/stores/subagents';
+ import { createEmptySessionRecord } from '@/stores/chat/store-state-helpers';
+@@ -11,6 +11,7 @@ import { createViewportWindowState } from '@/stores/chat/viewport-state';
+ import { buildRenderItemsFromMessages } from './helpers/timeline-fixtures';
+ 
+ const chatViewportPaneRenderSpy = vi.fn();
++const useChatStore = realUseChatStore;
+ 
+ vi.mock('react-i18next', async (importOriginal) => {
+   const actual = await importOriginal<typeof import('react-i18next')>();
+@@ -98,8 +99,17 @@ vi.mock('@/pages/Chat/components/ChatRuntimeDock', () => ({
+       <span data-testid="chat-gateway-banner-message">{message}</span>
+     </div>
+   ),
+-  ChatErrorBanner: ({ error }: { error: string }) => (
+-    <div data-testid="chat-error-banner">{error}</div>
++  ChatErrorBanner: ({
++    error,
++    onDismiss,
++  }: {
++    error: string;
++    onDismiss: () => void;
++  }) => (
++    <div data-testid="chat-error-banner">
++      <span>{error}</span>
++      <button type="button" onClick={onDismiss}>dismiss</button>
++    </div>
+   ),
+   ChatApprovalDock: () => <div data-testid="chat-approval-dock" />,
+ }));
+@@ -217,6 +227,7 @@ describe('chat 顶层订阅收口', () => {
+           ],
+           runtime: {
+             sending: true,
++            updatedAt: null,
+           },
+           window: createViewportWindowState({
+             totalItemCount: 1,
+@@ -246,7 +257,7 @@ describe('chat 顶层订阅收口', () => {
+       jumpViewportToLatest: vi.fn().mockResolvedValue(undefined),
+       sendMessage: vi.fn().mockResolvedValue(undefined),
+       abortRun: vi.fn().mockResolvedValue(undefined),
+-      clearError: vi.fn(),
++      clearError: realUseChatStore.getState().clearError,
+       resolveApproval: vi.fn().mockResolvedValue(undefined),
+       refresh: vi.fn().mockResolvedValue(undefined),
+       toggleThinking: vi.fn(),
+@@ -310,6 +321,7 @@ describe('chat 顶层订阅收口', () => {
+           runtime: {
+             ...state.loadedSessions['agent:main:main']!.runtime,
+             lastError: 'model unavailable',
++            updatedAt: 2,
+           },
+         }),
+       },
+@@ -334,6 +346,7 @@ describe('chat 顶层订阅收口', () => {
+           runtime: {
+             ...state.loadedSessions['agent:main:main']!.runtime,
+             lastError: activeRunDisconnectedError,
++            updatedAt: 2,
+           },
+         }),
+       },
+@@ -529,6 +542,7 @@ describe('chat 顶层订阅收口', () => {
+               code: 'MODEL_UNAVAILABLE',
+               details: { provider: 'anthropic' },
+             },
++            updatedAt: 2,
+           },
+         }),
+       },
+@@ -543,4 +557,102 @@ describe('chat 顶层订阅收口', () => {
+ 
+     expect(screen.getByTestId('chat-error-banner')).toHaveTextContent('errors.modelUnavailable');
+   });
++
++  it('忽略后，同一次 runtime 错误快照再次灌回时不应重新显示', () => {
++    useChatStore.setState((state) => ({
++      loadedSessions: {
++        ...state.loadedSessions,
++        'agent:main:main': buildSessionRecord({
++          sessionKey: 'agent:main:main',
++          runtime: {
++            ...state.loadedSessions['agent:main:main']!.runtime,
++            sending: false,
++            runPhase: 'error',
++            lastError: 'model unavailable',
++            updatedAt: 2,
++          },
++        }),
++      },
++      error: null,
++    }));
++
++    render(
++      <MemoryRouter>
++        <Chat isActive={false} />
++      </MemoryRouter>,
++    );
++
++    expect(screen.getByTestId('chat-error-banner')).toBeInTheDocument();
++
++    fireEvent.click(screen.getByRole('button', { name: 'dismiss' }));
++    expect(screen.queryByTestId('chat-error-banner')).toBeNull();
++
++    act(() => {
++      useChatStore.setState((state) => ({
++        loadedSessions: {
++          ...state.loadedSessions,
++          'agent:main:main': buildSessionRecord({
++            sessionKey: 'agent:main:main',
++            runtime: {
++              ...state.loadedSessions['agent:main:main']!.runtime,
++              sending: false,
++              runPhase: 'error',
++              lastError: 'model unavailable',
++              updatedAt: 2,
++            },
++          }),
++        },
++      }));
++    });
++
++    expect(screen.queryByTestId('chat-error-banner')).toBeNull();
++  });
++
++  it('新的 runtime 错误实例到来时，即使上一次已忽略也应重新显示', () => {
++    useChatStore.setState((state) => ({
++      loadedSessions: {
++        ...state.loadedSessions,
++        'agent:main:main': buildSessionRecord({
++          sessionKey: 'agent:main:main',
++          runtime: {
++            ...state.loadedSessions['agent:main:main']!.runtime,
++            sending: false,
++            runPhase: 'error',
++            lastError: 'old model unavailable',
++            updatedAt: 2,
++          },
++        }),
++      },
++      error: null,
++    }));
++
++    render(
++      <MemoryRouter>
++        <Chat isActive={false} />
++      </MemoryRouter>,
++    );
++
++    fireEvent.click(screen.getByRole('button', { name: 'dismiss' }));
++    expect(screen.queryByTestId('chat-error-banner')).toBeNull();
++
++    act(() => {
++      useChatStore.setState((state) => ({
++        loadedSessions: {
++          ...state.loadedSessions,
++          'agent:main:main': buildSessionRecord({
++            sessionKey: 'agent:main:main',
++            runtime: {
++              ...state.loadedSessions['agent:main:main']!.runtime,
++              sending: false,
++              runPhase: 'error',
++              lastError: 'new model unavailable',
++              updatedAt: 3,
++            },
++          }),
++        },
++      }));
++    });
++
++    expect(screen.getByTestId('chat-error-banner')).toHaveTextContent('new model unavailable');
++  });
+ });
+diff --git a/tests/unit/session-adapter-service.test.ts b/tests/unit/session-adapter-service.test.ts
+index 6e86a2f6..7fb03b1f 100644
+--- a/tests/unit/session-adapter-service.test.ts
++++ b/tests/unit/session-adapter-service.test.ts
+@@ -460,6 +460,36 @@ describe('session runtime service', () => {
+     });
+   });
+ 
++  it('patchSession clears stale runtime error from previous failed run', async () => {
++    const configDir = await createRuntimeConfigDir();
++    const service = new SessionRuntimeService({
++      getOpenClawConfigDir: () => configDir,
++      openclawBridge: {
++        chatSend: async () => ({ runId: 'run-unused' }),
++        gatewayRpc: async () => ({}),
++      },
++    });
++
++    service.consumeGatewayConversationEvent({
++      type: 'run.phase',
++      phase: 'error',
++      runId: 'run-old-error',
++      sessionKey: 'agent:main:main',
++      errorMessage: 'model unavailable',
++    });
++
++    const response = await service.patchSession({
++      sessionKey: 'agent:main:main',
++      model: 'openai/gpt-5.4',
++    });
++
++    expect(response.status).toBe(200);
++    expect(response.data.snapshot.runtime).toMatchObject({
++      lastError: null,
++      lastIssue: null,
++    });
++  });
++
+   it('team lane live ingress carries member lane metadata', () => {
+     const [event] = buildSessionUpdateEventsFromGatewayConversationEvent({
+       type: 'chat.message',
+@@ -2279,4 +2309,38 @@ describe('session runtime service', () => {
+     });
+     expect(persisted).not.toHaveProperty('liveSessions');
+   });
++
++  it('promptSession clears stale runtime error before starting a new run', async () => {
++    const configDir = await createRuntimeConfigDir();
++    const service = new SessionRuntimeService({
++      getOpenClawConfigDir: () => configDir,
++      openclawBridge: {
++        chatSend: async () => ({ runId: 'run-fresh-1' }),
++        gatewayRpc: async () => ({}),
++      },
++    });
++
++    service.consumeGatewayConversationEvent({
++      type: 'run.phase',
++      phase: 'error',
++      runId: 'run-old-error',
++      sessionKey: 'agent:main:main',
++      errorMessage: 'model unavailable',
++    });
++
++    const promptResponse = await service.promptSession({
++      sessionKey: 'agent:main:main',
++      message: 'hello runtime store',
++      idempotencyKey: 'user-local-fresh',
++    });
++
++    expect(promptResponse.status).toBe(200);
++    expect(promptResponse.data.snapshot.runtime).toMatchObject({
++      sending: true,
++      activeRunId: 'run-fresh-1',
++      runPhase: 'submitted',
++      lastError: null,
++      lastIssue: null,
++    });
++  });
+ });
+-- 
+2.52.0.windows.1
+

@@ -432,6 +432,7 @@ export function Sidebar({
   const toggleSidebar = useLayoutStore((state) => state.toggleSidebar);
   const devModeUnlocked = useSettingsStore((state) => state.devModeUnlocked);
   const newSession = useChatStore(selectSidebarNewSessionAction);
+  const currentSessionKey = useChatStore((state) => state.currentSessionKey);
   const gatewayStatus = useGatewayStore((state) => state.status);
   const gatewayOperational = isGatewayOperational(gatewayStatus);
   const taskCenterInitialized = useTaskCenterStore((state) => state.initialized);
@@ -498,9 +499,9 @@ export function Sidebar({
 
     if (path === '/tasks') {
       if (!taskCenterInitialized) {
-        void initTaskCenter();
+        void initTaskCenter(currentSessionKey);
       }
-      void refreshTaskCenter({ silent: true });
+      void refreshTaskCenter({ sessionKey: currentSessionKey, silent: true });
       return;
     }
 
@@ -514,6 +515,7 @@ export function Sidebar({
     prewarmPluginsData,
     refreshTaskCenter,
     taskCenterInitialized,
+    currentSessionKey,
   ]);
 
   const clearPrefetchHandle = useCallback((path: string) => {

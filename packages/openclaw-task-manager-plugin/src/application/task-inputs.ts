@@ -1,7 +1,6 @@
 import type { TaskStatus } from '../domain/task-status.js'
-import type { TaskCreateInput, TaskUpdateInput } from '../infrastructure/task-store.js'
+import type { TaskCreateInput, TaskUpdateInput } from '../infrastructure/session-task-store.js'
 import { asRecord, toNonEmptyString } from '../shared/params.js'
-import { parseAgentIdFromSessionKey } from './task-store-context.js'
 
 type InputRecord = Record<string, unknown>
 
@@ -18,6 +17,9 @@ export function toTaskCreateInput(params: InputRecord): TaskCreateInput {
       ? { activeForm: params.activeForm.trim() }
       : {}),
     ...(metadata ? { metadata } : {}),
+    ...(typeof params.owner === 'string' && params.owner.trim().length > 0
+      ? { owner: params.owner.trim() }
+      : {}),
   }
 }
 
@@ -28,24 +30,14 @@ export function toTaskUpdateInput(params: InputRecord): TaskUpdateInput {
     ...(typeof params.status === 'string' ? { status: params.status as TaskStatus } : {}),
     ...(typeof params.subject === 'string' ? { subject: params.subject } : {}),
     ...(typeof params.description === 'string' ? { description: params.description } : {}),
-    ...(typeof params.activeForm === 'string' || params.activeForm === null
-      ? { activeForm: params.activeForm as string | null }
+    ...(typeof params.activeForm === 'string'
+      ? { activeForm: params.activeForm }
       : {}),
-    ...(typeof params.owner === 'string' || params.owner === null
-      ? { owner: params.owner as string | null }
+    ...(typeof params.owner === 'string'
+      ? { owner: params.owner }
       : {}),
     ...(Array.isArray(params.addBlockedBy) ? { addBlockedBy: params.addBlockedBy as string[] } : {}),
     ...(Array.isArray(params.addBlocks) ? { addBlocks: params.addBlocks as string[] } : {}),
     ...(metadata ? { metadata } : {}),
   }
-}
-
-export function resolveClaimOwner(input: {
-  owner?: unknown
-  sessionKey?: string
-}): string {
-  if (typeof input.owner === 'string' && input.owner.trim().length > 0) {
-    return input.owner.trim()
-  }
-  return parseAgentIdFromSessionKey(input.sessionKey)
 }

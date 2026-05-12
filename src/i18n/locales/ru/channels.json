@@ -18,6 +18,7 @@
     "starting": "Starting",
     "reconnecting": "Reconnecting"
   },
+  "gatewayPreparing": "Шлюз запускается. Подключения каналов скоро восстановятся.",
   "gatewayWarning": "Служба шлюза не запущена. Каналы не могут подключиться.",
   "available": "Доступные каналы",
   "availableDesc": "Подключить новый канал",

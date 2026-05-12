@@ -11,7 +11,6 @@ import {
 } from './session-window-model';
 import type {
   SessionAbortRuntimePayload,
-  SessionDeletePayload,
   SessionLoadPayload,
   SessionNewPayload,
   SessionPatchPayload,
@@ -36,11 +35,6 @@ export function readCreateSessionRequest(payload: unknown): {
 
 export function readRequiredSessionKey(payload: unknown): string {
   const body = isRecord(payload) ? payload as SessionLoadPayload : {};
-  return normalizeString(body.sessionKey);
-}
-
-export function readDeleteSessionKey(payload: unknown): string {
-  const body = isRecord(payload) ? payload as SessionDeletePayload : {};
   return normalizeString(body.sessionKey);
 }
 

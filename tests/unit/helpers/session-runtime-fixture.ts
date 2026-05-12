@@ -19,7 +19,6 @@ import { createTestRuntimeIdGenerator } from './runtime-id-generator';
 
 export interface TestSessionRuntimeServiceDeps {
   workspace: Pick<OpenClawWorkspacePort, 'getConfigDir'>;
-  resolveDeletedPath?: (path: string) => string;
   sessionCatalog?: SessionCatalogPort;
   sessionCatalogJobs?: Pick<SessionCatalogJobPort, 'submitRefreshCatalog' | 'getRefreshCatalogJob'>;
   sessionMetadata?: SessionMetadataPort;
@@ -103,7 +102,6 @@ export function createTestSessionRuntimeService(deps: TestSessionRuntimeServiceD
     clock,
   });
   const commandService = new SessionCommandService({
-    resolveDeletedPath: deps.resolveDeletedPath,
     sessionCatalog,
     sessionCatalogJobs: deps.sessionCatalogJobs ?? {
       submitRefreshCatalog: () => ({

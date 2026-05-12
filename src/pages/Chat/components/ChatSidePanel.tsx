@@ -1,5 +1,5 @@
 import { memo, useMemo, type CSSProperties } from 'react';
-import { AlertCircle, ArrowLeft, Copy, Eye, FileCode2, FolderOpen, FolderTree, GitCompare, ListTodo, Maximize2, Minimize2, RefreshCw, Settings2, X } from 'lucide-react';
+import { AlertCircle, ArrowLeft, Copy, Eye, FileCode2, FolderOpen, FolderTree, GitCompare, ListTodo, Loader2, Maximize2, Minimize2, RefreshCw, Settings2, X } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { toast } from 'sonner';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
@@ -7,8 +7,10 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
 import { useGatewayStore } from '@/stores/gateway';
-import { useTaskInboxStore } from '@/stores/task-inbox-store';
-import { isGatewayOperational } from '@/lib/gateway-status';
+import { useChatStore } from '@/stores/chat';
+import { useTaskCenterStore } from '@/stores/task-center-store';
+import { useTaskSnapshotStore } from '@/stores/chat/task-snapshot-store';
+import { isGatewayOperational, isGatewayPreparing } from '@/lib/gateway-status';
 import type { ChatSidePanelMode } from '../chat-workspace-layout';
 import type { ChatSidePanelTab } from '../useChatSidePanelController';
 import { AgentSkillConfigPanel, type AgentSkillOption } from './AgentSkillConfigPanel';
@@ -18,6 +20,7 @@ import { invokeIpc } from '@/lib/api-client';
 import { FilePreviewBody, type FilePreviewMode } from '@/components/file-preview/FilePreviewBody';
 import { WorkspaceBrowserBody } from '@/components/file-preview/WorkspaceBrowserBody';
 import type { ArtifactPreviewTarget } from '@/components/file-preview/types';
+import type { DerivedPlanStatus } from '@/stores/chat/task-snapshot-store';
 
 interface ChatSidePanelProps {
   mode: Exclude<ChatSidePanelMode, 'hidden'>;
@@ -28,6 +31,7 @@ interface ChatSidePanelProps {
   onClose: () => void;
   onToggleArtifactWorkbenchFullscreen: () => void;
   unfinishedTaskCount: number;
+  derivedPlanStatus: DerivedPlanStatus;
   skillConfigLabel: string;
   skillConfigTitle: string;
   skillOptions: AgentSkillOption[];
@@ -106,6 +110,7 @@ export const ChatSidePanel = memo(function ChatSidePanel({
   onClose,
   onToggleArtifactWorkbenchFullscreen,
   unfinishedTaskCount,
+  derivedPlanStatus,
   skillConfigLabel,
   skillConfigTitle,
   skillOptions,
@@ -130,14 +135,17 @@ export const ChatSidePanel = memo(function ChatSidePanel({
 }: ChatSidePanelProps) {
   const { t } = useTranslation('chat');
   const gatewayStatus = useGatewayStore((state) => state.status);
+  const gatewayInitialized = useGatewayStore((state) => state.isInitialized);
   const isGatewayRunning = isGatewayOperational(gatewayStatus);
-  const tasks = useTaskInboxStore((state) => state.tasks);
-  const loading = useTaskInboxStore((state) => state.loading);
-  const initialized = useTaskInboxStore((state) => state.initialized);
-  const error = useTaskInboxStore((state) => state.error);
-  const refreshTasks = useTaskInboxStore((state) => state.refreshTasks);
-  const openTaskSession = useTaskInboxStore((state) => state.openTaskSession);
-  const clearError = useTaskInboxStore((state) => state.clearError);
+  const gatewayPreparing = isGatewayPreparing(gatewayStatus, gatewayInitialized);
+  const currentSessionKey = useChatStore((state) => state.currentSessionKey);
+  const openTaskSession = useChatStore((state) => state.openTaskSession);
+  const tasks = useTaskSnapshotStore((state) => state.getTaskDataList(currentSessionKey));
+  const loading = useTaskCenterStore((state) => state.initialLoading || state.refreshing);
+  const initialized = useTaskCenterStore((state) => state.initialized);
+  const error = useTaskCenterStore((state) => state.error);
+  const refreshTasks = useTaskCenterStore((state) => state.refreshTasks);
+  const clearError = useTaskCenterStore((state) => state.clearError);
   const panelStyle = {
     ['--chat-side-panel-width' as string]: `${width}px`,
   } as CSSProperties;
@@ -204,11 +212,11 @@ export const ChatSidePanel = memo(function ChatSidePanel({
   };
 
   const handleOpenSession = (taskId: string) => {
-    const result = openTaskSession(taskId);
-    if (result.switched) {
+    if (!tasks.some((task) => task.id === taskId)) {
+      toast.error(t('taskInbox.taskNotFound'));
       return;
     }
-    toast.error(t('taskInbox.taskNotFound'));
+    openTaskSession(currentSessionKey);
   };
 
   const handleOpenRelativeArtifactFile = (offset: -1 | 1) => {
@@ -517,12 +525,17 @@ export const ChatSidePanel = memo(function ChatSidePanel({
                 {t('taskInbox.unfinishedCount', { count: unfinishedTaskCount })}
               </p>
             </div>
+            {derivedPlanStatus ? (
+              <Badge variant={derivedPlanStatus === 'finished' ? 'success' : 'secondary'}>
+                {t(`taskInbox.planStatus.${derivedPlanStatus}`)}
+              </Badge>
+            ) : null}
             <Button
               type="button"
               variant="ghost"
               size="icon"
               className="h-8 w-8 shrink-0 rounded-md border border-border/40 bg-muted/30 text-muted-foreground hover:bg-secondary hover:text-foreground"
-              onClick={() => void refreshTasks()}
+              onClick={() => void refreshTasks({ sessionKey: currentSessionKey })}
               disabled={!isGatewayRunning || loading}
               title={t('taskInbox.refresh')}
               aria-label={t('taskInbox.refresh')}
@@ -533,8 +546,16 @@ export const ChatSidePanel = memo(function ChatSidePanel({
 
           <div className={cn('flex-1 space-y-3 overflow-y-auto', SIDE_PANEL_CONTENT_PAD_X, SIDE_PANEL_CONTENT_PAD_Y)}>
             {!isGatewayRunning ? (
-              <div className="rounded-lg border border-yellow-400/45 bg-yellow-50/72 px-3 py-2 text-xs text-yellow-800 dark:border-yellow-700/60 dark:bg-yellow-950/20 dark:text-yellow-200">
-                {t('taskInbox.gatewayStopped')}
+              <div className={cn(
+                'rounded-lg border px-3 py-2 text-xs',
+                gatewayPreparing
+                  ? 'border-border bg-muted/30 text-muted-foreground'
+                  : 'border-yellow-400/45 bg-yellow-50/72 text-yellow-800 dark:border-yellow-700/60 dark:bg-yellow-950/20 dark:text-yellow-200',
+              )}>
+                <span className="inline-flex items-center gap-2">
+                  {gatewayPreparing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
+                  {gatewayPreparing ? t('taskInbox.gatewayPreparing') : t('taskInbox.gatewayStopped')}
+                </span>
               </div>
             ) : null}
 
@@ -566,7 +587,7 @@ export const ChatSidePanel = memo(function ChatSidePanel({
               <div className="divide-y divide-border/35">
                 {tasks.map((task) => {
                   return (
-                    <div key={`${task.id}-${task.workspaceDir || 'default'}`} className="py-2">
+                    <div key={task.id} className="py-2">
                       <button
                         type="button"
                         onClick={() => handleOpenSession(task.id)}

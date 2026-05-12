@@ -38,7 +38,7 @@ import { useChatStore } from '@/stores/chat';
 import { useCronStore } from '@/stores/cron';
 import { useGatewayStore } from '@/stores/gateway';
 import { useSubagentsStore } from '@/stores/subagents';
-import { isGatewayOperational } from '@/lib/gateway-status';
+import { isGatewayOperational, isGatewayPreparing } from '@/lib/gateway-status';
 import { hostChannelsFetchSnapshot } from '@/lib/channel-runtime';
 import { useDelayedFlag } from '@/lib/use-delayed-flag';
 import { formatRelativeTime, cn } from '@/lib/utils';
@@ -869,6 +869,7 @@ export function Cron({ embedded = false }: CronProps) {
     triggerJob,
   } = useCronStore();
   const gatewayStatus = useGatewayStore((state) => state.status);
+  const gatewayInitialized = useGatewayStore((state) => state.isInitialized);
   const currentChatSessionKey = useChatStore((state) => state.currentSessionKey);
   const agentsResource = useSubagentsStore((state) => state.agentsResource);
   const loadAgents = useSubagentsStore((state) => state.loadAgents);
@@ -877,6 +878,7 @@ export function Cron({ embedded = false }: CronProps) {
   const [jobToDelete, setJobToDelete] = useState<{ id: string } | null>(null);
 
   const isGatewayRunning = isGatewayOperational(gatewayStatus);
+  const gatewayPreparing = isGatewayPreparing(gatewayStatus, gatewayInitialized);
   const availableAgents = Array.isArray(agentsResource.data)
     ? agentsResource.data.map((agent) => ({ id: agent.id, name: agent.name || agent.id }))
     : [];
@@ -960,11 +962,15 @@ export function Cron({ embedded = false }: CronProps) {
 
       {/* Gateway Warning */}
       {!isGatewayRunning && (
-        <Card className="border-yellow-500 bg-yellow-50 dark:bg-yellow-900/10">
+        <Card className={gatewayPreparing ? 'border-border bg-muted/30' : 'border-yellow-500 bg-yellow-50 dark:bg-yellow-900/10'}>
           <CardContent className="py-4 flex items-center gap-3">
-            <AlertCircle className="h-5 w-5 text-yellow-600" />
-            <span className="text-yellow-700 dark:text-yellow-400">
-              {t('gatewayWarning')}
+            {gatewayPreparing ? (
+              <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
+            ) : (
+              <AlertCircle className="h-5 w-5 text-yellow-600" />
+            )}
+            <span className={gatewayPreparing ? 'text-muted-foreground' : 'text-yellow-700 dark:text-yellow-400'}>
+              {gatewayPreparing ? t('gatewayPreparing') : t('gatewayWarning')}
             </span>
           </CardContent>
         </Card>

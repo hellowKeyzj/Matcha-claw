@@ -6,7 +6,7 @@ import { TooltipProvider } from '@/components/ui/tooltip';
 import { useChatStore } from '@/stores/chat';
 import { useGatewayStore } from '@/stores/gateway';
 import { useSubagentsStore } from '@/stores/subagents';
-import { useTaskInboxStore } from '@/stores/task-inbox-store';
+import { useTaskCenterStore } from '@/stores/task-center-store';
 import { createEmptySessionRecord, createEmptySessionViewportState } from '@/stores/chat/store-state-helpers';
 import { buildRenderItemsFromMessages } from './helpers/timeline-fixtures';
 import { createViewportWindowState } from '@/stores/chat/viewport-state';
@@ -84,7 +84,7 @@ function setupChatSessions() {
     loadAgents: vi.fn().mockResolvedValue(undefined),
     updateAgent: vi.fn().mockResolvedValue(undefined),
   } as never);
-  useTaskInboxStore.setState({
+  useTaskCenterStore.setState({
     tasks: [],
     loading: false,
     initialized: true,
