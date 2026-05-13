@@ -20,6 +20,7 @@ type RuntimeHostGatewayForwardEventName =
   | 'gateway:lifecycle'
   | 'gateway:notification'
   | 'session:update'
+  | 'task:snapshot'
   | 'gateway:channel-status'
   | 'gateway:error';
 
@@ -89,6 +90,7 @@ function isGatewayForwardEventName(value: unknown): value is RuntimeHostGatewayF
   return value === 'gateway:lifecycle'
     || value === 'gateway:notification'
     || value === 'session:update'
+    || value === 'task:snapshot'
     || value === 'gateway:channel-status'
     || value === 'gateway:error';
 }

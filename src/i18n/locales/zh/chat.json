@@ -73,6 +73,19 @@
             "error": "错误"
         }
     },
+    "todoPanel": {
+        "summary": "任务 {{completed}}/{{total}}",
+        "expand": "展开任务列表",
+        "collapse": "收起任务列表",
+        "allCompleted": "所有任务已完成",
+        "inProgress": "任务进行中",
+        "status": {
+            "pending": "待办",
+            "in_progress": "进行中",
+            "completed": "完成",
+            "deleted": "取消"
+        }
+    },
     "executionGraph": {
         "eyebrow": "对话执行",
         "title": "执行关系图",

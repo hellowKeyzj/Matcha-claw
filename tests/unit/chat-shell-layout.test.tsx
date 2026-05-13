@@ -27,21 +27,34 @@ vi.mock('react-i18next', () => ({
   }),
 }));
 
+const openTaskSessionMock = vi.fn(() => 'agent:main:main');
+let taskRows: Array<{
+  id: string;
+  subject?: string;
+  status: string;
+  metadata?: Record<string, unknown>;
+}> = [];
+
 vi.mock('@/stores/chat', () => ({
   useChatStore: (selector: (state: {
     currentSessionKey: string;
-    openTaskSession: () => string;
+    openTaskSession: (sessionKey: string) => string;
   }) => unknown) => selector({
     currentSessionKey: 'agent:main:main',
-    openTaskSession: vi.fn(() => 'agent:main:main'),
+    openTaskSession: openTaskSessionMock,
   }),
 }));
 
 vi.mock('@/stores/chat/task-snapshot-store', () => ({
   useTaskSnapshotStore: (selector: (state: {
-    getTaskDataList: () => Array<{ id: string; subject?: string; status: string }>;
+    getPersistentTaskDataList: () => Array<{
+      id: string;
+      subject?: string;
+      status: string;
+      metadata?: Record<string, unknown>;
+    }>;
   }) => unknown) => selector({
-    getTaskDataList: () => [],
+    getPersistentTaskDataList: () => taskRows,
   }),
 }));
 
@@ -142,6 +155,8 @@ vi.mock('@/components/file-preview/WorkspaceBrowserBody', () => ({
 describe('chat shell task panel layout', () => {
   beforeEach(() => {
     mockShowItemInFolder.mockClear();
+    openTaskSessionMock.mockClear();
+    taskRows = [];
   });
 
   const skillConfigProps = {
@@ -294,6 +309,35 @@ describe('chat shell task panel layout', () => {
 
     const taskPanel = screen.getByRole('tabpanel');
     expect(within(taskPanel).getByRole('button', { name: 'taskInbox.refresh' })).toBeInTheDocument();
+  });
+
+  it('renders only persistent task rows and opens the task execution session', () => {
+    taskRows = [{
+      id: 'task-1',
+      subject: '执行任务',
+      status: 'in_progress',
+      metadata: { sessionKey: 'agent:worker:session-1' },
+    }];
+
+    render(
+      <ChatSidePanel
+        mode="docked"
+        width={520}
+        activeTab="tasks"
+        onTabChange={vi.fn()}
+        onClose={vi.fn()}
+        unfinishedTaskCount={1}
+        {...skillConfigProps}
+      />,
+    );
+
+    const taskPanel = screen.getByRole('tabpanel');
+    expect(within(taskPanel).getByText('执行任务')).toBeInTheDocument();
+    expect(within(taskPanel).queryByText('分析页面结构')).toBeNull();
+
+    fireEvent.click(within(taskPanel).getByRole('button', { name: /执行任务/ }));
+
+    expect(openTaskSessionMock).toHaveBeenCalledWith('agent:worker:session-1');
   });
 
   it('renders derived plan status from the task snapshot pipeline', () => {

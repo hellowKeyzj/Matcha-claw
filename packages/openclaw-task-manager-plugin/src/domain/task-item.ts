@@ -1,4 +1,4 @@
-import type { TaskStatus } from './task-status.js'
+import type { TaskStatus, TodoStatus } from './task-status.js'
 
 export interface TaskItem {
   id: string
@@ -26,6 +26,6 @@ export interface TodoItem {
   id?: string
   content: string
   activeForm?: string
-  status: TaskStatus
+  status: TodoStatus
   owner?: string
 }

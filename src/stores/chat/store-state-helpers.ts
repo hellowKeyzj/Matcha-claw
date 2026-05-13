@@ -19,6 +19,12 @@ import type {
   SessionRenderSystemItem,
   SessionStateSnapshot,
 } from '../../../runtime-host/shared/session-adapter-types';
+import {
+  containsTodoToolDebugSignal,
+  logRendererTodoToolDebug,
+  summarizeItemsForTodoToolDebug,
+  summarizeSnapshotForTodoToolDebug,
+} from './todo-tool-debug';
 import { findLatestAssistantTextFromItems } from './timeline-message';
 import { syncViewportState } from './viewport-state';
 
@@ -51,6 +57,33 @@ function hashStringDjb2(input: string): string {
 
 function hashText(value: string | null | undefined): string {
   return hashStringDjb2(value ?? '');
+}
+
+function resolveTodoToolDebugCaller(): string {
+  const stack = new Error().stack?.split('\n').slice(2, 8).map((line) => line.trim()) ?? [];
+  return stack.join(' | ');
+}
+
+function logPatchSessionSnapshotTodoToolDebug(input: {
+  sessionKey: string;
+  currentItems: readonly SessionRenderItem[];
+  snapshot: SessionStateSnapshot;
+  nextItems: readonly SessionRenderItem[];
+}): void {
+  if (
+    !containsTodoToolDebugSignal(input.currentItems)
+    && !containsTodoToolDebugSignal(input.snapshot)
+    && !containsTodoToolDebugSignal(input.nextItems)
+  ) {
+    return;
+  }
+  logRendererTodoToolDebug('renderer.patchSessionSnapshot.global', {
+    sessionKey: input.sessionKey,
+    caller: resolveTodoToolDebugCaller(),
+    beforeItems: summarizeItemsForTodoToolDebug(input.currentItems),
+    incomingSnapshot: summarizeSnapshotForTodoToolDebug(input.snapshot),
+    afterItems: summarizeItemsForTodoToolDebug(input.nextItems),
+  });
 }
 
 function buildAttachedFilesSignature(
@@ -661,6 +694,12 @@ export function patchSessionSnapshot(
   const current = getSessionRecord(state, sessionKey);
   const catalog = snapshot.catalog;
   const nextItems = reconcileSessionItems(current.items, snapshot.items);
+  logPatchSessionSnapshotTodoToolDebug({
+    sessionKey,
+    currentItems: current.items,
+    snapshot,
+    nextItems,
+  });
   const incomingRuntimeUpdatedAt = typeof snapshot.runtime.updatedAt === 'number'
     ? snapshot.runtime.updatedAt
     : null;

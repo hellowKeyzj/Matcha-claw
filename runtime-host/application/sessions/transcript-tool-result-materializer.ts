@@ -28,6 +28,7 @@ import {
   resolveTranscriptEntryId,
   resolveTranscriptEntryStatus,
 } from './transcript-turn-identity';
+import { isMalformedEmptyToolNameResult } from './tool-event-sanitizer';
 
 function findLatestAssistantContentRow(
   rows: SessionTimelineEntry[],
@@ -125,6 +126,9 @@ export function materializeToolResultRows(input: {
   text: string;
   existingRows: SessionTimelineEntry[];
 }): SessionTimelineEntry[] {
+  if (isMalformedEmptyToolNameResult(input.message)) {
+    return [];
+  }
   const attachedFiles = mergeAttachedFiles(
     readAttachedFiles(input.message),
     [
@@ -140,6 +144,9 @@ export function materializeToolResultRows(input: {
     ],
   );
   const toolStatuses = readToolStatuses(input.message);
+  if (toolStatuses.length === 0 && input.text.trim().length === 0 && attachedFiles.length === 0) {
+    return [];
+  }
   const toolCallId = normalizeOptionalString(
     input.message.toolCallId
     ?? toolStatuses[0]?.toolCallId

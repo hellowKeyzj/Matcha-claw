@@ -73,6 +73,19 @@
             "error": "Error"
         }
     },
+    "todoPanel": {
+        "summary": "Tasks {{completed}}/{{total}}",
+        "expand": "Expand task list",
+        "collapse": "Collapse task list",
+        "allCompleted": "All tasks completed",
+        "inProgress": "Tasks in progress",
+        "status": {
+            "pending": "Todo",
+            "in_progress": "In Progress",
+            "completed": "Done",
+            "deleted": "Canceled"
+        }
+    },
     "executionGraph": {
         "eyebrow": "Conversation Run",
         "title": "Execution Graph",

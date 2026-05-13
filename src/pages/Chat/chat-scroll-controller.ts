@@ -74,6 +74,7 @@ export interface ChatScrollController {
   handleViewportPointerDown: () => void;
   handleViewportTouchMove: TouchEventHandler<HTMLDivElement>;
   handleViewportWheel: WheelEventHandler<HTMLDivElement>;
+  scrollViewportByWheelDelta: (deltaY: number) => void;
   prepareScopeAnchorRestore: (nextScopeKey: string) => void;
   prepareScopeBottomAlign: (nextScopeKey: string) => void;
   jumpToBottom: () => void;
@@ -92,6 +93,7 @@ interface ScrollControllerState {
   anchorRestoreRetryTimerId: number | null;
   anchorCaptureTimerId: number | null;
   programmaticScroll: boolean;
+  autoScrollGeneration: number;
   pendingPrependScroll: PendingPrependScrollCommand | null;
   pendingPrependFrameId: number | null;
 }
@@ -221,6 +223,7 @@ export function createChatScrollController(
     anchorRestoreRetryTimerId: null,
     anchorCaptureTimerId: null,
     programmaticScroll: false,
+    autoScrollGeneration: 0,
     pendingPrependScroll: null,
     pendingPrependFrameId: null,
   };
@@ -295,6 +298,11 @@ export function createChatScrollController(
     }
     state.scrollFrameId = null;
     state.scrollRetryTimerId = null;
+  };
+
+  const nextAutoScrollGeneration = () => {
+    state.autoScrollGeneration += 1;
+    return state.autoScrollGeneration;
   };
 
   const clearScheduledAnchorRestore = () => {
@@ -441,26 +449,33 @@ export function createChatScrollController(
     return true;
   };
 
-  const scheduleBottomAlignRetry = (force: boolean) => {
+  const scheduleBottomAlignRetry = (force: boolean, generation: number) => {
     if (typeof window === 'undefined') {
       return;
     }
     state.scrollRetryTimerId = window.setTimeout(() => {
       state.scrollRetryTimerId = null;
+      if (generation !== state.autoScrollGeneration) {
+        return;
+      }
       applyBottomAlign(force);
     }, force ? INITIAL_ALIGN_RETRY_MS : FOLLOW_RETRY_MS);
   };
 
   const scheduleBottomAlign = (options?: { force?: boolean; retry?: boolean; immediate?: boolean }) => {
     clearScheduledBottomAlign();
+    const generation = nextAutoScrollGeneration();
     const force = Boolean(options?.force);
     const retry = Boolean(options?.retry);
     const run = () => {
+      if (generation !== state.autoScrollGeneration) {
+        return false;
+      }
       if (!applyBottomAlign(force)) {
         return false;
       }
       if (retry) {
-        scheduleBottomAlignRetry(force);
+        scheduleBottomAlignRetry(force, generation);
       }
       return true;
     };
@@ -481,7 +496,11 @@ export function createChatScrollController(
 
   const scheduleAnchorRestore = (anchor: ViewportAnchor) => {
     clearScheduledAnchorRestore();
+    const generation = nextAutoScrollGeneration();
     const run = () => {
+      if (generation !== state.autoScrollGeneration) {
+        return;
+      }
       const config = getConfig();
       if (!config.enabled || !hasRenderableChatItems(config.contentRef.current, config.viewportRef.current)) {
         return;
@@ -503,6 +522,9 @@ export function createChatScrollController(
       if (state.anchorRestoreRetryTimerId == null && typeof window !== 'undefined') {
         state.anchorRestoreRetryTimerId = window.setTimeout(() => {
           state.anchorRestoreRetryTimerId = null;
+          if (generation !== state.autoScrollGeneration) {
+            return;
+          }
           run();
         }, ANCHOR_RESTORE_RETRY_MS);
       }
@@ -525,6 +547,15 @@ export function createChatScrollController(
     }
     state.pendingScopeTransition = null;
     clearScheduledAnchorRestore();
+  };
+
+  const cancelAutoScrollForUserIntent = () => {
+    const config = getConfig();
+    nextAutoScrollGeneration();
+    cancelPendingTransitionForScope(config.scrollScopeKey);
+    clearScheduledBottomAlign();
+    clearScheduledAnchorRestore();
+    state.programmaticScroll = false;
   };
 
   const markDetachedAnchorDirty = () => {
@@ -597,8 +628,7 @@ export function createChatScrollController(
 
   const detachFromBottom = () => {
     const config = getConfig();
-    cancelPendingTransitionForScope(config.scrollScopeKey);
-    clearScheduledBottomAlign();
+    cancelAutoScrollForUserIntent();
     const scopeState = ensureScopeState(config.scrollScopeKey);
     const wasBottomLocked = scopeState.isBottomLocked;
     scopeState.isBottomLocked = false;
@@ -773,6 +803,7 @@ export function createChatScrollController(
     if (!metrics || state.programmaticScroll) {
       return;
     }
+    cancelAutoScrollForUserIntent();
     markChatScrollActivity();
     if (isChatViewportNearBottom(metrics, config.stickyBottomThresholdPx)) {
       cancelPendingTransitionForScope(config.scrollScopeKey);
@@ -798,7 +829,7 @@ export function createChatScrollController(
     if (!config.enabled) {
       return;
     }
-    state.programmaticScroll = false;
+    cancelAutoScrollForUserIntent();
   };
 
   const handleViewportTouchMove: TouchEventHandler<HTMLDivElement> = () => {
@@ -806,7 +837,7 @@ export function createChatScrollController(
     if (!config.enabled) {
       return;
     }
-    state.programmaticScroll = false;
+    cancelAutoScrollForUserIntent();
     markChatScrollActivity();
     const scopeState = ensureScopeState(config.scrollScopeKey);
     if (scopeState.isBottomLocked) {
@@ -816,21 +847,40 @@ export function createChatScrollController(
     markDetachedAnchorDirty();
   };
 
-  const handleViewportWheel: WheelEventHandler<HTMLDivElement> = (event) => {
+  const handleWheelIntent = (deltaY: number) => {
     const config = getConfig();
-    if (!config.enabled) {
+    if (!config.enabled || !Number.isFinite(deltaY) || deltaY === 0) {
       return;
     }
-    state.programmaticScroll = false;
+    cancelAutoScrollForUserIntent();
     markChatScrollActivity();
-    if ((event?.deltaY ?? 0) < 0) {
-      const scopeState = ensureScopeState(config.scrollScopeKey);
+    const scopeState = ensureScopeState(config.scrollScopeKey);
+    if (deltaY < 0) {
       if (scopeState.isBottomLocked) {
         detachFromBottom();
         return;
       }
       markDetachedAnchorDirty();
+      return;
     }
+    if (!scopeState.isBottomLocked) {
+      markDetachedAnchorDirty();
+    }
+  };
+
+  const handleViewportWheel: WheelEventHandler<HTMLDivElement> = (event) => {
+    handleWheelIntent(event?.deltaY ?? 0);
+  };
+
+  const scrollViewportByWheelDelta = (deltaY: number) => {
+    const config = getConfig();
+    const viewport = config.viewportRef.current;
+    if (!config.enabled || !viewport || !Number.isFinite(deltaY) || deltaY === 0) {
+      return;
+    }
+    handleWheelIntent(deltaY);
+    viewport.scrollTop += deltaY;
+    handleViewportScroll();
   };
 
   const jumpToBottom = () => {
@@ -903,6 +953,7 @@ export function createChatScrollController(
     handleViewportPointerDown,
     handleViewportTouchMove,
     handleViewportWheel,
+    scrollViewportByWheelDelta,
     prepareScopeAnchorRestore,
     prepareScopeBottomAlign,
     jumpToBottom,

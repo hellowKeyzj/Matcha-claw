@@ -16,6 +16,7 @@ import { useTaskSnapshotStore } from './chat/task-snapshot-store';
 import { useChannelsStore } from './channels';
 import { isGatewayOperational } from '@/lib/gateway-status';
 import type { GatewayTransportIssue } from '../../runtime-host/shared/gateway-error';
+import { isTaskSnapshotToolMethod } from '../../runtime-host/shared/task-tool-contract';
 
 let gatewayInitPromise: Promise<void> | null = null;
 let gatewayEventUnsubscribers: Array<() => void> | null = null;
@@ -121,16 +122,7 @@ function coalesceTaskNotifications(
 }
 
 function isTaskNotificationMethod(method: unknown): method is string {
-  if (typeof method !== 'string') {
-    return false;
-  }
-  return method === 'TaskCreate'
-    || method === 'TaskUpdate'
-    || method === 'TaskList'
-    || method === 'TaskGet'
-    || method === 'TodoWrite'
-    || method === 'TaskSnapshot'
-    || method.startsWith('task_');
+  return isTaskSnapshotToolMethod(method) || method === 'TaskSnapshot';
 }
 
 function flushTaskNotifications(): void {

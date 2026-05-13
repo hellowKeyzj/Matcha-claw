@@ -8,6 +8,7 @@ import { SessionStorageRepository } from '../../runtime-host/application/session
 import { buildSessionUpdateEventsFromGatewayConversationEvent } from '../../runtime-host/application/sessions/gateway-ingress';
 import { parseTranscriptMessages } from '../../runtime-host/application/sessions/transcript-parser';
 import { materializeTranscriptTimelineEntries } from '../../runtime-host/application/sessions/transcript-timeline-materializer';
+import { filterStateOnlySnapshot } from '../../runtime-host/application/sessions/session-state-only-render-filter';
 import { createTestRuntimeFileSystem } from './helpers/runtime-file-system';
 
 async function createRuntimeConfigDir() {
@@ -73,6 +74,97 @@ async function getHydratedSessionState(
 }
 
 describe('session runtime service', () => {
+  it('drops assistant NO_REPLY realtime messages before timeline materialization', () => {
+    const events = buildSessionUpdateEventsFromGatewayConversationEvent({
+      type: 'chat.message',
+      event: {
+        state: 'final',
+        runId: 'run-silent',
+        sessionKey: 'agent:main:main',
+        sequenceId: 1,
+        message: {
+          role: 'assistant',
+          content: [{ type: 'text', text: 'NO_REPLY' }],
+        },
+      },
+    }, {
+      clock: testClock,
+    });
+
+    expect(events).toEqual([]);
+  });
+
+  it('drops assistant NO_REPLY prefix deltas without dropping real final NO replies', () => {
+    const prefixEvents = buildSessionUpdateEventsFromGatewayConversationEvent({
+      type: 'chat.message',
+      event: {
+        state: 'delta',
+        runId: 'run-silent-prefix',
+        sessionKey: 'agent:main:main',
+        sequenceId: 1,
+        message: {
+          role: 'assistant',
+          content: [{ type: 'text', text: 'NO' }],
+        },
+      },
+    }, {
+      clock: testClock,
+    });
+    const finalEvents = buildSessionUpdateEventsFromGatewayConversationEvent({
+      type: 'chat.message',
+      event: {
+        state: 'final',
+        runId: 'run-real-no',
+        sessionKey: 'agent:main:main',
+        sequenceId: 2,
+        message: {
+          role: 'assistant',
+          content: [{ type: 'text', text: 'NO' }],
+        },
+      },
+    }, {
+      clock: testClock,
+    });
+
+    expect(prefixEvents).toEqual([]);
+    expect(finalEvents).toHaveLength(1);
+    expect(finalEvents[0]).toMatchObject({
+      sessionUpdate: 'agent_message',
+      entries: [{
+        kind: 'message',
+        text: 'NO',
+      }],
+    });
+  });
+
+  it('keeps assistant realtime messages when text has real content even if content is NO_REPLY', () => {
+    const events = buildSessionUpdateEventsFromGatewayConversationEvent({
+      type: 'chat.message',
+      event: {
+        state: 'final',
+        runId: 'run-real-text',
+        sessionKey: 'agent:main:main',
+        sequenceId: 1,
+        message: {
+          role: 'assistant',
+          text: 'real reply',
+          content: 'NO_REPLY',
+        },
+      },
+    }, {
+      clock: testClock,
+    });
+
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      sessionUpdate: 'agent_message',
+      entries: [{
+        kind: 'message',
+        text: 'NO_REPLY',
+      }],
+    });
+  });
+
   it('loadSession does not wait for task snapshot replay', async () => {
     const readTaskSnapshot = vi.fn(() => new Promise(() => undefined));
     const timelineRuntime = {
@@ -120,6 +212,7 @@ describe('session runtime service', () => {
         buildLatestSnapshotAsync: vi.fn(async () => snapshot),
       } as never,
       gateway: { gatewayRpc: vi.fn() },
+      pendingApprovals: { list: () => [] },
       clock: testClock,
       idGenerator: { randomId: () => 'id' },
       sessionHydrationJobs: {} as never,
@@ -871,6 +964,94 @@ describe('session runtime service', () => {
     expect(resultEvent.snapshot.window.totalItemCount).toBe(1);
   });
 
+  it('TodoWrite lifecycle updates without repeated tool names stay as todo state events', () => {
+    const configDir = join(tmpdir(), `matcha-session-runtime-${Date.now()}`);
+    const service = createTestSessionRuntimeService({
+      workspace: { getConfigDir: () => configDir },
+      openclawBridge: {
+        chatSend: async () => ({ runId: 'run-unused' }),
+        gatewayRpc: async () => ({}),
+      },
+    });
+
+    const [startEvent] = service.consumeGatewayConversationEvent({
+      type: 'tool.lifecycle',
+      event: {
+        runId: 'run-todo-live',
+        sessionKey: 'agent:main:main',
+        sequenceId: 10,
+        timestamp: 1_700_000_000_000,
+        phase: 'start',
+        toolCallId: 'todo-write-1',
+        name: 'TodoWrite',
+        args: {
+          newTodos: [
+            { content: '分析页面结构', status: 'pending' },
+          ],
+        },
+      },
+    });
+
+    const updateEvents = service.consumeGatewayConversationEvent({
+      type: 'tool.lifecycle',
+      event: {
+        runId: 'run-todo-live',
+        sessionKey: 'agent:main:main',
+        sequenceId: 11,
+        timestamp: 1_700_000_000_001,
+        phase: 'update',
+        toolCallId: 'todo-write-1',
+        partialResult: {
+          todos: [
+            { content: '分析页面结构', status: 'in_progress' },
+          ],
+        },
+        isError: false,
+      },
+    });
+
+    const [resultEvent] = service.consumeGatewayConversationEvent({
+      type: 'tool.lifecycle',
+      event: {
+        runId: 'run-todo-live',
+        sessionKey: 'agent:main:main',
+        sequenceId: 12,
+        timestamp: 1_700_000_000_002,
+        phase: 'result',
+        toolCallId: 'todo-write-1',
+        result: {
+          todos: [
+            { content: '分析页面结构', status: 'completed' },
+          ],
+        },
+        isError: false,
+      },
+    });
+
+    expect(startEvent).toMatchObject({
+      sessionUpdate: 'plan',
+      taskSnapshot: {
+        source: 'todo',
+        tasks: [],
+        todos: [
+          { content: '分析页面结构', status: 'pending' },
+        ],
+      },
+    });
+    expect(updateEvents).toEqual([]);
+    expect(resultEvent).toMatchObject({
+      sessionUpdate: 'plan',
+      taskSnapshot: {
+        source: 'todo',
+        tasks: [],
+        todos: [
+          { content: '分析页面结构', status: 'completed' },
+        ],
+      },
+    });
+    expect(resultEvent.snapshot.items).toEqual([]);
+  });
+
   it('tool lifecycle task results emit a plan task snapshot event', () => {
     const configDir = join(tmpdir(), `matcha-session-runtime-${Date.now()}`);
     const service = createTestSessionRuntimeService({
@@ -923,6 +1104,1191 @@ describe('session runtime service', () => {
           status: 'in_progress',
         }],
       },
+    });
+  });
+
+  it('TodoWrite start is a todo snapshot event, not a visible tool activity entry', () => {
+    const events = buildSessionUpdateEventsFromGatewayConversationEvent({
+      type: 'tool.lifecycle',
+      event: {
+        runId: 'run-todo-write',
+        sessionKey: 'agent:main:main',
+        sequenceId: 4,
+        timestamp: 1_700_000_000_000,
+        phase: 'start',
+        toolCallId: 'todo-write-1',
+        name: 'TodoWrite',
+        args: {
+          oldTodos: [
+            { content: '旧任务', status: 'completed' },
+          ],
+          newTodos: [
+            { content: '分析页面结构', status: 'pending' },
+            { content: '实现任务状态', status: 'in_progress' },
+            { content: '验证刷新恢复', status: 'pending' },
+            { content: '上传验证结果', status: 'pending' },
+          ],
+        },
+      },
+    }, {
+      clock: testClock,
+    });
+
+    expect(events).toEqual([expect.objectContaining({
+      sessionUpdate: 'plan',
+      sessionKey: 'agent:main:main',
+      taskSnapshot: expect.objectContaining({
+        source: 'todo',
+        tasks: [],
+        todos: [
+          { content: '分析页面结构', status: 'pending' },
+          { content: '实现任务状态', status: 'in_progress' },
+          { content: '验证刷新恢复', status: 'pending' },
+          { content: '上传验证结果', status: 'pending' },
+        ],
+      }),
+    })]);
+  });
+
+  it('lowercase todowrite lifecycle start is a todo snapshot event, not a visible tool activity entry', () => {
+    const events = buildSessionUpdateEventsFromGatewayConversationEvent({
+      type: 'tool.lifecycle',
+      event: {
+        runId: 'run-todo-write-lowercase',
+        sessionKey: 'agent:main:main',
+        sequenceId: 4,
+        timestamp: 1_700_000_000_000,
+        phase: 'start',
+        toolCallId: 'todo-write-lowercase-1',
+        name: 'todowrite',
+        args: {
+          newTodos: [
+            { content: '分析页面结构', status: 'pending' },
+            { content: '实现任务状态', status: 'in_progress' },
+          ],
+        },
+      },
+    }, {
+      clock: testClock,
+    });
+
+    expect(events).toEqual([expect.objectContaining({
+      sessionUpdate: 'plan',
+      sessionKey: 'agent:main:main',
+      taskSnapshot: expect.objectContaining({
+        source: 'todo',
+        tasks: [],
+        todos: [
+          { content: '分析页面结构', status: 'pending' },
+          { content: '实现任务状态', status: 'in_progress' },
+        ],
+      }),
+    })]);
+    expect(JSON.stringify(events)).not.toContain('tool-activity');
+    expect(JSON.stringify(events)).not.toContain('todowrite');
+    expect(JSON.stringify(events)).not.toContain('newTodos');
+  });
+
+  it('TodoWrite result confirms the todo snapshot without creating a visible tool card', () => {
+    const events = buildSessionUpdateEventsFromGatewayConversationEvent({
+      type: 'tool.lifecycle',
+      event: {
+        runId: 'run-todo-write-result',
+        sessionKey: 'agent:main:main',
+        sequenceId: 5,
+        timestamp: 1_700_000_000_001,
+        phase: 'result',
+        toolCallId: 'todo-write-1',
+        name: 'TodoWrite',
+        result: {
+          todos: [
+            { content: '分析页面结构', status: 'completed' },
+          ],
+          updatedAt: 1_700_000_000_001,
+        },
+      },
+    }, {
+      clock: testClock,
+    });
+
+    expect(events).toEqual([expect.objectContaining({
+      sessionUpdate: 'plan',
+      sessionKey: 'agent:main:main',
+      taskSnapshot: expect.objectContaining({
+        source: 'todo',
+        tasks: [],
+        todos: [
+          { content: '分析页面结构', status: 'completed' },
+        ],
+      }),
+    })]);
+  });
+
+  it('lowercase todowrite result confirms the todo snapshot without creating a visible tool card', () => {
+    const events = buildSessionUpdateEventsFromGatewayConversationEvent({
+      type: 'tool.lifecycle',
+      event: {
+        runId: 'run-todo-write-result-lowercase',
+        sessionKey: 'agent:main:main',
+        sequenceId: 5,
+        timestamp: 1_700_000_000_001,
+        phase: 'result',
+        toolCallId: 'todo-write-lowercase-1',
+        name: 'todowrite',
+        result: {
+          todos: [
+            { content: '分析页面结构', status: 'completed' },
+          ],
+          updatedAt: 1_700_000_000_001,
+        },
+      },
+    }, {
+      clock: testClock,
+    });
+
+    expect(events).toEqual([expect.objectContaining({
+      sessionUpdate: 'plan',
+      sessionKey: 'agent:main:main',
+      taskSnapshot: expect.objectContaining({
+        source: 'todo',
+        tasks: [],
+        todos: [
+          { content: '分析页面结构', status: 'completed' },
+        ],
+      }),
+    })]);
+    expect(JSON.stringify(events)).not.toContain('tool-activity');
+    expect(JSON.stringify(events)).not.toContain('todowrite');
+  });
+
+  it('lowercase todoget result updates todo snapshot without a visible tool item', () => {
+    const events = buildSessionUpdateEventsFromGatewayConversationEvent({
+      type: 'tool.lifecycle',
+      event: {
+        runId: 'run-todo-get-result-lowercase',
+        sessionKey: 'agent:main:main',
+        sequenceId: 5,
+        timestamp: 1_700_000_000_001,
+        phase: 'result',
+        toolCallId: 'todo-get-lowercase-1',
+        name: 'todoget',
+        result: {
+          todos: [
+            { content: '验证刷新恢复', status: 'completed' },
+          ],
+        },
+      },
+    }, {
+      clock: testClock,
+    });
+
+    expect(events).toEqual([expect.objectContaining({
+      sessionUpdate: 'plan',
+      sessionKey: 'agent:main:main',
+      taskSnapshot: expect.objectContaining({
+        source: 'todo',
+        tasks: [],
+        todos: [
+          { content: '验证刷新恢复', status: 'completed' },
+        ],
+      }),
+    })]);
+    expect(JSON.stringify(events)).not.toContain('tool-activity');
+    expect(JSON.stringify(events)).not.toContain('todoget');
+  });
+
+  it('TodoWrite with an empty newTodos list still emits a clearing todo snapshot', () => {
+    const events = buildSessionUpdateEventsFromGatewayConversationEvent({
+      type: 'tool.lifecycle',
+      event: {
+        runId: 'run-todo-clear',
+        sessionKey: 'agent:main:main',
+        sequenceId: 5,
+        timestamp: 1_700_000_000_001,
+        phase: 'start',
+        toolCallId: 'todo-write-clear',
+        name: 'TodoWrite',
+        args: {
+          oldTodos: [
+            { content: '待清空', status: 'pending' },
+          ],
+          newTodos: [],
+        },
+      },
+    }, {
+      clock: testClock,
+    });
+
+    expect(events).toEqual([expect.objectContaining({
+      sessionUpdate: 'plan',
+      taskSnapshot: expect.objectContaining({
+        source: 'todo',
+        tasks: [],
+        todos: [],
+      }),
+    })]);
+  });
+
+  it('realtime chat.message lowercase todowrite is a todo snapshot event without a visible tool item', () => {
+    const events = buildSessionUpdateEventsFromGatewayConversationEvent({
+      type: 'chat.message',
+      event: {
+        state: 'final',
+        runId: 'run-chat-todo-write-lowercase',
+        sessionKey: 'agent:main:main',
+        sequenceId: 6,
+        message: {
+          role: 'assistant',
+          content: [{
+            type: 'toolCall',
+            id: 'chat-todo-write-lowercase-1',
+            name: 'todowrite',
+            arguments: {
+              newTodos: [
+                { content: '分析页面结构', status: 'pending' },
+                { content: '实现任务状态', status: 'in_progress' },
+              ],
+            },
+          }],
+        },
+      },
+    }, {
+      clock: testClock,
+    });
+
+    expect(events).toEqual([expect.objectContaining({
+      sessionUpdate: 'plan',
+      sessionKey: 'agent:main:main',
+      taskSnapshot: expect.objectContaining({
+        source: 'todo',
+        tasks: [],
+        todos: [
+          { content: '分析页面结构', status: 'pending' },
+          { content: '实现任务状态', status: 'in_progress' },
+        ],
+      }),
+    })]);
+    expect(JSON.stringify(events)).not.toContain('tool-activity');
+    expect(JSON.stringify(events)).not.toContain('todowrite');
+    expect(JSON.stringify(events)).not.toContain('newTodos');
+  });
+
+  it('realtime chat.message TodoWrite is a todo snapshot event without a visible tool item', () => {
+    const events = buildSessionUpdateEventsFromGatewayConversationEvent({
+      type: 'chat.message',
+      event: {
+        state: 'final',
+        runId: 'run-chat-todo-write',
+        sessionKey: 'agent:main:main',
+        sequenceId: 6,
+        message: {
+          role: 'assistant',
+          content: [{
+            type: 'toolCall',
+            id: 'chat-todo-write-1',
+            name: 'TodoWrite',
+            arguments: {
+              newTodos: [
+                { content: '分析页面结构', status: 'pending' },
+                { content: '实现任务状态', status: 'in_progress' },
+              ],
+            },
+          }],
+        },
+      },
+    }, {
+      clock: testClock,
+    });
+
+    expect(events).toEqual([expect.objectContaining({
+      sessionUpdate: 'plan',
+      sessionKey: 'agent:main:main',
+      taskSnapshot: expect.objectContaining({
+        source: 'todo',
+        tasks: [],
+        todos: [
+          { content: '分析页面结构', status: 'pending' },
+          { content: '实现任务状态', status: 'in_progress' },
+        ],
+      }),
+    })]);
+  });
+
+  it('realtime chat.message TodoWrite keeps later unnamed lifecycle updates as todo state', () => {
+    const configDir = join(tmpdir(), `matcha-session-runtime-${Date.now()}`);
+    const service = createTestSessionRuntimeService({
+      workspace: { getConfigDir: () => configDir },
+      openclawBridge: {
+        chatSend: async () => ({ runId: 'run-unused' }),
+        gatewayRpc: async () => ({}),
+      },
+    });
+
+    const [messageEvent] = service.consumeGatewayConversationEvent({
+      type: 'chat.message',
+      event: {
+        state: 'final',
+        runId: 'run-chat-todo-write',
+        sessionKey: 'agent:main:main',
+        sequenceId: 6,
+        message: {
+          role: 'assistant',
+          content: [{
+            type: 'toolCall',
+            id: 'chat-todo-write-1',
+            name: 'TodoWrite',
+            arguments: {
+              newTodos: [
+                { content: '分析页面结构', status: 'pending' },
+                { content: '实现任务状态', status: 'in_progress' },
+              ],
+            },
+          }],
+        },
+      },
+    });
+
+    const updateEvents = service.consumeGatewayConversationEvent({
+      type: 'tool.lifecycle',
+      event: {
+        runId: 'run-chat-todo-write',
+        sessionKey: 'agent:main:main',
+        sequenceId: 7,
+        timestamp: 1_700_000_000_001,
+        phase: 'update',
+        toolCallId: 'chat-todo-write-1',
+        partialResult: {
+          todos: [
+            { content: '分析页面结构', status: 'in_progress' },
+            { content: '实现任务状态', status: 'in_progress' },
+          ],
+        },
+      },
+    });
+
+    const [resultEvent] = service.consumeGatewayConversationEvent({
+      type: 'tool.lifecycle',
+      event: {
+        runId: 'run-chat-todo-write',
+        sessionKey: 'agent:main:main',
+        sequenceId: 8,
+        timestamp: 1_700_000_000_002,
+        phase: 'result',
+        toolCallId: 'chat-todo-write-1',
+        result: {
+          todos: [
+            { content: '分析页面结构', status: 'completed' },
+            { content: '实现任务状态', status: 'completed' },
+          ],
+        },
+      },
+    });
+
+    expect(messageEvent).toMatchObject({
+      sessionUpdate: 'plan',
+      taskSnapshot: {
+        source: 'todo',
+        tasks: [],
+        todos: [
+          { content: '分析页面结构', status: 'pending' },
+          { content: '实现任务状态', status: 'in_progress' },
+        ],
+      },
+    });
+    expect(updateEvents).toEqual([]);
+    expect(resultEvent).toMatchObject({
+      sessionUpdate: 'plan',
+      taskSnapshot: {
+        source: 'todo',
+        tasks: [],
+        todos: [
+          { content: '分析页面结构', status: 'completed' },
+          { content: '实现任务状态', status: 'completed' },
+        ],
+      },
+    });
+    expect(resultEvent.snapshot.items).toEqual([]);
+  });
+
+  it('state-only todo tools cannot remain visible in runtime snapshots after a mixed live turn', () => {
+    const configDir = join(tmpdir(), `matcha-session-runtime-${Date.now()}`);
+    const service = createTestSessionRuntimeService({
+      workspace: { getConfigDir: () => configDir },
+      openclawBridge: {
+        chatSend: async () => ({ runId: 'run-unused' }),
+        gatewayRpc: async () => ({}),
+      },
+    });
+
+    service.consumeGatewayConversationEvent({
+      type: 'tool.lifecycle',
+      event: {
+        runId: 'run-mixed-visible',
+        sessionKey: 'agent:main:main',
+        sequenceId: 1,
+        timestamp: 1_700_000_000_000,
+        phase: 'start',
+        toolCallId: 'visible-tool-1',
+        name: 'web_fetch',
+        args: { url: 'https://example.com' },
+      },
+    });
+
+    const [todoEvent] = service.consumeGatewayConversationEvent({
+      type: 'chat.message',
+      event: {
+        state: 'final',
+        runId: 'run-mixed-visible',
+        sessionKey: 'agent:main:main',
+        sequenceId: 2,
+        message: {
+          role: 'assistant',
+          content: [{
+            type: 'toolCall',
+            id: 'todo-write-hidden',
+            name: 'TodoWrite',
+            arguments: {
+              newTodos: [
+                { content: '分析页面结构', status: 'completed' },
+                { content: '实现任务状态', status: 'completed' },
+                { content: '验证刷新恢复', status: 'completed' },
+              ],
+            },
+          }],
+        },
+      },
+    });
+
+    expect(todoEvent).toMatchObject({
+      sessionUpdate: 'plan',
+      taskSnapshot: {
+        source: 'todo',
+        tasks: [],
+        todos: [
+          { content: '分析页面结构', status: 'completed' },
+          { content: '实现任务状态', status: 'completed' },
+          { content: '验证刷新恢复', status: 'completed' },
+        ],
+      },
+    });
+    expect(JSON.stringify(todoEvent.snapshot.items)).not.toContain('TodoWrite');
+    expect(JSON.stringify(todoEvent.snapshot.items)).not.toContain('newTodos');
+  });
+
+  it('snapshot boundary removes already materialized TodoWrite tool cards', () => {
+    const todoInput = {
+      newTodos: [
+        { content: '分析页面结构', status: 'completed' },
+      ],
+    };
+    const snapshot = filterStateOnlySnapshot({
+      sessionKey: 'agent:main:main',
+      catalog: {
+        key: 'agent:main:main',
+        sessionKey: 'agent:main:main',
+        label: null,
+        kind: null,
+        preferred: false,
+        titleSource: 'none',
+        updatedAt: null,
+        agentId: null,
+        displayName: null,
+        model: null,
+      },
+      items: [{
+        key: 'session:agent:main:main|assistant-turn:main:run-todo:main',
+        kind: 'assistant-turn',
+        sessionKey: 'agent:main:main',
+        role: 'assistant',
+        turnKey: 'main:run-todo',
+        laneKey: 'main',
+        identitySource: 'run',
+        identityMode: 'run',
+        identityConfidence: 'strong',
+        status: 'final',
+        segments: [{
+          kind: 'tool',
+          key: 'todo-write-hidden',
+          tool: {
+            id: 'todo-write-hidden',
+            toolCallId: 'todo-write-hidden',
+            name: 'TodoWrite',
+            input: todoInput,
+            inputText: JSON.stringify(todoInput, null, 2),
+            status: 'completed',
+            displayTitle: 'TodoWrite',
+            displayDetail: '分析页面结构',
+            result: {
+              kind: 'none',
+              surface: 'tool-card',
+            },
+          },
+        }],
+        thinking: null,
+        tools: [{
+          id: 'todo-write-hidden',
+          toolCallId: 'todo-write-hidden',
+          name: 'TodoWrite',
+          input: todoInput,
+          inputText: JSON.stringify(todoInput, null, 2),
+          status: 'completed',
+          displayTitle: 'TodoWrite',
+          displayDetail: '分析页面结构',
+          result: {
+            kind: 'none',
+            surface: 'tool-card',
+          },
+        }],
+        embeddedToolResults: [],
+        text: '',
+        images: [],
+        attachedFiles: [],
+      }],
+      replayComplete: true,
+      runtime: {
+        sending: false,
+        activeRunId: null,
+        runPhase: 'idle',
+        activeTurnItemKey: null,
+        pendingTurnKey: null,
+        pendingTurnLaneKey: null,
+        pendingFinal: false,
+        lastUserMessageAt: null,
+        lastError: null,
+        lastIssue: null,
+        updatedAt: null,
+      },
+      window: {
+        totalItemCount: 1,
+        windowStartOffset: 0,
+        windowEndOffset: 1,
+        hasMore: false,
+        hasNewer: false,
+        isAtLatest: true,
+      },
+    });
+
+    expect(snapshot.items).toEqual([]);
+    expect(snapshot.window).toMatchObject({
+      totalItemCount: 0,
+      windowEndOffset: 0,
+      isAtLatest: true,
+    });
+  });
+
+  it('realtime chat.message nested TodoWrite tool call is a todo snapshot event without a visible tool item', () => {
+    const events = buildSessionUpdateEventsFromGatewayConversationEvent({
+      type: 'chat.message',
+      event: {
+        state: 'final',
+        runId: 'run-chat-todo-write-nested',
+        sessionKey: 'agent:main:main',
+        sequenceId: 6,
+        message: {
+          role: 'assistant',
+          content: [{
+            type: 'tool_call',
+            id: 'chat-todo-write-nested-1',
+            function: {
+              name: 'TodoWrite',
+              arguments: JSON.stringify({
+                newTodos: [
+                  { content: '分析页面结构', status: 'completed' },
+                  { content: '实现任务状态', status: 'completed' },
+                ],
+              }),
+            },
+          }],
+        },
+      },
+    }, {
+      clock: testClock,
+    });
+
+    expect(events).toEqual([expect.objectContaining({
+      sessionUpdate: 'plan',
+      sessionKey: 'agent:main:main',
+      taskSnapshot: expect.objectContaining({
+        source: 'todo',
+        tasks: [],
+        todos: [
+          { content: '分析页面结构', status: 'completed' },
+          { content: '实现任务状态', status: 'completed' },
+        ],
+      }),
+    })]);
+  });
+
+  it('realtime chat.message function_call TodoWrite is state only', () => {
+    const events = buildSessionUpdateEventsFromGatewayConversationEvent({
+      type: 'chat.message',
+      event: {
+        state: 'final',
+        runId: 'run-chat-todo-write-function-call',
+        sessionKey: 'agent:main:main',
+        sequenceId: 6,
+        message: {
+          role: 'assistant',
+          content: [{
+            type: 'function_call',
+            call_id: 'chat-todo-write-function-call-1',
+            name: 'TodoWrite',
+            arguments: JSON.stringify({
+              newTodos: [
+                { content: '分析页面结构', status: 'pending' },
+                { content: '实现任务状态', status: 'in_progress' },
+                { content: '验证刷新恢复', status: 'pending' },
+              ],
+            }),
+          }],
+        },
+      },
+    }, {
+      clock: testClock,
+    });
+
+    expect(events).toEqual([expect.objectContaining({
+      sessionUpdate: 'plan',
+      sessionKey: 'agent:main:main',
+      taskSnapshot: expect.objectContaining({
+        source: 'todo',
+        tasks: [],
+        todos: [
+          { content: '分析页面结构', status: 'pending' },
+          { content: '实现任务状态', status: 'in_progress' },
+          { content: '验证刷新恢复', status: 'pending' },
+        ],
+      }),
+    })]);
+  });
+
+  it('realtime chat.message function_call TodoWrite does not enter live snapshot items', () => {
+    const configDir = join(tmpdir(), `matcha-session-runtime-${Date.now()}`);
+    const service = createTestSessionRuntimeService({
+      workspace: { getConfigDir: () => configDir },
+      openclawBridge: {
+        chatSend: async () => ({ runId: 'run-unused' }),
+        gatewayRpc: async () => ({}),
+      },
+    });
+
+    const [event] = service.consumeGatewayConversationEvent({
+      type: 'chat.message',
+      event: {
+        state: 'final',
+        runId: 'run-chat-todo-write-function-call',
+        sessionKey: 'agent:main:main',
+        sequenceId: 6,
+        message: {
+          role: 'assistant',
+          content: [{
+            type: 'function_call',
+            call_id: 'chat-todo-write-function-call-1',
+            name: 'TodoWrite',
+            arguments: JSON.stringify({
+              newTodos: [
+                { content: '分析页面结构', status: 'pending' },
+                { content: '实现任务状态', status: 'in_progress' },
+              ],
+            }),
+          }],
+        },
+      },
+    });
+
+    expect(event).toMatchObject({
+      sessionUpdate: 'plan',
+      taskSnapshot: {
+        source: 'todo',
+        tasks: [],
+        todos: [
+          { content: '分析页面结构', status: 'pending' },
+          { content: '实现任务状态', status: 'in_progress' },
+        ],
+      },
+    });
+    expect(event.snapshot.items).toEqual([]);
+  });
+
+  it('realtime function_call TodoWrite keeps later unnamed lifecycle result state only', () => {
+    const configDir = join(tmpdir(), `matcha-session-runtime-${Date.now()}`);
+    const service = createTestSessionRuntimeService({
+      workspace: { getConfigDir: () => configDir },
+      openclawBridge: {
+        chatSend: async () => ({ runId: 'run-unused' }),
+        gatewayRpc: async () => ({}),
+      },
+    });
+
+    service.consumeGatewayConversationEvent({
+      type: 'chat.message',
+      event: {
+        state: 'final',
+        runId: 'run-chat-todo-write-function-call',
+        sessionKey: 'agent:main:main',
+        sequenceId: 6,
+        message: {
+          role: 'assistant',
+          content: [{
+            type: 'function_call',
+            call_id: 'chat-todo-write-function-call-1',
+            name: 'TodoWrite',
+            arguments: JSON.stringify({
+              newTodos: [
+                { content: '分析页面结构', status: 'pending' },
+              ],
+            }),
+          }],
+        },
+      },
+    });
+
+    const [resultEvent] = service.consumeGatewayConversationEvent({
+      type: 'tool.lifecycle',
+      event: {
+        runId: 'run-chat-todo-write-function-call',
+        sessionKey: 'agent:main:main',
+        sequenceId: 7,
+        timestamp: 1_700_000_000_001,
+        phase: 'result',
+        toolCallId: 'chat-todo-write-function-call-1',
+        result: {
+          todos: [
+            { content: '分析页面结构', status: 'completed' },
+          ],
+        },
+      },
+    });
+
+    expect(resultEvent).toMatchObject({
+      sessionUpdate: 'plan',
+      taskSnapshot: {
+        source: 'todo',
+        tasks: [],
+        todos: [
+          { content: '分析页面结构', status: 'completed' },
+        ],
+      },
+    });
+    expect(resultEvent.snapshot.items).toEqual([]);
+  });
+
+  it('realtime chat.message TodoWrite tool status name variants update todo snapshot without a visible tool item', () => {
+    const events = buildSessionUpdateEventsFromGatewayConversationEvent({
+      type: 'chat.message',
+      event: {
+        state: 'final',
+        runId: 'run-chat-todo-write-status',
+        sessionKey: 'agent:main:main',
+        sequenceId: 7,
+        message: {
+          role: 'assistant',
+          content: '',
+          toolStatuses: [{
+            id: 'chat-todo-write-status-1',
+            toolCallId: 'chat-todo-write-status-1',
+            toolName: 'TodoWrite',
+            status: 'completed',
+            result: {
+              todos: [
+                { content: '验证刷新恢复', status: 'completed' },
+              ],
+              updatedAt: 7,
+            },
+          }],
+        },
+      },
+    }, {
+      clock: testClock,
+    });
+
+    expect(events).toEqual([expect.objectContaining({
+      sessionUpdate: 'plan',
+      sessionKey: 'agent:main:main',
+      taskSnapshot: expect.objectContaining({
+        source: 'todo',
+        tasks: [],
+        todos: [
+          { content: '验证刷新恢复', status: 'completed' },
+        ],
+      }),
+    })]);
+  });
+
+  it('realtime chat.message TodoGet result updates todo snapshot without a visible tool item', () => {
+    const events = buildSessionUpdateEventsFromGatewayConversationEvent({
+      type: 'chat.message',
+      event: {
+        state: 'final',
+        runId: 'run-chat-todo-get',
+        sessionKey: 'agent:main:main',
+        sequenceId: 7,
+        message: {
+          role: 'toolResult',
+          toolCallId: 'chat-todo-get-1',
+          toolName: 'TodoGet',
+          content: [{
+            type: 'text',
+            text: JSON.stringify({
+              todos: [
+                { content: '验证刷新恢复', status: 'completed' },
+              ],
+              updatedAt: 7,
+            }),
+          }],
+          details: {
+            todos: [
+              { content: '验证刷新恢复', status: 'completed' },
+            ],
+            updatedAt: 7,
+          },
+          isError: false,
+        },
+      },
+    }, {
+      clock: testClock,
+    });
+
+    expect(events).toEqual([expect.objectContaining({
+      sessionUpdate: 'plan',
+      sessionKey: 'agent:main:main',
+      taskSnapshot: expect.objectContaining({
+        source: 'todo',
+        tasks: [],
+        todos: [
+          { content: '验证刷新恢复', status: 'completed' },
+        ],
+      }),
+    })]);
+  });
+
+  it('realtime mixed assistant message strips todo tools but keeps visible text', () => {
+    const events = buildSessionUpdateEventsFromGatewayConversationEvent({
+      type: 'chat.message',
+      event: {
+        state: 'final',
+        runId: 'run-chat-mixed-todo',
+        sessionKey: 'agent:main:main',
+        sequenceId: 8,
+        message: {
+          role: 'assistant',
+          content: [
+            {
+              type: 'toolCall',
+              id: 'chat-todo-write-2',
+              name: 'TodoWrite',
+              arguments: {
+                newTodos: [
+                  { content: '上传验证结果', status: 'completed' },
+                ],
+              },
+            },
+            { type: 'text', text: '已更新任务列表。' },
+          ],
+        },
+      },
+    }, {
+      clock: testClock,
+    });
+
+    expect(events).toHaveLength(2);
+    expect(events[0]).toMatchObject({
+      sessionUpdate: 'plan',
+      taskSnapshot: {
+        source: 'todo',
+        tasks: [],
+        todos: [
+          { content: '上传验证结果', status: 'completed' },
+        ],
+      },
+    });
+    expect(events[1]).toMatchObject({
+      sessionUpdate: 'agent_message',
+      entries: [{
+        kind: 'message',
+        text: '已更新任务列表。',
+        toolCards: [],
+        toolUses: [],
+      }],
+    });
+  });
+
+  it('historical TodoWrite transcript entries do not materialize as assistant rows', () => {
+    const rows = materializeTranscriptTimelineEntries('agent:main:main', [{
+      role: 'assistant',
+      id: 'todo-write-history',
+      content: [{
+        type: 'toolCall',
+        id: 'todo-write-1',
+        name: 'TodoWrite',
+        input: {
+          newTodos: [
+            { content: '分析页面结构', status: 'pending' },
+          ],
+        },
+      }],
+      toolStatuses: [{
+        toolCallId: 'todo-write-1',
+        name: 'TodoWrite',
+        status: 'completed',
+        result: {
+          todos: [
+            { content: '分析页面结构', status: 'pending' },
+          ],
+        },
+      }],
+    }]);
+
+    expect(rows).toEqual([]);
+  });
+
+  it('historical TodoGet transcript entries update todo state without visible tool rows', async () => {
+    const rootDir = await mkdtemp(join(tmpdir(), 'matcha-session-runtime-'));
+    const transcriptDir = join(rootDir, 'agents', 'main', 'sessions');
+    await mkdir(transcriptDir, { recursive: true });
+    await writeFile(
+      join(transcriptDir, 'sessions.json'),
+      JSON.stringify({
+        sessions: [{
+          key: 'agent:main:main',
+          sessionKey: 'agent:main:main',
+          file: 'main.jsonl',
+        }],
+      }),
+      'utf8',
+    );
+    await writeFile(
+      join(transcriptDir, 'main.jsonl'),
+      [
+        JSON.stringify({
+          timestamp: 1,
+          message: {
+            role: 'assistant',
+            content: [{
+              type: 'toolCall',
+              id: 'todo-get-history',
+              name: 'TodoGet',
+              arguments: {},
+            }],
+          },
+        }),
+        JSON.stringify({
+          timestamp: 2,
+          message: {
+            role: 'toolResult',
+            toolCallId: 'todo-get-history',
+            toolName: 'TodoGet',
+            content: [{
+              type: 'text',
+              text: JSON.stringify({
+                todos: [
+                  { content: '分析页面结构', status: 'pending' },
+                  { content: '实现任务状态', status: 'in_progress' },
+                ],
+                updatedAt: 2,
+              }, null, 2),
+            }],
+            details: {
+              todos: [
+                { content: '分析页面结构', status: 'pending' },
+                { content: '实现任务状态', status: 'in_progress' },
+              ],
+              updatedAt: 2,
+            },
+            isError: false,
+          },
+        }),
+      ].join('\n'),
+      'utf8',
+    );
+    const service = createTestSessionRuntimeService({
+      workspace: { getConfigDir: () => rootDir },
+      openclawBridge: {
+        chatSend: async () => ({ runId: 'run-unused' }),
+        gatewayRpc: async () => ({}),
+      },
+    });
+
+    const response = await getHydratedSessionState(service, 'agent:main:main');
+
+    expect(response.status).toBe(200);
+    expect(response.data.snapshot.items).toEqual([]);
+    expect(response.data.snapshot.taskSnapshot).toMatchObject({
+      sessionKey: 'agent:main:main',
+      source: 'todo',
+      tasks: [],
+      todos: [
+        { content: '分析页面结构', status: 'pending' },
+        { content: '实现任务状态', status: 'in_progress' },
+      ],
+    });
+  });
+
+  it('historical assistant NO_REPLY is filtered while assistant NO remains visible', () => {
+    const rows = materializeTranscriptTimelineEntries('agent:main:main', parseTranscriptMessages([
+      JSON.stringify({
+        timestamp: 1,
+        message: {
+          role: 'assistant',
+          content: [{ type: 'text', text: 'NO_REPLY' }],
+        },
+      }),
+      JSON.stringify({
+        timestamp: 2,
+        message: {
+          role: 'assistant',
+          content: [{ type: 'text', text: 'NO' }],
+        },
+      }),
+    ].join('\n')));
+
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      role: 'assistant',
+      text: 'NO',
+    });
+  });
+
+  it('session hydration replays historical TodoWrite into the snapshot without visible tool rows', async () => {
+    const rootDir = await mkdtemp(join(tmpdir(), 'matcha-session-runtime-'));
+    const transcriptDir = join(rootDir, 'agents', 'main', 'sessions');
+    await mkdir(transcriptDir, { recursive: true });
+    await writeFile(
+      join(transcriptDir, 'sessions.json'),
+      JSON.stringify({
+        sessions: [{
+          key: 'agent:main:main',
+          sessionKey: 'agent:main:main',
+          file: 'main.jsonl',
+        }],
+      }),
+      'utf8',
+    );
+    await writeFile(
+      join(transcriptDir, 'main.jsonl'),
+      [
+        JSON.stringify({
+          timestamp: 1,
+          message: {
+            role: 'user',
+            content: '更新任务列表',
+          },
+        }),
+        JSON.stringify({
+          timestamp: 2,
+          message: {
+            role: 'assistant',
+            content: [{
+              type: 'toolCall',
+              id: 'todo-write-history',
+              name: 'TodoWrite',
+              input: {
+                oldTodos: [
+                  { content: '旧任务', status: 'completed' },
+                ],
+                newTodos: [
+                  { content: '分析页面结构', status: 'completed' },
+                  { content: '实现任务状态', status: 'completed' },
+                  { content: '验证刷新恢复', status: 'completed' },
+                  { content: '上传验证结果', status: 'completed' },
+                ],
+              },
+            }],
+          },
+        }),
+        JSON.stringify({
+          timestamp: 3,
+          message: {
+            role: 'assistant',
+            content: [{ type: 'text', text: 'NO_REPLY' }],
+          },
+        }),
+      ].join('\n'),
+      'utf8',
+    );
+    const service = createTestSessionRuntimeService({
+      workspace: { getConfigDir: () => rootDir },
+      openclawBridge: {
+        chatSend: async () => ({ runId: 'run-unused' }),
+        gatewayRpc: async () => ({}),
+      },
+    });
+
+    const response = await getHydratedSessionState(service, 'agent:main:main');
+
+    expect(response.status).toBe(200);
+    expect(response.data.snapshot.items).toEqual([
+      expect.objectContaining({
+        kind: 'user-message',
+        text: '更新任务列表',
+      }),
+    ]);
+    expect(response.data.snapshot.taskSnapshot).toMatchObject({
+      sessionKey: 'agent:main:main',
+      source: 'todo',
+      tasks: [],
+      todos: [
+        { content: '分析页面结构', status: 'completed' },
+        { content: '实现任务状态', status: 'completed' },
+        { content: '验证刷新恢复', status: 'completed' },
+        { content: '上传验证结果', status: 'completed' },
+      ],
+    });
+  });
+
+  it('session hydration replays historical TodoWrite clearing snapshots', async () => {
+    const rootDir = await mkdtemp(join(tmpdir(), 'matcha-session-runtime-'));
+    const transcriptDir = join(rootDir, 'agents', 'main', 'sessions');
+    await mkdir(transcriptDir, { recursive: true });
+    await writeFile(
+      join(transcriptDir, 'sessions.json'),
+      JSON.stringify({
+        sessions: [{
+          key: 'agent:main:main',
+          sessionKey: 'agent:main:main',
+          file: 'main.jsonl',
+        }],
+      }),
+      'utf8',
+    );
+    await writeFile(
+      join(transcriptDir, 'main.jsonl'),
+      JSON.stringify({
+        timestamp: 1,
+        message: {
+          role: 'assistant',
+          content: [{
+            type: 'toolCall',
+            id: 'todo-write-clear-history',
+            name: 'TodoWrite',
+            input: {
+              oldTodos: [
+                { content: '待清空', status: 'pending' },
+              ],
+              newTodos: [],
+            },
+          }],
+        },
+      }),
+      'utf8',
+    );
+    const service = createTestSessionRuntimeService({
+      workspace: { getConfigDir: () => rootDir },
+      openclawBridge: {
+        chatSend: async () => ({ runId: 'run-unused' }),
+        gatewayRpc: async () => ({}),
+      },
+    });
+
+    const response = await getHydratedSessionState(service, 'agent:main:main');
+
+    expect(response.status).toBe(200);
+    expect(response.data.snapshot.items).toEqual([]);
+    expect(response.data.snapshot.taskSnapshot).toMatchObject({
+      sessionKey: 'agent:main:main',
+      source: 'todo',
+      tasks: [],
+      todos: [],
     });
   });
 
@@ -2381,6 +3747,64 @@ describe('session runtime service', () => {
         ],
       },
     ]);
+  });
+
+  it('drops malformed empty-name tool calls and tool results instead of rendering Unknown tool cards', async () => {
+    const rootDir = await mkdtemp(join(tmpdir(), 'matcha-session-runtime-'));
+    const transcriptDir = join(rootDir, 'agents', 'main', 'sessions');
+    await mkdir(transcriptDir, { recursive: true });
+    await writeFile(
+      join(transcriptDir, 'main.jsonl'),
+      [
+        JSON.stringify({
+          type: 'message',
+          id: 'assistant-empty-tool',
+          timestamp: '2026-05-13T13:29:56.225Z',
+          message: {
+            role: 'assistant',
+            content: [
+              { type: 'toolCall', id: 'call_auto_1', name: '', arguments: {} },
+            ],
+          },
+        }),
+        JSON.stringify({
+          type: 'message',
+          id: 'empty-tool-result',
+          timestamp: '2026-05-13T13:29:58.935Z',
+          message: {
+            role: 'toolResult',
+            toolCallId: 'call_auto_1',
+            toolName: 'unknown',
+            content: [{ type: 'text', text: 'Tool  not found' }],
+            isError: true,
+          },
+        }),
+      ].join('\n'),
+      'utf8',
+    );
+    await writeFile(
+      join(transcriptDir, 'sessions.json'),
+      JSON.stringify({
+        sessions: [{
+          key: 'agent:main:main',
+          sessionKey: 'agent:main:main',
+          file: 'main.jsonl',
+        }],
+      }),
+      'utf8',
+    );
+
+    const service = createTestSessionRuntimeService({
+      workspace: { getConfigDir: () => rootDir },
+      openclawBridge: {
+        chatSend: async () => ({ runId: 'run-unused' }),
+        gatewayRpc: async () => ({}),
+      },
+    });
+
+    const loadResponse = await loadHydratedSession(service, 'agent:main:main');
+    expect(loadResponse.status).toBe(200);
+    expect(loadResponse.data.snapshot.items).toEqual([]);
   });
 
   it('live chat.message toolResult updates stay out of assistant-turn text and only update tool cards', async () => {

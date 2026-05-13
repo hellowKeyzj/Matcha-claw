@@ -10,6 +10,16 @@ import type {
 import {
   readMessageContent,
 } from './transcript-content-extractors';
+import {
+  isToolCallContentType,
+  isToolResultContentType,
+  isStateOnlyToolName,
+  resolveToolRecordCallId,
+  resolveToolRecordCallPayload,
+  resolveToolRecordName,
+  resolveToolRecordResultPayload,
+} from './state-only-tools';
+import { isMalformedEmptyToolNameResult } from './tool-event-sanitizer';
 
 export function extractToolUses(message: SessionTranscriptMessage): SessionTimelineMessageEntry['toolUses'] {
   const content = readMessageContent(message);
@@ -17,16 +27,16 @@ export function extractToolUses(message: SessionTranscriptMessage): SessionTimel
   if (Array.isArray(content)) {
     for (const block of content as ContentBlockLike[]) {
       const type = typeof block.type === 'string' ? block.type : '';
-      const name = typeof block.name === 'string' ? block.name.trim() : '';
-      if (!name || (type !== 'tool_use' && type !== 'toolCall')) {
+      const name = resolveToolRecordName(block);
+      if (!name || isStateOnlyToolName(name) || !isToolCallContentType(type)) {
         continue;
       }
-      const toolCallId = typeof block.id === 'string' && block.id.trim() ? block.id.trim() : undefined;
+      const toolCallId = resolveToolRecordCallId(block) || undefined;
       tools.push({
         id: toolCallId || name,
         ...(toolCallId ? { toolCallId } : {}),
         name,
-        input: block.input ?? block.arguments,
+        input: resolveToolRecordCallPayload(block),
       });
     }
   }
@@ -42,13 +52,12 @@ export function extractToolUses(message: SessionTranscriptMessage): SessionTimel
       return [];
     }
     const row = item as Record<string, unknown>;
-    const toolCallId = typeof row.id === 'string' && row.id.trim() ? row.id.trim() : '';
-    const fn = (row.function ?? row) as Record<string, unknown>;
-    const name = typeof fn.name === 'string' ? fn.name.trim() : '';
-    if (!name) {
+    const toolCallId = resolveToolRecordCallId(row);
+    const name = resolveToolRecordName(row);
+    if (!name || isStateOnlyToolName(name)) {
       return [];
     }
-    let input: unknown = fn.input ?? fn.arguments;
+    let input: unknown = resolveToolRecordCallPayload(row);
     if (typeof input === 'string') {
       try {
         input = JSON.parse(input);
@@ -163,21 +172,17 @@ function readToolStatusesFromStatusRecords(
       toolCallId,
       id,
     });
-    const name = typeof item.name === 'string' && item.name.trim()
-      ? item.name.trim()
-      : fallbackName;
+    const name = resolveToolRecordName(item) || fallbackName;
     const status = item.status === 'running' || item.status === 'completed' || item.status === 'error'
       ? item.status
       : null;
-    if (!name || !status) {
+    if (!name || isStateOnlyToolName(name) || !status) {
       return [];
     }
     const summary = typeof item.summary === 'string' && item.summary.trim() ? item.summary.trim() : undefined;
     const durationMs = typeof item.durationMs === 'number' && Number.isFinite(item.durationMs) ? item.durationMs : undefined;
     const updatedAt = typeof item.updatedAt === 'number' && Number.isFinite(item.updatedAt) ? item.updatedAt : undefined;
-    const output = Object.prototype.hasOwnProperty.call(item, 'result')
-      ? item.result
-      : (Object.prototype.hasOwnProperty.call(item, 'partialResult') ? item.partialResult : undefined);
+    const output = resolveToolRecordResultPayload(item);
     const outputText = normalizeToolOutputText(output);
     return [{
       ...(id ? { id } : {}),
@@ -204,31 +209,21 @@ function readToolStatusesFromContent(message: SessionTranscriptMessage): Session
     }
     const row = block as Record<string, unknown>;
     const type = typeof row.type === 'string' ? row.type : '';
-    if (type !== 'tool_result' && type !== 'toolResult') {
+    if (!isToolResultContentType(type)) {
       return [];
     }
-    const id = typeof row.id === 'string' && row.id.trim() ? row.id.trim() : undefined;
-    const toolCallId = typeof row.toolCallId === 'string' && row.toolCallId.trim()
-      ? row.toolCallId.trim()
-      : id;
+    const id = resolveToolRecordCallId(row) || undefined;
+    const toolCallId = id;
     const fallbackName = resolveFallbackToolName({
       message,
       toolCallId,
       id,
     });
-    const name = typeof row.name === 'string' && row.name.trim()
-      ? row.name.trim()
-      : fallbackName;
-    if (!name) {
+    const name = resolveToolRecordName(row) || fallbackName;
+    if (!name || isStateOnlyToolName(name)) {
       return [];
     }
-    const output = Object.prototype.hasOwnProperty.call(row, 'result')
-      ? row.result
-      : (
-          Object.prototype.hasOwnProperty.call(row, 'partialResult')
-            ? row.partialResult
-            : (Object.prototype.hasOwnProperty.call(row, 'content') ? row.content : row.text)
-        );
+    const output = resolveToolRecordResultPayload(row);
     const outputText = normalizeToolOutputText(output);
     const isError = row.isError === true || row.is_error === true;
     return [{
@@ -243,6 +238,9 @@ function readToolStatusesFromContent(message: SessionTranscriptMessage): Session
 }
 
 export function readToolStatuses(message: SessionTranscriptMessage): SessionTimelineMessageEntry['toolStatuses'] {
+  if (isMalformedEmptyToolNameResult(message)) {
+    return [];
+  }
   const records = Array.isArray(message.toolStatuses)
     ? message.toolStatuses.filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === 'object')
     : [];
@@ -261,7 +259,7 @@ export function readToolStatuses(message: SessionTranscriptMessage): SessionTime
     message,
     toolCallId,
   });
-  if (!name) {
+  if (!name || isStateOnlyToolName(name)) {
     return mergedStatuses;
   }
   const output = message.details !== undefined

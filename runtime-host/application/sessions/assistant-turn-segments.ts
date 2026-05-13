@@ -24,6 +24,13 @@ import {
 import {
   mergeAssistantSegmentStream,
 } from './assistant-segment-stream';
+import {
+  isToolCallContentType,
+  isToolResultContentType,
+  isStateOnlyToolName,
+  resolveToolRecordCallId,
+  resolveToolRecordName,
+} from './state-only-tools';
 
 export {
   buildTurnScopedAssistantSegmentKey,
@@ -150,14 +157,15 @@ export function buildAssistantSegmentsFromMessageContent(input: {
         }
         continue;
       }
-      if (type === 'tool_use' || type === 'toolCall' || type === 'toolResult' || type === 'tool_result') {
+      if (isToolCallContentType(type) || isToolResultContentType(type)) {
+        if (isStateOnlyToolName(resolveToolRecordName(row))) {
+          continue;
+        }
         const toolIndex = findAssistantToolCardIndexForBlock({
           toolCards: input.toolCards,
           consumedIndices: consumedToolIndices,
-          toolCallId: typeof row.toolCallId === 'string'
-            ? row.toolCallId
-            : (typeof row.id === 'string' ? row.id : undefined),
-          toolName: typeof row.name === 'string' ? row.name : undefined,
+          toolCallId: resolveToolRecordCallId(row) || undefined,
+          toolName: resolveToolRecordName(row) || undefined,
         });
         if (toolIndex >= 0) {
           consumedToolIndices.add(toolIndex);

@@ -2,7 +2,7 @@ import { existsSync } from 'node:fs'
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import type { TodoItem } from '../domain/task-item.js'
-import { isTaskStatus } from '../domain/task-status.js'
+import { isTodoStatus } from '../domain/task-status.js'
 import { toNonEmptyString } from '../shared/params.js'
 
 function nowTs(): number {
@@ -63,7 +63,7 @@ export class TodoStore {
           && typeof todo === 'object'
           && !Array.isArray(todo)
           && typeof (todo as { content?: unknown }).content === 'string'
-          && isTaskStatus((todo as { status?: unknown }).status)
+          && isTodoStatus((todo as { status?: unknown }).status)
         ))
       : []
     return {

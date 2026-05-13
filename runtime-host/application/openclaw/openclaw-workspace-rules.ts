@@ -29,6 +29,43 @@ function resolveFallbackMainWorkspace(openclawConfigDir: string): string {
   return resolvePath(join(openclawConfigDir, 'workspace'));
 }
 
+function parseSessionAgentId(sessionKey: string): string {
+  const parts = sessionKey.trim().split(':');
+  return parts[0] === 'agent' && parts[1]?.trim() ? parts[1].trim() : '';
+}
+
+function normalizeSubagentNameToSlug(name: string): string {
+  const slug = name
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+  if (!slug || /^\d+$/.test(slug)) {
+    return 'agent';
+  }
+  return slug;
+}
+
+function resolveConfiguredAgentWorkspace(config: unknown, agentId: string): string | null {
+  const root = isRecord(config) ? config : {};
+  const agents = isRecord(root.agents) ? root.agents : {};
+  const list = Array.isArray(agents.list) ? agents.list : [];
+  for (const item of list) {
+    if (!isRecord(item)) {
+      continue;
+    }
+    const id = typeof item.id === 'string' ? item.id.trim() : '';
+    if (id !== agentId) {
+      continue;
+    }
+    const workspace = normalizeWorkspacePath(item.workspace);
+    if (workspace) {
+      return workspace;
+    }
+  }
+  return null;
+}
+
 export function resolveMainWorkspaceDir(config: unknown, openclawConfigDir: string): string {
   const root = isRecord(config) ? config : {};
   const agents = isRecord(root.agents) ? root.agents : {};
@@ -56,6 +93,15 @@ export function resolveMainWorkspaceDir(config: unknown, openclawConfigDir: stri
   }
 
   return resolveFallbackMainWorkspace(openclawConfigDir);
+}
+
+export function resolveWorkspaceDirForSession(config: unknown, openclawConfigDir: string, sessionKey: string): string {
+  const agentId = parseSessionAgentId(sessionKey);
+  if (!agentId || agentId === 'main') {
+    return resolveMainWorkspaceDir(config, openclawConfigDir);
+  }
+  return resolveConfiguredAgentWorkspace(config, agentId)
+    ?? resolvePath(join(openclawConfigDir, 'workspace-subagents', normalizeSubagentNameToSlug(agentId)));
 }
 
 export function resolveTaskWorkspaceDirs(config: unknown, openclawConfigDir: string): string[] {

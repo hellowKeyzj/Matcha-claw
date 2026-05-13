@@ -24,6 +24,9 @@ import {
   buildToolCardsFromMessage,
   mergeToolCards,
 } from '../../../runtime-host/application/sessions/tool/tool-card-render';
+import {
+  isStateOnlyToolName,
+} from '../../../runtime-host/application/sessions/state-only-tools';
 
 export interface MessageTimelineMeta {
   entryId: string;
@@ -399,7 +402,11 @@ function readToolUses(content: unknown): SessionRenderToolUse[] {
       input?: unknown;
       arguments?: unknown;
     };
-    if ((row.type === 'tool_use' || row.type === 'toolCall') && typeof row.name === 'string') {
+    if (
+      (row.type === 'tool_use' || row.type === 'toolCall')
+      && typeof row.name === 'string'
+      && !isStateOnlyToolName(row.name)
+    ) {
       const toolCallId = typeof row.id === 'string' ? row.id : undefined;
       tools.push({
         id: toolCallId || row.name,
@@ -419,7 +426,7 @@ function readToolStatuses(message: RawMessage): SessionRenderToolStatus[] {
         .flatMap((toolStatus) => {
           const name = typeof toolStatus.name === 'string' ? toolStatus.name : '';
           const status = toolStatus.status;
-          if (!name || (status !== 'running' && status !== 'completed' && status !== 'error')) {
+          if (!name || isStateOnlyToolName(name) || (status !== 'running' && status !== 'completed' && status !== 'error')) {
             return [];
           }
           return [{
@@ -614,6 +621,9 @@ function buildAssistantSegmentsFromMessage(input: {
         continue;
       }
       if (type === 'tool_use' || type === 'toolCall' || type === 'tool_result' || type === 'toolResult') {
+        if (typeof row.name === 'string' && isStateOnlyToolName(row.name)) {
+          continue;
+        }
         const toolIndex = findToolCardIndexForBlock({
           toolCards: input.toolCards,
           consumedIndices: consumedToolIndices,

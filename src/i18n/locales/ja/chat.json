@@ -73,6 +73,19 @@
             "error": "エラー"
         }
     },
+    "todoPanel": {
+        "summary": "タスク {{completed}}/{{total}}",
+        "expand": "タスクリストを展開",
+        "collapse": "タスクリストを折りたたむ",
+        "allCompleted": "すべてのタスクが完了しました",
+        "inProgress": "タスク進行中",
+        "status": {
+            "pending": "未着手",
+            "in_progress": "進行中",
+            "completed": "完了",
+            "deleted": "キャンセル"
+        }
+    },
     "executionGraph": {
         "eyebrow": "会話実行",
         "title": "実行グラフ",

@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  isAssistantControlPrefixMessage,
   isInternalRuntimeDisplayMessage,
   shouldPreserveCanonicalTranscriptMessage,
 } from '../../runtime-host/shared/chat-message-normalization';
@@ -46,5 +47,51 @@ describe('chat message normalization', () => {
 
     expect(isInternalRuntimeDisplayMessage(message)).toBe(false);
     expect(shouldPreserveCanonicalTranscriptMessage(message)).toBe(true);
+  });
+
+  it('filters assistant NO_REPLY but keeps user NO_REPLY', () => {
+    const assistant = {
+      role: 'assistant',
+      content: [{ type: 'text', text: 'NO_REPLY' }],
+    };
+    const user = {
+      role: 'user',
+      content: [{ type: 'text', text: 'NO_REPLY' }],
+    };
+
+    expect(isInternalRuntimeDisplayMessage(assistant)).toBe(true);
+    expect(shouldPreserveCanonicalTranscriptMessage(assistant)).toBe(false);
+    expect(isInternalRuntimeDisplayMessage(user)).toBe(false);
+    expect(shouldPreserveCanonicalTranscriptMessage(user)).toBe(true);
+  });
+
+  it('uses assistant text field before content for silent-reply checks', () => {
+    const message = {
+      role: 'assistant',
+      text: 'real reply',
+      content: 'NO_REPLY',
+    };
+
+    expect(isInternalRuntimeDisplayMessage(message)).toBe(false);
+    expect(shouldPreserveCanonicalTranscriptMessage(message)).toBe(true);
+  });
+
+  it('detects only uppercase silent reply streaming prefixes for assistant messages', () => {
+    expect(isAssistantControlPrefixMessage({
+      role: 'assistant',
+      content: [{ type: 'text', text: 'NO' }],
+    })).toBe(true);
+    expect(isAssistantControlPrefixMessage({
+      role: 'assistant',
+      content: [{ type: 'text', text: 'NO_R' }],
+    })).toBe(true);
+    expect(isAssistantControlPrefixMessage({
+      role: 'assistant',
+      content: [{ type: 'text', text: 'No, that is fine.' }],
+    })).toBe(false);
+    expect(isAssistantControlPrefixMessage({
+      role: 'user',
+      content: [{ type: 'text', text: 'NO' }],
+    })).toBe(false);
   });
 });

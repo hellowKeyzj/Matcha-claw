@@ -73,6 +73,19 @@
       "error": "Ошибка"
     }
   },
+  "todoPanel": {
+    "summary": "Задачи {{completed}}/{{total}}",
+    "expand": "Развернуть список задач",
+    "collapse": "Свернуть список задач",
+    "allCompleted": "Все задачи выполнены",
+    "inProgress": "Задачи выполняются",
+    "status": {
+      "pending": "К выполнению",
+      "in_progress": "В работе",
+      "completed": "Готово",
+      "deleted": "Отменено"
+    }
+  },
   "executionGraph": {
     "eyebrow": "Выполнение в чате",
     "title": "Граф выполнения",

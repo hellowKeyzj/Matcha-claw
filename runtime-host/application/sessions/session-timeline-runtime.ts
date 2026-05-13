@@ -1,6 +1,7 @@
 import type {
   SessionRuntimeStateSnapshot,
   SessionTimelineEntry,
+  TaskSnapshotEvent,
 } from '../../shared/session-adapter-types';
 import type { GatewayTransportIssue } from '../../shared/gateway-error';
 import {
@@ -69,10 +70,14 @@ export class SessionTimelineRuntime {
       return;
     }
 
+    const replay = await this.deps.transcriptLoader.readTimelineReplay(sessionKey);
     state.timelineEntries = mergeTimelineEntries(
       state.timelineEntries,
-      await this.deps.transcriptLoader.readTimelineEntries(sessionKey),
+      replay.timelineEntries,
     );
+    if (replay.taskSnapshot) {
+      state.taskSnapshot = replay.taskSnapshot;
+    }
     state.hydrated = true;
     this.deps.executionGraphRuntime.rebuildFromTimeline(sessionKey, state);
     state.window = state.window.isAtLatest && state.window.windowStartOffset === 0
@@ -174,6 +179,14 @@ export class SessionTimelineRuntime {
     this.deps.executionGraphRuntime.refreshParents(sessionKey);
     this.deps.stateStore.persistStore();
     return mergedEntries;
+  }
+
+  updateTaskSnapshot(
+    sessionKey: string,
+    taskSnapshot: TaskSnapshotEvent,
+  ): void {
+    this.getSessionState(sessionKey).taskSnapshot = structuredClone(taskSnapshot);
+    this.deps.stateStore.persistStore();
   }
 
   setSessionRuntime(

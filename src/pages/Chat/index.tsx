@@ -28,6 +28,7 @@ import { ChatInput } from './ChatInput';
 import { ChatList, type ChatListHandle } from './components/ChatList';
 import { ChatHeaderBar } from './components/ChatHeaderBar';
 import { ChatApprovalDock, ChatErrorBanner } from './components/ChatRuntimeDock';
+import { SessionTodoPanel } from './components/SessionTodoPanel';
 import { WelcomeScreen } from './components/ChatStates';
 import { useChatInit } from './useChatInit';
 import { useChatSidePanelController } from './useChatSidePanelController';
@@ -214,7 +215,6 @@ function selectChatPageState(state: ChatStoreState) {
     currentPendingApprovals: getPendingApprovals(state, currentSessionKey) ?? EMPTY_APPROVAL_ITEMS,
     foregroundHistorySessionKey: state.foregroundHistorySessionKey,
     sessionsLoading: state.sessionCatalogStatus.status === 'loading',
-    mutating: state.mutating,
     showThinking: state.showThinking,
     refresh: state.refresh,
     toggleThinking: state.toggleThinking,
@@ -270,7 +270,6 @@ export function Chat({ isActive = true }: ChatProps) {
     currentPendingApprovals,
     foregroundHistorySessionKey,
     sessionsLoading,
-    mutating,
     showThinking,
     refresh,
     toggleThinking,
@@ -382,8 +381,6 @@ export function Chat({ isActive = true }: ChatProps) {
     currentSessionStatus: currentSession.meta.historyStatus,
     itemCount: viewportItems.length,
     sending: currentSession.runtime.sending,
-    refreshing,
-    mutating,
   });
   const allowedSkillIds = useMemo(() => {
     const matchedAgent = agents.find((agent) => agent.id === currentAgentId);
@@ -846,10 +843,6 @@ export function Chat({ isActive = true }: ChatProps) {
         )}
         header={(
           <ChatHeaderBar
-            showBackgroundStatus={liveView.showBackgroundStatus}
-            refreshing={refreshing}
-            statusRefreshingLabel={t('status.refreshing')}
-            statusMutatingLabel={t('status.mutating')}
             onRefresh={() => {
               void refresh();
             }}
@@ -912,6 +905,7 @@ export function Chat({ isActive = true }: ChatProps) {
             }}
           />
         ) : null}
+        todoPanel={<SessionTodoPanel sessionKey={currentSessionKey} />}
         input={inputNode}
       />
     </>

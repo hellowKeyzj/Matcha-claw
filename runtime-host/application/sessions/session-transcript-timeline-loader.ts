@@ -1,4 +1,5 @@
 import type {
+  TaskSnapshotEvent,
   SessionTimelineEntry,
 } from '../../shared/session-adapter-types';
 import {
@@ -11,7 +12,15 @@ import {
 import {
   upsertTimelineEntry,
 } from './timeline-state';
+import {
+  extractLatestTaskSnapshotFromTranscriptMessages,
+} from './transcript-task-snapshot-replay';
 import type { SessionStoragePort } from './session-storage-repository';
+
+export interface SessionTranscriptReplay {
+  timelineEntries: SessionTimelineEntry[];
+  taskSnapshot: TaskSnapshotEvent | null;
+}
 
 interface SessionTranscriptTimelineLoaderDeps {
   sessionStorage: SessionStoragePort;
@@ -21,11 +30,22 @@ export class SessionTranscriptTimelineLoader {
   constructor(private readonly deps: SessionTranscriptTimelineLoaderDeps) {}
 
   async readTimelineEntries(sessionKey: string): Promise<SessionTimelineEntry[]> {
+    return (await this.readTimelineReplay(sessionKey)).timelineEntries;
+  }
+
+  async readTimelineReplay(sessionKey: string): Promise<SessionTranscriptReplay> {
     const content = await this.deps.sessionStorage.readTranscriptContent(sessionKey);
     if (!content) {
-      return [];
+      return {
+        timelineEntries: [],
+        taskSnapshot: null,
+      };
     }
-    return materializeTranscriptTimelineEntries(sessionKey, parseTranscriptMessages(content));
+    const messages = parseTranscriptMessages(content);
+    return {
+      timelineEntries: materializeTranscriptTimelineEntries(sessionKey, messages),
+      taskSnapshot: extractLatestTaskSnapshotFromTranscriptMessages(sessionKey, messages),
+    };
   }
 
   async reconcileToolResultPatchEntries(input: {

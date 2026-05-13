@@ -127,4 +127,21 @@ describe('tasks status filter', () => {
     expect(screen.getByText(/Gateway is starting/i)).toBeInTheDocument();
     expect(screen.queryByText(/^Gateway is not running$/i)).not.toBeInTheDocument();
   });
+
+  it('任务中心不展示 TodoWrite 派生的会话待办', () => {
+    setupStores();
+    useTaskSnapshotStore.getState().cleanup('agent:main:main');
+    useTaskSnapshotStore.getState().reportTodos('agent:main:main', [
+      { content: 'Only chat todo', status: 'pending' },
+    ]);
+
+    render(
+      <MemoryRouter initialEntries={['/tasks']}>
+        <TasksPage />
+      </MemoryRouter>,
+    );
+
+    expect(screen.queryByRole('button', { name: /Only chat todo/i })).not.toBeInTheDocument();
+    expect(screen.getByText(/No tasks available/i)).toBeInTheDocument();
+  });
 });

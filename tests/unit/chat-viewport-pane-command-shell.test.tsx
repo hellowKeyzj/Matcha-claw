@@ -79,7 +79,6 @@ describe('chat list command shell', () => {
         liveView={{
           showBlockingLoading: false,
           showBlockingError: false,
-          showBackgroundStatus: false,
           isEmptyState: false,
         }}
         errorMessage={null}
@@ -112,7 +111,6 @@ describe('chat list command shell', () => {
         liveView={{
           showBlockingLoading: false,
           showBlockingError: false,
-          showBackgroundStatus: false,
           isEmptyState: false,
         }}
         errorMessage={null}
@@ -147,7 +145,6 @@ describe('chat list command shell', () => {
         liveView={{
           showBlockingLoading: false,
           showBlockingError: false,
-          showBackgroundStatus: false,
           isEmptyState: false,
         }}
         errorMessage={null}
@@ -180,7 +177,6 @@ describe('chat list command shell', () => {
         liveView={{
           showBlockingLoading: false,
           showBlockingError: false,
-          showBackgroundStatus: false,
           isEmptyState: false,
         }}
         errorMessage={null}
@@ -220,7 +216,6 @@ describe('chat list command shell', () => {
         liveView={{
           showBlockingLoading: false,
           showBlockingError: false,
-          showBackgroundStatus: false,
           isEmptyState: false,
         }}
         errorMessage={null}

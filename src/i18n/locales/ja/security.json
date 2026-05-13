@@ -39,11 +39,6 @@
     "collapse": "設定を隠す"
   },
   "toolLabels": {
-    "task_create": "タスク作成",
-    "task_list": "タスク一覧",
-    "task_get": "タスク詳細取得",
-    "task_update": "タスク更新",
-    "task_claim": "タスクを受領",
     "sessions_list": "セッション一覧",
     "sessions_send": "セッションへ送信",
     "sessions_spawn": "子セッション作成",

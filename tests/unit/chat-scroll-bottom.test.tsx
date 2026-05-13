@@ -1477,6 +1477,111 @@ describe('chat 主线程滚动锁', () => {
     expect(metrics.scrollTop).toBe(660);
   });
 
+  it('输入框浮层上滑后应脱离锁底，后续内容增长不能把位置拉回底部', async () => {
+    const { container } = renderChat();
+    const viewport = container.querySelector('.chat-scroll-sync-viewport') as HTMLDivElement;
+    const composerInput = container.querySelector('.chat-scroll-sync-input') as HTMLDivElement;
+    const itemElements = queryRenderableItems(container);
+    const metrics = {
+      scrollHeight: 1200,
+      clientHeight: 320,
+      scrollTop: 880,
+    };
+    installViewportMetrics(viewport, metrics);
+    installViewportRect(viewport, metrics);
+    installVirtualItemLayout(itemElements, metrics, [160, 220]);
+
+    act(() => {
+      triggerResizeObserver?.();
+    });
+
+    act(() => {
+      fireEvent.wheel(composerInput, { deltaY: -160 });
+    });
+
+    expect(metrics.scrollTop).toBe(720);
+
+    act(() => {
+      metrics.scrollHeight = 1440;
+      triggerResizeObserver?.();
+    });
+
+    expect(metrics.scrollTop).toBe(720);
+  });
+
+  it('发送触发强制贴底后，输入框浮层滚轮应打断待执行的自动贴底', async () => {
+    const rafQueue: FrameRequestCallback[] = [];
+    vi.stubGlobal('requestAnimationFrame', vi.fn((callback: FrameRequestCallback) => {
+      rafQueue.push(callback);
+      return rafQueue.length;
+    }));
+    vi.stubGlobal('cancelAnimationFrame', vi.fn());
+
+    try {
+      const { container } = renderChat();
+      const viewport = container.querySelector('.chat-scroll-sync-viewport') as HTMLDivElement;
+      const composerInput = container.querySelector('.chat-scroll-sync-input') as HTMLDivElement;
+      const itemElements = queryRenderableItems(container);
+      const metrics = {
+        scrollHeight: 1200,
+        clientHeight: 320,
+        scrollTop: 880,
+      };
+      installViewportMetrics(viewport, metrics);
+      installViewportRect(viewport, metrics);
+      installVirtualItemLayout(itemElements, metrics, [160, 220]);
+
+      act(() => {
+        triggerResizeObserver?.();
+      });
+
+      act(() => {
+        const textarea = container.querySelector('textarea') as HTMLTextAreaElement;
+        fireEvent.change(textarea, { target: { value: 'send while testing scroll' } });
+        fireEvent.keyDown(textarea, { key: 'Enter', code: 'Enter' });
+      });
+
+      act(() => {
+        metrics.scrollHeight = 1440;
+        fireEvent.wheel(composerInput, { deltaY: -180 });
+      });
+
+      expect(metrics.scrollTop).toBe(700);
+
+      act(() => {
+        for (const callback of [...rafQueue]) {
+          callback(performance.now());
+        }
+      });
+
+      act(() => {
+        triggerResizeObserver?.();
+      });
+
+      expect(metrics.scrollTop).toBe(700);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('输入框浮层下滑应继续滚动消息列表', async () => {
+    const { container } = renderChat();
+    const viewport = container.querySelector('.chat-scroll-sync-viewport') as HTMLDivElement;
+    const composerInput = container.querySelector('.chat-scroll-sync-input') as HTMLDivElement;
+    const metrics = {
+      scrollHeight: 1200,
+      clientHeight: 320,
+      scrollTop: 500,
+    };
+    installViewportMetrics(viewport, metrics);
+
+    act(() => {
+      fireEvent.wheel(composerInput, { deltaY: 160 });
+    });
+
+    expect(metrics.scrollTop).toBe(660);
+  });
+
   it('输入框内部自己还能滚时，不抢它的滚轮', async () => {
     const { container } = renderChat();
     const viewport = container.querySelector('.chat-scroll-sync-viewport') as HTMLDivElement;

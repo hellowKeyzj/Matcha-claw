@@ -1,5 +1,5 @@
 import type { OpenClawPluginApi, TaskRunCancelResult, TaskRunDetail } from 'openclaw/plugin-sdk'
-import { backgroundTaskParameters } from '../schemas/task-store-schema.js'
+import { taskOutputParameters, taskStopParameters } from '../schemas/task-store-schema.js'
 import { toNonEmptyString } from '../shared/params.js'
 
 type ToolParams = Record<string, unknown>
@@ -101,8 +101,8 @@ export function registerBackgroundTaskTools(api: OpenClawPluginApi): void {
   api.registerTool((toolCtx: ToolContext) => ({
     name: 'TaskOutput',
     label: 'Task Output',
-    description: 'Read output for a background agent or shell task.',
-    parameters: backgroundTaskParameters,
+    description: 'Get current output from a background task by taskId.',
+    parameters: taskOutputParameters,
     async execute(_toolCallId: string, params: ToolParams) {
       return await executeTaskOutput(api, toolCtx, params)
     },
@@ -111,8 +111,8 @@ export function registerBackgroundTaskTools(api: OpenClawPluginApi): void {
   api.registerTool((toolCtx: ToolContext) => ({
     name: 'TaskStop',
     label: 'Task Stop',
-    description: 'Stop a background agent or shell task.',
-    parameters: backgroundTaskParameters,
+    description: 'Stop a running background task by taskId.',
+    parameters: taskStopParameters,
     async execute(_toolCallId: string, params: ToolParams) {
       return await executeTaskStop(api, toolCtx, params)
     },

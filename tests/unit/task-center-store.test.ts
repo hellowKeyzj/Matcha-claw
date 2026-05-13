@@ -78,6 +78,51 @@ describe('task center store', () => {
     expect(state.error).toBe('refresh failed');
   });
 
+  it('refreshTasks keeps existing todo snapshot when TaskList returns an empty replay', async () => {
+    listTaskSnapshotMock.mockResolvedValueOnce({ tasks: [], todos: [] });
+    const { useTaskCenterStore } = await import('@/stores/task-center-store');
+    const { useTaskSnapshotStore } = await import('@/stores/chat/task-snapshot-store');
+
+    useTaskSnapshotStore.getState().reportTodos('agent:main:main', [
+      { content: '已有待办', status: 'pending' },
+    ]);
+
+    await useTaskCenterStore.getState().refreshTasks({ sessionKey: 'agent:main:main' });
+
+    expect(useTaskSnapshotStore.getState().getTaskDataList('agent:main:main')).toEqual([
+      expect.objectContaining({ subject: '已有待办', status: 'pending' }),
+    ]);
+    expect(useTaskSnapshotStore.getState().getPersistentTaskDataList('agent:main:main')).toEqual([]);
+  });
+
+  it('refreshTasks isolates in-flight requests by session key', async () => {
+    let resolveFirst: ((snapshot: TaskListSnapshot) => void) | null = null;
+    listTaskSnapshotMock.mockImplementation((sessionKey) => {
+      if (sessionKey === 'agent:main:first') {
+        return new Promise<TaskListSnapshot>((resolve) => {
+          resolveFirst = resolve;
+        });
+      }
+      return Promise.resolve(snapshot([task({ id: '2', subject: 'second task' })]));
+    });
+    const { useTaskCenterStore } = await import('@/stores/task-center-store');
+    const { useTaskSnapshotStore } = await import('@/stores/chat/task-snapshot-store');
+
+    const firstRefresh = useTaskCenterStore.getState().refreshTasks({ sessionKey: 'agent:main:first', silent: true });
+    const secondRefresh = useTaskCenterStore.getState().refreshTasks({ sessionKey: 'agent:main:second', silent: true });
+    await secondRefresh;
+
+    expect(listTaskSnapshotMock).toHaveBeenCalledWith('agent:main:first');
+    expect(listTaskSnapshotMock).toHaveBeenCalledWith('agent:main:second');
+    expect(useTaskSnapshotStore.getState().getTaskDataList('agent:main:second').map((item) => item.subject)).toEqual(['second task']);
+
+    resolveFirst?.(snapshot([task({ id: '1', subject: 'first task' })]));
+    await firstRefresh;
+
+    expect(useTaskSnapshotStore.getState().getTaskDataList('agent:main:first').map((item) => item.subject)).toEqual(['first task']);
+    expect(useTaskSnapshotStore.getState().getTaskDataList('agent:main:second').map((item) => item.subject)).toEqual(['second task']);
+  });
+
   it('deleteTaskById maps to TaskUpdate status=deleted and removes task', async () => {
     listTaskSnapshotMock.mockResolvedValue(snapshot([task({ id: '3', status: 'in_progress' })]));
     updateTaskMock.mockResolvedValue({

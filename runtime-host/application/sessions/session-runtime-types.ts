@@ -2,6 +2,7 @@ import type {
   SessionExecutionGraphItem,
   SessionRenderItem,
   SessionRuntimeStateSnapshot,
+  TaskSnapshotEvent,
   SessionTimelineEntry,
   SessionWindowStateSnapshot,
 } from '../../shared/session-adapter-types';
@@ -56,6 +57,7 @@ export interface SessionRuntimeTimelineState {
   timelineEntries: SessionTimelineEntry[];
   executionGraphItems: SessionExecutionGraphItem[];
   renderItems: SessionRenderItem[];
+  taskSnapshot: TaskSnapshotEvent | null;
   hydrated: boolean;
   runtime: SessionRuntimeStateSnapshot;
   window: SessionWindowStateSnapshot;

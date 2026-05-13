@@ -1,6 +1,6 @@
 import { join } from 'node:path';
 import type { OpenClawWorkspaceConfigPort } from './openclaw-config-repository';
-import { resolveMainWorkspaceDir, resolveTaskWorkspaceDirs } from './openclaw-workspace-rules';
+import { resolveMainWorkspaceDir, resolveTaskWorkspaceDirs, resolveWorkspaceDirForSession } from './openclaw-workspace-rules';
 import type { RuntimeFileSystemPort } from '../common/runtime-ports';
 import type { OpenClawEnvironmentRepository } from './openclaw-environment-repository';
 import type { RuntimeHostLogger } from '../../shared/logger';
@@ -11,6 +11,7 @@ export interface OpenClawWorkspacePort {
   getDefaultSkillReadmePath(skillKey: string): string;
   getPreviewRoots(): Promise<string[]>;
   getMainWorkspaceDir(): Promise<string>;
+  getWorkspaceDirForSession(sessionKey: string): Promise<string>;
   getTaskWorkspaceDirs(): Promise<string[]>;
   migrateMainAgentTemplatesIfNeeded(): Promise<{ workspaceDir: string; migratedFiles: string[] }>;
 }
@@ -63,6 +64,10 @@ export class OpenClawWorkspaceService implements OpenClawWorkspacePort {
 
   async getMainWorkspaceDir(): Promise<string> {
     return resolveMainWorkspaceDir(await this.config.read(), this.config.getConfigDir());
+  }
+
+  async getWorkspaceDirForSession(sessionKey: string): Promise<string> {
+    return resolveWorkspaceDirForSession(await this.config.read(), this.config.getConfigDir(), sessionKey);
   }
 
   async getTaskWorkspaceDirs(): Promise<string[]> {

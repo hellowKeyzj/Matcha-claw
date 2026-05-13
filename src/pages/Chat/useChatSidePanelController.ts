@@ -70,7 +70,7 @@ export function useChatSidePanelController(
   const setChatTakeoverMode = useLayoutStore((state) => state.setChatTakeoverMode);
   const clearChatTakeoverMode = useLayoutStore((state) => state.clearChatTakeoverMode);
   const currentSessionKey = useChatStore((state) => state.currentSessionKey);
-  const tasks = useTaskSnapshotStore((state) => state.getTaskDataList(currentSessionKey));
+  const tasks = useTaskSnapshotStore((state) => state.getPersistentTaskDataList(currentSessionKey));
   const derivedPlanStatus = useTaskSnapshotStore((state) => state.getDerivedPlanStatus(currentSessionKey));
   const initialized = useTaskCenterStore((state) => state.initialized);
   const init = useTaskCenterStore((state) => state.init);

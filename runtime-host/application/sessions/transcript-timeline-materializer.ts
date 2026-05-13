@@ -1,4 +1,7 @@
-import { normalizeOptionalString } from '../../shared/chat-message-normalization';
+import {
+  isInternalAssistantControlMessage,
+  normalizeOptionalString,
+} from '../../shared/chat-message-normalization';
 import { buildToolCardsFromMessage } from './tool/tool-card-render';
 import {
   buildAssistantSegmentsFromMessageContent,
@@ -9,7 +12,6 @@ import type {
   SessionTimelineEntry,
   SessionTimelineTaskCompletionEntry,
 } from '../../shared/session-adapter-types';
-import { parseTranscriptMessages } from './transcript-parser';
 import type { SessionTranscriptMessage } from './transcript-types';
 import {
   extractImages,
@@ -36,6 +38,13 @@ import {
   materializeToolResultPatchRows,
   materializeToolResultRows,
 } from './transcript-tool-result-materializer';
+import {
+  isToolCallContentType,
+  isToolResultContentType,
+  isStateOnlyToolName,
+  resolveToolRecordName,
+} from './state-only-tools';
+import { isMalformedEmptyToolNameResult } from './tool-event-sanitizer';
 
 function buildTaskCompletionText(row: SessionTimelineTaskCompletionEntry): string {
   return [
@@ -62,6 +71,75 @@ function resolveCompletionTriggerRow(
   return null;
 }
 
+function isStateOnlyAssistantMessage(message: SessionTranscriptMessage): boolean {
+  if (message.role !== 'assistant') {
+    return false;
+  }
+  if (isStateOnlyToolName(message.toolName ?? message.name)) {
+    return true;
+  }
+  const content = readMessageContent(message);
+  if (!Array.isArray(content)) {
+    return false;
+  }
+  let hasStateOnlyBlock = false;
+  for (const block of content) {
+    if (!block || typeof block !== 'object') {
+      return false;
+    }
+    const row = block as { type?: unknown; name?: unknown };
+    const type = typeof row.type === 'string' ? row.type : '';
+    if (!isToolCallContentType(type) && !isToolResultContentType(type)) {
+      return false;
+    }
+    if (!isStateOnlyToolName(resolveToolRecordName(row))) {
+      return false;
+    }
+    hasStateOnlyBlock = true;
+  }
+  return hasStateOnlyBlock;
+}
+
+function isStateOnlyToolResultMessage(message: SessionTranscriptMessage): boolean {
+  if (message.role !== 'toolresult' && message.role !== 'tool_result') {
+    return false;
+  }
+  return isStateOnlyToolName(message.toolName ?? message.name);
+}
+
+function hasOnlyMalformedEmptyToolBlocks(message: SessionTranscriptMessage): boolean {
+  const content = readMessageContent(message);
+  if (!Array.isArray(content)) {
+    return false;
+  }
+  let sawToolBlock = false;
+  for (const block of content) {
+    if (!block || typeof block !== 'object') {
+      return false;
+    }
+    const row = block as { type?: unknown };
+    const type = typeof row.type === 'string' ? row.type : '';
+    if (!isToolCallContentType(type) && !isToolResultContentType(type)) {
+      return false;
+    }
+    if (resolveToolRecordName(row)) {
+      return false;
+    }
+    sawToolBlock = true;
+  }
+  return sawToolBlock;
+}
+
+function isMalformedEmptyToolMessage(message: SessionTranscriptMessage): boolean {
+  if (message.role === 'assistant') {
+    return hasOnlyMalformedEmptyToolBlocks(message);
+  }
+  if (message.role !== 'toolresult' && message.role !== 'tool_result') {
+    return false;
+  }
+  return isMalformedEmptyToolNameResult(message);
+}
+
 export function buildTimelineEntriesFromTranscriptMessage(
   sessionKey: string,
   message: SessionTranscriptMessage,
@@ -73,6 +151,18 @@ export function buildTimelineEntriesFromTranscriptMessage(
     existingRows?: SessionTimelineEntry[];
   },
 ): SessionTimelineEntry[] {
+  if (isInternalAssistantControlMessage(message)) {
+    return [];
+  }
+  if (isMalformedEmptyToolMessage(message)) {
+    return [];
+  }
+  if (isStateOnlyAssistantMessage(message)) {
+    return [];
+  }
+  if (isStateOnlyToolResultMessage(message)) {
+    return [];
+  }
   const agentId = normalizeOptionalString(message.agentId) ?? '';
   const existingRows = options.existingRows ?? [];
   const defaultLaneKey = resolveSessionLaneKey(agentId);
@@ -280,6 +370,9 @@ export function materializeTranscriptToolResultPatchEntries(
   const entries: SessionTimelineEntry[] = [];
   for (const [index, message] of messages.entries()) {
     if (message.role !== 'toolresult' && message.role !== 'tool_result') {
+      continue;
+    }
+    if (isStateOnlyToolResultMessage(message)) {
       continue;
     }
     entries.push(...materializeToolResultPatchRows({

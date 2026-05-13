@@ -1,9 +1,11 @@
-import { act, render, screen } from '@testing-library/react';
-import { describe, expect, it } from 'vitest';
+import { act, fireEvent, render, screen } from '@testing-library/react';
+import { beforeEach, describe, expect, it } from 'vitest';
 import { ChatAssistantTurn } from '@/pages/Chat/ChatAssistantTurn';
 import { ChatMessage } from '@/pages/Chat/ChatMessage';
+import { SessionTodoPanel } from '@/pages/Chat/components/SessionTodoPanel';
 import { applyAssistantPresentationToItems } from '@/pages/Chat/chat-render-item-model';
 import { CHAT_LAYOUT_TOKENS } from '@/pages/Chat/chat-layout-tokens';
+import { useTaskSnapshotStore } from '@/stores/chat/task-snapshot-store';
 import type { RawMessage } from './helpers/timeline-fixtures';
 import { buildRenderItemsFromMessages } from './helpers/timeline-fixtures';
 import { vi } from 'vitest';
@@ -13,12 +15,39 @@ vi.mock('react-i18next', async (importOriginal) => {
   return {
     ...actual,
     useTranslation: () => ({
-      t: (key: string) => {
+      t: (key: string, options?: Record<string, unknown>) => {
         if (key === 'pending.typing') {
           return '正在思考';
         }
         if (key === 'pending.activity') {
           return '正在调用工具';
+        }
+        if (key === 'todoPanel.summary') {
+          return `任务 ${String(options?.completed)}/${String(options?.total)}`;
+        }
+        if (key === 'todoPanel.expand') {
+          return '展开任务列表';
+        }
+        if (key === 'todoPanel.collapse') {
+          return '收起任务列表';
+        }
+        if (key === 'todoPanel.allCompleted') {
+          return '所有任务已完成';
+        }
+        if (key === 'todoPanel.inProgress') {
+          return '任务进行中';
+        }
+        if (key === 'todoPanel.status.completed') {
+          return '完成';
+        }
+        if (key === 'todoPanel.status.in_progress') {
+          return '进行中';
+        }
+        if (key === 'todoPanel.status.deleted') {
+          return '取消';
+        }
+        if (key === 'todoPanel.status.pending') {
+          return '待办';
         }
         return key;
       },
@@ -40,6 +69,10 @@ function buildRenderItem(message: RawMessage) {
 }
 
 describe('chat message avatar', () => {
+  beforeEach(() => {
+    useTaskSnapshotStore.getState().cleanup('agent:test:main');
+  });
+
   it('assistant turn renders generated agent avatar', () => {
     const item = buildRenderItem({
       role: 'assistant',
@@ -293,6 +326,134 @@ describe('chat message avatar', () => {
       outputToggle?.click();
     });
     expect(screen.getAllByText(/tool output body/).length).toBeGreaterThan(0);
+  });
+
+  it('hides TodoWrite tool calls from historical assistant messages', () => {
+    const item = buildRenderItem({
+      role: 'assistant',
+      content: [{
+        type: 'toolCall',
+        id: 'todo-write-1',
+        name: 'TodoWrite',
+        input: {
+          newTodos: [
+            { content: '分析需求', status: 'completed' },
+            { content: '修改聊天展示', status: 'in_progress' },
+          ],
+        },
+      }],
+      toolStatuses: [{
+        toolCallId: 'todo-write-1',
+        name: 'TodoWrite',
+        status: 'completed',
+        updatedAt: 1,
+        result: {
+          todos: [
+            { content: '分析需求', status: 'completed' },
+            { content: '修改聊天展示', status: 'in_progress' },
+          ],
+        },
+        outputText: JSON.stringify({
+          todos: [
+            { content: '分析需求', status: 'completed' },
+            { content: '修改聊天展示', status: 'in_progress' },
+          ],
+        }),
+      }],
+    });
+    if (item.kind !== 'assistant-turn') {
+      throw new Error('expected assistant turn');
+    }
+
+    render(
+      <ChatAssistantTurn
+        item={item}
+        showThinking={false}
+      />,
+    );
+
+    expect(document.querySelector('[data-compact-rail="todo-tool"]')).toBeNull();
+    expect(document.querySelector('[data-compact-rail="tool"]')).toBeNull();
+  });
+
+  it('renders the current session todo list from the task snapshot store', () => {
+    const item = buildRenderItem({
+      role: 'assistant',
+      content: [{
+        type: 'toolCall',
+        id: 'todo-write-live',
+        name: 'TodoWrite',
+        input: {
+          newTodos: [
+            { content: '分析页面结构', status: 'pending' },
+            { content: '实现任务状态', status: 'pending' },
+            { content: '验证刷新恢复', status: 'pending' },
+          ],
+        },
+      }],
+      toolStatuses: [{
+        toolCallId: 'todo-write-live',
+        name: 'TodoWrite',
+        status: 'completed',
+        updatedAt: 1,
+        result: {
+          todos: [
+            { content: '分析页面结构', status: 'pending' },
+            { content: '实现任务状态', status: 'pending' },
+            { content: '验证刷新恢复', status: 'pending' },
+          ],
+        },
+        outputText: JSON.stringify({
+          todos: [
+            { content: '分析页面结构', status: 'pending' },
+            { content: '实现任务状态', status: 'pending' },
+            { content: '验证刷新恢复', status: 'pending' },
+          ],
+        }),
+      }],
+    });
+    if (item.kind !== 'assistant-turn') {
+      throw new Error('expected assistant turn');
+    }
+
+    render(
+      <ChatAssistantTurn
+        item={item}
+        showThinking={false}
+      />,
+    );
+
+    expect(screen.queryByTestId('session-todo-panel')).toBeNull();
+
+    act(() => {
+      useTaskSnapshotStore.getState().reportTodos('agent:test:main', [
+        { content: '分析页面结构', status: 'pending' },
+        { content: '实现任务状态', status: 'in_progress' },
+        { content: '验证刷新恢复', status: 'pending' },
+      ]);
+    });
+
+    const view = render(<SessionTodoPanel sessionKey="agent:test:main" />);
+
+    expect(screen.getByTestId('session-todo-panel')).toHaveTextContent('任务 0/3');
+    expect(screen.getByTestId('session-todo-panel')).not.toHaveTextContent('实现任务状态');
+
+    fireEvent.click(screen.getByRole('button', { name: '展开任务列表' }));
+
+    expect(screen.getByTestId('session-todo-panel')).toHaveTextContent('实现任务状态');
+
+    act(() => {
+      useTaskSnapshotStore.getState().reportTodos('agent:test:main', [
+        { content: '分析页面结构', status: 'completed' },
+        { content: '实现任务状态', status: 'completed' },
+        { content: '验证刷新恢复', status: 'completed' },
+      ]);
+    });
+
+    expect(screen.getByTestId('session-todo-panel')).toHaveTextContent('任务 3/3');
+    expect(screen.getByTestId('session-todo-panel')).toHaveTextContent('所有任务已完成');
+
+    view.unmount();
   });
 
   it('tool card renders json output as a collapsible JSON block', () => {

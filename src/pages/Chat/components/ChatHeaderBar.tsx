@@ -1,4 +1,4 @@
-import { Brain, Loader2, PanelRightClose, PanelRightOpen, RefreshCw } from 'lucide-react';
+import { Brain, PanelRightClose, PanelRightOpen, RefreshCw } from 'lucide-react';
 import { memo } from 'react';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -14,10 +14,6 @@ const HEADER_TOOLTIP_PROPS = {
 };
 
 export const ChatHeaderBar = memo(function ChatHeaderBar({
-  showBackgroundStatus,
-  refreshing,
-  statusRefreshingLabel,
-  statusMutatingLabel,
   onRefresh,
   refreshBusy,
   showThinking,
@@ -26,10 +22,6 @@ export const ChatHeaderBar = memo(function ChatHeaderBar({
   unfinishedTaskCount,
   onToggleSidePanel,
 }: {
-  showBackgroundStatus: boolean;
-  refreshing: boolean;
-  statusRefreshingLabel: string;
-  statusMutatingLabel: string;
   onRefresh: () => void;
   refreshBusy: boolean;
   showThinking: boolean;
@@ -45,13 +37,6 @@ export const ChatHeaderBar = memo(function ChatHeaderBar({
 
   return (
     <div className="flex items-start justify-end gap-2">
-      {showBackgroundStatus && (
-        <div className="inline-flex h-9 items-center gap-1.5 rounded-full border border-border/45 bg-card/92 px-3 text-[11px] text-muted-foreground shadow-[0_8px_22px_rgba(15,23,42,0.05)] backdrop-blur-xl">
-          <Loader2 className="h-3 w-3 animate-spin" />
-          <span>{refreshing ? statusRefreshingLabel : statusMutatingLabel}</span>
-        </div>
-      )}
-
       <div className="flex items-center gap-1">
         <Tooltip>
           <TooltipTrigger asChild>

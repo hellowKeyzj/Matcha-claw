@@ -37,7 +37,7 @@ describe('task manager client', () => {
     });
   });
 
-  it('createTask posts WorkBuddy task fields and returns task with todos', async () => {
+  it('createTask posts task fields and returns task with todos', async () => {
     hostApiFetchMock.mockResolvedValueOnce({
       task: {
         id: '2',
@@ -102,7 +102,7 @@ describe('task manager client', () => {
     });
   });
 
-  it('writeTodos posts oldTodos and newTodos to TodoWrite route', async () => {
+  it('writeTodos posts newTodos to TodoWrite route', async () => {
     hostApiFetchMock.mockResolvedValueOnce({
       todos: [{ content: 'done', status: 'completed' }],
       updatedAt: 12,
@@ -111,7 +111,6 @@ describe('task manager client', () => {
 
     const result = await writeTodos({
       sessionKey: 'agent:main:main',
-      oldTodos: [{ content: 'done', status: 'pending' }],
       newTodos: [{ content: 'done', status: 'completed' }],
     });
 
@@ -121,7 +120,6 @@ describe('task manager client', () => {
       method: 'POST',
       body: JSON.stringify({
         sessionKey: 'agent:main:main',
-        oldTodos: [{ content: 'done', status: 'pending' }],
         newTodos: [{ content: 'done', status: 'completed' }],
       }),
       timeoutMs: 60000,

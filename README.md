@@ -107,7 +107,7 @@ Communicate with AI agents through a modern chat experience. Support for multipl
 Create and manage specialized subagents in a visual workspace. Built-in draft generation, line-level diff preview, and controlled apply flow help you evolve `AGENTS.md` / `SOUL.md` / `TOOLS.md` / `IDENTITY.md` / `USER.md` safely.
 
 ### ✅ Session Task Center & Team Discussion Hub
-Plan and track session-scoped tasks in `/tasks`, inspect structured checklist progress, and keep Chat and Task Center aligned through the same task snapshot pipeline. Agent task tools use the WorkBuddy-style `TaskCreate` / `TaskUpdate` / `TaskList` / `TaskGet` / `TodoWrite` flow, while the Task Center keeps **Long Tasks** and **Scheduled Tasks** in one place.
+Plan and track persistent session tasks in `/tasks`, while Chat shows the current run's `TodoWrite` checklist as part of the same task snapshot pipeline. Agent task tools use `TaskCreate` / `TaskUpdate` / `TaskList` / `TaskGet` / `TodoWrite`; the Task Center manages only persistent tasks and keeps **Long Tasks** and **Scheduled Tasks** in one place.
 
 ### 📡 Multi-Channel Management
 Configure and monitor multiple AI channels simultaneously. Each channel operates independently, allowing you to run specialized agents for different tasks.

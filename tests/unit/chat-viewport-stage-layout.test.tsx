@@ -17,6 +17,7 @@ describe('chat shell stage layout', () => {
         viewportPane={<div data-testid="thread-panel" />}
         errorBanner={<div data-testid="chat-error-banner" />}
         approvalDock={<div data-testid="chat-approval-dock" />}
+        todoPanel={<div data-testid="chat-todo-panel" />}
         input={<div data-testid="chat-input" />}
       />,
     );
@@ -36,6 +37,7 @@ describe('chat shell stage layout', () => {
     expect(screen.getByTestId('chat-stage-bottom-fade').className).toContain('right-[var(--chat-scrollbar-gutter)]');
     expect(container.querySelector('[data-testid="chat-error-banner"]')).toBeInTheDocument();
     expect(container.querySelector('[data-testid="chat-approval-dock"]')).toBeInTheDocument();
+    expect(container.querySelector('[data-testid="chat-todo-panel"]')).toBeInTheDocument();
 
     const composerOverlay = screen.getByTestId('chat-input').parentElement?.parentElement?.parentElement as HTMLElement | null;
     expect(composerOverlay?.className).toContain('absolute');

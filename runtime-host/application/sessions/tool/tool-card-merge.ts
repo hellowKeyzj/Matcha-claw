@@ -8,6 +8,9 @@ import {
   resolveToolCardRenderState,
   serializeToolResultBodyText,
 } from './tool-card-render-state';
+import {
+  isStateOnlyToolName,
+} from '../state-only-tools';
 
 export function findToolCardIndexByCallId(
   tools: ReadonlyArray<SessionRenderToolCard>,
@@ -70,9 +73,14 @@ export function mergeToolCards(input: {
   toolUses: ReadonlyArray<SessionRenderToolUse>;
   toolStatuses: ReadonlyArray<SessionRenderToolStatus>;
 }): SessionRenderToolCard[] {
-  const merged = input.existingTools.map((tool) => ({ ...tool }));
+  const merged = input.existingTools
+    .filter((tool) => !isStateOnlyToolName(tool.name))
+    .map((tool) => ({ ...tool }));
 
   for (const toolUse of input.toolUses) {
+    if (isStateOnlyToolName(toolUse.name)) {
+      continue;
+    }
     const toolCallId = normalizeToolIdentity(toolUse.toolCallId);
     const existingIndex = toolCallId
       ? Math.max(
@@ -122,6 +130,9 @@ export function mergeToolCards(input: {
   }
 
   for (const toolStatus of input.toolStatuses) {
+    if (isStateOnlyToolName(toolStatus.name)) {
+      continue;
+    }
     const toolCallId = normalizeToolIdentity(toolStatus.toolCallId || toolStatus.id);
     const existingIndex = toolCallId
       ? Math.max(

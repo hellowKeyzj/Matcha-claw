@@ -20,10 +20,17 @@ import {
   UNKNOWN_ABORTED_RUN_MARKER,
   type StoreSessionRunCache,
 } from './session-run-cache';
+import {
+  logRendererTodoToolDebug,
+  summarizeAssistantTurnForTodoToolDebug,
+  summarizeItemsForTodoToolDebug,
+  summarizeSnapshotForTodoToolDebug,
+} from './todo-tool-debug';
 import type { ChatStoreState } from './types';
 import type {
   SessionItemChunkUpdateEvent,
   SessionItemUpdateEvent,
+  SessionStateSnapshot,
   SessionUpdateEvent,
 } from '../../../runtime-host/shared/session-adapter-types';
 
@@ -42,6 +49,29 @@ interface CreateStoreRuntimeEventActionsInput {
 
 function normalizeIdentifier(value: unknown): string {
   return typeof value === 'string' ? value.trim() : '';
+}
+
+function patchSessionSnapshotWithTodoToolDebug(
+  state: Pick<ChatStoreState, 'loadedSessions'>,
+  sessionKey: string,
+  snapshot: SessionStateSnapshot,
+  source: string,
+): Record<string, ChatStoreState['loadedSessions'][string]> {
+  const beforeItems = state.loadedSessions[sessionKey]?.items ?? [];
+  logRendererTodoToolDebug('renderer.patch.before', {
+    source,
+    sessionKey,
+    beforeItems: summarizeItemsForTodoToolDebug(beforeItems),
+    incomingSnapshot: summarizeSnapshotForTodoToolDebug(snapshot),
+  });
+  const nextLoadedSessions = patchSessionSnapshot(state, sessionKey, snapshot);
+  const afterItems = nextLoadedSessions[sessionKey]?.items ?? [];
+  logRendererTodoToolDebug('renderer.patch.after', {
+    source,
+    sessionKey,
+    afterItems: summarizeItemsForTodoToolDebug(afterItems),
+  });
+  return nextLoadedSessions;
 }
 
 function applySessionLifecycleEvent(
@@ -120,7 +150,12 @@ function applySessionLifecycleEvent(
   }
 
   set((state) => ({
-    loadedSessions: patchSessionSnapshot(state, targetSessionKey, event.snapshot),
+    loadedSessions: patchSessionSnapshotWithTodoToolDebug(
+      state,
+      targetSessionKey,
+      event.snapshot,
+      'session_info_update',
+    ),
   }));
 
   if (event.phase === 'final') {
@@ -206,7 +241,12 @@ function applySessionMessageEvent(
   }
 
   set((state) => ({
-      loadedSessions: patchSessionSnapshot(state, targetSessionKey, event.snapshot),
+      loadedSessions: patchSessionSnapshotWithTodoToolDebug(
+        state,
+        targetSessionKey,
+        event.snapshot,
+        event.sessionUpdate,
+      ),
   }));
 }
 
@@ -225,6 +265,17 @@ export function handleStoreSessionUpdateEvent(
   const targetSessionKey = eventSessionKey || currentSessionKey;
   const eventRunId = normalizeIdentifier(sessionUpdate.runId);
   const targetRuntime = getSessionRuntime(stateBeforeHandle, targetSessionKey);
+
+  logRendererTodoToolDebug('renderer.session-update.received', {
+    sessionUpdate: sessionUpdate.sessionUpdate,
+    sessionKey: sessionUpdate.sessionKey,
+    runId: sessionUpdate.runId,
+    item: 'item' in sessionUpdate && sessionUpdate.item?.kind === 'assistant-turn'
+      ? summarizeAssistantTurnForTodoToolDebug(sessionUpdate.item)
+      : ('item' in sessionUpdate ? sessionUpdate.item : undefined),
+    taskSnapshot: 'taskSnapshot' in sessionUpdate ? sessionUpdate.taskSnapshot : undefined,
+    snapshot: summarizeSnapshotForTodoToolDebug(sessionUpdate.snapshot),
+  });
 
   if (shouldBlockAbortedRunEvent({
     event: sessionUpdate,
@@ -249,6 +300,28 @@ export function handleStoreSessionUpdateEvent(
       currentSessionKey,
       event: sessionUpdate,
     });
+    return;
+  }
+
+  if (sessionUpdate.sessionUpdate === 'plan') {
+    useTaskSnapshotStore.getState().reportSessionUpdate(sessionUpdate);
+    if (eventRunId && targetRuntime.activeRunId && targetRuntime.activeRunId !== eventRunId) {
+      return;
+    }
+    if (shouldIgnoreRuntimeEvent({
+      eventSessionKey,
+      targetSessionKey,
+    })) {
+      return;
+    }
+    set((state) => ({
+      loadedSessions: patchSessionSnapshotWithTodoToolDebug(
+        state,
+        targetSessionKey,
+        sessionUpdate.snapshot,
+        'plan',
+      ),
+    }));
     return;
   }
 

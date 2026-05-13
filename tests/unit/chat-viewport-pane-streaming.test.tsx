@@ -90,7 +90,6 @@ describe('chat list streaming render', () => {
         liveView={{
           showBlockingLoading: false,
           showBlockingError: false,
-          showBackgroundStatus: false,
           isEmptyState: false,
         }}
         errorMessage={null}
@@ -144,7 +143,6 @@ describe('chat list streaming render', () => {
         liveView={{
           showBlockingLoading: false,
           showBlockingError: false,
-          showBackgroundStatus: false,
           isEmptyState: false,
         }}
         errorMessage={null}
@@ -192,7 +190,6 @@ describe('chat list streaming render', () => {
         liveView={{
           showBlockingLoading: false,
           showBlockingError: false,
-          showBackgroundStatus: false,
           isEmptyState: false,
         }}
         errorMessage={null}

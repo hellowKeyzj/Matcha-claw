@@ -4,37 +4,77 @@ import { normalizeStringList } from '../shared/params.js'
 
 export const taskListParameters = {
   type: 'object',
+  description: 'List persisted tasks and the session todo list. No parameters.',
   additionalProperties: false,
   properties: {},
 } as const
 
 export const taskGetParameters = {
   type: 'object',
+  description: 'Get one persisted task by ID.',
   additionalProperties: false,
   required: ['taskId'],
   properties: {
-    taskId: { type: 'string' },
+    taskId: { type: 'string', description: 'Required. The ID of the task to retrieve.' },
   },
 } as const
 
-export const backgroundTaskParameters = {
+export const todoGetParameters = {
   type: 'object',
+  description: 'Get the current session todo list. No parameters.',
+  additionalProperties: false,
+  properties: {},
+} as const
+
+export const taskOutputParameters = {
+  type: 'object',
+  description: 'Get current output for a background task by ID.',
   additionalProperties: false,
   required: ['taskId'],
   properties: {
-    taskId: { type: 'string' },
-    wait: { type: 'boolean' },
-    timeoutMs: { type: 'number' },
+    taskId: { type: 'string', description: 'Required. The ID of the background task.' },
+  },
+} as const
+
+export const taskStopParameters = {
+  type: 'object',
+  description: 'Stop a background task by ID.',
+  additionalProperties: false,
+  required: ['taskId'],
+  properties: {
+    taskId: { type: 'string', description: 'Required. The ID of the background task to stop.' },
+  },
+} as const
+
+export const todoItemParameters = {
+  type: 'object',
+  description: 'One todo item in the replacement todo list.',
+  additionalProperties: false,
+  required: ['content', 'status'],
+  properties: {
+    id: { type: 'string', description: 'Optional stable todo ID.' },
+    content: { type: 'string', description: 'Required. Todo text shown to the user.' },
+    activeForm: { type: 'string', description: 'Optional. Present-progress label shown while in_progress.' },
+    status: {
+      type: 'string',
+      enum: ['pending', 'in_progress', 'completed'],
+      description: 'Required. Todo status: pending, in_progress, or completed.',
+    },
+    owner: { type: 'string', description: 'Optional owner name or agent id.' },
   },
 } as const
 
 export const todoWriteParameters = {
   type: 'object',
+  description: 'Replace the current session todo list. newTodos is required. Pass newTodos: [] to explicitly clear the list.',
   additionalProperties: false,
   required: ['newTodos'],
   properties: {
-    oldTodos: { type: 'array', items: { type: 'object', additionalProperties: true } },
-    newTodos: { type: 'array', items: { type: 'object', additionalProperties: true } },
+    newTodos: {
+      type: 'array',
+      description: 'Required. Complete replacement list after the update. Example: {"newTodos":[{"content":"Analyze page structure","status":"pending"},{"content":"Implement task state","status":"in_progress"}]}. Use newTodos: [] only when clearing all todos.',
+      items: todoItemParameters,
+    },
   },
 } as const
 

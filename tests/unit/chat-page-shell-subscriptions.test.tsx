@@ -59,12 +59,14 @@ vi.mock('@/pages/Chat/components/ChatShell', () => ({
     viewportPane,
     errorBanner,
     approvalDock,
+    todoPanel,
     input,
   }: {
     header: ReactNode;
     viewportPane: ReactNode;
     errorBanner: ReactNode;
     approvalDock: ReactNode;
+    todoPanel?: ReactNode;
     input: ReactNode;
   }) => {
     return (
@@ -73,6 +75,7 @@ vi.mock('@/pages/Chat/components/ChatShell', () => ({
         {viewportPane}
         {errorBanner}
         {approvalDock}
+        {todoPanel}
         {input}
       </div>
     );

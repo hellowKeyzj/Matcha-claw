@@ -149,6 +149,25 @@ describe('chat side panel controller', () => {
     expect(result.current.unfinishedTaskCount).toBe(2);
   });
 
+  it('does not count session todos as task inbox tasks', () => {
+    useTaskSnapshotStore.getState().reportTodos('agent:main:main', [
+      { content: '分析页面结构', status: 'pending' },
+      { content: '实现任务状态', status: 'in_progress' },
+    ]);
+    useTaskSnapshotStore.getState().notifyChatStarted('agent:main:main');
+
+    const layoutNode = document.createElement('div');
+    Object.defineProperty(layoutNode, 'clientWidth', {
+      configurable: true,
+      value: 900,
+    });
+
+    const { result } = renderHook(() => useChatSidePanelController(true, { current: layoutNode }));
+
+    expect(result.current.unfinishedTaskCount).toBe(0);
+    expect(result.current.derivedPlanStatus).toBeNull();
+  });
+
   it('exposes derived plan status from the task snapshot store', () => {
     useTaskSnapshotStore.getState().reportTaskData('agent:main:main', [
       { id: '1', subject: '进行中', description: '', status: 'in_progress', blocks: [], blockedBy: [] },

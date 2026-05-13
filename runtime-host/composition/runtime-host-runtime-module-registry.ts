@@ -37,6 +37,7 @@ import {
   ParentShellGatewayControl,
   type GatewayControlPort,
 } from '../application/runtime-host/parent-shell-port';
+import { PendingApprovalStore } from '../application/sessions/pending-approval-store';
 
 export interface RuntimeHostSystemModuleContext {
   readonly container: RuntimeHostContainer;
@@ -96,6 +97,9 @@ const gatewayBridgeModule: RuntimeHostSystemModule = {
     context.container.register('gateway.control', (): GatewayControlPort => new ParentShellGatewayControl({
       request: context.parentTransport.requestParentShellAction,
     }));
+    context.container.register('session.pendingApprovals', () => new PendingApprovalStore({
+      clock: context.infrastructure.clock,
+    }));
   },
   registerServices: (context) => {
     const { container, infrastructure, parentTransport } = context;
@@ -107,6 +111,7 @@ const gatewayBridgeModule: RuntimeHostSystemModule = {
         payload: unknown,
       ) => Promise<RuntimeRouteResponse | null>>('runtime.dispatchRoute')(method, route, payload),
       systemEnvironment: infrastructure.systemEnvironment,
+      pendingApprovals: container.resolve('session.pendingApprovals'),
       clock: infrastructure.clock,
       scheduler: infrastructure.scheduler,
       tcpProbe: infrastructure.tcpProbe,

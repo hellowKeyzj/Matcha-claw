@@ -32,10 +32,6 @@ describe('chat header bar task panel toggle', () => {
 
     render(
       <ChatHeaderBar
-        showBackgroundStatus={false}
-        refreshing={false}
-        statusRefreshingLabel="refreshing"
-        statusMutatingLabel="mutating"
         onRefresh={vi.fn()}
         refreshBusy={false}
         showThinking={false}

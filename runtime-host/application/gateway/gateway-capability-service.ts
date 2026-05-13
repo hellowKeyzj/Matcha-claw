@@ -1,15 +1,11 @@
 import { unavailable, type ApplicationResponseOf } from '../common/application-response';
 import type { GatewayConnectionPort } from './gateway-runtime-port';
+import { TASK_SNAPSHOT_TOOL_METHODS } from '../../shared/task-tool-contract';
 
 export const TASK_MANAGER_GATEWAY_PLUGIN = {
   pluginId: 'task-manager',
   methods: [
-    'TaskList',
-    'TaskGet',
-    'TaskCreate',
-    'TaskUpdate',
-    'TodoWrite',
-    'TodoGet',
+    ...TASK_SNAPSHOT_TOOL_METHODS,
     'TaskOutput',
     'TaskStop',
   ],

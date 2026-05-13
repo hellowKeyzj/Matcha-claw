@@ -1,19 +1,32 @@
 import type { OpenClawPluginApi } from 'openclaw/plugin-sdk'
 import type { TaskItem, TodoItem } from '../domain/task-item.js'
-import type { TaskStatus } from '../domain/task-status.js'
 import { taskCreateParameters } from '../schemas/task-create-schema.js'
-import { taskGetParameters, taskListParameters, todoWriteParameters } from '../schemas/task-store-schema.js'
+import { taskGetParameters, taskListParameters, todoGetParameters, todoWriteParameters } from '../schemas/task-store-schema.js'
 import { taskUpdateParameters } from '../schemas/task-update-schema.js'
 import { TaskStoreError } from '../shared/errors.js'
 import { toNonEmptyString } from '../shared/params.js'
-import { toTaskCreateInput, toTaskUpdateInput } from './task-inputs.js'
+import { parseTaskCreateInput, parseTaskUpdateInput } from './task-inputs.js'
 import { asTaskDetailPayload } from './task-payloads.js'
 import { getStore, getTodoStore, resolveScopeKey } from './task-store-context.js'
+import { parseTodoWriteInput } from './todo-inputs.js'
 
 type ToolParams = Record<string, unknown>
 type ToolContext = {
   workspaceDir?: string
   sessionKey?: string
+}
+
+function logTaskPipeline(api: OpenClawPluginApi, event: string, payload: Record<string, unknown>): void {
+  api.logger?.debug?.(`[task-pipeline] plugin.${event} ${JSON.stringify(payload)}`)
+}
+
+function readPluginStorageRoot(api: OpenClawPluginApi): string | null {
+  const config = api.pluginConfig
+  if (!config || typeof config !== 'object' || Array.isArray(config)) {
+    return null
+  }
+  const storageRoot = (config as Record<string, unknown>).storageRoot
+  return typeof storageRoot === 'string' && storageRoot.trim() ? storageRoot.trim() : null
 }
 
 function asJsonText(value: unknown): string {
@@ -81,33 +94,10 @@ function renderTaskDetail(task: TaskItem): string {
   return lines.join('\n')
 }
 
-function normalizeTodoStatus(value: unknown): TaskStatus {
-  if (value === 'in_progress' || value === 'completed' || value === 'deleted') {
-    return value
-  }
-  return 'pending'
-}
-
-function normalizeTodoItems(value: unknown): TodoItem[] {
-  if (!Array.isArray(value)) {
-    return []
-  }
-  return value
-    .filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === 'object' && !Array.isArray(item))
-    .map((item) => ({
-      ...(typeof item.id === 'string' && item.id.trim() ? { id: item.id.trim() } : {}),
-      content: typeof item.content === 'string' ? item.content : '',
-      ...(typeof item.activeForm === 'string' && item.activeForm.trim() ? { activeForm: item.activeForm.trim() } : {}),
-      status: normalizeTodoStatus(item.status),
-      ...(typeof item.owner === 'string' && item.owner.trim() ? { owner: item.owner.trim() } : {}),
-    }))
-    .filter(item => item.content.trim().length > 0)
-}
-
 async function executeTaskCreate(api: OpenClawPluginApi, toolCtx: ToolContext, params: ToolParams) {
   const scopeKey = resolveScopeKey({ params, sessionKey: toolCtx.sessionKey })
   const store = getStore({ api, workspaceDir: toolCtx.workspaceDir })
-  const input = toTaskCreateInput(params)
+  const input = parseTaskCreateInput(params)
   const task = await store.create(scopeKey, {
     ...input,
     activeForm: input.activeForm || generateActiveForm(input.subject),
@@ -125,8 +115,8 @@ async function executeTaskCreate(api: OpenClawPluginApi, toolCtx: ToolContext, p
 async function executeTaskUpdate(api: OpenClawPluginApi, toolCtx: ToolContext, params: ToolParams) {
   const scopeKey = resolveScopeKey({ params, sessionKey: toolCtx.sessionKey })
   const store = getStore({ api, workspaceDir: toolCtx.workspaceDir })
-  const input = toTaskUpdateInput(params)
-  const taskId = toNonEmptyString(params.taskId, 'taskId')
+  const input = parseTaskUpdateInput(params)
+  const { taskId } = input
   if (input.status === 'deleted') {
     const deleted = await store.delete(scopeKey, taskId)
     if (!deleted) {
@@ -159,6 +149,15 @@ async function executeTaskList(api: OpenClawPluginApi, toolCtx: ToolContext, par
   const scopeKey = resolveScopeKey({ params, sessionKey: toolCtx.sessionKey })
   const tasks = await getStore({ api, workspaceDir: toolCtx.workspaceDir }).list(scopeKey)
   const todos = await loadStoredTodos(api, toolCtx, scopeKey)
+  logTaskPipeline(api, 'tool.TaskList', {
+    scopeKey,
+    toolCtxSessionKey: toolCtx.sessionKey ?? null,
+    paramSessionKey: typeof params.sessionKey === 'string' ? params.sessionKey : null,
+    workspaceDir: toolCtx.workspaceDir ?? null,
+    storageRoot: readPluginStorageRoot(api),
+    tasksCount: tasks.length,
+    todosCount: todos.length,
+  })
   const payload = { tasks: tasks.map(asTaskDetailPayload), todos }
   return {
     content: [{ type: 'text' as const, text: renderTaskList(tasks) }],
@@ -186,7 +185,16 @@ async function executeTaskGet(api: OpenClawPluginApi, toolCtx: ToolContext, para
 
 async function executeTodoWrite(api: OpenClawPluginApi, toolCtx: ToolContext, params: ToolParams) {
   const scopeKey = resolveScopeKey({ params, sessionKey: toolCtx.sessionKey })
-  const result = await getTodoStore({ api, workspaceDir: toolCtx.workspaceDir }).save(scopeKey, normalizeTodoItems(params.newTodos))
+  const input = parseTodoWriteInput(params)
+  const result = await getTodoStore({ api, workspaceDir: toolCtx.workspaceDir }).save(scopeKey, input.newTodos)
+  logTaskPipeline(api, 'tool.TodoWrite', {
+    scopeKey,
+    toolCtxSessionKey: toolCtx.sessionKey ?? null,
+    paramSessionKey: typeof params.sessionKey === 'string' ? params.sessionKey : null,
+    workspaceDir: toolCtx.workspaceDir ?? null,
+    storageRoot: readPluginStorageRoot(api),
+    todosCount: result.todos.length,
+  })
   const payload = { todos: result.todos, updatedAt: result.updatedAt }
   return {
     content: [{ type: 'text' as const, text: 'Todo list updated successfully' }],
@@ -208,11 +216,11 @@ async function executeTodoGet(api: OpenClawPluginApi, toolCtx: ToolContext, para
   }
 }
 
-export function registerWorkBuddyTaskTools(api: OpenClawPluginApi): void {
+export function registerTaskTools(api: OpenClawPluginApi): void {
   api.registerTool((toolCtx: ToolContext) => ({
     name: 'TaskCreate',
     label: 'Task Create',
-    description: 'Create a task in the current session or team task list.',
+    description: 'Create one persisted task. Requires subject and description.',
     parameters: taskCreateParameters,
     async execute(_toolCallId: string, params: ToolParams) {
       return await executeTaskCreate(api, toolCtx, params)
@@ -222,7 +230,7 @@ export function registerWorkBuddyTaskTools(api: OpenClawPluginApi): void {
   api.registerTool((toolCtx: ToolContext) => ({
     name: 'TaskUpdate',
     label: 'Task Update',
-    description: 'Update task fields and status in the current session or team task list.',
+    description: 'Update an existing task. Requires taskId plus at least one update field. status=deleted removes it.',
     parameters: taskUpdateParameters,
     async execute(_toolCallId: string, params: ToolParams) {
       return await executeTaskUpdate(api, toolCtx, params)
@@ -232,7 +240,7 @@ export function registerWorkBuddyTaskTools(api: OpenClawPluginApi): void {
   api.registerTool((toolCtx: ToolContext) => ({
     name: 'TaskList',
     label: 'Task List',
-    description: 'List tasks for the current session or team task list.',
+    description: 'List persisted tasks and todos for the current session. Takes no parameters.',
     parameters: taskListParameters,
     async execute(_toolCallId: string, params: ToolParams) {
       return await executeTaskList(api, toolCtx, params)
@@ -242,7 +250,7 @@ export function registerWorkBuddyTaskTools(api: OpenClawPluginApi): void {
   api.registerTool((toolCtx: ToolContext) => ({
     name: 'TaskGet',
     label: 'Task Get',
-    description: 'Get full details for a task in the current session or team task list.',
+    description: 'Get one persisted task by taskId.',
     parameters: taskGetParameters,
     async execute(_toolCallId: string, params: ToolParams) {
       return await executeTaskGet(api, toolCtx, params)
@@ -252,7 +260,7 @@ export function registerWorkBuddyTaskTools(api: OpenClawPluginApi): void {
   api.registerTool((toolCtx: ToolContext) => ({
     name: 'TodoWrite',
     label: 'Todo Write',
-    description: 'Persist the current todo list for this session.',
+    description: 'Replace the current session todo list. Requires newTodos: an array of {content, status}; use newTodos: [] to clear.',
     parameters: todoWriteParameters,
     async execute(_toolCallId: string, params: ToolParams) {
       return await executeTodoWrite(api, toolCtx, params)
@@ -262,63 +270,10 @@ export function registerWorkBuddyTaskTools(api: OpenClawPluginApi): void {
   api.registerTool((toolCtx: ToolContext) => ({
     name: 'TodoGet',
     label: 'Todo Get',
-    description: 'Read the current todo list for this session.',
-    parameters: taskListParameters,
+    description: 'Get the current session todo list. Takes no parameters.',
+    parameters: todoGetParameters,
     async execute(_toolCallId: string, params: ToolParams) {
       return await executeTodoGet(api, toolCtx, params)
-    },
-  }))
-
-  api.registerTool((toolCtx: ToolContext) => ({
-    name: 'task_create',
-    label: 'Task Create',
-    description: 'Compatibility wrapper for TaskCreate.',
-    parameters: taskCreateParameters,
-    async execute(_toolCallId: string, params: ToolParams) {
-      return await executeTaskCreate(api, toolCtx, params)
-    },
-  }))
-
-  api.registerTool((toolCtx: ToolContext) => ({
-    name: 'task_update',
-    label: 'Task Update',
-    description: 'Compatibility wrapper for TaskUpdate.',
-    parameters: taskUpdateParameters,
-    async execute(_toolCallId: string, params: ToolParams) {
-      return await executeTaskUpdate(api, toolCtx, params)
-    },
-  }))
-
-  api.registerTool((toolCtx: ToolContext) => ({
-    name: 'task_list',
-    label: 'Task List',
-    description: 'Compatibility wrapper for TaskList.',
-    parameters: taskListParameters,
-    async execute(_toolCallId: string, params: ToolParams) {
-      return await executeTaskList(api, toolCtx, params)
-    },
-  }))
-
-  api.registerTool((toolCtx: ToolContext) => ({
-    name: 'task_get',
-    label: 'Task Get',
-    description: 'Compatibility wrapper for TaskGet.',
-    parameters: taskGetParameters,
-    async execute(_toolCallId: string, params: ToolParams) {
-      return await executeTaskGet(api, toolCtx, params)
-    },
-  }))
-
-  api.registerTool((toolCtx: ToolContext) => ({
-    name: 'task_claim',
-    label: 'Task Claim',
-    description: 'Compatibility wrapper for TaskUpdate owner + in_progress.',
-    parameters: taskUpdateParameters,
-    async execute(_toolCallId: string, params: ToolParams) {
-      return await executeTaskUpdate(api, toolCtx, {
-        ...params,
-        status: 'in_progress',
-      })
     },
   }))
 }

@@ -8,19 +8,26 @@ function taskServiceWith(gatewayRpc = vi.fn(async () => ({})), inspectGatewayMet
   ready: true,
   methods: ['TaskList', 'TaskGet', 'TaskCreate', 'TaskUpdate', 'TodoWrite'],
   missingMethods: [],
-}))) {
+})), getWorkspaceDirForSession = vi.fn(async (sessionKey: string) => (
+  sessionKey.startsWith('agent:ui-designer:')
+    ? 'C:\\Users\\Dev\\.openclaw\\workspace-subagents\\ui-designer'
+    : 'C:\\Users\\Dev\\.openclaw\\workspace'
+))) {
   return {
     taskService: new TaskManagerService({
       gateway: { gatewayRpc },
       capabilities: new GatewayCapabilityService({ gateway: { inspectGatewayMethodReadiness } }),
+      clock: { now: () => 1 },
+      workspace: { getWorkspaceDirForSession },
     }),
     gatewayRpc,
     inspectGatewayMethodReadiness,
+    getWorkspaceDirForSession,
   };
 }
 
 describe('runtime-host task routes', () => {
-  it('routes session task list through WorkBuddy TaskList gateway method', async () => {
+  it('routes session task list through TaskList gateway method', async () => {
     const gatewayRpc = vi.fn(async () => ({
       tasks: [{ id: '1', subject: '整理需求' }],
       todos: [],
@@ -44,10 +51,34 @@ describe('runtime-host task routes', () => {
     });
     expect(gatewayRpc).toHaveBeenCalledWith(
       'TaskList',
-      { sessionKey: 'agent:main:main' },
+      { sessionKey: 'agent:main:main', workspaceDir: 'C:\\Users\\Dev\\.openclaw\\workspace' },
       60000,
     );
     expect(deps.inspectGatewayMethodReadiness).toHaveBeenCalledWith(['TaskList'], 5000);
+  });
+
+  it('routes subagent task list to the same workspace used by session tools', async () => {
+    const gatewayRpc = vi.fn(async () => ({ tasks: [], todos: [{ content: '分析页面结构', status: 'pending' }] }));
+    const deps = taskServiceWith(gatewayRpc);
+    const sessionKey = 'agent:ui-designer:session-1';
+
+    await dispatchRuntimeRouteDefinition(
+      taskRoutes,
+      'POST',
+      '/api/tasks/list',
+      { sessionKey },
+      { taskService: deps.taskService },
+    );
+
+    expect(deps.getWorkspaceDirForSession).toHaveBeenCalledWith(sessionKey);
+    expect(gatewayRpc).toHaveBeenCalledWith(
+      'TaskList',
+      {
+        sessionKey,
+        workspaceDir: 'C:\\Users\\Dev\\.openclaw\\workspace-subagents\\ui-designer',
+      },
+      60000,
+    );
   });
 
   it('validates required sessionKey and taskId before forwarding', async () => {
@@ -93,6 +124,36 @@ describe('runtime-host task routes', () => {
       'TodoWrite',
       'TodoGet',
     ]);
+    expect(gatewayRpc.mock.calls.map((call) => call[1].workspaceDir)).toEqual([
+      'C:\\Users\\Dev\\.openclaw\\workspace',
+      'C:\\Users\\Dev\\.openclaw\\workspace',
+      'C:\\Users\\Dev\\.openclaw\\workspace',
+      'C:\\Users\\Dev\\.openclaw\\workspace',
+      'C:\\Users\\Dev\\.openclaw\\workspace',
+    ]);
+  });
+
+  it('buildTaskSnapshot replays from the session workspace', async () => {
+    const gatewayRpc = vi.fn(async () => ({
+      tasks: [],
+      todos: [{ content: '恢复 todo', status: 'pending' }],
+    }));
+    const deps = taskServiceWith(gatewayRpc);
+
+    await expect(deps.taskService.buildTaskSnapshot('agent:ui-designer:session-1')).resolves.toMatchObject({
+      sessionKey: 'agent:ui-designer:session-1',
+      todos: [{ content: '恢复 todo', status: 'pending' }],
+      source: 'replay',
+    });
+
+    expect(gatewayRpc).toHaveBeenCalledWith(
+      'TaskList',
+      {
+        sessionKey: 'agent:ui-designer:session-1',
+        workspaceDir: 'C:\\Users\\Dev\\.openclaw\\workspace-subagents\\ui-designer',
+      },
+      60000,
+    );
   });
 
   it('returns background task output and stop results without renderer gateway access', async () => {

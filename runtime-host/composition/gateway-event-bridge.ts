@@ -17,6 +17,13 @@ import type {
   GatewayDeviceIdentityRepositoryPort,
 } from '../openclaw-bridge/client-auth-ports';
 import type { RuntimeHostLogger } from '../shared/logger';
+import type { SessionUpdateEvent } from '../shared/session-adapter-types';
+import type { PendingApprovalStore } from '../application/sessions/pending-approval-store';
+import {
+  containsTodoToolDebugSignal,
+  logTodoToolDebug,
+  summarizeSessionUpdateForTodoToolDebug,
+} from '../application/sessions/todo-tool-debug';
 
 export interface GatewaySessionRuntimePort {
   consumeGatewayConversationEvent(payload: GatewayConversationEvent): unknown[];
@@ -27,6 +34,7 @@ export interface RuntimeHostGatewayBridgeDeps {
   readonly parentTransport: Pick<ParentTransportClient, 'requestParentShellAction' | 'emitParentGatewayEvent'>;
   readonly dispatchRoute: (method: string, route: string, payload: unknown) => Promise<RuntimeRouteResponse | null>;
   readonly getSessionRuntime: () => GatewaySessionRuntimePort | null;
+  readonly pendingApprovals: Pick<PendingApprovalStore, 'consumeGatewayNotification'>;
   readonly runtimeHostDataDir: string;
   readonly gatewayPort: number;
   readonly readGatewayToken: () => Promise<string>;
@@ -55,11 +63,20 @@ export function createRuntimeHostGatewayClient(deps: RuntimeHostGatewayBridgeDep
     tcpProbe: deps.tcpProbe,
     logger: deps.logger,
     onGatewayNotification: (notification) => {
+      deps.pendingApprovals.consumeGatewayNotification(notification);
       void deps.parentTransport.emitParentGatewayEvent('gateway:notification', notification).catch(() => undefined);
     },
     onGatewayConversationEvent: (payload) => {
+      logTodoToolDebug(deps.logger, 'gateway.raw-conversation-event', payload);
       const sessionUpdates = deps.getSessionRuntime()?.consumeGatewayConversationEvent(payload) ?? [];
       for (const sessionUpdate of sessionUpdates) {
+        if (containsTodoToolDebugSignal(sessionUpdate)) {
+          logTodoToolDebug(
+            deps.logger,
+            'runtime-host.emit-session-update',
+            summarizeSessionUpdateForTodoToolDebug(sessionUpdate as SessionUpdateEvent),
+          );
+        }
         void deps.parentTransport.emitParentGatewayEvent('session:update', sessionUpdate).catch(() => undefined);
       }
     },

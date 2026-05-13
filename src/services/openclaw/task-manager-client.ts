@@ -137,7 +137,6 @@ export async function updateTask(payload: {
 
 export async function writeTodos(payload: {
   sessionKey: string;
-  oldTodos?: TodoItem[];
   newTodos: TodoItem[];
 }): Promise<{ todos: TodoItem[]; updatedAt?: number }> {
   const result = await taskApi<{ todos?: unknown[]; updatedAt?: unknown }>('/api/tasks/todos/write', payload);

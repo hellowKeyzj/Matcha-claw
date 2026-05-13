@@ -13,6 +13,7 @@ type ToolResult = {
 
 type ToolDefinition = {
   name: string
+  parameters?: unknown
   execute: (toolCallId: string, params: Record<string, unknown>) => Promise<ToolResult>
 }
 
@@ -112,13 +113,174 @@ function createPluginHarness() {
   return { getTool, callGateway }
 }
 
-describe('task-manager WorkBuddy semantics', () => {
+describe('task-manager semantics', () => {
   const tempDirs: string[] = []
 
   afterEach(() => {
     while (tempDirs.length > 0) {
       rmSync(tempDirs.pop() as string, { recursive: true, force: true })
     }
+  })
+
+  it('registers only final task tools and gateway methods', () => {
+    const harness = createPluginHarness()
+
+    expect(harness.getTool('TaskCreate', {}).name).toBe('TaskCreate')
+    expect(harness.getTool('TaskUpdate', {}).name).toBe('TaskUpdate')
+    expect(harness.getTool('TaskList', {}).name).toBe('TaskList')
+    expect(harness.getTool('TaskGet', {}).name).toBe('TaskGet')
+    expect(harness.getTool('TodoWrite', {}).name).toBe('TodoWrite')
+    expect(harness.getTool('TodoGet', {}).name).toBe('TodoGet')
+    expect(harness.getTool('TaskOutput', {}).name).toBe('TaskOutput')
+    expect(harness.getTool('TaskStop', {}).name).toBe('TaskStop')
+    expect(() => harness.getTool('task_create', {})).toThrow('tool not found: task_create')
+  })
+
+  it('TodoWrite schema requires explicit structured todo items and allows explicit clearing', () => {
+    const harness = createPluginHarness()
+    const todoWrite = harness.getTool('TodoWrite', {})
+
+    expect(todoWrite).toMatchObject({
+      name: 'TodoWrite',
+      parameters: {
+        required: ['newTodos'],
+        properties: {
+          newTodos: {
+            description: expect.stringContaining('newTodos: []'),
+            items: {
+              required: ['content', 'status'],
+              properties: {
+                content: { type: 'string', description: expect.stringContaining('Required') },
+                status: { enum: ['pending', 'in_progress', 'completed'], description: expect.stringContaining('Required') },
+              },
+            },
+          },
+        },
+      },
+    })
+  })
+
+  it('task tool schemas describe exact final tool contracts', () => {
+    const harness = createPluginHarness()
+
+    expect(harness.getTool('TaskCreate', {}).parameters).toMatchObject({
+      additionalProperties: false,
+      required: ['subject', 'description'],
+      properties: {
+        subject: { type: 'string' },
+        description: { type: 'string' },
+      },
+    })
+    expect(harness.getTool('TaskUpdate', {}).parameters).toMatchObject({
+      additionalProperties: false,
+      required: ['taskId'],
+      properties: {
+        taskId: { type: 'string' },
+        status: { enum: ['pending', 'in_progress', 'completed', 'deleted'] },
+      },
+    })
+    expect(harness.getTool('TaskList', {}).parameters).toMatchObject({
+      additionalProperties: false,
+      properties: {},
+    })
+    expect(harness.getTool('TaskGet', {}).parameters).toMatchObject({
+      additionalProperties: false,
+      required: ['taskId'],
+    })
+    expect(harness.getTool('TodoGet', {}).parameters).toMatchObject({
+      additionalProperties: false,
+      properties: {},
+    })
+    expect(harness.getTool('TaskOutput', {}).parameters).toMatchObject({
+      additionalProperties: false,
+      required: ['taskId'],
+      properties: {
+        taskId: { type: 'string' },
+      },
+    })
+    expect(Object.keys((harness.getTool('TaskOutput', {}).parameters as { properties: Record<string, unknown> }).properties)).toEqual(['taskId'])
+    expect(harness.getTool('TaskStop', {}).parameters).toMatchObject({
+      additionalProperties: false,
+      required: ['taskId'],
+      properties: {
+        taskId: { type: 'string' },
+      },
+    })
+    expect(Object.keys((harness.getTool('TaskStop', {}).parameters as { properties: Record<string, unknown> }).properties)).toEqual(['taskId'])
+  })
+
+  it('TaskCreate rejects malformed parameters at the plugin boundary', async () => {
+    const workspaceDir = mkdtempSync(join(tmpdir(), 'task-manager-plugin-create-invalid-'))
+    tempDirs.push(workspaceDir)
+    const harness = createPluginHarness()
+
+    await expect(harness.callGateway('TaskCreate', {
+      workspaceDir,
+      sessionKey: 'session-create-invalid',
+      subject: '有效标题',
+      description: '有效描述',
+      metadata: [],
+    })).resolves.toEqual({
+      success: false,
+      data: undefined,
+      error: {
+        code: 'invalid_params',
+        message: 'metadata must be an object',
+      },
+    })
+
+    const tool = harness.getTool('TaskCreate', { workspaceDir, sessionKey: 'session-create-invalid' })
+    await expect(tool.execute('call-create-invalid', {
+      subject: '有效标题',
+      description: '有效描述',
+      owner: '',
+    })).rejects.toThrow('owner must be a non-empty string when provided')
+  })
+
+  it('TaskUpdate rejects no-op and malformed updates at the plugin boundary', async () => {
+    const workspaceDir = mkdtempSync(join(tmpdir(), 'task-manager-plugin-update-invalid-'))
+    tempDirs.push(workspaceDir)
+    const harness = createPluginHarness()
+    const sessionKey = 'session-update-invalid'
+
+    await harness.callGateway('TaskCreate', {
+      workspaceDir,
+      sessionKey,
+      subject: '待更新任务',
+      description: '用于验证边界',
+    })
+
+    await expect(harness.callGateway('TaskUpdate', {
+      workspaceDir,
+      sessionKey,
+      taskId: '1',
+    })).resolves.toEqual({
+      success: false,
+      data: undefined,
+      error: {
+        code: 'invalid_params',
+        message: 'TaskUpdate requires at least one field to update',
+      },
+    })
+
+    await expect(harness.callGateway('TaskUpdate', {
+      workspaceDir,
+      sessionKey,
+      taskId: '1',
+      status: 'running',
+    })).resolves.toMatchObject({
+      success: false,
+      error: {
+        code: 'invalid_params',
+        message: 'status must be one of: pending, in_progress, completed, deleted',
+      },
+    })
+
+    const tool = harness.getTool('TaskUpdate', { workspaceDir, sessionKey })
+    await expect(tool.execute('call-update-invalid-list', {
+      taskId: '1',
+      addBlockedBy: ['2', 3],
+    })).rejects.toThrow('addBlockedBy must contain only non-empty strings')
   })
 
   it('TaskCreate -> TaskList -> TaskGet -> TaskUpdate uses session-scoped numeric tasks', async () => {
@@ -254,6 +416,74 @@ describe('task-manager WorkBuddy semantics', () => {
       { id: 'a', content: '读代码', activeForm: 'Reading code', status: 'in_progress', owner: 'main' },
       { id: 'b', content: '写实现', status: 'pending' },
     ])
+  })
+
+  it('TodoWrite rejects missing newTodos instead of treating it as clearing', async () => {
+    const workspaceDir = mkdtempSync(join(tmpdir(), 'task-manager-plugin-todos-missing-'))
+    tempDirs.push(workspaceDir)
+    const harness = createPluginHarness()
+    const todoWrite = harness.getTool('TodoWrite', { workspaceDir, sessionKey: 'session-todo-missing' })
+
+    await expect(todoWrite.execute('call-missing', {})).rejects.toThrow('newTodos is required')
+
+    const gatewayResult = await harness.callGateway('TodoWrite', {
+      workspaceDir,
+      sessionKey: 'session-todo-missing',
+    })
+    expect(gatewayResult).toEqual({
+      success: false,
+      data: undefined,
+      error: {
+        code: 'invalid_params',
+        message: 'newTodos is required',
+      },
+    })
+  })
+
+  it('TodoWrite rejects malformed todo items instead of filtering or defaulting them', async () => {
+    const workspaceDir = mkdtempSync(join(tmpdir(), 'task-manager-plugin-todos-invalid-'))
+    tempDirs.push(workspaceDir)
+    const harness = createPluginHarness()
+    const todoWrite = harness.getTool('TodoWrite', { workspaceDir, sessionKey: 'session-todo-invalid' })
+
+    await expect(todoWrite.execute('call-invalid-item', {
+      newTodos: [{}],
+    })).rejects.toThrow('newTodos[0].content is required')
+
+    await expect(todoWrite.execute('call-invalid-status', {
+      newTodos: [{ content: '状态错误', status: 'running' }],
+    })).rejects.toThrow('newTodos[0].status must be one of: pending, in_progress, completed')
+
+    await expect(harness.callGateway('TodoWrite', {
+      workspaceDir,
+      sessionKey: 'session-todo-invalid',
+      newTodos: 'not-an-array',
+    })).resolves.toEqual({
+      success: false,
+      data: undefined,
+      error: {
+        code: 'invalid_params',
+        message: 'newTodos must be an array',
+      },
+    })
+  })
+
+  it('TodoWrite treats an explicit empty newTodos array as clearing the todo list', async () => {
+    const workspaceDir = mkdtempSync(join(tmpdir(), 'task-manager-plugin-todos-clear-'))
+    tempDirs.push(workspaceDir)
+    const harness = createPluginHarness()
+    const sessionKey = 'session-todo-clear'
+    const todoWrite = harness.getTool('TodoWrite', { workspaceDir, sessionKey })
+
+    await todoWrite.execute('call-write', {
+      newTodos: [{ content: '保留到清空前', status: 'pending' }],
+    })
+
+    const cleared = await todoWrite.execute('call-clear', { newTodos: [] })
+    expect(cleared.details).toMatchObject({ todos: [] })
+
+    const listed = await harness.callGateway('TaskList', { workspaceDir, sessionKey })
+    expect((listed.data as { todos: unknown[] }).todos).toEqual([])
   })
 
   it('TaskOutput and TaskStop read and cancel OpenClaw background task runs', async () => {

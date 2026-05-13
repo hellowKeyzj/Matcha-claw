@@ -6,6 +6,7 @@ export interface ToolCardContentBlockLike {
   toolCallId?: unknown;
   tool_call_id?: unknown;
   callId?: unknown;
+  call_id?: unknown;
   name?: unknown;
   input?: unknown;
   arguments?: unknown;

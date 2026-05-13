@@ -1,4 +1,8 @@
-import { normalizeMessageRole } from '../../shared/chat-message-normalization';
+import {
+  isAssistantControlPrefixMessage,
+  isInternalAssistantControlMessage,
+  normalizeMessageRole,
+} from '../../shared/chat-message-normalization';
 import type { SessionTimelineEntry, SessionTimelineEntryStatus } from '../../shared/session-adapter-types';
 import {
   buildTimelineEntriesFromTranscriptMessage,
@@ -8,12 +12,24 @@ import {
 } from './transcript-turn-identity';
 import type { SessionTranscriptMessage } from './transcript-types';
 import { normalizeTaskCompletionEvents } from './task-completion-events';
-import { normalizeTaskArtifactSnapshot } from './task-snapshot-normalizer';
+import {
+  normalizeTaskArtifactSnapshot,
+} from './task-snapshot-normalizer';
+import {
+  isToolCallContentType,
+  isToolResultContentType,
+  isStateOnlyToolName,
+  resolveToolRecordName,
+} from './state-only-tools';
+import { isMalformedEmptyToolNameResult } from './tool-event-sanitizer';
 import {
   isRecord,
   normalizeFiniteNumber,
   normalizeString,
 } from './session-value-normalization';
+import {
+  extractTaskSnapshotFromTranscriptMessage,
+} from './transcript-task-snapshot-replay';
 import type {
   GatewayConversationMessagePayload,
   SessionTimelineIngressEvent,
@@ -80,6 +96,7 @@ function normalizeConversationMessagePayload(
   const normalizedMessage: SessionTranscriptMessage = {
     role,
     content,
+    ...(typeof rawMessage.text === 'string' ? { text: rawMessage.text } : {}),
     ...(normalizeFiniteNumber(rawMessage.timestamp) != null ? { timestamp: normalizeFiniteNumber(rawMessage.timestamp) } : {}),
     ...(normalizeString(rawMessage.id) ? { id: normalizeString(rawMessage.id) } : {}),
     ...(normalizeString(rawMessage.messageId) ? { messageId: normalizeString(rawMessage.messageId) } : {}),
@@ -106,6 +123,108 @@ function normalizeConversationMessagePayload(
   };
 }
 
+function stripStateOnlyToolContent(message: SessionTranscriptMessage): SessionTranscriptMessage {
+  const content = Array.isArray(message.content)
+    ? message.content.filter((block) => (
+        !isRecord(block)
+        || !isStateOnlyToolName(resolveToolRecordName(block))
+        || (!isToolCallContentType(block.type) && !isToolResultContentType(block.type))
+      ))
+    : message.content;
+  return {
+    ...message,
+    content,
+    tool_calls: Array.isArray(message.tool_calls)
+      ? message.tool_calls.filter((toolCall) => {
+          if (!isRecord(toolCall)) {
+            return true;
+          }
+          return !isStateOnlyToolName(resolveToolRecordName(toolCall));
+        })
+      : message.tool_calls,
+    toolCalls: Array.isArray(message.toolCalls)
+      ? message.toolCalls.filter((toolCall) => {
+          if (!isRecord(toolCall)) {
+            return true;
+          }
+          return !isStateOnlyToolName(resolveToolRecordName(toolCall));
+        })
+      : message.toolCalls,
+    toolStatuses: Array.isArray(message.toolStatuses)
+      ? message.toolStatuses.filter((toolStatus) => !isRecord(toolStatus) || !isStateOnlyToolName(resolveToolRecordName(toolStatus)))
+      : message.toolStatuses,
+  };
+}
+
+function stripMalformedEmptyToolContent(message: SessionTranscriptMessage): SessionTranscriptMessage {
+  const content = Array.isArray(message.content)
+    ? message.content.filter((block) => (
+        !isRecord(block)
+        || resolveToolRecordName(block)
+        || (!isToolCallContentType(block.type) && !isToolResultContentType(block.type))
+      ))
+    : message.content;
+  return {
+    ...message,
+    content,
+    tool_calls: Array.isArray(message.tool_calls)
+      ? message.tool_calls.filter((toolCall) => !isRecord(toolCall) || resolveToolRecordName(toolCall))
+      : message.tool_calls,
+    toolCalls: Array.isArray(message.toolCalls)
+      ? message.toolCalls.filter((toolCall) => !isRecord(toolCall) || resolveToolRecordName(toolCall))
+      : message.toolCalls,
+    toolStatuses: Array.isArray(message.toolStatuses)
+      ? message.toolStatuses.filter((toolStatus) => !isRecord(toolStatus) || resolveToolRecordName(toolStatus))
+      : message.toolStatuses,
+  };
+}
+
+function hasRenderableMessagePayload(message: SessionTranscriptMessage): boolean {
+  if (normalizeString(message.text)) {
+    return true;
+  }
+  if (Array.isArray(message.content)) {
+    return message.content.length > 0;
+  }
+  if (typeof message.content === 'string') {
+    return message.content.trim().length > 0;
+  }
+  if (message.content != null) {
+    return true;
+  }
+  return (
+    (Array.isArray(message.tool_calls) && message.tool_calls.length > 0)
+    || (Array.isArray(message.toolCalls) && message.toolCalls.length > 0)
+    || (Array.isArray(message.toolStatuses) && message.toolStatuses.length > 0)
+  );
+}
+
+function hasRenderableTimelineOutput(entry: SessionTimelineEntry): boolean {
+  if (entry.kind === 'message') {
+    return (
+      entry.text.trim().length > 0
+      || Boolean(entry.thinking?.trim())
+      || entry.assistantSegments.length > 0
+      || entry.images.length > 0
+      || entry.attachedFiles.length > 0
+      || entry.toolUses.length > 0
+      || entry.toolStatuses.length > 0
+      || entry.toolCards.length > 0
+    );
+  }
+  if (entry.kind === 'tool-activity') {
+    return (
+      entry.text.trim().length > 0
+      || entry.assistantSegments.length > 0
+      || entry.attachedFiles.length > 0
+      || entry.toolUses.length > 0
+      || entry.toolStatuses.length > 0
+      || entry.toolCards.length > 0
+    );
+  }
+  return true;
+}
+
 export function buildMessageIngressEvents(
   payload: GatewayConversationMessagePayload,
   options: {
@@ -114,6 +233,15 @@ export function buildMessageIngressEvents(
 ): SessionTimelineIngressEvent[] {
   const conversation = normalizeConversationMessagePayload(payload);
   if (!conversation.message) {
+    return [];
+  }
+  if (
+    isInternalAssistantControlMessage(conversation.message)
+    || (
+      conversation.status === 'streaming'
+      && isAssistantControlPrefixMessage(conversation.message)
+    )
+  ) {
     return [];
   }
   const artifactSnapshot = normalizeTaskArtifactSnapshot(conversation.message.content, conversation.sessionKey);
@@ -125,10 +253,31 @@ export function buildMessageIngressEvents(
       taskSnapshot: artifactSnapshot,
     }];
   }
+  const taskSnapshot = extractTaskSnapshotFromTranscriptMessage(
+    conversation.sessionKey ?? '',
+    conversation.message,
+  );
+  const sanitizedMessage = stripMalformedEmptyToolContent(conversation.message);
+  if (
+    isMalformedEmptyToolNameResult(conversation.message)
+    || !hasRenderableMessagePayload(sanitizedMessage)
+  ) {
+    return taskSnapshot
+      ? [{
+          sessionUpdate: 'plan',
+          sessionKey: taskSnapshot.sessionKey,
+          runId: conversation.runId,
+          taskSnapshot,
+        }]
+      : [];
+  }
+  const timelineMessage = taskSnapshot
+    ? stripStateOnlyToolContent(sanitizedMessage)
+    : sanitizedMessage;
   const laneKey = resolveSessionLaneKey(normalizeString(conversation.message.agentId));
   const entries = buildTimelineEntriesFromTranscriptMessage(
     conversation.sessionKey ?? '',
-    conversation.message,
+    timelineMessage,
     {
       runId: conversation.runId ?? undefined,
       sequenceId: conversation.sequenceId,
@@ -137,16 +286,32 @@ export function buildMessageIngressEvents(
       existingRows: options.existingEntries,
     },
   );
-  if (entries.length === 0) {
-    return [];
+  const visibleEntries = taskSnapshot
+    ? entries.filter(hasRenderableTimelineOutput)
+    : entries;
+  const events: SessionTimelineIngressEvent[] = [];
+  if (taskSnapshot) {
+    events.push({
+      sessionUpdate: 'plan',
+      sessionKey: taskSnapshot.sessionKey,
+      runId: conversation.runId,
+      taskSnapshot,
+    });
+  }
+  if (visibleEntries.length === 0) {
+    return events;
   }
   const meta = buildMemberMeta(normalizeString(conversation.message.agentId));
-  return [{
+  events.push({
     sessionUpdate: conversation.status === 'streaming' ? 'agent_message_chunk' : 'agent_message',
     sessionKey: conversation.sessionKey,
     runId: conversation.runId,
     laneKey,
-    entries,
+    entries: visibleEntries,
     ...(meta ? { _meta: meta } : {}),
-  }];
+  });
+  if (events.length === 0) {
+    return [];
+  }
+  return events;
 }

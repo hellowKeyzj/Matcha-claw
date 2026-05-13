@@ -19,6 +19,10 @@ import {
   createEmptySessionRuntimeState,
 } from './session-state-model';
 import {
+  filterStateOnlyRenderItem,
+  filterStateOnlyRenderItems,
+} from './session-state-only-render-filter';
+import {
   createSessionCatalogItem,
 } from './session-catalog-model';
 import {
@@ -65,7 +69,7 @@ export class SessionSnapshotService {
       resolvedModel?: string | null;
     } = {},
   ): SessionStateSnapshot {
-    const allItems = options.items ?? state.renderItems;
+    const allItems = filterStateOnlyRenderItems(options.items ?? state.renderItems);
     const baseWindow = cloneSessionWindowState(
       options.window
       ?? (
@@ -95,6 +99,7 @@ export class SessionSnapshotService {
           ?? this.deps.stateStore.getResolvedSessionModel(sessionKey),
       }),
       items: cloneRenderItems(allItems.slice(start, end)),
+      ...(state.taskSnapshot ? { taskSnapshot: structuredClone(state.taskSnapshot) } : {}),
       replayComplete: options.replayComplete ?? true,
       runtime: cloneSessionRuntimeState(state.runtime),
       window,
@@ -180,12 +185,14 @@ export class SessionSnapshotService {
       return null;
     }
     if (isAssistantTimelineEntry(source)) {
-      return snapshot.items.find((item) => (
-        item.kind === 'assistant-turn'
-        && item.turnKey === source.turnKey
-        && item.laneKey === source.laneKey
+      const item = snapshot.items.find((candidate) => (
+        candidate.kind === 'assistant-turn'
+        && candidate.turnKey === source.turnKey
+        && candidate.laneKey === source.laneKey
       )) ?? null;
+      return filterStateOnlyRenderItem(item);
     }
-    return snapshot.items.find((item) => item.key === source.key) ?? null;
+    const item = snapshot.items.find((candidate) => candidate.key === source.key) ?? null;
+    return filterStateOnlyRenderItem(item);
   }
 }

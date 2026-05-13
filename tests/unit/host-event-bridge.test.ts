@@ -155,6 +155,27 @@ describe('host event bridge runtime-host lifecycle', () => {
       }),
     );
 
+    gatewayEventHandler?.('task:snapshot', {
+      sessionKey: 'agent:main:main',
+      tasks: [],
+      todos: [{ content: '同步 todo', status: 'completed' }],
+      source: 'todo',
+    });
+
+    expect(eventBus.emit).toHaveBeenCalledWith(
+      'task:snapshot',
+      expect.objectContaining({
+        sessionKey: 'agent:main:main',
+        source: 'todo',
+      }),
+    );
+    expect(send).toHaveBeenCalledWith(
+      'host:event',
+      expect.objectContaining({
+        eventName: 'task:snapshot',
+      }),
+    );
+
     gatewayEventHandler?.('gateway:channel-status', {
       eventName: 'channel:weixin-qr',
       payload: { qrDataUrl: 'data:image/png;base64,abc' },

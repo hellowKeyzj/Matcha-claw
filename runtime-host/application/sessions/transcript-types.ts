@@ -3,6 +3,7 @@ import type { SessionTaskCompletionEvent } from '../../shared/session-adapter-ty
 export interface SessionTranscriptMessage {
   role: 'user' | 'assistant' | 'system' | 'toolresult' | 'tool_result';
   content: unknown;
+  text?: string;
   timestamp?: number;
   id?: string;
   messageId?: string;
@@ -68,6 +69,7 @@ export interface ContentBlockLike {
   alt?: unknown;
   id?: unknown;
   name?: unknown;
+  function?: unknown;
   input?: unknown;
   arguments?: unknown;
   content?: unknown;

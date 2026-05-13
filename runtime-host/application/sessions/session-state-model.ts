@@ -36,6 +36,7 @@ export function createEmptyTimelineState(
     timelineEntries: [],
     executionGraphItems: [],
     renderItems: [],
+    taskSnapshot: null,
     hydrated: false,
     runtime: createEmptySessionRuntimeState(),
     window: createLatestWindowState(0),

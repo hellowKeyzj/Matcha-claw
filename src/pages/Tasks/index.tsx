@@ -120,7 +120,7 @@ export function TasksPage() {
   const gatewayStatus = useGatewayStore((state) => state.status);
   const gatewayInitialized = useGatewayStore((state) => state.isInitialized);
   const currentSessionKey = useChatStore((state) => state.currentSessionKey);
-  const tasks = useTaskSnapshotStore((state) => state.getTaskDataList(currentSessionKey)) as Task[];
+  const tasks = useTaskSnapshotStore((state) => state.getPersistentTaskDataList(currentSessionKey)) as Task[];
   const {
     initialLoading,
     refreshing,

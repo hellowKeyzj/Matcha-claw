@@ -128,7 +128,6 @@ function buildChatListProps(items: ChatRenderItem[]) {
     liveView: {
       showBlockingLoading: false,
       showBlockingError: false,
-      showBackgroundStatus: false,
       isEmptyState: false,
     },
   };

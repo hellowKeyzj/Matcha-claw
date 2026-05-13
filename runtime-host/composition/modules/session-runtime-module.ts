@@ -27,6 +27,7 @@ import type { TaskManagerService } from '../../application/tasks/service';
 import type { OpenClawWorkspacePort } from '../../application/openclaw/openclaw-workspace-service';
 import type { RuntimeClockPort, RuntimeFileSystemPort, RuntimeIdGeneratorPort } from '../../application/common/runtime-ports';
 import type { GatewayChatPort, GatewayRpcPort } from '../../application/gateway/gateway-runtime-port';
+import type { RuntimeHostLogger } from '../../shared/logger';
 import {
   registerRuntimeJobDefinitions,
   type RuntimeJobDefinition,
@@ -97,6 +98,7 @@ export function registerSessionRuntimeModule(
     timelineRuntime: scope.resolve('sessionTimelineRuntime'),
     snapshotService: scope.resolve('sessionSnapshotService'),
     clock: scope.resolve<RuntimeClockPort>('runtime.clock'),
+    logger: scope.resolve<RuntimeHostLogger>('logger'),
   }));
   container.register('sessionHydrationJobAdapter', (scope): SessionHydrationJobPort => createSessionHydrationJobPort(
     scope.resolve<RuntimeLongTaskSubmissionPort>('runtime.tasks'),
@@ -109,6 +111,7 @@ export function registerSessionRuntimeModule(
     timelineRuntime: scope.resolve('sessionTimelineRuntime'),
     snapshotService: scope.resolve('sessionSnapshotService'),
     gateway: gateway(),
+    pendingApprovals: scope.resolve('session.pendingApprovals'),
     clock: scope.resolve<RuntimeClockPort>('runtime.clock'),
     idGenerator: scope.resolve<RuntimeIdGeneratorPort>('runtime.idGenerator'),
     sessionHydrationJobs: scope.resolve('sessionHydrationJobAdapter'),

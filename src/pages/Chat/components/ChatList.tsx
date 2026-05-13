@@ -455,6 +455,7 @@ export const ChatList = forwardRef<ChatListHandle, ChatListProps>(function ChatL
     notifyViewportGeometryChanged,
     prepareScopeAnchorRestore,
     prepareScopeBottomAlign,
+    scrollViewportByWheelDelta,
     jumpToBottom,
   } = useChatScroll({
     enabled: isActive,
@@ -536,17 +537,12 @@ export const ChatList = forwardRef<ChatListHandle, ChatListProps>(function ChatL
       prepareScopeBottomAlign(currentSessionKey);
     },
     scrollByWheelDelta: (deltaY) => {
-      const viewportNode = messagesViewportRef.current;
-      if (!viewportNode || !Number.isFinite(deltaY) || deltaY === 0) {
-        return;
-      }
-      viewportNode.scrollTop += deltaY;
-      handleViewportScroll();
+      scrollViewportByWheelDelta(deltaY);
     },
     notifyComposerGeometryChanged: () => {
       notifyViewportGeometryChanged();
     },
-  }), [currentSessionKey, handleViewportScroll, notifyViewportGeometryChanged, prepareScopeBottomAlign]);
+  }), [currentSessionKey, notifyViewportGeometryChanged, prepareScopeBottomAlign, scrollViewportByWheelDelta]);
 
   return (
     <ChatListSurface

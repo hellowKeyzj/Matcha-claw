@@ -39,6 +39,7 @@ import type {
 } from './session-hydration-jobs';
 import type { SessionCatalogJobPort } from './session-catalog-jobs';
 import type { TaskSnapshotEvent } from '../../shared/session-adapter-types';
+import type { PendingApprovalStore } from './pending-approval-store';
 
 export interface SessionCommandServiceDeps {
   sessionCatalog: SessionCatalogPort;
@@ -48,6 +49,7 @@ export interface SessionCommandServiceDeps {
   timelineRuntime: SessionTimelineRuntime;
   snapshotService: SessionSnapshotService;
   gateway: Pick<GatewayRpcPort, 'gatewayRpc'>;
+  pendingApprovals: Pick<PendingApprovalStore, 'list'>;
   clock: RuntimeClockPort;
   idGenerator: RuntimeIdGeneratorPort;
   sessionHydrationJobs: SessionHydrationJobPort;
@@ -377,7 +379,7 @@ export class SessionCommandService {
   }
 
   async listPendingApprovals(): Promise<ApplicationResponseOf<unknown>> {
-    return ok(await this.deps.gateway.gatewayRpc('exec.approvals.get', {}));
+    return ok({ approvals: this.deps.pendingApprovals.list() });
   }
 
   async resolveApproval(payload: unknown): Promise<ApplicationResponseOf> {

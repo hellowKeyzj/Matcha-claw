@@ -10,33 +10,248 @@ import {
   isRecord,
   normalizeString,
 } from './session-value-normalization';
+import {
+  canonicalizeToolName,
+  resolveToolRecordCallId,
+  resolveToolRecordName,
+  isStateOnlyToolName,
+} from './state-only-tools';
+import {
+  containsTodoToolDebugSignal,
+  logTodoToolDebug,
+  summarizeSessionUpdateForTodoToolDebug,
+} from './todo-tool-debug';
 import type { RuntimeClockPort } from '../common/runtime-ports';
+import type { RuntimeHostLogger } from '../../shared/logger';
 
 export interface SessionGatewayIngressServiceDeps {
   stateStore: SessionRuntimeStateStore;
   timelineRuntime: SessionTimelineRuntime;
   snapshotService: SessionSnapshotService;
   clock: RuntimeClockPort;
+  logger?: Pick<RuntimeHostLogger, 'traceDebug'>;
 }
 
 export class SessionGatewayIngressService {
+  private readonly stateOnlyToolNamesByCallKey = new Map<string, string>();
+
   constructor(private readonly deps: SessionGatewayIngressServiceDeps) {}
 
+  private buildToolCallKey(sessionKey: string, toolCallId: string): string {
+    return `${sessionKey}\n${toolCallId}`;
+  }
+
+  private buildRunScopedToolCallKey(sessionKey: string, runId: string, toolCallId: string): string {
+    return `${sessionKey}\n${runId}\n${toolCallId}`;
+  }
+
+  private rememberStateOnlyToolCall(input: {
+    sessionKey: string;
+    runId: string;
+    toolCallId: string;
+    toolName: string;
+  }): void {
+    if (!input.sessionKey || !input.toolCallId || !isStateOnlyToolName(input.toolName)) {
+      return;
+    }
+    const toolName = canonicalizeToolName(input.toolName);
+    this.stateOnlyToolNamesByCallKey.set(this.buildToolCallKey(input.sessionKey, input.toolCallId), toolName);
+    if (input.runId) {
+      this.stateOnlyToolNamesByCallKey.set(
+        this.buildRunScopedToolCallKey(input.sessionKey, input.runId, input.toolCallId),
+        toolName,
+      );
+    }
+  }
+
+  private forgetStateOnlyToolCall(input: {
+    sessionKey: string;
+    runId: string;
+    toolCallId: string;
+  }): void {
+    if (!input.sessionKey || !input.toolCallId) {
+      return;
+    }
+    this.stateOnlyToolNamesByCallKey.delete(this.buildToolCallKey(input.sessionKey, input.toolCallId));
+    if (input.runId) {
+      this.stateOnlyToolNamesByCallKey.delete(
+        this.buildRunScopedToolCallKey(input.sessionKey, input.runId, input.toolCallId),
+      );
+    }
+  }
+
+  private forgetStateOnlyToolCallsForRun(sessionKey: string, runId: string): void {
+    if (!sessionKey || !runId) {
+      return;
+    }
+    const prefix = `${sessionKey}\n${runId}\n`;
+    for (const key of Array.from(this.stateOnlyToolNamesByCallKey.keys())) {
+      if (key.startsWith(prefix)) {
+        const [, , toolCallId] = key.split('\n');
+        this.stateOnlyToolNamesByCallKey.delete(key);
+        if (toolCallId) {
+          this.stateOnlyToolNamesByCallKey.delete(this.buildToolCallKey(sessionKey, toolCallId));
+        }
+      }
+    }
+  }
+
+  private resolveRememberedStateOnlyToolName(input: {
+    sessionKey: string;
+    runId: string;
+    toolCallId: string;
+  }): string {
+    if (!input.sessionKey || !input.toolCallId) {
+      return '';
+    }
+    if (input.runId) {
+      const scopedName = this.stateOnlyToolNamesByCallKey.get(
+        this.buildRunScopedToolCallKey(input.sessionKey, input.runId, input.toolCallId),
+      );
+      if (scopedName) {
+        return scopedName;
+      }
+    }
+    return this.stateOnlyToolNamesByCallKey.get(this.buildToolCallKey(input.sessionKey, input.toolCallId)) ?? '';
+  }
+
+  private rememberStateOnlyToolCallsFromChatMessage(payload: Record<string, unknown>): void {
+    const event = isRecord(payload.event) ? payload.event : null;
+    const message = isRecord(event?.message) ? event.message : null;
+    if (!event || !message) {
+      return;
+    }
+    const sessionKey = normalizeString(event.sessionKey);
+    const runId = normalizeString(event.runId);
+    if (!sessionKey) {
+      return;
+    }
+
+    const rememberBlock = (block: unknown) => {
+      if (!isRecord(block)) {
+        return;
+      }
+      const toolName = resolveToolRecordName(block);
+      if (!isStateOnlyToolName(toolName)) {
+        return;
+      }
+      const toolCallId = resolveToolRecordCallId(block);
+      this.rememberStateOnlyToolCall({
+        sessionKey,
+        runId,
+        toolCallId,
+        toolName,
+      });
+    };
+
+    if (Array.isArray(message.content)) {
+      for (const block of message.content) {
+        rememberBlock(block);
+      }
+    }
+    if (Array.isArray(message.tool_calls)) {
+      for (const block of message.tool_calls) {
+        rememberBlock(block);
+      }
+    }
+    if (Array.isArray(message.toolCalls)) {
+      for (const block of message.toolCalls) {
+        rememberBlock(block);
+      }
+    }
+  }
+
+  private normalizeGatewayConversationPayload(payload: unknown): unknown {
+    if (!isRecord(payload)) {
+      return payload;
+    }
+
+    if (payload.type === 'run.phase') {
+      const sessionKey = normalizeString(payload.sessionKey);
+      const runId = normalizeString(payload.runId);
+      const phase = normalizeString(payload.phase);
+      if (phase === 'completed' || phase === 'error' || phase === 'aborted') {
+        this.forgetStateOnlyToolCallsForRun(sessionKey, runId);
+      }
+      return payload;
+    }
+
+    if (payload.type === 'chat.message') {
+      this.rememberStateOnlyToolCallsFromChatMessage(payload);
+      return payload;
+    }
+
+    if (payload.type !== 'tool.lifecycle' || !isRecord(payload.event)) {
+      return payload;
+    }
+
+    const sessionKey = normalizeString(payload.event.sessionKey);
+    const runId = normalizeString(payload.event.runId);
+    const toolCallId = normalizeString(payload.event.toolCallId);
+    if (!sessionKey || !toolCallId) {
+      return payload;
+    }
+
+    const phase = normalizeString(payload.event.phase);
+    const rawExplicitName = normalizeString(payload.event.name);
+    const explicitName = canonicalizeToolName(rawExplicitName);
+    const rememberedName = this.resolveRememberedStateOnlyToolName({
+      sessionKey,
+      runId,
+      toolCallId,
+    });
+    const resolvedName = explicitName || rememberedName;
+
+    if (phase === 'start' && isStateOnlyToolName(explicitName)) {
+      this.rememberStateOnlyToolCall({
+        sessionKey,
+        runId,
+        toolCallId,
+        toolName: explicitName,
+      });
+    }
+
+    if (phase === 'result') {
+      this.forgetStateOnlyToolCall({
+        sessionKey,
+        runId,
+        toolCallId,
+      });
+    }
+
+    if (!resolvedName || rawExplicitName === resolvedName) {
+      return payload;
+    }
+
+    return {
+      ...payload,
+      event: {
+        ...payload.event,
+        name: resolvedName,
+      },
+    };
+  }
+
   consumeGatewayConversationEvent(payload: unknown): SessionUpdateEvent[] {
-    const currentSessionKey = isRecord(payload) && isRecord(payload.event) && typeof payload.event.sessionKey === 'string'
-      ? payload.event.sessionKey
+    const normalizedPayload = this.normalizeGatewayConversationPayload(payload);
+    logTodoToolDebug(this.deps.logger, 'runtime-host.ingress.normalized-payload', normalizedPayload);
+    const currentSessionKey = isRecord(normalizedPayload) && isRecord(normalizedPayload.event) && typeof normalizedPayload.event.sessionKey === 'string'
+      ? normalizedPayload.event.sessionKey
       : '';
     const currentState = currentSessionKey ? this.deps.stateStore.getSessionState(currentSessionKey) : null;
-    const translated = buildSessionUpdateEventsFromGatewayConversationEvent(payload, {
+    const translated = buildSessionUpdateEventsFromGatewayConversationEvent(normalizedPayload, {
       clock: this.deps.clock,
       existingEntries: currentState?.timelineEntries,
     });
+    if (containsTodoToolDebugSignal(normalizedPayload) || containsTodoToolDebugSignal(translated)) {
+      logTodoToolDebug(this.deps.logger, 'runtime-host.ingress.translated-events', translated);
+    }
     return translated.map((event) => {
       const sessionKey = normalizeString(event.sessionKey);
       if (!sessionKey) {
         const emptySnapshot = this.deps.snapshotService.buildEmptySnapshot();
         if (event.sessionUpdate === 'session_info_update') {
-          return {
+          const output = {
             sessionUpdate: 'session_info_update',
             sessionKey: event.sessionKey,
             runId: event.runId,
@@ -46,8 +261,10 @@ export class SessionGatewayIngressService {
             ...(event.transportIssue !== undefined ? { transportIssue: event.transportIssue } : {}),
             ...(event._meta ? { _meta: event._meta } : {}),
           };
+          logTodoToolDebug(this.deps.logger, 'runtime-host.ingress.output-event', summarizeSessionUpdateForTodoToolDebug(output));
+          return output;
         }
-        return {
+        const output = {
           sessionUpdate: event.sessionUpdate === 'agent_message_chunk' ? 'session_item_chunk' : 'session_item',
           sessionKey: event.sessionKey,
           runId: event.runId,
@@ -55,6 +272,8 @@ export class SessionGatewayIngressService {
           snapshot: emptySnapshot,
           ...(event._meta ? { _meta: event._meta } : {}),
         };
+        logTodoToolDebug(this.deps.logger, 'runtime-host.ingress.output-event', summarizeSessionUpdateForTodoToolDebug(output));
+        return output;
       }
       if (event.sessionUpdate === 'session_info_update') {
         this.deps.stateStore.setActiveSessionKey(sessionKey);
@@ -71,7 +290,7 @@ export class SessionGatewayIngressService {
             : createLatestWindowState(state.renderItems.length),
           replayComplete: true,
         });
-        return {
+        const output = {
           sessionUpdate: 'session_info_update',
           sessionKey: event.sessionKey,
           runId: event.runId,
@@ -81,13 +300,16 @@ export class SessionGatewayIngressService {
           ...(event.transportIssue !== undefined ? { transportIssue: event.transportIssue } : {}),
           ...(event._meta ? { _meta: event._meta } : {}),
         };
+        logTodoToolDebug(this.deps.logger, 'runtime-host.ingress.output-event', summarizeSessionUpdateForTodoToolDebug(output));
+        return output;
       }
 
       if (event.sessionUpdate === 'plan') {
+        this.deps.timelineRuntime.updateTaskSnapshot(sessionKey, event.taskSnapshot);
         const snapshot = this.deps.snapshotService.buildSnapshot(sessionKey, this.deps.stateStore.getSessionState(sessionKey), {
           replayComplete: true,
         });
-        return {
+        const output = {
           sessionUpdate: 'plan',
           sessionKey: event.sessionKey,
           runId: event.runId,
@@ -98,6 +320,8 @@ export class SessionGatewayIngressService {
           },
           ...(event._meta ? { _meta: event._meta } : {}),
         };
+        logTodoToolDebug(this.deps.logger, 'runtime-host.ingress.output-event', summarizeSessionUpdateForTodoToolDebug(output));
+        return output;
       }
 
       const state = this.deps.stateStore.getSessionState(sessionKey);
@@ -119,7 +343,7 @@ export class SessionGatewayIngressService {
         replayComplete: true,
       });
       const item = this.deps.snapshotService.resolvePrimaryItemFromSnapshot(snapshot, runtimeSourceEntry, event.entries);
-      return {
+      const output = {
         sessionUpdate: event.sessionUpdate === 'agent_message_chunk' ? 'session_item_chunk' : 'session_item',
         sessionKey: event.sessionKey,
         runId: event.runId,
@@ -127,6 +351,8 @@ export class SessionGatewayIngressService {
         snapshot,
         ...(event._meta ? { _meta: event._meta } : {}),
       };
+      logTodoToolDebug(this.deps.logger, 'runtime-host.ingress.output-event', summarizeSessionUpdateForTodoToolDebug(output));
+      return output;
     });
   }
 }

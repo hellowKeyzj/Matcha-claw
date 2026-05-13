@@ -269,6 +269,61 @@ function createSessionMessageUpdate(payload: {
   };
 }
 
+function createSessionPlanUpdate(payload: {
+  runId?: string | null;
+  sessionKey?: string | null;
+  items?: SessionRenderItem[];
+}) {
+  const sessionKey = payload.sessionKey ?? 'agent:main:main';
+  const items = payload.items ?? [];
+  return {
+    sessionUpdate: 'plan' as const,
+    runId: payload.runId ?? null,
+    sessionKey: payload.sessionKey ?? null,
+    taskSnapshot: {
+      sessionKey,
+      source: 'todo' as const,
+      tasks: [],
+      todos: [
+        { content: '分析页面结构', status: 'completed' as const },
+      ],
+    },
+    snapshot: {
+      sessionKey,
+      catalog: {
+        key: sessionKey,
+        agentId: 'main',
+        kind: 'main' as const,
+        preferred: true,
+        displayName: sessionKey,
+      },
+      items,
+      replayComplete: true,
+      runtime: {
+        sending: false,
+        activeRunId: null,
+        runPhase: 'done' as const,
+        activeTurnItemKey: null,
+        pendingTurnKey: null,
+        pendingTurnLaneKey: null,
+        pendingFinal: false,
+        lastUserMessageAt: null,
+        lastError: null,
+        lastIssue: null,
+        updatedAt: 2,
+      },
+      window: {
+        totalItemCount: items.length,
+        windowStartOffset: 0,
+        windowEndOffset: items.length,
+        hasMore: false,
+        hasNewer: false,
+        isAtLatest: true,
+      },
+    },
+  };
+}
+
 describe('gateway store event wiring', () => {
   beforeEach(() => {
     vi.resetModules();
@@ -301,6 +356,7 @@ describe('gateway store event wiring', () => {
     expect(subscribeHostEventMock).toHaveBeenCalledWith('gateway:error', expect.any(Function));
     expect(subscribeHostEventMock).toHaveBeenCalledWith('gateway:notification', expect.any(Function));
     expect(subscribeHostEventMock).toHaveBeenCalledWith('session:update', expect.any(Function));
+    expect(subscribeHostEventMock).toHaveBeenCalledWith('task:snapshot', expect.any(Function));
     expect(subscribeHostEventMock).toHaveBeenCalledWith('gateway:channel-status', expect.any(Function));
     expect(subscribeHostEventMock).toHaveBeenCalledWith('runtime-host:status', expect.any(Function));
     expect(subscribeHostEventMock).toHaveBeenCalledWith('runtime-host:error', expect.any(Function));
@@ -825,6 +881,68 @@ describe('gateway store event wiring', () => {
     });
   });
 
+  it('plan session:update applies authoritative snapshot to clear stale visible tool cards', async () => {
+    hostApiFetchMock.mockResolvedValueOnce(createRunningGatewayStatus());
+    const handlers = new Map<string, (payload: unknown) => void>();
+    subscribeHostEventMock.mockImplementation((eventName: string, handler: (payload: unknown) => void) => {
+      handlers.set(eventName, handler);
+      return () => {};
+    });
+
+    const { useChatStore } = await import('@/stores/chat');
+    useChatStore.setState({
+      currentSessionKey: 'agent:main:main',
+      sessionCatalogStatus: {
+        status: 'ready',
+        error: null,
+        hasLoadedOnce: true,
+        lastLoadedAt: 1,
+      },
+      loadedSessions: {
+        'agent:main:main': createSessionRecord({
+          runtime: {
+            sending: true,
+            activeRunId: 'run-todo-plan-1',
+          },
+        }),
+      },
+    } as never);
+
+    const { useGatewayStore } = await import('@/stores/gateway');
+    await useGatewayStore.getState().init();
+
+    handlers.get('session:update')?.(createSessionMessageUpdate({
+      kind: 'agent_message_chunk',
+      runId: 'run-todo-plan-1',
+      sessionKey: 'agent:main:main',
+      sequenceId: 8,
+      message: {
+        role: 'assistant',
+        id: 'run:run-todo-plan-1:tool:todo-write-1',
+        content: [{
+          type: 'toolCall',
+          id: 'todo-write-1',
+          name: 'TodoWrite',
+          input: {
+            newTodos: [
+              { content: '分析页面结构', status: 'completed' },
+            ],
+          },
+        }],
+      },
+    }));
+
+    expect(getSessionItems(useChatStore.getState(), 'agent:main:main')).toHaveLength(1);
+
+    handlers.get('session:update')?.(createSessionPlanUpdate({
+      runId: 'run-todo-plan-1',
+      sessionKey: 'agent:main:main',
+      items: [],
+    }));
+
+    expect(getSessionItems(useChatStore.getState(), 'agent:main:main')).toEqual([]);
+  });
+
   it('run.phase completed 只应进入单一 session update 入口', async () => {
     hostApiFetchMock.mockResolvedValueOnce(createRunningGatewayStatus());
     const handlers = new Map<string, (payload: unknown) => void>();
@@ -1185,7 +1303,7 @@ describe('gateway store event wiring', () => {
     }));
   });
 
-  it('WorkBuddy task 通知会进入 task center，并按 taskId 合并批量更新', async () => {
+  it('task 通知会进入 task center，并按 taskId 合并批量更新', async () => {
     hostApiFetchMock.mockResolvedValueOnce(createRunningGatewayStatus());
     const handlers = new Map<string, (payload: unknown) => void>();
     subscribeHostEventMock.mockImplementation((eventName: string, handler: (payload: unknown) => void) => {
@@ -1210,6 +1328,34 @@ describe('gateway store event wiring', () => {
 
     expect(useTaskSnapshotStore.getState().getTaskDataList('agent:main:main')).toEqual([
       expect.objectContaining({ id: 'task-1', status: 'in_progress' }),
+    ]);
+  });
+
+  it('task:snapshot 事件会实时写入 task snapshot store', async () => {
+    hostApiFetchMock.mockResolvedValueOnce(createRunningGatewayStatus());
+    const handlers = new Map<string, (payload: unknown) => void>();
+    subscribeHostEventMock.mockImplementation((eventName: string, handler: (payload: unknown) => void) => {
+      handlers.set(eventName, handler);
+      return () => {};
+    });
+
+    const { useGatewayStore } = await import('@/stores/gateway');
+    const { useTaskSnapshotStore } = await import('@/stores/chat/task-snapshot-store');
+    await useGatewayStore.getState().init();
+
+    handlers.get('task:snapshot')?.({
+      sessionKey: 'agent:main:main',
+      tasks: [],
+      todos: [
+        { content: '分析页面结构', status: 'completed' },
+        { content: '实现任务状态', status: 'completed' },
+      ],
+      source: 'todo',
+    });
+
+    expect(useTaskSnapshotStore.getState().getTaskDataList('agent:main:main')).toEqual([
+      expect.objectContaining({ subject: '分析页面结构', status: 'completed' }),
+      expect.objectContaining({ subject: '实现任务状态', status: 'completed' }),
     ]);
   });
 });

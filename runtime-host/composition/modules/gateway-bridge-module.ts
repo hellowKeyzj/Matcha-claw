@@ -23,6 +23,7 @@ import type {
 } from '../../openclaw-bridge/client-auth-ports';
 import { buildInitialDiagnostics, createGatewayTransportIssue } from '../../openclaw-bridge/client-state';
 import type { SessionRuntimeService } from '../../application/sessions/service';
+import type { PendingApprovalStore } from '../../application/sessions/pending-approval-store';
 import type { SettingsRepository } from '../../application/settings/store';
 import {
   createRuntimeHostGatewayClient,
@@ -42,6 +43,7 @@ export interface GatewayBridgeModuleDeps {
   readonly parentTransport: ParentTransportClient;
   readonly dispatchRoute: (method: string, route: string, payload: unknown) => Promise<RuntimeRouteResponse | null>;
   readonly systemEnvironment: Pick<RuntimeSystemEnvironmentPort, 'getEnv' | 'platform'>;
+  readonly pendingApprovals: Pick<PendingApprovalStore, 'consumeGatewayNotification'>;
   readonly clock: RuntimeClockPort;
   readonly scheduler: RuntimeSchedulerPort;
   readonly tcpProbe: RuntimeTcpProbePort;
@@ -106,6 +108,7 @@ function createGatewayClientForEnvironment(deps: {
   readonly parentTransport: ParentTransportClient;
   readonly dispatchRoute: (method: string, route: string, payload: unknown) => Promise<RuntimeRouteResponse | null>;
   readonly getSessionRuntime: () => SessionRuntimeService | null;
+  readonly pendingApprovals: Pick<PendingApprovalStore, 'consumeGatewayNotification'>;
   readonly runtimeHostDataDir: string;
   readonly rawGatewayPort: string;
   readonly readGatewayToken: () => Promise<string>;
@@ -124,6 +127,7 @@ function createGatewayClientForEnvironment(deps: {
       parentTransport: deps.parentTransport,
       dispatchRoute: deps.dispatchRoute,
       getSessionRuntime: deps.getSessionRuntime,
+      pendingApprovals: deps.pendingApprovals,
       runtimeHostDataDir: deps.runtimeHostDataDir,
       gatewayPort,
       readGatewayToken: deps.readGatewayToken,
@@ -154,6 +158,7 @@ export function registerGatewayBridgeModule(
       parentTransport: deps.parentTransport,
       dispatchRoute: deps.dispatchRoute,
       getSessionRuntime: () => sessionRuntimeService,
+      pendingApprovals: deps.pendingApprovals,
       runtimeHostDataDir: environmentRepository.getRuntimeHostDataDir(),
       rawGatewayPort: deps.systemEnvironment.getEnv('MATCHACLAW_RUNTIME_HOST_GATEWAY_PORT'),
       readGatewayToken: async () => {

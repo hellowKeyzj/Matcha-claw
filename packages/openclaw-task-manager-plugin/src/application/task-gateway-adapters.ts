@@ -2,14 +2,28 @@ import type { OpenClawPluginApi } from 'openclaw/plugin-sdk'
 import { TaskStoreError, mapTaskStoreError } from '../shared/errors.js'
 import { toNonEmptyString } from '../shared/params.js'
 import { executeTaskOutput, executeTaskStop } from './background-task-tools.js'
-import { toTaskCreateInput, toTaskUpdateInput } from './task-inputs.js'
+import { parseTaskCreateInput, parseTaskUpdateInput } from './task-inputs.js'
 import { asTaskDetailPayload } from './task-payloads.js'
 import { getStore, getTodoStore, resolveScopeKey } from './task-store-context.js'
+import { parseTodoWriteInput } from './todo-inputs.js'
 
 type GatewayParams = Record<string, unknown>
 type GatewayOptions = {
   params: GatewayParams
   respond: (success: boolean, data?: unknown, error?: { code: string; message: string }) => void
+}
+
+function logTaskPipeline(api: OpenClawPluginApi, event: string, payload: Record<string, unknown>): void {
+  api.logger?.debug?.(`[task-pipeline] plugin.${event} ${JSON.stringify(payload)}`)
+}
+
+function readPluginStorageRoot(api: OpenClawPluginApi): string | null {
+  const config = api.pluginConfig
+  if (!config || typeof config !== 'object' || Array.isArray(config)) {
+    return null
+  }
+  const storageRoot = (config as Record<string, unknown>).storageRoot
+  return typeof storageRoot === 'string' && storageRoot.trim() ? storageRoot.trim() : null
 }
 
 async function withGatewayGuard(options: GatewayOptions, task: () => Promise<unknown>): Promise<void> {
@@ -20,10 +34,6 @@ async function withGatewayGuard(options: GatewayOptions, task: () => Promise<unk
     const mapped = mapTaskStoreError(error)
     options.respond(false, undefined, { code: mapped.code, message: mapped.message })
   }
-}
-
-function normalizeTodos(value: unknown) {
-  return Array.isArray(value) ? value : []
 }
 
 function gatewayToolContext(params: GatewayParams) {
@@ -46,7 +56,7 @@ export function registerTaskGatewayMethods(api: OpenClawPluginApi): void {
     await withGatewayGuard(options, async () => {
       const scopeKey = resolveScopeKey({ params: options.params, sessionKey: options.params.sessionKey as string | undefined })
       const store = getStore({ api, workspaceDir: options.params.workspaceDir })
-      const task = await store.create(scopeKey, toTaskCreateInput(options.params))
+      const task = await store.create(scopeKey, parseTaskCreateInput(options.params))
       const todos = await loadStoredTodos(api, options.params.workspaceDir, scopeKey)
       return { task: asTaskDetailPayload(task), todos }
     })
@@ -57,7 +67,16 @@ export function registerTaskGatewayMethods(api: OpenClawPluginApi): void {
       const scopeKey = resolveScopeKey({ params: options.params, sessionKey: options.params.sessionKey as string | undefined })
       const store = getStore({ api, workspaceDir: options.params.workspaceDir })
       const tasks = await store.list(scopeKey)
-      return { tasks: tasks.map(asTaskDetailPayload), todos: await loadStoredTodos(api, options.params.workspaceDir, scopeKey) }
+      const todos = await loadStoredTodos(api, options.params.workspaceDir, scopeKey)
+      logTaskPipeline(api, 'gateway.TaskList', {
+        scopeKey,
+        paramSessionKey: typeof options.params.sessionKey === 'string' ? options.params.sessionKey : null,
+        workspaceDir: typeof options.params.workspaceDir === 'string' ? options.params.workspaceDir : null,
+        storageRoot: readPluginStorageRoot(api),
+        tasksCount: tasks.length,
+        todosCount: todos.length,
+      })
+      return { tasks: tasks.map(asTaskDetailPayload), todos }
     })
   })
 
@@ -77,8 +96,8 @@ export function registerTaskGatewayMethods(api: OpenClawPluginApi): void {
     await withGatewayGuard(options, async () => {
       const scopeKey = resolveScopeKey({ params: options.params, sessionKey: options.params.sessionKey as string | undefined })
       const store = getStore({ api, workspaceDir: options.params.workspaceDir })
-      const input = toTaskUpdateInput(options.params)
-      const taskId = toNonEmptyString(options.params.taskId, 'taskId')
+      const input = parseTaskUpdateInput(options.params)
+      const { taskId } = input
       if (input.status === 'deleted') {
         const deleted = await store.delete(scopeKey, taskId)
         if (!deleted) {
@@ -97,7 +116,15 @@ export function registerTaskGatewayMethods(api: OpenClawPluginApi): void {
   api.registerGatewayMethod('TodoWrite', async (options: GatewayOptions) => {
     await withGatewayGuard(options, async () => {
       const scopeKey = resolveScopeKey({ params: options.params, sessionKey: options.params.sessionKey as string | undefined })
-      const result = await getTodoStore({ api, workspaceDir: options.params.workspaceDir }).save(scopeKey, normalizeTodos(options.params.newTodos) as never)
+      const input = parseTodoWriteInput(options.params)
+      const result = await getTodoStore({ api, workspaceDir: options.params.workspaceDir }).save(scopeKey, input.newTodos)
+      logTaskPipeline(api, 'gateway.TodoWrite', {
+        scopeKey,
+        paramSessionKey: typeof options.params.sessionKey === 'string' ? options.params.sessionKey : null,
+        workspaceDir: typeof options.params.workspaceDir === 'string' ? options.params.workspaceDir : null,
+        storageRoot: readPluginStorageRoot(api),
+        todosCount: result.todos.length,
+      })
       return { todos: result.todos, updatedAt: result.updatedAt }
     })
   })
@@ -124,54 +151,4 @@ export function registerTaskGatewayMethods(api: OpenClawPluginApi): void {
     })
   })
 
-  api.registerGatewayMethod('task_create', async (options: GatewayOptions) => {
-    await withGatewayGuard(options, async () => {
-      const scopeKey = resolveScopeKey({ params: options.params, sessionKey: options.params.sessionKey as string | undefined })
-      const store = getStore({ api, workspaceDir: options.params.workspaceDir })
-      const task = await store.create(scopeKey, toTaskCreateInput(options.params))
-      return { task: asTaskDetailPayload(task), todos: await loadStoredTodos(api, options.params.workspaceDir, scopeKey) }
-    })
-  })
-
-  api.registerGatewayMethod('task_update', async (options: GatewayOptions) => {
-    await withGatewayGuard(options, async () => {
-      const scopeKey = resolveScopeKey({ params: options.params, sessionKey: options.params.sessionKey as string | undefined })
-      const taskId = toNonEmptyString(options.params.taskId, 'taskId')
-      const task = await getStore({ api, workspaceDir: options.params.workspaceDir }).update(scopeKey, taskId, toTaskUpdateInput(options.params))
-      if (!task) throw new TaskStoreError('task_not_found', `Task not found: ${taskId}`)
-      return { task: asTaskDetailPayload(task), todos: await loadStoredTodos(api, options.params.workspaceDir, scopeKey) }
-    })
-  })
-
-  api.registerGatewayMethod('task_list', async (options: GatewayOptions) => {
-    await withGatewayGuard(options, async () => {
-      const scopeKey = resolveScopeKey({ params: options.params, sessionKey: options.params.sessionKey as string | undefined })
-      const tasks = await getStore({ api, workspaceDir: options.params.workspaceDir }).list(scopeKey)
-      return { tasks: tasks.map(asTaskDetailPayload), todos: await loadStoredTodos(api, options.params.workspaceDir, scopeKey) }
-    })
-  })
-
-  api.registerGatewayMethod('task_get', async (options: GatewayOptions) => {
-    await withGatewayGuard(options, async () => {
-      const scopeKey = resolveScopeKey({ params: options.params, sessionKey: options.params.sessionKey as string | undefined })
-      const taskId = toNonEmptyString(options.params.taskId, 'taskId')
-      const task = await getStore({ api, workspaceDir: options.params.workspaceDir }).get(scopeKey, taskId)
-      if (!task) throw new TaskStoreError('task_not_found', `Task not found: ${taskId}`)
-      return { task: asTaskDetailPayload(task) }
-    })
-  })
-
-  api.registerGatewayMethod('task_claim', async (options: GatewayOptions) => {
-    await withGatewayGuard(options, async () => {
-      const scopeKey = resolveScopeKey({ params: options.params, sessionKey: options.params.sessionKey as string | undefined })
-      const taskId = toNonEmptyString(options.params.taskId, 'taskId')
-      const task = await getStore({ api, workspaceDir: options.params.workspaceDir }).update(scopeKey, taskId, {
-        ...toTaskUpdateInput(options.params),
-        taskId,
-        status: 'in_progress',
-      })
-      if (!task) throw new TaskStoreError('task_not_found', `Task not found: ${taskId}`)
-      return { task: asTaskDetailPayload(task), todos: await loadStoredTodos(api, options.params.workspaceDir, scopeKey) }
-    })
-  })
 }

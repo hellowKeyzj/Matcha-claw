@@ -17,6 +17,11 @@ import {
 import { extractArtifactRefsFromAssistantText } from './artifact-paths';
 import { hostFileStat } from '@/lib/host-api';
 import { DIRECTORY_MIME_TYPE } from '@/components/file-preview/types';
+import {
+  containsTodoToolDebugSignal,
+  logRendererTodoToolDebug,
+  summarizeAssistantTurnForTodoToolDebug,
+} from '@/stores/chat/todo-tool-debug';
 
 interface ChatAssistantTurnProps {
   item: ChatAssistantTurnItem;
@@ -36,6 +41,17 @@ export const ChatAssistantTurn = memo(function ChatAssistantTurn({
   const [validatedDerivedPaths, setValidatedDerivedPaths] = useState<Record<string, boolean>>({});
 
   const isStreaming = item.status === 'streaming' || item.status === 'waiting_tool';
+
+  useEffect(() => {
+    if (!containsTodoToolDebugSignal(item)) {
+      return;
+    }
+    logRendererTodoToolDebug(
+      'renderer.ChatAssistantTurn.render-item',
+      summarizeAssistantTurnForTodoToolDebug(item),
+    );
+  }, [item]);
+
   const hasContentSegments = item.segments.some((segment) => {
     if (segment.kind === 'thinking') {
       return showThinking && segment.text.trim().length > 0;

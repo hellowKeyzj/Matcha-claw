@@ -1,18 +1,9 @@
 import type { TaskData, TaskDataStatus, TaskSnapshotEvent, TodoItem } from '../../shared/session-adapter-types';
+import {
+  canonicalizeStateOnlyTaskToolName,
+  canonicalizeTaskSnapshotToolName,
+} from '../../shared/task-tool-contract';
 import { isRecord, normalizeString } from './session-value-normalization';
-
-const TASK_TOOL_METHODS = new Set([
-  'TaskCreate',
-  'TaskUpdate',
-  'TaskList',
-  'TaskGet',
-  'TodoWrite',
-  'task_create',
-  'task_update',
-  'task_list',
-  'task_get',
-  'task_claim',
-]);
 
 function normalizeStatus(value: unknown): TaskDataStatus {
   if (value === 'in_progress' || value === 'completed' || value === 'deleted') {
@@ -108,13 +99,13 @@ export function normalizeTaskSnapshotPayload(
     ...normalizeTasks(payload.task ? [payload.task] : []),
   ];
   const todos = normalizeTodos(payload.todos ?? payload.newTodos);
-  if (tasks.length === 0 && todos.length === 0) {
-    return null;
-  }
   const rawSource = normalizeString(payload.source);
   const source = rawSource === 'plan' || rawSource === 'artifact' || rawSource === 'todo' || rawSource === 'replay'
     ? rawSource
     : 'tool';
+  if (tasks.length === 0 && todos.length === 0 && source !== 'todo') {
+    return null;
+  }
   return {
     sessionKey,
     tasks,
@@ -130,17 +121,21 @@ export function normalizeTaskToolSnapshot(
   payload: unknown,
   fallbackSessionKey?: string | null,
 ): TaskSnapshotEvent | null {
-  const method = normalizeString(toolName);
-  if (!TASK_TOOL_METHODS.has(method)) {
+  const method = canonicalizeTaskSnapshotToolName(toolName);
+  if (!method) {
     return null;
   }
-  const snapshot = normalizeTaskSnapshotPayload(payload, fallbackSessionKey);
+  const stateOnlyMethod = canonicalizeStateOnlyTaskToolName(method);
+  const normalizedPayload = stateOnlyMethod && isRecord(payload)
+    ? { ...payload, source: 'todo' }
+    : payload;
+  const snapshot = normalizeTaskSnapshotPayload(normalizedPayload, fallbackSessionKey);
   if (!snapshot) {
     return null;
   }
   return {
     ...snapshot,
-    source: method === 'TodoWrite' ? 'todo' : snapshot.source,
+    source: stateOnlyMethod ? 'todo' : snapshot.source,
   };
 }
 

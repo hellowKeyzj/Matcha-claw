@@ -22,6 +22,14 @@ import {
   mergeToolCards,
   resolveToolCardId,
 } from './tool-card-merge';
+import {
+  isToolCallContentType,
+  isToolResultContentType,
+  isStateOnlyToolName,
+  resolveToolRecordCallId,
+  resolveToolRecordCallPayload,
+  resolveToolRecordName,
+} from '../state-only-tools';
 
 function findLatestUnresolvedToolCardIndex(
   tools: ReadonlyArray<SessionRenderToolCard>,
@@ -57,19 +65,11 @@ export function buildToolCardsFromMessage(input: {
 
   for (const [index, block] of contentBlocks.entries()) {
     const type = normalizeToolIdentity(block.type).toLowerCase();
-    const toolCallId = normalizeToolIdentity(
-      block.id
-      ?? block.toolCallId
-      ?? block.tool_call_id
-      ?? block.callId,
-    );
+    const toolCallId = resolveToolRecordCallId(block);
     const fallbackName = normalizeOptionalString(input.toolName) ?? 'tool';
-    const name = normalizeOptionalString(block.name) ?? fallbackName;
+    const name = resolveToolRecordName(block) || fallbackName;
     const isToolCall = (
-      type === 'toolcall'
-      || type === 'tool_call'
-      || type === 'tooluse'
-      || type === 'tool_use'
+      isToolCallContentType(block.type)
       || (Boolean(name) && (
         Object.prototype.hasOwnProperty.call(block, 'input')
         || Object.prototype.hasOwnProperty.call(block, 'arguments')
@@ -78,7 +78,10 @@ export function buildToolCardsFromMessage(input: {
     );
 
     if (isToolCall && name) {
-      const toolInput = coerceToolArgs(block.input ?? block.arguments ?? block.args);
+      if (isStateOnlyToolName(name)) {
+        continue;
+      }
+      const toolInput = coerceToolArgs(resolveToolRecordCallPayload(block));
       cards.push({
         id: resolveToolCardId(cards, toolCallId, name || `tool:${index}`),
         ...(toolCallId ? { toolCallId } : {}),
@@ -93,7 +96,10 @@ export function buildToolCardsFromMessage(input: {
       continue;
     }
 
-    if ((type === 'toolresult' || type === 'tool_result') && name) {
+    if (isToolResultContentType(block.type) && name) {
+      if (isStateOnlyToolName(name)) {
+        continue;
+      }
       const output = extractToolResultOutput(block);
       const outputText = extractToolResultOutputText(output) ?? serializeToolPayload(output);
       const isError = block.isError === true || block.is_error === true;
@@ -163,16 +169,15 @@ export function buildToolCardsFromMessage(input: {
   const toolUses = Array.isArray(input.toolCalls)
     ? input.toolCalls.flatMap((item) => {
         const toolCallId = normalizeToolIdentity(item.id);
-        const fn = isRecord(item.function) ? item.function : item;
-        const name = normalizeOptionalString(fn.name) ?? '';
-        if (!name) {
+        const name = resolveToolRecordName(item);
+        if (!name || isStateOnlyToolName(name)) {
           return [];
         }
         return [{
           id: toolCallId || name,
           ...(toolCallId ? { toolCallId } : {}),
           name,
-          input: coerceToolArgs(fn.input ?? fn.arguments),
+          input: coerceToolArgs(resolveToolRecordCallPayload(item)),
         }];
       })
     : [];
@@ -190,6 +195,7 @@ export function buildToolCardsFromMessage(input: {
   const standaloneOutputText = extractToolResultOutputText(input.content) ?? serializeToolPayload(input.content);
   if (
     standaloneToolName
+    && !isStateOnlyToolName(standaloneToolName)
     && standaloneOutputText
     && (normalizeToolIdentity(input.role).toLowerCase() === 'toolresult'
       || normalizeToolIdentity(input.role).toLowerCase() === 'tool_result')

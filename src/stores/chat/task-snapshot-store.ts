@@ -9,6 +9,10 @@ import type {
   TaskSnapshotEvent,
   TodoItem,
 } from '../../../runtime-host/shared/session-adapter-types';
+import {
+  isTaskSnapshotToolMethod,
+  isTodoTaskToolName,
+} from '../../../runtime-host/shared/task-tool-contract';
 
 export type DerivedPlanStatus = 'finished' | 'building' | 'ready' | null;
 
@@ -42,7 +46,9 @@ interface TaskSnapshotStoreState {
   reportGatewayNotification: (notification: unknown, fallbackSessionKey?: string) => void;
   reportSessionUpdate: (event: SessionUpdateEvent) => void;
   reportSessionSnapshot: (snapshot: SessionStateSnapshot, source?: TaskSnapshotEvent['source']) => void;
+  getTodoList: (sessionKey: string) => TodoItem[];
   getTaskDataList: (sessionKey: string) => TaskData[];
+  getPersistentTaskDataList: (sessionKey: string) => TaskData[];
   getStatusMap: (sessionKey: string) => Record<string, TaskDataStatus>;
   getDerivedPlanStatus: (sessionKey: string) => DerivedPlanStatus;
   notifyChatStarted: (sessionKey: string) => void;
@@ -54,19 +60,6 @@ interface TaskSnapshotStoreState {
 const EMPTY_TASKS: TaskData[] = [];
 const EMPTY_TODOS: TodoItem[] = [];
 const EMPTY_STATUS_MAP: Record<string, TaskDataStatus> = {};
-const TASK_TOOL_METHODS = new Set([
-  'TaskCreate',
-  'TaskUpdate',
-  'TaskList',
-  'TaskGet',
-  'TodoWrite',
-  'task_create',
-  'task_update',
-  'task_list',
-  'task_get',
-  'task_claim',
-]);
-
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 }
@@ -261,6 +254,10 @@ function mergeTaskLists(current: TaskData[], incoming: TaskData[], deletedTaskId
   return sortTasks(Array.from(byId.values()).filter((task) => task.status !== 'deleted'));
 }
 
+function isEmptyReplay(source: TaskSnapshotEvent['source'] | undefined, tasks: TaskData[], todos?: TodoItem[]): boolean {
+  return source === 'replay' && tasks.length === 0 && Array.isArray(todos) && todos.length === 0;
+}
+
 function readSessionKey(value: unknown, fallback?: string): string {
   if (isRecord(value)) {
     const direct = normalizeString(value.sessionKey);
@@ -290,7 +287,7 @@ function normalizeToolPayload(method: string, params: Record<string, unknown>): 
   deletedTaskIds: string[];
   source: TaskSnapshotEvent['source'];
 } | null {
-  if (!TASK_TOOL_METHODS.has(method)) {
+  if (!isTaskSnapshotToolMethod(method)) {
     return null;
   }
   const tasks = [
@@ -301,7 +298,7 @@ function normalizeToolPayload(method: string, params: Record<string, unknown>): 
   const deletedTaskIds = params.deleted === true && normalizeString(params.taskId)
     ? [normalizeString(params.taskId)]
     : [];
-  if (method === 'TodoWrite') {
+  if (isTodoTaskToolName(method)) {
     return { tasks: [], todos, deletedTaskIds, source: 'todo' };
   }
   if (tasks.length === 0 && todos.length === 0 && deletedTaskIds.length === 0) {
@@ -454,6 +451,12 @@ export const useTaskSnapshotStore = create<TaskSnapshotStoreState>((set, get) =>
   reportSnapshotEvent: (event) => {
     const sessionKey = normalizeString(event.sessionKey);
     if (!sessionKey) return;
+    const current = get().snapshots[sessionKey];
+    if (isEmptyReplay(event.source, event.tasks, event.todos)) {
+      if (current && current.taskDataList.length > 0) {
+        return;
+      }
+    }
     get().reportTaskData(sessionKey, event.tasks, {
       source: event.source,
       enableEdit: event.enableEdit,
@@ -479,7 +482,7 @@ export const useTaskSnapshotStore = create<TaskSnapshotStoreState>((set, get) =>
         deletedTaskIds: payload.deletedTaskIds,
       });
     }
-    if (payload.todos.length > 0 || method === 'TodoWrite') {
+    if (payload.todos.length > 0 || isTodoTaskToolName(method)) {
       get().reportTodos(sessionKey, payload.todos);
     }
   },
@@ -511,17 +514,29 @@ export const useTaskSnapshotStore = create<TaskSnapshotStoreState>((set, get) =>
     }
   },
 
+  getTodoList: (sessionKey) => {
+    const snapshot = get().snapshots[sessionKey];
+    if (!snapshot) return EMPTY_TODOS;
+    return snapshot.todos;
+  },
+
   getTaskDataList: (sessionKey) => {
     const snapshot = get().snapshots[sessionKey];
     if (!snapshot) return EMPTY_TASKS;
     return snapshot.taskDataList;
   },
 
+  getPersistentTaskDataList: (sessionKey) => {
+    const snapshot = get().snapshots[sessionKey];
+    if (!snapshot) return EMPTY_TASKS;
+    return snapshot.tasks;
+  },
+
   getStatusMap: (sessionKey) => get().snapshots[sessionKey]?.statusMap ?? EMPTY_STATUS_MAP,
 
   getDerivedPlanStatus: (sessionKey) => {
     const snapshot = get().snapshots[sessionKey];
-    const tasks = get().getTaskDataList(sessionKey);
+    const tasks = get().getPersistentTaskDataList(sessionKey);
     if (tasks.length === 0) return null;
     if (tasks.every((task) => task.status === 'completed')) {
       return 'finished';

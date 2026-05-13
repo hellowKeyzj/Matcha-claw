@@ -45,8 +45,8 @@ function createFakeApi() {
   return { hooks, tools, gatewayMethods }
 }
 
-describe('task-manager task-list 插件入口注册', () => {
-  it('注册 task-list 工具与 task_manager 网关方法', () => {
+describe('task-manager 插件入口注册', () => {
+  it('只注册最终 task 工具与网关方法', () => {
     const { tools, gatewayMethods } = createFakeApi()
 
     expect(tools).toEqual([
@@ -56,11 +56,6 @@ describe('task-manager task-list 插件入口注册', () => {
       'TaskGet',
       'TodoWrite',
       'TodoGet',
-      'task_create',
-      'task_update',
-      'task_list',
-      'task_get',
-      'task_claim',
       'TaskOutput',
       'TaskStop',
     ])
@@ -74,11 +69,6 @@ describe('task-manager task-list 插件入口注册', () => {
       'TodoGet',
       'TaskOutput',
       'TaskStop',
-      'task_create',
-      'task_update',
-      'task_list',
-      'task_get',
-      'task_claim',
     ])
   })
 

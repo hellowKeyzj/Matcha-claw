@@ -113,6 +113,7 @@ export function useChatScroll({
     handleViewportPointerDown: controller.handleViewportPointerDown,
     handleViewportTouchMove: controller.handleViewportTouchMove,
     handleViewportWheel: controller.handleViewportWheel,
+    scrollViewportByWheelDelta: controller.scrollViewportByWheelDelta,
     prepareScopeAnchorRestore: controller.prepareScopeAnchorRestore,
     prepareScopeBottomAlign: controller.prepareScopeBottomAlign,
     notifyViewportGeometryChanged: controller.onResizeObserved,

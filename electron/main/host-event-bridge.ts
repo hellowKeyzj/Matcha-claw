@@ -17,6 +17,7 @@ type HostEventName =
   | 'gateway:error'
   | 'gateway:notification'
   | 'session:update'
+  | 'task:snapshot'
   | 'gateway:channel-status'
   | 'gateway:exit'
   | 'runtime-host:status'
@@ -194,6 +195,10 @@ export function registerHostEventBridge(deps: {
     }
     if (eventName === 'session:update') {
       emit('session:update', payload);
+      return;
+    }
+    if (eventName === 'task:snapshot') {
+      emit('task:snapshot', payload);
       return;
     }
     if (eventName === 'gateway:channel-status') {

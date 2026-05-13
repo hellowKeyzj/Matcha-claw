@@ -21,6 +21,9 @@ import type {
 import {
   normalizeString,
 } from './session-value-normalization';
+import {
+  filterStateOnlyRenderItem,
+} from './session-state-only-render-filter';
 
 export function cloneRenderItems(items: SessionRenderItem[]): SessionRenderItem[] {
   return structuredClone(items);
@@ -162,8 +165,11 @@ export function buildRenderItemsFromTimeline(input: {
         continue;
       }
       emittedAssistantTurnKeys.add(item.key);
-      renderItems.push(structuredClone(item));
-      flushAnchoredGraphs(item.key);
+      const filteredItem = filterStateOnlyRenderItem(item);
+      if (filteredItem) {
+        renderItems.push(filteredItem);
+        flushAnchoredGraphs(filteredItem.key);
+      }
       continue;
     }
 
@@ -205,8 +211,11 @@ export function buildRenderItemsFromTimeline(input: {
     pendingAssistantTurn
     && !renderItems.some((item) => item.kind === 'assistant-turn' && item.turnKey === pendingAssistantTurn.turnKey && item.laneKey === pendingAssistantTurn.laneKey)
   ) {
-    renderItems.push(pendingAssistantTurn);
-    flushAnchoredGraphs(pendingAssistantTurn.key);
+    const filteredPendingTurn = filterStateOnlyRenderItem(pendingAssistantTurn);
+    if (filteredPendingTurn) {
+      renderItems.push(filteredPendingTurn);
+      flushAnchoredGraphs(filteredPendingTurn.key);
+    }
   }
 
   renderItems.push(...tailGraphs);

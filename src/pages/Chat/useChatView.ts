@@ -4,14 +4,11 @@ interface UseChatViewInput {
   currentSessionStatus: ChatSessionHistoryStatus;
   itemCount: number;
   sending: boolean;
-  refreshing: boolean;
-  mutating: boolean;
 }
 
 export interface UseChatViewResult {
   showBlockingLoading: boolean;
   showBlockingError: boolean;
-  showBackgroundStatus: boolean;
   isEmptyState: boolean;
 }
 
@@ -20,8 +17,6 @@ export function useChatView(input: UseChatViewInput): UseChatViewResult {
     currentSessionStatus,
     itemCount,
     sending,
-    refreshing,
-    mutating,
   } = input;
 
   const hasRenderableItems = itemCount > 0;
@@ -29,13 +24,11 @@ export function useChatView(input: UseChatViewInput): UseChatViewResult {
     currentSessionStatus === 'idle' || currentSessionStatus === 'loading'
   );
   const showBlockingError = !sending && !hasRenderableItems && currentSessionStatus === 'error';
-  const showBackgroundStatus = !showBlockingLoading && !showBlockingError && (refreshing || mutating);
   const isEmptyState = !showBlockingLoading && !showBlockingError && !sending && itemCount === 0 && currentSessionStatus === 'ready';
 
   return {
     showBlockingLoading,
     showBlockingError,
-    showBackgroundStatus,
     isEmptyState,
   };
 }

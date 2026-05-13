@@ -166,6 +166,7 @@ export function registerOperationsApplicationServices(
     gateway: context.openclawBridge,
     capabilities: scope.resolve<GatewayPluginCapabilityPort>('gateway.capabilities'),
     clock: scope.resolve<RuntimeClockPort>('runtime.clock'),
+    workspace: scope.resolve<OpenClawWorkspacePort>('openclaw.workspaceService'),
     backgroundTasks: scope.resolve<BackgroundTaskManager>('runtime.backgroundTasks'),
     emitTaskSnapshot: (event) => {
       void context.parentGatewayEvents.emit('task:snapshot', event).catch(() => undefined);

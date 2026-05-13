@@ -284,6 +284,46 @@ describe('runtime-host internal routes', () => {
     });
   });
 
+  it('gateway-events 支持 task:snapshot 事件透传', async () => {
+    parseJsonBodyMock.mockResolvedValueOnce({
+      version: 1,
+      eventName: 'task:snapshot',
+      payload: {
+        sessionKey: 'agent:main:main',
+        tasks: [],
+        todos: [{ content: '同步 todo', status: 'completed' }],
+        source: 'todo',
+      },
+    });
+    const emitGatewayEvent = vi.fn();
+
+    const { handleRuntimeHostInternalRoutes } = await import('../../electron/api/routes/runtime-host-internal');
+    const handled = await handleRuntimeHostInternalRoutes(
+      {
+        method: 'POST',
+        headers: {
+          'x-runtime-host-dispatch-token': 'test-token',
+        },
+      } as unknown as IncomingMessage,
+      {} as ServerResponse,
+      new URL('http://127.0.0.1:3210/internal/runtime-host/gateway-events'),
+      {
+        runtimeHost: {
+          getInternalDispatchToken: () => 'test-token',
+          emitGatewayEvent,
+        },
+      } as never,
+    );
+
+    expect(handled).toBe(true);
+    expect(emitGatewayEvent).toHaveBeenCalledWith('task:snapshot', {
+      sessionKey: 'agent:main:main',
+      tasks: [],
+      todos: [{ content: '同步 todo', status: 'completed' }],
+      source: 'todo',
+    });
+  });
+
   it('非 POST 方法会返回统一 transport 错误体', async () => {
     const { handleRuntimeHostInternalRoutes } = await import('../../electron/api/routes/runtime-host-internal');
     const handled = await handleRuntimeHostInternalRoutes(

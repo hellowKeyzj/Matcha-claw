@@ -4,6 +4,7 @@ import {
   updateTask,
 } from '@/services/openclaw/task-manager-client';
 import { useTaskSnapshotStore } from '@/stores/chat/task-snapshot-store';
+import { logRendererDebug } from '@/lib/debug-logging';
 
 interface TaskCenterState {
   sessionKey: string | null;
@@ -19,8 +20,12 @@ interface TaskCenterState {
   clearError: () => void;
 }
 
-let taskCenterInitPromise: Promise<void> | null = null;
-let taskCenterRefreshPromise: Promise<void> | null = null;
+const taskCenterInitPromises = new Map<string, Promise<void>>();
+const taskCenterRefreshPromises = new Map<string, Promise<void>>();
+
+function logTaskPipeline(event: string, payload: Record<string, unknown>): void {
+  logRendererDebug(`[task-pipeline] task-center.${event}`, payload);
+}
 
 function resolveSessionKey(current: string | null, next?: string): string | null {
   if (typeof next === 'string' && next.trim().length > 0) {
@@ -43,21 +48,24 @@ export const useTaskCenterStore = create<TaskCenterState>((set, get) => ({
       set({ initialized: true, initialLoading: false, refreshing: false, error: null });
       return;
     }
-    if (taskCenterInitPromise) {
-      await taskCenterInitPromise;
+    const pendingInit = taskCenterInitPromises.get(resolvedSessionKey);
+    if (pendingInit) {
+      await pendingInit;
       return;
     }
     set({ sessionKey: resolvedSessionKey, initialLoading: true, refreshing: false, error: null });
     const task = get().refreshTasks({ sessionKey: resolvedSessionKey, silent: true })
       .finally(() => {
-        set({ initialized: true, initialLoading: false });
+        if (get().sessionKey === resolvedSessionKey) {
+          set({ initialized: true, initialLoading: false });
+        }
       });
-    taskCenterInitPromise = task;
+    taskCenterInitPromises.set(resolvedSessionKey, task);
     try {
       await task;
     } finally {
-      if (taskCenterInitPromise === task) {
-        taskCenterInitPromise = null;
+      if (taskCenterInitPromises.get(resolvedSessionKey) === task) {
+        taskCenterInitPromises.delete(resolvedSessionKey);
       }
     }
   },
@@ -68,36 +76,60 @@ export const useTaskCenterStore = create<TaskCenterState>((set, get) => ({
       set({ sessionKey: null, refreshing: false, error: null });
       return;
     }
-    if (taskCenterRefreshPromise) {
-      await taskCenterRefreshPromise;
+    const pendingRefresh = taskCenterRefreshPromises.get(resolvedSessionKey);
+    if (pendingRefresh) {
+      await pendingRefresh;
       return;
     }
     if (!options?.silent) {
-      set({ refreshing: true, error: null });
+      set({ sessionKey: resolvedSessionKey, refreshing: true, error: null });
+    } else if (get().sessionKey !== resolvedSessionKey) {
+      set({ sessionKey: resolvedSessionKey });
     }
-    taskCenterRefreshPromise = (async () => {
+    const task = (async () => {
       try {
-        const snapshot = await listTaskSnapshot(resolvedSessionKey);
-        useTaskSnapshotStore.getState().reportTaskData(resolvedSessionKey, snapshot.tasks, { source: 'replay' });
-        useTaskSnapshotStore.getState().reportTodos(resolvedSessionKey, snapshot.todos);
-        set({
+        logTaskPipeline('refresh.start', {
           sessionKey: resolvedSessionKey,
-          refreshing: false,
-          error: null,
-          initialized: true,
+          silent: options?.silent === true,
+          storeSessionKey: get().sessionKey,
         });
+        const snapshot = await listTaskSnapshot(resolvedSessionKey);
+        logTaskPipeline('refresh.result', {
+          sessionKey: resolvedSessionKey,
+          tasksCount: snapshot.tasks.length,
+          todosCount: snapshot.todos.length,
+        });
+        useTaskSnapshotStore.getState().reportSnapshotEvent({
+          sessionKey: resolvedSessionKey,
+          tasks: snapshot.tasks,
+          todos: snapshot.todos,
+          source: 'replay',
+        });
+        if (get().sessionKey === resolvedSessionKey) {
+          set({
+            sessionKey: resolvedSessionKey,
+            refreshing: false,
+            error: null,
+            initialized: true,
+          });
+        }
       } catch (error) {
-        set({
-          refreshing: false,
-          error: error instanceof Error ? error.message : String(error),
-          initialized: true,
-        });
+        if (get().sessionKey === resolvedSessionKey) {
+          set({
+            refreshing: false,
+            error: error instanceof Error ? error.message : String(error),
+            initialized: true,
+          });
+        }
       }
     })();
+    taskCenterRefreshPromises.set(resolvedSessionKey, task);
     try {
-      await taskCenterRefreshPromise;
+      await task;
     } finally {
-      taskCenterRefreshPromise = null;
+      if (taskCenterRefreshPromises.get(resolvedSessionKey) === task) {
+        taskCenterRefreshPromises.delete(resolvedSessionKey);
+      }
     }
   },
 

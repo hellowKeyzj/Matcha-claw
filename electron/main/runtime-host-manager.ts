@@ -28,6 +28,7 @@ export type RuntimeHostGatewayForwardEventName =
   | 'gateway:lifecycle'
   | 'gateway:notification'
   | 'session:update'
+  | 'task:snapshot'
   | 'gateway:channel-status'
   | 'gateway:error';
 

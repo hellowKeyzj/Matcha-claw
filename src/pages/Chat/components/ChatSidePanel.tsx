@@ -11,6 +11,7 @@ import { useChatStore } from '@/stores/chat';
 import { useTaskCenterStore } from '@/stores/task-center-store';
 import { useTaskSnapshotStore } from '@/stores/chat/task-snapshot-store';
 import { isGatewayOperational, isGatewayPreparing } from '@/lib/gateway-status';
+import { resolveTaskExecutionSessionKey } from '@/lib/task-domain';
 import type { ChatSidePanelMode } from '../chat-workspace-layout';
 import type { ChatSidePanelTab } from '../useChatSidePanelController';
 import { AgentSkillConfigPanel, type AgentSkillOption } from './AgentSkillConfigPanel';
@@ -140,7 +141,7 @@ export const ChatSidePanel = memo(function ChatSidePanel({
   const gatewayPreparing = isGatewayPreparing(gatewayStatus, gatewayInitialized);
   const currentSessionKey = useChatStore((state) => state.currentSessionKey);
   const openTaskSession = useChatStore((state) => state.openTaskSession);
-  const tasks = useTaskSnapshotStore((state) => state.getTaskDataList(currentSessionKey));
+  const tasks = useTaskSnapshotStore((state) => state.getPersistentTaskDataList(currentSessionKey));
   const loading = useTaskCenterStore((state) => state.initialLoading || state.refreshing);
   const initialized = useTaskCenterStore((state) => state.initialized);
   const error = useTaskCenterStore((state) => state.error);
@@ -212,11 +213,12 @@ export const ChatSidePanel = memo(function ChatSidePanel({
   };
 
   const handleOpenSession = (taskId: string) => {
-    if (!tasks.some((task) => task.id === taskId)) {
+    const task = tasks.find((item) => item.id === taskId);
+    if (!task) {
       toast.error(t('taskInbox.taskNotFound'));
       return;
     }
-    openTaskSession(currentSessionKey);
+    openTaskSession(resolveTaskExecutionSessionKey(task, currentSessionKey));
   };
 
   const handleOpenRelativeArtifactFile = (offset: -1 | 1) => {

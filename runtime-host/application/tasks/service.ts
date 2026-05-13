@@ -5,17 +5,28 @@ import {
 } from '../gateway/gateway-capability-service';
 import { badRequest, ok, type ApplicationResponseOf } from '../common/application-response';
 import type { RuntimeClockPort } from '../common/runtime-ports';
+import type { OpenClawWorkspacePort } from '../openclaw/openclaw-workspace-service';
 import type { BackgroundTaskManager } from '../../services/background-task-manager';
 import type { TaskData, TaskSnapshotEvent, TodoItem } from '../../shared/session-adapter-types';
+import { isTraceLogLevelEnabled } from '../../shared/trace-log-level';
+import { isTodoTaskToolName } from '../../shared/task-tool-contract';
 
 const TASK_RPC_TIMEOUT_MS = 60_000;
 const TASK_CAPABILITY_TIMEOUT_MS = 5_000;
+
+function logTaskPipeline(event: string, payload: Record<string, unknown>): void {
+  if (!isTraceLogLevelEnabled(process.env.MATCHACLAW_TRACE_LOG_LEVEL, 2)) {
+    return;
+  }
+  console.info(`[task-pipeline] runtime-host.${event}`, payload);
+}
 
 export class TaskManagerService {
   constructor(private readonly deps: {
     readonly gateway: Pick<GatewayRpcPort, 'gatewayRpc'>;
     readonly capabilities: GatewayPluginCapabilityPort;
     readonly clock: RuntimeClockPort;
+    readonly workspace: Pick<OpenClawWorkspacePort, 'getWorkspaceDirForSession'>;
     readonly backgroundTasks?: BackgroundTaskManager;
     readonly emitTaskSnapshot?: (event: TaskSnapshotEvent) => void;
   }) {}
@@ -107,7 +118,6 @@ export class TaskManagerService {
     }
     return await this.callTaskTool('TodoWrite', sessionKey, {
       sessionKey,
-      ...(Array.isArray(body.oldTodos) ? { oldTodos: body.oldTodos } : {}),
       newTodos: body.newTodos,
       ...this.readOptionalScopePayload(body),
     });
@@ -179,7 +189,11 @@ export class TaskManagerService {
     if (unavailable) {
       return null;
     }
-    const data = await this.deps.gateway.gatewayRpc('TaskList', { sessionKey: normalizedSessionKey }, TASK_RPC_TIMEOUT_MS);
+    const data = await this.deps.gateway.gatewayRpc(
+      'TaskList',
+      await this.buildScopedParams(normalizedSessionKey, { sessionKey: normalizedSessionKey }),
+      TASK_RPC_TIMEOUT_MS,
+    );
     if (!data || typeof data !== 'object' || Array.isArray(data)) {
       return null;
     }
@@ -211,7 +225,31 @@ export class TaskManagerService {
     if (unavailable) {
       return unavailable;
     }
-    const data = await this.deps.gateway.gatewayRpc(method, params, TASK_RPC_TIMEOUT_MS);
+    logTaskPipeline('rpc.start', {
+      method,
+      sessionKey,
+      paramSessionKey: typeof params.sessionKey === 'string' ? params.sessionKey : null,
+      hasTeamKey: typeof params.teamKey === 'string' && params.teamKey.trim().length > 0,
+    });
+    const scopedParams = await this.buildScopedParams(sessionKey, params);
+    const data = await this.deps.gateway.gatewayRpc(method, scopedParams, TASK_RPC_TIMEOUT_MS);
+    if (data && typeof data === 'object' && !Array.isArray(data)) {
+      const record = data as Record<string, unknown>;
+      logTaskPipeline('rpc.result', {
+        method,
+        sessionKey,
+        tasksCount: Array.isArray(record.tasks) ? record.tasks.length : 0,
+        taskCount: record.task ? 1 : 0,
+        todosCount: Array.isArray(record.todos) ? record.todos.length : 0,
+        deleted: record.deleted === true,
+      });
+    } else {
+      logTaskPipeline('rpc.result', {
+        method,
+        sessionKey,
+        resultType: Array.isArray(data) ? 'array' : typeof data,
+      });
+    }
     this.emitSnapshotFromToolResult(method, sessionKey, data);
     return ok(data);
   }
@@ -233,11 +271,18 @@ export class TaskManagerService {
     if (eventTasks.length === 0 && todos.length === 0) {
       return;
     }
+    logTaskPipeline('snapshot.emit', {
+      method,
+      sessionKey,
+      tasksCount: eventTasks.length,
+      todosCount: todos.length,
+      source: isTodoTaskToolName(method) ? 'todo' : 'tool',
+    });
     this.deps.emitTaskSnapshot({
       sessionKey,
       tasks: eventTasks,
-      ...(todos.length > 0 || method === 'TodoWrite' || method === 'TodoGet' ? { todos } : {}),
-      source: method === 'TodoWrite' || method === 'TodoGet' ? 'todo' : 'tool',
+      ...(todos.length > 0 || isTodoTaskToolName(method) ? { todos } : {}),
+      source: isTodoTaskToolName(method) ? 'todo' : 'tool',
     });
   }
 
@@ -245,6 +290,13 @@ export class TaskManagerService {
     return {
       ...(this.readString(body.workspaceDir) ? { workspaceDir: this.readString(body.workspaceDir) } : {}),
       ...(this.readString(body.teamKey) ? { teamKey: this.readString(body.teamKey) } : {}),
+    };
+  }
+
+  private async buildScopedParams(sessionKey: string, params: Record<string, unknown>): Promise<Record<string, unknown>> {
+    return {
+      ...params,
+      workspaceDir: this.readString(params.workspaceDir) || await this.deps.workspace.getWorkspaceDirForSession(sessionKey),
     };
   }
 

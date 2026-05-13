@@ -14,6 +14,11 @@ import {
   normalizeTaskArtifactSnapshot,
   normalizeTaskToolSnapshot,
 } from './task-snapshot-normalizer';
+import {
+  isStateOnlyToolCallSnapshotName,
+  isStateOnlyToolName,
+  canonicalizeToolName,
+} from './state-only-tools';
 import type {
   GatewayConversationToolLifecyclePayload,
   GatewaySessionIngressEvent,
@@ -129,12 +134,12 @@ function normalizeToolLifecyclePayload(
   const sequenceId = normalizeFiniteNumber(payload.sequenceId);
   const timestamp = normalizeFiniteNumber(payload.timestamp);
   const toolCallId = normalizeString(payload.toolCallId);
-  const name = normalizeString(payload.name)
+  const name = canonicalizeToolName(payload.name)
     || resolveExistingToolName(options.existingEntries, toolCallId);
   if (!phase || !runId || !sessionKey || sequenceId == null || timestamp == null || !toolCallId) {
     return null;
   }
-  if (phase === 'start' && !name) {
+  if (!name) {
     return null;
   }
 
@@ -171,6 +176,24 @@ export function buildToolLifecycleIngressEvents(
   });
   if (!toolLifecycle) {
     return [];
+  }
+  if (isStateOnlyToolName(toolLifecycle.message.toolName)) {
+    const payloadForSnapshot = toolLifecycle.phase === 'start' && isStateOnlyToolCallSnapshotName(toolLifecycle.message.toolName)
+      ? payload.args
+      : payload.result;
+    const taskSnapshot = normalizeTaskToolSnapshot(
+      toolLifecycle.message.toolName,
+      payloadForSnapshot,
+      toolLifecycle.sessionKey,
+    );
+    return taskSnapshot
+      ? [{
+          sessionUpdate: 'plan',
+          sessionKey: taskSnapshot.sessionKey,
+          runId: toolLifecycle.runId,
+          taskSnapshot,
+        }]
+      : [];
   }
   const entries = buildTimelineEntriesFromTranscriptMessage(
     toolLifecycle.sessionKey,

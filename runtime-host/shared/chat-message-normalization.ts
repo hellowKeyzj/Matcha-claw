@@ -250,8 +250,45 @@ export function isInternalAssistantControlMessage(value: unknown): boolean {
   if (normalizeMessageRole(message.role) !== 'assistant') {
     return false;
   }
-  const text = extractMessageText(message.content ?? message.text).trim();
-  return /^(HEARTBEAT_OK|NO_REPLY)$/.test(text);
+  const text = readAssistantControlText(message).trim();
+  return isExactAssistantControlText(text);
+}
+
+function readAssistantControlText(message: ChatMessageRecord): string {
+  if (typeof message.text === 'string') {
+    return message.text;
+  }
+  return extractMessageText(message.content);
+}
+
+function isExactAssistantControlText(text: string): boolean {
+  return /^(HEARTBEAT_OK|NO_REPLY)$/i.test(text.trim());
+}
+
+export function isAssistantControlPrefixMessage(value: unknown): boolean {
+  const message = isRecord(value) ? value : {};
+  if (normalizeMessageRole(message.role) !== 'assistant') {
+    return false;
+  }
+  const text = readAssistantControlText(message).trimStart();
+  if (!text) {
+    return false;
+  }
+  if (isExactAssistantControlText(text)) {
+    return true;
+  }
+  if (text !== text.toUpperCase()) {
+    return false;
+  }
+  if (text.length < 2 || /[^A-Z_]/.test(text)) {
+    return false;
+  }
+  const silentReply = 'NO_REPLY';
+  const heartbeat = 'HEARTBEAT_OK';
+  if (text.includes('_')) {
+    return silentReply.startsWith(text) || heartbeat.startsWith(text);
+  }
+  return text === 'NO';
 }
 
 function isRuntimeSystemInjectionText(text: string): boolean {
@@ -280,8 +317,10 @@ export function isInternalRuntimeDisplayMessage(value: unknown): boolean {
   if (role !== 'user' && role !== 'assistant') {
     return false;
   }
-  const text = extractMessageText(message.content ?? message.text);
-  if (role === 'assistant' && /^(HEARTBEAT_OK|NO_REPLY)\s*$/.test(text.trim())) {
+  const text = role === 'assistant'
+    ? readAssistantControlText(message)
+    : extractMessageText(message.content ?? message.text);
+  if (role === 'assistant' && isExactAssistantControlText(text)) {
     return true;
   }
   return isRuntimeSystemInjectionText(text);
