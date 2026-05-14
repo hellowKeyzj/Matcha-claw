@@ -14,6 +14,8 @@ import type {
 
 export function createEmptySessionRuntimeState(): SessionRuntimeStateSnapshot {
   return {
+    revision: 0,
+    runEpoch: 0,
     sending: false,
     activeRunId: null,
     runPhase: 'idle',
@@ -33,6 +35,8 @@ export function createEmptyTimelineState(
 ): SessionRuntimeTimelineState {
   return {
     sessionKey: '',
+    revision: 0,
+    runEpoch: 0,
     timelineEntries: [],
     executionGraphItems: [],
     renderItems: [],

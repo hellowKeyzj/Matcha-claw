@@ -26,6 +26,7 @@ import { SessionTimelineRuntime } from './session-timeline-runtime';
 import {
   accepted,
   badRequest,
+  conflict,
   notFound,
   ok,
   serverError,
@@ -40,6 +41,7 @@ import type {
 import type { SessionCatalogJobPort } from './session-catalog-jobs';
 import type { TaskSnapshotEvent } from '../../shared/session-adapter-types';
 import type { PendingApprovalStore } from './pending-approval-store';
+import { SessionOperationCoordinator } from './session-operation-coordinator';
 
 export interface SessionCommandServiceDeps {
   sessionCatalog: SessionCatalogPort;
@@ -50,6 +52,7 @@ export interface SessionCommandServiceDeps {
   snapshotService: SessionSnapshotService;
   gateway: Pick<GatewayRpcPort, 'gatewayRpc'>;
   pendingApprovals: Pick<PendingApprovalStore, 'list'>;
+  operationCoordinator: SessionOperationCoordinator;
   clock: RuntimeClockPort;
   idGenerator: RuntimeIdGeneratorPort;
   sessionHydrationJobs: SessionHydrationJobPort;
@@ -120,10 +123,11 @@ export class SessionCommandService {
       return notFound(`Unknown sessionKey: ${sessionKey}`);
     }
 
-    await this.deps.sessionStorage.updateSessionStatus(sessionKey, 'deleted');
+    await this.deps.sessionStorage.deleteSession(sessionKey);
     this.deps.stateStore.deleteSessionState(sessionKey);
     this.deps.stateStore.persistStore();
     await this.deps.stateStore.flushPersistedStore();
+    await this.deps.sessionCatalog.refreshCache().catch(() => undefined);
     return ok({ success: true });
   }
 
@@ -191,25 +195,27 @@ export class SessionCommandService {
       return badRequest('sessionKey is required');
     }
 
-    const state = await this.deps.timelineRuntime.activateSession(sessionKey, {
-      resetWindowToLatest: true,
-    });
-    const result: SessionLoadResult = this.withTaskSnapshot(sessionKey, {
-      snapshot: await this.deps.snapshotService.buildLatestSnapshotAsync(sessionKey, state, {
-        replayComplete: state.hydrated,
-      }),
-    });
-    await this.deps.stateStore.flushPersistedStore();
-    if (!state.hydrated) {
-      return accepted({
-        ...result,
-        hydrationJob: this.submitHydrationJob({
-          sessionKey,
-          snapshot: { kind: 'latest' },
+    return await this.deps.operationCoordinator.run(sessionKey, 'resume', async () => {
+      const state = await this.deps.timelineRuntime.activateSession(sessionKey, {
+        resetWindowToLatest: true,
+      });
+      const result: SessionLoadResult = this.withTaskSnapshot(sessionKey, {
+        snapshot: await this.deps.snapshotService.buildLatestSnapshotAsync(sessionKey, state, {
+          replayComplete: state.hydrated,
         }),
       });
-    }
-    return ok(result);
+      await this.deps.stateStore.flushPersistedStore();
+      if (!state.hydrated) {
+        return accepted({
+          ...result,
+          hydrationJob: this.submitHydrationJob({
+            sessionKey,
+            snapshot: { kind: 'latest' },
+          }),
+        });
+      }
+      return ok(result);
+    });
   }
 
   async resumeSession(payload: unknown): Promise<ApplicationResponseOf<SessionLoadResult | SessionHydratingLoadResult | { success: false; error: string }>> {
@@ -218,28 +224,30 @@ export class SessionCommandService {
       return badRequest('sessionKey is required');
     }
 
-    const state = await this.deps.timelineRuntime.activateSession(sessionKey, {
-      resetWindowToLatest: false,
-    });
-    const result: SessionLoadResult = this.withTaskSnapshot(sessionKey, {
-      snapshot: await this.deps.snapshotService.buildSnapshotAsync(sessionKey, state, {
-        window: state.window.totalItemCount > 0
-          ? state.window
-          : createLatestWindowState(state.renderItems.length),
-        replayComplete: state.hydrated,
-      }),
-    });
-    await this.deps.stateStore.flushPersistedStore();
-    if (!state.hydrated) {
-      return accepted({
-        ...result,
-        hydrationJob: this.submitHydrationJob({
-          sessionKey,
-          snapshot: { kind: 'state' },
+    return await this.deps.operationCoordinator.run(sessionKey, 'resume', async () => {
+      const state = await this.deps.timelineRuntime.activateSession(sessionKey, {
+        resetWindowToLatest: false,
+      });
+      const result: SessionLoadResult = this.withTaskSnapshot(sessionKey, {
+        snapshot: await this.deps.snapshotService.buildSnapshotAsync(sessionKey, state, {
+          window: state.window.totalItemCount > 0
+            ? state.window
+            : createLatestWindowState(state.renderItems.length),
+          replayComplete: state.hydrated,
         }),
       });
-    }
-    return ok(result);
+      await this.deps.stateStore.flushPersistedStore();
+      if (!state.hydrated) {
+        return accepted({
+          ...result,
+          hydrationJob: this.submitHydrationJob({
+            sessionKey,
+            snapshot: { kind: 'state' },
+          }),
+        });
+      }
+      return ok(result);
+    });
   }
 
   async patchSession(payload: unknown): Promise<ApplicationResponseOf> {
@@ -250,24 +258,41 @@ export class SessionCommandService {
     if (!model) {
       return badRequest('model is required');
     }
-    const patchResult = await this.deps.gateway.gatewayRpc('sessions.patch', {
-      key: sessionKey,
-      model,
-    }, 30000);
-    this.deps.stateStore.setResolvedSessionModel(sessionKey, readPatchedSessionResolvedModel(model, patchResult));
+    return await this.deps.operationCoordinator.run(sessionKey, 'patch-model', async () => {
+      const current = this.deps.stateStore.getSessionState(sessionKey).runtime;
+      if (current.sending || current.pendingFinal || current.activeRunId) {
+        const state = await this.deps.timelineRuntime.activateSession(sessionKey, {
+          resetWindowToLatest: false,
+        });
+        const snapshot = await this.deps.snapshotService.buildLatestSnapshotAsync(sessionKey, state, {
+          replayComplete: state.hydrated,
+        });
+        return conflict({
+          success: false,
+          code: 'ACTIVE_RUN',
+          error: 'Cannot switch model while a session run is active',
+          snapshot,
+        });
+      }
+      const patchResult = await this.deps.gateway.gatewayRpc('sessions.patch', {
+        key: sessionKey,
+        model,
+      }, 10000);
+      this.deps.stateStore.setResolvedSessionModel(sessionKey, readPatchedSessionResolvedModel(model, patchResult));
 
-    const state = await this.deps.timelineRuntime.activateSession(sessionKey, {
-      resetWindowToLatest: false,
-    });
-    this.deps.timelineRuntime.clearSessionRuntimeErrorState(sessionKey);
-    const snapshot = await this.deps.snapshotService.buildLatestSnapshotAsync(sessionKey, state, {
-      replayComplete: state.hydrated,
-    });
-    await this.deps.stateStore.flushPersistedStore();
+      const state = await this.deps.timelineRuntime.activateSession(sessionKey, {
+        resetWindowToLatest: false,
+      });
+      this.deps.timelineRuntime.clearSessionRuntimeErrorState(sessionKey);
+      const snapshot = await this.deps.snapshotService.buildLatestSnapshotAsync(sessionKey, state, {
+        replayComplete: state.hydrated,
+      });
+      await this.deps.stateStore.flushPersistedStore();
 
-    return ok({
-      success: true,
-      snapshot,
+      return ok({
+        success: true,
+        snapshot,
+      });
     });
   }
 
@@ -280,26 +305,28 @@ export class SessionCommandService {
     if (!sessionKey) {
       return badRequest('sessionKey is required');
     }
-    const state = await this.deps.timelineRuntime.activateSession(sessionKey);
-    const data: SessionLoadResult = this.withTaskSnapshot(sessionKey, {
-      snapshot: await this.deps.snapshotService.buildSnapshotAsync(sessionKey, state, {
-        window: state.window.totalItemCount > 0
-          ? state.window
-          : createLatestWindowState(state.renderItems.length),
-        replayComplete: state.hydrated,
-      }),
-    });
-    await this.deps.stateStore.flushPersistedStore();
-    if (!state.hydrated) {
-      return accepted({
-        ...data,
-        hydrationJob: this.submitHydrationJob({
-          sessionKey,
-          snapshot: { kind: 'state' },
+    return await this.deps.operationCoordinator.run(sessionKey, 'resume', async () => {
+      const state = await this.deps.timelineRuntime.activateSession(sessionKey);
+      const data: SessionLoadResult = this.withTaskSnapshot(sessionKey, {
+        snapshot: await this.deps.snapshotService.buildSnapshotAsync(sessionKey, state, {
+          window: state.window.totalItemCount > 0
+            ? state.window
+            : createLatestWindowState(state.renderItems.length),
+          replayComplete: state.hydrated,
         }),
       });
-    }
-    return ok(data);
+      await this.deps.stateStore.flushPersistedStore();
+      if (!state.hydrated) {
+        return accepted({
+          ...data,
+          hydrationJob: this.submitHydrationJob({
+            sessionKey,
+            snapshot: { kind: 'state' },
+          }),
+        });
+      }
+      return ok(data);
+    });
   }
 
   async getSessionWindow(payload: unknown): Promise<ApplicationResponseOf<SessionWindowResult | SessionHydratingWindowResult | { success: false; error: string }>> {
@@ -317,65 +344,101 @@ export class SessionCommandService {
       return badRequest(`offset is required for mode: ${mode}`);
     }
 
-    const state = await this.deps.timelineRuntime.activateSession(sessionKey);
-    if (!state.hydrated) {
+    return await this.deps.operationCoordinator.run(sessionKey, 'resume', async () => {
+      const state = await this.deps.timelineRuntime.activateSession(sessionKey);
+      if (!state.hydrated) {
+        const result: SessionWindowResult = this.withTaskSnapshot(sessionKey, {
+          snapshot: await this.deps.snapshotService.buildSnapshotAsync(sessionKey, state, {
+            window: state.window.totalItemCount > 0
+              ? state.window
+              : createLatestWindowState(state.renderItems.length),
+            replayComplete: false,
+          }),
+        });
+        await this.deps.stateStore.flushPersistedStore();
+        return accepted({
+          ...result,
+          hydrationJob: this.submitHydrationJob({
+            sessionKey,
+            snapshot: {
+              kind: 'window',
+              mode,
+              limit,
+              offset,
+            },
+          }),
+        });
+      }
       const result: SessionWindowResult = this.withTaskSnapshot(sessionKey, {
-        snapshot: await this.deps.snapshotService.buildSnapshotAsync(sessionKey, state, {
-          window: state.window.totalItemCount > 0
-            ? state.window
-            : createLatestWindowState(state.renderItems.length),
-          replayComplete: false,
+        snapshot: await this.deps.snapshotService.buildWindowSnapshotAsync(sessionKey, state, {
+          mode,
+          limit,
+          offset,
         }),
       });
       await this.deps.stateStore.flushPersistedStore();
-      return accepted({
-        ...result,
-        hydrationJob: this.submitHydrationJob({
-          sessionKey,
-          snapshot: {
-            kind: 'window',
-            mode,
-            limit,
-            offset,
-          },
-        }),
-      });
-    }
-    const result: SessionWindowResult = this.withTaskSnapshot(sessionKey, {
-      snapshot: await this.deps.snapshotService.buildWindowSnapshotAsync(sessionKey, state, {
-        mode,
-        limit,
-        offset,
-      }),
+      return ok(result);
     });
-    await this.deps.stateStore.flushPersistedStore();
-    return ok(result);
   }
 
-  async abortSessionRuntime(payload: unknown): Promise<ApplicationResponseOf<SessionLoadResult & { success: boolean } | { success: false; error: string }>> {
+  private async commitAbortSession(sessionKey: string): Promise<ApplicationResponseOf<SessionLoadResult & { success: boolean } | { success: false; error: string }>> {
+    return await this.deps.operationCoordinator.run(sessionKey, 'abort', async () => {
+      const currentRunId = this.deps.stateStore.getSessionState(sessionKey).runtime.activeRunId;
+      const committed = this.deps.timelineRuntime.commitSessionTransition(sessionKey, {
+        markTerminatedRunId: currentRunId,
+        runtimePatch: {
+          sending: false,
+          activeRunId: null,
+          runPhase: 'aborted',
+          activeTurnItemKey: null,
+          pendingTurnKey: null,
+          pendingTurnLaneKey: null,
+          pendingFinal: false,
+          lastError: null,
+          lastIssue: null,
+        },
+        activeTransportEpoch: null,
+        advanceRunEpoch: true,
+        resetWindowToLatest: true,
+      });
+      const result: SessionLoadResult & { success: boolean } = {
+        success: true,
+        snapshot: {
+          ...await this.deps.snapshotService.buildLatestSnapshotAsync(sessionKey, committed.state, {
+            replayComplete: committed.state.hydrated,
+          }),
+          runtime: committed.runtime,
+        },
+      };
+      await this.deps.stateStore.flushPersistedStore();
+      return ok(result);
+    });
+  }
+
+  async abortSession(payload: unknown): Promise<ApplicationResponseOf<SessionLoadResult & { success: boolean } | { success: false; error: string }>> {
     const sessionKey = readAbortSessionKey(payload, this.deps.stateStore.getActiveSessionKey());
     if (!sessionKey) {
       return badRequest('sessionKey is required');
     }
 
-    const runtime = this.deps.timelineRuntime.resolveLifecycleRuntime(sessionKey, {
-      phase: 'aborted',
-      runId: null,
-    });
-    const state = await this.deps.timelineRuntime.activateSession(sessionKey, {
-      resetWindowToLatest: true,
-    });
-    const result: SessionLoadResult & { success: boolean } = {
-      success: true,
-      snapshot: {
-        ...await this.deps.snapshotService.buildLatestSnapshotAsync(sessionKey, state, {
-          replayComplete: state.hydrated,
-        }),
-        runtime,
-      },
-    };
-    await this.deps.stateStore.flushPersistedStore();
-    return ok(result);
+    const body = payload && typeof payload === 'object' && !Array.isArray(payload)
+      ? payload as Record<string, unknown>
+      : {};
+    const rawApprovalIds = Array.isArray(body.approvalIds) ? body.approvalIds : [];
+    void Promise.all(rawApprovalIds.map((rawApprovalId) => {
+      const approvalId = typeof rawApprovalId === 'string' ? rawApprovalId.trim() : '';
+      if (!approvalId) {
+        return Promise.resolve();
+      }
+      return this.deps.gateway.gatewayRpc('exec.approval.resolve', {
+        id: approvalId,
+        decision: 'deny',
+      }, 5000).catch(() => undefined);
+    })).catch(() => undefined);
+
+    const response = await this.commitAbortSession(sessionKey);
+    void this.deps.gateway.gatewayRpc('chat.abort', { sessionKey }, 5000).catch(() => undefined);
+    return response;
   }
 
   async listPendingApprovals(): Promise<ApplicationResponseOf<unknown>> {
@@ -397,54 +460,31 @@ export class SessionCommandService {
     return ok(await this.deps.gateway.gatewayRpc('exec.approval.resolve', { id, decision }));
   }
 
-  async abortSession(payload: unknown): Promise<ApplicationResponseOf<SessionLoadResult & { success: boolean } | { success: false; error: string }>> {
-    const sessionKey = readAbortSessionKey(payload, this.deps.stateStore.getActiveSessionKey());
-    if (!sessionKey) {
-      return badRequest('sessionKey is required');
-    }
-
-    const body = payload && typeof payload === 'object' && !Array.isArray(payload)
-      ? payload as Record<string, unknown>
-      : {};
-    const rawApprovalIds = Array.isArray(body.approvalIds) ? body.approvalIds : [];
-    for (const rawApprovalId of rawApprovalIds) {
-      const approvalId = typeof rawApprovalId === 'string' ? rawApprovalId.trim() : '';
-      if (!approvalId) {
-        continue;
-      }
-      await this.deps.gateway.gatewayRpc('exec.approval.resolve', {
-        id: approvalId,
-        decision: 'deny',
-      });
-    }
-
-    await this.deps.gateway.gatewayRpc('chat.abort', { sessionKey });
-    return await this.abortSessionRuntime({ sessionKey });
-  }
-
   async executeSessionHydration(payload: unknown): Promise<SessionLoadResult | SessionWindowResult> {
     const sessionKey = readRequiredSessionKey(payload);
     if (!sessionKey) {
       throw new Error('sessionKey is required');
     }
-    const state = await this.deps.timelineRuntime.hydrateSession(sessionKey);
-    const snapshotRequest = this.readHydrationSnapshotRequest(payload);
-    const snapshot = snapshotRequest.kind === 'latest'
-      ? await this.deps.snapshotService.buildLatestSnapshotAsync(sessionKey, state)
-      : snapshotRequest.kind === 'window'
-        ? await this.deps.snapshotService.buildWindowSnapshotAsync(sessionKey, state, {
-            mode: snapshotRequest.mode,
-            limit: snapshotRequest.limit,
-            offset: snapshotRequest.offset,
-          })
-        : await this.deps.snapshotService.buildSnapshotAsync(sessionKey, state, {
-            window: state.window.totalItemCount > 0
-              ? state.window
-              : createLatestWindowState(state.renderItems.length),
-            replayComplete: true,
-          });
-    await this.deps.stateStore.flushPersistedStore();
-    return this.withTaskSnapshot(sessionKey, { snapshot });
+    return await this.deps.operationCoordinator.run(sessionKey, 'reconcile', async () => {
+      const state = await this.deps.timelineRuntime.hydrateSession(sessionKey);
+      const snapshotRequest = this.readHydrationSnapshotRequest(payload);
+      const snapshot = snapshotRequest.kind === 'latest'
+        ? await this.deps.snapshotService.buildLatestSnapshotAsync(sessionKey, state)
+        : snapshotRequest.kind === 'window'
+          ? await this.deps.snapshotService.buildWindowSnapshotAsync(sessionKey, state, {
+              mode: snapshotRequest.mode,
+              limit: snapshotRequest.limit,
+              offset: snapshotRequest.offset,
+            })
+          : await this.deps.snapshotService.buildSnapshotAsync(sessionKey, state, {
+              window: state.window.totalItemCount > 0
+                ? state.window
+                : createLatestWindowState(state.renderItems.length),
+              replayComplete: true,
+            });
+      await this.deps.stateStore.flushPersistedStore();
+      return this.withTaskSnapshot(sessionKey, { snapshot });
+    });
   }
 
   private readHydrationSnapshotRequest(payload: unknown): {

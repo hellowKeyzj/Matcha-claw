@@ -23,6 +23,7 @@ import {
 import { SessionRuntimeStateStore } from './session-runtime-state';
 import {
   collectPendingRunClosureSignal,
+  cloneRenderItems,
 } from './session-render-model';
 import {
   cloneSessionRuntimeState,
@@ -33,6 +34,7 @@ import {
   createLatestWindowState,
 } from './session-window-model';
 import type {
+  CommittedSessionTransition,
   SessionPromptMediaPayload,
   SessionRuntimeTimelineState,
 } from './session-runtime-types';
@@ -60,6 +62,62 @@ export class SessionTimelineRuntime {
 
   private getSessionState(sessionKey: string): SessionRuntimeTimelineState {
     return this.deps.stateStore.getSessionState(sessionKey);
+  }
+
+  private commitStateRevision(
+    state: SessionRuntimeTimelineState,
+    options: {
+      advanceRunEpoch?: boolean;
+    } = {},
+  ): void {
+    state.revision += 1;
+    if (options.advanceRunEpoch) {
+      state.runEpoch += 1;
+    }
+    state.runtime = {
+      ...state.runtime,
+      revision: state.revision,
+      runEpoch: state.runEpoch,
+      updatedAt: this.deps.clock.nowMs(),
+    };
+  }
+
+  private readRuntimePatch(
+    patch: Partial<SessionRuntimeStateSnapshot>,
+  ): Partial<SessionRuntimeStateSnapshot> {
+    const {
+      revision: _revision,
+      runEpoch: _runEpoch,
+      updatedAt: _updatedAt,
+      ...runtimePatch
+    } = patch;
+    void _revision;
+    void _runEpoch;
+    void _updatedAt;
+    return runtimePatch;
+  }
+
+  private markExistingRunIdsTerminated(sessionKey: string, state: SessionRuntimeTimelineState): void {
+    this.deps.stateStore.markRunTerminated(sessionKey, state.runtime.activeRunId);
+    for (const entry of state.timelineEntries) {
+      this.deps.stateStore.markRunTerminated(sessionKey, entry.runId);
+    }
+  }
+
+  private cloneCommittedSessionState(state: SessionRuntimeTimelineState): SessionRuntimeTimelineState {
+    return {
+      sessionKey: state.sessionKey,
+      revision: state.revision,
+      runEpoch: state.runEpoch,
+      timelineEntries: structuredClone(state.timelineEntries),
+      executionGraphItems: structuredClone(state.executionGraphItems),
+      renderItems: cloneRenderItems(state.renderItems),
+      taskSnapshot: state.taskSnapshot ? structuredClone(state.taskSnapshot) : null,
+      hydrated: state.hydrated,
+      runtime: cloneSessionRuntimeState(state.runtime),
+      window: cloneSessionWindowState(state.window),
+      activeTransportEpoch: state.activeTransportEpoch,
+    };
   }
 
   private async ensureSessionHydrated(
@@ -121,10 +179,10 @@ export class SessionTimelineRuntime {
       && !closureSignal.hasBlockingToolActivity
       && closureSignal.hasFinalAssistantTurn
     ) {
-      this.resetPendingRunState(sessionKey, {
-        runPhase: 'done',
-        lastError: null,
-        lastIssue: null,
+      this.commitSessionTransition(sessionKey, {
+        runtimePatch: this.buildTerminalRuntimePatch('done', null, null),
+        activeTransportEpoch: null,
+        advanceRunEpoch: true,
       });
     }
     state.window = state.window.isAtLatest
@@ -155,8 +213,11 @@ export class SessionTimelineRuntime {
     return state;
   }
 
-  upsertTimelineEntries(sessionKey: string, entries: SessionTimelineEntry[]): SessionTimelineEntry[] {
-    const state = this.getSessionState(sessionKey);
+  private upsertTimelineEntriesIntoState(
+    sessionKey: string,
+    state: SessionRuntimeTimelineState,
+    entries: SessionTimelineEntry[],
+  ): SessionTimelineEntry[] {
     const mergedEntries: SessionTimelineEntry[] = [];
     let touchedExecutionGraphs = false;
     for (const entry of entries) {
@@ -175,61 +236,106 @@ export class SessionTimelineRuntime {
     } else {
       this.deps.executionGraphRuntime.refreshExistingGraphs(state);
     }
+    return mergedEntries;
+  }
+
+  commitSessionTransition(
+    sessionKey: string,
+    transition: {
+      timelineEntries?: SessionTimelineEntry[];
+      taskSnapshot?: TaskSnapshotEvent;
+      runtimePatch?: Partial<SessionRuntimeStateSnapshot>;
+      activeTransportEpoch?: number | null;
+      resetWindowToLatest?: boolean;
+      advanceRunEpoch?: boolean;
+      markTerminatedRunId?: string | null;
+      terminateExistingRunIds?: boolean;
+    },
+  ): CommittedSessionTransition {
+    const state = this.getSessionState(sessionKey);
+    if (transition.terminateExistingRunIds) {
+      this.markExistingRunIdsTerminated(sessionKey, state);
+    }
+    const mergedEntries = transition.timelineEntries
+      ? this.upsertTimelineEntriesIntoState(sessionKey, state, transition.timelineEntries)
+      : [];
+    if (transition.taskSnapshot) {
+      state.taskSnapshot = structuredClone(transition.taskSnapshot);
+    }
+    if (transition.markTerminatedRunId) {
+      this.deps.stateStore.markRunTerminated(sessionKey, transition.markTerminatedRunId);
+    }
+    if (transition.activeTransportEpoch !== undefined) {
+      state.activeTransportEpoch = transition.activeTransportEpoch;
+    }
+    if (transition.runtimePatch) {
+      state.runtime = {
+        ...state.runtime,
+        ...this.readRuntimePatch(transition.runtimePatch),
+      };
+    }
+    if (transition.runtimePatch || !transition.timelineEntries || transition.timelineEntries.length === 0) {
+      this.deps.executionGraphRuntime.refreshExistingGraphs(state);
+    }
     state.window = createLatestWindowState(state.renderItems.length);
     this.deps.executionGraphRuntime.refreshParents(sessionKey);
+    if (
+      mergedEntries.length > 0
+      || transition.taskSnapshot
+      || transition.runtimePatch
+      || transition.activeTransportEpoch !== undefined
+      || transition.markTerminatedRunId
+      || transition.terminateExistingRunIds
+    ) {
+      this.commitStateRevision(state, {
+        advanceRunEpoch: transition.advanceRunEpoch,
+      });
+    }
+    if (transition.resetWindowToLatest) {
+      state.window = createLatestWindowState(state.renderItems.length);
+    }
     this.deps.stateStore.persistStore();
-    return mergedEntries;
+    return {
+      state: this.cloneCommittedSessionState(state),
+      runtime: cloneSessionRuntimeState(state.runtime),
+      mergedEntries,
+    };
   }
 
   updateTaskSnapshot(
     sessionKey: string,
     taskSnapshot: TaskSnapshotEvent,
   ): void {
-    this.getSessionState(sessionKey).taskSnapshot = structuredClone(taskSnapshot);
-    this.deps.stateStore.persistStore();
+    this.commitSessionTransition(sessionKey, { taskSnapshot });
   }
 
-  setSessionRuntime(
-    sessionKey: string,
-    patch: Partial<SessionRuntimeStateSnapshot>,
-  ): SessionRuntimeStateSnapshot {
-    const state = this.getSessionState(sessionKey);
-    state.runtime = {
-      ...state.runtime,
-      ...patch,
-      updatedAt: this.deps.clock.nowMs(),
-    };
-    this.deps.executionGraphRuntime.refreshExistingGraphs(state);
-    this.deps.stateStore.persistStore();
-    return cloneSessionRuntimeState(state.runtime);
-  }
-
-  resetPendingRunState(
-    sessionKey: string,
-    patch: Pick<SessionRuntimeStateSnapshot, 'runPhase' | 'lastError' | 'lastIssue'>,
-  ): SessionRuntimeStateSnapshot {
-    const state = this.getSessionState(sessionKey);
-    state.activeTransportEpoch = null;
-    return this.setSessionRuntime(sessionKey, {
+  buildTerminalRuntimePatch(
+    runPhase: SessionRuntimeStateSnapshot['runPhase'],
+    lastError: string | null,
+    lastIssue: GatewayTransportIssue | null,
+  ): Partial<SessionRuntimeStateSnapshot> {
+    return {
       sending: false,
       activeRunId: null,
-      runPhase: patch.runPhase,
+      runPhase,
       activeTurnItemKey: null,
       pendingTurnKey: null,
       pendingTurnLaneKey: null,
       pendingFinal: false,
-      lastError: patch.lastError,
-      lastIssue: patch.lastIssue,
-    });
+      lastError,
+      lastIssue,
+    };
   }
 
   clearSessionRuntimeErrorState(sessionKey: string): SessionRuntimeStateSnapshot {
     const state = this.getSessionState(sessionKey);
-    return this.setSessionRuntime(sessionKey, {
-      runPhase: state.runtime.runPhase === 'error' ? 'idle' : state.runtime.runPhase,
-      lastError: null,
-      lastIssue: null,
-    });
+    return this.commitSessionTransition(sessionKey, {
+      runtimePatch: {
+        runPhase: state.runtime.runPhase === 'error' ? 'idle' : state.runtime.runPhase,
+        lastError: null,
+        lastIssue: null,
+      },
+    }).runtime;
   }
 
   resolveLifecycleRuntime(
@@ -243,106 +349,129 @@ export class SessionTimelineRuntime {
   ): SessionRuntimeStateSnapshot {
     switch (input.phase) {
       case 'started':
-        this.getSessionState(sessionKey).activeTransportEpoch = this.deps.stateStore.getLatestConnectedTransportEpoch() || 1;
-        return this.setSessionRuntime(sessionKey, {
-          sending: true,
-          activeRunId: input.runId,
-          runPhase: 'submitted',
-          pendingTurnKey: input.runId ? `main:${input.runId}` : this.getSessionState(sessionKey).runtime.pendingTurnKey,
-          pendingTurnLaneKey: 'main',
-          lastError: null,
-          lastIssue: null,
-        });
+        return this.commitSessionTransition(sessionKey, {
+          runtimePatch: {
+            sending: true,
+            activeRunId: input.runId,
+            runPhase: 'submitted',
+            pendingTurnKey: input.runId ? `main:${input.runId}` : this.getSessionState(sessionKey).runtime.pendingTurnKey,
+            pendingTurnLaneKey: 'main',
+            lastError: null,
+            lastIssue: null,
+          },
+          activeTransportEpoch: this.deps.stateStore.getLatestConnectedTransportEpoch() || 1,
+          advanceRunEpoch: !this.getSessionState(sessionKey).runtime.sending,
+        }).runtime;
       case 'final':
-        return this.resetPendingRunState(sessionKey, {
-          runPhase: 'done',
-          lastError: null,
-          lastIssue: null,
-        });
-      case 'error':
-        return this.resetPendingRunState(sessionKey, {
-          runPhase: 'error',
-          lastError: input.error ?? null,
-          lastIssue: input.transportIssue ?? null,
-        });
-      case 'aborted':
-        return this.resetPendingRunState(sessionKey, {
-          runPhase: 'aborted',
-          lastError: input.error ?? null,
-          lastIssue: input.transportIssue ?? null,
-        });
+        return this.commitSessionTransition(sessionKey, {
+        runtimePatch: this.buildTerminalRuntimePatch('done', null, null),
+        activeTransportEpoch: null,
+        advanceRunEpoch: true,
+        markTerminatedRunId: input.runId,
+      }).runtime;
+    case 'error':
+      return this.commitSessionTransition(sessionKey, {
+        runtimePatch: this.buildTerminalRuntimePatch('error', input.error ?? null, input.transportIssue ?? null),
+        activeTransportEpoch: null,
+        advanceRunEpoch: true,
+        markTerminatedRunId: input.runId,
+      }).runtime;
+    case 'aborted':
+      return this.commitSessionTransition(sessionKey, {
+        runtimePatch: this.buildTerminalRuntimePatch('aborted', input.error ?? null, input.transportIssue ?? null),
+        activeTransportEpoch: null,
+        advanceRunEpoch: true,
+        markTerminatedRunId: input.runId,
+      }).runtime;
       default:
         return cloneSessionRuntimeState(this.getSessionState(sessionKey).runtime);
     }
   }
 
-  resolveMessageRuntime(
-    sessionKey: string,
+  resolveMessageRuntimePatch(
+    currentState: SessionRuntimeTimelineState,
     input: {
       runId: string | null;
       entry: SessionTimelineEntry;
       sessionUpdate: 'agent_message_chunk' | 'agent_message';
     },
-  ): SessionRuntimeStateSnapshot {
-    const currentState = this.getSessionState(sessionKey);
+  ): {
+    runtimePatch: Partial<SessionRuntimeStateSnapshot>;
+    advanceRunEpoch?: boolean;
+  } | null {
     const messageTimestamp = input.entry.createdAt != null ? input.entry.createdAt : null;
     if (input.sessionUpdate === 'agent_message_chunk') {
       const anchorItemKey = resolveAssistantTurnItemKeyFromTimelineEntry(input.entry);
-      return this.setSessionRuntime(sessionKey, {
-        sending: true,
-        activeRunId: input.runId,
-        runPhase: 'streaming',
-        activeTurnItemKey: anchorItemKey
-          ?? currentState.runtime.activeTurnItemKey,
-        pendingTurnKey: normalizeString(input.entry.turnKey) || currentState.runtime.pendingTurnKey,
-        pendingTurnLaneKey: normalizeString(input.entry.laneKey) || currentState.runtime.pendingTurnLaneKey,
-        pendingFinal: false,
-        lastError: null,
-        lastIssue: null,
-        lastUserMessageAt: input.entry.role === 'user' && typeof messageTimestamp === 'number'
-          ? messageTimestamp
-          : currentState.runtime.lastUserMessageAt,
-      });
+      return {
+        runtimePatch: {
+          sending: true,
+          activeRunId: input.runId,
+          runPhase: 'streaming',
+          activeTurnItemKey: anchorItemKey
+            ?? currentState.runtime.activeTurnItemKey,
+          pendingTurnKey: normalizeString(input.entry.turnKey) || currentState.runtime.pendingTurnKey,
+          pendingTurnLaneKey: normalizeString(input.entry.laneKey) || currentState.runtime.pendingTurnLaneKey,
+          pendingFinal: false,
+          lastError: null,
+          lastIssue: null,
+          lastUserMessageAt: input.entry.role === 'user' && typeof messageTimestamp === 'number'
+            ? messageTimestamp
+            : currentState.runtime.lastUserMessageAt,
+        },
+      };
     }
 
     if (input.entry.role === 'user') {
-      return this.setSessionRuntime(sessionKey, {
-        sending: Boolean(input.runId),
-        activeRunId: input.runId,
-        runPhase: input.runId ? 'submitted' : currentState.runtime.runPhase,
-        pendingTurnKey: input.runId ? `main:${input.runId}` : currentState.runtime.pendingTurnKey,
-        pendingTurnLaneKey: input.runId ? 'main' : currentState.runtime.pendingTurnLaneKey,
-        lastError: null,
-        lastIssue: null,
-        lastUserMessageAt: typeof messageTimestamp === 'number'
-          ? messageTimestamp
-          : currentState.runtime.lastUserMessageAt,
-      });
+      return {
+        runtimePatch: {
+          sending: Boolean(input.runId),
+          activeRunId: input.runId,
+          runPhase: input.runId ? 'submitted' : currentState.runtime.runPhase,
+          pendingTurnKey: input.runId ? `main:${input.runId}` : currentState.runtime.pendingTurnKey,
+          pendingTurnLaneKey: input.runId ? 'main' : currentState.runtime.pendingTurnLaneKey,
+          lastError: null,
+          lastIssue: null,
+          lastUserMessageAt: typeof messageTimestamp === 'number'
+            ? messageTimestamp
+            : currentState.runtime.lastUserMessageAt,
+        },
+      };
     }
 
     if (input.entry.kind === 'tool-activity' && input.entry.status !== 'streaming') {
-      return this.setSessionRuntime(sessionKey, {
-        sending: true,
-        activeRunId: input.runId,
-        runPhase: 'waiting_tool',
-        activeTurnItemKey: null,
-        pendingTurnKey: normalizeString(input.entry.turnKey) || currentState.runtime.pendingTurnKey,
-        pendingTurnLaneKey: normalizeString(input.entry.laneKey) || currentState.runtime.pendingTurnLaneKey,
-        pendingFinal: true,
-        lastError: null,
-        lastIssue: null,
-      });
+      return {
+        runtimePatch: {
+          sending: true,
+          activeRunId: input.runId,
+          runPhase: 'waiting_tool',
+          activeTurnItemKey: null,
+          pendingTurnKey: normalizeString(input.entry.turnKey) || currentState.runtime.pendingTurnKey,
+          pendingTurnLaneKey: normalizeString(input.entry.laneKey) || currentState.runtime.pendingTurnLaneKey,
+          pendingFinal: true,
+          lastError: null,
+          lastIssue: null,
+        },
+      };
     }
 
-    return this.resetPendingRunState(sessionKey, {
-      runPhase: input.entry.status === 'error'
-        ? 'error'
-        : (input.entry.status === 'aborted' ? 'aborted' : 'done'),
-      lastError: input.entry.status === 'error'
-        ? (input.entry.text.trim() || currentState.runtime.lastError)
-        : null,
-      lastIssue: null,
-    });
+    return {
+      runtimePatch: {
+        sending: false,
+        activeRunId: null,
+        runPhase: input.entry.status === 'error'
+          ? 'error'
+          : (input.entry.status === 'aborted' ? 'aborted' : 'done'),
+        activeTurnItemKey: null,
+        pendingTurnKey: null,
+        pendingTurnLaneKey: null,
+        pendingFinal: false,
+        lastError: input.entry.status === 'error'
+          ? (input.entry.text.trim() || currentState.runtime.lastError)
+          : null,
+        lastIssue: null,
+      },
+      advanceRunEpoch: true,
+    };
   }
 
   buildPromptUserEntry(input: {

@@ -2883,13 +2883,15 @@ describe('runtime-host process manager', () => {
       let payload = await initialResponse.json() as {
         success: boolean;
         status: number;
-        data?: Array<{
-          id?: string;
-          name?: string;
-          message?: string;
-          enabled?: boolean;
-          schedule?: { expr?: string };
-        }>;
+        data?: {
+          jobs?: Array<{
+            id?: string;
+            name?: string;
+            message?: string;
+            enabled?: boolean;
+            schedule?: { expr?: string };
+          }>;
+        };
       };
       await waitForCondition(async () => {
         response = await fetch(`http://127.0.0.1:${port}/dispatch`, {
@@ -2902,24 +2904,26 @@ describe('runtime-host process manager', () => {
           }),
         });
         payload = await response.json() as typeof payload;
-        return payload.data?.some((job) => job.id === 'job-1') === true;
+        return payload.data?.jobs?.some((job) => job.id === 'job-1') === true;
       }, 3000);
 
       expect(response.status).toBe(200);
       expect(payload).toMatchObject({
         success: true,
         status: 200,
-        data: [
-          {
-            id: 'job-1',
-            name: 'Daily Report',
-            message: 'report',
-            enabled: true,
-            schedule: {
-              expr: '0 9 * * *',
+        data: {
+          jobs: [
+            {
+              id: 'job-1',
+              name: 'Daily Report',
+              message: 'report',
+              enabled: true,
+              schedule: {
+                expr: '0 9 * * *',
+              },
             },
-          },
-        ],
+          ],
+        },
       });
       expect(parentDispatchServer.getDispatchRequestCount()).toBe(0);
       expect(parentDispatchServer.getExecutionSyncRequestCount()).toBe(0);

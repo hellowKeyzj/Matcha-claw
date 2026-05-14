@@ -235,7 +235,7 @@ export const useChatStore = create<ChatStoreState>((set, get) => {
       return true;
     },
     handleSessionUpdateEvent: (event) => {
-      handleStoreSessionUpdateEvent({ set, get, sessionRunCache }, event);
+      handleStoreSessionUpdateEvent({ set, get }, event);
     },
     toggleThinking: () => set((state) => ({ showThinking: !state.showThinking })),
     refresh: async () => {

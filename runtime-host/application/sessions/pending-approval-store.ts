@@ -1,5 +1,9 @@
 import type { RuntimeClockPort } from '../common/runtime-ports';
-import type { GatewayNotification } from '../../openclaw-bridge/protocol';
+
+export interface PendingApprovalNotification {
+  method: string;
+  params?: unknown;
+}
 
 export interface PendingApprovalItem {
   readonly id: string;
@@ -82,7 +86,7 @@ export class PendingApprovalStore {
 
   constructor(private readonly deps: PendingApprovalStoreDeps) {}
 
-  consumeGatewayNotification(notification: GatewayNotification): void {
+  consumeGatewayNotification(notification: PendingApprovalNotification): void {
     if (notification.method === 'exec.approval.requested' || notification.method === 'plugin.approval.requested') {
       this.recordRequested(notification.params);
       return;

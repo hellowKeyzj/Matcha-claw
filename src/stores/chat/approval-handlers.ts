@@ -1,5 +1,3 @@
-import { reduceSessionRuntime } from './runtime-state-reducer';
-import { getSessionRuntime, patchSessionRecord } from './store-state-helpers';
 import type {
   ApprovalDecision,
   ApprovalItem,
@@ -32,23 +30,8 @@ export function buildSyncPendingApprovalsPatch(
   const nextApprovals = normalizedHint
     ? { ...state.pendingApprovalsBySession, [normalizedHint]: grouped[normalizedHint] ?? [] }
     : grouped;
-  const currentPending = nextApprovals[state.currentSessionKey] ?? [];
-  const currentRuntime = getSessionRuntime(state, state.currentSessionKey);
-  const nextActiveRunId = currentRuntime.activeRunId ?? currentPending.find((item) => typeof item.runId === 'string')?.runId ?? null;
-  const runtimePatch = reduceSessionRuntime(currentRuntime, {
-    type: 'pending_approvals_synced',
-    currentPendingCount: currentPending.length,
-    nextActiveRunId,
-  });
   return {
     pendingApprovalsBySession: nextApprovals,
-    ...(runtimePatch === currentRuntime
-        ? {}
-        : {
-          loadedSessions: patchSessionRecord(state, state.currentSessionKey, {
-            runtime: { ...currentRuntime, ...runtimePatch },
-          }),
-        }),
   };
 }
 
@@ -75,21 +58,8 @@ export function buildApprovalRequestedPatch(
       pendingApprovalsBySession: nextApprovals,
     };
   }
-  const currentRuntime = getSessionRuntime(state, state.currentSessionKey);
-  const runtimePatch = reduceSessionRuntime(currentRuntime, {
-    type: 'approval_requested',
-    isCurrentSession,
-    runId: approval.runId,
-  });
   return {
     pendingApprovalsBySession: nextApprovals,
-    ...(runtimePatch === currentRuntime
-        ? {}
-        : {
-          loadedSessions: patchSessionRecord(state, state.currentSessionKey, {
-            runtime: { ...currentRuntime, ...runtimePatch },
-          }),
-        }),
   };
 }
 
@@ -121,30 +91,14 @@ export function buildApprovalResolvedPatch(
   const sessionApprovals = nextApprovals[matchedSessionKey] ?? [];
   nextApprovals[matchedSessionKey] = sessionApprovals.filter((item) => item.id !== id);
 
-  const stillPendingCurrent = (nextApprovals[state.currentSessionKey] ?? []).length > 0;
-  const abortedCurrentByDeny = decision === 'deny' && matchedSessionKey === state.currentSessionKey;
+  void decision;
   if (matchedSessionKey !== state.currentSessionKey) {
     return {
       pendingApprovalsBySession: nextApprovals,
     };
   }
 
-  const currentRuntime = getSessionRuntime(state, state.currentSessionKey);
-  const runtimePatch = reduceSessionRuntime(currentRuntime, {
-    type: 'approval_resolved',
-    stillPendingCurrent,
-    abortedCurrentByDeny,
-  });
-
   return {
     pendingApprovalsBySession: nextApprovals,
-    ...(runtimePatch === currentRuntime
-        ? {}
-        : {
-          loadedSessions: patchSessionRecord(state, state.currentSessionKey, {
-            runtime: { ...currentRuntime, ...runtimePatch },
-          }),
-        }),
   };
 }
-

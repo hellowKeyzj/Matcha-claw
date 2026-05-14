@@ -176,6 +176,9 @@ const sessionRuntimeModule: RuntimeHostSystemModule = {
     registerSessionRuntimeModule(
       context.container,
       () => context.container.resolve('gateway.openclawBridge') as GatewayChatPort & Pick<GatewayRpcPort, 'gatewayRpc'>,
+      {
+        emit: context.parentTransport.emitParentGatewayEvent,
+      },
     );
   },
   resolveServices: (context) => {

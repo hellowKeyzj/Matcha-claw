@@ -1,4 +1,5 @@
 import type {
+  SessionInfoUpdateEvent,
   SessionPromptResult,
 } from '../../shared/session-adapter-types';
 import {
@@ -10,9 +11,6 @@ import type {
   RuntimeIdGeneratorPort,
 } from '../common/runtime-ports';
 import type { GatewayChatPort } from '../gateway/gateway-runtime-port';
-import {
-  createLatestWindowState,
-} from './session-window-model';
 import {
   isRecord,
   normalizeString,
@@ -29,9 +27,9 @@ import { SessionTimelineRuntime } from './session-timeline-runtime';
 import {
   badRequest,
   ok,
-  serverError,
   type ApplicationResponseOf,
 } from '../common/application-response';
+import { SessionOperationCoordinator } from './session-operation-coordinator';
 
 export interface SessionPromptServiceDeps {
   stateStore: SessionRuntimeStateStore;
@@ -41,10 +39,140 @@ export interface SessionPromptServiceDeps {
   idGenerator: RuntimeIdGeneratorPort;
   clock: RuntimeClockPort;
   gateway: GatewayChatPort;
+  operationCoordinator: SessionOperationCoordinator;
+  emitSessionUpdate?: (event: SessionInfoUpdateEvent) => void;
 }
 
 export class SessionPromptService {
   constructor(private readonly deps: SessionPromptServiceDeps) {}
+
+  private emitSessionInfoUpdate(event: SessionInfoUpdateEvent): void {
+    this.deps.emitSessionUpdate?.(event);
+  }
+
+  private async bindSubmittedPromptRun(input: {
+    sessionKey: string;
+    promptId: string;
+    runEpoch: number;
+    runId: string | null;
+  }): Promise<void> {
+    await this.deps.operationCoordinator.run(input.sessionKey, 'prompt', async () => {
+      const state = this.deps.stateStore.getSessionState(input.sessionKey);
+      if (state.runtime.runEpoch !== input.runEpoch || !state.runtime.sending) {
+        return;
+      }
+      const committed = this.deps.timelineRuntime.commitSessionTransition(input.sessionKey, {
+        runtimePatch: {
+          sending: true,
+          activeRunId: input.runId,
+          runPhase: 'submitted',
+          pendingTurnKey: input.runId ? `main:${input.runId}` : `main:prompt:${input.promptId}`,
+          pendingTurnLaneKey: 'main',
+          lastError: null,
+          lastIssue: null,
+        },
+      });
+      const snapshot = {
+        ...await this.deps.snapshotService.buildLatestSnapshotAsync(input.sessionKey, committed.state),
+        runtime: committed.runtime,
+      };
+      await this.deps.stateStore.flushPersistedStore();
+      this.emitSessionInfoUpdate({
+        sessionUpdate: 'session_info_update',
+        sessionKey: input.sessionKey,
+        runId: input.runId,
+        phase: 'started',
+        snapshot,
+        error: null,
+      });
+      return snapshot;
+    });
+  }
+
+  private async failSubmittedPrompt(input: {
+    sessionKey: string;
+    runEpoch: number;
+    error: string;
+  }): Promise<void> {
+    await this.deps.operationCoordinator.run(input.sessionKey, 'prompt', async () => {
+      const state = this.deps.stateStore.getSessionState(input.sessionKey);
+      if (state.runtime.runEpoch !== input.runEpoch || !state.runtime.sending) {
+        return;
+      }
+      const committed = this.deps.timelineRuntime.commitSessionTransition(input.sessionKey, {
+        runtimePatch: {
+          sending: false,
+          activeRunId: null,
+          runPhase: 'error',
+          activeTurnItemKey: null,
+          pendingTurnKey: null,
+          pendingTurnLaneKey: null,
+          pendingFinal: false,
+          lastError: input.error,
+          lastIssue: null,
+        },
+        activeTransportEpoch: null,
+        advanceRunEpoch: true,
+      });
+      const snapshot = {
+        ...await this.deps.snapshotService.buildLatestSnapshotAsync(input.sessionKey, committed.state),
+        runtime: committed.runtime,
+      };
+      await this.deps.stateStore.flushPersistedStore();
+      this.emitSessionInfoUpdate({
+        sessionUpdate: 'session_info_update',
+        sessionKey: input.sessionKey,
+        runId: null,
+        phase: 'error',
+        snapshot,
+        error: input.error,
+      });
+      return snapshot;
+    });
+  }
+
+  private startGatewaySendInBackground(input: {
+    directBody: ReturnType<typeof readPromptSessionRequest>['directBody'];
+    mediaBody: ReturnType<typeof readPromptSessionRequest>['mediaBody'];
+    sessionKey: string;
+    message: string;
+    promptId: string;
+    runEpoch: number;
+  }): void {
+    void (async () => {
+      const sendResult = input.mediaBody
+        ? await sendWithMediaViaGateway(this.deps.fileSystem, this.deps.gateway, {
+            ...input.mediaBody,
+            sessionKey: input.sessionKey,
+            message: input.message,
+            idempotencyKey: input.promptId,
+          })
+        : await sendWithMediaViaGateway(this.deps.fileSystem, this.deps.gateway, {
+            sessionKey: input.sessionKey,
+            message: input.message,
+            idempotencyKey: input.promptId,
+            ...(typeof input.directBody.deliver === 'boolean' ? { deliver: input.directBody.deliver } : {}),
+          });
+
+      if (!sendResult.success) {
+        await this.failSubmittedPrompt({
+          sessionKey: input.sessionKey,
+          runEpoch: input.runEpoch,
+          error: sendResult.error ?? 'Failed to prompt session',
+        });
+        return;
+      }
+
+      const resultRecord = isRecord(sendResult.result) ? sendResult.result : {};
+      const runId = normalizeString(resultRecord.runId) || null;
+      await this.bindSubmittedPromptRun({
+        sessionKey: input.sessionKey,
+        promptId: input.promptId,
+        runEpoch: input.runEpoch,
+        runId,
+      });
+    })().catch(() => undefined);
+  }
 
   async promptSession(payload: unknown): Promise<ApplicationResponseOf<SessionPromptResult | { success: false; error: string }>> {
     const {
@@ -63,65 +191,66 @@ export class SessionPromptService {
 
     const promptId = requestedPromptId || this.deps.idGenerator.randomId();
 
-    const sendResult = mediaBody
-      ? await sendWithMediaViaGateway(this.deps.fileSystem, this.deps.gateway, {
-          ...mediaBody,
-          sessionKey,
-          message,
-          idempotencyKey: promptId,
-        })
-      : await sendWithMediaViaGateway(this.deps.fileSystem, this.deps.gateway, {
-          sessionKey,
-          message,
-          idempotencyKey: promptId,
-          ...(typeof directBody.deliver === 'boolean' ? { deliver: directBody.deliver } : {}),
-        });
-
-    if (!sendResult.success) {
-      return serverError(sendResult.error ?? 'Failed to prompt session');
-    }
-
-    const resultRecord = isRecord(sendResult.result) ? sendResult.result : {};
-    const runId = normalizeString(resultRecord.runId);
     const media = Array.isArray(mediaBody?.media)
       ? mediaBody.media as SessionPromptMediaPayload[]
       : undefined;
-    const state = await this.deps.timelineRuntime.activateSession(sessionKey, {
-      resetWindowToLatest: true,
+    const submitted = await this.deps.operationCoordinator.run(sessionKey, 'prompt', async () => {
+      const state = await this.deps.timelineRuntime.activateSession(sessionKey, {
+        resetWindowToLatest: true,
+      });
+      const promptEntry = this.deps.timelineRuntime.buildPromptUserEntry({
+        sessionKey,
+        promptId,
+        message,
+        media,
+      });
+      const committed = this.deps.timelineRuntime.commitSessionTransition(sessionKey, {
+        timelineEntries: [promptEntry],
+        runtimePatch: {
+          sending: true,
+          activeRunId: null,
+          runPhase: 'submitted',
+          activeTurnItemKey: null,
+          pendingTurnKey: `main:prompt:${promptId}`,
+          pendingTurnLaneKey: 'main',
+          pendingFinal: false,
+          lastUserMessageAt: promptEntry.createdAt ?? this.deps.clock.nowMs(),
+          lastError: null,
+          lastIssue: null,
+        },
+        activeTransportEpoch: this.deps.stateStore.getLatestConnectedTransportEpoch() || 1,
+        resetWindowToLatest: true,
+        advanceRunEpoch: true,
+        terminateExistingRunIds: true,
+      });
+      const snapshot = {
+        ...await this.deps.snapshotService.buildLatestSnapshotAsync(sessionKey, committed.state),
+        runtime: committed.runtime,
+      };
+      await this.deps.stateStore.flushPersistedStore();
+      return {
+        runEpoch: committed.runtime.runEpoch,
+        entryKey: committed.mergedEntries[0]?.key ?? promptEntry.key,
+        snapshot,
+      };
     });
-    const [entry] = this.deps.timelineRuntime.upsertTimelineEntries(sessionKey, [this.deps.timelineRuntime.buildPromptUserEntry({
+
+    this.startGatewaySendInBackground({
+      directBody,
+      mediaBody,
       sessionKey,
-      promptId,
       message,
-      media,
-    })]);
-    const runtime = this.deps.timelineRuntime.setSessionRuntime(sessionKey, {
-      sending: true,
-      activeRunId: runId || null,
-      runPhase: 'submitted',
-      activeTurnItemKey: null,
-      pendingTurnKey: runId ? `main:${runId}` : `main:prompt:${promptId}`,
-      pendingTurnLaneKey: 'main',
-      pendingFinal: false,
-      lastUserMessageAt: entry?.createdAt ?? this.deps.clock.nowMs(),
-      lastError: null,
-      lastIssue: null,
+      promptId,
+      runEpoch: submitted.runEpoch,
     });
-    state.activeTransportEpoch = this.deps.stateStore.getLatestConnectedTransportEpoch() || 1;
-    state.window = createLatestWindowState(state.renderItems.length);
-    const snapshot = {
-      ...await this.deps.snapshotService.buildLatestSnapshotAsync(sessionKey, state),
-      runtime,
-    };
-    const result: SessionPromptResult = {
+
+    return ok({
       success: true,
       sessionKey,
-      runId: runId || null,
+      runId: null,
       promptId,
-      item: snapshot.items.find((candidate) => candidate.key === entry?.key) ?? null,
-      snapshot,
-    };
-    await this.deps.stateStore.flushPersistedStore();
-    return ok(result);
+      item: submitted.snapshot.items.find((candidate) => candidate.key === submitted.entryKey) ?? null,
+      snapshot: submitted.snapshot,
+    });
   }
 }

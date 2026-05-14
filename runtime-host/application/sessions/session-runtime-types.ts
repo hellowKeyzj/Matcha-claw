@@ -54,6 +54,8 @@ export interface SessionPromptMediaPayload {
 
 export interface SessionRuntimeTimelineState {
   sessionKey: string;
+  revision: number;
+  runEpoch: number;
   timelineEntries: SessionTimelineEntry[];
   executionGraphItems: SessionExecutionGraphItem[];
   renderItems: SessionRenderItem[];
@@ -69,4 +71,10 @@ export interface PendingRunClosureSignal {
   hasBlockingToolActivity: boolean;
   hasFinalAssistantTurn: boolean;
   hasMatchingRunEvidence: boolean;
+}
+
+export interface CommittedSessionTransition {
+  state: SessionRuntimeTimelineState;
+  runtime: SessionRuntimeStateSnapshot;
+  mergedEntries: SessionTimelineEntry[];
 }

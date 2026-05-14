@@ -615,6 +615,9 @@ export function Chat({ isActive = true }: ChatProps) {
     if (!currentModelId) {
       return null;
     }
+    const activeRun = currentSession.runtime.sending
+      || currentSession.runtime.pendingFinal
+      || currentSession.runtime.activeRunId != null;
     const labels = new Map<string, string>();
     for (const model of availableModels) {
       labels.set(model.id, model.displayLabel);
@@ -635,8 +638,9 @@ export function Chat({ isActive = true }: ChatProps) {
       options,
       loading: modelsLoading,
       switching: false,
+      disabled: activeRun,
     };
-  }, [availableModels, effectiveCurrentModelId, modelsLoading]);
+  }, [availableModels, currentSession.runtime.activeRunId, currentSession.runtime.pendingFinal, currentSession.runtime.sending, effectiveCurrentModelId, modelsLoading]);
   const handleSendMessage = useCallback(async (
     text: string,
     attachments?: Parameters<typeof sendMessage>[1],
@@ -657,6 +661,13 @@ export function Chat({ isActive = true }: ChatProps) {
       return;
     }
     if (!normalizedNextModelId || normalizedNextModelId === currentModelId) {
+      return;
+    }
+    if (
+      currentSession.runtime.sending
+      || currentSession.runtime.pendingFinal
+      || currentSession.runtime.activeRunId != null
+    ) {
       return;
     }
     const previousModelId = currentSession.meta.model?.trim() || null;
@@ -689,7 +700,7 @@ export function Chat({ isActive = true }: ChatProps) {
       const message = error instanceof Error ? error.message : String(error);
       toast.error(t('input.modelSwitchFailed', { error: message }));
     }
-  }, [currentSession.meta.model, currentSessionKey, effectiveCurrentModelId, loadSessions, t]);
+  }, [currentSession.meta.model, currentSession.runtime.activeRunId, currentSession.runtime.pendingFinal, currentSession.runtime.sending, currentSessionKey, effectiveCurrentModelId, loadSessions, t]);
   const handlePreviewSkill = useCallback(async (skill: {
     id: string;
     name: string;

@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { PendingApprovalStore } from '../../runtime-host/application/sessions/pending-approval-store';
 import { SessionCommandService } from '../../runtime-host/application/sessions/session-command-service';
+import { SessionOperationCoordinator } from '../../runtime-host/application/sessions/session-operation-coordinator';
 
 const testClock = {
   nowMs: () => 1_700_000_000_000,
@@ -88,6 +89,7 @@ describe('session approval command service', () => {
           createdAtMs: 1_700_000_000_010,
         }],
       },
+      operationCoordinator: new SessionOperationCoordinator(),
       clock: testClock,
       idGenerator: { randomId: () => 'id', randomHex: () => 'hex' },
       sessionHydrationJobs: {} as never,

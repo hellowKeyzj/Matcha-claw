@@ -43,6 +43,18 @@ export function badRequest(message: string): ApplicationResponseOf<{ success: fa
   return failure(400, message);
 }
 
+export function conflict<T extends { success: false; error: string }>(
+  data: T,
+): ApplicationResponseOf<T>;
+export function conflict(message: string): ApplicationResponseOf<{ success: false; error: string }>;
+export function conflict<T extends { success: false; error: string }>(
+  input: string | T,
+): ApplicationResponseOf<T | { success: false; error: string }> {
+  return typeof input === 'string'
+    ? failure(409, input)
+    : applicationResponse(409, input);
+}
+
 export function notFound(message: string): ApplicationResponseOf<{ success: false; error: string }> {
   return failure(404, message);
 }

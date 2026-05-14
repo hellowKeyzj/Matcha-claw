@@ -835,7 +835,7 @@ export function handleE2EHostApiFetch(request: HostApiFetchRequest): HostApiProx
     });
   }
 
-  if (path === '/api/session/abort-runtime' && method === 'POST') {
+  if (path === '/api/session/abort' && method === 'POST') {
     const payload = parseJsonBody(request.body);
     const sessionKey = typeof payload.sessionKey === 'string' ? payload.sessionKey : state.mainSessionKey;
     const run = findLatestRunningRunBySession(sessionKey);

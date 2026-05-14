@@ -232,6 +232,53 @@ export class SessionGatewayIngressService {
     };
   }
 
+  private shouldIgnoreSessionUpdate(input: {
+    sessionKey: string;
+    runId: string;
+    sessionUpdate: string;
+    phase?: string;
+  }): boolean {
+    if (!input.runId) {
+      return false;
+    }
+    if (this.deps.stateStore.isRunTerminated(input.sessionKey, input.runId)) {
+      return true;
+    }
+    const runtime = this.deps.stateStore.getSessionState(input.sessionKey).runtime;
+    if (runtime.activeRunId === input.runId) {
+      return false;
+    }
+    if (runtime.sending) {
+      return true;
+    }
+    if (!runtime.activeRunId && (runtime.runPhase === 'aborted' || runtime.runPhase === 'error' || runtime.runPhase === 'done')) {
+      return input.phase !== 'aborted';
+    }
+    return runtime.activeRunId != null;
+  }
+
+  private isUnboundTerminalLifecycle(input: {
+    runId: string;
+    phase?: string;
+  }): boolean {
+    return !input.runId
+      && (
+        input.phase === 'final'
+        || input.phase === 'error'
+        || input.phase === 'aborted'
+      );
+  }
+
+  private buildCurrentSnapshot(sessionKey: string): ReturnType<SessionSnapshotService['buildSnapshot']> {
+    const state = this.deps.stateStore.getSessionState(sessionKey);
+    return this.deps.snapshotService.buildSnapshot(sessionKey, state, {
+      window: state.window.totalItemCount > 0
+        ? state.window
+        : createLatestWindowState(state.renderItems.length),
+      replayComplete: true,
+    });
+  }
+
   consumeGatewayConversationEvent(payload: unknown): SessionUpdateEvent[] {
     const normalizedPayload = this.normalizeGatewayConversationPayload(payload);
     logTodoToolDebug(this.deps.logger, 'runtime-host.ingress.normalized-payload', normalizedPayload);
@@ -276,6 +323,40 @@ export class SessionGatewayIngressService {
         return output;
       }
       if (event.sessionUpdate === 'session_info_update') {
+        if (this.isUnboundTerminalLifecycle({
+          runId: normalizeString(event.runId),
+          phase: event.phase,
+        })) {
+          const output = {
+            sessionUpdate: 'session_info_update',
+            sessionKey: event.sessionKey,
+            runId: event.runId,
+            phase: event.phase,
+            snapshot: this.buildCurrentSnapshot(sessionKey),
+            error: event.error,
+            ...(event.transportIssue !== undefined ? { transportIssue: event.transportIssue } : {}),
+            ...(event._meta ? { _meta: event._meta } : {}),
+          };
+          logTodoToolDebug(this.deps.logger, 'runtime-host.ingress.output-event', summarizeSessionUpdateForTodoToolDebug(output));
+          return output;
+        }
+        if (this.shouldIgnoreSessionUpdate({
+          sessionKey,
+          runId: normalizeString(event.runId),
+          sessionUpdate: event.sessionUpdate,
+          phase: event.phase,
+        })) {
+          return {
+            sessionUpdate: 'session_info_update',
+            sessionKey: event.sessionKey,
+            runId: event.runId,
+            phase: event.phase,
+            snapshot: this.buildCurrentSnapshot(sessionKey),
+            error: event.error,
+            ...(event.transportIssue !== undefined ? { transportIssue: event.transportIssue } : {}),
+            ...(event._meta ? { _meta: event._meta } : {}),
+          };
+        }
         this.deps.stateStore.setActiveSessionKey(sessionKey);
         this.deps.timelineRuntime.resolveLifecycleRuntime(sessionKey, {
           phase: event.phase,
@@ -305,6 +386,23 @@ export class SessionGatewayIngressService {
       }
 
       if (event.sessionUpdate === 'plan') {
+        if (this.shouldIgnoreSessionUpdate({
+          sessionKey,
+          runId: normalizeString(event.runId),
+          sessionUpdate: event.sessionUpdate,
+        })) {
+          const snapshot = this.deps.snapshotService.buildSnapshot(sessionKey, this.deps.stateStore.getSessionState(sessionKey), {
+            replayComplete: true,
+          });
+          return {
+            sessionUpdate: 'plan',
+            sessionKey: event.sessionKey,
+            runId: event.runId,
+            taskSnapshot: event.taskSnapshot,
+            snapshot,
+            ...(event._meta ? { _meta: event._meta } : {}),
+          };
+        }
         this.deps.timelineRuntime.updateTaskSnapshot(sessionKey, event.taskSnapshot);
         const snapshot = this.deps.snapshotService.buildSnapshot(sessionKey, this.deps.stateStore.getSessionState(sessionKey), {
           replayComplete: true,
@@ -325,24 +423,52 @@ export class SessionGatewayIngressService {
       }
 
       const state = this.deps.stateStore.getSessionState(sessionKey);
-      this.deps.stateStore.setActiveSessionKey(sessionKey);
-      const mergedEntries = this.deps.timelineRuntime.upsertTimelineEntries(sessionKey, event.entries);
-      const runtimeSourceEntry = mergedEntries[mergedEntries.length - 1] ?? event.entries[event.entries.length - 1] ?? null;
-      if (runtimeSourceEntry) {
-        this.deps.timelineRuntime.resolveMessageRuntime(sessionKey, {
-          runId: event.runId,
-          entry: runtimeSourceEntry,
-          sessionUpdate: event.sessionUpdate,
+      if (this.shouldIgnoreSessionUpdate({
+        sessionKey,
+        runId: normalizeString(event.runId),
+        sessionUpdate: event.sessionUpdate,
+      })) {
+        const snapshot = this.deps.snapshotService.buildSnapshot(sessionKey, state, {
+          window: state.window.totalItemCount > 0
+            ? state.window
+            : createLatestWindowState(state.renderItems.length),
+          replayComplete: true,
         });
+        return {
+          sessionUpdate: event.sessionUpdate === 'agent_message_chunk' ? 'session_item_chunk' : 'session_item',
+          sessionKey: event.sessionKey,
+          runId: event.runId,
+          item: null,
+          snapshot,
+          ...(event._meta ? { _meta: event._meta } : {}),
+        };
       }
-      state.window = createLatestWindowState(state.renderItems.length);
-      const snapshot = this.deps.snapshotService.buildSnapshot(sessionKey, state, {
+      this.deps.stateStore.setActiveSessionKey(sessionKey);
+      const previewEntries = event.entries;
+      const runtimeSourceEntry = previewEntries[previewEntries.length - 1] ?? null;
+      const runtimePatch = runtimeSourceEntry
+        ? this.deps.timelineRuntime.resolveMessageRuntimePatch(state, {
+            runId: event.runId,
+            entry: runtimeSourceEntry,
+            sessionUpdate: event.sessionUpdate,
+          })
+        : null;
+      const committed = this.deps.timelineRuntime.commitSessionTransition(sessionKey, {
+        timelineEntries: event.entries,
+        runtimePatch: runtimePatch?.runtimePatch,
+        advanceRunEpoch: runtimePatch?.advanceRunEpoch,
+        markTerminatedRunId: runtimePatch?.advanceRunEpoch ? event.runId : null,
+        resetWindowToLatest: true,
+      });
+      const mergedEntries = committed.mergedEntries;
+      const committedRuntimeSourceEntry = mergedEntries[mergedEntries.length - 1] ?? runtimeSourceEntry;
+      const snapshot = this.deps.snapshotService.buildSnapshot(sessionKey, committed.state, {
         window: state.window.totalItemCount > 0
           ? state.window
           : createLatestWindowState(state.renderItems.length),
         replayComplete: true,
       });
-      const item = this.deps.snapshotService.resolvePrimaryItemFromSnapshot(snapshot, runtimeSourceEntry, event.entries);
+      const item = this.deps.snapshotService.resolvePrimaryItemFromSnapshot(snapshot, committedRuntimeSourceEntry, event.entries);
       const output = {
         sessionUpdate: event.sessionUpdate === 'agent_message_chunk' ? 'session_item_chunk' : 'session_item',
         sessionKey: event.sessionKey,

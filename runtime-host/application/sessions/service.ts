@@ -8,6 +8,7 @@ import { SessionPromptService } from './session-prompt-service';
 import { SessionRuntimeStateStore } from './session-runtime-state';
 import { SessionSnapshotService } from './session-snapshot-service';
 import { SessionTimelineRuntime } from './session-timeline-runtime';
+import { SessionOperationCoordinator } from './session-operation-coordinator';
 
 interface SessionRuntimeServiceDeps {
   sessionCatalog: SessionCatalogPort;
@@ -17,6 +18,7 @@ interface SessionRuntimeServiceDeps {
   ingressService: SessionGatewayIngressService;
   commandService: SessionCommandService;
   promptService: SessionPromptService;
+  operationCoordinator: SessionOperationCoordinator;
 }
 
 export class SessionRuntimeService {
@@ -27,17 +29,39 @@ export class SessionRuntimeService {
       return;
     }
     for (const [sessionKey, state] of this.deps.stateStore.listSessionStates()) {
-      if (!state.runtime.sending || !state.runtime.activeRunId) {
+      if (!state.runtime.sending) {
         continue;
       }
       if (state.activeTransportEpoch == null || state.activeTransportEpoch >= transportEpoch) {
         continue;
       }
-      this.deps.timelineRuntime.resetPendingRunState(sessionKey, {
-        runPhase: 'error',
-        lastError: 'The active run disconnected before a terminal event was received.',
-        lastIssue: null,
-      });
+      void this.deps.operationCoordinator.run(sessionKey, 'reconcile', async () => {
+        const latestState = this.deps.stateStore.getSessionState(sessionKey);
+        if (!latestState.runtime.sending) {
+          return;
+        }
+        if (latestState.activeTransportEpoch == null || latestState.activeTransportEpoch >= transportEpoch) {
+          return;
+        }
+        const committed = this.deps.timelineRuntime.commitSessionTransition(sessionKey, {
+          runtimePatch: this.deps.timelineRuntime.buildTerminalRuntimePatch(
+            'error',
+            'The active run disconnected before a terminal event was received.',
+            null,
+          ),
+          activeTransportEpoch: null,
+          advanceRunEpoch: true,
+          terminateExistingRunIds: true,
+        });
+        const snapshot = {
+          ...await this.deps.snapshotService.buildLatestSnapshotAsync(sessionKey, committed.state, {
+            replayComplete: committed.state.hydrated,
+          }),
+          runtime: committed.runtime,
+        };
+        await this.deps.stateStore.flushPersistedStore();
+        return snapshot;
+      }).catch(() => undefined);
     }
   }
 
@@ -99,10 +123,6 @@ export class SessionRuntimeService {
 
   async executeSessionHydration(payload: unknown) {
     return await this.deps.commandService.executeSessionHydration(payload);
-  }
-
-  async abortSessionRuntime(payload: unknown) {
-    return await this.deps.commandService.abortSessionRuntime(payload);
   }
 
   async abortSession(payload: unknown) {

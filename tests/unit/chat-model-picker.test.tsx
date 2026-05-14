@@ -73,8 +73,10 @@ describe('chat model picker', () => {
         },
         items: messages,
         replayComplete: true,
-        runtime: {
-          sending: false,
+          runtime: {
+            revision: 1,
+            runEpoch: 1,
+            sending: false,
           activeRunId: null,
           runPhase: 'idle',
           activeTurnItemKey: null,
@@ -277,5 +279,32 @@ describe('chat model picker', () => {
     await screen.findByTestId('chat-model-picker');
 
     expect(loadAvailableModels).toHaveBeenCalledTimes(1);
+  });
+
+  it('disables model switching while the current session has an active run', async () => {
+    const sessionKey = 'agent:test:main';
+    const current = useChatStore.getState().loadedSessions[sessionKey];
+    useChatStore.setState({
+      loadedSessions: {
+        [sessionKey]: {
+          ...current!,
+          runtime: {
+            ...current!.runtime,
+            revision: 2,
+            runEpoch: 2,
+            sending: true,
+            activeRunId: 'run-active-1',
+          },
+        },
+      },
+    } as never);
+
+    renderChat();
+
+    const picker = await screen.findByTestId('chat-model-picker');
+    expect(picker).toBeDisabled();
+
+    fireEvent.click(picker);
+    expect(hostSessionPatchMock).not.toHaveBeenCalled();
   });
 });

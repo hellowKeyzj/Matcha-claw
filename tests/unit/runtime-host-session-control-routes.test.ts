@@ -14,7 +14,6 @@ function createSessionService() {
     switchSession: vi.fn(),
     resumeSession: vi.fn(),
     getSessionStateSnapshot: vi.fn(),
-    abortSessionRuntime: vi.fn(),
     abortSession: vi.fn(async () => ({
       status: 200,
       data: { success: true, snapshot: { sessionKey: 'agent:main:main' } },

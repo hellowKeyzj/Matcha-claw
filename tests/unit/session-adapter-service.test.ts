@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import { createTestSessionRuntimeService } from './helpers/session-runtime-fixture';
 import { SessionCommandService } from '../../runtime-host/application/sessions/session-command-service';
+import { SessionOperationCoordinator } from '../../runtime-host/application/sessions/session-operation-coordinator';
 import { SessionStorageRepository } from '../../runtime-host/application/sessions/session-storage-repository';
 import { buildSessionUpdateEventsFromGatewayConversationEvent } from '../../runtime-host/application/sessions/gateway-ingress';
 import { parseTranscriptMessages } from '../../runtime-host/application/sessions/transcript-parser';
@@ -21,6 +22,16 @@ const testClock = {
   nowMs: () => 1_700_000_000_000,
   nowIso: () => '2023-11-14T22:13:20.000Z',
 };
+
+function createDeferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((innerResolve, innerReject) => {
+    resolve = innerResolve;
+    reject = innerReject;
+  });
+  return { promise, resolve, reject };
+}
 
 async function loadHydratedSession(
   service: TestSessionRuntimeService,
@@ -213,6 +224,7 @@ describe('session runtime service', () => {
       } as never,
       gateway: { gatewayRpc: vi.fn() },
       pendingApprovals: { list: () => [] },
+      operationCoordinator: new SessionOperationCoordinator(),
       clock: testClock,
       idGenerator: { randomId: () => 'id' },
       sessionHydrationJobs: {} as never,
@@ -539,6 +551,100 @@ describe('session runtime service', () => {
     expect(secondEvent.snapshot.window.totalItemCount).toBe(1);
   });
 
+  it('same-run incremental assistant deltas append instead of replacing the visible message segment', () => {
+    const configDir = join(tmpdir(), `matcha-session-runtime-${Date.now()}`);
+    const service = createTestSessionRuntimeService({
+      workspace: { getConfigDir: () => configDir },
+      openclawBridge: {
+        chatSend: async () => ({ runId: 'run-unused' }),
+        gatewayRpc: async () => ({}),
+      },
+    });
+
+    service.consumeGatewayConversationEvent({
+      type: 'chat.message',
+      event: {
+        state: 'delta',
+        runId: 'run-incremental-delta',
+        sessionKey: 'agent:main:main',
+        sequenceId: 1,
+        message: {
+          role: 'assistant',
+          content: [{ type: 'text', text: '已' }],
+        },
+      },
+    });
+    const [secondEvent] = service.consumeGatewayConversationEvent({
+      type: 'chat.message',
+      event: {
+        state: 'delta',
+        runId: 'run-incremental-delta',
+        sessionKey: 'agent:main:main',
+        sequenceId: 2,
+        message: {
+          role: 'assistant',
+          content: [{ type: 'text', text: '写入。' }],
+        },
+      },
+    });
+
+    expect(secondEvent.item).toMatchObject({
+      kind: 'assistant-turn',
+      text: '已写入。',
+      segments: [{
+        kind: 'message',
+        text: '已写入。',
+      }],
+    });
+  });
+
+  it('same-run short final text must not truncate accumulated streaming output', () => {
+    const configDir = join(tmpdir(), `matcha-session-runtime-${Date.now()}`);
+    const service = createTestSessionRuntimeService({
+      workspace: { getConfigDir: () => configDir },
+      openclawBridge: {
+        chatSend: async () => ({ runId: 'run-unused' }),
+        gatewayRpc: async () => ({}),
+      },
+    });
+
+    service.consumeGatewayConversationEvent({
+      type: 'chat.message',
+      event: {
+        state: 'delta',
+        runId: 'run-short-final',
+        sessionKey: 'agent:main:main',
+        sequenceId: 1,
+        message: {
+          role: 'assistant',
+          content: [{ type: 'text', text: '已写入。' }],
+        },
+      },
+    });
+    const [finalEvent] = service.consumeGatewayConversationEvent({
+      type: 'chat.message',
+      event: {
+        state: 'final',
+        runId: 'run-short-final',
+        sessionKey: 'agent:main:main',
+        sequenceId: 2,
+        message: {
+          role: 'assistant',
+          content: [{ type: 'text', text: '已' }],
+        },
+      },
+    });
+
+    expect(finalEvent.item).toMatchObject({
+      kind: 'assistant-turn',
+      text: '已写入。',
+      segments: [{
+        kind: 'message',
+        text: '已写入。',
+      }],
+    });
+  });
+
   it('same-run assistant delta and final reuse the same message segment key', () => {
     const configDir = join(tmpdir(), `matcha-session-runtime-${Date.now()}`);
     const service = createTestSessionRuntimeService({
@@ -701,7 +807,7 @@ describe('session runtime service', () => {
     });
     expect(assistantTurns[1]).toMatchObject({
       kind: 'assistant-turn',
-      turnKey: 'main:run-new-pending',
+      turnKey: 'main:prompt:user-local-new',
       status: 'streaming',
       pendingState: 'typing',
       text: '',
@@ -732,7 +838,7 @@ describe('session runtime service', () => {
     expect(gatewayRpc).toHaveBeenCalledWith('sessions.patch', {
       key: 'agent:main:main',
       model: 'anthropic/claude-opus-4-6',
-    }, 30000);
+    }, 10000);
     expect(response.status).toBe(200);
     expect(response.data).toMatchObject({
       success: true,
@@ -742,6 +848,364 @@ describe('session runtime service', () => {
           model: 'anthropic/claude-opus-4-6',
         },
       },
+    });
+  });
+
+  it('patchSession rejects model switching while a run is active', async () => {
+    const configDir = await createRuntimeConfigDir();
+    const gatewayRpc = vi.fn(async () => ({}));
+    const service = createTestSessionRuntimeService({
+      workspace: { getConfigDir: () => configDir },
+      openclawBridge: {
+        chatSend: async () => ({ runId: 'run-active-1' }),
+        gatewayRpc,
+      },
+    });
+
+    await service.promptSession({
+      sessionKey: 'agent:main:main',
+      message: 'hello',
+      idempotencyKey: 'user-active-1',
+    });
+    await vi.waitFor(async () => {
+      const bound = await service.getSessionStateSnapshot({ sessionKey: 'agent:main:main' });
+      expect(bound.data.snapshot.runtime).toMatchObject({
+        activeRunId: 'run-active-1',
+      });
+    });
+    const response = await service.patchSession({
+      sessionKey: 'agent:main:main',
+      model: 'anthropic/claude-opus-4-6',
+    });
+
+    expect(response.status).toBe(409);
+    expect(response.data).toMatchObject({
+      success: false,
+      code: 'ACTIVE_RUN',
+      snapshot: {
+        sessionKey: 'agent:main:main',
+        runtime: {
+          sending: true,
+          activeRunId: 'run-active-1',
+          pendingTurnKey: 'main:run-active-1',
+        },
+      },
+    });
+    expect(gatewayRpc).not.toHaveBeenCalledWith('sessions.patch', expect.anything(), expect.anything());
+  });
+
+  it('promptSession commits user item and pending assistant turn in one submitted revision', async () => {
+    const configDir = await createRuntimeConfigDir();
+    const service = createTestSessionRuntimeService({
+      workspace: { getConfigDir: () => configDir },
+      openclawBridge: {
+        chatSend: async () => new Promise(() => undefined),
+        gatewayRpc: async () => ({}),
+      },
+    });
+
+    const promptPromise = service.promptSession({
+      sessionKey: 'agent:main:main',
+      message: 'hello atomic',
+      idempotencyKey: 'user-atomic-1',
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const stateResponse = await getHydratedSessionState(service, 'agent:main:main');
+    expect(stateResponse.status).toBe(200);
+    const snapshot = stateResponse.data.snapshot;
+    expect(snapshot.revision).toBe(snapshot.runtime.revision);
+    expect(snapshot.runEpoch).toBe(snapshot.runtime.runEpoch);
+    expect(snapshot.runtime).toMatchObject({
+      sending: true,
+      activeRunId: null,
+      runPhase: 'submitted',
+      pendingTurnKey: 'main:prompt:user-atomic-1',
+    });
+    expect(snapshot.items).toEqual([
+      expect.objectContaining({
+        kind: 'user-message',
+        key: 'session:agent:main:main|entry:user-atomic-1',
+      }),
+      expect.objectContaining({
+        kind: 'assistant-turn',
+        turnKey: 'main:prompt:user-atomic-1',
+        status: 'streaming',
+        pendingState: 'typing',
+      }),
+    ]);
+
+    void promptPromise.catch(() => undefined);
+  });
+
+  it('builds prompt response snapshot from the committed state even if live ingress mutates while metadata resolves', async () => {
+    const configDir = await createRuntimeConfigDir();
+    const modelResolution = createDeferred<string | null>();
+    const resolveSessionModel = vi.fn(() => modelResolution.promise);
+    const service = createTestSessionRuntimeService({
+      workspace: { getConfigDir: () => configDir },
+      sessionMetadata: {
+        resolveSessionModel,
+      },
+      openclawBridge: {
+        chatSend: async () => new Promise(() => undefined),
+        gatewayRpc: async () => ({}),
+      },
+    });
+
+    const promptPromise = service.promptSession({
+      sessionKey: 'agent:main:main',
+      message: 'hello atomic snapshot',
+      idempotencyKey: 'user-atomic-snapshot-1',
+    });
+
+    await vi.waitFor(async () => {
+      expect(resolveSessionModel).toHaveBeenCalled();
+    });
+
+    service.consumeGatewayConversationEvent({
+      type: 'chat.message',
+      event: {
+        state: 'final',
+        sessionKey: 'agent:main:main',
+        message: {
+          role: 'assistant',
+          content: 'late unbound mutation',
+        },
+      },
+    });
+    modelResolution.resolve(null);
+
+    const response = await promptPromise;
+
+    expect(response.data.snapshot).toMatchObject({
+      revision: 1,
+      runEpoch: 1,
+      runtime: {
+        sending: true,
+        activeRunId: null,
+        runPhase: 'submitted',
+        pendingTurnKey: 'main:prompt:user-atomic-snapshot-1',
+      },
+    });
+    expect(response.data.snapshot.items).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        text: expect.stringContaining('late unbound mutation'),
+      }),
+    ]));
+  });
+
+  it('ignores known old run events while a new prompt is submitted before run binding', async () => {
+    const configDir = await createRuntimeConfigDir();
+    const service = createTestSessionRuntimeService({
+      workspace: { getConfigDir: () => configDir },
+      openclawBridge: {
+        chatSend: async () => new Promise(() => undefined),
+        gatewayRpc: async () => ({}),
+      },
+    });
+
+    service.consumeGatewayConversationEvent({
+      type: 'chat.message',
+      event: {
+        state: 'final',
+        runId: 'run-old-1',
+        sessionKey: 'agent:main:main',
+        message: {
+          role: 'assistant',
+          content: 'old final',
+        },
+      },
+    });
+
+    await service.promptSession({
+      sessionKey: 'agent:main:main',
+      message: 'new prompt',
+      idempotencyKey: 'user-new-1',
+    });
+    const submitted = await getHydratedSessionState(service, 'agent:main:main');
+    const submittedRevision = submitted.data.snapshot.revision;
+
+    const [event] = service.consumeGatewayConversationEvent({
+      type: 'chat.message',
+      event: {
+        state: 'streaming',
+        runId: 'run-old-1',
+        sessionKey: 'agent:main:main',
+        message: {
+          role: 'assistant',
+          content: 'late old token',
+        },
+      },
+    });
+
+    expect(event?.snapshot.revision).toBe(submittedRevision);
+    expect(event?.snapshot.runtime).toMatchObject({
+      sending: true,
+      activeRunId: null,
+      runPhase: 'submitted',
+      pendingTurnKey: 'main:prompt:user-new-1',
+    });
+    expect(event && 'item' in event ? event.item : null).toBeNull();
+    expect(event?.snapshot.items).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        text: expect.stringContaining('late old token'),
+      }),
+    ]));
+  });
+
+  it('ignores unbound run events while a submitted prompt is waiting for gateway run binding', async () => {
+    const configDir = await createRuntimeConfigDir();
+    const service = createTestSessionRuntimeService({
+      workspace: { getConfigDir: () => configDir },
+      openclawBridge: {
+        chatSend: async () => new Promise(() => undefined),
+        gatewayRpc: async () => ({}),
+      },
+    });
+
+    await service.promptSession({
+      sessionKey: 'agent:main:main',
+      message: 'new prompt',
+      idempotencyKey: 'user-unbound-1',
+    });
+    const submitted = await getHydratedSessionState(service, 'agent:main:main');
+    const submittedRevision = submitted.data.snapshot.revision;
+
+    const [event] = service.consumeGatewayConversationEvent({
+      type: 'chat.message',
+      event: {
+        state: 'streaming',
+        runId: 'run-not-bound-to-current-prompt',
+        sessionKey: 'agent:main:main',
+        message: {
+          role: 'assistant',
+          content: 'should not bind implicitly',
+        },
+      },
+    });
+
+    expect(event?.snapshot.revision).toBe(submittedRevision);
+    expect(event?.snapshot.runtime).toMatchObject({
+      sending: true,
+      activeRunId: null,
+      runPhase: 'submitted',
+      pendingTurnKey: 'main:prompt:user-unbound-1',
+    });
+    expect(event && 'item' in event ? event.item : null).toBeNull();
+  });
+
+  it('abortSession returns a local aborted snapshot without waiting for gateway abort', async () => {
+    const configDir = await createRuntimeConfigDir();
+    const gatewayRpc = vi.fn((method: string) => (
+      method === 'chat.abort'
+        ? new Promise(() => undefined)
+        : Promise.resolve({})
+    ));
+    const service = createTestSessionRuntimeService({
+      workspace: { getConfigDir: () => configDir },
+      openclawBridge: {
+        chatSend: async () => ({ runId: 'run-abort-fast-1' }),
+        gatewayRpc,
+      },
+    });
+
+    await service.promptSession({
+      sessionKey: 'agent:main:main',
+      message: 'hello',
+      idempotencyKey: 'user-abort-fast-1',
+    });
+    const response = await service.abortSession({
+      sessionKey: 'agent:main:main',
+    });
+
+    expect(response.status).toBe(200);
+    expect(response.data.snapshot.runtime).toMatchObject({
+      sending: false,
+      activeRunId: null,
+      runPhase: 'aborted',
+      pendingFinal: false,
+    });
+    expect(gatewayRpc).toHaveBeenCalledWith('chat.abort', { sessionKey: 'agent:main:main' }, 5000);
+  });
+
+  it('ignores old run message events after local abort advances the run epoch', async () => {
+    const configDir = await createRuntimeConfigDir();
+    const service = createTestSessionRuntimeService({
+      workspace: { getConfigDir: () => configDir },
+      openclawBridge: {
+        chatSend: async () => ({ runId: 'run-abort-stale-1' }),
+        gatewayRpc: async () => ({}),
+      },
+    });
+
+    await service.promptSession({
+      sessionKey: 'agent:main:main',
+      message: 'hello',
+      idempotencyKey: 'user-abort-stale-1',
+    });
+    const abortResponse = await service.abortSession({
+      sessionKey: 'agent:main:main',
+    });
+    const abortedRevision = abortResponse.data.snapshot.revision;
+
+    const [event] = service.consumeGatewayConversationEvent({
+      type: 'chat.message',
+      event: {
+        state: 'streaming',
+        runId: 'run-abort-stale-1',
+        sessionKey: 'agent:main:main',
+        message: {
+          role: 'assistant',
+          content: 'late token',
+        },
+      },
+    });
+
+    expect(event?.snapshot.revision).toBe(abortedRevision);
+    expect(event?.snapshot.runtime).toMatchObject({
+      sending: false,
+      activeRunId: null,
+      runPhase: 'aborted',
+    });
+    expect(event && 'item' in event ? event.item : null).toBeNull();
+  });
+
+  it('does not let unbound terminal lifecycle events overwrite an active run', async () => {
+    const configDir = await createRuntimeConfigDir();
+    const service = createTestSessionRuntimeService({
+      workspace: { getConfigDir: () => configDir },
+      openclawBridge: {
+        chatSend: async () => ({ runId: 'run-active-terminal-guard-1' }),
+        gatewayRpc: async () => ({}),
+      },
+    });
+
+    await service.promptSession({
+      sessionKey: 'agent:main:main',
+      message: 'hello',
+      idempotencyKey: 'user-terminal-guard-1',
+    });
+    await vi.waitFor(async () => {
+      const bound = await service.getSessionStateSnapshot({ sessionKey: 'agent:main:main' });
+      expect(bound.data.snapshot.runtime.activeRunId).toBe('run-active-terminal-guard-1');
+    });
+    const before = await getHydratedSessionState(service, 'agent:main:main');
+    const beforeRevision = before.data.snapshot.revision;
+
+    const [event] = service.consumeGatewayConversationEvent({
+      type: 'run.phase',
+      phase: 'error',
+      sessionKey: 'agent:main:main',
+      errorMessage: 'unbound terminal should reconcile only',
+    });
+
+    expect(event?.snapshot.revision).toBe(beforeRevision);
+    expect(event?.snapshot.runtime).toMatchObject({
+      sending: true,
+      activeRunId: 'run-active-terminal-guard-1',
+      runPhase: 'submitted',
+      lastError: null,
     });
   });
 
@@ -2697,8 +3161,22 @@ describe('session runtime service', () => {
     expect(promptResponse.status).toBe(200);
     expect(promptResponse.data.snapshot.runtime).toMatchObject({
       sending: true,
-      activeRunId: 'run-orphan-1',
-      pendingTurnKey: 'main:run-orphan-1',
+      activeRunId: null,
+      pendingTurnKey: 'main:prompt:user-orphan-run',
+    });
+
+    await vi.waitFor(async () => {
+      const bound = await service.getSessionStateSnapshot({ sessionKey: 'agent:main:main' });
+      expect(bound).toMatchObject({
+        data: {
+          snapshot: {
+            runtime: {
+              activeRunId: 'run-orphan-1',
+              pendingTurnKey: 'main:run-orphan-1',
+            },
+          },
+        },
+      });
     });
 
     const resumed = await resumeHydratedSession(service, 'agent:main:main');
@@ -2735,8 +3213,22 @@ describe('session runtime service', () => {
     expect(promptResponse.status).toBe(200);
     expect(promptResponse.data.snapshot.runtime).toMatchObject({
       sending: true,
-      activeRunId: 'run-orphan-cleanup-1',
-      pendingTurnKey: 'main:run-orphan-cleanup-1',
+      activeRunId: null,
+      pendingTurnKey: 'main:prompt:user-orphan-cleanup-1',
+    });
+
+    await vi.waitFor(async () => {
+      const bound = await service.getSessionStateSnapshot({ sessionKey: 'agent:main:main' });
+      expect(bound).toMatchObject({
+        data: {
+          snapshot: {
+            runtime: {
+              activeRunId: 'run-orphan-cleanup-1',
+              pendingTurnKey: 'main:run-orphan-cleanup-1',
+            },
+          },
+        },
+      });
     });
 
     service.notifyTransportConnected(2);
@@ -3058,20 +3550,20 @@ describe('session runtime service', () => {
     expect(promptResponse.data).toMatchObject({
       success: true,
       sessionKey: 'agent:main:main',
-      runId: 'run-prompt-1',
+      runId: null,
       promptId: 'user-local-1',
       snapshot: {
         runtime: {
           sending: true,
-          activeRunId: 'run-prompt-1',
+          activeRunId: null,
           runPhase: 'submitted',
-          pendingTurnKey: 'main:run-prompt-1',
+          pendingTurnKey: 'main:prompt:user-local-1',
           pendingTurnLaneKey: 'main',
         },
         items: expect.arrayContaining([
           expect.objectContaining({
             kind: 'assistant-turn',
-            turnKey: 'main:run-prompt-1',
+            turnKey: 'main:prompt:user-local-1',
             laneKey: 'main',
             status: 'streaming',
             pendingState: 'typing',
@@ -3090,6 +3582,21 @@ describe('session runtime service', () => {
           fileSize: 1,
         }],
       },
+    });
+
+    await vi.waitFor(async () => {
+      const bound = await service.getSessionStateSnapshot({ sessionKey: 'agent:main:main' });
+      expect(bound).toMatchObject({
+        data: {
+          snapshot: {
+            runtime: {
+              sending: true,
+              activeRunId: 'run-prompt-1',
+              pendingTurnKey: 'main:run-prompt-1',
+            },
+          },
+        },
+      });
     });
 
     const loadResponse = await loadHydratedSession(service, 'agent:main:main');
@@ -4075,10 +4582,26 @@ describe('session runtime service', () => {
     expect(promptResponse.status).toBe(200);
     expect(promptResponse.data.snapshot.runtime).toMatchObject({
       sending: true,
-      activeRunId: 'run-fresh-1',
+      activeRunId: null,
       runPhase: 'submitted',
+      pendingTurnKey: 'main:prompt:user-local-fresh',
       lastError: null,
       lastIssue: null,
+    });
+
+    await vi.waitFor(async () => {
+      const bound = await service.getSessionStateSnapshot({ sessionKey: 'agent:main:main' });
+      expect(bound).toMatchObject({
+        data: {
+          snapshot: {
+            runtime: {
+              activeRunId: 'run-fresh-1',
+              lastError: null,
+              lastIssue: null,
+            },
+          },
+        },
+      });
     });
   });
 });

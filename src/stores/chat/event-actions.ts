@@ -17,10 +17,6 @@ import {
 } from './store-state-helpers';
 import { useTaskSnapshotStore } from './task-snapshot-store';
 import {
-  UNKNOWN_ABORTED_RUN_MARKER,
-  type StoreSessionRunCache,
-} from './session-run-cache';
-import {
   logRendererTodoToolDebug,
   summarizeAssistantTurnForTodoToolDebug,
   summarizeItemsForTodoToolDebug,
@@ -44,7 +40,6 @@ type ChatStoreGetFn = () => ChatStoreState;
 interface CreateStoreRuntimeEventActionsInput {
   set: ChatStoreSetFn;
   get: ChatStoreGetFn;
-  sessionRunCache: StoreSessionRunCache;
 }
 
 function normalizeIdentifier(value: unknown): string {
@@ -165,49 +160,6 @@ function applySessionLifecycleEvent(
   }
 }
 
-function shouldBlockAbortedRunEvent(input: {
-  event: SessionUpdateEvent;
-  eventRunId: string;
-  targetSessionKey: string;
-  targetRuntime: ReturnType<typeof getSessionRuntime>;
-  sessionRunCache: StoreSessionRunCache;
-}): boolean {
-  const {
-    event,
-    eventRunId,
-    targetSessionKey,
-    targetRuntime,
-    sessionRunCache,
-  } = input;
-  if (!eventRunId) {
-    return false;
-  }
-
-  const abortedRunMarker = sessionRunCache.getAbortedRunMarker(targetSessionKey);
-  if (!abortedRunMarker) {
-    return false;
-  }
-  if (abortedRunMarker !== UNKNOWN_ABORTED_RUN_MARKER && abortedRunMarker !== eventRunId) {
-    return false;
-  }
-
-  if (event.sessionUpdate === 'session_info_update' && event.phase === 'aborted') {
-    if (abortedRunMarker === UNKNOWN_ABORTED_RUN_MARKER) {
-      sessionRunCache.setAbortedRunMarker(targetSessionKey, eventRunId);
-    }
-    return false;
-  }
-
-  if (
-    abortedRunMarker === UNKNOWN_ABORTED_RUN_MARKER
-    && targetRuntime.sending
-    && !targetRuntime.activeRunId
-  ) {
-    sessionRunCache.queueBlockedSessionUpdate(targetSessionKey, eventRunId, event);
-  }
-  return true;
-}
-
 function applySessionMessageEvent(
   input: CreateStoreRuntimeEventActionsInput & {
     targetSessionKey: string;
@@ -277,16 +229,6 @@ export function handleStoreSessionUpdateEvent(
     snapshot: summarizeSnapshotForTodoToolDebug(sessionUpdate.snapshot),
   });
 
-  if (shouldBlockAbortedRunEvent({
-    event: sessionUpdate,
-    eventRunId,
-    targetSessionKey,
-    targetRuntime,
-    sessionRunCache: input.sessionRunCache,
-  })) {
-    return;
-  }
-
   if (sessionUpdate.sessionUpdate === 'session_info_update') {
     useTaskSnapshotStore.getState().reportSessionUpdate(sessionUpdate);
     if (eventRunId && targetRuntime.activeRunId && targetRuntime.activeRunId !== eventRunId) {
@@ -295,7 +237,6 @@ export function handleStoreSessionUpdateEvent(
     applySessionLifecycleEvent({
       set,
       get,
-      sessionRunCache: input.sessionRunCache,
       targetSessionKey,
       currentSessionKey,
       event: sessionUpdate,
@@ -350,7 +291,6 @@ export function handleStoreSessionUpdateEvent(
   applySessionMessageEvent({
     set,
     get,
-    sessionRunCache: input.sessionRunCache,
     targetSessionKey,
     event: sessionUpdate,
   });

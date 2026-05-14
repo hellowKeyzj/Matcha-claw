@@ -78,10 +78,14 @@ function setupSessionLoad(messages: RawMessage[]): void {
   hostSessionLoadMock.mockResolvedValueOnce({
     snapshot: {
       sessionKey,
+      revision: 1,
+      runEpoch: 1,
       catalog: buildSnapshotCatalog(sessionKey, entries),
       items,
       replayComplete: true,
       runtime: {
+        revision: 1,
+        runEpoch: 1,
         sending: false,
         activeRunId: null,
         runPhase: 'done',
@@ -544,6 +548,8 @@ describe('chat session labeling', () => {
       resolveHistory({
         snapshot: {
           sessionKey: 'agent:alpha:session-1',
+          revision: 1,
+          runEpoch: 1,
           catalog: {
             key: 'agent:alpha:session-1',
             agentId: 'alpha',
@@ -554,6 +560,8 @@ describe('chat session labeling', () => {
           items: [],
           replayComplete: true,
           runtime: {
+            revision: 1,
+            runEpoch: 1,
             sending: false,
             activeRunId: null,
             runPhase: 'done',

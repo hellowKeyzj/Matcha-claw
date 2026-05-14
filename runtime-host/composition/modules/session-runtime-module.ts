@@ -22,12 +22,14 @@ import { SessionSnapshotService } from '../../application/sessions/session-snaps
 import { SessionStorageRepository } from '../../application/sessions/session-storage-repository';
 import { SessionExecutionGraphRuntime } from '../../application/sessions/session-execution-graph-runtime';
 import { SessionTimelineRuntime } from '../../application/sessions/session-timeline-runtime';
+import { SessionOperationCoordinator } from '../../application/sessions/session-operation-coordinator';
 import { SessionTranscriptTimelineLoader } from '../../application/sessions/session-transcript-timeline-loader';
 import type { TaskManagerService } from '../../application/tasks/service';
 import type { OpenClawWorkspacePort } from '../../application/openclaw/openclaw-workspace-service';
 import type { RuntimeClockPort, RuntimeFileSystemPort, RuntimeIdGeneratorPort } from '../../application/common/runtime-ports';
 import type { GatewayChatPort, GatewayRpcPort } from '../../application/gateway/gateway-runtime-port';
 import type { RuntimeHostLogger } from '../../shared/logger';
+import type { ParentGatewayForwardEventName } from '../../shared/parent-transport-contracts';
 import {
   registerRuntimeJobDefinitions,
   type RuntimeJobDefinition,
@@ -51,6 +53,9 @@ export interface SessionRuntimeModule {
 export function registerSessionRuntimeModule(
   container: RuntimeHostContainer,
   gateway: () => GatewayChatPort & Pick<GatewayRpcPort, 'gatewayRpc'>,
+  parentGatewayEvents?: {
+    emit: (eventName: ParentGatewayForwardEventName, payload: unknown) => Promise<void>;
+  },
 ): void {
   container.register('sessionStorageRepository', (scope) => new SessionStorageRepository({
     workspace: scope.resolve<OpenClawWorkspacePort>('openclaw.workspaceService'),
@@ -75,6 +80,7 @@ export function registerSessionRuntimeModule(
   container.register('sessionRuntimeStateStore', (scope) => new SessionRuntimeStateStore({
     runtimeStore: scope.resolve('sessionRuntimeStoreRepository'),
   }));
+  container.register('sessionOperationCoordinator', () => new SessionOperationCoordinator());
   container.register('sessionTranscriptTimelineLoader', (scope) => new SessionTranscriptTimelineLoader({
     sessionStorage: scope.resolve('sessionStorageRepository'),
   }));
@@ -112,6 +118,7 @@ export function registerSessionRuntimeModule(
     snapshotService: scope.resolve('sessionSnapshotService'),
     gateway: gateway(),
     pendingApprovals: scope.resolve('session.pendingApprovals'),
+    operationCoordinator: scope.resolve('sessionOperationCoordinator'),
     clock: scope.resolve<RuntimeClockPort>('runtime.clock'),
     idGenerator: scope.resolve<RuntimeIdGeneratorPort>('runtime.idGenerator'),
     sessionHydrationJobs: scope.resolve('sessionHydrationJobAdapter'),
@@ -134,6 +141,10 @@ export function registerSessionRuntimeModule(
     idGenerator: scope.resolve<RuntimeIdGeneratorPort>('runtime.idGenerator'),
     clock: scope.resolve<RuntimeClockPort>('runtime.clock'),
     gateway: gateway(),
+    operationCoordinator: scope.resolve('sessionOperationCoordinator'),
+    emitSessionUpdate: (event) => {
+      void parentGatewayEvents?.emit('session:update', event).catch(() => undefined);
+    },
   }));
   container.register('sessionRuntimeService', (scope) => new SessionRuntimeService({
     sessionCatalog: scope.resolve('sessionCatalogService'),
@@ -143,6 +154,7 @@ export function registerSessionRuntimeModule(
     ingressService: scope.resolve('sessionGatewayIngressService'),
     commandService: scope.resolve('sessionCommandService'),
     promptService: scope.resolve('sessionPromptService'),
+    operationCoordinator: scope.resolve('sessionOperationCoordinator'),
   }));
 }
 

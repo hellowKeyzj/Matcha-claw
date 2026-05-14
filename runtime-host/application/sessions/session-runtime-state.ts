@@ -29,6 +29,7 @@ export class SessionRuntimeStateStore {
   private readonly sessionStates = new Map<string, SessionRuntimeTimelineState>();
   private readonly parentSessionsByChildSessionKey = new Map<string, Set<string>>();
   private readonly resolvedSessionModels = new Map<string, string>();
+  private readonly terminatedRunIdsBySessionKey = new Map<string, Set<string>>();
   private readonly persistedStoreReady: Promise<void>;
   private activeSessionKey: string | null = null;
   private latestConnectedTransportEpoch = 0;
@@ -84,6 +85,7 @@ export class SessionRuntimeStateStore {
       parents.delete(sessionKey);
     }
     this.resolvedSessionModels.delete(sessionKey);
+    this.terminatedRunIdsBySessionKey.delete(sessionKey);
     this.clearActiveSessionKey(sessionKey);
   }
 
@@ -106,6 +108,27 @@ export class SessionRuntimeStateStore {
 
   getResolvedSessionModel(sessionKey: string): string | null {
     return this.resolvedSessionModels.get(sessionKey) ?? null;
+  }
+
+  markRunTerminated(sessionKey: string, runId: string | null | undefined): void {
+    const normalizedRunId = normalizeString(runId);
+    if (!normalizedRunId) {
+      return;
+    }
+    let runIds = this.terminatedRunIdsBySessionKey.get(sessionKey);
+    if (!runIds) {
+      runIds = new Set<string>();
+      this.terminatedRunIdsBySessionKey.set(sessionKey, runIds);
+    }
+    runIds.add(normalizedRunId);
+  }
+
+  isRunTerminated(sessionKey: string, runId: string | null | undefined): boolean {
+    const normalizedRunId = normalizeString(runId);
+    if (!normalizedRunId) {
+      return false;
+    }
+    return this.terminatedRunIdsBySessionKey.get(sessionKey)?.has(normalizedRunId) ?? false;
   }
 
   updateExecutionGraphDependencyIndex(

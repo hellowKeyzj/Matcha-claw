@@ -11,7 +11,7 @@ interface CronRouteDeps {
 
 interface CronRouteService {
   usageRecent(payload: unknown, routeUrl: URL): Promise<unknown>;
-  listJobs(): unknown;
+  listJobs(): Promise<unknown>;
   sessionHistory(routeUrl: URL): Promise<ApplicationResponse>;
   createJob(payload: unknown): Promise<ApplicationResponse>;
   updateJob(jobId: string, payload: unknown): Promise<ApplicationResponse>;

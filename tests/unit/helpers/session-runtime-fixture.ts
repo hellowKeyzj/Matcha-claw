@@ -11,6 +11,7 @@ import { SessionStorageRepository, type SessionStoragePort } from '../../../runt
 import { SessionTranscriptTimelineLoader } from '../../../runtime-host/application/sessions/session-transcript-timeline-loader';
 import { SessionExecutionGraphRuntime } from '../../../runtime-host/application/sessions/session-execution-graph-runtime';
 import { SessionTimelineRuntime } from '../../../runtime-host/application/sessions/session-timeline-runtime';
+import { SessionOperationCoordinator } from '../../../runtime-host/application/sessions/session-operation-coordinator';
 import type { SessionHydrationJobPort } from '../../../runtime-host/application/sessions/session-hydration-jobs';
 import type { SessionCatalogJobPort } from '../../../runtime-host/application/sessions/session-catalog-jobs';
 import { PendingApprovalStore } from '../../../runtime-host/application/sessions/pending-approval-store';
@@ -26,6 +27,7 @@ export interface TestSessionRuntimeServiceDeps {
   sessionStorage?: SessionStoragePort;
   sessionRuntimeStore?: SessionRuntimeStorePort;
   sessionHydrationJobs?: SessionHydrationJobPort;
+  emitSessionUpdate?: ConstructorParameters<typeof SessionPromptService>[0]['emitSessionUpdate'];
   openclawBridge: {
     chatSend: (params: Record<string, unknown>) => Promise<unknown>;
     gatewayRpc?: (method: string, params?: unknown, timeoutMs?: number) => Promise<unknown>;
@@ -78,6 +80,7 @@ export function createTestSessionRuntimeService(deps: TestSessionRuntimeServiceD
   const stateStore = new SessionRuntimeStateStore({
     runtimeStore: sessionRuntimeStore,
   });
+  const operationCoordinator = new SessionOperationCoordinator();
   const transcriptLoader = new SessionTranscriptTimelineLoader({
     sessionStorage,
   });
@@ -126,6 +129,7 @@ export function createTestSessionRuntimeService(deps: TestSessionRuntimeServiceD
     snapshotService,
     gateway: deps.openclawBridge,
     pendingApprovals: new PendingApprovalStore({ clock }),
+    operationCoordinator,
     clock,
     idGenerator,
     sessionHydrationJobs: deps.sessionHydrationJobs ?? {
@@ -150,6 +154,8 @@ export function createTestSessionRuntimeService(deps: TestSessionRuntimeServiceD
     idGenerator,
     clock,
     gateway: deps.openclawBridge,
+    operationCoordinator,
+    emitSessionUpdate: deps.emitSessionUpdate,
   });
 
   return new SessionRuntimeService({
@@ -160,5 +166,6 @@ export function createTestSessionRuntimeService(deps: TestSessionRuntimeServiceD
     ingressService,
     commandService,
     promptService,
+    operationCoordinator,
   });
 }

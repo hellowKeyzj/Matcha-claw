@@ -72,6 +72,7 @@ describe('session adapter service catalog', () => {
           kind: 'main',
           label: '独立 catalog service',
           preferred: true,
+          status: 'completed',
           titleSource: 'user',
           displayName: 'agent:alpha:main',
           updatedAt: Date.parse('2026-04-10T10:00:00.000Z'),

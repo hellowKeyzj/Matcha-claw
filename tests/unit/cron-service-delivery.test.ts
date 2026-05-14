@@ -9,6 +9,11 @@ function createBridgeMock() {
     updateCronJob: vi.fn(),
     removeCronJob: vi.fn(),
     runCronJob: vi.fn(),
+    readGatewayConnectionState: vi.fn(async () => ({
+      state: 'connected' as const,
+      gatewayReady: true,
+      portReachable: true,
+    })),
   };
 }
 
@@ -328,7 +333,7 @@ describe('cron service delivery', () => {
       jobs: jobsPort,
     });
 
-    expect(service.listJobs()).toMatchObject({
+    await expect(service.listJobs()).resolves.toMatchObject({
       success: true,
       jobs: [],
       ready: false,
@@ -338,13 +343,13 @@ describe('cron service delivery', () => {
     });
     expect(jobsPort.submitRefreshJobs).toHaveBeenCalledTimes(1);
     const refreshResult = await service.refreshJobsSnapshot();
-    const snapshot = service.listJobs();
+    const snapshot = await service.listJobs();
 
     expect(refreshResult.success).toBe(true);
     expect(snapshot).toMatchObject({
       success: true,
       ready: true,
-      refreshing: false,
+      refreshing: true,
       updatedAt: 4567,
       error: null,
     });
@@ -383,7 +388,7 @@ describe('cron service delivery', () => {
       jobs: jobsPort,
     });
 
-    expect(service.listJobs()).toMatchObject({
+    await expect(service.listJobs()).resolves.toMatchObject({
       success: true,
       jobs: [],
       ready: false,
@@ -392,7 +397,7 @@ describe('cron service delivery', () => {
       error: null,
     });
     const refreshResult = await service.refreshJobsSnapshot();
-    const snapshot = service.listJobs();
+    const snapshot = await service.listJobs();
 
     expect(refreshResult.success).toBe(true);
     expect(jobsPort.submitRepairDelivery).toHaveBeenCalledTimes(1);

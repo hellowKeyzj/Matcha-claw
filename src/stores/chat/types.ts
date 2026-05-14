@@ -91,6 +91,8 @@ export interface TaskChatBridgeState {
 }
 
 export interface ChatSessionRuntimeState {
+  revision: number;
+  runEpoch: number;
   sending: boolean;
   activeRunId: string | null;
   runPhase: ChatRunPhase;

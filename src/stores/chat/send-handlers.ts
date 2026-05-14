@@ -1,10 +1,6 @@
 import { cacheSendAttachments } from './attachment-helpers';
-import { reduceSessionRuntime } from './runtime-state-reducer';
 import { hasActiveStreamingRun } from './runtime-stream-state';
-import {
-  UNKNOWN_ABORTED_RUN_MARKER,
-  type StoreSessionRunCache,
-} from './session-run-cache';
+import type { StoreSessionRunCache } from './session-run-cache';
 import {
   CHAT_SEND_RPC_TIMEOUT_MS,
   sendChatTransport,
@@ -19,7 +15,6 @@ import {
   setSendSafetyTimer,
 } from './timers';
 import {
-  patchSessionRecord,
   patchSessionSnapshot,
   getSessionMeta,
   getSessionRuntime,
@@ -52,20 +47,9 @@ export function applyStoreSendStart(params: ApplyStoreSendStartParams): void {
     const nextSessionLabel = sessionMeta.kind === 'main' || sessionMeta.preferred
       ? null
       : text;
-    const runtime = getSessionRuntime(state, sessionKey);
-    const runtimePatch = reduceSessionRuntime(runtime, {
-      type: 'send_submitted',
-      nowMs,
-    });
     return {
       loadedSessions: patchSessionMeta(
-        {
-          loadedSessions: patchSessionRecord(state, sessionKey, {
-            runtime: runtimePatch === runtime
-              ? runtime
-              : { ...runtime, ...runtimePatch },
-          }),
-        },
+        state,
         sessionKey,
         {
           label: nextSessionLabel ?? state.loadedSessions[sessionKey]?.meta.label ?? null,
@@ -157,18 +141,8 @@ export function startStoreSendWatchers(params: StartStoreSendWatchersParams): vo
       if (current.currentSessionKey !== sessionKey) {
         return current;
       }
-      const currentRuntime = getSessionRuntime(current, sessionKey);
-      const runtimePatch = reduceSessionRuntime(currentRuntime, {
-        type: 'send_failed',
-        error: NO_RESPONSE_RECEIVED_ERROR,
-        clearRun: true,
-      });
       return {
-        loadedSessions: patchSessionRecord(current, sessionKey, {
-          runtime: runtimePatch === currentRuntime
-            ? currentRuntime
-            : { ...currentRuntime, ...runtimePatch },
-        }),
+        error: NO_RESPONSE_RECEIVED_ERROR,
       };
     });
   };
@@ -190,7 +164,6 @@ export function resumeActiveStoreSend(
 }
 
 interface MaybeEnterStoreWaitingApprovalParams {
-  set: ChatStoreSetFn;
   get: ChatStoreGetFn;
   sessionKey: string;
 }
@@ -198,13 +171,12 @@ interface MaybeEnterStoreWaitingApprovalParams {
 async function maybeEnterStoreWaitingApproval(
   params: MaybeEnterStoreWaitingApprovalParams,
 ): Promise<boolean> {
-  const { set, get, sessionKey } = params;
+  const { get, sessionKey } = params;
   await get().syncPendingApprovals(sessionKey);
   const pendingApprovals = get().pendingApprovalsBySession[sessionKey] ?? [];
   if (pendingApprovals.length === 0) {
     return false;
   }
-  commitStoreSendWaitingApproval(set);
   return true;
 }
 
@@ -220,18 +192,6 @@ function hasStoreApprovalEvidence(
   );
 }
 
-function commitStoreSendWaitingApproval(set: ChatStoreSetFn): void {
-  set((state) => {
-    const runtime = getSessionRuntime(state, state.currentSessionKey);
-    const runtimePatch = reduceSessionRuntime(runtime, { type: 'send_waiting_approval' });
-    return {
-      loadedSessions: patchSessionRecord(state, state.currentSessionKey, {
-        runtime: runtimePatch === runtime ? runtime : { ...runtime, ...runtimePatch },
-      }),
-    };
-  });
-}
-
 interface FinalizeStoreSendFailureParams {
   set: ChatStoreSetFn;
   error: string;
@@ -240,17 +200,7 @@ interface FinalizeStoreSendFailureParams {
 function finalizeStoreSendFailure(params: FinalizeStoreSendFailureParams): void {
   const { set, error } = params;
   clearHistoryPoll();
-  set((state) => {
-    const runtime = getSessionRuntime(state, state.currentSessionKey);
-    const runtimePatch = reduceSessionRuntime(runtime, { type: 'send_failed', error });
-    return {
-      loadedSessions: patchSessionRecord(state, state.currentSessionKey, {
-        runtime: runtimePatch === runtime
-          ? runtime
-          : { ...runtime, ...runtimePatch, lastError: error },
-      }),
-    };
-  });
+  set({ error });
 }
 
 interface ExecuteStoreSendParams {
@@ -317,16 +267,6 @@ export async function executeStoreSend(params: ExecuteStoreSendParams): Promise<
     });
 
     if (sendGeneration !== sessionRunCache.getSendGeneration(currentSessionKey)) {
-      if (
-        sendResult.ok
-        && sendResult.runId
-        && sessionRunCache.getAbortedRunMarker(currentSessionKey) === UNKNOWN_ABORTED_RUN_MARKER
-      ) {
-        const currentRuntime = getSessionRuntime(get(), currentSessionKey);
-        if (!currentRuntime.sending) {
-          sessionRunCache.setAbortedRunMarker(currentSessionKey, sendResult.runId);
-        }
-      }
       return;
     }
 
@@ -334,7 +274,6 @@ export async function executeStoreSend(params: ExecuteStoreSendParams): Promise<
         const errorMsg = sendResult.error;
         if (isRecoverableChatSendTimeout(errorMsg)) {
           if (await maybeEnterStoreWaitingApproval({
-            set,
             get,
             sessionKey: currentSessionKey,
           })) {
@@ -343,7 +282,6 @@ export async function executeStoreSend(params: ExecuteStoreSendParams): Promise<
           return;
         }
       if (await maybeEnterStoreWaitingApproval({
-        set,
         get,
         sessionKey: currentSessionKey,
       })) {
@@ -356,38 +294,9 @@ export async function executeStoreSend(params: ExecuteStoreSendParams): Promise<
       return;
     }
 
-    if (sendResult.runId) {
-      set((state) => {
-        const runtime = getSessionRuntime(state, currentSessionKey);
-        const runtimePatch = reduceSessionRuntime(runtime, { type: 'send_run_bound', runId: sendResult.runId });
-        return {
-          loadedSessions: patchSessionRecord(
-            {
-              loadedSessions: patchSessionSnapshot(state, currentSessionKey, sendResult.snapshot),
-            },
-            currentSessionKey,
-            {
-              runtime: runtimePatch === runtime ? runtime : { ...runtime, ...runtimePatch },
-            },
-          ),
-        };
-      });
-      sessionRunCache.setAbortedRunMarker(currentSessionKey, null);
-      const blockedSessionUpdates = sessionRunCache.takeBlockedSessionUpdates(currentSessionKey, sendResult.runId);
-      if (blockedSessionUpdates.length > 0) {
-        queueMicrotask(() => {
-          for (const blockedSessionUpdate of blockedSessionUpdates) {
-            get().handleSessionUpdateEvent(blockedSessionUpdate);
-          }
-        });
-      }
-    } else {
-      set((state) => {
-        return {
-          loadedSessions: patchSessionSnapshot(state, currentSessionKey, sendResult.snapshot),
-        };
-      });
-    }
+    set((state) => ({
+      loadedSessions: patchSessionSnapshot(state, currentSessionKey, sendResult.snapshot),
+    }));
   } catch (error) {
     if (sendGeneration !== sessionRunCache.getSendGeneration(currentSessionKey)) {
       return;
@@ -395,7 +304,6 @@ export async function executeStoreSend(params: ExecuteStoreSendParams): Promise<
     const errorMsg = String(error);
     if (isRecoverableChatSendTimeout(errorMsg)) {
       if (await maybeEnterStoreWaitingApproval({
-        set,
         get,
         sessionKey: currentSessionKey,
       })) {
@@ -409,7 +317,6 @@ export async function executeStoreSend(params: ExecuteStoreSendParams): Promise<
     }
     const state = get();
     if (timeoutSignal && hasStoreApprovalEvidence(state, currentSessionKey)) {
-      commitStoreSendWaitingApproval(set);
       return;
     }
     finalizeStoreSendFailure({

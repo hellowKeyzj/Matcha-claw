@@ -6,12 +6,12 @@ import { buildRenderItemsFromMessages } from './helpers/timeline-fixtures';
 import type { SessionRenderItem } from '../../runtime-host/shared/session-adapter-types';
 
 const hostApiFetchMock = vi.fn();
-const hostSessionAbortRuntimeMock = vi.fn();
+const hostSessionAbortMock = vi.fn();
 const subscribeHostEventMock = vi.fn();
 
 vi.mock('@/lib/host-api', () => ({
   hostApiFetch: (...args: unknown[]) => hostApiFetchMock(...args),
-  hostSessionAbortRuntime: (...args: unknown[]) => hostSessionAbortRuntimeMock(...args),
+  hostSessionAbort: (...args: unknown[]) => hostSessionAbortMock(...args),
 }));
 
 vi.mock('@/lib/host-events', () => ({
@@ -37,6 +37,8 @@ function createRunningGatewayStatus(updatedAt = 1) {
 function createSessionRecord(input?: {
   messages?: RawMessage[];
   runtime?: Partial<{
+    revision: number;
+    runEpoch: number;
     sending: boolean;
     activeRunId: string | null;
     pendingFinal: boolean;
@@ -52,6 +54,8 @@ function createSessionRecord(input?: {
       thinkingLevel: null,
     },
     runtime: {
+      revision: input?.runtime?.revision ?? 0,
+      runEpoch: input?.runtime?.runEpoch ?? 0,
       sending: input?.runtime?.sending ?? false,
       activeRunId: input?.runtime?.activeRunId ?? null,
       runPhase: 'idle' as const,
@@ -76,6 +80,8 @@ function createSessionInfoUpdate(payload: {
   runId?: string | null;
   sessionKey?: string | null;
   error?: string | null;
+  revision?: number;
+  runEpoch?: number;
 }) {
   const sessionKey = payload.sessionKey ?? 'agent:main:main';
   return {
@@ -86,6 +92,8 @@ function createSessionInfoUpdate(payload: {
     error: payload.error ?? null,
     snapshot: {
       sessionKey,
+      revision: payload.revision ?? 1,
+      runEpoch: payload.runEpoch ?? 1,
       catalog: {
         key: sessionKey,
         agentId: 'main',
@@ -96,6 +104,8 @@ function createSessionInfoUpdate(payload: {
       items: [],
       replayComplete: true,
       runtime: {
+        revision: payload.revision ?? 1,
+        runEpoch: payload.runEpoch ?? 1,
         sending: payload.phase === 'started',
         activeRunId: payload.phase === 'started' ? (payload.runId ?? null) : null,
         runPhase: payload.phase === 'started' ? 'submitted' : (
@@ -111,7 +121,7 @@ function createSessionInfoUpdate(payload: {
         pendingFinal: false,
         lastUserMessageAt: null,
         lastError: payload.error ?? null,
-        updatedAt: 1,
+        updatedAt: payload.revision ?? 1,
       },
       window: {
         totalItemCount: 0,
@@ -130,9 +140,13 @@ function createSessionMessageUpdate(payload: {
   runId?: string | null;
   sessionKey?: string | null;
   sequenceId?: number;
+  revision?: number;
+  runEpoch?: number;
   message: Record<string, unknown>;
 }) {
   const sessionKey = payload.sessionKey ?? 'agent:main:main';
+  const revision = payload.revision ?? 1;
+  const runEpoch = payload.runEpoch ?? 1;
   const entryId = String(
     payload.message.id
     ?? payload.message.messageId
@@ -237,6 +251,8 @@ function createSessionMessageUpdate(payload: {
     item,
     snapshot: {
       sessionKey,
+      revision,
+      runEpoch,
       catalog: {
         key: sessionKey,
         agentId: 'main',
@@ -247,6 +263,8 @@ function createSessionMessageUpdate(payload: {
       items: [item],
       replayComplete: true,
       runtime: {
+        revision,
+        runEpoch,
         sending: payload.kind === 'agent_message_chunk',
         activeRunId: payload.runId ?? null,
         runPhase: payload.kind === 'agent_message_chunk' ? 'streaming' : 'done',
@@ -255,7 +273,7 @@ function createSessionMessageUpdate(payload: {
         pendingTurnLaneKey: isAssistant ? 'main' : null,
         pendingFinal: false,
         lastUserMessageAt: null,
-        updatedAt: 1,
+        updatedAt: revision,
       },
       window: {
         totalItemCount: 1,
@@ -272,9 +290,13 @@ function createSessionMessageUpdate(payload: {
 function createSessionPlanUpdate(payload: {
   runId?: string | null;
   sessionKey?: string | null;
+  revision?: number;
+  runEpoch?: number;
   items?: SessionRenderItem[];
 }) {
   const sessionKey = payload.sessionKey ?? 'agent:main:main';
+  const revision = payload.revision ?? 1;
+  const runEpoch = payload.runEpoch ?? 1;
   const items = payload.items ?? [];
   return {
     sessionUpdate: 'plan' as const,
@@ -290,6 +312,8 @@ function createSessionPlanUpdate(payload: {
     },
     snapshot: {
       sessionKey,
+      revision,
+      runEpoch,
       catalog: {
         key: sessionKey,
         agentId: 'main',
@@ -300,6 +324,8 @@ function createSessionPlanUpdate(payload: {
       items,
       replayComplete: true,
       runtime: {
+        revision,
+        runEpoch,
         sending: false,
         activeRunId: null,
         runPhase: 'done' as const,
@@ -310,7 +336,7 @@ function createSessionPlanUpdate(payload: {
         lastUserMessageAt: null,
         lastError: null,
         lastIssue: null,
-        updatedAt: 2,
+        updatedAt: revision,
       },
       window: {
         totalItemCount: items.length,
@@ -328,7 +354,7 @@ describe('gateway store event wiring', () => {
   beforeEach(() => {
     vi.resetModules();
     vi.clearAllMocks();
-    hostSessionAbortRuntimeMock.mockReset();
+    hostSessionAbortMock.mockReset();
   });
 
   it('subscribes to host events through subscribeHostEvent on init', async () => {
@@ -546,7 +572,7 @@ describe('gateway store event wiring', () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
 
     let chatState = useChatStore.getState();
-    expect(chatState.loadedSessions['agent:main:main']?.runtime.runPhase).toBe('waiting_tool');
+    expect(chatState.loadedSessions['agent:main:main']?.runtime.runPhase).toBe('idle');
     expect(chatState.pendingApprovalsBySession['agent:main:main']?.map((item) => item.id)).toEqual([
       'approval-evt-1',
     ]);
@@ -563,7 +589,7 @@ describe('gateway store event wiring', () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
 
     chatState = useChatStore.getState();
-    expect(chatState.loadedSessions['agent:main:main']?.runtime.runPhase).toBe('aborted');
+    expect(chatState.loadedSessions['agent:main:main']?.runtime.runPhase).toBe('idle');
     expect(chatState.pendingApprovalsBySession['agent:main:main'] ?? []).toEqual([]);
   });
 
@@ -644,11 +670,13 @@ describe('gateway store event wiring', () => {
       pendingApprovalsBySession: {},
     } as never);
 
-    hostSessionAbortRuntimeMock.mockResolvedValue({
+    hostSessionAbortMock.mockResolvedValue({
       snapshot: createSessionInfoUpdate({
         phase: 'aborted',
         runId: 'run-abort-1',
         sessionKey: 'agent:main:main',
+        revision: 3,
+        runEpoch: 2,
       }).snapshot,
     });
 
@@ -664,6 +692,8 @@ describe('gateway store event wiring', () => {
       phase: 'started',
       runId: 'run-abort-1',
       sessionKey: 'agent:main:main',
+      revision: 2,
+      runEpoch: 1,
     }));
 
     await new Promise((resolve) => setTimeout(resolve, 0));

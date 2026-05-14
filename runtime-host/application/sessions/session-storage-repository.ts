@@ -29,6 +29,7 @@ export interface SessionStoragePort {
   getTranscriptFingerprint(pathname: string): Promise<SessionTranscriptFingerprint | null>;
   readTranscriptContent(sessionKey: string): Promise<string | null>;
   readTranscriptDescriptorContent(descriptor: SessionStorageDescriptor): Promise<string | null>;
+  deleteSession(sessionKey: string): Promise<boolean>;
   updateSessionStatus(sessionKey: string, status: 'active' | 'completed' | 'archived' | 'deleted'): Promise<boolean>;
 }
 
@@ -238,6 +239,33 @@ function updateStorageIndexStatus(
   };
 }
 
+function removeSessionFromStorageIndex(
+  sessionsJson: Record<string, unknown>,
+  sessionKey: string,
+): Record<string, unknown> {
+  if (Array.isArray(sessionsJson.sessions)) {
+    return {
+      ...sessionsJson,
+      sessions: sessionsJson.sessions.filter((candidate) => {
+        if (!isRecord(candidate)) {
+          return true;
+        }
+        const candidateKey = normalizeString(candidate.key ?? candidate.sessionKey);
+        return candidateKey !== sessionKey;
+      }),
+    };
+  }
+  const next = { ...sessionsJson };
+  delete next[sessionKey];
+  return next;
+}
+
+function buildDeletedTranscriptPath(transcriptPath: string): string {
+  return transcriptPath.endsWith('.jsonl')
+    ? `${transcriptPath.slice(0, -'.jsonl'.length)}.deleted.jsonl`
+    : `${transcriptPath}.deleted`;
+}
+
 export class SessionStorageRepository implements SessionStoragePort {
   constructor(private readonly deps: SessionStorageRepositoryDeps) {}
 
@@ -343,6 +371,24 @@ export class SessionStorageRepository implements SessionStoragePort {
     await this.deps.fileSystem.writeTextFile(
       descriptor.sessionsJsonPath,
       JSON.stringify(updateStorageIndexStatus(descriptor.sessionsJson, sessionKey, status), null, 2),
+    );
+    return true;
+  }
+
+  async deleteSession(sessionKey: string): Promise<boolean> {
+    const descriptor = await this.findStorageDescriptor(sessionKey);
+    if (!descriptor?.sessionsJson || !descriptor.sessionsJsonPath) {
+      return false;
+    }
+    if (descriptor.transcriptPath && await this.deps.fileSystem.exists(descriptor.transcriptPath)) {
+      await this.deps.fileSystem.rename(
+        descriptor.transcriptPath,
+        buildDeletedTranscriptPath(descriptor.transcriptPath),
+      );
+    }
+    await this.deps.fileSystem.writeTextFile(
+      descriptor.sessionsJsonPath,
+      JSON.stringify(removeSessionFromStorageIndex(descriptor.sessionsJson, sessionKey), null, 2),
     );
     return true;
   }

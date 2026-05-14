@@ -13,7 +13,7 @@ describe('session adapter service status management', () => {
     }
   });
 
-  it('soft deletes the session through the adapter service', async () => {
+  it('deletes the session transcript and removes it from the adapter index', async () => {
     const configDir = mkdtempSync(join(tmpdir(), 'matchaclaw-session-delete-'));
     tempDirs.push(configDir);
 
@@ -41,10 +41,10 @@ describe('session adapter service status management', () => {
 
     expect(response.status).toBe(200);
     expect(response.data).toEqual({ success: true });
-    expect(existsSync(join(sessionsDir, 'session-a.jsonl'))).toBe(true);
+    expect(existsSync(join(sessionsDir, 'session-a.jsonl'))).toBe(false);
+    expect(existsSync(join(sessionsDir, 'session-a.deleted.jsonl'))).toBe(true);
     expect(JSON.parse(readFileSync(join(sessionsDir, 'sessions.json'), 'utf8'))).toEqual({
       sessions: [
-        { key: 'agent:alpha:session-a', id: 'session-a', status: 'deleted' },
         { key: 'agent:alpha:session-b', id: 'session-b' },
       ],
     });

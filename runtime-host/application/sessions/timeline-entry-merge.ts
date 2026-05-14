@@ -134,6 +134,14 @@ function resolveMergedEntryText(
   if (incoming.status === 'streaming') {
     return appendMonotonicText(existing.text, incoming.text);
   }
+  if (
+    existing.status === 'streaming'
+    && incoming.text
+    && existing.text
+    && existing.text.startsWith(incoming.text)
+  ) {
+    return existing.text;
+  }
   return incoming.text || existing.text;
 }
 

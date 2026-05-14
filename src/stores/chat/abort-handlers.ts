@@ -1,7 +1,6 @@
 import { hostSessionAbort } from '@/lib/host-api';
-import { reduceSessionRuntime } from './runtime-state-reducer';
-import { UNKNOWN_ABORTED_RUN_MARKER, type StoreSessionRunCache } from './session-run-cache';
-import { getSessionRuntime, patchSessionRecord, patchSessionSnapshot } from './store-state-helpers';
+import type { StoreSessionRunCache } from './session-run-cache';
+import { patchSessionSnapshot } from './store-state-helpers';
 import { clearErrorRecoveryTimer, clearHistoryPoll } from './timers';
 import type {
   ApprovalItem,
@@ -38,19 +37,8 @@ export async function executeStoreAbortRun(params: ExecuteStoreAbortRunParams): 
   clearErrorRecoveryTimer();
 
   const { sessionKey, pendingApprovals } = getPendingApprovalsForCurrentSession(get());
-  const activeRunId = getSessionRuntime(get(), sessionKey).activeRunId;
   sessionRunCache.nextSendGeneration(sessionKey);
-  sessionRunCache.setAbortedRunMarker(sessionKey, activeRunId ?? UNKNOWN_ABORTED_RUN_MARKER);
   onAbortedTelemetry(sessionKey);
-  set((state) => {
-    const runtime = getSessionRuntime(state, sessionKey);
-    const runtimePatch = reduceSessionRuntime(runtime, { type: 'run_aborted' });
-    return {
-      loadedSessions: patchSessionRecord(state, sessionKey, {
-        runtime: runtimePatch === runtime ? runtime : { ...runtime, ...runtimePatch },
-      }),
-    };
-  });
 
   onBeginMutating();
   try {

@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { applyStoreSendStart, executeStoreSend } from '@/stores/chat/send-handlers';
-import { createStoreSessionRunCache, UNKNOWN_ABORTED_RUN_MARKER } from '@/stores/chat/session-run-cache';
+import { createStoreSessionRunCache } from '@/stores/chat/session-run-cache';
 import type { ChatStoreState } from '@/stores/chat/types';
 import type { RawMessage } from './helpers/timeline-fixtures';
 import { getSessionItems } from '@/stores/chat/store-state-helpers';
@@ -34,6 +34,8 @@ function createSessionRecord(input?: {
       thinkingLevel: null,
     },
     runtime: {
+      revision: 0,
+      runEpoch: 0,
       sending: false,
       activeRunId: null,
       runPhase: 'idle' as const,
@@ -42,6 +44,9 @@ function createSessionRecord(input?: {
       pendingTurnLaneKey: null,
       pendingFinal: false,
       lastUserMessageAt: null,
+      lastError: null,
+      lastIssue: null,
+      updatedAt: null,
     },
     items,
     window: createViewportWindowState({
@@ -60,7 +65,7 @@ describe('chat send handlers', () => {
     vi.clearAllMocks();
   });
 
-  it('send start 只进入 sending runtime，不再本地写 optimistic user transcript', () => {
+  it('send start only updates local session label before runtime-host snapshot returns', () => {
     const sessionKey = 'agent:main:session-1';
     const nowMs = 1_700_000_000_000;
 
@@ -87,19 +92,22 @@ describe('chat send handlers', () => {
 
     const record = state.loadedSessions[sessionKey]!;
     expect(record.meta.label).toBe('hello world');
-    expect(record.runtime.lastUserMessageAt).toBe(nowMs);
-    expect(record.runtime.sending).toBe(true);
-    expect(record.runtime.runPhase).toBe('submitted');
+    expect(record.meta.lastActivityAt).toBe(nowMs);
+    expect(record.runtime.lastUserMessageAt).toBeNull();
+    expect(record.runtime.sending).toBe(false);
+    expect(record.runtime.runPhase).toBe('idle');
     expect(record.items).toEqual([]);
   });
 
-  it('send success 会把 runtime-host 返回的 authoritative user item 写入 render items', async () => {
+  it('send success applies the runtime-host submitted snapshot without binding runId locally', async () => {
     const sessionKey = 'agent:main:session-1';
     sendChatTransportMock.mockResolvedValueOnce({
       ok: true,
       runId: 'run-1',
       snapshot: {
         sessionKey,
+        revision: 1,
+        runEpoch: 1,
         catalog: {
           key: sessionKey,
           agentId: 'main',
@@ -124,6 +132,8 @@ describe('chat send handlers', () => {
         }],
         replayComplete: true,
         runtime: {
+          revision: 1,
+          runEpoch: 1,
           sending: true,
           activeRunId: null,
           runPhase: 'submitted',
@@ -174,7 +184,8 @@ describe('chat send handlers', () => {
     });
 
     const record = state.loadedSessions[sessionKey]!;
-    expect(record.runtime.activeRunId).toBe('run-1');
+    expect(record.runtime.activeRunId).toBeNull();
+    expect(record.runtime.pendingTurnKey).toBe('main:run-1');
     expect(getSessionItems(state, sessionKey).map((item) => item.messageId)).toEqual(['user-local-1']);
     expect(getSessionItems(state, sessionKey)[0]).toMatchObject({
       messageId: 'user-local-1',
@@ -244,7 +255,7 @@ describe('chat send handlers', () => {
     expect(getSessionItems(state, sessionKey).map((item) => item.messageId)).toEqual(['user-local-1']);
   });
 
-  it('recoverable chat.send timeout keeps the run pending instead of failing the session', async () => {
+  it('recoverable chat.send timeout leaves runtime unchanged while runtime-host remains authoritative', async () => {
     const sessionKey = 'agent:main:session-1';
     sendChatTransportMock.mockResolvedValueOnce({
       ok: false,
@@ -280,8 +291,8 @@ describe('chat send handlers', () => {
     });
 
     const runtime = state.loadedSessions[sessionKey]!.runtime;
-    expect(runtime.sending).toBe(true);
-    expect(runtime.runPhase).toBe('submitted');
+    expect(runtime.sending).toBe(false);
+    expect(runtime.runPhase).toBe('idle');
     expect(runtime.lastError).toBeNull();
     expect(runtime.pendingFinal).toBe(false);
   });
@@ -326,7 +337,6 @@ describe('chat send handlers', () => {
     await Promise.resolve();
 
     sessionRunCache.nextSendGeneration(sessionKey);
-    sessionRunCache.setAbortedRunMarker(sessionKey, UNKNOWN_ABORTED_RUN_MARKER);
     set((current) => ({
       loadedSessions: {
         ...current.loadedSessions,
@@ -348,6 +358,8 @@ describe('chat send handlers', () => {
       runId: 'run-late-1',
       snapshot: {
         sessionKey,
+        revision: 1,
+        runEpoch: 1,
         catalog: {
           key: sessionKey,
           agentId: 'main',
@@ -372,6 +384,8 @@ describe('chat send handlers', () => {
         }],
         replayComplete: true,
         runtime: {
+          revision: 1,
+          runEpoch: 1,
           sending: true,
           activeRunId: 'run-late-1',
           runPhase: 'submitted' as const,

@@ -17,6 +17,9 @@ import type {
 
 const HOST_API_PORT = 13210;
 const HOST_API_BASE = `http://127.0.0.1:${HOST_API_PORT}`;
+const SESSION_ABORT_TIMEOUT_MS = 5_000;
+const SESSION_PROMPT_TIMEOUT_MS = 10_000;
+const SESSION_PATCH_TIMEOUT_MS = 15_000;
 let cachedHostApiToken: string | null = null;
 
 type HostApiRequestInit = RequestInit & {
@@ -471,17 +474,6 @@ export async function hostSessionState(
   });
 }
 
-export async function hostSessionAbortRuntime(
-  payload: {
-    sessionKey: string;
-  },
-): Promise<SessionLoadResult & { success?: boolean }> {
-  return hostApiFetch('/api/session/abort-runtime', {
-    method: 'POST',
-    body: JSON.stringify(payload),
-  });
-}
-
 export async function hostSessionAbort(
   payload: {
     sessionKey: string;
@@ -491,6 +483,7 @@ export async function hostSessionAbort(
   return hostApiFetch('/api/session/abort', {
     method: 'POST',
     body: JSON.stringify(payload),
+    timeoutMs: SESSION_ABORT_TIMEOUT_MS,
   });
 }
 
@@ -519,6 +512,7 @@ export async function hostSessionPatch(
   return hostApiFetch('/api/session/patch', {
     method: 'POST',
     body: JSON.stringify(payload),
+    timeoutMs: SESSION_PATCH_TIMEOUT_MS,
   });
 }
 
@@ -541,5 +535,6 @@ export async function hostSessionPrompt(
   return hostApiFetch('/api/session/prompt', {
     method: 'POST',
     body: JSON.stringify(payload),
+    timeoutMs: SESSION_PROMPT_TIMEOUT_MS,
   });
 }

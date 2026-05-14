@@ -61,6 +61,8 @@ function buildWindowSnapshotResult(input: {
   return {
     snapshot: {
       sessionKey: input.sessionKey,
+      revision: 1,
+      runEpoch: 1,
       catalog: {
         key: input.sessionKey,
         agentId: input.sessionKey.split(':')[1] ?? 'main',
@@ -72,6 +74,8 @@ function buildWindowSnapshotResult(input: {
       items: buildRenderItemsFromMessages(input.sessionKey, input.messages),
       replayComplete: true,
       runtime: {
+        revision: 1,
+        runEpoch: 1,
         sending: false,
         activeRunId: null,
         runPhase: 'done' as const,
@@ -101,6 +105,8 @@ function buildSessionSnapshotResult(input: {
   return {
     snapshot: {
       sessionKey: input.sessionKey,
+      revision: 1,
+      runEpoch: 1,
       catalog: {
         key: input.sessionKey,
         agentId: input.sessionKey.split(':')[1] ?? 'main',
@@ -112,6 +118,8 @@ function buildSessionSnapshotResult(input: {
       items: buildRenderItemsFromMessages(input.sessionKey, input.messages),
       replayComplete: true,
       runtime: {
+        revision: 1,
+        runEpoch: 1,
         sending: false,
         activeRunId: null,
         runPhase: 'done' as const,
