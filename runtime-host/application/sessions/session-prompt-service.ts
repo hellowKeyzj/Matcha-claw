@@ -198,6 +198,10 @@ export class SessionPromptService {
       const state = await this.deps.timelineRuntime.activateSession(sessionKey, {
         resetWindowToLatest: true,
       });
+      this.deps.stateStore.blockRuns(sessionKey, [
+        state.runtime.activeRunId,
+        ...state.timelineEntries.map((entry) => entry.runId),
+      ]);
       const promptEntry = this.deps.timelineRuntime.buildPromptUserEntry({
         sessionKey,
         promptId,
@@ -221,7 +225,6 @@ export class SessionPromptService {
         activeTransportEpoch: this.deps.stateStore.getLatestConnectedTransportEpoch() || 1,
         resetWindowToLatest: true,
         advanceRunEpoch: true,
-        terminateExistingRunIds: true,
       });
       const snapshot = {
         ...await this.deps.snapshotService.buildLatestSnapshotAsync(sessionKey, committed.state),

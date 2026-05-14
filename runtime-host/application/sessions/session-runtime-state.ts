@@ -29,7 +29,7 @@ export class SessionRuntimeStateStore {
   private readonly sessionStates = new Map<string, SessionRuntimeTimelineState>();
   private readonly parentSessionsByChildSessionKey = new Map<string, Set<string>>();
   private readonly resolvedSessionModels = new Map<string, string>();
-  private readonly terminatedRunIdsBySessionKey = new Map<string, Set<string>>();
+  private readonly blockedRunIdsBySessionKey = new Map<string, Set<string>>();
   private readonly persistedStoreReady: Promise<void>;
   private activeSessionKey: string | null = null;
   private latestConnectedTransportEpoch = 0;
@@ -85,7 +85,7 @@ export class SessionRuntimeStateStore {
       parents.delete(sessionKey);
     }
     this.resolvedSessionModels.delete(sessionKey);
-    this.terminatedRunIdsBySessionKey.delete(sessionKey);
+    this.blockedRunIdsBySessionKey.delete(sessionKey);
     this.clearActiveSessionKey(sessionKey);
   }
 
@@ -110,25 +110,31 @@ export class SessionRuntimeStateStore {
     return this.resolvedSessionModels.get(sessionKey) ?? null;
   }
 
-  markRunTerminated(sessionKey: string, runId: string | null | undefined): void {
+  blockRun(sessionKey: string, runId: string | null | undefined): void {
     const normalizedRunId = normalizeString(runId);
     if (!normalizedRunId) {
       return;
     }
-    let runIds = this.terminatedRunIdsBySessionKey.get(sessionKey);
+    let runIds = this.blockedRunIdsBySessionKey.get(sessionKey);
     if (!runIds) {
       runIds = new Set<string>();
-      this.terminatedRunIdsBySessionKey.set(sessionKey, runIds);
+      this.blockedRunIdsBySessionKey.set(sessionKey, runIds);
     }
     runIds.add(normalizedRunId);
   }
 
-  isRunTerminated(sessionKey: string, runId: string | null | undefined): boolean {
+  blockRuns(sessionKey: string, runIds: Iterable<string | null | undefined>): void {
+    for (const runId of runIds) {
+      this.blockRun(sessionKey, runId);
+    }
+  }
+
+  isRunBlocked(sessionKey: string, runId: string | null | undefined): boolean {
     const normalizedRunId = normalizeString(runId);
     if (!normalizedRunId) {
       return false;
     }
-    return this.terminatedRunIdsBySessionKey.get(sessionKey)?.has(normalizedRunId) ?? false;
+    return this.blockedRunIdsBySessionKey.get(sessionKey)?.has(normalizedRunId) ?? false;
   }
 
   updateExecutionGraphDependencyIndex(

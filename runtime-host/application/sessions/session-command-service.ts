@@ -384,8 +384,8 @@ export class SessionCommandService {
   private async commitAbortSession(sessionKey: string): Promise<ApplicationResponseOf<SessionLoadResult & { success: boolean } | { success: false; error: string }>> {
     return await this.deps.operationCoordinator.run(sessionKey, 'abort', async () => {
       const currentRunId = this.deps.stateStore.getSessionState(sessionKey).runtime.activeRunId;
+      this.deps.stateStore.blockRun(sessionKey, currentRunId);
       const committed = this.deps.timelineRuntime.commitSessionTransition(sessionKey, {
-        markTerminatedRunId: currentRunId,
         runtimePatch: {
           sending: false,
           activeRunId: null,

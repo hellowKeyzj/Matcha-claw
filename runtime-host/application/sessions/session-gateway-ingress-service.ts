@@ -232,16 +232,15 @@ export class SessionGatewayIngressService {
     };
   }
 
-  private shouldIgnoreSessionUpdate(input: {
+  private shouldIgnoreNonMessageUpdate(input: {
     sessionKey: string;
     runId: string;
-    sessionUpdate: string;
     phase?: string;
   }): boolean {
     if (!input.runId) {
       return false;
     }
-    if (this.deps.stateStore.isRunTerminated(input.sessionKey, input.runId)) {
+    if (this.deps.stateStore.isRunBlocked(input.sessionKey, input.runId)) {
       return true;
     }
     const runtime = this.deps.stateStore.getSessionState(input.sessionKey).runtime;
@@ -255,6 +254,26 @@ export class SessionGatewayIngressService {
       return input.phase !== 'aborted';
     }
     return runtime.activeRunId != null;
+  }
+
+  private shouldIgnoreMessageUpdate(input: {
+    sessionKey: string;
+    runId: string;
+  }): boolean {
+    if (!input.runId) {
+      return false;
+    }
+    if (this.deps.stateStore.isRunBlocked(input.sessionKey, input.runId)) {
+      return true;
+    }
+    const runtime = this.deps.stateStore.getSessionState(input.sessionKey).runtime;
+    if (runtime.activeRunId) {
+      return runtime.activeRunId !== input.runId;
+    }
+    if (runtime.sending) {
+      return true;
+    }
+    return runtime.runPhase === 'aborted';
   }
 
   private isUnboundTerminalLifecycle(input: {
@@ -340,10 +359,9 @@ export class SessionGatewayIngressService {
           logTodoToolDebug(this.deps.logger, 'runtime-host.ingress.output-event', summarizeSessionUpdateForTodoToolDebug(output));
           return output;
         }
-        if (this.shouldIgnoreSessionUpdate({
+        if (this.shouldIgnoreNonMessageUpdate({
           sessionKey,
           runId: normalizeString(event.runId),
-          sessionUpdate: event.sessionUpdate,
           phase: event.phase,
         })) {
           return {
@@ -386,10 +404,9 @@ export class SessionGatewayIngressService {
       }
 
       if (event.sessionUpdate === 'plan') {
-        if (this.shouldIgnoreSessionUpdate({
+        if (this.shouldIgnoreNonMessageUpdate({
           sessionKey,
           runId: normalizeString(event.runId),
-          sessionUpdate: event.sessionUpdate,
         })) {
           const snapshot = this.deps.snapshotService.buildSnapshot(sessionKey, this.deps.stateStore.getSessionState(sessionKey), {
             replayComplete: true,
@@ -423,10 +440,9 @@ export class SessionGatewayIngressService {
       }
 
       const state = this.deps.stateStore.getSessionState(sessionKey);
-      if (this.shouldIgnoreSessionUpdate({
+      if (this.shouldIgnoreMessageUpdate({
         sessionKey,
         runId: normalizeString(event.runId),
-        sessionUpdate: event.sessionUpdate,
       })) {
         const snapshot = this.deps.snapshotService.buildSnapshot(sessionKey, state, {
           window: state.window.totalItemCount > 0
@@ -457,7 +473,6 @@ export class SessionGatewayIngressService {
         timelineEntries: event.entries,
         runtimePatch: runtimePatch?.runtimePatch,
         advanceRunEpoch: runtimePatch?.advanceRunEpoch,
-        markTerminatedRunId: runtimePatch?.advanceRunEpoch ? event.runId : null,
         resetWindowToLatest: true,
       });
       const mergedEntries = committed.mergedEntries;

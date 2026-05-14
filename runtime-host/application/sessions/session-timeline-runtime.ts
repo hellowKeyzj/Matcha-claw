@@ -97,13 +97,6 @@ export class SessionTimelineRuntime {
     return runtimePatch;
   }
 
-  private markExistingRunIdsTerminated(sessionKey: string, state: SessionRuntimeTimelineState): void {
-    this.deps.stateStore.markRunTerminated(sessionKey, state.runtime.activeRunId);
-    for (const entry of state.timelineEntries) {
-      this.deps.stateStore.markRunTerminated(sessionKey, entry.runId);
-    }
-  }
-
   private cloneCommittedSessionState(state: SessionRuntimeTimelineState): SessionRuntimeTimelineState {
     return {
       sessionKey: state.sessionKey,
@@ -248,22 +241,14 @@ export class SessionTimelineRuntime {
       activeTransportEpoch?: number | null;
       resetWindowToLatest?: boolean;
       advanceRunEpoch?: boolean;
-      markTerminatedRunId?: string | null;
-      terminateExistingRunIds?: boolean;
     },
   ): CommittedSessionTransition {
     const state = this.getSessionState(sessionKey);
-    if (transition.terminateExistingRunIds) {
-      this.markExistingRunIdsTerminated(sessionKey, state);
-    }
     const mergedEntries = transition.timelineEntries
       ? this.upsertTimelineEntriesIntoState(sessionKey, state, transition.timelineEntries)
       : [];
     if (transition.taskSnapshot) {
       state.taskSnapshot = structuredClone(transition.taskSnapshot);
-    }
-    if (transition.markTerminatedRunId) {
-      this.deps.stateStore.markRunTerminated(sessionKey, transition.markTerminatedRunId);
     }
     if (transition.activeTransportEpoch !== undefined) {
       state.activeTransportEpoch = transition.activeTransportEpoch;
@@ -284,8 +269,6 @@ export class SessionTimelineRuntime {
       || transition.taskSnapshot
       || transition.runtimePatch
       || transition.activeTransportEpoch !== undefined
-      || transition.markTerminatedRunId
-      || transition.terminateExistingRunIds
     ) {
       this.commitStateRevision(state, {
         advanceRunEpoch: transition.advanceRunEpoch,
@@ -367,21 +350,19 @@ export class SessionTimelineRuntime {
         runtimePatch: this.buildTerminalRuntimePatch('done', null, null),
         activeTransportEpoch: null,
         advanceRunEpoch: true,
-        markTerminatedRunId: input.runId,
       }).runtime;
     case 'error':
       return this.commitSessionTransition(sessionKey, {
         runtimePatch: this.buildTerminalRuntimePatch('error', input.error ?? null, input.transportIssue ?? null),
         activeTransportEpoch: null,
         advanceRunEpoch: true,
-        markTerminatedRunId: input.runId,
       }).runtime;
     case 'aborted':
+      this.deps.stateStore.blockRun(sessionKey, input.runId);
       return this.commitSessionTransition(sessionKey, {
         runtimePatch: this.buildTerminalRuntimePatch('aborted', input.error ?? null, input.transportIssue ?? null),
         activeTransportEpoch: null,
         advanceRunEpoch: true,
-        markTerminatedRunId: input.runId,
       }).runtime;
       default:
         return cloneSessionRuntimeState(this.getSessionState(sessionKey).runtime);

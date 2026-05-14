@@ -764,6 +764,70 @@ describe('session runtime service', () => {
     expect(finalEvent.snapshot.window.totalItemCount).toBe(1);
   });
 
+  it('same-run authoritative assistant update after a short final can still complete the visible message', () => {
+    const configDir = join(tmpdir(), `matcha-session-runtime-${Date.now()}`);
+    const service = createTestSessionRuntimeService({
+      workspace: { getConfigDir: () => configDir },
+      openclawBridge: {
+        chatSend: async () => ({ runId: 'run-unused' }),
+        gatewayRpc: async () => ({}),
+      },
+    });
+
+    service.consumeGatewayConversationEvent({
+      type: 'chat.message',
+      event: {
+        state: 'delta',
+        runId: 'run-final-catchup',
+        sessionKey: 'agent:main:main',
+        sequenceId: 1,
+        message: {
+          role: 'assistant',
+          content: [{ type: 'text', text: '完整回答的前半段' }],
+        },
+      },
+    });
+
+    const [shortFinalEvent] = service.consumeGatewayConversationEvent({
+      type: 'chat.message',
+      event: {
+        state: 'final',
+        runId: 'run-final-catchup',
+        sessionKey: 'agent:main:main',
+        sequenceId: 2,
+        message: {
+          role: 'assistant',
+          content: [{ type: 'text', text: '完整回答的前' }],
+        },
+      },
+    });
+
+    expect(shortFinalEvent?.snapshot.items[0]).toMatchObject({
+      text: '完整回答的前半段',
+    });
+
+    const [catchupEvent] = service.consumeGatewayConversationEvent({
+      type: 'chat.message',
+      event: {
+        state: 'final',
+        runId: 'run-final-catchup',
+        sessionKey: 'agent:main:main',
+        sequenceId: 3,
+        message: {
+          role: 'assistant',
+          content: [{ type: 'text', text: '完整回答的前半段，后半段补齐。' }],
+        },
+      },
+    });
+
+    expect(catchupEvent && 'item' in catchupEvent ? catchupEvent.item : null).toMatchObject({
+      text: '完整回答的前半段，后半段补齐。',
+    });
+    expect(catchupEvent?.snapshot.items[0]).toMatchObject({
+      text: '完整回答的前半段，后半段补齐。',
+    });
+  });
+
   it('new prompt must not reactivate the previous assistant turn as a second streaming shell', async () => {
     const configDir = await createRuntimeConfigDir();
     let nextRunId = 'run-old-final';

@@ -43,6 +43,10 @@ export class SessionRuntimeService {
         if (latestState.activeTransportEpoch == null || latestState.activeTransportEpoch >= transportEpoch) {
           return;
         }
+        this.deps.stateStore.blockRuns(sessionKey, [
+          latestState.runtime.activeRunId,
+          ...latestState.timelineEntries.map((entry) => entry.runId),
+        ]);
         const committed = this.deps.timelineRuntime.commitSessionTransition(sessionKey, {
           runtimePatch: this.deps.timelineRuntime.buildTerminalRuntimePatch(
             'error',
@@ -51,7 +55,6 @@ export class SessionRuntimeService {
           ),
           activeTransportEpoch: null,
           advanceRunEpoch: true,
-          terminateExistingRunIds: true,
         });
         const snapshot = {
           ...await this.deps.snapshotService.buildLatestSnapshotAsync(sessionKey, committed.state, {
