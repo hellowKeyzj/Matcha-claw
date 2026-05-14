@@ -175,6 +175,39 @@ describe('skills route state sync', () => {
     expect((skillsService as any).deps.jobs.submitRefreshStatus).toHaveBeenCalledTimes(1);
   });
 
+  it('POST /api/skills/status/refresh 在 Gateway ready 后直接返回最新快照', async () => {
+    const gatewayRpc = vi.fn(async () => ({
+      skills: [{ skillKey: 'demo-skill', disabled: false }],
+    }));
+    const skillsService = createSkillsService({
+      gateway: {
+        isGatewayRunning: async () => true,
+        readGatewayConnectionState: async () => ({
+          state: 'connected',
+          gatewayReady: true,
+          portReachable: true,
+        }),
+        gatewayRpc,
+      },
+    });
+
+    const response = await dispatchRuntimeRouteDefinition(skillsRoutes,
+      'POST',
+      '/api/skills/status/refresh',
+      undefined,
+      { skillsService },
+    );
+
+    expect(response.data).toMatchObject({
+      success: true,
+      skills: [{ skillKey: 'demo-skill', disabled: false }],
+      ready: true,
+      error: null,
+    });
+    expect(gatewayRpc).toHaveBeenCalledTimes(1);
+    expect(gatewayRpc).toHaveBeenCalledWith('skills.status');
+  });
+
   it('refreshStatus 后台任务才调用 Gateway skills.status 并更新快照', async () => {
     const gatewayRpc = vi.fn(async () => ({
       skills: [{ skillKey: 'demo-skill', disabled: false }],

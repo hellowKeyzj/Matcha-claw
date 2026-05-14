@@ -37,11 +37,15 @@ import { Badge } from '@/components/ui/badge';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { useSkillsStore } from '@/stores/skills';
 import { useGatewayStore } from '@/stores/gateway';
-import { hostOpenClawGetSkillsDir } from '@/lib/host-api';
+import {
+  hostApiFetch,
+  hostOpenClawGetSkillsDir,
+  waitForRuntimeJobResult,
+  type RuntimeJobSubmission,
+} from '@/lib/host-api';
 import { LoadingSpinner } from '@/components/common/LoadingSpinner';
 import { cn } from '@/lib/utils';
 import { invokeIpc } from '@/lib/api-client';
-import { hostApiFetch } from '@/lib/host-api';
 import { scheduleIdleReady } from '@/lib/idle-ready';
 import { useDelayedFlag } from '@/lib/use-delayed-flag';
 import { trackUiEvent } from '@/lib/telemetry';
@@ -51,6 +55,12 @@ import type { GatewayStatus } from '@/types/gateway';
 import { useTranslation } from 'react-i18next';
 
 type SkillAvailabilityKind = 'eligible' | 'blocked' | 'missing' | 'disabled' | 'unknown';
+type LocalSkillImportResult = {
+  success: true;
+  skillKey: string;
+  installedPath: string;
+  sourceKind: 'directory' | 'zip' | 'markdown';
+};
 const SKILLS_HEAVY_CONTENT_IDLE_TIMEOUT_MS = 320;
 const CLAWHUB_MARKETPLACE_PRIMARY_URL = 'https://cn.clawhub-mirror.com';
 const SKILL_CARD_DESCRIPTION_CLASS_NAME = 'line-clamp-2 text-sm leading-6 text-muted-foreground';
@@ -717,47 +727,42 @@ function MarketplaceSkillDetailDialog({
 interface LocalSkillUploadDialogProps {
   open: boolean;
   importing: boolean;
-  autoEnable: boolean;
   selectedSourceName: string;
   selectedSourcePath: string;
   onClose: () => void;
   onChooseSource: () => void;
   onDropSourcePath: (path: string) => void;
-  onAutoEnableChange: (checked: boolean) => void;
   onImport: () => void;
 }
 
 function LocalSkillUploadDialog({
   open,
   importing,
-  autoEnable,
   selectedSourceName,
   selectedSourcePath,
   onClose,
   onChooseSource,
   onDropSourcePath,
-  onAutoEnableChange,
   onImport,
 }: LocalSkillUploadDialogProps) {
   const { t } = useTranslation('skills');
   const [dragActive, setDragActive] = useState(false);
 
-  useEffect(() => {
-    if (!open) {
-      setDragActive(false);
-    }
-  }, [open]);
-
   if (!open) {
     return null;
   }
+
+  const handleClose = () => {
+    setDragActive(false);
+    onClose();
+  };
 
   const handleDrop = (event: React.DragEvent<HTMLDivElement>) => {
     event.preventDefault();
     event.stopPropagation();
     setDragActive(false);
     const droppedPaths = Array.from(event.dataTransfer.files)
-      .map((file) => (file as File & { path?: string }).path)
+      .map((file) => window.electron.getPathForFile(file))
       .filter((path): path is string => typeof path === 'string' && path.trim().length > 0);
     if (droppedPaths.length === 0) {
       return;
@@ -766,7 +771,7 @@ function LocalSkillUploadDialog({
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4" onClick={onClose}>
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4" onClick={handleClose}>
       <Card
         className="w-full max-w-[30rem] rounded-[1.5rem] border border-border/80 bg-card shadow-xl"
         onClick={(event) => event.stopPropagation()}
@@ -775,7 +780,7 @@ function LocalSkillUploadDialog({
           <div>
             <CardTitle className="text-xl">{t('marketplace.uploadDialog.title')}</CardTitle>
           </div>
-          <Button variant="ghost" size="icon" onClick={onClose} disabled={importing}>
+          <Button variant="ghost" size="icon" onClick={handleClose} disabled={importing}>
             <X className="h-4 w-4" />
           </Button>
         </CardHeader>
@@ -827,17 +832,6 @@ function LocalSkillUploadDialog({
               </div>
             )}
           </div>
-
-          <label className="flex cursor-pointer items-center gap-2 text-sm text-foreground">
-            <input
-              type="checkbox"
-              className="h-4 w-4 rounded border-border text-primary"
-              checked={autoEnable}
-              onChange={(event) => onAutoEnableChange(event.target.checked)}
-              disabled={importing}
-            />
-            <span>{t('marketplace.uploadDialog.autoEnable')}</span>
-          </label>
 
           <div className="space-y-2">
             <h3 className="text-sm font-medium text-foreground">{t('marketplace.uploadDialog.requirementsTitle')}</h3>
@@ -1024,7 +1018,6 @@ export function Skills() {
   const [marketplaceQuery, setMarketplaceQuery] = useState('');
   const [localSkillDialogOpen, setLocalSkillDialogOpen] = useState(false);
   const [localSkillSourcePath, setLocalSkillSourcePath] = useState('');
-  const [localSkillAutoEnable, setLocalSkillAutoEnable] = useState(false);
   const [localSkillImporting, setLocalSkillImporting] = useState(false);
   const [selectedSkill, setSelectedSkill] = useState<Skill | null>(null);
   const [selectedMarketplaceSkill, setSelectedMarketplaceSkill] = useState<MarketplaceSkill | null>(null);
@@ -1335,7 +1328,6 @@ export function Skills() {
   const resetLocalSkillDialog = useCallback(() => {
     setLocalSkillDialogOpen(false);
     setLocalSkillSourcePath('');
-    setLocalSkillAutoEnable(false);
     setLocalSkillImporting(false);
   }, []);
 
@@ -1370,27 +1362,33 @@ export function Skills() {
 
     setLocalSkillImporting(true);
     try {
-      const result = await hostApiFetch<{
-        success: boolean;
-        skillKey: string;
-        installedPath: string;
-        sourceKind: 'directory' | 'zip' | 'markdown';
-      }>('/api/skills/import-local', {
+      const submission = await hostApiFetch<RuntimeJobSubmission<LocalSkillImportResult>>('/api/skills/import-local', {
         method: 'POST',
         body: JSON.stringify({ sourcePath: localSkillSourcePath }),
       });
+      const result = await waitForRuntimeJobResult<LocalSkillImportResult>(submission.job.id);
+      const skillKey = result.skillKey.trim();
+      if (!skillKey) {
+        throw new Error('Imported skill did not return a skill key');
+      }
 
-      await fetchSkills({ force: true });
+      let enableError: unknown = null;
+      try {
+        await enableSkill(skillKey);
+      } catch (error) {
+        enableError = error;
+      }
 
-      if (localSkillAutoEnable) {
-        try {
-          await enableSkill(result.skillKey);
-          toast.success(t('toast.importedLocalSkillEnabled', { name: result.skillKey }));
-        } catch (error) {
-          toast.warning(t('toast.importedLocalSkillEnableFailed', { name: result.skillKey }) + ': ' + String(error));
-        }
+      try {
+        await fetchSkills({ force: true, fresh: true });
+      } catch (error) {
+        console.error('Failed to refresh skills after local import:', error);
+      }
+
+      if (enableError) {
+        toast.warning(t('toast.importedLocalSkillEnableFailed', { name: skillKey }) + ': ' + String(enableError));
       } else {
-        toast.success(t('toast.importedLocalSkill', { name: result.skillKey }));
+        toast.success(t('toast.importedLocalSkillEnabled', { name: skillKey }));
       }
 
       resetLocalSkillDialog();
@@ -1399,7 +1397,7 @@ export function Skills() {
     } finally {
       setLocalSkillImporting(false);
     }
-  }, [enableSkill, fetchSkills, localSkillAutoEnable, localSkillImporting, localSkillSourcePath, resetLocalSkillDialog, t]);
+  }, [enableSkill, fetchSkills, localSkillImporting, localSkillSourcePath, resetLocalSkillDialog, t]);
 
   // Handle marketplace search
   const handleMarketplaceSearch = useCallback((e: React.FormEvent) => {
@@ -1504,7 +1502,7 @@ export function Skills() {
           </p>
         </div>
         <div className="flex items-center gap-2">
-          <Button variant="outline" onClick={() => { void fetchSkills({ force: true }); }} disabled={!gatewayProcessRunning || manualRefreshBusy}>
+          <Button variant="outline" onClick={() => { void fetchSkills({ force: true, fresh: true }); }} disabled={!gatewayProcessRunning || manualRefreshBusy}>
             <RefreshCw className={cn('h-4 w-4 mr-2', refreshing && 'animate-spin')} />
             {t('refresh')}
           </Button>
@@ -1828,7 +1826,6 @@ export function Skills() {
       <LocalSkillUploadDialog
         open={localSkillDialogOpen}
         importing={localSkillImporting}
-        autoEnable={localSkillAutoEnable}
         selectedSourceName={localSkillSourceName}
         selectedSourcePath={localSkillSourcePath}
         onClose={() => {
@@ -1838,7 +1835,6 @@ export function Skills() {
         }}
         onChooseSource={() => { void handleChooseLocalSkillSource(); }}
         onDropSourcePath={setLocalSkillSourcePath}
-        onAutoEnableChange={setLocalSkillAutoEnable}
         onImport={() => { void handleImportLocalSkill(); }}
       />
     </div>

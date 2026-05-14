@@ -2,7 +2,7 @@
  * Preload Script
  * Exposes safe APIs to the renderer process via contextBridge
  */
-import { contextBridge, ipcRenderer } from 'electron';
+import { contextBridge, ipcRenderer, webUtils } from 'electron';
 import {
   isRetainedEventChannel,
   isRetainedInvokeChannel,
@@ -75,6 +75,10 @@ const electronAPI = {
    */
   openExternal: (url: string) => {
     return ipcRenderer.invoke('shell:openExternal', url);
+  },
+
+  getPathForFile: (file: File) => {
+    return webUtils.getPathForFile(file);
   },
 
   /**

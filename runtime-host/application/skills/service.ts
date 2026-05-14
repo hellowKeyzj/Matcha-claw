@@ -48,6 +48,8 @@ const SKILL_MANIFEST_FILE = 'SKILL.md';
 const PREINSTALLED_MANIFEST_NAME = 'preinstalled-manifest.json';
 const PREINSTALLED_MARKER_NAME = '.clawx-preinstalled.json';
 const FRONTMATTER_PATTERN = /^---\s*\r?\n([\s\S]*?)\r?\n---\s*(?:\r?\n|$)/;
+const CONTROL_CHAR_RANGE_PATTERN = `${String.fromCharCode(0)}-${String.fromCharCode(31)}`;
+const INVALID_SKILL_KEY_CHARS_PATTERN = new RegExp(`[<>:"/\\\\|?*${CONTROL_CHAR_RANGE_PATTERN}]+`, 'g');
 
 type SkillSourceKind = 'directory' | 'zip' | 'markdown';
 
@@ -55,6 +57,13 @@ interface PreinstalledSkillSpec {
   slug: string;
   version?: string;
   autoEnable?: boolean;
+}
+
+interface LocalSkillImportResult {
+  success: true;
+  skillKey: string;
+  installedPath: string;
+  sourceKind: SkillSourceKind;
 }
 
 interface PreinstalledMarker {
@@ -72,10 +81,7 @@ export class SkillsService {
 
   constructor(private readonly deps: SkillsServiceDeps) {}
 
-  async status() {
-    if (await isGatewayReadyForSnapshot(this.deps.gateway)) {
-      this.deps.jobs.submitRefreshStatus();
-    }
+  private buildStatusPayload() {
     return {
       success: true,
       ...(isRecord(this.statusSnapshot) ? this.statusSnapshot : { result: this.statusSnapshot }),
@@ -85,35 +91,26 @@ export class SkillsService {
     };
   }
 
+  async status() {
+    if (await isGatewayReadyForSnapshot(this.deps.gateway)) {
+      this.deps.jobs.submitRefreshStatus();
+    }
+    return this.buildStatusPayload();
+  }
+
   async refreshStatus() {
     if (!(await isGatewayReadyForSnapshot(this.deps.gateway))) {
-      return {
-        success: true,
-        ...(isRecord(this.statusSnapshot) ? this.statusSnapshot : { result: this.statusSnapshot }),
-        ready: this.statusSnapshotReady,
-        updatedAt: this.statusSnapshotUpdatedAt,
-        error: this.statusSnapshotError,
-      };
+      return this.buildStatusPayload();
     }
     try {
       this.statusSnapshot = await this.deps.gateway.gatewayRpc('skills.status');
       this.statusSnapshotReady = true;
       this.statusSnapshotError = null;
       this.statusSnapshotUpdatedAt = this.deps.clock.nowMs();
-      return {
-        success: true,
-        ...(isRecord(this.statusSnapshot) ? this.statusSnapshot : { result: this.statusSnapshot }),
-        updatedAt: this.statusSnapshotUpdatedAt,
-      };
+      return this.buildStatusPayload();
     } catch (error) {
       if (isGatewayStartupConnectionError(error)) {
-        return {
-          success: true,
-          ...(isRecord(this.statusSnapshot) ? this.statusSnapshot : { result: this.statusSnapshot }),
-          ready: this.statusSnapshotReady,
-          updatedAt: this.statusSnapshotUpdatedAt,
-          error: this.statusSnapshotError,
-        };
+        return this.buildStatusPayload();
       }
       this.statusSnapshotError = error instanceof Error ? error.message : String(error);
       throw error;
@@ -124,7 +121,7 @@ export class SkillsService {
     skillKey: string,
     updates: Record<string, unknown>,
   ): Promise<string | null> {
-    let gatewayRunning = false;
+    let gatewayRunning: boolean;
     try {
       gatewayRunning = await this.deps.gateway.isGatewayRunning();
     } catch (error) {
@@ -149,7 +146,7 @@ export class SkillsService {
     const normalized = input
       .trim()
       .replace(/\s+/g, '-')
-      .replace(/[<>:"/\\|?*\u0000-\u001f]+/g, '-')
+      .replace(INVALID_SKILL_KEY_CHARS_PATTERN, '-')
       .replace(/-+/g, '-')
       .replace(/^[.-]+|[.-]+$/g, '');
     return normalized || `skill-${this.deps.clock.nowMs()}`;
@@ -309,14 +306,14 @@ export class SkillsService {
     return accepted(this.deps.jobs.submitImportLocal({ sourcePath }));
   }
 
-  async executeImportLocal(payload: unknown) {
+  async executeImportLocal(payload: unknown): Promise<LocalSkillImportResult> {
     const body = isRecord(payload) ? payload : {};
     const sourcePath = typeof body.sourcePath === 'string' ? body.sourcePath.trim() : '';
     if (!sourcePath) {
-      return badRequest('sourcePath is required');
+      throw new Error('sourcePath is required');
     }
     if (!(await this.deps.fileSystem.exists(sourcePath))) {
-      return badRequest('选择的技能来源不存在。');
+      throw new Error('选择的技能来源不存在。');
     }
 
     const stagingRoot = join(
@@ -331,16 +328,16 @@ export class SkillsService {
       const installedPath = join(skillsRoot, skillKey);
       await this.deps.fileSystem.ensureDirectory(skillsRoot);
       if (await this.deps.fileSystem.exists(installedPath)) {
-        return badRequest(`技能 "${skillKey}" 已存在，请先删除旧版本后再导入。`);
+        throw new Error(`技能 "${skillKey}" 已存在，请先删除旧版本后再导入。`);
       }
       await this.copyDirectory(skillDir, installedPath);
       this.deps.logger.info(`Imported local skill "${skillKey}" from ${sourcePath} -> ${installedPath}`);
-      return ok({
+      return {
         success: true,
         skillKey,
         installedPath,
         sourceKind,
-      });
+      };
     } finally {
       await this.deps.fileSystem.removeDirectory(stagingRoot);
     }

@@ -35,12 +35,14 @@
     "hostRunning": "宿主运行中",
     "hostStopped": "宿主未运行",
     "hostStarting": "宿主启动中",
+    "hostRestarting": "宿主重启中",
     "hostDegraded": "宿主降级运行"
   },
   "lifecycle": {
     "host": {
       "idle": "宿主空闲",
       "starting": "宿主启动中",
+      "restarting": "宿主重启中",
       "running": "宿主运行中",
       "stopped": "宿主已停止",
       "error": "宿主错误"

@@ -224,4 +224,74 @@ describe('host event bridge runtime-host lifecycle', () => {
 
     expect(emitGatewayEvent).not.toHaveBeenCalled();
   });
+
+  it('runtime-host 重启期间不会把临时 transport health 失败发成错误事件', async () => {
+    const gatewayManager = new FakeGatewayManager();
+    let runtimeState = {
+      lifecycle: 'restarting' as const,
+      runtimeLifecycle: 'restarting' as const,
+      pid: 1111,
+      activePluginCount: 2,
+    };
+    let runtimeHealth = {
+      ok: false,
+      lifecycle: 'error' as const,
+      activePluginCount: 0,
+      degradedPlugins: [] as string[],
+      error: 'Runtime-host transport health failed: fetch failed',
+    };
+    const runtimeHostManager = {
+      getState: vi.fn(() => runtimeState),
+      checkHealth: vi.fn(async () => runtimeHealth),
+      readGatewayStatus: vi.fn(async () => null),
+      emitGatewayEvent: vi.fn(),
+      onGatewayEvent: vi.fn(() => () => {}),
+    };
+    const eventBus = { emit: vi.fn() };
+    const mainWindow = { webContents: { send: vi.fn() } };
+
+    const { registerHostEventBridge } = await import('../../electron/main/host-event-bridge');
+    registerHostEventBridge({
+      gatewayManager: gatewayManager as never,
+      runtimeHostManager: runtimeHostManager as never,
+      hostEventBus: eventBus as never,
+      getMainWindow: () => mainWindow as never,
+    });
+
+    await vi.runOnlyPendingTimersAsync();
+
+    expect(eventBus.emit).toHaveBeenCalledWith(
+      'runtime-host:status',
+      expect.objectContaining({
+        status: 'restarting',
+      }),
+    );
+    expect(eventBus.emit).not.toHaveBeenCalledWith(
+      'runtime-host:error',
+      expect.anything(),
+    );
+
+    runtimeState = {
+      ...runtimeState,
+      lifecycle: 'running',
+      runtimeLifecycle: 'running',
+      pid: 2222,
+    };
+    runtimeHealth = {
+      ok: true,
+      lifecycle: 'running',
+      activePluginCount: 2,
+      degradedPlugins: [],
+    };
+    await vi.advanceTimersByTimeAsync(1600);
+
+    expect(eventBus.emit).toHaveBeenCalledWith(
+      'runtime-host:restart',
+      expect.objectContaining({
+        previousPid: 1111,
+        pid: 2222,
+        status: 'running',
+      }),
+    );
+  });
 });

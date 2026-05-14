@@ -47,6 +47,7 @@ type RuntimeHostObservedStatus =
   | 'unknown'
   | 'starting'
   | 'running'
+  | 'restarting'
   | 'degraded'
   | 'error'
   | 'stopped';
@@ -319,7 +320,9 @@ export const useGatewayStore = create<GatewayState>((set, get) => ({
                 pid: payload.pid,
                 activePluginCount: payload.activePluginCount,
                 enabledPluginIds: payload.enabledPluginIds ?? state.runtimeHost.enabledPluginIds,
-                error: payload.error,
+                error: payload.status === 'running' || payload.status === 'restarting' || payload.status === 'starting'
+                  ? undefined
+                  : payload.error,
                 updatedAt: payload.updatedAt ?? Date.now(),
               },
             }));
@@ -341,12 +344,15 @@ export const useGatewayStore = create<GatewayState>((set, get) => ({
           unsubscribers.push(subscribeHostEvent<{
             previousPid?: number;
             pid?: number;
+            status?: RuntimeHostObservedStatus;
             recoveredAt?: number;
           }>('runtime-host:restart', (payload) => {
             set((state) => ({
               runtimeHost: {
                 ...state.runtimeHost,
+                lifecycle: payload.status ?? 'running',
                 pid: payload.pid ?? state.runtimeHost.pid,
+                error: undefined,
                 restartCount: state.runtimeHost.restartCount + 1,
                 lastRestartAt: payload.recoveredAt ?? Date.now(),
                 updatedAt: payload.recoveredAt ?? Date.now(),

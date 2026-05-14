@@ -173,12 +173,17 @@ describe('plugins store', () => {
     expect(waitForRuntimeJobResultMock).toHaveBeenCalledWith('job-1');
   });
 
-  it('restartHost 先请求宿主重启 runtime-host，再从 runtime-host 刷新插件业务快照', async () => {
+  it('restartHost 先请求宿主重启 runtime-host，等待恢复后刷新插件业务快照', async () => {
+    let runtimeAttempts = 0;
     hostApiFetchMock.mockImplementation(async (path: string) => {
       if (path === '/api/runtime-host/restart') {
         return { success: true };
       }
       if (path === '/api/plugins/runtime') {
+        runtimeAttempts += 1;
+        if (runtimeAttempts === 1) {
+          throw new Error('fetch failed during restart');
+        }
         return buildRuntimePayload({ enabledPluginIds: ['plugin-a'] });
       }
       if (path === '/api/plugins/catalog') {
@@ -192,6 +197,7 @@ describe('plugins store', () => {
 
     expect(hostApiFetchMock).toHaveBeenNthCalledWith(1, '/api/runtime-host/restart', { method: 'POST' });
     expect(hostApiFetchMock).toHaveBeenNthCalledWith(2, '/api/plugins/runtime');
+    expect(hostApiFetchMock).toHaveBeenNthCalledWith(3, '/api/plugins/runtime');
     expect(usePluginsStore.getState().runtime?.execution.enabledPluginIds).toEqual(['plugin-a']);
     expect(usePluginsStore.getState().mutating).toBe(false);
   });

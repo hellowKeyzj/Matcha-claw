@@ -23,21 +23,6 @@ function createDeferred<T>() {
   return { promise, resolve, reject };
 }
 
-function mockSkillsFetchDependencies() {
-  hostApiFetchMock.mockImplementation(async (path: string) => {
-    if (path === '/api/skills/status') {
-      return { skills: [] };
-    }
-    if (path === '/api/skills/configs') {
-      return {};
-    }
-    if (path === '/api/clawhub/list') {
-      return { success: true, results: [] };
-    }
-    throw new Error(`Unexpected hostApiFetch path: ${path}`);
-  });
-}
-
 describe('skills store availability and search cache', () => {
   beforeEach(() => {
     vi.resetModules();
@@ -147,6 +132,36 @@ describe('skills store availability and search cache', () => {
 
     deferredStatus.resolve({ skills: [{ skillKey: 'singleflight-skill', disabled: false }] });
     await Promise.all([first, second]);
+  });
+
+  it('fresh 刷新撞上进行中的旧请求时，会在旧请求结束后再拉一次最新数据', async () => {
+    const deferredStatus = createDeferred<{ skills: Array<{ skillKey: string; disabled?: boolean }> }>();
+    hostApiFetchMock.mockImplementation(async (path: string) => {
+      if (path === '/api/skills/status') {
+        return await deferredStatus.promise;
+      }
+      if (path === '/api/skills/status/refresh') {
+        return { skills: [{ skillKey: 'fresh-skill', disabled: false }] };
+      }
+      if (path === '/api/skills/configs') {
+        return {};
+      }
+      if (path === '/api/clawhub/list') {
+        return { success: true, results: [] };
+      }
+      throw new Error(`Unexpected hostApiFetch path: ${path}`);
+    });
+
+    const { useSkillsStore } = await import('@/stores/skills');
+    const staleFetch = useSkillsStore.getState().fetchSkills();
+    const forcedFetch = useSkillsStore.getState().fetchSkills({ force: true, fresh: true });
+
+    deferredStatus.resolve({ skills: [{ skillKey: 'stale-skill', disabled: false }] });
+    await Promise.all([staleFetch, forcedFetch]);
+
+    expect(hostApiFetchMock.mock.calls.filter((call) => call[0] === '/api/skills/status')).toHaveLength(1);
+    expect(hostApiFetchMock.mock.calls.filter((call) => call[0] === '/api/skills/status/refresh')).toHaveLength(1);
+    expect(useSkillsStore.getState().skills.map((skill) => skill.id)).toEqual(['fresh-skill']);
   });
 
   it('skills.status 未 ready 时不把空列表当作最终快照，并自动重试', async () => {

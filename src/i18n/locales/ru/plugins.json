@@ -35,12 +35,14 @@
     "hostRunning": "Host running",
     "hostStopped": "Host not running",
     "hostStarting": "Host starting",
+    "hostRestarting": "Host restarting",
     "hostDegraded": "Host degraded"
   },
   "lifecycle": {
     "host": {
       "idle": "Host idle",
       "starting": "Host starting",
+      "restarting": "Host restarting",
       "running": "Host running",
       "stopped": "Host stopped",
       "error": "Host error"

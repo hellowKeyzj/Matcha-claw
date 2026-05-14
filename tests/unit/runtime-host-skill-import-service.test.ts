@@ -78,13 +78,10 @@ describe('runtime-host skill import service', () => {
     const response = await createSkillsService().executeImportLocal({ sourcePath: sourceDir });
 
     expect(response).toMatchObject({
-      status: 200,
-      data: {
-        success: true,
-        skillKey: 'demo-skill',
-        sourceKind: 'directory',
-        installedPath: join(skillsRoot, 'demo-skill'),
-      },
+      success: true,
+      skillKey: 'demo-skill',
+      sourceKind: 'directory',
+      installedPath: join(skillsRoot, 'demo-skill'),
     });
     await expect(readFile(join(skillsRoot, 'demo-skill', 'prompts', 'system.txt'), 'utf8')).resolves.toBe('hello');
   });
@@ -108,13 +105,10 @@ describe('runtime-host skill import service', () => {
     const response = await createSkillsService().executeImportLocal({ sourcePath });
 
     expect(response).toMatchObject({
-      status: 200,
-      data: {
-        success: true,
-        skillKey: 'solo-skill',
-        sourceKind: 'markdown',
-        installedPath: join(skillsRoot, 'solo-skill'),
-      },
+      success: true,
+      skillKey: 'solo-skill',
+      sourceKind: 'markdown',
+      installedPath: join(skillsRoot, 'solo-skill'),
     });
     await expect(readFile(join(skillsRoot, 'solo-skill', 'SKILL.md'), 'utf8')).resolves.toContain('name: Solo Skill');
   });

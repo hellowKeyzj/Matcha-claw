@@ -3,7 +3,6 @@ import type { GatewayManager } from '../gateway/manager';
 import type { HostEventBus } from '../api/event-bus';
 import type {
   RuntimeHostManager,
-  RuntimeHostGatewayStatusSnapshot,
   RuntimeHostManagerHealth,
   RuntimeHostManagerState,
 } from './runtime-host-manager';
@@ -34,6 +33,7 @@ type EmitHostEvent = (eventName: HostEventName, payload: unknown) => void;
 type RuntimeHostLifecycleStatus =
   | 'starting'
   | 'running'
+  | 'restarting'
   | 'degraded'
   | 'error'
   | 'stopped';
@@ -53,13 +53,16 @@ function asRuntimeHostStatus(
   health: RuntimeHostManagerHealth,
 ): RuntimeHostStatusPayload {
   const stopped = state.lifecycle === 'stopped' || state.runtimeLifecycle === 'stopped';
+  const restarting = state.lifecycle === 'restarting' || state.runtimeLifecycle === 'restarting';
   const starting = state.lifecycle === 'starting' || state.runtimeLifecycle === 'starting';
   const hardError = state.lifecycle === 'error' || state.runtimeLifecycle === 'error';
   const running = state.lifecycle === 'running' && state.runtimeLifecycle === 'running' && health.ok;
-  const degraded = state.runtimeLifecycle === 'running' && !health.ok;
+  const degraded = !restarting && state.runtimeLifecycle === 'running' && !health.ok;
 
   let status: RuntimeHostLifecycleStatus = 'starting';
-  if (stopped) {
+  if (restarting) {
+    status = 'restarting';
+  } else if (stopped) {
     status = 'stopped';
   } else if (hardError) {
     status = 'error';
@@ -71,7 +74,9 @@ function asRuntimeHostStatus(
     status = 'starting';
   }
 
-  const mergedError = state.lastError || health.error;
+  const mergedError = status === 'restarting' || status === 'starting'
+    ? undefined
+    : (state.lastError || health.error);
   return {
     status,
     hostLifecycle: state.lifecycle,

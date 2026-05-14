@@ -16,18 +16,20 @@ export type PluginCatalogItem = {
   companionSkillSlugs?: string[];
 };
 
+type RuntimeLifecycle = 'starting' | 'running' | 'restarting' | 'stopping' | 'stopped' | 'error';
+
 export type RuntimePayload = {
   success: boolean;
   state: {
-    lifecycle: 'starting' | 'running' | 'stopping' | 'stopped' | 'error';
-    runtimeLifecycle: 'starting' | 'running' | 'stopping' | 'stopped' | 'error';
+    lifecycle: RuntimeLifecycle;
+    runtimeLifecycle: RuntimeLifecycle;
     activePluginCount: number;
     enabledPluginIds: string[];
     lastError?: string;
   };
   health: {
     ok: boolean;
-    lifecycle: 'starting' | 'running' | 'stopping' | 'stopped' | 'error';
+    lifecycle: RuntimeLifecycle;
     activePluginCount: number;
     degradedPlugins: string[];
     error?: string;
@@ -58,6 +60,8 @@ type PluginRefreshOptions = PluginFetchOptions & {
 
 const PLUGIN_LOAD_FAILED_KEY = 'plugins:errors.loadFailed';
 const PLUGIN_CACHE_FRESH_MS = 30_000;
+const RUNTIME_HOST_READY_TIMEOUT_MS = 15_000;
+const RUNTIME_HOST_READY_RETRY_MS = 300;
 const EMPTY_CATALOG: PluginCatalogItem[] = [];
 
 let runtimeCache: RuntimePayload | null = null;
@@ -102,6 +106,19 @@ function hasFreshCatalogCache(): boolean {
   return catalogCache !== null && (Date.now() - catalogCacheUpdatedAt) < PLUGIN_CACHE_FRESH_MS;
 }
 
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    window.setTimeout(resolve, ms);
+  });
+}
+
+function isRuntimeReady(payload: RuntimePayload): boolean {
+  return payload.health.ok
+    && payload.state.lifecycle === 'running'
+    && payload.state.runtimeLifecycle === 'running'
+    && payload.health.lifecycle === 'running';
+}
+
 async function fetchRuntimeShared(): Promise<RuntimePayload> {
   if (runtimeInflightTask) {
     return await runtimeInflightTask;
@@ -120,6 +137,29 @@ async function fetchRuntimeShared(): Promise<RuntimePayload> {
       runtimeInflightTask = null;
     }
   }
+}
+
+async function waitForRuntimeHostReady(): Promise<RuntimePayload> {
+  const startedAt = Date.now();
+  let lastError: unknown = null;
+
+  while (Date.now() - startedAt <= RUNTIME_HOST_READY_TIMEOUT_MS) {
+    try {
+      const payload = await hostApiFetch<RuntimePayload>('/api/plugins/runtime');
+      const cached = writeRuntimeCache(payload);
+      if (isRuntimeReady(cached)) {
+        return cached;
+      }
+      lastError = new Error(`Runtime Host is ${cached.state.runtimeLifecycle}`);
+    } catch (error) {
+      lastError = error;
+    }
+    await delay(RUNTIME_HOST_READY_RETRY_MS);
+  }
+
+  throw lastError instanceof Error
+    ? lastError
+    : new Error('Runtime Host did not become ready after restart');
 }
 
 async function fetchCatalogShared(): Promise<PluginCatalogItem[]> {
@@ -304,9 +344,9 @@ export const usePluginsStore = create<PluginsStoreState>((set, get) => ({
     set({ mutatingAction: 'restart', mutating: true, error: null });
     try {
       await hostApiFetch<{ success: boolean }>('/api/runtime-host/restart', { method: 'POST' });
-      const payload = await hostApiFetch<RuntimePayload>('/api/plugins/runtime');
+      const payload = await waitForRuntimeHostReady();
       set({
-        runtime: writeRuntimeCache(payload),
+        runtime: payload,
         runtimeReady: true,
       });
       await get().refreshSnapshot({ reason: 'mutation', force: true, silent: true });

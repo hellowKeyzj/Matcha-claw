@@ -13,9 +13,9 @@ import { app, shell } from 'electron';
 import { getOpenClawDir } from '../utils/paths';
 import type { GatewayTransportIssue } from '../../runtime-host/shared/gateway-error';
 
-type RuntimeHostLifecycle = 'idle' | 'starting' | 'running' | 'stopping' | 'stopped' | 'error';
+type RuntimeHostLifecycle = 'idle' | 'starting' | 'running' | 'restarting' | 'stopping' | 'stopped' | 'error';
 type RequestMethod = 'GET' | 'POST' | 'PUT' | 'DELETE';
-type RuntimeHealthLifecycle = 'starting' | 'running' | 'stopping' | 'stopped' | 'error';
+type RuntimeHealthLifecycle = 'starting' | 'running' | 'restarting' | 'stopping' | 'stopped' | 'error';
 export type RuntimeHostShellAction =
   | 'shell_open_path'
   | 'gateway_restart'
@@ -304,6 +304,9 @@ export function createRuntimeHostManager(
   function mapProcessLifecycleToRuntimeLifecycle(
     processLifecycle: 'idle' | 'starting' | 'running' | 'stopped' | 'error',
   ): RuntimeHealthLifecycle {
+    if (lifecycle === 'restarting') {
+      return 'restarting';
+    }
     switch (processLifecycle) {
       case 'starting':
         return 'starting';
@@ -384,9 +387,19 @@ export function createRuntimeHostManager(
     },
 
     async restart() {
-      await hydrateExecutionStateFromSources();
-      await infrastructure.processManager.restart();
-      lifecycle = 'running';
+      lifecycle = 'restarting';
+      lastError = undefined;
+      try {
+        await hydrateExecutionStateFromSources();
+        await infrastructure.processManager.restart();
+        lifecycle = 'running';
+        logger.info('Runtime Host restarted');
+      } catch (error) {
+        lifecycle = 'error';
+        lastError = error instanceof Error ? error.message : String(error);
+        logger.error('Runtime Host restart failed:', error);
+        throw error;
+      }
     },
 
     async checkHealth() {

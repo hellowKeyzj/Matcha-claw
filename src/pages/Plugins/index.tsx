@@ -81,6 +81,10 @@ export function PluginsPage() {
   const effectiveRuntimeHostStatus = observedRuntimeHostStatus !== 'unknown'
     ? observedRuntimeHostStatus
     : (runtime?.health.ok ? 'running' : 'stopped');
+  const showRuntimeHostError = effectiveRuntimeHostStatus === 'degraded'
+    || effectiveRuntimeHostStatus === 'error'
+    || effectiveRuntimeHostStatus === 'stopped';
+  const showRuntimeHealthError = showRuntimeHostError || runtime?.health.lifecycle === 'error';
   const recoveredAt = runtimeHostEventState.lastRestartAt
     ? formatIsoTime(runtimeHostEventState.lastRestartAt)
     : '';
@@ -160,6 +164,9 @@ export function PluginsPage() {
                 {effectiveRuntimeHostStatus === 'starting' && (
                   <Badge variant="outline">{t('plugins:state.hostStarting')}</Badge>
                 )}
+                {effectiveRuntimeHostStatus === 'restarting' && (
+                  <Badge variant="outline">{t('plugins:state.hostRestarting')}</Badge>
+                )}
                 {effectiveRuntimeHostStatus === 'degraded' && (
                   <Badge variant="secondary">{t('plugins:state.hostDegraded')}</Badge>
                 )}
@@ -175,12 +182,12 @@ export function PluginsPage() {
                   {runtime.state.lastError}
                 </p>
               )}
-              {runtimeHostEventState.error && (
+              {showRuntimeHostError && runtimeHostEventState.error && (
                 <p className="rounded-md border border-destructive/50 bg-destructive/10 p-2 text-xs text-destructive">
                   {runtimeHostEventState.error}
                 </p>
               )}
-              {runtime?.health.error && (
+              {showRuntimeHealthError && runtime?.health.error && (
                 <p className="rounded-md border border-destructive/50 bg-destructive/10 p-2 text-xs text-destructive">
                   {runtime.health.error}
                 </p>

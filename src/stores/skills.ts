@@ -168,7 +168,7 @@ interface SkillsState {
   error: string | null;
 
   // Actions
-  fetchSkills: (options?: { force?: boolean; silent?: boolean }) => Promise<void>;
+  fetchSkills: (options?: { force?: boolean; silent?: boolean; fresh?: boolean }) => Promise<void>;
   searchSkills: (query: string) => Promise<void>;
   installSkill: (slug: string, version?: string) => Promise<void>;
   uninstallSkill: (slug: string) => Promise<void>;
@@ -194,11 +194,15 @@ export const useSkillsStore = create<SkillsState>((set, get) => ({
   fetchSkills: async (options) => {
     const force = options?.force === true;
     const silent = options?.silent === true;
+    const fresh = options?.fresh === true;
     const now = Date.now();
     const hasSnapshot = get().snapshotReady;
 
     if (inflightSkillsFetch) {
       await inflightSkillsFetch;
+      if (force || fresh) {
+        await get().fetchSkills({ force: true, silent, fresh });
+      }
       return;
     }
     if (!force && hasSnapshot && now - lastSkillsFetchAt < SKILLS_FETCH_MIN_INTERVAL_MS) {
@@ -227,7 +231,9 @@ export const useSkillsStore = create<SkillsState>((set, get) => ({
 
     inflightSkillsFetch = (async () => {
       try {
-        const gatewayPromise = hostApiFetch<GatewaySkillsStatusResult>('/api/skills/status');
+        const gatewayPromise = fresh
+          ? hostApiFetch<GatewaySkillsStatusResult>('/api/skills/status/refresh', { method: 'POST' })
+          : hostApiFetch<GatewaySkillsStatusResult>('/api/skills/status');
         const configPromise = hostApiFetch<Record<string, { apiKey?: string; env?: Record<string, string> }>>('/api/skills/configs');
         const clawhubListPromise = hostApiFetch<{ success: boolean; results?: ClawHubListResult[] }>('/api/clawhub/list')
           .catch(() => ({ success: false, results: [] }));
@@ -416,7 +422,7 @@ export const useSkillsStore = create<SkillsState>((set, get) => ({
       }
       await waitForRuntimeJobResult<{ success: boolean }>(result.job.id);
       // Refresh skills after install
-      await get().fetchSkills({ force: true });
+      await get().fetchSkills({ force: true, fresh: true });
     } catch (error) {
       console.error('Install error:', error);
       throw error;
@@ -453,7 +459,7 @@ export const useSkillsStore = create<SkillsState>((set, get) => ({
       }
       await waitForRuntimeJobResult<{ success: boolean }>(result.job.id);
       // Refresh skills after uninstall
-      await get().fetchSkills({ force: true });
+      await get().fetchSkills({ force: true, fresh: true });
     } catch (error) {
       console.error('Uninstall error:', error);
       throw error;

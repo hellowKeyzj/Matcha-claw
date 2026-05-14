@@ -13,6 +13,7 @@ const mockElectron = {
     once: vi.fn(),
     off: vi.fn(),
   },
+  getPathForFile: vi.fn(),
   openExternal: vi.fn(),
   platform: 'darwin',
   isDev: true,

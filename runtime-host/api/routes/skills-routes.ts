@@ -6,6 +6,7 @@ interface SkillsRouteDeps {
 
 interface SkillsRouteService {
   status(): unknown;
+  refreshStatus(): Promise<unknown>;
   configs(): Promise<unknown>;
   updateConfig(payload: unknown): Promise<ApplicationResponse>;
   updateState(payload: unknown): Promise<ApplicationResponse>;
@@ -16,6 +17,7 @@ interface SkillsRouteService {
 
 export const skillsRoutes: readonly RuntimeRouteDefinition<SkillsRouteDeps>[] = [
   { method: 'GET', path: '/api/skills/status', handle: (_context, deps) => routeResponder.value(() => deps.skillsService.status()) },
+  { method: 'POST', path: '/api/skills/status/refresh', handle: (_context, deps) => routeResponder.value(() => deps.skillsService.refreshStatus()) },
   { method: 'GET', path: '/api/skills/configs', handle: (_context, deps) => routeResponder.value(() => deps.skillsService.configs()) },
   { method: 'PUT', path: '/api/skills/config', handle: (context, deps) => routeResponder.result(() => deps.skillsService.updateConfig(context.payload)) },
   { method: 'PUT', path: '/api/skills/state', handle: (context, deps) => routeResponder.result(() => deps.skillsService.updateState(context.payload)) },

@@ -7,7 +7,7 @@ const hostApiFetchMock = vi.fn();
 const initGatewayEventsMock = vi.fn(async () => {});
 
 type RuntimeHostState = {
-  lifecycle: 'unknown' | 'starting' | 'running' | 'degraded' | 'error' | 'stopped';
+  lifecycle: 'unknown' | 'starting' | 'running' | 'restarting' | 'degraded' | 'error' | 'stopped';
   error?: string;
   restartCount: number;
   lastRestartAt?: number;
@@ -191,6 +191,24 @@ describe('plugins page', () => {
 
     expect(await screen.findByText('Host degraded')).toBeInTheDocument();
     expect(screen.getByText('runtime-host health check failed')).toBeInTheDocument();
+  });
+
+  it('重启过程中不展示临时 runtime-host transport 错误', async () => {
+    const { PluginsPage } = await import('@/pages/Plugins');
+    gatewayStoreState.runtimeHost = {
+      lifecycle: 'restarting',
+      restartCount: 0,
+      error: 'Runtime-host transport health failed: fetch failed',
+    };
+
+    render(
+      <MemoryRouter>
+        <PluginsPage />
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByText('Host restarting')).toBeInTheDocument();
+    expect(screen.queryByText('Runtime-host transport health failed: fetch failed')).not.toBeInTheDocument();
   });
 
   it('插件中心直接展示后端返回的可管理能力插件，不再按渠道/模型分组', async () => {

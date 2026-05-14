@@ -18,6 +18,7 @@ export interface HostEventEnvelope<T = unknown> {
 export interface ElectronAPI {
   ipcRenderer: IpcRenderer;
   openExternal: (url: string) => Promise<void>;
+  getPathForFile: (file: File) => string;
   platform: NodeJS.Platform;
   isDev: boolean;
 }

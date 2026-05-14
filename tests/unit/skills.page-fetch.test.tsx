@@ -116,13 +116,46 @@ describe('skills page fetch behavior', () => {
         return {
           ok: true,
           data: {
+            status: 202,
+            ok: true,
+            json: {
+              success: true,
+              job: {
+                id: 'job-skill-import',
+                type: 'skills.importLocal',
+                status: 'queued',
+                queuedAt: 1,
+                attempts: 0,
+                maxAttempts: 1,
+              },
+            },
+          },
+        };
+      }
+      if (channel === 'hostapi:fetch' && payload?.path === '/api/runtime-host/jobs/get') {
+        return {
+          ok: true,
+          data: {
             status: 200,
             ok: true,
             json: {
               success: true,
-              skillKey: 'uploaded-skill',
-              installedPath: 'C:/Users/test/.openclaw/skills/uploaded-skill',
-              sourceKind: 'zip',
+              job: {
+                id: 'job-skill-import',
+                type: 'skills.importLocal',
+                status: 'succeeded',
+                queuedAt: 1,
+                startedAt: 2,
+                finishedAt: 3,
+                attempts: 1,
+                maxAttempts: 1,
+                result: {
+                  success: true,
+                  skillKey: 'uploaded-skill',
+                  installedPath: 'C:/Users/test/.openclaw/skills/uploaded-skill',
+                  sourceKind: 'zip',
+                },
+              },
             },
           },
         };
@@ -178,6 +211,23 @@ describe('skills page fetch behavior', () => {
     await waitFor(() => {
       expect(fetchSkillsMock).toHaveBeenCalledTimes(1);
     });
+  });
+
+  it('手动刷新按钮会请求最新技能快照', async () => {
+    skillsState.skills = [
+      { id: 's1', name: 'Skill1', description: 'd', enabled: true, isBundled: true, eligible: true },
+    ];
+    skillsState.snapshotReady = true;
+
+    render(
+      <MemoryRouter>
+        <Skills />
+      </MemoryRouter>,
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'refresh' }));
+
+    expect(fetchSkillsMock).toHaveBeenCalledWith({ force: true, fresh: true });
   });
 
   it('技能页会一次性渲染完整技能列表，不使用内部裁切滚动区', async () => {
@@ -321,5 +371,62 @@ describe('skills page fetch behavior', () => {
 
     expect(screen.getByText('uploaded-skill.zip')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'marketplace.uploadDialog.confirm' })).toBeEnabled();
+  });
+
+  it('上传技能弹窗可以拖入本地来源并更新选择状态', async () => {
+    skillsState.snapshotReady = true;
+    vi.mocked(window.electron.getPathForFile).mockReturnValue('C:/Downloads/dragged-skill.zip');
+
+    render(
+      <MemoryRouter>
+        <Skills />
+      </MemoryRouter>,
+    );
+
+    fireEvent.mouseDown(screen.getByRole('tab', { name: 'tabs.marketplace' }));
+    await screen.findByPlaceholderText('searchMarketplace');
+
+    fireEvent.click(screen.getByRole('button', { name: 'marketplace.uploadSkill' }));
+    const dropTarget = screen.getByText('marketplace.uploadDialog.empty').closest('[role="button"]');
+    expect(dropTarget).not.toBeNull();
+
+    fireEvent.drop(dropTarget as HTMLElement, {
+      dataTransfer: {
+        files: [new File(['skill'], 'dragged-skill.zip', { type: 'application/zip' })],
+      },
+    });
+
+    expect(window.electron.getPathForFile).toHaveBeenCalled();
+    expect(screen.getByText('dragged-skill.zip')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'marketplace.uploadDialog.confirm' })).toBeEnabled();
+  });
+
+  it('上传技能不需要勾选，导入完成后会用后台任务返回的 skillKey 自动启用', async () => {
+    skillsState.snapshotReady = true;
+
+    render(
+      <MemoryRouter>
+        <Skills />
+      </MemoryRouter>,
+    );
+
+    fireEvent.mouseDown(screen.getByRole('tab', { name: 'tabs.marketplace' }));
+    await screen.findByPlaceholderText('searchMarketplace');
+
+    fireEvent.click(screen.getByRole('button', { name: 'marketplace.uploadSkill' }));
+    expect(screen.queryByText('marketplace.uploadDialog.autoEnable')).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByText('marketplace.uploadDialog.empty'));
+    await screen.findByText('uploaded-skill.zip');
+
+    fireEvent.click(screen.getByRole('button', { name: 'marketplace.uploadDialog.confirm' }));
+
+    await waitFor(() => {
+      expect(enableSkillMock).toHaveBeenCalledWith('uploaded-skill');
+    });
+    expect(invokeIpcMock).toHaveBeenCalledWith(
+      'hostapi:fetch',
+      expect.objectContaining({ path: '/api/runtime-host/jobs/get' }),
+    );
   });
 });

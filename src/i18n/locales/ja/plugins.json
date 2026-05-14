@@ -35,12 +35,14 @@
     "hostRunning": "ホスト稼働中",
     "hostStopped": "ホスト停止中",
     "hostStarting": "ホスト起動中",
+    "hostRestarting": "ホスト再起動中",
     "hostDegraded": "ホスト劣化状態"
   },
   "lifecycle": {
     "host": {
       "idle": "ホスト待機中",
       "starting": "ホスト起動中",
+      "restarting": "ホスト再起動中",
       "running": "ホスト稼働中",
       "stopped": "ホスト停止中",
       "error": "ホストエラー"

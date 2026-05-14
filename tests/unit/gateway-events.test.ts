@@ -531,6 +531,47 @@ describe('gateway store event wiring', () => {
     expect(state.updatedAt).toBe(1003);
   });
 
+  it('runtime-host 恢复运行或重启完成后会清理过渡错误', async () => {
+    hostApiFetchMock.mockResolvedValueOnce(createRunningGatewayStatus());
+    const handlers = new Map<string, (payload: unknown) => void>();
+    subscribeHostEventMock.mockImplementation((eventName: string, handler: (payload: unknown) => void) => {
+      handlers.set(eventName, handler);
+      return () => {};
+    });
+
+    const { useGatewayStore } = await import('@/stores/gateway');
+    await useGatewayStore.getState().init();
+
+    handlers.get('runtime-host:error')?.({
+      status: 'degraded',
+      message: 'Runtime-host transport health failed: fetch failed',
+      updatedAt: 1001,
+    });
+    expect(useGatewayStore.getState().runtimeHost.error).toBe('Runtime-host transport health failed: fetch failed');
+
+    handlers.get('runtime-host:status')?.({
+      status: 'restarting',
+      updatedAt: 1002,
+    });
+    expect(useGatewayStore.getState().runtimeHost.lifecycle).toBe('restarting');
+    expect(useGatewayStore.getState().runtimeHost.error).toBeUndefined();
+
+    handlers.get('runtime-host:error')?.({
+      status: 'degraded',
+      message: 'Runtime-host transport health failed: fetch failed',
+      updatedAt: 1003,
+    });
+    handlers.get('runtime-host:restart')?.({
+      pid: 6789,
+      recoveredAt: 1004,
+    });
+
+    const state = useGatewayStore.getState().runtimeHost;
+    expect(state.lifecycle).toBe('running');
+    expect(state.error).toBeUndefined();
+    expect(state.pid).toBe(6789);
+  });
+
   it('forwards exec.approval.requested/resolved notifications into chat approval state', async () => {
     hostApiFetchMock.mockResolvedValueOnce(createRunningGatewayStatus());
     const handlers = new Map<string, (payload: unknown) => void>();
