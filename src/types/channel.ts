@@ -610,8 +610,28 @@ export const CHANNEL_META: Record<ChannelType, ChannelMeta> = {
 /**
  * Get primary supported channels (non-plugin, commonly used)
  */
+const PRIMARY_CHANNEL_TYPES = [
+  'telegram',
+  'discord',
+  'whatsapp',
+  'dingtalk',
+  'feishu',
+  'wecom',
+  'openclaw-weixin',
+  'qqbot',
+] satisfies ChannelType[];
+
+const LEGACY_IM_CHANNEL_TYPES = new Set<ChannelType>(['telegram', 'discord', 'whatsapp']);
+
+export const LEGACY_IM_CHANNELS_FEATURE_ENABLED =
+  import.meta.env.VITE_ENABLE_LEGACY_IM_CHANNELS_FEATURE === 'true';
+
+export function isPrimaryChannelVisible(type: ChannelType): boolean {
+  return LEGACY_IM_CHANNELS_FEATURE_ENABLED || !LEGACY_IM_CHANNEL_TYPES.has(type);
+}
+
 export function getPrimaryChannels(): ChannelType[] {
-  return ['telegram', 'discord', 'whatsapp', 'dingtalk', 'feishu', 'wecom', 'openclaw-weixin', 'qqbot'];
+  return PRIMARY_CHANNEL_TYPES.filter(isPrimaryChannelVisible);
 }
 
 /**

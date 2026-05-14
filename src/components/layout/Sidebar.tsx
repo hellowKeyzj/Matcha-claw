@@ -37,6 +37,7 @@ import { hostApiFetch } from '@/lib/host-api';
 import { isGatewayOperational } from '@/lib/gateway-status';
 import { preloadLazyRouteForPath } from '@/lib/route-preload';
 import { prefetchSubagentTemplateCatalog } from '@/services/openclaw/subagent-template-catalog';
+import { TEAMS_FEATURE_ENABLED } from '@/features/teams/feature-flag';
 import type { TeamMailboxMessage } from '@/features/teams/api/runtime-client';
 import { useTranslation } from 'react-i18next';
 import { memo, startTransition, useCallback, useDeferredValue, useEffect, useMemo, useRef } from 'react';
@@ -282,6 +283,10 @@ const SidebarPendingBlockers = memo(function SidebarPendingBlockers() {
   }, [deferredChatSessions, deferredloadedSessions, t]);
 
   const teamMailboxCards = useMemo(() => {
+    if (!TEAMS_FEATURE_ENABLED) {
+      return [];
+    }
+
     const cards: PendingBlockerCard[] = [];
 
     for (const team of deferredTeams) {
@@ -471,7 +476,9 @@ export function Sidebar({
   const navItems = [
     { to: '/tasks', icon: <ListTodo className="h-5 w-5" />, label: t('sidebar.tasks') },
     { to: '/subagents', icon: <Bot className="h-5 w-5" />, label: t('sidebar.subagents') },
-    { to: '/teams', icon: <Users className="h-5 w-5" />, label: t('sidebar.teams') },
+    ...(TEAMS_FEATURE_ENABLED
+      ? [{ to: '/teams', icon: <Users className="h-5 w-5" />, label: t('sidebar.teams') }]
+      : []),
     { to: '/providers', icon: <KeyRound className="h-5 w-5" />, label: t('settings:aiProviders.title') },
     { to: '/skills', icon: <Puzzle className="h-5 w-5" />, label: t('sidebar.skills') },
     { to: '/plugins', icon: <Package className="h-5 w-5" />, label: t('sidebar.plugins') },
@@ -512,7 +519,6 @@ export function Sidebar({
     fetchSkills,
     gatewayOperational,
     initTaskCenter,
-    prewarmPluginsData,
     refreshTaskCenter,
     taskCenterInitialized,
     currentSessionKey,

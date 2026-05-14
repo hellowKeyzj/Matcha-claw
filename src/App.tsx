@@ -15,6 +15,7 @@ import { useProviderStore } from './stores/providers';
 import { hostApiFetch } from './lib/host-api';
 import { useDelayedFlag } from './lib/use-delayed-flag';
 import { TeamsRuntimeDaemon } from './components/runtime/TeamsRuntimeDaemon';
+import { TEAMS_FEATURE_ENABLED } from '@/features/teams/feature-flag';
 import {
   SetupRoute,
   SkillsRoute,
@@ -233,7 +234,7 @@ function App() {
   return (
     <ErrorBoundary>
       <TooltipProvider delayDuration={300}>
-        <TeamsRuntimeDaemon />
+        {TEAMS_FEATURE_ENABLED ? <TeamsRuntimeDaemon /> : null}
         <Routes>
           {/* Setup wizard (shown on first launch) */}
           <Route
@@ -274,19 +275,19 @@ function App() {
             />
             <Route
               path="/teams"
-              element={(
+              element={TEAMS_FEATURE_ENABLED ? (
                 <Suspense fallback={<RouteLoadingFallback />}>
                   <TeamsRoute />
                 </Suspense>
-              )}
+              ) : <Navigate to="/" replace />}
             />
             <Route
               path="/teams/:teamId"
-              element={(
+              element={TEAMS_FEATURE_ENABLED ? (
                 <Suspense fallback={<RouteLoadingFallback />}>
                   <TeamChatRoute />
                 </Suspense>
-              )}
+              ) : <Navigate to="/" replace />}
             />
             <Route
               path="/tasks"

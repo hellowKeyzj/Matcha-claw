@@ -1,4 +1,5 @@
 import { lazy, type ComponentType, type LazyExoticComponent } from 'react';
+import { TEAMS_FEATURE_ENABLED } from '@/features/teams/feature-flag';
 
 type PreloadableLazyComponent<T extends ComponentType<unknown>> = LazyExoticComponent<T> & {
   preload: () => Promise<{ default: T }>;
@@ -68,10 +69,10 @@ function resolveRoutePreloader(path: string): (() => Promise<unknown>) | null {
   if (normalizedPath.startsWith('/plugins')) {
     return () => PluginsRoute.preload();
   }
-  if (normalizedPath.startsWith('/teams/')) {
+  if (TEAMS_FEATURE_ENABLED && normalizedPath.startsWith('/teams/')) {
     return () => TeamChatRoute.preload();
   }
-  if (normalizedPath.startsWith('/teams')) {
+  if (TEAMS_FEATURE_ENABLED && normalizedPath.startsWith('/teams')) {
     return () => TeamsRoute.preload();
   }
   return null;

@@ -201,16 +201,18 @@ export function Channels() {
 
   // Get channel types to display
   const displayedChannelTypes = getPrimaryChannels();
+  const displayedChannelTypeSet = new Set<ChannelType>(displayedChannelTypes);
   const safeChannels = Array.isArray(channels) ? channels : [];
+  const visibleChannels = safeChannels.filter((channel) => displayedChannelTypeSet.has(channel.type));
   const configuredPlaceholderChannels: Channel[] = displayedChannelTypes
-    .filter((type) => configuredTypes.includes(type) && !safeChannels.some((channel) => channel.type === type))
+    .filter((type) => configuredTypes.includes(type) && !visibleChannels.some((channel) => channel.type === type))
     .map((type) => ({
       id: `${type}-default`,
       type,
       name: CHANNEL_NAMES[type] || CHANNEL_META[type].name,
       status: 'disconnected',
     }));
-  const configuredChannels = [...safeChannels, ...configuredPlaceholderChannels];
+  const configuredChannels = [...visibleChannels, ...configuredPlaceholderChannels];
 
   // Connected/disconnected channel counts
   const connectedCount = configuredChannels.filter((c) => c.status === 'connected').length;

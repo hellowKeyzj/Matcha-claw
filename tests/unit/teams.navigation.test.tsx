@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { render, screen } from '@testing-library/react';
-import { MemoryRouter } from 'react-router-dom';
+import { MemoryRouter, useLocation } from 'react-router-dom';
 import App from '@/App';
 import { Sidebar } from '@/components/layout/Sidebar';
 import { useChatStore } from '@/stores/chat';
@@ -8,7 +8,13 @@ import { useGatewayStore } from '@/stores/gateway';
 import { useLayoutStore } from '@/stores/layout';
 import { useSettingsStore } from '@/stores/settings';
 import { useSubagentsStore } from '@/stores/subagents';
+import { preloadLazyRouteForPath } from '@/lib/route-preload';
 import i18n from '@/i18n';
+
+function LocationEcho() {
+  const location = useLocation();
+  return <div data-testid="location-echo">{location.pathname}</div>;
+}
 
 function enableMainAppRoutes() {
   useSettingsStore.setState({
@@ -69,7 +75,7 @@ function enableMainAppRoutes() {
 }
 
 describe('teams navigation', () => {
-  it('shows teams entry in sidebar', () => {
+  it('hides teams entry in sidebar while the feature flag is off', () => {
     enableMainAppRoutes();
 
     render(
@@ -78,19 +84,25 @@ describe('teams navigation', () => {
       </MemoryRouter>,
     );
 
-    const teamsLink = screen.getByRole('link', { name: 'Teams' });
-    expect(teamsLink).toHaveAttribute('href', '/teams');
+    expect(screen.queryByRole('link', { name: 'Teams' })).not.toBeInTheDocument();
   });
 
-  it('renders teams page at /teams', async () => {
+  it('redirects /teams while the feature flag is off', async () => {
     enableMainAppRoutes();
 
     render(
       <MemoryRouter initialEntries={['/teams']}>
         <App />
+        <LocationEcho />
       </MemoryRouter>,
     );
 
-    expect(await screen.findByText('Agents Workspace')).toBeInTheDocument();
+    expect(await screen.findByTestId('location-echo')).toHaveTextContent('/');
+    expect(screen.queryByText('Agents Workspace')).not.toBeInTheDocument();
+  });
+
+  it('does not preload teams routes while the feature flag is off', () => {
+    expect(preloadLazyRouteForPath('/teams')).toBeNull();
+    expect(preloadLazyRouteForPath('/teams/team-1')).toBeNull();
   });
 });
