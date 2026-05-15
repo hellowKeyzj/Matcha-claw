@@ -24,7 +24,7 @@ export interface StreamingToolStatus {
   id?: string;
   toolCallId?: string;
   name: string;
-  status: 'running' | 'completed' | 'error';
+  status: 'running' | 'completed' | 'error' | 'missing_result';
   durationMs?: number;
   summary?: string;
 }
@@ -322,6 +322,7 @@ function ToolCard({
   const durationLabel = formatDuration(tool.durationMs);
   const isRunning = tool.status === 'running';
   const isError = tool.status === 'error';
+  const isMissingResult = tool.status === 'missing_result';
   const inputText = tool.inputText?.trim() ?? '';
   const result = tool.result;
   const hasInput = inputText.length > 0;
@@ -424,7 +425,7 @@ function ToolCard({
         <div className="flex items-start gap-2 text-left">
           <div className="flex shrink-0 items-center gap-1 pt-px">
             {isRunning && <Loader2 className="h-3.5 w-3.5 animate-spin text-primary shrink-0" />}
-            {!isRunning && !isError && <CheckCircle2 className="h-3.5 w-3.5 text-green-500 shrink-0" />}
+            {!isRunning && !isError && !isMissingResult && <CheckCircle2 className="h-3.5 w-3.5 text-green-500 shrink-0" />}
             {isError && <AlertCircle className="h-3.5 w-3.5 text-destructive shrink-0" />}
             <Wrench className="h-3.5 w-3.5 shrink-0 opacity-55" />
           </div>
@@ -444,7 +445,7 @@ function ToolCard({
             {!expanded && durationLabel ? <span className="text-[10px] text-muted-foreground/65">{durationLabel}</span> : null}
             {!expanded && !isRunning ? (
               <span className="text-[10px] text-muted-foreground/55">
-                {isError ? '失败' : '完成'}
+                {isError ? '失败' : (isMissingResult ? '无结果' : '完成')}
               </span>
             ) : null}
             <button

@@ -43,6 +43,9 @@ import {
 } from './session-value-normalization';
 import { SessionTranscriptTimelineLoader } from './session-transcript-timeline-loader';
 import { SessionExecutionGraphRuntime } from './session-execution-graph-runtime';
+import {
+  closeMissingToolResultsForRun,
+} from './tool/tool-card-terminal';
 import type { RuntimeClockPort } from '../common/runtime-ports';
 
 export interface SessionTimelineRuntimeDeps {
@@ -310,6 +313,15 @@ export class SessionTimelineRuntime {
     };
   }
 
+  closeMissingToolResultsForRun(
+    sessionKey: string,
+    runId: string | null,
+  ): void {
+    const state = this.getSessionState(sessionKey);
+    state.timelineEntries = closeMissingToolResultsForRun(state.timelineEntries, runId);
+    this.deps.executionGraphRuntime.rebuildFromTimeline(sessionKey, state);
+  }
+
   clearSessionRuntimeErrorState(sessionKey: string): SessionRuntimeStateSnapshot {
     const state = this.getSessionState(sessionKey);
     return this.commitSessionTransition(sessionKey, {
@@ -346,12 +358,14 @@ export class SessionTimelineRuntime {
           advanceRunEpoch: !this.getSessionState(sessionKey).runtime.sending,
         }).runtime;
       case 'final':
+        this.closeMissingToolResultsForRun(sessionKey, input.runId);
         return this.commitSessionTransition(sessionKey, {
         runtimePatch: this.buildTerminalRuntimePatch('done', null, null),
         activeTransportEpoch: null,
         advanceRunEpoch: true,
       }).runtime;
     case 'error':
+      this.closeMissingToolResultsForRun(sessionKey, input.runId);
       return this.commitSessionTransition(sessionKey, {
         runtimePatch: this.buildTerminalRuntimePatch('error', input.error ?? null, input.transportIssue ?? null),
         activeTransportEpoch: null,
@@ -359,6 +373,7 @@ export class SessionTimelineRuntime {
       }).runtime;
     case 'aborted':
       this.deps.stateStore.blockRun(sessionKey, input.runId);
+      this.closeMissingToolResultsForRun(sessionKey, input.runId);
       return this.commitSessionTransition(sessionKey, {
         runtimePatch: this.buildTerminalRuntimePatch('aborted', input.error ?? null, input.transportIssue ?? null),
         activeTransportEpoch: null,

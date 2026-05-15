@@ -1423,6 +1423,37 @@ describe('session runtime service', () => {
     });
   });
 
+  it('historical final assistant tool calls without results load as missing_result', () => {
+    const rows = materializeTranscriptTimelineEntries('agent:main:main', [{
+      role: 'assistant',
+      content: [{
+        type: 'toolCall',
+        id: 'tool-historical-missing-result',
+        name: 'TaskCreate',
+        arguments: { subject: '验证任务创建' },
+      }],
+    }]);
+
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      kind: 'tool-activity',
+      status: 'final',
+      toolCards: [{
+        toolCallId: 'tool-historical-missing-result',
+        name: 'TaskCreate',
+        status: 'missing_result',
+        result: { kind: 'none', surface: 'tool-card' },
+      }],
+      assistantSegments: [{
+        kind: 'tool',
+        tool: {
+          toolCallId: 'tool-historical-missing-result',
+          status: 'missing_result',
+        },
+      }],
+    });
+  });
+
   it('same toolCallId live stream stays inside the same assistant-turn item', () => {
     const configDir = join(tmpdir(), `matcha-session-runtime-${Date.now()}`);
     const service = createTestSessionRuntimeService({
@@ -3058,7 +3089,7 @@ describe('session runtime service', () => {
       tools: [{
         toolCallId: 'tool-final-output',
         name: 'web_fetch',
-        status: 'running',
+        status: 'missing_result',
         result: {
           kind: 'none',
         },
@@ -3074,12 +3105,65 @@ describe('session runtime service', () => {
       tools: [{
         toolCallId: 'tool-final-output',
         name: 'web_fetch',
-        status: 'running',
+        status: 'missing_result',
         result: {
           kind: 'none',
         },
       }],
     });
+  });
+
+  it('run terminal lifecycle closes running tool cards without result as missing_result', () => {
+    const service = createTestSessionRuntimeService({
+      workspace: { getConfigDir: () => join(tmpdir(), `matcha-session-runtime-${Date.now()}`) },
+      openclawBridge: {
+        chatSend: async () => ({ runId: 'run-unused' }),
+        gatewayRpc: async () => ({}),
+      },
+    });
+
+    service.consumeGatewayConversationEvent({
+      type: 'tool.lifecycle',
+      event: {
+        runId: 'run-tool-missing-result',
+        sessionKey: 'agent:main:main',
+        sequenceId: 1,
+        timestamp: 1_700_000_000_000,
+        phase: 'start',
+        toolCallId: 'tool-missing-result',
+        name: 'TaskCreate',
+        args: { subject: '创建任务' },
+      },
+    });
+
+    const [finalEvent] = service.consumeGatewayConversationEvent({
+      type: 'run.phase',
+      phase: 'completed',
+      runId: 'run-tool-missing-result',
+      sessionKey: 'agent:main:main',
+    });
+
+    expect(finalEvent.snapshot.runtime.runPhase).toBe('done');
+    expect(finalEvent.snapshot.items).toEqual([
+      expect.objectContaining({
+        kind: 'assistant-turn',
+        turnKey: 'main:run-tool-missing-result',
+        status: 'final',
+        tools: [expect.objectContaining({
+          toolCallId: 'tool-missing-result',
+          name: 'TaskCreate',
+          status: 'missing_result',
+          result: { kind: 'none', surface: 'tool-card' },
+        })],
+        segments: [expect.objectContaining({
+          kind: 'tool',
+          tool: expect.objectContaining({
+            toolCallId: 'tool-missing-result',
+            status: 'missing_result',
+          }),
+        })],
+      }),
+    ]);
   });
 
   it('final transcript assistant text does not override or append onto an existing live assistant turn', async () => {
@@ -3441,7 +3525,7 @@ describe('session runtime service', () => {
                   tool: {
                     id: 'tool-read',
                     name: 'read',
-                    status: 'running',
+                    status: 'missing_result',
                   },
                 },
               ],
@@ -3450,7 +3534,7 @@ describe('session runtime service', () => {
                 {
                   id: 'tool-read',
                   name: 'read',
-                  status: 'running',
+                  status: 'missing_result',
                 },
               ],
             },

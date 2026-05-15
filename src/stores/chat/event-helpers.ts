@@ -7,7 +7,7 @@ export function isToolResultRole(role: unknown): boolean {
 }
 
 function mergeToolStatus(existing: ToolStatus['status'], incoming: ToolStatus['status']): ToolStatus['status'] {
-  const order: Record<ToolStatus['status'], number> = { running: 0, completed: 1, error: 2 };
+  const order: Record<ToolStatus['status'], number> = { running: 0, completed: 1, missing_result: 2, error: 3 };
   return order[incoming] >= order[existing] ? incoming : existing;
 }
 

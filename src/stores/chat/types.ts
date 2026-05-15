@@ -55,7 +55,7 @@ export interface ToolStatus {
   id?: string;
   toolCallId?: string;
   name: string;
-  status: 'running' | 'completed' | 'error';
+  status: 'running' | 'completed' | 'error' | 'missing_result';
   durationMs?: number;
   summary?: string;
   updatedAt: number;

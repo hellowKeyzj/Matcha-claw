@@ -1,6 +1,7 @@
 import type {
   SessionRenderToolStatus,
   SessionRenderToolCard,
+  SessionTimelineEntryStatus,
 } from '../../../shared/session-adapter-types';
 import {
   isRecord,
@@ -55,6 +56,7 @@ function findLatestUnresolvedToolCardIndex(
 export function buildToolCardsFromMessage(input: {
   content: unknown;
   role?: string;
+  status?: SessionTimelineEntryStatus;
   toolName?: string;
   toolCallId?: string;
   toolStatuses?: ReadonlyArray<SessionRenderToolStatus>;
@@ -87,7 +89,7 @@ export function buildToolCardsFromMessage(input: {
         ...(toolCallId ? { toolCallId } : {}),
         name,
         input: toolInput,
-        status: 'running',
+        status: input.status === 'streaming' || input.status === 'pending' ? 'running' : 'missing_result',
         ...resolveToolCardRenderState({
           name,
           input: toolInput,

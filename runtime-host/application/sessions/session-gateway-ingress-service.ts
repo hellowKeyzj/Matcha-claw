@@ -469,6 +469,13 @@ export class SessionGatewayIngressService {
             sessionUpdate: event.sessionUpdate,
           })
         : null;
+      if (
+        runtimeSourceEntry
+        && event.sessionUpdate === 'agent_message'
+        && (runtimeSourceEntry.status === 'final' || runtimeSourceEntry.status === 'error' || runtimeSourceEntry.status === 'aborted')
+      ) {
+        this.deps.timelineRuntime.closeMissingToolResultsForRun(sessionKey, event.runId);
+      }
       const committed = this.deps.timelineRuntime.commitSessionTransition(sessionKey, {
         timelineEntries: event.entries,
         runtimePatch: runtimePatch?.runtimePatch,

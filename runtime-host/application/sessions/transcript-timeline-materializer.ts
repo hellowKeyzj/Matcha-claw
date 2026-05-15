@@ -205,6 +205,7 @@ export function buildTimelineEntriesFromTranscriptMessage(
   const toolCards = buildToolCardsFromMessage({
     content: message.content,
     role: message.role,
+    status,
     toolName: message.toolName ?? message.name,
     toolCallId: message.toolCallId,
     toolStatuses,

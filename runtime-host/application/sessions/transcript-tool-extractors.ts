@@ -173,7 +173,7 @@ function readToolStatusesFromStatusRecords(
       id,
     });
     const name = resolveToolRecordName(item) || fallbackName;
-    const status = item.status === 'running' || item.status === 'completed' || item.status === 'error'
+    const status = item.status === 'running' || item.status === 'completed' || item.status === 'error' || item.status === 'missing_result'
       ? item.status
       : null;
     if (!name || isStateOnlyToolName(name) || !status) {
