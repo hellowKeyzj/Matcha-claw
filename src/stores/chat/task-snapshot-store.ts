@@ -31,7 +31,7 @@ interface SessionTaskSnapshotState {
 interface TaskSnapshotStoreState {
   snapshots: Record<string, SessionTaskSnapshotState>;
   reportTodos: (sessionKey: string, todos: TodoItem[]) => void;
-  reportTaskData: (
+  reportTaskCenterData: (
     sessionKey: string,
     tasks: TaskData[],
     options?: {
@@ -42,8 +42,8 @@ interface TaskSnapshotStoreState {
       uri?: string;
     },
   ) => void;
-  reportSnapshotEvent: (event: TaskSnapshotEvent) => void;
-  reportGatewayNotification: (notification: unknown, fallbackSessionKey?: string) => void;
+  reportTaskCenterSnapshot: (event: TaskSnapshotEvent) => void;
+  reportTaskCenterNotification: (notification: unknown, fallbackSessionKey?: string) => void;
   reportSessionUpdate: (event: SessionUpdateEvent) => void;
   reportSessionSnapshot: (snapshot: SessionStateSnapshot, source?: TaskSnapshotEvent['source']) => void;
   getTodoList: (sessionKey: string) => TodoItem[];
@@ -60,6 +60,7 @@ interface TaskSnapshotStoreState {
 const EMPTY_TASKS: TaskData[] = [];
 const EMPTY_TODOS: TodoItem[] = [];
 const EMPTY_STATUS_MAP: Record<string, TaskDataStatus> = {};
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 }
@@ -254,8 +255,12 @@ function mergeTaskLists(current: TaskData[], incoming: TaskData[], deletedTaskId
   return sortTasks(Array.from(byId.values()).filter((task) => task.status !== 'deleted'));
 }
 
-function isEmptyReplay(source: TaskSnapshotEvent['source'] | undefined, tasks: TaskData[], todos?: TodoItem[]): boolean {
-  return source === 'replay' && tasks.length === 0 && Array.isArray(todos) && todos.length === 0;
+function readDeletedTaskIds(tasks: TaskData[], explicitDeletedTaskIds: string[] = []): string[] {
+  const deleted = tasks
+    .filter((task) => task.status === 'deleted')
+    .map((task) => task.id)
+    .filter((taskId) => taskId.trim().length > 0);
+  return [...explicitDeletedTaskIds, ...deleted];
 }
 
 function readSessionKey(value: unknown, fallback?: string): string {
@@ -413,15 +418,16 @@ export const useTaskSnapshotStore = create<TaskSnapshotStoreState>((set, get) =>
     });
   },
 
-  reportTaskData: (sessionKey, tasks, options) => {
+  reportTaskCenterData: (sessionKey, tasks, options) => {
     const normalizedSessionKey = normalizeString(sessionKey);
     if (!normalizedSessionKey) return;
     const normalizedTasks = sortTasks(tasks.map(normalizeTask).filter((item): item is TaskData => Boolean(item)));
     set((state) => {
       const current = state.snapshots[normalizedSessionKey];
+      const deletedTaskIds = readDeletedTaskIds(normalizedTasks, options?.deletedTaskIds);
       const nextTasks = options?.merge
-        ? mergeTaskLists(current?.tasks ?? [], normalizedTasks, options.deletedTaskIds)
-        : normalizedTasks;
+        ? mergeTaskLists(current?.tasks ?? [], normalizedTasks, deletedTaskIds)
+        : normalizedTasks.filter((task) => task.status !== 'deleted');
       const nextSource = options?.source ?? current?.source ?? 'tool';
       const nextEnableEdit = options?.enableEdit ?? current?.enableEdit;
       const nextUri = options?.uri ?? current?.uri;
@@ -448,16 +454,14 @@ export const useTaskSnapshotStore = create<TaskSnapshotStoreState>((set, get) =>
     });
   },
 
-  reportSnapshotEvent: (event) => {
+  reportTaskCenterSnapshot: (event) => {
     const sessionKey = normalizeString(event.sessionKey);
     if (!sessionKey) return;
-    const current = get().snapshots[sessionKey];
-    if (isEmptyReplay(event.source, event.tasks, event.todos)) {
-      if (current && current.taskDataList.length > 0) {
-        return;
-      }
+    if (event.source === 'todo') {
+      get().reportTodos(sessionKey, event.todos ?? []);
+      return;
     }
-    get().reportTaskData(sessionKey, event.tasks, {
+    get().reportTaskCenterData(sessionKey, event.tasks, {
       source: event.source,
       enableEdit: event.enableEdit,
       uri: event.uri,
@@ -467,7 +471,7 @@ export const useTaskSnapshotStore = create<TaskSnapshotStoreState>((set, get) =>
     }
   },
 
-  reportGatewayNotification: (notification, fallbackSessionKey) => {
+  reportTaskCenterNotification: (notification, fallbackSessionKey) => {
     if (!isRecord(notification)) return;
     const method = normalizeString(notification.method);
     const params = isRecord(notification.params) ? notification.params : notification;
@@ -476,7 +480,7 @@ export const useTaskSnapshotStore = create<TaskSnapshotStoreState>((set, get) =>
     const payload = normalizeToolPayload(method, params);
     if (!payload) return;
     if (payload.tasks.length > 0 || payload.deletedTaskIds.length > 0) {
-      get().reportTaskData(sessionKey, payload.tasks, {
+      get().reportTaskCenterData(sessionKey, payload.tasks, {
         source: payload.source,
         merge: true,
         deletedTaskIds: payload.deletedTaskIds,
@@ -499,18 +503,23 @@ export const useTaskSnapshotStore = create<TaskSnapshotStoreState>((set, get) =>
       }
     }
     if (event.sessionUpdate === 'plan') {
-      get().reportSnapshotEvent(event.taskSnapshot);
+      if (event.taskSnapshot.source === 'todo' || event.taskSnapshot.todos) {
+        get().reportTodos(sessionKey, event.taskSnapshot.todos ?? []);
+      }
       return;
     }
     get().reportSessionSnapshot(event.snapshot, 'replay');
   },
 
   reportSessionSnapshot: (snapshot, source = 'replay') => {
-    if (snapshot.taskSnapshot) {
-      get().reportSnapshotEvent(snapshot.taskSnapshot);
+    void source;
+    if (snapshot.taskSnapshot?.source === 'todo' || snapshot.taskSnapshot?.todos) {
+      get().reportTodos(snapshot.sessionKey, snapshot.taskSnapshot.todos ?? []);
     }
     for (const event of extractSnapshotEventsFromItems(snapshot)) {
-      get().reportSnapshotEvent({ ...event, source: event.source ?? source });
+      if (event.source === 'todo' || event.todos) {
+        get().reportTodos(snapshot.sessionKey, event.todos ?? []);
+      }
     }
   },
 

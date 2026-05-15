@@ -140,7 +140,7 @@ function flushTaskNotifications(): void {
 
   for (const payload of compacted) {
     try {
-      useTaskSnapshotStore.getState().reportGatewayNotification(
+      useTaskSnapshotStore.getState().reportTaskCenterNotification(
         payload,
         useChatStore.getState().currentSessionKey,
       );
@@ -287,7 +287,7 @@ export const useGatewayStore = create<GatewayState>((set, get) => ({
           unsubscribers.push(subscribeHostEvent<TaskSnapshotEvent>(
             'task:snapshot',
             (payload) => {
-              useTaskSnapshotStore.getState().reportSnapshotEvent(payload);
+              useTaskSnapshotStore.getState().reportTaskCenterSnapshot(payload);
             },
           ));
           unsubscribers.push(subscribeHostEvent<{ channelId?: string; status?: string }>(

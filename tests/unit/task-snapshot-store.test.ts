@@ -9,7 +9,7 @@ describe('task snapshot store', () => {
     const { useTaskSnapshotStore } = await import('@/stores/chat/task-snapshot-store');
     const store = useTaskSnapshotStore.getState();
 
-    store.reportTaskData('agent:main:main', [
+    store.reportTaskCenterData('agent:main:main', [
       { id: '1', subject: '实现模型', description: '', status: 'in_progress', blocks: [], blockedBy: [] },
     ]);
 
@@ -21,7 +21,7 @@ describe('task snapshot store', () => {
   it('normalizes TodoWrite notification into todo task data without driving task inbox plan status', async () => {
     const { useTaskSnapshotStore } = await import('@/stores/chat/task-snapshot-store');
 
-    useTaskSnapshotStore.getState().reportGatewayNotification({
+    useTaskSnapshotStore.getState().reportTaskCenterNotification({
       method: 'TodoWrite',
       params: {
         sessionKey: 'agent:main:main',
@@ -39,7 +39,7 @@ describe('task snapshot store', () => {
   it('normalizes TodoGet notification as todo state without persistent tasks', async () => {
     const { useTaskSnapshotStore } = await import('@/stores/chat/task-snapshot-store');
 
-    useTaskSnapshotStore.getState().reportGatewayNotification({
+    useTaskSnapshotStore.getState().reportTaskCenterNotification({
       method: 'TodoGet',
       params: {
         sessionKey: 'agent:main:main',
@@ -57,7 +57,7 @@ describe('task snapshot store', () => {
     const { useTaskSnapshotStore } = await import('@/stores/chat/task-snapshot-store');
     const store = useTaskSnapshotStore.getState();
 
-    store.reportGatewayNotification({
+    store.reportTaskCenterNotification({
       method: 'TodoWrite',
       params: {
         sessionKey: 'agent:main:main',
@@ -70,7 +70,7 @@ describe('task snapshot store', () => {
     ]);
     expect(store.getPersistentTaskDataList('agent:main:main')).toEqual([]);
 
-    store.reportTaskData('agent:main:main', [
+    store.reportTaskCenterData('agent:main:main', [
       { id: '1', subject: '修复任务中心删除', description: '', status: 'in_progress', blocks: [], blockedBy: [] },
     ]);
 
@@ -79,27 +79,45 @@ describe('task snapshot store', () => {
     ]);
   });
 
-  it('does not let an empty replay erase existing todo snapshot data', async () => {
+  it('empty replay clears stale todo snapshot data', async () => {
     const { useTaskSnapshotStore } = await import('@/stores/chat/task-snapshot-store');
     const store = useTaskSnapshotStore.getState();
 
-    store.reportSnapshotEvent({
+    store.reportTaskCenterSnapshot({
       sessionKey: 'agent:main:main',
       source: 'todo',
       tasks: [],
       todos: [{ content: '保留当前 todo', status: 'in_progress' }],
     });
 
-    store.reportSnapshotEvent({
+    store.reportTaskCenterSnapshot({
       sessionKey: 'agent:main:main',
       source: 'replay',
       tasks: [],
       todos: [],
     });
 
-    expect(useTaskSnapshotStore.getState().getTaskDataList('agent:main:main')).toEqual([
-      expect.objectContaining({ subject: '保留当前 todo', status: 'in_progress' }),
+    expect(useTaskSnapshotStore.getState().getTaskDataList('agent:main:main')).toEqual([]);
+  });
+
+  it('empty task center snapshot clears stale persistent tasks from the task inbox', async () => {
+    const { useTaskSnapshotStore } = await import('@/stores/chat/task-snapshot-store');
+    const store = useTaskSnapshotStore.getState();
+
+    store.reportTaskCenterData('agent:main:main', [
+      { id: '1', subject: '已不存在的任务', description: '', status: 'in_progress', blocks: [], blockedBy: [] },
     ]);
+
+    store.reportTaskCenterSnapshot({
+      sessionKey: 'agent:main:main',
+      source: 'replay',
+      tasks: [],
+      todos: [],
+    });
+
+    expect(useTaskSnapshotStore.getState().getPersistentTaskDataList('agent:main:main')).toEqual([]);
+    expect(useTaskSnapshotStore.getState().getTaskDataList('agent:main:main')).toEqual([]);
+    expect(useTaskSnapshotStore.getState().getDerivedPlanStatus('agent:main:main')).toBeNull();
   });
 
   it('returns stable derived task references for React selectors', async () => {
@@ -124,7 +142,7 @@ describe('task snapshot store', () => {
     expect(store.getStatusMap('agent:main:main')).toBe(firstStatusMap);
   });
 
-  it('replays tasks artifact from session snapshot', async () => {
+  it('does not let session snapshot task artifacts drive the task inbox', async () => {
     const { useTaskSnapshotStore } = await import('@/stores/chat/task-snapshot-store');
 
     useTaskSnapshotStore.getState().reportSessionSnapshot({
@@ -162,6 +180,79 @@ describe('task snapshot store', () => {
       },
     });
 
-    expect(useTaskSnapshotStore.getState().getTaskDataList('agent:main:main')[0]?.subject).toBe('回放任务');
+    expect(useTaskSnapshotStore.getState().getPersistentTaskDataList('agent:main:main')).toEqual([]);
+  });
+
+  it('does not expose transient historical task events while replaying a session snapshot', async () => {
+    const { useTaskSnapshotStore } = await import('@/stores/chat/task-snapshot-store');
+    const seenCounts: number[] = [];
+    const unsubscribe = useTaskSnapshotStore.subscribe((state) => {
+      seenCounts.push(state.getPersistentTaskDataList('agent:main:main').length);
+    });
+
+    useTaskSnapshotStore.getState().reportSessionSnapshot({
+      sessionKey: 'agent:main:main',
+      catalog: { key: 'agent:main:main', agentId: 'main', kind: 'main', preferred: true },
+      items: [{
+        key: 'assistant-turn:1',
+        kind: 'assistant-turn',
+        sessionKey: 'agent:main:main',
+        role: 'assistant',
+        identitySource: 'run',
+        identityMode: 'run',
+        identityConfidence: 'strong',
+        status: 'final',
+        segments: [],
+        thinking: null,
+        text: '',
+        images: [],
+        attachedFiles: [],
+        tools: [{
+          id: 'call_1',
+          toolCallId: 'call_1',
+          name: 'TaskCreate',
+          displayTitle: 'TaskCreate',
+          input: {},
+          status: 'completed',
+          output: {
+            task: { id: '1', subject: '历史旧任务', description: '', status: 'pending', blocks: [], blockedBy: [] },
+          },
+          result: {
+            kind: 'json',
+            surface: 'tool-card',
+            collapsedPreview: '',
+            bodyText: '{"task":{"id":"1","subject":"历史旧任务","description":"","status":"pending","blocks":[],"blockedBy":[]}}',
+          },
+        }],
+      }],
+      replayComplete: true,
+      runtime: {
+        revision: 1,
+        runEpoch: 1,
+        sending: false,
+        activeRunId: null,
+        runPhase: 'done',
+        activeTurnItemKey: null,
+        pendingTurnKey: null,
+        pendingTurnLaneKey: null,
+        pendingFinal: false,
+        lastUserMessageAt: null,
+        lastError: null,
+        lastIssue: null,
+        updatedAt: null,
+      },
+      window: {
+        totalItemCount: 1,
+        windowStartOffset: 0,
+        windowEndOffset: 1,
+        hasMore: false,
+        hasNewer: false,
+        isAtLatest: true,
+      },
+    });
+    unsubscribe();
+
+    expect(seenCounts).not.toContain(1);
+    expect(useTaskSnapshotStore.getState().getPersistentTaskDataList('agent:main:main')).toEqual([]);
   });
 });

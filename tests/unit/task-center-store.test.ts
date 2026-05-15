@@ -78,7 +78,7 @@ describe('task center store', () => {
     expect(state.error).toBe('refresh failed');
   });
 
-  it('refreshTasks keeps existing todo snapshot when TaskList returns an empty replay', async () => {
+  it('refreshTasks clears existing todo snapshot when TaskList returns an empty snapshot', async () => {
     listTaskSnapshotMock.mockResolvedValueOnce({ tasks: [], todos: [] });
     const { useTaskCenterStore } = await import('@/stores/task-center-store');
     const { useTaskSnapshotStore } = await import('@/stores/chat/task-snapshot-store');
@@ -89,9 +89,7 @@ describe('task center store', () => {
 
     await useTaskCenterStore.getState().refreshTasks({ sessionKey: 'agent:main:main' });
 
-    expect(useTaskSnapshotStore.getState().getTaskDataList('agent:main:main')).toEqual([
-      expect.objectContaining({ subject: '已有待办', status: 'pending' }),
-    ]);
+    expect(useTaskSnapshotStore.getState().getTaskDataList('agent:main:main')).toEqual([]);
     expect(useTaskSnapshotStore.getState().getPersistentTaskDataList('agent:main:main')).toEqual([]);
   });
 
@@ -147,7 +145,7 @@ describe('task center store', () => {
   it('handleGatewayNotification patches task or removes deleted task', async () => {
     const { useTaskCenterStore } = await import('@/stores/task-center-store');
     const { useTaskSnapshotStore } = await import('@/stores/chat/task-snapshot-store');
-    useTaskSnapshotStore.getState().reportTaskData('agent:main:main', [
+    useTaskSnapshotStore.getState().reportTaskCenterData('agent:main:main', [
       task({ id: '1', status: 'pending' }),
     ]);
     useTaskCenterStore.setState({

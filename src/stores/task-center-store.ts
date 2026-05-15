@@ -99,7 +99,7 @@ export const useTaskCenterStore = create<TaskCenterState>((set, get) => ({
           tasksCount: snapshot.tasks.length,
           todosCount: snapshot.todos.length,
         });
-        useTaskSnapshotStore.getState().reportSnapshotEvent({
+        useTaskSnapshotStore.getState().reportTaskCenterSnapshot({
           sessionKey: resolvedSessionKey,
           tasks: snapshot.tasks,
           todos: snapshot.todos,
@@ -146,7 +146,7 @@ export const useTaskCenterStore = create<TaskCenterState>((set, get) => ({
         status: 'deleted',
       });
       if (result.deleted) {
-        useTaskSnapshotStore.getState().reportTaskData(resolvedSessionKey, [], {
+        useTaskSnapshotStore.getState().reportTaskCenterData(resolvedSessionKey, [], {
           merge: true,
           deletedTaskIds: [taskId],
           source: 'tool',
@@ -161,7 +161,7 @@ export const useTaskCenterStore = create<TaskCenterState>((set, get) => ({
 
   handleGatewayNotification: (notification) => {
     const sessionKey = get().sessionKey ?? undefined;
-    useTaskSnapshotStore.getState().reportGatewayNotification(notification, sessionKey);
+    useTaskSnapshotStore.getState().reportTaskCenterNotification(notification, sessionKey);
   },
 
   clearError: () => set({ error: null }),

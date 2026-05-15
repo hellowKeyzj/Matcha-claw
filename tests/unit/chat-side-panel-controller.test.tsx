@@ -131,7 +131,7 @@ describe('chat side panel controller', () => {
   });
 
   it('counts only pending and in-progress tasks for the header badge', () => {
-    useTaskSnapshotStore.getState().reportTaskData('agent:main:main', [
+    useTaskSnapshotStore.getState().reportTaskCenterData('agent:main:main', [
       { id: '1', subject: '待做', description: '', status: 'pending', blocks: [], blockedBy: [] },
       { id: '2', subject: '进行中', description: '', status: 'in_progress', blocks: [], blockedBy: [] },
       { id: '3', subject: '已完成', description: '', status: 'completed', blocks: [], blockedBy: [] },
@@ -169,7 +169,7 @@ describe('chat side panel controller', () => {
   });
 
   it('exposes derived plan status from the task snapshot store', () => {
-    useTaskSnapshotStore.getState().reportTaskData('agent:main:main', [
+    useTaskSnapshotStore.getState().reportTaskCenterData('agent:main:main', [
       { id: '1', subject: '进行中', description: '', status: 'in_progress', blocks: [], blockedBy: [] },
     ], { source: 'replay' });
     useTaskSnapshotStore.getState().notifyChatStarted('agent:main:main');

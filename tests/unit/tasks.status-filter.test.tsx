@@ -26,7 +26,7 @@ function setupStores() {
     init: vi.fn().mockResolvedValue(undefined),
   } as never);
 
-  useTaskSnapshotStore.getState().reportTaskData('agent:main:main', [
+  useTaskSnapshotStore.getState().reportTaskCenterData('agent:main:main', [
     {
       id: 'task-in-progress',
       subject: 'Task In Progress',
