@@ -208,6 +208,7 @@ const LOCAL_MINILM_ALIASES = new Set([
 const LOCAL_MINILM_DTYPE = "fp32";
 const PLUGIN_ROOT = getPluginPackageRoot(import.meta.url);
 const BUNDLED_MODELS_ROOT = join(PLUGIN_ROOT, "models");
+const LOCAL_MINILM_ONNX_FILE = "onnx/model.onnx";
 
 // ============================================================================
 // Utility Functions
@@ -560,7 +561,7 @@ async function loadLocalMiniLmExtractor(model: string): Promise<LocalFeatureExtr
         env.remoteHost = `${endpoint}/`;
       }
 
-      const bundledModelPath = join(BUNDLED_MODELS_ROOT, model);
+      const bundledModelPath = join(BUNDLED_MODELS_ROOT, model, LOCAL_MINILM_ONNX_FILE);
       const hasBundledModel = existsSync(bundledModelPath);
       env.allowRemoteModels = !hasBundledModel;
 
