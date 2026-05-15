@@ -269,9 +269,10 @@ describe('skills page fetch behavior', () => {
     expect(clippedViewport).toBeNull();
   });
 
-  it('已安装列表只展示可用技能，并移除冗余的可用筛选', async () => {
+  it('已安装列表展示可用技能与用户禁用项，过滤掉缺依赖与状态未知项', async () => {
     skillsState.skills = [
       { id: 'available-skill', name: 'Available Skill', description: 'ready', enabled: true, isBundled: true, eligible: true },
+      { id: 'disabled-skill', name: 'Disabled Skill', description: 'user disabled', enabled: false, isBundled: true, eligible: false },
       { id: 'missing-skill', name: 'Missing Skill', description: 'missing deps', enabled: true, isBundled: true, eligible: false },
       { id: 'unknown-skill', name: 'Unknown Skill', description: 'unknown eligibility', enabled: true, isBundled: false },
     ];
@@ -287,6 +288,7 @@ describe('skills page fetch behavior', () => {
       expect(screen.getByText('Available Skill')).toBeInTheDocument();
     });
 
+    expect(screen.getByText('Disabled Skill')).toBeInTheDocument();
     expect(screen.queryByText('Missing Skill')).not.toBeInTheDocument();
     expect(screen.queryByText('Unknown Skill')).not.toBeInTheDocument();
     expect(screen.queryByText('filter.eligible')).not.toBeInTheDocument();

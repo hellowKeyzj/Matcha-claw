@@ -109,6 +109,14 @@ function getSkillAvailabilityKind(skill: Skill): SkillAvailabilityKind {
   return 'unknown';
 }
 
+// 已安装列表的可见性策略：
+// - 用户主动禁用的 skill 必须可见，否则没法重新启用
+// - 当前可用的 skill 可见
+// - missing / blocked / unknown 仍然隐藏，避免噪声
+function isInstalledSkillVisible(skill: Skill): boolean {
+  return skill.enabled === false || skill.eligible === true;
+}
+
 function getAvailabilityBadgeClass(kind: SkillAvailabilityKind): string {
   switch (kind) {
     case 'eligible':
@@ -1120,7 +1128,7 @@ export function Skills() {
   // Filter skills
   const safeSkills = useMemo(() => (Array.isArray(skills) ? skills : []), [skills]);
   const visibleInstalledSkills = useMemo(
-    () => safeSkills.filter((skill) => skill.eligible === true),
+    () => safeSkills.filter(isInstalledSkillVisible),
     [safeSkills],
   );
   const skillById = useMemo(() => {
