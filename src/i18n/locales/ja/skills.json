@@ -127,8 +127,8 @@
             "replace": "別のソースをクリックまたはドラッグすると選び直せます",
             "confirm": "スキルフォルダへインストール",
             "requirementsTitle": "ファイル要件",
-            "requirementDirectoryZip": "スキルフォルダまたは .zip アーカイブには SKILL.md が必要です",
-            "requirementMarkdown": ".md スキルファイルには YAML frontmatter の name と description が必要です",
+            "requirementDirectoryZip": "スキルフォルダまたは .zip アーカイブには、YAML frontmatter の name と description を含む SKILL.md が必要です",
+            "requirementMarkdown": "単体の .md スキルファイルにも YAML frontmatter の name と description が必要です",
             "skillSourceFilter": "スキルソース",
             "allFilesFilter": "すべてのファイル"
         },

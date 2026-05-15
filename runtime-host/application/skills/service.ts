@@ -161,6 +161,26 @@ export class SkillsService {
     return match[1].trim().replace(/^["']|["']$/g, '') || null;
   }
 
+  private readRequiredSkillManifestFrontmatter(markdown: string): { name: string; description: string } {
+    const frontmatterMatch = markdown.match(FRONTMATTER_PATTERN);
+    if (!frontmatterMatch) {
+      throw new Error('SKILL.md 格式不符合要求，缺少 YAML frontmatter 中的 name 和 description。');
+    }
+    const frontmatter = frontmatterMatch[1];
+    const name = this.parseFrontmatterField(frontmatter, 'name');
+    const description = this.parseFrontmatterField(frontmatter, 'description');
+    if (!name || !description) {
+      throw new Error('SKILL.md 格式不符合要求，缺少 YAML frontmatter 中的 name 和 description。');
+    }
+    return { name, description };
+  }
+
+  private async validateSkillManifest(skillDir: string): Promise<void> {
+    const manifestPath = join(skillDir, SKILL_MANIFEST_FILE);
+    const markdown = await this.deps.fileSystem.readTextFile(manifestPath);
+    this.readRequiredSkillManifestFrontmatter(markdown);
+  }
+
   private async copyDirectory(sourceDir: string, targetDir: string): Promise<void> {
     await this.deps.fileSystem.ensureDirectory(targetDir);
     const entries = await this.deps.fileSystem.listDirectory(sourceDir);
@@ -243,16 +263,7 @@ export class SkillsService {
 
   private async createMarkdownSkillDirectory(sourcePath: string, stagingRoot: string): Promise<string> {
     const markdown = await this.deps.fileSystem.readTextFile(sourcePath);
-    const frontmatterMatch = markdown.match(FRONTMATTER_PATTERN);
-    if (!frontmatterMatch) {
-      throw new Error('Markdown 技能缺少 YAML frontmatter。');
-    }
-    const frontmatter = frontmatterMatch[1];
-    const name = this.parseFrontmatterField(frontmatter, 'name');
-    const description = this.parseFrontmatterField(frontmatter, 'description');
-    if (!name || !description) {
-      throw new Error('Markdown 技能必须在 YAML frontmatter 中提供 name 和 description。');
-    }
+    const { name } = this.readRequiredSkillManifestFrontmatter(markdown);
     const fileBaseName = basename(sourcePath, extname(sourcePath));
     const suggestedName = fileBaseName.toLowerCase() === 'skill'
       ? basename(dirname(sourcePath))
@@ -270,8 +281,10 @@ export class SkillsService {
   ): Promise<{ skillDir: string; sourceKind: SkillSourceKind }> {
     const info = await this.deps.fileSystem.stat(sourcePath);
     if (info.isDirectory) {
+      const skillDir = await this.resolveSkillDirectory(sourcePath);
+      await this.validateSkillManifest(skillDir);
       return {
-        skillDir: await this.resolveSkillDirectory(sourcePath),
+        skillDir,
         sourceKind: 'directory',
       };
     }
@@ -283,8 +296,10 @@ export class SkillsService {
       const extractRoot = join(stagingRoot, 'zip');
       await this.deps.fileSystem.ensureDirectory(extractRoot);
       await this.extractZipArchive(sourcePath, extractRoot);
+      const skillDir = await this.resolveSkillDirectory(extractRoot);
+      await this.validateSkillManifest(skillDir);
       return {
-        skillDir: await this.resolveSkillDirectory(extractRoot),
+        skillDir,
         sourceKind: 'zip',
       };
     }

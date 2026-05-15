@@ -127,8 +127,8 @@
             "replace": "点击或拖拽其他来源可重新选择",
             "confirm": "安装到技能目录",
             "requirementsTitle": "文件要求",
-            "requirementDirectoryZip": "文件夹或 .zip 压缩包需要包含 SKILL.md 文件",
-            "requirementMarkdown": ".md 文件需要包含 YAML frontmatter 中的 name 和 description",
+            "requirementDirectoryZip": "文件夹或 .zip 压缩包需要包含 SKILL.md，且 SKILL.md 需要包含 YAML frontmatter 中的 name 和 description",
+            "requirementMarkdown": "单个 .md 技能文件也需要包含 YAML frontmatter 中的 name 和 description",
             "skillSourceFilter": "技能来源",
             "allFilesFilter": "所有文件"
         },

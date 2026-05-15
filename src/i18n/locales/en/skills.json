@@ -127,8 +127,8 @@
             "replace": "Click or drop another source to replace the current selection",
             "confirm": "Install to Skills Folder",
             "requirementsTitle": "Requirements",
-            "requirementDirectoryZip": "Skill folders or .zip archives must contain a SKILL.md file",
-            "requirementMarkdown": ".md skill files must define name and description in YAML frontmatter",
+            "requirementDirectoryZip": "Skill folders or .zip archives must contain SKILL.md with name and description in YAML frontmatter",
+            "requirementMarkdown": "Single .md skill files must also define name and description in YAML frontmatter",
             "skillSourceFilter": "Skill Sources",
             "allFilesFilter": "All Files"
         },

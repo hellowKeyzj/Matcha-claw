@@ -1393,7 +1393,8 @@ export function Skills() {
 
       resetLocalSkillDialog();
     } catch (error) {
-      toast.error(t('toast.failedImportLocalSkill') + ': ' + String(error));
+      const message = error instanceof Error ? error.message : String(error);
+      toast.error(t('toast.failedImportLocalSkill') + ': ' + message);
     } finally {
       setLocalSkillImporting(false);
     }

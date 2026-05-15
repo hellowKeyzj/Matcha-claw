@@ -2,6 +2,7 @@ import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { MemoryRouter } from 'react-router-dom';
 import { Skills } from '@/pages/Skills';
+import { toast } from 'sonner';
 
 const fetchSkillsMock = vi.fn(async () => {});
 const enableSkillMock = vi.fn(async () => {});
@@ -86,6 +87,15 @@ vi.mock('@/lib/telemetry', () => ({
   trackUiEvent: vi.fn(),
 }));
 
+vi.mock('sonner', () => ({
+  toast: {
+    success: vi.fn(),
+    error: vi.fn(),
+    warning: vi.fn(),
+    info: vi.fn(),
+  },
+}));
+
 vi.mock('react-i18next', () => ({
   useTranslation: () => ({
     t: (key: string) => key,
@@ -101,6 +111,9 @@ describe('skills page fetch behavior', () => {
     disableSkillMock.mockClear();
     installSkillMock.mockClear();
     uninstallSkillMock.mockClear();
+    vi.mocked(toast.error).mockClear();
+    vi.mocked(toast.success).mockClear();
+    vi.mocked(toast.warning).mockClear();
     invokeIpcMock.mockImplementation(async (channel: string, payload?: { path?: string }) => {
       if (channel === 'hostapi:fetch' && payload?.path === '/api/openclaw/skills-dir') {
         return {
@@ -428,5 +441,95 @@ describe('skills page fetch behavior', () => {
       'hostapi:fetch',
       expect.objectContaining({ path: '/api/runtime-host/jobs/get' }),
     );
+  });
+
+  it('上传技能格式不符合要求时显示具体错误且不会启用', async () => {
+    skillsState.snapshotReady = true;
+    invokeIpcMock.mockImplementation(async (channel: string, payload?: { path?: string }) => {
+      if (channel === 'hostapi:fetch' && payload?.path === '/api/openclaw/skills-dir') {
+        return {
+          ok: true,
+          data: {
+            status: 200,
+            ok: true,
+            json: 'C:/Users/test/.openclaw/skills',
+          },
+        };
+      }
+      if (channel === 'hostapi:fetch' && payload?.path === '/api/skills/import-local') {
+        return {
+          ok: true,
+          data: {
+            status: 202,
+            ok: true,
+            json: {
+              success: true,
+              job: {
+                id: 'job-skill-import',
+                type: 'skills.importLocal',
+                status: 'queued',
+                queuedAt: 1,
+                attempts: 0,
+                maxAttempts: 1,
+              },
+            },
+          },
+        };
+      }
+      if (channel === 'hostapi:fetch' && payload?.path === '/api/runtime-host/jobs/get') {
+        return {
+          ok: true,
+          data: {
+            status: 200,
+            ok: true,
+            json: {
+              success: true,
+              job: {
+                id: 'job-skill-import',
+                type: 'skills.importLocal',
+                status: 'failed',
+                queuedAt: 1,
+                startedAt: 2,
+                finishedAt: 3,
+                attempts: 1,
+                maxAttempts: 1,
+                error: 'SKILL.md 格式不符合要求，缺少 YAML frontmatter 中的 name 和 description。',
+              },
+            },
+          },
+        };
+      }
+      if (channel === 'dialog:open') {
+        return {
+          canceled: false,
+          filePaths: ['C:/Downloads/bad-skill.zip'],
+        };
+      }
+      return '';
+    });
+
+    render(
+      <MemoryRouter>
+        <Skills />
+      </MemoryRouter>,
+    );
+
+    fireEvent.mouseDown(screen.getByRole('tab', { name: 'tabs.marketplace' }));
+    await screen.findByPlaceholderText('searchMarketplace');
+
+    fireEvent.click(screen.getByRole('button', { name: 'marketplace.uploadSkill' }));
+    fireEvent.click(screen.getByText('marketplace.uploadDialog.empty'));
+    await screen.findByText('bad-skill.zip');
+
+    fireEvent.click(screen.getByRole('button', { name: 'marketplace.uploadDialog.confirm' }));
+
+    await waitFor(() => {
+      expect(toast.error).toHaveBeenCalledWith(
+        'toast.failedImportLocalSkill: SKILL.md 格式不符合要求，缺少 YAML frontmatter 中的 name 和 description。',
+      );
+    });
+    expect(enableSkillMock).not.toHaveBeenCalled();
+    expect(fetchSkillsMock).not.toHaveBeenCalledWith({ force: true, fresh: true });
+    expect(toast.success).not.toHaveBeenCalled();
   });
 });

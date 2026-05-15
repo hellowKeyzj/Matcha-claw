@@ -8,6 +8,7 @@ import { createTestOpenClawEnvironmentRepository, createTestRuntimeSystemEnviron
 
 const tempDirs: string[] = [];
 let skillsRoot = '';
+let commandExecutorMock: ReturnType<typeof vi.fn>;
 
 async function createTempDir(prefix: string): Promise<string> {
   const dir = await mkdtemp(join(tmpdir(), prefix));
@@ -16,6 +17,7 @@ async function createTempDir(prefix: string): Promise<string> {
 }
 
 function createSkillsService(): SkillsService {
+  commandExecutorMock = vi.fn(async () => ({ stdout: '', stderr: '' }));
   return new SkillsService({
     repository: {
       getAllConfigs: async () => ({}),
@@ -43,7 +45,7 @@ function createSkillsService(): SkillsService {
     },
     fileSystem: createTestRuntimeFileSystem(),
     commandExecutor: {
-      execFile: vi.fn(async () => ({ stdout: '', stderr: '' })),
+      execFile: commandExecutorMock,
     },
     systemEnvironment: createTestRuntimeSystemEnvironment(),
     workspace: {
@@ -61,6 +63,7 @@ function createSkillsService(): SkillsService {
 
 beforeEach(async () => {
   skillsRoot = await createTempDir('matchaclaw-skills-root-');
+  commandExecutorMock = vi.fn(async () => ({ stdout: '', stderr: '' }));
 });
 
 afterEach(async () => {
@@ -72,7 +75,18 @@ describe('runtime-host skill import service', () => {
     const sourceRoot = await createTempDir('matchaclaw-skill-source-');
     const sourceDir = join(sourceRoot, 'demo-skill');
     await mkdir(join(sourceDir, 'prompts'), { recursive: true });
-    await writeFile(join(sourceDir, 'SKILL.md'), '# Demo Skill\n', 'utf8');
+    await writeFile(
+      join(sourceDir, 'SKILL.md'),
+      [
+        '---',
+        'name: Demo Skill',
+        'description: A local directory skill.',
+        '---',
+        '',
+        '# Demo Skill',
+      ].join('\n'),
+      'utf8',
+    );
     await writeFile(join(sourceDir, 'prompts', 'system.txt'), 'hello', 'utf8');
 
     const response = await createSkillsService().executeImportLocal({ sourcePath: sourceDir });
@@ -84,6 +98,38 @@ describe('runtime-host skill import service', () => {
       installedPath: join(skillsRoot, 'demo-skill'),
     });
     await expect(readFile(join(skillsRoot, 'demo-skill', 'prompts', 'system.txt'), 'utf8')).resolves.toBe('hello');
+  });
+
+  it('rejects a local skill directory whose SKILL.md is missing required frontmatter', async () => {
+    const sourceRoot = await createTempDir('matchaclaw-skill-source-');
+    const sourceDir = join(sourceRoot, 'bad-skill');
+    await mkdir(sourceDir, { recursive: true });
+    await writeFile(join(sourceDir, 'SKILL.md'), '# Bad Skill\n', 'utf8');
+
+    await expect(createSkillsService().executeImportLocal({ sourcePath: sourceDir }))
+      .rejects
+      .toThrow('SKILL.md 格式不符合要求，缺少 YAML frontmatter 中的 name 和 description。');
+    await expect(readFile(join(skillsRoot, 'bad-skill', 'SKILL.md'), 'utf8')).rejects.toThrow();
+  });
+
+  it('rejects a zip skill whose SKILL.md is missing required frontmatter', async () => {
+    const sourceRoot = await createTempDir('matchaclaw-skill-zip-');
+    const sourcePath = join(sourceRoot, 'bad-skill.zip');
+    await writeFile(sourcePath, 'fake zip', 'utf8');
+    const service = createSkillsService();
+    commandExecutorMock.mockImplementationOnce(async (_command: string, args: string[]) => {
+      const commandArg = args[args.indexOf('-Command') + 1];
+      const destinationDir = commandArg.match(/-DestinationPath '([^']+)'/)?.[1] ?? args[args.length - 1];
+      const skillDir = join(destinationDir, 'bad-skill');
+      await mkdir(skillDir, { recursive: true });
+      await writeFile(join(skillDir, 'SKILL.md'), '# Bad Skill\n', 'utf8');
+      return { stdout: '', stderr: '' };
+    });
+
+    await expect(service.executeImportLocal({ sourcePath }))
+      .rejects
+      .toThrow('SKILL.md 格式不符合要求，缺少 YAML frontmatter 中的 name 和 description。');
+    await expect(readFile(join(skillsRoot, 'bad-skill', 'SKILL.md'), 'utf8')).rejects.toThrow();
   });
 
   it('imports a standalone markdown skill file as SKILL.md', async () => {
