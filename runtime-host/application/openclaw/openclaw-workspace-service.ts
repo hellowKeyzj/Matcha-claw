@@ -4,6 +4,7 @@ import { resolveMainWorkspaceDir, resolveTaskWorkspaceDirs, resolveWorkspaceDirF
 import type { RuntimeFileSystemPort } from '../common/runtime-ports';
 import type { OpenClawEnvironmentRepository } from './openclaw-environment-repository';
 import type { RuntimeHostLogger } from '../../shared/logger';
+import { mergeWorkspaceContext, type ContextMergeResult } from './workspace-context-merge';
 
 export interface OpenClawWorkspacePort {
   getConfigDir(): string;
@@ -14,6 +15,7 @@ export interface OpenClawWorkspacePort {
   getWorkspaceDirForSession(sessionKey: string): Promise<string>;
   getTaskWorkspaceDirs(): Promise<string[]>;
   migrateMainAgentTemplatesIfNeeded(): Promise<{ workspaceDir: string; migratedFiles: string[] }>;
+  mergeContextSnippets(): Promise<ContextMergeResult>;
 }
 
 const MAIN_AGENT_TEMPLATE_FILES = [
@@ -156,5 +158,40 @@ export class OpenClawWorkspaceService implements OpenClawWorkspacePort {
       this.logger.info(`[workspace] Migrated main-agent templates in ${workspaceDir}: ${migratedFiles.join(', ')}`);
     }
     return { workspaceDir, migratedFiles };
+  }
+
+  async mergeContextSnippets(): Promise<ContextMergeResult> {
+    const contextDir = await this.firstExistingContextDir();
+    if (!contextDir) {
+      this.logger.debug('[context-merge] No context directory found in any candidate path');
+      return { mergedFiles: [], skippedMissing: 0 };
+    }
+
+    const workspaceDirs = await this.getTaskWorkspaceDirs();
+    const combined: ContextMergeResult = { mergedFiles: [], skippedMissing: 0 };
+
+    for (const workspaceDir of workspaceDirs) {
+      const result = await mergeWorkspaceContext(this.fileSystem, this.logger, contextDir, workspaceDir);
+      combined.mergedFiles.push(...result.mergedFiles);
+      combined.skippedMissing += result.skippedMissing;
+    }
+
+    return combined;
+  }
+
+  private async firstExistingContextDir(): Promise<string | null> {
+    const resourcesPath = this.environment.getResourcesPath();
+    const candidates = [
+      resourcesPath ? join(resourcesPath, 'resources', 'context') : '',
+      resourcesPath ? join(resourcesPath, 'context') : '',
+      join(this.environment.getWorkingDir(), 'resources', 'context'),
+    ].filter((p) => p.length > 0);
+
+    for (const candidate of candidates) {
+      if (await this.fileSystem.exists(candidate)) {
+        return candidate;
+      }
+    }
+    return null;
   }
 }
