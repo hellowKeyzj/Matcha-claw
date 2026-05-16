@@ -280,6 +280,7 @@ function buildAssistantTurnFromAssistantMessage(input: {
     attachedFiles,
     defaultToolStatus: input.status === 'streaming' || input.status === 'pending' ? 'running' : 'missing_result',
     previousSegments,
+    isStreaming: input.status === 'streaming' || Boolean(input.message.streaming),
   });
   return buildAssistantTurnEntry({
     identity,

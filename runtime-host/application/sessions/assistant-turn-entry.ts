@@ -171,16 +171,108 @@ function findToolSegmentByName(
  * Build the segment list for an assistant turn from one chat-stream content
  * array. The content array order is the authoritative ordering for the turn.
  *
- * - text/thinking/image blocks become message/thinking/media segments in
- *   their original positions.
- * - toolCall/toolResult blocks become tool segments. If a tool with the same
- *   toolCallId already lives on `previousSegments` (e.g. populated by an
- *   earlier tool-lifecycle update), its runtime state is preserved.
- * - Tool segments existing on `previousSegments` whose toolCallId does not
- *   appear in the new content array are kept at the tail to protect early
- *   tool frames that arrived before chat content caught up.
+ * - For `final` status: content array is complete and authoritative. Segments
+ *   are rebuilt from scratch following content order.
+ * - For `streaming` status: content array only contains the currently
+ *   generating fragment (no previously completed toolCall blocks). New text
+ *   is appended after existing tool segments to preserve correct visual order.
+ *   Tool segments from previousSegments are kept in place.
  */
 export function buildSegmentsFromChatContent(input: {
+  identity: Pick<AssistantTurnEntryIdentity, 'turnKey' | 'laneKey'>;
+  content: unknown;
+  fallbackText: string;
+  attachedFiles: ReadonlyArray<SessionRenderAttachedFile>;
+  defaultToolStatus: SessionRenderToolStatusKind;
+  previousSegments: ReadonlyArray<SessionAssistantTurnSegment>;
+  isStreaming: boolean;
+}): ReadonlyArray<SessionAssistantTurnSegment> {
+  if (input.isStreaming && input.previousSegments.length > 0) {
+    return buildStreamingSegments(input);
+  }
+  return buildFinalSegments(input);
+}
+
+function buildStreamingSegments(input: {
+  identity: Pick<AssistantTurnEntryIdentity, 'turnKey' | 'laneKey'>;
+  content: unknown;
+  fallbackText: string;
+  attachedFiles: ReadonlyArray<SessionRenderAttachedFile>;
+  defaultToolStatus: SessionRenderToolStatusKind;
+  previousSegments: ReadonlyArray<SessionAssistantTurnSegment>;
+}): ReadonlyArray<SessionAssistantTurnSegment> {
+  const incomingText = extractTextFromContent(input.content) || input.fallbackText;
+  const incomingThinking = extractThinkingFromContent(input.content);
+
+  const segments: SessionAssistantTurnSegment[] = [];
+  let hasMessageSegment = false;
+  let hasThinkingSegment = false;
+
+  for (const previous of input.previousSegments) {
+    if (previous.kind === 'message') {
+      hasMessageSegment = true;
+      segments.push({
+        ...structuredClone(previous),
+        text: incomingText || previous.text,
+      });
+    } else if (previous.kind === 'thinking') {
+      hasThinkingSegment = true;
+      segments.push({
+        ...structuredClone(previous),
+        text: incomingThinking || previous.text,
+      });
+    } else {
+      segments.push(structuredClone(previous));
+    }
+  }
+
+  if (!hasThinkingSegment && incomingThinking) {
+    const segment = buildThinkingSegment(
+      buildSegmentKey(input.identity, 'thinking', 0),
+      incomingThinking,
+    );
+    if (segment) segments.push(segment);
+  }
+
+  if (!hasMessageSegment && incomingText.trim()) {
+    const segment = buildMessageSegment(
+      buildSegmentKey(input.identity, 'message', 0),
+      incomingText,
+    );
+    if (segment) segments.push(segment);
+  }
+
+  return segments;
+}
+
+function extractTextFromContent(content: unknown): string {
+  if (typeof content === 'string') {
+    return content;
+  }
+  if (!Array.isArray(content)) {
+    return '';
+  }
+  return content
+    .filter((block): block is { type: string; text: string } => (
+      Boolean(block) && typeof block === 'object' && block.type === 'text' && typeof block.text === 'string'
+    ))
+    .map((block) => block.text)
+    .join('\n');
+}
+
+function extractThinkingFromContent(content: unknown): string {
+  if (!Array.isArray(content)) {
+    return '';
+  }
+  return content
+    .filter((block): block is { type: string; thinking: string } => (
+      Boolean(block) && typeof block === 'object' && block.type === 'thinking' && typeof block.thinking === 'string'
+    ))
+    .map((block) => block.thinking)
+    .join('\n\n');
+}
+
+function buildFinalSegments(input: {
   identity: Pick<AssistantTurnEntryIdentity, 'turnKey' | 'laneKey'>;
   content: unknown;
   fallbackText: string;
