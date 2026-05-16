@@ -24,6 +24,7 @@ import {
   logTodoToolDebug,
   summarizeSessionUpdateForTodoToolDebug,
 } from '../application/sessions/todo-tool-debug';
+import { GatewayAutoRecovery } from './gateway-auto-recovery';
 
 export interface GatewaySessionRuntimePort {
   consumeGatewayConversationEvent(payload: GatewayConversationEvent): unknown[];
@@ -50,6 +51,22 @@ export interface RuntimeHostGatewayBridgeDeps {
 
 export function createRuntimeHostGatewayClient(deps: RuntimeHostGatewayBridgeDeps) {
   let latestObservedTransportEpoch = 0;
+
+  const requestGatewayRestart = async (reason: string): Promise<void> => {
+    const result = await deps.parentTransport.requestParentShellAction('gateway_restart', { reason });
+    if (!result.success) {
+      throw new Error(result.error.message);
+    }
+    if (result.status >= 400) {
+      throw new Error(`Gateway restart request failed: HTTP ${String(result.status)}`);
+    }
+  };
+
+  const autoRecovery = new GatewayAutoRecovery({
+    requestRestart: requestGatewayRestart,
+    logger: deps.logger,
+  });
+
   const gatewayClient = createGatewayClient({
     runtimeHostDataDir: deps.runtimeHostDataDir,
     gatewayPort: deps.gatewayPort,
@@ -77,6 +94,7 @@ export function createRuntimeHostGatewayClient(deps: RuntimeHostGatewayBridgeDep
             summarizeSessionUpdateForTodoToolDebug(sessionUpdate as SessionUpdateEvent),
           );
         }
+        autoRecovery.observe(sessionUpdate as SessionUpdateEvent);
         void deps.parentTransport.emitParentGatewayEvent('session:update', sessionUpdate).catch(() => undefined);
       }
     },
@@ -101,6 +119,7 @@ export function createRuntimeHostGatewayClient(deps: RuntimeHostGatewayBridgeDep
         return;
       }
       latestObservedTransportEpoch = payload.transportEpoch;
+      autoRecovery.reset();
       void deps.dispatchRoute(
         'POST',
         '/api/runtime-host/gateway-lifecycle',
@@ -112,15 +131,7 @@ export function createRuntimeHostGatewayClient(deps: RuntimeHostGatewayBridgeDep
       ).catch(() => undefined);
       deps.getSessionRuntime()?.notifyTransportConnected(payload.transportEpoch);
     },
-    requestGatewayRestart: async (reason) => {
-      const result = await deps.parentTransport.requestParentShellAction('gateway_restart', { reason });
-      if (!result.success) {
-        throw new Error(result.error.message);
-      }
-      if (result.status >= 400) {
-        throw new Error(`Gateway restart request failed: HTTP ${String(result.status)}`);
-      }
-    },
+    requestGatewayRestart: requestGatewayRestart,
   });
 
   return gatewayClient;
