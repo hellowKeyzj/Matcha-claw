@@ -129,6 +129,7 @@ export class PlaywrightSession {
   private readonly targetIdByPage = new WeakMap<any, string>()
   private readonly pageStateInitialized = new WeakSet<any>()
   private readonly rememberedRoleRefs = new Map<string, RememberedRoleRefs>()
+  private readonly prevSnapshotState = new Map<string, { refs: Record<string, RoleRef>; maxRefCounter: number }>()
   private directAutoConnectLocked = false
 
   constructor(
@@ -354,6 +355,31 @@ export class PlaywrightSession {
       if (first.done) break
       this.rememberedRoleRefs.delete(first.value)
     }
+  }
+
+  getPrevSnapshotState(cdpUrl: string, targetId?: string): { refs: Record<string, RoleRef>; maxRefCounter: number } | undefined {
+    const tid = targetId?.trim()
+    if (!tid) return undefined
+    return this.prevSnapshotState.get(resolveRoleRefCacheKey(cdpUrl, tid))
+  }
+
+  updatePrevSnapshotState(cdpUrl: string, targetId: string | undefined, refs: Record<string, RoleRef>, maxRefCounter: number): void {
+    const tid = targetId?.trim()
+    if (!tid) return
+    const key = resolveRoleRefCacheKey(cdpUrl, tid)
+    this.prevSnapshotState.set(key, { refs, maxRefCounter })
+    // Cap size
+    while (this.prevSnapshotState.size > 50) {
+      const first = this.prevSnapshotState.keys().next()
+      if (first.done) break
+      this.prevSnapshotState.delete(first.value)
+    }
+  }
+
+  clearPrevSnapshotState(cdpUrl: string, targetId?: string): void {
+    const tid = targetId?.trim()
+    if (!tid) return
+    this.prevSnapshotState.delete(resolveRoleRefCacheKey(cdpUrl, tid))
   }
 
   restoreRoleRefs(input: { cdpUrl: string; targetId?: string; page: any }): void {

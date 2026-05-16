@@ -759,8 +759,23 @@ export class BrowserControlService {
           compact: asBoolean(params.compact) ?? asBoolean(params.efficient),
           maxDepth: asNumber(params.depth),
         },
+        scope: params.scope,
+        filter: params.filter,
       })
-      return { ok: true, targetId, url: result.pageUrl, snapshot: result.snapshot, refs: result.refs, stats: result.stats }
+      return {
+        ok: true,
+        targetId,
+        url: result.pageUrl,
+        snapshot: result.snapshot,
+        refs: result.refs,
+        stats: result.stats,
+        ...(result.totalCount !== undefined ? { totalCount: result.totalCount } : {}),
+        ...(result.matchedCount !== undefined ? { matchedCount: result.matchedCount } : {}),
+        ...(result.returnedCount !== undefined ? { returnedCount: result.returnedCount } : {}),
+        ...(result.truncated ? { truncated: true } : {}),
+        ...(result.sparse ? { sparse: true } : {}),
+        ...(result.refRange ? { refRange: result.refRange } : {}),
+      }
     }
 
     if (action === 'screenshot') {
@@ -947,18 +962,21 @@ export class BrowserControlService {
     }
 
     switch (payload.kind) {
-      case 'click':
+      case 'click': {
+        const selector = asString(payload.selector)
         await this.actions.click({
           cdpUrl,
           targetId,
           mode,
-          ref: requiredString(payload.ref, 'ref'),
+          ref: selector ? undefined : asString(payload.ref),
+          selector,
           timeoutMs,
           doubleClick: payload.doubleClick,
           button: asMouseButton(payload.button),
           modifiers: payload.modifiers,
         })
         return { ok: true, action: 'act.click', targetId }
+      }
       case 'type':
         await this.actions.type({ cdpUrl, targetId, mode, ref: requiredString(payload.ref, 'ref'), text: requiredString(payload.text, 'text'), submit: payload.submit, slowly: payload.slowly, clearFirst: payload.clearFirst, timeoutMs })
         return { ok: true, action: 'act.type', targetId }

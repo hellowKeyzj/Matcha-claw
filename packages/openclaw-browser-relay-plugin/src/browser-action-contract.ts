@@ -113,6 +113,7 @@ export type BrowserClickRequest = {
   targetId?: string
   timeoutMs?: number
   ref?: string
+  selector?: string
   doubleClick?: boolean
   button?: MouseButton
   modifiers?: string[]
@@ -293,6 +294,8 @@ export type BrowserSnapshotAction = BrowserExecutionActionBase & {
   compact?: boolean
   efficient?: boolean
   depth?: number
+  scope?: { frame?: string; landmark?: string; selector?: string }
+  filter?: { keywords?: string[]; roles?: string[]; contextLines?: number; maxMatches?: number }
 }
 
 export type BrowserNavigateAction = BrowserExecutionActionBase & {

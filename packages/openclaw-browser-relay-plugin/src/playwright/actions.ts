@@ -1,5 +1,22 @@
 import type { PlaywrightSession } from './session.js'
-import { parseRoleSnapshot } from './role-refs.js'
+import { parseRoleSnapshot, type RoleRef } from './role-refs.js'
+import { filterSnapshot, type SnapshotFilterOptions } from './snapshot-filter.js'
+import { PageBlankError, ScopeEmptyError, ScopeFrameMultiMatchError } from './snapshot-errors.js'
+import { stabilizeRefs, computeRefDiff } from './snapshot-diff.js'
+
+const LANDMARK_SELECTORS: Record<string, string> = {
+  main: 'main, [role="main"]',
+  nav: 'nav, [role="navigation"]',
+  form: 'form, [role="form"]',
+  search: '[role="search"]',
+  aside: 'aside, [role="complementary"]',
+  header: 'header, [role="banner"]',
+  footer: 'footer, [role="contentinfo"]',
+}
+
+function landmarkToSelector(landmark: string): string {
+  return LANDMARK_SELECTORS[landmark] ?? landmark
+}
 
 type BrowserStorageHandle = 'localStorage' | 'sessionStorage'
 
@@ -98,6 +115,10 @@ export class PlaywrightActions {
         throw retryError
       }
     }
+
+    // Navigation invalidates previous snapshot diff baseline
+    this.session.clearPrevSnapshotState(input.cdpUrl, input.targetId)
+
     return { url: page.url() }
   }
 
@@ -109,37 +130,152 @@ export class PlaywrightActions {
     frameSelector?: string
     timeoutMs?: number
     options?: { interactive?: boolean; compact?: boolean; maxDepth?: number }
-  }): Promise<{ snapshot: string; refs: Record<string, { role: string; name?: string; nth?: number }>; stats: { lines: number; chars: number; refs: number; interactive: number }; pageUrl: string }> {
+    scope?: { frame?: string; landmark?: string; selector?: string }
+    filter?: SnapshotFilterOptions
+  }): Promise<{
+    snapshot: string
+    refs: Record<string, RoleRef>
+    stats: { lines: number; chars: number; refs: number; interactive: number }
+    pageUrl: string
+    totalCount?: number
+    matchedCount?: number
+    returnedCount?: number
+    truncated?: boolean
+    sparse?: boolean
+    refRange?: { min: string; max: string }
+    diff?: string
+  }> {
     const page = await this.session.getPageForTargetId(input)
     this.session.ensurePageState(page)
 
-    const frameSelector = input.frameSelector?.trim() || ''
-    const selector = input.selector?.trim() || ''
-    const locator = frameSelector
-      ? selector
-        ? page.frameLocator(frameSelector).locator(selector)
-        : page.frameLocator(frameSelector).locator(':root')
-      : selector
-        ? page.locator(selector)
-        : page.locator(':root')
+    // Resolve scope (frame → landmark/selector → locator root)
+    const scope = input.scope
+    const frameSelector = scope?.frame?.trim() || input.frameSelector?.trim() || ''
+    const landmark = scope?.landmark?.trim() || ''
+    const scopeSelector = scope?.selector?.trim() || input.selector?.trim() || ''
+
+    let pageRoot: any = page
+    if (frameSelector) {
+      const frameLocator = page.locator(frameSelector)
+      const frameCount = await frameLocator.count()
+      if (frameCount === 0) {
+        throw new ScopeEmptyError('frame_not_found', `scope.frame ${JSON.stringify(frameSelector)} matched 0 iframes.`)
+      }
+      if (frameCount > 1) {
+        throw new ScopeFrameMultiMatchError(frameSelector, frameCount)
+      }
+      pageRoot = page.frameLocator(frameSelector)
+    }
+
+    const resolvedSelector = landmark ? landmarkToSelector(landmark) : scopeSelector
+    let locator: any
+    if (resolvedSelector) {
+      locator = frameSelector
+        ? pageRoot.locator(resolvedSelector)
+        : page.locator(resolvedSelector)
+      const count = await locator.count()
+      if (count === 0) {
+        throw new ScopeEmptyError(
+          landmark ? 'landmark_not_found' : 'selector_no_match',
+          `scope ${landmark ? `landmark=${landmark}` : `selector=${JSON.stringify(scopeSelector)}`} matched 0 elements.`,
+        )
+      }
+    } else {
+      locator = frameSelector ? pageRoot.locator(':root') : page.locator(':root')
+    }
 
     const ariaSnapshot = await locator.ariaSnapshot({ timeout: withTimeout(input.timeoutMs, 20_000) })
-    const parsed = parseRoleSnapshot(String(ariaSnapshot ?? ''), input.options)
+    const ariaText = String(ariaSnapshot ?? '')
+
+    // Detect blank page
+    if (!ariaText.trim()) {
+      throw new PageBlankError()
+    }
+
+    const parsed = parseRoleSnapshot(ariaText, input.options)
+
+    // Apply ref stability: reuse previous ref IDs for unchanged elements
+    const prevState = this.session.getPrevSnapshotState(input.cdpUrl, input.targetId)
+    const stabilized = stabilizeRefs({
+      currentRefs: parsed.refs,
+      currentSnapshot: parsed.snapshot,
+      currentLineMeta: parsed.lineMeta,
+      prevRefs: prevState?.refs,
+      prevMaxCounter: prevState?.maxRefCounter,
+    })
+
+    // Store current state for next diff
+    this.session.updatePrevSnapshotState(input.cdpUrl, input.targetId, stabilized.refs, stabilized.nextMaxCounter)
 
     this.session.rememberRoleRefs({
       page,
       cdpUrl: input.cdpUrl,
       targetId: input.targetId,
-      refs: parsed.refs,
+      refs: stabilized.refs,
       frameSelector: frameSelector || undefined,
       mode: 'role',
     })
 
+    // Compute diff if we have previous state
+    let diffText: string | undefined
+    if (prevState && stabilized.keptRefs.length > 0) {
+      const diffResult = computeRefDiff({
+        prevRefs: prevState.refs,
+        currentRefs: stabilized.refs,
+        currentLineMeta: stabilized.lineMeta,
+        currentSnapshot: stabilized.snapshot,
+      })
+      if (diffResult.kind === 'DIFF') {
+        diffText = diffResult.diffText
+      }
+    }
+
+    // Apply filter if provided
+    const filter = input.filter
+    if (filter && (filter.keywords?.length || filter.roles?.length)) {
+      const filterResult = filterSnapshot(stabilized.lineMeta, filter)
+      if (filterResult === null) {
+        return {
+          snapshot: stabilized.snapshot,
+          refs: stabilized.refs,
+          stats: parsed.stats,
+          pageUrl: page.url(),
+          totalCount: Object.keys(stabilized.refs).length,
+          matchedCount: 0,
+          returnedCount: Object.keys(stabilized.refs).length,
+          truncated: false,
+          sparse: false,
+          ...(diffText ? { diff: diffText } : {}),
+        }
+      }
+      return {
+        snapshot: filterResult.prunedSnapshot,
+        refs: stabilized.refs,
+        stats: parsed.stats,
+        pageUrl: page.url(),
+        totalCount: Object.keys(stabilized.refs).length,
+        matchedCount: filterResult.matchedCount,
+        returnedCount: filterResult.returnedCount,
+        truncated: filterResult.truncated,
+        sparse: filterResult.sparse,
+        refRange: filterResult.refRange,
+        ...(diffText ? { diff: diffText } : {}),
+      }
+    }
+
+    // Use diff output if available and shorter than full snapshot
+    const finalSnapshot = diffText ?? stabilized.snapshot
+
     return {
-      snapshot: parsed.snapshot,
-      refs: parsed.refs,
+      snapshot: finalSnapshot,
+      refs: stabilized.refs,
       stats: parsed.stats,
       pageUrl: page.url(),
+      totalCount: Object.keys(stabilized.refs).length,
+      matchedCount: Object.keys(stabilized.refs).length,
+      returnedCount: Object.keys(stabilized.refs).length,
+      truncated: false,
+      sparse: false,
     }
   }
 
@@ -262,21 +398,45 @@ export class PlaywrightActions {
     return await evaluateFunctionOnPage(page, fnBody, timeoutMs)
   }
 
-  async click(input: { cdpUrl: string; targetId?: string; mode?: 'relay' | 'direct-cdp'; ref: string; timeoutMs?: number; doubleClick?: boolean; button?: 'left' | 'middle' | 'right'; modifiers?: string[] }): Promise<void> {
+  async click(input: { cdpUrl: string; targetId?: string; mode?: 'relay' | 'direct-cdp'; ref?: string; selector?: string; timeoutMs?: number; doubleClick?: boolean; button?: 'left' | 'middle' | 'right'; modifiers?: string[] }): Promise<void> {
     const page = await this.session.getPageForTargetId(input)
     this.session.ensurePageState(page)
-    this.session.restoreRoleRefs({ cdpUrl: input.cdpUrl, targetId: input.targetId, page })
 
-    const ref = requiredString(input.ref, 'ref')
-    const locator = this.session.refLocator(page, ref)
+    const selector = input.selector?.trim()
+    const ref = input.ref?.trim()
+
+    if (!selector && !ref) {
+      throw new Error('Either ref or selector is required for click')
+    }
+
+    let locator: any
+    let identifier: string
+
+    if (selector) {
+      // Selector path: verify element exists, then build locator
+      const handle = await page.$(selector)
+      if (!handle) {
+        throw new Error(`Selector "${selector}" did not match any elements on the page.`)
+      }
+      await handle.dispose()
+      locator = page.locator(selector).first()
+      identifier = selector
+    } else {
+      // Ref path: restore role refs and resolve locator
+      this.session.restoreRoleRefs({ cdpUrl: input.cdpUrl, targetId: input.targetId, page })
+      locator = this.session.refLocator(page, ref!)
+      identifier = ref!
+    }
+
+    const timeout = withTimeout(input.timeoutMs, 8_000)
     try {
       if (input.doubleClick) {
-        await locator.dblclick({ timeout: withTimeout(input.timeoutMs, 8_000), button: input.button, modifiers: input.modifiers })
+        await locator.dblclick({ timeout, button: input.button, modifiers: input.modifiers })
       } else {
-        await locator.click({ timeout: withTimeout(input.timeoutMs, 8_000), button: input.button, modifiers: input.modifiers })
+        await locator.click({ timeout, button: input.button, modifiers: input.modifiers })
       }
     } catch (error) {
-      throw mapLocatorError(error, ref)
+      throw mapLocatorError(error, identifier)
     }
   }
 

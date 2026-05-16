@@ -58,10 +58,25 @@ export type RoleRef = {
   nth?: number
 }
 
+export type RoleSnapshotLineMeta = {
+  text: string
+  indent: number
+  ref?: string
+  role?: string
+  name?: string
+}
+
 export type RoleSnapshotOptions = {
   interactive?: boolean
   compact?: boolean
   maxDepth?: number
+}
+
+export type RoleSnapshotResult = {
+  snapshot: string
+  refs: Record<string, RoleRef>
+  lineMeta: RoleSnapshotLineMeta[]
+  stats: { lines: number; chars: number; refs: number; interactive: number }
 }
 
 type DuplicateTracker = {
@@ -208,11 +223,7 @@ function appendRefLine(
 export function parseRoleSnapshot(
   ariaSnapshot: string,
   options: RoleSnapshotOptions = {},
-): {
-  snapshot: string
-  refs: Record<string, RoleRef>
-  stats: { lines: number; chars: number; refs: number; interactive: number }
-} {
+): RoleSnapshotResult {
   const lines = ariaSnapshot.split('\n')
   const refs: Record<string, RoleRef> = {}
   const tracker = createDuplicateTracker()
@@ -224,6 +235,7 @@ export function parseRoleSnapshot(
 
   if (options.interactive) {
     const interactiveLines: string[] = []
+    const lineMeta: RoleSnapshotLineMeta[] = []
     for (const line of lines) {
       const depth = getIndentDepth(line)
       if (options.maxDepth !== undefined && depth > options.maxDepth) continue
@@ -246,6 +258,7 @@ export function parseRoleSnapshot(
       if (nth > 0) rewritten += ` [nth=${nth}]`
       if (tail?.includes('[')) rewritten += tail
       interactiveLines.push(rewritten)
+      lineMeta.push({ text: rewritten, indent: 0, ref, role, name })
     }
 
     removeDuplicateNth(refs, tracker)
@@ -253,6 +266,7 @@ export function parseRoleSnapshot(
     return {
       snapshot,
       refs,
+      lineMeta,
       stats: {
         lines: snapshot.split('\n').length,
         chars: snapshot.length,
@@ -262,9 +276,24 @@ export function parseRoleSnapshot(
     }
   }
 
-  const rewrittenLines = lines
-    .map((line) => appendRefLine(line, refs, options, tracker, nextRef))
-    .filter((line): line is string => line !== null)
+  const lineMeta: RoleSnapshotLineMeta[] = []
+  const rewrittenLines: string[] = []
+
+  for (const line of lines) {
+    const result = appendRefLine(line, refs, options, tracker, nextRef)
+    if (result === null) continue
+    rewrittenLines.push(result)
+
+    const depth = getIndentDepth(line)
+    const match = line.match(/^(\s*-\s*)(\w+)(?:\s+"([^"]*)")?(.*)$/)
+    const role = match ? match[2].toLowerCase() : undefined
+    const name = match ? match[3] : undefined
+    // Find ref if one was assigned to this line
+    const refMatch = result.match(/\[ref=(e\d+)\]/)
+    const ref = refMatch ? refMatch[1] : undefined
+
+    lineMeta.push({ text: result, indent: depth, ref, role, name })
+  }
 
   removeDuplicateNth(refs, tracker)
   const snapshot = options.compact ? stripRedundantContainerLines(rewrittenLines.join('\n') || '(empty)') : rewrittenLines.join('\n') || '(empty)'
@@ -272,6 +301,7 @@ export function parseRoleSnapshot(
   return {
     snapshot,
     refs,
+    lineMeta,
     stats: {
       lines: snapshot.split('\n').length,
       chars: snapshot.length,
