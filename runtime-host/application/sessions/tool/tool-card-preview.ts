@@ -304,6 +304,11 @@ export function buildSemanticTextPreview(value: string): string {
   if (!compact) {
     return '';
   }
+  // 不含任何字母或数字（如 `{`、`{}`、`[]`、流式中残缺的结构片段）视为无语义内容，
+  // 不应作为工具卡片的副标题或结果摘要展示。
+  if (!/[\p{L}\p{N}]/u.test(compact)) {
+    return '';
+  }
 
   const objectLikePreview = buildObjectLikePreview(compact);
   if (objectLikePreview) {

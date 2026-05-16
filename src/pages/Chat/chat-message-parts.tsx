@@ -334,9 +334,10 @@ function ToolCard({
   )
     ? result.collapsedPreview.trim()
     : '';
-  const shouldShowHeaderTitle = !headerDetail;
-  const headerPrimaryLine = shouldShowHeaderTitle ? titleText : headerDetail;
-  const headerSecondaryLine = hasOutput ? outputPreview : '';
+  // 工具名永远作为主行展示，承担"这是什么工具"这一身份语义；
+  // 副行优先显示参数摘要（displayDetail），没有再回退到结果预览（outputPreview）。
+  const headerPrimaryLine = titleText || tool.name?.trim() || '工具';
+  const headerSecondaryLine = headerDetail || (hasOutput ? outputPreview : '');
   const rawOutputMarkdown = useMemo(() => {
     if (result.kind !== 'canvas' || !result.rawText?.trim()) {
       return null;
@@ -422,42 +423,42 @@ function ToolCard({
       className={`${COMPACT_SIDE_RAIL_TRACK} text-sm`}
     >
       <div className={`${COMPACT_SIDE_RAIL_HEADER} rounded-[13px] border border-border/36 bg-background/72 px-2.5 py-1.5`}>
-        <div className="flex items-start gap-2 text-left">
-          <div className="flex shrink-0 items-center gap-1 pt-px">
-            {isRunning && <Loader2 className="h-3.5 w-3.5 animate-spin text-primary shrink-0" />}
-            {!isRunning && !isError && !isMissingResult && <CheckCircle2 className="h-3.5 w-3.5 text-green-500 shrink-0" />}
-            {isError && <AlertCircle className="h-3.5 w-3.5 text-destructive shrink-0" />}
-            <Wrench className="h-3.5 w-3.5 shrink-0 opacity-55" />
-          </div>
-          <div className="min-w-0 flex-1">
+        <div className="flex flex-col gap-0.5 text-left">
+          <div className="flex items-center gap-2">
+            <div className="flex shrink-0 items-center gap-1">
+              {isRunning && <Loader2 className="h-3.5 w-3.5 animate-spin text-primary shrink-0" />}
+              {!isRunning && !isError && !isMissingResult && <CheckCircle2 className="h-3.5 w-3.5 text-green-500 shrink-0" />}
+              {isError && <AlertCircle className="h-3.5 w-3.5 text-destructive shrink-0" />}
+              <Wrench className="h-3.5 w-3.5 shrink-0 opacity-55" />
+            </div>
             {headerPrimaryLine ? (
-              <div className={`${shouldShowHeaderTitle ? 'text-[12px] font-semibold text-foreground/92' : 'text-[11px] text-muted-foreground/80'} truncate leading-4.5`}>
+              <div className="min-w-0 truncate text-[12px] font-semibold text-foreground/92 leading-4.5">
                 {headerPrimaryLine}
               </div>
             ) : null}
-            {headerSecondaryLine ? (
-              <div className="truncate text-[11px] leading-4.5 text-muted-foreground/62">
-                {headerSecondaryLine}
-              </div>
-            ) : null}
+            <div className="flex shrink-0 items-center gap-1.5">
+              {!expanded && durationLabel ? <span className="text-[10px] text-muted-foreground/65">{durationLabel}</span> : null}
+              {!expanded && !isRunning ? (
+                <span className="text-[10px] text-muted-foreground/55">
+                  {isError ? '失败' : (isMissingResult ? '无结果' : '完成')}
+                </span>
+              ) : null}
+              <button
+                type="button"
+                aria-label={expanded ? `收起工具 ${tool.name}` : `展开工具 ${tool.name}`}
+                className={COMPACT_ICON_TOGGLE}
+                onClick={() => setExpanded((value) => !value)}
+                aria-expanded={expanded}
+              >
+                {expanded ? <ChevronDown className="h-3 w-3 shrink-0" /> : <ChevronRight className="h-3 w-3 shrink-0" />}
+              </button>
+            </div>
           </div>
-          <div className="flex shrink-0 items-center gap-1.5 pt-px">
-            {!expanded && durationLabel ? <span className="text-[10px] text-muted-foreground/65">{durationLabel}</span> : null}
-            {!expanded && !isRunning ? (
-              <span className="text-[10px] text-muted-foreground/55">
-                {isError ? '失败' : (isMissingResult ? '无结果' : '完成')}
-              </span>
-            ) : null}
-            <button
-              type="button"
-              aria-label={expanded ? `收起工具 ${tool.name}` : `展开工具 ${tool.name}`}
-              className={COMPACT_ICON_TOGGLE}
-              onClick={() => setExpanded((value) => !value)}
-              aria-expanded={expanded}
-            >
-              {expanded ? <ChevronDown className="h-3 w-3 shrink-0" /> : <ChevronRight className="h-3 w-3 shrink-0" />}
-            </button>
-          </div>
+          {headerSecondaryLine ? (
+            <div className="truncate pl-[2rem] text-[11px] leading-4.5 text-muted-foreground/62">
+              {headerSecondaryLine}
+            </div>
+          ) : null}
         </div>
       </div>
       {expanded && (
