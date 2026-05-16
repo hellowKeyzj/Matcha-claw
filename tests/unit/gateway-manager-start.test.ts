@@ -60,6 +60,9 @@ describe('gateway manager start', () => {
     const { GatewayManager } = await import('../../electron/gateway/manager');
 
     const manager = new GatewayManager();
+    manager.setRuntimeHostManager({
+      onRuntimeJobEvent: () => () => {},
+    } as never);
     const controlReadyProbeMock = vi.fn(async () => {
       expect(manager.getStatus()).toEqual(expect.objectContaining({
         processState: 'control_connecting',
@@ -91,6 +94,9 @@ describe('gateway manager start', () => {
     internals.ownsProcess = true;
 
     const recordRestartCompletedSpy = vi.spyOn(internals.restartController, 'recordRestartCompleted');
+    manager.setRuntimeHostManager({
+      onRuntimeJobEvent: () => () => {},
+    } as never);
     manager.setControlReadyProbe(vi.fn(async () => {}));
     runGatewayStartupSequenceMock.mockImplementationOnce(async (hooks: {
       onConnectedToExistingGateway: () => void;

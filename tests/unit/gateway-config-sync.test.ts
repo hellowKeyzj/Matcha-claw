@@ -63,6 +63,27 @@ vi.mock('../../electron/gateway/config-sync-env', () => ({
   stripSystemdSupervisorEnv: vi.fn((env: Record<string, string | undefined>) => env),
 }));
 
+function createFakeRuntimeHostManager() {
+  let registeredHandler:
+    | ((eventName: 'runtime-job:done' | 'runtime-job:progress', payload: unknown) => void)
+    | null = null;
+  return {
+    request: hoisted.runtimeHostRequestMock,
+    onRuntimeJobEvent: (
+      handler: (eventName: 'runtime-job:done' | 'runtime-job:progress', payload: unknown) => void,
+    ) => {
+      registeredHandler = handler;
+      return () => {
+        registeredHandler = null;
+      };
+    },
+    fireRuntimeJobEvent: (
+      eventName: 'runtime-job:done' | 'runtime-job:progress',
+      payload: unknown,
+    ) => registeredHandler?.(eventName, payload),
+  };
+}
+
 describe('gateway config sync', () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -134,7 +155,8 @@ describe('gateway config sync', () => {
 
   it('gateway 启动前会通过 runtime-host 执行单一路径准备', async () => {
     const { prepareGatewayRuntimeBeforeLaunch } = await import('../../electron/gateway/config-sync');
-    await prepareGatewayRuntimeBeforeLaunch({
+    const runtimeHost = createFakeRuntimeHostManager();
+    await prepareGatewayRuntimeBeforeLaunch(runtimeHost as never, {
       gatewayToken: 'matchaclaw-token-1',
       proxyEnabled: true,
       proxyServer: 'http://127.0.0.1:7890',
@@ -157,7 +179,8 @@ describe('gateway config sync', () => {
     hoisted.runtimeHostRequestMock.mockRejectedValueOnce(new Error('runtime-host offline'));
 
     const { prepareGatewayRuntimeBeforeLaunch } = await import('../../electron/gateway/config-sync');
-    await expect(prepareGatewayRuntimeBeforeLaunch({
+    const runtimeHost = createFakeRuntimeHostManager();
+    await expect(prepareGatewayRuntimeBeforeLaunch(runtimeHost as never, {
       gatewayToken: 'matchaclaw-token-1',
       proxyEnabled: true,
       proxyServer: 'http://127.0.0.1:7890',
@@ -175,7 +198,8 @@ describe('gateway config sync', () => {
     mkdirSync(staleDir, { recursive: true });
 
     const { prepareGatewayRuntimeBeforeLaunch } = await import('../../electron/gateway/config-sync');
-    await prepareGatewayRuntimeBeforeLaunch({
+    const runtimeHost = createFakeRuntimeHostManager();
+    await prepareGatewayRuntimeBeforeLaunch(runtimeHost as never, {
       gatewayToken: 'matchaclaw-token-1',
       proxyEnabled: true,
       proxyServer: 'http://127.0.0.1:7890',
@@ -188,8 +212,9 @@ describe('gateway config sync', () => {
 
   it('Gateway 启动上下文只消费 runtime-host 输出的宿主设置和启动计划', async () => {
     const { prepareGatewayLaunchContext } = await import('../../electron/gateway/config-sync');
+    const runtimeHost = createFakeRuntimeHostManager();
 
-    const context = await prepareGatewayLaunchContext(18789);
+    const context = await prepareGatewayLaunchContext(18789, runtimeHost as never);
 
     expect(context.gatewayArgs).toEqual([
       'gateway',

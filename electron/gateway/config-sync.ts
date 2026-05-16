@@ -10,6 +10,7 @@ import { ensureBundledPluginsMirrorDir } from './bundled-plugins-mirror';
 import { createDefaultRuntimeHostHttpClient } from '../main/runtime-host-client';
 import { stripSystemdSupervisorEnv } from './config-sync-env';
 import { waitForRuntimeHostJob, type RuntimeHostJobSnapshot } from '../main/runtime-host-jobs';
+import type { RuntimeHostManager } from '../main/runtime-host-manager';
 
 function createGatewayConfigRuntimeHostClient() {
   return createDefaultRuntimeHostHttpClient({
@@ -51,6 +52,7 @@ type HostBootstrapSettings = GatewayLaunchSettings & {
 };
 
 export async function prepareGatewayRuntimeBeforeLaunch(
+  runtimeHost: RuntimeHostManager,
   _appSettings?: GatewayLaunchSettings,
 ): Promise<void> {
   const runtimeHostClient = createGatewayConfigRuntimeHostClient();
@@ -62,9 +64,8 @@ export async function prepareGatewayRuntimeBeforeLaunch(
   if (!job?.id) {
     throw new Error('Runtime Host did not return a gateway prelaunch job');
   }
-  await waitForRuntimeHostJob(runtimeHostClient, job.id, {
+  await waitForRuntimeHostJob(runtimeHost, job.id, {
     timeoutMs: 120_000,
-    intervalMs: 200,
   });
 }
 
@@ -113,7 +114,10 @@ export async function loadHostBootstrapSettings(): Promise<HostBootstrapSettings
   };
 }
 
-export async function prepareGatewayLaunchContext(port: number): Promise<GatewayLaunchContext> {
+export async function prepareGatewayLaunchContext(
+  port: number,
+  runtimeHost: RuntimeHostManager,
+): Promise<GatewayLaunchContext> {
   const openclawDir = getOpenClawDir();
   const entryScript = getOpenClawEntryPath();
 
@@ -122,7 +126,7 @@ export async function prepareGatewayLaunchContext(port: number): Promise<Gateway
   }
 
   const appSettings = await loadHostBootstrapSettings();
-  await prepareGatewayRuntimeBeforeLaunch(appSettings);
+  await prepareGatewayRuntimeBeforeLaunch(runtimeHost, appSettings);
   const launchPlan = await loadGatewayLaunchPlan();
 
   const bundledPluginsDir = await ensureBundledPluginsMirrorDir({

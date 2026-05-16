@@ -32,6 +32,7 @@ import {
   shouldSuppressGatewayStderrRepeat,
 } from './startup-stderr';
 import { runGatewayStartupSequence } from './startup-orchestrator';
+import type { RuntimeHostManager } from '../main/runtime-host-manager';
 
 export interface GatewayStatus {
   processState: GatewayLifecycleState;
@@ -52,6 +53,7 @@ export interface GatewayManagerEvents {
 
 export class GatewayManager extends EventEmitter {
   private controlReadyProbe: ((timeoutMs: number, port: number, externalToken?: string) => Promise<void>) | null = null;
+  private runtimeHostManager: RuntimeHostManager | null = null;
   private process: Electron.UtilityProcess | null = null;
   private processExitCode: number | null = null;
   private ownsProcess = false;
@@ -112,6 +114,10 @@ export class GatewayManager extends EventEmitter {
     probe: (timeoutMs: number, port: number, externalToken?: string) => Promise<void>,
   ): void {
     this.controlReadyProbe = probe;
+  }
+
+  setRuntimeHostManager(runtimeHost: RuntimeHostManager): void {
+    this.runtimeHostManager = runtimeHost;
   }
 
   isConnected(): boolean {
@@ -454,7 +460,10 @@ export class GatewayManager extends EventEmitter {
   }
 
   private async startProcess(): Promise<void> {
-    const launchContext = await prepareGatewayLaunchContext(this.status.port);
+    if (!this.runtimeHostManager) {
+      throw new Error('Gateway runtimeHost manager is not configured');
+    }
+    const launchContext = await prepareGatewayLaunchContext(this.status.port, this.runtimeHostManager);
     await unloadLaunchctlGatewayService();
     this.processExitCode = null;
     const stderrDedupCounter = new Map<string, number>();

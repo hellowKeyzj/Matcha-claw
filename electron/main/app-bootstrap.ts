@@ -105,7 +105,6 @@ async function autoStartGatewayIfEnabled(deps: {
     }
     await waitForRuntimeHostJob(deps.runtimeHostManager, job.id, {
       timeoutMs: 120_000,
-      intervalMs: 200,
     });
     logger.debug('Auto-starting Gateway...');
     await deps.gatewayManager.start();

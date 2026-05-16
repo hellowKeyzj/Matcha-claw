@@ -175,6 +175,7 @@ if (gotTheLock) {
   runtimeHostManager = createRuntimeHostManager({
     gatewayManager,
   });
+  gatewayManager.setRuntimeHostManager(runtimeHostManager);
   gatewayManager.setControlReadyProbe(async (timeoutMs) => {
     const result = await runtimeHostManager.request<{
       success?: boolean;

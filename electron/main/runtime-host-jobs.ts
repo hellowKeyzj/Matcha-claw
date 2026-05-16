@@ -1,4 +1,4 @@
-import type { RuntimeHostHttpClient } from './runtime-host-client';
+import type { RuntimeHostManager } from './runtime-host-manager';
 
 export type RuntimeHostJobSnapshot = {
   id: string;
@@ -7,35 +7,107 @@ export type RuntimeHostJobSnapshot = {
   error?: string;
 };
 
+type RuntimeHostJobEventPayload = {
+  id?: string;
+  type?: string;
+  status?: string;
+  error?: string;
+};
+
+function isJobEventPayload(value: unknown): value is RuntimeHostJobEventPayload {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+function asJobSnapshot(payload: RuntimeHostJobEventPayload): RuntimeHostJobSnapshot | null {
+  if (typeof payload.id !== 'string' || typeof payload.type !== 'string') {
+    return null;
+  }
+  if (payload.status !== 'queued'
+    && payload.status !== 'running'
+    && payload.status !== 'succeeded'
+    && payload.status !== 'failed') {
+    return null;
+  }
+  return {
+    id: payload.id,
+    type: payload.type,
+    status: payload.status,
+    ...(typeof payload.error === 'string' ? { error: payload.error } : {}),
+  };
+}
+
 export async function waitForRuntimeHostJob(
-  runtimeHostClient: Pick<RuntimeHostHttpClient, 'request'>,
+  runtimeHost: RuntimeHostManager,
   jobId: string,
   options: {
     timeoutMs: number;
-    intervalMs: number;
   },
 ): Promise<RuntimeHostJobSnapshot> {
-  const startedAt = Date.now();
-  let lastJob: RuntimeHostJobSnapshot | null = null;
-  while (Date.now() - startedAt < options.timeoutMs) {
-    const response = await runtimeHostClient.request<{
-      success?: boolean;
-      job?: RuntimeHostJobSnapshot | null;
-    }>('POST', '/api/runtime-host/jobs/get', { jobId }, {
-      timeoutMs: 8_000,
+  return await new Promise<RuntimeHostJobSnapshot>((resolve, reject) => {
+    let settled = false;
+    let timeoutHandle: NodeJS.Timeout | null = null;
+    let unsubscribe: (() => void) | null = null;
+
+    const finalize = (action: () => void) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      if (timeoutHandle !== null) {
+        clearTimeout(timeoutHandle);
+        timeoutHandle = null;
+      }
+      unsubscribe?.();
+      unsubscribe = null;
+      action();
+    };
+
+    const handleSnapshot = (snapshot: RuntimeHostJobSnapshot) => {
+      if (snapshot.id !== jobId) {
+        return;
+      }
+      if (snapshot.status === 'succeeded') {
+        finalize(() => resolve(snapshot));
+        return;
+      }
+      if (snapshot.status === 'failed') {
+        finalize(() => reject(new Error(
+          `Runtime Host job failed: ${snapshot.type} (${snapshot.error ?? 'unknown error'})`,
+        )));
+      }
+    };
+
+    unsubscribe = runtimeHost.onRuntimeJobEvent((eventName, payload) => {
+      if (eventName !== 'runtime-job:done') {
+        return;
+      }
+      if (!isJobEventPayload(payload)) {
+        return;
+      }
+      const snapshot = asJobSnapshot(payload);
+      if (snapshot) {
+        handleSnapshot(snapshot);
+      }
     });
-    const job = response.data?.job ?? null;
-    if (!job) {
-      throw new Error(`Runtime Host job not found: ${jobId}`);
-    }
-    lastJob = job;
-    if (job.status === 'succeeded') {
-      return job;
-    }
-    if (job.status === 'failed') {
-      throw new Error(`Runtime Host job failed: ${job.type} (${job.error ?? 'unknown error'})`);
-    }
-    await new Promise((resolve) => setTimeout(resolve, options.intervalMs));
-  }
-  throw new Error(`Runtime Host job timed out: ${jobId} (${lastJob?.status ?? 'unknown'})`);
+
+    timeoutHandle = setTimeout(() => {
+      finalize(() => reject(new Error(`Runtime Host job timed out: ${jobId}`)));
+    }, options.timeoutMs);
+
+    void runtimeHost.request<{ success?: boolean; job?: RuntimeHostJobSnapshot | null }>(
+      'POST',
+      '/api/runtime-host/jobs/get',
+      { jobId },
+      { timeoutMs: 8_000 },
+    ).then((response) => {
+      const job = response.data?.job ?? null;
+      if (!job) {
+        finalize(() => reject(new Error(`Runtime Host job not found: ${jobId}`)));
+        return;
+      }
+      handleSnapshot(job);
+    }).catch((error) => {
+      finalize(() => reject(error));
+    });
+  });
 }
