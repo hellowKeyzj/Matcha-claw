@@ -122,7 +122,11 @@ export function registerOperationsApplicationServices(
     environment: scope.resolve<OpenClawEnvironmentRepository>('openclaw.environmentRepository'),
     idGenerator: scope.resolve<RuntimeIdGeneratorPort>('runtime.idGenerator'),
   }));
-  container.register('license.runtime', () => new NodeLicenseRuntime());
+  container.register('license.runtime', () => new NodeLicenseRuntime({
+    onGateChanged: (snapshot) => {
+      void context.parentGatewayEvents.emit('license:gate-changed', snapshot).catch(() => undefined);
+    },
+  }));
   container.register('license.service', (scope) => new LicenseService(scope.resolve('license.runtime')));
   container.register('platform.service', (scope) => new PlatformService({
     platformRuntime: context.platformRuntime,

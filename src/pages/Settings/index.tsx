@@ -693,11 +693,17 @@ export function Settings() {
     if (activeSection !== 'license') {
       return;
     }
-    const timer = window.setInterval(() => {
-      void refreshLicenseGateSnapshot();
-    }, 15000);
-    return () => window.clearInterval(timer);
-  }, [activeSection, refreshLicenseGateSnapshot]);
+    // 后端 license-node-runtime 的 armRevalidateTimer 会按服务端 refreshAfterSec 自动重新验证；
+    // 验证完成后会推 license:gate-changed 事件，渲染端只需要订阅，不再轮询。
+    const unsubscribe = subscribeHostEvent<LicenseGateSnapshot>('license:gate-changed', (payload) => {
+      if (payload && typeof payload === 'object' && typeof payload.state === 'string') {
+        setLicenseGateSnapshot(payload);
+      }
+    });
+    return () => {
+      unsubscribe();
+    };
+  }, [activeSection]);
 
   useEffect(() => {
     const sectionFromQuery = parseSettingsSectionFromSearch(location.search);

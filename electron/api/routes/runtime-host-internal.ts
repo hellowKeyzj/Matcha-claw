@@ -23,7 +23,8 @@ type RuntimeHostGatewayForwardEventName =
   | 'session:update'
   | 'task:snapshot'
   | 'gateway:channel-status'
-  | 'gateway:error';
+  | 'gateway:error'
+  | 'license:gate-changed';
 
 type RuntimeHostRuntimeJobForwardEventName =
   | 'runtime-job:done'
@@ -97,7 +98,8 @@ function isGatewayForwardEventName(value: unknown): value is RuntimeHostGatewayF
     || value === 'session:update'
     || value === 'task:snapshot'
     || value === 'gateway:channel-status'
-    || value === 'gateway:error';
+    || value === 'gateway:error'
+    || value === 'license:gate-changed';
 }
 
 function isRuntimeJobForwardEventName(value: unknown): value is RuntimeHostRuntimeJobForwardEventName {

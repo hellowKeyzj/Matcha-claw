@@ -24,6 +24,7 @@ type HostEventName =
   | 'runtime-host:restart'
   | 'runtime-job:done'
   | 'runtime-job:progress'
+  | 'license:gate-changed'
   | 'openclaw:cli-installed'
   | 'oauth:code'
   | 'oauth:start'
@@ -222,6 +223,10 @@ export function registerHostEventBridge(deps: {
     }
     if (eventName === 'gateway:channel-status') {
       emit('gateway:channel-status', payload);
+      return;
+    }
+    if (eventName === 'license:gate-changed') {
+      emit('license:gate-changed', payload);
     }
   });
 

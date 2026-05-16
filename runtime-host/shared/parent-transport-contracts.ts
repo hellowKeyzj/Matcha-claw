@@ -12,7 +12,8 @@ export type ParentGatewayForwardEventName =
   | 'session:update'
   | 'task:snapshot'
   | 'gateway:channel-status'
-  | 'gateway:error';
+  | 'gateway:error'
+  | 'license:gate-changed';
 
 export type ParentRuntimeJobForwardEventName =
   | 'runtime-job:done'

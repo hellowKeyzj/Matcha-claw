@@ -122,11 +122,15 @@ let gateBootstrapPromise: Promise<void> | null = null;
 let revalidateTimer: NodeJS.Timeout | null = null;
 let hardwareIdPromise: Promise<string | null> | null = null;
 let revalidateFailureCount = 0;
+let gateChangeListener: ((snapshot: LicenseGateSnapshot) => void) | null = null;
 
 function setGateSnapshot(patch: Partial<LicenseGateSnapshot>): void {
   Object.assign(licenseGateSnapshot, patch, {
     checkedAtMs: Date.now(),
   });
+  // 把当前快照推给 listener，让 main 通过 license:gate-changed 事件转发到 renderer，
+  // 替代 renderer 15s 轮询 /api/license/gate 的兜底行为。
+  gateChangeListener?.({ ...licenseGateSnapshot });
 }
 
 function clearRevalidateTimer(): void {
@@ -1212,7 +1216,17 @@ export async function waitForLicenseGateBootstrap(): Promise<void> {
   await gateBootstrapPromise;
 }
 
+export interface NodeLicenseRuntimeOptions {
+  readonly onGateChanged?: (snapshot: LicenseGateSnapshot) => void;
+}
+
 export class NodeLicenseRuntime implements LicenseRuntimePort {
+  constructor(options?: NodeLicenseRuntimeOptions) {
+    if (options?.onGateChanged) {
+      gateChangeListener = options.onGateChanged;
+    }
+  }
+
   async gate() {
     await waitForLicenseGateBootstrap();
     return getLicenseGateSnapshot();
