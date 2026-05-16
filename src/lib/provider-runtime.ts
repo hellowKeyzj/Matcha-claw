@@ -1,4 +1,8 @@
-import { hostApiFetch, type RuntimeJobLookupResult, type RuntimeJobSubmission } from '@/lib/host-api';
+import {
+  hostApiFetch,
+  waitForRuntimeJobResult,
+  type RuntimeJobSubmission,
+} from '@/lib/host-api';
 import type { ProviderAccount, ProviderType } from '@/lib/providers';
 
 async function submitProviderJob<TResult = { success: boolean; error?: string }>(
@@ -6,31 +10,7 @@ async function submitProviderJob<TResult = { success: boolean; error?: string }>
   init: RequestInit,
 ): Promise<TResult> {
   const submission = await hostApiFetch<RuntimeJobSubmission<TResult>>(path, init);
-  return await waitForProviderJobResult<TResult>(submission.job.id);
-}
-
-async function waitForProviderJobResult<TResult>(jobId: string): Promise<TResult> {
-  const startedAt = Date.now();
-  for (;;) {
-    const response = await hostApiFetch<RuntimeJobLookupResult<TResult>>('/api/runtime-host/jobs/get', {
-      method: 'POST',
-      body: JSON.stringify({ jobId }),
-    });
-    const job = response.job;
-    if (!job) {
-      throw new Error(`runtime job not found: ${jobId}`);
-    }
-    if (job.status === 'succeeded') {
-      return job.result as TResult;
-    }
-    if (job.status === 'failed') {
-      throw new Error(job.error || `runtime job failed: ${job.type}`);
-    }
-    if (Date.now() - startedAt >= 120000) {
-      throw new Error(`runtime job timed out: ${job.type}`);
-    }
-    await new Promise((resolve) => window.setTimeout(resolve, 500));
-  }
+  return await waitForRuntimeJobResult<TResult>(submission.job.id);
 }
 
 export async function hostProviderSetDefaultAccount(accountId: string): Promise<{ success: boolean; error?: string }> {

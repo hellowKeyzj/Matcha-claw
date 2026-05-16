@@ -290,7 +290,7 @@ describe('ProviderAccountsService create/setDefault（写入后立即同步 open
       apiKey: 'sk-custom',
     });
 
-    expect(result.status).toBe(200);
+    expect(result.success).toBe(true);
     expect(writeProviderStore).toHaveBeenCalledTimes(1);
     expect(saveProviderKeyMock).toHaveBeenCalledWith('custom-12345678', 'sk-custom');
     expect(syncProviderConfigMock).toHaveBeenCalledWith(
@@ -376,7 +376,7 @@ describe('ProviderAccountsService create/setDefault（写入后立即同步 open
       apiKey: 'sk-custom',
     });
 
-    expect(result.status).toBe(200);
+    expect(result.success).toBe(true);
     expect(syncProviderConfigMock).toHaveBeenCalledWith(
       'custom-87654321',
       expect.objectContaining({
@@ -424,7 +424,7 @@ describe('ProviderAccountsService create/setDefault（写入后立即同步 open
 
     const result = await service.executeSetDefault({ accountId: 'moonshot-main' });
 
-    expect(result.status).toBe(200);
+    expect(result.success).toBe(true);
     expect(setDefaultModelMock).toHaveBeenCalledWith(
       'moonshot',
       'kimi-k2.6',
@@ -451,7 +451,7 @@ describe('ProviderAccountsService create/setDefault（写入后立即同步 open
 
     const result = await service.executeSetDefault({ accountId: 'moonshot-global-main' });
 
-    expect(result.status).toBe(200);
+    expect(result.success).toBe(true);
     expect(setDefaultModelMock).toHaveBeenCalledWith(
       'moonshot-global',
       'kimi-k2.6',
@@ -484,7 +484,7 @@ describe('ProviderAccountsService delete（删除后状态清理）', () => {
 
     const result = await service.executeDelete('moonshot-cn', false);
 
-    expect(result.status).toBe(200);
+    expect(result.success).toBe(true);
     expect(removeProviderMock).toHaveBeenCalledWith('custom-moonshot');
     expect(removeProviderMock).toHaveBeenCalledWith('moonshot-cn');
     expect(removeProviderMock).toHaveBeenCalledTimes(2);
@@ -509,7 +509,7 @@ describe('ProviderAccountsService delete（删除后状态清理）', () => {
 
     const result = await service.executeDelete('openai-main', true);
 
-    expect(result.status).toBe(200);
+    expect(result.success).toBe(true);
     expect(removeProviderKeyMock).toHaveBeenCalledWith('openai');
     expect(removeProviderKeyMock).toHaveBeenCalledWith('openai-main');
     expect(removeProviderMock).not.toHaveBeenCalled();

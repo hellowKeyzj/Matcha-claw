@@ -1,4 +1,4 @@
-import { accepted, badRequest, notFound, ok, type ApplicationResponse } from '../common/application-response';
+import { accepted, badRequest, ok, type ApplicationResponse } from '../common/application-response';
 import type { ProviderAccountJobPort } from './provider-account-jobs';
 import type { ParentShellPort } from '../runtime-host/parent-shell-port';
 import type { RuntimeClockPort, RuntimeHttpClientPort } from '../common/runtime-ports';
@@ -80,11 +80,11 @@ export class ProviderAccountsService {
     return accepted(this.deps.jobs.submitCreate(payload));
   }
 
-  async executeCreate(payload: unknown): Promise<ApplicationResponse> {
+  async executeCreate(payload: unknown): Promise<{ success: true; account: Record<string, unknown> }> {
     const body = isRecord(payload) ? payload : {};
     const account = normalizeProviderAccountLocal(body.account, null, this.deps.clock);
     if (!account) {
-      return badRequest('account 参数无效');
+      throw new Error('account 参数无效');
     }
     const store = await this.deps.store.read();
     store.accounts[account.id] = account;
@@ -98,25 +98,25 @@ export class ProviderAccountsService {
     }
     await this.deps.store.write(store);
     await this.syncStoreToOpenClaw(store);
-    return ok({
+    return {
       success: true,
       account: store.accounts[account.id],
-    });
+    };
   }
 
   setDefault(payload: unknown): ApplicationResponse {
     return accepted(this.deps.jobs.submitSetDefault(payload));
   }
 
-  async executeSetDefault(payload: unknown): Promise<ApplicationResponse> {
+  async executeSetDefault(payload: unknown): Promise<{ success: true }> {
     const body = isRecord(payload) ? payload : {};
     const accountId = typeof body.accountId === 'string' ? body.accountId : '';
     if (!accountId) {
-      return badRequest('accountId 参数无效');
+      throw new Error('accountId 参数无效');
     }
     const store = await this.deps.store.read();
     if (!store.accounts[accountId]) {
-      return notFound('Provider account not found');
+      throw new Error('Provider account not found');
     }
     store.defaultAccountId = accountId;
     for (const account of Object.values(store.accounts)) {
@@ -124,7 +124,7 @@ export class ProviderAccountsService {
     }
     await this.deps.store.write(store);
     await this.syncStoreToOpenClaw(store);
-    return ok({ success: true });
+    return { success: true };
   }
 
   async validate(payload: unknown) {
@@ -244,16 +244,16 @@ export class ProviderAccountsService {
     return accepted(this.deps.jobs.submitUpdate(accountId, payload));
   }
 
-  async executeUpdate(accountId: string, payload: unknown): Promise<ApplicationResponse> {
+  async executeUpdate(accountId: string, payload: unknown): Promise<{ success: true; account: Record<string, unknown> }> {
     const store = await this.deps.store.read();
     const existing = isRecord(store.accounts[accountId]) ? store.accounts[accountId] : null;
     if (!existing) {
-      return notFound('Provider account not found');
+      throw new Error('Provider account not found');
     }
     const body = isRecord(payload) ? payload : {};
     const updates = isRecord(body.updates) ? body.updates : null;
     if (!updates) {
-      return badRequest('updates 参数无效');
+      throw new Error('updates 参数无效');
     }
     const next = normalizeProviderAccountLocal({
       ...existing,
@@ -261,7 +261,7 @@ export class ProviderAccountsService {
       id: accountId,
     }, existing, this.deps.clock);
     if (!next) {
-      return badRequest('provider account 参数无效');
+      throw new Error('provider account 参数无效');
     }
     store.accounts[accountId] = next;
     if (Object.prototype.hasOwnProperty.call(body, 'apiKey')) {
@@ -274,14 +274,14 @@ export class ProviderAccountsService {
     }
     await this.deps.store.write(store);
     await this.syncStoreToOpenClaw(store);
-    return ok({ success: true, account: next });
+    return { success: true, account: next };
   }
 
   delete(accountId: string, apiKeyOnly: boolean): ApplicationResponse {
     return accepted(this.deps.jobs.submitDelete(accountId, apiKeyOnly));
   }
 
-  async executeDelete(accountId: string, apiKeyOnly: boolean): Promise<ApplicationResponse> {
+  async executeDelete(accountId: string, apiKeyOnly: boolean): Promise<{ success: true }> {
     const store = await this.deps.store.read();
     const existingAccount = isRecord(store.accounts[accountId]) ? store.accounts[accountId] : null;
     const cleanupProviderKeys = this.runtime.resolveCleanupProviderKeys({
@@ -296,7 +296,7 @@ export class ProviderAccountsService {
       }
       await this.deps.store.write(store);
       await this.syncStoreToOpenClaw(store);
-      return ok({ success: true });
+      return { success: true };
     }
     delete store.accounts[accountId];
     delete store.apiKeys[accountId];
@@ -311,6 +311,6 @@ export class ProviderAccountsService {
     }
     await this.deps.store.write(store);
     await this.syncStoreToOpenClaw(store);
-    return ok({ success: true });
+    return { success: true };
   }
 }
