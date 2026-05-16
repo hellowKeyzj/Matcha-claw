@@ -138,6 +138,14 @@ export interface TokenUsageHistoryRepositoryDeps {
 export class TokenUsageHistoryRepository {
   private cachedEntries: TokenUsageHistoryEntry[] = [];
   private cacheReady = false;
+  // 按文件 path 缓存上次解析结果。下次扫描时，如果 stat 的 size + mtimeMs 与缓存一致，
+  // 直接复用 entries，不再重新 readFile + JSON.parse 每一行。文件被删除（不再出现在 listRecentSessionFiles
+  // 输出里）会在 reconcile 阶段从 fileCache 移除，避免内存无界增长。
+  private readonly fileCache = new Map<string, {
+    readonly size: number;
+    readonly mtimeMs: number;
+    readonly entries: TokenUsageHistoryEntry[];
+  }>();
 
   constructor(private readonly deps: TokenUsageHistoryRepositoryDeps) {}
 
@@ -173,19 +181,45 @@ export class TokenUsageHistoryRepository {
 
     const openclawConfigDir = this.deps.configRepository.getConfigDir();
     const files = await listRecentSessionFiles(openclawConfigDir, this.deps.fileSystem);
+    const presentFilePaths = new Set<string>(files.map((file) => file.filePath));
     const results: TokenUsageHistoryEntry[] = [];
 
     for (const file of files) {
       if (results.length >= maxEntries) break;
       try {
-        const content = await this.deps.fileSystem.readTextFile(file.filePath);
-        const entries = parseUsageEntriesFromJsonl(content, {
-          sessionId: file.sessionId,
-          agentId: file.agentId,
-        }, Number.isFinite(maxEntries) ? maxEntries - results.length : undefined);
-        results.push(...entries);
+        const stat = await this.deps.fileSystem.stat(file.filePath);
+        const cached = this.fileCache.get(file.filePath);
+        let entries: TokenUsageHistoryEntry[];
+        if (cached && cached.size === stat.size && cached.mtimeMs === stat.mtimeMs) {
+          entries = cached.entries;
+        } else {
+          const content = await this.deps.fileSystem.readTextFile(file.filePath);
+          entries = parseUsageEntriesFromJsonl(content, {
+            sessionId: file.sessionId,
+            agentId: file.agentId,
+          });
+          this.fileCache.set(file.filePath, {
+            size: stat.size,
+            mtimeMs: stat.mtimeMs,
+            entries,
+          });
+        }
+        const remaining = Number.isFinite(maxEntries) ? maxEntries - results.length : entries.length;
+        if (remaining >= entries.length) {
+          results.push(...entries);
+        } else {
+          results.push(...entries.slice(0, remaining));
+        }
       } catch {
-        // Skip malformed transcript files.
+        // 单文件解析失败仅丢弃该文件，不影响其他文件。文件已损坏时主动从缓存清掉，下次重读。
+        this.fileCache.delete(file.filePath);
+      }
+    }
+
+    // 文件已被删除（不在最新 listRecentSessionFiles 输出里）从缓存移除，避免长跑内存增长。
+    for (const cachedPath of [...this.fileCache.keys()]) {
+      if (!presentFilePaths.has(cachedPath)) {
+        this.fileCache.delete(cachedPath);
       }
     }
 
