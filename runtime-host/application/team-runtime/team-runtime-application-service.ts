@@ -124,7 +124,21 @@ export class TeamRuntimeApplicationService {
   constructor(
     private readonly storage: TeamRuntimeStoragePort,
     private readonly resolveRuntimeRoot: (teamId: string) => string,
+    private readonly onEventEmitted?: (event: TeamEventRecord) => void,
   ) {}
+
+  private async appendAndEmit(input: {
+    runtimeRoot: string;
+    teamId: string;
+    type: string;
+    payload: Record<string, unknown>;
+  }): Promise<TeamEventRecord> {
+    const event = await this.storage.appendEvent(input);
+    // 把刚追加的 team event 推给 listener，让 main 通过 host:event 'team:event' 转发到 renderer，
+    // 替代 TeamChat 3s 轮询 /api/team-runtime/snapshot + /api/team-runtime/mailbox-pull 的兜底行为。
+    this.onEventEmitted?.(event);
+    return event;
+  }
 
   async init(input: { teamId: string; leadAgentId: string }): Promise<{ runtimeRoot: string; run: TeamRunRecord }> {
     const runtimeRoot = this.resolveRuntimeRoot(input.teamId);
@@ -133,7 +147,7 @@ export class TeamRuntimeApplicationService {
       teamId: input.teamId,
       leadAgentId: input.leadAgentId,
     });
-    await this.storage.appendEvent({
+    await this.appendAndEmit({
       runtimeRoot,
       teamId: run.teamId,
       type: 'team:init',
@@ -172,7 +186,7 @@ export class TeamRuntimeApplicationService {
       runtimeRoot,
       tasks: input.tasks,
     });
-    await this.storage.appendEvent({
+    await this.appendAndEmit({
       runtimeRoot,
       teamId: input.teamId,
       type: 'team:planUpsert',
@@ -194,7 +208,7 @@ export class TeamRuntimeApplicationService {
       sessionKey: input.sessionKey,
       leaseMs: input.leaseMs ?? 60_000,
     });
-    await this.storage.appendEvent({
+    await this.appendAndEmit({
       runtimeRoot,
       teamId: input.teamId,
       type: 'team:claimNext',
@@ -222,7 +236,7 @@ export class TeamRuntimeApplicationService {
       leaseMs: input.leaseMs ?? 60_000,
     });
     if (result.ok) {
-      await this.storage.appendEvent({
+      await this.appendAndEmit({
         runtimeRoot,
         teamId: input.teamId,
         type: 'team:heartbeat',
@@ -251,7 +265,7 @@ export class TeamRuntimeApplicationService {
       resultSummary: input.resultSummary,
       error: input.error,
     });
-    await this.storage.appendEvent({
+    await this.appendAndEmit({
       runtimeRoot,
       teamId: input.teamId,
       type: 'team:taskUpdate',
@@ -281,7 +295,7 @@ export class TeamRuntimeApplicationService {
       runtimeRoot,
       message: input.message,
     });
-    await this.storage.appendEvent({
+    await this.appendAndEmit({
       runtimeRoot,
       teamId: input.teamId,
       type: 'team:mailboxPost',
@@ -319,7 +333,7 @@ export class TeamRuntimeApplicationService {
       agentId: input.agentId,
       sessionKey: input.sessionKey,
     });
-    await this.storage.appendEvent({
+    await this.appendAndEmit({
       runtimeRoot,
       teamId: input.teamId,
       type: 'team:releaseClaim',

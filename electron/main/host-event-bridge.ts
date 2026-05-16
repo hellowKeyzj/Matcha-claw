@@ -25,6 +25,7 @@ type HostEventName =
   | 'runtime-job:done'
   | 'runtime-job:progress'
   | 'license:gate-changed'
+  | 'team:event'
   | 'openclaw:cli-installed'
   | 'oauth:code'
   | 'oauth:start'
@@ -227,6 +228,10 @@ export function registerHostEventBridge(deps: {
     }
     if (eventName === 'license:gate-changed') {
       emit('license:gate-changed', payload);
+      return;
+    }
+    if (eventName === 'team:event') {
+      emit('team:event', payload);
     }
   });
 

@@ -162,6 +162,9 @@ export function registerOperationsApplicationServices(
   container.register('teamRuntime.applicationService', (scope) => new TeamRuntimeApplicationService(
     scope.resolve('teamRuntime.storageRepository'),
     createTeamRuntimeRootResolver(scope.resolve<OpenClawWorkspacePort>('openclaw.workspaceService')),
+    (event) => {
+      void context.parentGatewayEvents.emit('team:event', event).catch(() => undefined);
+    },
   ));
   container.register('teamRuntime.service', (scope) => new TeamRuntimeService(
     scope.resolve('teamRuntime.applicationService'),

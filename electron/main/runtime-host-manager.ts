@@ -31,7 +31,8 @@ export type RuntimeHostGatewayForwardEventName =
   | 'task:snapshot'
   | 'gateway:channel-status'
   | 'gateway:error'
-  | 'license:gate-changed';
+  | 'license:gate-changed'
+  | 'team:event';
 
 export type RuntimeHostRuntimeJobForwardEventName =
   | 'runtime-job:done'

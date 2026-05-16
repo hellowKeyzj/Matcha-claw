@@ -11,6 +11,7 @@ import { useTeamsRunnerStore } from '@/stores/teams-runner';
 import { useTranslation } from 'react-i18next';
 import type { TeamMailboxMessage, TeamTask } from '@/features/teams/api/runtime-client';
 import { isGatewayOperational } from '@/lib/gateway-status';
+import { subscribeHostEvent } from '@/lib/host-events';
 
 const DEFAULT_LEASE_MS = 60_000;
 const EMPTY_TASKS: TeamTask[] = [];
@@ -82,11 +83,26 @@ export function TeamChat({ teamId }: { teamId?: string }) {
     }
     setActiveTeam(team.id);
     void initRuntime(team.id).then(() => refreshSnapshot(team.id));
-    const timer = window.setInterval(() => {
-      void refreshSnapshot(team.id);
-      void pullMailbox(team.id, 50);
-    }, 3000);
-    return () => window.clearInterval(timer);
+
+    // 后端 TeamRuntimeApplicationService 在每次 init / planUpsert / claimNext / heartbeat / taskUpdate /
+    // mailboxPost / releaseClaim 后都会通过 team:event 推送事件。订阅事件并按需触发 refreshSnapshot 与
+    // pullMailbox，替代 3s 轮询的兜底行为。
+    const teamId = team.id;
+    const unsubscribe = subscribeHostEvent<{ teamId?: string; type?: string }>(
+      'team:event',
+      (payload) => {
+        if (!payload || payload.teamId !== teamId) {
+          return;
+        }
+        void refreshSnapshot(teamId);
+        if (payload.type === 'team:mailboxPost') {
+          void pullMailbox(teamId, 50);
+        }
+      },
+    );
+    return () => {
+      unsubscribe();
+    };
   }, [team, resolvedTeamId, setActiveTeam, initRuntime, refreshSnapshot, pullMailbox]);
 
   const tasksByStatus = useMemo(() => {

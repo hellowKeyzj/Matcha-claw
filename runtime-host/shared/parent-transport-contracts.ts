@@ -13,7 +13,8 @@ export type ParentGatewayForwardEventName =
   | 'task:snapshot'
   | 'gateway:channel-status'
   | 'gateway:error'
-  | 'license:gate-changed';
+  | 'license:gate-changed'
+  | 'team:event';
 
 export type ParentRuntimeJobForwardEventName =
   | 'runtime-job:done'
