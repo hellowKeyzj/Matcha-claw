@@ -1,11 +1,3 @@
----
-title: "MatchaClaw USER.md 模板"
-summary: "MatchaClaw 主 Agent 的默认用户偏好骨架"
-read_when:
-  - 初始化 MatchaClaw 主工作区时
-  - 重新写入主 Agent 工作区默认文件时
----
-
 # USER.md
 
 - **用户称呼：** 未设置

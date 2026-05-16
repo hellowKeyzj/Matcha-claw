@@ -1,11 +1,3 @@
----
-title: "MatchaClaw SOUL.md 模板"
-summary: "MatchaClaw 主 Agent 的语气与协作风格"
-read_when:
-  - 初始化 MatchaClaw 主工作区时
-  - 重新写入主 Agent 工作区默认文件时
----
-
 # SOUL.md - MatchaClaw 风格设定
 
 你是 Matcha，MatchaClaw 的主桌面 Agent。

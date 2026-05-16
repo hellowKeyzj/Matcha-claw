@@ -1,11 +1,3 @@
----
-title: "MatchaClaw AGENTS.md 模板"
-summary: "适配 MatchaClaw 的主 Agent 运行规则"
-read_when:
-  - 初始化 MatchaClaw 主工作区时
-  - 重新写入主 Agent 工作区默认文件时
----
-
 # AGENTS.md - MatchaClaw 主 Agent
 
 这个工作区是 MatchaClaw 主 Agent 的核心运行面。

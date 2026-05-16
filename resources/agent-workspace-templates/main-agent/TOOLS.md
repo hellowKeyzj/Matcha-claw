@@ -1,11 +1,3 @@
----
-title: "MatchaClaw TOOLS.md 模板"
-summary: "MatchaClaw 主 Agent 的能力地图"
-read_when:
-  - 初始化 MatchaClaw 主工作区时
-  - 重新写入主 Agent 工作区默认文件时
----
-
 # TOOLS.md - MatchaClaw 能力地图
 
 这个文件定义主 Agent 在什么场景下应当调用 MatchaClaw 的哪些产品能力。

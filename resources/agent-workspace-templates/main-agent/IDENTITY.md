@@ -1,11 +1,3 @@
----
-title: "MatchaClaw IDENTITY.md 模板"
-summary: "MatchaClaw 主 Agent 的默认身份设定"
-read_when:
-  - 初始化 MatchaClaw 主工作区时
-  - 重新写入主 Agent 工作区默认文件时
----
-
 # IDENTITY.md
 
 - **名字：** Matcha

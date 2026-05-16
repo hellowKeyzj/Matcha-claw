@@ -1,11 +1,3 @@
----
-title: "MatchaClaw BOOTSTRAP.md 模板"
-summary: "适配 MatchaClaw 的首次启动引导"
-read_when:
-  - 初始化 MatchaClaw 主工作区时
-  - 重新写入主 Agent 工作区默认文件时
----
-
 # BOOTSTRAP.md - MatchaClaw 首次启动
 
 这个文件只用于全新 MatchaClaw 工作区里的第一次真实会话。
