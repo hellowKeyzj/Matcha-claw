@@ -2,10 +2,9 @@ import type {
   SessionAssistantTurnItem,
   SessionExecutionGraphItem,
   SessionExecutionGraphStep,
+  SessionTimelineAssistantTurnEntry,
   SessionTimelineEntry,
-  SessionTimelineMessageEntry,
   SessionTimelineTaskCompletionEntry,
-  SessionTimelineToolActivityEntry,
 } from '../../shared/session-adapter-types';
 
 const MAX_GRAPH_STEPS = 32;
@@ -18,10 +17,10 @@ function normalizeText(value: unknown): string | undefined {
   return trimmed.length > 0 ? trimmed : undefined;
 }
 
-export function isAssistantActivityEntry(
+export function isAssistantTurnTimelineEntry(
   entry: SessionTimelineEntry,
-): entry is SessionTimelineMessageEntry | SessionTimelineToolActivityEntry {
-  return entry.role === 'assistant' && (entry.kind === 'message' || entry.kind === 'tool-activity');
+): entry is SessionTimelineAssistantTurnEntry {
+  return entry.kind === 'assistant-turn';
 }
 
 export function isTaskCompletionEntry(entry: SessionTimelineEntry): entry is SessionTimelineTaskCompletionEntry {
@@ -30,6 +29,32 @@ export function isTaskCompletionEntry(entry: SessionTimelineEntry): entry is Ses
 
 function makeToolId(prefix: string, toolName: string, index: number): string {
   return `${prefix}:${toolName}:${index}`;
+}
+
+function readTurnSummary(entry: SessionTimelineAssistantTurnEntry): {
+  thinking: string | undefined;
+  tools: ReadonlyArray<{ id: string; toolCallId?: string; name: string; status: 'running' | 'completed' | 'error' | 'missing_result'; summary?: string; inputText?: string; input: unknown }>;
+} {
+  let thinking: string | undefined;
+  const tools: Array<{ id: string; toolCallId?: string; name: string; status: 'running' | 'completed' | 'error' | 'missing_result'; summary?: string; inputText?: string; input: unknown }> = [];
+  for (const segment of entry.segments) {
+    if (segment.kind === 'thinking') {
+      thinking = thinking ? `${thinking}\n\n${segment.text}` : segment.text;
+      continue;
+    }
+    if (segment.kind === 'tool') {
+      tools.push({
+        id: segment.tool.id,
+        ...(segment.tool.toolCallId ? { toolCallId: segment.tool.toolCallId } : {}),
+        name: segment.tool.name,
+        status: segment.tool.status,
+        ...(segment.tool.summary ? { summary: segment.tool.summary } : {}),
+        ...(segment.tool.inputText ? { inputText: segment.tool.inputText } : {}),
+        input: segment.tool.input,
+      });
+    }
+  }
+  return { thinking: normalizeText(thinking), tools };
 }
 
 export function deriveExecutionGraphSteps(entries: SessionTimelineEntry[]): SessionExecutionGraphStep[] {
@@ -51,32 +76,22 @@ export function deriveExecutionGraphSteps(entries: SessionTimelineEntry[]): Sess
     };
   };
 
-  const relevantAssistantEntries = entries.filter((entry): entry is SessionTimelineMessageEntry | SessionTimelineToolActivityEntry => (
-    isAssistantActivityEntry(entry)
-    && (
-      entry.toolUses.length > 0
-      || (entry.kind === 'message' && Boolean(normalizeText(entry.thinking)))
-    )
-  ));
-
-  for (const [entryIndex, assistantEntry] of relevantAssistantEntries.entries()) {
-    if (assistantEntry.kind === 'message') {
-      const thinking = normalizeText(assistantEntry.thinking);
-      if (thinking) {
-        upsertStep({
-          id: `history-thinking-${assistantEntry.entryId || assistantEntry.messageId || entryIndex}`,
-          label: 'Thinking',
-          status: assistantEntry.status === 'error' ? 'error' : 'completed',
-          kind: 'thinking',
-          detail: thinking,
-          depth: 1,
-        });
-      }
-    }
-
-    for (const [toolIndex, tool] of assistantEntry.toolCards.entries()) {
+  const turnEntries = entries.filter(isAssistantTurnTimelineEntry);
+  for (const [entryIndex, entry] of turnEntries.entries()) {
+    const summary = readTurnSummary(entry);
+    if (summary.thinking) {
       upsertStep({
-        id: tool.toolCallId || tool.id || makeToolId(`history-tool-${assistantEntry.entryId || assistantEntry.key || entryIndex}`, tool.name, toolIndex),
+        id: `history-thinking-${entry.entryId || entry.messageId || entryIndex}`,
+        label: 'Thinking',
+        status: entry.status === 'error' ? 'error' : 'completed',
+        kind: 'thinking',
+        detail: summary.thinking,
+        depth: 1,
+      });
+    }
+    for (const [toolIndex, tool] of summary.tools.entries()) {
+      upsertStep({
+        id: tool.toolCallId || tool.id || makeToolId(`history-tool-${entry.entryId || entry.key || entryIndex}`, tool.name, toolIndex),
         label: tool.name,
         status: tool.status,
         kind: 'tool',
@@ -86,53 +101,22 @@ export function deriveExecutionGraphSteps(entries: SessionTimelineEntry[]): Sess
     }
   }
 
-  const streamingEntry = [...entries].reverse().find((entry): entry is SessionTimelineMessageEntry | SessionTimelineToolActivityEntry => (
-    isAssistantActivityEntry(entry) && entry.status === 'streaming'
-  )) ?? null;
-  const streamingStatuses = streamingEntry?.toolStatuses ?? [];
-  const streamingToolCards = streamingEntry?.toolCards ?? [];
-
-  if (streamingEntry?.kind === 'message') {
-    const thinking = normalizeText(streamingEntry.thinking);
-    if (thinking) {
+  const streamingEntry = [...turnEntries].reverse().find((entry) => entry.status === 'streaming' || entry.isStreaming) ?? null;
+  if (streamingEntry) {
+    const summary = readTurnSummary(streamingEntry);
+    if (summary.thinking) {
       upsertStep({
         id: 'stream-thinking',
         label: 'Thinking',
         status: 'running',
         kind: 'thinking',
-        detail: thinking,
+        detail: summary.thinking,
         depth: 1,
       });
     }
-  }
-
-  const activeToolIds = new Set<string>();
-  const activeToolNamesWithoutIds = new Set<string>();
-
-  for (const [index, tool] of streamingStatuses.entries()) {
-    const id = tool.toolCallId || tool.id || makeToolId('stream-status', tool.name, index);
-    activeToolIds.add(id);
-    if (!tool.toolCallId && !tool.id) {
-      activeToolNamesWithoutIds.add(tool.name);
-    }
-    upsertStep({
-      id,
-      label: tool.name,
-      status: tool.status,
-      kind: 'tool',
-      detail: normalizeText(tool.summary),
-      depth: 1,
-    });
-  }
-
-  if (streamingEntry) {
-    for (const [index, tool] of streamingToolCards.entries()) {
-      const id = tool.toolCallId || tool.id || makeToolId('stream-tool', tool.name, index);
-      if (activeToolIds.has(id) || activeToolNamesWithoutIds.has(tool.name)) {
-        continue;
-      }
+    for (const [toolIndex, tool] of summary.tools.entries()) {
       upsertStep({
-        id,
+        id: tool.toolCallId || tool.id || makeToolId('stream-tool', tool.name, toolIndex),
         label: tool.name,
         status: tool.status,
         kind: 'tool',
@@ -148,19 +132,15 @@ export function deriveExecutionGraphSteps(entries: SessionTimelineEntry[]): Sess
 }
 
 function resolveAnchorIdentity(
-  replyRow: SessionTimelineMessageEntry | SessionTimelineToolActivityEntry | SessionAssistantTurnItem | null,
-): Pick<SessionExecutionGraphItem, 'laneKey' | 'turnKey' | 'agentId' | 'assistantTurnKey' | 'assistantLaneKey' | 'assistantLaneAgentId'> {
+  replyRow: SessionTimelineAssistantTurnEntry | SessionAssistantTurnItem | null,
+): Pick<SessionExecutionGraphItem, 'laneKey' | 'turnKey' | 'agentId'> {
   if (!replyRow) {
     return {};
   }
-  const isAssistantTurnItem = replyRow.kind === 'assistant-turn';
   return {
-    laneKey: replyRow.laneKey,
-    turnKey: replyRow.turnKey,
-    agentId: replyRow.agentId,
-    assistantTurnKey: isAssistantTurnItem ? (replyRow.turnKey ?? null) : (replyRow.assistantTurnKey ?? null),
-    assistantLaneKey: isAssistantTurnItem ? (replyRow.laneKey ?? null) : (replyRow.assistantLaneKey ?? null),
-    assistantLaneAgentId: isAssistantTurnItem ? (replyRow.agentId ?? null) : (replyRow.assistantLaneAgentId ?? null),
+    ...(replyRow.laneKey ? { laneKey: replyRow.laneKey } : {}),
+    ...(replyRow.turnKey ? { turnKey: replyRow.turnKey } : {}),
+    ...(replyRow.agentId ? { agentId: replyRow.agentId } : {}),
   };
 }
 
@@ -223,7 +203,7 @@ export function createExecutionGraphItem(
 
 export function attachExecutionGraphReply(
   graph: SessionExecutionGraphItem,
-  replyRow: SessionTimelineMessageEntry | SessionTimelineToolActivityEntry | SessionAssistantTurnItem | null,
+  replyRow: SessionTimelineAssistantTurnEntry | SessionAssistantTurnItem | null,
 ): SessionExecutionGraphItem {
   if (!replyRow) {
     return {

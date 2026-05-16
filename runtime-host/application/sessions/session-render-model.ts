@@ -5,34 +5,32 @@ import type {
   SessionRenderTaskCompletionItem,
   SessionRenderUserMessageItem,
   SessionRuntimeStateSnapshot,
+  SessionTimelineAssistantTurnEntry,
   SessionTimelineEntry,
-  SessionTimelineMessageEntry,
-  SessionTimelineToolActivityEntry,
+  SessionTimelineUserMessageEntry,
 } from '../../shared/session-adapter-types';
 import {
   assembleAuthoritativeAssistantTurns,
+  hasAssistantTurnOutput,
 } from './assistant-turn-assembler';
 import {
-  hasAssistantTurnOutput,
-} from './assistant-turn-summary';
+  filterStateOnlyRenderItem,
+} from './session-state-only-render-filter';
 import type {
   PendingRunClosureSignal,
 } from './session-runtime-types';
 import {
   normalizeString,
 } from './session-value-normalization';
-import {
-  filterStateOnlyRenderItem,
-} from './session-state-only-render-filter';
 
 export function cloneRenderItems(items: SessionRenderItem[]): SessionRenderItem[] {
   return structuredClone(items);
 }
 
-export function isAssistantTimelineEntry(
+export function isAssistantTurnTimelineEntry(
   entry: SessionTimelineEntry,
-): entry is SessionTimelineMessageEntry | SessionTimelineToolActivityEntry {
-  return entry.role === 'assistant' && (entry.kind === 'message' || entry.kind === 'tool-activity');
+): entry is SessionTimelineAssistantTurnEntry {
+  return entry.kind === 'assistant-turn';
 }
 
 export function collectPendingRunClosureSignal(
@@ -91,7 +89,7 @@ function sortExecutionGraphItems(graphs: SessionExecutionGraphItem[]): SessionEx
   });
 }
 
-function buildUserMessageItem(entry: SessionTimelineMessageEntry): SessionRenderUserMessageItem {
+function buildUserMessageItem(entry: SessionTimelineUserMessageEntry): SessionRenderUserMessageItem {
   return {
     key: entry.key,
     kind: 'user-message',
@@ -137,7 +135,6 @@ export function buildRenderItemsFromTimeline(input: {
     }
   }
   const renderItems: SessionRenderItem[] = [];
-  const emittedAssistantTurnKeys = new Set<string>();
 
   const flushAnchoredGraphs = (anchorKey: string) => {
     const anchored = graphByAnchorKey.get(anchorKey);
@@ -149,22 +146,18 @@ export function buildRenderItemsFromTimeline(input: {
   };
 
   for (const entry of input.timelineEntries) {
-    if (entry.kind === 'message' && entry.role === 'user') {
+    if (entry.kind === 'user-message') {
       const item = buildUserMessageItem(entry);
       renderItems.push(item);
       flushAnchoredGraphs(item.key);
       continue;
     }
 
-    if (isAssistantTimelineEntry(entry)) {
-      const item = assembledTurns.turnsByLatestTimelineKey.get(entry.key);
+    if (entry.kind === 'assistant-turn') {
+      const item = assembledTurns.itemsByEntryKey.get(entry.key);
       if (!item) {
         continue;
       }
-      if (emittedAssistantTurnKeys.has(item.key)) {
-        continue;
-      }
-      emittedAssistantTurnKeys.add(item.key);
       const filteredItem = filterStateOnlyRenderItem(item);
       if (filteredItem) {
         renderItems.push(filteredItem);

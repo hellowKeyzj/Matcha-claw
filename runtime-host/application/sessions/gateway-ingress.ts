@@ -23,6 +23,7 @@ export type {
   GatewaySessionIngressEvent,
   SessionInfoIngressEvent,
   SessionTimelineIngressEvent,
+  SessionToolStatusUpdateIngressEvent,
 } from './gateway-ingress-types';
 
 export function buildSessionUpdateEventsFromGatewayConversationEvent(
@@ -42,9 +43,7 @@ export function buildSessionUpdateEventsFromGatewayConversationEvent(
   }
 
   if (input.type === 'tool.lifecycle') {
-    return buildToolLifecycleIngressEvents(input.event as GatewayConversationToolLifecyclePayload, {
-      existingEntries: options.existingEntries,
-    });
+    return buildToolLifecycleIngressEvents(input.event as GatewayConversationToolLifecyclePayload);
   }
 
   if (input.type === 'chat.message') {

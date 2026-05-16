@@ -12,6 +12,7 @@ import {
   resolveAssistantTurnItemKeyFromTimelineEntry,
 } from './assistant-turn-assembler';
 import {
+  applyToolStatusUpdate,
   findTimelineEntryIndex,
   mergeTimelineEntries,
   upsertTimelineEntry,
@@ -46,6 +47,7 @@ import { SessionExecutionGraphRuntime } from './session-execution-graph-runtime'
 import {
   closeMissingToolResultsForRun,
 } from './tool/tool-card-terminal';
+import type { SessionToolStatusUpdateIngressEvent } from './gateway-ingress-types';
 import type { RuntimeClockPort } from '../common/runtime-ports';
 
 export interface SessionTimelineRuntimeDeps {
@@ -138,7 +140,6 @@ export class SessionTimelineRuntime {
     await this.deps.stateStore.ready();
     const state = this.getSessionState(sessionKey);
     await this.ensureSessionHydrated(sessionKey, state);
-    await this.reconcileSessionTranscript(sessionKey);
     this.deps.executionGraphRuntime.refreshRenderItems(state);
     state.window = state.window.isAtLatest && state.window.windowStartOffset === 0
       ? createLatestWindowState(state.renderItems.length)
@@ -155,10 +156,6 @@ export class SessionTimelineRuntime {
       await this.ensureSessionHydrated(sessionKey, state);
       return;
     }
-    state.timelineEntries = await this.deps.transcriptLoader.reconcileToolResultPatchEntries({
-      sessionKey,
-      existingEntries: state.timelineEntries,
-    });
     this.deps.executionGraphRuntime.rebuildFromTimeline(sessionKey, state);
     const closureSignal = collectPendingRunClosureSignal(state.renderItems, state.runtime);
     if (
@@ -278,6 +275,35 @@ export class SessionTimelineRuntime {
       runtime: cloneSessionRuntimeState(state.runtime),
       mergedEntries,
     };
+  }
+
+  applyToolStatus(
+    sessionKey: string,
+    update: SessionToolStatusUpdateIngressEvent,
+  ): SessionTimelineEntry | null {
+    const state = this.getSessionState(sessionKey);
+    const previousEntries = state.timelineEntries;
+    const nextEntries = applyToolStatusUpdate(previousEntries, update);
+    if (nextEntries === previousEntries) {
+      return null;
+    }
+    state.timelineEntries = nextEntries;
+    this.deps.executionGraphRuntime.refreshExistingGraphs(state);
+    state.window = createLatestWindowState(state.renderItems.length);
+    this.touchSessionStateMeta(state);
+    this.deps.stateStore.persistStore();
+    for (let index = nextEntries.length - 1; index >= 0; index -= 1) {
+      const entry = nextEntries[index];
+      if (entry?.kind !== 'assistant-turn') {
+        continue;
+      }
+      for (const segment of entry.segments) {
+        if (segment.kind === 'tool' && (segment.tool.toolCallId === update.toolCallId || segment.tool.id === update.toolCallId)) {
+          return structuredClone(entry);
+        }
+      }
+    }
+    return null;
   }
 
   updateTaskSnapshot(
@@ -425,22 +451,6 @@ export class SessionTimelineRuntime {
           lastUserMessageAt: typeof messageTimestamp === 'number'
             ? messageTimestamp
             : currentState.runtime.lastUserMessageAt,
-        },
-      };
-    }
-
-    if (input.entry.kind === 'tool-activity' && input.entry.status !== 'streaming') {
-      return {
-        runtimePatch: {
-          sending: true,
-          activeRunId: input.runId,
-          runPhase: 'waiting_tool',
-          activeTurnItemKey: null,
-          pendingTurnKey: normalizeString(input.entry.turnKey) || currentState.runtime.pendingTurnKey,
-          pendingTurnLaneKey: normalizeString(input.entry.laneKey) || currentState.runtime.pendingTurnLaneKey,
-          pendingFinal: true,
-          lastError: null,
-          lastIssue: null,
         },
       };
     }

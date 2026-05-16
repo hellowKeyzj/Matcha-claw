@@ -22,21 +22,6 @@ export type SessionTurnBindingSource =
   | 'client'
   | 'heuristic';
 
-/**
- * Assistant turn identity mode.
- *
- * Rules:
- * - `tool_call` means the turn was anchored by authoritative `toolCallId`.
- * - `run` means the turn was anchored by authoritative live `runId`.
- * - `message` means the turn was anchored by authoritative assistant `messageId`.
- * - `origin` / `client` are supplemental upstream identities only.
- * - `heuristic` means no strong upstream turn identity existed; binding is controlled fallback only.
- *
- * Explicitly not supported as turn identity:
- * - `uniqueId`
- * - `requestId`
- * - any legacy row-era synthetic pseudo turn id
- */
 export type SessionTurnIdentityMode =
   | 'tool_call'
   | 'run'
@@ -46,12 +31,6 @@ export type SessionTurnIdentityMode =
   | 'heuristic';
 
 export type SessionTurnBindingConfidence = 'strong' | 'fallback';
-/**
- * Binding confidence for the final assistant-turn render model.
- *
- * - `strong`: backed by authoritative upstream identity.
- * - `fallback`: controlled heuristic grouping only, not guaranteed 100% exact.
- */
 export type SessionTurnIdentityConfidence = 'strong' | 'fallback';
 
 export interface SessionTaskCompletionEvent {
@@ -78,7 +57,7 @@ export interface SessionTaskCompletionEvent {
   replyInstruction?: string;
 }
 
-export type SessionExecutionGraphStepStatus = 'running' | 'completed' | 'error';
+export type SessionExecutionGraphStepStatus = 'running' | 'completed' | 'error' | 'missing_result';
 export type SessionExecutionGraphStepKind = 'thinking' | 'tool' | 'system';
 export type SessionCatalogKind = 'main' | 'subsession' | 'session' | 'named';
 export type SessionCatalogTitleSource = 'user' | 'assistant' | 'none';
@@ -132,27 +111,7 @@ export interface SessionRenderImage {
   mimeType: string;
 }
 
-export interface SessionRenderToolStatus {
-  id?: string;
-  toolCallId?: string;
-  name: string;
-  status: 'running' | 'completed' | 'error' | 'missing_result';
-  durationMs?: number;
-  summary?: string;
-  updatedAt?: number;
-  output?: unknown;
-  outputText?: string;
-}
-
-export interface SessionRenderToolUse {
-  id: string;
-  toolCallId?: string;
-  name: string;
-  input: unknown;
-  status?: SessionRenderToolStatus['status'];
-  summary?: string;
-  durationMs?: number;
-}
+export type SessionRenderToolStatusKind = 'running' | 'completed' | 'error' | 'missing_result';
 
 export interface SessionRenderToolPreviewCanvas {
   kind: 'canvas';
@@ -215,7 +174,7 @@ export interface SessionRenderToolCard {
   displayDetail?: string;
   input: unknown;
   inputText?: string;
-  status: SessionRenderToolStatus['status'];
+  status: SessionRenderToolStatusKind;
   summary?: string;
   durationMs?: number;
   updatedAt?: number;
@@ -257,8 +216,8 @@ export type SessionAssistantTurnSegment =
 export interface SessionTimelineEntryBase {
   key: string;
   kind:
-    | 'message'
-    | 'tool-activity'
+    | 'user-message'
+    | 'assistant-turn'
     | 'task-completion'
     | 'execution-graph'
     | 'system';
@@ -266,6 +225,7 @@ export interface SessionTimelineEntryBase {
   role: 'user' | 'assistant' | 'system';
   text: string;
   createdAt?: number;
+  updatedAt?: number;
   status?: SessionTimelineEntryStatus;
   runId?: string;
   entryId?: string;
@@ -278,36 +238,37 @@ export interface SessionTimelineEntryBase {
   turnIdentityConfidence?: SessionTurnIdentityConfidence;
   agentId?: string;
   sourceRole?: SessionMessageRole;
-  assistantTurnKey?: string | null;
-  assistantLaneKey?: string | null;
-  assistantLaneAgentId?: string | null;
 }
 
-export interface SessionTimelineMessageEntry extends SessionTimelineEntryBase {
-  kind: 'message';
-  text: string;
-  thinking: string | null;
-  assistantSegments: ReadonlyArray<SessionAssistantTurnSegment>;
+export interface SessionTimelineUserMessageEntry extends SessionTimelineEntryBase {
+  kind: 'user-message';
+  role: 'user';
   images: ReadonlyArray<SessionRenderImage>;
-  toolUses: ReadonlyArray<SessionRenderToolUse>;
   attachedFiles: ReadonlyArray<SessionRenderAttachedFile>;
-  toolStatuses: ReadonlyArray<SessionRenderToolStatus>;
-  toolCards: ReadonlyArray<SessionRenderToolCard>;
-  isStreaming: boolean;
   messageId?: string;
   originMessageId?: string;
   clientId?: string;
 }
 
-export interface SessionTimelineToolActivityEntry extends SessionTimelineEntryBase {
-  kind: 'tool-activity';
+/**
+ * One assistant turn = one timeline entry.
+ *
+ * Authoritative ordering for the turn lives in `segments`. The `segments`
+ * array is built from the chat stream's `message.content` array order.
+ *
+ * Tool runtime state (running/completed/error + result data) is updated
+ * independently via `tool-status-update` events keyed by `toolCallId`.
+ * Tool ordering is never derived from the tool stream; it follows the
+ * position of the corresponding `toolCall` block in the chat content array.
+ */
+export interface SessionTimelineAssistantTurnEntry extends SessionTimelineEntryBase {
+  kind: 'assistant-turn';
   role: 'assistant';
-  assistantSegments: ReadonlyArray<SessionAssistantTurnSegment>;
-  toolUses: ReadonlyArray<SessionRenderToolUse>;
-  toolStatuses: ReadonlyArray<SessionRenderToolStatus>;
-  toolCards: ReadonlyArray<SessionRenderToolCard>;
-  attachedFiles: ReadonlyArray<SessionRenderAttachedFile>;
+  segments: ReadonlyArray<SessionAssistantTurnSegment>;
   isStreaming: boolean;
+  messageId?: string;
+  originMessageId?: string;
+  clientId?: string;
 }
 
 export interface SessionTimelineTaskCompletionEntry extends SessionTimelineEntryBase {
@@ -350,11 +311,12 @@ export interface SessionRenderSystemItem extends SessionTimelineEntryBase {
 }
 
 export type SessionTimelineEntry =
-  | SessionTimelineMessageEntry
-  | SessionTimelineToolActivityEntry
+  | SessionTimelineUserMessageEntry
+  | SessionTimelineAssistantTurnEntry
   | SessionTimelineTaskCompletionEntry
   | SessionRenderExecutionGraphItem
   | SessionRenderSystemItem;
+
 export type SessionExecutionGraphItem = SessionRenderExecutionGraphItem;
 
 export interface SessionRenderItemBase {
@@ -382,43 +344,19 @@ export interface SessionAssistantTurnItem extends SessionRenderItemBase {
   kind: 'assistant-turn';
   role: 'assistant';
   identitySource: SessionTurnBindingSource;
-  /**
-   * `messageId` is optional in upstream history and must not be assumed to exist.
-   * `toolCallId` is the strongest tool identity when present.
-   */
   identityMode: SessionTurnIdentityMode;
   identityConfidence: SessionTurnIdentityConfidence;
   status: 'streaming' | 'waiting_tool' | 'final' | 'error' | 'aborted';
   /**
-   * Authoritative presentation order for one assistant turn.
-   *
-   * The UI must render assistant turns from `segments`, not by independently
-   * arranging `thinking`, `tools`, `text`, or media summary fields.
+   * Authoritative presentation order. Built from the chat stream's
+   * `message.content` array order. Mirrors `entry.segments` 1:1.
    */
   segments: ReadonlyArray<SessionAssistantTurnSegment>;
-  /**
-   * Derived convenience summary built from `segments`.
-   */
   thinking: string | null;
-  /**
-   * Derived convenience summary built from `segments`.
-   */
   tools: ReadonlyArray<SessionRenderToolCard>;
-  /**
-   * Derived convenience summary built from `segments`.
-   */
   embeddedToolResults?: ReadonlyArray<SessionRenderAssistantBubbleToolResult>;
-  /**
-   * Derived convenience summary built from `segments`.
-   */
   text: string;
-  /**
-   * Derived convenience summary built from `segments`.
-   */
   images: ReadonlyArray<SessionRenderImage>;
-  /**
-   * Derived convenience summary built from `segments`.
-   */
   attachedFiles: ReadonlyArray<SessionRenderAttachedFile>;
   pendingState?: 'typing' | 'activity' | null;
 }

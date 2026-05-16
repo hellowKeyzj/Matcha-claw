@@ -57,7 +57,7 @@ export function resolveSessionLabelFromTimelineEntries(entries: SessionTimelineE
 export function resolveSessionLabelDetailsFromTimelineEntries(entries: SessionTimelineEntry[]): SessionResolvedLabel {
   for (let index = entries.length - 1; index >= 0; index -= 1) {
     const entry = entries[index];
-    if (entry?.kind !== 'message' || entry.role !== 'user') {
+    if (entry?.kind !== 'user-message') {
       continue;
     }
     const candidate = resolveUserLabelCandidate(entry.text);
@@ -71,7 +71,7 @@ export function resolveSessionLabelDetailsFromTimelineEntries(entries: SessionTi
 
   for (let index = entries.length - 1; index >= 0; index -= 1) {
     const entry = entries[index];
-    if (entry?.kind !== 'message' || entry.role !== 'assistant') {
+    if (entry?.kind !== 'assistant-turn') {
       continue;
     }
     const candidate = resolveAssistantLabelCandidate(entry.text);

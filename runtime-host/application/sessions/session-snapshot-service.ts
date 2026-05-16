@@ -27,7 +27,7 @@ import {
 } from './session-catalog-model';
 import {
   cloneRenderItems,
-  isAssistantTimelineEntry,
+  isAssistantTurnTimelineEntry,
 } from './session-render-model';
 import type {
   SessionRuntimeTimelineState,
@@ -184,11 +184,9 @@ export class SessionSnapshotService {
     if (!source) {
       return null;
     }
-    if (isAssistantTimelineEntry(source)) {
+    if (isAssistantTurnTimelineEntry(source)) {
       const item = snapshot.items.find((candidate) => (
-        candidate.kind === 'assistant-turn'
-        && candidate.turnKey === source.turnKey
-        && candidate.laneKey === source.laneKey
+        candidate.kind === 'assistant-turn' && candidate.key === source.key
       )) ?? null;
       return filterStateOnlyRenderItem(item);
     }

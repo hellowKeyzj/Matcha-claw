@@ -1,5 +1,13 @@
-import type { SessionUpdateEvent } from '../../shared/session-adapter-types';
+import type {
+  SessionItemChunkUpdateEvent,
+  SessionRenderItem,
+  SessionUpdateEvent,
+} from '../../shared/session-adapter-types';
 import { buildSessionUpdateEventsFromGatewayConversationEvent } from './gateway-ingress';
+import type {
+  GatewaySessionIngressEvent,
+  SessionToolStatusUpdateIngressEvent,
+} from './gateway-ingress-types';
 import { SessionRuntimeStateStore } from './session-runtime-state';
 import { SessionSnapshotService } from './session-snapshot-service';
 import { SessionTimelineRuntime } from './session-timeline-runtime';
@@ -314,12 +322,55 @@ export class SessionGatewayIngressService {
     }
     const outputs: SessionUpdateEvent[] = [];
     for (const event of translated) {
-      outputs.push(await this.translateSessionUpdateEvent(event));
+      const translatedOutput = await this.translateIngressEvent(event);
+      if (translatedOutput) {
+        outputs.push(translatedOutput);
+      }
     }
     return outputs;
   }
 
-  private async translateSessionUpdateEvent(event: SessionUpdateEvent): Promise<SessionUpdateEvent> {
+  private async translateIngressEvent(event: GatewaySessionIngressEvent): Promise<SessionUpdateEvent | null> {
+    if (event.sessionUpdate === 'tool_status_update') {
+      return this.translateToolStatusUpdate(event);
+    }
+    return await this.translateSessionUpdateEvent(event);
+  }
+
+  private translateToolStatusUpdate(event: SessionToolStatusUpdateIngressEvent): SessionItemChunkUpdateEvent | null {
+    const sessionKey = normalizeString(event.sessionKey);
+    if (!sessionKey) {
+      return null;
+    }
+    if (this.shouldIgnoreNonMessageUpdate({
+      sessionKey,
+      runId: normalizeString(event.runId),
+      phase: event.phase,
+    })) {
+      return null;
+    }
+    const updatedTurn = this.deps.timelineRuntime.applyToolStatus(sessionKey, event);
+    if (!updatedTurn) {
+      return null;
+    }
+    const state = this.deps.stateStore.getSessionState(sessionKey);
+    const snapshot = this.deps.snapshotService.buildSnapshot(sessionKey, state, {
+      replayComplete: true,
+    });
+    const item = this.deps.snapshotService.resolvePrimaryItemFromSnapshot(snapshot, updatedTurn, [updatedTurn]) as SessionRenderItem | null;
+    return {
+      sessionUpdate: 'session_item_chunk',
+      sessionKey: event.sessionKey,
+      runId: event.runId,
+      item,
+      snapshot,
+      ...(event._meta ? { _meta: event._meta } : {}),
+    };
+  }
+
+  private async translateSessionUpdateEvent(
+    event: Exclude<GatewaySessionIngressEvent, SessionToolStatusUpdateIngressEvent>,
+  ): Promise<SessionUpdateEvent> {
     const sessionKey = normalizeString(event.sessionKey);
     if (!sessionKey) {
       const emptySnapshot = this.deps.snapshotService.buildEmptySnapshot();
@@ -336,6 +387,16 @@ export class SessionGatewayIngressService {
         };
         logTodoToolDebug(this.deps.logger, 'runtime-host.ingress.output-event', summarizeSessionUpdateForTodoToolDebug(output));
         return output;
+      }
+      if (event.sessionUpdate === 'plan') {
+        return {
+          sessionUpdate: 'plan' as const,
+          sessionKey: event.sessionKey,
+          runId: event.runId,
+          taskSnapshot: event.taskSnapshot,
+          snapshot: emptySnapshot,
+          ...(event._meta ? { _meta: event._meta } : {}),
+        };
       }
       const output = {
         sessionUpdate: event.sessionUpdate === 'agent_message_chunk' ? 'session_item_chunk' as const : 'session_item' as const,

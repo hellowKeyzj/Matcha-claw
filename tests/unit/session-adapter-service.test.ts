@@ -142,7 +142,7 @@ describe('session runtime service', () => {
     expect(finalEvents[0]).toMatchObject({
       sessionUpdate: 'agent_message',
       entries: [{
-        kind: 'message',
+        kind: 'assistant-turn',
         text: 'NO',
       }],
     });
@@ -170,7 +170,7 @@ describe('session runtime service', () => {
     expect(events[0]).toMatchObject({
       sessionUpdate: 'agent_message',
       entries: [{
-        kind: 'message',
+        kind: 'assistant-turn',
         text: 'NO_REPLY',
       }],
     });
@@ -406,7 +406,7 @@ describe('session runtime service', () => {
       sessionKey: 'agent:main:main',
       laneKey: 'main',
       entries: [{
-        kind: 'message',
+        kind: 'assistant-turn',
         entryId: 'run:run-live-1:assistant:0',
         sequenceId: 2,
         laneKey: 'main',
@@ -1368,7 +1368,7 @@ describe('session runtime service', () => {
     expect(event).toMatchObject({
       sessionUpdate: 'agent_message',
       entries: [expect.objectContaining({
-        kind: 'message',
+        kind: 'assistant-turn',
         text: '你喜欢温柔甜美类型的小姐姐。',
       })],
     });
@@ -1394,7 +1394,7 @@ describe('session runtime service', () => {
     expect(event).toMatchObject({
       sessionUpdate: 'agent_message_chunk',
       entries: [{
-        kind: 'tool-activity',
+        kind: 'assistant-turn',
         entryId: 'run:run-tools-1:tool:tool-1',
         text: '',
         toolUses: [{
@@ -2552,7 +2552,7 @@ describe('session runtime service', () => {
     expect(events[1]).toMatchObject({
       sessionUpdate: 'agent_message',
       entries: [{
-        kind: 'message',
+        kind: 'assistant-turn',
         text: '已更新任务列表。',
         toolCards: [],
         toolUses: [],
@@ -4741,4 +4741,5 @@ describe('session runtime service', () => {
     });
   });
 });
+
 

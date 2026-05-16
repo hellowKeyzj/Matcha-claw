@@ -3,7 +3,7 @@ import {
   sanitizeAssistantDisplayText,
   sanitizeCanonicalUserText,
 } from '../../shared/chat-message-normalization';
-import type { SessionRenderImage, SessionTimelineMessageEntry } from '../../shared/session-adapter-types';
+import type { SessionRenderImage } from '../../shared/session-adapter-types';
 import type {
   ContentBlockLike,
   SessionTranscriptMessage,
@@ -42,7 +42,7 @@ export function extractThinking(message: SessionTranscriptMessage): string | nul
   return combined || null;
 }
 
-export function extractImages(message: SessionTranscriptMessage): SessionTimelineMessageEntry['images'] {
+export function extractImages(message: SessionTranscriptMessage): SessionRenderImage[] {
   const content = readMessageContent(message);
   if (!Array.isArray(content)) {
     return [];

@@ -45,7 +45,7 @@ describe('transcript utils gateway media', () => {
         updatedAt: null,
       },
     });
-    const turn = Array.from(assembly.turnsByLatestTimelineKey.values())[0];
+    const turn = Array.from(assembly.itemsByEntryKey.values())[0];
 
     expect(turn).toMatchObject({
       kind: 'assistant-turn',

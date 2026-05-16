@@ -1,10 +1,10 @@
-import type { SessionRenderAttachedFile, SessionTimelineMessageEntry } from '../../shared/session-adapter-types';
+import type { SessionRenderAttachedFile } from '../../shared/session-adapter-types';
 import type {
   ContentBlockLike,
   SessionTranscriptMessage,
 } from './transcript-types';
 
-export function readAttachedFiles(message: SessionTranscriptMessage): SessionTimelineMessageEntry['attachedFiles'] {
+export function readAttachedFiles(message: SessionTranscriptMessage): SessionRenderAttachedFile[] {
   const attachedFiles = message._attachedFiles;
   if (!Array.isArray(attachedFiles)) {
     return [];
@@ -47,8 +47,8 @@ export function readMediaRefs(text: string): Array<{ filePath: string; mimeType:
 
 export function extractImagesAsAttachedFiles(
   content: unknown,
-  source: SessionTimelineMessageEntry['attachedFiles'][number]['source'] = 'message-ref',
-): SessionTimelineMessageEntry['attachedFiles'] {
+  source: SessionRenderAttachedFile['source'] = 'message-ref',
+): SessionRenderAttachedFile[] {
   if (!Array.isArray(content)) {
     return [];
   }
@@ -99,9 +99,9 @@ export function extractImagesAsAttachedFiles(
 }
 
 export function mergeAttachedFiles(
-  existingFiles: ReadonlyArray<SessionTimelineMessageEntry['attachedFiles'][number]>,
-  incomingFiles: ReadonlyArray<SessionTimelineMessageEntry['attachedFiles'][number]>,
-): SessionTimelineMessageEntry['attachedFiles'] {
+  existingFiles: ReadonlyArray<SessionRenderAttachedFile>,
+  incomingFiles: ReadonlyArray<SessionRenderAttachedFile>,
+): SessionRenderAttachedFile[] {
   const merged = existingFiles.map((file) => ({ ...file }));
   for (const file of incomingFiles) {
     const exists = merged.some((candidate) => (

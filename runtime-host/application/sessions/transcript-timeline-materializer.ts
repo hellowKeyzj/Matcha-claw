@@ -2,49 +2,46 @@ import {
   isInternalAssistantControlMessage,
   normalizeOptionalString,
 } from '../../shared/chat-message-normalization';
-import { buildToolCardsFromMessage } from './tool/tool-card-render';
-import {
-  buildAssistantSegmentsFromMessageContent,
-  buildAssistantSegmentsFromToolCards,
-} from './assistant-turn-segments';
 import type {
-  SessionTimelineEntryStatus,
+  SessionTimelineAssistantTurnEntry,
   SessionTimelineEntry,
+  SessionTimelineEntryStatus,
   SessionTimelineTaskCompletionEntry,
+  SessionTimelineUserMessageEntry,
 } from '../../shared/session-adapter-types';
-import type { SessionTranscriptMessage } from './transcript-types';
 import {
-  extractImages,
-  extractThinking,
-  readMessageContent,
-  resolveTranscriptDisplayText,
-} from './transcript-content-extractors';
+  applyToolStatusToSegments,
+  buildAssistantTurnEntry,
+  buildAssistantTurnEntryKey,
+  buildSegmentsFromChatContent,
+  type AssistantTurnEntryIdentity,
+} from './assistant-turn-entry';
+import {
+  isStateOnlyToolName,
+  isToolCallContentType,
+  isToolResultContentType,
+  resolveToolRecordCallId,
+  resolveToolRecordName,
+  resolveToolRecordResultPayload,
+} from './state-only-tools';
+import { isMalformedEmptyToolNameResult } from './tool-event-sanitizer';
 import {
   extractImagesAsAttachedFiles,
   mergeAttachedFiles,
   readAttachedFiles,
+  readMediaRefs,
 } from './transcript-media-extractors';
 import {
-  extractToolUses,
-  readToolStatuses,
-} from './transcript-tool-extractors';
+  resolveTranscriptDisplayText,
+} from './transcript-content-extractors';
 import {
   resolveSessionLaneKey,
   resolveTranscriptEntryId,
   resolveTranscriptEntryStatus,
   resolveTranscriptTurnBinding,
 } from './transcript-turn-identity';
-import {
-  materializeToolResultPatchRows,
-  materializeToolResultRows,
-} from './transcript-tool-result-materializer';
-import {
-  isToolCallContentType,
-  isToolResultContentType,
-  isStateOnlyToolName,
-  resolveToolRecordName,
-} from './state-only-tools';
-import { isMalformedEmptyToolNameResult } from './tool-event-sanitizer';
+import type { SessionTranscriptMessage } from './transcript-types';
+import { readMessageContent } from './transcript-content-extractors';
 
 function buildTaskCompletionText(row: SessionTimelineTaskCompletionEntry): string {
   return [
@@ -140,6 +137,224 @@ function isMalformedEmptyToolMessage(message: SessionTranscriptMessage): boolean
   return isMalformedEmptyToolNameResult(message);
 }
 
+function buildIdentityFromMessage(input: {
+  sessionKey: string;
+  message: SessionTranscriptMessage;
+  runId?: string;
+  sequenceId?: number;
+  index: number;
+}): AssistantTurnEntryIdentity {
+  const agentId = normalizeOptionalString(input.message.agentId) ?? '';
+  const laneKey = resolveSessionLaneKey(agentId);
+  const turnBinding = resolveTranscriptTurnBinding(input.message, { runId: input.runId });
+  const entryId = resolveTranscriptEntryId(input.message, input.index, {
+    runId: input.runId,
+    sequenceId: input.sequenceId,
+  });
+  const turnKey = turnBinding ? `${laneKey}:${turnBinding.key}` : `${laneKey}:entry:${entryId}`;
+  return {
+    sessionKey: input.sessionKey,
+    laneKey,
+    turnKey,
+    entryId,
+    ...(input.runId ? { runId: input.runId } : {}),
+    ...(agentId ? { agentId } : {}),
+    turnBindingSource: turnBinding?.source ?? 'heuristic',
+    turnBindingConfidence: turnBinding?.confidence ?? 'fallback',
+    turnIdentityMode: turnBinding?.mode ?? 'heuristic',
+    turnIdentityConfidence: turnBinding?.confidence ?? 'fallback',
+    ...(input.message.messageId ? { messageId: input.message.messageId } : {}),
+    ...(input.message.originMessageId ? { originMessageId: input.message.originMessageId } : {}),
+    ...(input.message.clientId ? { clientId: input.message.clientId } : {}),
+  };
+}
+
+function findExistingAssistantTurnEntry(
+  rows: ReadonlyArray<SessionTimelineEntry>,
+  identity: AssistantTurnEntryIdentity,
+): SessionTimelineAssistantTurnEntry | null {
+  const target = buildAssistantTurnEntryKey(identity.sessionKey, identity.laneKey, identity.turnKey);
+  for (let index = rows.length - 1; index >= 0; index -= 1) {
+    const row = rows[index];
+    if (row?.kind === 'assistant-turn' && row.key === target) {
+      return row;
+    }
+  }
+  return null;
+}
+
+function findAssistantTurnByToolCallId(
+  rows: ReadonlyArray<SessionTimelineEntry>,
+  toolCallId: string,
+): SessionTimelineAssistantTurnEntry | null {
+  for (let index = rows.length - 1; index >= 0; index -= 1) {
+    const row = rows[index];
+    if (row?.kind !== 'assistant-turn') {
+      continue;
+    }
+    for (const segment of row.segments) {
+      if (segment.kind === 'tool' && (segment.tool.toolCallId === toolCallId || segment.tool.id === toolCallId)) {
+        return row;
+      }
+    }
+  }
+  return null;
+}
+
+function buildUserMessageEntry(input: {
+  sessionKey: string;
+  message: SessionTranscriptMessage;
+  runId?: string;
+  sequenceId?: number;
+  index: number;
+  status: SessionTimelineEntryStatus;
+}): SessionTimelineUserMessageEntry {
+  const message = input.message;
+  const agentId = normalizeOptionalString(message.agentId) ?? '';
+  const laneKey = resolveSessionLaneKey(agentId);
+  const turnBinding = resolveTranscriptTurnBinding(message, { runId: input.runId });
+  const entryId = resolveTranscriptEntryId(message, input.index, {
+    runId: input.runId,
+    sequenceId: input.sequenceId,
+  });
+  const turnKey = turnBinding ? `${laneKey}:${turnBinding.key}` : `${laneKey}:entry:${entryId}`;
+  const text = resolveTranscriptDisplayText(message);
+  const attachedFiles = mergeAttachedFiles(
+    readAttachedFiles(message),
+    extractImagesAsAttachedFiles(message.content).filter((file) => Boolean(file.gatewayUrl)),
+  );
+  return {
+    key: `session:${input.sessionKey}|entry:${entryId}`,
+    kind: 'user-message',
+    sessionKey: input.sessionKey,
+    role: 'user',
+    text,
+    status: input.status,
+    ...(message.timestamp != null ? { createdAt: message.timestamp } : {}),
+    ...(input.runId ? { runId: input.runId } : {}),
+    ...(input.sequenceId != null ? { sequenceId: input.sequenceId } : {}),
+    entryId,
+    laneKey,
+    turnKey,
+    turnBindingSource: turnBinding?.source ?? 'heuristic',
+    turnBindingConfidence: turnBinding?.confidence ?? 'fallback',
+    turnIdentityMode: turnBinding?.mode ?? 'heuristic',
+    turnIdentityConfidence: turnBinding?.confidence ?? 'fallback',
+    ...(agentId ? { agentId } : {}),
+    sourceRole: message.role,
+    images: [],
+    attachedFiles,
+    ...(message.messageId ? { messageId: message.messageId } : {}),
+    ...(message.originMessageId ? { originMessageId: message.originMessageId } : {}),
+    ...(message.clientId ? { clientId: message.clientId } : {}),
+  };
+}
+
+function buildAssistantTurnFromAssistantMessage(input: {
+  sessionKey: string;
+  message: SessionTranscriptMessage;
+  runId?: string;
+  sequenceId?: number;
+  index: number;
+  status: SessionTimelineEntryStatus;
+  existingRows: ReadonlyArray<SessionTimelineEntry>;
+}): SessionTimelineAssistantTurnEntry {
+  const identity = buildIdentityFromMessage({
+    sessionKey: input.sessionKey,
+    message: input.message,
+    runId: input.runId,
+    sequenceId: input.sequenceId,
+    index: input.index,
+  });
+  const existing = findExistingAssistantTurnEntry(input.existingRows, identity);
+  const previousSegments = existing?.segments ?? [];
+  const text = resolveTranscriptDisplayText(input.message);
+  const attachedFiles = mergeAttachedFiles(
+    readAttachedFiles(input.message),
+    extractImagesAsAttachedFiles(input.message.content).filter((file) => Boolean(file.gatewayUrl)),
+  );
+  const segments = buildSegmentsFromChatContent({
+    identity,
+    content: input.message.content,
+    fallbackText: text,
+    attachedFiles,
+    defaultToolStatus: input.status === 'streaming' || input.status === 'pending' ? 'running' : 'missing_result',
+    previousSegments,
+  });
+  return buildAssistantTurnEntry({
+    identity,
+    status: input.status,
+    text,
+    ...(input.message.timestamp != null ? { createdAt: input.message.timestamp } : {}),
+    ...(input.sequenceId != null ? { sequenceId: input.sequenceId } : {}),
+    segments,
+    isStreaming: input.status === 'streaming' || Boolean(input.message.streaming),
+  });
+}
+
+function buildAssistantTurnFromToolResult(input: {
+  sessionKey: string;
+  message: SessionTranscriptMessage;
+  runId?: string;
+  sequenceId?: number;
+  index: number;
+  status: SessionTimelineEntryStatus;
+  existingRows: ReadonlyArray<SessionTimelineEntry>;
+}): SessionTimelineAssistantTurnEntry | null {
+  const message = input.message;
+  if (isMalformedEmptyToolNameResult(message)) {
+    return null;
+  }
+  const toolCallId = normalizeOptionalString(message.toolCallId) ?? '';
+  const toolName = normalizeOptionalString(message.toolName ?? message.name) ?? '';
+  if (!toolName || isStateOnlyToolName(toolName)) {
+    return null;
+  }
+
+  const existingTurn = toolCallId
+    ? findAssistantTurnByToolCallId(input.existingRows, toolCallId)
+    : null;
+  if (!existingTurn) {
+    return null;
+  }
+
+  const identity: AssistantTurnEntryIdentity = {
+    sessionKey: existingTurn.sessionKey,
+    laneKey: existingTurn.laneKey ?? 'main',
+    turnKey: existingTurn.turnKey ?? '',
+    entryId: existingTurn.entryId ?? '',
+    ...(existingTurn.runId ? { runId: existingTurn.runId } : {}),
+    ...(existingTurn.agentId ? { agentId: existingTurn.agentId } : {}),
+    turnBindingSource: existingTurn.turnBindingSource ?? 'heuristic',
+    turnBindingConfidence: existingTurn.turnBindingConfidence ?? 'fallback',
+    turnIdentityMode: existingTurn.turnIdentityMode ?? 'heuristic',
+    turnIdentityConfidence: existingTurn.turnIdentityConfidence ?? 'fallback',
+    ...(existingTurn.messageId ? { messageId: existingTurn.messageId } : {}),
+    ...(existingTurn.originMessageId ? { originMessageId: existingTurn.originMessageId } : {}),
+    ...(existingTurn.clientId ? { clientId: existingTurn.clientId } : {}),
+  };
+
+  const output = message.details !== undefined
+    ? message.details
+    : resolveToolRecordResultPayload(message) ?? message.content;
+  const segments = applyToolStatusToSegments(existingTurn.segments, identity, {
+    toolCallId,
+    name: toolName,
+    output,
+    status: message.isError ? 'error' : 'completed',
+  });
+
+  return buildAssistantTurnEntry({
+    identity,
+    status: existingTurn.status ?? 'final',
+    text: existingTurn.text,
+    ...(existingTurn.createdAt != null ? { createdAt: existingTurn.createdAt } : {}),
+    ...(existingTurn.sequenceId != null ? { sequenceId: existingTurn.sequenceId } : {}),
+    segments,
+    isStreaming: existingTurn.isStreaming,
+  });
+}
+
 export function buildTimelineEntriesFromTranscriptMessage(
   sessionKey: string,
   message: SessionTranscriptMessage,
@@ -163,161 +378,77 @@ export function buildTimelineEntriesFromTranscriptMessage(
   if (isStateOnlyToolResultMessage(message)) {
     return [];
   }
-  const agentId = normalizeOptionalString(message.agentId) ?? '';
-  const existingRows = options.existingRows ?? [];
-  const defaultLaneKey = resolveSessionLaneKey(agentId);
-  const turnBinding = resolveTranscriptTurnBinding(message, {
-    runId: options.runId,
-  });
-  const laneKey = defaultLaneKey;
-  const entryId = resolveTranscriptEntryId(message, options.index, {
-    runId: options.runId,
-    sequenceId: options.sequenceId,
-  });
+
   const status = options.status ?? 'final';
-  const createdAt = message.timestamp;
-  const text = resolveTranscriptDisplayText(message);
-  const turnKey = turnBinding
-    ? `${laneKey}:${turnBinding.key}`
-    : `${laneKey}:entry:${entryId}`;
-  const resolvedRunId = options.runId;
-  const resolvedAgentId = agentId;
+  const existingRows = options.existingRows ?? [];
 
   if (message.role === 'toolresult' || message.role === 'tool_result') {
-    return materializeToolResultRows({
+    const updated = buildAssistantTurnFromToolResult({
       sessionKey,
       message,
-      status,
-      runId: resolvedRunId,
+      runId: options.runId,
       sequenceId: options.sequenceId,
-      createdAt,
-      entryId,
-      laneKey,
-      turnKey,
-      agentId: resolvedAgentId,
-      text,
+      index: options.index,
+      status,
       existingRows,
     });
+    return updated ? [updated] : [];
   }
 
-  const toolUses = extractToolUses(message);
-  const toolStatuses = readToolStatuses(message);
-  const toolCards = buildToolCardsFromMessage({
-    content: message.content,
-    role: message.role,
-    status,
-    toolName: message.toolName ?? message.name,
-    toolCallId: message.toolCallId,
-    toolStatuses,
-    toolCalls: message.tool_calls ?? message.toolCalls,
-  });
-  const thinking = extractThinking(message);
-  const images = extractImages(message);
-  const attachedFiles = mergeAttachedFiles(
-    readAttachedFiles(message),
-    extractImagesAsAttachedFiles(message.content).filter((file) => Boolean(file.gatewayUrl)),
-  );
-  const role = message.role === 'user' || message.role === 'system' ? message.role : 'assistant';
-  const assistantSegments = role === 'assistant'
-    ? buildAssistantSegmentsFromMessageContent({
-        role: message.role,
-        turnKey,
-        laneKey,
-        content: readMessageContent(message),
-        text,
-        images,
-        attachedFiles,
-        toolCards,
-      })
-    : [];
-  const base = {
-    key: `session:${sessionKey}|entry:${entryId}`,
+  if (message.role === 'user' || message.role === 'system') {
+    if (message.role === 'system') {
+      const entryId = resolveTranscriptEntryId(message, options.index, {
+        runId: options.runId,
+        sequenceId: options.sequenceId,
+      });
+      return [{
+        key: `session:${sessionKey}|entry:${entryId}`,
+        kind: 'system',
+        sessionKey,
+        role: 'system',
+        level: 'info',
+        text: resolveTranscriptDisplayText(message),
+        status,
+        ...(message.timestamp != null ? { createdAt: message.timestamp } : {}),
+        ...(options.runId ? { runId: options.runId } : {}),
+        ...(options.sequenceId != null ? { sequenceId: options.sequenceId } : {}),
+        entryId,
+      }];
+    }
+    return [buildUserMessageEntry({
+      sessionKey,
+      message,
+      runId: options.runId,
+      sequenceId: options.sequenceId,
+      index: options.index,
+      status,
+    })];
+  }
+
+  const turnEntry = buildAssistantTurnFromAssistantMessage({
     sessionKey,
-    role,
-    text,
-    createdAt,
+    message,
+    runId: options.runId,
+    sequenceId: options.sequenceId,
+    index: options.index,
     status,
-    ...(resolvedRunId ? { runId: resolvedRunId } : {}),
-    ...(options.sequenceId != null ? { sequenceId: options.sequenceId } : {}),
-    entryId,
-    laneKey,
-    turnKey,
-    ...(turnBinding ? {
-      turnBindingSource: turnBinding.source,
-      turnBindingConfidence: turnBinding.confidence,
-      turnIdentityMode: turnBinding.mode,
-      turnIdentityConfidence: turnBinding.confidence,
-    } : {
-      turnBindingSource: 'heuristic' as const,
-      turnBindingConfidence: 'fallback' as const,
-      turnIdentityMode: 'heuristic' as const,
-      turnIdentityConfidence: 'fallback' as const,
-    }),
-    ...(resolvedAgentId ? { agentId: resolvedAgentId } : {}),
-      ...(role === 'assistant' ? {
-        sourceRole: message.role,
-        assistantTurnKey: turnKey,
-        assistantLaneKey: laneKey,
-        assistantLaneAgentId: resolvedAgentId || null,
-    } : {}),
-  } as const;
-
-  const isToolActivity = (
-    role === 'assistant'
-    && toolUses.length > 0
-    && text.trim().length === 0
-    && !thinking
-    && images.length === 0
-    && attachedFiles.length === 0
-  );
-
-  const rows: SessionTimelineEntry[] = [];
-  if (isToolActivity) {
-    rows.push({
-      ...base,
-      kind: 'tool-activity',
-      role: 'assistant',
-      assistantSegments: buildAssistantSegmentsFromToolCards({
-        toolCards,
-      }),
-      toolUses,
-      toolStatuses,
-      toolCards,
-      attachedFiles: [],
-      isStreaming: status === 'streaming' || Boolean(message.streaming),
-    });
-  } else {
-    rows.push({
-      ...base,
-      kind: 'message',
-      thinking,
-      assistantSegments,
-      images,
-      toolUses,
-      attachedFiles,
-      toolStatuses,
-      toolCards,
-      isStreaming: status === 'streaming' || Boolean(message.streaming),
-      ...(message.messageId ? { messageId: message.messageId } : {}),
-      ...(message.originMessageId ? { originMessageId: message.originMessageId } : {}),
-      ...(message.clientId ? { clientId: message.clientId } : {}),
-    });
-  }
+    existingRows,
+  });
+  const rows: SessionTimelineEntry[] = [turnEntry];
 
   const completionEvents = Array.isArray(message.taskCompletionEvents) ? message.taskCompletionEvents : [];
   for (const [completionIndex, event] of completionEvents.entries()) {
-    const triggerRow = resolveCompletionTriggerRow(existingRows, entryId);
+    const triggerRow = resolveCompletionTriggerRow(existingRows, turnEntry.entryId ?? '');
+    const entryId = turnEntry.entryId ?? `entry-${options.index}`;
     const completionRow: SessionTimelineTaskCompletionEntry = {
       key: `session:${sessionKey}|completion:${entryId}:${completionIndex}`,
       kind: 'task-completion',
       sessionKey,
       role: 'system',
-      text: [
-        event.taskLabel,
-        event.statusLabel,
-        event.result,
-      ].filter((value) => typeof value === 'string' && value.trim()).join(' · '),
-      createdAt,
+      text: [event.taskLabel, event.statusLabel, event.result]
+        .filter((value) => typeof value === 'string' && value.trim())
+        .join(' · '),
+      ...(message.timestamp != null ? { createdAt: message.timestamp } : {}),
       status: 'final',
       ...(options.runId ? { runId: options.runId } : {}),
       ...(options.sequenceId != null ? { sequenceId: options.sequenceId } : {}),
@@ -348,44 +479,22 @@ export function materializeTranscriptTimelineEntries(
     existingRows?: SessionTimelineEntry[];
   } = {},
 ): SessionTimelineEntry[] {
-  const entries: SessionTimelineEntry[] = [];
-  const baselineRows = options.existingRows ?? [];
+  const entries: SessionTimelineEntry[] = [...(options.existingRows ?? [])];
+  const baselineLength = entries.length;
   for (const [index, message] of messages.entries()) {
-    entries.push(...buildTimelineEntriesFromTranscriptMessage(sessionKey, message, {
+    const produced = buildTimelineEntriesFromTranscriptMessage(sessionKey, message, {
       index,
       status: resolveTranscriptEntryStatus(message),
-      existingRows: [
-        ...baselineRows,
-        ...entries,
-      ],
-    }));
-  }
-  return entries;
-}
-
-export function materializeTranscriptToolResultPatchEntries(
-  sessionKey: string,
-  messages: SessionTranscriptMessage[],
-  existingRows: SessionTimelineEntry[],
-): SessionTimelineEntry[] {
-  const entries: SessionTimelineEntry[] = [];
-  for (const [index, message] of messages.entries()) {
-    if (message.role !== 'toolresult' && message.role !== 'tool_result') {
-      continue;
+      existingRows: entries,
+    });
+    for (const entry of produced) {
+      const existingIndex = entries.findIndex((candidate) => candidate.key === entry.key);
+      if (existingIndex >= 0) {
+        entries[existingIndex] = entry;
+      } else {
+        entries.push(entry);
+      }
     }
-    if (isStateOnlyToolResultMessage(message)) {
-      continue;
-    }
-    entries.push(...materializeToolResultPatchRows({
-      sessionKey,
-      message,
-      sequenceId: undefined,
-      index,
-      existingRows: [
-        ...existingRows,
-        ...entries,
-      ],
-    }));
   }
-  return entries;
+  return entries.slice(baselineLength);
 }

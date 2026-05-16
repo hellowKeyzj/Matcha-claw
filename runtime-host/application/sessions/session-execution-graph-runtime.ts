@@ -69,10 +69,7 @@ export class SessionExecutionGraphRuntime {
     if (replyItemIndex >= 0) {
       const replyItem = state.renderItems[replyItemIndex];
       if (replyItem?.kind === 'assistant-turn') {
-        replyTimelineIndex = state.timelineEntries.findIndex((entry) => (
-          entry.turnKey === replyItem.turnKey
-          && entry.laneKey === replyItem.laneKey
-        ));
+        replyTimelineIndex = state.timelineEntries.findIndex((entry) => entry.key === replyItem.key);
       }
     }
     const endExclusive = replyTimelineIndex >= 0 ? replyTimelineIndex + 1 : state.timelineEntries.length;

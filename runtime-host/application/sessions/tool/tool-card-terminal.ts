@@ -1,14 +1,12 @@
 import type {
   SessionAssistantTurnSegment,
   SessionRenderToolCard,
-  SessionRenderToolStatus,
+  SessionTimelineAssistantTurnEntry,
   SessionTimelineEntry,
-  SessionTimelineMessageEntry,
-  SessionTimelineToolActivityEntry,
 } from '../../../shared/session-adapter-types';
 
-function isToolBearingEntry(entry: SessionTimelineEntry): entry is SessionTimelineMessageEntry | SessionTimelineToolActivityEntry {
-  return entry.kind === 'message' || entry.kind === 'tool-activity';
+function isAssistantTurnEntry(entry: SessionTimelineEntry): entry is SessionTimelineAssistantTurnEntry {
+  return entry.kind === 'assistant-turn';
 }
 
 function hasToolResult(tool: SessionRenderToolCard): boolean {
@@ -23,12 +21,6 @@ function closeMissingToolCardResult(tool: SessionRenderToolCard): SessionRenderT
     ...tool,
     status: 'missing_result',
   };
-}
-
-function closeMissingToolStatusResult(status: SessionRenderToolStatus): SessionRenderToolStatus {
-  return status.status === 'running'
-    ? { ...status, status: 'missing_result' }
-    : status;
 }
 
 function closeMissingToolSegmentResult(segment: SessionAssistantTurnSegment): SessionAssistantTurnSegment {
@@ -46,14 +38,12 @@ export function closeMissingToolResultsForRun(
   }
 
   return entries.map((entry) => {
-    if (entry.runId !== runId || !isToolBearingEntry(entry)) {
+    if (entry.runId !== runId || !isAssistantTurnEntry(entry)) {
       return structuredClone(entry);
     }
     return {
       ...structuredClone(entry),
-      toolStatuses: entry.toolStatuses.map(closeMissingToolStatusResult),
-      toolCards: entry.toolCards.map(closeMissingToolCardResult),
-      assistantSegments: entry.assistantSegments.map(closeMissingToolSegmentResult),
+      segments: entry.segments.map(closeMissingToolSegmentResult),
       isStreaming: false,
     };
   });

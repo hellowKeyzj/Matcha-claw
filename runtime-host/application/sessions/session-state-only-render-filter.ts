@@ -11,10 +11,9 @@ import {
 function filterAssistantTurnSegments(
   segments: ReadonlyArray<SessionAssistantTurnSegment>,
 ): SessionAssistantTurnSegment[] {
-  return segments.filter((segment) => (
-    segment.kind !== 'tool'
-    || !isStateOnlyToolCard(segment.tool)
-  )).map((segment) => structuredClone(segment));
+  return segments
+    .filter((segment) => segment.kind !== 'tool' || !isStateOnlyToolCard(segment.tool))
+    .map((segment) => structuredClone(segment));
 }
 
 function filterAssistantTurnItem(item: SessionAssistantTurnItem): SessionAssistantTurnItem | null {

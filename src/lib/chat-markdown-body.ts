@@ -1,5 +1,5 @@
 import type { AttachedFileMeta } from '@/stores/chat';
-import type { SessionAssistantTurnItem, SessionTimelineMessageEntry } from '../../runtime-host/shared/session-adapter-types';
+import type { SessionAssistantTurnItem, SessionTimelineAssistantTurnEntry } from '../../runtime-host/shared/session-adapter-types';
 import {
   buildMarkdownCacheKey,
   getOrBuildMarkdownBody,
@@ -19,9 +19,9 @@ interface PreparedAssistantMarkdownBodyInput {
 }
 
 type AssistantMarkdownSource = Pick<
-  SessionTimelineMessageEntry,
-  'key' | 'entryId' | 'messageId' | 'role' | 'createdAt' | 'text' | 'attachedFiles'
-> | Pick<
+  SessionTimelineAssistantTurnEntry,
+  'key' | 'entryId' | 'messageId' | 'role' | 'createdAt' | 'text'
+> & { attachedFiles?: ReadonlyArray<unknown> } | Pick<
   SessionAssistantTurnItem,
   'key' | 'role' | 'createdAt' | 'text' | 'attachedFiles'
 >;
@@ -73,7 +73,7 @@ export function prewarmAssistantMarkdownBody(source: AssistantMarkdownSource): M
   });
 }
 
-export function prewarmAssistantMarkdownBodies(entries: SessionTimelineMessageEntry[]): void {
+export function prewarmAssistantMarkdownBodies(entries: SessionTimelineAssistantTurnEntry[]): void {
   for (const entry of entries) {
     if (entry.role !== 'assistant') {
       continue;

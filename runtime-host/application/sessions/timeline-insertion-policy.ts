@@ -14,28 +14,6 @@ export function findTimelineEntryIndex(
       return index;
     }
   }
-
-  for (let index = entries.length - 1; index >= 0; index -= 1) {
-    const candidate = entries[index]!;
-    const shouldAllowFallbackMerge = (
-      candidate.entryId === incoming.entryId
-      || candidate.status === 'streaming'
-      || incoming.status === 'streaming'
-    );
-    if (!shouldAllowFallbackMerge || candidate.kind !== incoming.kind) {
-      continue;
-    }
-    if (
-      candidate.role === incoming.role
-      && (candidate.runId ?? null) === (incoming.runId ?? null)
-      && (candidate.sequenceId ?? null) === (incoming.sequenceId ?? null)
-      && candidate.laneKey === incoming.laneKey
-      && candidate.turnKey === incoming.turnKey
-    ) {
-      return index;
-    }
-  }
-
   return -1;
 }
 

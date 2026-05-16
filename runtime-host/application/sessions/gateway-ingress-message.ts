@@ -3,7 +3,10 @@ import {
   isInternalAssistantControlMessage,
   normalizeMessageRole,
 } from '../../shared/chat-message-normalization';
-import type { SessionTimelineEntry, SessionTimelineEntryStatus } from '../../shared/session-adapter-types';
+import type {
+  SessionTimelineEntry,
+  SessionTimelineEntryStatus,
+} from '../../shared/session-adapter-types';
 import {
   buildTimelineEntriesFromTranscriptMessage,
 } from './transcript-timeline-materializer';
@@ -16,9 +19,9 @@ import {
   normalizeTaskArtifactSnapshot,
 } from './task-snapshot-normalizer';
 import {
+  isStateOnlyToolName,
   isToolCallContentType,
   isToolResultContentType,
-  isStateOnlyToolName,
   resolveToolRecordName,
 } from './state-only-tools';
 import { isMalformedEmptyToolNameResult } from './tool-event-sanitizer';
@@ -32,7 +35,7 @@ import {
 } from './transcript-task-snapshot-replay';
 import type {
   GatewayConversationMessagePayload,
-  SessionTimelineIngressEvent,
+  GatewaySessionIngressEvent,
 } from './gateway-ingress-types';
 
 export function normalizeTimelineEntryStatus(value: unknown): SessionTimelineEntryStatus {
@@ -107,7 +110,6 @@ function normalizeConversationMessagePayload(
     ...(normalizeString(rawMessage.toolName ?? rawMessage.name) ? { toolName: normalizeString(rawMessage.toolName ?? rawMessage.name) } : {}),
     ...(Array.isArray(rawMessage.tool_calls) ? { tool_calls: rawMessage.tool_calls.map((item: unknown) => ({ ...(isRecord(item) ? item : {}) })) } : {}),
     ...(Array.isArray(rawMessage.toolCalls) ? { toolCalls: rawMessage.toolCalls.map((item: unknown) => ({ ...(isRecord(item) ? item : {}) })) } : {}),
-    ...(Array.isArray(rawMessage.toolStatuses) ? { toolStatuses: rawMessage.toolStatuses.map((item) => ({ ...(isRecord(item) ? item : {}) })) } : {}),
     ...(taskCompletionEvents ? { taskCompletionEvents } : {}),
     ...(Object.prototype.hasOwnProperty.call(rawMessage, 'details') ? { details: rawMessage.details } : {}),
     ...(Array.isArray(rawMessage._attachedFiles) ? { _attachedFiles: rawMessage._attachedFiles.map((item: unknown) => ({ ...(isRecord(item) ? item : {}) })) } : {}),
@@ -135,24 +137,15 @@ function stripStateOnlyToolContent(message: SessionTranscriptMessage): SessionTr
     ...message,
     content,
     tool_calls: Array.isArray(message.tool_calls)
-      ? message.tool_calls.filter((toolCall) => {
-          if (!isRecord(toolCall)) {
-            return true;
-          }
-          return !isStateOnlyToolName(resolveToolRecordName(toolCall));
-        })
+      ? message.tool_calls.filter((toolCall) => (
+          !isRecord(toolCall) || !isStateOnlyToolName(resolveToolRecordName(toolCall))
+        ))
       : message.tool_calls,
     toolCalls: Array.isArray(message.toolCalls)
-      ? message.toolCalls.filter((toolCall) => {
-          if (!isRecord(toolCall)) {
-            return true;
-          }
-          return !isStateOnlyToolName(resolveToolRecordName(toolCall));
-        })
+      ? message.toolCalls.filter((toolCall) => (
+          !isRecord(toolCall) || !isStateOnlyToolName(resolveToolRecordName(toolCall))
+        ))
       : message.toolCalls,
-    toolStatuses: Array.isArray(message.toolStatuses)
-      ? message.toolStatuses.filter((toolStatus) => !isRecord(toolStatus) || !isStateOnlyToolName(resolveToolRecordName(toolStatus)))
-      : message.toolStatuses,
   };
 }
 
@@ -173,9 +166,6 @@ function stripMalformedEmptyToolContent(message: SessionTranscriptMessage): Sess
     toolCalls: Array.isArray(message.toolCalls)
       ? message.toolCalls.filter((toolCall) => !isRecord(toolCall) || resolveToolRecordName(toolCall))
       : message.toolCalls,
-    toolStatuses: Array.isArray(message.toolStatuses)
-      ? message.toolStatuses.filter((toolStatus) => !isRecord(toolStatus) || resolveToolRecordName(toolStatus))
-      : message.toolStatuses,
   };
 }
 
@@ -195,32 +185,15 @@ function hasRenderableMessagePayload(message: SessionTranscriptMessage): boolean
   return (
     (Array.isArray(message.tool_calls) && message.tool_calls.length > 0)
     || (Array.isArray(message.toolCalls) && message.toolCalls.length > 0)
-    || (Array.isArray(message.toolStatuses) && message.toolStatuses.length > 0)
   );
 }
 
 function hasRenderableTimelineOutput(entry: SessionTimelineEntry): boolean {
-  if (entry.kind === 'message') {
-    return (
-      entry.text.trim().length > 0
-      || Boolean(entry.thinking?.trim())
-      || entry.assistantSegments.length > 0
-      || entry.images.length > 0
-      || entry.attachedFiles.length > 0
-      || entry.toolUses.length > 0
-      || entry.toolStatuses.length > 0
-      || entry.toolCards.length > 0
-    );
+  if (entry.kind === 'assistant-turn') {
+    return entry.text.trim().length > 0 || entry.segments.length > 0;
   }
-  if (entry.kind === 'tool-activity') {
-    return (
-      entry.text.trim().length > 0
-      || entry.assistantSegments.length > 0
-      || entry.attachedFiles.length > 0
-      || entry.toolUses.length > 0
-      || entry.toolStatuses.length > 0
-      || entry.toolCards.length > 0
-    );
+  if (entry.kind === 'user-message') {
+    return entry.text.trim().length > 0 || entry.attachedFiles.length > 0;
   }
   return true;
 }
@@ -230,7 +203,7 @@ export function buildMessageIngressEvents(
   options: {
     existingEntries?: SessionTimelineEntry[];
   } = {},
-): SessionTimelineIngressEvent[] {
+): GatewaySessionIngressEvent[] {
   const conversation = normalizeConversationMessagePayload(payload);
   if (!conversation.message) {
     return [];
@@ -289,7 +262,7 @@ export function buildMessageIngressEvents(
   const visibleEntries = taskSnapshot
     ? entries.filter(hasRenderableTimelineOutput)
     : entries;
-  const events: SessionTimelineIngressEvent[] = [];
+  const events: GatewaySessionIngressEvent[] = [];
   if (taskSnapshot) {
     events.push({
       sessionUpdate: 'plan',
@@ -310,8 +283,5 @@ export function buildMessageIngressEvents(
     entries: visibleEntries,
     ...(meta ? { _meta: meta } : {}),
   });
-  if (events.length === 0) {
-    return [];
-  }
   return events;
 }
