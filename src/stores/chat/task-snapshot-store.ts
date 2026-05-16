@@ -36,14 +36,11 @@ interface TaskSnapshotStoreState {
     tasks: TaskData[],
     options?: {
       source?: TaskSnapshotEvent['source'];
-      merge?: boolean;
-      deletedTaskIds?: string[];
       enableEdit?: boolean;
       uri?: string;
     },
   ) => void;
   reportTaskCenterSnapshot: (event: TaskSnapshotEvent) => void;
-  reportTaskCenterNotification: (notification: unknown, fallbackSessionKey?: string) => void;
   reportSessionUpdate: (event: SessionUpdateEvent) => void;
   reportSessionSnapshot: (snapshot: SessionStateSnapshot, source?: TaskSnapshotEvent['source']) => void;
   getTodoList: (sessionKey: string) => TodoItem[];
@@ -244,36 +241,6 @@ function sortTasks(tasks: TaskData[]): TaskData[] {
   });
 }
 
-function mergeTaskLists(current: TaskData[], incoming: TaskData[], deletedTaskIds: string[] = []): TaskData[] {
-  const byId = new Map(current.map((task) => [task.id, task] as const));
-  for (const taskId of deletedTaskIds) {
-    byId.delete(taskId);
-  }
-  for (const task of incoming) {
-    byId.set(task.id, { ...(byId.get(task.id) ?? {}), ...task });
-  }
-  return sortTasks(Array.from(byId.values()).filter((task) => task.status !== 'deleted'));
-}
-
-function readDeletedTaskIds(tasks: TaskData[], explicitDeletedTaskIds: string[] = []): string[] {
-  const deleted = tasks
-    .filter((task) => task.status === 'deleted')
-    .map((task) => task.id)
-    .filter((taskId) => taskId.trim().length > 0);
-  return [...explicitDeletedTaskIds, ...deleted];
-}
-
-function readSessionKey(value: unknown, fallback?: string): string {
-  if (isRecord(value)) {
-    const direct = normalizeString(value.sessionKey);
-    if (direct) return direct;
-    const params = isRecord(value.params) ? value.params : null;
-    const nested = normalizeString(params?.sessionKey);
-    if (nested) return nested;
-  }
-  return normalizeString(fallback);
-}
-
 function parseJsonMaybe(value: string): unknown {
   const trimmed = value.trim();
   if (!trimmed || (!trimmed.startsWith('{') && !trimmed.startsWith('['))) {
@@ -289,7 +256,6 @@ function parseJsonMaybe(value: string): unknown {
 function normalizeToolPayload(method: string, params: Record<string, unknown>): {
   tasks: TaskData[];
   todos: TodoItem[];
-  deletedTaskIds: string[];
   source: TaskSnapshotEvent['source'];
 } | null {
   if (!isTaskSnapshotToolMethod(method)) {
@@ -300,16 +266,13 @@ function normalizeToolPayload(method: string, params: Record<string, unknown>): 
     ...normalizeTasks(params.task ? [params.task] : []),
   ];
   const todos = normalizeTodos(params.todos ?? params.newTodos);
-  const deletedTaskIds = params.deleted === true && normalizeString(params.taskId)
-    ? [normalizeString(params.taskId)]
-    : [];
   if (isTodoTaskToolName(method)) {
-    return { tasks: [], todos, deletedTaskIds, source: 'todo' };
+    return { tasks: [], todos, source: 'todo' };
   }
-  if (tasks.length === 0 && todos.length === 0 && deletedTaskIds.length === 0) {
+  if (tasks.length === 0 && todos.length === 0) {
     return null;
   }
-  return { tasks, todos, deletedTaskIds, source: 'tool' };
+  return { tasks, todos, source: 'tool' };
 }
 
 function extractTaskArtifactPayload(value: unknown): TaskSnapshotEvent | null {
@@ -421,19 +384,20 @@ export const useTaskSnapshotStore = create<TaskSnapshotStoreState>((set, get) =>
   reportTaskCenterData: (sessionKey, tasks, options) => {
     const normalizedSessionKey = normalizeString(sessionKey);
     if (!normalizedSessionKey) return;
-    const normalizedTasks = sortTasks(tasks.map(normalizeTask).filter((item): item is TaskData => Boolean(item)));
+    const normalizedTasks = sortTasks(
+      tasks
+        .map(normalizeTask)
+        .filter((item): item is TaskData => Boolean(item))
+        .filter((task) => task.status !== 'deleted'),
+    );
     set((state) => {
       const current = state.snapshots[normalizedSessionKey];
-      const deletedTaskIds = readDeletedTaskIds(normalizedTasks, options?.deletedTaskIds);
-      const nextTasks = options?.merge
-        ? mergeTaskLists(current?.tasks ?? [], normalizedTasks, deletedTaskIds)
-        : normalizedTasks.filter((task) => task.status !== 'deleted');
       const nextSource = options?.source ?? current?.source ?? 'tool';
       const nextEnableEdit = options?.enableEdit ?? current?.enableEdit;
       const nextUri = options?.uri ?? current?.uri;
       if (
         current
-        && areTasksEqual(current.tasks, nextTasks)
+        && areTasksEqual(current.tasks, normalizedTasks)
         && current.source === nextSource
         && current.enableEdit === nextEnableEdit
         && current.uri === nextUri
@@ -444,7 +408,7 @@ export const useTaskSnapshotStore = create<TaskSnapshotStoreState>((set, get) =>
         snapshots: {
           ...state.snapshots,
           [normalizedSessionKey]: updateSnapshot(current, {
-            tasks: nextTasks,
+            tasks: normalizedTasks,
             source: nextSource,
             enableEdit: nextEnableEdit,
             uri: nextUri,
@@ -468,26 +432,6 @@ export const useTaskSnapshotStore = create<TaskSnapshotStoreState>((set, get) =>
     });
     if (event.todos) {
       get().reportTodos(sessionKey, event.todos);
-    }
-  },
-
-  reportTaskCenterNotification: (notification, fallbackSessionKey) => {
-    if (!isRecord(notification)) return;
-    const method = normalizeString(notification.method);
-    const params = isRecord(notification.params) ? notification.params : notification;
-    const sessionKey = readSessionKey(params, fallbackSessionKey);
-    if (!sessionKey) return;
-    const payload = normalizeToolPayload(method, params);
-    if (!payload) return;
-    if (payload.tasks.length > 0 || payload.deletedTaskIds.length > 0) {
-      get().reportTaskCenterData(sessionKey, payload.tasks, {
-        source: payload.source,
-        merge: true,
-        deletedTaskIds: payload.deletedTaskIds,
-      });
-    }
-    if (payload.todos.length > 0 || isTodoTaskToolName(method)) {
-      get().reportTodos(sessionKey, payload.todos);
     }
   },
 

@@ -121,50 +121,29 @@ describe('task center store', () => {
     expect(useTaskSnapshotStore.getState().getTaskDataList('agent:main:second').map((item) => item.subject)).toEqual(['second task']);
   });
 
-  it('deleteTaskById maps to TaskUpdate status=deleted and removes task', async () => {
-    listTaskSnapshotMock.mockResolvedValue(snapshot([task({ id: '3', status: 'in_progress' })]));
-    updateTaskMock.mockResolvedValue({
-      taskId: '3',
-      deleted: true,
-      todos: [],
-    });
+  it('deleteTaskById 调用 TaskUpdate(status=deleted) 后用 TaskList 全量刷新', async () => {
+    listTaskSnapshotMock.mockResolvedValueOnce(snapshot([
+      task({ id: '1', status: 'pending' }),
+      task({ id: '2', status: 'in_progress' }),
+      task({ id: '3', status: 'completed' }),
+    ]));
+    updateTaskMock.mockResolvedValueOnce({ taskId: '2', deleted: true, todos: [] });
+    listTaskSnapshotMock.mockResolvedValueOnce(snapshot([
+      task({ id: '1', status: 'pending' }),
+      task({ id: '3', status: 'completed' }),
+    ]));
     const { useTaskCenterStore } = await import('@/stores/task-center-store');
+    const { useTaskSnapshotStore } = await import('@/stores/chat/task-snapshot-store');
     await useTaskCenterStore.getState().init('agent:main:main');
 
-    await useTaskCenterStore.getState().deleteTaskById({ taskId: '3' });
+    await useTaskCenterStore.getState().deleteTaskById({ taskId: '2' });
 
     expect(updateTaskMock).toHaveBeenCalledWith({
       sessionKey: 'agent:main:main',
-      taskId: '3',
+      taskId: '2',
       status: 'deleted',
     });
-    const { useTaskSnapshotStore } = await import('@/stores/chat/task-snapshot-store');
-    expect(useTaskSnapshotStore.getState().getTaskDataList('agent:main:main')).toEqual([]);
-  });
-
-  it('handleGatewayNotification patches task or removes deleted task', async () => {
-    const { useTaskCenterStore } = await import('@/stores/task-center-store');
-    const { useTaskSnapshotStore } = await import('@/stores/chat/task-snapshot-store');
-    useTaskSnapshotStore.getState().reportTaskCenterData('agent:main:main', [
-      task({ id: '1', status: 'pending' }),
-    ]);
-    useTaskCenterStore.setState({
-      sessionKey: 'agent:main:main',
-    } as never);
-
-    useTaskCenterStore.getState().handleGatewayNotification({
-      method: 'TaskCreate',
-      params: {
-        sessionKey: 'agent:main:main',
-        task: task({ id: '2', status: 'in_progress' }),
-      },
-    });
-    expect(useTaskSnapshotStore.getState().getTaskDataList('agent:main:main').map((item) => item.id)).toEqual(['1', '2']);
-
-    useTaskCenterStore.getState().handleGatewayNotification({
-      method: 'TaskUpdate',
-      params: { sessionKey: 'agent:main:main', taskId: '1', deleted: true },
-    });
-    expect(useTaskSnapshotStore.getState().getTaskDataList('agent:main:main').map((item) => item.id)).toEqual(['2']);
+    expect(listTaskSnapshotMock).toHaveBeenCalledTimes(2);
+    expect(useTaskSnapshotStore.getState().getTaskDataList('agent:main:main').map((item) => item.id)).toEqual(['1', '3']);
   });
 });

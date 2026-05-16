@@ -1374,34 +1374,6 @@ describe('gateway store event wiring', () => {
     }));
   });
 
-  it('task 通知会进入 task center，并按 taskId 合并批量更新', async () => {
-    hostApiFetchMock.mockResolvedValueOnce(createRunningGatewayStatus());
-    const handlers = new Map<string, (payload: unknown) => void>();
-    subscribeHostEventMock.mockImplementation((eventName: string, handler: (payload: unknown) => void) => {
-      handlers.set(eventName, handler);
-      return () => {};
-    });
-
-    const { useGatewayStore } = await import('@/stores/gateway');
-    const { useTaskSnapshotStore } = await import('@/stores/chat/task-snapshot-store');
-    await useGatewayStore.getState().init();
-
-    handlers.get('gateway:notification')?.({
-      method: 'TaskUpdate',
-      params: { task: { id: 'task-1', status: 'pending' } },
-    });
-    handlers.get('gateway:notification')?.({
-      method: 'TaskUpdate',
-      params: { task: { id: 'task-1', status: 'in_progress' } },
-    });
-
-    await new Promise((resolve) => setTimeout(resolve, 80));
-
-    expect(useTaskSnapshotStore.getState().getTaskDataList('agent:main:main')).toEqual([
-      expect.objectContaining({ id: 'task-1', status: 'in_progress' }),
-    ]);
-  });
-
   it('task:snapshot 事件会实时写入 task snapshot store', async () => {
     hostApiFetchMock.mockResolvedValueOnce(createRunningGatewayStatus());
     const handlers = new Map<string, (payload: unknown) => void>();

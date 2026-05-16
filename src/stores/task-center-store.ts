@@ -16,7 +16,6 @@ interface TaskCenterState {
   init: (sessionKey?: string) => Promise<void>;
   refreshTasks: (options?: { sessionKey?: string; silent?: boolean }) => Promise<void>;
   deleteTaskById: (payload: { taskId: string; sessionKey?: string }) => Promise<void>;
-  handleGatewayNotification: (notification: unknown) => void;
   clearError: () => void;
 }
 
@@ -140,28 +139,17 @@ export const useTaskCenterStore = create<TaskCenterState>((set, get) => ({
     }
     set({ mutating: true, error: null });
     try {
-      const result = await updateTask({
+      await updateTask({
         sessionKey: resolvedSessionKey,
         taskId,
         status: 'deleted',
       });
-      if (result.deleted) {
-        useTaskSnapshotStore.getState().reportTaskCenterData(resolvedSessionKey, [], {
-          merge: true,
-          deletedTaskIds: [taskId],
-          source: 'tool',
-        });
-      }
+      await get().refreshTasks({ sessionKey: resolvedSessionKey, silent: true });
     } catch (error) {
       set({ error: error instanceof Error ? error.message : String(error) });
     } finally {
       set({ mutating: false });
     }
-  },
-
-  handleGatewayNotification: (notification) => {
-    const sessionKey = get().sessionKey ?? undefined;
-    useTaskSnapshotStore.getState().reportTaskCenterNotification(notification, sessionKey);
   },
 
   clearError: () => set({ error: null }),

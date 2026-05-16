@@ -139,7 +139,6 @@ function setupSidebarState() {
     error: null,
     init: vi.fn().mockResolvedValue(undefined),
     refreshTasks: vi.fn().mockResolvedValue(undefined),
-    handleGatewayNotification: vi.fn(),
   } as never);
   usePluginsStore.setState({
     prewarm: vi.fn().mockResolvedValue(undefined),

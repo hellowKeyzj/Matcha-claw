@@ -12,17 +12,19 @@ function taskServiceWith(gatewayRpc = vi.fn(async () => ({})), inspectGatewayMet
   sessionKey.startsWith('agent:ui-designer:')
     ? 'C:\\Users\\Dev\\.openclaw\\workspace-subagents\\ui-designer'
     : 'C:\\Users\\Dev\\.openclaw\\workspace'
-))) {
+)), emitTaskSnapshot = vi.fn()) {
   return {
     taskService: new TaskManagerService({
       gateway: { gatewayRpc },
       capabilities: new GatewayCapabilityService({ gateway: { inspectGatewayMethodReadiness } }),
       clock: { now: () => 1 },
       workspace: { getWorkspaceDirForSession },
+      emitTaskSnapshot,
     }),
     gatewayRpc,
     inspectGatewayMethodReadiness,
     getWorkspaceDirForSession,
+    emitTaskSnapshot,
   };
 }
 
@@ -117,20 +119,20 @@ describe('runtime-host task routes', () => {
       sessionKey: 'agent:main:main',
     }, { taskService: deps.taskService });
 
+    // 写方法（TaskCreate / TaskUpdate / TodoWrite）成功后会追加一次 TaskList 推送权威全量。
     expect(gatewayRpc.mock.calls.map((call) => call[0])).toEqual([
       'TaskCreate',
+      'TaskList',
       'TaskGet',
       'TaskUpdate',
+      'TaskList',
       'TodoWrite',
+      'TaskList',
       'TodoGet',
     ]);
-    expect(gatewayRpc.mock.calls.map((call) => call[1].workspaceDir)).toEqual([
-      'C:\\Users\\Dev\\.openclaw\\workspace',
-      'C:\\Users\\Dev\\.openclaw\\workspace',
-      'C:\\Users\\Dev\\.openclaw\\workspace',
-      'C:\\Users\\Dev\\.openclaw\\workspace',
-      'C:\\Users\\Dev\\.openclaw\\workspace',
-    ]);
+    expect(gatewayRpc.mock.calls.map((call) => call[1].workspaceDir)).toEqual(
+      Array(8).fill('C:\\Users\\Dev\\.openclaw\\workspace'),
+    );
   });
 
   it('buildTaskSnapshot replays from the session workspace', async () => {
@@ -154,6 +156,51 @@ describe('runtime-host task routes', () => {
       },
       60000,
     );
+  });
+
+  it('TaskUpdate(status=deleted) 完成后基于 TaskList 推送权威全量快照', async () => {
+    let listCount = 0;
+    const gatewayRpc = vi.fn(async (method: string) => {
+      if (method === 'TaskUpdate') {
+        return { taskId: '2', deleted: true };
+      }
+      if (method === 'TaskList') {
+        listCount += 1;
+        return {
+          tasks: [
+            { id: '1', subject: '保留', status: 'pending', blocks: [], blockedBy: [] },
+            { id: '3', subject: '保留 2', status: 'completed', blocks: [], blockedBy: [] },
+          ],
+          todos: [],
+        };
+      }
+      return {};
+    });
+    const deps = taskServiceWith(gatewayRpc);
+
+    await dispatchRuntimeRouteDefinition(taskRoutes, 'POST', '/api/tasks/update', {
+      sessionKey: 'agent:main:main',
+      taskId: '2',
+      status: 'deleted',
+    }, { taskService: deps.taskService });
+
+    expect(listCount).toBe(1);
+    expect(deps.emitTaskSnapshot).toHaveBeenCalledTimes(1);
+    const event = deps.emitTaskSnapshot.mock.calls[0][0];
+    expect(event.sessionKey).toBe('agent:main:main');
+    expect(event.source).toBe('tool');
+    expect(event.tasks.map((t: { id: string }) => t.id)).toEqual(['1', '3']);
+  });
+
+  it('TaskList 等读方法不会触发权威全量 emit', async () => {
+    const gatewayRpc = vi.fn(async () => ({ tasks: [], todos: [] }));
+    const deps = taskServiceWith(gatewayRpc);
+
+    await dispatchRuntimeRouteDefinition(taskRoutes, 'POST', '/api/tasks/list', {
+      sessionKey: 'agent:main:main',
+    }, { taskService: deps.taskService });
+
+    expect(deps.emitTaskSnapshot).not.toHaveBeenCalled();
   });
 
   it('returns background task output and stop results without renderer gateway access', async () => {

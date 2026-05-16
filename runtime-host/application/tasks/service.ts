@@ -14,6 +14,8 @@ import { isTodoTaskToolName } from '../../shared/task-tool-contract';
 const TASK_RPC_TIMEOUT_MS = 60_000;
 const TASK_CAPABILITY_TIMEOUT_MS = 5_000;
 
+const TASK_WRITE_METHODS = new Set(['TaskCreate', 'TaskUpdate', 'TodoWrite']);
+
 function logTaskPipeline(event: string, payload: Record<string, unknown>): void {
   if (!isTraceLogLevelEnabled(process.env.MATCHACLAW_TRACE_LOG_LEVEL, 2)) {
     return;
@@ -250,40 +252,29 @@ export class TaskManagerService {
         resultType: Array.isArray(data) ? 'array' : typeof data,
       });
     }
-    this.emitSnapshotFromToolResult(method, sessionKey, data);
+    if (TASK_WRITE_METHODS.has(method)) {
+      await this.emitAuthoritativeSnapshot(method, sessionKey);
+    }
     return ok(data);
   }
 
-  private emitSnapshotFromToolResult(method: string, sessionKey: string, data: unknown): void {
-    if (!this.deps.emitTaskSnapshot || !data || typeof data !== 'object' || Array.isArray(data)) {
+  private async emitAuthoritativeSnapshot(method: string, sessionKey: string): Promise<void> {
+    if (!this.deps.emitTaskSnapshot) {
       return;
     }
-    const record = data as Record<string, unknown>;
-    const tasks = [
-      ...this.readTaskList(record.tasks),
-      ...this.readTaskList(record.task ? [record.task] : []),
-    ];
-    const todos = this.readTodoList(record.todos);
-    const deletedTaskId = record.deleted === true ? this.readString(record.taskId) : '';
-    const eventTasks = deletedTaskId
-      ? [{ id: deletedTaskId, subject: deletedTaskId, description: '', status: 'deleted' as const, blocks: [], blockedBy: [] }]
-      : tasks;
-    if (eventTasks.length === 0 && todos.length === 0) {
+    const snapshot = await this.buildTaskSnapshot(sessionKey);
+    if (!snapshot) {
       return;
     }
+    const source: TaskSnapshotEvent['source'] = isTodoTaskToolName(method) ? 'todo' : 'tool';
     logTaskPipeline('snapshot.emit', {
       method,
       sessionKey,
-      tasksCount: eventTasks.length,
-      todosCount: todos.length,
-      source: isTodoTaskToolName(method) ? 'todo' : 'tool',
+      tasksCount: snapshot.tasks.length,
+      todosCount: snapshot.todos?.length ?? 0,
+      source,
     });
-    this.deps.emitTaskSnapshot({
-      sessionKey,
-      tasks: eventTasks,
-      ...(todos.length > 0 || isTodoTaskToolName(method) ? { todos } : {}),
-      source: isTodoTaskToolName(method) ? 'todo' : 'tool',
-    });
+    this.deps.emitTaskSnapshot({ ...snapshot, source });
   }
 
   private readOptionalScopePayload(body: Record<string, unknown>): Record<string, unknown> {

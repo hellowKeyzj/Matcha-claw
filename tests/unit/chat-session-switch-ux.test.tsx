@@ -97,7 +97,6 @@ function setupChatSessions() {
     submitDecision: vi.fn().mockResolvedValue(undefined),
     submitFreeText: vi.fn().mockResolvedValue(undefined),
     openTaskSession: vi.fn().mockReturnValue({ switched: false, reason: 'task_not_found' }),
-    handleGatewayNotification: vi.fn(),
     clearError: vi.fn(),
   } as never);
 

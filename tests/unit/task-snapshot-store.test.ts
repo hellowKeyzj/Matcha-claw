@@ -18,52 +18,13 @@ describe('task snapshot store', () => {
     expect(useTaskSnapshotStore.getState().getDerivedPlanStatus('agent:main:main')).toBe('building');
   });
 
-  it('normalizes TodoWrite notification into todo task data without driving task inbox plan status', async () => {
-    const { useTaskSnapshotStore } = await import('@/stores/chat/task-snapshot-store');
-
-    useTaskSnapshotStore.getState().reportTaskCenterNotification({
-      method: 'TodoWrite',
-      params: {
-        sessionKey: 'agent:main:main',
-        todos: [{ content: '同步方案', status: 'completed' }],
-      },
-    });
-
-    expect(useTaskSnapshotStore.getState().getTaskDataList('agent:main:main')).toEqual([
-      expect.objectContaining({ id: 'todo-1', subject: '同步方案', status: 'completed' }),
-    ]);
-    expect(useTaskSnapshotStore.getState().getPersistentTaskDataList('agent:main:main')).toEqual([]);
-    expect(useTaskSnapshotStore.getState().getDerivedPlanStatus('agent:main:main')).toBeNull();
-  });
-
-  it('normalizes TodoGet notification as todo state without persistent tasks', async () => {
-    const { useTaskSnapshotStore } = await import('@/stores/chat/task-snapshot-store');
-
-    useTaskSnapshotStore.getState().reportTaskCenterNotification({
-      method: 'TodoGet',
-      params: {
-        sessionKey: 'agent:main:main',
-        todos: [{ content: '读取当前待办', status: 'in_progress' }],
-      },
-    });
-
-    expect(useTaskSnapshotStore.getState().getTaskDataList('agent:main:main')).toEqual([
-      expect.objectContaining({ id: 'todo-1', subject: '读取当前待办', status: 'in_progress' }),
-    ]);
-    expect(useTaskSnapshotStore.getState().getPersistentTaskDataList('agent:main:main')).toEqual([]);
-  });
-
   it('keeps todo plan items out of the persistent task view', async () => {
     const { useTaskSnapshotStore } = await import('@/stores/chat/task-snapshot-store');
     const store = useTaskSnapshotStore.getState();
 
-    store.reportTaskCenterNotification({
-      method: 'TodoWrite',
-      params: {
-        sessionKey: 'agent:main:main',
-        todos: [{ content: '分析页面结构', status: 'pending' }],
-      },
-    });
+    store.reportTodos('agent:main:main', [
+      { content: '分析页面结构', status: 'pending' },
+    ]);
 
     expect(store.getTaskDataList('agent:main:main')).toEqual([
       expect.objectContaining({ id: 'todo-1', subject: '分析页面结构' }),
@@ -118,6 +79,27 @@ describe('task snapshot store', () => {
     expect(useTaskSnapshotStore.getState().getPersistentTaskDataList('agent:main:main')).toEqual([]);
     expect(useTaskSnapshotStore.getState().getTaskDataList('agent:main:main')).toEqual([]);
     expect(useTaskSnapshotStore.getState().getDerivedPlanStatus('agent:main:main')).toBeNull();
+  });
+
+  it('task:snapshot 收到的全量列表完全替换当前 session 任务集合', async () => {
+    const { useTaskSnapshotStore } = await import('@/stores/chat/task-snapshot-store');
+    const store = useTaskSnapshotStore.getState();
+
+    store.reportTaskCenterData('agent:main:main', [
+      { id: '1', subject: '保留', description: '', status: 'pending', blocks: [], blockedBy: [] },
+      { id: '2', subject: '将被删', description: '', status: 'in_progress', blocks: [], blockedBy: [] },
+      { id: '3', subject: '将被删 2', description: '', status: 'completed', blocks: [], blockedBy: [] },
+    ]);
+
+    store.reportTaskCenterSnapshot({
+      sessionKey: 'agent:main:main',
+      source: 'tool',
+      tasks: [
+        { id: '1', subject: '保留', description: '', status: 'pending', blocks: [], blockedBy: [] },
+      ],
+    });
+
+    expect(useTaskSnapshotStore.getState().getPersistentTaskDataList('agent:main:main').map((t) => t.id)).toEqual(['1']);
   });
 
   it('returns stable derived task references for React selectors', async () => {

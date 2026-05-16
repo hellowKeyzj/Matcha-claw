@@ -68,7 +68,6 @@ function setupStores() {
     sessionKey: 'agent:main:main',
     init: vi.fn().mockResolvedValue(undefined),
     refreshTasks: vi.fn().mockResolvedValue(undefined),
-    handleGatewayNotification: vi.fn(),
   } as never);
 
   i18n.changeLanguage('en');
