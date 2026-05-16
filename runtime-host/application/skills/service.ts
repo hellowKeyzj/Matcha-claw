@@ -4,7 +4,6 @@ import { isGatewayReadyForSnapshot, isGatewayStartupConnectionError } from '../g
 import {
   accepted,
   badRequest,
-  ok,
   serverError,
   type ApplicationResponse,
 } from '../common/application-response';
@@ -460,13 +459,13 @@ export class SkillsService {
   async executeEnsurePreinstalled() {
     const skills = await this.readPreinstalledManifest();
     if (skills.length === 0) {
-      return ok({ success: true, installed: [], stateSyncs: [] });
+      return { success: true, installed: [], stateSyncs: [] };
     }
 
     const sourceRoot = await this.firstExistingPath(this.getPreinstalledSourceRootCandidates());
     if (!sourceRoot) {
       this.deps.logger.warn('Preinstalled skills source root not found; skipping preinstall.');
-      return ok({ success: true, installed: [], stateSyncs: [] });
+      return { success: true, installed: [], stateSyncs: [] };
     }
 
     const lockVersions = await this.readPreinstalledLockVersions(sourceRoot);
@@ -526,7 +525,7 @@ export class SkillsService {
       this.deps.logger.info(`Installed preinstalled skill: ${spec.slug} -> ${targetDir}`);
     }
 
-    return ok({ success: true, installed, stateSyncs });
+    return { success: true, installed, stateSyncs };
   }
 
   private async applyUpdates(
