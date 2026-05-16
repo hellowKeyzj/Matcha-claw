@@ -8,6 +8,7 @@ import { appUpdater, registerUpdateHandlers } from './updater';
 import { logger } from '../utils/logger';
 import { warmupNetworkOptimization } from '../utils/uv-env';
 import { autoInstallCliIfNeeded, generateCompletionCache, installCompletionToProfile } from '../services/openclaw/openclaw-cli-service';
+import { ensureWorkspaceContext } from '../utils/workspace-context';
 import { applyProxySettings } from './proxy';
 import { applyLaunchAtStartupSetting } from './launch-at-startup';
 import { loadHostBootstrapSettings } from '../gateway/config-sync';
@@ -109,6 +110,9 @@ async function autoStartGatewayIfEnabled(deps: {
     logger.debug('Auto-starting Gateway...');
     await deps.gatewayManager.start();
     logger.info('Gateway auto-start succeeded');
+    void ensureWorkspaceContext().catch((error) => {
+      logger.warn('Workspace context merge failed:', error);
+    });
   } catch (error) {
     logger.error('Gateway auto-start failed:', error);
     emitHostEvent(deps.hostEventBus, deps.mainWindow, 'gateway:error', { message: String(error) });

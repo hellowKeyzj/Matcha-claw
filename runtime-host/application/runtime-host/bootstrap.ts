@@ -67,7 +67,7 @@ export class RuntimeHostBootstrapService {
         'cleanupStaleBuiltinExtensionsForGatewayLaunch' | 'reconcileConfiguredChannelPluginsForGatewayLaunch' | 'ensureConfiguredManagedPluginsForGatewayLaunch'
       >;
       providerRuntimeSync: Pick<ProviderRuntimeSyncService, 'syncProviderStore'>;
-      workspace: Pick<OpenClawWorkspacePort, 'migrateMainAgentTemplatesIfNeeded' | 'mergeContextSnippets'>;
+      workspace: Pick<OpenClawWorkspacePort, 'migrateMainAgentTemplatesIfNeeded'>;
       securityJobs: Pick<SecurityJobPort, 'submitPolicySync'>;
       idGenerator: Pick<RuntimeIdGeneratorPort, 'randomHex'>;
       jobs: RuntimeHostBootstrapJobPort;
@@ -176,9 +176,7 @@ export class RuntimeHostBootstrapService {
   }
 
   async executeWorkspaceTemplateMigration() {
-    const migration = await this.deps.workspace.migrateMainAgentTemplatesIfNeeded();
-    const contextMerge = await this.deps.workspace.mergeContextSnippets();
-    return { ...migration, contextMerge };
+    return await this.deps.workspace.migrateMainAgentTemplatesIfNeeded();
   }
 
   onGatewayLifecycle(payload: unknown) {
