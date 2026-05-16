@@ -7,11 +7,11 @@
  * Port configuration
  */
 export const PORTS = {
-  /** ClawX GUI development server port */
-  CLAWX_DEV: 5173,
+  /** MatchaClaw GUI development server port */
+  MATCHACLAW_DEV: 5173,
 
-  /** ClawX GUI production port (for reference) */
-  CLAWX_GUI: 23333,
+  /** MatchaClaw GUI production port (for reference) */
+  MATCHACLAW_GUI: 23333,
 
   /** Local host API server port */
   MATCHACLAW_HOST_API: 13210,
@@ -29,15 +29,15 @@ export const PORTS = {
 
 type PortKey = keyof typeof PORTS;
 type CanonicalPortKey =
-  | 'CLAWX_DEV'
-  | 'CLAWX_GUI'
+  | 'MATCHACLAW_DEV'
+  | 'MATCHACLAW_GUI'
   | 'MATCHACLAW_HOST_API'
   | 'MATCHACLAW_RUNTIME_HOST'
   | 'OPENCLAW_GATEWAY';
 
 function toCanonicalPortKey(key: PortKey): CanonicalPortKey {
-  if (key === 'MatchaClaw_DEV') return 'CLAWX_DEV';
-  if (key === 'MatchaClaw_GUI') return 'CLAWX_GUI';
+  if (key === 'MatchaClaw_DEV') return 'MATCHACLAW_DEV';
+  if (key === 'MatchaClaw_GUI') return 'MATCHACLAW_GUI';
   return key;
 }
 
@@ -55,9 +55,9 @@ export function getPort(key: PortKey): number {
   const canonical = toCanonicalPortKey(key);
   const envKeys = new Set<string>([
     `MATCHACLAW_PORT_${canonical}`,
-    `CLAWX_PORT_${canonical}`,
+    `MATCHACLAW_PORT_${canonical}`,
     `MATCHACLAW_PORT_${key}`,
-    `CLAWX_PORT_${key}`,
+    `MATCHACLAW_PORT_${key}`,
     `MatchaClaw_PORT_${key}`,
   ]);
 

@@ -35,8 +35,8 @@ export function getOpenClawConfigDir(): string {
 /**
  * Get MatchaClaw config directory
  */
-export function getClawXConfigDir(): string {
-  return join(homedir(), '.clawx');
+export function getMatchaClawConfigDir(): string {
+  return join(homedir(), '.matchaclaw');
 }
 
 /**

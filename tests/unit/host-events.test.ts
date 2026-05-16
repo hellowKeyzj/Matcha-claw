@@ -97,7 +97,7 @@ describe('host-events', () => {
         invoke: vi.fn(),
       },
     };
-    window.localStorage.setItem('clawx:allow-sse-fallback', '1');
+    window.localStorage.setItem('matchaclaw:allow-sse-fallback', '1');
     const { subscribeHostEvent } = await import('@/lib/host-events');
     const handler = vi.fn();
     const unsubscribe = subscribeHostEvent('unknown:event', handler);
@@ -118,7 +118,7 @@ describe('host-events', () => {
   it('SSE fallback 缺少 token 获取能力时直接禁用', async () => {
     const warnMock = vi.spyOn(console, 'warn').mockImplementation(() => {});
     (window as unknown as { electron?: unknown }).electron = undefined;
-    window.localStorage.setItem('clawx:allow-sse-fallback', '1');
+    window.localStorage.setItem('matchaclaw:allow-sse-fallback', '1');
 
     const { subscribeHostEvent } = await import('@/lib/host-events');
     const unsubscribe = subscribeHostEvent('unknown:event', vi.fn());

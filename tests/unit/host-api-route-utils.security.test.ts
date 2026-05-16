@@ -35,7 +35,7 @@ describe('host api route-utils security', () => {
   });
 
   it('仅对 allowlist origin 回写 Access-Control-Allow-Origin', () => {
-    const knownOrigin = `http://127.0.0.1:${PORTS.CLAWX_DEV}`;
+    const knownOrigin = `http://127.0.0.1:${PORTS.MATCHACLAW_DEV}`;
     const unknownOrigin = 'https://evil.example.com';
 
     const resKnown = makeRes();

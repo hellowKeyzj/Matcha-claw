@@ -3,7 +3,7 @@ import type { Page } from '@playwright/test';
 
 async function ensureSetupComplete(page: Page) {
   await page.evaluate(async () => {
-    const storageKey = 'clawx-settings';
+    const storageKey = 'matchaclaw-settings';
     const raw = window.localStorage.getItem(storageKey);
     let parsed: { state?: Record<string, unknown>; version?: number } = {};
     if (raw) {
@@ -36,7 +36,7 @@ async function ensureSetupComplete(page: Page) {
   await page.reload({ waitUntil: 'domcontentloaded' });
 }
 
-test.describe('ClawX Electron smoke', () => {
+test.describe('MatchaClaw Electron smoke', () => {
   test('应用可启动并渲染设置页', async ({ page }) => {
     await ensureSetupComplete(page);
     await page.evaluate(() => {

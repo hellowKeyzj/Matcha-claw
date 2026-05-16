@@ -208,7 +208,7 @@ export const useSettingsStore = create<SettingsState>()(
       },
     }),
     {
-      name: 'clawx-settings',
+      name: 'matchaclaw-settings',
       merge: (persistedState, currentState) => ({
         ...currentState,
         ...(persistedState as Partial<SettingsState>),

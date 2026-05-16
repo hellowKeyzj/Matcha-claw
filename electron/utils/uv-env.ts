@@ -17,7 +17,7 @@ function quoteTomlString(value: string): string {
   return JSON.stringify(value);
 }
 
-function buildClawXUvConfigToml(): string {
+function buildMatchaClawUvConfigToml(): string {
   return [
     '# This file is managed by MatchaClaw.',
     '# It keeps uv mirror settings available even when child process env filtering drops UV_INDEX_URL.',
@@ -27,13 +27,13 @@ function buildClawXUvConfigToml(): string {
   ].join('\n');
 }
 
-export function getClawXUvConfigFilePath(): string {
-  return path.join(getOpenClawConfigDir(), 'clawx', 'uv.toml');
+export function getMatchaClawUvConfigFilePath(): string {
+  return path.join(getOpenClawConfigDir(), 'matchaclaw', 'uv.toml');
 }
 
-function ensureClawXUvConfigFile(): string | null {
-  const filePath = getClawXUvConfigFilePath();
-  const nextContent = buildClawXUvConfigToml();
+function ensureMatchaClawUvConfigFile(): string | null {
+  const filePath = getMatchaClawUvConfigFilePath();
+  const nextContent = buildMatchaClawUvConfigToml();
 
   try {
     mkdirSync(path.dirname(filePath), { recursive: true });
@@ -152,7 +152,7 @@ export async function getUvMirrorEnv(): Promise<Record<string, string>> {
     return {};
   }
 
-  const uvConfigFile = ensureClawXUvConfigFile();
+  const uvConfigFile = ensureMatchaClawUvConfigFile();
   return uvConfigFile
     ? { ...UV_MIRROR_ENV, UV_CONFIG_FILE: uvConfigFile }
     : { ...UV_MIRROR_ENV };

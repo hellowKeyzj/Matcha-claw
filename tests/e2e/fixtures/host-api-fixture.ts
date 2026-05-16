@@ -84,7 +84,7 @@ interface E2EChatMockState {
   counter: number;
 }
 
-const isE2EMode = process.env.CLAWX_E2E === '1';
+const isE2EMode = process.env.MATCHACLAW_E2E === '1';
 
 const state: E2EChatMockState = {
   sessions: [],

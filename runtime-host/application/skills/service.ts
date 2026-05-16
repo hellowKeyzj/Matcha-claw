@@ -45,7 +45,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 const SKILL_MANIFEST_FILE = 'SKILL.md';
 const PREINSTALLED_MANIFEST_NAME = 'preinstalled-manifest.json';
-const PREINSTALLED_MARKER_NAME = '.clawx-preinstalled.json';
+const PREINSTALLED_MARKER_NAME = '.matchaclaw-preinstalled.json';
 const FRONTMATTER_PATTERN = /^---\s*\r?\n([\s\S]*?)\r?\n---\s*(?:\r?\n|$)/;
 const CONTROL_CHAR_RANGE_PATTERN = `${String.fromCharCode(0)}-${String.fromCharCode(31)}`;
 const INVALID_SKILL_KEY_CHARS_PATTERN = new RegExp(`[<>:"/\\\\|?*${CONTROL_CHAR_RANGE_PATTERN}]+`, 'g');
@@ -66,7 +66,7 @@ interface LocalSkillImportResult {
 }
 
 interface PreinstalledMarker {
-  source: 'clawx-preinstalled';
+  source: 'matchaclaw-preinstalled';
   slug: string;
   version: string;
   installedAt: string;
@@ -438,14 +438,14 @@ export class SkillsService {
     }
     try {
       const parsed = JSON.parse(await this.deps.fileSystem.readTextFile(markerPath));
-      if (!isRecord(parsed) || parsed.source !== 'clawx-preinstalled') {
+      if (!isRecord(parsed) || parsed.source !== 'matchaclaw-preinstalled') {
         return null;
       }
       const slug = typeof parsed.slug === 'string' ? parsed.slug : '';
       const version = typeof parsed.version === 'string' ? parsed.version : '';
       const installedAt = typeof parsed.installedAt === 'string' ? parsed.installedAt : '';
       return slug && version && installedAt
-        ? { source: 'clawx-preinstalled', slug, version, installedAt }
+        ? { source: 'matchaclaw-preinstalled', slug, version, installedAt }
         : null;
     } catch {
       return null;
@@ -511,7 +511,7 @@ export class SkillsService {
 
       await this.copyDirectory(sourceDir, targetDir);
       const markerPayload: PreinstalledMarker = {
-        source: 'clawx-preinstalled',
+        source: 'matchaclaw-preinstalled',
         slug: spec.slug,
         version: desiredVersion,
         installedAt: this.deps.clock.nowIso(),

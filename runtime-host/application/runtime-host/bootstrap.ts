@@ -237,7 +237,7 @@ export class RuntimeHostBootstrapService {
     if (typeof settings.gatewayToken === 'string' && settings.gatewayToken.trim()) {
       return settings;
     }
-    const gatewayToken = `clawx-${this.deps.idGenerator.randomHex(16)}`;
+    const gatewayToken = `matchaclaw-${this.deps.idGenerator.randomHex(16)}`;
     await this.deps.settingsRepository.setValue('gatewayToken', gatewayToken);
     return {
       ...settings,

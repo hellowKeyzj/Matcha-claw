@@ -10,7 +10,7 @@ const SLOW_REQUEST_THRESHOLD_MS = 800;
 
 function shouldLogApiRequests(): boolean {
   try {
-    return import.meta.env.DEV || window.localStorage.getItem('clawx:api-log') === '1';
+    return import.meta.env.DEV || window.localStorage.getItem('matchaclaw:api-log') === '1';
   } catch {
     return !!import.meta.env.DEV;
   }

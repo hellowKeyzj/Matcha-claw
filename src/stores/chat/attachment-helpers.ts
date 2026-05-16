@@ -9,7 +9,7 @@ import type {
   SessionRenderUserMessageItem,
 } from '../../../runtime-host/shared/session-adapter-types';
 
-const IMAGE_CACHE_KEY = 'clawx:image-cache';
+const IMAGE_CACHE_KEY = 'matchaclaw:image-cache';
 const IMAGE_CACHE_MAX = 100;
 
 function loadImageCache(): Map<string, AttachedFileMeta> {

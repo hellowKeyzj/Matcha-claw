@@ -119,7 +119,7 @@ WeChat（`openclaw-weixin`）の cron 能動配信は利用できますが、制
 
 ### 🧩 拡張可能なスキルシステム
 事前構築されたスキルでAIエージェントを拡張できます。統合スキルパネルからスキルの閲覧、インストール、ローカルのスキルフォルダ/ZIP/Markdown ファイルのアップロード、管理が可能です。パッケージマネージャーは不要です。
-ClawX はドキュメント処理スキル（`pdf`、`xlsx`、`docx`、`pptx`）もフル内容で同梱し、起動時に `~/.openclaw/skills` へ自動配備し、初回インストール時に既定で有効化します。追加の同梱スキル（`find-skills`、`tavily-search`、`multi-search-engine`、`web-extract`、`daily-news-briefing`）も既定で有効化されますが、必要な API キーが未設定の場合は OpenClaw が実行時に設定エラーを表示します。
+MatchaClaw はドキュメント処理スキル（`pdf`、`xlsx`、`docx`、`pptx`）もフル内容で同梱し、起動時に `~/.openclaw/skills` へ自動配備し、初回インストール時に既定で有効化します。追加の同梱スキル（`find-skills`、`tavily-search`、`multi-search-engine`、`web-extract`、`daily-news-briefing`）も既定で有効化されますが、必要な API キーが未設定の場合は OpenClaw が実行時に設定エラーを表示します。
 
 主な検索スキルで必要な環境変数:
 - `TAVILY_API_KEY`: `tavily-search` 用（上流ランタイムで OAuth 対応の場合あり）
@@ -140,7 +140,7 @@ relay 対応ブラウザが起動していない場合、MatchaClaw はまず「
 ライトモード、ダークモード、またはシステム同期テーマ。MatchaClawはあなたの好みに自動的に適応します。
 
 ### 🚀 自動起動設定
-**設定 → 通用** から **システム起動時に自動起動** を有効化すると、ログイン後に ClawX が自動的に起動します。
+**設定 → 通用** から **システム起動時に自動起動** を有効化すると、ログイン後に MatchaClaw が自動的に起動します。
 
 ---
 

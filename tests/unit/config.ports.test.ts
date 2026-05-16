@@ -7,8 +7,6 @@ function resetPortEnv(): void {
   process.env = { ...envBackup };
   delete process.env.MATCHACLAW_PORT_MATCHACLAW_HOST_API;
   delete process.env.MATCHACLAW_RUNTIME_HOST_PORT;
-  delete process.env.CLAWX_PORT_CLAWX_HOST_API;
-  delete process.env.MATCHACLAW_PORT_CLAWX_HOST_API;
 }
 
 afterEach(() => {
@@ -28,11 +26,5 @@ describe('config ports', () => {
   it('runtime-host 端口通过 MATCHACLAW_RUNTIME_HOST_PORT 读取', () => {
     process.env.MATCHACLAW_RUNTIME_HOST_PORT = '4324';
     expect(getPort('MATCHACLAW_RUNTIME_HOST')).toBe(4324);
-  });
-
-  it('不再读取 CLAWX_HOST_API 兼容环境变量', () => {
-    process.env.MATCHACLAW_PORT_CLAWX_HOST_API = '4322';
-    process.env.CLAWX_PORT_CLAWX_HOST_API = '4323';
-    expect(getPort('MATCHACLAW_HOST_API')).toBe(PORTS.MATCHACLAW_HOST_API);
   });
 });

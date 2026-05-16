@@ -29,7 +29,7 @@ const MonacoDiffViewerInner = lazy(async () => {
     return (
       <div
         data-testid="monaco-diff-viewer"
-        className={cn('clawx-diff-editor h-full min-h-0 w-full overflow-hidden', className)}
+        className={cn('matchaclaw-diff-editor h-full min-h-0 w-full overflow-hidden', className)}
       >
         <DiffEditor
           height="100%"

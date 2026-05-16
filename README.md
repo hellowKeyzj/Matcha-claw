@@ -119,7 +119,7 @@ WeChat (`openclaw-weixin`) cron proactive delivery is supported with constraints
 
 ### 🧩 Extensible Skill System
 Extend your AI agents with pre-built skills. Browse, install, upload local skill folders/ZIPs/Markdown files, and manage skills through the integrated skill panel—no package managers required.
-ClawX also pre-bundles full document-processing skills (`pdf`, `xlsx`, `docx`, `pptx`), deploys them automatically to `~/.openclaw/skills` on startup, and enables them by default on first install. Additional bundled skills (`find-skills`, `tavily-search`, `multi-search-engine`, `web-extract`, `daily-news-briefing`) are also enabled by default; if required API keys are missing, OpenClaw will surface configuration errors in runtime.
+MatchaClaw also pre-bundles full document-processing skills (`pdf`, `xlsx`, `docx`, `pptx`), deploys them automatically to `~/.openclaw/skills` on startup, and enables them by default on first install. Additional bundled skills (`find-skills`, `tavily-search`, `multi-search-engine`, `web-extract`, `daily-news-briefing`) are also enabled by default; if required API keys are missing, OpenClaw will surface configuration errors in runtime.
 
 Environment variables for bundled search skills:
 - `TAVILY_API_KEY` for `tavily-search` (OAuth may also be supported by upstream skill runtime)
@@ -141,7 +141,7 @@ The setup wizard requires license validation before continuing. Runtime access i
 Light mode, dark mode, or system-synchronized themes. MatchaClaw adapts to your preferences automatically.
 
 ### 🚀 Startup Launch Control
-In **Settings → General**, you can enable **Launch at system startup** so ClawX starts automatically after login.
+In **Settings → General**, you can enable **Launch at system startup** so MatchaClaw starts automatically after login.
 
 ---
 

@@ -30,7 +30,7 @@ type E2EFixtureModule = {
 let fixtureModulePromise: Promise<E2EFixtureModule | null> | null = null;
 
 function isE2EEnabled(): boolean {
-  return process.env.CLAWX_E2E === '1';
+  return process.env.MATCHACLAW_E2E === '1';
 }
 
 async function loadFixtureModule(): Promise<E2EFixtureModule | null> {

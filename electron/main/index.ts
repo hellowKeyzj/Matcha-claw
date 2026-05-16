@@ -24,9 +24,9 @@ import {
 import { createSignalQuitHandler } from './signal-quit';
 import { acquireProcessInstanceFileLock } from './process-instance-lock';
 
-const WINDOWS_APP_USER_MODEL_ID = 'app.clawx.desktop';
-const isE2EMode = process.env.CLAWX_E2E === '1';
-const requestedUserDataDir = process.env.CLAWX_E2E_USER_DATA_DIR?.trim();
+const WINDOWS_APP_USER_MODEL_ID = 'app.matchaclaw.desktop';
+const isE2EMode = process.env.MATCHACLAW_E2E === '1';
+const requestedUserDataDir = process.env.MATCHACLAW_E2E_USER_DATA_DIR?.trim();
 
 // Disable GPU hardware acceleration globally for maximum stability across
 // all GPU configurations (no GPU, integrated, discrete).
@@ -45,11 +45,11 @@ const requestedUserDataDir = process.env.CLAWX_E2E_USER_DATA_DIR?.trim();
 app.disableHardwareAcceleration();
 
 // On Linux, set CHROME_DESKTOP so Chromium can find the correct .desktop file.
-// On Wayland this maps the running window to clawx.desktop (→ icon + app grouping);
+// On Wayland this maps the running window to matchaclaw.desktop (→ icon + app grouping);
 // on X11 it supplements the StartupWMClass matching.
 // Must be called before app.whenReady() / before any window is created.
 if (process.platform === 'linux') {
-  app.setDesktopName('clawx.desktop');
+  app.setDesktopName('matchaclaw.desktop');
 }
 
 if (isE2EMode && requestedUserDataDir) {
@@ -70,7 +70,7 @@ if (gotElectronLock && !isE2EMode) {
   try {
     const fileLock = acquireProcessInstanceFileLock({
       userDataDir: app.getPath('userData'),
-      lockName: 'clawx',
+      lockName: 'matchaclaw',
       force: true,
     });
     gotFileLock = fileLock.acquired;

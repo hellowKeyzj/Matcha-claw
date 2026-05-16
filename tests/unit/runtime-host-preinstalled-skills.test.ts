@@ -123,8 +123,8 @@ describe('runtime-host preinstalled skills', () => {
     const targetDir = join(skillsRoot, 'nuwa-skill');
     await mkdir(targetDir, { recursive: true });
     await writeFile(join(targetDir, 'SKILL.md'), '# nuwa\n', 'utf8');
-    await writeFile(join(targetDir, '.clawx-preinstalled.json'), `${JSON.stringify({
-      source: 'clawx-preinstalled',
+    await writeFile(join(targetDir, '.matchaclaw-preinstalled.json'), `${JSON.stringify({
+      source: 'matchaclaw-preinstalled',
       slug: 'nuwa-skill',
       version: '2026-05-01',
       installedAt: '2026-05-01T00:00:00.000Z',
@@ -140,8 +140,8 @@ describe('runtime-host preinstalled skills', () => {
     const targetDir = join(skillsRoot, 'nuwa-skill');
     await mkdir(targetDir, { recursive: true });
     await writeFile(join(targetDir, 'SKILL.md'), '# nuwa\n', 'utf8');
-    await writeFile(join(targetDir, '.clawx-preinstalled.json'), `${JSON.stringify({
-      source: 'clawx-preinstalled',
+    await writeFile(join(targetDir, '.matchaclaw-preinstalled.json'), `${JSON.stringify({
+      source: 'matchaclaw-preinstalled',
       slug: 'nuwa-skill',
       version: '2026-05-01',
       installedAt: '2026-05-01T00:00:00.000Z',
@@ -150,6 +150,6 @@ describe('runtime-host preinstalled skills', () => {
     await createSkillsService({ 'nuwa-skill': { enabled: false } }).executeEnsurePreinstalled();
 
     expect(setEnabled).not.toHaveBeenCalled();
-    expect(await readFile(join(targetDir, '.clawx-preinstalled.json'), 'utf8')).toContain('"slug": "nuwa-skill"');
+    expect(await readFile(join(targetDir, '.matchaclaw-preinstalled.json'), 'utf8')).toContain('"slug": "nuwa-skill"');
   });
 });

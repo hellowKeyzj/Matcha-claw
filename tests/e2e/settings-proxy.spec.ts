@@ -13,7 +13,7 @@ async function ensureSwitchState(
 
 async function ensureSetupComplete(page: Page): Promise<void> {
   await page.evaluate(async () => {
-    const storageKey = 'clawx-settings';
+    const storageKey = 'matchaclaw-settings';
     const raw = window.localStorage.getItem(storageKey);
     let parsed: { state?: Record<string, unknown>; version?: number } = {};
     if (raw) {
@@ -46,7 +46,7 @@ async function ensureSetupComplete(page: Page): Promise<void> {
   await page.reload({ waitUntil: 'domcontentloaded' });
 }
 
-test.describe('ClawX developer proxy settings', () => {
+test.describe('MatchaClaw developer proxy settings', () => {
   test('禁用代理时仍可保存', async ({ page }) => {
     await ensureSetupComplete(page);
     await page.evaluate(() => {

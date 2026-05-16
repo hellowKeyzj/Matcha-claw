@@ -102,7 +102,7 @@ async function getEventSource(): Promise<EventSource> {
 
 function allowSseFallback(): boolean {
   try {
-    return window.localStorage.getItem('clawx:allow-sse-fallback') === '1';
+    return window.localStorage.getItem('matchaclaw:allow-sse-fallback') === '1';
   } catch {
     return false;
   }

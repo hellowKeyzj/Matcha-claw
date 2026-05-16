@@ -58,7 +58,7 @@ const CREATE_AGENT_RUNTIME_BARRIER_TIMEOUT_MS = 3000;
 const CREATE_AGENT_RUNTIME_BARRIER_POLL_INTERVAL_MS = 120;
 const CONFIG_DISPLAY_CACHE_TTL_MS = 1000;
 const SUBAGENT_SNAPSHOT_NOT_READY_RETRY_MS = 1200;
-const SUBAGENT_AVATAR_STORAGE_KEY = 'clawx-subagent-avatar-presentations';
+const SUBAGENT_AVATAR_STORAGE_KEY = 'matchaclaw-subagent-avatar-presentations';
 let workspaceFallbackRootCache: string | undefined;
 let workspaceFallbackRootTask: Promise<string | undefined> | null = null;
 let configDisplayCache:

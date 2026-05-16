@@ -3188,7 +3188,7 @@ tests/unit/
 
 1. `hostapi:fetch` 需要主进程实际 handler，避免 `No handler registered for 'hostapi:fetch'`。
 2. Host API 启动使用 `resolvedPort`，避免端口空值污染监听与日志。
-3. 按要求去除 `CLAWX_HOST_API` 兼容，防止配置源混杂。
+3. 按要求去除 `MATCHACLAW_HOST_API` 兼容，防止配置源混杂。
 4. 日志改 ASCII，规避 Windows 控制台编码导致的中文乱码。
 
 ## 本次变更日志
@@ -3198,7 +3198,7 @@ tests/unit/
 - 主要结果：
   - 新增主进程 `hostapi:fetch` 代理实现，前端 Host API 调用链恢复可用。
   - 修复 Host API 端口解析兜底，消除 `http://127.0.0.1:undefined`。
-  - Host API 端口键统一为 `MATCHACLAW_HOST_API`，并移除 `CLAWX_HOST_API` 兼容读取。
+  - Host API 端口键统一为 `MATCHACLAW_HOST_API`，并移除 `MATCHACLAW_HOST_API` 兼容读取。
   - 插件镜像日志改为 ASCII 文案并补齐端口配置单测。
 
 ---

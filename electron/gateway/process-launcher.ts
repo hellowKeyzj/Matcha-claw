@@ -120,7 +120,7 @@ export async function launchGatewayProcess(options: {
   const lastSpawnSummary = `mode=${mode}, entry="${entryScript}", args="${options.sanitizeSpawnArgs(gatewayArgs).join(' ')}", cwd="${openclawDir}"`;
 
   const runtimeEnv = { ...forkEnv };
-  // ClawX does not provide LAN gateway discovery, so OpenClaw's Bonjour
+  // MatchaClaw does not provide LAN gateway discovery, so OpenClaw's Bonjour
   // broadcaster only adds noisy cross-device collisions on shared networks.
   runtimeEnv.OPENCLAW_DISABLE_BONJOUR = '1';
   if (!app.isPackaged) {

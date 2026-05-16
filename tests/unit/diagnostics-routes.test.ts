@@ -92,7 +92,7 @@ describe('diagnostics routes', () => {
             healthSummary: 'healthy',
             transportState: 'connected',
           }),
-          clawxLogTail: 'matchaclaw-log-tail',
+          matchaclawLogTail: 'matchaclaw-log-tail',
           gatewayLogTail: 'g1\ng2\ng3\n',
           gatewayErrLogTail: 'e1\ne2\n',
         }),

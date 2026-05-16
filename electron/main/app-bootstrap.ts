@@ -19,7 +19,7 @@ import { createMainWindow, loadMainWindowContent } from './main-window';
 import { isQuitting } from './app-state';
 import { waitForRuntimeHostJob, type RuntimeHostJobSnapshot } from './runtime-host-jobs';
 
-const isE2EMode = process.env.CLAWX_E2E === '1';
+const isE2EMode = process.env.MATCHACLAW_E2E === '1';
 
 type HostBootstrapSettings = {
   launchAtStartup: boolean;

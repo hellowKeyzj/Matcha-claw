@@ -1,4 +1,4 @@
-const RENDERER_DEBUG_LOG_STORAGE_KEY = 'clawx:debug-log';
+const RENDERER_DEBUG_LOG_STORAGE_KEY = 'matchaclaw:debug-log';
 
 export function isRendererDebugLoggingEnabled(): boolean {
   try {

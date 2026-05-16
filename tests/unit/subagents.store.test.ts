@@ -8,7 +8,7 @@ import {
 import { useProviderStore } from '@/stores/providers';
 import { useSubagentsStore } from '@/stores/subagents';
 
-const AVATAR_STORAGE_KEY = 'clawx-subagent-avatar-presentations';
+const AVATAR_STORAGE_KEY = 'matchaclaw-subagent-avatar-presentations';
 
 describe('subagents store', () => {
   beforeEach(() => {

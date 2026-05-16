@@ -96,8 +96,8 @@ export const test = base.extend<ElectronFixtures>({
 
     const launchEnv = {
       ...process.env,
-      CLAWX_E2E: '1',
-      CLAWX_E2E_USER_DATA_DIR: userDataDir,
+      MATCHACLAW_E2E: '1',
+      MATCHACLAW_E2E_USER_DATA_DIR: userDataDir,
       MATCHACLAW_PORT_MATCHACLAW_HOST_API: String(hostApiPort),
       MATCHACLAW_RUNTIME_HOST_PORT: String(runtimeHostPort),
       HOME: homeDir,

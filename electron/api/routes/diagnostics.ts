@@ -119,7 +119,7 @@ export async function handleDiagnosticsRoutes(
     sendJson(res, 200, {
       capturedAt: Date.now(),
       gateway,
-      clawxLogTail: await logger.readLogFile(DEFAULT_TAIL_LINES),
+      matchaclawLogTail: await logger.readLogFile(DEFAULT_TAIL_LINES),
       gatewayLogTail: await readTail(join(openClawConfigDir, 'logs', 'gateway.log')),
       gatewayErrLogTail: await readTail(join(openClawConfigDir, 'logs', 'gateway.err.log')),
     });

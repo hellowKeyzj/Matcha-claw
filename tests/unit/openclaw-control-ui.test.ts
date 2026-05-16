@@ -3,8 +3,8 @@ import { buildOpenClawControlUiUrl } from '../../electron/utils/openclaw-control
 
 describe('buildOpenClawControlUiUrl', () => {
   it('使用 URL fragment 传递 token', () => {
-    expect(buildOpenClawControlUiUrl(18789, 'clawx-test-token')).toBe(
-      'http://127.0.0.1:18789/#token=clawx-test-token',
+    expect(buildOpenClawControlUiUrl(18789, 'matchaclaw-test-token')).toBe(
+      'http://127.0.0.1:18789/#token=matchaclaw-test-token',
     );
   });
 

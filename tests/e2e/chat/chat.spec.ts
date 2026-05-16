@@ -3,7 +3,7 @@ import type { Page } from '@playwright/test';
 
 async function ensureSetupComplete(page: Page): Promise<void> {
   await page.evaluate(() => {
-    const storageKey = 'clawx-settings';
+    const storageKey = 'matchaclaw-settings';
     const raw = window.localStorage.getItem(storageKey);
     let parsed: { state?: Record<string, unknown>; version?: number } = {};
     if (raw) {

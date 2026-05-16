@@ -3,7 +3,7 @@ import { gatewayClientRpcMock, resetGatewayClientMocks } from './helpers/mock-ga
 
 import { useSubagentsStore } from '@/stores/subagents';
 
-const AVATAR_STORAGE_KEY = 'clawx-subagent-avatar-presentations';
+const AVATAR_STORAGE_KEY = 'matchaclaw-subagent-avatar-presentations';
 
 describe('subagents crud', () => {
   beforeEach(() => {
