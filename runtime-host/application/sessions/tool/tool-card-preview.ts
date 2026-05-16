@@ -104,21 +104,21 @@ function buildJsonPreviewSummary(value: unknown): string {
       return '空结果';
     }
 
-    for (const key of ['error', 'reason']) {
+    for (const key of ['error', 'reason', 'cause']) {
       const candidate = value[key];
       if (typeof candidate === 'string' && candidate.trim()) {
         return `失败：${previewText(candidate, 32)}`;
       }
     }
 
-    for (const key of ['text', 'content', 'message', 'result', 'summary', 'title']) {
+    for (const key of ['text', 'content', 'message', 'result', 'summary', 'title', 'body', 'description']) {
       const candidate = value[key];
       if (typeof candidate === 'string' && candidate.trim()) {
         return previewText(candidate, 40);
       }
     }
 
-    for (const key of ['items', 'results', 'data', 'rows', 'files', 'matches']) {
+    for (const key of ['items', 'results', 'data', 'rows', 'files', 'matches', 'entries', 'records']) {
       const candidate = value[key];
       if (Array.isArray(candidate)) {
         return candidate.length === 0 ? '空结果' : `共 ${candidate.length} 项`;
@@ -128,6 +128,15 @@ function buildJsonPreviewSummary(value: unknown): string {
     if (typeof value.status === 'string' && value.status.trim()) {
       return `状态：${previewText(value.status, 24)}`;
     }
+
+    // 通用兜底：取第一个有意义的字符串值
+    for (const key of keys) {
+      const candidate = value[key];
+      if (typeof candidate === 'string' && candidate.trim().length >= 2 && /[\p{L}]/u.test(candidate)) {
+        return previewText(candidate, 40) ?? `包含 ${keys.join('、')}`;
+      }
+    }
+
     if (keys.length <= 4) {
       return `包含 ${keys.join('、')}`;
     }
@@ -242,6 +251,45 @@ function extractLooseStructuredChunk(text: string): string {
   return trimmed;
 }
 
+/**
+ * 从结构化文本中提取第一个有语义的字符串值（不限字段名）。
+ * 匹配 "key": "value" 或 'key': 'value' 或 key: value 模式，
+ * 返回第一个长度 >= 2 且包含字母/数字的值。
+ */
+function extractFirstMeaningfulValue(text: string): string | undefined {
+  // 优先匹配双引号值
+  const doubleQuoted = /["']?\w+["']?\s*:\s*"([^"]{2,})"/g;
+  let match = doubleQuoted.exec(text);
+  while (match) {
+    const value = match[1]?.trim();
+    if (value && /[\p{L}\p{N}]/u.test(value)) {
+      return value;
+    }
+    match = doubleQuoted.exec(text);
+  }
+  // 再匹配单引号值
+  const singleQuoted = /["']?\w+["']?\s*:\s*'([^']{2,})'/g;
+  match = singleQuoted.exec(text);
+  while (match) {
+    const value = match[1]?.trim();
+    if (value && /[\p{L}\p{N}]/u.test(value)) {
+      return value;
+    }
+    match = singleQuoted.exec(text);
+  }
+  // 最后匹配无引号值（排除纯数字和布尔值，只取有字母的）
+  const unquoted = /["']?\w+["']?\s*:\s*([^,}\]\n"'][^,}\]\n]*)/g;
+  match = unquoted.exec(text);
+  while (match) {
+    const value = match[1]?.trim();
+    if (value && value.length >= 2 && /\p{L}/u.test(value) && !/^(true|false|null|undefined)$/i.test(value)) {
+      return value;
+    }
+    match = unquoted.exec(text);
+  }
+  return undefined;
+}
+
 function buildObjectLikePreview(text: string): string | undefined {
   const trimmed = extractLooseStructuredChunk(text);
   if (!trimmed.includes(':')) {
@@ -255,18 +303,68 @@ function buildObjectLikePreview(text: string): string | undefined {
     'text',
     'result',
     'content',
+    'body',
   ]
     .map((field) => extractObjectLikeField(trimmed, field))
     .find((value) => Boolean(value));
-  const error = ['error', 'reason']
+  const error = ['error', 'reason', 'cause']
     .map((field) => extractObjectLikeField(trimmed, field))
     .find((value) => Boolean(value));
   const diff = extractObjectLikeField(trimmed, 'diff');
-  const status = extractObjectLikeField(trimmed, 'status');
+  const status = extractObjectLikeField(trimmed, 'status')
+    ?? extractObjectLikeField(trimmed, 'state');
   const tool = extractObjectLikeField(trimmed, 'tool') ?? extractObjectLikeField(trimmed, 'name');
-  const url = extractObjectLikeField(trimmed, 'url');
+  const url = [
+    'url',
+    'endpoint',
+    'target_url',
+    'targetUrl',
+    'href',
+    'host',
+  ]
+    .map((field) => extractObjectLikeField(trimmed, field))
+    .find((value) => Boolean(value));
   const description = extractObjectLikeField(trimmed, 'description');
-  const query = extractObjectLikeField(trimmed, 'query');
+  const query = [
+    'query',
+    'keyword',
+    'search',
+    'pattern',
+    'term',
+    'sql',
+    'statement',
+  ]
+    .map((field) => extractObjectLikeField(trimmed, field))
+    .find((value) => Boolean(value));
+  const path = [
+    'path',
+    'file_path',
+    'filePath',
+    'file',
+    'filename',
+    'directory',
+    'folder',
+    'source',
+    'destination',
+  ]
+    .map((field) => extractObjectLikeField(trimmed, field))
+    .find((value) => Boolean(value));
+  const command = [
+    'command',
+    'cmd',
+    'script',
+    'shell',
+  ]
+    .map((field) => extractObjectLikeField(trimmed, field))
+    .find((value) => Boolean(value));
+  const prompt = [
+    'prompt',
+    'input_text',
+    'instruction',
+    'question',
+  ]
+    .map((field) => extractObjectLikeField(trimmed, field))
+    .find((value) => Boolean(value));
 
   if (error && message) {
     const prefix = tool ? `${normalizePreviewLine(stripStructuredPreviewNoise(tool), 18)}失败：` : '失败：';
@@ -285,6 +383,15 @@ function buildObjectLikePreview(text: string): string | undefined {
   if (query) {
     return `查询：${normalizePreviewLine(stripStructuredPreviewNoise(query), 40)}`;
   }
+  if (command) {
+    return `执行：${normalizePreviewLine(stripStructuredPreviewNoise(command), 40)}`;
+  }
+  if (path) {
+    return normalizePreviewLine(stripStructuredPreviewNoise(path), 48);
+  }
+  if (prompt) {
+    return normalizePreviewLine(stripStructuredPreviewNoise(prompt), 48);
+  }
   if (description) {
     return normalizePreviewLine(stripStructuredPreviewNoise(description), 44);
   }
@@ -296,6 +403,14 @@ function buildObjectLikePreview(text: string): string | undefined {
       ? `${normalizePreviewLine(stripStructuredPreviewNoise(tool), 18)} · 状态 ${normalizePreviewLine(stripStructuredPreviewNoise(status), 18)}`
       : `状态：${normalizePreviewLine(stripStructuredPreviewNoise(status), 24)}`;
   }
+
+  // 通用兜底：白名单字段全部未命中时，提取第一个有语义的字符串值。
+  // 覆盖任意 skill/MCP 工具的未知字段名。
+  const firstValue = extractFirstMeaningfulValue(trimmed);
+  if (firstValue) {
+    return normalizePreviewLine(stripStructuredPreviewNoise(firstValue), 48);
+  }
+
   return undefined;
 }
 
@@ -316,11 +431,20 @@ export function buildSemanticTextPreview(value: string): string {
   }
 
   const firstLine = stripStructuredPreviewNoise(compact.split(/\r?\n/)[0] ?? '');
-  if (firstLine) {
+  if (firstLine && /[\p{L}\p{N}]/u.test(firstLine)) {
     return normalizePreviewLine(firstLine, 48);
   }
 
-  return normalizePreviewLine(compact, 48);
+  // 多行文本首行无语义时，尝试找到第一个有语义的行
+  const lines = compact.split(/\r?\n/);
+  for (let i = 1; i < lines.length; i++) {
+    const line = stripStructuredPreviewNoise(lines[i] ?? '');
+    if (line && /[\p{L}\p{N}]/u.test(line)) {
+      return normalizePreviewLine(line, 48);
+    }
+  }
+
+  return '';
 }
 
 export function buildToolResultPreviewText(value: string): string {
