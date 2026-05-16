@@ -45,8 +45,6 @@ export class SessionSnapshotService {
   buildEmptySnapshot(sessionKey = ''): SessionStateSnapshot {
     return {
       sessionKey,
-      revision: 0,
-      runEpoch: 0,
       catalog: createSessionCatalogItem({
         sessionKey,
         timelineEntries: [],
@@ -92,8 +90,6 @@ export class SessionSnapshotService {
     });
     return {
       sessionKey,
-      revision: state.revision,
-      runEpoch: state.runEpoch,
       catalog: createSessionCatalogItem({
         sessionKey,
         timelineEntries: state.timelineEntries,

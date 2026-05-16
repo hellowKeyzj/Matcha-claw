@@ -34,8 +34,6 @@ function createSnapshot(sessionKey: string, messages: RawMessage[]) {
   const items = buildRenderItemsFromMessages(sessionKey, messages);
   return {
     sessionKey,
-    revision: 1,
-    runEpoch: 1,
     catalog: {
       key: sessionKey,
       agentId: 'main',
@@ -50,8 +48,6 @@ function createSnapshot(sessionKey: string, messages: RawMessage[]) {
     items,
     replayComplete: true,
     runtime: {
-      revision: 1,
-      runEpoch: 1,
       sending: false,
       activeRunId: null,
       runPhase: 'done' as const,

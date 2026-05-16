@@ -27,7 +27,7 @@ import {
 import { GatewayAutoRecovery } from './gateway-auto-recovery';
 
 export interface GatewaySessionRuntimePort {
-  consumeGatewayConversationEvent(payload: GatewayConversationEvent): unknown[];
+  consumeGatewayConversationEvent(payload: GatewayConversationEvent): Promise<unknown[]>;
   notifyTransportConnected(transportEpoch: number): void;
 }
 
@@ -51,6 +51,7 @@ export interface RuntimeHostGatewayBridgeDeps {
 
 export function createRuntimeHostGatewayClient(deps: RuntimeHostGatewayBridgeDeps) {
   let latestObservedTransportEpoch = 0;
+  let conversationEventChain: Promise<void> = Promise.resolve();
 
   const requestGatewayRestart = async (reason: string): Promise<void> => {
     const result = await deps.parentTransport.requestParentShellAction('gateway_restart', { reason });
@@ -85,18 +86,21 @@ export function createRuntimeHostGatewayClient(deps: RuntimeHostGatewayBridgeDep
     },
     onGatewayConversationEvent: (payload) => {
       logTodoToolDebug(deps.logger, 'gateway.raw-conversation-event', payload);
-      const sessionUpdates = deps.getSessionRuntime()?.consumeGatewayConversationEvent(payload) ?? [];
-      for (const sessionUpdate of sessionUpdates) {
-        if (containsTodoToolDebugSignal(sessionUpdate)) {
-          logTodoToolDebug(
-            deps.logger,
-            'runtime-host.emit-session-update',
-            summarizeSessionUpdateForTodoToolDebug(sessionUpdate as SessionUpdateEvent),
-          );
+      conversationEventChain = conversationEventChain.then(async () => {
+        const runtime = deps.getSessionRuntime();
+        const sessionUpdates = runtime ? await runtime.consumeGatewayConversationEvent(payload) : [];
+        for (const sessionUpdate of sessionUpdates) {
+          if (containsTodoToolDebugSignal(sessionUpdate)) {
+            logTodoToolDebug(
+              deps.logger,
+              'runtime-host.emit-session-update',
+              summarizeSessionUpdateForTodoToolDebug(sessionUpdate as SessionUpdateEvent),
+            );
+          }
+          autoRecovery.observe(sessionUpdate as SessionUpdateEvent);
+          void deps.parentTransport.emitParentGatewayEvent('session:update', sessionUpdate).catch(() => undefined);
         }
-        autoRecovery.observe(sessionUpdate as SessionUpdateEvent);
-        void deps.parentTransport.emitParentGatewayEvent('session:update', sessionUpdate).catch(() => undefined);
-      }
+      }).catch(() => undefined);
     },
     onGatewayChannelStatus: (payload) => {
       void deps.parentTransport.emitParentGatewayEvent('gateway:channel-status', payload).catch(() => undefined);

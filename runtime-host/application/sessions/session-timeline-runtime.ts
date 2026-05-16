@@ -67,20 +67,17 @@ export class SessionTimelineRuntime {
     return this.deps.stateStore.getSessionState(sessionKey);
   }
 
-  private commitStateRevision(
+  private touchSessionStateMeta(
     state: SessionRuntimeTimelineState,
     options: {
       advanceRunEpoch?: boolean;
     } = {},
   ): void {
-    state.revision += 1;
     if (options.advanceRunEpoch) {
       state.runEpoch += 1;
     }
     state.runtime = {
       ...state.runtime,
-      revision: state.revision,
-      runEpoch: state.runEpoch,
       updatedAt: this.deps.clock.nowMs(),
     };
   }
@@ -89,13 +86,9 @@ export class SessionTimelineRuntime {
     patch: Partial<SessionRuntimeStateSnapshot>,
   ): Partial<SessionRuntimeStateSnapshot> {
     const {
-      revision: _revision,
-      runEpoch: _runEpoch,
       updatedAt: _updatedAt,
       ...runtimePatch
     } = patch;
-    void _revision;
-    void _runEpoch;
     void _updatedAt;
     return runtimePatch;
   }
@@ -103,7 +96,6 @@ export class SessionTimelineRuntime {
   private cloneCommittedSessionState(state: SessionRuntimeTimelineState): SessionRuntimeTimelineState {
     return {
       sessionKey: state.sessionKey,
-      revision: state.revision,
       runEpoch: state.runEpoch,
       timelineEntries: structuredClone(state.timelineEntries),
       executionGraphItems: structuredClone(state.executionGraphItems),
@@ -273,7 +265,7 @@ export class SessionTimelineRuntime {
       || transition.runtimePatch
       || transition.activeTransportEpoch !== undefined
     ) {
-      this.commitStateRevision(state, {
+      this.touchSessionStateMeta(state, {
         advanceRunEpoch: transition.advanceRunEpoch,
       });
     }
@@ -333,7 +325,7 @@ export class SessionTimelineRuntime {
     }).runtime;
   }
 
-  resolveLifecycleRuntime(
+  async resolveLifecycleRuntime(
     sessionKey: string,
     input: {
       phase: 'started' | 'final' | 'error' | 'aborted' | 'unknown';
@@ -341,7 +333,7 @@ export class SessionTimelineRuntime {
       error?: string | null;
       transportIssue?: GatewayTransportIssue | null;
     },
-  ): SessionRuntimeStateSnapshot {
+  ): Promise<SessionRuntimeStateSnapshot> {
     switch (input.phase) {
       case 'started':
         return this.commitSessionTransition(sessionKey, {
@@ -358,27 +350,30 @@ export class SessionTimelineRuntime {
           advanceRunEpoch: !this.getSessionState(sessionKey).runtime.sending,
         }).runtime;
       case 'final':
+        await this.reconcileSessionTranscript(sessionKey);
         this.closeMissingToolResultsForRun(sessionKey, input.runId);
         return this.commitSessionTransition(sessionKey, {
-        runtimePatch: this.buildTerminalRuntimePatch('done', null, null),
-        activeTransportEpoch: null,
-        advanceRunEpoch: true,
-      }).runtime;
-    case 'error':
-      this.closeMissingToolResultsForRun(sessionKey, input.runId);
-      return this.commitSessionTransition(sessionKey, {
-        runtimePatch: this.buildTerminalRuntimePatch('error', input.error ?? null, input.transportIssue ?? null),
-        activeTransportEpoch: null,
-        advanceRunEpoch: true,
-      }).runtime;
-    case 'aborted':
-      this.deps.stateStore.blockRun(sessionKey, input.runId);
-      this.closeMissingToolResultsForRun(sessionKey, input.runId);
-      return this.commitSessionTransition(sessionKey, {
-        runtimePatch: this.buildTerminalRuntimePatch('aborted', input.error ?? null, input.transportIssue ?? null),
-        activeTransportEpoch: null,
-        advanceRunEpoch: true,
-      }).runtime;
+          runtimePatch: this.buildTerminalRuntimePatch('done', null, null),
+          activeTransportEpoch: null,
+          advanceRunEpoch: true,
+        }).runtime;
+      case 'error':
+        await this.reconcileSessionTranscript(sessionKey);
+        this.closeMissingToolResultsForRun(sessionKey, input.runId);
+        return this.commitSessionTransition(sessionKey, {
+          runtimePatch: this.buildTerminalRuntimePatch('error', input.error ?? null, input.transportIssue ?? null),
+          activeTransportEpoch: null,
+          advanceRunEpoch: true,
+        }).runtime;
+      case 'aborted':
+        this.deps.stateStore.blockRun(sessionKey, input.runId);
+        await this.reconcileSessionTranscript(sessionKey);
+        this.closeMissingToolResultsForRun(sessionKey, input.runId);
+        return this.commitSessionTransition(sessionKey, {
+          runtimePatch: this.buildTerminalRuntimePatch('aborted', input.error ?? null, input.transportIssue ?? null),
+          activeTransportEpoch: null,
+          advanceRunEpoch: true,
+        }).runtime;
       default:
         return cloneSessionRuntimeState(this.getSessionState(sessionKey).runtime);
     }

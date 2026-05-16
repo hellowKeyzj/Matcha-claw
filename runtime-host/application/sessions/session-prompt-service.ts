@@ -58,7 +58,7 @@ export class SessionPromptService {
   }): Promise<void> {
     await this.deps.operationCoordinator.run(input.sessionKey, 'prompt', async () => {
       const state = this.deps.stateStore.getSessionState(input.sessionKey);
-      if (state.runtime.runEpoch !== input.runEpoch || !state.runtime.sending) {
+      if (state.runEpoch !== input.runEpoch || !state.runtime.sending) {
         return;
       }
       const committed = this.deps.timelineRuntime.commitSessionTransition(input.sessionKey, {
@@ -96,7 +96,7 @@ export class SessionPromptService {
   }): Promise<void> {
     await this.deps.operationCoordinator.run(input.sessionKey, 'prompt', async () => {
       const state = this.deps.stateStore.getSessionState(input.sessionKey);
-      if (state.runtime.runEpoch !== input.runEpoch || !state.runtime.sending) {
+      if (state.runEpoch !== input.runEpoch || !state.runtime.sending) {
         return;
       }
       const committed = this.deps.timelineRuntime.commitSessionTransition(input.sessionKey, {
@@ -232,7 +232,7 @@ export class SessionPromptService {
       };
       await this.deps.stateStore.flushPersistedStore();
       return {
-        runEpoch: committed.runtime.runEpoch,
+        runEpoch: committed.state.runEpoch,
         entryKey: committed.mergedEntries[0]?.key ?? promptEntry.key,
         snapshot,
       };

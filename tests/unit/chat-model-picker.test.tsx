@@ -74,8 +74,6 @@ describe('chat model picker', () => {
         items: messages,
         replayComplete: true,
           runtime: {
-            revision: 1,
-            runEpoch: 1,
             sending: false,
           activeRunId: null,
           runPhase: 'idle',
@@ -289,8 +287,6 @@ describe('chat model picker', () => {
           ...current!,
           runtime: {
             ...current!.runtime,
-            revision: 2,
-            runEpoch: 2,
             sending: true,
             activeRunId: 'run-active-1',
           },

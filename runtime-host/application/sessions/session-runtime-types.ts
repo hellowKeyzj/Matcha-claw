@@ -54,7 +54,6 @@ export interface SessionPromptMediaPayload {
 
 export interface SessionRuntimeTimelineState {
   sessionKey: string;
-  revision: number;
   runEpoch: number;
   timelineEntries: SessionTimelineEntry[];
   executionGraphItems: SessionExecutionGraphItem[];

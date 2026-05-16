@@ -34,8 +34,6 @@ function createSessionRecord(input?: {
       thinkingLevel: null,
     },
     runtime: {
-      revision: 0,
-      runEpoch: 0,
       sending: false,
       activeRunId: null,
       runPhase: 'idle' as const,
@@ -106,8 +104,6 @@ describe('chat send handlers', () => {
       runId: 'run-1',
       snapshot: {
         sessionKey,
-        revision: 1,
-        runEpoch: 1,
         catalog: {
           key: sessionKey,
           agentId: 'main',
@@ -132,8 +128,6 @@ describe('chat send handlers', () => {
         }],
         replayComplete: true,
         runtime: {
-          revision: 1,
-          runEpoch: 1,
           sending: true,
           activeRunId: null,
           runPhase: 'submitted',
@@ -358,8 +352,6 @@ describe('chat send handlers', () => {
       runId: 'run-late-1',
       snapshot: {
         sessionKey,
-        revision: 1,
-        runEpoch: 1,
         catalog: {
           key: sessionKey,
           agentId: 'main',
@@ -384,8 +376,6 @@ describe('chat send handlers', () => {
         }],
         replayComplete: true,
         runtime: {
-          revision: 1,
-          runEpoch: 1,
           sending: true,
           activeRunId: 'run-late-1',
           runPhase: 'submitted' as const,

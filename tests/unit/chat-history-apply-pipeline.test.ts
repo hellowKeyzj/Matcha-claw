@@ -3,7 +3,6 @@ import { createApplyLoadedMessagesPipeline } from '@/stores/chat/history-load-ex
 import {
   createEmptySessionRecord,
   getSessionItems,
-  patchSessionSnapshot,
 } from '@/stores/chat/store-state-helpers';
 import type { StoreHistoryCache } from '@/stores/chat/history-cache';
 import type { HistoryWindowResult } from '@/stores/chat/history-fetch-helpers';
@@ -26,7 +25,11 @@ function createHistoryRuntimeHarness(): StoreHistoryCache {
   };
 }
 
-function createSnapshot(sessionKey: string, messages: RawMessage[], runtimeOverrides: Partial<HistoryWindowResult['snapshot']['runtime']> = {}) {
+function createSnapshot(
+  sessionKey: string,
+  messages: RawMessage[],
+  runtimeOverrides: Partial<HistoryWindowResult['snapshot']['runtime']> = {},
+) {
   const items = buildRenderItemsFromMessages(sessionKey, messages);
   const agentId = sessionKey.split(':')[1] ?? 'main';
   const suffix = sessionKey.split(':').slice(2).join(':');
@@ -35,8 +38,6 @@ function createSnapshot(sessionKey: string, messages: RawMessage[], runtimeOverr
     : (suffix.startsWith('subagent:') ? 'subsession' : 'session');
   return {
     sessionKey,
-    revision: runtimeOverrides.revision ?? 1,
-    runEpoch: runtimeOverrides.runEpoch ?? 1,
     catalog: {
       key: sessionKey,
       agentId,
@@ -48,8 +49,6 @@ function createSnapshot(sessionKey: string, messages: RawMessage[], runtimeOverr
     items,
     replayComplete: true,
     runtime: {
-      revision: runtimeOverrides.revision ?? 1,
-      runEpoch: runtimeOverrides.runEpoch ?? 1,
       sending: false,
       activeRunId: null,
       runPhase: 'done' as const,
@@ -106,114 +105,6 @@ function createStateHarness(state: ChatStoreState) {
 }
 
 describe('chat history apply pipeline', () => {
-  it('drops stale snapshots atomically so pending items cannot revive after abort', () => {
-    const sessionKey = 'agent:main:main';
-    const currentMessages: RawMessage[] = [
-      { role: 'user', content: 'hello', timestamp: 1, id: 'user-1' },
-    ];
-    const staleMessages: RawMessage[] = [
-      { role: 'user', content: 'hello', timestamp: 1, id: 'user-1' },
-      { role: 'assistant', content: '', timestamp: 2, id: 'assistant-pending', status: 'sending' },
-    ];
-    const current = createEmptySessionRecord();
-    const abortedSnapshot = createSnapshot(sessionKey, currentMessages, {
-      revision: 3,
-      runEpoch: 2,
-      runPhase: 'aborted',
-      updatedAt: 3,
-    });
-    const staleSnapshot = createSnapshot(sessionKey, staleMessages, {
-      revision: 2,
-      runEpoch: 1,
-      sending: true,
-      activeRunId: 'run-old',
-      runPhase: 'streaming',
-      updatedAt: 2,
-    });
-    const firstState = {
-      loadedSessions: {
-        [sessionKey]: current,
-      },
-    } as Pick<ChatStoreState, 'loadedSessions'>;
-    const loadedSessions = patchSessionSnapshot(
-      firstState,
-      sessionKey,
-      abortedSnapshot,
-    );
-    const staleResult = patchSessionSnapshot(
-      { loadedSessions },
-      sessionKey,
-      staleSnapshot,
-    );
-
-    expect(staleResult).toBe(loadedSessions);
-    expect(getSessionItems({ loadedSessions: staleResult }, sessionKey)).toHaveLength(1);
-    expect(staleResult[sessionKey]?.runtime).toMatchObject({
-      revision: 3,
-      runEpoch: 2,
-      sending: false,
-      runPhase: 'aborted',
-    });
-  });
-
-  it('stale canonical final text can repair existing final items without rolling runtime back', () => {
-    const sessionKey = 'agent:main:main';
-    const currentShortMessages: RawMessage[] = [
-      { role: 'user', content: 'write file', timestamp: 1, id: 'user-1' },
-      { role: 'assistant', content: '已', timestamp: 2, id: 'assistant-1' },
-    ];
-    const canonicalMessages: RawMessage[] = [
-      { role: 'user', content: 'write file', timestamp: 1, id: 'user-1' },
-      { role: 'assistant', content: '已写入。', timestamp: 2, id: 'assistant-1' },
-    ];
-    const current = {
-      ...createEmptySessionRecord(),
-      items: createSnapshot(sessionKey, currentShortMessages, {
-        revision: 3,
-        runEpoch: 2,
-        runPhase: 'done',
-        updatedAt: 3,
-      }).items,
-      runtime: {
-        ...createEmptySessionRecord().runtime,
-        revision: 3,
-        runEpoch: 2,
-        runPhase: 'done',
-        updatedAt: 3,
-      },
-    };
-    const staleCanonicalSnapshot = createSnapshot(sessionKey, canonicalMessages, {
-      revision: 2,
-      runEpoch: 1,
-      sending: true,
-      activeRunId: 'run-old',
-      runPhase: 'streaming',
-      updatedAt: 2,
-    });
-
-    const loadedSessions = patchSessionSnapshot(
-      {
-        loadedSessions: {
-          [sessionKey]: current,
-        },
-      } as Pick<ChatStoreState, 'loadedSessions'>,
-      sessionKey,
-      staleCanonicalSnapshot,
-    );
-
-    expect(getSessionItems({ loadedSessions }, sessionKey)).toMatchObject([
-      expect.objectContaining({ kind: 'user-message', text: 'write file' }),
-      expect.objectContaining({ kind: 'assistant-turn', text: '已写入。' }),
-    ]);
-    expect(loadedSessions[sessionKey]?.runtime).toMatchObject({
-      revision: 3,
-      runEpoch: 2,
-      sending: false,
-      activeRunId: null,
-      runPhase: 'done',
-    });
-  });
-
   it('foreground apply writes authoritative snapshot into the requested session', async () => {
     const sessionKey = 'agent:main:main';
     const rawMessages: RawMessage[] = [
@@ -478,4 +369,3 @@ describe('chat history apply pipeline', () => {
     });
   });
 });
-

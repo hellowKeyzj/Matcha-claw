@@ -85,7 +85,7 @@ async function getHydratedSessionState(
 }
 
 describe('session runtime service', () => {
-  it('drops assistant NO_REPLY realtime messages before timeline materialization', () => {
+  it('drops assistant NO_REPLY realtime messages before timeline materialization', async () => {
     const events = buildSessionUpdateEventsFromGatewayConversationEvent({
       type: 'chat.message',
       event: {
@@ -105,7 +105,7 @@ describe('session runtime service', () => {
     expect(events).toEqual([]);
   });
 
-  it('drops assistant NO_REPLY prefix deltas without dropping real final NO replies', () => {
+  it('drops assistant NO_REPLY prefix deltas without dropping real final NO replies', async () => {
     const prefixEvents = buildSessionUpdateEventsFromGatewayConversationEvent({
       type: 'chat.message',
       event: {
@@ -148,7 +148,7 @@ describe('session runtime service', () => {
     });
   });
 
-  it('keeps assistant realtime messages when text has real content even if content is NO_REPLY', () => {
+  it('keeps assistant realtime messages when text has real content even if content is NO_REPLY', async () => {
     const events = buildSessionUpdateEventsFromGatewayConversationEvent({
       type: 'chat.message',
       event: {
@@ -383,7 +383,7 @@ describe('session runtime service', () => {
     expect(response.data.snapshot.items).toEqual([]);
   });
 
-  it('live ingress still builds stable assistant timeline identities', () => {
+  it('live ingress still builds stable assistant timeline identities', async () => {
     const [event] = buildSessionUpdateEventsFromGatewayConversationEvent({
       type: 'chat.message',
       event: {
@@ -417,7 +417,7 @@ describe('session runtime service', () => {
     });
   });
 
-  it('run.phase error 会保留上游 errorMessage，不再在 bridge 层丢失', () => {
+  it('run.phase error 会保留上游 errorMessage，不再在 bridge 层丢失', async () => {
     const [event] = buildSessionUpdateEventsFromGatewayConversationEvent({
       type: 'run.phase',
       phase: 'error',
@@ -445,7 +445,7 @@ describe('session runtime service', () => {
     });
   });
 
-  it('history transcript hydrate sanitizes user and assistant display text', () => {
+  it('history transcript hydrate sanitizes user and assistant display text', async () => {
     const sessionKey = 'agent:main:main';
     const transcript = [
       JSON.stringify({
@@ -496,7 +496,7 @@ describe('session runtime service', () => {
     ]);
   });
 
-  it('same-run assistant deltas merge into one assistant-turn item', () => {
+  it('same-run assistant deltas merge into one assistant-turn item', async () => {
     const configDir = join(tmpdir(), `matcha-session-runtime-${Date.now()}`);
     const service = createTestSessionRuntimeService({
       workspace: { getConfigDir: () => configDir },
@@ -506,7 +506,7 @@ describe('session runtime service', () => {
       },
     });
 
-    const [firstEvent] = service.consumeGatewayConversationEvent({
+    const [firstEvent] = await service.consumeGatewayConversationEvent({
       type: 'chat.message',
       event: {
         state: 'delta',
@@ -519,7 +519,7 @@ describe('session runtime service', () => {
         },
       },
     });
-    const [secondEvent] = service.consumeGatewayConversationEvent({
+    const [secondEvent] = await service.consumeGatewayConversationEvent({
       type: 'chat.message',
       event: {
         state: 'delta',
@@ -551,7 +551,7 @@ describe('session runtime service', () => {
     expect(secondEvent.snapshot.window.totalItemCount).toBe(1);
   });
 
-  it('same-run incremental assistant deltas append instead of replacing the visible message segment', () => {
+  it('same-run incremental assistant deltas append instead of replacing the visible message segment', async () => {
     const configDir = join(tmpdir(), `matcha-session-runtime-${Date.now()}`);
     const service = createTestSessionRuntimeService({
       workspace: { getConfigDir: () => configDir },
@@ -561,7 +561,7 @@ describe('session runtime service', () => {
       },
     });
 
-    service.consumeGatewayConversationEvent({
+    await service.consumeGatewayConversationEvent({
       type: 'chat.message',
       event: {
         state: 'delta',
@@ -574,7 +574,7 @@ describe('session runtime service', () => {
         },
       },
     });
-    const [secondEvent] = service.consumeGatewayConversationEvent({
+    const [secondEvent] = await service.consumeGatewayConversationEvent({
       type: 'chat.message',
       event: {
         state: 'delta',
@@ -598,7 +598,7 @@ describe('session runtime service', () => {
     });
   });
 
-  it('same-run short final text must not truncate accumulated streaming output', () => {
+  it('same-run short final text must not truncate accumulated streaming output', async () => {
     const configDir = join(tmpdir(), `matcha-session-runtime-${Date.now()}`);
     const service = createTestSessionRuntimeService({
       workspace: { getConfigDir: () => configDir },
@@ -608,7 +608,7 @@ describe('session runtime service', () => {
       },
     });
 
-    service.consumeGatewayConversationEvent({
+    await service.consumeGatewayConversationEvent({
       type: 'chat.message',
       event: {
         state: 'delta',
@@ -621,7 +621,7 @@ describe('session runtime service', () => {
         },
       },
     });
-    const [finalEvent] = service.consumeGatewayConversationEvent({
+    const [finalEvent] = await service.consumeGatewayConversationEvent({
       type: 'chat.message',
       event: {
         state: 'final',
@@ -645,7 +645,7 @@ describe('session runtime service', () => {
     });
   });
 
-  it('same-run assistant delta and final reuse the same message segment key', () => {
+  it('same-run assistant delta and final reuse the same message segment key', async () => {
     const configDir = join(tmpdir(), `matcha-session-runtime-${Date.now()}`);
     const service = createTestSessionRuntimeService({
       workspace: { getConfigDir: () => configDir },
@@ -655,7 +655,7 @@ describe('session runtime service', () => {
       },
     });
 
-    const [deltaEvent] = service.consumeGatewayConversationEvent({
+    const [deltaEvent] = await service.consumeGatewayConversationEvent({
       type: 'chat.message',
       event: {
         state: 'delta',
@@ -668,7 +668,7 @@ describe('session runtime service', () => {
         },
       },
     });
-    const [finalEvent] = service.consumeGatewayConversationEvent({
+    const [finalEvent] = await service.consumeGatewayConversationEvent({
       type: 'chat.message',
       event: {
         state: 'final',
@@ -704,7 +704,7 @@ describe('session runtime service', () => {
     expect(finalEvent.snapshot.window.totalItemCount).toBe(1);
   });
 
-  it('same-run assistant final with messageId still reuses the live message segment key', () => {
+  it('same-run assistant final with messageId still reuses the live message segment key', async () => {
     const configDir = join(tmpdir(), `matcha-session-runtime-${Date.now()}`);
     const service = createTestSessionRuntimeService({
       workspace: { getConfigDir: () => configDir },
@@ -714,7 +714,7 @@ describe('session runtime service', () => {
       },
     });
 
-    const [deltaEvent] = service.consumeGatewayConversationEvent({
+    const [deltaEvent] = await service.consumeGatewayConversationEvent({
       type: 'chat.message',
       event: {
         state: 'delta',
@@ -727,7 +727,7 @@ describe('session runtime service', () => {
         },
       },
     });
-    const [finalEvent] = service.consumeGatewayConversationEvent({
+    const [finalEvent] = await service.consumeGatewayConversationEvent({
       type: 'chat.message',
       event: {
         state: 'final',
@@ -764,7 +764,7 @@ describe('session runtime service', () => {
     expect(finalEvent.snapshot.window.totalItemCount).toBe(1);
   });
 
-  it('same-run authoritative assistant update after a short final can still complete the visible message', () => {
+  it('same-run authoritative assistant update after a short final can still complete the visible message', async () => {
     const configDir = join(tmpdir(), `matcha-session-runtime-${Date.now()}`);
     const service = createTestSessionRuntimeService({
       workspace: { getConfigDir: () => configDir },
@@ -774,7 +774,7 @@ describe('session runtime service', () => {
       },
     });
 
-    service.consumeGatewayConversationEvent({
+    await service.consumeGatewayConversationEvent({
       type: 'chat.message',
       event: {
         state: 'delta',
@@ -788,7 +788,7 @@ describe('session runtime service', () => {
       },
     });
 
-    const [shortFinalEvent] = service.consumeGatewayConversationEvent({
+    const [shortFinalEvent] = await service.consumeGatewayConversationEvent({
       type: 'chat.message',
       event: {
         state: 'final',
@@ -806,7 +806,7 @@ describe('session runtime service', () => {
       text: '完整回答的前半段',
     });
 
-    const [catchupEvent] = service.consumeGatewayConversationEvent({
+    const [catchupEvent] = await service.consumeGatewayConversationEvent({
       type: 'chat.message',
       event: {
         state: 'final',
@@ -839,7 +839,7 @@ describe('session runtime service', () => {
       },
     });
 
-    service.consumeGatewayConversationEvent({
+    await service.consumeGatewayConversationEvent({
       type: 'chat.message',
       event: {
         state: 'final',
@@ -978,8 +978,6 @@ describe('session runtime service', () => {
     const stateResponse = await getHydratedSessionState(service, 'agent:main:main');
     expect(stateResponse.status).toBe(200);
     const snapshot = stateResponse.data.snapshot;
-    expect(snapshot.revision).toBe(snapshot.runtime.revision);
-    expect(snapshot.runEpoch).toBe(snapshot.runtime.runEpoch);
     expect(snapshot.runtime).toMatchObject({
       sending: true,
       activeRunId: null,
@@ -1027,7 +1025,7 @@ describe('session runtime service', () => {
       expect(resolveSessionModel).toHaveBeenCalled();
     });
 
-    service.consumeGatewayConversationEvent({
+    await service.consumeGatewayConversationEvent({
       type: 'chat.message',
       event: {
         state: 'final',
@@ -1043,8 +1041,6 @@ describe('session runtime service', () => {
     const response = await promptPromise;
 
     expect(response.data.snapshot).toMatchObject({
-      revision: 1,
-      runEpoch: 1,
       runtime: {
         sending: true,
         activeRunId: null,
@@ -1069,7 +1065,7 @@ describe('session runtime service', () => {
       },
     });
 
-    service.consumeGatewayConversationEvent({
+    await service.consumeGatewayConversationEvent({
       type: 'chat.message',
       event: {
         state: 'final',
@@ -1088,9 +1084,8 @@ describe('session runtime service', () => {
       idempotencyKey: 'user-new-1',
     });
     const submitted = await getHydratedSessionState(service, 'agent:main:main');
-    const submittedRevision = submitted.data.snapshot.revision;
 
-    const [event] = service.consumeGatewayConversationEvent({
+    const [event] = await service.consumeGatewayConversationEvent({
       type: 'chat.message',
       event: {
         state: 'streaming',
@@ -1103,7 +1098,6 @@ describe('session runtime service', () => {
       },
     });
 
-    expect(event?.snapshot.revision).toBe(submittedRevision);
     expect(event?.snapshot.runtime).toMatchObject({
       sending: true,
       activeRunId: null,
@@ -1134,9 +1128,8 @@ describe('session runtime service', () => {
       idempotencyKey: 'user-unbound-1',
     });
     const submitted = await getHydratedSessionState(service, 'agent:main:main');
-    const submittedRevision = submitted.data.snapshot.revision;
 
-    const [event] = service.consumeGatewayConversationEvent({
+    const [event] = await service.consumeGatewayConversationEvent({
       type: 'chat.message',
       event: {
         state: 'streaming',
@@ -1149,7 +1142,6 @@ describe('session runtime service', () => {
       },
     });
 
-    expect(event?.snapshot.revision).toBe(submittedRevision);
     expect(event?.snapshot.runtime).toMatchObject({
       sending: true,
       activeRunId: null,
@@ -1211,9 +1203,8 @@ describe('session runtime service', () => {
     const abortResponse = await service.abortSession({
       sessionKey: 'agent:main:main',
     });
-    const abortedRevision = abortResponse.data.snapshot.revision;
 
-    const [event] = service.consumeGatewayConversationEvent({
+    const [event] = await service.consumeGatewayConversationEvent({
       type: 'chat.message',
       event: {
         state: 'streaming',
@@ -1226,7 +1217,6 @@ describe('session runtime service', () => {
       },
     });
 
-    expect(event?.snapshot.revision).toBe(abortedRevision);
     expect(event?.snapshot.runtime).toMatchObject({
       sending: false,
       activeRunId: null,
@@ -1255,16 +1245,14 @@ describe('session runtime service', () => {
       expect(bound.data.snapshot.runtime.activeRunId).toBe('run-active-terminal-guard-1');
     });
     const before = await getHydratedSessionState(service, 'agent:main:main');
-    const beforeRevision = before.data.snapshot.revision;
 
-    const [event] = service.consumeGatewayConversationEvent({
+    const [event] = await service.consumeGatewayConversationEvent({
       type: 'run.phase',
       phase: 'error',
       sessionKey: 'agent:main:main',
       errorMessage: 'unbound terminal should reconcile only',
     });
 
-    expect(event?.snapshot.revision).toBe(beforeRevision);
     expect(event?.snapshot.runtime).toMatchObject({
       sending: true,
       activeRunId: 'run-active-terminal-guard-1',
@@ -1283,7 +1271,7 @@ describe('session runtime service', () => {
       },
     });
 
-    service.consumeGatewayConversationEvent({
+    await service.consumeGatewayConversationEvent({
       type: 'run.phase',
       phase: 'error',
       runId: 'run-old-error',
@@ -1303,7 +1291,7 @@ describe('session runtime service', () => {
     });
   });
 
-  it('team lane live ingress carries member lane metadata', () => {
+  it('team lane live ingress carries member lane metadata', async () => {
     const [event] = buildSessionUpdateEventsFromGatewayConversationEvent({
       type: 'chat.message',
       event: {
@@ -1338,7 +1326,7 @@ describe('session runtime service', () => {
     });
   });
 
-  it('live gateway assistant message is sanitized during ingress', () => {
+  it('live gateway assistant message is sanitized during ingress', async () => {
     const [event] = buildSessionUpdateEventsFromGatewayConversationEvent({
       type: 'chat.message',
       event: {
@@ -1386,7 +1374,7 @@ describe('session runtime service', () => {
     });
   });
 
-  it('tool lifecycle ingress still materializes assistant tool activity timeline entries', () => {
+  it('tool lifecycle ingress still materializes assistant tool activity timeline entries', async () => {
     const [event] = buildSessionUpdateEventsFromGatewayConversationEvent({
       type: 'tool.lifecycle',
       event: {
@@ -1423,7 +1411,7 @@ describe('session runtime service', () => {
     });
   });
 
-  it('historical final assistant tool calls without results load as missing_result', () => {
+  it('historical final assistant tool calls without results load as missing_result', async () => {
     const rows = materializeTranscriptTimelineEntries('agent:main:main', [{
       role: 'assistant',
       content: [{
@@ -1454,7 +1442,7 @@ describe('session runtime service', () => {
     });
   });
 
-  it('same toolCallId live stream stays inside the same assistant-turn item', () => {
+  it('same toolCallId live stream stays inside the same assistant-turn item', async () => {
     const configDir = join(tmpdir(), `matcha-session-runtime-${Date.now()}`);
     const service = createTestSessionRuntimeService({
       workspace: { getConfigDir: () => configDir },
@@ -1464,7 +1452,7 @@ describe('session runtime service', () => {
       },
     });
 
-    const [startEvent] = service.consumeGatewayConversationEvent({
+    const [startEvent] = await service.consumeGatewayConversationEvent({
       type: 'tool.lifecycle',
       event: {
         runId: 'run-tool-live',
@@ -1477,7 +1465,7 @@ describe('session runtime service', () => {
         args: { text: '记住偏好' },
       },
     });
-    const [resultEvent] = service.consumeGatewayConversationEvent({
+    const [resultEvent] = await service.consumeGatewayConversationEvent({
       type: 'tool.lifecycle',
       event: {
         runId: 'run-tool-live',
@@ -1523,7 +1511,7 @@ describe('session runtime service', () => {
     expect(resultEvent.snapshot.window.totalItemCount).toBe(1);
   });
 
-  it('TodoWrite lifecycle updates without repeated tool names stay as todo state events', () => {
+  it('TodoWrite lifecycle updates without repeated tool names stay as todo state events', async () => {
     const configDir = join(tmpdir(), `matcha-session-runtime-${Date.now()}`);
     const service = createTestSessionRuntimeService({
       workspace: { getConfigDir: () => configDir },
@@ -1533,7 +1521,7 @@ describe('session runtime service', () => {
       },
     });
 
-    const [startEvent] = service.consumeGatewayConversationEvent({
+    const [startEvent] = await service.consumeGatewayConversationEvent({
       type: 'tool.lifecycle',
       event: {
         runId: 'run-todo-live',
@@ -1551,7 +1539,7 @@ describe('session runtime service', () => {
       },
     });
 
-    const updateEvents = service.consumeGatewayConversationEvent({
+    const updateEvents = await service.consumeGatewayConversationEvent({
       type: 'tool.lifecycle',
       event: {
         runId: 'run-todo-live',
@@ -1569,7 +1557,7 @@ describe('session runtime service', () => {
       },
     });
 
-    const [resultEvent] = service.consumeGatewayConversationEvent({
+    const [resultEvent] = await service.consumeGatewayConversationEvent({
       type: 'tool.lifecycle',
       event: {
         runId: 'run-todo-live',
@@ -1611,7 +1599,7 @@ describe('session runtime service', () => {
     expect(resultEvent.snapshot.items).toEqual([]);
   });
 
-  it('tool lifecycle task results emit a plan task snapshot event', () => {
+  it('tool lifecycle task results emit a plan task snapshot event', async () => {
     const configDir = join(tmpdir(), `matcha-session-runtime-${Date.now()}`);
     const service = createTestSessionRuntimeService({
       workspace: { getConfigDir: () => configDir },
@@ -1621,7 +1609,7 @@ describe('session runtime service', () => {
       },
     });
 
-    service.consumeGatewayConversationEvent({
+    await service.consumeGatewayConversationEvent({
       type: 'tool.lifecycle',
       event: {
         runId: 'run-task-plan',
@@ -1634,7 +1622,7 @@ describe('session runtime service', () => {
       },
     });
 
-    const events = service.consumeGatewayConversationEvent({
+    const events = await service.consumeGatewayConversationEvent({
       type: 'tool.lifecycle',
       event: {
         runId: 'run-task-plan',
@@ -1666,7 +1654,7 @@ describe('session runtime service', () => {
     });
   });
 
-  it('TodoWrite start is a todo snapshot event, not a visible tool activity entry', () => {
+  it('TodoWrite start is a todo snapshot event, not a visible tool activity entry', async () => {
     const events = buildSessionUpdateEventsFromGatewayConversationEvent({
       type: 'tool.lifecycle',
       event: {
@@ -1709,7 +1697,7 @@ describe('session runtime service', () => {
     })]);
   });
 
-  it('lowercase todowrite lifecycle start is a todo snapshot event, not a visible tool activity entry', () => {
+  it('lowercase todowrite lifecycle start is a todo snapshot event, not a visible tool activity entry', async () => {
     const events = buildSessionUpdateEventsFromGatewayConversationEvent({
       type: 'tool.lifecycle',
       event: {
@@ -1748,7 +1736,7 @@ describe('session runtime service', () => {
     expect(JSON.stringify(events)).not.toContain('newTodos');
   });
 
-  it('TodoWrite result confirms the todo snapshot without creating a visible tool card', () => {
+  it('TodoWrite result confirms the todo snapshot without creating a visible tool card', async () => {
     const events = buildSessionUpdateEventsFromGatewayConversationEvent({
       type: 'tool.lifecycle',
       event: {
@@ -1783,7 +1771,7 @@ describe('session runtime service', () => {
     })]);
   });
 
-  it('lowercase todowrite result confirms the todo snapshot without creating a visible tool card', () => {
+  it('lowercase todowrite result confirms the todo snapshot without creating a visible tool card', async () => {
     const events = buildSessionUpdateEventsFromGatewayConversationEvent({
       type: 'tool.lifecycle',
       event: {
@@ -1820,7 +1808,7 @@ describe('session runtime service', () => {
     expect(JSON.stringify(events)).not.toContain('todowrite');
   });
 
-  it('lowercase todoget result updates todo snapshot without a visible tool item', () => {
+  it('lowercase todoget result updates todo snapshot without a visible tool item', async () => {
     const events = buildSessionUpdateEventsFromGatewayConversationEvent({
       type: 'tool.lifecycle',
       event: {
@@ -1856,7 +1844,7 @@ describe('session runtime service', () => {
     expect(JSON.stringify(events)).not.toContain('todoget');
   });
 
-  it('TodoWrite with an empty newTodos list still emits a clearing todo snapshot', () => {
+  it('TodoWrite with an empty newTodos list still emits a clearing todo snapshot', async () => {
     const events = buildSessionUpdateEventsFromGatewayConversationEvent({
       type: 'tool.lifecycle',
       event: {
@@ -1888,7 +1876,7 @@ describe('session runtime service', () => {
     })]);
   });
 
-  it('realtime chat.message lowercase todowrite is a todo snapshot event without a visible tool item', () => {
+  it('realtime chat.message lowercase todowrite is a todo snapshot event without a visible tool item', async () => {
     const events = buildSessionUpdateEventsFromGatewayConversationEvent({
       type: 'chat.message',
       event: {
@@ -1932,7 +1920,7 @@ describe('session runtime service', () => {
     expect(JSON.stringify(events)).not.toContain('newTodos');
   });
 
-  it('realtime chat.message TodoWrite is a todo snapshot event without a visible tool item', () => {
+  it('realtime chat.message TodoWrite is a todo snapshot event without a visible tool item', async () => {
     const events = buildSessionUpdateEventsFromGatewayConversationEvent({
       type: 'chat.message',
       event: {
@@ -1973,7 +1961,7 @@ describe('session runtime service', () => {
     })]);
   });
 
-  it('realtime chat.message TodoWrite keeps later unnamed lifecycle updates as todo state', () => {
+  it('realtime chat.message TodoWrite keeps later unnamed lifecycle updates as todo state', async () => {
     const configDir = join(tmpdir(), `matcha-session-runtime-${Date.now()}`);
     const service = createTestSessionRuntimeService({
       workspace: { getConfigDir: () => configDir },
@@ -1983,7 +1971,7 @@ describe('session runtime service', () => {
       },
     });
 
-    const [messageEvent] = service.consumeGatewayConversationEvent({
+    const [messageEvent] = await service.consumeGatewayConversationEvent({
       type: 'chat.message',
       event: {
         state: 'final',
@@ -2007,7 +1995,7 @@ describe('session runtime service', () => {
       },
     });
 
-    const updateEvents = service.consumeGatewayConversationEvent({
+    const updateEvents = await service.consumeGatewayConversationEvent({
       type: 'tool.lifecycle',
       event: {
         runId: 'run-chat-todo-write',
@@ -2025,7 +2013,7 @@ describe('session runtime service', () => {
       },
     });
 
-    const [resultEvent] = service.consumeGatewayConversationEvent({
+    const [resultEvent] = await service.consumeGatewayConversationEvent({
       type: 'tool.lifecycle',
       event: {
         runId: 'run-chat-todo-write',
@@ -2069,7 +2057,7 @@ describe('session runtime service', () => {
     expect(resultEvent.snapshot.items).toEqual([]);
   });
 
-  it('state-only todo tools cannot remain visible in runtime snapshots after a mixed live turn', () => {
+  it('state-only todo tools cannot remain visible in runtime snapshots after a mixed live turn', async () => {
     const configDir = join(tmpdir(), `matcha-session-runtime-${Date.now()}`);
     const service = createTestSessionRuntimeService({
       workspace: { getConfigDir: () => configDir },
@@ -2079,7 +2067,7 @@ describe('session runtime service', () => {
       },
     });
 
-    service.consumeGatewayConversationEvent({
+    await service.consumeGatewayConversationEvent({
       type: 'tool.lifecycle',
       event: {
         runId: 'run-mixed-visible',
@@ -2093,7 +2081,7 @@ describe('session runtime service', () => {
       },
     });
 
-    const [todoEvent] = service.consumeGatewayConversationEvent({
+    const [todoEvent] = await service.consumeGatewayConversationEvent({
       type: 'chat.message',
       event: {
         state: 'final',
@@ -2134,7 +2122,7 @@ describe('session runtime service', () => {
     expect(JSON.stringify(todoEvent.snapshot.items)).not.toContain('newTodos');
   });
 
-  it('snapshot boundary removes already materialized TodoWrite tool cards', () => {
+  it('snapshot boundary removes already materialized TodoWrite tool cards', async () => {
     const todoInput = {
       newTodos: [
         { content: '分析页面结构', status: 'completed' },
@@ -2235,7 +2223,7 @@ describe('session runtime service', () => {
     });
   });
 
-  it('realtime chat.message nested TodoWrite tool call is a todo snapshot event without a visible tool item', () => {
+  it('realtime chat.message nested TodoWrite tool call is a todo snapshot event without a visible tool item', async () => {
     const events = buildSessionUpdateEventsFromGatewayConversationEvent({
       type: 'chat.message',
       event: {
@@ -2278,7 +2266,7 @@ describe('session runtime service', () => {
     })]);
   });
 
-  it('realtime chat.message function_call TodoWrite is state only', () => {
+  it('realtime chat.message function_call TodoWrite is state only', async () => {
     const events = buildSessionUpdateEventsFromGatewayConversationEvent({
       type: 'chat.message',
       event: {
@@ -2321,7 +2309,7 @@ describe('session runtime service', () => {
     })]);
   });
 
-  it('realtime chat.message function_call TodoWrite does not enter live snapshot items', () => {
+  it('realtime chat.message function_call TodoWrite does not enter live snapshot items', async () => {
     const configDir = join(tmpdir(), `matcha-session-runtime-${Date.now()}`);
     const service = createTestSessionRuntimeService({
       workspace: { getConfigDir: () => configDir },
@@ -2331,7 +2319,7 @@ describe('session runtime service', () => {
       },
     });
 
-    const [event] = service.consumeGatewayConversationEvent({
+    const [event] = await service.consumeGatewayConversationEvent({
       type: 'chat.message',
       event: {
         state: 'final',
@@ -2369,7 +2357,7 @@ describe('session runtime service', () => {
     expect(event.snapshot.items).toEqual([]);
   });
 
-  it('realtime function_call TodoWrite keeps later unnamed lifecycle result state only', () => {
+  it('realtime function_call TodoWrite keeps later unnamed lifecycle result state only', async () => {
     const configDir = join(tmpdir(), `matcha-session-runtime-${Date.now()}`);
     const service = createTestSessionRuntimeService({
       workspace: { getConfigDir: () => configDir },
@@ -2379,7 +2367,7 @@ describe('session runtime service', () => {
       },
     });
 
-    service.consumeGatewayConversationEvent({
+    await service.consumeGatewayConversationEvent({
       type: 'chat.message',
       event: {
         state: 'final',
@@ -2402,7 +2390,7 @@ describe('session runtime service', () => {
       },
     });
 
-    const [resultEvent] = service.consumeGatewayConversationEvent({
+    const [resultEvent] = await service.consumeGatewayConversationEvent({
       type: 'tool.lifecycle',
       event: {
         runId: 'run-chat-todo-write-function-call',
@@ -2432,7 +2420,7 @@ describe('session runtime service', () => {
     expect(resultEvent.snapshot.items).toEqual([]);
   });
 
-  it('realtime chat.message TodoWrite tool status name variants update todo snapshot without a visible tool item', () => {
+  it('realtime chat.message TodoWrite tool status name variants update todo snapshot without a visible tool item', async () => {
     const events = buildSessionUpdateEventsFromGatewayConversationEvent({
       type: 'chat.message',
       event: {
@@ -2474,7 +2462,7 @@ describe('session runtime service', () => {
     })]);
   });
 
-  it('realtime chat.message TodoGet result updates todo snapshot without a visible tool item', () => {
+  it('realtime chat.message TodoGet result updates todo snapshot without a visible tool item', async () => {
     const events = buildSessionUpdateEventsFromGatewayConversationEvent({
       type: 'chat.message',
       event: {
@@ -2521,7 +2509,7 @@ describe('session runtime service', () => {
     })]);
   });
 
-  it('realtime mixed assistant message strips todo tools but keeps visible text', () => {
+  it('realtime mixed assistant message strips todo tools but keeps visible text', async () => {
     const events = buildSessionUpdateEventsFromGatewayConversationEvent({
       type: 'chat.message',
       event: {
@@ -2572,7 +2560,7 @@ describe('session runtime service', () => {
     });
   });
 
-  it('historical TodoWrite transcript entries do not materialize as assistant rows', () => {
+  it('historical TodoWrite transcript entries do not materialize as assistant rows', async () => {
     const rows = materializeTranscriptTimelineEntries('agent:main:main', [{
       role: 'assistant',
       id: 'todo-write-history',
@@ -2683,7 +2671,7 @@ describe('session runtime service', () => {
     });
   });
 
-  it('historical assistant NO_REPLY is filtered while assistant NO remains visible', () => {
+  it('historical assistant NO_REPLY is filtered while assistant NO remains visible', async () => {
     const rows = materializeTranscriptTimelineEntries('agent:main:main', parseTranscriptMessages([
       JSON.stringify({
         timestamp: 1,
@@ -2851,7 +2839,7 @@ describe('session runtime service', () => {
     });
   });
 
-  it('tasks artifact messages emit an artifact task snapshot event', () => {
+  it('tasks artifact messages emit an artifact task snapshot event', async () => {
     const configDir = join(tmpdir(), `matcha-session-runtime-${Date.now()}`);
     const service = createTestSessionRuntimeService({
       workspace: { getConfigDir: () => configDir },
@@ -2861,7 +2849,7 @@ describe('session runtime service', () => {
       },
     });
 
-    const [planEvent] = service.consumeGatewayConversationEvent({
+    const [planEvent] = await service.consumeGatewayConversationEvent({
       type: 'chat.message',
       event: {
         state: 'final',
@@ -2896,7 +2884,7 @@ describe('session runtime service', () => {
     });
   });
 
-  it('live tool.lifecycle result with output immediately populates the assistant-turn tool segment output', () => {
+  it('live tool.lifecycle result with output immediately populates the assistant-turn tool segment output', async () => {
     const configDir = join(tmpdir(), `matcha-session-runtime-${Date.now()}`);
     const service = createTestSessionRuntimeService({
       workspace: { getConfigDir: () => configDir },
@@ -2906,7 +2894,7 @@ describe('session runtime service', () => {
       },
     });
 
-    service.consumeGatewayConversationEvent({
+    await service.consumeGatewayConversationEvent({
       type: 'tool.lifecycle',
       event: {
         runId: 'run-tool-live-output',
@@ -2920,7 +2908,7 @@ describe('session runtime service', () => {
       },
     });
 
-    const [resultEvent] = service.consumeGatewayConversationEvent({
+    const [resultEvent] = await service.consumeGatewayConversationEvent({
       type: 'tool.lifecycle',
       event: {
         runId: 'run-tool-live-output',
@@ -2979,7 +2967,7 @@ describe('session runtime service', () => {
       },
     });
 
-    service.consumeGatewayConversationEvent({
+    await service.consumeGatewayConversationEvent({
       type: 'chat.message',
       event: {
         state: 'final',
@@ -2993,7 +2981,7 @@ describe('session runtime service', () => {
         },
       },
     });
-    service.consumeGatewayConversationEvent({
+    await service.consumeGatewayConversationEvent({
       type: 'tool.lifecycle',
       event: {
         runId: 'run-final-reconcile',
@@ -3006,7 +2994,7 @@ describe('session runtime service', () => {
         args: { url: 'https://example.com' },
       },
     });
-    service.consumeGatewayConversationEvent({
+    await service.consumeGatewayConversationEvent({
       type: 'chat.message',
       event: {
         state: 'final',
@@ -3071,7 +3059,7 @@ describe('session runtime service', () => {
       'utf8',
     );
 
-    const [finalEvent] = service.consumeGatewayConversationEvent({
+    const [finalEvent] = await service.consumeGatewayConversationEvent({
       type: 'run.phase',
       phase: 'completed',
       runId: 'run-final-reconcile',
@@ -3113,7 +3101,7 @@ describe('session runtime service', () => {
     });
   });
 
-  it('run terminal lifecycle closes running tool cards without result as missing_result', () => {
+  it('run terminal lifecycle closes running tool cards without result as missing_result', async () => {
     const service = createTestSessionRuntimeService({
       workspace: { getConfigDir: () => join(tmpdir(), `matcha-session-runtime-${Date.now()}`) },
       openclawBridge: {
@@ -3122,7 +3110,7 @@ describe('session runtime service', () => {
       },
     });
 
-    service.consumeGatewayConversationEvent({
+    await service.consumeGatewayConversationEvent({
       type: 'tool.lifecycle',
       event: {
         runId: 'run-tool-missing-result',
@@ -3136,7 +3124,7 @@ describe('session runtime service', () => {
       },
     });
 
-    const [finalEvent] = service.consumeGatewayConversationEvent({
+    const [finalEvent] = await service.consumeGatewayConversationEvent({
       type: 'run.phase',
       phase: 'completed',
       runId: 'run-tool-missing-result',
@@ -3191,7 +3179,7 @@ describe('session runtime service', () => {
       },
     });
 
-    service.consumeGatewayConversationEvent({
+    await service.consumeGatewayConversationEvent({
       type: 'chat.message',
       event: {
         state: 'final',
@@ -3205,7 +3193,7 @@ describe('session runtime service', () => {
         },
       },
     });
-    service.consumeGatewayConversationEvent({
+    await service.consumeGatewayConversationEvent({
       type: 'chat.message',
       event: {
         state: 'final',
@@ -3245,7 +3233,7 @@ describe('session runtime service', () => {
       'utf8',
     );
 
-    const [finalEvent] = service.consumeGatewayConversationEvent({
+    const [finalEvent] = await service.consumeGatewayConversationEvent({
       type: 'run.phase',
       phase: 'completed',
       runId: 'run-final-text-only',
@@ -3407,7 +3395,7 @@ describe('session runtime service', () => {
       { id: 'tool-2', name: 'grep', result: { matches: 3 } },
       { id: 'tool-3', name: 'list_dir', result: ['src', 'tests'] },
     ]) {
-      service.consumeGatewayConversationEvent({
+      await service.consumeGatewayConversationEvent({
         type: 'tool.lifecycle',
         event: {
           runId: 'run-tool-batch',
@@ -3420,7 +3408,7 @@ describe('session runtime service', () => {
           args: { value: tool.id },
         },
       });
-      service.consumeGatewayConversationEvent({
+      await service.consumeGatewayConversationEvent({
         type: 'tool.lifecycle',
         event: {
           runId: 'run-tool-batch',
@@ -3465,7 +3453,7 @@ describe('session runtime service', () => {
       },
     });
 
-    service.consumeGatewayConversationEvent({
+    await service.consumeGatewayConversationEvent({
       type: 'chat.message',
       event: {
         state: 'delta',
@@ -3478,7 +3466,7 @@ describe('session runtime service', () => {
         },
       },
     });
-    service.consumeGatewayConversationEvent({
+    await service.consumeGatewayConversationEvent({
       type: 'tool.lifecycle',
       event: {
         runId: 'run-order-1',
@@ -3491,7 +3479,7 @@ describe('session runtime service', () => {
         args: { filePath: 'README.md' },
       },
     });
-    const [finalEvent] = service.consumeGatewayConversationEvent({
+    const [finalEvent] = await service.consumeGatewayConversationEvent({
       type: 'chat.message',
       event: {
         state: 'final',
@@ -3825,7 +3813,7 @@ describe('session runtime service', () => {
       },
     });
 
-    const [sessionUpdate] = service.consumeGatewayConversationEvent({
+    const [sessionUpdate] = await service.consumeGatewayConversationEvent({
       type: 'chat.message',
       event: {
         state: 'final',
@@ -4472,7 +4460,7 @@ describe('session runtime service', () => {
       },
     });
 
-    service.consumeGatewayConversationEvent({
+    await service.consumeGatewayConversationEvent({
       type: 'chat.message',
       event: {
         state: 'final',
@@ -4491,7 +4479,7 @@ describe('session runtime service', () => {
       },
     });
 
-    const [resultEvent] = service.consumeGatewayConversationEvent({
+    const [resultEvent] = await service.consumeGatewayConversationEvent({
       type: 'chat.message',
       event: {
         state: 'final',
@@ -4713,7 +4701,7 @@ describe('session runtime service', () => {
       },
     });
 
-    service.consumeGatewayConversationEvent({
+    await service.consumeGatewayConversationEvent({
       type: 'run.phase',
       phase: 'error',
       runId: 'run-old-error',

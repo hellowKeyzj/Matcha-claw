@@ -209,8 +209,6 @@ describe('task snapshot store', () => {
       }],
       replayComplete: true,
       runtime: {
-        revision: 1,
-        runEpoch: 1,
         sending: false,
         activeRunId: null,
         runPhase: 'done',

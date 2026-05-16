@@ -324,54 +324,6 @@ export function reconcileSessionItems(
   return changed ? reconciled : currentItems;
 }
 
-function isAssistantTurnRuntimeTransient(item: SessionAssistantTurnItem): boolean {
-  return item.status === 'streaming'
-    || item.status === 'waiting_tool'
-    || item.pendingState != null;
-}
-
-function canApplyStaleSnapshotItem(
-  currentItem: SessionRenderItem,
-  nextItem: SessionRenderItem,
-): boolean {
-  if (currentItem.kind !== nextItem.kind) {
-    return false;
-  }
-  if (nextItem.kind !== 'assistant-turn') {
-    return true;
-  }
-  if (currentItem.kind !== 'assistant-turn') {
-    return false;
-  }
-  return !isAssistantTurnRuntimeTransient(currentItem)
-    && !isAssistantTurnRuntimeTransient(nextItem);
-}
-
-function reconcileStaleSnapshotItems(
-  currentItems: SessionRenderItem[],
-  nextItems: SessionRenderItem[],
-): SessionRenderItem[] {
-  if (currentItems.length === 0 || nextItems.length === 0) {
-    return currentItems;
-  }
-
-  const nextByKey = new Map(nextItems.map((item) => [item.key, item] as const));
-  let changed = false;
-  const reconciled = currentItems.map((currentItem) => {
-    const nextItem = nextByKey.get(currentItem.key);
-    if (!nextItem || !canApplyStaleSnapshotItem(currentItem, nextItem)) {
-      return currentItem;
-    }
-    if (buildProtocolItemSignature(currentItem) === buildProtocolItemSignature(nextItem)) {
-      return currentItem;
-    }
-    changed = true;
-    return nextItem;
-  });
-
-  return changed ? reconciled : currentItems;
-}
-
 export function areSessionsEquivalent(left: ChatSession[], right: ChatSession[]): boolean {
   if (left === right) {
     return true;
@@ -465,8 +417,6 @@ const EMPTY_VIEWPORT_STATE: ChatSessionViewportState = {
 
 export function createEmptySessionRuntime(): ChatSessionRuntimeState {
   return {
-    revision: 0,
-    runEpoch: 0,
     sending: false,
     activeRunId: null,
     runPhase: 'idle',
@@ -717,24 +667,14 @@ export function patchSessionSnapshot(
   snapshot: SessionStateSnapshot,
 ): Record<string, ChatSessionRecord> {
   const current = getSessionRecord(state, sessionKey);
-  const canApplyRuntimeSnapshot = snapshot.revision >= current.runtime.revision;
   const catalog = snapshot.catalog;
-  const nextItems = canApplyRuntimeSnapshot
-    ? reconcileSessionItems(current.items, snapshot.items)
-    : reconcileStaleSnapshotItems(current.items, snapshot.items);
+  const nextItems = reconcileSessionItems(current.items, snapshot.items);
   logPatchSessionSnapshotTodoToolDebug({
     sessionKey,
     currentItems: current.items,
     snapshot,
     nextItems,
   });
-  if (!canApplyRuntimeSnapshot) {
-    return nextItems === current.items
-      ? state.loadedSessions
-      : patchSessionRecord(state, sessionKey, {
-          items: nextItems,
-        });
-  }
   return patchSessionRecord(state, sessionKey, {
     meta: {
       ...current.meta,
@@ -750,8 +690,6 @@ export function patchSessionSnapshot(
     items: nextItems,
     runtime: {
       ...current.runtime,
-      revision: snapshot.revision,
-      runEpoch: snapshot.runEpoch,
       sending: snapshot.runtime.sending,
       activeRunId: snapshot.runtime.activeRunId,
       runPhase: snapshot.runtime.runPhase,

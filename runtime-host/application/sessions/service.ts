@@ -68,8 +68,8 @@ export class SessionRuntimeService {
     }
   }
 
-  consumeGatewayConversationEvent(payload: unknown): SessionUpdateEvent[] {
-    return this.deps.ingressService.consumeGatewayConversationEvent(payload);
+  async consumeGatewayConversationEvent(payload: unknown): Promise<SessionUpdateEvent[]> {
+    return await this.deps.ingressService.consumeGatewayConversationEvent(payload);
   }
 
   async createSession(payload: unknown) {

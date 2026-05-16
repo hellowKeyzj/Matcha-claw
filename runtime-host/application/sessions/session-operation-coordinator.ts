@@ -8,8 +8,6 @@ export interface SessionOperationResult {
   sessionKey: string;
   operationId: string;
   kind: SessionOperationKind;
-  revision: number;
-  runEpoch: number;
   snapshot: SessionStateSnapshot;
 }
 
@@ -50,8 +48,6 @@ export class SessionOperationCoordinator {
     }
     const record = value as Record<string, unknown>;
     return typeof record.sessionKey === 'string'
-      && typeof record.revision === 'number'
-      && typeof record.runEpoch === 'number'
       && Boolean(record.runtime)
       && Array.isArray(record.items);
   }
@@ -69,8 +65,6 @@ export class SessionOperationCoordinator {
       sessionKey: input.sessionKey,
       operationId: input.operationId,
       kind: input.kind,
-      revision: input.snapshot.revision,
-      runEpoch: input.snapshot.runEpoch,
       snapshot: input.snapshot,
     });
   }

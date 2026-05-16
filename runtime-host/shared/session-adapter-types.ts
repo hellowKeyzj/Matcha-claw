@@ -94,8 +94,6 @@ export interface SessionExecutionGraphStep {
 }
 
 export interface SessionRuntimeStateSnapshot {
-  revision: number;
-  runEpoch: number;
   sending: boolean;
   activeRunId: string | null;
   runPhase: 'idle' | 'submitted' | 'streaming' | 'waiting_tool' | 'finalizing' | 'done' | 'error' | 'aborted';
@@ -451,8 +449,6 @@ export type SessionRenderItem =
 
 export interface SessionStateSnapshot {
   sessionKey: string;
-  revision: number;
-  runEpoch: number;
   catalog: SessionCatalogItem;
   items: SessionRenderItem[];
   taskSnapshot?: TaskSnapshotEvent;
