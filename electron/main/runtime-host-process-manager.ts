@@ -1,5 +1,6 @@
 import { fork, spawn, type ChildProcess } from 'node:child_process';
 import { promises as fsp } from 'node:fs';
+import { EventEmitter } from 'node:events';
 import { dirname, join, resolve } from 'node:path';
 import { getPort } from '../utils/config';
 
@@ -26,6 +27,7 @@ export interface RuntimeHostProcessManager {
   readonly restart: () => Promise<void>;
   readonly checkHealth: () => Promise<RuntimeHostProcessHealth>;
   readonly getState: () => RuntimeHostProcessState;
+  readonly onStateChange: (handler: (state: RuntimeHostProcessState) => void) => () => void;
 }
 
 interface RuntimeHostProcessLogger {
@@ -368,12 +370,18 @@ export function createRuntimeHostProcessManager(
   let shouldKeepAlive = false;
   let autoRestartTimer: ReturnType<typeof setTimeout> | null = null;
   let crashTimestamps: number[] = [];
+  const stateChangeEmitter = new EventEmitter();
+
+  const emitStateChange = (): void => {
+    stateChangeEmitter.emit('change', getState());
+  };
   let startInflight: Promise<void> | null = null;
   let restartInflight: Promise<void> | null = null;
 
   const markError = (message: string): void => {
     lifecycle = 'error';
     lastError = message;
+    emitStateChange();
   };
 
   const clearAutoRestartTimer = (): void => {
@@ -440,7 +448,7 @@ export function createRuntimeHostProcessManager(
     }
     lifecycle = 'starting';
     lastError = undefined;
-
+    emitStateChange();
     const env = {
       ...process.env,
       MATCHACLAW_RUNTIME_HOST_PORT: String(port),
@@ -496,6 +504,7 @@ export function createRuntimeHostProcessManager(
     lifecycle = 'running';
     lastError = undefined;
     crashTimestamps = [];
+    emitStateChange();
   }
 
   async function start(): Promise<void> {
@@ -520,9 +529,11 @@ export function createRuntimeHostProcessManager(
     clearAutoRestartTimer();
     if (!child) {
       lifecycle = 'stopped';
+      emitStateChange();
       return;
     }
     lifecycle = 'stopped';
+    emitStateChange();
 
     const exitPromise = new Promise<void>((resolveExit) => {
       const current = child;
@@ -588,11 +599,19 @@ export function createRuntimeHostProcessManager(
     };
   }
 
+  function onStateChange(handler: (state: RuntimeHostProcessState) => void): () => void {
+    stateChangeEmitter.on('change', handler);
+    return () => {
+      stateChangeEmitter.off('change', handler);
+    };
+  }
+
   return {
     start,
     stop,
     restart,
     checkHealth,
     getState,
+    onStateChange,
   };
 }

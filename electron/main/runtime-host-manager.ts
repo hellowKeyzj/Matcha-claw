@@ -106,6 +106,7 @@ export interface RuntimeHostManager {
   readonly onRuntimeJobEvent: (
     handler: (eventName: RuntimeHostRuntimeJobForwardEventName, payload: unknown) => void,
   ) => () => void;
+  readonly onStateChange: (handler: (state: RuntimeHostManagerState) => void) => () => void;
   readonly getInternalDispatchToken: () => string;
 }
 
@@ -167,6 +168,7 @@ export function createRuntimeHostManager(
   const internalDispatchToken = `runtime-host-dispatch-${Math.random().toString(36).slice(2)}-${Date.now()}`;
   const gatewayEventBus = new EventEmitter();
   const runtimeJobEventBus = new EventEmitter();
+  const stateChangeBus = new EventEmitter();
   const hostApiPort = getPort('MATCHACLAW_HOST_API');
   const openClawDir = getOpenClawDir();
   const runtimeHostProcess = createRuntimeHostProcessManager({
@@ -384,6 +386,37 @@ export function createRuntimeHostManager(
     };
   }
 
+  function emitStateChangeInternal(): void {
+    stateChangeBus.emit('state:change', getStateInternal());
+  }
+
+  function getStateInternal(): RuntimeHostManagerState {
+    const processState = infrastructure.processManager.getState();
+    const runtimeLifecycle = mapProcessLifecycleToRuntimeLifecycle(processState.lifecycle);
+    return {
+      lifecycle,
+      runtimeLifecycle,
+      ...(processState.pid ? { pid: processState.pid } : {}),
+      activePluginCount,
+      ...((lastError || processState.lastError) ? { lastError: processState.lastError ?? lastError } : {}),
+    };
+  }
+
+  function onStateChangeInternal(
+    handler: (state: RuntimeHostManagerState) => void,
+  ): () => void {
+    stateChangeBus.on('state:change', handler);
+    return () => {
+      stateChangeBus.off('state:change', handler);
+    };
+  }
+
+  // 子进程的 lifecycle 变化（启动完成、自动重启、退出）由 processManager 推送，
+  // 这里桥接到 RuntimeHostManager 自己的 stateChangeBus。
+  infrastructure.processManager.onStateChange(() => {
+    emitStateChangeInternal();
+  });
+
   return {
     async start() {
       if (lifecycle === 'starting' || lifecycle === 'running') {
@@ -391,6 +424,7 @@ export function createRuntimeHostManager(
       }
       lifecycle = 'starting';
       lastError = undefined;
+      emitStateChangeInternal();
       try {
         await hydrateExecutionStateFromSources();
         await infrastructure.processManager.start();
@@ -401,6 +435,8 @@ export function createRuntimeHostManager(
         lastError = error instanceof Error ? error.message : String(error);
         logger.error('Runtime Host start failed:', error);
         throw error;
+      } finally {
+        emitStateChangeInternal();
       }
     },
 
@@ -409,14 +445,17 @@ export function createRuntimeHostManager(
         return;
       }
       lifecycle = 'stopping';
+      emitStateChangeInternal();
       await infrastructure.processManager.stop();
       lifecycle = 'stopped';
       logger.info('Runtime Host stopped');
+      emitStateChangeInternal();
     },
 
     async restart() {
       lifecycle = 'restarting';
       lastError = undefined;
+      emitStateChangeInternal();
       try {
         await hydrateExecutionStateFromSources();
         await infrastructure.processManager.restart();
@@ -427,6 +466,8 @@ export function createRuntimeHostManager(
         lastError = error instanceof Error ? error.message : String(error);
         logger.error('Runtime Host restart failed:', error);
         throw error;
+      } finally {
+        emitStateChangeInternal();
       }
     },
 
@@ -477,15 +518,7 @@ export function createRuntimeHostManager(
     },
 
     getState() {
-      const processState = infrastructure.processManager.getState();
-      const runtimeLifecycle = mapProcessLifecycleToRuntimeLifecycle(processState.lifecycle);
-      return {
-        lifecycle,
-        runtimeLifecycle,
-        ...(processState.pid ? { pid: processState.pid } : {}),
-        activePluginCount,
-        ...((lastError || processState.lastError) ? { lastError: processState.lastError ?? lastError } : {}),
-      };
+      return getStateInternal();
     },
 
     async request<TResponse>(
@@ -517,6 +550,10 @@ export function createRuntimeHostManager(
 
     onRuntimeJobEvent(handler) {
       return onRuntimeJobEventInternal(handler);
+    },
+
+    onStateChange(handler) {
+      return onStateChangeInternal(handler);
     },
 
     getInternalDispatchToken() {

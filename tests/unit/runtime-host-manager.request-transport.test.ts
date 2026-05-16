@@ -30,6 +30,7 @@ const hoisted = vi.hoisted(() => {
       port: 3211,
       ...(processStateRef.lastError ? { lastError: processStateRef.lastError } : {}),
     })),
+    onStateChange: vi.fn(() => () => {}),
   }));
   const shellOpenPathMock = vi.fn(async () => '');
   const getOpenClawDirMock = vi.fn(() => 'E:\\code\\Matcha-claw\\node_modules\\openclaw');

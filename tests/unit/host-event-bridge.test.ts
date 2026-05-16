@@ -45,6 +45,7 @@ describe('host event bridge runtime-host lifecycle', () => {
       degradedPlugins: [] as string[],
     };
 
+    let stateChangeHandler: (() => void) | null = null;
     const runtimeHostManager = {
       getState: vi.fn(() => runtimeState),
       checkHealth: vi.fn(async () => runtimeHealth),
@@ -68,6 +69,12 @@ describe('host event bridge runtime-host lifecycle', () => {
       }),
       emitRuntimeJobEvent: vi.fn(),
       onRuntimeJobEvent: vi.fn(() => () => {}),
+      onStateChange: vi.fn((handler: () => void) => {
+        stateChangeHandler = handler;
+        return () => {
+          stateChangeHandler = null;
+        };
+      }),
     };
     const eventBus = { emit: vi.fn() };
     const send = vi.fn();
@@ -96,7 +103,8 @@ describe('host event bridge runtime-host lifecycle', () => {
       ...runtimeState,
       pid: 2222,
     };
-    await vi.advanceTimersByTimeAsync(1600);
+    stateChangeHandler?.();
+    await vi.runOnlyPendingTimersAsync();
 
     expect(eventBus.emit).toHaveBeenCalledWith(
       'runtime-host:restart',
@@ -114,7 +122,8 @@ describe('host event bridge runtime-host lifecycle', () => {
       degradedPlugins: ['security-core'],
       error: 'runtime-host child health check failed',
     } as never;
-    await vi.advanceTimersByTimeAsync(1600);
+    stateChangeHandler?.();
+    await vi.runOnlyPendingTimersAsync();
 
     expect(eventBus.emit).toHaveBeenCalledWith(
       'runtime-host:error',
@@ -213,6 +222,7 @@ describe('host event bridge runtime-host lifecycle', () => {
       onGatewayEvent: vi.fn(() => () => {}),
       emitRuntimeJobEvent: vi.fn(),
       onRuntimeJobEvent: vi.fn(() => () => {}),
+      onStateChange: vi.fn(() => () => {}),
     };
 
     const { registerHostEventBridge } = await import('../../electron/main/host-event-bridge');
@@ -244,6 +254,7 @@ describe('host event bridge runtime-host lifecycle', () => {
       degradedPlugins: [] as string[],
       error: 'Runtime-host transport health failed: fetch failed',
     };
+    let stateChangeHandler: (() => void) | null = null;
     const runtimeHostManager = {
       getState: vi.fn(() => runtimeState),
       checkHealth: vi.fn(async () => runtimeHealth),
@@ -252,6 +263,12 @@ describe('host event bridge runtime-host lifecycle', () => {
       onGatewayEvent: vi.fn(() => () => {}),
       emitRuntimeJobEvent: vi.fn(),
       onRuntimeJobEvent: vi.fn(() => () => {}),
+      onStateChange: vi.fn((handler: () => void) => {
+        stateChangeHandler = handler;
+        return () => {
+          stateChangeHandler = null;
+        };
+      }),
     };
     const eventBus = { emit: vi.fn() };
     const mainWindow = { webContents: { send: vi.fn() } };
@@ -289,7 +306,8 @@ describe('host event bridge runtime-host lifecycle', () => {
       activePluginCount: 2,
       degradedPlugins: [],
     };
-    await vi.advanceTimersByTimeAsync(1600);
+    stateChangeHandler?.();
+    await vi.runOnlyPendingTimersAsync();
 
     expect(eventBus.emit).toHaveBeenCalledWith(
       'runtime-host:restart',

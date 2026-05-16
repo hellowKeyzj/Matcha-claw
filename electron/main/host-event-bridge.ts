@@ -113,7 +113,7 @@ export function registerHostEventBridge(deps: {
   let previousRuntimeHostStatus: RuntimeHostLifecycleStatus | null = null;
   let previousRuntimeHostPid: number | undefined;
   let previousRuntimeHostError: string | undefined;
-  let runtimeHostPollingBusy = false;
+  let runtimeHostPublishInflight: Promise<void> | null = null;
 
   const publishGatewaySnapshot = async () => {
     const e2eStatus = await getE2EGatewayStatus<ReturnType<typeof buildPublicGatewayStatus>>();
@@ -127,11 +127,11 @@ export function registerHostEventBridge(deps: {
   };
 
   const publishRuntimeHostSnapshot = async () => {
-    if (runtimeHostPollingBusy) {
+    if (runtimeHostPublishInflight) {
+      await runtimeHostPublishInflight;
       return;
     }
-    runtimeHostPollingBusy = true;
-    try {
+    const work = (async () => {
       const state = deps.runtimeHostManager.getState();
       const health = await deps.runtimeHostManager.checkHealth();
       const payload = asRuntimeHostStatus(state, health);
@@ -174,8 +174,14 @@ export function registerHostEventBridge(deps: {
       previousRuntimeHostStatus = payload.status;
       previousRuntimeHostPid = payload.pid;
       previousRuntimeHostError = payload.error;
+    })();
+    runtimeHostPublishInflight = work;
+    try {
+      await work;
     } finally {
-      runtimeHostPollingBusy = false;
+      if (runtimeHostPublishInflight === work) {
+        runtimeHostPublishInflight = null;
+      }
     }
   };
 
@@ -253,9 +259,8 @@ export function registerHostEventBridge(deps: {
 
   void publishGatewaySnapshot();
   void publishRuntimeHostSnapshot();
-  const runtimeHostPollTimer = setInterval(() => {
-    void publishGatewaySnapshot();
+  deps.runtimeHostManager.onStateChange(() => {
     void publishRuntimeHostSnapshot();
-  }, 1500);
-  runtimeHostPollTimer.unref();
+    void publishGatewaySnapshot();
+  });
 }
