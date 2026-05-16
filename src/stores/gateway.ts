@@ -20,7 +20,6 @@ import { isTaskSnapshotToolMethod } from '../../runtime-host/shared/task-tool-co
 
 let gatewayInitPromise: Promise<void> | null = null;
 let gatewayEventUnsubscribers: Array<() => void> | null = null;
-let gatewayReconcileTimer: ReturnType<typeof setInterval> | null = null;
 const TASK_NOTIFICATION_FLUSH_MS = 48;
 const TASK_NOTIFICATION_COALESCE_LIMIT = 200;
 let queuedTaskNotifications: Array<{ method?: string; params?: Record<string, unknown> }> = [];
@@ -359,25 +358,6 @@ export const useGatewayStore = create<GatewayState>((set, get) => ({
               },
             }));
           }));
-          if (gatewayReconcileTimer !== null) {
-            clearInterval(gatewayReconcileTimer);
-          }
-          gatewayReconcileTimer = setInterval(() => {
-            void fetchGatewayStatusSnapshot()
-              .then((latest) => {
-                const current = get().status;
-                if (
-                  latest.processState !== current.processState
-                  || latest.transportState !== current.transportState
-                  || latest.healthSummary !== current.healthSummary
-                  || latest.gatewayReady !== current.gatewayReady
-                  || latest.updatedAt !== current.updatedAt
-                ) {
-                  set({ status: latest });
-                }
-              })
-              .catch(() => {});
-          }, 30_000);
           gatewayEventUnsubscribers = unsubscribers;
         }
         if (isGatewayOperational(status)) {

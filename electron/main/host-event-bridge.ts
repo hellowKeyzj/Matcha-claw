@@ -198,6 +198,12 @@ export function registerHostEventBridge(deps: {
   });
 
   deps.runtimeHostManager.onGatewayEvent((eventName, payload) => {
+    if (eventName === 'gateway:lifecycle') {
+      // child 视角的 transport state 变化（connected/reconnecting/disconnected）触发完整 PublicGatewayStatus 重发。
+      // 这样 renderer 只需要订阅 gateway:status 事件，不再需要 30s 轮询补盲区。
+      void publishGatewaySnapshot();
+      return;
+    }
     if (eventName === 'gateway:error') {
       emit('gateway:error', payload);
       return;

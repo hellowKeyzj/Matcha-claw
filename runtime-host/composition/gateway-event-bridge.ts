@@ -112,6 +112,10 @@ export function createRuntimeHostGatewayClient(deps: RuntimeHostGatewayBridgeDep
       }).catch(() => undefined);
     },
     onGatewayConnectionState: (payload: GatewayConnectionStatePayload) => {
+      // 任何状态变化都向 main push，让 host-event-bridge 重新组装完整 PublicGatewayStatus 推到 renderer，
+      // 替代 renderer 30s 轮询 /api/gateway/status 的盲区兜底。
+      void deps.parentTransport.emitParentGatewayEvent('gateway:lifecycle', payload).catch(() => undefined);
+
       if (payload.state !== 'connected') {
         return;
       }

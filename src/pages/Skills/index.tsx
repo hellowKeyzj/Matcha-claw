@@ -1073,7 +1073,6 @@ export function Skills() {
     setSkillsFeatureReady(gatewayReportedReady);
 
     let cancelled = false;
-    let retryTimer: ReturnType<typeof setInterval> | null = null;
 
     const attemptFetch = async (force: boolean) => {
       await fetchSkills({ force, silent: true });
@@ -1082,10 +1081,6 @@ export function Skills() {
       }
       if (!useSkillsStore.getState().error) {
         setSkillsFeatureReady(true);
-        if (retryTimer) {
-          clearInterval(retryTimer);
-          retryTimer = null;
-        }
       }
     };
 
@@ -1093,17 +1088,8 @@ export function Skills() {
       void attemptFetch(!snapshotReady || !skillsFeatureReady);
     }
 
-    if (!gatewayReportedReady) {
-      retryTimer = setInterval(() => {
-        void attemptFetch(true);
-      }, 5000);
-    }
-
     return () => {
       cancelled = true;
-      if (retryTimer) {
-        clearInterval(retryTimer);
-      }
     };
   }, [fetchSkills, gatewayProcessRunning, gatewayReportedReady, gatewayRuntimeKey, skillsFeatureReady, snapshotReady]);
 
