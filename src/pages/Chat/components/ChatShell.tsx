@@ -136,7 +136,7 @@ export function ChatShell({
       observer.disconnect();
       resetOverlayOffsets();
     };
-  }, [isEmptyState, onComposerGeometryChange]);
+  }, [artifactWorkbenchFullscreen, isEmptyState, onComposerGeometryChange]);
 
   const handleSidePanelResizeStart = (event: React.PointerEvent<HTMLDivElement>) => {
     if (!onSidePanelResize) {
