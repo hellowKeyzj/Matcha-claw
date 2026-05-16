@@ -5,6 +5,7 @@ import { getHostApiToken } from '../../api/server';
 import { handleE2EHostApiFetch } from '../e2e-fixture-loader';
 
 type HostApiFetchRequest = {
+  requestId?: string;
   path?: string;
   method?: string;
   headers?: Record<string, string>;
@@ -12,18 +13,40 @@ type HostApiFetchRequest = {
   timeoutMs?: number;
 };
 
+type HostApiAbortRequest = {
+  requestId?: string;
+};
+
 const DEFAULT_HOST_API_TIMEOUT_MS = 15000;
 const FILE_DIRECTORY_TIMEOUT_MS = 60000;
 const REQUEST_TIMEOUT_HEADER = 'x-matchaclaw-request-timeout-ms';
 
 export function registerHostApiProxyHandlers(): void {
+  // requestId → AbortController 注册表，让 renderer 通过 hostapi:abort 真正取消正在进行的 upstream fetch，
+  // 避免页面切换后还白白等几秒再丢弃响应。
+  const inflightControllers = new Map<string, AbortController>();
+
   ipcMain.handle('hostapi:token', () => getHostApiToken());
+
+  ipcMain.handle('hostapi:abort', (_, request: HostApiAbortRequest) => {
+    const requestId = typeof request?.requestId === 'string' ? request.requestId : '';
+    if (!requestId) {
+      return { ok: false };
+    }
+    const controller = inflightControllers.get(requestId);
+    if (!controller) {
+      return { ok: false };
+    }
+    controller.abort();
+    return { ok: true };
+  });
 
   ipcMain.handle('hostapi:fetch', async (_, request: HostApiFetchRequest) => {
     const e2eMock = await handleE2EHostApiFetch(request);
     if (e2eMock) {
       return e2eMock;
     }
+    const requestId = typeof request?.requestId === 'string' ? request.requestId : '';
     try {
       const port = getPort('MATCHACLAW_HOST_API');
       const normalizedPath = request?.path
@@ -49,6 +72,9 @@ export function registerHostApiProxyHandlers(): void {
       }
 
       const controller = new AbortController();
+      if (requestId) {
+        inflightControllers.set(requestId, controller);
+      }
       const timer = setTimeout(() => controller.abort(), timeoutMs);
       let response: Awaited<ReturnType<typeof proxyAwareFetch>>;
       try {
@@ -60,6 +86,9 @@ export function registerHostApiProxyHandlers(): void {
         });
       } finally {
         clearTimeout(timer);
+        if (requestId) {
+          inflightControllers.delete(requestId);
+        }
       }
 
       const contentType = (response.headers.get('content-type') || '').toLowerCase();

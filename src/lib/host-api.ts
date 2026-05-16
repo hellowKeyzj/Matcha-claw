@@ -167,14 +167,43 @@ async function getHostApiToken(): Promise<string> {
 export async function hostApiFetch<T>(path: string, init?: HostApiRequestInit): Promise<T> {
   const startedAt = Date.now();
   const method = init?.method || 'GET';
+  const signal = init?.signal ?? null;
+  if (signal?.aborted) {
+    throw normalizeAppError(new DOMException('Aborted', 'AbortError'), {
+      source: 'ipc-proxy',
+      path,
+      method,
+    });
+  }
+  const requestId = crypto.randomUUID();
+  let abortListener: (() => void) | null = null;
+  if (signal) {
+    abortListener = () => {
+      // 通过独立 IPC 通道告诉 main 取消正在进行的 upstream fetch；这里不 await，
+      // 上层 Promise.race 由 signal.addEventListener('abort') 立即 reject 主流程。
+      void invokeIpc<unknown>('hostapi:abort', { requestId }).catch(() => undefined);
+    };
+    signal.addEventListener('abort', abortListener, { once: true });
+  }
   try {
-    const response = await invokeIpc<unknown>('hostapi:fetch', {
+    const responsePromise = invokeIpc<unknown>('hostapi:fetch', {
+      requestId,
       path,
       method,
       headers: headersToRecord(init?.headers),
       body: init?.body ?? null,
       timeoutMs: init?.timeoutMs,
     });
+    const response = signal
+      ? await Promise.race<unknown>([
+        responsePromise,
+        new Promise((_resolve, reject) => {
+          signal.addEventListener('abort', () => {
+            reject(new DOMException('Aborted', 'AbortError'));
+          }, { once: true });
+        }),
+      ])
+      : await responsePromise;
     const envelope = decodeHostApiProxyEnvelope(response);
     return parseUnifiedProxyResponse<T>(envelope, path, method, startedAt);
   } catch (error) {
@@ -188,6 +217,10 @@ export async function hostApiFetch<T>(path: string, init?: HostApiRequestInit): 
       code: normalized.code,
     });
     throw normalized;
+  } finally {
+    if (signal && abortListener) {
+      signal.removeEventListener('abort', abortListener);
+    }
   }
 }
 
