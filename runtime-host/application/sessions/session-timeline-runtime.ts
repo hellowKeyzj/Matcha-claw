@@ -156,6 +156,17 @@ export class SessionTimelineRuntime {
       await this.ensureSessionHydrated(sessionKey, state);
       return;
     }
+    // Re-read transcript to pick up tool results written by OpenClaw
+    const replay = await this.deps.transcriptLoader.readTimelineReplay(sessionKey);
+    if (replay.timelineEntries.length > 0) {
+      state.timelineEntries = mergeTimelineEntries(
+        state.timelineEntries,
+        replay.timelineEntries,
+      );
+    }
+    if (replay.taskSnapshot) {
+      state.taskSnapshot = replay.taskSnapshot;
+    }
     this.deps.executionGraphRuntime.rebuildFromTimeline(sessionKey, state);
     const closureSignal = collectPendingRunClosureSignal(state.renderItems, state.runtime);
     if (
