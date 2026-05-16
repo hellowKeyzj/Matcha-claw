@@ -7,7 +7,21 @@ export type UiTelemetryEntry = {
   ts: string;
 };
 
+interface SamplingRule {
+  readonly keyFields: readonly string[];
+  readonly windowMs: number;
+}
+
+// 高频 telemetry 事件按 (event + keyFields) 维度做时间窗口 sampling，避免 history / listeners /
+// console 在长跑场景被同 path 的成百上千次刷新挤爆。命中 cooldown 的事件仍在 counters 累加，
+// 用户看总量不变，只是不再每次都写 history / 通知 listeners / 打 console。
+const SAMPLING_RULES: Record<string, SamplingRule> = {
+  'hostapi.fetch': { keyFields: ['path', 'method', 'source'], windowMs: 1_000 },
+  'hostapi.fetch_error': { keyFields: ['path', 'method', 'source'], windowMs: 1_000 },
+};
+
 const counters = new Map<string, number>();
+const samplingLastEmittedAt = new Map<string, number>();
 const history: UiTelemetryEntry[] = [];
 const listeners = new Set<(entry: UiTelemetryEntry) => void>();
 let nextEntryId = 1;
@@ -21,9 +35,46 @@ function safeStringify(payload: TelemetryPayload): string {
   }
 }
 
+function readSamplingFieldValue(payload: TelemetryPayload, field: string): string {
+  const value = payload[field];
+  if (typeof value === 'string') {
+    return value;
+  }
+  if (typeof value === 'number' || typeof value === 'boolean') {
+    return String(value);
+  }
+  return '';
+}
+
+function buildSamplingKey(event: string, payload: TelemetryPayload, rule: SamplingRule): string {
+  const parts: string[] = [event];
+  for (const field of rule.keyFields) {
+    parts.push(readSamplingFieldValue(payload, field));
+  }
+  return parts.join('|');
+}
+
+function shouldSample(event: string, payload: TelemetryPayload, nowMs: number): boolean {
+  const rule = SAMPLING_RULES[event];
+  if (!rule) {
+    return false;
+  }
+  const samplingKey = buildSamplingKey(event, payload, rule);
+  const lastEmittedAt = samplingLastEmittedAt.get(samplingKey) ?? 0;
+  if (nowMs - lastEmittedAt < rule.windowMs) {
+    return true;
+  }
+  samplingLastEmittedAt.set(samplingKey, nowMs);
+  return false;
+}
+
 export function trackUiEvent(event: string, payload: TelemetryPayload = {}): void {
   const count = (counters.get(event) ?? 0) + 1;
   counters.set(event, count);
+
+  if (shouldSample(event, payload, Date.now())) {
+    return;
+  }
 
   const normalizedPayload = {
     ...payload,
@@ -99,6 +150,7 @@ export function getUiTelemetrySnapshot(limit = 200): UiTelemetryEntry[] {
 
 export function clearUiTelemetry(): void {
   counters.clear();
+  samplingLastEmittedAt.clear();
   history.length = 0;
 }
 
