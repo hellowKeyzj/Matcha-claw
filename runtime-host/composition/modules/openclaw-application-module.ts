@@ -5,7 +5,6 @@ import {
   ACTIVATE_DIRECT_CHANNEL_JOB,
   DELETE_CHANNEL_CONFIG_JOB,
   REFRESH_CHANNEL_SNAPSHOT_JOB,
-  SET_CHANNEL_ENABLED_JOB,
   createChannelJobPort,
   type ChannelJobPort,
 } from '../../application/channels/channel-jobs';
@@ -248,20 +247,6 @@ function createOpenClawApplicationJobDefinitions(
       type: REFRESH_CHANNEL_SNAPSHOT_JOB,
       handler: async () => {
         return await container.resolve<ChannelService>('channels.service').refreshSnapshot();
-      },
-    },
-    {
-      type: SET_CHANNEL_ENABLED_JOB,
-      handler: async (payload) => {
-        const body = readJobPayloadRecord(payload);
-        const channelType = typeof body.channelType === 'string' ? body.channelType : '';
-        if (!channelType) {
-          throw new Error('channelType is required');
-        }
-        return await container.resolve<ChannelService>('channels.service').setEnabledDirect(
-          channelType,
-          body.enabled === true,
-        );
       },
     },
     {

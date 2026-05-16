@@ -16,7 +16,6 @@ interface ChannelRouteService {
   validateCredentials(payload: unknown): Promise<unknown>;
   activate(payload: unknown): Promise<ApplicationResponse>;
   cancelSession(payload: unknown): Promise<ApplicationResponse>;
-  setEnabled(payload: unknown): Promise<ApplicationResponse>;
   connect(payload: unknown): Promise<ApplicationResponse>;
   disconnect(payload: unknown): Promise<ApplicationResponse>;
   requestQr(payload: unknown): Promise<ApplicationResponse>;
@@ -52,7 +51,6 @@ export const channelRoutes: readonly RuntimeRouteDefinition<ChannelRouteDeps>[] 
   },
   { method: 'POST', path: '/api/channels/activate', handle: (context, deps) => routeResponder.result(() => deps.channelService.activate(context.payload)) },
   { method: 'POST', path: '/api/channels/session/cancel', handle: (context, deps) => routeResponder.result(() => deps.channelService.cancelSession(context.payload)) },
-  { method: 'PUT', path: '/api/channels/config/enabled', handle: (context, deps) => routeResponder.result(() => deps.channelService.setEnabled(context.payload)) },
   { method: 'POST', path: '/api/channels/connect', handle: (context, deps) => routeResponder.result(() => deps.channelService.connect(context.payload)) },
   { method: 'POST', path: '/api/channels/disconnect', handle: (context, deps) => routeResponder.result(() => deps.channelService.disconnect(context.payload)) },
   { method: 'POST', path: '/api/channels/request-qr', handle: (context, deps) => routeResponder.result(() => deps.channelService.requestQr(context.payload)) },

@@ -249,36 +249,6 @@ export class ChannelConfigRepository {
     });
   }
 
-  async setChannelEnabled(channelType: string, enabled: boolean) {
-    await withOpenClawConfigLock(async () => {
-      if (!channelType) {
-        throw new Error('channelType is required');
-      }
-      let config = await this.configRepository.read();
-      if (!isRecord(config.channels)) {
-        config.channels = {};
-      }
-      const channels = config.channels as Record<string, any>;
-      if (!isRecord(channels[channelType])) {
-        channels[channelType] = {};
-      }
-      const section = channels[channelType] as Record<string, any>;
-      section.enabled = enabled;
-      const accounts = getChannelAccountsMap(section);
-      if (accounts) {
-        for (const account of Object.values(accounts)) {
-          if (!isRecord(account)) {
-            continue;
-          }
-          account.enabled = enabled;
-          account.updatedAt = this.clock.nowIso();
-        }
-      }
-      config = await reconcileChannelDerivedPluginStateLocal(this.configRepository, this.pluginFileSystem, config);
-      await this.configRepository.write(config);
-    });
-  }
-
   async getChannelFormValues(channelType: string, accountId?: string) {
     if (!channelType) {
       return {};
@@ -354,7 +324,6 @@ export interface ChannelConfigPort extends Pick<
   | 'validateChannelConfig'
   | 'validateChannelCredentials'
   | 'saveChannelConfig'
-  | 'setChannelEnabled'
   | 'getChannelFormValues'
   | 'deleteChannelConfig'
 > {}

@@ -249,28 +249,6 @@ describe('channel-runtime config save', () => {
     expect(config.plugins).toBeUndefined();
   });
 
-  it('禁用外部频道时会同步禁用对应插件', async () => {
-    await repository.saveChannelConfig({
-      channelType: 'wecom',
-      accountId: 'acc1',
-      config: {
-        botId: 'wecom-bot',
-        secret: 'secret-1',
-      },
-      enabled: true,
-    });
-
-    await repository.setChannelEnabled('wecom', false);
-
-    const config = JSON.parse(
-      await readFile(join(tempDir, 'openclaw.json'), 'utf8'),
-    ) as Record<string, any>;
-
-    expect(config.channels.wecom.enabled).toBe(false);
-    expect(config.plugins.entries.wecom.enabled).toBe(false);
-    expect(config.plugins.allow).toEqual(['openclaw-lark']);
-  });
-
   it('删除外部频道配置时会同步禁用对应插件', async () => {
     await repository.saveChannelConfig({
       channelType: 'qqbot',

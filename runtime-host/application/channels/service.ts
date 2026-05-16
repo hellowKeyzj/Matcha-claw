@@ -1,9 +1,7 @@
 import {
   accepted,
-  applicationResponse,
   badRequest,
   ok,
-  type ApplicationResponse,
 } from '../common/application-response';
 import type { RuntimeClockPort } from '../common/runtime-ports';
 import type { GatewayChannelPort } from '../gateway/gateway-runtime-port';
@@ -36,27 +34,23 @@ export class ChannelService {
 
   constructor(private readonly deps: ChannelServiceDeps) {}
 
-  async restartGateway(): Promise<ApplicationResponse> {
+  private async restartGateway(): Promise<void> {
     const restartResponse = await this.deps.parentShell.request('gateway_restart');
     if (!restartResponse.success) {
-      return applicationResponse(restartResponse.status, { success: false, error: restartResponse.error.message });
+      throw new Error(restartResponse.error?.message ?? 'gateway restart failed');
     }
-    return applicationResponse(restartResponse.status, { success: true });
   }
 
-  async activateDirect(payload: unknown): Promise<ApplicationResponse> {
+  async activateDirect(payload: unknown): Promise<{ success: true }> {
     await this.deps.channelConfig.saveChannelConfig(payload);
-    return await this.restartGateway();
+    await this.restartGateway();
+    return { success: true };
   }
 
-  async setEnabledDirect(channelType: string, enabled: boolean): Promise<ApplicationResponse> {
-    await this.deps.channelConfig.setChannelEnabled(channelType, enabled);
-    return await this.restartGateway();
-  }
-
-  async deleteConfigDirect(channelType: string): Promise<ApplicationResponse> {
+  async deleteConfigDirect(channelType: string): Promise<{ success: true }> {
     await this.deps.channelConfig.deleteChannelConfig(channelType);
-    return await this.restartGateway();
+    await this.restartGateway();
+    return { success: true };
   }
 
   async snapshot() {
@@ -169,18 +163,6 @@ export class ChannelService {
 
     await this.deps.loginSessions.cancel(channelType);
     return ok({ success: true });
-  }
-
-  async setEnabled(payload: unknown) {
-    const body = isRecord(payload) ? payload : {};
-    const channelType = typeof body.channelType === 'string' ? body.channelType : '';
-    if (!channelType) {
-      return badRequest('channelType is required');
-    }
-    return accepted(this.deps.jobs.submitSetChannelEnabled({
-      channelType,
-      enabled: body.enabled === true,
-    }));
   }
 
   async connect(payload: unknown) {

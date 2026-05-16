@@ -49,17 +49,6 @@ function createDeps() {
         maxAttempts: 1,
       },
     })),
-    submitSetChannelEnabled: vi.fn(() => ({
-      success: true,
-      job: {
-        id: 'job-enabled',
-        type: 'channels.setEnabled',
-        status: 'queued',
-        queuedAt: 2,
-        attempts: 0,
-        maxAttempts: 1,
-      },
-    })),
     submitDeleteChannelConfig: vi.fn(() => ({
       success: true,
       job: {
@@ -72,7 +61,6 @@ function createDeps() {
       },
     })),
     saveChannelConfig: vi.fn(async () => {}),
-    setChannelEnabled: vi.fn(async () => {}),
     getChannelFormValues: vi.fn(async () => ({})),
     deleteChannelConfig: vi.fn(async () => {}),
     startLoginSession: vi.fn(async (input: { channelType: string; accountId?: string }) => ({
@@ -91,7 +79,6 @@ function createDeps() {
           validateChannelConfig: deps.validateChannelConfig,
           validateChannelCredentials: deps.validateChannelCredentials,
           saveChannelConfig: deps.saveChannelConfig,
-          setChannelEnabled: deps.setChannelEnabled,
           getChannelFormValues: deps.getChannelFormValues,
           deleteChannelConfig: deps.deleteChannelConfig,
         },
@@ -106,7 +93,6 @@ function createDeps() {
         jobs: {
           submitRefreshSnapshot: deps.submitRefreshSnapshot,
           submitActivateDirectChannel: deps.submitActivateDirectChannel,
-          submitSetChannelEnabled: deps.submitSetChannelEnabled,
           submitDeleteChannelConfig: deps.submitDeleteChannelConfig,
         },
         clock,
@@ -254,7 +240,7 @@ describe('runtime-host process channel routes', () => {
 
     expect(deps.saveChannelConfig).toHaveBeenCalledOnce();
     expect(deps.requestParentShellAction).toHaveBeenCalledWith('gateway_restart');
-    expect(result).toEqual({ status: 200, data: { success: true } });
+    expect(result).toEqual({ success: true });
   });
 
   it('登录会话型渠道激活时不会立即写配置或重启 gateway', async () => {
@@ -292,36 +278,6 @@ describe('runtime-host process channel routes', () => {
     expect(deps.cancelLoginSession).toHaveBeenCalledWith('whatsapp');
     expect(deps.requestParentShellAction).not.toHaveBeenCalled();
     expect(result).toEqual({ status: 200, data: { success: true } });
-  });
-
-  it('启用状态变更只提交后台任务', async () => {
-    const deps = createDeps();
-
-    const result = await dispatchRuntimeRouteDefinition(channelRoutes, 
-      'PUT',
-      '/api/channels/config/enabled',
-      new URL('http://127.0.0.1/api/channels/config/enabled'),
-      { channelType: 'wecom', enabled: false },
-      deps.routeDeps,
-    );
-
-    expect(deps.submitSetChannelEnabled).toHaveBeenCalledWith({ channelType: 'wecom', enabled: false });
-    expect(deps.setChannelEnabled).not.toHaveBeenCalled();
-    expect(deps.requestParentShellAction).not.toHaveBeenCalledWith('gateway_restart');
-    expect(result).toEqual({
-      status: 202,
-      data: {
-        success: true,
-        job: {
-          id: 'job-enabled',
-          type: 'channels.setEnabled',
-          status: 'queued',
-          queuedAt: 2,
-          attempts: 0,
-          maxAttempts: 1,
-        },
-      },
-    });
   });
 
   it('删除渠道配置只提交后台任务', async () => {
