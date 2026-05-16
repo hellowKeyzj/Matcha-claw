@@ -1,5 +1,5 @@
-import { fork, spawnSync, type ChildProcess } from 'node:child_process';
-import { existsSync, readdirSync, statSync } from 'node:fs';
+import { fork, spawn, type ChildProcess } from 'node:child_process';
+import { promises as fsp } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { getPort } from '../utils/config';
 
@@ -55,8 +55,16 @@ const DEFAULT_AUTO_RESTART_BASE_DELAY_MS = 300;
 const DEFAULT_AUTO_RESTART_MAX_DELAY_MS = 5000;
 const DEFAULT_AUTO_RESTART_WINDOW_MS = 60000;
 const DEFAULT_AUTO_RESTART_MAX_ATTEMPTS = 6;
-const REBUILD_OUTPUT_MAX_BUFFER = 10 * 1024 * 1024;
 const ANSI_ESCAPE_PATTERN = /\u001b\[[0-9;?]*[ -/]*[@-~]/g;
+
+async function pathExists(path: string): Promise<boolean> {
+  try {
+    await fsp.access(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 function getDefaultScriptPathCandidates(): string[] {
   const resourcesPath = typeof process.resourcesPath === 'string' ? process.resourcesPath : '';
@@ -78,39 +86,39 @@ function getDefaultScriptPathCandidates(): string[] {
   return [...packagedCandidates, ...workspaceCandidates];
 }
 
-function resolveScriptPath(explicitPath?: string): string | null {
+async function resolveScriptPath(explicitPath?: string): Promise<string | null> {
   const candidates = explicitPath ? [explicitPath] : getDefaultScriptPathCandidates();
   for (const candidate of candidates) {
-    if (existsSync(candidate)) {
+    if (await pathExists(candidate)) {
       return candidate;
     }
   }
   return null;
 }
 
-function resolveRuntimeHostDirFromScriptPath(scriptPath: string | null): string | null {
+async function resolveRuntimeHostDirFromScriptPath(scriptPath: string | null): Promise<string | null> {
   if (!scriptPath) {
     return null;
   }
   const normalized = resolve(scriptPath);
   const scriptDir = dirname(normalized);
   const wrapperEntry = join(scriptDir, 'host-process.cjs');
-  if (!existsSync(wrapperEntry)) {
+  if (!(await pathExists(wrapperEntry))) {
     return null;
   }
   return scriptDir;
 }
 
-function resolveRuntimeHostDirForBuild(scriptPath: string | null): string | null {
-  const runtimeHostDirFromScript = resolveRuntimeHostDirFromScriptPath(scriptPath);
+async function resolveRuntimeHostDirForBuild(scriptPath: string | null): Promise<string | null> {
+  const runtimeHostDirFromScript = await resolveRuntimeHostDirFromScriptPath(scriptPath);
   if (runtimeHostDirFromScript) {
     return runtimeHostDirFromScript;
   }
-  const projectRoot = resolveProjectRootForRuntimeHostBuild();
+  const projectRoot = await resolveProjectRootForRuntimeHostBuild();
   return projectRoot ? join(projectRoot, 'runtime-host') : null;
 }
 
-function resolveProjectRootForRuntimeHostBuild(): string | null {
+async function resolveProjectRootForRuntimeHostBuild(): Promise<string | null> {
   const candidates = [
     resolve(__dirname, '../..'),
     resolve(__dirname, '../../..'),
@@ -119,18 +127,18 @@ function resolveProjectRootForRuntimeHostBuild(): string | null {
   for (const candidate of candidates) {
     const packageJsonPath = join(candidate, 'package.json');
     const buildScriptPath = join(candidate, 'scripts', 'build-runtime-host-process.mjs');
-    if (existsSync(packageJsonPath) && existsSync(buildScriptPath)) {
+    if ((await pathExists(packageJsonPath)) && (await pathExists(buildScriptPath))) {
       return candidate;
     }
   }
   return null;
 }
 
-function collectLatestMtimeMs(rootDir: string, options?: {
+async function collectLatestMtimeMs(rootDir: string, options?: {
   skipDir?: (dirPath: string) => boolean;
   skipFile?: (filePath: string) => boolean;
-}): number {
-  if (!existsSync(rootDir)) {
+}): Promise<number> {
+  if (!(await pathExists(rootDir))) {
     return 0;
   }
 
@@ -141,7 +149,7 @@ function collectLatestMtimeMs(rootDir: string, options?: {
     if (!currentDir) {
       continue;
     }
-    const entries = readdirSync(currentDir, { withFileTypes: true });
+    const entries = await fsp.readdir(currentDir, { withFileTypes: true });
     for (const entry of entries) {
       const fullPath = join(currentDir, entry.name);
       if (entry.isDirectory()) {
@@ -154,57 +162,60 @@ function collectLatestMtimeMs(rootDir: string, options?: {
       if (options?.skipFile?.(fullPath)) {
         continue;
       }
-      const mtimeMs = statSync(fullPath).mtimeMs;
-      if (mtimeMs > latest) {
-        latest = mtimeMs;
+      const stat = await fsp.stat(fullPath);
+      if (stat.mtimeMs > latest) {
+        latest = stat.mtimeMs;
       }
     }
   }
   return latest;
 }
 
-function runtimeHostBuildArtifactStale(runtimeHostDir: string): boolean {
+async function runtimeHostBuildArtifactStale(runtimeHostDir: string): Promise<boolean> {
   const buildDir = join(runtimeHostDir, 'build');
   const buildMain = join(buildDir, 'main.js');
-  if (!existsSync(buildMain)) {
+  if (!(await pathExists(buildMain))) {
     return true;
   }
 
-  const latestSourceMtime = collectLatestMtimeMs(runtimeHostDir, {
+  const latestSourceMtime = await collectLatestMtimeMs(runtimeHostDir, {
     skipDir: (dirPath) => dirPath === buildDir,
     skipFile: (filePath) => filePath.endsWith('host-process.cjs'),
   });
-  const latestBuildMtime = collectLatestMtimeMs(buildDir);
+  const latestBuildMtime = await collectLatestMtimeMs(buildDir);
   return latestSourceMtime > latestBuildMtime;
 }
 
-function shouldAutoRebuildRuntimeHost(scriptPath: string | null, explicitScriptPath?: string): boolean {
+async function shouldAutoRebuildRuntimeHost(
+  scriptPath: string | null,
+  explicitScriptPath?: string,
+): Promise<boolean> {
   if (explicitScriptPath) {
     return false;
   }
   if (process.env.VITEST) {
     return false;
   }
-  const runtimeHostDir = resolveRuntimeHostDirForBuild(scriptPath);
-  if (!runtimeHostDir || !existsSync(runtimeHostDir)) {
+  const runtimeHostDir = await resolveRuntimeHostDirForBuild(scriptPath);
+  if (!runtimeHostDir || !(await pathExists(runtimeHostDir))) {
     return false;
   }
   return true;
 }
 
-function ensureRuntimeHostBuildCurrent(
+async function ensureRuntimeHostBuildCurrent(
   scriptPath: string | null,
   explicitScriptPath: string | undefined,
   logger?: RuntimeHostProcessLogger,
-): string | null {
-  if (!shouldAutoRebuildRuntimeHost(scriptPath, explicitScriptPath)) {
-    return scriptPath;
+): Promise<string | null> {
+  if (!(await shouldAutoRebuildRuntimeHost(scriptPath, explicitScriptPath))) {
+    return scriptPath ?? (await resolveScriptPath(explicitScriptPath));
   }
-  const runtimeHostDir = resolveRuntimeHostDirForBuild(scriptPath);
-  if (runtimeHostDir && runtimeHostBuildArtifactStale(runtimeHostDir)) {
-    rebuildRuntimeHostProcess(logger);
+  const runtimeHostDir = await resolveRuntimeHostDirForBuild(scriptPath);
+  if (runtimeHostDir && (await runtimeHostBuildArtifactStale(runtimeHostDir))) {
+    await rebuildRuntimeHostProcess(logger);
   }
-  return resolveScriptPath(explicitScriptPath);
+  return await resolveScriptPath(explicitScriptPath);
 }
 
 function normalizeProcessOutputChunk(output: string | Buffer | null | undefined): string[] {
@@ -239,33 +250,35 @@ function logRebuildOutput(
   }
 }
 
-function rebuildRuntimeHostProcess(logger?: RuntimeHostProcessLogger): void {
+async function rebuildRuntimeHostProcess(logger?: RuntimeHostProcessLogger): Promise<void> {
   logger?.info?.('[runtime-host-child] runtime-host build is stale, rebuilding...');
-  const projectRoot = resolveProjectRootForRuntimeHostBuild();
+  const projectRoot = await resolveProjectRootForRuntimeHostBuild();
   if (!projectRoot) {
     throw new Error('Unable to locate project root for runtime-host build');
   }
-  const result = spawnSync('pnpm', ['run', 'build:runtime-host-process'], {
-    cwd: projectRoot,
-    stdio: 'pipe',
-    encoding: 'utf8',
-    maxBuffer: REBUILD_OUTPUT_MAX_BUFFER,
-    env: {
-      ...process.env,
-      FORCE_COLOR: '0',
-      NO_COLOR: '1',
-      npm_config_color: 'false',
-    },
-    shell: process.platform === 'win32',
+  await new Promise<void>((resolveBuild, rejectBuild) => {
+    const child = spawn('pnpm', ['run', 'build:runtime-host-process'], {
+      cwd: projectRoot,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env: {
+        ...process.env,
+        FORCE_COLOR: '0',
+        NO_COLOR: '1',
+        npm_config_color: 'false',
+      },
+      shell: process.platform === 'win32',
+    });
+    child.stdout?.on('data', (chunk: Buffer) => logRebuildOutput(logger, 'stdout', chunk));
+    child.stderr?.on('data', (chunk: Buffer) => logRebuildOutput(logger, 'stderr', chunk));
+    child.once('error', (error) => rejectBuild(error));
+    child.once('close', (code) => {
+      if ((code ?? 1) !== 0) {
+        rejectBuild(new Error(`build:runtime-host-process failed with exit code ${String(code ?? 1)}`));
+        return;
+      }
+      resolveBuild();
+    });
   });
-  logRebuildOutput(logger, 'stdout', result.stdout);
-  logRebuildOutput(logger, 'stderr', result.stderr);
-  if (result.error) {
-    throw result.error;
-  }
-  if ((result.status ?? 1) !== 0) {
-    throw new Error(`build:runtime-host-process failed with exit code ${String(result.status ?? 1)}`);
-  }
 }
 
 function sleep(ms: number): Promise<void> {
@@ -348,13 +361,15 @@ export function createRuntimeHostProcessManager(
     ? Number(options.autoRestartMaxAttempts)
     : DEFAULT_AUTO_RESTART_MAX_ATTEMPTS;
 
-  let scriptPath = resolveScriptPath(options.scriptPath);
+  let scriptPath: string | null = options.scriptPath ?? null;
   let child: ChildProcess | null = null;
   let lifecycle: RuntimeHostProcessLifecycle = 'idle';
   let lastError: string | undefined;
   let shouldKeepAlive = false;
   let autoRestartTimer: ReturnType<typeof setTimeout> | null = null;
   let crashTimestamps: number[] = [];
+  let startInflight: Promise<void> | null = null;
+  let restartInflight: Promise<void> | null = null;
 
   const markError = (message: string): void => {
     lifecycle = 'error';
@@ -412,10 +427,10 @@ export function createRuntimeHostProcessManager(
     autoRestartTimer.unref();
   };
 
-  async function start(): Promise<void> {
+  async function startInternal(): Promise<void> {
     shouldKeepAlive = true;
     clearAutoRestartTimer();
-    scriptPath = ensureRuntimeHostBuildCurrent(scriptPath, options.scriptPath, logger);
+    scriptPath = await ensureRuntimeHostBuildCurrent(scriptPath, options.scriptPath, logger);
     if (!scriptPath) {
       markError('runtime-host child script not found');
       throw new Error(lastError);
@@ -483,6 +498,23 @@ export function createRuntimeHostProcessManager(
     crashTimestamps = [];
   }
 
+  async function start(): Promise<void> {
+    if (startInflight) {
+      return await startInflight;
+    }
+    const task = (async () => {
+      try {
+        await startInternal();
+      } finally {
+        if (startInflight === task) {
+          startInflight = null;
+        }
+      }
+    })();
+    startInflight = task;
+    return await task;
+  }
+
   async function stop(): Promise<void> {
     shouldKeepAlive = false;
     clearAutoRestartTimer();
@@ -526,8 +558,21 @@ export function createRuntimeHostProcessManager(
   }
 
   async function restart(): Promise<void> {
-    await stop();
-    await start();
+    if (restartInflight) {
+      return await restartInflight;
+    }
+    const task = (async () => {
+      try {
+        await stop();
+        await start();
+      } finally {
+        if (restartInflight === task) {
+          restartInflight = null;
+        }
+      }
+    })();
+    restartInflight = task;
+    return await task;
   }
 
   async function checkHealth(): Promise<RuntimeHostProcessHealth> {
