@@ -104,185 +104,98 @@ function buildMediaSegment(input: {
   };
 }
 
-function buildToolSegmentFromBlock(input: {
-  key: string;
-  toolCallId: string;
-  name: string;
-  block: ContentBlockLike;
-  existingTool: SessionRenderToolCard | null;
-  defaultStatus: SessionRenderToolStatusKind;
-}): SessionAssistantToolSegment {
-  const isCall = isToolCallContentType(input.block.type);
-  const isResult = isToolResultContentType(input.block.type);
-  const callPayload = isCall ? resolveToolRecordCallPayload(input.block) : input.existingTool?.input ?? null;
-  const resultPayload = isResult ? resolveToolRecordResultPayload(input.block) : input.existingTool?.output;
-  const isError = isResult && (input.block as { isError?: unknown; is_error?: unknown }).isError === true;
-  const status: SessionRenderToolStatusKind = isResult
-    ? (isError ? 'error' : 'completed')
-    : input.existingTool?.status ?? input.defaultStatus;
-  const renderState = resolveToolCardRenderState({
-    name: input.name,
-    input: callPayload,
-    output: resultPayload,
-  });
-  return {
-    kind: 'tool',
-    key: input.key,
-    tool: {
-      id: input.toolCallId || input.name,
-      ...(input.toolCallId ? { toolCallId: input.toolCallId } : {}),
-      name: input.name,
-      input: callPayload,
-      status,
-      ...renderState,
-      ...(input.existingTool?.summary ? { summary: input.existingTool.summary } : {}),
-      ...(input.existingTool?.durationMs != null ? { durationMs: input.existingTool.durationMs } : {}),
-      ...(input.existingTool?.updatedAt != null ? { updatedAt: input.existingTool.updatedAt } : {}),
-      ...(resultPayload !== undefined ? { output: structuredClone(resultPayload) } : {}),
-    },
-  };
-}
-
-function findToolSegment(
+function countSegmentsOfKind(
   segments: ReadonlyArray<SessionAssistantTurnSegment>,
-  toolCallId: string,
-): SessionAssistantToolSegment | null {
-  for (const segment of segments) {
-    if (segment.kind === 'tool' && (segment.tool.toolCallId === toolCallId || segment.tool.id === toolCallId)) {
-      return segment;
-    }
-  }
-  return null;
-}
-
-function findToolSegmentByName(
-  segments: ReadonlyArray<SessionAssistantTurnSegment>,
-  name: string,
-): SessionAssistantToolSegment | null {
-  for (const segment of segments) {
-    if (segment.kind === 'tool' && segment.tool.name === name && !segment.tool.toolCallId) {
-      return segment;
-    }
-  }
-  return null;
+  kind: SessionAssistantTurnSegment['kind'],
+): number {
+  return segments.filter((segment) => segment.kind === kind).length;
 }
 
 /**
- * Build the segment list for an assistant turn from one chat-stream content
- * array. The content array order is the authoritative ordering for the turn.
+ * Incremental segment update from a chat-stream content frame.
  *
- * - For `final` status: content array is complete and authoritative. Segments
- *   are rebuilt from scratch following content order.
- * - For `streaming` status: content array only contains the currently
- *   generating fragment (no previously completed toolCall blocks). New text
- *   is appended after existing tool segments to preserve correct visual order.
- *   Tool segments from previousSegments are kept in place.
+ * OpenClaw's chat stream only carries text (and optionally thinking). It
+ * never carries toolCall/toolResult blocks in realtime — those arrive via
+ * the separate tool-lifecycle stream.
+ *
+ * Incremental rule:
+ * - If the tail of `previousSegments` is a message segment, update its text.
+ * - If the tail is NOT a message (e.g. a tool just arrived), append a new
+ *   message segment — this creates the interleaved text→tool→text pattern.
+ *
+ * For transcript replay (history), content arrays DO contain toolCall/
+ * toolResult blocks. Those are handled by `buildSegmentsFromTranscriptContent`.
  */
 export function buildSegmentsFromChatContent(input: {
   identity: Pick<AssistantTurnEntryIdentity, 'turnKey' | 'laneKey'>;
   content: unknown;
   fallbackText: string;
   attachedFiles: ReadonlyArray<SessionRenderAttachedFile>;
-  defaultToolStatus: SessionRenderToolStatusKind;
   previousSegments: ReadonlyArray<SessionAssistantTurnSegment>;
   isStreaming: boolean;
 }): ReadonlyArray<SessionAssistantTurnSegment> {
-  if (input.isStreaming && input.previousSegments.length > 0) {
-    return buildStreamingSegments(input);
-  }
-  return buildFinalSegments(input);
-}
-
-function buildStreamingSegments(input: {
-  identity: Pick<AssistantTurnEntryIdentity, 'turnKey' | 'laneKey'>;
-  content: unknown;
-  fallbackText: string;
-  attachedFiles: ReadonlyArray<SessionRenderAttachedFile>;
-  defaultToolStatus: SessionRenderToolStatusKind;
-  previousSegments: ReadonlyArray<SessionAssistantTurnSegment>;
-}): ReadonlyArray<SessionAssistantTurnSegment> {
   const incomingText = extractTextFromContent(input.content) || input.fallbackText;
   const incomingThinking = extractThinkingFromContent(input.content);
+  const hasToolCallBlocks = contentHasToolBlocks(input.content);
 
-  const segments: SessionAssistantTurnSegment[] = [];
-  let hasMessageSegment = false;
-  let hasThinkingSegment = false;
+  // Transcript replay: content has toolCall/toolResult blocks → use positional build
+  if (hasToolCallBlocks) {
+    return buildSegmentsFromTranscriptContent(input);
+  }
 
-  for (const previous of input.previousSegments) {
-    if (previous.kind === 'message') {
-      hasMessageSegment = true;
-      segments.push({
-        ...structuredClone(previous),
-        text: incomingText || previous.text,
-      });
-    } else if (previous.kind === 'thinking') {
-      hasThinkingSegment = true;
-      segments.push({
-        ...structuredClone(previous),
-        text: incomingThinking || previous.text,
-      });
+  // Realtime chat stream: only text/thinking, incremental append
+  const segments: SessionAssistantTurnSegment[] = input.previousSegments.map((s) => structuredClone(s));
+
+  // Update or append thinking
+  if (incomingThinking) {
+    const thinkingIndex = segments.findIndex((s) => s.kind === 'thinking');
+    if (thinkingIndex >= 0) {
+      (segments[thinkingIndex] as SessionAssistantThinkingSegment).text = incomingThinking;
     } else {
-      segments.push(structuredClone(previous));
+      const slot = countSegmentsOfKind(segments, 'thinking');
+      const segment = buildThinkingSegment(
+        buildSegmentKey(input.identity, 'thinking', slot),
+        incomingThinking,
+      );
+      if (segment) segments.push(segment);
     }
   }
 
-  if (!hasThinkingSegment && incomingThinking) {
-    const segment = buildThinkingSegment(
-      buildSegmentKey(input.identity, 'thinking', 0),
-      incomingThinking,
-    );
-    if (segment) segments.push(segment);
-  }
-
-  if (!hasMessageSegment && incomingText.trim()) {
-    const segment = buildMessageSegment(
-      buildSegmentKey(input.identity, 'message', 0),
-      incomingText,
-    );
-    if (segment) segments.push(segment);
+  // Update or append message text
+  if (incomingText.trim()) {
+    const lastSegment = segments[segments.length - 1];
+    if (lastSegment?.kind === 'message') {
+      // Tail is already a message → update in place (same text position)
+      (lastSegment as SessionAssistantMessageSegment).text = sanitizeAssistantDisplayText([{ type: 'text', text: incomingText }]);
+    } else {
+      // Tail is a tool or thinking or empty → append new message segment
+      const slot = countSegmentsOfKind(segments, 'message');
+      const segment = buildMessageSegment(
+        buildSegmentKey(input.identity, 'message', slot),
+        incomingText,
+      );
+      if (segment) segments.push(segment);
+    }
   }
 
   return segments;
 }
 
-function extractTextFromContent(content: unknown): string {
-  if (typeof content === 'string') {
-    return content;
-  }
-  if (!Array.isArray(content)) {
-    return '';
-  }
-  return content
-    .filter((block): block is { type: string; text: string } => (
-      Boolean(block) && typeof block === 'object' && block.type === 'text' && typeof block.text === 'string'
-    ))
-    .map((block) => block.text)
-    .join('\n');
-}
-
-function extractThinkingFromContent(content: unknown): string {
-  if (!Array.isArray(content)) {
-    return '';
-  }
-  return content
-    .filter((block): block is { type: string; thinking: string } => (
-      Boolean(block) && typeof block === 'object' && block.type === 'thinking' && typeof block.thinking === 'string'
-    ))
-    .map((block) => block.thinking)
-    .join('\n\n');
-}
-
-function buildFinalSegments(input: {
+/**
+ * Build segments from a transcript content array (history replay).
+ * Content arrays in transcripts contain the full interleaved sequence:
+ * thinking, text, toolCall, toolResult, text, etc.
+ * Order follows the array positions directly.
+ */
+function buildSegmentsFromTranscriptContent(input: {
   identity: Pick<AssistantTurnEntryIdentity, 'turnKey' | 'laneKey'>;
   content: unknown;
   fallbackText: string;
   attachedFiles: ReadonlyArray<SessionRenderAttachedFile>;
-  defaultToolStatus: SessionRenderToolStatusKind;
   previousSegments: ReadonlyArray<SessionAssistantTurnSegment>;
 }): ReadonlyArray<SessionAssistantTurnSegment> {
   const slots = { thinking: 0, message: 0, media: 0 };
   const segments: SessionAssistantTurnSegment[] = [];
-  const consumedToolCallIds = new Set<string>();
   let emittedInlineMedia = false;
 
   if (Array.isArray(input.content)) {
@@ -333,21 +246,38 @@ function buildFinalSegments(input: {
           continue;
         }
         const toolCallId = resolveToolRecordCallId(row);
-        const previousTool = toolCallId
+        const existingTool = toolCallId
           ? findToolSegment(input.previousSegments, toolCallId)?.tool ?? null
           : findToolSegmentByName(input.previousSegments, name)?.tool ?? null;
-        const toolSegment = buildToolSegmentFromBlock({
-          key: buildSegmentKey(input.identity, 'tool', 0, toolCallId || `${name}:${segments.length}`),
-          toolCallId,
+        const isCall = isToolCallContentType(type);
+        const isResult = isToolResultContentType(type);
+        const callPayload = isCall ? resolveToolRecordCallPayload(row) : existingTool?.input ?? null;
+        const resultPayload = isResult ? resolveToolRecordResultPayload(row) : existingTool?.output;
+        const isError = isResult && (row as { isError?: unknown; is_error?: unknown }).isError === true;
+        const status: SessionRenderToolStatusKind = isResult
+          ? (isError ? 'error' : 'completed')
+          : existingTool?.status ?? 'running';
+        const renderState = resolveToolCardRenderState({
           name,
-          block: row,
-          existingTool: previousTool,
-          defaultStatus: input.defaultToolStatus,
+          input: callPayload,
+          output: resultPayload,
         });
-        segments.push(toolSegment);
-        if (toolCallId) {
-          consumedToolCallIds.add(toolCallId);
-        }
+        segments.push({
+          kind: 'tool',
+          key: buildSegmentKey(input.identity, 'tool', 0, toolCallId || `${name}:${segments.length}`),
+          tool: {
+            id: toolCallId || name,
+            ...(toolCallId ? { toolCallId } : {}),
+            name,
+            input: callPayload,
+            status,
+            ...renderState,
+            ...(existingTool?.summary ? { summary: existingTool.summary } : {}),
+            ...(existingTool?.durationMs != null ? { durationMs: existingTool.durationMs } : {}),
+            ...(existingTool?.updatedAt != null ? { updatedAt: existingTool.updatedAt } : {}),
+            ...(resultPayload !== undefined ? { output: structuredClone(resultPayload) } : {}),
+          },
+        });
       }
     }
   }
@@ -357,25 +287,7 @@ function buildFinalSegments(input: {
       buildSegmentKey(input.identity, 'message', slots.message),
       input.fallbackText,
     );
-    slots.message += 1;
     if (segment) segments.push(segment);
-  }
-
-  for (const previous of input.previousSegments) {
-    if (previous.kind !== 'tool') {
-      continue;
-    }
-    const id = previous.tool.toolCallId ?? previous.tool.id;
-    if (id && consumedToolCallIds.has(id)) {
-      continue;
-    }
-    if (isStateOnlyToolName(previous.tool.name)) {
-      continue;
-    }
-    segments.push(structuredClone(previous));
-    if (id) {
-      consumedToolCallIds.add(id);
-    }
   }
 
   if (!emittedInlineMedia) {
@@ -391,12 +303,11 @@ function buildFinalSegments(input: {
 }
 
 /**
- * Apply a tool-lifecycle update to a turn's segments.
+ * Apply a tool-lifecycle event to a turn's segments (incremental).
  *
- * Only the tool segment with the matching toolCallId is mutated. If no
- * matching segment exists yet, a new tool segment is appended at the tail;
- * a subsequent chat-content frame will reorder it via
- * `buildSegmentsFromChatContent`.
+ * - If a tool segment with matching toolCallId exists → update its state.
+ * - If not → append a new tool segment at the tail. This is the normal
+ *   realtime path: tool events arrive independently of chat text.
  */
 export function applyToolStatusToSegments(
   segments: ReadonlyArray<SessionAssistantTurnSegment>,
@@ -417,16 +328,10 @@ export function applyToolStatusToSegments(
   }
 
   const next = segments.map((segment) => structuredClone(segment));
-  let index = next.findIndex((segment) => (
+  const index = next.findIndex((segment) => (
     segment.kind === 'tool'
     && (segment.tool.toolCallId === update.toolCallId || segment.tool.id === update.toolCallId)
   ));
-
-  if (index < 0) {
-    index = next.findIndex((segment) => (
-      segment.kind === 'tool' && segment.tool.name === update.name && !segment.tool.toolCallId
-    ));
-  }
 
   const renderState = resolveToolCardRenderState({
     name: update.name,
@@ -437,6 +342,7 @@ export function applyToolStatusToSegments(
   });
 
   if (index < 0) {
+    // New tool → append at tail (incremental arrival)
     next.push({
       kind: 'tool',
       key: buildSegmentKey(identity, 'tool', 0, update.toolCallId),
@@ -456,6 +362,7 @@ export function applyToolStatusToSegments(
     return next;
   }
 
+  // Existing tool → update in place (preserves position)
   const target = next[index] as SessionAssistantToolSegment;
   next[index] = {
     ...target,
@@ -512,4 +419,72 @@ export function buildAssistantTurnEntry(input: {
     segments: input.segments,
     isStreaming: input.isStreaming,
   };
+}
+
+// --- helpers ---
+
+function extractTextFromContent(content: unknown): string {
+  if (typeof content === 'string') {
+    return content;
+  }
+  if (!Array.isArray(content)) {
+    return '';
+  }
+  return content
+    .filter((block): block is { type: string; text: string } => (
+      Boolean(block) && typeof block === 'object' && block.type === 'text' && typeof block.text === 'string'
+    ))
+    .map((block) => block.text)
+    .join('\n');
+}
+
+function extractThinkingFromContent(content: unknown): string {
+  if (!Array.isArray(content)) {
+    return '';
+  }
+  return content
+    .filter((block): block is { type: string; thinking: string } => (
+      Boolean(block) && typeof block === 'object' && block.type === 'thinking' && typeof block.thinking === 'string'
+    ))
+    .map((block) => block.thinking)
+    .join('\n\n');
+}
+
+function contentHasToolBlocks(content: unknown): boolean {
+  if (!Array.isArray(content)) {
+    return false;
+  }
+  return content.some((block) => {
+    if (!block || typeof block !== 'object') {
+      return false;
+    }
+    const type = typeof (block as { type?: unknown }).type === 'string'
+      ? (block as { type: string }).type
+      : '';
+    return isToolCallContentType(type) || isToolResultContentType(type);
+  });
+}
+
+function findToolSegment(
+  segments: ReadonlyArray<SessionAssistantTurnSegment>,
+  toolCallId: string,
+): SessionAssistantToolSegment | null {
+  for (const segment of segments) {
+    if (segment.kind === 'tool' && (segment.tool.toolCallId === toolCallId || segment.tool.id === toolCallId)) {
+      return segment;
+    }
+  }
+  return null;
+}
+
+function findToolSegmentByName(
+  segments: ReadonlyArray<SessionAssistantTurnSegment>,
+  name: string,
+): SessionAssistantToolSegment | null {
+  for (const segment of segments) {
+    if (segment.kind === 'tool' && segment.tool.name === name && !segment.tool.toolCallId) {
+      return segment;
+    }
+  }
+  return null;
 }

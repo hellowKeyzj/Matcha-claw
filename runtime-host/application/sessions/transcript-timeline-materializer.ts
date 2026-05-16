@@ -278,7 +278,6 @@ function buildAssistantTurnFromAssistantMessage(input: {
     content: input.message.content,
     fallbackText: text,
     attachedFiles,
-    defaultToolStatus: input.status === 'streaming' || input.status === 'pending' ? 'running' : 'missing_result',
     previousSegments,
     isStreaming: input.status === 'streaming' || Boolean(input.message.streaming),
   });
