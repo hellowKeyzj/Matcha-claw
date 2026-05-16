@@ -20,6 +20,8 @@ vi.mock('@/pages/Chat/useChatScroll', () => ({
     prepareScopeAnchorRestore: scrollHandlers.prepareScopeAnchorRestore,
     prepareScopeBottomAlign: scrollHandlers.prepareScopeBottomAlign,
     jumpToBottom: scrollHandlers.jumpToBottom,
+    notifyViewportGeometryChanged: vi.fn(),
+    scrollViewportByWheelDelta: vi.fn(),
   }),
 }));
 

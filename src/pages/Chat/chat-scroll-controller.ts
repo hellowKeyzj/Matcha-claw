@@ -1,876 +1,245 @@
 import type { RefObject, TouchEventHandler, WheelEventHandler } from 'react';
-import { markChatScrollActivity } from './chat-scroll-drain';
-
-type ScopeTransitionMode = 'restore-anchor' | 'force-bottom';
-
-const INITIAL_ALIGN_RETRY_MS = 150;
-const FOLLOW_RETRY_MS = 120;
-const ANCHOR_RESTORE_RETRY_MS = 50;
-const DETACHED_ANCHOR_CAPTURE_IDLE_MS = 90;
-
-export interface ChatViewportMetrics {
-  scrollHeight: number;
-  scrollTop: number;
-  clientHeight: number;
-  clientWidth: number;
-}
-
-interface ViewportAnchor {
-  itemKey?: string;
-  timestamp?: number;
-  followingItemKey?: string;
-  offsetWithinViewport: number;
-}
-
-interface TailItemMetrics {
-  itemKey: string;
-  height: number;
-}
-
-interface PendingScopeTransition {
-  targetScopeKey: string;
-  mode: ScopeTransitionMode;
-  anchor?: ViewportAnchor;
-}
-
-interface PendingPrependScrollCommand {
-  targetScopeKey: string;
-  previousScrollHeight: number;
-  previousScrollTop: number;
-}
-
-interface FollowSnapshot {
-  viewportHeight: number | null;
-  viewportWidth: number | null;
-  scrollHeight: number | null;
-  tailMetrics: TailItemMetrics | null;
-}
-
-interface ScrollScopeState {
-  hasLoaded: boolean;
-  isBottomLocked: boolean;
-  anchor: ViewportAnchor | null;
-  anchorDirty: boolean;
-}
+import {
+  INITIAL_SCOPE_STATE,
+  bottomScrollTop,
+  hasScrollableOverflow,
+  isAtBottom,
+  readViewportMetrics,
+  restoreViewportAnchor,
+  sampleViewportAnchor,
+  viewportHasRenderableItems,
+  type ChatScrollPhase,
+  type ChatScrollScopeState,
+  type ViewportAnchor,
+} from './chat-scroll-model';
 
 export interface ChatScrollControllerConfig {
   enabled: boolean;
   scrollScopeKey: string;
-  anchorItemKey: string | null;
-  tailActivityOpen: boolean;
-  setScrollChromeBottomLocked: (isBottomLocked: boolean) => void;
+  setChromePhase: (phase: ChatScrollPhase) => void;
   viewportRef: RefObject<HTMLDivElement | null>;
   contentRef: RefObject<HTMLDivElement | null>;
-  stickyBottomThresholdPx: number;
 }
 
 export interface ChatScrollController {
-  onScopeRenderSync: () => void;
-  onTailActivityRenderSync: () => void;
-  onAutoFollowRenderSync: () => void;
-  onResizeObserved: () => void;
-  syncChromeRender: () => void;
+  /** scope key 变化时调用 */
+  onScopeChanged: () => void;
+  /** ResizeObserver 回调：唯一的"被动几何变化"入口 */
+  onGeometryChanged: () => void;
+  /** 视口原生 scroll 事件：phase 的几何真值同步器 */
   handleViewportScroll: () => void;
   handleViewportPointerDown: () => void;
   handleViewportTouchMove: TouchEventHandler<HTMLDivElement>;
   handleViewportWheel: WheelEventHandler<HTMLDivElement>;
+  /** 来自外层（输入框浮层）的滚轮代理 */
   scrollViewportByWheelDelta: (deltaY: number) => void;
+  /** 加载更早消息前调用：先记下当前位置，加载完后会自动按 scrollHeight delta 补偿 */
   prepareScopeAnchorRestore: (nextScopeKey: string) => void;
+  /** 显式让某 scope 进入 follow 并立即贴底（发送消息 / 跳到底部按钮） */
   prepareScopeBottomAlign: (nextScopeKey: string) => void;
+  /** 当前 scope 直接贴底 */
   jumpToBottom: () => void;
   cleanup: () => void;
 }
 
-interface ScrollControllerState {
-  isBottomLocked: boolean;
-  lastScopeKey: string;
-  scopeStateByScope: Map<string, ScrollScopeState>;
-  pendingScopeTransition: PendingScopeTransition | null;
-  followSnapshot: FollowSnapshot;
-  scrollFrameId: number | null;
-  scrollRetryTimerId: number | null;
-  anchorRestoreFrameId: number | null;
-  anchorRestoreRetryTimerId: number | null;
-  anchorCaptureTimerId: number | null;
-  programmaticScroll: boolean;
-  autoScrollGeneration: number;
-  pendingPrependScroll: PendingPrependScrollCommand | null;
-  pendingPrependFrameId: number | null;
+interface PendingPrepend {
+  scopeKey: string;
+  previousScrollHeight: number;
+  previousScrollTop: number;
 }
 
-const EMPTY_FOLLOW_SNAPSHOT: FollowSnapshot = {
-  viewportHeight: null,
-  viewportWidth: null,
-  scrollHeight: null,
-  tailMetrics: null,
-};
-
-export function isChatViewportNearBottom(
-  metrics: ChatViewportMetrics,
-  thresholdPx: number,
-): boolean {
-  const distanceToBottom = metrics.scrollHeight - metrics.scrollTop - metrics.clientHeight;
-  return distanceToBottom <= thresholdPx;
+interface PendingTransition {
+  scopeKey: string;
+  mode: 'restore-anchor' | 'force-follow';
+  anchor?: ViewportAnchor;
 }
 
-export function computeBottomLockedScrollTopOnResize(
-  _previousMetrics: ChatViewportMetrics,
-  nextMetrics: ChatViewportMetrics,
-): number {
-  return Math.max(0, nextMetrics.scrollHeight - nextMetrics.clientHeight);
+interface ControllerState {
+  scopeStateByScope: Map<string, ChatScrollScopeState>;
+  lastScopeKey: string | null;
+  pendingPrepend: PendingPrepend | null;
+  pendingTransition: PendingTransition | null;
+  /** 触摸手势起始 y 坐标，用于在 touchmove 时判定手势方向 */
+  touchStartY: number | null;
 }
 
-function readViewportMetrics(viewport: HTMLDivElement | null): ChatViewportMetrics | null {
-  if (!viewport) {
-    return null;
+function ensureScopeState(
+  scopeKey: string,
+  byScope: Map<string, ChatScrollScopeState>,
+): ChatScrollScopeState {
+  const existing = byScope.get(scopeKey);
+  if (existing) {
+    return existing;
   }
-  return {
-    scrollHeight: viewport.scrollHeight,
-    scrollTop: viewport.scrollTop,
-    clientHeight: viewport.clientHeight,
-    clientWidth: viewport.clientWidth,
-  };
-}
-
-function hasRenderableChatItems(
-  content: HTMLDivElement | null,
-  viewport: HTMLDivElement | null,
-): boolean {
-  if (content?.querySelector('[data-chat-item-key]') != null) {
-    return true;
-  }
-  return viewport?.querySelector('[data-chat-item-key]') != null;
-}
-
-function sampleViewportAnchor(viewport: HTMLDivElement | null): ViewportAnchor | null {
-  if (!viewport) {
-    return null;
-  }
-  const viewportRect = viewport.getBoundingClientRect();
-  const items = Array.from(viewport.querySelectorAll<HTMLElement>('[data-chat-item-key]'));
-  for (const [index, item] of items.entries()) {
-    const rect = item.getBoundingClientRect();
-    const intersectsViewport = rect.bottom > viewportRect.top && rect.top < viewportRect.bottom;
-    if (!intersectsViewport) {
-      continue;
-    }
-    const itemKey = typeof item.dataset.chatItemKey === 'string' && item.dataset.chatItemKey.trim()
-      ? item.dataset.chatItemKey
-      : undefined;
-    const timestampText = item.dataset.chatMessageTimestamp;
-    const timestamp = typeof timestampText === 'string' && timestampText.trim()
-      ? Number(timestampText)
-      : undefined;
-    const anchor = {
-      itemKey,
-      timestamp: Number.isFinite(timestamp) ? timestamp : undefined,
-      followingItemKey: items[index + 1]?.dataset.chatItemKey,
-      offsetWithinViewport: rect.top - viewportRect.top,
-    };
-    return anchor;
-  }
-  return null;
-}
-
-function sampleTailItemMetrics(viewport: HTMLDivElement | null): TailItemMetrics | null {
-  if (!viewport) {
-    return null;
-  }
-  const items = viewport.querySelectorAll<HTMLElement>('[data-chat-item-key]');
-  const tailItem = items.length > 0 ? items[items.length - 1] : null;
-  const itemKey = tailItem?.dataset.chatItemKey;
-  if (!tailItem || !itemKey) {
-    return null;
-  }
-  return {
-    itemKey,
-    height: tailItem.getBoundingClientRect().height,
-  };
-}
-
-function hasTailResizeDelta(
-  previous: TailItemMetrics | null,
-  next: TailItemMetrics | null,
-): boolean {
-  if (!previous || !next) {
-    return previous !== next;
-  }
-  return previous.itemKey !== next.itemKey || previous.height !== next.height;
-}
-
-function createInitialScopeState(): ScrollScopeState {
-  return {
-    hasLoaded: false,
-    isBottomLocked: true,
-    anchor: null,
-    anchorDirty: false,
-  };
+  const next: ChatScrollScopeState = { ...INITIAL_SCOPE_STATE };
+  byScope.set(scopeKey, next);
+  return next;
 }
 
 export function createChatScrollController(
   getConfig: () => ChatScrollControllerConfig,
 ): ChatScrollController {
   const initialConfig = getConfig();
-  const state: ScrollControllerState = {
-    isBottomLocked: true,
-    lastScopeKey: initialConfig.scrollScopeKey,
-    scopeStateByScope: new Map([[initialConfig.scrollScopeKey, createInitialScopeState()]]),
-    pendingScopeTransition: null,
-    followSnapshot: EMPTY_FOLLOW_SNAPSHOT,
-    scrollFrameId: null,
-    scrollRetryTimerId: null,
-    anchorRestoreFrameId: null,
-    anchorRestoreRetryTimerId: null,
-    anchorCaptureTimerId: null,
-    programmaticScroll: false,
-    autoScrollGeneration: 0,
-    pendingPrependScroll: null,
-    pendingPrependFrameId: null,
+  const state: ControllerState = {
+    scopeStateByScope: new Map(),
+    lastScopeKey: null,
+    pendingPrepend: null,
+    pendingTransition: null,
+    touchStartY: null,
   };
+  ensureScopeState(initialConfig.scrollScopeKey, state.scopeStateByScope);
 
-  const ensureScopeState = (scopeKey: string): ScrollScopeState => {
-    const existing = state.scopeStateByScope.get(scopeKey);
-    if (existing) {
-      return existing;
-    }
-    const next = createInitialScopeState();
-    state.scopeStateByScope.set(scopeKey, next);
-    return next;
-  };
+  const getScope = (key: string) => ensureScopeState(key, state.scopeStateByScope);
 
-  const clearScheduledDetachedAnchorCapture = () => {
-    if (state.anchorCaptureTimerId == null || typeof window === 'undefined') {
-      return;
-    }
-    window.clearTimeout(state.anchorCaptureTimerId);
-    state.anchorCaptureTimerId = null;
-  };
-
-  const setBottomLockedForCurrentScope = (nextValue: boolean) => {
+  const setPhase = (phase: ChatScrollPhase) => {
     const config = getConfig();
-    const scopeState = ensureScopeState(config.scrollScopeKey);
-    scopeState.isBottomLocked = nextValue;
-    if (nextValue) {
-      clearScheduledDetachedAnchorCapture();
-      scopeState.anchor = null;
-      scopeState.anchorDirty = false;
-    }
-    if (state.isBottomLocked === nextValue) {
-      return;
-    }
-    state.isBottomLocked = nextValue;
-    config.setScrollChromeBottomLocked(nextValue);
-  };
-
-  const markScopeLoaded = () => {
-    const config = getConfig();
-    ensureScopeState(config.scrollScopeKey).hasLoaded = true;
-  };
-
-  const syncDetachedViewportAnchor = () => {
-    const config = getConfig();
-    const anchor = sampleViewportAnchor(config.viewportRef.current);
-    const scopeState = ensureScopeState(config.scrollScopeKey);
-    scopeState.anchor = anchor;
-    scopeState.anchorDirty = false;
-    return anchor;
-  };
-
-  const syncFollowSnapshot = () => {
-    const { viewportRef } = getConfig();
-    const viewport = viewportRef.current;
-    state.followSnapshot = {
-      viewportHeight: viewport?.clientHeight ?? null,
-      viewportWidth: viewport?.clientWidth ?? null,
-      scrollHeight: viewport?.scrollHeight ?? null,
-      tailMetrics: sampleTailItemMetrics(viewport),
-    };
-  };
-
-  const clearScheduledBottomAlign = () => {
-    if (typeof window !== 'undefined') {
-      if (state.scrollFrameId != null && typeof window.cancelAnimationFrame === 'function') {
-        window.cancelAnimationFrame(state.scrollFrameId);
-      }
-      if (state.scrollRetryTimerId != null) {
-        window.clearTimeout(state.scrollRetryTimerId);
+    const scope = getScope(config.scrollScopeKey);
+    if (scope.phase !== phase) {
+      scope.phase = phase;
+      if (phase === 'follow') {
+        scope.anchor = null;
       }
     }
-    state.scrollFrameId = null;
-    state.scrollRetryTimerId = null;
+    config.setChromePhase(phase);
   };
 
-  const nextAutoScrollGeneration = () => {
-    state.autoScrollGeneration += 1;
-    return state.autoScrollGeneration;
-  };
-
-  const clearScheduledAnchorRestore = () => {
-    if (typeof window !== 'undefined') {
-      if (state.anchorRestoreFrameId != null && typeof window.cancelAnimationFrame === 'function') {
-        window.cancelAnimationFrame(state.anchorRestoreFrameId);
-      }
-      if (state.anchorRestoreRetryTimerId != null) {
-        window.clearTimeout(state.anchorRestoreRetryTimerId);
-      }
-    }
-    state.anchorRestoreFrameId = null;
-    state.anchorRestoreRetryTimerId = null;
-  };
-
-  const clearScheduledPrependOffset = () => {
-    if (
-      typeof window !== 'undefined'
-      && state.pendingPrependFrameId != null
-      && typeof window.cancelAnimationFrame === 'function'
-    ) {
-      window.cancelAnimationFrame(state.pendingPrependFrameId);
-    }
-    state.pendingPrependFrameId = null;
-  };
-
-  const scheduleProgrammaticScrollCleanup = (onComplete?: () => void) => {
-    const complete = () => {
-      state.programmaticScroll = false;
-      onComplete?.();
-    };
-    if (typeof window !== 'undefined' && typeof window.requestAnimationFrame === 'function') {
-      window.requestAnimationFrame(complete);
-      return;
-    }
-    setTimeout(complete, 16);
-  };
-
-  const scheduleDetachedAnchorCapture = () => {
-    clearScheduledDetachedAnchorCapture();
-    if (typeof window === 'undefined') {
-      return;
-    }
-    state.anchorCaptureTimerId = window.setTimeout(() => {
-      state.anchorCaptureTimerId = null;
-      const config = getConfig();
-      const scopeState = ensureScopeState(config.scrollScopeKey);
-      if (scopeState.isBottomLocked || !scopeState.anchorDirty) {
-        return;
-      }
-      syncDetachedViewportAnchor();
-    }, DETACHED_ANCHOR_CAPTURE_IDLE_MS);
-  };
-
-  const restoreViewportAnchor = (anchor: ViewportAnchor) => {
-    const config = getConfig();
-    if (!config.enabled) {
-      return false;
-    }
-    const viewport = config.viewportRef.current;
-    if (!viewport) {
-      return false;
-    }
-    const messageItems = Array.from(
-      viewport.querySelectorAll<HTMLElement>('[data-chat-item-key]'),
-    );
-    let target: HTMLElement | undefined;
-    if (anchor.itemKey) {
-      target = messageItems.find((element) => element.dataset.chatItemKey === anchor.itemKey);
-      if (target && anchor.followingItemKey) {
-        const targetIndex = messageItems.indexOf(target);
-        const followingItem = targetIndex >= 0 ? messageItems[targetIndex + 1] : null;
-        if (followingItem?.dataset.chatItemKey !== anchor.followingItemKey) {
-          target = undefined;
-        }
-      }
-    }
-    if (!target && typeof anchor.timestamp === 'number') {
-      let nearestDistance = Number.POSITIVE_INFINITY;
-      for (const element of messageItems) {
-        const timestampText = element.dataset.chatMessageTimestamp;
-        const timestamp = typeof timestampText === 'string' && timestampText.trim()
-          ? Number(timestampText)
-          : NaN;
-        if (!Number.isFinite(timestamp)) {
-          continue;
-        }
-        const distance = Math.abs(timestamp - anchor.timestamp);
-        if (distance < nearestDistance) {
-          nearestDistance = distance;
-          target = element;
-        }
-      }
-    }
-    if (!target) {
-      return false;
-    }
-    const viewportRect = viewport.getBoundingClientRect();
-    const targetRect = target.getBoundingClientRect();
-    state.programmaticScroll = true;
-    viewport.scrollTop += (targetRect.top - viewportRect.top) - anchor.offsetWithinViewport;
-    scheduleProgrammaticScrollCleanup();
-    return true;
-  };
-
-  const syncScrollContainerState = () => {
+  /**
+   * 不写 phase。仅"该贴底就贴底"，目标位置由纯函数算出。
+   */
+  const stickToBottom = () => {
     const config = getConfig();
     const viewport = config.viewportRef.current;
-    const syncContainer = viewport?.closest<HTMLElement>('.chat-scroll-sync');
-    if (!syncContainer) {
-      return;
-    }
-    const metrics = readViewportMetrics(viewport);
-    syncContainer.dataset.chatScrollPhase = state.isBottomLocked ? 'following' : 'detached';
-    syncContainer.dataset.chatScrollLocked = state.isBottomLocked ? 'true' : 'false';
-    syncContainer.dataset.chatScrollOverflow = (
-      metrics != null && metrics.scrollHeight > metrics.clientHeight
-    ) ? 'true' : 'false';
-    syncContainer.dataset.chatScrollScope = config.scrollScopeKey;
-  };
-
-  const applyBottomAlign = (force = false) => {
-    const config = getConfig();
-    const viewport = config.viewportRef.current;
-    if (!config.enabled || !viewport || !hasRenderableChatItems(config.contentRef.current, viewport)) {
+    if (!viewport || !viewportHasRenderableItems(viewport)) {
       return false;
     }
     const metrics = readViewportMetrics(viewport);
     if (!metrics) {
       return false;
     }
-    const shouldStick = force || state.isBottomLocked || isChatViewportNearBottom(metrics, config.stickyBottomThresholdPx);
-    if (!shouldStick) {
-      return false;
-    }
-    markScopeLoaded();
-    setBottomLockedForCurrentScope(true);
-    state.programmaticScroll = true;
-    viewport.scrollTop = computeBottomLockedScrollTopOnResize(metrics, metrics);
-    scheduleProgrammaticScrollCleanup(() => {
-      syncFollowSnapshot();
-      syncScrollContainerState();
-    });
+    viewport.scrollTop = bottomScrollTop(metrics);
+    getScope(config.scrollScopeKey).hasInitialAligned = true;
     return true;
   };
 
-  const scheduleBottomAlignRetry = (force: boolean, generation: number) => {
-    if (typeof window === 'undefined') {
-      return;
-    }
-    state.scrollRetryTimerId = window.setTimeout(() => {
-      state.scrollRetryTimerId = null;
-      if (generation !== state.autoScrollGeneration) {
-        return;
-      }
-      applyBottomAlign(force);
-    }, force ? INITIAL_ALIGN_RETRY_MS : FOLLOW_RETRY_MS);
-  };
-
-  const scheduleBottomAlign = (options?: { force?: boolean; retry?: boolean; immediate?: boolean }) => {
-    clearScheduledBottomAlign();
-    const generation = nextAutoScrollGeneration();
-    const force = Boolean(options?.force);
-    const retry = Boolean(options?.retry);
-    const run = () => {
-      if (generation !== state.autoScrollGeneration) {
-        return false;
-      }
-      if (!applyBottomAlign(force)) {
-        return false;
-      }
-      if (retry) {
-        scheduleBottomAlignRetry(force, generation);
-      }
-      return true;
-    };
-
-    if (Boolean(options?.immediate) && run()) {
-      return;
-    }
-
-    if (typeof window !== 'undefined' && typeof window.requestAnimationFrame === 'function') {
-      state.scrollFrameId = window.requestAnimationFrame(() => {
-        state.scrollFrameId = null;
-        run();
-      });
-      return;
-    }
-    run();
-  };
-
-  const scheduleAnchorRestore = (anchor: ViewportAnchor) => {
-    clearScheduledAnchorRestore();
-    const generation = nextAutoScrollGeneration();
-    const run = () => {
-      if (generation !== state.autoScrollGeneration) {
-        return;
-      }
-      const config = getConfig();
-      if (!config.enabled || !hasRenderableChatItems(config.contentRef.current, config.viewportRef.current)) {
-        return;
-      }
-      if (!restoreViewportAnchor(anchor)) {
-        return;
-      }
-      const scopeState = ensureScopeState(config.scrollScopeKey);
-      scopeState.hasLoaded = true;
-      scopeState.isBottomLocked = false;
-      state.pendingScopeTransition = null;
-      if (state.isBottomLocked !== false) {
-        state.isBottomLocked = false;
-        config.setScrollChromeBottomLocked(false);
-      }
-      syncDetachedViewportAnchor();
-      syncFollowSnapshot();
-      syncScrollContainerState();
-      if (state.anchorRestoreRetryTimerId == null && typeof window !== 'undefined') {
-        state.anchorRestoreRetryTimerId = window.setTimeout(() => {
-          state.anchorRestoreRetryTimerId = null;
-          if (generation !== state.autoScrollGeneration) {
-            return;
-          }
-          run();
-        }, ANCHOR_RESTORE_RETRY_MS);
-      }
-    };
-
-    if (typeof window !== 'undefined' && typeof window.requestAnimationFrame === 'function') {
-      state.anchorRestoreFrameId = window.requestAnimationFrame(() => {
-        state.anchorRestoreFrameId = null;
-        run();
-      });
-      return;
-    }
-    run();
-  };
-
-  const cancelPendingTransitionForScope = (scopeKey: string) => {
-    const pending = state.pendingScopeTransition;
-    if (!pending || pending.targetScopeKey !== scopeKey) {
-      return;
-    }
-    state.pendingScopeTransition = null;
-    clearScheduledAnchorRestore();
-  };
-
-  const cancelAutoScrollForUserIntent = () => {
-    const config = getConfig();
-    nextAutoScrollGeneration();
-    cancelPendingTransitionForScope(config.scrollScopeKey);
-    clearScheduledBottomAlign();
-    clearScheduledAnchorRestore();
-    state.programmaticScroll = false;
-  };
-
-  const markDetachedAnchorDirty = () => {
-    const config = getConfig();
-    const scopeState = ensureScopeState(config.scrollScopeKey);
-    scopeState.anchorDirty = true;
-    scheduleDetachedAnchorCapture();
-  };
-
-  const handlePendingTransitionForCurrentScope = () => {
-    const config = getConfig();
-    const pending = state.pendingScopeTransition;
-    if (!pending || pending.targetScopeKey !== config.scrollScopeKey) {
-      return false;
-    }
-    if (pending.mode === 'force-bottom') {
-      state.pendingScopeTransition = null;
-      scheduleBottomAlign({ force: true, retry: true, immediate: true });
-      return true;
-    }
-    if (pending.anchor) {
-      scheduleAnchorRestore(pending.anchor);
-      return true;
-    }
-    return false;
-  };
-
-  const applyPendingPrependOffset = () => {
+  const syncSyncContainerDataset = () => {
     const config = getConfig();
     const viewport = config.viewportRef.current;
-    const pending = state.pendingPrependScroll;
-    if (!pending || pending.targetScopeKey !== config.scrollScopeKey || !viewport) {
+    const sync = viewport?.closest<HTMLElement>('.chat-scroll-sync');
+    if (!sync) {
+      return;
+    }
+    const metrics = readViewportMetrics(viewport);
+    const scope = getScope(config.scrollScopeKey);
+    sync.dataset.chatScrollPhase = scope.phase;
+    sync.dataset.chatScrollLocked = scope.phase === 'follow' ? 'true' : 'false';
+    sync.dataset.chatScrollOverflow = metrics != null && hasScrollableOverflow(metrics) ? 'true' : 'false';
+    sync.dataset.chatScrollScope = config.scrollScopeKey;
+  };
+
+  /**
+   * 应用历史 prepend 的位置补偿。
+   *
+   * 仅当：
+   *   a. 当前 scope 有挂起的 pendingPrepend
+   *   b. phase=detached（用户没主动回到底部）
+   * 时才补偿。如果用户在加载完成前已经下滑到底，phase 已被 scroll 事件改成 follow，
+   * 此时保留 follow 即可——pendingPrepend 在 scroll handler 转 follow 时已经被清。
+   */
+  const applyPendingPrepend = () => {
+    const config = getConfig();
+    const pending = state.pendingPrepend;
+    const viewport = config.viewportRef.current;
+    if (!pending || !viewport || pending.scopeKey !== config.scrollScopeKey) {
+      return false;
+    }
+    const scope = getScope(config.scrollScopeKey);
+    if (scope.phase !== 'detached') {
+      state.pendingPrepend = null;
       return false;
     }
     const delta = viewport.scrollHeight - pending.previousScrollHeight;
     if (delta <= 0) {
       return false;
     }
-    state.pendingPrependScroll = null;
-    clearScheduledPrependOffset();
-    state.programmaticScroll = true;
+    state.pendingPrepend = null;
     viewport.scrollTop = pending.previousScrollTop + delta;
-    scheduleProgrammaticScrollCleanup(() => {
-      syncFollowSnapshot();
-      syncScrollContainerState();
-    });
     return true;
   };
 
-  const schedulePendingPrependOffset = () => {
-    if (state.pendingPrependScroll == null) {
+  /**
+   * 切 scope 后的过渡：恢复阅读锚点 / 强制贴底。
+   */
+  const applyPendingTransition = () => {
+    const config = getConfig();
+    const pending = state.pendingTransition;
+    if (!pending || pending.scopeKey !== config.scrollScopeKey) {
       return false;
     }
-    if (applyPendingPrependOffset()) {
+    if (!viewportHasRenderableItems(config.viewportRef.current)) {
+      return false;
+    }
+    if (pending.mode === 'force-follow') {
+      state.pendingTransition = null;
+      setPhase('follow');
+      stickToBottom();
       return true;
     }
-    if (
-      state.pendingPrependFrameId == null
-      && typeof window !== 'undefined'
-      && typeof window.requestAnimationFrame === 'function'
-    ) {
-      state.pendingPrependFrameId = window.requestAnimationFrame(() => {
-        state.pendingPrependFrameId = null;
-        schedulePendingPrependOffset();
-      });
+    if (pending.anchor && restoreViewportAnchor(config.viewportRef.current, pending.anchor)) {
+      state.pendingTransition = null;
+      setPhase('detached');
+      const scope = getScope(config.scrollScopeKey);
+      scope.hasInitialAligned = true;
+      scope.anchor = pending.anchor;
       return true;
     }
     return false;
   };
 
-  const detachFromBottom = () => {
-    const config = getConfig();
-    cancelAutoScrollForUserIntent();
-    const scopeState = ensureScopeState(config.scrollScopeKey);
-    const wasBottomLocked = scopeState.isBottomLocked;
-    scopeState.isBottomLocked = false;
-    scopeState.anchorDirty = true;
-    if (state.isBottomLocked !== false) {
-      state.isBottomLocked = false;
-      config.setScrollChromeBottomLocked(false);
-    }
-    if (wasBottomLocked) {
-      syncDetachedViewportAnchor();
-    } else {
-      scheduleDetachedAnchorCapture();
-    }
-    syncScrollContainerState();
-  };
-
-  const onScopeRenderSync = () => {
-    const config = getConfig();
-    if (!config.enabled) {
-      return;
-    }
-    const scopeChanged = state.lastScopeKey !== config.scrollScopeKey;
-    state.lastScopeKey = config.scrollScopeKey;
-    if (!scopeChanged) {
-      return;
-    }
-
-    clearScheduledBottomAlign();
-    clearScheduledAnchorRestore();
-    clearScheduledDetachedAnchorCapture();
-    clearScheduledPrependOffset();
-    state.followSnapshot = EMPTY_FOLLOW_SNAPSHOT;
-
-    if (handlePendingTransitionForCurrentScope()) {
-      return;
-    }
-
-    const scopeState = ensureScopeState(config.scrollScopeKey);
-    state.isBottomLocked = scopeState.isBottomLocked;
-    config.setScrollChromeBottomLocked(scopeState.isBottomLocked);
-
-    if (!scopeState.hasLoaded || scopeState.isBottomLocked) {
-      scheduleBottomAlign({ force: !scopeState.hasLoaded, retry: true });
-      return;
-    }
-
-    if (scopeState.anchor) {
-      scheduleAnchorRestore(scopeState.anchor);
-    }
-  };
-
-  const onTailActivityRenderSync = () => {
-    const config = getConfig();
-    if (!config.enabled || !config.tailActivityOpen) {
-      return;
-    }
-    if (state.isBottomLocked) {
-      scheduleBottomAlign({ retry: true });
-    }
-  };
-
-  const onAutoFollowRenderSync = () => {
-    const config = getConfig();
-    if (!config.enabled) {
-      return;
-    }
-    if (handlePendingTransitionForCurrentScope()) {
-      return;
-    }
-    const scopeState = ensureScopeState(config.scrollScopeKey);
-    if (!hasRenderableChatItems(config.contentRef.current, config.viewportRef.current)) {
-      return;
-    }
-    if (!scopeState.isBottomLocked && schedulePendingPrependOffset()) {
-      return;
-    }
-    if (!scopeState.isBottomLocked && config.anchorItemKey) {
-      scheduleAnchorRestore({
-        itemKey: config.anchorItemKey,
-        offsetWithinViewport: 0,
-      });
-      return;
-    }
-    if (!scopeState.hasLoaded) {
-      scheduleBottomAlign({ force: true, retry: true });
-      return;
-    }
-    if (scopeState.isBottomLocked) {
-      scheduleBottomAlign({ retry: config.tailActivityOpen });
-    }
-  };
-
-  const onResizeObserved = () => {
-    const config = getConfig();
-    if (handlePendingTransitionForCurrentScope()) {
-      return;
-    }
-
-    const viewportNode = config.viewportRef.current;
-    const contentNode = config.contentRef.current;
-    const scopeState = ensureScopeState(config.scrollScopeKey);
-    if (!scopeState.isBottomLocked && schedulePendingPrependOffset()) {
-      return;
-    }
-    const nextSnapshot: FollowSnapshot = {
-      viewportHeight: viewportNode?.clientHeight ?? null,
-      viewportWidth: viewportNode?.clientWidth ?? null,
-      scrollHeight: viewportNode?.scrollHeight ?? null,
-      tailMetrics: sampleTailItemMetrics(viewportNode),
-    };
-    const previousSnapshot = state.followSnapshot;
-    state.followSnapshot = nextSnapshot;
-
-    const viewportHeightChanged = (
-      nextSnapshot.viewportHeight != null
-      && previousSnapshot.viewportHeight != null
-      && nextSnapshot.viewportHeight !== previousSnapshot.viewportHeight
-    );
-    const viewportWidthChanged = (
-      nextSnapshot.viewportWidth != null
-      && previousSnapshot.viewportWidth != null
-      && nextSnapshot.viewportWidth !== previousSnapshot.viewportWidth
-    );
-    const scrollHeightChanged = (
-      nextSnapshot.scrollHeight != null
-      && previousSnapshot.scrollHeight != null
-      && nextSnapshot.scrollHeight !== previousSnapshot.scrollHeight
-    );
-    const tailMetricsChanged = hasTailResizeDelta(previousSnapshot.tailMetrics, nextSnapshot.tailMetrics);
-
-    if (!scopeState.hasLoaded && hasRenderableChatItems(contentNode, viewportNode)) {
-      scheduleBottomAlign({ force: true, retry: true });
-      syncScrollContainerState();
-      return;
-    }
-
-    if (scopeState.isBottomLocked) {
-      if (viewportHeightChanged || viewportWidthChanged) {
-        scheduleBottomAlign({ force: true });
-        syncScrollContainerState();
-        return;
-      }
-      if (config.tailActivityOpen && (scrollHeightChanged || tailMetricsChanged)) {
-        scheduleBottomAlign();
-      }
-      syncScrollContainerState();
-      return;
-    }
-
-    if (viewportHeightChanged || viewportWidthChanged || scrollHeightChanged) {
-      const anchor = scopeState.anchorDirty ? syncDetachedViewportAnchor() : scopeState.anchor;
-      if (anchor) {
-        scheduleAnchorRestore(anchor);
-        return;
-      }
-    }
-
-    if (scopeState.anchorDirty) {
-      scheduleDetachedAnchorCapture();
-      return;
-    }
-
-    syncScrollContainerState();
-  };
-
-  const handleViewportScroll = () => {
-    const config = getConfig();
-    if (!config.enabled) {
-      return;
-    }
-    const metrics = readViewportMetrics(config.viewportRef.current);
-    if (!metrics || state.programmaticScroll) {
-      return;
-    }
-    cancelAutoScrollForUserIntent();
-    markChatScrollActivity();
-    if (isChatViewportNearBottom(metrics, config.stickyBottomThresholdPx)) {
-      cancelPendingTransitionForScope(config.scrollScopeKey);
-      setBottomLockedForCurrentScope(true);
-      syncFollowSnapshot();
-      syncScrollContainerState();
-      return;
-    }
-    const scopeState = ensureScopeState(config.scrollScopeKey);
-    if (scopeState.isBottomLocked) {
-      detachFromBottom();
-      return;
-    }
-    if (scopeState.anchorDirty && !scopeState.anchor) {
-      syncDetachedViewportAnchor();
-      return;
-    }
-    markDetachedAnchorDirty();
-  };
+  // ──────────────── 用户主动事件：预设 phase（最终由 scroll 事件兜底校正） ────────────────
 
   const handleViewportPointerDown = () => {
+    // pointerdown 不改 phase；具体方向由后续 wheel/touchmove/scroll 决定。
+    state.touchStartY = null;
+  };
+
+  const handleViewportTouchMove: TouchEventHandler<HTMLDivElement> = (event) => {
     const config = getConfig();
     if (!config.enabled) {
       return;
     }
-    cancelAutoScrollForUserIntent();
-  };
-
-  const handleViewportTouchMove: TouchEventHandler<HTMLDivElement> = () => {
-    const config = getConfig();
-    if (!config.enabled) {
+    const touch = event.touches[0];
+    if (!touch) {
       return;
     }
-    cancelAutoScrollForUserIntent();
-    markChatScrollActivity();
-    const scopeState = ensureScopeState(config.scrollScopeKey);
-    if (scopeState.isBottomLocked) {
-      detachFromBottom();
+    const previousY = state.touchStartY;
+    state.touchStartY = touch.clientY;
+    if (previousY == null) {
       return;
     }
-    markDetachedAnchorDirty();
-  };
-
-  const handleWheelIntent = (deltaY: number) => {
-    const config = getConfig();
-    if (!config.enabled || !Number.isFinite(deltaY) || deltaY === 0) {
-      return;
-    }
-    cancelAutoScrollForUserIntent();
-    markChatScrollActivity();
-    const scopeState = ensureScopeState(config.scrollScopeKey);
-    if (deltaY < 0) {
-      if (scopeState.isBottomLocked) {
-        detachFromBottom();
-        return;
-      }
-      markDetachedAnchorDirty();
-      return;
-    }
-    if (!scopeState.isBottomLocked) {
-      markDetachedAnchorDirty();
+    // 手指下移 = 视图上滑 = 用户在往回看历史。
+    if (touch.clientY > previousY) {
+      setPhase('detached');
     }
   };
 
   const handleViewportWheel: WheelEventHandler<HTMLDivElement> = (event) => {
-    handleWheelIntent(event?.deltaY ?? 0);
+    handleWheelDelta(event?.deltaY ?? 0);
   };
+
+  function handleWheelDelta(deltaY: number) {
+    const config = getConfig();
+    if (!config.enabled || !Number.isFinite(deltaY) || deltaY === 0) {
+      return;
+    }
+    if (deltaY < 0) {
+      // 用户上滑：预设 detached。这条很关键——
+      // 如果浏览器的 scroll 派发跟流式 token 重排撞在同一帧，
+      // onGeometryChanged 会在 scroll 事件之前先看到 phase=detached，
+      // 从而不再 stickToBottom，把用户的上滑意图保住。
+      setPhase('detached');
+    }
+    // deltaY > 0：不主动改 phase；如果滚到底部 scroll 事件会把它转回 follow。
+  }
 
   const scrollViewportByWheelDelta = (deltaY: number) => {
     const config = getConfig();
@@ -878,48 +247,126 @@ export function createChatScrollController(
     if (!config.enabled || !viewport || !Number.isFinite(deltaY) || deltaY === 0) {
       return;
     }
-    handleWheelIntent(deltaY);
+    handleWheelDelta(deltaY);
     viewport.scrollTop += deltaY;
     handleViewportScroll();
   };
 
-  const jumpToBottom = () => {
+  /**
+   * scroll 事件 = phase 的几何真值同步器：
+   *   到底  → follow
+   *   未到底 → detached
+   * 这是唯一一处"按几何把 phase 拉回 follow"的入口。
+   */
+  const handleViewportScroll = () => {
     const config = getConfig();
     if (!config.enabled) {
       return;
     }
-    cancelPendingTransitionForScope(config.scrollScopeKey);
-    clearScheduledDetachedAnchorCapture();
-    state.pendingPrependScroll = null;
-    clearScheduledPrependOffset();
-    scheduleBottomAlign({ force: true, retry: true, immediate: true });
+    const metrics = readViewportMetrics(config.viewportRef.current);
+    if (!metrics) {
+      return;
+    }
+    if (isAtBottom(metrics)) {
+      // 用户主动滚到底部：清掉残留的 prepend 补偿，避免被它把位置拉回。
+      state.pendingPrepend = null;
+      setPhase('follow');
+    } else {
+      setPhase('detached');
+    }
+    syncSyncContainerDataset();
   };
+
+  // ──────────────── 内容/几何被动变化：只读 phase ────────────────
+
+  const onGeometryChanged = () => {
+    const config = getConfig();
+    if (!config.enabled) {
+      return;
+    }
+    if (applyPendingTransition()) {
+      syncSyncContainerDataset();
+      return;
+    }
+    if (applyPendingPrepend()) {
+      syncSyncContainerDataset();
+      return;
+    }
+    const scope = getScope(config.scrollScopeKey);
+    if (!scope.hasInitialAligned && viewportHasRenderableItems(config.viewportRef.current)) {
+      stickToBottom();
+      syncSyncContainerDataset();
+      return;
+    }
+    if (scope.phase === 'follow') {
+      stickToBottom();
+    }
+    // phase === 'detached'：保持 scrollTop 不变（append 不会让用户位置漂走，
+    // prepend 已由 pendingPrepend 单独补偿）。
+    syncSyncContainerDataset();
+  };
+
+  const onScopeChanged = () => {
+    const config = getConfig();
+    if (!config.enabled) {
+      return;
+    }
+    const previousScopeKey = state.lastScopeKey;
+    state.lastScopeKey = config.scrollScopeKey;
+    const scope = getScope(config.scrollScopeKey);
+    config.setChromePhase(scope.phase);
+
+    if (applyPendingTransition()) {
+      syncSyncContainerDataset();
+      return;
+    }
+
+    // 首次进入（包括 enabled 由 false→true 的首次）：必须做一次首贴。
+    const isFirstEnable = previousScopeKey === null
+      || previousScopeKey !== config.scrollScopeKey
+      || !scope.hasInitialAligned;
+
+    if (!isFirstEnable) {
+      syncSyncContainerDataset();
+      return;
+    }
+
+    if (scope.phase === 'follow') {
+      stickToBottom();
+    } else if (scope.anchor) {
+      restoreViewportAnchor(config.viewportRef.current, scope.anchor);
+    }
+    syncSyncContainerDataset();
+  };
+
+  // ──────────────── 显式过渡命令 ────────────────
 
   const prepareScopeAnchorRestore = (nextScopeKey: string) => {
     if (!nextScopeKey) {
       return;
     }
-    const anchor = syncDetachedViewportAnchor();
-    if (!anchor) {
-      return;
-    }
     const config = getConfig();
-    if (nextScopeKey === config.scrollScopeKey) {
-      const viewport = config.viewportRef.current;
-      if (viewport) {
-        state.pendingPrependScroll = {
-          targetScopeKey: nextScopeKey,
-          previousScrollHeight: viewport.scrollHeight,
-          previousScrollTop: viewport.scrollTop,
-        };
-        schedulePendingPrependOffset();
-      }
+    const viewport = config.viewportRef.current;
+    if (!viewport) {
       return;
     }
-    state.pendingScopeTransition = {
-      targetScopeKey: nextScopeKey,
+    const scope = getScope(config.scrollScopeKey);
+    scope.anchor = sampleViewportAnchor(viewport);
+    if (nextScopeKey === config.scrollScopeKey) {
+      // 同 scope 加载更早：内容到位后用 scrollHeight delta 补偿。
+      state.pendingPrepend = {
+        scopeKey: nextScopeKey,
+        previousScrollHeight: viewport.scrollHeight,
+        previousScrollTop: viewport.scrollTop,
+      };
+      // 切 detached：避免被 follow 抢走用户当前位置。
+      setPhase('detached');
+      return;
+    }
+    state.pendingTransition = {
+      scopeKey: nextScopeKey,
       mode: 'restore-anchor',
-      anchor,
+      anchor: scope.anchor ?? undefined,
     };
   };
 
@@ -927,28 +374,37 @@ export function createChatScrollController(
     if (!nextScopeKey) {
       return;
     }
-    state.pendingScopeTransition = {
-      targetScopeKey: nextScopeKey,
-      mode: 'force-bottom',
-    };
-    if (nextScopeKey === getConfig().scrollScopeKey) {
-      scheduleBottomAlign({ force: true, retry: true, immediate: true });
+    const config = getConfig();
+    if (nextScopeKey === config.scrollScopeKey) {
+      state.pendingPrepend = null;
+      setPhase('follow');
+      stickToBottom();
+      syncSyncContainerDataset();
+      return;
     }
+    state.pendingTransition = { scopeKey: nextScopeKey, mode: 'force-follow' };
+  };
+
+  const jumpToBottom = () => {
+    const config = getConfig();
+    if (!config.enabled) {
+      return;
+    }
+    state.pendingPrepend = null;
+    setPhase('follow');
+    stickToBottom();
+    syncSyncContainerDataset();
   };
 
   const cleanup = () => {
-    clearScheduledBottomAlign();
-    clearScheduledAnchorRestore();
-    clearScheduledDetachedAnchorCapture();
-    clearScheduledPrependOffset();
+    state.pendingPrepend = null;
+    state.pendingTransition = null;
+    state.touchStartY = null;
   };
 
   return {
-    onScopeRenderSync,
-    onTailActivityRenderSync,
-    onAutoFollowRenderSync,
-    onResizeObserved,
-    syncChromeRender: syncScrollContainerState,
+    onScopeChanged,
+    onGeometryChanged,
     handleViewportScroll,
     handleViewportPointerDown,
     handleViewportTouchMove,

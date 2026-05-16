@@ -44,7 +44,7 @@ function renderSurface(items: SessionRenderItem[], options?: {
       onLoadOlder={() => {}}
       loadOlderLabel="Load older"
       scrollChromeStore={createChatScrollChromeStore({
-        isBottomLocked: true,
+        phase: 'follow',
         visible: true,
         isAtLatest: true,
         jumpActionLabel: 'Jump',

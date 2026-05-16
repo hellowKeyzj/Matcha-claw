@@ -10,7 +10,7 @@ import { useTaskCenterStore } from '@/stores/task-center-store';
 import { createEmptySessionRecord } from '@/stores/chat/store-state-helpers';
 import { buildRenderItemsFromMessages, type RawMessage } from './helpers/timeline-fixtures';
 import { createViewportWindowState } from '@/stores/chat/viewport-state';
-import { computeBottomLockedScrollTopOnResize, isChatViewportNearBottom } from '@/pages/Chat/useChatScroll';
+import { bottomScrollTop, isAtBottom } from '@/pages/Chat/chat-scroll-model';
 
 let triggerResizeObserver: (() => void) | null = null;
 let resizeObserverCallbacks: Array<() => void> = [];
@@ -48,20 +48,14 @@ function buildSessionRecord(
     ? buildRenderItemsFromMessages('agent:test:main', overrides.messages)
     : (overrides?.items ?? base.items);
   return {
-    meta: {
-      ...base.meta,
-      ...overrides?.meta,
-    },
-    runtime: {
-      ...base.runtime,
-      ...overrides?.runtime,
-    },
+    meta: { ...base.meta, ...overrides?.meta },
+    runtime: { ...base.runtime, ...overrides?.runtime },
     items,
     window: overrides?.window ?? base.window,
   };
 }
 
-function createStreamingAssistantMessage(content: string, timestamp: number): RawMessage {
+function streamingAssistant(content: string, timestamp: number): RawMessage {
   return {
     id: 'assistant-1',
     role: 'assistant',
@@ -72,11 +66,8 @@ function createStreamingAssistantMessage(content: string, timestamp: number): Ra
 }
 
 function setupCommonStores() {
-  const loadHistory = vi.fn().mockResolvedValue(undefined);
-  const loadSessions = vi.fn().mockResolvedValue(undefined);
   const sessionKey = 'agent:test:main';
   const now = Date.now();
-
   useGatewayStore.setState({
     status: {
       processState: 'running',
@@ -85,14 +76,10 @@ function setupCommonStores() {
       healthSummary: 'healthy',
       transportState: 'connected',
       portReachable: true,
-      diagnostics: {
-        consecutiveHeartbeatMisses: 0,
-        consecutiveRpcFailures: 0,
-      },
+      diagnostics: { consecutiveHeartbeatMisses: 0, consecutiveRpcFailures: 0 },
       updatedAt: 1,
     },
   } as never);
-
   useSubagentsStore.setState({
     agents: [
       { id: 'test', name: 'Test Agent', workspace: '.', isDefault: false, createdAt: 1, updatedAt: 1 },
@@ -100,7 +87,6 @@ function setupCommonStores() {
     loadAgents: vi.fn().mockResolvedValue(undefined),
     updateAgent: vi.fn().mockResolvedValue(undefined),
   } as never);
-
   useTaskCenterStore.setState({
     tasks: [],
     loading: false,
@@ -114,20 +100,12 @@ function setupCommonStores() {
     openTaskSession: vi.fn().mockReturnValue({ switched: false, reason: 'task_not_found' }),
     clearError: vi.fn(),
   } as never);
-
   useChatStore.setState({
     loadedSessions: {
       [sessionKey]: buildSessionRecord({
         messages: [
-          {
-            role: 'user',
-            content: 'hello',
-            timestamp: now / 1000,
-            id: 'user-1',
-          },
-          {
-            ...createStreamingAssistantMessage('first chunk', now / 1000),
-          },
+          { role: 'user', content: 'hello', timestamp: now / 1000, id: 'user-1' },
+          streamingAssistant('first chunk', now / 1000),
         ],
         window: createViewportWindowState({
           totalItemCount: 2,
@@ -135,10 +113,7 @@ function setupCommonStores() {
           windowEndOffset: 2,
           isAtLatest: true,
         }),
-        meta: {
-          historyStatus: 'ready',
-          lastActivityAt: now,
-        },
+        meta: { historyStatus: 'ready', lastActivityAt: now },
         runtime: {
           sending: true,
           activeRunId: 'run-1',
@@ -162,8 +137,8 @@ function setupCommonStores() {
       hasLoadedOnce: true,
       lastLoadedAt: now,
     },
-    loadHistory,
-    loadSessions,
+    loadHistory: vi.fn().mockResolvedValue(undefined),
+    loadSessions: vi.fn().mockResolvedValue(undefined),
   } as never);
 }
 
@@ -199,18 +174,6 @@ function installViewportMetrics(
     set: (value: number) => {
       metrics.scrollTop = value;
     },
-  });
-}
-
-function installItemHeight(element: HTMLElement, height: number) {
-  Object.defineProperty(element, 'getBoundingClientRect', {
-    configurable: true,
-    value: () => DOMRect.fromRect({
-      x: 0,
-      y: 0,
-      width: 400,
-      height,
-    }),
   });
 }
 
@@ -251,11 +214,11 @@ function installVirtualItemLayout(
   });
 }
 
-function queryRenderableItems(container: HTMLElement) {
+function queryItems(container: HTMLElement) {
   return Array.from(container.querySelectorAll<HTMLElement>('[data-chat-item-key]'));
 }
 
-describe('chat 主线程滚动锁', () => {
+describe('chat 滚动模型 - phase=follow', () => {
   beforeEach(() => {
     resizeObserverCallbacks = [];
     triggerResizeObserver = null;
@@ -263,18 +226,11 @@ describe('chat 主线程滚动锁', () => {
     setupCommonStores();
   });
 
-  it('锁底时流式增长应持续贴底', async () => {
+  it('内容增长应贴底', async () => {
     const { container } = renderChat();
     const viewport = container.querySelector('.overflow-y-auto') as HTMLDivElement;
-    const itemElements = queryRenderableItems(container);
-    const metrics = {
-      scrollHeight: 980,
-      clientHeight: 320,
-      scrollTop: 660,
-    };
+    const metrics = { scrollHeight: 980, clientHeight: 320, scrollTop: 660 };
     installViewportMetrics(viewport, metrics);
-    installItemHeight(itemElements[0]!, 120);
-    installItemHeight(itemElements[1]!, 80);
 
     act(() => {
       triggerResizeObserver?.();
@@ -282,38 +238,6 @@ describe('chat 主线程滚动锁', () => {
 
     act(() => {
       metrics.scrollHeight = 1300;
-      useChatStore.setState({
-        loadedSessions: {
-          'agent:test:main': buildSessionRecord({
-            messages: [
-              {
-                role: 'user',
-                content: 'hello',
-                timestamp: Date.now() / 1000,
-                id: 'user-1',
-              },
-              createStreamingAssistantMessage('first chunk second chunk', Date.now() / 1000),
-            ],
-            window: createViewportWindowState({
-              totalItemCount: 2,
-              windowStartOffset: 0,
-              windowEndOffset: 2,
-              isAtLatest: true,
-            }),
-            meta: {
-              historyStatus: 'ready',
-              lastActivityAt: Date.now(),
-            },
-            runtime: {
-              ...useChatStore.getState().loadedSessions['agent:test:main']!.runtime,
-              activeTurnItemKey: 'assistant-1',
-            },
-          }),
-        },
-      } as never);
-      const nextItemElements = queryRenderableItems(container);
-      installItemHeight(nextItemElements[0]!, 120);
-      installItemHeight(nextItemElements[1]!, 140);
       triggerResizeObserver?.();
     });
 
@@ -322,23 +246,13 @@ describe('chat 主线程滚动锁', () => {
     });
   });
 
-  it('发送中旧 item 高度变化时，不应因为非尾部 resize 抢滚动', async () => {
+  it('viewport 高度变小时也应继续贴底', async () => {
     useChatStore.setState({
       loadedSessions: {
         'agent:test:main': buildSessionRecord({
           messages: [
-            {
-              role: 'user',
-              content: 'older message',
-              timestamp: Date.now() / 1000,
-              id: 'user-1',
-            },
-            {
-              role: 'assistant',
-              content: 'tail message',
-              timestamp: Date.now() / 1000,
-              id: 'assistant-1',
-            },
+            { role: 'user', content: 'older message', timestamp: Date.now() / 1000, id: 'user-1' },
+            { role: 'assistant', content: 'assistant body', timestamp: Date.now() / 1000, id: 'assistant-1' },
           ],
           window: createViewportWindowState({
             totalItemCount: 2,
@@ -346,200 +260,47 @@ describe('chat 主线程滚动锁', () => {
             windowEndOffset: 2,
             isAtLatest: true,
           }),
-          meta: {
-            historyStatus: 'ready',
-            lastActivityAt: Date.now(),
-          },
-          runtime: {
-            sending: true,
-            activeRunId: 'run-1',
-            runPhase: 'streaming',
-            activeTurnItemKey: null,
-            pendingTurnKey: null,
-            pendingTurnLaneKey: null,
-            lastUserMessageAt: Date.now(),
-            pendingFinal: false,
-          },
+          meta: { historyStatus: 'ready', lastActivityAt: Date.now() },
         }),
       },
     } as never);
 
     const { container } = renderChat();
     const viewport = container.querySelector('.overflow-y-auto') as HTMLDivElement;
-    const metrics = {
-      scrollHeight: 980,
-      clientHeight: 320,
-      scrollTop: 660,
-    };
-    installViewportMetrics(viewport, metrics);
-    const initialItems = queryRenderableItems(container);
-    installItemHeight(initialItems[0]!, 220);
-    installItemHeight(initialItems[1]!, 80);
-
-    act(() => {
-      fireEvent.wheel(viewport, { deltaY: -120 });
-      metrics.scrollTop = 420;
-      fireEvent.scroll(viewport);
-    });
-
-    act(() => {
-      metrics.scrollHeight = 1180;
-      triggerResizeObserver?.();
-    });
-
-    await waitFor(() => {
-      expect(metrics.scrollTop).toBe(420);
-    });
-  });
-
-  it('锁底时发送中的本地 user item 追加后应立即贴底', async () => {
-    useChatStore.setState({
-      loadedSessions: {
-        'agent:test:main': buildSessionRecord({
-          messages: [
-            {
-              role: 'user',
-              content: 'hello',
-              timestamp: Date.now() / 1000,
-              id: 'user-1',
-            },
-          ],
-          window: createViewportWindowState({
-            totalItemCount: 1,
-            windowStartOffset: 0,
-            windowEndOffset: 1,
-            isAtLatest: true,
-          }),
-          runtime: {
-            ...useChatStore.getState().loadedSessions['agent:test:main']!.runtime,
-            sending: true,
-            activeTurnItemKey: null,
-            pendingFinal: false,
-          },
-        }),
-      },
-    } as never);
-
-    const { container } = renderChat();
-    const viewport = container.querySelector('.overflow-y-auto') as HTMLDivElement;
-    const metrics = {
-      scrollHeight: 980,
-      clientHeight: 320,
-      scrollTop: 660,
-    };
+    const metrics = { scrollHeight: 980, clientHeight: 320, scrollTop: 0 };
     installViewportMetrics(viewport, metrics);
 
     act(() => {
       triggerResizeObserver?.();
-    });
-
-    act(() => {
-      metrics.scrollHeight = 1180;
-      useChatStore.setState({
-        loadedSessions: {
-          'agent:test:main': buildSessionRecord({
-            messages: [
-              {
-                role: 'user',
-                content: 'hello',
-                timestamp: Date.now() / 1000,
-                id: 'user-1',
-              },
-              {
-                id: 'pending-user-2',
-                role: 'user',
-                content: 'pending send',
-                timestamp: Date.now() / 1000,
-                status: 'sending',
-              },
-            ],
-            window: createViewportWindowState({
-              totalItemCount: 2,
-              windowStartOffset: 0,
-              windowEndOffset: 2,
-              isAtLatest: true,
-            }),
-            runtime: {
-              ...useChatStore.getState().loadedSessions['agent:test:main']!.runtime,
-              sending: true,
-              pendingFinal: false,
-            },
-          }),
-        },
-      } as never);
-      triggerResizeObserver?.();
-    });
-
-    await waitFor(() => {
-      expect(metrics.scrollTop).toBe(860);
-    });
-  });
-
-  it('首次启动主会话在历史内容落地后应自动贴到底部', async () => {
-    useChatStore.setState({
-      loadedSessions: {
-        'agent:test:main': buildSessionRecord(),
-      },
-      foregroundHistorySessionKey: 'agent:test:main',
-      currentSessionKey: 'agent:test:main',
-    } as never);
-
-    const { container } = renderChat();
-    const viewport = container.querySelector('.overflow-y-auto') as HTMLDivElement;
-    const metrics = {
-      scrollHeight: 980,
-      clientHeight: 320,
-      scrollTop: 0,
-    };
-    installViewportMetrics(viewport, metrics);
-
-    act(() => {
-      useChatStore.setState({
-        loadedSessions: {
-          'agent:test:main': buildSessionRecord({
-            messages: [
-              {
-                role: 'user',
-                content: 'older message',
-                timestamp: Date.now() / 1000,
-                id: 'user-1',
-              },
-              {
-                role: 'assistant',
-                content: 'latest message',
-                timestamp: Date.now() / 1000,
-                id: 'assistant-1',
-              },
-            ],
-            window: createViewportWindowState({
-              totalItemCount: 2,
-              windowStartOffset: 0,
-              windowEndOffset: 2,
-              isAtLatest: true,
-            }),
-            meta: {
-              historyStatus: 'ready',
-              lastActivityAt: Date.now(),
-            },
-          }),
-        },
-        foregroundHistorySessionKey: null,
-      } as never);
     });
 
     await waitFor(() => {
       expect(metrics.scrollTop).toBe(660);
     });
+
+    act(() => {
+      metrics.clientHeight = 220;
+      triggerResizeObserver?.();
+    });
+
+    await waitFor(() => {
+      expect(metrics.scrollTop).toBe(760);
+    });
+  });
+});
+
+describe('chat 滚动模型 - 用户上滑后转 detached', () => {
+  beforeEach(() => {
+    resizeObserverCallbacks = [];
+    triggerResizeObserver = null;
+    (globalThis as unknown as { ResizeObserver: typeof ResizeObserver }).ResizeObserver = ResizeObserverStub as unknown as typeof ResizeObserver;
+    setupCommonStores();
   });
 
-  it('用户向上滚后应立即脱离锁底，后续增长不能再抢滚动', async () => {
+  it('上滑后流式增长不再抢滚动 (核心回归)', async () => {
     const { container } = renderChat();
     const viewport = container.querySelector('.overflow-y-auto') as HTMLDivElement;
-    const metrics = {
-      scrollHeight: 980,
-      clientHeight: 320,
-      scrollTop: 660,
-    };
+    const metrics = { scrollHeight: 980, clientHeight: 320, scrollTop: 660 };
     installViewportMetrics(viewport, metrics);
 
     act(() => {
@@ -558,13 +319,8 @@ describe('chat 主线程滚动锁', () => {
         loadedSessions: {
           'agent:test:main': buildSessionRecord({
             messages: [
-              {
-                role: 'user',
-                content: 'hello',
-                timestamp: Date.now() / 1000,
-                id: 'user-1',
-              },
-              createStreamingAssistantMessage('first chunk second chunk', Date.now() / 1000),
+              { role: 'user', content: 'hello', timestamp: Date.now() / 1000, id: 'user-1' },
+              streamingAssistant('first chunk second chunk', Date.now() / 1000),
             ],
             window: createViewportWindowState({
               totalItemCount: 2,
@@ -572,10 +328,7 @@ describe('chat 主线程滚动锁', () => {
               windowEndOffset: 2,
               isAtLatest: true,
             }),
-            meta: {
-              historyStatus: 'ready',
-              lastActivityAt: Date.now(),
-            },
+            meta: { historyStatus: 'ready', lastActivityAt: Date.now() },
             runtime: {
               ...useChatStore.getState().loadedSessions['agent:test:main']!.runtime,
               activeTurnItemKey: 'assistant-1',
@@ -591,116 +344,55 @@ describe('chat 主线程滚动锁', () => {
     });
   });
 
-  it('连续上滑查看旧消息时，不应在 wheel/scroll 热路径里同步反复采样阅读锚点', async () => {
+  it('上滑后 jump-to-bottom 按钮立即出现', async () => {
+    const { container } = renderChat();
+    const viewport = container.querySelector('.overflow-y-auto') as HTMLDivElement;
+    const metrics = { scrollHeight: 980, clientHeight: 320, scrollTop: 660 };
+    installViewportMetrics(viewport, metrics);
+
+    act(() => {
+      triggerResizeObserver?.();
+    });
+
+    act(() => {
+      fireEvent.wheel(viewport, { deltaY: -120 });
+      metrics.scrollTop = 420;
+      fireEvent.scroll(viewport);
+    });
+
+    expect(await screen.findByRole('button', { name: 'Jump to bottom' })).toBeInTheDocument();
+  });
+
+  it('detached 后窗口缩小不会被拉回底部', async () => {
     useChatStore.setState({
       loadedSessions: {
         'agent:test:main': buildSessionRecord({
           messages: [
-            {
-              role: 'user',
-              content: 'message-1',
-              timestamp: 1,
-              id: 'user-1',
-            },
-            {
-              role: 'assistant',
-              content: 'message-2',
-              timestamp: 2,
-              id: 'assistant-1',
-            },
-            {
-              role: 'assistant',
-              content: 'message-3',
-              timestamp: 3,
-              id: 'assistant-2',
-            },
+            { role: 'user', content: 'older message', timestamp: Date.now() / 1000, id: 'user-1' },
+            { role: 'assistant', content: 'assistant body', timestamp: Date.now() / 1000, id: 'assistant-1' },
           ],
           window: createViewportWindowState({
-            totalItemCount: 3,
+            totalItemCount: 2,
             windowStartOffset: 0,
-            windowEndOffset: 3,
+            windowEndOffset: 2,
             isAtLatest: true,
           }),
-          meta: {
-            historyStatus: 'ready',
-            lastActivityAt: Date.now(),
-          },
+          meta: { historyStatus: 'ready', lastActivityAt: Date.now() },
         }),
       },
     } as never);
 
     const { container } = renderChat();
     const viewport = container.querySelector('.overflow-y-auto') as HTMLDivElement;
-    const metrics = {
-      scrollHeight: 300,
-      clientHeight: 100,
-      clientWidth: 400,
-      scrollTop: 200,
-    };
+    const metrics = { scrollHeight: 980, clientHeight: 320, scrollTop: 0 };
     installViewportMetrics(viewport, metrics);
-    installViewportRect(viewport, metrics);
 
-    const itemElements = queryRenderableItems(container);
-    let anchorItemReadCount = 0;
-    let offsetTop = 0;
-    for (const [index, element] of itemElements.entries()) {
-      const itemTop = offsetTop;
-      const itemHeight = [80, 120, 100][index] ?? 80;
-      offsetTop += itemHeight;
-      Object.defineProperty(element, 'getBoundingClientRect', {
-        configurable: true,
-        value: () => {
-          if (index === 1) {
-            anchorItemReadCount += 1;
-          }
-          return DOMRect.fromRect({
-            x: 0,
-            y: itemTop - metrics.scrollTop,
-            width: metrics.clientWidth,
-            height: itemHeight,
-          });
-        },
-      });
-    }
-
-    await waitFor(() => {
-      expect(metrics.scrollTop).toBe(200);
-    });
-
-    anchorItemReadCount = 0;
     act(() => {
-      fireEvent.wheel(viewport, { deltaY: -120 });
-      metrics.scrollTop = 170;
-      fireEvent.scroll(viewport);
-      fireEvent.wheel(viewport, { deltaY: -120 });
-      metrics.scrollTop = 130;
-      fireEvent.scroll(viewport);
-      fireEvent.wheel(viewport, { deltaY: -120 });
-      metrics.scrollTop = 90;
-      fireEvent.scroll(viewport);
+      triggerResizeObserver?.();
     });
-
-    expect(anchorItemReadCount).toBeGreaterThan(0);
-
-    await act(async () => {
-      await new Promise((resolve) => setTimeout(resolve, 120));
-    });
-
-    expect(anchorItemReadCount).toBeGreaterThan(0);
-  });
-
-  it('滚动控制器不再依赖 MutationObserver follow pulse', async () => {
-    const { container } = renderChat();
-    const viewport = container.querySelector('.overflow-y-auto') as HTMLDivElement;
-    const metrics = {
-      scrollHeight: 980,
-      clientHeight: 320,
-      scrollTop: 660,
-    };
-    installViewportMetrics(viewport, metrics);
 
     await waitFor(() => {
-      expect(resizeObserverCallbacks.length).toBeGreaterThan(0);
+      expect(metrics.scrollTop).toBe(660);
     });
 
     act(() => {
@@ -710,28 +402,20 @@ describe('chat 主线程滚动锁', () => {
     });
 
     act(() => {
-      fireEvent.wheel(viewport, { deltaY: 180 });
-      metrics.scrollTop = 660;
-      fireEvent.scroll(viewport);
+      metrics.clientHeight = 220;
+      triggerResizeObserver?.();
     });
 
     await waitFor(() => {
-      expect(resizeObserverCallbacks.length).toBeGreaterThan(0);
+      expect(metrics.scrollTop).toBe(420);
     });
   });
 
-  it('用户重新滚到底部后应恢复跟随，后续增长继续贴底', async () => {
+  it('用户重新滚到底部后恢复跟随', async () => {
     const { container } = renderChat();
     const viewport = container.querySelector('.overflow-y-auto') as HTMLDivElement;
-    const itemElements = queryRenderableItems(container);
-    const metrics = {
-      scrollHeight: 980,
-      clientHeight: 320,
-      scrollTop: 660,
-    };
+    const metrics = { scrollHeight: 980, clientHeight: 320, scrollTop: 660 };
     installViewportMetrics(viewport, metrics);
-    installItemHeight(itemElements[0]!, 120);
-    installItemHeight(itemElements[1]!, 80);
 
     act(() => {
       triggerResizeObserver?.();
@@ -744,45 +428,12 @@ describe('chat 主线程滚动锁', () => {
     });
 
     act(() => {
-      fireEvent.wheel(viewport, { deltaY: 180 });
       metrics.scrollTop = 660;
       fireEvent.scroll(viewport);
     });
 
     act(() => {
       metrics.scrollHeight = 1320;
-      useChatStore.setState({
-        loadedSessions: {
-          'agent:test:main': buildSessionRecord({
-            messages: [
-              {
-                role: 'user',
-                content: 'hello',
-                timestamp: Date.now() / 1000,
-                id: 'user-1',
-              },
-              createStreamingAssistantMessage('first chunk second chunk', Date.now() / 1000),
-            ],
-            window: createViewportWindowState({
-              totalItemCount: 2,
-              windowStartOffset: 0,
-              windowEndOffset: 2,
-              isAtLatest: true,
-            }),
-            meta: {
-              historyStatus: 'ready',
-              lastActivityAt: Date.now(),
-            },
-            runtime: {
-              ...useChatStore.getState().loadedSessions['agent:test:main']!.runtime,
-              activeTurnItemKey: 'assistant-1',
-            },
-          }),
-        },
-      } as never);
-      const nextItemElements = queryRenderableItems(container);
-      installItemHeight(nextItemElements[0]!, 120);
-      installItemHeight(nextItemElements[1]!, 140);
       triggerResizeObserver?.();
     });
 
@@ -790,15 +441,20 @@ describe('chat 主线程滚动锁', () => {
       expect(metrics.scrollTop).toBe(1000);
     });
   });
+});
 
-  it('用户上滑脱离贴底后，点击按钮应立即跳到底部并恢复跟随', async () => {
+describe('chat 滚动模型 - 显式过渡', () => {
+  beforeEach(() => {
+    resizeObserverCallbacks = [];
+    triggerResizeObserver = null;
+    (globalThis as unknown as { ResizeObserver: typeof ResizeObserver }).ResizeObserver = ResizeObserverStub as unknown as typeof ResizeObserver;
+    setupCommonStores();
+  });
+
+  it('点 jump-to-bottom 应直接贴底并恢复跟随', async () => {
     const { container } = renderChat();
     const viewport = container.querySelector('.overflow-y-auto') as HTMLDivElement;
-    const metrics = {
-      scrollHeight: 980,
-      clientHeight: 320,
-      scrollTop: 660,
-    };
+    const metrics = { scrollHeight: 980, clientHeight: 320, scrollTop: 660 };
     installViewportMetrics(viewport, metrics);
 
     act(() => {
@@ -816,24 +472,14 @@ describe('chat 主线程滚动锁', () => {
     });
   });
 
-  it('非 latest 窗口首次点击回到底部时，不应先停在旧位置再等下一帧贴底', async () => {
+  it('非 latest 窗口点击 jump 应先调 jumpViewportToLatest，落地后立即贴底', async () => {
     const jumpViewportToLatest = vi.fn().mockImplementation(async () => {
       useChatStore.setState({
         loadedSessions: {
           'agent:test:main': buildSessionRecord({
             messages: [
-              {
-                role: 'user',
-                content: 'older message',
-                timestamp: Date.now() / 1000,
-                id: 'user-1',
-              },
-              {
-                role: 'assistant',
-                content: 'latest message',
-                timestamp: Date.now() / 1000,
-                id: 'assistant-1',
-              },
+              { role: 'user', content: 'older message', timestamp: Date.now() / 1000, id: 'user-1' },
+              { role: 'assistant', content: 'latest message', timestamp: Date.now() / 1000, id: 'assistant-1' },
             ],
             window: createViewportWindowState({
               totalItemCount: 2,
@@ -843,10 +489,7 @@ describe('chat 主线程滚动锁', () => {
               hasNewer: false,
               isAtLatest: true,
             }),
-            meta: {
-              historyStatus: 'ready',
-              lastActivityAt: Date.now(),
-            },
+            meta: { historyStatus: 'ready', lastActivityAt: Date.now() },
           }),
         },
       } as never);
@@ -855,18 +498,8 @@ describe('chat 主线程滚动锁', () => {
       loadedSessions: {
         'agent:test:main': buildSessionRecord({
           messages: [
-            {
-              role: 'user',
-              content: 'older message',
-              timestamp: Date.now() / 1000,
-              id: 'user-1',
-            },
-            {
-              role: 'assistant',
-              content: 'latest message',
-              timestamp: Date.now() / 1000,
-              id: 'assistant-1',
-            },
+            { role: 'user', content: 'older message', timestamp: Date.now() / 1000, id: 'user-1' },
+            { role: 'assistant', content: 'latest message', timestamp: Date.now() / 1000, id: 'assistant-1' },
           ],
           window: createViewportWindowState({
             totalItemCount: 2,
@@ -876,465 +509,52 @@ describe('chat 主线程滚动锁', () => {
             hasNewer: true,
             isAtLatest: false,
           }),
-          meta: {
-            historyStatus: 'ready',
-            lastActivityAt: Date.now(),
-          },
+          meta: { historyStatus: 'ready', lastActivityAt: Date.now() },
         }),
       },
       jumpViewportToLatest,
     } as never);
 
-    const rafQueue: FrameRequestCallback[] = [];
-    vi.stubGlobal('requestAnimationFrame', vi.fn((callback: FrameRequestCallback) => {
-      rafQueue.push(callback);
-      return rafQueue.length;
-    }));
-    vi.stubGlobal('cancelAnimationFrame', vi.fn());
-
-    try {
-      const { container } = renderChat();
-      const viewport = container.querySelector('.overflow-y-auto') as HTMLDivElement;
-      const metrics = {
-        scrollHeight: 980,
-        clientHeight: 320,
-        scrollTop: 420,
-      };
-      installViewportMetrics(viewport, metrics);
-
-      act(() => {
-        triggerResizeObserver?.();
-        fireEvent.wheel(viewport, { deltaY: -120 });
-        metrics.scrollTop = 420;
-        fireEvent.scroll(viewport);
-      });
-
-      const jumpButton = await screen.findByRole('button', { name: 'Jump to bottom' });
-      fireEvent.click(jumpButton);
-
-      expect(jumpViewportToLatest).toHaveBeenCalledWith('agent:test:main');
-      expect(metrics.scrollTop).toBe(660);
-      expect(rafQueue.length).toBeGreaterThan(0);
-    } finally {
-      vi.unstubAllGlobals();
-    }
-  });
-
-  it('正文二次渲染只导致高度变化时，不应再次自动贴底', async () => {
-    useChatStore.setState({
-      loadedSessions: {
-        'agent:test:main': buildSessionRecord({
-          messages: [
-            {
-              role: 'user',
-              content: 'older message',
-              timestamp: Date.now() / 1000,
-              id: 'user-1',
-            },
-            {
-              role: 'assistant',
-              content: 'assistant body',
-              timestamp: Date.now() / 1000,
-              id: 'assistant-1',
-            },
-          ],
-          window: createViewportWindowState({
-            totalItemCount: 2,
-            windowStartOffset: 0,
-            windowEndOffset: 2,
-            isAtLatest: true,
-          }),
-          meta: {
-            historyStatus: 'ready',
-            lastActivityAt: Date.now(),
-          },
-        }),
-      },
-    } as never);
-
     const { container } = renderChat();
     const viewport = container.querySelector('.overflow-y-auto') as HTMLDivElement;
-    const metrics = {
-      scrollHeight: 980,
-      clientHeight: 320,
-      scrollTop: 0,
-    };
+    const metrics = { scrollHeight: 980, clientHeight: 320, scrollTop: 420 };
     installViewportMetrics(viewport, metrics);
 
-    await waitFor(() => {
-      expect(metrics.scrollTop).toBe(660);
-    });
-
     act(() => {
+      triggerResizeObserver?.();
       fireEvent.wheel(viewport, { deltaY: -120 });
       metrics.scrollTop = 420;
       fireEvent.scroll(viewport);
     });
 
-    act(() => {
-      metrics.scrollHeight = 1280;
-      triggerResizeObserver?.();
-    });
+    const jumpButton = await screen.findByRole('button', { name: 'Jump to bottom' });
+    fireEvent.click(jumpButton);
 
-    await waitFor(() => {
-      expect(metrics.scrollTop).toBe(420);
-    });
-  });
-
-  it('锁底时窗口缩小导致 viewport 变矮，静态线程仍应保持贴底', async () => {
-    useChatStore.setState({
-      loadedSessions: {
-        'agent:test:main': buildSessionRecord({
-          messages: [
-            {
-              role: 'user',
-              content: 'older message',
-              timestamp: Date.now() / 1000,
-              id: 'user-1',
-            },
-            {
-              role: 'assistant',
-              content: 'assistant body',
-              timestamp: Date.now() / 1000,
-              id: 'assistant-1',
-            },
-          ],
-          window: createViewportWindowState({
-            totalItemCount: 2,
-            windowStartOffset: 0,
-            windowEndOffset: 2,
-            isAtLatest: true,
-          }),
-          meta: {
-            historyStatus: 'ready',
-            lastActivityAt: Date.now(),
-          },
-        }),
-      },
-    } as never);
-
-    const { container } = renderChat();
-    const viewport = container.querySelector('.overflow-y-auto') as HTMLDivElement;
-    const metrics = {
-      scrollHeight: 980,
-      clientHeight: 320,
-      scrollTop: 0,
-    };
-    installViewportMetrics(viewport, metrics);
-
+    expect(jumpViewportToLatest).toHaveBeenCalledWith('agent:test:main');
     await waitFor(() => {
       expect(metrics.scrollTop).toBe(660);
     });
-
-    act(() => {
-      triggerResizeObserver?.();
-    });
-
-    act(() => {
-      metrics.clientHeight = 220;
-      triggerResizeObserver?.();
-    });
-
-    await waitFor(() => {
-      expect(metrics.scrollTop).toBe(760);
-    });
   });
 
-  it('静态线程脱离锁底后窗口缩小，不应被重新拉回到底部', async () => {
-    useChatStore.setState({
-      loadedSessions: {
-        'agent:test:main': buildSessionRecord({
-          messages: [
-            {
-              role: 'user',
-              content: 'older message',
-              timestamp: Date.now() / 1000,
-              id: 'user-1',
-            },
-            {
-              role: 'assistant',
-              content: 'assistant body',
-              timestamp: Date.now() / 1000,
-              id: 'assistant-1',
-            },
-          ],
-          window: createViewportWindowState({
-            totalItemCount: 2,
-            windowStartOffset: 0,
-            windowEndOffset: 2,
-            isAtLatest: true,
-          }),
-          meta: {
-            historyStatus: 'ready',
-            lastActivityAt: Date.now(),
-          },
-        }),
-      },
-    } as never);
-
-    const { container } = renderChat();
-    const viewport = container.querySelector('.overflow-y-auto') as HTMLDivElement;
-    const metrics = {
-      scrollHeight: 980,
-      clientHeight: 320,
-      scrollTop: 0,
-    };
-    installViewportMetrics(viewport, metrics);
-
-    await waitFor(() => {
-      expect(metrics.scrollTop).toBe(660);
-    });
-
-    act(() => {
-      triggerResizeObserver?.();
-    });
-
-    act(() => {
-      fireEvent.wheel(viewport, { deltaY: -120 });
-      metrics.scrollTop = 420;
-      fireEvent.scroll(viewport);
-    });
-
-    act(() => {
-      metrics.clientHeight = 220;
-      triggerResizeObserver?.();
-    });
-
-    await waitFor(() => {
-      expect(metrics.scrollTop).toBe(420);
-    });
-  });
-
-  it('静态线程脱离锁底后，上方 item 因 resize 重排增高时应保持当前阅读锚点', async () => {
-    useChatStore.setState({
-      loadedSessions: {
-        'agent:test:main': buildSessionRecord({
-          messages: [
-            {
-              role: 'user',
-              content: 'message-1',
-              timestamp: Date.now() / 1000,
-              id: 'user-1',
-            },
-            {
-              role: 'assistant',
-              content: 'message-2',
-              timestamp: Date.now() / 1000,
-              id: 'assistant-1',
-            },
-            {
-              role: 'assistant',
-              content: 'message-3',
-              timestamp: Date.now() / 1000,
-              id: 'assistant-2',
-            },
-          ],
-          window: createViewportWindowState({
-            totalItemCount: 3,
-            windowStartOffset: 0,
-            windowEndOffset: 3,
-            isAtLatest: true,
-          }),
-          meta: {
-            historyStatus: 'ready',
-            lastActivityAt: Date.now(),
-          },
-        }),
-      },
-    } as never);
-
-    const { container } = renderChat();
-    const viewport = container.querySelector('.overflow-y-auto') as HTMLDivElement;
-    const itemElements = queryRenderableItems(container);
-    expect(itemElements.length).toBeGreaterThanOrEqual(2);
-    const initialItemHeights = [100, 300, ...Array.from({ length: Math.max(0, itemElements.length - 2) }, () => 80)];
-    const resizedItemHeights = [160, 300, ...Array.from({ length: Math.max(0, itemElements.length - 2) }, () => 80)];
-    const metrics = {
-      scrollHeight: initialItemHeights.reduce((sum, height) => sum + height, 0),
-      clientHeight: 120,
-      clientWidth: 400,
-      scrollTop: 0,
-    };
-    installViewportMetrics(viewport, metrics);
-    installViewportRect(viewport, metrics);
-    installVirtualItemLayout(itemElements, metrics, initialItemHeights);
-
-    await waitFor(() => {
-      expect(metrics.scrollTop).toBe(metrics.scrollHeight - metrics.clientHeight);
-    });
-
-    act(() => {
-      triggerResizeObserver?.();
-    });
-
-    await act(async () => {
-      await new Promise((resolve) => setTimeout(resolve, 40));
-    });
-
-    act(() => {
-      fireEvent.wheel(viewport, { deltaY: -120 });
-      metrics.scrollTop = 150;
-      fireEvent.scroll(viewport);
-    });
-
-    await screen.findByRole('button', { name: 'Jump to bottom' });
-    await act(async () => {
-      await new Promise((resolve) => setTimeout(resolve, 120));
-    });
-
-    act(() => {
-      metrics.clientWidth = 320;
-      metrics.scrollHeight = resizedItemHeights.reduce((sum, height) => sum + height, 0);
-      installViewportRect(viewport, metrics);
-      installVirtualItemLayout(itemElements, metrics, resizedItemHeights);
-      triggerResizeObserver?.();
-    });
-
-    await waitFor(() => {
-      expect(metrics.scrollTop).toBe(150);
-    });
-  });
-
-  it('锁底时 assistant final 完成后的尾部继续增高，仍应保持贴底', async () => {
-    useChatStore.setState({
-      loadedSessions: {
-        'agent:test:main': buildSessionRecord({
-          messages: [
-            {
-              role: 'user',
-              content: 'hello',
-              timestamp: Date.now() / 1000,
-              id: 'user-1',
-            },
-            {
-              role: 'assistant',
-              content: 'first chunk',
-              timestamp: Date.now() / 1000,
-              id: 'assistant-1',
-            },
-          ],
-          window: createViewportWindowState({
-            totalItemCount: 2,
-            windowStartOffset: 0,
-            windowEndOffset: 2,
-            isAtLatest: true,
-          }),
-          meta: {
-            historyStatus: 'ready',
-            lastActivityAt: Date.now(),
-          },
-          runtime: {
-            sending: true,
-            activeRunId: 'run-1',
-            runPhase: 'streaming',
-            lastUserMessageAt: Date.now(),
-            activeTurnItemKey: null,
-            pendingTurnKey: null,
-            pendingTurnLaneKey: null,
-            pendingFinal: false,
-          },
-        }),
-      },
-    } as never);
-
-    const { container } = renderChat();
-    const viewport = container.querySelector('.overflow-y-auto') as HTMLDivElement;
-    const metrics = {
-      scrollHeight: 980,
-      clientHeight: 320,
-      scrollTop: 660,
-    };
-    installViewportMetrics(viewport, metrics);
-
-    act(() => {
-      triggerResizeObserver?.();
-    });
-
-    await waitFor(() => {
-      expect(metrics.scrollTop).toBe(660);
-    });
-
-    act(() => {
-      useChatStore.setState({
-        loadedSessions: {
-          'agent:test:main': {
-            ...useChatStore.getState().loadedSessions['agent:test:main'],
-            runtime: {
-              ...useChatStore.getState().loadedSessions['agent:test:main']!.runtime,
-              sending: false,
-              activeRunId: null,
-              runPhase: 'done',
-              pendingFinal: false,
-            },
-          },
-        },
-      } as never);
-    });
-
-    act(() => {
-      metrics.scrollHeight = 1400;
-      triggerResizeObserver?.();
-    });
-
-    await waitFor(() => {
-      expect(metrics.scrollTop).toBe(1080);
-    });
-  });
-
-  it('同会话加载更早消息后，应保持当前阅读锚点不跳动', async () => {
+  it('加载更早消息后保持当前阅读锚点', async () => {
     const loadOlderViewportItems = vi.fn().mockResolvedValue(undefined);
     useChatStore.setState({
       loadedSessions: {
         'agent:test:main': buildSessionRecord({
           messages: [
-            {
-              role: 'user',
-              content: 'message-0',
-              timestamp: 0,
-              id: 'user-0',
-            },
-            {
-              role: 'assistant',
-              content: 'message-0.5',
-              timestamp: 0.5,
-              id: 'assistant-0',
-            },
-            {
-              role: 'user',
-              content: 'older message',
-              timestamp: 0.75,
-              id: 'user-older',
-            },
-            {
-              role: 'user',
-              content: 'message-1',
-              timestamp: 1,
-              id: 'user-1',
-            },
-            {
-              role: 'assistant',
-              content: 'message-2',
-              timestamp: 2,
-              id: 'assistant-1',
-            },
-            {
-              role: 'assistant',
-              content: 'message-3',
-              timestamp: 3,
-              id: 'assistant-2',
-            },
+            { role: 'user', content: 'message-0', timestamp: 0, id: 'user-0' },
+            { role: 'assistant', content: 'message-0.5', timestamp: 0.5, id: 'assistant-0' },
+            { role: 'user', content: 'message-1', timestamp: 1, id: 'user-1' },
+            { role: 'assistant', content: 'message-2', timestamp: 2, id: 'assistant-1' },
           ],
           window: createViewportWindowState({
-            totalItemCount: 6,
-            windowStartOffset: 3,
-            windowEndOffset: 6,
+            totalItemCount: 4,
+            windowStartOffset: 2,
+            windowEndOffset: 4,
             hasMore: true,
             isAtLatest: true,
           }),
-          meta: {
-            historyStatus: 'ready',
-            lastActivityAt: Date.now(),
-          },
+          meta: { historyStatus: 'ready', lastActivityAt: Date.now() },
         }),
       },
       loadOlderViewportItems,
@@ -1342,17 +562,11 @@ describe('chat 主线程滚动锁', () => {
 
     const { container } = renderChat();
     const viewport = container.querySelector('.overflow-y-auto') as HTMLDivElement;
-    const metrics = {
-      scrollHeight: 300,
-      clientHeight: 100,
-      clientWidth: 400,
-      scrollTop: 200,
-    };
+    const metrics = { scrollHeight: 300, clientHeight: 100, clientWidth: 400, scrollTop: 200 };
     installViewportMetrics(viewport, metrics);
     installViewportRect(viewport, metrics);
-
-    let itemElements = queryRenderableItems(container);
-    installVirtualItemLayout(itemElements, metrics, [80, 120, 100]);
+    let itemElements = queryItems(container);
+    installVirtualItemLayout(itemElements, metrics, [80, 120]);
 
     await waitFor(() => {
       expect(metrics.scrollTop).toBe(200);
@@ -1373,100 +587,47 @@ describe('chat 主线程滚动锁', () => {
         loadedSessions: {
           'agent:test:main': buildSessionRecord({
             messages: [
-              {
-                role: 'user',
-                content: 'message-0',
-                timestamp: 0,
-                id: 'user-0',
-              },
-              {
-                role: 'assistant',
-                content: 'message-0.5',
-                timestamp: 0.5,
-                id: 'assistant-0',
-              },
-              {
-                role: 'user',
-                content: 'older message',
-                timestamp: 0.75,
-                id: 'user-older',
-              },
-              {
-                role: 'user',
-                content: 'message-1',
-                timestamp: 1,
-                id: 'user-1',
-              },
-              {
-                role: 'assistant',
-                content: 'message-2',
-                timestamp: 2,
-                id: 'assistant-1',
-              },
-              {
-                role: 'assistant',
-                content: 'message-3',
-                timestamp: 3,
-                id: 'assistant-2',
-              },
+              { role: 'user', content: 'message-0', timestamp: 0, id: 'user-0' },
+              { role: 'assistant', content: 'message-0.5', timestamp: 0.5, id: 'assistant-0' },
+              { role: 'user', content: 'older message', timestamp: 0.75, id: 'user-older' },
+              { role: 'user', content: 'message-1', timestamp: 1, id: 'user-1' },
+              { role: 'assistant', content: 'message-2', timestamp: 2, id: 'assistant-1' },
             ],
             window: createViewportWindowState({
-              totalItemCount: 6,
+              totalItemCount: 5,
               windowStartOffset: 2,
-              windowEndOffset: 6,
+              windowEndOffset: 5,
               hasMore: true,
               isAtLatest: true,
             }),
-            meta: {
-              historyStatus: 'ready',
-              lastActivityAt: Date.now(),
-            },
+            meta: { historyStatus: 'ready', lastActivityAt: Date.now() },
           }),
         },
       } as never);
     });
 
-    itemElements = queryRenderableItems(container);
-    installVirtualItemLayout(itemElements, metrics, [70, 80, 120, 100]);
+    itemElements = queryItems(container);
+    installVirtualItemLayout(itemElements, metrics, [70, 80, 120]);
 
     await waitFor(() => {
       expect(metrics.scrollTop).toBe(130);
     });
   });
+});
 
-  it('锁底时尾部内容继续增高，也应继续贴底', async () => {
-    const { container } = renderChat();
-    const viewport = container.querySelector('.overflow-y-auto') as HTMLDivElement;
-    const metrics = {
-      scrollHeight: 980,
-      clientHeight: 320,
-      scrollTop: 660,
-    };
-    installViewportMetrics(viewport, metrics);
-
-    act(() => {
-      triggerResizeObserver?.();
-    });
-
-    act(() => {
-      metrics.scrollHeight = 1220;
-      triggerResizeObserver?.();
-    });
-
-    await waitFor(() => {
-      expect(metrics.scrollTop).toBe(900);
-    });
+describe('chat 滚动模型 - 输入框浮层滚轮代理', () => {
+  beforeEach(() => {
+    resizeObserverCallbacks = [];
+    triggerResizeObserver = null;
+    (globalThis as unknown as { ResizeObserver: typeof ResizeObserver }).ResizeObserver = ResizeObserverStub as unknown as typeof ResizeObserver;
+    setupCommonStores();
   });
 
-  it('鼠标停在底部输入框浮层时，滚轮仍应滚动消息列表', async () => {
+  it('停在浮层时滚轮下滚仍能滚动列表', async () => {
     const { container } = renderChat();
     const viewport = container.querySelector('.chat-scroll-sync-viewport') as HTMLDivElement;
     const composerInput = container.querySelector('.chat-scroll-sync-input') as HTMLDivElement;
-    const metrics = {
-      scrollHeight: 1200,
-      clientHeight: 320,
-      scrollTop: 500,
-    };
+    const metrics = { scrollHeight: 1200, clientHeight: 320, scrollTop: 500 };
     installViewportMetrics(viewport, metrics);
 
     act(() => {
@@ -1476,16 +637,12 @@ describe('chat 主线程滚动锁', () => {
     expect(metrics.scrollTop).toBe(660);
   });
 
-  it('输入框浮层上滑后应脱离锁底，后续内容增长不能把位置拉回底部', async () => {
+  it('浮层上滑后转 detached，后续内容增长不被拉回底部', async () => {
     const { container } = renderChat();
     const viewport = container.querySelector('.chat-scroll-sync-viewport') as HTMLDivElement;
     const composerInput = container.querySelector('.chat-scroll-sync-input') as HTMLDivElement;
-    const itemElements = queryRenderableItems(container);
-    const metrics = {
-      scrollHeight: 1200,
-      clientHeight: 320,
-      scrollTop: 880,
-    };
+    const itemElements = queryItems(container);
+    const metrics = { scrollHeight: 1200, clientHeight: 320, scrollTop: 880 };
     installViewportMetrics(viewport, metrics);
     installViewportRect(viewport, metrics);
     installVirtualItemLayout(itemElements, metrics, [160, 220]);
@@ -1508,101 +665,15 @@ describe('chat 主线程滚动锁', () => {
     expect(metrics.scrollTop).toBe(720);
   });
 
-  it('发送触发强制贴底后，输入框浮层滚轮应打断待执行的自动贴底', async () => {
-    const rafQueue: FrameRequestCallback[] = [];
-    vi.stubGlobal('requestAnimationFrame', vi.fn((callback: FrameRequestCallback) => {
-      rafQueue.push(callback);
-      return rafQueue.length;
-    }));
-    vi.stubGlobal('cancelAnimationFrame', vi.fn());
-
-    try {
-      const { container } = renderChat();
-      const viewport = container.querySelector('.chat-scroll-sync-viewport') as HTMLDivElement;
-      const composerInput = container.querySelector('.chat-scroll-sync-input') as HTMLDivElement;
-      const itemElements = queryRenderableItems(container);
-      const metrics = {
-        scrollHeight: 1200,
-        clientHeight: 320,
-        scrollTop: 880,
-      };
-      installViewportMetrics(viewport, metrics);
-      installViewportRect(viewport, metrics);
-      installVirtualItemLayout(itemElements, metrics, [160, 220]);
-
-      act(() => {
-        triggerResizeObserver?.();
-      });
-
-      act(() => {
-        const textarea = container.querySelector('textarea') as HTMLTextAreaElement;
-        fireEvent.change(textarea, { target: { value: 'send while testing scroll' } });
-        fireEvent.keyDown(textarea, { key: 'Enter', code: 'Enter' });
-      });
-
-      act(() => {
-        metrics.scrollHeight = 1440;
-        fireEvent.wheel(composerInput, { deltaY: -180 });
-      });
-
-      expect(metrics.scrollTop).toBe(700);
-
-      act(() => {
-        for (const callback of [...rafQueue]) {
-          callback(performance.now());
-        }
-      });
-
-      act(() => {
-        triggerResizeObserver?.();
-      });
-
-      expect(metrics.scrollTop).toBe(700);
-    } finally {
-      vi.unstubAllGlobals();
-    }
-  });
-
-  it('输入框浮层下滑应继续滚动消息列表', async () => {
-    const { container } = renderChat();
-    const viewport = container.querySelector('.chat-scroll-sync-viewport') as HTMLDivElement;
-    const composerInput = container.querySelector('.chat-scroll-sync-input') as HTMLDivElement;
-    const metrics = {
-      scrollHeight: 1200,
-      clientHeight: 320,
-      scrollTop: 500,
-    };
-    installViewportMetrics(viewport, metrics);
-
-    act(() => {
-      fireEvent.wheel(composerInput, { deltaY: 160 });
-    });
-
-    expect(metrics.scrollTop).toBe(660);
-  });
-
-  it('输入框内部自己还能滚时，不抢它的滚轮', async () => {
+  it('输入框 textarea 自己还能滚时不抢它', async () => {
     const { container } = renderChat();
     const viewport = container.querySelector('.chat-scroll-sync-viewport') as HTMLDivElement;
     const textarea = container.querySelector('textarea') as HTMLTextAreaElement;
-    const metrics = {
-      scrollHeight: 1200,
-      clientHeight: 320,
-      scrollTop: 500,
-    };
+    const metrics = { scrollHeight: 1200, clientHeight: 320, scrollTop: 500 };
     installViewportMetrics(viewport, metrics);
-    Object.defineProperty(textarea, 'scrollHeight', {
-      configurable: true,
-      get: () => 400,
-    });
-    Object.defineProperty(textarea, 'clientHeight', {
-      configurable: true,
-      get: () => 80,
-    });
-    Object.defineProperty(textarea, 'scrollTop', {
-      configurable: true,
-      get: () => 40,
-    });
+    Object.defineProperty(textarea, 'scrollHeight', { configurable: true, get: () => 400 });
+    Object.defineProperty(textarea, 'clientHeight', { configurable: true, get: () => 80 });
+    Object.defineProperty(textarea, 'scrollTop', { configurable: true, get: () => 40 });
 
     act(() => {
       fireEvent.wheel(textarea, { deltaY: 160 });
@@ -1610,25 +681,17 @@ describe('chat 主线程滚动锁', () => {
 
     expect(metrics.scrollTop).toBe(500);
   });
+});
 
-  it('helper 只按真实布局量判断近底和目标滚动位', () => {
-    expect(isChatViewportNearBottom({
-      scrollHeight: 1000,
-      clientHeight: 300,
-      scrollTop: 690,
-      clientWidth: 800,
-    }, 12)).toBe(true);
+describe('chat 滚动模型 - 几何工具', () => {
+  it('isAtBottom 仅吸收亚像素抖动，不被 96px 阈值污染', () => {
+    expect(isAtBottom({ scrollHeight: 1000, clientHeight: 300, scrollTop: 700, clientWidth: 800 })).toBe(true);
+    expect(isAtBottom({ scrollHeight: 1000, clientHeight: 300, scrollTop: 699, clientWidth: 800 })).toBe(false);
+    expect(isAtBottom({ scrollHeight: 1000, clientHeight: 300, scrollTop: 700.5, clientWidth: 800 })).toBe(true);
+  });
 
-    expect(isChatViewportNearBottom({
-      scrollHeight: 1000,
-      clientHeight: 300,
-      scrollTop: 650,
-      clientWidth: 800,
-    }, 12)).toBe(false);
-
-    expect(computeBottomLockedScrollTopOnResize(
-      { scrollHeight: 900, clientHeight: 300, scrollTop: 600, clientWidth: 800 },
-      { scrollHeight: 1180, clientHeight: 320, scrollTop: 0, clientWidth: 800 },
-    )).toBe(860);
+  it('bottomScrollTop 给出贴底位置', () => {
+    expect(bottomScrollTop({ scrollHeight: 1180, clientHeight: 320, scrollTop: 0, clientWidth: 800 })).toBe(860);
+    expect(bottomScrollTop({ scrollHeight: 200, clientHeight: 300, scrollTop: 0, clientWidth: 800 })).toBe(0);
   });
 });

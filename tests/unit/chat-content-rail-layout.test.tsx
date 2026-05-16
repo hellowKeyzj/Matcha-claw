@@ -49,14 +49,14 @@ vi.mock('@/pages/Chat/components/ChatStates', () => ({
 }));
 
 function buildScrollChromeStore(options?: {
-  isBottomLocked?: boolean;
+  phase?: 'follow' | 'detached';
   visible?: boolean;
   isAtLatest?: boolean;
   jumpActionLabel?: string;
   onJumpAction?: () => void;
 }) {
   const store = createChatScrollChromeStore({
-    isBottomLocked: options?.isBottomLocked ?? true,
+    phase: options?.phase ?? 'follow',
     visible: options?.visible ?? true,
     isAtLatest: options?.isAtLatest ?? true,
     jumpActionLabel: options?.jumpActionLabel ?? 'Jump to bottom',
@@ -263,7 +263,7 @@ describe('chat content rail layout', () => {
   it('chat list exposes a jump-to-bottom button only when requested', () => {
     const onJumpAction = vi.fn();
     const scrollChromeStore = buildScrollChromeStore({
-      isBottomLocked: false,
+      phase: 'detached',
       onJumpAction,
     });
 
@@ -386,7 +386,7 @@ describe('chat content rail layout', () => {
     expect(assistantTurnRenderSpy).toHaveBeenCalledTimes(1);
 
     act(() => {
-      commonProps.scrollChromeStore.setBottomLocked(false);
+      commonProps.scrollChromeStore.setPhase('detached');
     });
 
     expect(chatMessageRenderSpy).toHaveBeenCalledTimes(1);

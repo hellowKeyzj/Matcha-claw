@@ -1,5 +1,7 @@
+import type { ChatScrollPhase } from './chat-scroll-model';
+
 export interface ChatScrollChromeSnapshot {
-  isBottomLocked: boolean;
+  phase: ChatScrollPhase;
   visible: boolean;
   isAtLatest: boolean;
   jumpActionLabel: string;
@@ -8,14 +10,14 @@ export interface ChatScrollChromeSnapshot {
 export interface ChatScrollChromeStore {
   getSnapshot: () => ChatScrollChromeSnapshot;
   subscribe: (listener: () => void) => () => void;
-  setBottomLocked: (isBottomLocked: boolean) => void;
-  setChromeState: (state: Omit<ChatScrollChromeSnapshot, 'isBottomLocked'>) => void;
+  setPhase: (phase: ChatScrollPhase) => void;
+  setChromeState: (state: Omit<ChatScrollChromeSnapshot, 'phase'>) => void;
   setJumpAction: (handler: () => void) => void;
   runJumpAction: () => void;
 }
 
 const DEFAULT_SNAPSHOT: ChatScrollChromeSnapshot = {
-  isBottomLocked: true,
+  phase: 'follow',
   visible: false,
   isAtLatest: true,
   jumpActionLabel: '',
@@ -25,7 +27,7 @@ export function createChatScrollChromeStore(
   initialSnapshot: ChatScrollChromeSnapshot = DEFAULT_SNAPSHOT,
 ): ChatScrollChromeStore {
   let snapshot = initialSnapshot;
-  let jumpAction = () => {};
+  let jumpAction: () => void = () => {};
   const listeners = new Set<() => void>();
 
   const emit = () => {
@@ -42,14 +44,11 @@ export function createChatScrollChromeStore(
         listeners.delete(listener);
       };
     },
-    setBottomLocked: (isBottomLocked) => {
-      if (snapshot.isBottomLocked === isBottomLocked) {
+    setPhase: (phase) => {
+      if (snapshot.phase === phase) {
         return;
       }
-      snapshot = {
-        ...snapshot,
-        isBottomLocked,
-      };
+      snapshot = { ...snapshot, phase };
       emit();
     },
     setChromeState: (state) => {
@@ -60,10 +59,7 @@ export function createChatScrollChromeStore(
       ) {
         return;
       }
-      snapshot = {
-        ...snapshot,
-        ...state,
-      };
+      snapshot = { ...snapshot, ...state };
       emit();
     },
     setJumpAction: (handler) => {

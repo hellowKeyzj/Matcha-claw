@@ -1,77 +1,64 @@
-import { useLayoutEffect, useRef, type RefObject } from 'react';
+import { useLayoutEffect, useMemo, useRef, type RefObject } from 'react';
 import {
-  computeBottomLockedScrollTopOnResize,
   createChatScrollController,
-  isChatViewportNearBottom,
+  type ChatScrollController,
   type ChatScrollControllerConfig,
 } from './chat-scroll-controller';
+import type { ChatScrollPhase } from './chat-scroll-model';
 
 interface UseChatScrollInput {
   enabled: boolean;
   scrollScopeKey: string;
-  viewportWindowSignal: string;
-  anchorItemKey: string | null;
-  autoFollowSignal: string;
-  tailActivityOpen: boolean;
-  setScrollChromeBottomLocked: (isBottomLocked: boolean) => void;
+  /** 列表渲染数据的快照签名：每次 items/window 发生显著变化时变化 */
+  contentSignal: string;
+  setChromePhase: (phase: ChatScrollPhase) => void;
   viewportRef: RefObject<HTMLDivElement | null>;
   contentRef: RefObject<HTMLDivElement | null>;
-  stickyBottomThresholdPx: number;
 }
-
-export { computeBottomLockedScrollTopOnResize, isChatViewportNearBottom };
 
 export function useChatScroll({
   enabled,
   scrollScopeKey,
-  viewportWindowSignal,
-  anchorItemKey,
-  autoFollowSignal,
-  tailActivityOpen,
-  setScrollChromeBottomLocked,
+  contentSignal,
+  setChromePhase,
   viewportRef,
   contentRef,
-  stickyBottomThresholdPx,
 }: UseChatScrollInput) {
   const configRef = useRef<ChatScrollControllerConfig>({
     enabled,
     scrollScopeKey,
-    anchorItemKey,
-    tailActivityOpen,
-    setScrollChromeBottomLocked,
+    setChromePhase,
     viewportRef,
     contentRef,
-    stickyBottomThresholdPx,
   });
   configRef.current = {
     enabled,
     scrollScopeKey,
-    anchorItemKey,
-    tailActivityOpen,
-    setScrollChromeBottomLocked,
+    setChromePhase,
     viewportRef,
     contentRef,
-    stickyBottomThresholdPx,
   };
 
-  const controllerRef = useRef<ReturnType<typeof createChatScrollController> | null>(null);
+  const controllerRef = useRef<ChatScrollController | null>(null);
   if (controllerRef.current == null) {
     controllerRef.current = createChatScrollController(() => configRef.current);
   }
   const controller = controllerRef.current;
 
+  // scope 变化时同步 phase + 触发过渡（首次加载贴底 / 锚点恢复 / 强制贴底）
   useLayoutEffect(() => {
-    controller.onScopeRenderSync();
+    controller.onScopeChanged();
   }, [controller, enabled, scrollScopeKey]);
 
+  // 列表内容刷新（新消息 / 流式 token / 历史 prepend）：与 ResizeObserver 等价的入口。
   useLayoutEffect(() => {
-    controller.onTailActivityRenderSync();
-  }, [controller, enabled, tailActivityOpen]);
+    if (!enabled) {
+      return;
+    }
+    controller.onGeometryChanged();
+  }, [contentSignal, controller, enabled]);
 
-  useLayoutEffect(() => {
-    controller.onAutoFollowRenderSync();
-  }, [anchorItemKey, autoFollowSignal, controller, enabled, tailActivityOpen, viewportWindowSignal]);
-
+  // 视口/内容尺寸变化（流式 token / 历史 prepend / composer 高度变化 / 窗口变化）
   useLayoutEffect(() => {
     if (!enabled) {
       return;
@@ -82,33 +69,20 @@ export function useChatScroll({
       return;
     }
     const observer = new ResizeObserver(() => {
-      controller.onResizeObserved();
+      controller.onGeometryChanged();
     });
-
     if (viewport) {
       observer.observe(viewport);
     }
     if (content) {
       observer.observe(content);
     }
-
     return () => observer.disconnect();
   }, [contentRef, controller, enabled, viewportRef]);
 
-  useLayoutEffect(() => {
-    if (!enabled) {
-      return;
-    }
-    controller.syncChromeRender();
-  }, [autoFollowSignal, controller, enabled, scrollScopeKey]);
+  useLayoutEffect(() => () => controller.cleanup(), [controller]);
 
-  useLayoutEffect(() => {
-    return () => {
-      controller.cleanup();
-    };
-  }, [controller]);
-
-  return {
+  return useMemo(() => ({
     handleViewportScroll: controller.handleViewportScroll,
     handleViewportPointerDown: controller.handleViewportPointerDown,
     handleViewportTouchMove: controller.handleViewportTouchMove,
@@ -116,7 +90,7 @@ export function useChatScroll({
     scrollViewportByWheelDelta: controller.scrollViewportByWheelDelta,
     prepareScopeAnchorRestore: controller.prepareScopeAnchorRestore,
     prepareScopeBottomAlign: controller.prepareScopeBottomAlign,
-    notifyViewportGeometryChanged: controller.onResizeObserved,
+    notifyViewportGeometryChanged: controller.onGeometryChanged,
     jumpToBottom: controller.jumpToBottom,
-  };
+  }), [controller]);
 }

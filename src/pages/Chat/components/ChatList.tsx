@@ -17,7 +17,6 @@ import { LoadingSpinner } from '@/components/common/LoadingSpinner';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
 import { CHAT_LAYOUT_TOKENS } from '../chat-layout-tokens';
-import { buildChatAutoFollowSignal } from '../chat-auto-follow';
 import { createChatScrollChromeStore, type ChatScrollChromeStore } from '../chat-scroll-chrome-store';
 import type {
   ChatExecutionGraphItem,
@@ -38,8 +37,6 @@ import type {
   ChatSessionViewportState,
 } from '@/stores/chat';
 import type { GeneratedFile } from '@/lib/generated-files';
-
-const CHAT_BOTTOM_FOLLOW_THRESHOLD_PX = 96;
 
 export interface ChatListHandle {
   prepareCurrentLatestBottomAlign: () => void;
@@ -283,12 +280,12 @@ const ChatScrollChrome = memo(function ChatScrollChrome({
   scrollChromeStore: ChatScrollChromeStore;
   showLoadOlderButton: boolean;
 }) {
-  const { isBottomLocked, visible, isAtLatest, jumpActionLabel } = useSyncExternalStore(
+  const { phase, visible, isAtLatest, jumpActionLabel } = useSyncExternalStore(
     scrollChromeStore.subscribe,
     scrollChromeStore.getSnapshot,
     scrollChromeStore.getSnapshot,
   );
-  const showJumpToBottom = visible && (!isBottomLocked || !isAtLatest);
+  const showJumpToBottom = visible && (phase === 'detached' || !isAtLatest);
 
   if (!showJumpToBottom) {
     return null;
@@ -405,7 +402,6 @@ export const ChatList = forwardRef<ChatListHandle, ChatListProps>(function ChatL
   {
     isActive,
     currentSessionKey,
-    runtime,
     viewport,
     items,
     liveView,
@@ -426,7 +422,7 @@ export const ChatList = forwardRef<ChatListHandle, ChatListProps>(function ChatL
   const messageContentRef = useRef<HTMLDivElement>(null);
   const [scrollChromeStore] = useState(() => (
     createChatScrollChromeStore({
-      isBottomLocked: true,
+      phase: 'follow',
       visible: false,
       isAtLatest: viewport.isAtLatest,
       jumpActionLabel: jumpToBottomLabel,
@@ -436,16 +432,12 @@ export const ChatList = forwardRef<ChatListHandle, ChatListProps>(function ChatL
   const artifactFilesByGraphKey = useMemo(() => (
     new Map(artifactGroups.map((group) => [group.graphItemKey, group.files] as const))
   ), [artifactGroups]);
-  const autoFollowSignal = buildChatAutoFollowSignal(items);
-  const viewportWindowSignal = [
-    viewport.windowStartOffset,
-    viewport.windowEndOffset,
-    viewport.totalItemCount,
-    viewport.hasMore ? '1' : '0',
-    viewport.hasNewer ? '1' : '0',
-    viewport.isAtLatest ? '1' : '0',
-  ].join('|');
-  const tailActivityOpen = runtime.sending || runtime.pendingFinal || items.some((item) => item.kind === 'assistant-turn' && item.status !== 'final');
+
+  const lastItem = items.at(-1);
+  const lastItemSignal = lastItem
+    ? `${lastItem.key}|${'updatedAt' in lastItem ? (lastItem.updatedAt ?? '') : ''}`
+    : '';
+  const contentSignal = `${items.length}|${lastItemSignal}|${viewport.windowEndOffset}|${viewport.totalItemCount}|${viewport.isAtLatest ? '1' : '0'}|${viewport.hasMore ? '1' : '0'}|${viewport.hasNewer ? '1' : '0'}`;
 
   const {
     handleViewportPointerDown,
@@ -460,14 +452,10 @@ export const ChatList = forwardRef<ChatListHandle, ChatListProps>(function ChatL
   } = useChatScroll({
     enabled: isActive,
     scrollScopeKey: currentSessionKey,
-    viewportWindowSignal,
-    anchorItemKey: viewport.anchorItemKey,
-    autoFollowSignal,
-    tailActivityOpen,
-    setScrollChromeBottomLocked: scrollChromeStore.setBottomLocked,
+    contentSignal,
+    setChromePhase: scrollChromeStore.setPhase,
     viewportRef: messagesViewportRef,
     contentRef: messageContentRef,
-    stickyBottomThresholdPx: CHAT_BOTTOM_FOLLOW_THRESHOLD_PX,
   });
 
   const handleLoadOlder = useCallback(() => {
