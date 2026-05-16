@@ -103,6 +103,7 @@ export class RuntimeJobQueue {
     low: [],
   };
   private readonly jobs = new Map<string, RuntimeJobRecord>();
+  private readonly jobIdsByType = new Map<string, Set<string>>();
   private readonly activeDedupeKeys = new Map<string, string>();
   private readonly recentDedupeJobIds = new Map<string, string>();
   private readonly retryTasks = new Map<string, RuntimeScheduledTask>();
@@ -173,6 +174,12 @@ export class RuntimeJobQueue {
       retryDelayMs: Math.max(0, Math.floor(options.retryDelayMs ?? this.defaultRetryDelayMs)),
     };
     this.jobs.set(job.id, job);
+    let typeBucket = this.jobIdsByType.get(job.type);
+    if (!typeBucket) {
+      typeBucket = new Set<string>();
+      this.jobIdsByType.set(job.type, typeBucket);
+    }
+    typeBucket.add(job.id);
     if (options.dedupeKey) {
       this.activeDedupeKeys.set(options.dedupeKey, job.id);
     }
@@ -188,13 +195,37 @@ export class RuntimeJobQueue {
   }
 
   latestByType(type: string): RuntimeJobSnapshot | null {
-    const matches = Array.from(this.jobs.values()).filter((job) => job.type === type);
-    const latest = matches.sort((left, right) => right.queuedAt - left.queuedAt)[0];
+    const bucket = this.jobIdsByType.get(type);
+    if (!bucket || bucket.size === 0) {
+      return null;
+    }
+    let latest: RuntimeJobRecord | null = null;
+    for (const jobId of bucket) {
+      const job = this.jobs.get(jobId);
+      if (!job) {
+        continue;
+      }
+      if (!latest || job.queuedAt > latest.queuedAt) {
+        latest = job;
+      }
+    }
     return latest ? this.snapshot(latest) : null;
   }
 
   listByType(type: string): RuntimeJobSnapshot[] {
-    return this.list().filter((job) => job.type === type);
+    const bucket = this.jobIdsByType.get(type);
+    if (!bucket || bucket.size === 0) {
+      return [];
+    }
+    const matches: RuntimeJobRecord[] = [];
+    for (const jobId of bucket) {
+      const job = this.jobs.get(jobId);
+      if (job) {
+        matches.push(job);
+      }
+    }
+    matches.sort((left, right) => left.queuedAt - right.queuedAt);
+    return matches.map((job) => this.snapshot(job));
   }
 
   list(): RuntimeJobSnapshot[] {
@@ -382,6 +413,13 @@ export class RuntimeJobQueue {
       return;
     }
     this.jobs.delete(jobId);
+    const typeBucket = this.jobIdsByType.get(job.type);
+    if (typeBucket) {
+      typeBucket.delete(jobId);
+      if (typeBucket.size === 0) {
+        this.jobIdsByType.delete(job.type);
+      }
+    }
     const evictionTask = this.evictionTasks.get(jobId);
     if (evictionTask) {
       evictionTask.cancel();
