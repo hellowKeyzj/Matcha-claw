@@ -134,7 +134,7 @@ const PRESET_RUNTIME_TEMPLATES: Record<Preset, RuntimePolicy> = {
   },
   relaxed: {
     runtimeGuardEnabled: true,
-    auditOnGatewayStart: true,
+    auditOnGatewayStart: false,
     autoHarden: false,
     enablePromptInjectionGuard: true,
     blockDestructive: true,
@@ -175,9 +175,9 @@ function cloneRuntimeTemplate(preset: Preset): RuntimePolicy {
 }
 
 const DEFAULT_POLICY: SecurityPolicy = {
-  preset: 'balanced',
+  preset: 'relaxed',
   securityPolicyVersion: 1,
-  runtime: cloneRuntimeTemplate('balanced'),
+  runtime: cloneRuntimeTemplate('relaxed'),
 };
 
 let securityPolicyCache: SecurityPolicy | null = null;

@@ -121,7 +121,7 @@ const PRESET_RUNTIME_TEMPLATES: Record<SecurityPreset, SecurityRuntimePolicy> = 
       memory: true,
       cost: false,
     },
-    auditOnGatewayStart: true,
+    auditOnGatewayStart: false,
     runtimeGuardEnabled: true,
     enablePromptInjectionGuard: true,
     blockDestructive: true,

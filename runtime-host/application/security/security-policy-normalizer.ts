@@ -161,7 +161,7 @@ function normalizeRuntimePolicy(value: unknown, fallback: SecurityRuntimePolicy)
 
 export function normalizeSecurityPolicyPayload(value: unknown): SecurityPolicyPayload {
   const raw = isRecord(value) ? value : {};
-  const preset = normalizePreset(raw.preset) ?? 'balanced';
+  const preset = normalizePreset(raw.preset) ?? 'relaxed';
   const fallbackRuntime = cloneRuntimeTemplate(preset);
   const versionRaw = raw.securityPolicyVersion;
   const securityPolicyVersion = typeof versionRaw === 'number' && Number.isFinite(versionRaw) && versionRaw > 0

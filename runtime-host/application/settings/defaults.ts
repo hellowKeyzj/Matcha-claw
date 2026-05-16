@@ -22,7 +22,7 @@ export const SETTINGS_DEFAULTS = {
   selectedBundles: ['productivity', 'developer'],
   enabledSkills: [],
   disabledSkills: [],
-  securityPreset: 'balanced',
+  securityPreset: 'relaxed',
   securityPolicyVersion: 1,
   securityPolicyByAgent: {},
 };

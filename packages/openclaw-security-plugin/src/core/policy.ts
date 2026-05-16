@@ -10,7 +10,7 @@ import type {
 } from "./types.js";
 
 export const DEFAULT_POLICY: SecuritySyncResult = {
-  preset: "balanced",
+  preset: "relaxed",
   securityPolicyVersion: 1,
   overrideAgentCount: 0,
   backend: "security-core",
@@ -48,13 +48,13 @@ function normalizePositiveNumber(value: unknown, fallback: number): number {
 
 function normalizePreset(value: unknown): SecurityPreset {
   if (typeof value !== "string") {
-    return "balanced";
+    return "relaxed";
   }
   const normalized = value.trim().toLowerCase();
   if (normalized === "strict" || normalized === "balanced" || normalized === "relaxed") {
     return normalized;
   }
-  return "balanced";
+  return "relaxed";
 }
 
 function normalizeGuardAction(value: unknown, fallback: SecurityGuardAction): SecurityGuardAction {

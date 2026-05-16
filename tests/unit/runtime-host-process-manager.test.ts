@@ -2388,7 +2388,7 @@ describe('runtime-host process manager', () => {
         data?: { preset?: string };
       };
       expect(initialResponse.status).toBe(200);
-      expect(initialPayload.data?.preset).toBe('balanced');
+      expect(initialPayload.data?.preset).toBe('relaxed');
 
       const updateResponse = await fetch(`http://127.0.0.1:${port}/dispatch`, {
         method: 'POST',
