@@ -158,8 +158,7 @@
     "approval": {
         "panelTitle": "审批待处理",
         "waitingLabel": "等待审批中...",
-        "pendingTool": "工具：{{tool}}",
-        "unknownTool": "未知工具",
+        "pendingRequest": "{{title}}",
         "allowOnce": "同意一次",
         "allowAlways": "始终同意",
         "deny": "拒绝"

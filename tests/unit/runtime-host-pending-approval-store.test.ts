@@ -20,7 +20,9 @@ describe('runtime-host pending approval store', () => {
         request: {
           sessionKey: 'agent:main:main',
           runId: 'run-1',
-          toolName: 'shell',
+          command: 'Remove-Item demo.txt',
+          host: 'gateway',
+          allowedDecisions: ['allow-once', 'deny'],
         },
         createdAtMs: 1_700_000_000_010,
         expiresAtMs: 1_700_000_060_000,
@@ -31,11 +33,15 @@ describe('runtime-host pending approval store', () => {
       id: 'approval-1',
       sessionKey: 'agent:main:main',
       runId: 'run-1',
-      toolName: 'shell',
+      title: 'gateway',
+      command: 'Remove-Item demo.txt',
+      allowedDecisions: ['allow-once', 'deny'],
       request: {
         sessionKey: 'agent:main:main',
         runId: 'run-1',
-        toolName: 'shell',
+        command: 'Remove-Item demo.txt',
+        host: 'gateway',
+        allowedDecisions: ['allow-once', 'deny'],
       },
       createdAtMs: 1_700_000_000_010,
       expiresAtMs: 1_700_000_060_000,
@@ -66,6 +72,46 @@ describe('runtime-host pending approval store', () => {
 
     expect(store.list()).toEqual([]);
   });
+
+  it('mirrors plugin approvals with nested data payloads', () => {
+    const store = new PendingApprovalStore({ clock: testClock });
+
+    store.consumeGatewayNotification({
+      method: 'plugin.approval.requested',
+      params: {
+        data: {
+          id: 'approval-plugin-1',
+          request: {
+            sessionKey: 'agent:plugin:main',
+            runId: 'run-plugin-1',
+            commandArgv: ['tool:example'],
+            host: 'plugin-host',
+            allowedDecisions: ['allow-once', 'deny'],
+          },
+        },
+      },
+    });
+
+    expect(store.list()).toMatchObject([{
+      id: 'approval-plugin-1',
+      sessionKey: 'agent:plugin:main',
+      runId: 'run-plugin-1',
+      title: 'plugin-host',
+      command: 'tool:example',
+      allowedDecisions: ['allow-once', 'deny'],
+    }]);
+
+    store.consumeGatewayNotification({
+      method: 'plugin.approval.resolved',
+      params: {
+        data: {
+          id: 'approval-plugin-1',
+        },
+      },
+    });
+
+    expect(store.list()).toEqual([]);
+  });
 });
 
 describe('session approval command service', () => {
@@ -86,6 +132,8 @@ describe('session approval command service', () => {
         list: () => [{
           id: 'approval-1',
           sessionKey: 'agent:main:main',
+          title: 'gateway',
+          allowedDecisions: ['allow-once', 'deny'],
           createdAtMs: 1_700_000_000_010,
         }],
       },
@@ -101,6 +149,8 @@ describe('session approval command service', () => {
         approvals: [{
           id: 'approval-1',
           sessionKey: 'agent:main:main',
+          title: 'gateway',
+          allowedDecisions: ['allow-once', 'deny'],
           createdAtMs: 1_700_000_000_010,
         }],
       },

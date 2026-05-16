@@ -70,37 +70,38 @@ export function ApprovalActionsPanel({
   onResolve: (id: string, decision: ApprovalDecision) => void;
 }) {
   const { t } = useTranslation('chat');
+  const decisionLabels: Record<ApprovalDecision, string> = {
+    'allow-once': t('approval.allowOnce'),
+    'allow-always': t('approval.allowAlways'),
+    deny: t('approval.deny'),
+  };
   return (
     <div className="w-full rounded-[18px] border border-primary/15 bg-background/76 p-3 backdrop-blur-sm">
       <div className="mb-2 text-sm font-medium text-foreground">{t('approval.panelTitle')}</div>
       <div className="space-y-2">
         {approvals.map((approval) => (
           <div key={approval.id} className="rounded-[14px] border border-border/55 bg-background/72 p-2.5">
-            <div className="mb-2 text-xs text-muted-foreground">
-              {t('approval.pendingTool', { tool: approval.toolName || t('approval.unknownTool') })}
+            <div className="mb-1 text-xs font-medium text-foreground">
+              {t('approval.pendingRequest', { title: approval.title })}
             </div>
+            {approval.command ? (
+              <div className="mb-2 max-h-16 overflow-hidden rounded-[10px] border border-border/45 bg-muted/20 px-2 py-1.5 font-mono text-[11px] leading-4 text-muted-foreground">
+                {approval.command}
+              </div>
+            ) : null}
             <div className="flex flex-wrap gap-2">
-              <button
-                type="button"
-                onClick={() => onResolve(approval.id, 'allow-once')}
-                className="rounded-full border border-primary/20 bg-primary/8 px-3 py-1 text-xs font-medium text-primary transition hover:bg-primary/14"
-              >
-                {t('approval.allowOnce')}
-              </button>
-              <button
-                type="button"
-                onClick={() => onResolve(approval.id, 'allow-always')}
-                className="rounded-full border border-primary/20 bg-primary/8 px-3 py-1 text-xs font-medium text-primary transition hover:bg-primary/14"
-              >
-                {t('approval.allowAlways')}
-              </button>
-              <button
-                type="button"
-                onClick={() => onResolve(approval.id, 'deny')}
-                className="rounded-full border border-destructive/20 bg-destructive/8 px-3 py-1 text-xs font-medium text-destructive transition hover:bg-destructive/14"
-              >
-                {t('approval.deny')}
-              </button>
+              {approval.allowedDecisions.map((decision) => (
+                <button
+                  key={decision}
+                  type="button"
+                  onClick={() => onResolve(approval.id, decision)}
+                  className={decision === 'deny'
+                    ? 'rounded-full border border-destructive/20 bg-destructive/8 px-3 py-1 text-xs font-medium text-destructive transition hover:bg-destructive/14'
+                    : 'rounded-full border border-primary/20 bg-primary/8 px-3 py-1 text-xs font-medium text-primary transition hover:bg-primary/14'}
+                >
+                  {decisionLabels[decision]}
+                </button>
+              ))}
             </div>
           </div>
         ))}

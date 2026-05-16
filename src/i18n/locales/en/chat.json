@@ -158,8 +158,7 @@
     "approval": {
         "panelTitle": "Approval required",
         "waitingLabel": "Waiting for approval...",
-        "pendingTool": "Tool: {{tool}}",
-        "unknownTool": "Unknown tool",
+        "pendingRequest": "{{title}}",
         "allowOnce": "Allow once",
         "allowAlways": "Always allow",
         "deny": "Deny"

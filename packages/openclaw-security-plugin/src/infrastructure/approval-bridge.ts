@@ -417,6 +417,7 @@ export class ApprovalBridgeService {
       }
       if (
         finalDecision === "allow"
+        || finalDecision === "allow-once"
         || finalDecision === "allow-always"
         || finalDecision === "approve"
         || finalDecision === "approved"

@@ -577,9 +577,12 @@ describe('gateway store event wiring', () => {
       params: {
         id: 'approval-evt-1',
         runId: 'run-evt-1',
-        toolName: 'shell.exec',
         request: {
           sessionKey: 'agent:main:main',
+          runId: 'run-evt-1',
+          command: 'Remove-Item demo.txt',
+          host: 'gateway',
+          allowedDecisions: ['allow-once', 'deny'],
         },
       },
     });
@@ -591,6 +594,11 @@ describe('gateway store event wiring', () => {
     expect(chatState.pendingApprovalsBySession['agent:main:main']?.map((item) => item.id)).toEqual([
       'approval-evt-1',
     ]);
+    expect(chatState.pendingApprovalsBySession['agent:main:main']?.[0]).toMatchObject({
+      title: 'gateway',
+      command: 'Remove-Item demo.txt',
+      allowedDecisions: ['allow-once', 'deny'],
+    });
 
     handlers.get('gateway:notification')?.({
       method: 'exec.approval.resolved',

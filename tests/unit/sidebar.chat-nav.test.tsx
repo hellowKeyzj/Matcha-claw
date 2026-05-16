@@ -349,7 +349,9 @@ describe('sidebar chat nav', () => {
             id: 'approval-chat-1',
             sessionKey: 'agent:analytics:main',
             runId: 'run-chat-1',
-            toolName: 'browser.fetch',
+            title: 'gateway',
+            command: 'Remove-Item demo.txt',
+            allowedDecisions: ['allow-once', 'deny'],
             createdAtMs: Date.now(),
           },
         ],
@@ -358,8 +360,8 @@ describe('sidebar chat nav', () => {
 
     mountSidebar('/dashboard');
 
-    expect(screen.getByText(/Approval Blocker · browser.fetch/i)).toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: /Approval Blocker · browser.fetch/i }));
+    expect(screen.getByText(/Approval Blocker · gateway/i)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /Approval Blocker · gateway/i }));
     await waitFor(() => {
       expect(screen.getByTestId('location-echo')).toHaveTextContent('/?session=agent%3Aanalytics%3Amain');
     });
@@ -384,7 +386,9 @@ describe('sidebar chat nav', () => {
             id: 'approval-chat-1',
             sessionKey: 'agent:main:main',
             runId: 'run-chat-1',
-            toolName: 'browser.fetch',
+            title: 'gateway',
+            command: 'Remove-Item demo.txt',
+            allowedDecisions: ['allow-once', 'deny'],
             createdAtMs: Date.now(),
           },
         ],
@@ -394,6 +398,6 @@ describe('sidebar chat nav', () => {
     mountSidebar('/dashboard');
 
     expect(screen.queryByText('MatchaClaw Runtime Host')).not.toBeInTheDocument();
-    expect(screen.getByText(/Approval Blocker · browser.fetch/i)).toBeInTheDocument();
+    expect(screen.getByText(/Approval Blocker · gateway/i)).toBeInTheDocument();
   });
 });

@@ -7,10 +7,12 @@ describe('chat event normalizer', () => {
       method: 'exec.approval.requested',
       params: {
         id: 'approval-1',
+        allowedDecisions: ['allow-once', 'deny'],
         request: {
           sessionKey: 'agent:main:main',
           runId: 'run-1',
-          toolName: 'shell.exec',
+          command: 'Remove-Item demo.txt',
+          host: 'gateway',
         },
       },
     });
@@ -21,14 +23,16 @@ describe('chat event normalizer', () => {
       sessionKey: 'agent:main:main',
       payload: {
         id: 'approval-1',
+        command: 'Remove-Item demo.txt',
+        allowedDecisions: ['allow-once', 'deny'],
         request: {
           sessionKey: 'agent:main:main',
           runId: 'run-1',
-          toolName: 'shell.exec',
+          command: 'Remove-Item demo.txt',
+          host: 'gateway',
         },
         sessionKey: 'agent:main:main',
         runId: 'run-1',
-        toolName: 'shell.exec',
       },
     });
   });
@@ -57,6 +61,38 @@ describe('chat event normalizer', () => {
         },
         sessionKey: 'agent:main:main',
         runId: 'run-1',
+      },
+    });
+  });
+
+  it('normalizes plugin approval events with nested request data', () => {
+    const normalized = normalizeGatewayNotificationEvent({
+      method: 'plugin.approval.requested',
+      params: {
+        data: {
+          id: 'approval-plugin-1',
+          request: {
+            sessionKey: 'agent:plugin:main',
+            runId: 'run-plugin-1',
+            commandArgv: ['tool:example'],
+            host: 'plugin-host',
+            allowedDecisions: ['allow-once', 'deny'],
+          },
+        },
+      },
+    });
+
+    expect(normalized).toMatchObject({
+      kind: 'chat.approval.requested',
+      runId: 'run-plugin-1',
+      sessionKey: 'agent:plugin:main',
+      payload: {
+        data: {
+          id: 'approval-plugin-1',
+        },
+        sessionKey: 'agent:plugin:main',
+        runId: 'run-plugin-1',
+        allowedDecisions: ['allow-once', 'deny'],
       },
     });
   });

@@ -1,11 +1,16 @@
 import { describe, expect, it, vi } from 'vitest';
 import { render, screen } from '@testing-library/react';
+import { ApprovalActionsPanel } from '@/pages/Chat/components/ChatStates';
 import { ChatApprovalDock, ChatErrorBanner } from '@/pages/Chat/components/ChatRuntimeDock';
 import { ChatImageLightbox } from '@/pages/Chat/components/ChatImageLightbox';
 
 vi.mock('react-i18next', () => ({
   useTranslation: () => ({
-    t: (key: string) => key,
+    t: (key: string, params?: Record<string, unknown>) => (
+      key === 'approval.pendingRequest' && typeof params?.title === 'string'
+        ? params.title
+        : key
+    ),
   }),
 }));
 
@@ -58,5 +63,27 @@ describe('chat floating overlays layout', () => {
     const controls = dialog.querySelector('div:last-child') as HTMLElement | null;
     expect(controls?.className).toContain('rounded-full');
     expect(controls?.className).toContain('backdrop-blur-xl');
+  });
+
+  it('approval panel renders request details and only allowed decisions', () => {
+    render(
+      <ApprovalActionsPanel
+        approvals={[{
+          id: 'approval-1',
+          sessionKey: 'agent:main:main',
+          title: 'gateway',
+          command: 'Remove-Item demo.txt',
+          allowedDecisions: ['allow-once', 'deny'],
+          createdAtMs: 1,
+        }]}
+        onResolve={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText('gateway')).toBeInTheDocument();
+    expect(screen.getByText('Remove-Item demo.txt')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'approval.allowOnce' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'approval.deny' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'approval.allowAlways' })).not.toBeInTheDocument();
   });
 });

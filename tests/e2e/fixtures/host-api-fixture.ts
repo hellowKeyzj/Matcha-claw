@@ -59,7 +59,9 @@ type MockApproval = {
   id: string;
   sessionKey: string;
   runId: string;
-  toolName: string;
+  title: string;
+  command: string;
+  allowedDecisions: Array<'allow-once' | 'allow-always' | 'deny'>;
   createdAt: number;
 };
 
@@ -667,7 +669,9 @@ function createRun(sessionKey: string, userText: string, mode: MockRun['mode']):
       id: approvalId,
       sessionKey,
       runId,
-      toolName: 'shell.exec',
+      title: 'gateway',
+      command: 'Remove-Item demo.txt',
+      allowedDecisions: ['allow-once', 'deny'],
       createdAt: Date.now(),
     };
     state.approvals.push(approval);
@@ -679,7 +683,9 @@ function createRun(sessionKey: string, userText: string, mode: MockRun['mode']):
           request: {
             sessionKey,
             runId,
-            toolName: approval.toolName,
+            command: approval.command,
+            host: approval.title,
+            allowedDecisions: approval.allowedDecisions,
           },
         },
       });

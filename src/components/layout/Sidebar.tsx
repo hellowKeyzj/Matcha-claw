@@ -196,16 +196,13 @@ function buildApprovalBlockerCards(input: {
   const startIndex = Math.max(0, input.approvals.length - CHAT_APPROVAL_SCAN_LIMIT);
   for (let index = input.approvals.length - 1; index >= startIndex; index -= 1) {
     const approval = input.approvals[index];
-    const toolName = typeof approval.toolName === 'string' && approval.toolName.trim().length > 0
-      ? approval.toolName.trim()
-      : 'tool-call';
     cards.push({
       id: `chat-approval:${approval.id}`,
       source: 'chat_approval',
       teamId: '',
       teamName: input.sessionLabel,
-      title: `${input.approvalTitlePrefix} · ${toolName}`,
-      content: input.approvalHint,
+      title: `${input.approvalTitlePrefix} · ${approval.title}`,
+      content: approval.command ?? input.approvalHint,
       from: approval.id,
       createdAt: approval.createdAtMs,
       sessionKey: input.sessionKey,

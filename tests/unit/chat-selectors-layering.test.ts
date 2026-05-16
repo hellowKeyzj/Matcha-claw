@@ -114,7 +114,13 @@ describe('chat selectors layering', () => {
   it('sidebar and session pane selectors read stable snapshot/runtime surfaces', () => {
     const state = makeState({
       pendingApprovalsBySession: {
-        'agent:main:main': [{ id: 'ap-1', sessionKey: 'agent:main:main', createdAtMs: 1 }],
+        'agent:main:main': [{
+          id: 'ap-1',
+          sessionKey: 'agent:main:main',
+          title: 'gateway',
+          allowedDecisions: ['allow-once', 'deny'],
+          createdAtMs: 1,
+        }],
       },
       loadedSessions: {
         'agent:main:main': createSessionRecord({ label: 'Main' }),

@@ -11,7 +11,6 @@ import { useGatewayStore } from '../gateway';
 import { executeStoreAbortRun } from './abort-handlers';
 import {
   normalizeApprovalDecision,
-  normalizeApprovalTimestampMs,
   parseGatewayApprovalResponse,
   resolveApprovalSessionKey,
 } from './approval-helpers';
@@ -149,28 +148,11 @@ export const useChatStore = create<ChatStoreState>((set, get) => {
       }
     },
     handleApprovalRequested: (payload) => {
-      const id = typeof payload.id === 'string' ? payload.id.trim() : '';
-      const sessionKey = resolveApprovalSessionKey(payload);
-      if (!id || !sessionKey) return;
+      const parsed = parseGatewayApprovalResponse(payload);
+      const approval = parsed.items[0];
+      if (!approval) return;
 
-      const runId = typeof payload.runId === 'string' ? payload.runId.trim() : undefined;
-      const toolName = typeof payload.toolName === 'string' ? payload.toolName.trim() : undefined;
-      const createdAtMs = normalizeApprovalTimestampMs(payload.createdAt)
-        ?? normalizeApprovalTimestampMs(payload.requestedAt)
-        ?? Date.now();
-      const expiresAtMs = normalizeApprovalTimestampMs(payload.expiresAt);
-
-      set((state) => buildApprovalRequestedPatch({
-        state,
-        approval: {
-          id,
-          sessionKey,
-          ...(runId ? { runId } : {}),
-          ...(toolName ? { toolName } : {}),
-          createdAtMs,
-          ...(expiresAtMs ? { expiresAtMs } : {}),
-        },
-      }));
+      set((state) => buildApprovalRequestedPatch({ state, approval }));
     },
     handleApprovalResolved: (payload) => {
       const id = typeof payload.id === 'string' ? payload.id.trim() : '';
@@ -179,7 +161,7 @@ export const useChatStore = create<ChatStoreState>((set, get) => {
         const patch = buildApprovalResolvedPatch({
           state,
           id,
-          resolvedSessionKey: resolveApprovalSessionKey(payload) ?? undefined,
+          resolvedSessionKey: resolveApprovalSessionKey(payload),
           decision: normalizeApprovalDecision(payload.decision),
         });
         return patch ?? state;

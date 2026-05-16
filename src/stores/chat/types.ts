@@ -78,7 +78,10 @@ export interface ApprovalItem {
   id: string;
   sessionKey: string;
   runId?: string;
-  toolName?: string;
+  title: string;
+  command?: string;
+  allowedDecisions: ApprovalDecision[];
+  request?: Record<string, unknown>;
   createdAtMs: number;
   expiresAtMs?: number;
   decision?: ApprovalDecision;
