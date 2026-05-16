@@ -2,7 +2,6 @@ import { normalizeBrowserMode } from '../../shared/browser-mode';
 import type { OpenClawRuntimeConfigService } from '../openclaw/openclaw-runtime-config-service';
 import {
   accepted,
-  applicationResponse,
   ok,
   type ApplicationResponse,
 } from '../common/application-response';
@@ -104,24 +103,22 @@ export class SettingsService {
     return ok({ success: true });
   }
 
-  async executeRuntimeConfigSync(payload: SettingsRuntimeConfigSyncPayload): Promise<ApplicationResponse> {
+  async executeRuntimeConfigSync(payload: SettingsRuntimeConfigSyncPayload): Promise<{ success: true }> {
     if (payload.syncProxy && this.deps.runtimeConfig) {
       await this.deps.runtimeConfig.syncProxy(
         toProxySettings(payload.settings),
         { preserveExistingWhenDisabled: false },
       );
     }
-    const restartFailure = payload.syncBrowserMode
-      ? await this.syncBrowserModeAndRestart(payload.settings)
-      : null;
-    return restartFailure ?? {
-      ...ok({ success: true }),
-    };
+    if (payload.syncBrowserMode) {
+      await this.syncBrowserModeAndRestart(payload.settings);
+    }
+    return { success: true };
   }
 
-  private async syncBrowserModeAndRestart(settings: Record<string, unknown>): Promise<ApplicationResponse | null> {
+  private async syncBrowserModeAndRestart(settings: Record<string, unknown>): Promise<void> {
     if (!this.deps.runtimeConfig) {
-      return null;
+      return;
     }
     const browserMode = normalizeBrowserMode(settings.browserMode);
     if (browserMode === 'relay') {
@@ -129,18 +126,11 @@ export class SettingsService {
     }
     await this.deps.runtimeConfig.syncBrowserMode(browserMode);
     if (!this.deps.gatewayControl) {
-      return null;
+      return;
     }
     const restartResponse = await this.deps.gatewayControl.restartGateway();
-    if (restartResponse.success) {
-      return null;
+    if (!restartResponse.success) {
+      throw new Error(restartResponse.error?.message ?? 'gateway restart failed');
     }
-    return applicationResponse(
-      restartResponse.status,
-      {
-        success: false,
-        error: restartResponse.error?.message ?? 'gateway restart failed',
-      },
-    );
   }
 }

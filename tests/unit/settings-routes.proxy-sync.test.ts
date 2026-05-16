@@ -274,10 +274,7 @@ describe('settings route proxy sync', () => {
       syncBrowserMode: true,
     });
 
-    expect(result).toEqual({
-      status: 200,
-      data: { success: true },
-    });
+    expect(result).toEqual({ success: true });
     expect(ensureManagedPluginInstalled).toHaveBeenCalledWith('browser-relay');
     expect(runtimeConfig.syncBrowserMode).toHaveBeenCalledWith('relay');
     expect(requestParentShellAction).toHaveBeenCalledWith('gateway_restart');
