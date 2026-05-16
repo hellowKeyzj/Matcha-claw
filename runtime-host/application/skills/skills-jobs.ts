@@ -1,4 +1,5 @@
 import type { RuntimeLongTaskSubmission, RuntimeLongTaskSubmissionPort } from '../runtime-host/runtime-task-ports';
+import { RUNTIME_REFRESH_JOB_COOLDOWN_MS } from '../common/runtime-job-throttle';
 
 export const SYNC_SKILL_GATEWAY_UPDATE_JOB = 'skills.syncGatewayUpdate';
 export const REFRESH_SKILL_STATUS_JOB = 'skills.refreshStatus';
@@ -21,6 +22,7 @@ export function createSkillsJobPort(tasks: RuntimeLongTaskSubmissionPort): Skill
   return {
     submitRefreshStatus: () => tasks.submit(REFRESH_SKILL_STATUS_JOB, null, {
       dedupeKey: REFRESH_SKILL_STATUS_JOB,
+      dedupeCooldownMs: RUNTIME_REFRESH_JOB_COOLDOWN_MS,
     }),
     submitGatewayUpdate: (payload) => tasks.submit(SYNC_SKILL_GATEWAY_UPDATE_JOB, payload, {
       dedupeKey: `${SYNC_SKILL_GATEWAY_UPDATE_JOB}:${payload.skillKey}`,

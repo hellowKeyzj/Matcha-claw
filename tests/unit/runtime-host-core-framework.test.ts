@@ -317,6 +317,104 @@ describe('runtime-host core framework', () => {
     expect(queue.latestByType('first')?.status).toBe('succeeded');
   });
 
+  it('job queue 已完成任务在 retention 到期后从内存中驱逐', async () => {
+    vi.useFakeTimers();
+    const registry = new RuntimeJobRegistry();
+    registry.register('one-shot', vi.fn(() => 'done'));
+    const queue = new RuntimeJobQueue(registry, logger, scheduler, clock, {
+      retentionSucceededMs: 100,
+      retentionFailedMs: 100,
+    });
+
+    const job = queue.enqueue('one-shot', null);
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(queue.get(job.id)?.status).toBe('succeeded');
+
+    await vi.advanceTimersByTimeAsync(100);
+    expect(queue.get(job.id)).toBeNull();
+    expect(queue.list()).toHaveLength(0);
+    vi.useRealTimers();
+  });
+
+  it('job queue 已完成任务超过 maxRetainedJobs 时按 finishedAt 升序裁剪', async () => {
+    const registry = new RuntimeJobRegistry();
+    registry.register('one-shot', vi.fn());
+    const queue = new RuntimeJobQueue(registry, logger, scheduler, clock, {
+      retentionSucceededMs: 60_000,
+      maxRetainedJobs: 2,
+    });
+
+    clock.current = 2000;
+    const a = queue.enqueue('one-shot', null);
+    await vi.waitFor(() => expect(queue.get(a.id)?.status).toBe('succeeded'));
+    clock.current = 2500;
+    const b = queue.enqueue('one-shot', null);
+    await vi.waitFor(() => expect(queue.get(b.id)?.status).toBe('succeeded'));
+    clock.current = 3000;
+    const c = queue.enqueue('one-shot', null);
+    await vi.waitFor(() => expect(queue.get(c.id)?.status).toBe('succeeded'));
+
+    expect(queue.get(a.id)).toBeNull();
+    expect(queue.get(b.id)?.status).toBe('succeeded');
+    expect(queue.get(c.id)?.status).toBe('succeeded');
+  });
+
+  it('job queue dedupeCooldownMs 命中冷却时返回最近完成任务，不入新队', async () => {
+    vi.useFakeTimers();
+    const handler = vi.fn(() => 'ok');
+    const registry = new RuntimeJobRegistry();
+    registry.register('refresh.snapshot', handler);
+    const queue = new RuntimeJobQueue(registry, logger, scheduler, clock, {
+      retentionSucceededMs: 60_000,
+    });
+
+    clock.current = 5000;
+    const first = queue.enqueue('refresh.snapshot', null, {
+      dedupeKey: 'refresh.snapshot',
+      dedupeCooldownMs: 1000,
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(queue.get(first.id)?.status).toBe('succeeded');
+
+    clock.current = 5500;
+    const cooled = queue.enqueue('refresh.snapshot', null, {
+      dedupeKey: 'refresh.snapshot',
+      dedupeCooldownMs: 1000,
+    });
+    expect(cooled.id).toBe(first.id);
+    expect(handler).toHaveBeenCalledTimes(1);
+
+    clock.current = 6500;
+    const refreshed = queue.enqueue('refresh.snapshot', null, {
+      dedupeKey: 'refresh.snapshot',
+      dedupeCooldownMs: 1000,
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(refreshed.id).not.toBe(first.id);
+    expect(handler).toHaveBeenCalledTimes(2);
+    vi.useRealTimers();
+  });
+
+  it('job queue finish 时清掉 payload 引用以释放大对象', async () => {
+    const largePayload = { blob: new Array(1024).fill('x').join('') };
+    const registry = new RuntimeJobRegistry();
+    registry.register('large.payload', vi.fn());
+    const queue = new RuntimeJobQueue(registry, logger, scheduler, clock, {
+      retentionSucceededMs: 60_000,
+    });
+
+    const job = queue.enqueue('large.payload', largePayload);
+    await vi.waitFor(() => expect(queue.get(job.id)?.status).toBe('succeeded'));
+
+    // 通过 latestByType 拿到 record（snapshot 不含 payload，但内存层应已释放引用）
+    // 这里通过反射式读取保证内部状态被清理
+    const record = (queue as unknown as { jobs: Map<string, { payload: unknown }> }).jobs.get(job.id);
+    expect(record?.payload).toBeNull();
+  });
+
   it('lifecycle 统一启动后台服务并按逆序清理', async () => {
     const lifecycle = new RuntimeHostLifecycle(logger);
     const events: string[] = [];

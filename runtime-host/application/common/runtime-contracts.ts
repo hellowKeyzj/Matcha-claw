@@ -38,6 +38,7 @@ export interface RuntimeJobQueueSnapshot {
 export interface RuntimeJobEnqueueOptions {
   readonly queue?: RuntimeJobQueueName;
   readonly dedupeKey?: string;
+  readonly dedupeCooldownMs?: number;
   readonly maxAttempts?: number;
   readonly retryDelayMs?: number;
 }

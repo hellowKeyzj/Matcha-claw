@@ -44,6 +44,9 @@ export interface RuntimeJobQueueOptions {
   readonly concurrency?: number;
   readonly maxAttempts?: number;
   readonly retryDelayMs?: number;
+  readonly retentionSucceededMs?: number;
+  readonly retentionFailedMs?: number;
+  readonly maxRetainedJobs?: number;
 }
 
 const RUNTIME_JOB_QUEUE_ORDER: readonly RuntimeJobQueueName[] = ['critical', 'default', 'low'] as const;
@@ -95,11 +98,16 @@ export class RuntimeJobQueue {
   };
   private readonly jobs = new Map<string, RuntimeJobRecord>();
   private readonly activeDedupeKeys = new Map<string, string>();
+  private readonly recentDedupeJobIds = new Map<string, string>();
   private readonly retryTasks = new Map<string, RuntimeScheduledTask>();
+  private readonly evictionTasks = new Map<string, RuntimeScheduledTask>();
   private readonly idleWaiters: Array<() => void> = [];
   private readonly concurrency: number;
   private readonly defaultMaxAttempts: number;
   private readonly defaultRetryDelayMs: number;
+  private readonly retentionSucceededMs: number;
+  private readonly retentionFailedMs: number;
+  private readonly maxRetainedJobs: number;
 
   constructor(
     private readonly registry: RuntimeJobRegistry,
@@ -111,6 +119,9 @@ export class RuntimeJobQueue {
     this.concurrency = Math.max(1, Math.floor(options.concurrency ?? 2));
     this.defaultMaxAttempts = Math.max(1, Math.floor(options.maxAttempts ?? 1));
     this.defaultRetryDelayMs = Math.max(0, Math.floor(options.retryDelayMs ?? 250));
+    this.retentionSucceededMs = Math.max(0, Math.floor(options.retentionSucceededMs ?? 60_000));
+    this.retentionFailedMs = Math.max(0, Math.floor(options.retentionFailedMs ?? 300_000));
+    this.maxRetainedJobs = Math.max(1, Math.floor(options.maxRetainedJobs ?? 200));
   }
 
   enqueue(type: string, payload: unknown, options: RuntimeJobEnqueueOptions = {}): RuntimeJobSnapshot {
@@ -126,6 +137,14 @@ export class RuntimeJobQueue {
       const activeJob = activeJobId ? this.jobs.get(activeJobId) : null;
       if (activeJob && (activeJob.status === 'queued' || activeJob.status === 'running')) {
         return this.snapshot(activeJob);
+      }
+      const cooldownMs = Math.max(0, Math.floor(options.dedupeCooldownMs ?? 0));
+      if (cooldownMs > 0) {
+        const recentJob = this.findRecentDedupeJob(options.dedupeKey);
+        if (recentJob && typeof recentJob.finishedAt === 'number'
+          && this.clock.nowMs() - recentJob.finishedAt < cooldownMs) {
+          return this.snapshot(recentJob);
+        }
       }
     }
 
@@ -208,6 +227,11 @@ export class RuntimeJobQueue {
       task.cancel();
     }
     this.retryTasks.clear();
+
+    for (const task of this.evictionTasks.values()) {
+      task.cancel();
+    }
+    this.evictionTasks.clear();
 
     for (const queue of RUNTIME_JOB_QUEUE_ORDER) {
       for (const jobId of this.pendingJobIds[queue].splice(0)) {
@@ -296,9 +320,74 @@ export class RuntimeJobQueue {
     } else {
       job.error = undefined;
     }
-    if (job.dedupeKey && this.activeDedupeKeys.get(job.dedupeKey) === job.id) {
-      this.activeDedupeKeys.delete(job.dedupeKey);
+    job.payload = null;
+    if (job.dedupeKey) {
+      if (this.activeDedupeKeys.get(job.dedupeKey) === job.id) {
+        this.activeDedupeKeys.delete(job.dedupeKey);
+      }
+      this.recentDedupeJobIds.set(job.dedupeKey, job.id);
     }
+    this.scheduleEviction(job);
+    this.enforceMaxRetention();
+  }
+
+  private scheduleEviction(job: RuntimeJobRecord): void {
+    const retentionMs = job.status === 'failed' ? this.retentionFailedMs : this.retentionSucceededMs;
+    if (retentionMs <= 0) {
+      this.evictJob(job.id);
+      return;
+    }
+    const previousTask = this.evictionTasks.get(job.id);
+    if (previousTask) {
+      previousTask.cancel();
+    }
+    const task = this.scheduler.schedule(retentionMs, () => {
+      this.evictionTasks.delete(job.id);
+      this.evictJob(job.id);
+    });
+    this.evictionTasks.set(job.id, task);
+  }
+
+  private enforceMaxRetention(): void {
+    const finishedJobs = Array.from(this.jobs.values()).filter(
+      (job) => job.status === 'succeeded' || job.status === 'failed',
+    );
+    if (finishedJobs.length <= this.maxRetainedJobs) {
+      return;
+    }
+    finishedJobs.sort((left, right) => (left.finishedAt ?? 0) - (right.finishedAt ?? 0));
+    const overflow = finishedJobs.length - this.maxRetainedJobs;
+    for (let index = 0; index < overflow; index += 1) {
+      this.evictJob(finishedJobs[index].id);
+    }
+  }
+
+  private evictJob(jobId: string): void {
+    const job = this.jobs.get(jobId);
+    if (!job) {
+      return;
+    }
+    this.jobs.delete(jobId);
+    const evictionTask = this.evictionTasks.get(jobId);
+    if (evictionTask) {
+      evictionTask.cancel();
+      this.evictionTasks.delete(jobId);
+    }
+    if (job.dedupeKey && this.recentDedupeJobIds.get(job.dedupeKey) === jobId) {
+      this.recentDedupeJobIds.delete(job.dedupeKey);
+    }
+  }
+
+  private findRecentDedupeJob(dedupeKey: string): RuntimeJobRecord | null {
+    const recentJobId = this.recentDedupeJobIds.get(dedupeKey);
+    if (!recentJobId) {
+      return null;
+    }
+    const recentJob = this.jobs.get(recentJobId);
+    if (!recentJob || (recentJob.status !== 'succeeded' && recentJob.status !== 'failed')) {
+      return null;
+    }
+    return recentJob;
   }
 
   private snapshot(job: RuntimeJobRecord): RuntimeJobSnapshot {

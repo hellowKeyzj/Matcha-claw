@@ -1,4 +1,5 @@
 import type { RuntimeLongTaskSubmission, RuntimeLongTaskSubmissionPort } from '../runtime-host/runtime-task-ports';
+import { RUNTIME_REFRESH_JOB_COOLDOWN_MS } from '../common/runtime-job-throttle';
 
 export const CRON_TRIGGER_JOB = 'cron.trigger';
 export const CRON_CREATE_JOB = 'cron.create';
@@ -24,6 +25,7 @@ export function createCronRuntimeJobPort(tasks: RuntimeLongTaskSubmissionPort): 
   return {
     submitRefreshJobs: () => tasks.submit(CRON_REFRESH_JOBS_JOB, null, {
       dedupeKey: CRON_REFRESH_JOBS_JOB,
+      dedupeCooldownMs: RUNTIME_REFRESH_JOB_COOLDOWN_MS,
     }),
     submitCreate: (payload) => tasks.submit(CRON_CREATE_JOB, payload),
     submitUpdate: (payload) => tasks.submit(CRON_UPDATE_JOB, payload, {

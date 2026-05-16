@@ -1,4 +1,5 @@
 import type { RuntimeJobSnapshot } from '../common/runtime-contracts';
+import { RUNTIME_REFRESH_JOB_COOLDOWN_MS } from '../common/runtime-job-throttle';
 import type {
   RuntimeLongTaskLookupPort,
   RuntimeLongTaskSubmission,
@@ -22,6 +23,7 @@ export function createSessionCatalogJobPort(
     submitRefreshCatalog: () => tasks.submit(REFRESH_SESSION_CATALOG_JOB, null, {
       queue: 'low',
       dedupeKey: REFRESH_SESSION_CATALOG_JOB,
+      dedupeCooldownMs: RUNTIME_REFRESH_JOB_COOLDOWN_MS,
     }),
     getRefreshCatalogJob: () => lookup.latestByType(REFRESH_SESSION_CATALOG_JOB),
   };
