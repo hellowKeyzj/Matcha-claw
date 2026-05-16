@@ -22,6 +22,8 @@ type HostEventName =
   | 'runtime-host:status'
   | 'runtime-host:error'
   | 'runtime-host:restart'
+  | 'runtime-job:done'
+  | 'runtime-job:progress'
   | 'openclaw:cli-installed'
   | 'oauth:code'
   | 'oauth:start'
@@ -208,6 +210,12 @@ export function registerHostEventBridge(deps: {
     }
     if (eventName === 'gateway:channel-status') {
       emit('gateway:channel-status', payload);
+    }
+  });
+
+  deps.runtimeHostManager.onRuntimeJobEvent((eventName, payload) => {
+    if (eventName === 'runtime-job:done' || eventName === 'runtime-job:progress') {
+      emit(eventName, payload);
     }
   });
 

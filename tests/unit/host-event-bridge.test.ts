@@ -66,6 +66,8 @@ describe('host event bridge runtime-host lifecycle', () => {
           gatewayEventHandler = null;
         };
       }),
+      emitRuntimeJobEvent: vi.fn(),
+      onRuntimeJobEvent: vi.fn(() => () => {}),
     };
     const eventBus = { emit: vi.fn() };
     const send = vi.fn();
@@ -209,6 +211,8 @@ describe('host event bridge runtime-host lifecycle', () => {
       readGatewayStatus: vi.fn(async () => null),
       emitGatewayEvent,
       onGatewayEvent: vi.fn(() => () => {}),
+      emitRuntimeJobEvent: vi.fn(),
+      onRuntimeJobEvent: vi.fn(() => () => {}),
     };
 
     const { registerHostEventBridge } = await import('../../electron/main/host-event-bridge');
@@ -246,6 +250,8 @@ describe('host event bridge runtime-host lifecycle', () => {
       readGatewayStatus: vi.fn(async () => null),
       emitGatewayEvent: vi.fn(),
       onGatewayEvent: vi.fn(() => () => {}),
+      emitRuntimeJobEvent: vi.fn(),
+      onRuntimeJobEvent: vi.fn(() => () => {}),
     };
     const eventBus = { emit: vi.fn() };
     const mainWindow = { webContents: { send: vi.fn() } };

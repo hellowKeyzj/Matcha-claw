@@ -4,6 +4,7 @@ import {
 } from '../shared/runtime-host-constants';
 import type {
   ParentGatewayForwardEventName,
+  ParentRuntimeJobForwardEventName,
   ParentShellAction,
   ParentTransportUpstreamPayload,
 } from '../shared/parent-transport-contracts';
@@ -24,6 +25,7 @@ interface ParentTransportResponse {
 export interface ParentTransportClient {
   requestParentShellAction(action: ParentShellAction, payload?: unknown): Promise<ParentTransportUpstreamPayload>;
   emitParentGatewayEvent(eventName: ParentGatewayForwardEventName, payload: unknown): Promise<void>;
+  emitParentRuntimeJobEvent(eventName: ParentRuntimeJobForwardEventName, payload: unknown): Promise<void>;
   mapParentTransportResponse(upstream: ParentTransportUpstreamPayload): ParentTransportResponse;
 }
 
@@ -133,6 +135,31 @@ export function createParentTransportClient(options: ParentTransportClientOption
     }
   }
 
+  async function emitParentRuntimeJobEvent(
+    eventName: ParentRuntimeJobForwardEventName,
+    payload: unknown,
+  ): Promise<void> {
+    const controller = new AbortController();
+    const timeoutTask = scheduler.schedule(Math.min(DISPATCH_TIMEOUT_MS, 3000), () => controller.abort());
+    try {
+      await httpClient.request(`${parentApiBaseUrl}/internal/runtime-host/runtime-jobs`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-runtime-host-dispatch-token': parentDispatchToken,
+        },
+        body: JSON.stringify({
+          version: TRANSPORT_VERSION,
+          eventName,
+          payload,
+        }),
+        signal: controller.signal,
+      });
+    } finally {
+      timeoutTask.cancel();
+    }
+  }
+
   function mapParentTransportResponse(upstream: ParentTransportUpstreamPayload): ParentTransportResponse {
     if (upstream.success) {
       return {
@@ -152,6 +179,7 @@ export function createParentTransportClient(options: ParentTransportClientOption
   return {
     requestParentShellAction,
     emitParentGatewayEvent,
+    emitParentRuntimeJobEvent,
     mapParentTransportResponse,
   };
 }

@@ -14,6 +14,10 @@ export type ParentGatewayForwardEventName =
   | 'gateway:channel-status'
   | 'gateway:error';
 
+export type ParentRuntimeJobForwardEventName =
+  | 'runtime-job:done'
+  | 'runtime-job:progress';
+
 export interface ParentTransportErrorPayload {
   code: string;
   message: string;

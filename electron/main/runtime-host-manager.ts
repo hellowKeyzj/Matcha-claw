@@ -32,6 +32,10 @@ export type RuntimeHostGatewayForwardEventName =
   | 'gateway:channel-status'
   | 'gateway:error';
 
+export type RuntimeHostRuntimeJobForwardEventName =
+  | 'runtime-job:done'
+  | 'runtime-job:progress';
+
 export interface RuntimeHostGatewayStatusSnapshot {
   readonly state: 'connected' | 'reconnecting' | 'disconnected';
   readonly portReachable: boolean;
@@ -95,6 +99,13 @@ export interface RuntimeHostManager {
   readonly onGatewayEvent: (
     handler: (eventName: RuntimeHostGatewayForwardEventName, payload: unknown) => void,
   ) => () => void;
+  readonly emitRuntimeJobEvent: (
+    eventName: RuntimeHostRuntimeJobForwardEventName,
+    payload: unknown,
+  ) => void;
+  readonly onRuntimeJobEvent: (
+    handler: (eventName: RuntimeHostRuntimeJobForwardEventName, payload: unknown) => void,
+  ) => () => void;
   readonly getInternalDispatchToken: () => string;
 }
 
@@ -155,6 +166,7 @@ export function createRuntimeHostManager(
   };
   const internalDispatchToken = `runtime-host-dispatch-${Math.random().toString(36).slice(2)}-${Date.now()}`;
   const gatewayEventBus = new EventEmitter();
+  const runtimeJobEventBus = new EventEmitter();
   const hostApiPort = getPort('MATCHACLAW_HOST_API');
   const openClawDir = getOpenClawDir();
   const runtimeHostProcess = createRuntimeHostProcessManager({
@@ -356,6 +368,22 @@ export function createRuntimeHostManager(
     };
   }
 
+  function emitRuntimeJobEventInternal(
+    eventName: RuntimeHostRuntimeJobForwardEventName,
+    payload: unknown,
+  ): void {
+    runtimeJobEventBus.emit('runtime-job:event', eventName, payload);
+  }
+
+  function onRuntimeJobEventInternal(
+    handler: (eventName: RuntimeHostRuntimeJobForwardEventName, payload: unknown) => void,
+  ): () => void {
+    runtimeJobEventBus.on('runtime-job:event', handler);
+    return () => {
+      runtimeJobEventBus.off('runtime-job:event', handler);
+    };
+  }
+
   return {
     async start() {
       if (lifecycle === 'starting' || lifecycle === 'running') {
@@ -481,6 +509,14 @@ export function createRuntimeHostManager(
 
     onGatewayEvent(handler) {
       return onGatewayEventInternal(handler);
+    },
+
+    emitRuntimeJobEvent(eventName, payload) {
+      emitRuntimeJobEventInternal(eventName, payload);
+    },
+
+    onRuntimeJobEvent(handler) {
+      return onRuntimeJobEventInternal(handler);
     },
 
     getInternalDispatchToken() {

@@ -6,6 +6,7 @@ import {
   type HostApiProxyEnvelope,
   unwrapHostApiProxyEnvelope,
 } from './host-api-transport-contract';
+import { subscribeHostEvent } from './host-events';
 import type {
   SessionCatalogItem,
   SessionLoadResult,
@@ -331,26 +332,61 @@ export async function waitForRuntimeJobResult<TResult>(
     intervalMs?: number;
   } = {},
 ): Promise<TResult> {
+  void options.intervalMs;
   const timeoutMs = options.timeoutMs ?? 120000;
-  const intervalMs = options.intervalMs ?? 500;
-  const startedAt = Date.now();
-  for (;;) {
-    const response = await hostRuntimeJobGet<TResult>(jobId);
-    const job = response.job;
-    if (!job) {
-      throw new Error(`runtime job not found: ${jobId}`);
-    }
-    if (job.status === 'succeeded') {
-      return job.result as TResult;
-    }
-    if (job.status === 'failed') {
-      throw new Error(job.error || `runtime job failed: ${job.type}`);
-    }
-    if (Date.now() - startedAt >= timeoutMs) {
-      throw new Error(`runtime job timed out: ${job.type}`);
-    }
-    await new Promise((resolve) => window.setTimeout(resolve, intervalMs));
-  }
+
+  return await new Promise<TResult>((resolve, reject) => {
+    let settled = false;
+    let timeoutHandle: number | null = null;
+    let unsubscribe: (() => void) | null = null;
+
+    const finalize = (action: () => void) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      if (timeoutHandle !== null) {
+        window.clearTimeout(timeoutHandle);
+        timeoutHandle = null;
+      }
+      unsubscribe?.();
+      unsubscribe = null;
+      action();
+    };
+
+    const handleSnapshot = (snapshot: RuntimeJobSnapshot<TResult> | null | undefined) => {
+      if (!snapshot || snapshot.id !== jobId) {
+        return;
+      }
+      if (snapshot.status === 'succeeded') {
+        finalize(() => resolve(snapshot.result as TResult));
+        return;
+      }
+      if (snapshot.status === 'failed') {
+        finalize(() => reject(new Error(snapshot.error || `runtime job failed: ${snapshot.type}`)));
+      }
+    };
+
+    unsubscribe = subscribeHostEvent<RuntimeJobSnapshot<TResult>>('runtime-job:done', (snapshot) => {
+      handleSnapshot(snapshot);
+    });
+
+    timeoutHandle = window.setTimeout(() => {
+      finalize(() => reject(new Error(`runtime job timed out: ${jobId}`)));
+    }, timeoutMs);
+
+    void hostRuntimeJobGet<TResult>(jobId)
+      .then((response) => {
+        if (!response.job) {
+          finalize(() => reject(new Error(`runtime job not found: ${jobId}`)));
+          return;
+        }
+        handleSnapshot(response.job);
+      })
+      .catch((error) => {
+        finalize(() => reject(error));
+      });
+  });
 }
 
 export async function hostSessionWindowFetch(

@@ -82,6 +82,14 @@ export function createRuntimeHostProcess(): RuntimeHostProcess {
     httpClient,
     scheduler,
   });
+  infrastructure.jobQueue.setEventSink({
+    emitDone: (snapshot) => {
+      void parentTransportClient.emitParentRuntimeJobEvent('runtime-job:done', snapshot).catch(() => undefined);
+    },
+    emitProgress: (snapshot) => {
+      void parentTransportClient.emitParentRuntimeJobEvent('runtime-job:progress', snapshot).catch(() => undefined);
+    },
+  });
   const parentShell = {
     request: parentTransportClient.requestParentShellAction,
     mapResponse: parentTransportClient.mapParentTransportResponse,

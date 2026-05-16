@@ -7,6 +7,7 @@ import { parseJsonBody, sendJson } from '../route-utils';
 
 const SHELL_ACTION_PATH = '/internal/runtime-host/shell-actions';
 const GATEWAY_EVENT_PATH = '/internal/runtime-host/gateway-events';
+const RUNTIME_JOB_EVENT_PATH = '/internal/runtime-host/runtime-jobs';
 
 type RuntimeHostShellAction =
   | 'shell_open_path'
@@ -23,6 +24,10 @@ type RuntimeHostGatewayForwardEventName =
   | 'task:snapshot'
   | 'gateway:channel-status'
   | 'gateway:error';
+
+type RuntimeHostRuntimeJobForwardEventName =
+  | 'runtime-job:done'
+  | 'runtime-job:progress';
 
 function normalizeHeaderValue(headerValue: string | string[] | undefined): string | null {
   if (!headerValue) {
@@ -93,6 +98,10 @@ function isGatewayForwardEventName(value: unknown): value is RuntimeHostGatewayF
     || value === 'task:snapshot'
     || value === 'gateway:channel-status'
     || value === 'gateway:error';
+}
+
+function isRuntimeJobForwardEventName(value: unknown): value is RuntimeHostRuntimeJobForwardEventName {
+  return value === 'runtime-job:done' || value === 'runtime-job:progress';
 }
 
 async function handleShellActionRoute(
@@ -237,6 +246,77 @@ async function handleGatewayEventRoute(
   }
 }
 
+async function handleRuntimeJobEventRoute(
+  req: IncomingMessage,
+  res: ServerResponse,
+  ctx: RuntimeHostApiContext,
+): Promise<boolean> {
+  if (req.method !== 'POST') {
+    sendTransportError(
+      res,
+      405,
+      'BAD_REQUEST',
+      `Method not allowed: ${req.method ?? 'UNKNOWN'}`,
+    );
+    return true;
+  }
+
+  if (!ensureInternalToken(req, res, ctx)) {
+    return true;
+  }
+
+  try {
+    const body = await parseJsonBody<unknown>(req);
+    const record = asRecord(body);
+    if (!record) {
+      sendTransportError(
+        res,
+        400,
+        'BAD_REQUEST',
+        'Runtime job event body 必须是 object',
+      );
+      return true;
+    }
+
+    if (record.version !== RUNTIME_HOST_TRANSPORT_VERSION) {
+      sendTransportError(
+        res,
+        400,
+        'BAD_REQUEST',
+        `Unsupported transport version: ${String(record.version)}`,
+      );
+      return true;
+    }
+
+    if (!isRuntimeJobForwardEventName(record.eventName)) {
+      sendTransportError(
+        res,
+        400,
+        'BAD_REQUEST',
+        `Invalid runtime job forward event: ${String(record.eventName)}`,
+      );
+      return true;
+    }
+
+    ctx.runtimeHost.emitRuntimeJobEvent(record.eventName, record.payload);
+    sendJson(res, 200, {
+      version: RUNTIME_HOST_TRANSPORT_VERSION,
+      success: true,
+      status: 200,
+      data: { accepted: true },
+    });
+    return true;
+  } catch (error) {
+    sendTransportError(
+      res,
+      500,
+      'INTERNAL_ERROR',
+      error instanceof Error ? error.message : String(error),
+    );
+    return true;
+  }
+}
+
 export async function handleRuntimeHostInternalRoutes(
   req: IncomingMessage,
   res: ServerResponse,
@@ -248,6 +328,9 @@ export async function handleRuntimeHostInternalRoutes(
   }
   if (url.pathname === GATEWAY_EVENT_PATH) {
     return await handleGatewayEventRoute(req, res, ctx);
+  }
+  if (url.pathname === RUNTIME_JOB_EVENT_PATH) {
+    return await handleRuntimeJobEventRoute(req, res, ctx);
   }
   return false;
 }

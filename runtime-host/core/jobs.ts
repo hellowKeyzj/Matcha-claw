@@ -40,6 +40,11 @@ interface RuntimeJobRecord extends RuntimeJobSnapshot {
   error?: string;
 }
 
+export interface RuntimeJobEventSink {
+  emitDone(snapshot: RuntimeJobSnapshot): void;
+  emitProgress(snapshot: RuntimeJobSnapshot): void;
+}
+
 export interface RuntimeJobQueueOptions {
   readonly concurrency?: number;
   readonly maxAttempts?: number;
@@ -47,6 +52,7 @@ export interface RuntimeJobQueueOptions {
   readonly retentionSucceededMs?: number;
   readonly retentionFailedMs?: number;
   readonly maxRetainedJobs?: number;
+  readonly eventSink?: RuntimeJobEventSink;
 }
 
 const RUNTIME_JOB_QUEUE_ORDER: readonly RuntimeJobQueueName[] = ['critical', 'default', 'low'] as const;
@@ -108,6 +114,7 @@ export class RuntimeJobQueue {
   private readonly retentionSucceededMs: number;
   private readonly retentionFailedMs: number;
   private readonly maxRetainedJobs: number;
+  private eventSink: RuntimeJobEventSink | null;
 
   constructor(
     private readonly registry: RuntimeJobRegistry,
@@ -122,6 +129,11 @@ export class RuntimeJobQueue {
     this.retentionSucceededMs = Math.max(0, Math.floor(options.retentionSucceededMs ?? 60_000));
     this.retentionFailedMs = Math.max(0, Math.floor(options.retentionFailedMs ?? 300_000));
     this.maxRetainedJobs = Math.max(1, Math.floor(options.maxRetainedJobs ?? 200));
+    this.eventSink = options.eventSink ?? null;
+  }
+
+  setEventSink(sink: RuntimeJobEventSink): void {
+    this.eventSink = sink;
   }
 
   enqueue(type: string, payload: unknown, options: RuntimeJobEnqueueOptions = {}): RuntimeJobSnapshot {
@@ -283,6 +295,7 @@ export class RuntimeJobQueue {
               : {}),
             ...(progress.message ? { message: progress.message } : {}),
           };
+          this.eventSink?.emitProgress(this.snapshot(job));
         },
       });
       this.finish(job, 'succeeded');
@@ -320,13 +333,14 @@ export class RuntimeJobQueue {
     } else {
       job.error = undefined;
     }
-    job.payload = null;
     if (job.dedupeKey) {
       if (this.activeDedupeKeys.get(job.dedupeKey) === job.id) {
         this.activeDedupeKeys.delete(job.dedupeKey);
       }
       this.recentDedupeJobIds.set(job.dedupeKey, job.id);
     }
+    this.eventSink?.emitDone(this.snapshot(job));
+    job.payload = null;
     this.scheduleEviction(job);
     this.enforceMaxRetention();
   }
