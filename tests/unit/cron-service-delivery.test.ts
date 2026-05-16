@@ -178,9 +178,8 @@ describe('cron service delivery', () => {
       },
     }));
     expect(response.status).toBe(202);
-    expect(executed.status).toBe(200);
-    expect((executed.data as { agentId?: string }).agentId).toBe('agent-reporter');
-    expect((executed.data as { delivery?: unknown }).delivery).toEqual({
+    expect((executed as { agentId?: string }).agentId).toBe('agent-reporter');
+    expect((executed as { delivery?: unknown }).delivery).toEqual({
       mode: 'announce',
       channel: 'feishu',
       accountId: 'feishu-main',
@@ -230,7 +229,7 @@ describe('cron service delivery', () => {
         to: 'wxid_123@im.wechat',
       },
     });
-    expect(executed.status).toBe(200);
+    expect((executed as { id?: string }).id).toBe('job-wx-1');
     expect(bridge.addCronJob).toHaveBeenCalledWith(expect.objectContaining({
       agentId: 'wechat-agent',
       delivery: {
@@ -293,7 +292,7 @@ describe('cron service delivery', () => {
         to: 'chat:oc_yyy',
       },
     });
-    expect(executed.status).toBe(200);
+    expect(executed).toEqual({ success: true });
     expect(bridge.updateCronJob).toHaveBeenCalledWith('job-2', expect.objectContaining({
       agentId: 'agent-evening',
       schedule: { kind: 'cron', expr: '0 18 * * *' },

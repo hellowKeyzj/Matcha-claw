@@ -163,12 +163,11 @@ export const useCronStore = create<CronState>((set, get) => ({
   createJob: async (input) => {
     set({ mutating: true });
     try {
-      const submission = await hostApiFetch<RuntimeJobSubmission<{ status?: number; data?: CronJob }>>('/api/cron/jobs', {
+      const submission = await hostApiFetch<RuntimeJobSubmission<CronJob>>('/api/cron/jobs', {
         method: 'POST',
         body: JSON.stringify(input),
       });
-      const response = await waitForRuntimeJobResult<{ status?: number; data?: CronJob }>(submission.job.id);
-      const job = response?.data;
+      const job = await waitForRuntimeJobResult<CronJob>(submission.job.id);
       if (!job || typeof job.id !== 'string') {
         throw new Error('Invalid cron create job result');
       }
@@ -294,14 +293,13 @@ export const useCronStore = create<CronState>((set, get) => ({
       };
     });
     try {
-      const submission = await hostApiFetch<RuntimeJobSubmission<{ status?: number; data?: { ok?: boolean; ran?: boolean; reason?: string } }>>('/api/cron/trigger', {
+      const submission = await hostApiFetch<RuntimeJobSubmission<{ ok?: boolean; ran?: boolean; reason?: string }>>('/api/cron/trigger', {
         method: 'POST',
         body: JSON.stringify({ id }),
       });
-      const response = await waitForRuntimeJobResult<{ status?: number; data?: { ok?: boolean; ran?: boolean; reason?: string } }>(
+      const result = await waitForRuntimeJobResult<{ ok?: boolean; ran?: boolean; reason?: string }>(
         submission.job.id,
       );
-      const result = response?.data ?? {};
       console.log('Cron trigger result:', result);
       // Refresh jobs after trigger to update lastRun/nextRun state
       await get().fetchJobs({ silent: true });

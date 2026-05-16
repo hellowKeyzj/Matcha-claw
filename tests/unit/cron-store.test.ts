@@ -153,7 +153,7 @@ describe('cron store', () => {
       }
       throw new Error(`unexpected path: ${path}`);
     });
-    waitForRuntimeJobResultMock.mockResolvedValueOnce({ status: 200, data: { success: true } });
+    waitForRuntimeJobResultMock.mockResolvedValueOnce({ success: true });
 
     const updatePromise = useCronStore.getState().updateJob('job-4', { name: 'updated-name' });
     expect(useCronStore.getState().mutating).toBe(true);
@@ -182,7 +182,7 @@ describe('cron store', () => {
         maxAttempts: 1,
       },
     });
-    waitForRuntimeJobResultMock.mockResolvedValueOnce({ status: 200, data: createdJob });
+    waitForRuntimeJobResultMock.mockResolvedValueOnce(createdJob);
 
     const { useCronStore } = await import('@/stores/cron');
     const result = await useCronStore.getState().createJob({
@@ -229,10 +229,7 @@ describe('cron store', () => {
       }
       throw new Error(`unexpected path: ${path}`);
     });
-    waitForRuntimeJobResultMock.mockResolvedValueOnce({
-      status: 200,
-      data: { ok: true, ran: true },
-    });
+    waitForRuntimeJobResultMock.mockResolvedValueOnce({ ok: true, ran: true });
 
     const { useCronStore } = await import('@/stores/cron');
     useCronStore.getState().setJobs([job]);

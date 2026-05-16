@@ -1,5 +1,5 @@
 import { triggerCronJobWithSplitProfiles } from './manual-trigger';
-import { accepted, badRequest, ok, type ApplicationResponse } from '../common/application-response';
+import { accepted, badRequest, type ApplicationResponse } from '../common/application-response';
 import type { RuntimeClockPort, RuntimeTimerPort } from '../common/runtime-ports';
 import type { GatewayCronPort } from '../gateway/gateway-runtime-port';
 import { isGatewayReadyForSnapshot, isGatewayStartupConnectionError } from '../gateway/gateway-readiness';
@@ -22,6 +22,11 @@ import { CronSessionHistoryService } from './cron-session-history';
 type CronUpdatePatchResult =
   | { readonly ok: true; readonly patch: Record<string, any> }
   | { readonly ok: false; readonly response: ApplicationResponse };
+
+function extractErrorMessage(response: ApplicationResponse, fallback: string): string {
+  const data = isRecord(response.data) ? response.data : null;
+  return typeof data?.error === 'string' && data.error ? data.error : fallback;
+}
 
 export interface CronServiceDeps {
   readonly gateway: GatewayCronPort;
@@ -185,11 +190,11 @@ export class CronService {
   async executeCreateJob(payload: unknown) {
     const input = asCronCreateInput(payload);
     if (!input) {
-      return badRequest('Invalid cron create payload');
+      throw new Error('Invalid cron create payload');
     }
     const deliveryValidationError = getCronDeliveryValidationError(input.delivery);
     if (deliveryValidationError) {
-      return badRequest(deliveryValidationError);
+      throw new Error(deliveryValidationError);
     }
     const created = await this.deps.gateway.addCronJob({
       name: input.name,
@@ -201,9 +206,9 @@ export class CronService {
       sessionTarget: 'isolated',
       delivery: input.delivery,
     });
-    const response = ok(isRecord(created) ? normalizeCronJob(created, this.deps.clock) : created);
+    const result = isRecord(created) ? normalizeCronJob(created, this.deps.clock) : created;
     await this.refreshJobsSnapshot();
-    return response;
+    return result;
   }
 
   async updateJob(jobId: string, payload: unknown) {
@@ -217,11 +222,11 @@ export class CronService {
   async executeUpdateJob(jobId: string, payload: unknown) {
     const patchResult = await this.buildUpdatePatch(jobId, payload);
     if (!patchResult.ok) {
-      return patchResult.response;
+      throw new Error(extractErrorMessage(patchResult.response, 'Invalid cron update payload'));
     }
-    const response = ok(await this.deps.gateway.updateCronJob(jobId, patchResult.patch));
+    const result = await this.deps.gateway.updateCronJob(jobId, patchResult.patch);
     await this.refreshJobsSnapshot();
-    return response;
+    return result;
   }
 
   async deleteJob(jobId: string) {
@@ -229,9 +234,9 @@ export class CronService {
   }
 
   async executeDeleteJob(jobId: string) {
-    const response = ok(await this.deps.gateway.removeCronJob(jobId));
+    const result = await this.deps.gateway.removeCronJob(jobId);
     await this.refreshJobsSnapshot();
-    return response;
+    return result;
   }
 
   toggleJob(payload: unknown) {
@@ -245,11 +250,11 @@ export class CronService {
   async executeToggleJob(payload: unknown) {
     const body = isRecord(payload) ? payload : null;
     if (!body || typeof body.id !== 'string' || typeof body.enabled !== 'boolean') {
-      return badRequest('Invalid cron toggle payload');
+      throw new Error('Invalid cron toggle payload');
     }
-    const response = ok(await this.deps.gateway.updateCronJob(body.id, { enabled: body.enabled }));
+    const result = await this.deps.gateway.updateCronJob(body.id, { enabled: body.enabled });
     await this.refreshJobsSnapshot();
-    return response;
+    return result;
   }
 
   trigger(payload: unknown) {
@@ -263,16 +268,16 @@ export class CronService {
   async executeTrigger(payload: unknown) {
     const body = isRecord(payload) ? payload : null;
     if (!body || typeof body.id !== 'string') {
-      return badRequest('Invalid cron trigger payload');
+      throw new Error('Invalid cron trigger payload');
     }
-    const response = ok(await triggerCronJobWithSplitProfiles({
-        gateway: this.deps.gateway,
-        id: body.id,
-        clock: this.deps.clock,
-        timer: this.deps.timer,
-      }));
+    const result = await triggerCronJobWithSplitProfiles({
+      gateway: this.deps.gateway,
+      id: body.id,
+      clock: this.deps.clock,
+      timer: this.deps.timer,
+    });
     await this.refreshJobsSnapshot();
-    return response;
+    return result;
   }
 
   private async buildUpdatePatch(jobId: string, payload: unknown): Promise<CronUpdatePatchResult> {
