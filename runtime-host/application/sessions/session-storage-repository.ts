@@ -267,6 +267,15 @@ function buildDeletedTranscriptPath(transcriptPath: string): string {
 }
 
 export class SessionStorageRepository implements SessionStoragePort {
+  // 按 agentId 缓存上次扫描得到的 descriptors。下次扫描时若 sessions.json 与 sessions 目录的
+  // (size, mtimeMs) 都没变化，则直接复用 descriptors，跳过 readJsonRecordFromFileSystem +
+  // listDirectory(sessionsDir) 的目录列举与 JSON 解析开销。
+  private readonly agentDescriptorsCache = new Map<string, {
+    readonly sessionsJsonFingerprint: { size: number; mtimeMs: number } | null;
+    readonly sessionsDirFingerprint: { mtimeMs: number } | null;
+    readonly descriptors: SessionStorageDescriptor[];
+  }>();
+
   constructor(private readonly deps: SessionStorageRepositoryDeps) {}
 
   async listStorageDescriptors(): Promise<SessionStorageDescriptor[]> {
@@ -279,13 +288,29 @@ export class SessionStorageRepository implements SessionStoragePort {
     }
 
     const descriptors: SessionStorageDescriptor[] = [];
+    const presentAgentIds = new Set<string>();
     for (const agentDirEntry of agentEntries) {
       if (!agentDirEntry.isDirectory) {
         continue;
       }
       const agentId = agentDirEntry.name;
+      presentAgentIds.add(agentId);
       const sessionsDir = join(agentsDir, agentId, 'sessions');
       const sessionsJsonPath = join(sessionsDir, 'sessions.json');
+
+      const sessionsJsonFingerprint = await this.statFingerprint(sessionsJsonPath);
+      const sessionsDirFingerprint = await this.statDirFingerprint(sessionsDir);
+
+      const cached = this.agentDescriptorsCache.get(agentId);
+      if (
+        cached
+        && this.fingerprintEqual(cached.sessionsJsonFingerprint, sessionsJsonFingerprint)
+        && this.fingerprintEqual(cached.sessionsDirFingerprint, sessionsDirFingerprint)
+      ) {
+        descriptors.push(...cached.descriptors);
+        continue;
+      }
+
       const sessionsJson = await readJsonRecordFromFileSystem(this.deps.fileSystem, sessionsJsonPath);
       const indexedDescriptors = sessionsJson ? listAgentStorageDescriptors({
         agentId,
@@ -302,17 +327,76 @@ export class SessionStorageRepository implements SessionStoragePort {
       } catch {
         entryNames = [];
       }
-      descriptors.push(...indexedDescriptors);
-      descriptors.push(...listTranscriptStorageDescriptors({
+      const transcriptDescriptors = listTranscriptStorageDescriptors({
         agentId,
         sessionsDir,
         sessionsJsonPath: sessionsJson ? sessionsJsonPath : null,
         sessionsJson,
         entryNames,
         indexedDescriptors,
-      }));
+      });
+
+      const agentDescriptors: SessionStorageDescriptor[] = [
+        ...indexedDescriptors,
+        ...transcriptDescriptors,
+      ];
+      this.agentDescriptorsCache.set(agentId, {
+        sessionsJsonFingerprint,
+        sessionsDirFingerprint,
+        descriptors: agentDescriptors,
+      });
+      descriptors.push(...agentDescriptors);
     }
+
+    // agent 目录被删除时同步清掉缓存条目，避免长跑内存增长。
+    for (const cachedAgentId of [...this.agentDescriptorsCache.keys()]) {
+      if (!presentAgentIds.has(cachedAgentId)) {
+        this.agentDescriptorsCache.delete(cachedAgentId);
+      }
+    }
+
     return descriptors;
+  }
+
+  private async statFingerprint(pathname: string): Promise<{ size: number; mtimeMs: number } | null> {
+    try {
+      const fileStat = await this.deps.fileSystem.stat(pathname);
+      if (!fileStat.isFile) {
+        return null;
+      }
+      return { size: fileStat.size, mtimeMs: fileStat.mtimeMs };
+    } catch {
+      return null;
+    }
+  }
+
+  private async statDirFingerprint(pathname: string): Promise<{ mtimeMs: number } | null> {
+    try {
+      const fileStat = await this.deps.fileSystem.stat(pathname);
+      if (!fileStat.isDirectory) {
+        return null;
+      }
+      return { mtimeMs: fileStat.mtimeMs };
+    } catch {
+      return null;
+    }
+  }
+
+  private fingerprintEqual(
+    left: { size?: number; mtimeMs: number } | null,
+    right: { size?: number; mtimeMs: number } | null,
+  ): boolean {
+    if (left === null && right === null) {
+      return true;
+    }
+    if (left === null || right === null) {
+      return false;
+    }
+    return left.mtimeMs === right.mtimeMs && left.size === right.size;
+  }
+
+  private invalidateAgentDescriptorsCache(agentId: string): void {
+    this.agentDescriptorsCache.delete(agentId);
   }
 
   async findStorageDescriptor(sessionKey: string): Promise<SessionStorageDescriptor | null> {
@@ -372,6 +456,7 @@ export class SessionStorageRepository implements SessionStoragePort {
       descriptor.sessionsJsonPath,
       JSON.stringify(updateStorageIndexStatus(descriptor.sessionsJson, sessionKey, status), null, 2),
     );
+    this.invalidateAgentDescriptorsCache(descriptor.agentId);
     return true;
   }
 
@@ -390,6 +475,7 @@ export class SessionStorageRepository implements SessionStoragePort {
       descriptor.sessionsJsonPath,
       JSON.stringify(removeSessionFromStorageIndex(descriptor.sessionsJson, sessionKey), null, 2),
     );
+    this.invalidateAgentDescriptorsCache(descriptor.agentId);
     return true;
   }
 
