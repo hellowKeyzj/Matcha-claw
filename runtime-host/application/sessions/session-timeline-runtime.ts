@@ -288,6 +288,29 @@ export class SessionTimelineRuntime {
       return null;
     }
     state.timelineEntries = nextEntries;
+
+    // Update pendingFinal: tool running → true, tool completed/error → false
+    if (update.phase === 'start' && state.runtime.sending) {
+      state.runtime = {
+        ...state.runtime,
+        pendingFinal: true,
+        runPhase: 'waiting_tool',
+      };
+    } else if (update.phase === 'result') {
+      // Check if any tools are still running
+      const hasRunningTools = nextEntries.some((entry) => (
+        entry.kind === 'assistant-turn'
+        && entry.segments.some((s) => s.kind === 'tool' && s.tool.status === 'running')
+      ));
+      if (!hasRunningTools && state.runtime.pendingFinal) {
+        state.runtime = {
+          ...state.runtime,
+          pendingFinal: false,
+          runPhase: state.runtime.sending ? 'streaming' : state.runtime.runPhase,
+        };
+      }
+    }
+
     this.deps.executionGraphRuntime.refreshExistingGraphs(state);
     state.window = createLatestWindowState(state.renderItems.length);
     this.touchSessionStateMeta(state);
