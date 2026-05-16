@@ -23,6 +23,7 @@ const hoisted = vi.hoisted(() => ({
       lifecycle: 'running',
       port: 3211,
     })),
+    onStateChange: vi.fn(() => () => {}),
   })),
   getOpenClawDirMock: vi.fn(() => 'E:\\code\\Matcha-claw\\node_modules\\openclaw'),
 }));
