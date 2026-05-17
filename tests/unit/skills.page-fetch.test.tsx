@@ -269,12 +269,14 @@ describe('skills page fetch behavior', () => {
     expect(clippedViewport).toBeNull();
   });
 
-  it('已安装列表展示可用技能与用户禁用项，过滤掉缺依赖与状态未知项', async () => {
+  it('已安装列表只过滤掉平台明确不支持的技能，未测出 eligible 的默认显示', async () => {
+    // unknown-skill 同时覆盖回归点：enabled=true 且 eligible 未测出（启用瞬间的状态），
+    // 不应当从列表消失。这是“启用一下卡片消失需要刷新”那个 bug 的根因场景。
     skillsState.skills = [
       { id: 'available-skill', name: 'Available Skill', description: 'ready', enabled: true, isBundled: true, eligible: true },
-      { id: 'disabled-skill', name: 'Disabled Skill', description: 'user disabled', enabled: false, isBundled: true, eligible: false },
-      { id: 'missing-skill', name: 'Missing Skill', description: 'missing deps', enabled: true, isBundled: true, eligible: false },
-      { id: 'unknown-skill', name: 'Unknown Skill', description: 'unknown eligibility', enabled: true, isBundled: false },
+      { id: 'disabled-skill', name: 'Disabled Skill', description: 'user disabled', enabled: false, isBundled: true, eligible: true },
+      { id: 'missing-skill', name: 'Missing Skill', description: 'platform unsupported', enabled: true, isBundled: true, eligible: false },
+      { id: 'unknown-skill', name: 'Unknown Skill', description: 'eligibility not yet evaluated', enabled: true, isBundled: false },
     ];
     skillsState.snapshotReady = true;
 
@@ -289,8 +291,8 @@ describe('skills page fetch behavior', () => {
     });
 
     expect(screen.getByText('Disabled Skill')).toBeInTheDocument();
+    expect(screen.getByText('Unknown Skill')).toBeInTheDocument();
     expect(screen.queryByText('Missing Skill')).not.toBeInTheDocument();
-    expect(screen.queryByText('Unknown Skill')).not.toBeInTheDocument();
     expect(screen.queryByText('filter.eligible')).not.toBeInTheDocument();
   });
 

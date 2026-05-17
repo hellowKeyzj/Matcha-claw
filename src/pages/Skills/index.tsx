@@ -110,11 +110,11 @@ function getSkillAvailabilityKind(skill: Skill): SkillAvailabilityKind {
 }
 
 // 已安装列表的可见性策略：
-// - 用户主动禁用的 skill 必须可见，否则没法重新启用
-// - 当前可用的 skill 可见
-// - missing / blocked / unknown 仍然隐藏，避免噪声
+// - 平台明确不支持（eligible === false）时隐藏，显示了用户也用不了
+// - 其余一律展示，eligible 未测出（undefined）默认乐观显示
+// - 切换 enabled 不影响可见性，避免“启用一下就消失”的卡片闪现
 function isInstalledSkillVisible(skill: Skill): boolean {
-  return skill.enabled === false || skill.eligible === true;
+  return skill.eligible !== false;
 }
 
 function getAvailabilityBadgeClass(kind: SkillAvailabilityKind): string {
