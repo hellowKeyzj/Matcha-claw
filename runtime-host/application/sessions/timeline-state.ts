@@ -104,11 +104,38 @@ function buildIdentityFromTurnEntry(entry: SessionTimelineAssistantTurnEntry): A
   };
 }
 
+function buildIdentityForOrphanToolEvent(
+  update: SessionToolStatusUpdateIngressEvent,
+): AssistantTurnEntryIdentity | null {
+  const sessionKey = update.sessionKey ?? '';
+  const runId = update.runId ?? '';
+  if (!sessionKey || !runId) {
+    return null;
+  }
+  const laneKey = 'main';
+  return {
+    sessionKey,
+    laneKey,
+    turnKey: `${laneKey}:${runId}`,
+    entryId: `run:${runId}:assistant:0`,
+    runId,
+    turnBindingSource: 'run',
+    turnBindingConfidence: 'strong',
+    turnIdentityMode: 'run',
+    turnIdentityConfidence: 'strong',
+  };
+}
+
 /**
  * Apply a tool-lifecycle update to the assistant-turn entry that owns the
  * matching `toolCallId`. If no turn currently references the toolCallId, the
  * latest streaming turn for the same run is patched with a placeholder tool
  * segment; the next chat-content frame will reorder it.
+ *
+ * 当一个新的 chat 回合首条事件就是 tool start（assistant 还没有任何文本输出）时，
+ * timeline 里此时没有对应 assistant-turn。此情况下凭借 runId 凭空创建一条空的
+ * assistant-turn 占位条目，把 tool segment 挂上去。后续 chat delta 通过同一个 runId
+ * 的 turn binding 会复用这条 entry，实现"先 tool 后文本"的正确顺序。
  */
 export function applyToolStatusUpdate(
   entries: SessionTimelineEntry[],
@@ -121,15 +148,21 @@ export function applyToolStatusUpdate(
   if (index < 0 && update.runId) {
     index = findLatestAssistantTurnIndexForRun(entries, update.runId);
   }
-  if (index < 0) {
+  let target: SessionTimelineAssistantTurnEntry | null = null;
+  if (index >= 0) {
+    const candidate = entries[index]!;
+    if (candidate.kind === 'assistant-turn') {
+      target = candidate;
+    }
+  }
+  const identity = target
+    ? buildIdentityFromTurnEntry(target)
+    : buildIdentityForOrphanToolEvent(update);
+  if (!identity) {
     return entries;
   }
-  const target = entries[index]!;
-  if (target.kind !== 'assistant-turn') {
-    return entries;
-  }
-  const identity = buildIdentityFromTurnEntry(target);
-  const nextSegments = applyToolStatusToSegments(target.segments, identity, {
+  const previousSegments = target?.segments ?? [];
+  const nextSegments = applyToolStatusToSegments(previousSegments, identity, {
     toolCallId: update.toolCallId,
     name: update.toolName,
     status: update.status,
@@ -137,21 +170,28 @@ export function applyToolStatusUpdate(
     ...(update.output !== undefined ? { output: update.output } : {}),
     ...(update.timestamp != null ? { updatedAt: update.timestamp } : {}),
   });
-  if (nextSegments === target.segments) {
+  if (nextSegments === previousSegments) {
     return entries;
   }
   const nextTurn = buildAssistantTurnEntry({
     identity,
-    status: target.status ?? 'streaming',
-    text: target.text,
-    ...(target.createdAt != null ? { createdAt: target.createdAt } : {}),
-    ...(target.sequenceId != null ? { sequenceId: target.sequenceId } : {}),
+    status: target?.status ?? 'streaming',
+    text: target?.text ?? '',
+    ...(target?.createdAt != null
+      ? { createdAt: target.createdAt }
+      : (update.timestamp != null ? { createdAt: update.timestamp } : {})),
+    ...(target?.sequenceId != null
+      ? { sequenceId: target.sequenceId }
+      : (update.sequenceId != null ? { sequenceId: update.sequenceId } : {})),
     segments: nextSegments,
-    isStreaming: target.isStreaming,
+    isStreaming: target?.isStreaming ?? true,
   });
-  const next = cloneTimelineEntries(entries);
-  next[index] = nextTurn;
-  return next;
+  if (target) {
+    const next = cloneTimelineEntries(entries);
+    next[index] = nextTurn;
+    return next;
+  }
+  return upsertTimelineEntry(entries, nextTurn);
 }
 
 export function resolveTimelineLastActivityAt(

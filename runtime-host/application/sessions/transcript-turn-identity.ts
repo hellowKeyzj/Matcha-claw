@@ -22,6 +22,7 @@ export function resolveTranscriptTurnBinding(
   message: SessionTranscriptMessage,
   options: {
     runId?: string;
+    turnAnchorId?: string;
   } = {},
 ): ResolvedTranscriptTurnBinding | null {
   const runId = normalizeOptionalString(options.runId);
@@ -30,6 +31,16 @@ export function resolveTranscriptTurnBinding(
       key: runId,
       source: 'run',
       mode: 'run',
+      confidence: 'strong',
+    };
+  }
+
+  const turnAnchorId = normalizeOptionalString(options.turnAnchorId);
+  if (turnAnchorId) {
+    return {
+      key: `anchor:${turnAnchorId}`,
+      source: 'message',
+      mode: 'message',
       confidence: 'strong',
     };
   }

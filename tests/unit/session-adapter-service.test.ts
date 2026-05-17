@@ -217,6 +217,8 @@ describe('session runtime service', () => {
       sessionStorage: {} as never,
       stateStore: {
         flushPersistedStore: vi.fn(async () => undefined),
+        hasVerboseConfigured: vi.fn(() => false),
+        markVerboseConfigured: vi.fn(),
       } as never,
       timelineRuntime: timelineRuntime as never,
       snapshotService: {
@@ -955,7 +957,11 @@ describe('session runtime service', () => {
         },
       },
     });
-    expect(gatewayRpc).not.toHaveBeenCalledWith('sessions.patch', expect.anything(), expect.anything());
+    expect(gatewayRpc).not.toHaveBeenCalledWith(
+      'sessions.patch',
+      expect.objectContaining({ model: 'anthropic/claude-opus-4-6' }),
+      expect.anything(),
+    );
   });
 
   it('promptSession commits user item and pending assistant turn in one submitted revision', async () => {

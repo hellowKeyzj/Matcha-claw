@@ -143,10 +143,14 @@ function buildIdentityFromMessage(input: {
   runId?: string;
   sequenceId?: number;
   index: number;
+  turnAnchorId?: string;
 }): AssistantTurnEntryIdentity {
   const agentId = normalizeOptionalString(input.message.agentId) ?? '';
   const laneKey = resolveSessionLaneKey(agentId);
-  const turnBinding = resolveTranscriptTurnBinding(input.message, { runId: input.runId });
+  const turnBinding = resolveTranscriptTurnBinding(input.message, {
+    runId: input.runId,
+    ...(input.turnAnchorId ? { turnAnchorId: input.turnAnchorId } : {}),
+  });
   const entryId = resolveTranscriptEntryId(input.message, input.index, {
     runId: input.runId,
     sequenceId: input.sequenceId,
@@ -258,6 +262,7 @@ function buildAssistantTurnFromAssistantMessage(input: {
   index: number;
   status: SessionTimelineEntryStatus;
   existingRows: ReadonlyArray<SessionTimelineEntry>;
+  turnAnchorId?: string;
 }): SessionTimelineAssistantTurnEntry {
   const identity = buildIdentityFromMessage({
     sessionKey: input.sessionKey,
@@ -265,6 +270,7 @@ function buildAssistantTurnFromAssistantMessage(input: {
     runId: input.runId,
     sequenceId: input.sequenceId,
     index: input.index,
+    ...(input.turnAnchorId ? { turnAnchorId: input.turnAnchorId } : {}),
   });
   const existing = findExistingAssistantTurnEntry(input.existingRows, identity);
   const previousSegments = existing?.segments ?? [];
@@ -364,6 +370,7 @@ export function buildTimelineEntriesFromTranscriptMessage(
     status?: SessionTimelineEntryStatus;
     index: number;
     existingRows?: SessionTimelineEntry[];
+    turnAnchorId?: string;
   },
 ): SessionTimelineEntry[] {
   if (isInternalAssistantControlMessage(message)) {
@@ -433,6 +440,7 @@ export function buildTimelineEntriesFromTranscriptMessage(
     index: options.index,
     status,
     existingRows,
+    ...(options.turnAnchorId ? { turnAnchorId: options.turnAnchorId } : {}),
   });
   const rows: SessionTimelineEntry[] = [turnEntry];
 
@@ -481,11 +489,18 @@ export function materializeTranscriptTimelineEntries(
 ): SessionTimelineEntry[] {
   const entries: SessionTimelineEntry[] = [...(options.existingRows ?? [])];
   const baselineLength = entries.length;
+  let turnAnchorId: string | undefined;
   for (const [index, message] of messages.entries()) {
+    if (message.role === 'user') {
+      turnAnchorId = normalizeOptionalString(message.messageId)
+        ?? normalizeOptionalString(message.id)
+        ?? `index:${index}`;
+    }
     const produced = buildTimelineEntriesFromTranscriptMessage(sessionKey, message, {
       index,
       status: resolveTranscriptEntryStatus(message),
       existingRows: entries,
+      ...(turnAnchorId ? { turnAnchorId } : {}),
     });
     for (const entry of produced) {
       const existingIndex = entries.findIndex((candidate) => candidate.key === entry.key);

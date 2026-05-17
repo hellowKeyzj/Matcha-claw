@@ -10,7 +10,7 @@ import type {
   RuntimeFileSystemPort,
   RuntimeIdGeneratorPort,
 } from '../common/runtime-ports';
-import type { GatewayChatPort } from '../gateway/gateway-runtime-port';
+import type { GatewayChatPort, GatewayRpcPort } from '../gateway/gateway-runtime-port';
 import {
   isRecord,
   normalizeString,
@@ -24,6 +24,7 @@ import {
 import { SessionRuntimeStateStore } from './session-runtime-state';
 import { SessionSnapshotService } from './session-snapshot-service';
 import { SessionTimelineRuntime } from './session-timeline-runtime';
+import { ensureSessionVerboseFull } from './session-verbose-config';
 import {
   badRequest,
   ok,
@@ -38,7 +39,7 @@ export interface SessionPromptServiceDeps {
   fileSystem: RuntimeFileSystemPort;
   idGenerator: RuntimeIdGeneratorPort;
   clock: RuntimeClockPort;
-  gateway: GatewayChatPort;
+  gateway: GatewayChatPort & Pick<GatewayRpcPort, 'gatewayRpc'>;
   operationCoordinator: SessionOperationCoordinator;
   emitSessionUpdate?: (event: SessionInfoUpdateEvent) => void;
 }
@@ -190,6 +191,8 @@ export class SessionPromptService {
     }
 
     const promptId = requestedPromptId || this.deps.idGenerator.randomId();
+
+    await ensureSessionVerboseFull(sessionKey, this.deps.gateway, this.deps.stateStore);
 
     const media = Array.isArray(mediaBody?.media)
       ? mediaBody.media as SessionPromptMediaPayload[]

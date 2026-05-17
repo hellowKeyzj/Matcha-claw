@@ -124,7 +124,10 @@ function countSegmentsOfKind(
  *   message segment — this creates the interleaved text→tool→text pattern.
  *
  * For transcript replay (history), content arrays DO contain toolCall/
- * toolResult blocks. Those are handled by `buildSegmentsFromTranscriptContent`.
+ * toolResult blocks. The presence of tool blocks distinguishes the two
+ * flows; transcript content is forwarded to `buildSegmentsFromTranscriptContent`,
+ * which merges tool segments onto previousSegments (so multiple transcript
+ * messages within the same turn aggregate without duplicating tool cards).
  */
 export function buildSegmentsFromChatContent(input: {
   identity: Pick<AssistantTurnEntryIdentity, 'turnKey' | 'laneKey'>;
@@ -138,10 +141,12 @@ export function buildSegmentsFromChatContent(input: {
   const incomingThinking = extractThinkingFromContent(input.content);
   const hasToolCallBlocks = contentHasToolBlocks(input.content);
 
-  // Transcript replay (initial hydration only): content has toolCall/toolResult
-  // blocks AND no previous segments exist → positional build from scratch.
-  // If previousSegments exist, we are in a live session and must stay incremental.
-  if (hasToolCallBlocks && input.previousSegments.length === 0) {
+  // Transcript-style content (any frame containing toolCall/toolResult blocks):
+  // the realtime chat stream never includes tool blocks, so this signal reliably
+  // identifies transcript replay or chat.append injection paths. Merge against
+  // previousSegments so multiple transcript messages within the same turn
+  // aggregate (no duplicate text, no duplicate tool cards).
+  if (hasToolCallBlocks) {
     return buildSegmentsFromTranscriptContent(input);
   }
 
@@ -184,10 +189,15 @@ export function buildSegmentsFromChatContent(input: {
 }
 
 /**
- * Build segments from a transcript content array (history replay).
- * Content arrays in transcripts contain the full interleaved sequence:
- * thinking, text, toolCall, toolResult, text, etc.
- * Order follows the array positions directly.
+ * Build segments from a transcript content array (history replay or chat.append injection).
+ *
+ * 合并语义（关键）：
+ * - 起步基于 previousSegments，确保同一 turn 内多条 transcript message 累积叠加。
+ * - text/thinking/image 块：append 新 segment，slot 序号从 previousSegments 已有数量起算。
+ * - toolCall/toolResult 块：按 toolCallId upsert。已有就在原位置更新；没有就追加。
+ *
+ * 如此一来，重启后水合时同一 turn 的 N 条 assistant message 会被合并到同一个 entry 的
+ * segments 数组里，不会重复 tool 卡或文本。
  */
 function buildSegmentsFromTranscriptContent(input: {
   identity: Pick<AssistantTurnEntryIdentity, 'turnKey' | 'laneKey'>;
@@ -196,9 +206,14 @@ function buildSegmentsFromTranscriptContent(input: {
   attachedFiles: ReadonlyArray<SessionRenderAttachedFile>;
   previousSegments: ReadonlyArray<SessionAssistantTurnSegment>;
 }): ReadonlyArray<SessionAssistantTurnSegment> {
-  const slots = { thinking: 0, message: 0, media: 0 };
-  const segments: SessionAssistantTurnSegment[] = [];
-  let emittedInlineMedia = false;
+  const segments: SessionAssistantTurnSegment[] = input.previousSegments.map((s) => structuredClone(s));
+  const slots = {
+    thinking: countSegmentsOfKind(segments, 'thinking'),
+    message: countSegmentsOfKind(segments, 'message'),
+    media: countSegmentsOfKind(segments, 'media'),
+  };
+  const hadInlineMedia = segments.some((segment) => segment.kind === 'media');
+  let emittedInlineMedia = hadInlineMedia;
 
   if (Array.isArray(input.content)) {
     for (const block of input.content) {
@@ -248,9 +263,15 @@ function buildSegmentsFromTranscriptContent(input: {
           continue;
         }
         const toolCallId = resolveToolRecordCallId(row);
-        const existingTool = toolCallId
-          ? findToolSegment(input.previousSegments, toolCallId)?.tool ?? null
-          : findToolSegmentByName(input.previousSegments, name)?.tool ?? null;
+        const existingIndex = toolCallId
+          ? segments.findIndex((segment) => (
+              segment.kind === 'tool'
+              && (segment.tool.toolCallId === toolCallId || segment.tool.id === toolCallId)
+            ))
+          : -1;
+        const existingTool = existingIndex >= 0 && segments[existingIndex]!.kind === 'tool'
+          ? (segments[existingIndex] as SessionAssistantToolSegment).tool
+          : (toolCallId ? null : findToolSegmentByName(segments, name)?.tool ?? null);
         const isCall = isToolCallContentType(type);
         const isResult = isToolResultContentType(type);
         const callPayload = isCall ? resolveToolRecordCallPayload(row) : existingTool?.input ?? null;
@@ -264,12 +285,15 @@ function buildSegmentsFromTranscriptContent(input: {
           input: callPayload,
           output: resultPayload,
         });
-        segments.push({
+        const toolSegmentKey = existingIndex >= 0
+          ? segments[existingIndex]!.key
+          : buildSegmentKey(input.identity, 'tool', 0, toolCallId || `${name}:${segments.length}`);
+        const nextToolSegment: SessionAssistantToolSegment = {
           kind: 'tool',
-          key: buildSegmentKey(input.identity, 'tool', 0, toolCallId || `${name}:${segments.length}`),
+          key: toolSegmentKey,
           tool: {
-            id: toolCallId || name,
-            ...(toolCallId ? { toolCallId } : {}),
+            id: toolCallId || existingTool?.id || name,
+            ...(toolCallId ? { toolCallId } : (existingTool?.toolCallId ? { toolCallId: existingTool.toolCallId } : {})),
             name,
             input: callPayload,
             status,
@@ -279,7 +303,12 @@ function buildSegmentsFromTranscriptContent(input: {
             ...(existingTool?.updatedAt != null ? { updatedAt: existingTool.updatedAt } : {}),
             ...(resultPayload !== undefined ? { output: structuredClone(resultPayload) } : {}),
           },
-        });
+        };
+        if (existingIndex >= 0) {
+          segments[existingIndex] = nextToolSegment;
+        } else {
+          segments.push(nextToolSegment);
+        }
       }
     }
   }
@@ -292,7 +321,7 @@ function buildSegmentsFromTranscriptContent(input: {
     if (segment) segments.push(segment);
   }
 
-  if (!emittedInlineMedia) {
+  if (!emittedInlineMedia && input.attachedFiles.length > 0) {
     const segment = buildMediaSegment({
       key: buildSegmentKey(input.identity, 'media', slots.media),
       images: [],
@@ -465,18 +494,6 @@ function contentHasToolBlocks(content: unknown): boolean {
       : '';
     return isToolCallContentType(type) || isToolResultContentType(type);
   });
-}
-
-function findToolSegment(
-  segments: ReadonlyArray<SessionAssistantTurnSegment>,
-  toolCallId: string,
-): SessionAssistantToolSegment | null {
-  for (const segment of segments) {
-    if (segment.kind === 'tool' && (segment.tool.toolCallId === toolCallId || segment.tool.id === toolCallId)) {
-      return segment;
-    }
-  }
-  return null;
 }
 
 function findToolSegmentByName(
