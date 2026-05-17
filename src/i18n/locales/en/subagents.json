@@ -56,6 +56,7 @@
   "manage": {
     "promptLabel": "Prompt",
     "promptPlaceholder": "Describe what this subagent should write for AGENTS.md / SOUL.md / TOOLS.md / IDENTITY.md / USER.md",
+    "includeCurrentFilesLabel": "Use current files",
     "generateDraft": "Generate Draft",
     "generatingDraft": "Generating...",
     "applyingDraft": "Applying...",

@@ -56,6 +56,7 @@
   "manage": {
     "promptLabel": "プロンプト",
     "promptPlaceholder": "このサブAgentが AGENTS.md / SOUL.md / TOOLS.md / IDENTITY.md / USER.md に書く内容を入力してください",
+    "includeCurrentFilesLabel": "現在のファイルを使う",
     "generateDraft": "下書きを生成",
     "generatingDraft": "生成中...",
     "applyingDraft": "適用中...",

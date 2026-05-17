@@ -32,6 +32,7 @@ import {
   normalizeSubagentNameToSlug,
 } from '@/features/subagents/domain/workspace';
 import {
+  buildDraftRepairPrompt,
   buildSubagentPromptPayload,
   parseDraftPayload,
 } from '@/features/subagents/domain/prompt';
@@ -126,6 +127,7 @@ interface SubagentsState {
   draftApplySuccessByAgent: Record<string, boolean>;
   draftSessionKeyByAgent: Record<string, string>;
   draftRawOutputByAgent: Record<string, string>;
+  draftIncludeCurrentFilesByAgent: Record<string, boolean>;
   persistedFilesByAgent: Record<string, Partial<Record<SubagentTargetFile, string>>>;
   draftByFile: DraftByFile;
   draftError: string | null;
@@ -137,6 +139,7 @@ interface SubagentsState {
   setManagedAgentId: (agentId: string | null) => void;
   loadPersistedFilesForAgent: (agentId: string) => Promise<Partial<Record<SubagentTargetFile, string>>>;
   setDraftPromptForAgent: (agentId: string, prompt: string) => void;
+  setDraftIncludeCurrentFilesForAgent: (agentId: string, includeCurrentFiles: boolean) => void;
   cancelDraft: (agentId: string) => Promise<void>;
   createAgent: (input: {
     name: string;
@@ -160,7 +163,11 @@ interface SubagentsState {
     avatarStyle?: AgentAvatarStyle | null;
   }) => Promise<void>;
   deleteAgent: (agentId: string) => Promise<void>;
-  generateDraftFromPrompt: (agentId: string, prompt: string) => Promise<void>;
+  generateDraftFromPrompt: (input: {
+    agentId: string;
+    prompt: string;
+    includeCurrentFiles: boolean;
+  }) => Promise<void>;
   generatePreviewDiffByFile: (originalByFile: Partial<Record<SubagentTargetFile, string>>) => void;
   applyDraft: (agentId: string) => Promise<void>;
 }
@@ -1134,6 +1141,7 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
   draftApplySuccessByAgent: {},
   draftSessionKeyByAgent: {},
   draftRawOutputByAgent: {},
+  draftIncludeCurrentFilesByAgent: {},
   persistedFilesByAgent: {},
   draftByFile: {},
   draftError: null,
@@ -1302,6 +1310,16 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
     draftPromptByAgent: {
       ...state.draftPromptByAgent,
       [agentId]: prompt,
+    },
+    draftApplySuccessByAgent: {
+      ...state.draftApplySuccessByAgent,
+      [agentId]: false,
+    },
+  })),
+  setDraftIncludeCurrentFilesForAgent: (agentId, includeCurrentFiles) => set((state) => ({
+    draftIncludeCurrentFilesByAgent: {
+      ...state.draftIncludeCurrentFilesByAgent,
+      [agentId]: includeCurrentFiles,
     },
     draftApplySuccessByAgent: {
       ...state.draftApplySuccessByAgent,
@@ -1622,7 +1640,7 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
     }
   }),
 
-  generateDraftFromPrompt: async (agentId, prompt) => {
+  generateDraftFromPrompt: async ({ agentId, prompt, includeCurrentFiles }) => {
     const trimmedPrompt = prompt.trim();
     if (!trimmedPrompt) {
       throw new Error('Prompt cannot be empty');
@@ -1634,10 +1652,10 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
     }
     const existingSessionKey = get().draftSessionKeyByAgent[agentId];
     const sessionKey = existingSessionKey || buildDraftSessionKey(agentId);
-    let persistedFiles = existingSessionKey
-      ? {}
-      : get().persistedFilesByAgent[agentId];
-    if (!existingSessionKey && !persistedFiles) {
+    let persistedFiles = includeCurrentFiles && !existingSessionKey
+      ? get().persistedFilesByAgent[agentId]
+      : {};
+    if (includeCurrentFiles && !existingSessionKey && !persistedFiles) {
       persistedFiles = await get().loadPersistedFilesForAgent(agentId);
     }
     beginGlobalMutating(set);
@@ -1662,7 +1680,10 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
     }));
     let lastModelOutput = '';
     try {
-      const payload = buildSubagentPromptPayload(trimmedPrompt, persistedFiles ?? {});
+      const payload = buildSubagentPromptPayload(trimmedPrompt, {
+        includeCurrentFiles: includeCurrentFiles && !existingSessionKey,
+        persistedFilesByName: persistedFiles ?? {},
+      });
       const baseMessage = `${payload.systemPrompt}\n\n${payload.userPrompt}`;
       const sendDraftMessage = async (message: string): Promise<string> => {
         const result = await sendChatMessage({
@@ -1692,18 +1713,13 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
       } catch (firstParseError) {
         const parseMessage = firstParseError instanceof Error ? firstParseError.message : '';
         const shouldRetry = parseMessage.includes('Invalid JSON output from model')
-          || parseMessage.includes('Invalid output schema');
+          || parseMessage.includes('Invalid output schema')
+          || parseMessage.includes('Invalid draft content');
         if (!shouldRetry) {
           throw firstParseError;
         }
 
-        const retryMessage = [
-          '上一条输出无法解析为有效 JSON。',
-          '请只返回一个 JSON 对象，不要 Markdown 代码块，不要任何额外解释。',
-          '严格使用结构：{"files":[{"name","content","reason","confidence"}]}。',
-          'content 内不要使用 ``` 代码块；若有双引号必须转义为 \\\\"。',
-          '请精简内容，确保 5 个文件都完整闭合后再输出。',
-        ].join('\n');
+        const retryMessage = buildDraftRepairPrompt(parseMessage || 'Invalid draft output');
         outputText = await sendDraftMessage(retryMessage);
         lastModelOutput = outputText;
         const parsedDraft = parseDraftPayload(outputText);

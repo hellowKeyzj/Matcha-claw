@@ -1,5 +1,6 @@
 import { Button } from '@/components/ui/button';
 import { Label } from '@/components/ui/label';
+import { Switch } from '@/components/ui/switch';
 import { Textarea } from '@/components/ui/textarea';
 import type { DraftByFile, PreviewDiffByFile, SubagentTargetFile } from '@/types/subagent';
 import { useTranslation } from 'react-i18next';
@@ -12,6 +13,7 @@ interface SubagentManageDialogProps {
   draftPrompt: string;
   generatingDraft: boolean;
   applyingDraft: boolean;
+  includeCurrentFiles: boolean;
   hasAnyDraft: boolean;
   hasApprovedDraft: boolean;
   applySucceeded: boolean;
@@ -21,6 +23,7 @@ interface SubagentManageDialogProps {
   previewDiffByFile: PreviewDiffByFile;
   persistedContentByFile: Partial<Record<SubagentTargetFile, string>>;
   onDraftPromptChange: (prompt: string) => void;
+  onIncludeCurrentFilesChange: (includeCurrentFiles: boolean) => void;
   onGenerateDraft: () => Promise<void>;
   onGenerateDiffPreview: (originalByFile: Partial<Record<SubagentTargetFile, string>>) => void;
   onApplyDraft: () => Promise<void>;
@@ -33,6 +36,7 @@ export function SubagentManageDialog({
   draftPrompt,
   generatingDraft,
   applyingDraft,
+  includeCurrentFiles,
   hasAnyDraft,
   hasApprovedDraft,
   applySucceeded,
@@ -42,6 +46,7 @@ export function SubagentManageDialog({
   previewDiffByFile,
   persistedContentByFile,
   onDraftPromptChange,
+  onIncludeCurrentFilesChange,
   onGenerateDraft,
   onGenerateDiffPreview,
   onApplyDraft,
@@ -77,7 +82,7 @@ export function SubagentManageDialog({
           />
         </div>
 
-        <div className="flex flex-wrap gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           <Button
             variant="outline"
             size="sm"
@@ -86,6 +91,14 @@ export function SubagentManageDialog({
           >
             {generatingDraft ? t('manage.generatingDraft') : t('manage.generateDraft')}
           </Button>
+          <label className="inline-flex h-9 items-center gap-2 rounded-md border px-3 text-xs text-muted-foreground">
+            <Switch
+              checked={includeCurrentFiles}
+              disabled={generatingDraft || applyingDraft}
+              onCheckedChange={onIncludeCurrentFilesChange}
+            />
+            <span>{t('manage.includeCurrentFilesLabel')}</span>
+          </label>
           {hasAnyDraft && (
             <Button
               variant="outline"

@@ -122,6 +122,7 @@ export function SubAgents() {
   const draftApplyingByAgent = useSubagentsStore((state) => state.draftApplyingByAgent);
   const draftApplySuccessByAgent = useSubagentsStore((state) => state.draftApplySuccessByAgent);
   const draftRawOutputByAgent = useSubagentsStore((state) => state.draftRawOutputByAgent);
+  const draftIncludeCurrentFilesByAgent = useSubagentsStore((state) => state.draftIncludeCurrentFilesByAgent);
   const persistedFilesByAgent = useSubagentsStore((state) => state.persistedFilesByAgent);
   const previewDiffByFile = useSubagentsStore((state) => state.previewDiffByFile);
   const loadAgents = useSubagentsStore((state) => state.loadAgents);
@@ -129,6 +130,7 @@ export function SubAgents() {
   const setManagedAgentId = useSubagentsStore((state) => state.setManagedAgentId);
   const loadPersistedFilesForAgent = useSubagentsStore((state) => state.loadPersistedFilesForAgent);
   const setDraftPromptForAgent = useSubagentsStore((state) => state.setDraftPromptForAgent);
+  const setDraftIncludeCurrentFilesForAgent = useSubagentsStore((state) => state.setDraftIncludeCurrentFilesForAgent);
   const cancelDraft = useSubagentsStore((state) => state.cancelDraft);
   const createAgent = useSubagentsStore((state) => state.createAgent);
   const updateAgent = useSubagentsStore((state) => state.updateAgent);
@@ -165,6 +167,7 @@ export function SubAgents() {
   const hasRequestedAgentsForCurrentGatewayRunRef = useRef(false);
   const draftPrompt = managedAgentId ? (draftPromptByAgent[managedAgentId] ?? '') : '';
   const generatingDraft = managedAgentId ? Boolean(draftGeneratingByAgent[managedAgentId]) : false;
+  const includeCurrentFiles = managedAgentId ? Boolean(draftIncludeCurrentFilesByAgent[managedAgentId]) : false;
   const persistedContentByFile = managedAgentId ? (persistedFilesByAgent[managedAgentId] ?? {}) : {};
   const hasAnyDraft = Object.values(draftByFile).some((draft) => Boolean(draft));
   const hasApprovedDraft = Object.values(draftByFile).some((draft) => Boolean(draft) && !draft?.needsReview);
@@ -756,6 +759,7 @@ export function SubAgents() {
         draftPrompt={draftPrompt}
         generatingDraft={generatingDraft}
         applyingDraft={applyingDraft}
+        includeCurrentFiles={includeCurrentFiles}
         hasAnyDraft={hasAnyDraft}
         hasApprovedDraft={hasApprovedDraft}
         applySucceeded={applySucceeded}
@@ -770,12 +774,22 @@ export function SubAgents() {
           }
           setDraftPromptForAgent(managedAgentId, prompt);
         }}
+        onIncludeCurrentFilesChange={(nextIncludeCurrentFiles) => {
+          if (!managedAgentId) {
+            return;
+          }
+          setDraftIncludeCurrentFilesForAgent(managedAgentId, nextIncludeCurrentFiles);
+        }}
         onGenerateDraft={async () => {
           if (!managedAgentId || !draftPrompt.trim()) {
             return;
           }
           try {
-            await generateDraftFromPrompt(managedAgentId, draftPrompt.trim());
+            await generateDraftFromPrompt({
+              agentId: managedAgentId,
+              prompt: draftPrompt.trim(),
+              includeCurrentFiles,
+            });
           } catch {
             // Error state is already set by store.
           }

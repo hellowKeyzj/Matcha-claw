@@ -161,6 +161,7 @@ describe('subagents page', () => {
       draftGeneratingByAgent: {},
       draftApplyingByAgent: {},
       draftApplySuccessByAgent: {},
+      draftIncludeCurrentFilesByAgent: {},
       persistedFilesByAgent: {
         'agent-alpha': {
           'AGENTS.md': 'saved agents',
@@ -405,7 +406,28 @@ describe('subagents page', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Generate Draft' }));
 
     await waitFor(() => {
-      expect(generateDraftFromPrompt).toHaveBeenCalledWith('agent-alpha', 'draft policy docs');
+      expect(generateDraftFromPrompt).toHaveBeenCalledWith({
+        agentId: 'agent-alpha',
+        prompt: 'draft policy docs',
+        includeCurrentFiles: false,
+      });
+    });
+  });
+
+  it('passes current-file baseline option when draft switch is enabled', async () => {
+    renderSubagentsPage();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Manage agent-alpha' }));
+    fireEvent.change(screen.getByLabelText('Prompt'), { target: { value: 'draft policy docs' } });
+    fireEvent.click(screen.getByRole('switch', { name: /Use current files/i }));
+    fireEvent.click(screen.getByRole('button', { name: 'Generate Draft' }));
+
+    await waitFor(() => {
+      expect(generateDraftFromPrompt).toHaveBeenCalledWith({
+        agentId: 'agent-alpha',
+        prompt: 'draft policy docs',
+        includeCurrentFiles: true,
+      });
     });
   });
 

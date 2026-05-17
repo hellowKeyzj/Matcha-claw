@@ -56,6 +56,7 @@
   "manage": {
     "promptLabel": "提示词",
     "promptPlaceholder": "描述这个子Agent要为 AGENTS.md / SOUL.md / TOOLS.md / IDENTITY.md / USER.md 生成什么内容",
+    "includeCurrentFilesLabel": "带当前文件",
     "generateDraft": "生成草稿",
     "generatingDraft": "生成中...",
     "applyingDraft": "应用中...",
