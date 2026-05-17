@@ -9,6 +9,7 @@ import type {
   SessionTimelineAssistantTurnEntry,
   SessionTimelineEntry,
 } from '../../shared/session-adapter-types';
+import { isRunActive, isWaitingTool } from '../../shared/session-adapter-types';
 import {
   buildAssistantTurnEntryKey,
 } from './assistant-turn-entry';
@@ -100,7 +101,7 @@ function resolveStatus(
     return 'aborted';
   }
   if (entry.status === 'streaming' || entry.isStreaming) {
-    return runtime.pendingFinal ? 'waiting_tool' : 'streaming';
+    return isWaitingTool(runtime) ? 'waiting_tool' : 'streaming';
   }
   return 'final';
 }
@@ -109,14 +110,14 @@ function resolvePendingState(
   entry: SessionTimelineAssistantTurnEntry,
   runtime: SessionRuntimeStateSnapshot,
 ): SessionAssistantTurnItem['pendingState'] {
-  if (!runtime.sending) {
+  if (!isRunActive(runtime)) {
     return null;
   }
   const pendingTurnKey = normalizeString(runtime.pendingTurnKey);
   if (pendingTurnKey && entry.turnKey !== pendingTurnKey) {
     return null;
   }
-  if (runtime.pendingFinal || deriveTools(entry.segments).length > 0) {
+  if (isWaitingTool(runtime) || deriveTools(entry.segments).length > 0) {
     return 'activity';
   }
   if (entry.status === 'streaming' || entry.isStreaming) {
@@ -163,10 +164,10 @@ function buildPendingTurnItem(input: {
 }): SessionAssistantTurnItem | null {
   const pendingTurnKey = normalizeString(input.runtime.pendingTurnKey);
   const pendingLaneKey = normalizeString(input.runtime.pendingTurnLaneKey) || 'main';
-  if (!input.runtime.sending || !pendingTurnKey) {
+  if (!isRunActive(input.runtime) || !pendingTurnKey) {
     return null;
   }
-  const hasAuthoritativeRunBinding = !pendingTurnKey.startsWith('main:prompt:');
+  const waitingTool = isWaitingTool(input.runtime);
   return {
     key: buildAssistantTurnEntryKey(input.sessionKey, pendingLaneKey, pendingTurnKey),
     kind: 'assistant-turn',
@@ -174,10 +175,10 @@ function buildPendingTurnItem(input: {
     role: 'assistant',
     laneKey: pendingLaneKey,
     turnKey: pendingTurnKey,
-    identitySource: hasAuthoritativeRunBinding ? 'run' : 'heuristic',
-    identityMode: hasAuthoritativeRunBinding ? 'run' : 'heuristic',
-    identityConfidence: hasAuthoritativeRunBinding ? 'strong' : 'fallback',
-    status: input.runtime.pendingFinal ? 'waiting_tool' : 'streaming',
+    identitySource: 'run',
+    identityMode: 'run',
+    identityConfidence: 'strong',
+    status: waitingTool ? 'waiting_tool' : 'streaming',
     segments: [],
     thinking: null,
     tools: [],
@@ -185,7 +186,7 @@ function buildPendingTurnItem(input: {
     text: '',
     images: [],
     attachedFiles: [],
-    pendingState: input.runtime.pendingFinal ? 'activity' : 'typing',
+    pendingState: waitingTool ? 'activity' : 'typing',
     ...(typeof input.runtime.updatedAt === 'number' ? { updatedAt: input.runtime.updatedAt } : {}),
   };
 }

@@ -629,13 +629,11 @@ function buildSnapshotForSession(sessionKey: string): SessionStateSnapshot {
     items,
     replayComplete: true,
     runtime: {
-      sending: Boolean(activeRun),
       activeRunId: activeRun?.runId ?? null,
       runPhase,
       activeTurnItemKey: streamingItem?.key ?? null,
       pendingTurnKey: null,
       pendingTurnLaneKey: null,
-      pendingFinal: hasPendingApproval,
       lastUserMessageAt: activeRun ? Date.now() : null,
       lastError: null,
       lastIssue: null,
@@ -866,7 +864,6 @@ export function handleE2EHostApiFetch(request: HostApiFetchRequest): HostApiProx
       success: true,
       sessionKey,
       runId: result.runId,
-      promptId: typeof payload.promptId === 'string' ? payload.promptId : result.runId,
       item: null,
       snapshot: buildSnapshotForSession(sessionKey),
     });

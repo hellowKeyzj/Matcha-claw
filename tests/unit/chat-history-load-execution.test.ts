@@ -48,13 +48,11 @@ function createSnapshot(sessionKey: string, messages: RawMessage[]) {
     items,
     replayComplete: true,
     runtime: {
-      sending: false,
       activeRunId: null,
       runPhase: 'done' as const,
       activeTurnItemKey: null,
       pendingTurnKey: null,
       pendingTurnLaneKey: null,
-      pendingFinal: false,
       lastUserMessageAt: null,
       updatedAt: 1,
     },

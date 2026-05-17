@@ -23,6 +23,7 @@ import {
   isRecoverableChatSendTimeout,
 } from './store-state-helpers';
 import type { ChatSendAttachment, ChatStoreState } from './types';
+import { isRunActive, isWaitingTool } from './types';
 
 export type ChatStoreSetFn = (
   partial: Partial<ChatStoreState> | ((state: ChatStoreState) => Partial<ChatStoreState> | ChatStoreState),
@@ -92,7 +93,7 @@ export function startStoreSendWatchers(params: StartStoreSendWatchersParams): vo
       return;
     }
     const runtime = getSessionRuntime(state, sessionKey);
-    if (!runtime.sending) {
+    if (!isRunActive(runtime)) {
       clearHistoryPoll();
       return;
     }
@@ -121,11 +122,11 @@ export function startStoreSendWatchers(params: StartStoreSendWatchersParams): vo
       return;
     }
     const runtime = getSessionRuntime(state, sessionKey);
-    if (!runtime.sending) {
+    if (!isRunActive(runtime)) {
       clearSendSafetyTimer();
       return;
     }
-    if (hasActiveStreamingRun(runtime) || runtime.pendingFinal) {
+    if (hasActiveStreamingRun(runtime) || isWaitingTool(runtime)) {
       setSendSafetyTimer(setTimeout(checkStuck, SAFETY_RETRY_INTERVAL_MS));
       return;
     }
@@ -153,7 +154,7 @@ export function resumeActiveStoreSend(
   params: Pick<StartStoreSendWatchersParams, 'set' | 'get' | 'sessionKey'>,
 ): void {
   const state = params.get();
-  if (!getSessionRuntime(state, params.sessionKey).sending) {
+  if (!isRunActive(getSessionRuntime(state, params.sessionKey))) {
     return;
   }
   startStoreSendWatchers({
@@ -231,7 +232,7 @@ export async function executeStoreSend(params: ExecuteStoreSendParams): Promise<
   const stateBeforeSend = get();
   const { currentSessionKey } = stateBeforeSend;
   const runtimeBeforeSend = getSessionRuntime(stateBeforeSend, currentSessionKey);
-  if (runtimeBeforeSend.sending || runtimeBeforeSend.pendingFinal) {
+  if (isRunActive(runtimeBeforeSend)) {
     return;
   }
   const nowMs = Date.now();

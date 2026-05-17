@@ -19,7 +19,6 @@ function buildCurrentSession(messages: RawMessage[]) {
   return {
     runtime: {
       ...base.runtime,
-      sending: true,
       activeRunId: 'run-1',
       runPhase: 'submitted' as const,
     },

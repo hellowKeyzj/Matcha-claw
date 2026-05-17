@@ -82,13 +82,11 @@ function setupSessionLoad(messages: RawMessage[]): void {
       items,
       replayComplete: true,
       runtime: {
-        sending: false,
         activeRunId: null,
         runPhase: 'done',
         activeTurnItemKey: null,
         pendingTurnKey: null,
         pendingTurnLaneKey: null,
-        pendingFinal: false,
         lastUserMessageAt: null,
         updatedAt: 1,
       },
@@ -270,7 +268,6 @@ describe('chat session labeling', () => {
             status: 'sending',
           }]),
           runtime: {
-            sending: true,
             lastUserMessageAt: sentAtMs,
           },
         }),
@@ -507,13 +504,11 @@ describe('chat session labeling', () => {
           rows: unknown[];
           replayComplete: boolean;
           runtime: {
-            sending: boolean;
             activeRunId: string | null;
             runPhase: 'done';
             activeTurnItemKey: null;
             pendingTurnKey: null;
             pendingTurnLaneKey: null;
-            pendingFinal: boolean;
             lastUserMessageAt: null;
             updatedAt: number;
           };
@@ -554,13 +549,11 @@ describe('chat session labeling', () => {
           items: [],
           replayComplete: true,
           runtime: {
-            sending: false,
             activeRunId: null,
             runPhase: 'done',
             activeTurnItemKey: null,
             pendingTurnKey: null,
             pendingTurnLaneKey: null,
-            pendingFinal: false,
             lastUserMessageAt: null,
             updatedAt: 1,
           },

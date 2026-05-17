@@ -49,13 +49,11 @@ function createSnapshot(
     items,
     replayComplete: true,
     runtime: {
-      sending: false,
       activeRunId: null,
       runPhase: 'done' as const,
       activeTurnItemKey: null,
       pendingTurnKey: null,
       pendingTurnLaneKey: null,
-      pendingFinal: false,
       lastUserMessageAt: null,
       updatedAt: 1,
       ...runtimeOverrides,
@@ -251,7 +249,6 @@ describe('chat history apply pipeline', () => {
           ...createEmptySessionRecord(),
           runtime: {
             ...createEmptySessionRecord().runtime,
-            sending: true,
             activeRunId: 'run-1',
             runPhase: 'streaming',
           },
@@ -278,13 +275,11 @@ describe('chat history apply pipeline', () => {
       snapshot: createSnapshot(sessionKey, [
         { role: 'assistant', content: 'done', timestamp: 2, id: 'assistant-1' },
       ], {
-        sending: false,
         activeRunId: null,
         runPhase: 'done',
       }),
     });
 
-    expect(harness.get().loadedSessions[sessionKey]?.runtime.sending).toBe(false);
     expect(harness.get().loadedSessions[sessionKey]?.runtime.activeRunId).toBeNull();
     expect(harness.get().loadedSessions[sessionKey]?.runtime.runPhase).toBe('done');
   });
@@ -320,7 +315,6 @@ describe('chat history apply pipeline', () => {
           }],
           runtime: {
             ...createEmptySessionRecord().runtime,
-            sending: true,
             activeRunId: 'run-1',
             runPhase: 'submitted',
             pendingTurnKey: 'main:run-1',
@@ -345,7 +339,6 @@ describe('chat history apply pipeline', () => {
     await applyLoadedMessages({
       ...createHistoryWindow(sessionKey, []),
       snapshot: createSnapshot(sessionKey, [], {
-        sending: true,
         activeRunId: 'run-1',
         runPhase: 'submitted',
         pendingTurnKey: 'main:run-1',
@@ -362,7 +355,6 @@ describe('chat history apply pipeline', () => {
       }),
     ]);
     expect(harness.get().loadedSessions[sessionKey]?.runtime).toMatchObject({
-      sending: true,
       activeRunId: 'run-1',
       pendingTurnKey: 'main:run-1',
       runPhase: 'submitted',

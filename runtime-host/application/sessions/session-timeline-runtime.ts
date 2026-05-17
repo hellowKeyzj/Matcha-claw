@@ -1,8 +1,10 @@
 import type {
+  SessionRunPhase,
   SessionRuntimeStateSnapshot,
   SessionTimelineEntry,
   TaskSnapshotEvent,
 } from '../../shared/session-adapter-types';
+import { isRunActive } from '../../shared/session-adapter-types';
 import type { GatewayTransportIssue } from '../../shared/gateway-error';
 import {
   buildTimelineEntriesFromTranscriptMessage,
@@ -160,7 +162,7 @@ export class SessionTimelineRuntime {
     // 不再需要在 final 时从 transcript 文件回填 tool output。
     const closureSignal = collectPendingRunClosureSignal(state.renderItems, state.runtime);
     if (
-      state.runtime.sending
+      isRunActive(state.runtime)
       && !closureSignal.hasActiveAssistantStream
       && !closureSignal.hasBlockingToolActivity
       && closureSignal.hasFinalAssistantTurn
@@ -290,24 +292,21 @@ export class SessionTimelineRuntime {
     }
     state.timelineEntries = nextEntries;
 
-    // Update pendingFinal: tool running → true, tool completed/error → false
-    if (update.phase === 'start' && state.runtime.sending) {
+    // tool start：进入 waiting_tool；result 且无任何 running tool：回到 streaming。
+    if (update.phase === 'start' && isRunActive(state.runtime)) {
       state.runtime = {
         ...state.runtime,
-        pendingFinal: true,
         runPhase: 'waiting_tool',
       };
-    } else if (update.phase === 'result') {
-      // Check if any tools are still running
+    } else if (update.phase === 'result' && state.runtime.runPhase === 'waiting_tool') {
       const hasRunningTools = nextEntries.some((entry) => (
         entry.kind === 'assistant-turn'
         && entry.segments.some((s) => s.kind === 'tool' && s.tool.status === 'running')
       ));
-      if (!hasRunningTools && state.runtime.pendingFinal) {
+      if (!hasRunningTools) {
         state.runtime = {
           ...state.runtime,
-          pendingFinal: false,
-          runPhase: state.runtime.sending ? 'streaming' : state.runtime.runPhase,
+          runPhase: 'streaming',
         };
       }
     }
@@ -338,18 +337,16 @@ export class SessionTimelineRuntime {
   }
 
   buildTerminalRuntimePatch(
-    runPhase: SessionRuntimeStateSnapshot['runPhase'],
+    runPhase: SessionRunPhase,
     lastError: string | null,
     lastIssue: GatewayTransportIssue | null,
   ): Partial<SessionRuntimeStateSnapshot> {
     return {
-      sending: false,
       activeRunId: null,
       runPhase,
       activeTurnItemKey: null,
       pendingTurnKey: null,
       pendingTurnLaneKey: null,
-      pendingFinal: false,
       lastError,
       lastIssue,
     };
@@ -388,7 +385,6 @@ export class SessionTimelineRuntime {
       case 'started':
         return this.commitSessionTransition(sessionKey, {
           runtimePatch: {
-            sending: true,
             activeRunId: input.runId,
             runPhase: 'submitted',
             pendingTurnKey: input.runId ? `main:${input.runId}` : this.getSessionState(sessionKey).runtime.pendingTurnKey,
@@ -397,7 +393,7 @@ export class SessionTimelineRuntime {
             lastIssue: null,
           },
           activeTransportEpoch: this.deps.stateStore.getLatestConnectedTransportEpoch() || 1,
-          advanceRunEpoch: !this.getSessionState(sessionKey).runtime.sending,
+          advanceRunEpoch: !isRunActive(this.getSessionState(sessionKey).runtime),
         }).runtime;
       case 'final':
         await this.reconcileSessionTranscript(sessionKey);
@@ -445,14 +441,12 @@ export class SessionTimelineRuntime {
       const anchorItemKey = resolveAssistantTurnItemKeyFromTimelineEntry(input.entry);
       return {
         runtimePatch: {
-          sending: true,
           activeRunId: input.runId,
           runPhase: 'streaming',
           activeTurnItemKey: anchorItemKey
             ?? currentState.runtime.activeTurnItemKey,
           pendingTurnKey: normalizeString(input.entry.turnKey) || currentState.runtime.pendingTurnKey,
           pendingTurnLaneKey: normalizeString(input.entry.laneKey) || currentState.runtime.pendingTurnLaneKey,
-          pendingFinal: false,
           lastError: null,
           lastIssue: null,
           lastUserMessageAt: input.entry.role === 'user' && typeof messageTimestamp === 'number'
@@ -465,7 +459,6 @@ export class SessionTimelineRuntime {
     if (input.entry.role === 'user') {
       return {
         runtimePatch: {
-          sending: Boolean(input.runId),
           activeRunId: input.runId,
           runPhase: input.runId ? 'submitted' : currentState.runtime.runPhase,
           pendingTurnKey: input.runId ? `main:${input.runId}` : currentState.runtime.pendingTurnKey,
@@ -481,7 +474,6 @@ export class SessionTimelineRuntime {
 
     return {
       runtimePatch: {
-        sending: false,
         activeRunId: null,
         runPhase: input.entry.status === 'error'
           ? 'error'
@@ -489,7 +481,6 @@ export class SessionTimelineRuntime {
         activeTurnItemKey: null,
         pendingTurnKey: null,
         pendingTurnLaneKey: null,
-        pendingFinal: false,
         lastError: input.entry.status === 'error'
           ? (input.entry.text.trim() || currentState.runtime.lastError)
           : null,
@@ -501,7 +492,7 @@ export class SessionTimelineRuntime {
 
   buildPromptUserEntry(input: {
     sessionKey: string;
-    promptId: string;
+    runId: string;
     message: string;
     media?: SessionPromptMediaPayload[];
   }): SessionTimelineEntry {
@@ -510,7 +501,7 @@ export class SessionTimelineRuntime {
     const message: SessionTranscriptMessage = {
       role: 'user',
       content: input.message || (input.media && input.media.length > 0 ? '(file attached)' : ''),
-      id: input.promptId,
+      id: input.runId,
       status: 'sending',
       timestamp,
       ...(input.media && input.media.length > 0
@@ -526,6 +517,7 @@ export class SessionTimelineRuntime {
         : {}),
     };
     return buildTimelineEntriesFromTranscriptMessage(input.sessionKey, message, {
+      runId: input.runId,
       index: state.timelineEntries.length,
       status: 'pending',
       existingRows: state.timelineEntries,

@@ -30,7 +30,6 @@ export interface SessionPromptPayload {
   message?: unknown;
   deliver?: unknown;
   runId?: unknown;
-  promptId?: unknown;
   idempotencyKey?: unknown;
   media?: unknown;
 }

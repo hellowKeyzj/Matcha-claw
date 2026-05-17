@@ -37,9 +37,7 @@ function createRunningGatewayStatus(updatedAt = 1) {
 function createSessionRecord(input?: {
   messages?: RawMessage[];
   runtime?: Partial<{
-    sending: boolean;
     activeRunId: string | null;
-    pendingFinal: boolean;
   }>;
 }) {
   const messages = input?.messages ?? [];
@@ -52,10 +50,8 @@ function createSessionRecord(input?: {
       thinkingLevel: null,
     },
     runtime: {
-      sending: input?.runtime?.sending ?? false,
       activeRunId: input?.runtime?.activeRunId ?? null,
       runPhase: 'idle' as const,
-      pendingFinal: input?.runtime?.pendingFinal ?? false,
       activeTurnItemKey: null,
       pendingTurnKey: null,
       pendingTurnLaneKey: null,
@@ -96,7 +92,6 @@ function createSessionInfoUpdate(payload: {
       items: [],
       replayComplete: true,
       runtime: {
-        sending: payload.phase === 'started',
         activeRunId: payload.phase === 'started' ? (payload.runId ?? null) : null,
         runPhase: payload.phase === 'started' ? 'submitted' : (
           payload.phase === 'final' ? 'done' : (
@@ -108,7 +103,6 @@ function createSessionInfoUpdate(payload: {
         activeTurnItemKey: null,
         pendingTurnKey: payload.phase === 'started' && payload.runId ? `main:${payload.runId}` : null,
         pendingTurnLaneKey: payload.phase === 'started' ? 'main' : null,
-        pendingFinal: false,
         lastUserMessageAt: null,
         lastError: payload.error ?? null,
         updatedAt: 1,
@@ -247,13 +241,11 @@ function createSessionMessageUpdate(payload: {
       items: [item],
       replayComplete: true,
       runtime: {
-        sending: payload.kind === 'agent_message_chunk',
         activeRunId: payload.runId ?? null,
         runPhase: payload.kind === 'agent_message_chunk' ? 'streaming' : 'done',
         activeTurnItemKey: payload.kind === 'agent_message_chunk' ? assistantItemKey : null,
         pendingTurnKey: isAssistant ? `main:${turnIdentity}` : null,
         pendingTurnLaneKey: isAssistant ? 'main' : null,
-        pendingFinal: false,
         lastUserMessageAt: null,
         updatedAt: 1,
       },
@@ -300,13 +292,11 @@ function createSessionPlanUpdate(payload: {
       items,
       replayComplete: true,
       runtime: {
-        sending: false,
         activeRunId: null,
         runPhase: 'done' as const,
         activeTurnItemKey: null,
         pendingTurnKey: null,
         pendingTurnLaneKey: null,
-        pendingFinal: false,
         lastUserMessageAt: null,
         lastError: null,
         lastIssue: null,
@@ -636,9 +626,7 @@ describe('gateway store event wiring', () => {
       loadedSessions: {
         'agent:main:main': createSessionRecord({
           runtime: {
-            sending: true,
             activeRunId: 'run-cleanup',
-            pendingFinal: true,
           },
         }),
       },
@@ -658,8 +646,6 @@ describe('gateway store event wiring', () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
 
     const state = useChatStore.getState();
-    expect(state.loadedSessions['agent:main:main']?.runtime.sending).toBe(false);
-    expect(state.loadedSessions['agent:main:main']?.runtime.pendingFinal).toBe(false);
     expect(state.loadedSessions['agent:main:main']?.runtime.activeRunId).toBeNull();
     expect(state.loadedSessions['agent:main:main']?.runtime.lastError).toBeNull();
   });
@@ -684,9 +670,7 @@ describe('gateway store event wiring', () => {
       loadedSessions: {
         'agent:main:main': createSessionRecord({
           runtime: {
-            sending: true,
             activeRunId: 'run-error-1',
-            pendingFinal: false,
           },
         }),
       },
@@ -730,7 +714,6 @@ describe('gateway store event wiring', () => {
       loadedSessions: {
         'agent:main:main': createSessionRecord({
           runtime: {
-            sending: true,
             activeRunId: 'run-delta-direct-1',
           },
         }),
@@ -826,7 +809,6 @@ describe('gateway store event wiring', () => {
       loadedSessions: {
         'agent:main:main': createSessionRecord({
           runtime: {
-            sending: true,
             activeRunId: 'run-tool-direct-1',
           },
         }),
@@ -891,7 +873,6 @@ describe('gateway store event wiring', () => {
       loadedSessions: {
         'agent:main:main': createSessionRecord({
           runtime: {
-            sending: true,
             activeRunId: 'run-todo-plan-1',
           },
         }),
@@ -1076,7 +1057,6 @@ describe('gateway store event wiring', () => {
       loadedSessions: {
         'agent:main:main': createSessionRecord({
           runtime: {
-            sending: true,
             activeRunId: 'run-non-structured',
           },
         }),
@@ -1122,7 +1102,6 @@ describe('gateway store event wiring', () => {
       loadedSessions: {
         'agent:main:main': createSessionRecord({
           runtime: {
-            sending: true,
             activeRunId: 'run-legacy-1',
           },
         }),
@@ -1187,7 +1166,6 @@ describe('gateway store event wiring', () => {
       loadedSessions: {
         'agent:main:main': createSessionRecord({
           runtime: {
-            sending: true,
             activeRunId: 'run-user-1',
           },
         }),
@@ -1252,7 +1230,6 @@ describe('gateway store event wiring', () => {
       loadedSessions: {
         'agent:main:main': createSessionRecord({
           runtime: {
-            sending: true,
             activeRunId: 'run-assistant-1',
           },
         }),

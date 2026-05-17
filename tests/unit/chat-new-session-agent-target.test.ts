@@ -43,13 +43,11 @@ function buildNewSessionSnapshot(sessionKey: string) {
     items: [],
     replayComplete: true,
     runtime: {
-      sending: false,
       activeRunId: null,
       runPhase: 'idle' as const,
       activeTurnItemKey: null,
       pendingTurnKey: null,
       pendingTurnLaneKey: null,
-      pendingFinal: false,
       lastUserMessageAt: null,
       updatedAt: 1,
     },
@@ -124,9 +122,7 @@ describe('chat store newSession agent targeting', () => {
         ...useChatStore.getState().loadedSessions,
         'agent:test:main': buildSessionRecord({
           runtime: {
-            sending: true,
             activeRunId: 'run-from-agent-test',
-            pendingFinal: true,
           },
         }),
       },
@@ -137,9 +133,8 @@ describe('chat store newSession agent targeting', () => {
     const state = useChatStore.getState();
     const runtime = state.loadedSessions['agent:another:main']?.runtime;
     expect(state.currentSessionKey).toBe('agent:another:main');
-    expect(runtime?.sending).toBe(false);
     expect(runtime?.activeRunId).toBeNull();
-    expect(runtime?.pendingFinal).toBe(false);
+    expect(runtime?.runPhase).toBe('idle');
   });
 
   it('切回发送中的会话时，应立即恢复本地消息与等待态，避免出现空白页错觉', () => {
@@ -162,9 +157,7 @@ describe('chat store newSession agent targeting', () => {
             isAtLatest: true,
           }),
           runtime: {
-            sending: true,
             activeRunId: 'run-agent-test',
-            pendingFinal: true,
           },
         }),
       },
@@ -178,8 +171,6 @@ describe('chat store newSession agent targeting', () => {
     expect(state.currentSessionKey).toBe('agent:test:main');
     expect(getSessionItems(state, 'agent:test:main')).toHaveLength(1);
     expect(record?.items[0]?.key).toContain('msg-local-1');
-    expect(record?.runtime.sending).toBe(true);
-    expect(record?.runtime.pendingFinal).toBe(true);
   });
 
   it('切换会话时，不应误删“messages 为空但已有历史痕迹”的会话', () => {
@@ -257,9 +248,7 @@ describe('chat store newSession agent targeting', () => {
         ...useChatStore.getState().loadedSessions,
         'agent:test:main': buildSessionRecord({
           runtime: {
-            sending: true,
             activeRunId: 'run-from-agent-test',
-            pendingFinal: true,
           },
         }),
       },
@@ -270,9 +259,8 @@ describe('chat store newSession agent targeting', () => {
     const state = useChatStore.getState();
     const runtime = state.loadedSessions[state.currentSessionKey]?.runtime;
     expect(state.currentSessionKey).toBe('agent:test:session-1722222222222');
-    expect(runtime?.sending).toBe(false);
     expect(runtime?.activeRunId).toBeNull();
-    expect(runtime?.pendingFinal).toBe(false);
+    expect(runtime?.runPhase).toBe('idle');
     nowSpy.mockRestore();
   });
 

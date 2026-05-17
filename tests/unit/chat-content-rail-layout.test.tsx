@@ -104,13 +104,11 @@ function buildUserAndAssistantItems(): ChatRenderItem[] {
 function buildChatListProps(items: ChatRenderItem[]) {
   return {
     runtime: {
-      sending: false,
       activeRunId: null,
       runPhase: 'idle',
       activeTurnItemKey: null,
       pendingTurnKey: null,
       pendingTurnLaneKey: null,
-      pendingFinal: false,
       lastUserMessageAt: null,
     },
     items,

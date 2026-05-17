@@ -34,6 +34,7 @@ import {
   type ApplicationResponseOf,
 } from '../common/application-response';
 import type { GatewayRpcPort } from '../gateway/gateway-runtime-port';
+import { isRunActive } from '../../shared/session-adapter-types';
 import type { RuntimeClockPort, RuntimeIdGeneratorPort } from '../common/runtime-ports';
 import type {
   SessionHydrationJobPort,
@@ -264,7 +265,7 @@ export class SessionCommandService {
     }
     return await this.deps.operationCoordinator.run(sessionKey, 'patch-model', async () => {
       const current = this.deps.stateStore.getSessionState(sessionKey).runtime;
-      if (current.sending || current.pendingFinal || current.activeRunId) {
+      if (isRunActive(current) || current.activeRunId) {
         const state = await this.deps.timelineRuntime.activateSession(sessionKey, {
           resetWindowToLatest: false,
         });
@@ -391,13 +392,11 @@ export class SessionCommandService {
       this.deps.stateStore.blockRun(sessionKey, currentRunId);
       const committed = this.deps.timelineRuntime.commitSessionTransition(sessionKey, {
         runtimePatch: {
-          sending: false,
           activeRunId: null,
           runPhase: 'aborted',
           activeTurnItemKey: null,
           pendingTurnKey: null,
           pendingTurnLaneKey: null,
-          pendingFinal: false,
           lastError: null,
           lastIssue: null,
         },

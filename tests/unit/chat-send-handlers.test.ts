@@ -34,13 +34,11 @@ function createSessionRecord(input?: {
       thinkingLevel: null,
     },
     runtime: {
-      sending: false,
       activeRunId: null,
       runPhase: 'idle' as const,
       activeTurnItemKey: null,
       pendingTurnKey: null,
       pendingTurnLaneKey: null,
-      pendingFinal: false,
       lastUserMessageAt: null,
       lastError: null,
       lastIssue: null,
@@ -92,7 +90,6 @@ describe('chat send handlers', () => {
     expect(record.meta.label).toBe('hello world');
     expect(record.meta.lastActivityAt).toBe(nowMs);
     expect(record.runtime.lastUserMessageAt).toBeNull();
-    expect(record.runtime.sending).toBe(false);
     expect(record.runtime.runPhase).toBe('idle');
     expect(record.items).toEqual([]);
   });
@@ -128,13 +125,11 @@ describe('chat send handlers', () => {
         }],
         replayComplete: true,
         runtime: {
-          sending: true,
           activeRunId: null,
           runPhase: 'submitted',
           activeTurnItemKey: null,
           pendingTurnKey: 'main:run-1',
           pendingTurnLaneKey: 'main',
-          pendingFinal: false,
           lastUserMessageAt: 1,
           updatedAt: 1,
         },
@@ -209,13 +204,11 @@ describe('chat send handlers', () => {
             }],
           }),
           runtime: {
-            sending: true,
             activeRunId: 'run-1',
             runPhase: 'submitted' as const,
             activeTurnItemKey: null,
             pendingTurnKey: 'main:run-1',
             pendingTurnLaneKey: 'main',
-            pendingFinal: false,
             lastUserMessageAt: 1,
           },
         },
@@ -285,10 +278,8 @@ describe('chat send handlers', () => {
     });
 
     const runtime = state.loadedSessions[sessionKey]!.runtime;
-    expect(runtime.sending).toBe(false);
     expect(runtime.runPhase).toBe('idle');
     expect(runtime.lastError).toBeNull();
-    expect(runtime.pendingFinal).toBe(false);
   });
 
   it('ignores a late send result after the user already aborted the session', async () => {
@@ -338,10 +329,8 @@ describe('chat send handlers', () => {
           ...current.loadedSessions[sessionKey]!,
           runtime: {
             ...current.loadedSessions[sessionKey]!.runtime,
-            sending: false,
             activeRunId: null,
             runPhase: 'aborted',
-            pendingFinal: false,
           },
         },
       },
@@ -376,13 +365,11 @@ describe('chat send handlers', () => {
         }],
         replayComplete: true,
         runtime: {
-          sending: true,
           activeRunId: 'run-late-1',
           runPhase: 'submitted' as const,
           activeTurnItemKey: null,
           pendingTurnKey: 'main:run-late-1',
           pendingTurnLaneKey: 'main',
-          pendingFinal: false,
           lastUserMessageAt: 1,
           updatedAt: 1,
         },
@@ -401,7 +388,6 @@ describe('chat send handlers', () => {
 
     const record = state.loadedSessions[sessionKey]!;
     expect(record.runtime.runPhase).toBe('aborted');
-    expect(record.runtime.sending).toBe(false);
     expect(record.runtime.activeRunId).toBeNull();
     expect(getSessionItems(state, sessionKey)).toEqual([]);
   });

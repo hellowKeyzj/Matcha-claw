@@ -130,8 +130,6 @@ function setupChatSessions() {
           lastActivityAt: Date.now(),
         },
         runtime: {
-          sending: true,
-          pendingFinal: true,
           activeRunId: 'run-current',
         },
       }),
@@ -189,7 +187,6 @@ describe('chat 会话切换 UX', () => {
     const record = useChatStore.getState().loadedSessions[currentSessionKey];
     expect(record?.items).toHaveLength(12);
     expect(record?.runtime.activeRunId).toBe('run-current');
-    expect(record?.runtime.sending).toBe(true);
   });
 
   it('切到目标会话时应直接显示目标 viewport messages', async () => {

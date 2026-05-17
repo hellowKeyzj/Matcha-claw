@@ -25,7 +25,6 @@ export async function sendChatTransport(
   const response = await hostSessionPrompt({
     sessionKey: params.sessionKey,
     message: params.message || (attachments.length > 0 ? CHAT_SEND_WITH_MEDIA_FALLBACK_PROMPT : ''),
-    promptId: params.idempotencyKey,
     idempotencyKey: params.idempotencyKey,
     deliver: false,
     ...(attachments.length > 0

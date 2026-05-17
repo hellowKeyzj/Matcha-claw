@@ -14,13 +14,11 @@ import type {
 
 export function createEmptySessionRuntimeState(): SessionRuntimeStateSnapshot {
   return {
-    sending: false,
     activeRunId: null,
     runPhase: 'idle',
     activeTurnItemKey: null,
     pendingTurnKey: null,
     pendingTurnLaneKey: null,
-    pendingFinal: false,
     lastUserMessageAt: null,
     lastError: null,
     lastIssue: null,

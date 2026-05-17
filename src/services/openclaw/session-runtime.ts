@@ -92,7 +92,6 @@ export async function sendChatMessage(
     sessionKey: input.sessionKey,
     message: input.message,
     deliver: input.deliver,
-    promptId: input.idempotencyKey,
     idempotencyKey: input.idempotencyKey,
   });
 }

@@ -115,7 +115,6 @@ function setupCommonStores() {
         }),
         meta: { historyStatus: 'ready', lastActivityAt: now },
         runtime: {
-          sending: true,
           activeRunId: 'run-1',
           runPhase: 'streaming',
           activeTurnItemKey: 'assistant-1',

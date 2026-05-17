@@ -15,7 +15,6 @@ function createSessionRecord(input?: {
   historyStatus?: 'idle' | 'loading' | 'ready' | 'error';
   lastActivityAt?: number | null;
   items?: ReturnType<typeof buildRenderItemsFromMessages>;
-  sending?: boolean;
 }) {
   const sessionKey = input?.sessionKey ?? 'agent:main:main';
   const items = input?.items ?? buildRenderItemsFromMessages(sessionKey, [
@@ -32,13 +31,11 @@ function createSessionRecord(input?: {
       thinkingLevel: null,
     },
     runtime: {
-      sending: input?.sending ?? false,
       activeRunId: null,
       runPhase: 'idle' as const,
       activeTurnItemKey: null,
       pendingTurnKey: null,
       pendingTurnLaneKey: null,
-      pendingFinal: false,
       lastUserMessageAt: null,
     },
     items,
@@ -103,7 +100,6 @@ describe('chat selectors layering', () => {
     const view = selectViewLayerState(state);
 
     expect(snapshot.sessions).toHaveLength(1);
-    expect(runtime.sending).toBe(true);
     expect(view.error).toBe('boom');
     expect(view.foregroundHistorySessionKey).toBe('agent:main:main');
     expect(view.sessionsLoading).toBe(false);

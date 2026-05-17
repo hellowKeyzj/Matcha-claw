@@ -33,13 +33,11 @@ function buildHistoryWindow(output: string) {
       }]),
       replayComplete: true,
       runtime: {
-        sending: false,
         activeRunId: null,
         runPhase: 'done' as const,
         activeTurnItemKey: null,
         pendingTurnKey: null,
         pendingTurnLaneKey: null,
-        pendingFinal: false,
         lastUserMessageAt: null,
         updatedAt: 1,
       },
@@ -84,7 +82,6 @@ describe('subagents prompt pipeline', () => {
       success: true,
       sessionKey: 'agent:writer:subagent-draft',
       runId: null,
-      promptId: 'prompt-1',
     });
     hostSessionWindowFetchMock.mockResolvedValueOnce(buildHistoryWindow(buildDraftOutput([
       {
@@ -108,7 +105,6 @@ describe('subagents prompt pipeline', () => {
       sessionKey: expect.stringContaining('subagent-draft'),
       message: expect.stringContaining('AGENTS.md'),
       idempotencyKey: expect.any(String),
-      promptId: expect.any(String),
       deliver: false,
     }));
     const sentMessage = String((hostSessionPromptMock.mock.calls[0]?.[0] as { message?: unknown } | undefined)?.message ?? '');
@@ -129,13 +125,11 @@ describe('subagents prompt pipeline', () => {
         success: true,
         sessionKey: 'agent:writer:subagent-draft',
         runId: null,
-        promptId: 'prompt-1',
       })
       .mockResolvedValueOnce({
         success: true,
         sessionKey: 'agent:writer:subagent-draft',
         runId: null,
-        promptId: 'prompt-2',
       });
     hostSessionWindowFetchMock
       .mockResolvedValueOnce(buildHistoryWindow('not-json'))
@@ -153,7 +147,6 @@ describe('subagents prompt pipeline', () => {
       success: true,
       sessionKey: 'agent:writer:subagent-draft',
       runId: null,
-      promptId: 'prompt-1',
     });
     hostSessionWindowFetchMock.mockResolvedValueOnce(buildHistoryWindow([
       '以下是草稿：',
@@ -179,7 +172,6 @@ describe('subagents prompt pipeline', () => {
       success: true,
       sessionKey: 'agent:writer:subagent-draft',
       runId: null,
-      promptId: 'prompt-1',
     });
     hostSessionWindowFetchMock.mockResolvedValueOnce(buildHistoryWindow(buildDraftOutput([
       {
@@ -200,7 +192,6 @@ describe('subagents prompt pipeline', () => {
       success: true,
       sessionKey: 'agent:writer:subagent-draft',
       runId: 'run-123',
-      promptId: 'prompt-1',
     });
     hostSessionWindowFetchMock
       .mockResolvedValueOnce({
@@ -209,13 +200,11 @@ describe('subagents prompt pipeline', () => {
           items: [],
           replayComplete: true,
           runtime: {
-            sending: false,
             activeRunId: null,
             runPhase: 'done' as const,
             activeTurnItemKey: null,
             pendingTurnKey: null,
             pendingTurnLaneKey: null,
-            pendingFinal: false,
             lastUserMessageAt: null,
             updatedAt: 1,
           },
@@ -294,7 +283,6 @@ describe('subagents prompt pipeline', () => {
       success: true,
       sessionKey: 'agent:writer:subagent-draft',
       runId: null,
-      promptId: 'prompt-1',
     });
     await firstRun;
   });
@@ -305,13 +293,11 @@ describe('subagents prompt pipeline', () => {
         success: true,
         sessionKey: 'agent:writer:subagent-draft',
         runId: null,
-        promptId: 'prompt-1',
       })
       .mockResolvedValueOnce({
         success: true,
         sessionKey: 'agent:writer:subagent-draft',
         runId: null,
-        promptId: 'prompt-2',
       });
     hostSessionWindowFetchMock
       .mockResolvedValueOnce(buildHistoryWindow(buildDraftOutput([
@@ -355,7 +341,6 @@ describe('subagents prompt pipeline', () => {
       success: true,
       sessionKey: 'agent:writer:subagent-draft',
       runId: null,
-      promptId: 'prompt-1',
     });
     hostSessionWindowFetchMock.mockResolvedValueOnce(buildHistoryWindow(buildDraftOutput([
       {
@@ -390,7 +375,6 @@ describe('subagents prompt pipeline', () => {
       success: true,
       sessionKey: 'agent:writer:subagent-draft',
       runId: null,
-      promptId: 'prompt-1',
     });
     hostSessionWindowFetchMock.mockResolvedValueOnce(buildHistoryWindow(buildDraftOutput([
       {
@@ -436,7 +420,6 @@ describe('subagents prompt pipeline', () => {
         success: true,
         sessionKey: 'agent:writer:subagent-draft',
         runId: null,
-        promptId: 'prompt-1',
       };
     });
     hostSessionWindowFetchMock.mockResolvedValueOnce(buildHistoryWindow(buildDraftOutput([

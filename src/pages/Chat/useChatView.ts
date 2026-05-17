@@ -3,7 +3,7 @@ import type { ChatSessionHistoryStatus } from '@/stores/chat';
 interface UseChatViewInput {
   currentSessionStatus: ChatSessionHistoryStatus;
   itemCount: number;
-  sending: boolean;
+  runActive: boolean;
 }
 
 export interface UseChatViewResult {
@@ -16,15 +16,15 @@ export function useChatView(input: UseChatViewInput): UseChatViewResult {
   const {
     currentSessionStatus,
     itemCount,
-    sending,
+    runActive,
   } = input;
 
   const hasRenderableItems = itemCount > 0;
-  const showBlockingLoading = !sending && !hasRenderableItems && (
+  const showBlockingLoading = !runActive && !hasRenderableItems && (
     currentSessionStatus === 'idle' || currentSessionStatus === 'loading'
   );
-  const showBlockingError = !sending && !hasRenderableItems && currentSessionStatus === 'error';
-  const isEmptyState = !showBlockingLoading && !showBlockingError && !sending && itemCount === 0 && currentSessionStatus === 'ready';
+  const showBlockingError = !runActive && !hasRenderableItems && currentSessionStatus === 'error';
+  const isEmptyState = !showBlockingLoading && !showBlockingError && !runActive && itemCount === 0 && currentSessionStatus === 'ready';
 
   return {
     showBlockingLoading,

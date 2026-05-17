@@ -7,6 +7,7 @@ import { useLocation, useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { useShallow } from 'zustand/react/shallow';
 import { useChatStore, type ApprovalItem, type ChatStoreState } from '@/stores/chat';
+import { isRunActive } from '@/stores/chat/types';
 import { useGatewayStore } from '@/stores/gateway';
 import { useSkillsStore } from '@/stores/skills';
 import { useSubagentsStore } from '@/stores/subagents';
@@ -380,7 +381,7 @@ export function Chat({ isActive = true }: ChatProps) {
   const liveView = useChatView({
     currentSessionStatus: currentSession.meta.historyStatus,
     itemCount: viewportItems.length,
-    sending: currentSession.runtime.sending,
+    runActive: isRunActive(currentSession.runtime),
   });
   const allowedSkillIds = useMemo(() => {
     const matchedAgent = agents.find((agent) => agent.id === currentAgentId);
@@ -590,9 +591,7 @@ export function Chat({ isActive = true }: ChatProps) {
     const fallbackGatewayRuntimeError = (
       localizedGatewayIssue
       && (
-        currentSession.runtime.sending
-        || currentSession.runtime.pendingFinal
-        || currentSession.runtime.runPhase === 'finalizing'
+        isRunActive(currentSession.runtime)
         || currentSession.runtime.runPhase === 'error'
       )
         ? localizedGatewayIssue
@@ -615,8 +614,7 @@ export function Chat({ isActive = true }: ChatProps) {
     if (!currentModelId) {
       return null;
     }
-    const activeRun = currentSession.runtime.sending
-      || currentSession.runtime.pendingFinal
+    const activeRun = isRunActive(currentSession.runtime)
       || currentSession.runtime.activeRunId != null;
     const labels = new Map<string, string>();
     for (const model of availableModels) {
@@ -640,7 +638,7 @@ export function Chat({ isActive = true }: ChatProps) {
       switching: false,
       disabled: activeRun,
     };
-  }, [availableModels, currentSession.runtime.activeRunId, currentSession.runtime.pendingFinal, currentSession.runtime.sending, effectiveCurrentModelId, modelsLoading]);
+  }, [availableModels, currentSession.runtime, effectiveCurrentModelId, modelsLoading]);
   const handleSendMessage = useCallback(async (
     text: string,
     attachments?: Parameters<typeof sendMessage>[1],
@@ -664,8 +662,7 @@ export function Chat({ isActive = true }: ChatProps) {
       return;
     }
     if (
-      currentSession.runtime.sending
-      || currentSession.runtime.pendingFinal
+      isRunActive(currentSession.runtime)
       || currentSession.runtime.activeRunId != null
     ) {
       return;
@@ -700,7 +697,7 @@ export function Chat({ isActive = true }: ChatProps) {
       const message = error instanceof Error ? error.message : String(error);
       toast.error(t('input.modelSwitchFailed', { error: message }));
     }
-  }, [currentSession.meta.model, currentSession.runtime.activeRunId, currentSession.runtime.pendingFinal, currentSession.runtime.sending, currentSessionKey, effectiveCurrentModelId, loadSessions, t]);
+  }, [currentSession.meta.model, currentSession.runtime, currentSessionKey, effectiveCurrentModelId, loadSessions, t]);
   const handlePreviewSkill = useCallback(async (skill: {
     id: string;
     name: string;
@@ -772,7 +769,7 @@ export function Chat({ isActive = true }: ChatProps) {
         },
       } : null}
       disabled={false}
-      sending={currentSession.runtime.sending}
+      sending={isRunActive(currentSession.runtime)}
       approvalWaiting={approvalStatus === 'awaiting_approval'}
       allowedSkillIds={allowedSkillIds}
     />

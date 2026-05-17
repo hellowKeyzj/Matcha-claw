@@ -31,6 +31,7 @@ import { useTaskSnapshotStore } from './task-snapshot-store';
 import { isHistoryLoadAbortError, throwIfHistoryLoadAborted } from './history-abort';
 import type { StoreHistoryCache } from './history-cache';
 import type { ChatHistoryLoadRequest, ChatStoreState } from './types';
+import { isRunActive } from './types';
 import type {
   SessionRenderItem,
   SessionWindowResult,
@@ -238,7 +239,7 @@ function shouldPreserveActiveForegroundItems(input: {
   }
   const currentRuntime = getSessionRuntime(state, requestedSessionKey);
   const snapshotRuntime = snapshot.runtime;
-  if (!currentRuntime.sending || !snapshotRuntime.sending) {
+  if (!isRunActive(currentRuntime) || !isRunActive(snapshotRuntime)) {
     return false;
   }
   if (!currentRuntime.activeRunId || currentRuntime.activeRunId !== snapshotRuntime.activeRunId) {

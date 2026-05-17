@@ -217,7 +217,6 @@ describe('chat 顶层订阅收口', () => {
             },
           ],
           runtime: {
-            sending: true,
             updatedAt: null,
           },
           window: createViewportWindowState({
@@ -285,7 +284,6 @@ describe('chat 顶层订阅收口', () => {
             ],
             runtime: {
               ...state.loadedSessions['agent:main:main']!.runtime,
-              sending: true,
             },
             window: createViewportWindowState({
               totalItemCount: 1,
@@ -487,8 +485,6 @@ describe('chat 顶层订阅收口', () => {
           sessionKey: 'agent:main:main',
           runtime: {
             ...state.loadedSessions['agent:main:main']!.runtime,
-            sending: true,
-            pendingFinal: false,
             runPhase: 'submitted',
             lastError: null,
           },
@@ -513,7 +509,6 @@ describe('chat 顶层订阅收口', () => {
           sessionKey: 'agent:main:main',
           runtime: {
             ...state.loadedSessions['agent:main:main']!.runtime,
-            sending: false,
             runPhase: 'error',
             lastError: null,
             lastIssue: {
@@ -547,7 +542,6 @@ describe('chat 顶层订阅收口', () => {
           sessionKey: 'agent:main:main',
           runtime: {
             ...state.loadedSessions['agent:main:main']!.runtime,
-            sending: false,
             runPhase: 'error',
             lastError: 'model unavailable',
             updatedAt: 2,
@@ -576,7 +570,6 @@ describe('chat 顶层订阅收口', () => {
             sessionKey: 'agent:main:main',
             runtime: {
               ...state.loadedSessions['agent:main:main']!.runtime,
-              sending: false,
               runPhase: 'error',
               lastError: 'model unavailable',
               updatedAt: 2,
@@ -597,7 +590,6 @@ describe('chat 顶层订阅收口', () => {
           sessionKey: 'agent:main:main',
           runtime: {
             ...state.loadedSessions['agent:main:main']!.runtime,
-            sending: false,
             runPhase: 'error',
             lastError: 'old model unavailable',
             updatedAt: 2,
@@ -624,7 +616,6 @@ describe('chat 顶层订阅收口', () => {
             sessionKey: 'agent:main:main',
             runtime: {
               ...state.loadedSessions['agent:main:main']!.runtime,
-              sending: false,
               runPhase: 'error',
               lastError: 'new model unavailable',
               updatedAt: 3,

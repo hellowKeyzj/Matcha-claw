@@ -6,7 +6,6 @@ describe('chat view state', () => {
     const loading = useChatView({
       currentSessionStatus: 'loading',
       itemCount: 0,
-      sending: false,
     });
     expect(loading.showBlockingLoading).toBe(true);
     expect(loading.isEmptyState).toBe(false);
@@ -14,7 +13,6 @@ describe('chat view state', () => {
     const ready = useChatView({
       currentSessionStatus: 'ready',
       itemCount: 2,
-      sending: false,
     });
     expect(ready.showBlockingLoading).toBe(false);
   });
@@ -23,7 +21,6 @@ describe('chat view state', () => {
     const empty = useChatView({
       currentSessionStatus: 'ready',
       itemCount: 0,
-      sending: false,
     });
     expect(empty.isEmptyState).toBe(true);
     expect(empty.showBlockingLoading).toBe(false);
@@ -33,7 +30,6 @@ describe('chat view state', () => {
     const failed = useChatView({
       currentSessionStatus: 'error',
       itemCount: 0,
-      sending: false,
     });
 
     expect(failed.showBlockingError).toBe(true);

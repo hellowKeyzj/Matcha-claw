@@ -74,13 +74,11 @@ describe('chat model picker', () => {
         items: messages,
         replayComplete: true,
           runtime: {
-            sending: false,
           activeRunId: null,
           runPhase: 'idle',
           activeTurnItemKey: null,
           pendingTurnKey: null,
           pendingTurnLaneKey: null,
-          pendingFinal: false,
           lastUserMessageAt: null,
           lastError: null,
           lastIssue: null,
@@ -287,7 +285,6 @@ describe('chat model picker', () => {
           ...current!,
           runtime: {
             ...current!.runtime,
-            sending: true,
             activeRunId: 'run-active-1',
           },
         },

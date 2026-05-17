@@ -43,6 +43,7 @@ import type {
   ChatSession,
   ChatStoreState,
 } from './types';
+import { isRunActive } from './types';
 import type { SessionLoadResult } from '../../../runtime-host/shared/session-adapter-types';
 
 const SESSION_CATALOG_NOT_READY_RETRY_MS = 1200;
@@ -160,7 +161,7 @@ function shouldMarkSessionLoadingOnSwitch(
   if (!sessionKey) {
     return false;
   }
-  if (sessionRecord.runtime.sending) {
+  if (isRunActive(sessionRecord.runtime)) {
     return false;
   }
   return sessionRecord.meta.historyStatus !== 'ready' && getSessionItemCount(sessionRecord) === 0;

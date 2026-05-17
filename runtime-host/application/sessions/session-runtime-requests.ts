@@ -76,7 +76,7 @@ export function readPromptSessionRequest(payload: unknown): {
   mediaBody: ReturnType<typeof normalizeSendWithMediaInput>;
   sessionKey: string;
   message: string;
-  requestedPromptId: string;
+  requestedRunId: string;
 } {
   const directBody = isRecord(payload) ? payload as SessionPromptPayload : {};
   const mediaBody = normalizeSendWithMediaInput(payload);
@@ -88,9 +88,8 @@ export function readPromptSessionRequest(payload: unknown): {
     mediaBody,
     sessionKey: normalizeString(directBody.sessionKey ?? mediaBody?.sessionKey),
     message,
-    requestedPromptId: normalizeString(
-      directBody.promptId
-      ?? directBody.runId
+    requestedRunId: normalizeString(
+      directBody.runId
       ?? directBody.idempotencyKey
       ?? mediaBody?.idempotencyKey,
     ),

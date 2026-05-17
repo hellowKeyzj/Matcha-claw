@@ -11,10 +11,6 @@ import type {
   RuntimeIdGeneratorPort,
 } from '../common/runtime-ports';
 import type { GatewayChatPort, GatewayRpcPort } from '../gateway/gateway-runtime-port';
-import {
-  isRecord,
-  normalizeString,
-} from './session-value-normalization';
 import type {
   SessionPromptMediaPayload,
 } from './session-runtime-types';
@@ -44,6 +40,14 @@ export interface SessionPromptServiceDeps {
   emitSessionUpdate?: (event: SessionInfoUpdateEvent) => void;
 }
 
+/**
+ * Prompt 服务的“单一事实源”策略：
+ * - runId 由 runtime-host 在收到请求时立即生成，并同步落到 runtime
+ *   （activeRunId、pendingTurnKey 都用这个 id），同时作为 chat.send 的
+ *   idempotencyKey 透给 Gateway。
+ * - 不再保留“已 submit 但 activeRunId 还没绑”的中间态。lifecycle 终态事件
+ *   靠 activeRunId 直接匹配，不会被守卫吞掉。
+ */
 export class SessionPromptService {
   constructor(private readonly deps: SessionPromptServiceDeps) {}
 
@@ -51,64 +55,24 @@ export class SessionPromptService {
     this.deps.emitSessionUpdate?.(event);
   }
 
-  private async bindSubmittedPromptRun(input: {
-    sessionKey: string;
-    promptId: string;
-    runEpoch: number;
-    runId: string | null;
-  }): Promise<void> {
-    await this.deps.operationCoordinator.run(input.sessionKey, 'prompt', async () => {
-      const state = this.deps.stateStore.getSessionState(input.sessionKey);
-      if (state.runEpoch !== input.runEpoch || !state.runtime.sending) {
-        return;
-      }
-      const committed = this.deps.timelineRuntime.commitSessionTransition(input.sessionKey, {
-        runtimePatch: {
-          sending: true,
-          activeRunId: input.runId,
-          runPhase: 'submitted',
-          pendingTurnKey: input.runId ? `main:${input.runId}` : `main:prompt:${input.promptId}`,
-          pendingTurnLaneKey: 'main',
-          lastError: null,
-          lastIssue: null,
-        },
-      });
-      const snapshot = {
-        ...await this.deps.snapshotService.buildLatestSnapshotAsync(input.sessionKey, committed.state),
-        runtime: committed.runtime,
-      };
-      await this.deps.stateStore.flushPersistedStore();
-      this.emitSessionInfoUpdate({
-        sessionUpdate: 'session_info_update',
-        sessionKey: input.sessionKey,
-        runId: input.runId,
-        phase: 'started',
-        snapshot,
-        error: null,
-      });
-      return snapshot;
-    });
-  }
-
   private async failSubmittedPrompt(input: {
     sessionKey: string;
-    runEpoch: number;
+    runId: string;
     error: string;
   }): Promise<void> {
     await this.deps.operationCoordinator.run(input.sessionKey, 'prompt', async () => {
       const state = this.deps.stateStore.getSessionState(input.sessionKey);
-      if (state.runEpoch !== input.runEpoch || !state.runtime.sending) {
+      if (state.runtime.activeRunId !== input.runId) {
+        // 已被 abort/新 prompt/lifecycle 终态覆盖，跳过失败收尾。
         return;
       }
       const committed = this.deps.timelineRuntime.commitSessionTransition(input.sessionKey, {
         runtimePatch: {
-          sending: false,
           activeRunId: null,
           runPhase: 'error',
           activeTurnItemKey: null,
           pendingTurnKey: null,
           pendingTurnLaneKey: null,
-          pendingFinal: false,
           lastError: input.error,
           lastIssue: null,
         },
@@ -123,7 +87,7 @@ export class SessionPromptService {
       this.emitSessionInfoUpdate({
         sessionUpdate: 'session_info_update',
         sessionKey: input.sessionKey,
-        runId: null,
+        runId: input.runId,
         phase: 'error',
         snapshot,
         error: input.error,
@@ -137,8 +101,7 @@ export class SessionPromptService {
     mediaBody: ReturnType<typeof readPromptSessionRequest>['mediaBody'];
     sessionKey: string;
     message: string;
-    promptId: string;
-    runEpoch: number;
+    runId: string;
   }): void {
     void (async () => {
       const sendResult = input.mediaBody
@@ -146,32 +109,22 @@ export class SessionPromptService {
             ...input.mediaBody,
             sessionKey: input.sessionKey,
             message: input.message,
-            idempotencyKey: input.promptId,
+            idempotencyKey: input.runId,
           })
         : await sendWithMediaViaGateway(this.deps.fileSystem, this.deps.gateway, {
             sessionKey: input.sessionKey,
             message: input.message,
-            idempotencyKey: input.promptId,
+            idempotencyKey: input.runId,
             ...(typeof input.directBody.deliver === 'boolean' ? { deliver: input.directBody.deliver } : {}),
           });
 
       if (!sendResult.success) {
         await this.failSubmittedPrompt({
           sessionKey: input.sessionKey,
-          runEpoch: input.runEpoch,
+          runId: input.runId,
           error: sendResult.error ?? 'Failed to prompt session',
         });
-        return;
       }
-
-      const resultRecord = isRecord(sendResult.result) ? sendResult.result : {};
-      const runId = normalizeString(resultRecord.runId) || null;
-      await this.bindSubmittedPromptRun({
-        sessionKey: input.sessionKey,
-        promptId: input.promptId,
-        runEpoch: input.runEpoch,
-        runId,
-      });
     })().catch(() => undefined);
   }
 
@@ -181,7 +134,7 @@ export class SessionPromptService {
       mediaBody,
       sessionKey,
       message,
-      requestedPromptId,
+      requestedRunId,
     } = readPromptSessionRequest(payload);
     if (!sessionKey) {
       return badRequest('sessionKey is required');
@@ -190,7 +143,7 @@ export class SessionPromptService {
       return badRequest('message is required');
     }
 
-    const promptId = requestedPromptId || this.deps.idGenerator.randomId();
+    const runId = requestedRunId || this.deps.idGenerator.randomId();
 
     await ensureSessionVerboseFull(sessionKey, this.deps.gateway, this.deps.stateStore);
 
@@ -207,20 +160,18 @@ export class SessionPromptService {
       ]);
       const promptEntry = this.deps.timelineRuntime.buildPromptUserEntry({
         sessionKey,
-        promptId,
+        runId,
         message,
         media,
       });
       const committed = this.deps.timelineRuntime.commitSessionTransition(sessionKey, {
         timelineEntries: [promptEntry],
         runtimePatch: {
-          sending: true,
-          activeRunId: null,
+          activeRunId: runId,
           runPhase: 'submitted',
           activeTurnItemKey: null,
-          pendingTurnKey: `main:prompt:${promptId}`,
+          pendingTurnKey: `main:${runId}`,
           pendingTurnLaneKey: 'main',
-          pendingFinal: false,
           lastUserMessageAt: promptEntry.createdAt ?? this.deps.clock.nowMs(),
           lastError: null,
           lastIssue: null,
@@ -235,7 +186,6 @@ export class SessionPromptService {
       };
       await this.deps.stateStore.flushPersistedStore();
       return {
-        runEpoch: committed.state.runEpoch,
         entryKey: committed.mergedEntries[0]?.key ?? promptEntry.key,
         snapshot,
       };
@@ -246,15 +196,13 @@ export class SessionPromptService {
       mediaBody,
       sessionKey,
       message,
-      promptId,
-      runEpoch: submitted.runEpoch,
+      runId,
     });
 
     return ok({
       success: true,
       sessionKey,
-      runId: null,
-      promptId,
+      runId,
       item: submitted.snapshot.items.find((candidate) => candidate.key === submitted.entryKey) ?? null,
       snapshot: submitted.snapshot,
     });

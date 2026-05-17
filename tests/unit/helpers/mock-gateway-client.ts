@@ -113,7 +113,6 @@ vi.spyOn(hostApiModule, 'hostSessionPrompt').mockImplementation(async (
   payload: {
     sessionKey: string;
     message: string;
-    promptId?: string;
     idempotencyKey?: string;
     deliver?: boolean;
     media?: Array<{

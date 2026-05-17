@@ -25,13 +25,11 @@ function buildPromptSnapshot(entryId: string, content: string) {
       },
     ],
     runtime: {
-      sending: true,
       activeRunId: 'run-1',
       runPhase: 'submitted',
       activeTurnItemKey: null,
       pendingTurnKey: null,
       pendingTurnLaneKey: null,
-      pendingFinal: false,
       lastUserMessageAt: 1,
       lastError: null,
       updatedAt: 1,
@@ -57,7 +55,6 @@ describe('chat send transport', () => {
       success: true,
       runId: 'run-1',
       sessionKey: 'agent:main:main',
-      promptId: 'user-local-1',
       snapshot: buildPromptSnapshot('user-local-1', 'hello'),
     });
 
@@ -71,7 +68,6 @@ describe('chat send transport', () => {
     expect(hostSessionPromptMock).toHaveBeenCalledWith({
       sessionKey: 'agent:main:main',
       message: 'hello',
-      promptId: 'user-local-1',
       idempotencyKey: 'user-local-1',
       deliver: false,
     });
@@ -89,7 +85,6 @@ describe('chat send transport', () => {
       success: true,
       runId: 'run-2',
       sessionKey: 'agent:main:main',
-      promptId: 'user-local-2',
       snapshot: buildPromptSnapshot('user-local-2', 'hello'),
     });
 
@@ -110,7 +105,6 @@ describe('chat send transport', () => {
     expect(hostSessionPromptMock).toHaveBeenCalledWith({
       sessionKey: 'agent:main:main',
       message: 'hello',
-      promptId: 'user-local-2',
       idempotencyKey: 'user-local-2',
       deliver: false,
       media: [{

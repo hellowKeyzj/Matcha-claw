@@ -240,6 +240,14 @@ export class SessionGatewayIngressService {
     };
   }
 
+  /**
+   * 守卫规则（lifecycle/plan/tool 状态）：
+   * - 不带 runId 的事件直接放行（unbound terminal 由 isUnboundTerminalLifecycle 单独处理）
+   * - 显式作废的 run（abort、重连清理、新 prompt 覆盖）一律丢
+   * - activeRunId 一致：放行（这是绝大多数正常事件）
+   * - activeRunId 不同：拒绝（属于另一条 run 的事件）
+   * - activeRunId 为空且 run 已结束（aborted/error/done）：除 aborted 外丢弃
+   */
   private shouldIgnoreNonMessageUpdate(input: {
     sessionKey: string;
     runId: string;
@@ -255,15 +263,26 @@ export class SessionGatewayIngressService {
     if (runtime.activeRunId === input.runId) {
       return false;
     }
-    if (runtime.sending) {
-      return true;
+    if (runtime.activeRunId == null) {
+      // 已收口的 session：忽略迟到事件，避免重新激活旧 run。
+      if (runtime.runPhase === 'aborted' || runtime.runPhase === 'error' || runtime.runPhase === 'done') {
+        return input.phase !== 'aborted';
+      }
+      // 还没绑过 run（如纯监听新 session）：放行，由事件本身把 runtime 推进起来。
+      return false;
     }
-    if (!runtime.activeRunId && (runtime.runPhase === 'aborted' || runtime.runPhase === 'error' || runtime.runPhase === 'done')) {
-      return input.phase !== 'aborted';
-    }
-    return runtime.activeRunId != null;
+    return true;
   }
 
+  /**
+   * 守卫规则（chat.message）：
+   * - 不带 runId：放行
+   * - 显式作废：丢
+   * - activeRunId 一致：放行
+   * - activeRunId 为空且未 abort：放行（包含 run 收口后同 run 的权威补齐场景，
+   *   见 6479dc9d）
+   * - activeRunId 不同：丢（属于另一条 run）
+   */
   private shouldIgnoreMessageUpdate(input: {
     sessionKey: string;
     runId: string;
@@ -275,13 +294,13 @@ export class SessionGatewayIngressService {
       return true;
     }
     const runtime = this.deps.stateStore.getSessionState(input.sessionKey).runtime;
-    if (runtime.activeRunId) {
-      return runtime.activeRunId !== input.runId;
+    if (runtime.activeRunId === input.runId) {
+      return false;
     }
-    if (runtime.sending) {
-      return true;
+    if (runtime.activeRunId == null) {
+      return runtime.runPhase === 'aborted';
     }
-    return runtime.runPhase === 'aborted';
+    return true;
   }
 
   private isUnboundTerminalLifecycle(input: {

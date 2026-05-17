@@ -1,4 +1,5 @@
 import type { ChatSession, ChatStoreState, TaskChatBridgeState } from './types';
+import { isRunActive } from './types';
 import {
   getSessionMeta,
   getSessionItemCount,
@@ -157,8 +158,7 @@ export function shouldRetainLocalSessionRecord(
     getSessionItemCount(record) > 0
     || Boolean(record.meta.label)
     || Boolean(record.meta.lastActivityAt)
-    || runtime.sending
-    || runtime.pendingFinal
+    || isRunActive(runtime)
     || runtime.activeRunId != null
     || runtime.activeTurnItemKey != null
     || (state.pendingApprovalsBySession[sessionKey]?.length ?? 0) > 0
@@ -231,7 +231,7 @@ export function buildTaskBridgeState(
   return {
     sessionKey,
     owner: parseAgentIdFromSessionKey(sessionKey) || 'main',
-    canSendRecoveryPrompt: !runtime.sending && !runtime.pendingFinal && !runtime.activeRunId,
+    canSendRecoveryPrompt: !isRunActive(runtime) && !runtime.activeRunId,
   };
 }
 

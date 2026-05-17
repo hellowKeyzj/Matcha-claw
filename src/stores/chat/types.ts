@@ -71,6 +71,23 @@ export type ChatRunPhase =
   | 'error'
   | 'aborted';
 
+const ACTIVE_RUN_PHASES = new Set<ChatRunPhase>([
+  'submitted',
+  'streaming',
+  'waiting_tool',
+  'finalizing',
+]);
+
+/** 单一事实源派生：当前回合是否处于运行状态。 */
+export function isRunActive(runtime: { runPhase: ChatRunPhase }): boolean {
+  return ACTIVE_RUN_PHASES.has(runtime.runPhase);
+}
+
+/** 单一事实源派生：当前回合是否在等待工具结果。 */
+export function isWaitingTool(runtime: { runPhase: ChatRunPhase }): boolean {
+  return runtime.runPhase === 'waiting_tool';
+}
+
 export type ApprovalStatus = 'idle' | 'awaiting_approval';
 export type ApprovalDecision = 'allow-once' | 'allow-always' | 'deny';
 
@@ -94,13 +111,11 @@ export interface TaskChatBridgeState {
 }
 
 export interface ChatSessionRuntimeState {
-  sending: boolean;
   activeRunId: string | null;
   runPhase: ChatRunPhase;
   activeTurnItemKey: string | null;
   pendingTurnKey: string | null;
   pendingTurnLaneKey: string | null;
-  pendingFinal: boolean;
   lastUserMessageAt: number | null;
   lastError: string | null;
   lastIssue: GatewayTransportIssue | null;

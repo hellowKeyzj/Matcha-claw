@@ -1,6 +1,7 @@
 import type {
   SessionUpdateEvent,
 } from '../../shared/session-adapter-types';
+import { isRunActive } from '../../shared/session-adapter-types';
 import type { SessionCatalogPort } from './session-catalog';
 import { SessionCommandService } from './session-command-service';
 import { SessionGatewayIngressService } from './session-gateway-ingress-service';
@@ -29,7 +30,7 @@ export class SessionRuntimeService {
       return;
     }
     for (const [sessionKey, state] of this.deps.stateStore.listSessionStates()) {
-      if (!state.runtime.sending) {
+      if (!isRunActive(state.runtime)) {
         continue;
       }
       if (state.activeTransportEpoch == null || state.activeTransportEpoch >= transportEpoch) {
@@ -37,7 +38,7 @@ export class SessionRuntimeService {
       }
       void this.deps.operationCoordinator.run(sessionKey, 'reconcile', async () => {
         const latestState = this.deps.stateStore.getSessionState(sessionKey);
-        if (!latestState.runtime.sending) {
+        if (!isRunActive(latestState.runtime)) {
           return;
         }
         if (latestState.activeTransportEpoch == null || latestState.activeTransportEpoch >= transportEpoch) {

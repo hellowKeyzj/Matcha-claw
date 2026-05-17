@@ -19,8 +19,6 @@ function createSessionRecord(input?: {
   lastActivityAt?: number | null;
   thinkingLevel?: string | null;
   runtime?: {
-    sending?: boolean;
-    pendingFinal?: boolean;
     activeRunId?: string | null;
   };
 }) {
@@ -42,8 +40,6 @@ function createSessionRecord(input?: {
       thinkingLevel: input?.thinkingLevel ?? null,
     },
     runtime: {
-      sending: input?.runtime?.sending ?? false,
-      pendingFinal: input?.runtime?.pendingFinal ?? false,
       activeRunId: input?.runtime?.activeRunId ?? null,
       runPhase: 'idle' as const,
       activeTurnItemKey: null,

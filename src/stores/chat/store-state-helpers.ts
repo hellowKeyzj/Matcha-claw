@@ -417,13 +417,11 @@ const EMPTY_VIEWPORT_STATE: ChatSessionViewportState = {
 
 export function createEmptySessionRuntime(): ChatSessionRuntimeState {
   return {
-    sending: false,
     activeRunId: null,
     runPhase: 'idle',
     activeTurnItemKey: null,
     pendingTurnKey: null,
     pendingTurnLaneKey: null,
-    pendingFinal: false,
     lastUserMessageAt: null,
     lastError: null,
     lastIssue: null,
@@ -690,13 +688,11 @@ export function patchSessionSnapshot(
     items: nextItems,
     runtime: {
       ...current.runtime,
-      sending: snapshot.runtime.sending,
       activeRunId: snapshot.runtime.activeRunId,
       runPhase: snapshot.runtime.runPhase,
       activeTurnItemKey: snapshot.runtime.activeTurnItemKey,
       pendingTurnKey: snapshot.runtime.pendingTurnKey,
       pendingTurnLaneKey: snapshot.runtime.pendingTurnLaneKey,
-      pendingFinal: snapshot.runtime.pendingFinal,
       lastUserMessageAt: snapshot.runtime.lastUserMessageAt,
       lastError: snapshot.runtime.lastError,
       lastIssue: snapshot.runtime.lastIssue,
