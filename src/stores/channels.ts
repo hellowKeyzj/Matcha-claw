@@ -8,6 +8,7 @@ import {
   hostChannelsDeleteConfig,
   hostChannelsDisconnect,
   hostChannelsFetchSnapshot,
+  hostChannelsProbe,
   hostChannelsRequestQrCode,
 } from '@/lib/channel-runtime';
 import {
@@ -33,6 +34,7 @@ interface ChannelsState {
 
   // Actions
   fetchChannels: (options?: FetchChannelsOptions) => Promise<void>;
+  probeChannels: () => Promise<void>;
   deleteChannel: (channelId: string) => Promise<void>;
   connectChannel: (channelId: string) => Promise<void>;
   disconnectChannel: (channelId: string) => Promise<void>;
@@ -283,6 +285,21 @@ export const useChannelsStore = create<ChannelsState>((set, get) => ({
         inflightChannelsFetchPromise = null;
       }
     }
+  },
+
+  probeChannels: async () => {
+    set({ refreshing: true, error: null });
+    try {
+      await hostChannelsProbe();
+    } catch (error) {
+      set((state) => ({
+        ...state,
+        error: error instanceof Error ? error.message : 'Failed to probe channels',
+      }));
+    } finally {
+      set({ refreshing: false });
+    }
+    await get().fetchChannels({ silent: true });
   },
 
   deleteChannel: async (channelId) => {

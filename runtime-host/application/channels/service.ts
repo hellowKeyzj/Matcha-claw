@@ -9,14 +9,20 @@ import { isGatewayReadyForSnapshot } from '../gateway/gateway-readiness';
 import type { ParentShellPort } from '../runtime-host/parent-shell-port';
 import { channelUsesLoginSession } from './channel-activation-strategy';
 import type { ChannelJobPort } from './channel-jobs';
+import type { ChannelPairingService } from './channel-pairing-service';
 import type { ChannelConfigPort } from './channel-runtime';
 import type { ChannelLoginSessionService } from './channel-login-session-service';
+import {
+  projectChannelsSnapshot,
+  type ProjectedChannelsSnapshot,
+} from './channel-snapshot-projection';
 
 export interface ChannelServiceDeps {
   readonly gateway: GatewayChannelPort;
   readonly channelConfig: ChannelConfigPort;
   readonly parentShell: ParentShellPort;
   readonly loginSessions: Pick<ChannelLoginSessionService, 'start' | 'cancel'>;
+  readonly pairing: Pick<ChannelPairingService, 'listRequests' | 'approveRequest'>;
   readonly jobs: ChannelJobPort;
   readonly clock: RuntimeClockPort;
 }
@@ -26,10 +32,10 @@ function isRecord(value: unknown): value is Record<string, any> {
 }
 
 export class ChannelService {
-  private snapshotValue: unknown = null;
-  private snapshotReady = false;
-  private snapshotError: string | null = null;
-  private snapshotUpdatedAt: number | null = null;
+  private gatewayChannelsCache: unknown = null;
+  private gatewayChannelsCacheReady = false;
+  private gatewayChannelsCacheError: string | null = null;
+  private gatewayChannelsCacheUpdatedAt: number | null = null;
   private snapshotRefreshTask: Promise<unknown> | null = null;
 
   constructor(private readonly deps: ChannelServiceDeps) {}
@@ -54,63 +60,49 @@ export class ChannelService {
   }
 
   async snapshot() {
+    const configuredChannels = await this.deps.channelConfig.listConfiguredChannels();
+    const projected = projectChannelsSnapshot(configuredChannels, this.gatewayChannelsCache);
+
     let refreshSubmitted = false;
     if (await isGatewayReadyForSnapshot(this.deps.gateway)) {
       this.deps.jobs.submitRefreshSnapshot();
       refreshSubmitted = true;
     }
+
     return {
       success: true,
-      snapshot: this.snapshotValue,
-      ready: this.snapshotReady,
+      snapshot: projected satisfies ProjectedChannelsSnapshot,
+      ready: this.gatewayChannelsCacheReady,
       refreshing: refreshSubmitted || this.snapshotRefreshTask !== null,
-      updatedAt: this.snapshotUpdatedAt,
-      error: this.snapshotError,
+      updatedAt: this.gatewayChannelsCacheUpdatedAt,
+      error: this.gatewayChannelsCacheError,
     };
-  }
-
-  private refreshSnapshotInBackground(): Promise<unknown> {
-    if (this.snapshotRefreshTask) {
-      return this.snapshotRefreshTask;
-    }
-    const task = this.refreshSnapshot()
-      .catch((error) => {
-        return {
-          success: false,
-          error: error instanceof Error ? error.message : String(error),
-        };
-      })
-      .finally(() => {
-        if (this.snapshotRefreshTask === task) {
-          this.snapshotRefreshTask = null;
-        }
-      });
-    this.snapshotRefreshTask = task;
-    return task;
   }
 
   async refreshSnapshot() {
-    try {
-      this.snapshotValue = await this.deps.gateway.channelsStatus(true);
-      this.snapshotReady = true;
-      this.snapshotError = null;
-      this.snapshotUpdatedAt = this.deps.clock.nowMs();
-      return {
-        success: true,
-        snapshot: this.snapshotValue,
-        updatedAt: this.snapshotUpdatedAt,
-      };
-    } catch (error) {
-      this.snapshotError = error instanceof Error ? error.message : String(error);
-      throw error;
-    }
+    return await this.fetchAndCache(false);
   }
 
-  async configured() {
-    return {
-      success: true,
-      channels: await this.deps.channelConfig.listConfiguredChannels(),
-    };
+  async probeSnapshot() {
+    return await this.fetchAndCache(true);
+  }
+
+  private async fetchAndCache(probe: boolean) {
+    try {
+      this.gatewayChannelsCache = await this.deps.gateway.channelsStatus(probe);
+      this.gatewayChannelsCacheReady = true;
+      this.gatewayChannelsCacheError = null;
+      this.gatewayChannelsCacheUpdatedAt = this.deps.clock.nowMs();
+      const configuredChannels = await this.deps.channelConfig.listConfiguredChannels();
+      return {
+        success: true,
+        snapshot: projectChannelsSnapshot(configuredChannels, this.gatewayChannelsCache),
+        updatedAt: this.gatewayChannelsCacheUpdatedAt,
+      };
+    } catch (error) {
+      this.gatewayChannelsCacheError = error instanceof Error ? error.message : String(error);
+      throw error;
+    }
   }
 
   async validateConfig(payload: unknown) {
@@ -143,6 +135,7 @@ export class ChannelService {
       return accepted(this.deps.jobs.submitActivateDirectChannel(payload));
     }
 
+    await this.deps.channelConfig.prepareChannelPlugin(channelType);
     const result = await this.deps.loginSessions.start({
       channelType,
       ...(typeof body.accountId === 'string' ? { accountId: body.accountId } : {}),
@@ -210,7 +203,35 @@ export class ChannelService {
     };
   }
 
+  async listPairingRequests(channelType: string, accountId?: string) {
+    if (!channelType) {
+      return badRequest('channelType is required');
+    }
+    return ok(await this.deps.pairing.listRequests({ channelType, accountId }));
+  }
+
+  async approvePairingRequest(channelType: string, payload: unknown) {
+    if (!channelType) {
+      return badRequest('channelType is required');
+    }
+    const body = isRecord(payload) ? payload : {};
+    const code = typeof body.code === 'string' ? body.code.trim() : '';
+    if (!code) {
+      return badRequest('code is required');
+    }
+    const accountId = typeof body.accountId === 'string' ? body.accountId : undefined;
+    const result = await this.deps.pairing.approveRequest({ channelType, code, accountId });
+    if (!result.approved) {
+      return badRequest('pairing code not found or expired');
+    }
+    return ok(result);
+  }
+
   deleteConfig(channelType: string) {
     return accepted(this.deps.jobs.submitDeleteChannelConfig({ channelType }));
+  }
+
+  probe() {
+    return accepted(this.deps.jobs.submitProbeSnapshot());
   }
 }

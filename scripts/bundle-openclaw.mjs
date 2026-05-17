@@ -21,6 +21,8 @@ import path from 'node:path';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 
+import { REMOVED_BUNDLED_CHANNEL_PLUGIN_IDS } from './openclaw-bundled-channels.mjs';
+
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 function printLine(message = '') {
@@ -567,10 +569,15 @@ function cleanupBundle(outputDir) {
     'node_modules/koffi/src',
     'node_modules/koffi/vendor',
     'node_modules/koffi/doc',
-    'extensions/feishu', // Removed in favor of official @larksuite/openclaw-lark plugin
   ];
   for (const rel of LARGE_REMOVALS) {
     if (rmSafe(path.join(outputDir, rel))) removedCount++;
+  }
+
+  // --- bundled channel plugins we explicitly drop ---
+  // See scripts/openclaw-bundled-channels.mjs for the rationale per plugin.
+  for (const pluginId of REMOVED_BUNDLED_CHANNEL_PLUGIN_IDS) {
+    if (rmSafe(path.join(outputDir, 'dist', 'extensions', pluginId))) removedCount++;
   }
 
   return removedCount;

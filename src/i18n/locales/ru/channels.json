@@ -28,6 +28,17 @@
   "deleteConfirm": "Вы уверены, что хотите удалить этот канал?",
   "showAll": "Показать все",
   "pluginBadge": "Плагин",
+  "pairing": {
+    "manage": "Manage user binding",
+    "title": "{{name}} User Binding",
+    "description": "Approve users who have messaged the bot. Approved users can use this channel.",
+    "codeLabel": "Pairing code",
+    "codePlaceholder": "e.g. RTHZA8EP",
+    "approve": "Approve",
+    "pendingTitle": "Pending requests",
+    "empty": "No pending requests. Ask the user to message the bot first, then approve here.",
+    "approvedToast": "User binding approved"
+  },
   "toast": {
     "whatsappConnected": "WhatsApp успешно подключён",
     "whatsappFailed": "Не удалось подключить WhatsApp: {{error}}",

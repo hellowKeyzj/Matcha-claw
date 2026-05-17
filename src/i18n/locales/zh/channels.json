@@ -28,6 +28,17 @@
     "deleteConfirm": "确定要删除此频道吗？",
     "showAll": "显示全部",
     "pluginBadge": "插件",
+    "pairing": {
+        "manage": "管理用户绑定",
+        "title": "{{name}} 用户绑定",
+        "description": "审批已向机器人发消息的用户，审批后该用户就可以使用这个频道。",
+        "codeLabel": "配对码",
+        "codePlaceholder": "例如 RTHZA8EP",
+        "approve": "通过",
+        "pendingTitle": "待绑定请求",
+        "empty": "暂无待绑定请求。让用户先给机器人发送一条消息，再回到这里审批。",
+        "approvedToast": "用户绑定已通过"
+    },
     "toast": {
         "whatsappConnected": "WhatsApp 连接成功",
         "whatsappFailed": "WhatsApp 连接失败: {{error}}",

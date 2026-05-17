@@ -257,6 +257,62 @@ describe('subagents prompt pipeline', () => {
     expect(useSubagentsStore.getState().draftByFile['AGENTS.md']?.content).toBe('rules from history');
   });
 
+  it('keeps waiting when draft history only contains the user prompt', async () => {
+    hostSessionPromptMock.mockResolvedValueOnce({
+      success: true,
+      sessionKey: 'agent:writer:subagent-draft',
+      runId: null,
+    });
+    hostSessionWindowFetchMock
+      .mockResolvedValueOnce({
+        snapshot: {
+          sessionKey: 'agent:writer:subagent-draft',
+          items: buildRenderItemsFromMessages('agent:writer:subagent-draft', [{
+            id: 'user-entry-1',
+            role: 'user',
+            content: [
+              {
+                type: 'text',
+                text: '{"files":{"AGENTS.md":"not an assistant draft"}}',
+              },
+            ],
+          }]),
+          replayComplete: true,
+          runtime: {
+            activeRunId: null,
+            runPhase: 'running' as const,
+            activeTurnItemKey: null,
+            pendingTurnKey: null,
+            pendingTurnLaneKey: null,
+            lastUserMessageAt: null,
+            updatedAt: 1,
+          },
+          window: {
+            totalItemCount: 1,
+            windowStartOffset: 0,
+            windowEndOffset: 1,
+            hasMore: false,
+            hasNewer: false,
+            isAtLatest: true,
+          },
+        },
+      })
+      .mockResolvedValueOnce(buildHistoryWindow(buildDraftOutput([
+        {
+          name: 'AGENTS.md',
+          content: 'assistant draft',
+          reason: 'assistant output',
+          confidence: 0.9,
+        },
+      ])));
+
+    await useSubagentsStore.getState().generateDraftFromPrompt('writer', 'generate config');
+
+    expect(hostSessionWindowFetchMock).toHaveBeenCalledTimes(2);
+    expect(useSubagentsStore.getState().draftByFile['AGENTS.md']?.content).toBe('assistant draft');
+    expect(useSubagentsStore.getState().draftRawOutputByAgent.writer).toBe('');
+  });
+
   it('rejects duplicate draft generation while same agent run is in-flight', async () => {
     let resolveFirst: ((value: unknown) => void) | undefined;
     hostSessionPromptMock.mockImplementationOnce(() => new Promise((resolve) => {

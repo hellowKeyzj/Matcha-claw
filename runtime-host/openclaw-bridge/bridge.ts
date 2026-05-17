@@ -24,7 +24,7 @@ export interface OpenClawBridge {
   readGatewayCapabilities: (timeoutMs?: number) => Promise<GatewayCapabilitiesSnapshot | null>;
   gatewayRpc: (method: string, params?: unknown, timeoutMs?: number) => Promise<unknown>;
   chatSend: (params: Record<string, unknown>) => Promise<unknown>;
-  channelsStatus: (probe?: boolean) => Promise<unknown>;
+  channelsStatus: (probe: boolean) => Promise<unknown>;
   channelsConnect: (channelId: string) => Promise<unknown>;
   channelsDisconnect: (channelId: string) => Promise<unknown>;
   channelsRequestQr: (channelType: string) => Promise<unknown>;
@@ -71,7 +71,11 @@ export function createOpenClawBridge(client: OpenClawGatewayClient): OpenClawBri
         ? params.attachments.filter((attachment) => Boolean(attachment && typeof attachment === 'object'))
         : undefined,
     }), 120000),
-    channelsStatus: (probe = true) => client.gatewayRpc('channels.status', { probe }, 10000),
+    channelsStatus: (probe) => client.gatewayRpc(
+      'channels.status',
+      { probe },
+      probe ? 30000 : 10000,
+    ),
     channelsConnect: (channelId) => client.gatewayRpc('channels.connect', { channelId }, 10000),
     channelsDisconnect: (channelId) => client.gatewayRpc('channels.disconnect', { channelId }, 10000),
     channelsRequestQr: (channelType) => client.gatewayRpc('channels.requestQr', { type: channelType }, 12000),

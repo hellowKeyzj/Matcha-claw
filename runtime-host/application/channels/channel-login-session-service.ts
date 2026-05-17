@@ -118,10 +118,11 @@ function isAbortError(error: unknown): boolean {
 function normalizeAccountId(input: string): string {
   const normalized = input
     .trim()
-    .replace(/\s+/g, '-')
-    .replace(/[^a-zA-Z0-9._-]+/g, '-')
-    .replace(/-+/g, '-')
-    .replace(/^[.-]+|[.-]+$/g, '');
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, '-')
+    .replace(/^-+/, '')
+    .replace(/-+$/, '')
+    .slice(0, 64);
   return normalized || 'default';
 }
 
@@ -313,6 +314,7 @@ export class ChannelLoginSessionService {
       ...(accountId ? { accountId } : {}),
       config: { ...pending, enabled: true },
       enabled: true,
+      ...(Array.isArray(payload.staleAccountIds) ? { staleAccountIds: payload.staleAccountIds } : {}),
     });
     await this.deps.restartGateway();
   }
@@ -363,28 +365,68 @@ export class ChannelLoginSessionService {
     }
   }
 
+  private async readWeixinAccountUserId(accountId: string): Promise<string | undefined> {
+    try {
+      const raw = await this.deps.fileSystem.readTextFile(join(this.resolveWeixinAccountsDir(), `${accountId}.json`));
+      const parsed = JSON.parse(raw);
+      return isRecord(parsed) && typeof parsed.userId === 'string'
+        ? parsed.userId.trim() || undefined
+        : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  private async removeWeixinAccountFiles(accountId: string): Promise<void> {
+    const accountsDir = this.resolveWeixinAccountsDir();
+    await Promise.all([
+      this.deps.fileSystem.removeFile(join(accountsDir, `${accountId}.json`)),
+      this.deps.fileSystem.removeFile(join(accountsDir, `${accountId}.sync.json`)),
+      this.deps.fileSystem.removeFile(join(accountsDir, `${accountId}.context-tokens.json`)),
+    ]);
+  }
+
   private async saveWeixinAccountData(params: {
     normalizedAccountId: string;
     token: string;
     baseUrl: string;
     userId?: string;
-  }): Promise<void> {
+  }): Promise<{ staleAccountIds: string[] }> {
     const stateDir = this.resolveWeixinStateDir();
     const accountsDir = this.resolveWeixinAccountsDir();
     await this.deps.fileSystem.ensureDirectory(stateDir);
     await this.deps.fileSystem.ensureDirectory(accountsDir);
+    const indexPath = this.resolveWeixinAccountsIndexPath();
+    const existingIds = await this.readJsonStringArray(indexPath);
+    const userId = params.userId?.trim();
+    const staleAccountIds = userId
+      ? (await Promise.all(existingIds.map(async (accountId) => ({
+        accountId,
+        userId: await this.readWeixinAccountUserId(accountId),
+      })))).filter((item) => (
+        item.accountId !== params.normalizedAccountId
+        && item.userId === userId
+      )).map((item) => item.accountId)
+      : [];
+
     await this.deps.fileSystem.writeTextFile(join(accountsDir, `${params.normalizedAccountId}.json`), `${JSON.stringify({
       token: params.token,
       baseUrl: params.baseUrl,
       savedAt: new Date().toISOString(),
-      ...(params.userId?.trim() ? { userId: params.userId.trim() } : {}),
+      ...(userId ? { userId } : {}),
     }, null, 2)}\n`);
 
-    const indexPath = this.resolveWeixinAccountsIndexPath();
-    const existingIds = await this.readJsonStringArray(indexPath);
-    if (!existingIds.includes(params.normalizedAccountId)) {
-      await this.deps.fileSystem.writeTextFile(indexPath, `${JSON.stringify([...existingIds, params.normalizedAccountId], null, 2)}\n`);
+    for (const accountId of staleAccountIds) {
+      await this.removeWeixinAccountFiles(accountId);
     }
+
+    const staleSet = new Set(staleAccountIds);
+    const updatedIds = [
+      ...existingIds.filter((accountId) => accountId !== params.normalizedAccountId && !staleSet.has(accountId)),
+      params.normalizedAccountId,
+    ];
+    await this.deps.fileSystem.writeTextFile(indexPath, `${JSON.stringify(updatedIds, null, 2)}\n`);
+    return { staleAccountIds };
   }
 
   private startWeixinInBackground(options: { accountId?: string; baseUrl?: string; routeTag?: string; timeoutMs?: number }): void {
@@ -495,7 +537,7 @@ export class ChannelLoginSessionService {
           }
           const normalizedId = normalizeAccountId(status.ilink_bot_id);
           const persistedBaseUrl = normalizeBaseUrl(status.baseurl || current.baseUrl);
-          await this.saveWeixinAccountData({
+          const persisted = await this.saveWeixinAccountData({
             normalizedAccountId: normalizedId,
             token: status.bot_token,
             baseUrl: persistedBaseUrl,
@@ -507,6 +549,7 @@ export class ChannelLoginSessionService {
             accountId: normalizedId,
             userId: status.ilink_user_id,
             baseUrl: persistedBaseUrl,
+            staleAccountIds: persisted.staleAccountIds,
           };
           this.weixinRunning = false;
           this.weixinActiveLogin = null;

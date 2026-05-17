@@ -27,6 +27,28 @@ function readTurnMessageText(item: SessionAssistantTurnItem): string {
 export function findLatestAssistantTextFromItems(
   items: SessionRenderItem[],
 ): string {
+  const latestAssistant = findLatestAssistantTurnTextFromItems(items);
+  if (latestAssistant) {
+    return latestAssistant;
+  }
+
+  for (const item of items) {
+    if (item.kind !== 'user-message' && item.kind !== 'task-completion' && item.kind !== 'system') {
+      continue;
+    }
+    const text = 'text' in item && typeof item.text === 'string'
+      ? item.text.trim()
+      : '';
+    if (text) {
+      return text;
+    }
+  }
+  return '';
+}
+
+export function findLatestAssistantTurnTextFromItems(
+  items: SessionRenderItem[],
+): string {
   if (!Array.isArray(items) || items.length === 0) {
     return '';
   }
@@ -43,18 +65,6 @@ export function findLatestAssistantTextFromItems(
   }
   if (latestAssistant) {
     return latestAssistant;
-  }
-
-  for (const item of items) {
-    if (item.kind !== 'user-message' && item.kind !== 'task-completion' && item.kind !== 'system') {
-      continue;
-    }
-    const text = 'text' in item && typeof item.text === 'string'
-      ? item.text.trim()
-      : '';
-    if (text) {
-      return text;
-    }
   }
   return '';
 }

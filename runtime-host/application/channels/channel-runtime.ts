@@ -101,6 +101,14 @@ function isStrictSchemaChannel(channelType: string): boolean {
   return STRICT_SCHEMA_CHANNEL_IDS.has(channelType);
 }
 
+function usesTopLevelDefaultAccount(channelType: string): boolean {
+  return channelType === 'feishu';
+}
+
+function isDefaultAccountId(accountId: string): boolean {
+  return accountId.trim().toLowerCase() === DEFAULT_ACCOUNT_ID;
+}
+
 function getChannelAccountsMap(channelSection: Record<string, any>): Record<string, Record<string, any>> | null {
   if (!isRecord(channelSection.accounts)) {
     return null;
@@ -120,6 +128,12 @@ function ensureChannelAccountsMap(channelSection: Record<string, any>): Record<s
 function channelHasAnyAccount(channelType: string, channelSection: Record<string, any>): boolean {
   if (typeof channelSection.enabled === 'boolean' && channelSection.enabled === false) {
     return false;
+  }
+  if (usesTopLevelDefaultAccount(channelType)) {
+    const uniqueKey = CHANNEL_UNIQUE_CREDENTIAL_KEY[channelType];
+    if (uniqueKey && normalizeChannelConfigValueLocal(channelSection[uniqueKey]).trim().length > 0) {
+      return true;
+    }
   }
   if (isStrictSchemaChannel(channelType) && !getChannelAccountsMap(channelSection)) {
     return Object.entries(channelSection).some(([key, value]) => (
@@ -187,6 +201,14 @@ export class ChannelConfigRepository {
     return configuredChannels;
   }
 
+  async prepareChannelPlugin(channelType: string): Promise<void> {
+    const externalPluginId = getExternalChannelPluginId(channelType.trim());
+    if (!externalPluginId) {
+      return;
+    }
+    await this.ensureChannelPluginInstalled(externalPluginId);
+  }
+
   async saveChannelConfig(input: unknown) {
     if (!isRecord(input)) {
       throw new Error('Invalid channel config payload');
@@ -196,10 +218,21 @@ export class ChannelConfigRepository {
       throw new Error('channelType is required');
     }
 
+    // OpenClaw watches openclaw.json and reloads on changes. If we write
+    // plugins.allow with an external channel plugin id (e.g. openclaw-lark)
+    // before that plugin is materialized under ~/.openclaw/extensions/<id>,
+    // OpenClaw classifies the config as invalid and reverts it to the
+    // last-known-good snapshot, swallowing the user's channel configuration.
+    // Install the plugin first so the upcoming reload sees a consistent state.
+    await this.prepareChannelPlugin(channelType);
+
     await withOpenClawConfigLock(async () => {
       const accountId = typeof input.accountId === 'string' && input.accountId.trim()
         ? input.accountId.trim()
         : DEFAULT_ACCOUNT_ID;
+      const staleAccountIds = Array.isArray(input.staleAccountIds)
+        ? input.staleAccountIds.filter((item): item is string => typeof item === 'string' && item.trim().length > 0)
+        : [];
       let config = await this.configRepository.read();
       cleanupLegacyBuiltInChannelPluginRegistrationLocal(config, channelType);
       if (!isRecord(config.channels)) {
@@ -226,8 +259,32 @@ export class ChannelConfigRepository {
           enabled: input.enabled !== false,
           updatedAt: this.clock.nowIso(),
         });
+      } else if (usesTopLevelDefaultAccount(channelType) && isDefaultAccountId(accountId)) {
+        const nextAccountConfig = {
+          ...section,
+          ...bodyConfig,
+        };
+        assertNoDuplicateCredential(channelType, section, accountId, nextAccountConfig);
+        delete nextAccountConfig.accounts;
+        delete nextAccountConfig.defaultAccount;
+        Object.assign(section, nextAccountConfig, {
+          enabled: input.enabled !== false,
+          updatedAt: this.clock.nowIso(),
+        });
+        const accounts = getChannelAccountsMap(section);
+        if (accounts && Object.prototype.hasOwnProperty.call(accounts, DEFAULT_ACCOUNT_ID)) {
+          delete accounts[DEFAULT_ACCOUNT_ID];
+          if (Object.keys(accounts).length === 0) {
+            delete section.accounts;
+          }
+        }
       } else {
         const accounts = ensureChannelAccountsMap(section);
+        for (const staleAccountId of staleAccountIds) {
+          if (staleAccountId !== accountId) {
+            delete accounts[staleAccountId];
+          }
+        }
         const previous = isRecord(accounts[accountId]) ? accounts[accountId] : {};
         const nextAccountConfig = {
           ...previous,
@@ -239,9 +296,7 @@ export class ChannelConfigRepository {
           enabled: input.enabled !== false,
           updatedAt: this.clock.nowIso(),
         };
-        section.defaultAccount = typeof section.defaultAccount === 'string' && section.defaultAccount.trim()
-          ? section.defaultAccount
-          : accountId;
+        section.defaultAccount = accountId;
         section.enabled = input.enabled !== false;
       }
       config = await reconcileChannelDerivedPluginStateLocal(this.configRepository, this.pluginFileSystem, config);
@@ -323,6 +378,7 @@ export interface ChannelConfigPort extends Pick<
   | 'listConfiguredChannels'
   | 'validateChannelConfig'
   | 'validateChannelCredentials'
+  | 'prepareChannelPlugin'
   | 'saveChannelConfig'
   | 'getChannelFormValues'
   | 'deleteChannelConfig'
@@ -369,6 +425,16 @@ function assertNoDuplicateCredential(
     return;
   }
 
+  if (
+    usesTopLevelDefaultAccount(channelType)
+    && !isDefaultAccountId(resolvedAccountId)
+    && normalizeCredentialString(channelSection[uniqueKey]) === incomingValue
+  ) {
+    throw new Error(
+      `The ${channelType} bot (${uniqueKey}: ${incomingValue}) is already bound to another agent (account: ${DEFAULT_ACCOUNT_ID}). Each agent must use a unique bot.`,
+    );
+  }
+
   const accounts = getChannelAccountsMap(channelSection) ?? {};
   for (const [existingAccountId, accountConfig] of Object.entries(accounts)) {
     if (existingAccountId === resolvedAccountId || !isRecord(accountConfig)) {
@@ -386,6 +452,13 @@ function assertNoDuplicateCredential(
 function getChannelAccountConfigLocal(channelType: string, channelSection: Record<string, any>, accountId: string) {
   if (isStrictSchemaChannel(channelType) && !getChannelAccountsMap(channelSection)) {
     return channelSection;
+  }
+  if (usesTopLevelDefaultAccount(channelType) && isDefaultAccountId(accountId)) {
+    const { accounts: _accounts, defaultAccount: _defaultAccount, ...topLevel } = channelSection;
+    const uniqueKey = CHANNEL_UNIQUE_CREDENTIAL_KEY[channelType];
+    if (uniqueKey && normalizeChannelConfigValueLocal(topLevel[uniqueKey]).trim().length > 0) {
+      return topLevel;
+    }
   }
   const accounts = getChannelAccountsMap(channelSection) ?? {};
   if (isRecord(accounts[accountId])) {

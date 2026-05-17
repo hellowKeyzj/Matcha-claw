@@ -21,6 +21,7 @@ import {
   AlertCircle,
   CheckCircle,
   ShieldCheck,
+  UserCheck,
   ChevronDown,
   ChevronUp,
 } from 'lucide-react';
@@ -36,10 +37,12 @@ import { useGatewayStore } from '@/stores/gateway';
 import { StatusBadge, type Status } from '@/components/common/StatusBadge';
 import {
   hostChannelsActivate,
+  hostChannelsApprovePairingRequest,
   hostChannelsCancelSession,
-  hostChannelsFetchConfiguredTypes,
+  hostChannelsListPairingRequests,
   hostChannelsReadConfig,
   hostChannelsValidateCredentials,
+  type ChannelPairingRequest,
 } from '@/lib/channel-runtime';
 import { subscribeHostEvent } from '@/lib/host-events';
 import { isGatewayOperational, isGatewayPreparing } from '@/lib/gateway-status';
@@ -111,6 +114,10 @@ function resolveQrImageSource(payload: { qrDataUrl?: string; qr?: string; raw?: 
   );
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
 export function Channels() {
   const { t } = useTranslation('channels');
   const channels = useChannelsStore((state) => state.channels);
@@ -121,14 +128,15 @@ export function Channels() {
   const mutatingByChannelId = useChannelsStore((state) => state.mutatingByChannelId);
   const error = useChannelsStore((state) => state.error);
   const fetchChannels = useChannelsStore((state) => state.fetchChannels);
+  const probeChannels = useChannelsStore((state) => state.probeChannels);
   const deleteChannel = useChannelsStore((state) => state.deleteChannel);
   const gatewayStatus = useGatewayStore((state) => state.status);
   const gatewayInitialized = useGatewayStore((state) => state.isInitialized);
 
   const [showAddDialog, setShowAddDialog] = useState(false);
   const [selectedChannelType, setSelectedChannelType] = useState<ChannelType | null>(null);
-  const [configuredTypes, setConfiguredTypes] = useState<string[]>([]);
   const [channelToDelete, setChannelToDelete] = useState<{ id: string; type: ChannelType } | null>(null);
+  const [pairingChannel, setPairingChannel] = useState<Channel | null>(null);
   const statusRefreshPendingRef = useRef(false);
   const statusRefreshRafRef = useRef<number | null>(null);
   const statusRefreshLastAtRef = useRef(0);
@@ -138,23 +146,6 @@ export function Channels() {
   useEffect(() => {
     void fetchChannels({ silent: true });
   }, [fetchChannels]);
-
-  // Fetch configured channel types from config file
-  const fetchConfiguredTypes = useCallback(async () => {
-    try {
-      const result = await hostChannelsFetchConfiguredTypes();
-      if (result.success && result.channels) {
-        setConfiguredTypes(result.channels);
-      }
-    } catch {
-      // ignore
-    }
-  }, []);
-
-  useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    void fetchConfiguredTypes();
-  }, [fetchConfiguredTypes]);
 
   const scheduleStatusRefresh = useCallback(() => {
     if (statusRefreshPendingRef.current) {
@@ -170,12 +161,14 @@ export function Channels() {
       }
       statusRefreshLastAtRef.current = now;
       void fetchChannels({ silent: true });
-      void fetchConfiguredTypes();
     });
-  }, [fetchChannels, fetchConfiguredTypes]);
+  }, [fetchChannels]);
 
   useEffect(() => {
-    const unsubscribe = subscribeHostEvent('gateway:channel-status', () => {
+    const unsubscribe = subscribeHostEvent('gateway:channel-status', (payload: unknown) => {
+      if (isRecord(payload) && typeof payload.eventName === 'string' && payload.eventName.startsWith('channel:')) {
+        return;
+      }
       scheduleStatusRefresh();
     });
     return () => {
@@ -203,16 +196,7 @@ export function Channels() {
   const displayedChannelTypes = getPrimaryChannels();
   const displayedChannelTypeSet = new Set<ChannelType>(displayedChannelTypes);
   const safeChannels = Array.isArray(channels) ? channels : [];
-  const visibleChannels = safeChannels.filter((channel) => displayedChannelTypeSet.has(channel.type));
-  const configuredPlaceholderChannels: Channel[] = displayedChannelTypes
-    .filter((type) => configuredTypes.includes(type) && !visibleChannels.some((channel) => channel.type === type))
-    .map((type) => ({
-      id: `${type}-default`,
-      type,
-      name: CHANNEL_NAMES[type] || CHANNEL_META[type].name,
-      status: 'disconnected',
-    }));
-  const configuredChannels = [...visibleChannels, ...configuredPlaceholderChannels];
+  const configuredChannels: Channel[] = safeChannels.filter((channel) => displayedChannelTypeSet.has(channel.type));
 
   // Connected/disconnected channel counts
   const connectedCount = configuredChannels.filter((c) => c.status === 'connected').length;
@@ -233,7 +217,7 @@ export function Channels() {
           </p>
         </div>
         <div className="flex gap-2">
-          <Button variant="outline" onClick={() => { void fetchChannels(); }} disabled={manualRefreshBusy}>
+          <Button variant="outline" onClick={() => { void probeChannels(); }} disabled={manualRefreshBusy}>
             <RefreshCw className={cn('h-4 w-4 mr-2', refreshing && 'animate-spin')} />
             {t('refresh')}
           </Button>
@@ -346,6 +330,7 @@ export function Channels() {
                       key={channel.id}
                       channel={channel}
                       isMutating={Boolean(mutatingByChannelId[channel.id])}
+                      onManagePairing={channel.type === 'feishu' ? () => setPairingChannel(channel) : undefined}
                       onDelete={() => setChannelToDelete({ id: channel.id, type: channel.type })}
                     />
                   ))}
@@ -415,7 +400,6 @@ export function Channels() {
           }}
           onChannelAdded={() => {
             void fetchChannels();
-            void fetchConfiguredTypes();
             setShowAddDialog(false);
             setSelectedChannelType(null);
           }}
@@ -433,12 +417,18 @@ export function Channels() {
           if (channelToDelete) {
             await deleteChannel(channelToDelete.id);
             await fetchChannels({ silent: true });
-            await fetchConfiguredTypes();
             setChannelToDelete(null);
           }
         }}
         onCancel={() => setChannelToDelete(null)}
       />
+
+      {pairingChannel && (
+        <ChannelPairingDialog
+          channel={pairingChannel}
+          onClose={() => setPairingChannel(null)}
+        />
+      )}
     </div>
   );
 }
@@ -448,10 +438,11 @@ export function Channels() {
 interface ChannelCardProps {
   channel: Channel;
   isMutating?: boolean;
+  onManagePairing?: () => void;
   onDelete: () => void;
 }
 
-function ChannelCard({ channel, isMutating = false, onDelete }: ChannelCardProps) {
+function ChannelCard({ channel, isMutating = false, onManagePairing, onDelete }: ChannelCardProps) {
   const { t } = useTranslation('channels');
   const status = channel.status as Status;
   const statusLabel = t(`status.${status}`, { defaultValue: status });
@@ -482,7 +473,18 @@ function ChannelCard({ channel, isMutating = false, onDelete }: ChannelCardProps
           )}
         </div>
 
-        <div className="flex items-center justify-end">
+        <div className="flex items-center justify-end gap-1">
+          {onManagePairing && (
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={onManagePairing}
+              disabled={isMutating}
+              aria-label={t('pairing.manage')}
+            >
+              <UserCheck className="h-4 w-4" />
+            </Button>
+          )}
           <Button
             variant="ghost"
             size="sm"
@@ -495,6 +497,170 @@ function ChannelCard({ channel, isMutating = false, onDelete }: ChannelCardProps
         </div>
       </CardContent>
     </Card>
+  );
+}
+
+// ==================== Channel Pairing Dialog ====================
+
+interface ChannelPairingDialogProps {
+  channel: Channel;
+  onClose: () => void;
+}
+
+function formatPairingTime(value: string): string {
+  const timestamp = Date.parse(value);
+  if (!Number.isFinite(timestamp)) {
+    return value;
+  }
+  return new Intl.DateTimeFormat(undefined, {
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+  }).format(new Date(timestamp));
+}
+
+function ChannelPairingDialog({ channel, onClose }: ChannelPairingDialogProps) {
+  const { t } = useTranslation('channels');
+  const [requests, setRequests] = useState<ChannelPairingRequest[]>([]);
+  const [code, setCode] = useState('');
+  const [loading, setLoading] = useState(true);
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const refreshRequests = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const result = await hostChannelsListPairingRequests(channel.type, channel.accountId);
+      setRequests(result.requests || []);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setLoading(false);
+    }
+  }, [channel.accountId, channel.type]);
+
+  useEffect(() => {
+    void refreshRequests();
+  }, [refreshRequests]);
+
+  const approveCode = async (rawCode: string) => {
+    const pairingCode = rawCode.trim().toUpperCase();
+    if (!pairingCode) {
+      return;
+    }
+    setSubmitting(true);
+    setError(null);
+    try {
+      await hostChannelsApprovePairingRequest(channel.type, {
+        code: pairingCode,
+        accountId: channel.accountId,
+      });
+      toast.success(t('pairing.approvedToast'));
+      setCode('');
+      await refreshRequests();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
+      onMouseDown={(event) => {
+        if (event.target === event.currentTarget) {
+          onClose();
+        }
+      }}
+    >
+      <Card
+        className="w-full max-w-lg"
+        onMouseDown={(event) => event.stopPropagation()}
+      >
+        <CardHeader className="flex flex-row items-start justify-between">
+          <div>
+            <CardTitle>{t('pairing.title', { name: channel.name })}</CardTitle>
+            <CardDescription>{t('pairing.description')}</CardDescription>
+          </div>
+          <Button variant="ghost" size="icon" onClick={onClose}>
+            <X className="h-4 w-4" />
+          </Button>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="space-y-2">
+            <Label htmlFor="channel-pairing-code">{t('pairing.codeLabel')}</Label>
+            <div className="flex gap-2">
+              <Input
+                id="channel-pairing-code"
+                value={code}
+                onChange={(event) => setCode(event.target.value)}
+                placeholder={t('pairing.codePlaceholder')}
+                className="font-mono uppercase"
+              />
+              <Button
+                onClick={() => { void approveCode(code); }}
+                disabled={submitting || !code.trim()}
+              >
+                {submitting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Check className="h-4 w-4" />}
+                {t('pairing.approve')}
+              </Button>
+            </div>
+          </div>
+
+          {error && (
+            <div className="rounded-lg bg-destructive/10 p-3 text-sm text-destructive">
+              {error}
+            </div>
+          )}
+
+          <Separator />
+
+          <div className="space-y-3">
+            <div className="flex items-center justify-between">
+              <p className="text-sm font-medium">{t('pairing.pendingTitle')}</p>
+              <Button variant="ghost" size="sm" onClick={() => { void refreshRequests(); }} disabled={loading}>
+                <RefreshCw className={cn('h-4 w-4', loading && 'animate-spin')} />
+              </Button>
+            </div>
+            {loading ? (
+              <div className="flex items-center gap-2 py-4 text-sm text-muted-foreground">
+                <Loader2 className="h-4 w-4 animate-spin" />
+                {t('common:status.loading', 'Loading...')}
+              </div>
+            ) : requests.length > 0 ? (
+              <div className="space-y-2">
+                {requests.map((request) => (
+                  <div key={`${request.id}-${request.code}`} className="flex items-center justify-between rounded-lg border p-3">
+                    <div className="min-w-0">
+                      <p className="truncate font-mono text-sm">{request.code}</p>
+                      <p className="truncate text-xs text-muted-foreground">
+                        {request.id} · {formatPairingTime(request.lastSeenAt)}
+                      </p>
+                    </div>
+                    <Button
+                      variant="secondary"
+                      size="sm"
+                      onClick={() => { void approveCode(request.code); }}
+                      disabled={submitting}
+                    >
+                      <Check className="h-4 w-4" />
+                      {t('pairing.approve')}
+                    </Button>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <p className="rounded-lg bg-muted p-3 text-sm text-muted-foreground">
+                {t('pairing.empty')}
+              </p>
+            )}
+          </div>
+        </CardContent>
+      </Card>
+    </div>
   );
 }
 
@@ -520,6 +686,7 @@ function AddChannelDialog({ selectedType, onSelectType, onClose, onChannelAdded 
   const [isExistingConfig, setIsExistingConfig] = useState(false);
   const qrGenerateTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const firstInputRef = useRef<HTMLInputElement>(null);
+  const onChannelAddedRef = useRef(onChannelAdded);
   const [validationResult, setValidationResult] = useState<{
     valid: boolean;
     errors: string[];
@@ -528,6 +695,10 @@ function AddChannelDialog({ selectedType, onSelectType, onClose, onChannelAdded 
   const [showAdvancedSettings, setShowAdvancedSettings] = useState(false);
 
   const meta: ChannelMeta | null = selectedType ? CHANNEL_META[selectedType] : null;
+
+  useEffect(() => {
+    onChannelAddedRef.current = onChannelAdded;
+  }, [onChannelAdded]);
 
   const clearQrGenerateTimeout = useCallback(() => {
     if (qrGenerateTimeoutRef.current) {
@@ -613,7 +784,7 @@ function AddChannelDialog({ selectedType, onSelectType, onClose, onChannelAdded 
         toast.success(t('toast.channelSaved', { name: CHANNEL_NAMES[selectedType] }));
       }
       void data;
-      onChannelAdded();
+      onChannelAddedRef.current();
       setConnecting(false);
     };
 
@@ -631,20 +802,36 @@ function AddChannelDialog({ selectedType, onSelectType, onClose, onChannelAdded 
       setConnecting(false);
     };
 
-    const removeQrListener = subscribeHostEvent(`${eventPrefix}-qr`, onQr);
-    const removeSuccessListener = subscribeHostEvent(`${eventPrefix}-success`, onSuccess);
-    const removeErrorListener = subscribeHostEvent(`${eventPrefix}-error`, onError);
+    const removeChannelStatusListener = subscribeHostEvent('gateway:channel-status', (raw: unknown) => {
+      if (!isRecord(raw) || typeof raw.eventName !== 'string') {
+        return;
+      }
+      const payload = raw.payload;
+      if (raw.eventName === `${eventPrefix}-qr`) {
+        onQr(isRecord(payload) ? {
+          qr: typeof payload.qr === 'string' ? payload.qr : undefined,
+          qrDataUrl: typeof payload.qrDataUrl === 'string' ? payload.qrDataUrl : undefined,
+          raw: typeof payload.raw === 'string' ? payload.raw : undefined,
+        } : {});
+        return;
+      }
+      if (raw.eventName === `${eventPrefix}-success`) {
+        void onSuccess(isRecord(payload) ? { accountId: typeof payload.accountId === 'string' ? payload.accountId : undefined } : undefined);
+        return;
+      }
+      if (raw.eventName === `${eventPrefix}-error`) {
+        onError(payload);
+      }
+    });
 
     return () => {
-      if (typeof removeQrListener === 'function') removeQrListener();
-      if (typeof removeSuccessListener === 'function') removeSuccessListener();
-      if (typeof removeErrorListener === 'function') removeErrorListener();
+      if (typeof removeChannelStatusListener === 'function') removeChannelStatusListener();
       clearQrGenerateTimeout();
       // Cancel when unmounting or switching types
       const qrChannelType = selectedType as Extract<ChannelType, 'whatsapp' | 'openclaw-weixin'>;
       void hostChannelsCancelSession(qrChannelType).catch(() => { });
     };
-  }, [selectedType, channelName, onChannelAdded, t, clearQrGenerateTimeout]);
+  }, [selectedType, t, clearQrGenerateTimeout]);
 
   const handleValidate = async () => {
     if (!selectedType) return;

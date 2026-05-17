@@ -34,6 +34,8 @@
   "private": true,
   "scripts": {
     "init": "pnpm install && pnpm run uv:download",
+    "postinstall": "node scripts/strip-openclaw-bundled-channels.mjs",
+    "strip:openclaw-bundled-channels": "node scripts/strip-openclaw-bundled-channels.mjs",
     "dev": "pnpm run build:runtime-host-process && vite",
     "build": "pnpm run build:runtime-host-process && pnpm run build:vite && zx scripts/bundle-openclaw.mjs && zx scripts/bundle-openclaw-plugins.mjs && zx scripts/bundle-preinstalled-skills.mjs && electron-builder",
     "build:vite": "node --max-old-space-size=6144 ./node_modules/vite/bin/vite.js build",

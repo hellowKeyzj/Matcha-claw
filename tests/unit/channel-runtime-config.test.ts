@@ -1,4 +1,5 @@
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -8,6 +9,11 @@ import { createTestOpenClawEnvironmentRepository } from './helpers/runtime-syste
 import { ManagedPluginInstaller } from '../../runtime-host/application/plugins/managed-plugin-installer';
 import { PluginCompanionSkillService } from '../../runtime-host/application/plugins/plugin-companion-skill-service';
 import { createTestPluginFileSystem } from './helpers/plugin-file-system';
+
+const require = createRequire(import.meta.url);
+const { getLarkAccount } = require('../../node_modules/@larksuite/openclaw-lark/src/core/accounts.js') as {
+  getLarkAccount: (config: Record<string, any>, accountId?: string | null) => Record<string, any>;
+};
 
 describe('channel-runtime config save', () => {
   let tempDir = '';
@@ -91,6 +97,58 @@ describe('channel-runtime config save', () => {
     expect(config.plugins.entries.feishu?.enabled).toBe(false);
   }, 15000);
 
+  it('保存 Feishu 默认账号时写入插件实际读取的顶层凭证', async () => {
+    await repository.saveChannelConfig({
+      channelType: 'feishu',
+      config: {
+        appId: 'cli_default',
+        appSecret: 'default-secret',
+      },
+      enabled: true,
+    });
+
+    const config = JSON.parse(
+      await readFile(join(tempDir, 'openclaw.json'), 'utf8'),
+    ) as Record<string, any>;
+
+    expect(config.channels.feishu.appId).toBe('cli_default');
+    expect(config.channels.feishu.appSecret).toBe('default-secret');
+    expect(config.channels.feishu.accounts?.default).toBeUndefined();
+    expect(getLarkAccount(config as any, 'default')).toMatchObject({
+      accountId: 'default',
+      configured: true,
+      appId: 'cli_default',
+      appSecret: 'default-secret',
+    });
+  }, 15000);
+
+  it('读取 Feishu 表单值时兼容旧 accounts.default 凭证', async () => {
+    await writeFile(
+      join(tempDir, 'openclaw.json'),
+      `${JSON.stringify({
+        channels: {
+          feishu: {
+            enabled: true,
+            defaultAccount: 'default',
+            accounts: {
+              default: {
+                appId: 'cli_old_default',
+                appSecret: 'old-default-secret',
+                enabled: true,
+              },
+            },
+          },
+        },
+      }, null, 2)}\n`,
+      'utf8',
+    );
+
+    await expect(repository.getChannelFormValues('feishu')).resolves.toMatchObject({
+      appId: 'cli_old_default',
+      appSecret: 'old-default-secret',
+    });
+  });
+
   it('同一频道下不同账号禁止复用唯一凭证', async () => {
     await expect(repository.saveChannelConfig({
       channelType: 'feishu',
@@ -124,6 +182,74 @@ describe('channel-runtime config save', () => {
     expect(config.plugins.entries.wecom.enabled).toBe(true);
     expect(config.plugins.entries['wecom-openclaw-plugin']).toBeUndefined();
   });
+
+  it('准备 WeChat 插件时只安装扩展，不提前写入渠道配置', async () => {
+    await repository.prepareChannelPlugin('openclaw-weixin');
+
+    await expect(readFile(
+      join(tempDir, 'extensions', 'openclaw-weixin', 'openclaw.plugin.json'),
+      'utf8',
+    )).resolves.toContain('"id": "openclaw-weixin"');
+
+    const config = JSON.parse(
+      await readFile(join(tempDir, 'openclaw.json'), 'utf8'),
+    ) as Record<string, any>;
+
+    expect(config.channels?.['openclaw-weixin']).toBeUndefined();
+    expect(config.plugins?.allow ?? []).not.toContain('openclaw-weixin');
+    expect(config.plugins?.entries?.['openclaw-weixin']).toBeUndefined();
+  }, 15000);
+
+  it('保存 WeChat 新登录账号时移除同一用户的旧账号并设为默认账号', async () => {
+    await writeFile(
+      join(tempDir, 'openclaw.json'),
+      `${JSON.stringify({
+        plugins: {
+          allow: ['openclaw-weixin'],
+          entries: {
+            'openclaw-weixin': { enabled: true },
+          },
+        },
+        channels: {
+          'openclaw-weixin': {
+            enabled: true,
+            defaultAccount: 'old-im-bot',
+            accounts: {
+              'old-im-bot': {
+                enabled: true,
+                updatedAt: '2026-04-20T00:00:00.000Z',
+              },
+              'other-im-bot': {
+                enabled: true,
+                updatedAt: '2026-04-21T00:00:00.000Z',
+              },
+            },
+          },
+        },
+      }, null, 2)}\n`,
+      'utf8',
+    );
+
+    await repository.saveChannelConfig({
+      channelType: 'openclaw-weixin',
+      accountId: 'new-im-bot',
+      config: { enabled: true },
+      enabled: true,
+      staleAccountIds: ['old-im-bot'],
+    });
+
+    const config = JSON.parse(
+      await readFile(join(tempDir, 'openclaw.json'), 'utf8'),
+    ) as Record<string, any>;
+
+    expect(config.channels['openclaw-weixin'].defaultAccount).toBe('new-im-bot');
+    expect(config.channels['openclaw-weixin'].accounts['old-im-bot']).toBeUndefined();
+    expect(config.channels['openclaw-weixin'].accounts['other-im-bot']).toBeDefined();
+    expect(config.channels['openclaw-weixin'].accounts['new-im-bot']).toMatchObject({
+      enabled: true,
+      updatedAt: '2023-11-14T22:13:20.000Z',
+    });
+  }, 15000);
 
   it('保存 QQBot 配置时会迁移到 openclaw-qqbot 插件 ID', async () => {
     await writeFile(
@@ -180,7 +306,7 @@ describe('channel-runtime config save', () => {
     expect(channels).not.toContain('qqbot');
   });
 
-  it('忽略数组形态的异常 accounts，并回退到默认账号 legacy 配置', async () => {
+  it('Feishu accounts 形态异常但顶层凭证存在时仍识别为默认账号配置', async () => {
     await writeFile(
       join(tempDir, 'openclaw.json'),
       `${JSON.stringify({
@@ -198,7 +324,12 @@ describe('channel-runtime config save', () => {
     );
 
     const channels = await repository.listConfiguredChannels();
-    expect(channels).not.toContain('feishu');
+    expect(channels).toContain('feishu');
+
+    await expect(repository.getChannelFormValues('feishu')).resolves.toMatchObject({
+      appId: 'cli_real_app',
+      appSecret: 'real_secret',
+    });
   });
 
   it('内置频道保存配置时保留已有信任白名单但不把 bundled channel 写进 allowlist', async () => {

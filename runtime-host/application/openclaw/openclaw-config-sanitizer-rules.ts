@@ -17,6 +17,46 @@ const BUILTIN_CHANNEL_IDS = new Set([
   'mattermost',
 ]);
 
+const FEISHU_ACCOUNT_SCOPED_KEYS = [
+  'appId',
+  'appSecret',
+  'encryptKey',
+  'verificationToken',
+  'name',
+  'domain',
+  'connectionMode',
+  'webhookPath',
+  'webhookPort',
+  'dmPolicy',
+  'allowFrom',
+  'groupPolicy',
+  'groupAllowFrom',
+  'requireMention',
+  'respondToMentionAll',
+  'groups',
+  'historyLimit',
+  'dmHistoryLimit',
+  'dms',
+  'textChunkLimit',
+  'chunkMode',
+  'blockStreamingCoalesce',
+  'mediaMaxMb',
+  'heartbeat',
+  'replyMode',
+  'streaming',
+  'blockStreaming',
+  'toolUseDisplay',
+  'tools',
+  'footer',
+  'markdown',
+  'configWrites',
+  'capabilities',
+  'dedup',
+  'reactionNotifications',
+  'threadSession',
+  'uat',
+] as const;
+
 export interface OpenClawConfigSanitizerRulesDeps {
   fileExists(pathname: string): Promise<boolean>;
   discoverBundledPluginIds(): Promise<Set<string>>;
@@ -274,6 +314,50 @@ function sanitizeStrictSchemaChannels(config: Record<string, unknown>, deps: Ope
   return modified;
 }
 
+function migrateFeishuDefaultAccountToTopLevel(
+  config: Record<string, unknown>,
+  deps: OpenClawConfigSanitizerRulesDeps,
+): boolean {
+  const channels = (
+    config.channels && typeof config.channels === 'object' && !Array.isArray(config.channels)
+      ? config.channels as Record<string, Record<string, unknown>>
+      : {}
+  );
+  const feishu = channels.feishu;
+  if (!feishu || typeof feishu !== 'object' || Array.isArray(feishu)) {
+    return false;
+  }
+  const accounts = (
+    feishu.accounts && typeof feishu.accounts === 'object' && !Array.isArray(feishu.accounts)
+      ? feishu.accounts as Record<string, Record<string, unknown>>
+      : null
+  );
+  const defaultAccount = accounts?.default;
+  if (!defaultAccount || typeof defaultAccount !== 'object' || Array.isArray(defaultAccount)) {
+    return false;
+  }
+
+  let modified = false;
+  for (const key of FEISHU_ACCOUNT_SCOPED_KEYS) {
+    if (defaultAccount[key] !== undefined && feishu[key] === undefined) {
+      feishu[key] = defaultAccount[key];
+      modified = true;
+    }
+  }
+
+  delete accounts.default;
+  modified = true;
+  if (Object.keys(accounts).length === 0) {
+    delete feishu.accounts;
+  }
+  if (feishu.defaultAccount === 'default') {
+    delete feishu.defaultAccount;
+  }
+
+  deps.info('[sanitize] Migrated channels.feishu.accounts.default to top-level channels.feishu for openclaw-lark default account compatibility');
+  return modified;
+}
+
 function migrateAllowId(
   allowList: string[],
   legacyId: string,
@@ -457,6 +541,7 @@ export async function applyOpenClawConfigSanitizerRules(
   modified = enforceBootstrapCharLimits(config, deps) || modified;
   modified = await sanitizePluginsLoadPaths(config, deps) || modified;
   modified = sanitizeStrictSchemaChannels(config, deps) || modified;
+  modified = migrateFeishuDefaultAccountToTopLevel(config, deps) || modified;
   modified = await sanitizePlugins(config, deps) || modified;
   return modified;
 }

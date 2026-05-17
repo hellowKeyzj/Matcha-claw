@@ -62,7 +62,7 @@ export interface GatewayConnectionPort {
 
 export interface GatewayChannelPort {
   readGatewayConnectionState(timeoutMs?: number): Promise<unknown>;
-  channelsStatus(probe?: boolean): Promise<unknown>;
+  channelsStatus(probe: boolean): Promise<unknown>;
   channelsConnect(channelId: string): Promise<unknown>;
   channelsDisconnect(channelId: string): Promise<unknown>;
   channelsRequestQr(channelType: string): Promise<unknown>;

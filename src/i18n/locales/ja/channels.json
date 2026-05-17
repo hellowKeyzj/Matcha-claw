@@ -28,6 +28,17 @@
     "deleteConfirm": "このチャンネルを削除してもよろしいですか？",
     "showAll": "すべて表示",
     "pluginBadge": "プラグイン",
+    "pairing": {
+        "manage": "ユーザー連携を管理",
+        "title": "{{name}} ユーザー連携",
+        "description": "ボットにメッセージを送ったユーザーを承認します。承認後、そのユーザーはこのチャンネルを使用できます。",
+        "codeLabel": "ペアリングコード",
+        "codePlaceholder": "例: RTHZA8EP",
+        "approve": "承認",
+        "pendingTitle": "保留中のリクエスト",
+        "empty": "保留中のリクエストはありません。ユーザーに先にボットへメッセージを送ってもらい、ここで承認してください。",
+        "approvedToast": "ユーザー連携を承認しました"
+    },
     "toast": {
         "whatsappConnected": "WhatsApp が正常に接続されました",
         "whatsappFailed": "WhatsApp 接続に失敗しました: {{error}}",

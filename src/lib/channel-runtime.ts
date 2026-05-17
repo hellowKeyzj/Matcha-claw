@@ -9,10 +9,6 @@ async function submitChannelJob<TResult = unknown>(
   return await waitForRuntimeJobResult<TResult>(submission.job.id);
 }
 
-export async function hostChannelsFetchConfiguredTypes(): Promise<{ success: boolean; channels?: string[] }> {
-  return await hostApiFetch<{ success: boolean; channels?: string[] }>('/api/channels/configured');
-}
-
 export interface ChannelSnapshotFetchResult {
   success: boolean;
   snapshot?: unknown;
@@ -22,8 +18,20 @@ export interface ChannelSnapshotFetchResult {
   error?: string | null;
 }
 
+export interface ChannelPairingRequest {
+  id: string;
+  code: string;
+  createdAt: string;
+  lastSeenAt: string;
+  meta?: Record<string, string>;
+}
+
 export async function hostChannelsFetchSnapshot(): Promise<ChannelSnapshotFetchResult> {
   return await hostApiFetch<ChannelSnapshotFetchResult>('/api/channels/snapshot');
+}
+
+export async function hostChannelsProbe(): Promise<unknown> {
+  return await submitChannelJob('/api/channels/probe', { method: 'POST' });
 }
 
 export async function hostChannelsReadConfig(
@@ -117,4 +125,27 @@ export async function hostChannelsCancelSession(
     method: 'POST',
     body: JSON.stringify({ channelType }),
   });
+}
+
+export async function hostChannelsListPairingRequests(
+  channelType: ChannelType,
+  accountId?: string,
+): Promise<{ success: boolean; requests?: ChannelPairingRequest[] }> {
+  const suffix = accountId ? `?accountId=${encodeURIComponent(accountId)}` : '';
+  return await hostApiFetch<{ success: boolean; requests?: ChannelPairingRequest[] }>(
+    `/api/channels/pairing/${encodeURIComponent(channelType)}${suffix}`,
+  );
+}
+
+export async function hostChannelsApprovePairingRequest(
+  channelType: ChannelType,
+  input: { code: string; accountId?: string },
+): Promise<{ success: boolean; approved?: { id: string; entry?: ChannelPairingRequest } }> {
+  return await hostApiFetch<{ success: boolean; approved?: { id: string; entry?: ChannelPairingRequest } }>(
+    `/api/channels/pairing/${encodeURIComponent(channelType)}/approve`,
+    {
+      method: 'POST',
+      body: JSON.stringify(input),
+    },
+  );
 }

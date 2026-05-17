@@ -49,10 +49,6 @@ vi.mock('../../electron/utils/fs-path', () => ({
   fsPath: (value: string) => value,
 }));
 
-vi.mock('../../electron/gateway/bundled-plugins-mirror', () => ({
-  ensureBundledPluginsMirrorDir: vi.fn(async () => undefined),
-}));
-
 vi.mock('../../electron/main/runtime-host-client', () => ({
   createDefaultRuntimeHostHttpClient: vi.fn(() => ({
     request: (...args: unknown[]) => hoisted.runtimeHostRequestMock(...args),

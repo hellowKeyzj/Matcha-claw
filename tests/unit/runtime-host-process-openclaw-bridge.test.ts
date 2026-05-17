@@ -86,6 +86,7 @@ describe('runtime-host openclaw bridge', () => {
     const bridge = createOpenClawBridge(client);
 
     await bridge.channelsStatus(true);
+    await bridge.channelsStatus(false);
     await bridge.channelsConnect('wecom-main');
     await bridge.channelsDisconnect('wecom-main');
     await bridge.channelsRequestQr('whatsapp');
@@ -94,22 +95,28 @@ describe('runtime-host openclaw bridge', () => {
       1,
       'channels.status',
       { probe: true },
-      10000,
+      30000,
     );
     expect(client.gatewayRpc).toHaveBeenNthCalledWith(
       2,
+      'channels.status',
+      { probe: false },
+      10000,
+    );
+    expect(client.gatewayRpc).toHaveBeenNthCalledWith(
+      3,
       'channels.connect',
       { channelId: 'wecom-main' },
       10000,
     );
     expect(client.gatewayRpc).toHaveBeenNthCalledWith(
-      3,
+      4,
       'channels.disconnect',
       { channelId: 'wecom-main' },
       10000,
     );
     expect(client.gatewayRpc).toHaveBeenNthCalledWith(
-      4,
+      5,
       'channels.requestQr',
       { type: 'whatsapp' },
       12000,

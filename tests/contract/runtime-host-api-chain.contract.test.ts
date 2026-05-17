@@ -77,12 +77,15 @@ describe('runtime-host API 真实链路 contract', () => {
     expect(saved.success).toBe(true);
     await harness.waitForJob(saved.job.id);
 
-    const configured = await harness.dispatchOk<{ success: boolean; channels: string[] }>(
+    const snapshot = await harness.dispatchOk<{
+      success: boolean;
+      snapshot: { channelOrder: string[] };
+    }>(
       'GET',
-      '/api/channels/configured',
+      '/api/channels/snapshot',
     );
-    expect(configured.success).toBe(true);
-    expect(configured.channels).toContain('wecom');
+    expect(snapshot.success).toBe(true);
+    expect(snapshot.snapshot.channelOrder).toContain('wecom');
 
     const values = await harness.dispatchOk<{ success: boolean; values: Record<string, string> }>(
       'GET',

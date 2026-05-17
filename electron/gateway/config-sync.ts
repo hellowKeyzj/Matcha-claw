@@ -4,9 +4,7 @@ import { existsSync } from 'fs';
 import { getOpenClawDir, getOpenClawEntryPath, isOpenClawPresent } from '../utils/paths';
 import { getUvMirrorEnv } from '../utils/uv-env';
 import { buildProxyEnv, resolveProxySettings } from '../utils/proxy';
-import { logger } from '../utils/logger';
 import { prependPathEntry } from '../utils/env-path';
-import { ensureBundledPluginsMirrorDir } from './bundled-plugins-mirror';
 import { createDefaultRuntimeHostHttpClient } from '../main/runtime-host-client';
 import { stripSystemdSupervisorEnv } from './config-sync-env';
 import { waitForRuntimeHostJob, type RuntimeHostJobSnapshot } from '../main/runtime-host-jobs';
@@ -28,7 +26,6 @@ export interface GatewayLaunchContext {
   loadedProviderKeyCount: number;
   proxySummary: string;
   channelStartupSummary: string;
-  bundledPluginsDir?: string;
 }
 
 type GatewayLaunchSettings = {
@@ -129,13 +126,6 @@ export async function prepareGatewayLaunchContext(
   await prepareGatewayRuntimeBeforeLaunch(runtimeHost, appSettings);
   const launchPlan = await loadGatewayLaunchPlan();
 
-  const bundledPluginsDir = await ensureBundledPluginsMirrorDir({
-    openclawDir,
-    mirrorRootDir: path.join(app.getPath('userData'), 'openclaw-bundled-plugins'),
-    packaged: app.isPackaged,
-    logger,
-  });
-
   if (!existsSync(entryScript)) {
     throw new Error(`OpenClaw entry script not found at: ${entryScript}`);
   }
@@ -174,9 +164,6 @@ export async function prepareGatewayLaunchContext(
     CLAWDBOT_SKIP_CHANNELS: skipChannels ? '1' : '',
     OPENCLAW_NO_RESPAWN: '1',
   };
-  if (bundledPluginsDir) {
-    forkEnv.OPENCLAW_BUNDLED_PLUGINS_DIR = bundledPluginsDir;
-  }
 
   return {
     openclawDir,
@@ -188,6 +175,5 @@ export async function prepareGatewayLaunchContext(
     loadedProviderKeyCount,
     proxySummary,
     channelStartupSummary,
-    bundledPluginsDir,
   };
 }

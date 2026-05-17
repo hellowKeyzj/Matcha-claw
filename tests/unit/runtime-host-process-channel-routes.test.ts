@@ -25,6 +25,7 @@ function createDeps() {
     listConfiguredChannels: vi.fn(async () => []),
     validateChannelConfig: vi.fn(async () => ({ valid: true, errors: [], warnings: [] })),
     validateChannelCredentials: vi.fn(async () => ({ valid: true, errors: [], warnings: [] })),
+    prepareChannelPlugin: vi.fn(async () => {}),
     requestParentShellAction: vi.fn(async () => ({ success: true, status: 200, data: { success: true } })),
     mapParentTransportResponse: vi.fn((upstream: unknown) => ({ status: 200, data: upstream })),
     submitActivateDirectChannel: vi.fn(() => ({
@@ -49,6 +50,17 @@ function createDeps() {
         maxAttempts: 1,
       },
     })),
+    submitProbeSnapshot: vi.fn(() => ({
+      success: true,
+      job: {
+        id: 'job-probe',
+        type: 'channels.probeSnapshot',
+        status: 'queued',
+        queuedAt: 2,
+        attempts: 0,
+        maxAttempts: 1,
+      },
+    })),
     submitDeleteChannelConfig: vi.fn(() => ({
       success: true,
       job: {
@@ -63,6 +75,28 @@ function createDeps() {
     saveChannelConfig: vi.fn(async () => {}),
     getChannelFormValues: vi.fn(async () => ({})),
     deleteChannelConfig: vi.fn(async () => {}),
+    listPairingRequests: vi.fn(async () => ({
+      success: true,
+      requests: [{
+        id: 'ou_user_1',
+        code: 'RTHZA8EP',
+        createdAt: '2026-05-18T00:00:00.000Z',
+        lastSeenAt: '2026-05-18T00:01:00.000Z',
+        meta: { name: 'Alice' },
+      }],
+    })),
+    approvePairingRequest: vi.fn(async (input: { code: string }) => ({
+      success: true,
+      approved: {
+        id: 'ou_user_1',
+        entry: {
+          id: 'ou_user_1',
+          code: input.code,
+          createdAt: '2026-05-18T00:00:00.000Z',
+          lastSeenAt: '2026-05-18T00:01:00.000Z',
+        },
+      },
+    })),
     startLoginSession: vi.fn(async (input: { channelType: string; accountId?: string }) => ({
       queued: true as const,
       sessionKey: input.accountId || input.channelType,
@@ -78,6 +112,7 @@ function createDeps() {
           listConfiguredChannels: deps.listConfiguredChannels,
           validateChannelConfig: deps.validateChannelConfig,
           validateChannelCredentials: deps.validateChannelCredentials,
+          prepareChannelPlugin: deps.prepareChannelPlugin,
           saveChannelConfig: deps.saveChannelConfig,
           getChannelFormValues: deps.getChannelFormValues,
           deleteChannelConfig: deps.deleteChannelConfig,
@@ -90,8 +125,13 @@ function createDeps() {
           start: deps.startLoginSession,
           cancel: deps.cancelLoginSession,
         },
+        pairing: {
+          listRequests: deps.listPairingRequests,
+          approveRequest: deps.approvePairingRequest,
+        },
         jobs: {
           submitRefreshSnapshot: deps.submitRefreshSnapshot,
+          submitProbeSnapshot: deps.submitProbeSnapshot,
           submitActivateDirectChannel: deps.submitActivateDirectChannel,
           submitDeleteChannelConfig: deps.submitDeleteChannelConfig,
         },
@@ -128,7 +168,12 @@ describe('runtime-host process channel routes', () => {
       status: 200,
       data: {
         success: true,
-        snapshot: null,
+        snapshot: {
+          channelOrder: [],
+          channels: {},
+          channelAccounts: {},
+          channelDefaultAccountId: {},
+        },
         ready: false,
         refreshing: false,
         updatedAt: null,
@@ -154,7 +199,12 @@ describe('runtime-host process channel routes', () => {
       status: 200,
       data: {
         success: true,
-        snapshot: null,
+        snapshot: {
+          channelOrder: [],
+          channels: {},
+          channelAccounts: {},
+          channelDefaultAccountId: {},
+        },
         ready: false,
         refreshing: true,
         updatedAt: null,
@@ -260,6 +310,10 @@ describe('runtime-host process channel routes', () => {
       accountId: 'wx-main',
       config: { routeTag: 'prod' },
     });
+    expect(deps.prepareChannelPlugin).toHaveBeenCalledWith('openclaw-weixin');
+    expect(deps.prepareChannelPlugin.mock.invocationCallOrder[0]).toBeLessThan(
+      deps.startLoginSession.mock.invocationCallOrder[0],
+    );
     expect(deps.requestParentShellAction).not.toHaveBeenCalled();
     expect(result).toEqual({ status: 200, data: { success: true, queued: true, sessionKey: 'wx-main' } });
   });
@@ -305,6 +359,92 @@ describe('runtime-host process channel routes', () => {
           queuedAt: 3,
           attempts: 0,
           maxAttempts: 1,
+        },
+      },
+    });
+  });
+
+  it('深度 probe 渠道只提交后台任务，不会同步访问 gateway', async () => {
+    const deps = createDeps();
+
+    const result = await dispatchRuntimeRouteDefinition(channelRoutes,
+      'POST',
+      '/api/channels/probe',
+      new URL('http://127.0.0.1/api/channels/probe'),
+      undefined,
+      deps.routeDeps,
+    );
+
+    expect(deps.submitProbeSnapshot).toHaveBeenCalledTimes(1);
+    expect(deps.openclawBridge.channelsStatus).not.toHaveBeenCalled();
+    expect(result).toEqual({
+      status: 202,
+      data: {
+        success: true,
+        job: {
+          id: 'job-probe',
+          type: 'channels.probeSnapshot',
+          status: 'queued',
+          queuedAt: 2,
+          attempts: 0,
+          maxAttempts: 1,
+        },
+      },
+    });
+  });
+
+  it('渠道配对列表和审批走 runtime-host pairing 服务', async () => {
+    const deps = createDeps();
+
+    const listResult = await dispatchRuntimeRouteDefinition(channelRoutes,
+      'GET',
+      '/api/channels/pairing/feishu',
+      new URL('http://127.0.0.1/api/channels/pairing/feishu?accountId=default'),
+      undefined,
+      deps.routeDeps,
+    );
+    const approveResult = await dispatchRuntimeRouteDefinition(channelRoutes,
+      'POST',
+      '/api/channels/pairing/feishu/approve',
+      new URL('http://127.0.0.1/api/channels/pairing/feishu/approve'),
+      { code: ' RTHZA8EP ', accountId: 'default' },
+      deps.routeDeps,
+    );
+
+    expect(deps.listPairingRequests).toHaveBeenCalledWith({
+      channelType: 'feishu',
+      accountId: 'default',
+    });
+    expect(deps.approvePairingRequest).toHaveBeenCalledWith({
+      channelType: 'feishu',
+      code: 'RTHZA8EP',
+      accountId: 'default',
+    });
+    expect(listResult).toEqual({
+      status: 200,
+      data: {
+        success: true,
+        requests: [{
+          id: 'ou_user_1',
+          code: 'RTHZA8EP',
+          createdAt: '2026-05-18T00:00:00.000Z',
+          lastSeenAt: '2026-05-18T00:01:00.000Z',
+          meta: { name: 'Alice' },
+        }],
+      },
+    });
+    expect(approveResult).toEqual({
+      status: 200,
+      data: {
+        success: true,
+        approved: {
+          id: 'ou_user_1',
+          entry: {
+            id: 'ou_user_1',
+            code: 'RTHZA8EP',
+            createdAt: '2026-05-18T00:00:00.000Z',
+            lastSeenAt: '2026-05-18T00:01:00.000Z',
+          },
         },
       },
     });

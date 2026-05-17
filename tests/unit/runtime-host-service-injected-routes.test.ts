@@ -18,7 +18,7 @@ describe('runtime-host service-injected routes', () => {
   it('routes channel requests through the injected channel service', async () => {
     const channelService = {
       snapshot: vi.fn(async () => ({ success: true, snapshot: [] })),
-      configured: vi.fn(),
+      probe: vi.fn(),
       validateConfig: vi.fn(),
       validateCredentials: vi.fn(),
       activate: vi.fn(),

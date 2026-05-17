@@ -12,6 +12,7 @@ import type { ChatSession } from '@/stores/chat/types';
 import {
   findLatestAssistantSnapshotFromItems,
   findLatestAssistantTextFromItems,
+  findLatestAssistantTurnTextFromItems,
 } from '@/stores/chat/timeline-message';
 
 export interface AssistantSnapshot {
@@ -73,6 +74,16 @@ export async function fetchLatestAssistantText(
     limit: input.limit,
   });
   return findLatestAssistantTextFromItems(items);
+}
+
+export async function fetchLatestAssistantTurnText(
+  input: FetchChatHistoryInput,
+): Promise<string> {
+  const items = await fetchChatTimeline({
+    sessionKey: input.sessionKey,
+    limit: input.limit,
+  });
+  return findLatestAssistantTurnTextFromItems(items);
 }
 
 export async function fetchLatestAssistantSnapshot(

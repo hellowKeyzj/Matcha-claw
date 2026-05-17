@@ -1,9 +1,11 @@
 import { isChannelDerivedPluginId } from '../../application/channels/channel-plugin-bindings';
 import type { ChannelConfigPort } from '../../application/channels/channel-runtime';
 import { ChannelLoginSessionService } from '../../application/channels/channel-login-session-service';
+import { ChannelPairingService } from '../../application/channels/channel-pairing-service';
 import {
   ACTIVATE_DIRECT_CHANNEL_JOB,
   DELETE_CHANNEL_CONFIG_JOB,
+  PROBE_CHANNEL_SNAPSHOT_JOB,
   REFRESH_CHANNEL_SNAPSHOT_JOB,
   createChannelJobPort,
   type ChannelJobPort,
@@ -115,9 +117,13 @@ export function registerOpenClawApplicationServices(
     channelConfig: scope.resolve<ChannelConfigPort>('channels.configRepository'),
     parentShell: context.parentShell,
     loginSessions: scope.resolve('channels.loginSessionService'),
+    pairing: scope.resolve('channels.pairingService'),
     jobs: scope.resolve<ChannelJobPort>('channels.jobs'),
     clock: scope.resolve<RuntimeClockPort>('runtime.clock'),
   }));
+  container.register('channels.pairingService', (scope) => new ChannelPairingService(
+    scope.resolve('openclaw.environmentRepository'),
+  ));
   container.register('channels.loginSessionService', (scope) => new ChannelLoginSessionService({
     fileSystem: scope.resolve<RuntimeFileSystemPort>('runtime.fileSystem'),
     environment: scope.resolve('openclaw.environmentRepository'),
@@ -247,6 +253,12 @@ function createOpenClawApplicationJobDefinitions(
       type: REFRESH_CHANNEL_SNAPSHOT_JOB,
       handler: async () => {
         return await container.resolve<ChannelService>('channels.service').refreshSnapshot();
+      },
+    },
+    {
+      type: PROBE_CHANNEL_SNAPSHOT_JOB,
+      handler: async () => {
+        return await container.resolve<ChannelService>('channels.service').probeSnapshot();
       },
     },
     {

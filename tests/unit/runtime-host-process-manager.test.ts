@@ -2138,24 +2138,6 @@ describe('runtime-host process manager', () => {
       expect(savePayload.data?.success).toBe(true);
       await waitForRuntimeHostJob(port, (savePayload.data as { job?: { id?: string } } | undefined)?.job?.id);
 
-      const configuredResponse = await fetch(`http://127.0.0.1:${port}/dispatch`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          version: 1,
-          method: 'GET',
-          route: '/api/channels/configured',
-        }),
-      });
-      const configuredPayload = await configuredResponse.json() as {
-        success: boolean;
-        status: number;
-        data?: { channels?: string[] };
-      };
-      expect(configuredResponse.status).toBe(200);
-      expect(JSON.parse(readFileSync(join(configDir, 'openclaw.json'), 'utf8')).channels?.discord).toBeDefined();
-      expect(configuredPayload.data?.channels).toContain('discord');
-
       const snapshotResponse = await fetch(`http://127.0.0.1:${port}/dispatch`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -2171,6 +2153,7 @@ describe('runtime-host process manager', () => {
         data?: { success?: boolean; snapshot?: { channelOrder?: string[] } };
       };
       expect(snapshotResponse.status).toBe(200);
+      expect(JSON.parse(readFileSync(join(configDir, 'openclaw.json'), 'utf8')).channels?.discord).toBeDefined();
       expect(snapshotPayload.data?.success).toBe(true);
       expect(snapshotPayload.data?.snapshot?.channelOrder).toEqual(['discord']);
 

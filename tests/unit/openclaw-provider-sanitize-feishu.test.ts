@@ -327,6 +327,48 @@ describe('sanitizeOpenClawConfig feishu plugin migration', () => {
     expect(nextConfig.channels.dingtalk.defaultAccount).toBeUndefined();
   });
 
+  it('会把 Feishu accounts.default 迁移到 openclaw-lark 实际读取的顶层配置', async () => {
+    readOpenClawJsonMock.mockResolvedValue({
+      ...createSanitizeNeutralConfig(),
+      channels: {
+        feishu: {
+          enabled: true,
+          defaultAccount: 'default',
+          accounts: {
+            default: {
+              appId: 'cli_default',
+              appSecret: 'default-secret',
+              name: 'Default Feishu',
+              enabled: true,
+            },
+            backup: {
+              appId: 'cli_backup',
+              appSecret: 'backup-secret',
+              enabled: true,
+            },
+          },
+        },
+      },
+    });
+
+    await sanitizeMockConfig();
+
+    expect(writeOpenClawJsonMock).toHaveBeenCalledTimes(1);
+    const nextConfig = writeOpenClawJsonMock.mock.calls[0][0] as Record<string, any>;
+    expect(nextConfig.channels.feishu).toMatchObject({
+      enabled: true,
+      appId: 'cli_default',
+      appSecret: 'default-secret',
+      name: 'Default Feishu',
+    });
+    expect(nextConfig.channels.feishu.accounts.default).toBeUndefined();
+    expect(nextConfig.channels.feishu.accounts.backup).toMatchObject({
+      appId: 'cli_backup',
+      appSecret: 'backup-secret',
+    });
+    expect(nextConfig.channels.feishu.defaultAccount).toBeUndefined();
+  });
+
   it('会清理 plugins.load.paths 下失效或 bundled 的绝对路径', async () => {
     const retainedAbsolutePath = 'C:\\Users\\Mr.Key\\.openclaw\\plugins\\custom';
     const localBuildPluginPath = join(process.cwd(), 'build', 'openclaw-plugins', 'task-manager');
@@ -1006,4 +1048,3 @@ describe('syncProviderConfigToOpenClaw OAuth plugin compatibility', () => {
     }
   });
 });
-

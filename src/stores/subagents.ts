@@ -22,7 +22,7 @@ import {
 } from '@/services/openclaw/agent-runtime';
 import {
   deleteSession,
-  fetchLatestAssistantText,
+  fetchLatestAssistantTurnText,
   sendChatMessage,
 } from '@/services/openclaw/session-runtime';
 import {
@@ -928,7 +928,7 @@ async function waitForDraftOutputFromHistoryWithTimeout(
 ): Promise<string> {
   const startedAt = Date.now();
   while (Date.now() - startedAt < timeoutMs) {
-    const output = await fetchLatestAssistantText({
+    const output = await fetchLatestAssistantTurnText({
       sessionKey,
       limit: 20,
     });
