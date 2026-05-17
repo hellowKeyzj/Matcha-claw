@@ -156,13 +156,64 @@ export class SessionTimelineRuntime {
       await this.ensureSessionHydrated(sessionKey, state);
       return;
     }
-    // Re-read transcript to pick up tool results written by OpenClaw
+    // Only read transcript to patch tool results onto existing turns.
+    // Do NOT rebuild segments from transcript content — that would overwrite
+    // the incremental streaming segments and cause content flicker.
     const replay = await this.deps.transcriptLoader.readTimelineReplay(sessionKey);
     if (replay.timelineEntries.length > 0) {
-      state.timelineEntries = mergeTimelineEntries(
-        state.timelineEntries,
-        replay.timelineEntries,
-      );
+      for (const replayEntry of replay.timelineEntries) {
+        if (replayEntry.kind !== 'assistant-turn') {
+          continue;
+        }
+        // Find the matching live entry by key
+        const liveIndex = state.timelineEntries.findIndex((e) => e.key === replayEntry.key);
+        if (liveIndex < 0) {
+          continue;
+        }
+        const liveEntry = state.timelineEntries[liveIndex];
+        if (liveEntry?.kind !== 'assistant-turn') {
+          continue;
+        }
+        // Only patch tool segments that gained output from transcript
+        let patched = false;
+        const nextSegments = liveEntry.segments.map((segment) => {
+          if (segment.kind !== 'tool') {
+            return segment;
+          }
+          const toolId = segment.tool.toolCallId ?? segment.tool.id;
+          if (!toolId || segment.tool.output !== undefined) {
+            return segment;
+          }
+          // Find matching tool in replay entry
+          const replayTool = replayEntry.segments.find((s) => (
+            s.kind === 'tool' && (s.tool.toolCallId === toolId || s.tool.id === toolId)
+          ));
+          if (!replayTool || replayTool.kind !== 'tool' || replayTool.tool.output === undefined) {
+            return segment;
+          }
+          patched = true;
+          return {
+            ...structuredClone(segment),
+            tool: {
+              ...structuredClone(segment.tool),
+              output: structuredClone(replayTool.tool.output),
+              status: replayTool.tool.status,
+              result: structuredClone(replayTool.tool.result),
+              displayTitle: replayTool.tool.displayTitle,
+              displayDetail: replayTool.tool.displayDetail,
+            },
+          };
+        });
+        if (patched) {
+          state.timelineEntries = [...state.timelineEntries];
+          state.timelineEntries[liveIndex] = {
+            ...structuredClone(liveEntry),
+            segments: nextSegments,
+            isStreaming: false,
+            status: 'final',
+          };
+        }
+      }
     }
     if (replay.taskSnapshot) {
       state.taskSnapshot = replay.taskSnapshot;

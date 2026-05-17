@@ -138,8 +138,10 @@ export function buildSegmentsFromChatContent(input: {
   const incomingThinking = extractThinkingFromContent(input.content);
   const hasToolCallBlocks = contentHasToolBlocks(input.content);
 
-  // Transcript replay: content has toolCall/toolResult blocks → use positional build
-  if (hasToolCallBlocks) {
+  // Transcript replay (initial hydration only): content has toolCall/toolResult
+  // blocks AND no previous segments exist → positional build from scratch.
+  // If previousSegments exist, we are in a live session and must stay incremental.
+  if (hasToolCallBlocks && input.previousSegments.length === 0) {
     return buildSegmentsFromTranscriptContent(input);
   }
 
