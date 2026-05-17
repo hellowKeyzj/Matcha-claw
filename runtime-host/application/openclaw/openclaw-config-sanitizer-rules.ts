@@ -215,6 +215,40 @@ function enforceToolDefaults(config: Record<string, unknown>, deps: OpenClawConf
   return true;
 }
 
+const MIN_BOOTSTRAP_MAX_CHARS = 32_000;
+const MIN_BOOTSTRAP_TOTAL_MAX_CHARS = 100_000;
+
+function enforceBootstrapCharLimits(config: Record<string, unknown>, deps: OpenClawConfigSanitizerRulesDeps): boolean {
+  const agents = (config.agents && typeof config.agents === 'object' && !Array.isArray(config.agents)
+    ? config.agents
+    : {}) as Record<string, unknown>;
+  const defaults = (agents.defaults && typeof agents.defaults === 'object' && !Array.isArray(agents.defaults)
+    ? agents.defaults
+    : {}) as Record<string, unknown>;
+
+  let modified = false;
+
+  const currentMax = typeof defaults.bootstrapMaxChars === 'number' ? defaults.bootstrapMaxChars : 0;
+  if (currentMax < MIN_BOOTSTRAP_MAX_CHARS) {
+    defaults.bootstrapMaxChars = MIN_BOOTSTRAP_MAX_CHARS;
+    modified = true;
+  }
+
+  const currentTotal = typeof defaults.bootstrapTotalMaxChars === 'number' ? defaults.bootstrapTotalMaxChars : 0;
+  if (currentTotal < MIN_BOOTSTRAP_TOTAL_MAX_CHARS) {
+    defaults.bootstrapTotalMaxChars = MIN_BOOTSTRAP_TOTAL_MAX_CHARS;
+    modified = true;
+  }
+
+  if (!modified) {
+    return false;
+  }
+  agents.defaults = defaults;
+  config.agents = agents;
+  deps.info(`[sanitize] Enforced agents.defaults.bootstrapMaxChars>=${MIN_BOOTSTRAP_MAX_CHARS} and bootstrapTotalMaxChars>=${MIN_BOOTSTRAP_TOTAL_MAX_CHARS} to fit injected MatchaClaw context`);
+  return true;
+}
+
 function sanitizeStrictSchemaChannels(config: Record<string, unknown>, deps: OpenClawConfigSanitizerRulesDeps): boolean {
   const channelsObj = (
     config.channels && typeof config.channels === 'object' && !Array.isArray(config.channels)
@@ -420,6 +454,7 @@ export async function applyOpenClawConfigSanitizerRules(
   modified = ensureCommandsRestart(config, deps) || modified;
   modified = removeStaleMoonshotKimiApiKey(config, deps) || modified;
   modified = enforceToolDefaults(config, deps) || modified;
+  modified = enforceBootstrapCharLimits(config, deps) || modified;
   modified = await sanitizePluginsLoadPaths(config, deps) || modified;
   modified = sanitizeStrictSchemaChannels(config, deps) || modified;
   modified = await sanitizePlugins(config, deps) || modified;
