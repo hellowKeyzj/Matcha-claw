@@ -90,10 +90,47 @@ function stripLeadingUntrustedMetadataBlocks(text: string): string {
   return output;
 }
 
+function stripLeadingBootstrapPendingBlock(text: string): string {
+  const header = /^\s*\[Bootstrap pending\]\s*(?:\r?\n|$)/i.exec(text);
+  if (!header) {
+    return text;
+  }
+
+  const directivePatterns = [
+    /^Please read BOOTSTRAP\.md\b/i,
+    /^If this run can complete\b/i,
+    /^If it cannot\b/i,
+    /^are still possible here\b/i,
+    /^Do not pretend bootstrap is complete\b/i,
+    /^Do not use a generic first greeting\b/i,
+    /^handled BOOTSTRAP\.md\./i,
+    /^Your first user-visible reply\b/i,
+    /^BOOTSTRAP\.md, not a generic greeting\./i,
+  ];
+
+  let offset = header[0].length;
+  const linePattern = /.*(?:\r?\n|$)/g;
+  linePattern.lastIndex = offset;
+  while (linePattern.lastIndex < text.length) {
+    const match = linePattern.exec(text);
+    if (!match || !match[0]) {
+      break;
+    }
+    const line = match[0];
+    const trimmed = line.replace(/\r?\n$/, '').trim();
+    if (!trimmed || directivePatterns.some((pattern) => pattern.test(trimmed))) {
+      offset = linePattern.lastIndex;
+      continue;
+    }
+    break;
+  }
+  return text.slice(offset);
+}
+
 function stripLeadingInternalPromptArtifacts(text: string): string {
   let output = text;
   while (true) {
-    const next = output
+    const next = stripLeadingBootstrapPendingBlock(output)
       .replace(/^\s*<relevant-memories>\s*[\s\S]*?<\/relevant-memories>\s*/i, '')
       .replace(/^\s*\[UNTRUSTED DATA[^\n]*\][\s\S]*?\[END UNTRUSTED DATA\]\s*/i, '');
     if (next === output) {
@@ -108,6 +145,7 @@ function stripLeadingConversationEnvelopeArtifacts(text: string): string {
   let output = text;
   while (true) {
     const next = output
+      .replace(/^\s*System:\s*\[[^\]\r\n]+\]\s+[^\r\n]*\[msg:[^\]\r\n]+\]\s*(?:\r?\n|$)/i, '')
       .replace(
         /^\s*(?:Conversation info|Sender|Forwarded message context)\s*\([^)]*\):\s*(?:```[a-z]*\n[\s\S]*?```\s*|\{[\s\S]*?\}\s*)/i,
         '',
@@ -295,6 +333,13 @@ function isRuntimeSystemInjectionText(text: string): boolean {
   const normalized = text.trim();
   if (!normalized) {
     return false;
+  }
+  if (sanitizeCanonicalUserText(normalized).length === 0 && (
+    /\[Bootstrap pending\]/i.test(normalized)
+    || /^\s*System:\s*\[[^\]\r\n]+\]\s+[^\r\n]*\[msg:[^\]\r\n]+\]/i.test(normalized)
+    || /(?:Conversation info|Sender|Forwarded message context)\s*\([^)]*\):/i.test(normalized)
+  )) {
+    return true;
   }
   if (/^\s*System\s*\(untrusted\)\s*:/i.test(normalized)) {
     return true;

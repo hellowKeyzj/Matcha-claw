@@ -105,6 +105,113 @@ describe('session runtime service', () => {
     expect(events).toEqual([]);
   });
 
+  it('drops pure bootstrap and metadata realtime user messages before timeline materialization', async () => {
+    const events = buildSessionUpdateEventsFromGatewayConversationEvent({
+      type: 'chat.message',
+      event: {
+        state: 'final',
+        runId: 'run-bootstrap-only',
+        sessionKey: 'agent:main:main',
+        sequenceId: 1,
+        message: {
+          role: 'user',
+          content: [
+            '[Bootstrap pending]',
+            'Please read BOOTSTRAP.md from the workspace and follow it before replying normally.',
+            'Do not pretend bootstrap is complete when it is not.',
+            '',
+            'Conversation info (untrusted metadata):',
+            '```json',
+            '{ "chat_id": "user_1" }',
+            '```',
+          ].join('\n'),
+        },
+      },
+    }, {
+      clock: testClock,
+    });
+
+    expect(events).toEqual([]);
+  });
+
+  it('keeps only real text from bootstrap and metadata realtime user messages', async () => {
+    const events = buildSessionUpdateEventsFromGatewayConversationEvent({
+      type: 'chat.message',
+      event: {
+        state: 'final',
+        runId: 'run-bootstrap-user',
+        sessionKey: 'agent:main:main',
+        sequenceId: 1,
+        message: {
+          role: 'user',
+          content: [
+            '[Bootstrap pending]',
+            'Please read BOOTSTRAP.md from the workspace and follow it before replying normally.',
+            '',
+            'Sender (untrusted metadata):',
+            '```json',
+            '{ "id": "gateway-client" }',
+            '```',
+            '',
+            '在吗',
+          ].join('\n'),
+        },
+      },
+    }, {
+      clock: testClock,
+    });
+
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      sessionUpdate: 'agent_message',
+      entries: [{
+        kind: 'user-message',
+        text: '在吗',
+      }],
+    });
+  });
+
+  it('keeps only real text from channel system envelope realtime user messages', async () => {
+    const events = buildSessionUpdateEventsFromGatewayConversationEvent({
+      type: 'chat.message',
+      event: {
+        state: 'final',
+        runId: 'run-feishu-envelope-user',
+        sessionKey: 'agent:main:main',
+        sequenceId: 1,
+        message: {
+          role: 'user',
+          content: [
+            'System: [2026-05-18 01:07:22 GMT+8] Feishu[default] DM | ou_41b96165b0b61187832087517df1deed [msg:om_x100b6fab12662468b3704885b5c1abf]',
+            '',
+            'Conversation info (untrusted metadata):',
+            '```json',
+            '{ "message_id": "om_x100b6fab12662468b3704885b5c1abf" }',
+            '```',
+            '',
+            'Sender (untrusted metadata):',
+            '```json',
+            '{ "id": "ou_41b96165b0b61187832087517df1deed" }',
+            '```',
+            '',
+            '在吗',
+          ].join('\n'),
+        },
+      },
+    }, {
+      clock: testClock,
+    });
+
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      sessionUpdate: 'agent_message',
+      entries: [{
+        kind: 'user-message',
+        text: '在吗',
+      }],
+    });
+  });
+
   it('drops assistant NO_REPLY prefix deltas without dropping real final NO replies', async () => {
     const prefixEvents = buildSessionUpdateEventsFromGatewayConversationEvent({
       type: 'chat.message',
@@ -4700,5 +4807,3 @@ describe('session runtime service', () => {
     });
   });
 });
-
-

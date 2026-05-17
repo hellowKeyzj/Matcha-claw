@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   isAssistantControlPrefixMessage,
   isInternalRuntimeDisplayMessage,
+  sanitizeCanonicalUserText,
   shouldPreserveCanonicalTranscriptMessage,
 } from '../../runtime-host/shared/chat-message-normalization';
 
@@ -47,6 +48,112 @@ describe('chat message normalization', () => {
 
     expect(isInternalRuntimeDisplayMessage(message)).toBe(false);
     expect(shouldPreserveCanonicalTranscriptMessage(message)).toBe(true);
+  });
+
+  it('strips bootstrap and channel metadata from displayed external user messages', () => {
+    const text = [
+      '[Bootstrap pending]',
+      'Please read BOOTSTRAP.md from the workspace and follow it before replying normally.',
+      'Do not pretend bootstrap is complete when it is not.',
+      '',
+      'Conversation info (untrusted metadata):',
+      '```json',
+      '{',
+      '  "chat_id": "user_1",',
+      '  "message_id": "msg_1"',
+      '}',
+      '```',
+      '',
+      'Sender (untrusted metadata):',
+      '```json',
+      '{',
+      '  "id": "user_1",',
+      '  "name": "user_1"',
+      '}',
+      '```',
+      '',
+      '在吗',
+    ].join('\n');
+
+    expect(sanitizeCanonicalUserText(text)).toBe('在吗');
+  });
+
+  it('strips channel system envelopes and metadata from displayed external user messages', () => {
+    const text = [
+      'System: [2026-05-18 01:07:22 GMT+8] Feishu[default] DM | ou_41b96165b0b61187832087517df1deed [msg:om_x100b6fab12662468b3704885b5c1abf]',
+      '',
+      'Conversation info (untrusted metadata):',
+      '```json',
+      '{',
+      '  "chat_id": "user:ou_41b96165b0b61187832087517df1deed",',
+      '  "message_id": "om_x100b6fab12662468b3704885b5c1abf"',
+      '}',
+      '```',
+      '',
+      'Sender (untrusted metadata):',
+      '```json',
+      '{',
+      '  "id": "ou_41b96165b0b61187832087517df1deed"',
+      '}',
+      '```',
+      '',
+      '在吗',
+    ].join('\n');
+
+    expect(sanitizeCanonicalUserText(text)).toBe('在吗');
+  });
+
+  it('does not strip normal user text that mentions System', () => {
+    const text = 'System: 这是我要发给模型看的普通文本，不是渠道消息信封。';
+
+    expect(sanitizeCanonicalUserText(text)).toBe(text);
+  });
+
+  it('treats pure bootstrap and metadata bundles as internal display messages', () => {
+    const message = {
+      role: 'user',
+      content: [{
+        type: 'text',
+        text: [
+          '[Bootstrap pending]',
+          'Please read BOOTSTRAP.md from the workspace and follow it before replying normally.',
+          'Do not use a generic first greeting or reply normally until after you have handled BOOTSTRAP.md.',
+          '',
+          'Sender (untrusted metadata):',
+          '```json',
+          '{ "id": "gateway-client" }',
+          '```',
+        ].join('\n'),
+      }],
+    };
+
+    expect(isInternalRuntimeDisplayMessage(message)).toBe(true);
+    expect(shouldPreserveCanonicalTranscriptMessage(message)).toBe(false);
+  });
+
+  it('treats pure channel envelopes and metadata bundles as internal display messages', () => {
+    const message = {
+      role: 'user',
+      content: [{
+        type: 'text',
+        text: [
+          'System: [2026-05-18 01:07:22 GMT+8] Feishu[default] DM | ou_41b96165b0b61187832087517df1deed [msg:om_x100b6fab12662468b3704885b5c1abf]',
+          '',
+          'Conversation info (untrusted metadata):',
+          '```json',
+          '{ "message_id": "om_x100b6fab12662468b3704885b5c1abf" }',
+          '```',
+          '',
+          'Sender (untrusted metadata):',
+          '```json',
+          '{ "id": "ou_41b96165b0b61187832087517df1deed" }',
+          '```',
+        ].join('\n'),
+      }],
+    };
+
+    expect(isInternalRuntimeDisplayMessage(message)).toBe(true);
+    expect(shouldPreserveCanonicalTranscriptMessage(message)).toBe(false);
   });
 
   it('filters assistant NO_REPLY but keeps user NO_REPLY', () => {

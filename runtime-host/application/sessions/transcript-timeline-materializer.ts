@@ -1,5 +1,6 @@
 import {
   isInternalAssistantControlMessage,
+  isInternalRuntimeDisplayMessage,
   normalizeOptionalString,
 } from '../../shared/chat-message-normalization';
 import type {
@@ -374,6 +375,9 @@ export function buildTimelineEntriesFromTranscriptMessage(
   },
 ): SessionTimelineEntry[] {
   if (isInternalAssistantControlMessage(message)) {
+    return [];
+  }
+  if (isInternalRuntimeDisplayMessage(message)) {
     return [];
   }
   if (isMalformedEmptyToolMessage(message)) {

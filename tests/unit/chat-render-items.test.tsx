@@ -38,12 +38,13 @@ describe('chat render item fixtures', () => {
 
     expect(itemsDuringStreaming[1]).toMatchObject({
       kind: 'assistant-turn',
-      key: 'session:agent:main:main|assistant-turn:entry:assistant-1:main',
+      text: 'hello',
     });
     expect(finalItems[1]).toMatchObject({
       kind: 'assistant-turn',
-      key: 'session:agent:main:main|assistant-turn:entry:assistant-1:main',
+      text: 'hello world',
     });
+    expect(itemsDuringStreaming[1].key).toBe(finalItems[1].key);
   });
 
   it('keeps streaming assistant content inside the same assistant-turn item', () => {
@@ -55,14 +56,88 @@ describe('chat render item fixtures', () => {
     expect(items).toHaveLength(2);
     expect(items[1]).toMatchObject({
       kind: 'assistant-turn',
-      key: 'session:agent:main:main|assistant-turn:entry:assistant-stream-1:main',
       text: 'hello world',
-      status: 'final',
+      status: 'streaming',
     });
   });
 
   it('builds no items for an empty transcript', () => {
     expect(buildRenderItemsFromMessages('agent:main:main', [])).toEqual([]);
+  });
+
+  it('does not render pure bootstrap and metadata injected user messages', () => {
+    const items = buildRenderItemsFromMessages('agent:main:main', [{
+      role: 'user',
+      content: [
+        '[Bootstrap pending]',
+        'Please read BOOTSTRAP.md from the workspace and follow it before replying normally.',
+        'Do not pretend bootstrap is complete when it is not.',
+        '',
+        'Conversation info (untrusted metadata):',
+        '```json',
+        '{ "chat_id": "user_1" }',
+        '```',
+      ].join('\n'),
+      timestamp: 1,
+      id: 'user-injection-1',
+    }]);
+
+    expect(items).toEqual([]);
+  });
+
+  it('renders only the real external user text after bootstrap and metadata injection', () => {
+    const items = buildRenderItemsFromMessages('agent:main:main', [{
+      role: 'user',
+      content: [
+        '[Bootstrap pending]',
+        'Please read BOOTSTRAP.md from the workspace and follow it before replying normally.',
+        'Your first user-visible reply for a bootstrap-pending workspace must follow BOOTSTRAP.md.',
+        '',
+        'Sender (untrusted metadata):',
+        '```json',
+        '{ "id": "gateway-client" }',
+        '```',
+        '',
+        '你好',
+      ].join('\n'),
+      timestamp: 1,
+      id: 'user-external-1',
+    }]);
+
+    expect(items).toHaveLength(1);
+    expect(items[0]).toMatchObject({
+      kind: 'user-message',
+      text: '你好',
+    });
+  });
+
+  it('renders only the real external user text after channel system envelope injection', () => {
+    const items = buildRenderItemsFromMessages('agent:main:main', [{
+      role: 'user',
+      content: [
+        'System: [2026-05-18 01:07:22 GMT+8] Feishu[default] DM | ou_41b96165b0b61187832087517df1deed [msg:om_x100b6fab12662468b3704885b5c1abf]',
+        '',
+        'Conversation info (untrusted metadata):',
+        '```json',
+        '{ "message_id": "om_x100b6fab12662468b3704885b5c1abf" }',
+        '```',
+        '',
+        'Sender (untrusted metadata):',
+        '```json',
+        '{ "id": "ou_41b96165b0b61187832087517df1deed" }',
+        '```',
+        '',
+        '在吗',
+      ].join('\n'),
+      timestamp: 1,
+      id: 'user-feishu-envelope-1',
+    }]);
+
+    expect(items).toHaveLength(1);
+    expect(items[0]).toMatchObject({
+      kind: 'user-message',
+      text: '在吗',
+    });
   });
 
   it('materializes tool-only assistant messages as assistant-turn items', () => {
@@ -87,12 +162,11 @@ describe('chat render item fixtures', () => {
     expect(items).toHaveLength(1);
     expect(items[0]).toMatchObject({
       kind: 'assistant-turn',
-      key: 'session:agent:main:main|assistant-turn:entry:assistant-tool-1:main',
       tools: [{
         id: 'tool-1',
         name: 'read_file',
         input: { filePath: 'README.md' },
-        status: 'completed',
+        status: 'running',
       }],
       text: '',
     });
