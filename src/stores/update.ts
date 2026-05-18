@@ -5,6 +5,7 @@
 import { create } from 'zustand';
 import { useSettingsStore } from './settings';
 import { invokeIpc } from '@/lib/api-client';
+import { isUpdateVersionNewer } from '../../runtime-host/shared/update-version';
 
 export interface UpdateInfo {
   version: string;
@@ -48,6 +49,36 @@ interface UpdateState {
 
 let updateInitPromise: Promise<void> | null = null;
 
+function normalizeUpdateStatus(
+  currentVersion: string,
+  status: {
+    status: UpdateStatus;
+    info?: UpdateInfo;
+    progress?: ProgressInfo;
+    error?: string;
+  },
+): Pick<UpdateState, 'status' | 'updateInfo' | 'progress' | 'error'> {
+  if (
+    (status.status === 'available' || status.status === 'downloaded')
+    && status.info
+    && !isUpdateVersionNewer(status.info.version, currentVersion)
+  ) {
+    return {
+      status: 'not-available',
+      updateInfo: null,
+      progress: null,
+      error: null,
+    };
+  }
+
+  return {
+    status: status.status,
+    updateInfo: status.info || null,
+    progress: status.progress || null,
+    error: status.error || null,
+  };
+}
+
 export const useUpdateStore = create<UpdateState>((set, get) => ({
   status: 'idle',
   currentVersion: '0.0.0',
@@ -75,12 +106,7 @@ export const useUpdateStore = create<UpdateState>((set, get) => ({
           progress?: ProgressInfo;
           error?: string;
         }>('update:status');
-        set({
-          status: status.status,
-          updateInfo: status.info || null,
-          progress: status.progress || null,
-          error: status.error || null,
-        });
+        set(normalizeUpdateStatus(get().currentVersion, status));
       } catch (error) {
         console.error('Failed to get update status:', error);
       }
@@ -92,12 +118,7 @@ export const useUpdateStore = create<UpdateState>((set, get) => ({
           progress?: ProgressInfo;
           error?: string;
         };
-        set({
-          status: status.status,
-          updateInfo: status.info || null,
-          progress: status.progress || null,
-          error: status.error || null,
-        });
+        set(normalizeUpdateStatus(get().currentVersion, status));
       });
 
       set({ isInitialized: true });
@@ -137,12 +158,7 @@ export const useUpdateStore = create<UpdateState>((set, get) => ({
       };
       
       if (result.status) {
-        set({
-          status: result.status.status,
-          updateInfo: result.status.info || null,
-          progress: result.status.progress || null,
-          error: result.status.error || null,
-        });
+        set(normalizeUpdateStatus(get().currentVersion, result.status));
       } else if (!result.success) {
         set({ status: 'error', error: result.error || 'Failed to check for updates' });
       }

@@ -15,10 +15,14 @@ vi.mock('electron-updater', () => ({
   autoUpdater: mockAutoUpdater,
 }));
 
+const electronMock = vi.hoisted(() => ({
+  appVersion: '1.0.0',
+}));
+
 vi.mock('electron', () => ({
   BrowserWindow: class BrowserWindow {},
   app: {
-    getVersion: () => '1.0.0',
+    getVersion: () => electronMock.appVersion,
   },
   ipcMain: {
     handle: vi.fn(),
@@ -36,6 +40,7 @@ vi.mock('../../electron/utils/logger', () => ({
 
 describe('AppUpdater 错误事件兜底', () => {
   beforeEach(() => {
+    electronMock.appVersion = '1.0.0';
     mockAutoUpdater.removeAllListeners();
   });
 
@@ -57,5 +62,16 @@ describe('AppUpdater 错误事件兜底', () => {
 
     expect(mockAutoUpdater.autoDownload).toBe(false);
     expect(mockAutoUpdater.autoInstallOnAppQuit).toBe(false);
+  });
+
+  it('ignores update-available events for versions older than the running app', async () => {
+    electronMock.appVersion = '1.0.1';
+    const { AppUpdater } = await import('../../electron/main/updater');
+    const updater = new AppUpdater();
+
+    mockAutoUpdater.emit('update-available', { version: '1.0.0' });
+
+    expect(updater.getStatus().status).toBe('not-available');
+    expect(updater.getStatus().info).toBeUndefined();
   });
 });

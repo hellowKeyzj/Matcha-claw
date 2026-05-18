@@ -11,6 +11,7 @@ import { BrowserWindow, app, ipcMain } from 'electron';
 import { logger } from '../utils/logger';
 import { EventEmitter } from 'events';
 import { setQuitting } from './app-state';
+import { isUpdateVersionNewer } from '../../runtime-host/shared/update-version';
 
 export interface UpdateStatus {
   status: 'idle' | 'checking' | 'available' | 'not-available' | 'downloading' | 'downloaded' | 'error';
@@ -95,6 +96,12 @@ export class AppUpdater extends EventEmitter {
     });
 
     autoUpdater.on('update-available', (info: UpdateInfo) => {
+      if (!this.isNewerUpdate(info)) {
+        this.updateStatus({ status: 'not-available' });
+        this.emit('update-not-available', info);
+        return;
+      }
+
       this.updateStatus({ status: 'available', info });
       this.emit('update-available', info);
     });
@@ -110,6 +117,12 @@ export class AppUpdater extends EventEmitter {
     });
 
     autoUpdater.on('update-downloaded', (event: UpdateDownloadedEvent) => {
+      if (!this.isNewerUpdate(event)) {
+        this.updateStatus({ status: 'not-available' });
+        this.emit('update-not-available', event);
+        return;
+      }
+
       this.updateStatus({ status: 'downloaded', info: event });
       this.emit('update-downloaded', event);
     });
@@ -131,6 +144,19 @@ export class AppUpdater extends EventEmitter {
       error: newStatus.error,
     };
     this.sendToRenderer('update:status-changed', this.status);
+  }
+
+  private isNewerUpdate(info: UpdateInfo): boolean {
+    const currentVersion = app.getVersion();
+    const isNewer = isUpdateVersionNewer(info.version, currentVersion);
+
+    if (!isNewer) {
+      logger.info(
+        `[Updater] Ignoring update version ${info.version}; current version is ${currentVersion}`,
+      );
+    }
+
+    return isNewer;
   }
 
   /**
