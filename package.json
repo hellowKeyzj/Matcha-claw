@@ -69,7 +69,7 @@
     "package:mac:local": "SKIP_PREINSTALLED_SKILLS=1 pnpm run check:openclaw-plugin-inputs && pnpm run build:runtime-host-process && pnpm run build:vite && zx scripts/bundle-openclaw.mjs && zx scripts/bundle-openclaw-plugins.mjs && pnpm run check:openclaw-plugin-mirrors && zx scripts/bundle-preinstalled-skills.mjs && electron-builder --mac",
     "package:win": "pnpm run check:openclaw-plugin-inputs && pnpm run prep:win-binaries && pnpm run build:runtime-host-process && pnpm run build:vite && zx scripts/bundle-openclaw.mjs && zx scripts/bundle-openclaw-plugins.mjs && pnpm run check:openclaw-plugin-mirrors && zx scripts/bundle-preinstalled-skills.mjs && electron-builder --win",
     "package:linux": "pnpm run check:openclaw-plugin-inputs && pnpm run build:runtime-host-process && pnpm run build:vite && zx scripts/bundle-openclaw.mjs && zx scripts/bundle-openclaw-plugins.mjs && pnpm run check:openclaw-plugin-mirrors && zx scripts/bundle-preinstalled-skills.mjs && electron-builder --linux",
-    "release": "pnpm run uv:download && pnpm run build:runtime-host-process && pnpm run build:vite && zx scripts/bundle-openclaw.mjs && zx scripts/bundle-openclaw-plugins.mjs && zx scripts/bundle-preinstalled-skills.mjs && electron-builder --publish always",
+    "release": "pnpm run uv:download && pnpm run build:runtime-host-process && pnpm run build:vite && zx scripts/bundle-openclaw.mjs && zx scripts/bundle-openclaw-plugins.mjs && pnpm run check:openclaw-plugin-mirrors && zx scripts/bundle-preinstalled-skills.mjs && electron-builder --publish always",
     "version:patch": "pnpm version patch",
     "version:minor": "pnpm version minor",
     "version:major": "pnpm version major",

@@ -29,6 +29,10 @@ const REQUIRED_PLUGIN_MIRRORS = [
       'models/Xenova/all-MiniLM-L6-v2/onnx/model.onnx',
     ],
   },
+  {
+    pluginId: 'openclaw-lark',
+    dir: 'feishu-openclaw-plugin',
+  },
 ];
 
 function fail(message, details = []) {

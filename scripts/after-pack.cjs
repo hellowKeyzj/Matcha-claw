@@ -534,6 +534,14 @@ exports.default = async function afterPack(context) {
         join(__dirname, '..', 'build', 'openclaw-plugins', 'browser-relay'),
       ],
     },
+    {
+      pluginId: 'openclaw-lark',
+      required: true,
+      localSourceCandidates: [
+        join(__dirname, '..', 'build', 'openclaw-plugins', 'openclaw-lark'),
+        join(__dirname, '..', 'build', 'openclaw-plugins', 'feishu-openclaw-plugin'),
+      ],
+    },
   ];
 
   mkdirSync(pluginsDestRoot, { recursive: true });
@@ -547,6 +555,9 @@ exports.default = async function afterPack(context) {
     }
     if (!ok && Array.isArray(plugin.localSourceCandidates)) {
       ok = copyPluginFromLocalCandidates(pluginId, plugin.localSourceCandidates, pluginDestDir);
+    }
+    if (!ok && plugin.required) {
+      throw new Error(`Required OpenClaw plugin ${pluginId} was not bundled into packaged resources`);
     }
     if (ok) {
       const pluginNM = join(pluginDestDir, 'node_modules');
