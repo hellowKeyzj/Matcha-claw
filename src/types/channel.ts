@@ -129,7 +129,7 @@ export const CHANNEL_META: Record<ChannelType, ChannelMeta> = {
     icon: '🧧',
     description: 'channels:meta.openclaw-weixin.description',
     connectionType: 'qr',
-    docsPath: 'connector-guide/wechat.md',
+    docsPath: 'connector-guide/wechat.html',
     configFields: [
       {
         key: 'baseUrl',
@@ -175,7 +175,7 @@ export const CHANNEL_META: Record<ChannelType, ChannelMeta> = {
     icon: '🐧',
     description: 'channels:meta.qqbot.description',
     connectionType: 'token',
-    docsPath: 'connector-guide/qqbot.md',
+    docsPath: 'connector-guide/qqbot.html',
     configFields: [
       {
         key: 'appId',
@@ -205,7 +205,7 @@ export const CHANNEL_META: Record<ChannelType, ChannelMeta> = {
     icon: '💬',
     description: 'channels:meta.dingtalk.description',
     connectionType: 'token',
-    docsPath: 'connector-guide/dingtalk.md',
+    docsPath: 'connector-guide/dingtalk.html',
     configFields: [
       {
         key: 'clientId',
@@ -257,7 +257,7 @@ export const CHANNEL_META: Record<ChannelType, ChannelMeta> = {
     icon: '💼',
     description: 'channels:meta.wecom.description',
     connectionType: 'token',
-    docsPath: 'connector-guide/wecom.md',
+    docsPath: 'connector-guide/wecom.html',
     configFields: [
       {
         key: 'botId',
@@ -287,7 +287,7 @@ export const CHANNEL_META: Record<ChannelType, ChannelMeta> = {
     icon: '✈️',
     description: 'channels:meta.telegram.description',
     connectionType: 'token',
-    docsPath: 'connector-guide/telegram.md',
+    docsPath: 'connector-guide/telegram.html',
     configFields: [
       {
         key: 'botToken',
@@ -320,7 +320,7 @@ export const CHANNEL_META: Record<ChannelType, ChannelMeta> = {
     icon: '🎮',
     description: 'channels:meta.discord.description',
     connectionType: 'token',
-    docsPath: 'connector-guide/discord.md',
+    docsPath: 'connector-guide/discord.html',
     configFields: [
       {
         key: 'token',
@@ -363,7 +363,7 @@ export const CHANNEL_META: Record<ChannelType, ChannelMeta> = {
     icon: '📱',
     description: 'channels:meta.whatsapp.description',
     connectionType: 'qr',
-    docsPath: 'connector-guide/whatsapp.md',
+    docsPath: 'connector-guide/whatsapp.html',
     configFields: [],
     instructions: [
       'channels:meta.whatsapp.instructions.0',
@@ -399,7 +399,7 @@ export const CHANNEL_META: Record<ChannelType, ChannelMeta> = {
     icon: '🐦',
     description: 'channels:meta.feishu.description',
     connectionType: 'token',
-    docsPath: 'connector-guide/feishu.md',
+    docsPath: 'connector-guide/feishu.html',
     configFields: [
       {
         key: 'appId',

@@ -1,0 +1,483 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Feishu Operation Guide</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      line-height: 1.65;
+      background: #f6f7f9;
+      color: #172033;
+    }
+    body {
+      margin: 0;
+      padding: 32px 20px;
+    }
+    main {
+      max-width: 960px;
+      margin: 0 auto;
+      padding: 32px;
+      border: 1px solid #dde2ea;
+      border-radius: 10px;
+      background: #ffffff;
+      box-shadow: 0 18px 45px rgba(16, 24, 40, 0.08);
+    }
+    h1, h2, h3 {
+      line-height: 1.25;
+    }
+    h1 {
+      margin-top: 0;
+      padding-bottom: 12px;
+      border-bottom: 1px solid #e5e8ef;
+    }
+    img {
+      display: block;
+      max-width: 100%;
+      height: auto;
+      margin: 16px 0 24px;
+      border: 1px solid #e5e8ef;
+      border-radius: 8px;
+    }
+    code, pre {
+      font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+    }
+    pre {
+      overflow: auto;
+      padding: 14px;
+      border-radius: 8px;
+      background: #f1f3f7;
+    }
+    a {
+      color: #1f66d1;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        background: #111318;
+        color: #e8ecf3;
+      }
+      main {
+        border-color: #2c313a;
+        background: #181b21;
+        box-shadow: none;
+      }
+      h1 {
+        border-bottom-color: #2c313a;
+      }
+      img {
+        border-color: #2c313a;
+      }
+      pre {
+        background: #101217;
+      }
+      a {
+        color: #80b3ff;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main>
+<h1>Feishu Operation Guide</h1>
+<h2>中文教程</h2>
+<h2>飞书官方全新功能</h2>
+<p>打开下方链接，即可一键创建机器人，复制id、secret到MatchaClaw即可完成配置。</p>
+<p><a href="https://open.feishu.cn/page/openclaw?form=multiAgent">https://open.feishu.cn/page/openclaw?form=multiAgent</a></p>
+<p>修改机器人配置可以在开发者控制台，做更加精细化的权限管理。</p>
+<p><strong>飞书官方插件使用说明：</strong><a href="https://bytedance.larkoffice.com/docx/MFK7dDFLFoVlOGxWCv5cTXKmnMh">OpenClaw飞书官方插件使用指南（公开版）</a></p>
+<h2>老版本自定义配置</h2>
+<ol>
+<li><strong>打开飞书开放平台</strong></li>
+</ol>
+<p>访问 <a href="https://open.feishu.cn/app">飞书开放平台</a>，使用飞书账号登录。</p>
+<ol start="2">
+<li>
+<p><strong>创建应用</strong></p>
+</li>
+<li>
+<p>点击 创建企业自建应用</p>
+</li>
+<li>
+<p>填写应用名称和描述</p>
+</li>
+<li>
+<p>选择应用图标</p>
+</li>
+</ol>
+<p><img src="feishu-images/001.png" alt=""></p>
+<ol start="3">
+<li><strong>获取应用凭证</strong></li>
+</ol>
+<p>在应用的 凭证与基础信息 页面，复制：</p>
+<ul>
+<li>App ID（格式如 cli_xxx）</li>
+<li>App Secret</li>
+</ul>
+<p>❗ 重要：请妥善保管 App Secret，不要分享给他人。</p>
+<p><img src="feishu-images/002.png" alt=""></p>
+<ol start="4">
+<li><strong>配置应用权限</strong></li>
+</ol>
+<p>在 权限管理 页面，点击 批量导入 按钮，粘贴以下 JSON 配置一键导入所需权限：</p>
+<p>JSON<br>
+{<br>
+“scopes”: {<br>
+“tenant”: [<br>
+“contact:contact.base:readonly”,<br>
+“docx:document:readonly”,<br>
+“im:chat:read”,<br>
+“im:chat:update”,<br>
+“im:message.group_at_msg:readonly”,<br>
+“im:message.p2p_msg:readonly”,<br>
+“im:message.pins:read”,<br>
+“im:message.pins:write_only”,<br>
+“im:message.reactions:read”,<br>
+“im:message.reactions:write_only”,<br>
+“im:message:readonly”,<br>
+“im:message:recall”,<br>
+“im:message:send_as_bot”,<br>
+“im:message:send_multi_users”,<br>
+“im:message:send_sys_msg”,<br>
+“im:message:update”,<br>
+“im:resource”,<br>
+“application:application:self_manage”,<br>
+“cardkit:card:write”,<br>
+“cardkit:card:read”<br>
+],<br>
+“user”: [<br>
+“contact:user.employee_id:readonly”,<br>
+“offline_access”,“base:app:copy”,<br>
+“base:field:create”,<br>
+“base:field:delete”,<br>
+“base:field:read”,<br>
+“base:field:update”,<br>
+“base:record:create”,<br>
+“base:record:delete”,<br>
+“base:record:retrieve”,<br>
+“base:record:update”,<br>
+“base:table:create”,<br>
+“base:table:delete”,<br>
+“base:table:read”,<br>
+“base:table:update”,<br>
+“base:view:read”,<br>
+“base:view:write_only”,<br>
+“base:app:create”,<br>
+“base:app:update”,<br>
+“base:app:read”,<br>
+“sheets:spreadsheet.meta:read”,<br>
+“sheets:spreadsheet:read”,<br>
+“sheets:spreadsheet:create”,<br>
+“sheets:spreadsheet:write_only”,<br>
+“docs:document:export”,<br>
+“docs:document.media:upload”,<br>
+“board:whiteboard:node:create”,<br>
+“board:whiteboard:node:read”,<br>
+“calendar:calendar:read”,<br>
+“calendar:calendar.event:create”,<br>
+“calendar:calendar.event:delete”,<br>
+“calendar:calendar.event:read”,<br>
+“calendar:calendar.event:reply”,<br>
+“calendar:calendar.event:update”,<br>
+“calendar:calendar.free_busy:read”,<br>
+“contact:contact.base:readonly”,<br>
+“contact:user.base:readonly”,<br>
+“contact:user:search”,<br>
+“docs:document.comment:create”,<br>
+“docs:document.comment:read”,<br>
+“docs:document.comment:update”,<br>
+“docs:document.media:download”,<br>
+“docs:document:copy”,<br>
+“docx:document:create”,<br>
+“docx:document:readonly”,<br>
+“docx:document:write_only”,<br>
+“drive:drive.metadata:readonly”,<br>
+“drive:file:download”,<br>
+“drive:file:upload”,<br>
+“im:chat.members:read”,<br>
+“im:chat:read”,<br>
+“im:message”,<br>
+“im:message.group_msg:get_as_user”,<br>
+“im:message.p2p_msg:get_as_user”,<br>
+“im:message:readonly”,<br>
+“search:docs:read”,<br>
+“search:message”,<br>
+“space:document:delete”,<br>
+“space:document:move”,<br>
+“space:document:retrieve”,<br>
+“task:comment:read”,<br>
+“task:comment:write”,<br>
+“task:task:read”,<br>
+“task:task:write”,<br>
+“task:task:writeonly”,<br>
+“task:tasklist:read”,<br>
+“task:tasklist:write”,<br>
+“wiki:node:copy”,<br>
+“wiki:node:create”,<br>
+“wiki:node:move”,<br>
+“wiki:node:read”,<br>
+“wiki:node:retrieve”,<br>
+“wiki:space:read”,<br>
+“wiki:space:retrieve”,<br>
+“wiki:space:write_only”<br>
+]<br>
+}<br>
+}</p>
+<p><img src="feishu-images/003.png" alt=""></p>
+<ol start="5">
+<li><strong>启用机器人能力</strong></li>
+</ol>
+<p>在 应用能力 &gt; 机器人 页面：</p>
+<ol>
+<li>开启机器人能力</li>
+<li>配置机器人名称</li>
+</ol>
+<p><img src="feishu-images/004.png" alt=""></p>
+<ol start="6">
+<li>
+<p><strong>发布应用</strong></p>
+</li>
+<li>
+<p>在 <strong>版本管理与发布</strong> 页面创建版本</p>
+</li>
+<li>
+<p>提交审核并发布</p>
+</li>
+<li>
+<p>等待管理员审批（企业自建应用通常自动通过）</p>
+</li>
+<li>
+<p><strong>配置事件订阅</strong></p>
+</li>
+</ol>
+<p>在 事件订阅 页面：<br>
+⚠️ 注意：应用版本是否发布成功，不成功无法选择 使用长连接接收事件</p>
+<ol>
+<li>选择 使用长连接接收事件（WebSocket 模式）</li>
+<li>添加事件：im.message.receive_v1（接收消息）</li>
+</ol>
+<p>⚠️ 注意：如果网关未启动或渠道未添加，长连接设置将保存失败。</p>
+<p><img src="feishu-images/005.png" alt=""></p>
+<ol start="7">
+<li>
+<p><strong>再次发布应用</strong></p>
+</li>
+<li>
+<p>在 <strong>版本管理与发布</strong> 页面创建版本</p>
+</li>
+<li>
+<p>提交审核并发布</p>
+</li>
+<li>
+<p>等待管理员审批（企业自建应用通常自动通过）</p>
+</li>
+<li>
+<p><strong>开始使用</strong></p>
+</li>
+<li>
+<p>通讯录页面飞书搜索；群聊天页面添加群成员，搜索Bot名称即可</p>
+</li>
+</ol>
+<h2>English Guide</h2>
+<h2>New Official Feature from Feishu</h2>
+<p>Open the link below to create a bot with one click. Then copy the <strong>ID</strong> and <strong>Secret</strong> into <strong>MatchaClaw</strong> to complete the configuration.</p>
+<p><a href="https://open.feishu.cn/page/openclaw?form=multiAgent">https://open.feishu.cn/page/openclaw?form=multiAgent</a></p>
+<p>If you need to modify the bot configuration, you can go to the <strong>Developer Console</strong> to perform more fine-grained permission management.</p>
+<p>__Feishu Official Plugin Usage Guide : __<a href="https://bytedance.larkoffice.com/docx/MFK7dDFLFoVlOGxWCv5cTXKmnMh">OpenClaw飞书官方插件使用指南（公开版）</a></p>
+<h2>Legacy Custom Configuration</h2>
+<ol>
+<li><strong>Open Feishu Open Platform</strong></li>
+</ol>
+<p>Visit <a href="https://open.feishu.cn/app">Feishu Open Platform</a> and sign in.</p>
+<ol start="2">
+<li>
+<p><strong>Create an app</strong></p>
+</li>
+<li>
+<p>Click Create enterprise app</p>
+</li>
+<li>
+<p>Fill in the app name + description</p>
+</li>
+<li>
+<p>Choose an app icon</p>
+</li>
+</ol>
+<p><img src="feishu-images/006.png" alt=""></p>
+<ol start="3">
+<li><strong>Copy credentials</strong></li>
+</ol>
+<p>From Credentials &amp; Basic Info, copy:</p>
+<ul>
+<li>App ID (format: cli_xxx)</li>
+<li>App Secret</li>
+</ul>
+<p>❗ Important: keep the App Secret private.</p>
+<p><img src="feishu-images/007.png" alt=""></p>
+<ol start="4">
+<li><strong>Configure permissions</strong></li>
+</ol>
+<p>On Permissions, click Batch import and paste:</p>
+<p><img src="feishu-images/008.png" alt=""></p>
+<p>JSON<br>
+{<br>
+“scopes”: {<br>
+“tenant”: [<br>
+“contact:contact.base:readonly”,<br>
+“docx:document:readonly”,<br>
+“im:chat:read”,<br>
+“im:chat:update”,<br>
+“im:message.group_at_msg:readonly”,<br>
+“im:message.p2p_msg:readonly”,<br>
+“im:message.pins:read”,<br>
+“im:message.pins:write_only”,<br>
+“im:message.reactions:read”,<br>
+“im:message.reactions:write_only”,<br>
+“im:message:readonly”,<br>
+“im:message:recall”,<br>
+“im:message:send_as_bot”,<br>
+“im:message:send_multi_users”,<br>
+“im:message:send_sys_msg”,<br>
+“im:message:update”,<br>
+“im:resource”,<br>
+“application:application:self_manage”,<br>
+“cardkit:card:write”,<br>
+“cardkit:card:read”<br>
+],<br>
+“user”: [<br>
+“contact:user.employee_id:readonly”,<br>
+“offline_access”,“base:app:copy”,<br>
+“base:field:create”,<br>
+“base:field:delete”,<br>
+“base:field:read”,<br>
+“base:field:update”,<br>
+“base:record:create”,<br>
+“base:record:delete”,<br>
+“base:record:retrieve”,<br>
+“base:record:update”,<br>
+“base:table:create”,<br>
+“base:table:delete”,<br>
+“base:table:read”,<br>
+“base:table:update”,<br>
+“base:view:read”,<br>
+“base:view:write_only”,<br>
+“base:app:create”,<br>
+“base:app:update”,<br>
+“base:app:read”,<br>
+“sheets:spreadsheet.meta:read”,<br>
+“sheets:spreadsheet:read”,<br>
+“sheets:spreadsheet:create”,<br>
+“sheets:spreadsheet:write_only”,<br>
+“docs:document:export”,<br>
+“docs:document.media:upload”,<br>
+“board:whiteboard:node:create”,<br>
+“board:whiteboard:node:read”,<br>
+“calendar:calendar:read”,<br>
+“calendar:calendar.event:create”,<br>
+“calendar:calendar.event:delete”,<br>
+“calendar:calendar.event:read”,<br>
+“calendar:calendar.event:reply”,<br>
+“calendar:calendar.event:update”,<br>
+“calendar:calendar.free_busy:read”,<br>
+“contact:contact.base:readonly”,<br>
+“contact:user.base:readonly”,<br>
+“contact:user:search”,<br>
+“docs:document.comment:create”,<br>
+“docs:document.comment:read”,<br>
+“docs:document.comment:update”,<br>
+“docs:document.media:download”,<br>
+“docs:document:copy”,<br>
+“docx:document:create”,<br>
+“docx:document:readonly”,<br>
+“docx:document:write_only”,<br>
+“drive:drive.metadata:readonly”,<br>
+“drive:file:download”,<br>
+“drive:file:upload”,<br>
+“im:chat.members:read”,<br>
+“im:chat:read”,<br>
+“im:message”,<br>
+“im:message.group_msg:get_as_user”,<br>
+“im:message.p2p_msg:get_as_user”,<br>
+“im:message:readonly”,<br>
+“search:docs:read”,<br>
+“search:message”,<br>
+“space:document:delete”,<br>
+“space:document:move”,<br>
+“space:document:retrieve”,<br>
+“task:comment:read”,<br>
+“task:comment:write”,<br>
+“task:task:read”,<br>
+“task:task:write”,<br>
+“task:task:writeonly”,<br>
+“task:tasklist:read”,<br>
+“task:tasklist:write”,<br>
+“wiki:node:copy”,<br>
+“wiki:node:create”,<br>
+“wiki:node:move”,<br>
+“wiki:node:read”,<br>
+“wiki:node:retrieve”,<br>
+“wiki:space:read”,<br>
+“wiki:space:retrieve”,<br>
+“wiki:space:write_only”<br>
+]<br>
+}<br>
+}</p>
+<ol start="5">
+<li><strong>Enable bot capability</strong></li>
+</ol>
+<p>In App Capability &gt; Bot:</p>
+<ol>
+<li>Enable bot capability</li>
+<li>Set the bot name</li>
+</ol>
+<p><img src="feishu-images/009.png" alt=""></p>
+<ol start="6">
+<li>
+<p><strong>Publish the app</strong></p>
+</li>
+<li>
+<p>Create a version in Version Management &amp; Release</p>
+</li>
+<li>
+<p>Submit for review and publish</p>
+</li>
+<li>
+<p>Wait for admin approval (enterprise apps usually auto-approve)</p>
+</li>
+<li>
+<p><strong>Configure event subscription</strong></p>
+</li>
+</ol>
+<p>In Event Subscription:</p>
+<p>⚠️Verify whether the application version has been <strong>successfully published</strong>. If the publication fails, you will be unable to select the <strong>“Receive events through persistent connection”</strong> option.</p>
+<ol>
+<li>Choose Receive events through persistent connection (WebSocket)</li>
+<li>Add the event: im.message.receive_v1</li>
+</ol>
+<p>⚠️ If the gateway is not running, the <strong>persistent-connection</strong> setup may fail to save.</p>
+<p><img src="feishu-images/010.png" alt=""></p>
+<ol start="8">
+<li>
+<p><strong>Publish the app again</strong></p>
+</li>
+<li>
+<p>Create a version in Version Management &amp; Release</p>
+</li>
+<li>
+<p>Submit for review and publish</p>
+</li>
+<li>
+<p>Wait for admin approval (enterprise apps usually auto-approve)</p>
+</li>
+<li>
+<p><strong>Start using</strong></p>
+</li>
+<li>
+<p>Address book page Feishu search; add group members on the group chat page, just search for the Bot name.</p>
+</li>
+</ol>
+
+  </main>
+</body>
+</html>

@@ -1,0 +1,231 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>DingTalk Operation Guide</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      line-height: 1.65;
+      background: #f6f7f9;
+      color: #172033;
+    }
+    body {
+      margin: 0;
+      padding: 32px 20px;
+    }
+    main {
+      max-width: 960px;
+      margin: 0 auto;
+      padding: 32px;
+      border: 1px solid #dde2ea;
+      border-radius: 10px;
+      background: #ffffff;
+      box-shadow: 0 18px 45px rgba(16, 24, 40, 0.08);
+    }
+    h1, h2, h3 {
+      line-height: 1.25;
+    }
+    h1 {
+      margin-top: 0;
+      padding-bottom: 12px;
+      border-bottom: 1px solid #e5e8ef;
+    }
+    img {
+      display: block;
+      max-width: 100%;
+      height: auto;
+      margin: 16px 0 24px;
+      border: 1px solid #e5e8ef;
+      border-radius: 8px;
+    }
+    code, pre {
+      font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+    }
+    pre {
+      overflow: auto;
+      padding: 14px;
+      border-radius: 8px;
+      background: #f1f3f7;
+    }
+    a {
+      color: #1f66d1;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        background: #111318;
+        color: #e8ecf3;
+      }
+      main {
+        border-color: #2c313a;
+        background: #181b21;
+        box-shadow: none;
+      }
+      h1 {
+        border-bottom-color: #2c313a;
+      }
+      img {
+        border-color: #2c313a;
+      }
+      pre {
+        background: #101217;
+      }
+      a {
+        color: #80b3ff;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main>
+<h1>DingTalk Operation Guide</h1>
+<h2>中文教程</h2>
+<h2>第一步： 点击 “创建或加入企业”</h2>
+<p><img src="dingtalk-images/001.png" alt=""></p>
+<ul>
+<li>点击 “企业” 后，选择 “创建企业/团体”</li>
+</ul>
+<p><img src="dingtalk-images/002.png" alt=""></p>
+<p><img src="dingtalk-images/003.png" alt=""></p>
+<ul>
+<li>填写信息并创建（填写 “企业名称” 后会出现如下内容需要填写，企业名称需要超过三个字，内容可随便填写，无特殊要求）</li>
+</ul>
+<p><img src="dingtalk-images/004.png" alt=""></p>
+<p><img src="dingtalk-images/005.png" alt=""></p>
+<p><strong>第二步：进入</strong><a href="https://open-dev.dingtalk.com/"><strong>钉钉开发者平台</strong></a><strong>创建机器人</strong></p>
+<p>钉钉开发者平台网址：<a href="https://open-dev.dingtalk.com">https://open-dev.dingtalk.com</a></p>
+<ul>
+<li>选择刚刚创建的组织</li>
+</ul>
+<p><img src="dingtalk-images/006.png" alt=""></p>
+<ul>
+<li>选择 “创建”</li>
+</ul>
+<p><img src="dingtalk-images/007.png" alt=""></p>
+<ul>
+<li>左侧栏目选择 “机器人” 后，点击 “创建应用”</li>
+</ul>
+<p><img src="dingtalk-images/008.png" alt=""></p>
+<ul>
+<li>填写 “应用名称” 和 “应用描述” 后点击 “保存”</li>
+</ul>
+<p><img src="dingtalk-images/009.png" alt=""></p>
+<ul>
+<li>在左侧栏目选择 “添加应用能力” 并选择添加“机器人”</li>
+</ul>
+<p><img src="dingtalk-images/010.png" alt=""></p>
+<ul>
+<li>开启机器人配置并填写内容</li>
+</ul>
+<p><img src="dingtalk-images/011.png" alt=""></p>
+<p><img src="dingtalk-images/012.png" alt=""></p>
+<p><img src="dingtalk-images/013.png" alt=""></p>
+<h2>第三步：调整权限后发布即可绑定</h2>
+<ul>
+<li>在左侧栏目选择 “权限管理”，搜索 “消息”，勾选图中两项后点击 “批量申请”</li>
+</ul>
+<p><img src="dingtalk-images/014.png" alt=""></p>
+<ul>
+<li>在左侧栏目选择 “版本管理与发布” 后，点击创建新版本，必须创建版本信息才能够发布</li>
+</ul>
+<p><img src="dingtalk-images/015.png" alt=""></p>
+<ul>
+<li>输入 “版本描述” 后 “保存”，即发布完成</li>
+</ul>
+<p><img src="dingtalk-images/016.png" alt=""></p>
+<ul>
+<li>选择左侧栏目的 “凭证与基础信息”，复制 APP ID 和 Client Secret 到MatchaClaw客户端中保存并连接即可完成互联</li>
+</ul>
+<p><img src="dingtalk-images/017.png" alt=""></p>
+<p><img src="dingtalk-images/018.png" alt=""></p>
+<p><img src="dingtalk-images/019.png" alt=""></p>
+<p><img src="dingtalk-images/020.png" alt=""></p>
+<h2>第四步：如何找到创建的机器人</h2>
+<ul>
+<li>在钉钉【消息】栏的“搜索框”，搜索刚刚创建的 “机器人名称”，会展示在功能栏下</li>
+</ul>
+<p><img src="dingtalk-images/021.png" alt=""></p>
+<p><img src="dingtalk-images/022.png" alt=""></p>
+<p><img src="dingtalk-images/023.png" alt=""></p>
+<p><img src="dingtalk-images/024.png" alt=""></p>
+<p><img src="dingtalk-images/025.png" alt=""></p>
+<p><img src="dingtalk-images/026.jpg" alt=""></p>
+<h2>English Guide</h2>
+<h2>Step 1: Click “Create or Join Enterprise.”</h2>
+<p><img src="dingtalk-images/027.png" alt=""></p>
+<ul>
+<li>Select <strong>“Create Organization/Group.”</strong></li>
+</ul>
+<p><img src="dingtalk-images/028.png" alt=""></p>
+<p><img src="dingtalk-images/029.png" alt=""></p>
+<ul>
+<li>Fill in the required information and create.</li>
+<li><em>Note: After entering the “Organization Name” (must be more than three characters), additional fields will appear. You may fill these in as you wish; there are no specific requirements.</em></li>
+</ul>
+<p><img src="dingtalk-images/030.png" alt=""></p>
+<p><img src="dingtalk-images/031.png" alt=""></p>
+<h2>Step 2: Create a Bot in the DingTalk Open Platfor</h2>
+<ul>
+<li>Access the <strong>DingTalk Open Platform</strong>: <a href="https://open-dev.dingtalk.com">https://open-dev.dingtalk.com</a>.</li>
+<li>Select the organization you just created.</li>
+</ul>
+<p><img src="dingtalk-images/032.png" alt=""></p>
+<ul>
+<li>Click  <strong>“application development”</strong> and on the left sidebar, select <strong>“Robots”</strong> and click <strong>“Create Application.”</strong></li>
+</ul>
+<p><img src="dingtalk-images/033.png" alt=""></p>
+<p><img src="dingtalk-images/034.png" alt=""></p>
+<ul>
+<li>Enter the <strong>“App Name”</strong> and <strong>“App Description,”</strong> then click <strong>“Save.”</strong></li>
+</ul>
+<p><img src="dingtalk-images/035.png" alt=""></p>
+<ul>
+<li>In the left sidebar, select <strong>“Add App Capabilities”</strong> and choose <strong>“Robot.”</strong></li>
+</ul>
+<p><img src="dingtalk-images/036.png" alt=""></p>
+<ul>
+<li>Enable the robot configuration and fill in the required details.</li>
+</ul>
+<p><img src="dingtalk-images/037.png" alt=""></p>
+<p><img src="dingtalk-images/038.png" alt=""></p>
+<p><img src="dingtalk-images/039.png" alt=""></p>
+<h2>Step 3: Adjust Permissions and Publish to Bind</h2>
+<ul>
+<li>Select <strong>“Permission Management”</strong> in the left sidebar. Search for <strong>“Message,”</strong> check the two items shown in the diagram, and click <strong>&quot;Batch Request.</strong></li>
+</ul>
+<p><img src="dingtalk-images/040.png" alt=""></p>
+<ul>
+<li>Select <strong>“Version Management &amp; Release”</strong> in the left sidebar and click the <strong>Edit</strong> button.</li>
+</ul>
+<p><img src="dingtalk-images/041.png" alt=""></p>
+<ul>
+<li><em>Note: You must edit the version information before you can publish.</em></li>
+<li>Enter a <strong>“Version Description,”</strong> click <strong>“Save,”</strong> and the release is complete.</li>
+</ul>
+<p><img src="dingtalk-images/042.png" alt=""></p>
+<ul>
+<li>Select <strong>“Credentials &amp; Basic Info”</strong> in the left sidebar.</li>
+</ul>
+<p><img src="dingtalk-images/043.png" alt=""></p>
+<ul>
+<li>Copy the <strong>App ID</strong> and <strong>Client Secret</strong>, paste them into the <strong>MatchaClaw client</strong>, save, and connect to finalize the integration.</li>
+</ul>
+<p><img src="dingtalk-images/044.png" alt=""></p>
+<p><img src="dingtalk-images/045.png" alt=""></p>
+<p><img src="dingtalk-images/046.png" alt=""></p>
+<h2>Step 4: How to Locate Your Robot</h2>
+<ul>
+<li>In the DingTalk <strong>“Messages”</strong> tab, go to the <strong>Search Bar</strong>.  Search for the <strong>“Robot Name”</strong> you created.  The robot will appear under the <strong>“Functions”</strong> section.</li>
+</ul>
+<p><img src="dingtalk-images/047.png" alt=""></p>
+<p><img src="dingtalk-images/048.png" alt=""></p>
+<p><img src="dingtalk-images/049.png" alt=""></p>
+<p><img src="dingtalk-images/050.png" alt=""></p>
+<p><img src="dingtalk-images/051.png" alt=""></p>
+<p><img src="dingtalk-images/052.png" alt=""></p>
+
+  </main>
+</body>
+</html>

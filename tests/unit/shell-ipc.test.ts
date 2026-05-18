@@ -48,12 +48,12 @@ describe('shell ipc', () => {
     const openResourcePathHandler = registeredHandlers.get('shell:openResourcePath');
     expect(openResourcePathHandler).toBeTypeOf('function');
 
-    const result = await openResourcePathHandler?.({}, 'connector-guide/wechat.md');
+    const result = await openResourcePathHandler?.({}, 'connector-guide/wechat.html');
 
-    expect(openPathMock).toHaveBeenCalledWith(resolve(process.cwd(), 'resources', 'connector-guide', 'wechat.md'));
+    expect(openPathMock).toHaveBeenCalledWith(resolve(process.cwd(), 'resources', 'connector-guide', 'wechat.html'));
     expect(result).toEqual({
       success: true,
-      resolvedPath: resolve(process.cwd(), 'resources', 'connector-guide', 'wechat.md'),
+      resolvedPath: resolve(process.cwd(), 'resources', 'connector-guide', 'wechat.html'),
     });
   });
 

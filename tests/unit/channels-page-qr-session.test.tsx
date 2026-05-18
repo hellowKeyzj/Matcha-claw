@@ -146,7 +146,7 @@ describe('Channels page QR session lifecycle', () => {
     invokeIpcMock.mockResolvedValue({ success: true });
   });
 
-  it('查看文档打开渠道对应的本地 Markdown 文档', async () => {
+  it('查看文档打开渠道对应的本地 HTML 预览', async () => {
     render(<Channels />);
 
     const weComLabel = await screen.findByText('WeCom');
@@ -156,7 +156,7 @@ describe('Channels page QR session lifecycle', () => {
     fireEvent.click(await screen.findByRole('button', { name: 'View Documentation' }));
 
     await waitFor(() => {
-      expect(invokeIpcMock).toHaveBeenCalledWith('shell:openResourcePath', 'connector-guide/wecom.md');
+      expect(invokeIpcMock).toHaveBeenCalledWith('shell:openResourcePath', 'connector-guide/wecom.html');
     });
   });
 
