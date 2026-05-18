@@ -82,45 +82,6 @@
 
   ; Prevent NSIS itself from holding $INSTDIR as current working directory.
   SetOutPath $TEMP
-
-  ; Move the previous install directory out of the way before extraction.
-  ; This avoids upgrade hangs when one locked file blocks overwrite in-place.
-  IfFileExists "$INSTDIR\" 0 _ccar_done
-    StrCpy $R8 0
-
-  _ccar_find_stale_slot:
-    IfFileExists "$INSTDIR._stale_$R8\" 0 _ccar_try_rename
-    IntOp $R8 $R8 + 1
-    Goto _ccar_find_stale_slot
-
-  _ccar_try_rename:
-    ClearErrors
-    Rename "$INSTDIR" "$INSTDIR._stale_$R8"
-    IfErrors _ccar_rename_failed _ccar_rename_ok
-
-  _ccar_rename_failed:
-    MessageBox MB_RETRYCANCEL|MB_ICONEXCLAMATION "Failed to prepare installation directory. Another process is still locking files under:$\r$\n$INSTDIR$\r$\nPlease close related processes and retry." /SD IDCANCEL IDRETRY _ccar_try_rename
-    Quit
-
-  _ccar_rename_ok:
-    CreateDirectory "$INSTDIR"
-    DetailPrint "Moved previous install directory to $INSTDIR._stale_$R8"
-
-  _ccar_done:
-!macroend
-
-!macro customUnInstallCheck
-  ${if} $R0 != 0
-    DetailPrint "Old uninstaller exited with code $R0. Continue with overwrite install."
-  ${endIf}
-  ClearErrors
-!macroend
-
-!macro customUnInstallCheckCurrentUser
-  ${if} $R0 != 0
-    DetailPrint "Old uninstaller (current user) exited with code $R0. Continue with overwrite install."
-  ${endIf}
-  ClearErrors
 !macroend
 
 !macro customInstall

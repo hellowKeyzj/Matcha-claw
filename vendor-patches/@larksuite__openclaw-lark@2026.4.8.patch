@@ -1,0 +1,262 @@
+diff --git a/src/channel/monitor.js b/src/channel/monitor.js
+index 8b9d330c5c85739429ebf0349708ddec1bf71458..541da3e8bb2ec0e899cf68246674427fa156b2d8 100644
+--- a/src/channel/monitor.js
++++ b/src/channel/monitor.js
+@@ -29,7 +29,7 @@ const mlog = (0, lark_logger_1.larkLogger)('channel/monitor');
+  * when the abort signal fires (or immediately if already aborted).
+  */
+ async function monitorSingleAccount(params) {
+-    const { account, runtime, abortSignal } = params;
++    const { account, runtime, abortSignal, setStatus } = params;
+     const { accountId } = account;
+     const log = runtime?.log ?? ((...args) => mlog.info(args.map(String).join(' ')));
+     const error = runtime?.error ?? ((...args) => mlog.error(args.map(String).join(' ')));
+@@ -85,6 +85,10 @@ async function monitorSingleAccount(params) {
+             (0, event_handlers_1.handleCardActionEvent)(ctx, data)),
+         },
+         abortSignal,
++        onStatus: (patch) => setStatus?.({
++            accountId,
++            ...patch,
++        }),
+     });
+     // startWS resolves when abortSignal fires — probe result is logged inside startWS.
+     log(`feishu[${accountId}]: bot open_id resolved: ${lark.botOpenId ?? 'unknown'}`);
+@@ -119,6 +123,7 @@ async function monitorFeishuProvider(opts = {}) {
+             account,
+             runtime: opts.runtime,
+             abortSignal: opts.abortSignal,
++            setStatus: opts.setStatus,
+         });
+         await (0, shutdown_hooks_1.drainShutdownHooks)({ log });
+         return;
+@@ -134,6 +139,7 @@ async function monitorFeishuProvider(opts = {}) {
+         account,
+         runtime: opts.runtime,
+         abortSignal: opts.abortSignal,
++        setStatus: opts.setStatus,
+     })));
+     await (0, shutdown_hooks_1.drainShutdownHooks)({ log });
+ }
+diff --git a/src/channel/plugin.js b/src/channel/plugin.js
+index b421eec25ebe50b500d7160dae52aa2bfa0159c3..5890dcf33a61c1163dd4f036eedee60c37898ae5 100644
+--- a/src/channel/plugin.js
++++ b/src/channel/plugin.js
+@@ -259,6 +259,8 @@ exports.feishuPlugin = {
+         buildChannelSummary: ({ snapshot }) => ({
+             configured: snapshot.configured ?? false,
+             running: snapshot.running ?? false,
++            connected: snapshot.connected ?? false,
++            connectionState: snapshot.connectionState ?? null,
+             lastStartAt: snapshot.lastStartAt ?? null,
+             lastStopAt: snapshot.lastStopAt ?? null,
+             lastError: snapshot.lastError ?? null,
+@@ -277,6 +279,10 @@ exports.feishuPlugin = {
+             appId: account.appId,
+             brand: account.brand,
+             running: runtime?.running ?? false,
++            connected: runtime?.connected ?? false,
++            connectionState: runtime?.connectionState ?? null,
++            lastConnectedAt: runtime?.lastConnectedAt ?? null,
++            lastDisconnectedAt: runtime?.lastDisconnectedAt ?? null,
+             lastStartAt: runtime?.lastStartAt ?? null,
+             lastStopAt: runtime?.lastStopAt ?? null,
+             lastError: runtime?.lastError ?? null,
+@@ -299,6 +305,7 @@ exports.feishuPlugin = {
+                 runtime: ctx.runtime,
+                 abortSignal: ctx.abortSignal,
+                 accountId: ctx.accountId,
++                setStatus: ctx.setStatus,
+             });
+         },
+         stopAccount: async (ctx) => {
+diff --git a/src/channel/types.d.ts b/src/channel/types.d.ts
+index 15f7576e35f08d78bb2bc8e9ca097648ed385f8b..11811ea71dd0cabd4c5ac6b5727639845132cc83 100644
+--- a/src/channel/types.d.ts
++++ b/src/channel/types.d.ts
+@@ -14,6 +14,7 @@ export interface MonitorFeishuOpts {
+     runtime?: RuntimeEnv;
+     abortSignal?: AbortSignal;
+     accountId?: string;
++    setStatus?: (next: Record<string, unknown>) => void;
+ }
+ export interface FeishuDirectoryPeer {
+     kind: 'user';
+diff --git a/src/core/lark-client.d.ts b/src/core/lark-client.d.ts
+index 9f532d8773255889d371ca259ce5f6fbc5b75be5..20c81ba73f6d23d5127b76697be662d1c22e2afe 100644
+--- a/src/core/lark-client.d.ts
++++ b/src/core/lark-client.d.ts
+@@ -31,6 +31,7 @@ export declare class LarkClient {
+     private _botName;
+     private _lastProbeResult;
+     private _lastProbeAt;
++    private _wsStatusPublisher;
+     /** Attached message deduplicator — disposed together with the client. */
+     messageDedup: MessageDedup | null;
+     /** Persist the runtime instance for later retrieval (activate 阶段调用一次). */
+@@ -91,6 +92,7 @@ export declare class LarkClient {
+         handlers: Record<string, (data: unknown) => Promise<void>>;
+         abortSignal?: AbortSignal;
+         autoProbe?: boolean;
++        onStatus?: (patch: Record<string, unknown>) => void;
+     }): Promise<void>;
+     /** Whether a WebSocket client is currently active. */
+     get wsConnected(): boolean;
+@@ -99,6 +101,8 @@ export declare class LarkClient {
+     /** Disconnect + remove from cache. */
+     dispose(): void;
+     /** Assert credentials exist or throw. */
++    private publishWsStatus;
++    private watchWsClientStatus;
+     private requireCredentials;
+     /**
+      * Start the WSClient and return a promise that resolves when the
+diff --git a/src/core/lark-client.js b/src/core/lark-client.js
+index e981c5d50cf93c55be792ef9f767e0bf38e231ab..be4f4ec9501d8d6066cc7a68ca489df9d32adbea 100644
+--- a/src/core/lark-client.js
++++ b/src/core/lark-client.js
+@@ -58,6 +58,7 @@ const lark_logger_1 = require("./lark-logger.js");
+ const runtime_store_1 = require("./runtime-store.js");
+ const version_1 = require("./version.js");
+ const log = (0, lark_logger_1.larkLogger)('core/lark-client');
++const WS_READY_STATE_OPEN = 1;
+ // ---------------------------------------------------------------------------
+ // 注入 User-Agent 到所有飞书 SDK 请求
+ // ---------------------------------------------------------------------------
+@@ -131,6 +132,7 @@ class LarkClient {
+     _botName;
+     _lastProbeResult = null;
+     _lastProbeAt = 0;
++    _wsStatusPublisher = null;
+     /** Attached message deduplicator — disposed together with the client. */
+     messageDedup = null;
+     // ---- Plugin runtime (singleton) ------------------------------------------
+@@ -314,7 +316,8 @@ class LarkClient {
+      * The returned Promise resolves when `abortSignal` fires.
+      */
+     async startWS(opts) {
+-        const { handlers, abortSignal, autoProbe = true } = opts;
++        const { handlers, abortSignal, autoProbe = true, onStatus } = opts;
++        this._wsStatusPublisher = typeof onStatus === 'function' ? onStatus : null;
+         if (autoProbe)
+             await this.probe();
+         const dispatcher = new Lark.EventDispatcher({
+@@ -360,7 +363,8 @@ class LarkClient {
+     }
+     /** Whether a WebSocket client is currently active. */
+     get wsConnected() {
+-        return this._wsClient != null;
++        const wsInstance = this._wsClient?.wsConfig?.getWSInstance?.();
++        return wsInstance?.readyState === WS_READY_STATE_OPEN;
+     }
+     /** Disconnect WebSocket but keep instance in cache. */
+     disconnect() {
+@@ -374,12 +378,26 @@ class LarkClient {
+             }
+         }
+         this._wsClient = null;
++        this.publishWsStatus({
++            connected: false,
++            connectionState: 'disconnected',
++            lastDisconnectedAt: Date.now(),
++        });
++        this._wsStatusPublisher = null;
+         if (this.messageDedup) {
+             log.info(`disposing message dedup`, { accountId: this.accountId, size: this.messageDedup.size });
+             this.messageDedup.dispose();
+             this.messageDedup = null;
+         }
+     }
++    publishWsStatus(patch) {
++        try {
++            this._wsStatusPublisher?.(patch);
++        }
++        catch {
++            // Status publication must not break the SDK event loop.
++        }
++    }
+     /** Disconnect + remove from cache. */
+     dispose() {
+         this.disconnect();
+@@ -410,7 +428,13 @@ class LarkClient {
+                 resolve();
+             }, { once: true });
+             try {
++                this.publishWsStatus({
++                    connected: false,
++                    connectionState: 'connecting',
++                    lastError: null,
++                });
+                 void this._wsClient.start({ eventDispatcher: dispatcher });
++                this.watchWsClientStatus(signal);
+             }
+             catch (err) {
+                 this.disconnect();
+@@ -418,6 +442,67 @@ class LarkClient {
+             }
+         });
+     }
++    watchWsClientStatus(signal) {
++        const wsClient = this._wsClient;
++        if (!wsClient) {
++            return;
++        }
++        let currentWs = null;
++        let pollTimer = null;
++        let closed = false;
++        const publishConnected = () => {
++            this.publishWsStatus({
++                connected: true,
++                connectionState: 'connected',
++                lastConnectedAt: Date.now(),
++                lastError: null,
++            });
++        };
++        const publishReconnecting = (error) => {
++            this.publishWsStatus({
++                connected: false,
++                connectionState: 'reconnecting',
++                lastDisconnectedAt: Date.now(),
++                ...(error ? { lastError: error } : {}),
++            });
++        };
++        const attach = (ws) => {
++            if (!ws || ws === currentWs) {
++                return;
++            }
++            currentWs = ws;
++            if (ws.readyState === WS_READY_STATE_OPEN) {
++                publishConnected();
++            }
++            ws.on?.('open', publishConnected);
++            ws.on?.('close', () => {
++                if (!closed) {
++                    publishReconnecting();
++                }
++            });
++            ws.on?.('error', (err) => {
++                publishReconnecting(err instanceof Error ? err.message : String(err));
++            });
++        };
++        const poll = () => {
++            if (closed || signal?.aborted || this._wsClient !== wsClient) {
++                if (pollTimer) {
++                    clearInterval(pollTimer);
++                }
++                return;
++            }
++            attach(wsClient.wsConfig?.getWSInstance?.());
++        };
++        pollTimer = setInterval(poll, 1000);
++        pollTimer.unref?.();
++        poll();
++        signal?.addEventListener('abort', () => {
++            closed = true;
++            if (pollTimer) {
++                clearInterval(pollTimer);
++            }
++        }, { once: true });
++    }
+ }
+ exports.LarkClient = LarkClient;
+ // Inject LarkClient reference into chat-info-cache to break the circular

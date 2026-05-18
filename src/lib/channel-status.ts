@@ -67,6 +67,10 @@ export function isChannelRuntimeConnected(
     return true;
   }
 
+  if (account.connected === false) {
+    return false;
+  }
+
   // OpenClaw 某些渠道长时间只维持 running，不会稳定写入 connected=true。
   // 对无错误的 running 视作已连接，避免前端长期误判“连接中/错误”。
   return account.running === true && !hasChannelRuntimeError(account);

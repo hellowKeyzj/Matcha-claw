@@ -9,10 +9,18 @@ describe('channel runtime status helpers', () => {
     expect(
       computeChannelRuntimeStatus({
         running: true,
-        connected: false,
         linked: false,
       }),
     ).toBe('connected');
+  });
+
+  it('显式 connected=false 时不再用 running 误判为 connected', () => {
+    expect(
+      computeChannelRuntimeStatus({
+        running: true,
+        connected: false,
+      }),
+    ).toBe('connecting');
   });
 
   it('将 probe.ok=true 视为 connected', () => {
@@ -36,7 +44,7 @@ describe('channel runtime status helpers', () => {
   it('多账号场景下：有健康账号时整体保持 connected', () => {
     expect(
       pickChannelRuntimeStatus([
-        { running: true, connected: false, lastError: null },
+        { running: true, lastError: null },
         { connected: false, running: false, lastError: 'boom' },
       ]),
     ).toBe('connected');

@@ -36,7 +36,6 @@ export class ChannelService {
   private gatewayChannelsCacheReady = false;
   private gatewayChannelsCacheError: string | null = null;
   private gatewayChannelsCacheUpdatedAt: number | null = null;
-  private snapshotRefreshTask: Promise<unknown> | null = null;
 
   constructor(private readonly deps: ChannelServiceDeps) {}
 
@@ -60,20 +59,36 @@ export class ChannelService {
   }
 
   async snapshot() {
+    if (await isGatewayReadyForSnapshot(this.deps.gateway)) {
+      try {
+        const refresh = await this.fetchAndCache(false);
+        return {
+          ...refresh,
+          ready: true,
+          refreshing: false,
+          error: null,
+        };
+      } catch {
+        const configuredChannels = await this.deps.channelConfig.listConfiguredChannels();
+        return {
+          success: true,
+          snapshot: projectChannelsSnapshot(configuredChannels, this.gatewayChannelsCache),
+          ready: true,
+          refreshing: false,
+          updatedAt: this.gatewayChannelsCacheUpdatedAt,
+          error: this.gatewayChannelsCacheError,
+        };
+      }
+    }
+
     const configuredChannels = await this.deps.channelConfig.listConfiguredChannels();
     const projected = projectChannelsSnapshot(configuredChannels, this.gatewayChannelsCache);
-
-    let refreshSubmitted = false;
-    if (await isGatewayReadyForSnapshot(this.deps.gateway)) {
-      this.deps.jobs.submitRefreshSnapshot();
-      refreshSubmitted = true;
-    }
 
     return {
       success: true,
       snapshot: projected satisfies ProjectedChannelsSnapshot,
       ready: this.gatewayChannelsCacheReady,
-      refreshing: refreshSubmitted || this.snapshotRefreshTask !== null,
+      refreshing: false,
       updatedAt: this.gatewayChannelsCacheUpdatedAt,
       error: this.gatewayChannelsCacheError,
     };

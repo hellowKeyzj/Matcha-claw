@@ -178,7 +178,7 @@ describe('channels store', () => {
         channels: { telegram: { configured: true } },
         channelAccounts: {
           telegram: [
-            { accountId: 'default', running: true, connected: false, linked: false, name: 'default' },
+            { accountId: 'default', running: true, linked: false, name: 'default' },
             { accountId: 'backup', running: false, connected: false, linked: false, lastError: 'secondary failed', name: 'backup' },
           ],
         },
@@ -193,6 +193,30 @@ describe('channels store', () => {
       expect.objectContaining({
         type: 'telegram',
         status: 'connected',
+      }),
+    ]);
+  });
+
+  it('账号显式 connected=false 时不应被 running 误判 connected', async () => {
+    hostChannelsFetchSnapshotMock.mockResolvedValue({
+      success: true,
+      snapshot: {
+        channelOrder: ['feishu'],
+        channels: { feishu: { configured: true } },
+        channelAccounts: {
+          feishu: [{ accountId: 'default', running: true, connected: false, name: 'default' }],
+        },
+        channelDefaultAccountId: { feishu: 'default' },
+      },
+    });
+
+    const { useChannelsStore } = await import('../../src/stores/channels');
+    await useChannelsStore.getState().fetchChannels();
+
+    expect(useChannelsStore.getState().channels).toEqual([
+      expect.objectContaining({
+        type: 'feishu',
+        status: 'connecting',
       }),
     ]);
   });

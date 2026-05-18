@@ -8,6 +8,11 @@ overrides:
   '@whiskeysockets/baileys>libsignal': git+https://github.com/whiskeysockets/libsignal-node.git#1c30d7d7e76a3b0aa120b04dc6a26f5a12dccf67
   isbinaryfile: ^5.0.0
 
+patchedDependencies:
+  '@larksuite/openclaw-lark@2026.4.8':
+    hash: 1f30a7463aa9edac9f78c598b8aa1e30d2ccb2f55df6c9a640938622cac112d6
+    path: vendor-patches/@larksuite__openclaw-lark@2026.4.8.patch
+
 importers:
 
   .:
@@ -78,7 +83,7 @@ importers:
         version: 10.0.1(eslint@10.0.0(jiti@1.21.7))
       '@larksuite/openclaw-lark':
         specifier: 2026.4.8
-        version: 2026.4.8(openclaw@2026.4.23(@napi-rs/canvas@0.1.100)(encoding@0.1.13))
+        version: 2026.4.8(patch_hash=1f30a7463aa9edac9f78c598b8aa1e30d2ccb2f55df6c9a640938622cac112d6)(openclaw@2026.4.23(@napi-rs/canvas@0.1.100)(encoding@0.1.13))
       '@playwright/test':
         specifier: ^1.58.2
         version: 1.59.1
@@ -8720,7 +8725,7 @@ snapshots:
       '@lancedb/lancedb-win32-arm64-msvc': 0.26.2
       '@lancedb/lancedb-win32-x64-msvc': 0.26.2
 
-  '@larksuite/openclaw-lark@2026.4.8(openclaw@2026.4.23(@napi-rs/canvas@0.1.100)(encoding@0.1.13))':
+  '@larksuite/openclaw-lark@2026.4.8(patch_hash=1f30a7463aa9edac9f78c598b8aa1e30d2ccb2f55df6c9a640938622cac112d6)(openclaw@2026.4.23(@napi-rs/canvas@0.1.100)(encoding@0.1.13))':
     dependencies:
       '@larksuiteoapi/node-sdk': 1.60.0
       '@sinclair/typebox': 0.34.48

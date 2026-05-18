@@ -62,6 +62,7 @@ import { toast } from 'sonner';
 import { useTranslation } from 'react-i18next';
 
 const CHANNELS_EVENT_REFRESH_COOLDOWN_MS = 400;
+const CHANNELS_STATUS_POLL_MS = 10_000;
 const QR_EVENT_PREFIX_BY_TYPE: Partial<Record<ChannelType, string>> = {
   whatsapp: 'channel:whatsapp',
   'openclaw-weixin': 'channel:weixin',
@@ -205,6 +206,18 @@ export function Channels() {
   const showInitialLoading = !snapshotReady && initialLoading;
   const manualRefreshBusy = refreshing || mutating;
   const showRefreshingHint = useDelayedFlag(refreshing && snapshotReady, 180);
+
+  useEffect(() => {
+    if (!gatewayOperational || configuredChannels.length === 0) {
+      return undefined;
+    }
+    const timer = window.setInterval(() => {
+      void fetchChannels({ silent: true });
+    }, CHANNELS_STATUS_POLL_MS);
+    return () => {
+      window.clearInterval(timer);
+    };
+  }, [configuredChannels.length, fetchChannels, gatewayOperational]);
 
   return (
     <div className="space-y-6">

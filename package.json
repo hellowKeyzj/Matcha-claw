@@ -25,6 +25,9 @@
         "x64",
         "arm64"
       ]
+    },
+    "patchedDependencies": {
+      "@larksuite/openclaw-lark@2026.4.8": "vendor-patches/@larksuite__openclaw-lark@2026.4.8.patch"
     }
   },
   "description": "MatchaClaw - Graphical AI Assistant based on OpenClaw",

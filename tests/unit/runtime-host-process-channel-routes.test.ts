@@ -182,8 +182,14 @@ describe('runtime-host process channel routes', () => {
     });
   });
 
-  it('snapshot 在 Gateway ready 后提交后台刷新任务并立即返回本地快照', async () => {
+  it('snapshot 在 Gateway ready 后同步读取 channels.status 并返回实时快照', async () => {
     const deps = createDeps();
+    deps.openclawBridge.channelsStatus.mockResolvedValueOnce({
+      channels: { feishu: { configured: true } },
+      channelAccounts: { feishu: [{ accountId: 'default', running: true, connected: true }] },
+      channelDefaultAccountId: { feishu: 'default' },
+    });
+    deps.listConfiguredChannels.mockResolvedValue(['feishu']);
 
     const snapshotResult = await dispatchRuntimeRouteDefinition(channelRoutes,
       'GET',
@@ -193,22 +199,91 @@ describe('runtime-host process channel routes', () => {
       deps.routeDeps,
     );
 
-    expect(deps.submitRefreshSnapshot).toHaveBeenCalledTimes(1);
-    expect(deps.openclawBridge.channelsStatus).not.toHaveBeenCalled();
+    expect(deps.submitRefreshSnapshot).not.toHaveBeenCalled();
+    expect(deps.openclawBridge.channelsStatus).toHaveBeenCalledWith(false);
     expect(snapshotResult).toEqual({
       status: 200,
       data: {
         success: true,
         snapshot: {
-          channelOrder: [],
-          channels: {},
-          channelAccounts: {},
+          channelOrder: ['feishu'],
+          channels: { feishu: { configured: true } },
+          channelAccounts: { feishu: [{ accountId: 'default', running: true, connected: true }] },
+          channelDefaultAccountId: { feishu: 'default' },
+        },
+        ready: true,
+        refreshing: false,
+        updatedAt: 1234,
+        error: null,
+      },
+    });
+  });
+
+  it('snapshot 同步刷新失败时保留上一次成功快照并返回错误', async () => {
+    const deps = createDeps();
+    deps.listConfiguredChannels.mockResolvedValue(['feishu']);
+    deps.openclawBridge.channelsStatus
+      .mockResolvedValueOnce({
+        channels: { feishu: { configured: true } },
+        channelAccounts: { feishu: [{ accountId: 'default', running: true, connected: true }] },
+        channelDefaultAccountId: { feishu: 'default' },
+      })
+      .mockRejectedValueOnce(new Error('Gateway RPC timeout: channels.status'));
+
+    await deps.routeDeps.channelService.snapshot();
+    const snapshotResult = await dispatchRuntimeRouteDefinition(channelRoutes,
+      'GET',
+      '/api/channels/snapshot',
+      new URL('http://127.0.0.1/api/channels/snapshot'),
+      undefined,
+      deps.routeDeps,
+    );
+
+    expect(snapshotResult).toEqual({
+      status: 200,
+      data: {
+        success: true,
+        snapshot: {
+          channelOrder: ['feishu'],
+          channels: { feishu: { configured: true } },
+          channelAccounts: { feishu: [{ accountId: 'default', running: true, connected: true }] },
+          channelDefaultAccountId: { feishu: 'default' },
+        },
+        ready: true,
+        refreshing: false,
+        updatedAt: 1234,
+        error: 'Gateway RPC timeout: channels.status',
+      },
+    });
+  });
+
+  it('snapshot 首次同步刷新失败时仍返回已配置渠道快照和错误', async () => {
+    const deps = createDeps();
+    deps.listConfiguredChannels.mockResolvedValue(['feishu']);
+    deps.openclawBridge.channelsStatus.mockRejectedValueOnce(new Error('Gateway RPC timeout: channels.status'));
+
+    const snapshotResult = await dispatchRuntimeRouteDefinition(channelRoutes,
+      'GET',
+      '/api/channels/snapshot',
+      new URL('http://127.0.0.1/api/channels/snapshot'),
+      undefined,
+      deps.routeDeps,
+    );
+
+    expect(snapshotResult).toEqual({
+      status: 200,
+      data: {
+        success: true,
+        snapshot: {
+          channelOrder: ['feishu'],
+          channels: { feishu: { configured: true } },
+          channelAccounts: { feishu: [] },
           channelDefaultAccountId: {},
         },
-        ready: false,
-        refreshing: true,
+        ready: true,
+        refreshing: false,
         updatedAt: null,
-        error: null,
+        error: 'Gateway RPC timeout: channels.status',
       },
     });
   });
