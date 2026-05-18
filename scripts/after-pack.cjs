@@ -19,7 +19,7 @@
  *      @mariozechner/clipboard).
  */
 
-const { cpSync, existsSync, readdirSync, rmSync, mkdirSync, realpathSync } = require('fs');
+const { cpSync, existsSync, readdirSync, rmSync, mkdirSync, realpathSync, readFileSync, writeFileSync } = require('fs');
 const { join, dirname, basename } = require('path');
 const STRIP_LINKER_ARTIFACTS = process.env.MATCHACLAW_STRIP_LINKER_ARTIFACTS === '1';
 
@@ -51,6 +51,26 @@ const ARCH_MAP = { 0: 'ia32', 1: 'x64', 2: 'armv7l', 3: 'arm64', 4: 'universal' 
 
 function resolveArch(archEnum) {
   return ARCH_MAP[archEnum] || 'x64';
+}
+
+function readJsonSafe(filePath) {
+  try {
+    return JSON.parse(readFileSync(normWin(filePath), 'utf8'));
+  } catch {
+    return null;
+  }
+}
+
+function listPackageDeps(pkgJson) {
+  return Object.keys({
+    ...(pkgJson?.dependencies && typeof pkgJson.dependencies === 'object' ? pkgJson.dependencies : {}),
+    ...(pkgJson?.optionalDependencies && typeof pkgJson.optionalDependencies === 'object' ? pkgJson.optionalDependencies : {}),
+  }).sort((a, b) => a.localeCompare(b));
+}
+
+function readInstalledPackageVersion(packageDir) {
+  const pkg = readJsonSafe(join(packageDir, 'package.json'));
+  return typeof pkg?.version === 'string' ? pkg.version.trim() : null;
 }
 
 // ── General cleanup ──────────────────────────────────────────────────────────
@@ -335,6 +355,57 @@ function patchPluginIds(pluginDir, expectedId) {
   }
 }
 
+function resolveNsisExtractTemplate() {
+  const candidates = [];
+
+  try {
+    const electronBuilderPackage = require.resolve('electron-builder/package.json');
+    const pnpmNodeModulesDir = dirname(dirname(electronBuilderPackage));
+    candidates.push(join(
+      pnpmNodeModulesDir,
+      'app-builder-lib',
+      'templates',
+      'nsis',
+      'include',
+      'extractAppPackage.nsh',
+    ));
+  } catch {
+    // Fall through to filesystem candidates below.
+  }
+
+  candidates.push(join(
+    __dirname,
+    '..',
+    'node_modules',
+    'app-builder-lib',
+    'templates',
+    'nsis',
+    'include',
+    'extractAppPackage.nsh',
+  ));
+
+  const pnpmDir = join(__dirname, '..', 'node_modules', '.pnpm');
+  if (existsSync(pnpmDir)) {
+    for (const entry of readdirSync(pnpmDir, { withFileTypes: true })) {
+      if (!entry.isDirectory() || !entry.name.startsWith('app-builder-lib@')) {
+        continue;
+      }
+      candidates.push(join(
+        pnpmDir,
+        entry.name,
+        'node_modules',
+        'app-builder-lib',
+        'templates',
+        'nsis',
+        'include',
+        'extractAppPackage.nsh',
+      ));
+    }
+  }
+
+  return candidates.find((candidate) => existsSync(candidate)) || null;
+}
+
 // ── Plugin bundler ───────────────────────────────────────────────────────────
 // Bundles a single OpenClaw plugin (and its transitive deps) from node_modules
 // directly into the packaged resources directory.
@@ -570,6 +641,124 @@ exports.default = async function afterPack(context) {
     }
   }
 
+  // 1.2 Prepare built-in extension node_modules that electron-builder skips.
+  //
+  // OpenClaw ships some built-in extensions under dist/extensions/<ext>/ with
+  // their own node_modules. extraResources does not reliably copy those
+  // node_modules because the project .gitignore excludes node_modules. The
+  // shared chunks under dist/ can also resolve packages from the top-level
+  // openclaw/node_modules, so we merge missing extension deps there.
+  //
+  // On macOS we avoid duplicating packages already available at the top level
+  // when the versions match. This reduces codesign file pressure without
+  // changing runtime resolution. On Windows/Linux we keep the extension-local
+  // copy to preserve the exact existing layout.
+  const buildExtDir = join(__dirname, '..', 'build', 'openclaw', 'dist', 'extensions');
+  const packExtDir = join(openclawRoot, 'dist', 'extensions');
+  if (existsSync(buildExtDir)) {
+    let extNMCount = 0;
+    let mergedPkgCount = 0;
+    let prunedSharedDepCount = 0;
+
+    for (const extEntry of readdirSync(buildExtDir, { withFileTypes: true })) {
+      if (!extEntry.isDirectory()) continue;
+
+      const srcNM = join(buildExtDir, extEntry.name, 'node_modules');
+      if (!existsSync(srcNM)) continue;
+
+      const destExtRoot = join(packExtDir, extEntry.name);
+      const destExtNM = join(destExtRoot, 'node_modules');
+      rmSync(destExtNM, { recursive: true, force: true });
+      mkdirSync(destExtNM, { recursive: true });
+      extNMCount++;
+
+      if (platform === 'darwin') {
+        const buildPkgPath = join(buildExtDir, extEntry.name, 'package.json');
+        const packPkgPath = join(destExtRoot, 'package.json');
+        const buildPkgJson = readJsonSafe(buildPkgPath) || {};
+        const packPkgJson = readJsonSafe(packPkgPath) || JSON.parse(JSON.stringify(buildPkgJson));
+
+        for (const depName of listPackageDeps(buildPkgJson)) {
+          const srcDepPkg = join(srcNM, ...depName.split('/'));
+          const destDepPkg = join(dest, ...depName.split('/'));
+          if (!existsSync(destDepPkg) && existsSync(srcDepPkg)) {
+            mkdirSync(dirname(destDepPkg), { recursive: true });
+            cpSync(srcDepPkg, destDepPkg, { recursive: true });
+            mergedPkgCount++;
+          }
+
+          const srcVersion = existsSync(srcDepPkg) ? readInstalledPackageVersion(srcDepPkg) : null;
+          const destVersion = existsSync(destDepPkg) ? readInstalledPackageVersion(destDepPkg) : null;
+          const canReuseTopLevel = existsSync(destDepPkg) && (
+            !srcVersion || (destVersion && srcVersion === destVersion)
+          );
+          if (canReuseTopLevel) {
+            if (packPkgJson.dependencies && depName in packPkgJson.dependencies) {
+              delete packPkgJson.dependencies[depName];
+              prunedSharedDepCount++;
+            }
+            if (packPkgJson.optionalDependencies && depName in packPkgJson.optionalDependencies) {
+              delete packPkgJson.optionalDependencies[depName];
+              prunedSharedDepCount++;
+            }
+            continue;
+          }
+
+          const extDepPkg = join(destExtNM, ...depName.split('/'));
+          mkdirSync(dirname(extDepPkg), { recursive: true });
+          if (existsSync(srcDepPkg)) {
+            cpSync(srcDepPkg, extDepPkg, { recursive: true });
+          } else if (existsSync(destDepPkg)) {
+            cpSync(destDepPkg, extDepPkg, { recursive: true });
+          }
+        }
+
+        if (packPkgJson.dependencies && Object.keys(packPkgJson.dependencies).length === 0) {
+          delete packPkgJson.dependencies;
+        }
+        if (packPkgJson.optionalDependencies && Object.keys(packPkgJson.optionalDependencies).length === 0) {
+          delete packPkgJson.optionalDependencies;
+        }
+        writeFileSync(packPkgPath, JSON.stringify(packPkgJson, null, 2) + '\n', 'utf8');
+      } else {
+        for (const pkgEntry of readdirSync(srcNM, { withFileTypes: true })) {
+          if (!pkgEntry.isDirectory() || pkgEntry.name === '.bin') continue;
+          const srcPkg = join(srcNM, pkgEntry.name);
+          const destPkg = join(dest, pkgEntry.name);
+
+          if (pkgEntry.name.startsWith('@')) {
+            for (const scopeEntry of readdirSync(srcPkg, { withFileTypes: true })) {
+              if (!scopeEntry.isDirectory()) continue;
+              const srcScoped = join(srcPkg, scopeEntry.name);
+              const destScoped = join(destPkg, scopeEntry.name);
+              if (!existsSync(destScoped)) {
+                mkdirSync(dirname(destScoped), { recursive: true });
+                cpSync(srcScoped, destScoped, { recursive: true });
+                mergedPkgCount++;
+              }
+
+              const extScoped = join(destExtNM, pkgEntry.name, scopeEntry.name);
+              mkdirSync(dirname(extScoped), { recursive: true });
+              cpSync(srcScoped, extScoped, { recursive: true });
+            }
+          } else {
+            if (!existsSync(destPkg)) {
+              cpSync(srcPkg, destPkg, { recursive: true });
+              mergedPkgCount++;
+            }
+
+            const extPkg = join(destExtNM, pkgEntry.name);
+            cpSync(srcPkg, extPkg, { recursive: true });
+          }
+        }
+      }
+    }
+
+    if (extNMCount > 0) {
+      console.log(`[after-pack] ✅ Prepared node_modules for ${extNMCount} built-in extension(s), merged ${mergedPkgCount} packages into top-level${prunedSharedDepCount > 0 ? `, pruned ${prunedSharedDepCount} redundant direct deps on macOS` : ''}.`);
+    }
+  }
+
   // 2. General cleanup on the full openclaw directory (not just node_modules)
   console.log('[after-pack] 🧹 Cleaning up unnecessary files ...');
   const removedRoot = cleanupUnnecessaryFiles(openclawRoot);
@@ -585,6 +774,49 @@ exports.default = async function afterPack(context) {
   const nativeRemoved = cleanupNativePlatformPackages(dest, platform, arch);
   if (nativeRemoved > 0) {
     console.log(`[after-pack] ✅ Removed ${nativeRemoved} non-target native platform packages.`);
+  }
+
+  // 5. [Windows only] Patch NSIS extraction to avoid the slow temp CopyFiles step.
+  //
+  // electron-builder's extractUsing7za macro extracts app-64.7z into a temp
+  // directory, then copies the whole tree to $INSTDIR. MatchaClaw's OpenClaw
+  // runtime contains more than 100k small files, so this second copy can take a
+  // very long time under Windows Defender or on slower disks.
+  //
+  // customCheckAppRunning in scripts/installer.nsh already renames the old
+  // $INSTDIR to a _stale_ directory and recreates an empty $INSTDIR before
+  // extraction. That makes direct extraction safe and removes the duplicate copy.
+  if (platform === 'win32') {
+    const extractNsh = resolveNsisExtractTemplate();
+    if (extractNsh && existsSync(extractNsh)) {
+      const { readFileSync, writeFileSync } = require('fs');
+      const original = readFileSync(extractNsh, 'utf8');
+
+      if (original.includes('MatchaClaw-patched')) {
+        console.log('[after-pack] ⚡ extractAppPackage.nsh already patched; skipping.');
+      } else if (original.includes('CopyFiles')) {
+        const patched = original.replace(
+          /!macro extractUsing7za FILE[\s\S]*?!macroend/,
+          [
+            '!macro extractUsing7za FILE',
+            '  ; MatchaClaw-patched: extract directly to $INSTDIR.',
+            '  ; customCheckAppRunning moves the old $INSTDIR aside first,',
+            '  ; so the target directory is clean and does not need CopyFiles.',
+            '  Nsis7z::Extract "${FILE}"',
+            '!macroend',
+          ].join('\n'),
+        );
+
+        if (patched !== original) {
+          writeFileSync(extractNsh, patched, 'utf8');
+          console.log('[after-pack] ⚡ Patched extractAppPackage.nsh: using direct Nsis7z::Extract.');
+        } else {
+          console.warn('[after-pack] ⚠️  Failed to patch extractAppPackage.nsh; template shape changed.');
+        }
+      }
+    } else {
+      console.warn('[after-pack] ⚠️  Could not find extractAppPackage.nsh; NSIS CopyFiles optimization skipped.');
+    }
   }
 };
 
