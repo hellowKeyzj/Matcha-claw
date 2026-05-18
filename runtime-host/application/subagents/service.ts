@@ -5,6 +5,7 @@ import {
 } from '../gateway/gateway-capability-service';
 import { badRequest, ok, type ApplicationResponseOf } from '../common/application-response';
 import type { RuntimeClockPort } from '../common/runtime-ports';
+import type { OpenClawWorkspacePort } from '../openclaw/openclaw-workspace-service';
 
 const SUBAGENT_RPC_TIMEOUT_MS = 60_000;
 const SUBAGENT_CAPABILITY_TIMEOUT_MS = 5_000;
@@ -21,6 +22,7 @@ export class SubagentRuntimeService {
   constructor(private readonly deps: {
     readonly gateway: Pick<GatewayRpcPort, 'gatewayRpc'>;
     readonly capabilities: GatewayPluginCapabilityPort;
+    readonly workspace: Pick<OpenClawWorkspacePort, 'ensureIdentityFile'>;
     readonly clock: RuntimeClockPort;
   }) {}
 
@@ -57,6 +59,7 @@ export class SubagentRuntimeService {
     if (!workspace) {
       return badRequest('workspace is required');
     }
+    await this.deps.workspace.ensureIdentityFile(workspace, { createDir: true });
     return await this.call('agents.create', {
       name,
       workspace,

@@ -21,12 +21,14 @@ describe('token usage history scan', () => {
     }
   });
 
-  it('支持解析 deleted+reset transcript 文件名', () => {
-    expect(extractSessionIdFromTranscriptFileName('abc-123.deleted.jsonl.reset.2026-03-09T03-01-29.968Z')).toBe('abc-123');
-    expect(extractSessionIdFromTranscriptFileName('abc-123.deleted.jsonl')).toBe('abc-123');
+  it('只解析 live transcript 和 reset 快照文件名', () => {
+    expect(extractSessionIdFromTranscriptFileName('abc-123.jsonl')).toBe('abc-123');
+    expect(extractSessionIdFromTranscriptFileName('abc-123.jsonl.reset.2026-03-09T03-01-29.968Z')).toBe('abc-123');
+    expect(extractSessionIdFromTranscriptFileName('abc-123.deleted.jsonl')).toBeUndefined();
+    expect(extractSessionIdFromTranscriptFileName('abc-123.deleted.jsonl.reset.2026-03-09T03-01-29.968Z')).toBeUndefined();
   });
 
-  it('会扫描磁盘上的 agent 目录并读取 deleted/reset transcript', async () => {
+  it('会扫描磁盘上的 agent 目录并读取 live/reset transcript', async () => {
     await writeFile(join(configDir, 'openclaw.json'), JSON.stringify({
       agents: {
         list: [{ id: 'main', name: 'Main' }],
@@ -36,7 +38,7 @@ describe('token usage history scan', () => {
     const diskOnlySessionsDir = join(configDir, 'agents', 'custom-custom25', 'sessions');
     await mkdir(diskOnlySessionsDir, { recursive: true });
     await writeFile(
-      join(diskOnlySessionsDir, 'f8e66f77-0125-4e2f-b750-9c4de01e8f5a.deleted.jsonl.reset.2026-03-09T03-01-29.968Z'),
+      join(diskOnlySessionsDir, 'f8e66f77-0125-4e2f-b750-9c4de01e8f5a.jsonl.reset.2026-03-09T03-01-29.968Z'),
       `${JSON.stringify({
         type: 'message',
         timestamp: '2026-03-12T12:19:00.000Z',

@@ -461,6 +461,18 @@ export async function hostSessionDelete(
   });
 }
 
+export async function hostSessionRename(
+  payload: {
+    sessionKey: string;
+    label: string;
+  },
+): Promise<{ success: boolean; sessionKey?: string; label?: string; error?: string }> {
+  return hostApiFetch('/api/sessions/rename', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
 export async function hostSessionArchive(
   payload: {
     sessionKey: string;

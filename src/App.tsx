@@ -12,9 +12,11 @@ import { TooltipProvider } from '@/components/ui/tooltip';
 import { useSettingsStore } from './stores/settings';
 import { useGatewayStore } from './stores/gateway';
 import { useProviderStore } from './stores/providers';
+import { useUpdateStore } from './stores/update';
 import { hostApiFetch } from './lib/host-api';
 import { useDelayedFlag } from './lib/use-delayed-flag';
 import { TeamsRuntimeDaemon } from './components/runtime/TeamsRuntimeDaemon';
+import { UpdateNotifier } from './components/update/UpdateNotifier';
 import { TEAMS_FEATURE_ENABLED } from '@/features/teams/feature-flag';
 import {
   SetupRoute,
@@ -127,6 +129,7 @@ function App() {
   const settingsInitialized = useSettingsStore((state) => state.initialized);
   const initGateway = useGatewayStore((state) => state.init);
   const initProviders = useProviderStore((state) => state.init);
+  const initUpdate = useUpdateStore((state) => state.init);
 
   const fetchLicenseGateSnapshot = useCallback(async (): Promise<LicenseGateSnapshot | null> => {
     try {
@@ -143,6 +146,13 @@ function App() {
   useEffect(() => {
     initSettings();
   }, [initSettings]);
+
+  useEffect(() => {
+    if (!settingsInitialized) {
+      return;
+    }
+    void initUpdate();
+  }, [initUpdate, settingsInitialized]);
 
   // Sync i18n language with persisted settings on mount
   useEffect(() => {
@@ -340,6 +350,8 @@ function App() {
             />
           </Route>
         </Routes>
+
+        <UpdateNotifier />
 
         {/* Global toast notifications */}
         <Toaster

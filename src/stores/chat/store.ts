@@ -6,7 +6,7 @@
 import { create } from 'zustand';
 import type { GatewayStatus } from '@/types/gateway';
 import { createIdleResourceStatusState } from '@/lib/resource-state';
-import { hostSessionApprovals, hostSessionResolveApproval } from '@/lib/host-api';
+import { hostSessionApprovals, hostSessionRename, hostSessionResolveApproval } from '@/lib/host-api';
 import { useGatewayStore } from '../gateway';
 import { executeStoreAbortRun } from './abort-handlers';
 import {
@@ -32,6 +32,7 @@ import {
   executeLoadSessions,
   executeNewSession,
   executeOpenAgentConversation,
+  executeRenameSession,
   executeSetViewportAnchorItemKey,
   executeSwitchSession,
 } from './session-actions';
@@ -86,6 +87,10 @@ export const useChatStore = create<ChatStoreState>((set, get) => {
       await executeNewSession(sessionInput, agentId);
     },
     deleteSession: (key) => executeDeleteSession(sessionInput, key),
+    renameSession: (key, label) => executeRenameSession({
+      ...sessionInput,
+      renameSession: hostSessionRename,
+    }, key, label),
     cleanupEmptySession: () => {
       executeCleanupEmptySession(sessionInput);
     },

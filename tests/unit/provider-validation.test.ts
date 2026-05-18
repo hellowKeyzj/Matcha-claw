@@ -204,4 +204,28 @@ describe('validateApiKeyWithProvider', () => {
       expect.anything(),
     );
   });
+
+  it('openrouter 使用专用 auth/key 端点校验', async () => {
+    fetchMock.mockResolvedValueOnce(
+      new Response(JSON.stringify({ data: { label: 'MatchaClaw' } }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }),
+    );
+
+    const { validateApiKeyWithProvider } = await import('../../runtime-host/application/providers/provider-validation');
+    const result = await validateApiKeyWithProvider('openrouter', 'sk-or-v1-test', {
+      httpClient: { request: fetchMock },
+    });
+
+    expect(result).toMatchObject({ valid: true });
+    expect(fetchMock).toHaveBeenCalledWith(
+      'https://openrouter.ai/api/v1/auth/key',
+      expect.objectContaining({
+        headers: {
+          Authorization: 'Bearer sk-or-v1-test',
+        },
+      }),
+    );
+  });
 });

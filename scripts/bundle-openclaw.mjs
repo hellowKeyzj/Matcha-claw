@@ -22,6 +22,11 @@ import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 
 import { REMOVED_BUNDLED_CHANNEL_PLUGIN_IDS } from './openclaw-bundled-channels.mjs';
+import {
+  EXTRA_OPENCLAW_RUNTIME_PACKAGES,
+  mergeOpenClawRuntimePackages,
+} from './openclaw-runtime-deps.mjs';
+import { patchExtensionOpenClawSelfImports } from './openclaw-self-import-patch.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -333,7 +338,10 @@ function drainDependencyQueue() {
 
 drainDependencyQueue();
 
-const stagedBundledRuntimeDeps = collectStagedBundledRuntimeDeps(OUTPUT);
+const stagedBundledRuntimeDeps = mergeOpenClawRuntimePackages(
+  collectStagedBundledRuntimeDeps(OUTPUT),
+  EXTRA_OPENCLAW_RUNTIME_PACKAGES,
+);
 let stagedBundledRuntimeDepCount = 0;
 for (const pkgName of stagedBundledRuntimeDeps) {
   if (enqueuePackageDependency(pkgName)) {
@@ -913,6 +921,10 @@ function patchBundledRuntime(outputDir) {
 
 patchBrokenModules(outputNodeModules);
 patchBundledRuntime(OUTPUT);
+const selfImportPatch = patchExtensionOpenClawSelfImports(OUTPUT);
+if (selfImportPatch.specifiersPatched > 0) {
+  printLine(`   🩹 Rewrote ${selfImportPatch.specifiersPatched} OpenClaw plugin-sdk self-import(s) in ${selfImportPatch.filesPatched} extension file(s)`);
+}
 
 // 8. Verify the bundle
 const entryExists = fs.existsSync(path.join(OUTPUT, 'openclaw.mjs'));

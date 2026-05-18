@@ -301,6 +301,43 @@ describe('agent sessions pane', () => {
     });
   });
 
+  it('可重命名会话并触发 renameSession', async () => {
+    const renameSession = vi.fn().mockResolvedValue(undefined);
+    const now = Date.now();
+    useChatStore.setState({
+      currentSessionKey: 'agent:main:main',
+      sessionCatalogStatus: buildReadySessionCatalogStatus([
+        { key: 'agent:main:main', displayName: 'agent:main:main' },
+        { key: 'agent:main:session-1', displayName: 'agent:main:session-1' },
+      ]),
+      loadedSessions: {
+        'agent:main:main': createSessionRecord({ sessionKey: 'agent:main:main', historyStatus: 'ready' }),
+        'agent:main:session-1': createSessionRecord({
+          sessionKey: 'agent:main:session-1',
+          historyStatus: 'ready',
+          label: 'Old session title',
+          lastActivityAt: now,
+        }),
+      },
+      switchSession: vi.fn(),
+      newSession: vi.fn(),
+      deleteSession: vi.fn().mockResolvedValue(undefined),
+      renameSession,
+      loadSessions: vi.fn().mockResolvedValue(undefined),
+    } as never);
+
+    renderPane();
+
+    fireEvent.click(screen.getByRole('button', { name: /Rename session Old session title/i }));
+    const input = screen.getByRole('textbox', { name: /Rename session Old session title/i });
+    fireEvent.change(input, { target: { value: 'New session title' } });
+    fireEvent.keyDown(input, { key: 'Enter' });
+
+    await waitFor(() => {
+      expect(renameSession).toHaveBeenCalledWith('agent:main:session-1', 'New session title');
+    });
+  });
+
   it('agent 列表和会话列表使用两个独立滚动区', () => {
     const now = Date.now();
     useSubagentsStore.setState({

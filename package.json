@@ -79,11 +79,11 @@
     "postversion": "git push && git push --tags"
   },
   "dependencies": {
-    "@monaco-editor/react": "^4.7.0",
     "@buape/carbon": "0.16.0",
     "@dicebear/collection": "^9.4.2",
     "@dicebear/core": "^9.4.2",
     "@matchaclaw/plugins-sdk": "workspace:*",
+    "@monaco-editor/react": "^4.7.0",
     "@slack/bolt": "^4.6.0",
     "@whiskeysockets/baileys": "7.0.0-rc.9",
     "clawhub": "^0.5.0",
@@ -132,6 +132,7 @@
     "@typescript-eslint/parser": "^8.56.0",
     "@vitejs/plugin-react": "^5.1.4",
     "@wecom/wecom-openclaw-plugin": "^2026.4.23",
+    "acpx": "0.5.3",
     "autoprefixer": "^10.4.24",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
@@ -148,6 +149,7 @@
     "markdown-it": "^14.1.1",
     "memory-lancedb-pro": "workspace:*",
     "openclaw": "2026.4.23",
+    "playwright-core": "1.59.1",
     "png2icons": "^2.0.1",
     "postcss": "^8.5.6",
     "react": "^19.2.4",

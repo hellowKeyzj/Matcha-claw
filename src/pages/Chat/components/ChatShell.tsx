@@ -53,6 +53,7 @@ export function ChatShell({
   todoPanel = null,
   input,
 }: ChatShellProps) {
+  const isMac = window.electron?.platform === 'darwin';
   const stageRef = useRef<HTMLDivElement>(null);
   const headerOverlayRef = useRef<HTMLDivElement>(null);
   const composerOverlayRef = useRef<HTMLDivElement>(null);
@@ -197,6 +198,14 @@ export function ChatShell({
           className={`${CHAT_LAYOUT_TOKENS.stageSurface} chat-scroll-sync`}
           style={CHAT_STAGE_CSS_VARS}
         >
+          {isMac ? (
+            <div
+              data-testid="mac-chat-drag-region"
+              aria-hidden="true"
+              className="drag-region pointer-events-auto absolute inset-x-0 top-0 z-[15] h-7"
+            />
+          ) : null}
+
           <div
             data-testid="chat-stage-backdrop"
             className={CHAT_LAYOUT_TOKENS.stageBackdrop}

@@ -51,7 +51,6 @@ describe('settings page section switch', () => {
       proxyServer: '',
       proxyBypassRules: '<local>;localhost;127.0.0.1;::1',
       autoCheckUpdate: true,
-      autoDownloadUpdate: false,
       devModeUnlocked: false,
       setupComplete: true,
       userAvatarDataUrl: null,

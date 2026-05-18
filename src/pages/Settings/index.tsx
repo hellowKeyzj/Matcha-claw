@@ -34,7 +34,6 @@ import { Input } from '@/components/ui/input';
 import { toast } from 'sonner';
 import { useSettingsStore } from '@/stores/settings';
 import { useGatewayStore } from '@/stores/gateway';
-import { useUpdateStore } from '@/stores/update';
 import { UpdateSettings } from '@/components/settings/UpdateSettings';
 import {
   invokeIpc,
@@ -239,14 +238,11 @@ export function Settings() {
   const setProxyBypassRules = useSettingsStore((state) => state.setProxyBypassRules);
   const autoCheckUpdate = useSettingsStore((state) => state.autoCheckUpdate);
   const setAutoCheckUpdate = useSettingsStore((state) => state.setAutoCheckUpdate);
-  const autoDownloadUpdate = useSettingsStore((state) => state.autoDownloadUpdate);
-  const setAutoDownloadUpdate = useSettingsStore((state) => state.setAutoDownloadUpdate);
   const devModeUnlocked = useSettingsStore((state) => state.devModeUnlocked);
   const setDevModeUnlocked = useSettingsStore((state) => state.setDevModeUnlocked);
 
   const gatewayStatus = useGatewayStore((state) => state.status);
   const restartGateway = useGatewayStore((state) => state.restart);
-  const updateSetAutoDownload = useUpdateStore((state) => state.setAutoDownload);
   const [controlUiInfo, setControlUiInfo] = useState<ControlUiInfo | null>(null);
   const [openclawCliCommand, setOpenclawCliCommand] = useState('');
   const [openclawCliError, setOpenclawCliError] = useState<string | null>(null);
@@ -1586,21 +1582,6 @@ export function Settings() {
             />
           </div>
 
-          <div className="flex items-center justify-between">
-            <div>
-              <Label>{t('updates.autoDownload')}</Label>
-              <p className="text-sm text-muted-foreground">
-                {t('updates.autoDownloadDesc')}
-              </p>
-            </div>
-            <Switch
-              checked={autoDownloadUpdate}
-              onCheckedChange={(value) => {
-                setAutoDownloadUpdate(value);
-                updateSetAutoDownload(value);
-              }}
-            />
-          </div>
         </CardContent>
       </Card>
       )}

@@ -1,5 +1,5 @@
 import { memo, useCallback, useEffect, useState } from 'react';
-import { ChevronDown, ChevronLeft, ChevronRight, Plus, Trash2, X } from 'lucide-react';
+import { Check, ChevronDown, ChevronLeft, ChevronRight, Pencil, Plus, Trash2, X } from 'lucide-react';
 import { AgentAvatar } from '@/components/common/AgentAvatar';
 import type { AgentAvatarStyle } from '@/lib/agent-avatar';
 import { cn } from '@/lib/utils';
@@ -8,6 +8,7 @@ import { useChatStore, type ChatSession } from '@/stores/chat';
 import { selectAgentSessionsPaneState } from '@/stores/chat/selectors';
 import { useTranslation } from 'react-i18next';
 import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
 import { useShallow } from 'zustand/react/shallow';
 import {
   inferUntitledSessionLabel,
@@ -124,8 +125,18 @@ interface SessionListItemProps {
   avatarStyle?: AgentAvatarStyle;
   isCurrent: boolean;
   deleting: boolean;
+  renaming: boolean;
+  editing: boolean;
+  editingTitle: string;
   deleteLabel: string;
+  renameLabel: string;
+  saveRenameLabel: string;
+  cancelRenameLabel: string;
   onSwitchSession: (sessionKey: string) => void;
+  onStartRename: (session: ChatSession, title: string) => void;
+  onRenameTitleChange: (title: string) => void;
+  onSubmitRename: () => void;
+  onCancelRename: () => void;
   onRequestDelete: (session: ChatSession) => void;
 }
 
@@ -139,10 +150,72 @@ const SessionListItem = memo(function SessionListItem({
   avatarStyle,
   isCurrent,
   deleting,
+  renaming,
+  editing,
+  editingTitle,
   deleteLabel,
+  renameLabel,
+  saveRenameLabel,
+  cancelRenameLabel,
   onSwitchSession,
+  onStartRename,
+  onRenameTitleChange,
+  onSubmitRename,
+  onCancelRename,
   onRequestDelete,
 }: SessionListItemProps) {
+  if (editing) {
+    return (
+      <div className="flex items-center gap-1 rounded-[calc(var(--radius-interactive)+2px)] bg-secondary px-1.5 py-1">
+        <Input
+          value={editingTitle}
+          autoFocus
+          disabled={renaming}
+          aria-label={renameLabel}
+          className="h-8 min-w-0 flex-1 text-sm"
+          onChange={(event) => onRenameTitleChange(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === 'Enter') {
+              event.preventDefault();
+              onSubmitRename();
+              return;
+            }
+            if (event.key === 'Escape') {
+              event.preventDefault();
+              onCancelRename();
+            }
+          }}
+        />
+        <button
+          type="button"
+          className="shrink-0 rounded-full p-1 text-current/70 transition hover:bg-card/15 hover:text-foreground disabled:cursor-not-allowed disabled:opacity-40"
+          aria-label={saveRenameLabel}
+          title={saveRenameLabel}
+          disabled={renaming}
+          onMouseDown={(event) => {
+            event.preventDefault();
+            onSubmitRename();
+          }}
+        >
+          <Check className="h-3.5 w-3.5" />
+        </button>
+        <button
+          type="button"
+          className="shrink-0 rounded-full p-1 text-current/70 transition hover:bg-card/15 hover:text-foreground disabled:cursor-not-allowed disabled:opacity-40"
+          aria-label={cancelRenameLabel}
+          title={cancelRenameLabel}
+          disabled={renaming}
+          onMouseDown={(event) => {
+            event.preventDefault();
+            onCancelRename();
+          }}
+        >
+          <X className="h-3.5 w-3.5" />
+        </button>
+      </div>
+    );
+  }
+
   return (
     <div
       className={cn(
@@ -171,20 +244,36 @@ const SessionListItem = memo(function SessionListItem({
         </span>
       </button>
       {session.kind !== 'main' && !session.preferred && (
-        <button
-          type="button"
-          className="mr-1 shrink-0 rounded-full p-1 text-current/70 opacity-0 transition hover:bg-destructive/15 hover:text-destructive-foreground group-hover:opacity-100 disabled:cursor-not-allowed disabled:opacity-40"
-          aria-label={deleteLabel}
-          title={deleteLabel}
-          disabled={deleting}
-          onClick={(event) => {
-            event.preventDefault();
-            event.stopPropagation();
-            onRequestDelete(session);
-          }}
-        >
-          <Trash2 className="h-3.5 w-3.5" />
-        </button>
+        <div className="mr-1 flex shrink-0 items-center gap-0.5 opacity-0 transition group-hover:opacity-100">
+          <button
+            type="button"
+            className="rounded-full p-1 text-current/70 transition hover:bg-card/15 hover:text-foreground disabled:cursor-not-allowed disabled:opacity-40"
+            aria-label={renameLabel}
+            title={renameLabel}
+            disabled={deleting || renaming}
+            onClick={(event) => {
+              event.preventDefault();
+              event.stopPropagation();
+              onStartRename(session, sessionTitle);
+            }}
+          >
+            <Pencil className="h-3.5 w-3.5" />
+          </button>
+          <button
+            type="button"
+            className="rounded-full p-1 text-current/70 transition hover:bg-destructive/15 hover:text-destructive-foreground disabled:cursor-not-allowed disabled:opacity-40"
+            aria-label={deleteLabel}
+            title={deleteLabel}
+            disabled={deleting || renaming}
+            onClick={(event) => {
+              event.preventDefault();
+              event.stopPropagation();
+              onRequestDelete(session);
+            }}
+          >
+            <Trash2 className="h-3.5 w-3.5" />
+          </button>
+        </div>
       )}
     </div>
   );
@@ -253,6 +342,8 @@ interface SessionListSectionProps {
   sessionViewModelByKey: Map<string, SessionViewModel>;
   currentSessionKey: string;
   deletingSessionKeys: Record<string, true>;
+  renamingSessionKey: string | null;
+  editingSession: { key: string; title: string } | null;
   collapsedSessionBuckets: Record<string, boolean>;
   state: 'loading' | 'error' | 'ready';
   errorMessage: string | null;
@@ -260,9 +351,14 @@ interface SessionListSectionProps {
   loadingLabel: string;
   fallbackErrorLabel: string;
   fallbackDeleteLabel: (sessionKey: string) => string;
+  fallbackRenameLabel: (sessionKey: string) => string;
   fallbackUntitledLabel: (session: ChatSession) => string;
   onToggleBucket: (bucketId: SessionBucketId, defaultCollapsed: boolean) => void;
   onSwitchSession: (sessionKey: string) => void;
+  onStartRename: (session: ChatSession, title: string) => void;
+  onRenameTitleChange: (title: string) => void;
+  onSubmitRename: () => void;
+  onCancelRename: () => void;
   onRequestDelete: (session: ChatSession) => void;
 }
 
@@ -271,6 +367,8 @@ const SessionListSection = memo(function SessionListSection({
   sessionViewModelByKey,
   currentSessionKey,
   deletingSessionKeys,
+  renamingSessionKey,
+  editingSession,
   collapsedSessionBuckets,
   state,
   errorMessage,
@@ -278,9 +376,14 @@ const SessionListSection = memo(function SessionListSection({
   loadingLabel,
   fallbackErrorLabel,
   fallbackDeleteLabel,
+  fallbackRenameLabel,
   fallbackUntitledLabel,
   onToggleBucket,
   onSwitchSession,
+  onStartRename,
+  onRenameTitleChange,
+  onSubmitRename,
+  onCancelRename,
   onRequestDelete,
 }: SessionListSectionProps) {
   if (state === 'loading') {
@@ -331,6 +434,7 @@ const SessionListSection = memo(function SessionListSection({
                   const session = entry.session;
                   const viewModel = sessionViewModelByKey.get(session.key);
                   const deleting = Boolean(deletingSessionKeys[session.key]);
+                  const editing = editingSession?.key === session.key;
                   return (
                     <SessionListItem
                       key={session.key}
@@ -343,8 +447,18 @@ const SessionListSection = memo(function SessionListSection({
                       avatarStyle={viewModel?.avatarStyle}
                       isCurrent={currentSessionKey === session.key}
                       deleting={deleting}
+                      renaming={renamingSessionKey === session.key}
+                      editing={editing}
+                      editingTitle={editing ? editingSession.title : ''}
                       deleteLabel={viewModel?.deleteLabel ?? fallbackDeleteLabel(session.key)}
+                      renameLabel={viewModel?.renameLabel ?? fallbackRenameLabel(session.key)}
+                      saveRenameLabel={viewModel?.saveRenameLabel ?? fallbackRenameLabel(session.key)}
+                      cancelRenameLabel={viewModel?.cancelRenameLabel ?? fallbackRenameLabel(session.key)}
                       onSwitchSession={onSwitchSession}
+                      onStartRename={onStartRename}
+                      onRenameTitleChange={onRenameTitleChange}
+                      onSubmitRename={onSubmitRename}
+                      onCancelRename={onCancelRename}
                       onRequestDelete={onRequestDelete}
                     />
                   );
@@ -378,11 +492,14 @@ export const AgentSessionsPane = memo(function AgentSessionsPane({
     openAgentConversation,
     newSession,
     deleteSession,
+    renameSession,
   } = useChatStore(useShallow(selectAgentSessionsPaneState));
   const [collapsedSessionBuckets, setCollapsedSessionBuckets] = useState<Record<string, boolean>>(
     () => loadCollapsedSessionBucketMap(),
   );
   const [deletingSessionKeys, setDeletingSessionKeys] = useState<Record<string, true>>({});
+  const [renamingSessionKey, setRenamingSessionKey] = useState<string | null>(null);
+  const [editingSession, setEditingSession] = useState<{ key: string; title: string } | null>(null);
   const [pendingDeleteSession, setPendingDeleteSession] = useState<{
     key: string;
     title: string;
@@ -445,6 +562,41 @@ export const AgentSessionsPane = memo(function AgentSessionsPane({
       title,
     });
   }, [paneViewModel.sessionViewModelByKey, t]);
+
+  const startRenameSession = useCallback((session: ChatSession, title: string) => {
+    if (session.kind === 'main' || session.preferred) {
+      return;
+    }
+    setEditingSession({
+      key: session.key,
+      title,
+    });
+  }, []);
+
+  const submitRenameSession = useCallback(async () => {
+    if (!editingSession) {
+      return;
+    }
+    const normalizedTitle = editingSession.title.trim();
+    if (!normalizedTitle) {
+      setEditingSession(null);
+      return;
+    }
+    setRenamingSessionKey(editingSession.key);
+    try {
+      await renameSession(editingSession.key, normalizedTitle);
+      setEditingSession(null);
+    } finally {
+      setRenamingSessionKey(null);
+    }
+  }, [editingSession, renameSession]);
+
+  const cancelRenameSession = useCallback(() => {
+    if (renamingSessionKey) {
+      return;
+    }
+    setEditingSession(null);
+  }, [renamingSessionKey]);
 
   const closeDeleteDialog = useCallback(() => {
     if (!pendingDeleteSession) {
@@ -592,6 +744,8 @@ export const AgentSessionsPane = memo(function AgentSessionsPane({
                   sessionViewModelByKey={paneViewModel.sessionViewModelByKey}
                   currentSessionKey={currentSessionKey}
                   deletingSessionKeys={deletingSessionKeys}
+                  renamingSessionKey={renamingSessionKey}
+                  editingSession={editingSession}
                   collapsedSessionBuckets={collapsedSessionBuckets}
                   state={paneViewModel.sessionListState}
                   errorMessage={paneViewModel.sessionErrorMessage}
@@ -599,9 +753,16 @@ export const AgentSessionsPane = memo(function AgentSessionsPane({
                   loadingLabel={t('status.loading')}
                   fallbackErrorLabel={t('status.error')}
                   fallbackDeleteLabel={(sessionKey) => t('sidebar.deleteSessionAria', { title: sessionKey })}
+                  fallbackRenameLabel={(sessionKey) => t('sidebar.renameSessionAria', { title: sessionKey })}
                   fallbackUntitledLabel={(session) => inferUntitledSessionLabel(session, t)}
                   onToggleBucket={toggleSessionBucket}
                   onSwitchSession={handleSwitchSession}
+                  onStartRename={startRenameSession}
+                  onRenameTitleChange={(title) => {
+                    setEditingSession((current) => current ? { ...current, title } : current);
+                  }}
+                  onSubmitRename={() => void submitRenameSession()}
+                  onCancelRename={cancelRenameSession}
                   onRequestDelete={requestDeleteSession}
                 />
               </div>

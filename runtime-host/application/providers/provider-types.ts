@@ -39,7 +39,8 @@ export const OLLAMA_PLACEHOLDER_API_KEY = 'ollama-local';
 export type ProviderProtocol =
   | 'openai-completions'
   | 'openai-responses'
-  | 'anthropic-messages';
+  | 'anthropic-messages'
+  | 'openrouter';
 
 export type ProviderAuthMode =
   | 'api_key'

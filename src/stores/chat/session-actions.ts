@@ -86,6 +86,10 @@ interface CreateStoreSessionActionsInput {
   historyRuntime: StoreHistoryCache;
 }
 
+interface RenameStoreSessionInput extends CreateStoreSessionActionsInput {
+  renameSession: (payload: { sessionKey: string; label: string }) => Promise<{ success: boolean; error?: string }>;
+}
+
 function clearSessionHistoryFingerprints(
   historyRuntime: StoreHistoryCache,
   sessionKey: string,
@@ -503,6 +507,39 @@ export async function executeDeleteSession(input: CreateStoreSessionActionsInput
     }));
   } finally {
     finishMutating();
+  }
+}
+
+export async function executeRenameSession(
+  input: RenameStoreSessionInput,
+  key: string,
+  label: string,
+): Promise<void> {
+  const normalizedLabel = label.trim();
+  if (!key.trim()) {
+    return;
+  }
+  if (!normalizedLabel) {
+    throw new Error('Session label cannot be empty');
+  }
+
+  input.beginMutating();
+  try {
+    const result = await input.renameSession({
+      sessionKey: key,
+      label: normalizedLabel,
+    });
+    if (result.success === false) {
+      throw new Error(result.error || 'Failed to rename session');
+    }
+    input.set((state) => ({
+      loadedSessions: patchSessionMeta(state, key, {
+        label: normalizedLabel,
+        titleSource: 'user',
+      }),
+    }));
+  } finally {
+    input.finishMutating();
   }
 }
 

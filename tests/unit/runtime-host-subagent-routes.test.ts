@@ -27,6 +27,7 @@ describe('runtime-host subagent routes', () => {
     const subagentService = new SubagentRuntimeService({
       gateway: { gatewayRpc },
       capabilities: new GatewayCapabilityService({ gateway: { inspectGatewayMethodReadiness } }),
+      workspace: { ensureIdentityFile: vi.fn(async () => ({ wroteIdentity: false, replacedTemplate: false, removedBootstrap: false })) },
       clock: clock(1000),
     });
 
@@ -59,6 +60,7 @@ describe('runtime-host subagent routes', () => {
     const subagentService = new SubagentRuntimeService({
       gateway: { gatewayRpc },
       capabilities: new GatewayCapabilityService({ gateway: { inspectGatewayMethodReadiness } }),
+      workspace: { ensureIdentityFile: vi.fn(async () => ({ wroteIdentity: false, replacedTemplate: false, removedBootstrap: false })) },
       clock: clock(1000),
     });
 
@@ -86,6 +88,7 @@ describe('runtime-host subagent routes', () => {
     const subagentService = new SubagentRuntimeService({
       gateway: { gatewayRpc },
       capabilities: new GatewayCapabilityService({ gateway: { inspectGatewayMethodReadiness } }),
+      workspace: { ensureIdentityFile: vi.fn(async () => ({ wroteIdentity: false, replacedTemplate: false, removedBootstrap: false })) },
       clock: clock(1000),
     });
 
@@ -126,6 +129,7 @@ describe('runtime-host subagent routes', () => {
     const subagentService = new SubagentRuntimeService({
       gateway: { gatewayRpc },
       capabilities: new GatewayCapabilityService({ gateway: { inspectGatewayMethodReadiness } }),
+      workspace: { ensureIdentityFile: vi.fn(async () => ({ wroteIdentity: false, replacedTemplate: false, removedBootstrap: false })) },
       clock: clock(1000),
     });
 
@@ -156,6 +160,7 @@ describe('runtime-host subagent routes', () => {
     const subagentService = new SubagentRuntimeService({
       gateway: { gatewayRpc },
       capabilities: new GatewayCapabilityService({ gateway: { inspectGatewayMethodReadiness } }),
+      workspace: { ensureIdentityFile: vi.fn(async () => ({ wroteIdentity: false, replacedTemplate: false, removedBootstrap: false })) },
       clock: clock(2000),
     });
 
@@ -203,5 +208,39 @@ describe('runtime-host subagent routes', () => {
           error: null,
         },
       });
+  });
+
+  it('seeds the target workspace identity before creating a subagent through Gateway', async () => {
+    const gatewayRpc = vi.fn(async () => ({ agentId: 'writer' }));
+    const inspectGatewayMethodReadiness = vi.fn(async (methods: string[]) => ({
+      ready: true,
+      methods,
+      missingMethods: [],
+    }));
+    const ensureIdentityFile = vi.fn(async () => ({ wroteIdentity: true, replacedTemplate: false, removedBootstrap: false }));
+    const subagentService = new SubagentRuntimeService({
+      gateway: { gatewayRpc },
+      capabilities: new GatewayCapabilityService({ gateway: { inspectGatewayMethodReadiness } }),
+      workspace: { ensureIdentityFile },
+      clock: clock(1000),
+    });
+
+    await expect(dispatchRuntimeRouteDefinition(
+      subagentRoutes,
+      'POST',
+      '/api/subagents/create',
+      { name: 'Writer', workspace: 'C:\\Users\\Dev\\.openclaw\\workspace-subagents\\writer' },
+      { subagentService },
+    )).resolves.toEqual({ status: 200, data: { agentId: 'writer' } });
+
+    expect(ensureIdentityFile).toHaveBeenCalledWith(
+      'C:\\Users\\Dev\\.openclaw\\workspace-subagents\\writer',
+      { createDir: true },
+    );
+    expect(gatewayRpc).toHaveBeenCalledWith(
+      'agents.create',
+      { name: 'Writer', workspace: 'C:\\Users\\Dev\\.openclaw\\workspace-subagents\\writer' },
+      60000,
+    );
   });
 });

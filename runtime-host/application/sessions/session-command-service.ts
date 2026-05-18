@@ -14,6 +14,7 @@ import {
   readAbortSessionKey,
   readCreateSessionRequest,
   readPatchSessionRequest,
+  readRenameSessionRequest,
   readRequiredSessionKey,
   readSessionWindowRequest,
 } from './session-runtime-requests';
@@ -299,6 +300,22 @@ export class SessionCommandService {
         snapshot,
       });
     });
+  }
+
+  async renameSession(payload: unknown): Promise<ApplicationResponseOf> {
+    const { sessionKey, label } = readRenameSessionRequest(payload);
+    if (!sessionKey || !sessionKey.startsWith('agent:')) {
+      return badRequest(`Invalid sessionKey: ${sessionKey}`);
+    }
+    if (!label) {
+      return badRequest('label is required');
+    }
+    const updated = await this.deps.sessionStorage.renameSession(sessionKey, label);
+    if (!updated) {
+      return notFound(`Unknown sessionKey: ${sessionKey}`);
+    }
+    await this.deps.sessionCatalog.refreshCache().catch(() => undefined);
+    return ok({ success: true, sessionKey, label });
   }
 
   async switchSession(payload: unknown): Promise<ApplicationResponseOf<SessionLoadResult | SessionHydratingLoadResult | { success: false; error: string }>> {

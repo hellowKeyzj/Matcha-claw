@@ -13,7 +13,7 @@ export function getGatewayHeartbeatOptions(platform: RuntimePlatform) {
   };
 }
 
-export const GATEWAY_READY_FALLBACK_MS = 30_000;
+export const GATEWAY_READY_FALLBACK_PROBE_DELAYS_MS = [1_500, 3_000, 5_000, 8_000, 12_000, 30_000] as const;
 export const GATEWAY_INITIAL_READY_HEARTBEAT_GRACE_MS = 300_000;
 
 export interface GatewayHeartbeatCallbacks {
@@ -35,6 +35,7 @@ export class GatewayHeartbeatScheduler {
   private heartbeatTimeoutTimer: RuntimeScheduledTask | null = null;
   private gatewayReadyFallbackTimer: RuntimeScheduledTask | null = null;
   private initialReadyHeartbeatRecoveryTimer: RuntimeScheduledTask | null = null;
+  private gatewayReadyFallbackAttempt = 0;
 
   constructor(
     private readonly callbacks: GatewayHeartbeatCallbacks,
@@ -59,17 +60,35 @@ export class GatewayHeartbeatScheduler {
       this.gatewayReadyFallbackTimer.cancel();
       this.gatewayReadyFallbackTimer = null;
     }
+    this.gatewayReadyFallbackAttempt = 0;
     if (this.initialReadyHeartbeatRecoveryTimer) {
       this.initialReadyHeartbeatRecoveryTimer.cancel();
       this.initialReadyHeartbeatRecoveryTimer = null;
     }
   }
 
+  private nextGatewayReadyFallbackDelayMs(): number {
+    const index = Math.min(
+      this.gatewayReadyFallbackAttempt,
+      GATEWAY_READY_FALLBACK_PROBE_DELAYS_MS.length - 1,
+    );
+    const delayMs = GATEWAY_READY_FALLBACK_PROBE_DELAYS_MS[index]!;
+    this.gatewayReadyFallbackAttempt += 1;
+    return delayMs;
+  }
+
   scheduleGatewayReadyFallback(expectedEpoch: number): void {
     if (this.gatewayReadyFallbackTimer) {
       this.gatewayReadyFallbackTimer.cancel();
     }
-    this.gatewayReadyFallbackTimer = this.scheduler.schedule(GATEWAY_READY_FALLBACK_MS, () => {
+    if (
+      !this.callbacks.isActive(expectedEpoch)
+      || !this.callbacks.isConnected()
+      || this.callbacks.isGatewayReady()
+    ) {
+      return;
+    }
+    this.gatewayReadyFallbackTimer = this.scheduler.schedule(this.nextGatewayReadyFallbackDelayMs(), () => {
       this.gatewayReadyFallbackTimer = null;
       if (
         !this.callbacks.isActive(expectedEpoch)

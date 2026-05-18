@@ -67,7 +67,10 @@ export class RuntimeHostBootstrapService {
         'cleanupStaleBuiltinExtensionsForGatewayLaunch' | 'reconcileConfiguredChannelPluginsForGatewayLaunch' | 'ensureConfiguredManagedPluginsForGatewayLaunch'
       >;
       providerRuntimeSync: Pick<ProviderRuntimeSyncService, 'syncProviderStore'>;
-      workspace: Pick<OpenClawWorkspacePort, 'migrateMainAgentTemplatesIfNeeded' | 'mergeContextSnippets'>;
+      workspace: Pick<
+        OpenClawWorkspacePort,
+        'ensureDefaultIdentity' | 'migrateMainAgentTemplatesIfNeeded' | 'mergeContextSnippets'
+      >;
       securityJobs: Pick<SecurityJobPort, 'submitPolicySync'>;
       idGenerator: Pick<RuntimeIdGeneratorPort, 'randomHex'>;
       jobs: RuntimeHostBootstrapJobPort;
@@ -143,6 +146,7 @@ export class RuntimeHostBootstrapService {
 
     await this.deps.runtimeConfig.syncGatewayToken(String(settings.gatewayToken));
 
+    await this.deps.workspace.ensureDefaultIdentity();
     await this.deps.runtimeConfig.sanitize();
     const browserMode = normalizeBrowserMode(settings.browserMode);
     if (browserMode === 'relay') {
@@ -176,6 +180,7 @@ export class RuntimeHostBootstrapService {
   }
 
   async executeWorkspaceTemplateMigration() {
+    await this.deps.workspace.ensureDefaultIdentity();
     const migration = await this.deps.workspace.migrateMainAgentTemplatesIfNeeded();
     await this.deps.workspace.mergeContextSnippets();
     return migration;

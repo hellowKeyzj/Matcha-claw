@@ -113,6 +113,10 @@ export class SessionRuntimeService {
     return await this.deps.commandService.patchSession(payload);
   }
 
+  async renameSession(payload: unknown) {
+    return await this.deps.commandService.renameSession(payload);
+  }
+
   async switchSession(payload: unknown) {
     return await this.deps.commandService.switchSession(payload);
   }

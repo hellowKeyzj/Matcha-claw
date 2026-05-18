@@ -29,8 +29,6 @@ export const TOOLCHAIN_AND_UPDATE_INVOKE_CHANNELS = [
   'update:download',
   'update:install',
   'update:setChannel',
-  'update:setAutoDownload',
-  'update:cancelAutoInstall',
 ] as const;
 
 export const ENVIRONMENT_QUERY_INVOKE_CHANNELS = [
@@ -61,7 +59,6 @@ export const RETAINED_EVENT_CHANNELS = [
   'update:progress',
   'update:downloaded',
   'update:error',
-  'update:auto-install-countdown',
 ] as const;
 
 export const RETAINED_ONCE_CHANNELS = [
@@ -74,7 +71,6 @@ export const RETAINED_ONCE_CHANNELS = [
   'update:progress',
   'update:downloaded',
   'update:error',
-  'update:auto-install-countdown',
 ] as const;
 
 const retainedInvokeChannelSet = new Set<string>(RETAINED_INVOKE_CHANNELS);

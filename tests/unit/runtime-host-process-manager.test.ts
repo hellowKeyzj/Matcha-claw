@@ -1480,8 +1480,8 @@ describe('runtime-host process manager', () => {
       expect(parentDispatchServer.getDispatchRequestCount()).toBe(0);
       expect(parentDispatchServer.getExecutionSyncRequestCount()).toBe(0);
 
-      const deletedPath = join(sessionsDir, 'uuid-a.deleted.jsonl');
-      expect(existsSync(deletedPath)).toBe(true);
+      expect(existsSync(join(sessionsDir, 'uuid-a.jsonl'))).toBe(false);
+      expect(existsSync(join(sessionsDir, 'uuid-a.deleted.jsonl'))).toBe(false);
       const sessionsIndex = JSON.parse(readFileSync(join(sessionsDir, 'sessions.json'), 'utf8')) as {
         sessions?: Array<{ key?: string }>;
       };

@@ -7,6 +7,7 @@ interface SessionRouteService {
   loadSession: (payload: unknown) => Promise<ApplicationResponse>;
   promptSession: (payload: unknown) => Promise<ApplicationResponse>;
   patchSession: (payload: unknown) => Promise<ApplicationResponse>;
+  renameSession: (payload: unknown) => Promise<ApplicationResponse>;
   deleteSession: (payload: unknown) => Promise<ApplicationResponse>;
   archiveSession: (payload: unknown) => Promise<ApplicationResponse>;
   unarchiveSession: (payload: unknown) => Promise<ApplicationResponse>;
@@ -26,6 +27,7 @@ export const sessionRoutes: readonly RuntimeRouteDefinition<SessionRouteService>
   { method: 'POST', path: '/api/session/load', handle: (context, service) => routeResponder.result(() => service.loadSession(context.payload)) },
   { method: 'POST', path: '/api/session/prompt', handle: (context, service) => routeResponder.result(() => service.promptSession(context.payload)) },
   { method: 'POST', path: '/api/session/patch', handle: (context, service) => routeResponder.result(() => service.patchSession(context.payload)) },
+  { method: 'POST', path: '/api/sessions/rename', handle: (context, service) => routeResponder.result(() => service.renameSession(context.payload)) },
   { method: 'POST', path: '/api/sessions/delete', handle: (context, service) => routeResponder.result(() => service.deleteSession(context.payload)) },
   { method: 'POST', path: '/api/sessions/archive', handle: (context, service) => routeResponder.result(() => service.archiveSession(context.payload)) },
   { method: 'POST', path: '/api/sessions/unarchive', handle: (context, service) => routeResponder.result(() => service.unarchiveSession(context.payload)) },

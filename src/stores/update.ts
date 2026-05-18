@@ -36,19 +36,17 @@ interface UpdateState {
   progress: ProgressInfo | null;
   error: string | null;
   isInitialized: boolean;
-  /** Seconds remaining before auto-install, or null if inactive. */
-  autoInstallCountdown: number | null;
 
   // Actions
   init: () => Promise<void>;
   checkForUpdates: () => Promise<void>;
   downloadUpdate: () => Promise<void>;
   installUpdate: () => void;
-  cancelAutoInstall: () => Promise<void>;
   setChannel: (channel: 'stable' | 'beta' | 'dev') => Promise<void>;
-  setAutoDownload: (enable: boolean) => Promise<void>;
   clearError: () => void;
 }
+
+let updateInitPromise: Promise<void> | null = null;
 
 export const useUpdateStore = create<UpdateState>((set, get) => ({
   status: 'idle',
@@ -57,75 +55,66 @@ export const useUpdateStore = create<UpdateState>((set, get) => ({
   progress: null,
   error: null,
   isInitialized: false,
-  autoInstallCountdown: null,
 
   init: async () => {
     if (get().isInitialized) return;
+    if (updateInitPromise) return updateInitPromise;
 
-    // Get current version
-    try {
-      const version = await invokeIpc<string>('update:version');
-      set({ currentVersion: version as string });
-    } catch (error) {
-      console.error('Failed to get version:', error);
-    }
+    updateInitPromise = (async () => {
+      try {
+        const version = await invokeIpc<string>('update:version');
+        set({ currentVersion: version as string });
+      } catch (error) {
+        console.error('Failed to get version:', error);
+      }
 
-    // Get current status
-    try {
-      const status = await invokeIpc<{
-        status: UpdateStatus;
-        info?: UpdateInfo;
-        progress?: ProgressInfo;
-        error?: string;
-      }>('update:status');
-      set({
-        status: status.status,
-        updateInfo: status.info || null,
-        progress: status.progress || null,
-        error: status.error || null,
+      try {
+        const status = await invokeIpc<{
+          status: UpdateStatus;
+          info?: UpdateInfo;
+          progress?: ProgressInfo;
+          error?: string;
+        }>('update:status');
+        set({
+          status: status.status,
+          updateInfo: status.info || null,
+          progress: status.progress || null,
+          error: status.error || null,
+        });
+      } catch (error) {
+        console.error('Failed to get update status:', error);
+      }
+
+      window.electron.ipcRenderer.on('update:status-changed', (data) => {
+        const status = data as {
+          status: UpdateStatus;
+          info?: UpdateInfo;
+          progress?: ProgressInfo;
+          error?: string;
+        };
+        set({
+          status: status.status,
+          updateInfo: status.info || null,
+          progress: status.progress || null,
+          error: status.error || null,
+        });
       });
-    } catch (error) {
-      console.error('Failed to get update status:', error);
-    }
 
-    // Listen for update events
-    // Single source of truth: listen only to update:status-changed
-    // (sent by AppUpdater.updateStatus() in the main process)
-    window.electron.ipcRenderer.on('update:status-changed', (data) => {
-      const status = data as {
-        status: UpdateStatus;
-        info?: UpdateInfo;
-        progress?: ProgressInfo;
-        error?: string;
-      };
-      set({
-        status: status.status,
-        updateInfo: status.info || null,
-        progress: status.progress || null,
-        error: status.error || null,
-      });
-    });
+      set({ isInitialized: true });
 
-    window.electron.ipcRenderer.on('update:auto-install-countdown', (data) => {
-      const { seconds, cancelled } = data as { seconds: number; cancelled?: boolean };
-      set({ autoInstallCountdown: cancelled ? null : seconds });
-    });
+      if (useSettingsStore.getState().autoCheckUpdate) {
+        setTimeout(() => {
+          get().checkForUpdates().catch(() => {});
+        }, 10000);
+      }
+    })();
 
-    set({ isInitialized: true });
-
-    // Apply persisted settings from the settings store
-    const { autoCheckUpdate, autoDownloadUpdate } = useSettingsStore.getState();
-
-    // Sync auto-download preference to the main process
-    if (autoDownloadUpdate) {
-      invokeIpc('update:setAutoDownload', true).catch(() => {});
-    }
-
-    // Auto-check for updates on startup (respects user toggle)
-    if (autoCheckUpdate) {
-      setTimeout(() => {
-        get().checkForUpdates().catch(() => {});
-      }, 10000);
+    try {
+      await updateInitPromise;
+    } finally {
+      if (get().isInitialized) {
+        updateInitPromise = null;
+      }
     }
   },
 
@@ -190,27 +179,11 @@ export const useUpdateStore = create<UpdateState>((set, get) => ({
     void invokeIpc('update:install');
   },
 
-  cancelAutoInstall: async () => {
-    try {
-      await invokeIpc('update:cancelAutoInstall');
-    } catch (error) {
-      console.error('Failed to cancel auto-install:', error);
-    }
-  },
-
   setChannel: async (channel) => {
     try {
       await invokeIpc('update:setChannel', channel);
     } catch (error) {
       console.error('Failed to set update channel:', error);
-    }
-  },
-
-  setAutoDownload: async (enable) => {
-    try {
-      await invokeIpc('update:setAutoDownload', enable);
-    } catch (error) {
-      console.error('Failed to set auto-download:', error);
     }
   },
 

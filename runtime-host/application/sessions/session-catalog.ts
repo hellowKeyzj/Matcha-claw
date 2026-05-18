@@ -9,6 +9,7 @@ import {
   type SessionStorageDescriptor,
   type SessionStoragePort,
   type SessionTranscriptFingerprint,
+  readSessionStoreLabel,
 } from './session-storage-repository';
 import type { SessionMetadataPort } from './session-metadata-repository';
 import {
@@ -85,7 +86,8 @@ async function buildSessionCatalogItem(input: {
   metadataRepository: SessionMetadataPort;
 }): Promise<SessionCatalogItem> {
   const agentId = parseSessionKeyAgent(input.sessionKey) ?? 'main';
-  const label = resolveSessionLabelDetailsFromTimelineEntries(input.timelineEntries);
+  const storeLabel = readSessionStoreLabel(input.storageDescriptor?.sessionStoreEntry ?? null);
+  const timelineLabel = resolveSessionLabelDetailsFromTimelineEntries(input.timelineEntries);
   const updatedAt = resolveTimelineLastActivityAt(input.timelineEntries, input.runtime);
   const kind = resolveSessionCatalogKind(input.sessionKey);
   const resolvedModel = await input.metadataRepository.resolveSessionModel({
@@ -104,8 +106,10 @@ async function buildSessionCatalogItem(input: {
       || input.storageDescriptor?.sessionStoreEntry?.status === 'active'
       ? input.storageDescriptor.sessionStoreEntry.status
       : 'completed',
-    ...(label.label ? { label: label.label } : {}),
-    ...(label.titleSource !== 'none' ? { titleSource: label.titleSource } : {}),
+    ...(storeLabel || timelineLabel.label ? { label: storeLabel ?? timelineLabel.label ?? undefined } : {}),
+    ...(storeLabel
+      ? { titleSource: 'user' as const }
+      : (timelineLabel.titleSource !== 'none' ? { titleSource: timelineLabel.titleSource } : {})),
     displayName: input.sessionKey,
     ...(resolvedModel ? { model: resolvedModel } : {}),
     ...(typeof updatedAt === 'number' ? { updatedAt } : {}),
@@ -186,7 +190,7 @@ export class SessionCatalogService implements SessionCatalogPort {
       if (!cached && !shouldExposeRuntimeOnlySession(overlay.runtime)) {
         continue;
       }
-      sessionsByKey.set(overlay.sessionKey, this.buildOverlayCatalogItem(overlay, cached));
+      sessionsByKey.set(overlay.sessionKey, await this.buildOverlayCatalogItem(overlay, cached));
     }
 
     const sessions = Array.from(sessionsByKey.values())
@@ -237,12 +241,16 @@ export class SessionCatalogService implements SessionCatalogPort {
     };
   }
 
-  private buildOverlayCatalogItem(
+  private async buildOverlayCatalogItem(
     overlay: SessionCatalogRuntimeOverlay,
     cached: SessionCatalogItem | undefined,
-  ): SessionCatalogItem {
+  ): Promise<SessionCatalogItem> {
     const agentId = parseSessionKeyAgent(overlay.sessionKey) ?? cached?.agentId ?? 'main';
-    const label = resolveSessionLabelDetailsFromTimelineEntries(overlay.timelineEntries);
+    const storageDescriptor = await this.storageRepository.findStorageDescriptor(overlay.sessionKey);
+    const storeLabel = readSessionStoreLabel(storageDescriptor?.sessionStoreEntry ?? null);
+    const timelineLabel = resolveSessionLabelDetailsFromTimelineEntries(overlay.timelineEntries);
+    const label = storeLabel ?? timelineLabel.label;
+    const titleSource = storeLabel ? 'user' : timelineLabel.titleSource;
     const updatedAt = resolveTimelineLastActivityAt(overlay.timelineEntries, overlay.runtime);
     const kind = resolveSessionCatalogKind(overlay.sessionKey);
     return {
@@ -252,8 +260,8 @@ export class SessionCatalogService implements SessionCatalogPort {
       preferred: kind === 'main',
       ...(cached ?? {}),
       status: cached?.status ?? 'completed',
-      ...(label.label ? { label: label.label } : {}),
-      ...(label.titleSource !== 'none' ? { titleSource: label.titleSource } : {}),
+      ...(label ? { label } : {}),
+      ...(titleSource !== 'none' ? { titleSource } : {}),
       displayName: cached?.displayName ?? overlay.sessionKey,
       ...(overlay.runtimeModel ? { model: overlay.runtimeModel } : {}),
       ...(typeof updatedAt === 'number' ? { updatedAt } : {}),

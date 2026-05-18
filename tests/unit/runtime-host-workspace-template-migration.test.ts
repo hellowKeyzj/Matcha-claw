@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { access, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { OpenClawWorkspaceService } from '../../runtime-host/application/openclaw/openclaw-workspace-service';
@@ -19,6 +19,16 @@ describe('runtime-host workspace template migration', () => {
     await mkdir(workspaceDir, { recursive: true });
     await mkdir(join(resourcesDir, 'agent-workspace-templates', 'main-agent'), { recursive: true });
     await mkdir(join(openclawDir, 'docs', 'reference', 'templates'), { recursive: true });
+    await writeFile(
+      join(resourcesDir, 'agent-workspace-templates', 'main-agent', 'IDENTITY.md'),
+      '# IDENTITY.md\n\n- **名字：** Matcha\n',
+      'utf8',
+    );
+    await writeFile(
+      join(openclawDir, 'docs', 'reference', 'templates', 'IDENTITY.md'),
+      '# IDENTITY.md - Who Am I?\n\n- **Name:**\n  _(pick something you like)_\n',
+      'utf8',
+    );
   });
 
   afterEach(async () => {
@@ -80,5 +90,74 @@ describe('runtime-host workspace template migration', () => {
 
     expect(result.migratedFiles).toEqual([]);
     await expect(readFile(workspacePath, 'utf8')).resolves.toBe('# AGENTS.md\n\nCustomized for this user\n');
+  });
+
+  it('creates a default identity and removes legacy bootstrap files from managed workspaces', async () => {
+    await writeFile(join(workspaceDir, 'BOOTSTRAP.md'), 'chat-first bootstrap', 'utf8');
+
+    const result = await createService().ensureIdentityFile(workspaceDir);
+
+    expect(result).toEqual({
+      wroteIdentity: true,
+      replacedTemplate: false,
+      removedBootstrap: true,
+    });
+    await expect(readFile(join(workspaceDir, 'IDENTITY.md'), 'utf8')).resolves.toBe('# IDENTITY.md\n\n- **名字：** Matcha\n');
+    await expect(access(join(workspaceDir, 'BOOTSTRAP.md'))).rejects.toThrow();
+  });
+
+  it('replaces only untouched upstream identity templates', async () => {
+    const identityPath = join(workspaceDir, 'IDENTITY.md');
+    await writeFile(identityPath, '# IDENTITY.md - Who Am I?\n\n- **Name:**\n  _(pick something you like)_\n', 'utf8');
+
+    await expect(createService().ensureIdentityFile(workspaceDir)).resolves.toMatchObject({
+      wroteIdentity: true,
+      replacedTemplate: true,
+    });
+    await expect(readFile(identityPath, 'utf8')).resolves.toBe('# IDENTITY.md\n\n- **名字：** Matcha\n');
+
+    await writeFile(identityPath, '# IDENTITY.md\n\n- **Name:** Custom\n', 'utf8');
+    await expect(createService().ensureIdentityFile(workspaceDir)).resolves.toMatchObject({
+      wroteIdentity: false,
+      replacedTemplate: false,
+    });
+    await expect(readFile(identityPath, 'utf8')).resolves.toBe('# IDENTITY.md\n\n- **Name:** Custom\n');
+  });
+
+  it('ensures identity files for every configured task workspace', async () => {
+    const subagentWorkspaceDir = join(tempRoot, 'workspace-subagents', 'writer');
+    const service = new OpenClawWorkspaceService(
+      {
+        getConfigDir: () => tempRoot,
+        read: async () => ({
+          agents: {
+            defaults: {
+              workspace: workspaceDir,
+            },
+            list: [
+              { id: 'writer', workspace: subagentWorkspaceDir },
+            ],
+          },
+        }),
+      },
+      {
+        getResourcesPath: () => resourcesDir,
+        getWorkingDir: () => tempRoot,
+        getOpenClawDirPath: () => openclawDir,
+      },
+      createTestRuntimeFileSystem(),
+      {
+        debug: vi.fn(),
+        info: vi.fn(),
+        warn: vi.fn(),
+        error: vi.fn(),
+      },
+    );
+
+    const result = await service.ensureDefaultIdentity();
+
+    expect(result.workspaceDirs).toEqual([workspaceDir, subagentWorkspaceDir]);
+    await expect(readFile(join(workspaceDir, 'IDENTITY.md'), 'utf8')).resolves.toContain('Matcha');
+    await expect(readFile(join(subagentWorkspaceDir, 'IDENTITY.md'), 'utf8')).resolves.toContain('Matcha');
   });
 });

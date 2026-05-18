@@ -43,7 +43,9 @@ function createBootstrapService() {
       syncProviderStore: vi.fn(),
     },
     workspace: {
+      ensureDefaultIdentity: vi.fn(),
       migrateMainAgentTemplatesIfNeeded: vi.fn(),
+      mergeContextSnippets: vi.fn(),
     },
     securityJobs: {
       submitPolicySync,

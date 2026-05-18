@@ -156,6 +156,7 @@ describe('chat shell task panel layout', () => {
   beforeEach(() => {
     mockShowItemInFolder.mockClear();
     openTaskSessionMock.mockClear();
+    window.electron.platform = 'darwin';
     taskRows = [];
   });
 
@@ -239,6 +240,56 @@ describe('chat shell task panel layout', () => {
     expect(shell?.style.getPropertyValue('--chat-side-panel-resizer-width')).toBe('6px');
     expect(screen.getByTestId('chat-side-panel')).toHaveAttribute('data-mode', 'docked');
     expect(screen.getByTestId('chat-side-panel-resizer')).toBeInTheDocument();
+  });
+
+  it('keeps the macOS drag strip inside the chat stage and below docked side panel chrome', () => {
+    render(
+      <ChatShell
+        chatLayoutRef={{ current: null }}
+        sidePanelOpen
+        sidePanelMode="docked"
+        sidePanelWidth={360}
+        artifactWorkbenchFullscreen={false}
+        isEmptyState={false}
+        emptyState={null}
+        sidePanel={<div data-testid="chat-side-panel" data-mode="docked" />}
+        header={<button type="button" data-testid="chat-header-button">header action</button>}
+        viewportPane={<div data-testid="thread-panel" />}
+        errorBanner={null}
+        approvalDock={null}
+        input={<div data-testid="chat-input" />}
+      />,
+    );
+
+    const dragRegion = screen.getByTestId('mac-chat-drag-region');
+    expect(dragRegion).toHaveClass('drag-region');
+    expect(dragRegion).toHaveClass('z-[15]');
+    expect(screen.getByTestId('chat-stage-header-overlay')).toHaveClass('z-20');
+    expect(screen.getByTestId('chat-side-panel')).not.toContainElement(dragRegion);
+  });
+
+  it('does not render the chat-stage drag strip outside macOS', () => {
+    window.electron.platform = 'win32';
+
+    render(
+      <ChatShell
+        chatLayoutRef={{ current: null }}
+        sidePanelOpen={false}
+        sidePanelMode="hidden"
+        sidePanelWidth={0}
+        artifactWorkbenchFullscreen={false}
+        isEmptyState={false}
+        emptyState={null}
+        sidePanel={<div data-testid="chat-side-panel" />}
+        header={<div data-testid="chat-header" />}
+        viewportPane={<div data-testid="thread-panel" />}
+        errorBanner={null}
+        approvalDock={null}
+        input={<div data-testid="chat-input" />}
+      />,
+    );
+
+    expect(screen.queryByTestId('mac-chat-drag-region')).not.toBeInTheDocument();
   });
 
   it('renders the chat side panel as an overlay when requested', () => {

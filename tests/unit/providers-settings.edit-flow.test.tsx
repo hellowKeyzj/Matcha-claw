@@ -79,7 +79,8 @@ vi.mock('@/stores/settings', () => ({
 describe('providers settings edit flow', () => {
   beforeEach(() => {
     i18n.changeLanguage('en');
-    providerStoreState.refreshProviderSnapshot.mockClear();
+    vi.clearAllMocks();
+    providerStoreState.validateAccountApiKey.mockResolvedValue({ valid: true });
   });
 
   it('编辑态应提供清晰的取消入口', () => {
@@ -143,5 +144,28 @@ describe('providers settings edit flow', () => {
         'sk-custom',
       );
     });
+  });
+
+  it('编辑 provider 时验证失败应显示行内错误且不保存', async () => {
+    providerStoreState.validateAccountApiKey.mockResolvedValueOnce({
+      valid: false,
+      error: 'Invalid API key',
+    });
+
+    render(<ProvidersSettings />);
+
+    fireEvent.click(screen.getByTitle('Edit API key'));
+    fireEvent.change(screen.getByTestId('provider-edit-key-input-custom-1'), {
+      target: { value: 'sk-bad' },
+    });
+    fireEvent.click(screen.getByTestId('provider-edit-save-custom-1'));
+
+    expect(await screen.findByTestId('provider-edit-validation-error-custom-1')).toHaveTextContent('Failed: Invalid API key');
+    expect(providerStoreState.updateAccount).not.toHaveBeenCalled();
+
+    fireEvent.change(screen.getByTestId('provider-edit-key-input-custom-1'), {
+      target: { value: 'sk-good' },
+    });
+    expect(screen.queryByTestId('provider-edit-validation-error-custom-1')).toBeNull();
   });
 });

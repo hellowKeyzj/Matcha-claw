@@ -15,7 +15,8 @@ import {
 type ProviderRuntimeProtocol =
   | 'openai-completions'
   | 'openai-responses'
-  | 'anthropic-messages';
+  | 'anthropic-messages'
+  | 'openrouter';
 
 export type RuntimeProviderConfigOverride = {
   baseUrl?: string;
@@ -56,6 +57,9 @@ function normalizeProviderProtocol(protocol: unknown): ProviderRuntimeProtocol {
   }
   if (protocol === 'anthropic-messages') {
     return 'anthropic-messages';
+  }
+  if (protocol === 'openrouter') {
+    return 'openrouter';
   }
   return 'openai-completions';
 }

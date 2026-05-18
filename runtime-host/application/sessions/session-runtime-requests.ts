@@ -15,6 +15,7 @@ import type {
   SessionNewPayload,
   SessionPatchPayload,
   SessionPromptPayload,
+  SessionRenamePayload,
   SessionWindowPayload,
 } from './session-runtime-types';
 
@@ -51,6 +52,17 @@ export function readPatchSessionRequest(payload: unknown): {
   return {
     sessionKey: normalizeString(body.sessionKey),
     model: normalizeString(body.model),
+  };
+}
+
+export function readRenameSessionRequest(payload: unknown): {
+  sessionKey: string;
+  label: string;
+} {
+  const body = isRecord(payload) ? payload as SessionRenamePayload : {};
+  return {
+    sessionKey: normalizeString(body.sessionKey),
+    label: normalizeString(body.label),
   };
 }
 

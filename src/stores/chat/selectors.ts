@@ -85,6 +85,7 @@ function buildAgentSessionsPaneState(state: ChatStoreState, sessionEntries: Agen
     openAgentConversation: state.openAgentConversation,
     newSession: state.newSession,
     deleteSession: state.deleteSession,
+    renameSession: state.renameSession,
   };
 }
 
@@ -144,6 +145,7 @@ export function selectAgentSessionsPaneState(state: ChatStoreState) {
     && cachedAgentSessionsPaneState.openAgentConversation === state.openAgentConversation
     && cachedAgentSessionsPaneState.newSession === state.newSession
     && cachedAgentSessionsPaneState.deleteSession === state.deleteSession
+    && cachedAgentSessionsPaneState.renameSession === state.renameSession
   ) {
     return cachedAgentSessionsPaneState;
   }

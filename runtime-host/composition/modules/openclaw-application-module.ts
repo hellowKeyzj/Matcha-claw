@@ -200,6 +200,7 @@ export function registerOpenClawApplicationServices(
   container.register('subagents.service', (scope) => new SubagentRuntimeService({
     gateway: context.openclawBridge,
     capabilities: scope.resolve<GatewayPluginCapabilityPort>('gateway.capabilities'),
+    workspace: scope.resolve('openclaw.workspaceService'),
     clock: scope.resolve<RuntimeClockPort>('runtime.clock'),
   }));
   container.register('clawhub.service', (scope) => new ClawHubService({

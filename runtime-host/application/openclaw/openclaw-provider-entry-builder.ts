@@ -8,6 +8,14 @@ export interface RuntimeProviderModel {
   name: string;
   contextWindow?: number;
   maxTokens?: number;
+  cost?: RuntimeProviderModelCost;
+}
+
+export interface RuntimeProviderModelCost {
+  input: number;
+  output: number;
+  cacheRead: number;
+  cacheWrite: number;
 }
 
 export interface RuntimeProviderConfigOverride {
@@ -49,7 +57,30 @@ export function extractFallbackModelIds(provider: string, fallbackModels: string
 }
 
 export function buildNamedProviderModels(modelIds: string[]): RuntimeProviderModel[] {
-  return modelIds.map((id) => ({ id, name: id }));
+  return modelIds.map((id) => normalizeProviderModel({ id, name: id }));
+}
+
+function normalizeCostNumber(value: unknown): number {
+  return typeof value === 'number' && Number.isFinite(value) ? value : 0;
+}
+
+function normalizeProviderModelCost(value: unknown): RuntimeProviderModelCost {
+  const record = value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {};
+  return {
+    input: normalizeCostNumber(record.input),
+    output: normalizeCostNumber(record.output),
+    cacheRead: normalizeCostNumber(record.cacheRead),
+    cacheWrite: normalizeCostNumber(record.cacheWrite),
+  };
+}
+
+function normalizeProviderModel(model: RuntimeProviderModel): RuntimeProviderModel {
+  return {
+    ...model,
+    cost: normalizeProviderModelCost(model.cost),
+  };
 }
 
 function mergeProviderModels(
@@ -65,7 +96,7 @@ function mergeProviderModels(
         continue;
       }
       seen.add(id);
-      merged.push(item);
+      merged.push(normalizeProviderModel(item));
     }
   }
   return merged;

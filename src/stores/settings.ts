@@ -36,7 +36,6 @@ interface SettingsState {
   // Update
   updateChannel: UpdateChannel;
   autoCheckUpdate: boolean;
-  autoDownloadUpdate: boolean;
 
   // UI State
   devModeUnlocked: boolean;
@@ -61,7 +60,6 @@ interface SettingsState {
   setProxyBypassRules: (value: string) => void;
   setUpdateChannel: (channel: UpdateChannel) => void;
   setAutoCheckUpdate: (value: boolean) => void;
-  setAutoDownloadUpdate: (value: boolean) => void;
   setDevModeUnlocked: (value: boolean) => void;
   markSetupComplete: () => void;
   resetSettings: () => Promise<void>;
@@ -82,7 +80,6 @@ const defaultSettings = {
   proxyBypassRules: '<local>;localhost;127.0.0.1;::1',
   updateChannel: 'stable' as UpdateChannel,
   autoCheckUpdate: true,
-  autoDownloadUpdate: false,
   devModeUnlocked: false,
   setupComplete: false,
   initialized: false,
@@ -174,10 +171,6 @@ export const useSettingsStore = create<SettingsState>()(
       setAutoCheckUpdate: (autoCheckUpdate) => {
         set({ autoCheckUpdate });
         void hostSettingsPutValue('autoCheckUpdate', autoCheckUpdate).catch(() => {});
-      },
-      setAutoDownloadUpdate: (autoDownloadUpdate) => {
-        set({ autoDownloadUpdate });
-        void hostSettingsPutValue('autoDownloadUpdate', autoDownloadUpdate).catch(() => {});
       },
       setDevModeUnlocked: (devModeUnlocked) => {
         set({ devModeUnlocked });

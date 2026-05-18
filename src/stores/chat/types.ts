@@ -206,6 +206,7 @@ export interface ChatStoreActions {
   switchSession: (key: string) => void;
   newSession: (agentId?: string) => Promise<void>;
   deleteSession: (key: string) => Promise<void>;
+  renameSession: (key: string, label: string) => Promise<void>;
   cleanupEmptySession: () => void;
   loadHistory: (request: ChatHistoryLoadRequest) => Promise<void>;
   loadOlderViewportItems: (sessionKey?: string) => Promise<void>;

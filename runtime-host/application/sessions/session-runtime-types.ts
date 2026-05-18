@@ -43,6 +43,11 @@ export interface SessionPatchPayload {
   model?: unknown;
 }
 
+export interface SessionRenamePayload {
+  sessionKey?: unknown;
+  label?: unknown;
+}
+
 export interface SessionPromptMediaPayload {
   filePath: string;
   mimeType: string;

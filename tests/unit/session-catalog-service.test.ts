@@ -456,6 +456,56 @@ describe('session adapter service catalog', () => {
     });
   });
 
+  it('renames a session through runtime-host storage and catalog prefers the user label', async () => {
+    const configDir = mkdtempSync(join(tmpdir(), 'matchaclaw-session-catalog-'));
+    tempDirs.push(configDir);
+
+    const sessionsDir = join(configDir, 'agents', 'alpha', 'sessions');
+    mkdirSync(sessionsDir, { recursive: true });
+    writeFileSync(join(sessionsDir, 'sessions.json'), JSON.stringify({
+      sessions: [
+        { key: 'agent:alpha:session-1', id: 'session-1' },
+      ],
+    }, null, 2));
+    writeFileSync(join(sessionsDir, 'session-1.jsonl'), [
+      buildTranscriptLine({
+        timestamp: '2026-04-10T10:00:00.000Z',
+        role: 'user',
+        content: 'transcript title',
+        id: 'message-1',
+      }),
+    ].join('\n'));
+
+    const service = createTestSessionRuntimeService({
+      workspace: { getConfigDir: () => configDir },
+      openclawBridge: {
+        chatSend: async () => ({}),
+        gatewayRpc: async () => ({}),
+      },
+    });
+
+    await expect(service.renameSession({
+      sessionKey: 'agent:alpha:session-1',
+      label: 'manual title',
+    })).resolves.toEqual({
+      status: 200,
+      data: {
+        success: true,
+        sessionKey: 'agent:alpha:session-1',
+        label: 'manual title',
+      },
+    });
+
+    const response = await service.listSessions();
+
+    expect(response.status).toBe(200);
+    expect(response.data.sessions[0]).toMatchObject({
+      key: 'agent:alpha:session-1',
+      label: 'manual title',
+      titleSource: 'user',
+    });
+  });
+
   it('falls back to configured agent default model when session store has no override', async () => {
     const configDir = mkdtempSync(join(tmpdir(), 'matchaclaw-session-catalog-'));
     tempDirs.push(configDir);

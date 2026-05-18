@@ -13,12 +13,14 @@ describe('session adapter service status management', () => {
     }
   });
 
-  it('deletes the session transcript and removes it from the adapter index', async () => {
+  it('hard deletes the session transcript artefacts and removes it from the adapter index', async () => {
     const configDir = mkdtempSync(join(tmpdir(), 'matchaclaw-session-delete-'));
     tempDirs.push(configDir);
 
     const sessionsDir = join(configDir, 'agents', 'alpha', 'sessions');
+    const trajectoryDir = join(configDir, 'trajectory');
     mkdirSync(sessionsDir, { recursive: true });
+    mkdirSync(trajectoryDir, { recursive: true });
     writeFileSync(join(sessionsDir, 'sessions.json'), JSON.stringify({
       sessions: [
         { key: 'agent:alpha:session-a', id: 'session-a' },
@@ -26,6 +28,15 @@ describe('session adapter service status management', () => {
       ],
     }, null, 2));
     writeFileSync(join(sessionsDir, 'session-a.jsonl'), '{"hello":"world"}\n', 'utf8');
+    writeFileSync(join(sessionsDir, 'session-a.deleted.jsonl'), '{"old":"soft-delete"}\n', 'utf8');
+    writeFileSync(join(sessionsDir, 'session-a.jsonl.reset.2026-03-09T03-01-29.968Z'), '{"old":"reset"}\n', 'utf8');
+    writeFileSync(join(sessionsDir, 'session-a.trajectory.jsonl'), '{"old":"trajectory"}\n', 'utf8');
+    writeFileSync(join(sessionsDir, 'session-a.trajectory-path.json'), JSON.stringify({
+      traceSchema: 'openclaw-trajectory-pointer',
+      runtimeFile: join(trajectoryDir, 'session-a-runtime.jsonl'),
+    }), 'utf8');
+    writeFileSync(join(trajectoryDir, 'session-a-runtime.jsonl'), '{"old":"external-trajectory"}\n', 'utf8');
+    writeFileSync(join(sessionsDir, 'session-b.jsonl'), '{"keep":"world"}\n', 'utf8');
 
     const service = createTestSessionRuntimeService({
       workspace: { getConfigDir: () => configDir },
@@ -42,7 +53,12 @@ describe('session adapter service status management', () => {
     expect(response.status).toBe(200);
     expect(response.data).toEqual({ success: true });
     expect(existsSync(join(sessionsDir, 'session-a.jsonl'))).toBe(false);
-    expect(existsSync(join(sessionsDir, 'session-a.deleted.jsonl'))).toBe(true);
+    expect(existsSync(join(sessionsDir, 'session-a.deleted.jsonl'))).toBe(false);
+    expect(existsSync(join(sessionsDir, 'session-a.jsonl.reset.2026-03-09T03-01-29.968Z'))).toBe(false);
+    expect(existsSync(join(sessionsDir, 'session-a.trajectory.jsonl'))).toBe(false);
+    expect(existsSync(join(sessionsDir, 'session-a.trajectory-path.json'))).toBe(false);
+    expect(existsSync(join(trajectoryDir, 'session-a-runtime.jsonl'))).toBe(false);
+    expect(existsSync(join(sessionsDir, 'session-b.jsonl'))).toBe(true);
     expect(JSON.parse(readFileSync(join(sessionsDir, 'sessions.json'), 'utf8'))).toEqual({
       sessions: [
         { key: 'agent:alpha:session-b', id: 'session-b' },

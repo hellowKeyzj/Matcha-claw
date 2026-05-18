@@ -77,6 +77,9 @@ export interface SessionViewModel {
   avatarSeed?: string;
   avatarStyle?: AgentAvatarStyle;
   deleteLabel: string;
+  renameLabel: string;
+  saveRenameLabel: string;
+  cancelRenameLabel: string;
 }
 
 export interface AgentSessionsPaneViewModel {
@@ -482,6 +485,9 @@ export function useAgentSessionsPaneViewModel(
         avatarSeed: sessionOwner?.avatarSeed,
         avatarStyle: sessionOwner?.avatarStyle,
         deleteLabel: input.t('sidebar.deleteSessionAria', { title: sessionTitle }),
+        renameLabel: input.t('sidebar.renameSessionAria', { title: sessionTitle }),
+        saveRenameLabel: input.t('sidebar.saveSessionRenameAria', { title: sessionTitle }),
+        cancelRenameLabel: input.t('sidebar.cancelSessionRenameAria', { title: sessionTitle }),
       });
     }
     return map;

@@ -28,30 +28,51 @@ function StepDetailCard({ step }: { step: SessionExecutionGraphStep }) {
   const { t } = useTranslation('chat');
   const [expanded, setExpanded] = useState(false);
   const hasDetail = !!step.detail;
+  const isFlatRow = step.kind === 'tool' || step.kind === 'system';
+  const detailPreview = step.detail?.replace(/\s+/g, ' ').trim();
+  const showStatusPill = !(isFlatRow && step.status === 'completed');
 
   return (
-    <div className="min-w-0 flex-1 rounded-[18px] border border-border/45 bg-background/68 px-3 py-2.5 shadow-sm backdrop-blur-sm">
+    <div
+      className={cn(
+        'min-w-0 flex-1',
+        isFlatRow
+          ? 'px-0 py-0'
+          : 'rounded-[18px] border border-border/45 bg-background/68 px-3 py-2.5 shadow-sm backdrop-blur-sm',
+      )}
+    >
       <button
         type="button"
-        className={cn('flex w-full items-start gap-2 text-left', hasDetail ? 'cursor-pointer' : 'cursor-default')}
+        className={cn(
+          'flex w-full gap-2 text-left',
+          isFlatRow ? 'items-center' : 'items-start',
+          hasDetail ? 'cursor-pointer' : 'cursor-default',
+        )}
         onClick={() => {
           if (!hasDetail) return;
           setExpanded((value) => !value);
         }}
       >
         <div className="min-w-0 flex-1">
-          <div className="flex items-center gap-2">
-            <p className="text-sm font-medium text-foreground">{step.label}</p>
-            <span className="rounded-full border border-border/40 bg-background/82 px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
-              {t(`taskPanel.stepStatus.${step.status}`)}
-            </span>
+          <div className="flex min-w-0 items-center gap-2">
+            <p className={cn('text-sm font-medium text-foreground', isFlatRow && 'shrink-0')}>{step.label}</p>
+            {isFlatRow && detailPreview && !expanded && (
+              <p className="min-w-0 truncate text-[12px] leading-5 text-muted-foreground">
+                {detailPreview}
+              </p>
+            )}
+            {showStatusPill && (
+              <span className="shrink-0 whitespace-nowrap rounded-full border border-border/40 bg-background/82 px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+                {t(`taskPanel.stepStatus.${step.status}`)}
+              </span>
+            )}
             {step.depth > 1 && (
-              <span className="rounded-full bg-primary/10 px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide text-primary">
+              <span className="shrink-0 whitespace-nowrap rounded-full bg-primary/10 px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide text-primary">
                 {t('executionGraph.branchLabel')}
               </span>
             )}
           </div>
-          {step.detail && !expanded && (
+          {step.detail && !expanded && !isFlatRow && (
             <p className="mt-1 text-[12px] leading-5 text-muted-foreground line-clamp-2">{step.detail}</p>
           )}
         </div>
@@ -63,7 +84,7 @@ function StepDetailCard({ step }: { step: SessionExecutionGraphStep }) {
       </button>
       {step.detail && expanded && (
         <div className="mt-3 rounded-[14px] border border-border/40 bg-background/74 px-3 py-2">
-          <pre className="whitespace-pre-wrap break-all text-[12px] leading-5 text-muted-foreground">
+          <pre className="whitespace-pre-wrap break-words text-[12px] leading-5 text-muted-foreground">
             {step.detail}
           </pre>
         </div>

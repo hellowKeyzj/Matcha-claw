@@ -1,4 +1,4 @@
-import { join } from 'node:path';
+import { basename, dirname, isAbsolute, join, relative, win32 } from 'node:path';
 import type { RuntimeFileSystemPort } from '../common/runtime-ports';
 import type { OpenClawWorkspacePort } from '../openclaw/openclaw-workspace-service';
 
@@ -30,6 +30,7 @@ export interface SessionStoragePort {
   readTranscriptContent(sessionKey: string): Promise<string | null>;
   readTranscriptDescriptorContent(descriptor: SessionStorageDescriptor): Promise<string | null>;
   deleteSession(sessionKey: string): Promise<boolean>;
+  renameSession(sessionKey: string, label: string): Promise<boolean>;
   updateSessionStatus(sessionKey: string, status: 'active' | 'completed' | 'archived' | 'deleted'): Promise<boolean>;
 }
 
@@ -42,7 +43,7 @@ function normalizeString(value: unknown): string {
 }
 
 function isAbsolutePath(path: string): boolean {
-  return /^[a-zA-Z]:[\\/]/.test(path) || path.startsWith('\\\\');
+  return isAbsolute(path) || win32.isAbsolute(path);
 }
 
 function resolveIndexedTranscriptPath(
@@ -260,10 +261,83 @@ function removeSessionFromStorageIndex(
   return next;
 }
 
-function buildDeletedTranscriptPath(transcriptPath: string): string {
-  return transcriptPath.endsWith('.jsonl')
-    ? `${transcriptPath.slice(0, -'.jsonl'.length)}.deleted.jsonl`
-    : `${transcriptPath}.deleted`;
+function updateStorageIndexLabel(
+  sessionsJson: Record<string, unknown>,
+  sessionKey: string,
+  label: string,
+): Record<string, unknown> {
+  if (Array.isArray(sessionsJson.sessions)) {
+    let found = false;
+    const sessions = sessionsJson.sessions.map((candidate) => {
+      if (!isRecord(candidate)) {
+        return candidate;
+      }
+      const candidateKey = normalizeString(candidate.key ?? candidate.sessionKey);
+      if (candidateKey !== sessionKey) {
+        return candidate;
+      }
+      found = true;
+      return { ...candidate, label };
+    });
+    return found ? { ...sessionsJson, sessions } : sessionsJson;
+  }
+
+  const current = sessionsJson[sessionKey];
+  if (isRecord(current)) {
+    return {
+      ...sessionsJson,
+      [sessionKey]: { ...current, label },
+    };
+  }
+  if (typeof current === 'string' && current.trim()) {
+    return {
+      ...sessionsJson,
+      [sessionKey]: { file: current, label },
+    };
+  }
+  return sessionsJson;
+}
+
+export function readSessionStoreLabel(entry: Record<string, unknown> | null): string | null {
+  const label = normalizeString(entry?.label);
+  return label || null;
+}
+
+function isPathInside(parentDir: string, childPath: string): boolean {
+  const rel = relative(parentDir, childPath);
+  return rel === '' || (!rel.startsWith('..') && !isAbsolutePath(rel));
+}
+
+function readTranscriptBaseId(transcriptPath: string): string | null {
+  const fileName = basename(transcriptPath);
+  return fileName.endsWith('.jsonl') ? fileName.slice(0, -'.jsonl'.length) : null;
+}
+
+function isSessionArtefactName(fileName: string, baseId: string): boolean {
+  return fileName === `${baseId}.jsonl`
+    || fileName === `${baseId}.deleted.jsonl`
+    || fileName === `${baseId}.trajectory.jsonl`
+    || fileName === `${baseId}.trajectory-path.json`
+    || fileName.startsWith(`${baseId}.jsonl.reset.`);
+}
+
+function readTrajectoryRuntimeFile(pointerContent: string): string | null {
+  try {
+    const parsed = JSON.parse(pointerContent) as unknown;
+    if (!isRecord(parsed)) {
+      return null;
+    }
+    if (parsed.traceSchema !== 'openclaw-trajectory-pointer') {
+      return null;
+    }
+    const runtimeFile = normalizeString(parsed.runtimeFile);
+    if (!runtimeFile || !runtimeFile.endsWith('.jsonl') || !isAbsolutePath(runtimeFile)) {
+      return null;
+    }
+    return runtimeFile;
+  } catch {
+    return null;
+  }
 }
 
 export class SessionStorageRepository implements SessionStoragePort {
@@ -460,16 +534,34 @@ export class SessionStorageRepository implements SessionStoragePort {
     return true;
   }
 
+  async renameSession(sessionKey: string, label: string): Promise<boolean> {
+    const normalizedLabel = normalizeString(label);
+    if (!normalizedLabel) {
+      return false;
+    }
+    const descriptor = await this.findStorageDescriptor(sessionKey);
+    if (!descriptor?.sessionsJson || !descriptor.sessionsJsonPath) {
+      return false;
+    }
+    const nextSessionsJson = updateStorageIndexLabel(descriptor.sessionsJson, sessionKey, normalizedLabel);
+    if (nextSessionsJson === descriptor.sessionsJson) {
+      return false;
+    }
+    await this.deps.fileSystem.writeTextFile(
+      descriptor.sessionsJsonPath,
+      JSON.stringify(nextSessionsJson, null, 2),
+    );
+    this.invalidateAgentDescriptorsCache(descriptor.agentId);
+    return true;
+  }
+
   async deleteSession(sessionKey: string): Promise<boolean> {
     const descriptor = await this.findStorageDescriptor(sessionKey);
     if (!descriptor?.sessionsJson || !descriptor.sessionsJsonPath) {
       return false;
     }
-    if (descriptor.transcriptPath && await this.deps.fileSystem.exists(descriptor.transcriptPath)) {
-      await this.deps.fileSystem.rename(
-        descriptor.transcriptPath,
-        buildDeletedTranscriptPath(descriptor.transcriptPath),
-      );
+    if (descriptor.transcriptPath) {
+      await this.removeSessionArtefacts(descriptor);
     }
     await this.deps.fileSystem.writeTextFile(
       descriptor.sessionsJsonPath,
@@ -477,6 +569,51 @@ export class SessionStorageRepository implements SessionStoragePort {
     );
     this.invalidateAgentDescriptorsCache(descriptor.agentId);
     return true;
+  }
+
+  private async removeSessionArtefacts(descriptor: SessionStorageDescriptor): Promise<void> {
+    if (!descriptor.transcriptPath) {
+      return;
+    }
+    const baseId = readTranscriptBaseId(descriptor.transcriptPath);
+    if (!baseId) {
+      return;
+    }
+    const transcriptDir = dirname(descriptor.transcriptPath);
+    if (!isPathInside(descriptor.sessionsDir, transcriptDir)) {
+      return;
+    }
+
+    let entries: RuntimeDirectoryEntry[] = [];
+    try {
+      entries = await this.deps.fileSystem.listDirectory(transcriptDir);
+    } catch {
+      return;
+    }
+
+    const localTargets = entries
+      .filter((entry) => entry.isFile && isSessionArtefactName(entry.name, baseId))
+      .map((entry) => join(transcriptDir, entry.name));
+
+    const pointerPath = join(transcriptDir, `${baseId}.trajectory-path.json`);
+    if (localTargets.includes(pointerPath)) {
+      await this.removeExternalTrajectory(pointerPath, transcriptDir);
+    }
+
+    await Promise.all(localTargets.map((target) => this.deps.fileSystem.removeFile(target)));
+  }
+
+  private async removeExternalTrajectory(pointerPath: string, transcriptDir: string): Promise<void> {
+    let runtimeFile: string | null = null;
+    try {
+      runtimeFile = readTrajectoryRuntimeFile(await this.deps.fileSystem.readTextFile(pointerPath));
+    } catch {
+      return;
+    }
+    if (!runtimeFile || isPathInside(transcriptDir, runtimeFile)) {
+      return;
+    }
+    await this.deps.fileSystem.removeFile(runtimeFile);
   }
 
 }

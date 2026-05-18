@@ -87,6 +87,18 @@
 !macro customInstall
   DetailPrint "Core files extracted. Finalizing system integration..."
 
+  ; Remove the legacy bundled OpenClaw skills directory during overwrite installs.
+  ; Current builds use resources\preinstalled-skills; keeping the old subtree can
+  ; leave stale skills such as apple-notes or discord visible after an upgrade.
+  IfFileExists "$INSTDIR\resources\openclaw\skills\" 0 _ci_legacySkillsDone
+    DetailPrint "Removing stale bundled OpenClaw skills from previous install..."
+    RMDir /r "$INSTDIR\resources\openclaw\skills"
+    IfFileExists "$INSTDIR\resources\openclaw\skills\" 0 _ci_legacySkillsDone
+      nsExec::ExecToStack 'cmd.exe /c rd /s /q "$INSTDIR\resources\openclaw\skills"'
+      Pop $0
+      Pop $1
+  _ci_legacySkillsDone:
+
   ; Enable Windows long path support (Windows 10 1607+ / Windows 11).
   ; pnpm virtual store paths can exceed the default MAX_PATH limit of 260 chars.
   ; Writing to HKLM requires admin privileges; on per-user installs without

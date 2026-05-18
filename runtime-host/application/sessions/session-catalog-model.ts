@@ -37,9 +37,13 @@ export function createSessionCatalogItem(input: {
   runtime: SessionRuntimeStateSnapshot;
   runtimeModel?: string | null;
   resolvedModel?: string | null;
+  label?: string | null;
 }): SessionCatalogItem {
   const agentId = parseSessionKeyAgent(input.sessionKey) ?? 'main';
-  const label = resolveSessionLabelDetailsFromTimelineEntries(input.timelineEntries);
+  const inputLabel = typeof input.label === 'string' ? input.label.trim() : '';
+  const timelineLabel = resolveSessionLabelDetailsFromTimelineEntries(input.timelineEntries);
+  const label = inputLabel || timelineLabel.label;
+  const titleSource = inputLabel ? 'user' : timelineLabel.titleSource;
   const updatedAt = resolveTimelineLastActivityAt(input.timelineEntries, input.runtime);
   const kind = resolveSessionCatalogKind(input.sessionKey);
   const resolvedModel = input.runtimeModel ?? input.resolvedModel ?? null;
@@ -48,8 +52,8 @@ export function createSessionCatalogItem(input: {
     agentId,
     kind,
     preferred: kind === 'main',
-    ...(label.label ? { label: label.label } : {}),
-    ...(label.titleSource !== 'none' ? { titleSource: label.titleSource } : {}),
+    ...(label ? { label } : {}),
+    ...(titleSource !== 'none' ? { titleSource } : {}),
     displayName: input.sessionKey,
     ...(resolvedModel ? { model: resolvedModel } : {}),
     ...(typeof updatedAt === 'number' ? { updatedAt } : {}),

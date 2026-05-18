@@ -713,16 +713,19 @@ function CronJobCard({ job, isMutating, onToggle, onEdit, onDelete, onTrigger }:
   };
 
   return (
-    <Card className={cn(
-      TASK_CENTER_SURFACE_CARD_CLASS,
-      'transition-colors',
-      job.enabled && 'border-primary/30'
-    )}>
+    <Card
+      data-testid={`cron-job-card-${job.id}`}
+      className={cn(
+        TASK_CENTER_SURFACE_CARD_CLASS,
+        'transition-colors',
+        job.enabled && 'border-primary/30'
+      )}
+    >
       <CardHeader className="pb-3">
-        <div className="flex items-start justify-between">
-          <div className="flex items-center gap-3">
+        <div className="flex items-start justify-between gap-3">
+          <div className="flex min-w-0 flex-1 items-center gap-3">
             <div className={cn(
-              'rounded-full p-2',
+              'shrink-0 rounded-full p-2',
               job.enabled
                 ? 'bg-green-100 dark:bg-green-900/30'
                 : 'bg-muted'
@@ -732,15 +735,23 @@ function CronJobCard({ job, isMutating, onToggle, onEdit, onDelete, onTrigger }:
                 job.enabled ? 'text-green-600' : 'text-muted-foreground'
               )} />
             </div>
-            <div>
-              <CardTitle className="text-lg">{job.name}</CardTitle>
-              <CardDescription className="flex items-center gap-2">
-                <Timer className="h-3 w-3" />
-                {parseCronSchedule(job.schedule, t)}
+            <div className="min-w-0 flex-1">
+              <CardTitle
+                data-testid={`cron-job-card-title-${job.id}`}
+                className="truncate text-lg"
+              >
+                {job.name}
+              </CardTitle>
+              <CardDescription className="flex min-w-0 items-center gap-2">
+                <Timer className="h-3 w-3 shrink-0" />
+                <span className="truncate">{parseCronSchedule(job.schedule, t)}</span>
               </CardDescription>
             </div>
           </div>
-          <div className="flex items-center gap-2">
+          <div
+            data-testid={`cron-job-card-switch-${job.id}`}
+            className="flex shrink-0 items-center gap-2"
+          >
             <Badge variant={job.enabled ? 'success' : 'secondary'}>
               {job.enabled ? t('stats.active') : t('stats.paused')}
             </Badge>
@@ -762,7 +773,7 @@ function CronJobCard({ job, isMutating, onToggle, onEdit, onDelete, onTrigger }:
         {/* Message Preview */}
         <div className="flex items-start gap-2 p-3 rounded-lg bg-muted/50">
           <MessageSquare className="h-4 w-4 mt-0.5 text-muted-foreground shrink-0" />
-          <p className="text-sm text-muted-foreground line-clamp-2">
+          <p className="min-w-0 flex-1 break-all text-sm text-muted-foreground line-clamp-2">
             {job.message}
           </p>
         </div>

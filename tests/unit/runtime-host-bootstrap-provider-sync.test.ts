@@ -16,6 +16,14 @@ const hoisted = vi.hoisted(() => ({
   reconcileConfiguredChannelPluginsForGatewayLaunchMock: vi.fn(async () => []),
   cleanupStaleBuiltinExtensionsForGatewayLaunchMock: vi.fn(async () => []),
   ensureConfiguredManagedPluginsForGatewayLaunchMock: vi.fn(async () => []),
+  ensureDefaultIdentityMock: vi.fn(async () => ({
+    workspaceDirs: [],
+    seededFiles: [],
+    replacedTemplateFiles: [],
+    removedBootstrapFiles: [],
+  })),
+  migrateMainAgentTemplatesIfNeededMock: vi.fn(async () => ({ workspaceDir: '', migratedFiles: [] })),
+  mergeContextSnippetsMock: vi.fn(async () => ({ mergedFiles: [], skippedMissing: 0 })),
   getAllSettingsMock: vi.fn(async () => ({ browserMode: 'relay', gatewayToken: '' })),
   setSettingValueMock: vi.fn(async () => {}),
   ensureManagedPluginInstalledMock: vi.fn(async () => {}),
@@ -74,7 +82,9 @@ function createBootstrapService(RuntimeHostBootstrapService: typeof import('../.
     },
     providerRuntimeSync: createProviderRuntimeSync(),
     workspace: {
-      migrateMainAgentTemplatesIfNeeded: vi.fn(async () => ({ migrated: 0 })),
+      ensureDefaultIdentity: hoisted.ensureDefaultIdentityMock,
+      migrateMainAgentTemplatesIfNeeded: hoisted.migrateMainAgentTemplatesIfNeededMock,
+      mergeContextSnippets: hoisted.mergeContextSnippetsMock,
     },
     securityJobs: {
       submitPolicySync: vi.fn(),
@@ -105,6 +115,12 @@ describe('runtime-host bootstrap provider sync', () => {
     hoisted.cleanupStaleBuiltinExtensionsForGatewayLaunchMock.mockResolvedValue([]);
     hoisted.reconcileConfiguredChannelPluginsForGatewayLaunchMock.mockResolvedValue([]);
     hoisted.ensureConfiguredManagedPluginsForGatewayLaunchMock.mockResolvedValue([]);
+    hoisted.ensureDefaultIdentityMock.mockResolvedValue({
+      workspaceDirs: [],
+      seededFiles: [],
+      replacedTemplateFiles: [],
+      removedBootstrapFiles: [],
+    });
     hoisted.submitLongTaskMock.mockReturnValue({
       success: true,
       job: {
@@ -160,6 +176,7 @@ describe('runtime-host bootstrap provider sync', () => {
     });
     expect(hoisted.setSettingValueMock).toHaveBeenCalledWith('gatewayToken', 'matchaclaw-token-1');
     expect(hoisted.runtimeConfigSyncGatewayTokenMock).toHaveBeenCalledWith('matchaclaw-token-1');
+    expect(hoisted.ensureDefaultIdentityMock).toHaveBeenCalledTimes(1);
     expect(hoisted.runtimeConfigSanitizeMock).toHaveBeenCalledTimes(1);
     expect(hoisted.ensureManagedPluginInstalledMock).toHaveBeenCalledWith('browser-relay');
     expect(hoisted.runtimeConfigSyncBrowserModeMock).toHaveBeenCalledWith('relay');

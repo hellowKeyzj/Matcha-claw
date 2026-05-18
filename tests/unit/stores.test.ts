@@ -19,7 +19,6 @@ describe('Settings Store', () => {
       gatewayAutoStart: true,
       gatewayPort: 18789,
       autoCheckUpdate: true,
-      autoDownloadUpdate: false,
       startMinimized: false,
       launchAtStartup: false,
       updateChannel: 'stable',
@@ -52,13 +51,11 @@ describe('Settings Store', () => {
       .mockResolvedValueOnce({ success: true })
       .mockResolvedValueOnce({ success: true });
 
-    const { setAutoCheckUpdate, setAutoDownloadUpdate, setDevModeUnlocked } = useSettingsStore.getState();
+    const { setAutoCheckUpdate, setDevModeUnlocked } = useSettingsStore.getState();
     setAutoCheckUpdate(false);
-    setAutoDownloadUpdate(true);
     setDevModeUnlocked(true);
 
     expect(useSettingsStore.getState().autoCheckUpdate).toBe(false);
-    expect(useSettingsStore.getState().autoDownloadUpdate).toBe(true);
     expect(useSettingsStore.getState().devModeUnlocked).toBe(true);
 
     await waitFor(() => {
@@ -67,13 +64,6 @@ describe('Settings Store', () => {
         expect.objectContaining({
           method: 'PUT',
           body: JSON.stringify({ value: false }),
-        }),
-      );
-      expect(hostApiFetchMock).toHaveBeenCalledWith(
-        '/api/settings/autoDownloadUpdate',
-        expect.objectContaining({
-          method: 'PUT',
-          body: JSON.stringify({ value: true }),
         }),
       );
       expect(hostApiFetchMock).toHaveBeenCalledWith(

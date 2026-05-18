@@ -6,6 +6,7 @@ import type {
 } from '../../shared/session-adapter-types';
 import type { SessionMetadataPort } from './session-metadata-repository';
 import type { SessionStoragePort } from './session-storage-repository';
+import { readSessionStoreLabel } from './session-storage-repository';
 import { SessionRuntimeStateStore } from './session-runtime-state';
 import {
   buildWindowRange,
@@ -67,6 +68,7 @@ export class SessionSnapshotService {
       window?: SessionWindowStateSnapshot;
       replayComplete?: boolean;
       resolvedModel?: string | null;
+      label?: string | null;
     } = {},
   ): SessionStateSnapshot {
     const allItems = filterStateOnlyRenderItems(options.items ?? state.renderItems);
@@ -97,6 +99,7 @@ export class SessionSnapshotService {
         runtimeModel: this.deps.stateStore.getResolvedSessionModel(sessionKey),
         resolvedModel: options.resolvedModel
           ?? this.deps.stateStore.getResolvedSessionModel(sessionKey),
+        label: options.label,
       }),
       items: cloneRenderItems(allItems.slice(start, end)),
       ...(state.taskSnapshot ? { taskSnapshot: structuredClone(state.taskSnapshot) } : {}),
@@ -124,6 +127,7 @@ export class SessionSnapshotService {
     return this.buildSnapshot(sessionKey, state, {
       ...options,
       resolvedModel,
+      label: readSessionStoreLabel(storageDescriptor?.sessionStoreEntry ?? null),
     });
   }
 

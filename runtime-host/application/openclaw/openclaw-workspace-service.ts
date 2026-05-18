@@ -14,6 +14,8 @@ export interface OpenClawWorkspacePort {
   getMainWorkspaceDir(): Promise<string>;
   getWorkspaceDirForSession(sessionKey: string): Promise<string>;
   getTaskWorkspaceDirs(): Promise<string[]>;
+  ensureIdentityFile(workspaceDir: string, options?: { createDir?: boolean }): Promise<{ wroteIdentity: boolean; replacedTemplate: boolean; removedBootstrap: boolean }>;
+  ensureDefaultIdentity(): Promise<{ workspaceDirs: string[]; seededFiles: string[]; replacedTemplateFiles: string[]; removedBootstrapFiles: string[] }>;
   migrateMainAgentTemplatesIfNeeded(): Promise<{ workspaceDir: string; migratedFiles: string[] }>;
   mergeContextSnippets(): Promise<ContextMergeResult>;
 }
@@ -25,10 +27,20 @@ const MAIN_AGENT_TEMPLATE_FILES = [
   'IDENTITY.md',
   'USER.md',
   'HEARTBEAT.md',
-  'BOOTSTRAP.md',
 ] as const;
 
 const UPSTREAM_TEMPLATE_SNAPSHOT_DIRNAME = 'templates-upstream-openclaw';
+const DEFAULT_IDENTITY_FILE_NAME = 'IDENTITY.md';
+const LEGACY_BOOTSTRAP_FILE_NAME = 'BOOTSTRAP.md';
+const FALLBACK_IDENTITY_CONTENT = [
+  '# IDENTITY.md',
+  '',
+  '- **Name:** Matcha',
+  '- **Role:** MatchaClaw desktop agent',
+  '- **Vibe:** calm, clear, and reliable',
+  '- **Mission:** Turn MatchaClaw capabilities into clear, reliable, actionable results',
+  '',
+].join('\n');
 
 function normalizeTemplateText(content: string): string {
   return content.replace(/\r\n/g, '\n').trimEnd();
@@ -76,6 +88,74 @@ export class OpenClawWorkspaceService implements OpenClawWorkspacePort {
     return resolveTaskWorkspaceDirs(await this.config.read(), this.config.getConfigDir());
   }
 
+  async ensureIdentityFile(
+    workspaceDir: string,
+    options: { createDir?: boolean } = {},
+  ): Promise<{ wroteIdentity: boolean; replacedTemplate: boolean; removedBootstrap: boolean }> {
+    if (options.createDir) {
+      await this.fileSystem.ensureDirectory(workspaceDir);
+    } else if (!(await this.fileSystem.exists(workspaceDir))) {
+      return { wroteIdentity: false, replacedTemplate: false, removedBootstrap: false };
+    }
+
+    const identityPath = join(workspaceDir, DEFAULT_IDENTITY_FILE_NAME);
+    const defaultIdentity = await this.readDefaultIdentityContent();
+    let wroteIdentity = await this.fileSystem.writeTextFileExclusive(identityPath, defaultIdentity);
+    let replacedTemplate = false;
+
+    if (!wroteIdentity) {
+      const currentContent = await this.tryReadTextFile(identityPath);
+      const upstreamContent = await this.readUpstreamIdentityTemplate();
+      if (
+        currentContent !== null
+        && upstreamContent !== null
+        && normalizeTemplateText(currentContent) === normalizeTemplateText(upstreamContent)
+      ) {
+        await this.fileSystem.writeTextFile(identityPath, defaultIdentity);
+        wroteIdentity = true;
+        replacedTemplate = true;
+      }
+    }
+
+    const bootstrapPath = join(workspaceDir, LEGACY_BOOTSTRAP_FILE_NAME);
+    let removedBootstrap = false;
+    if (await this.fileSystem.exists(bootstrapPath)) {
+      await this.fileSystem.removeFile(bootstrapPath);
+      removedBootstrap = true;
+    }
+
+    return { wroteIdentity, replacedTemplate, removedBootstrap };
+  }
+
+  async ensureDefaultIdentity(): Promise<{ workspaceDirs: string[]; seededFiles: string[]; replacedTemplateFiles: string[]; removedBootstrapFiles: string[] }> {
+    const workspaceDirs = await this.getTaskWorkspaceDirs();
+    const seededFiles: string[] = [];
+    const replacedTemplateFiles: string[] = [];
+    const removedBootstrapFiles: string[] = [];
+
+    for (const workspaceDir of workspaceDirs) {
+      const result = await this.ensureIdentityFile(workspaceDir, { createDir: true });
+      if (result.wroteIdentity) {
+        seededFiles.push(join(workspaceDir, DEFAULT_IDENTITY_FILE_NAME));
+      }
+      if (result.replacedTemplate) {
+        replacedTemplateFiles.push(join(workspaceDir, DEFAULT_IDENTITY_FILE_NAME));
+      }
+      if (result.removedBootstrap) {
+        removedBootstrapFiles.push(join(workspaceDir, LEGACY_BOOTSTRAP_FILE_NAME));
+      }
+    }
+
+    if (seededFiles.length > 0) {
+      this.logger.info(`[workspace] Ensured default identity files: ${seededFiles.length}`);
+    }
+    if (removedBootstrapFiles.length > 0) {
+      this.logger.info(`[workspace] Removed legacy bootstrap files: ${removedBootstrapFiles.length}`);
+    }
+
+    return { workspaceDirs, seededFiles, replacedTemplateFiles, removedBootstrapFiles };
+  }
+
   private resolveManagedTemplateDir(): string {
     const resourcesPath = this.environment.getResourcesPath();
     const candidates = [
@@ -100,12 +180,42 @@ export class OpenClawWorkspaceService implements OpenClawWorkspacePort {
     return null;
   }
 
+  private async firstExistingFileDir(candidates: string[], fileName: string): Promise<string | null> {
+    for (const candidate of candidates) {
+      if (await this.fileSystem.exists(join(candidate, fileName))) {
+        return candidate;
+      }
+    }
+    return null;
+  }
+
   private async tryReadTextFile(pathname: string): Promise<string | null> {
     try {
       return await this.fileSystem.readTextFile(pathname);
     } catch {
       return null;
     }
+  }
+
+  private async readDefaultIdentityContent(): Promise<string> {
+    const managedTemplateDir = await this.firstExistingFileDir([
+      this.resolveManagedTemplateDir(),
+      join(this.environment.getWorkingDir(), 'resources', 'agent-workspace-templates', 'main-agent'),
+    ], DEFAULT_IDENTITY_FILE_NAME);
+    const managedContent = managedTemplateDir
+      ? await this.tryReadTextFile(join(managedTemplateDir, DEFAULT_IDENTITY_FILE_NAME))
+      : null;
+    return managedContent ?? FALLBACK_IDENTITY_CONTENT;
+  }
+
+  private async readUpstreamIdentityTemplate(): Promise<string | null> {
+    const upstreamTemplateDir = await this.firstExistingFileDir([
+      this.resolveUpstreamTemplateSnapshotDir(),
+      join(this.environment.getOpenClawDirPath(), 'docs', 'reference', 'templates'),
+    ], DEFAULT_IDENTITY_FILE_NAME);
+    return upstreamTemplateDir
+      ? await this.tryReadTextFile(join(upstreamTemplateDir, DEFAULT_IDENTITY_FILE_NAME))
+      : null;
   }
 
   async migrateMainAgentTemplatesIfNeeded(): Promise<{ workspaceDir: string; migratedFiles: string[] }> {

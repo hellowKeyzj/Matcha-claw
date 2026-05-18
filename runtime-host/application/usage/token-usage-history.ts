@@ -37,12 +37,14 @@ async function listConfiguredAgentIds(
 }
 
 export function extractSessionIdFromTranscriptFileName(fileName: string): string | undefined {
+  if (fileName.endsWith('.deleted.jsonl') || fileName.includes('.deleted.jsonl.reset.')) {
+    return undefined;
+  }
   if (!fileName.endsWith('.jsonl') && !fileName.includes('.jsonl.reset.')) {
     return undefined;
   }
   return fileName
     .replace(/\.reset\..+$/, '')
-    .replace(/\.deleted\.jsonl$/, '')
     .replace(/\.jsonl$/, '');
 }
 

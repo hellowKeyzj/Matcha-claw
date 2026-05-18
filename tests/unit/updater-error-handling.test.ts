@@ -50,4 +50,12 @@ describe('AppUpdater 错误事件兜底', () => {
     expect(updater.getStatus().status).toBe('error');
     expect(updater.getStatus().error).toBe('network failed');
   });
+
+  it('uses prompt-first updater settings instead of automatic install on quit', async () => {
+    const { AppUpdater } = await import('../../electron/main/updater');
+    new AppUpdater();
+
+    expect(mockAutoUpdater.autoDownload).toBe(false);
+    expect(mockAutoUpdater.autoInstallOnAppQuit).toBe(false);
+  });
 });

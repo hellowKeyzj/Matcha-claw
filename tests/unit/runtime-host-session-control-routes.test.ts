@@ -10,7 +10,14 @@ function createSessionService() {
     loadSession: vi.fn(),
     promptSession: vi.fn(),
     patchSession: vi.fn(),
+    renameSession: vi.fn(async (payload) => ({
+      status: 200,
+      data: { success: true, ...payload },
+    })),
     deleteSession: vi.fn(),
+    archiveSession: vi.fn(),
+    unarchiveSession: vi.fn(),
+    updateSessionStatus: vi.fn(),
     switchSession: vi.fn(),
     resumeSession: vi.fn(),
     getSessionStateSnapshot: vi.fn(),
@@ -60,5 +67,21 @@ describe('runtime-host session control routes', () => {
 
     expect(service.listPendingApprovals).toHaveBeenCalledTimes(1);
     expect(service.resolveApproval).toHaveBeenCalledWith({ id: 'approval-1', decision: 'allow' });
+  });
+
+  it('routes session rename through injected session service', async () => {
+    const service = createSessionService();
+    const payload = {
+      sessionKey: 'agent:main:session-1',
+      label: 'Renamed session',
+    };
+
+    const response = await dispatchRuntimeRouteDefinition(sessionRoutes, 'POST', '/api/sessions/rename', payload, service);
+
+    expect(service.renameSession).toHaveBeenCalledWith(payload);
+    expect(response).toEqual({
+      status: 200,
+      data: { success: true, ...payload },
+    });
   });
 });
