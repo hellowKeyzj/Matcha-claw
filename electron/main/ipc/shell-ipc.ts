@@ -1,8 +1,8 @@
 import { ipcMain, shell } from 'electron';
 import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { isAbsolute, resolve as resolvePath } from 'node:path';
-import { expandPath } from '../../utils/paths';
+import { isAbsolute, relative, resolve as resolvePath } from 'node:path';
+import { expandPath, getResourcesDir } from '../../utils/paths';
 import { logger } from '../../utils/logger';
 
 const CHROME_EXTENSIONS_URL = 'chrome://extensions/';
@@ -14,6 +14,28 @@ function isAllowedExternalUrl(url: string): boolean {
   } catch {
     return false;
   }
+}
+
+function resolveResourcePath(path: string): { success: true; resolvedPath: string } | { success: false; error: string; rawPath: string } {
+  const rawPath = typeof path === 'string' ? path.trim() : '';
+  if (!rawPath) {
+    return { success: false, error: 'empty_path', rawPath };
+  }
+  if (isAbsolute(rawPath)) {
+    return { success: false, error: 'absolute_path_not_supported', rawPath };
+  }
+
+  const resourcesDir = resolvePath(getResourcesDir());
+  const resolvedPath = resolvePath(resourcesDir, rawPath);
+  const relativePath = relative(resourcesDir, resolvedPath);
+  if (relativePath.startsWith('..') || isAbsolute(relativePath)) {
+    return { success: false, error: 'resource_path_outside_resources', rawPath };
+  }
+  if (!existsSync(resolvedPath)) {
+    return { success: false, error: 'not_found', rawPath };
+  }
+
+  return { success: true, resolvedPath };
 }
 
 function getChromeLaunchCommands(): Array<{ command: string; args: string[] }> {
@@ -183,6 +205,19 @@ export function registerShellHandlers(): void {
 
   ipcMain.handle('shell:openChromeExtensions', async () => {
     await openChromeExtensionsPage();
+  });
+
+  ipcMain.handle('shell:openResourcePath', async (_, path: string) => {
+    const result = resolveResourcePath(path);
+    if (!result.success) {
+      logger.warn(`[shell:openResourcePath] ${result.error}: "${result.rawPath}"`);
+      return result;
+    }
+    const openResult = await shell.openPath(result.resolvedPath);
+    if (openResult) {
+      return { success: false, error: openResult, rawPath: path, resolvedPath: result.resolvedPath };
+    }
+    return { success: true, resolvedPath: result.resolvedPath };
   });
 
   ipcMain.handle('shell:showItemInFolder', async (_, path: string) => {

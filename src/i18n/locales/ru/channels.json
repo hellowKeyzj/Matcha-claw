@@ -45,7 +45,8 @@
     "channelSaved": "Канал {{name}} сохранён",
     "channelConnecting": "Подключение к {{name}}...",
     "configFailed": "Ошибка конфигурации: {{error}}",
-    "qrGenerateTimeout": "QR code generation timed out, please retry"
+    "qrGenerateTimeout": "QR code generation timed out, please retry",
+    "openDocsFailed": "Не удалось открыть документацию: {{error}}"
   },
   "dialog": {
     "updateTitle": "Обновить {{name}}",
@@ -83,7 +84,6 @@
   "meta": {
     "telegram": {
       "description": "Подключите Telegram через токен бота от @BotFather",
-      "docsUrl": "https://icnnp7d0dymg.feishu.cn/wiki/TjiGwxsMWi7hpDkDAQBc0ydMnEf#MEkKdqXP1orZU2x4SrFcdUHgnl1",
       "fields": {
         "botToken": {
           "label": "Токен бота",
@@ -105,7 +105,6 @@
     },
     "discord": {
       "description": "Подключите Discord через токен бота из Developer Portal",
-      "docsUrl": "https://icnnp7d0dymg.feishu.cn/wiki/BkOywJYCAiYRN9k4KTTceKPMnxg#QS6LdxnA2oNtfcxtFc8cgabnnNd",
       "fields": {
         "token": {
           "label": "Токен бота",
@@ -133,7 +132,6 @@
     },
     "whatsapp": {
       "description": "Подключите WhatsApp сканированием QR-кода (номер телефона не требуется)",
-      "docsUrl": "https://icnnp7d0dymg.feishu.cn/wiki/ES7fwUfH8iGl8FkHYfFcyWB3n4d#doxcnUElomBZLi0NnKLUzn6zLbd",
       "instructions": [
         "Откройте WhatsApp на телефоне",
         "Перейдите в Настройки > Связанные устройства > Подключить устройство",
@@ -143,7 +141,6 @@
     },
     "dingtalk": {
       "description": "Подключите DingTalk через плагин канала OpenClaw (режим Stream)",
-      "docsUrl": "https://icnnp7d0dymg.feishu.cn/wiki/Y5eNwiSiZidkLskrwtJc1rUln0b#doxcnDgA78n43DbkiQjI1OqUA7b",
       "fields": {
         "clientId": {
           "label": "Client ID (AppKey)",
@@ -175,7 +172,6 @@
     },
     "openclaw-weixin": {
       "description": "Connect WeChat via Tencent openclaw-weixin plugin (QR login)",
-      "docsUrl": "https://www.npmjs.com/package/@tencent-weixin/openclaw-weixin",
       "fields": {
         "baseUrl": {
           "label": "Base URL (optional)",
@@ -204,7 +200,6 @@
     },
     "signal": {
       "description": "Подключите Signal через signal-cli",
-      "docsUrl": "https://docs.openclaw.ai/channels/signal",
       "fields": {
         "phoneNumber": {
           "label": "Номер телефона",
@@ -219,7 +214,6 @@
     },
     "feishu": {
       "description": "Подключите бота Feishu/Lark через WebSocket",
-      "docsUrl": "https://icnnp7d0dymg.feishu.cn/wiki/GKn8wOvHnibpPNkNkPzcAvGlnzK#GdHUdp9t9oqyegxwV8ScLvVGn1c",
       "fields": {
         "appId": {
           "label": "App ID",
@@ -239,7 +233,6 @@
     },
     "wecom": {
       "description": "Подключите бота WeCom через плагин",
-      "docsUrl": "https://icnnp7d0dymg.feishu.cn/wiki/JTGnwoV0RixKPtkr4w7c7gpAnDc",
       "fields": {
         "botId": {
           "label": "Bot ID",
@@ -258,7 +251,6 @@
     },
     "imessage": {
       "description": "Подключите iMessage через BlueBubbles (macOS)",
-      "docsUrl": "https://docs.openclaw.ai/channels/bluebubbles",
       "fields": {
         "serverUrl": {
           "label": "URL сервера BlueBubbles",
@@ -277,7 +269,6 @@
     },
     "matrix": {
       "description": "Подключитесь к протоколу Matrix",
-      "docsUrl": "https://docs.openclaw.ai/channels/matrix",
       "fields": {
         "homeserver": {
           "label": "URL Homeserver",
@@ -296,7 +287,6 @@
     },
     "line": {
       "description": "Подключите LINE Messaging API",
-      "docsUrl": "https://docs.openclaw.ai/channels/line",
       "fields": {
         "channelAccessToken": {
           "label": "Channel Access Token",
@@ -315,7 +305,6 @@
     },
     "msteams": {
       "description": "Подключите Microsoft Teams через Bot Framework",
-      "docsUrl": "https://docs.openclaw.ai/channels/msteams",
       "fields": {
         "appId": {
           "label": "App ID",
@@ -335,7 +324,6 @@
     },
     "googlechat": {
       "description": "Подключите Google Chat через webhook",
-      "docsUrl": "https://docs.openclaw.ai/channels/googlechat",
       "fields": {
         "serviceAccountKey": {
           "label": "Путь к JSON файлу сервисного аккаунта",
@@ -351,7 +339,6 @@
     },
     "mattermost": {
       "description": "Подключите Mattermost через Bot API",
-      "docsUrl": "https://docs.openclaw.ai/channels/mattermost",
       "fields": {
         "serverUrl": {
           "label": "URL сервера",
@@ -370,7 +357,6 @@
     },
     "qqbot": {
       "description": "Подключите канал QQ Bot (встроенный с OpenClaw 3.31)",
-      "docsUrl": "https://icnnp7d0dymg.feishu.cn/wiki/KPIJwlyiGiupMrkiS9ice39Zn2c",
       "fields": {
         "appId": {
           "label": "App ID",

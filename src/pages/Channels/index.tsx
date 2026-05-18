@@ -13,7 +13,6 @@ import {
   QrCode,
   Loader2,
   X,
-  ExternalLink,
   BookOpen,
   Eye,
   EyeOff,
@@ -47,6 +46,7 @@ import {
 import { subscribeHostEvent } from '@/lib/host-events';
 import { isGatewayOperational, isGatewayPreparing } from '@/lib/gateway-status';
 import { useDelayedFlag } from '@/lib/use-delayed-flag';
+import { invokeIpc } from '@/lib/api-client';
 import { cn } from '@/lib/utils';
 import {
   CHANNEL_ICONS,
@@ -961,20 +961,11 @@ function AddChannelDialog({ selectedType, onSelectType, onClose, onChannelAdded 
   };
 
   const openDocs = () => {
-    if (meta?.docsUrl) {
-      const url = t(meta.docsUrl);
-      try {
-        if (window.electron?.openExternal) {
-          window.electron.openExternal(url);
-        } else {
-          // Fallback: open in new window
-          window.open(url, '_blank');
-        }
-      } catch (error) {
+    if (meta?.docsPath) {
+      void invokeIpc('shell:openResourcePath', meta.docsPath).catch((error) => {
         console.error('Failed to open docs:', error);
-        // Fallback: open in new window
-        window.open(url, '_blank');
-      }
+        toast.error(t('toast.openDocsFailed', { error }));
+      });
     }
   };
 
@@ -1110,10 +1101,10 @@ function AddChannelDialog({ selectedType, onSelectType, onClose, onChannelAdded 
                     variant="link"
                     className="p-0 h-auto text-sm"
                     onClick={openDocs}
+                    disabled={!meta?.docsPath}
                   >
                     <BookOpen className="h-3 w-3 mr-1" />
                     {t('dialog.viewDocs')}
-                    <ExternalLink className="h-3 w-3 ml-1" />
                   </Button>
                 </div>
                 <ol className="list-decimal list-inside text-sm text-muted-foreground space-y-1">

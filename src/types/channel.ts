@@ -71,7 +71,7 @@ export interface ChannelMeta {
   icon: string;
   description: string;
   connectionType: ChannelConnectionType;
-  docsUrl: string;
+  docsPath?: string;
   configFields: ChannelConfigField[];
   instructions: string[];
   isPlugin?: boolean;
@@ -129,7 +129,7 @@ export const CHANNEL_META: Record<ChannelType, ChannelMeta> = {
     icon: '🧧',
     description: 'channels:meta.openclaw-weixin.description',
     connectionType: 'qr',
-    docsUrl: 'channels:meta.openclaw-weixin.docsUrl',
+    docsPath: 'connector-guide/wechat.md',
     configFields: [
       {
         key: 'baseUrl',
@@ -175,7 +175,7 @@ export const CHANNEL_META: Record<ChannelType, ChannelMeta> = {
     icon: '🐧',
     description: 'channels:meta.qqbot.description',
     connectionType: 'token',
-    docsUrl: 'channels:meta.qqbot.docsUrl',
+    docsPath: 'connector-guide/qqbot.md',
     configFields: [
       {
         key: 'appId',
@@ -205,7 +205,7 @@ export const CHANNEL_META: Record<ChannelType, ChannelMeta> = {
     icon: '💬',
     description: 'channels:meta.dingtalk.description',
     connectionType: 'token',
-    docsUrl: 'channels:meta.dingtalk.docsUrl',
+    docsPath: 'connector-guide/dingtalk.md',
     configFields: [
       {
         key: 'clientId',
@@ -257,7 +257,7 @@ export const CHANNEL_META: Record<ChannelType, ChannelMeta> = {
     icon: '💼',
     description: 'channels:meta.wecom.description',
     connectionType: 'token',
-    docsUrl: 'channels:meta.wecom.docsUrl',
+    docsPath: 'connector-guide/wecom.md',
     configFields: [
       {
         key: 'botId',
@@ -287,7 +287,7 @@ export const CHANNEL_META: Record<ChannelType, ChannelMeta> = {
     icon: '✈️',
     description: 'channels:meta.telegram.description',
     connectionType: 'token',
-    docsUrl: 'channels:meta.telegram.docsUrl',
+    docsPath: 'connector-guide/telegram.md',
     configFields: [
       {
         key: 'botToken',
@@ -320,7 +320,7 @@ export const CHANNEL_META: Record<ChannelType, ChannelMeta> = {
     icon: '🎮',
     description: 'channels:meta.discord.description',
     connectionType: 'token',
-    docsUrl: 'channels:meta.discord.docsUrl',
+    docsPath: 'connector-guide/discord.md',
     configFields: [
       {
         key: 'token',
@@ -363,7 +363,7 @@ export const CHANNEL_META: Record<ChannelType, ChannelMeta> = {
     icon: '📱',
     description: 'channels:meta.whatsapp.description',
     connectionType: 'qr',
-    docsUrl: 'channels:meta.whatsapp.docsUrl',
+    docsPath: 'connector-guide/whatsapp.md',
     configFields: [],
     instructions: [
       'channels:meta.whatsapp.instructions.0',
@@ -378,7 +378,6 @@ export const CHANNEL_META: Record<ChannelType, ChannelMeta> = {
     icon: '🔒',
     description: 'channels:meta.signal.description',
     connectionType: 'token',
-    docsUrl: 'channels:meta.signal.docsUrl',
     configFields: [
       {
         key: 'phoneNumber',
@@ -400,7 +399,7 @@ export const CHANNEL_META: Record<ChannelType, ChannelMeta> = {
     icon: '🐦',
     description: 'channels:meta.feishu.description',
     connectionType: 'token',
-    docsUrl: 'channels:meta.feishu.docsUrl',
+    docsPath: 'connector-guide/feishu.md',
     configFields: [
       {
         key: 'appId',
@@ -434,7 +433,6 @@ export const CHANNEL_META: Record<ChannelType, ChannelMeta> = {
     icon: '💬',
     description: 'channels:meta.imessage.description',
     connectionType: 'token',
-    docsUrl: 'channels:meta.imessage.docsUrl',
     configFields: [
       {
         key: 'serverUrl',
@@ -463,7 +461,6 @@ export const CHANNEL_META: Record<ChannelType, ChannelMeta> = {
     icon: '🔗',
     description: 'channels:meta.matrix.description',
     connectionType: 'token',
-    docsUrl: 'channels:meta.matrix.docsUrl',
     configFields: [
       {
         key: 'homeserver',
@@ -493,7 +490,6 @@ export const CHANNEL_META: Record<ChannelType, ChannelMeta> = {
     icon: '🟢',
     description: 'channels:meta.line.description',
     connectionType: 'token',
-    docsUrl: 'channels:meta.line.docsUrl',
     configFields: [
       {
         key: 'channelAccessToken',
@@ -525,7 +521,6 @@ export const CHANNEL_META: Record<ChannelType, ChannelMeta> = {
     icon: '👔',
     description: 'channels:meta.msteams.description',
     connectionType: 'token',
-    docsUrl: 'channels:meta.msteams.docsUrl',
     configFields: [
       {
         key: 'appId',
@@ -558,7 +553,6 @@ export const CHANNEL_META: Record<ChannelType, ChannelMeta> = {
     icon: '💭',
     description: 'channels:meta.googlechat.description',
     connectionType: 'webhook',
-    docsUrl: 'channels:meta.googlechat.docsUrl',
     configFields: [
       {
         key: 'serviceAccountKey',
@@ -581,7 +575,6 @@ export const CHANNEL_META: Record<ChannelType, ChannelMeta> = {
     icon: '💠',
     description: 'channels:meta.mattermost.description',
     connectionType: 'token',
-    docsUrl: 'channels:meta.mattermost.docsUrl',
     configFields: [
       {
         key: 'serverUrl',

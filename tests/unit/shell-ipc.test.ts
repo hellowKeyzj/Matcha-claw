@@ -1,11 +1,14 @@
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const registeredHandlers = new Map<string, (...args: unknown[]) => unknown>();
 const openPathMock = vi.fn(async () => '');
 
 vi.mock('electron', () => ({
+  app: {
+    isPackaged: false,
+  },
   ipcMain: {
     handle: (channel: string, handler: (...args: unknown[]) => unknown) => {
       registeredHandlers.set(channel, handler);
@@ -36,5 +39,36 @@ describe('shell ipc', () => {
     await openPathHandler?.({}, '~/.openclaw/skills');
 
     expect(openPathMock).toHaveBeenCalledWith(join(homedir(), '.openclaw/skills'));
+  });
+
+  it('opens resource-relative paths from the bundled resources directory', async () => {
+    const { registerShellHandlers } = await import('../../electron/main/ipc/shell-ipc');
+    registerShellHandlers();
+
+    const openResourcePathHandler = registeredHandlers.get('shell:openResourcePath');
+    expect(openResourcePathHandler).toBeTypeOf('function');
+
+    const result = await openResourcePathHandler?.({}, 'connector-guide/wechat.md');
+
+    expect(openPathMock).toHaveBeenCalledWith(resolve(process.cwd(), 'resources', 'connector-guide', 'wechat.md'));
+    expect(result).toEqual({
+      success: true,
+      resolvedPath: resolve(process.cwd(), 'resources', 'connector-guide', 'wechat.md'),
+    });
+  });
+
+  it('rejects resource paths that escape the resources directory', async () => {
+    const { registerShellHandlers } = await import('../../electron/main/ipc/shell-ipc');
+    registerShellHandlers();
+
+    const openResourcePathHandler = registeredHandlers.get('shell:openResourcePath');
+    const result = await openResourcePathHandler?.({}, '../package.json');
+
+    expect(openPathMock).not.toHaveBeenCalled();
+    expect(result).toEqual({
+      success: false,
+      error: 'resource_path_outside_resources',
+      rawPath: '../package.json',
+    });
   });
 });

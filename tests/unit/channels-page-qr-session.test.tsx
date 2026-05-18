@@ -16,6 +16,7 @@ const hostChannelsDisconnectMock = vi.fn();
 const hostChannelsRequestQrCodeMock = vi.fn();
 const hostChannelsListPairingRequestsMock = vi.fn();
 const hostChannelsApprovePairingRequestMock = vi.fn();
+const invokeIpcMock = vi.fn();
 const subscribedHostEvents = new Map<string, Set<(payload: unknown) => void>>();
 
 vi.mock('@/lib/channel-runtime', () => ({
@@ -49,6 +50,10 @@ vi.mock('@/lib/host-events', () => ({
       }
     };
   },
+}));
+
+vi.mock('@/lib/api-client', () => ({
+  invokeIpc: (...args: unknown[]) => invokeIpcMock(...args),
 }));
 
 vi.mock('@/stores/gateway', () => ({
@@ -137,6 +142,21 @@ describe('Channels page QR session lifecycle', () => {
     hostChannelsApprovePairingRequestMock.mockResolvedValue({
       success: true,
       approved: { id: 'ou_user_1' },
+    });
+    invokeIpcMock.mockResolvedValue({ success: true });
+  });
+
+  it('查看文档打开渠道对应的本地 Markdown 文档', async () => {
+    render(<Channels />);
+
+    const weComLabel = await screen.findByText('WeCom');
+    const weComButton = weComLabel.closest('button');
+    expect(weComButton).toBeInstanceOf(HTMLButtonElement);
+    fireEvent.click(weComButton as HTMLButtonElement);
+    fireEvent.click(await screen.findByRole('button', { name: 'View Documentation' }));
+
+    await waitFor(() => {
+      expect(invokeIpcMock).toHaveBeenCalledWith('shell:openResourcePath', 'connector-guide/wecom.md');
     });
   });
 
