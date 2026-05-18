@@ -1,6 +1,6 @@
 /**
  * TitleBar Component
- * macOS: empty drag region (native traffic lights handled by hiddenInset).
+ * macOS: drag region with native traffic lights handled by hiddenInset.
  * Windows: custom title bar with window controls.
  * Linux: use native title bar for better IME compatibility.
  */
@@ -15,7 +15,7 @@ import { preloadLazyRouteForPath } from '@/lib/route-preload';
 export function TitleBar() {
   const platform = window.electron?.platform;
   if (platform === 'darwin') {
-    return <div className="drag-region h-12 shrink-0 border-b border-border/70 bg-card" />;
+    return <MacTitleBar />;
   }
 
   if (platform !== 'win32') {
@@ -25,10 +25,44 @@ export function TitleBar() {
   return <WindowsTitleBar />;
 }
 
-function WindowsTitleBar() {
-  const [maximized, setMaximized] = useState(false);
+function SettingsButton() {
   const navigate = useNavigate();
   const { t } = useTranslation();
+
+  const handleOpenSettings = () => {
+    navigate('/settings');
+  };
+
+  const handleSettingsHover = () => {
+    void preloadLazyRouteForPath('/settings');
+  };
+
+  return (
+    <button
+      type="button"
+      onClick={handleOpenSettings}
+      onMouseEnter={handleSettingsHover}
+      onFocus={handleSettingsHover}
+      className="flex h-full w-11 items-center justify-center rounded-[var(--radius-pill)] text-muted-foreground transition-colors hover:bg-secondary/80 hover:text-foreground"
+      title={t('sidebar.settings')}
+    >
+      <Settings className="h-4 w-4" />
+    </button>
+  );
+}
+
+function MacTitleBar() {
+  return (
+    <div className="drag-region flex h-12 shrink-0 items-center justify-end border-b border-border/70 bg-card px-3">
+      <div className="no-drag flex h-full">
+        <SettingsButton />
+      </div>
+    </div>
+  );
+}
+
+function WindowsTitleBar() {
+  const [maximized, setMaximized] = useState(false);
 
   useEffect(() => {
     // Check initial state
@@ -53,14 +87,6 @@ function WindowsTitleBar() {
     invokeIpc('window:close');
   };
 
-  const handleOpenSettings = () => {
-    navigate('/settings');
-  };
-
-  const handleSettingsHover = () => {
-    void preloadLazyRouteForPath('/settings');
-  };
-
   return (
     <div className="drag-region flex h-12 shrink-0 items-center justify-between border-b border-border/70 bg-card px-3">
       <div className="no-drag flex items-center gap-2">
@@ -71,15 +97,7 @@ function WindowsTitleBar() {
       </div>
 
       <div className="no-drag flex h-full">
-        <button
-          onClick={handleOpenSettings}
-          onMouseEnter={handleSettingsHover}
-          onFocus={handleSettingsHover}
-          className="flex h-full w-11 items-center justify-center rounded-[var(--radius-pill)] text-muted-foreground transition-colors hover:bg-secondary/80 hover:text-foreground"
-          title={t('sidebar.settings')}
-        >
-          <Settings className="h-4 w-4" />
-        </button>
+        <SettingsButton />
         <button
           onClick={handleMinimize}
           className="flex h-full w-11 items-center justify-center rounded-[var(--radius-pill)] text-muted-foreground transition-colors hover:bg-secondary/80 hover:text-foreground"
