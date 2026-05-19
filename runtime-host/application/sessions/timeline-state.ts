@@ -73,6 +73,15 @@ function findAssistantTurnIndexByToolCallId(
   return -1;
 }
 
+function findLatestAssistantToolByCallId(
+  entries: SessionTimelineEntry[],
+  toolCallId: string,
+): SessionTimelineAssistantTurnEntry | null {
+  const index = findAssistantTurnIndexByToolCallId(entries, toolCallId);
+  const entry = index >= 0 ? entries[index] : null;
+  return entry?.kind === 'assistant-turn' ? entry : null;
+}
+
 function findLatestAssistantTurnIndexForRun(
   entries: SessionTimelineEntry[],
   runId: string,
@@ -116,7 +125,7 @@ function buildIdentityForOrphanToolEvent(
   return {
     sessionKey,
     laneKey,
-    turnKey: `${laneKey}:${runId}`,
+    turnKey: runId,
     entryId: `run:${runId}:assistant:0`,
     runId,
     turnBindingSource: 'run',
@@ -141,7 +150,7 @@ export function applyToolStatusUpdate(
   entries: SessionTimelineEntry[],
   update: SessionToolStatusUpdateIngressEvent,
 ): SessionTimelineEntry[] {
-  if (!update.toolCallId || !update.toolName) {
+  if (!update.toolCallId) {
     return entries;
   }
   let index = findAssistantTurnIndexByToolCallId(entries, update.toolCallId);
@@ -155,6 +164,15 @@ export function applyToolStatusUpdate(
       target = candidate;
     }
   }
+  const previousToolTurn = target ?? findLatestAssistantToolByCallId(entries, update.toolCallId);
+  const previousTool = previousToolTurn?.segments.find((segment) => (
+    segment.kind === 'tool'
+    && (segment.tool.toolCallId === update.toolCallId || segment.tool.id === update.toolCallId)
+  ));
+  const toolName = update.toolName || (previousTool?.kind === 'tool' ? previousTool.tool.name : '');
+  if (!toolName) {
+    return entries;
+  }
   const identity = target
     ? buildIdentityFromTurnEntry(target)
     : buildIdentityForOrphanToolEvent(update);
@@ -164,10 +182,11 @@ export function applyToolStatusUpdate(
   const previousSegments = target?.segments ?? [];
   const nextSegments = applyToolStatusToSegments(previousSegments, identity, {
     toolCallId: update.toolCallId,
-    name: update.toolName,
+    name: toolName,
     status: update.status,
     ...(update.input !== undefined ? { input: update.input } : {}),
     ...(update.output !== undefined ? { output: update.output } : {}),
+    ...(update.outputText !== undefined ? { outputText: update.outputText } : {}),
     ...(update.timestamp != null ? { updatedAt: update.timestamp } : {}),
   });
   if (nextSegments === previousSegments) {

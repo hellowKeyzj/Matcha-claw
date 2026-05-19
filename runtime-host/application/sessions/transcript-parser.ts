@@ -66,7 +66,10 @@ export function parseTranscriptMessages(content: string): SessionTranscriptMessa
       name: normalizeOptionalString(normalized.name),
       details: normalized.details,
       toolStatuses: Array.isArray(normalized.toolStatuses) ? normalized.toolStatuses as Array<Record<string, unknown>> : undefined,
-      taskCompletionEvents: normalizeTaskCompletionEvents(normalized.taskCompletionEvents),
+      taskCompletionEvents: normalizeTaskCompletionEvents(parsed.message.taskCompletionEvents ?? normalized.taskCompletionEvents),
+      _attachedFiles: Array.isArray(parsed.message._attachedFiles)
+        ? parsed.message._attachedFiles as Array<Record<string, unknown>>
+        : undefined,
       isError: normalizeOptionalBoolean(normalized.isError ?? normalized.is_error),
     });
   }

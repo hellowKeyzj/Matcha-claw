@@ -85,6 +85,7 @@ export interface SessionToolStatusUpdateIngressEvent {
   input?: unknown;
   partialResult?: unknown;
   output?: unknown;
+  outputText?: string;
   _meta?: Record<string, unknown>;
 }
 

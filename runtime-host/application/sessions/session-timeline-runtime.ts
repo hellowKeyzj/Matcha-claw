@@ -253,6 +253,9 @@ export class SessionTimelineRuntime {
         ...state.runtime,
         ...this.readRuntimePatch(transition.runtimePatch),
       };
+      if (!transition.timelineEntries || transition.timelineEntries.length === 0) {
+        this.deps.executionGraphRuntime.refreshRenderItems(state);
+      }
     }
     if (transition.runtimePatch || !transition.timelineEntries || transition.timelineEntries.length === 0) {
       this.deps.executionGraphRuntime.refreshExistingGraphs(state);
@@ -359,6 +362,7 @@ export class SessionTimelineRuntime {
     const state = this.getSessionState(sessionKey);
     state.timelineEntries = closeMissingToolResultsForRun(state.timelineEntries, runId);
     this.deps.executionGraphRuntime.rebuildFromTimeline(sessionKey, state);
+    this.deps.executionGraphRuntime.refreshRenderItems(state);
   }
 
   clearSessionRuntimeErrorState(sessionKey: string): SessionRuntimeStateSnapshot {
@@ -387,7 +391,7 @@ export class SessionTimelineRuntime {
           runtimePatch: {
             activeRunId: input.runId,
             runPhase: 'submitted',
-            pendingTurnKey: input.runId ? `main:${input.runId}` : this.getSessionState(sessionKey).runtime.pendingTurnKey,
+            pendingTurnKey: input.runId ? input.runId : this.getSessionState(sessionKey).runtime.pendingTurnKey,
             pendingTurnLaneKey: 'main',
             lastError: null,
             lastIssue: null,
@@ -461,7 +465,7 @@ export class SessionTimelineRuntime {
         runtimePatch: {
           activeRunId: input.runId,
           runPhase: input.runId ? 'submitted' : currentState.runtime.runPhase,
-          pendingTurnKey: input.runId ? `main:${input.runId}` : currentState.runtime.pendingTurnKey,
+          pendingTurnKey: input.runId ? input.runId : currentState.runtime.pendingTurnKey,
           pendingTurnLaneKey: input.runId ? 'main' : currentState.runtime.pendingTurnLaneKey,
           lastError: null,
           lastIssue: null,

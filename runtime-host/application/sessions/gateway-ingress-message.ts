@@ -17,6 +17,7 @@ import type { SessionTranscriptMessage } from './transcript-types';
 import { normalizeTaskCompletionEvents } from './task-completion-events';
 import {
   normalizeTaskArtifactSnapshot,
+  normalizeTaskToolSnapshot,
 } from './task-snapshot-normalizer';
 import {
   isStateOnlyToolName,
@@ -110,6 +111,7 @@ function normalizeConversationMessagePayload(
     ...(normalizeString(rawMessage.toolName ?? rawMessage.name) ? { toolName: normalizeString(rawMessage.toolName ?? rawMessage.name) } : {}),
     ...(Array.isArray(rawMessage.tool_calls) ? { tool_calls: rawMessage.tool_calls.map((item: unknown) => ({ ...(isRecord(item) ? item : {}) })) } : {}),
     ...(Array.isArray(rawMessage.toolCalls) ? { toolCalls: rawMessage.toolCalls.map((item: unknown) => ({ ...(isRecord(item) ? item : {}) })) } : {}),
+    ...(Array.isArray(rawMessage.toolStatuses) ? { toolStatuses: rawMessage.toolStatuses.map((item: unknown) => ({ ...(isRecord(item) ? item : {}) })) } : {}),
     ...(taskCompletionEvents ? { taskCompletionEvents } : {}),
     ...(Object.prototype.hasOwnProperty.call(rawMessage, 'details') ? { details: rawMessage.details } : {}),
     ...(Array.isArray(rawMessage._attachedFiles) ? { _attachedFiles: rawMessage._attachedFiles.map((item: unknown) => ({ ...(isRecord(item) ? item : {}) })) } : {}),
@@ -147,6 +149,36 @@ function stripStateOnlyToolContent(message: SessionTranscriptMessage): SessionTr
         ))
       : message.toolCalls,
   };
+}
+
+function extractStateOnlyToolStatusSnapshot(
+  sessionKey: string,
+  message: SessionTranscriptMessage,
+) {
+  if (!Array.isArray(message.toolStatuses)) {
+    return null;
+  }
+  for (const toolStatus of message.toolStatuses) {
+    if (!isRecord(toolStatus)) {
+      continue;
+    }
+    const toolName = resolveToolRecordName(toolStatus);
+    if (!isStateOnlyToolName(toolName)) {
+      continue;
+    }
+    const payload = Object.prototype.hasOwnProperty.call(toolStatus, 'result')
+      ? toolStatus.result
+      : (Object.prototype.hasOwnProperty.call(toolStatus, 'output')
+          ? toolStatus.output
+          : (Object.prototype.hasOwnProperty.call(toolStatus, 'content')
+              ? toolStatus.content
+              : (Object.prototype.hasOwnProperty.call(toolStatus, 'details') ? toolStatus.details : toolStatus)));
+    const snapshot = normalizeTaskToolSnapshot(toolName, payload, sessionKey);
+    if (snapshot) {
+      return snapshot;
+    }
+  }
+  return null;
 }
 
 function stripMalformedEmptyToolContent(message: SessionTranscriptMessage): SessionTranscriptMessage {
@@ -229,7 +261,7 @@ export function buildMessageIngressEvents(
   const taskSnapshot = extractTaskSnapshotFromTranscriptMessage(
     conversation.sessionKey ?? '',
     conversation.message,
-  );
+  ) ?? extractStateOnlyToolStatusSnapshot(conversation.sessionKey ?? '', conversation.message);
   const sanitizedMessage = stripMalformedEmptyToolContent(conversation.message);
   if (
     isMalformedEmptyToolNameResult(conversation.message)

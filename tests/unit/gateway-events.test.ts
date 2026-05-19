@@ -38,6 +38,7 @@ function createSessionRecord(input?: {
   messages?: RawMessage[];
   runtime?: Partial<{
     activeRunId: string | null;
+    runPhase: 'idle' | 'submitted' | 'streaming' | 'waiting_tool' | 'done' | 'error' | 'aborted';
   }>;
 }) {
   const messages = input?.messages ?? [];
@@ -51,7 +52,7 @@ function createSessionRecord(input?: {
     },
     runtime: {
       activeRunId: input?.runtime?.activeRunId ?? null,
-      runPhase: 'idle' as const,
+      runPhase: input?.runtime?.runPhase ?? 'idle' as const,
       activeTurnItemKey: null,
       pendingTurnKey: null,
       pendingTurnLaneKey: null,
@@ -101,7 +102,7 @@ function createSessionInfoUpdate(payload: {
           )
         ),
         activeTurnItemKey: null,
-        pendingTurnKey: payload.phase === 'started' && payload.runId ? `main:${payload.runId}` : null,
+        pendingTurnKey: payload.phase === 'started' && payload.runId ? payload.runId : null,
         pendingTurnLaneKey: payload.phase === 'started' ? 'main' : null,
         lastUserMessageAt: null,
         lastError: payload.error ?? null,
@@ -136,7 +137,7 @@ function createSessionMessageUpdate(payload: {
         : `${payload.kind}-entry`
     ),
   );
-  const turnIdentity = String(
+    const turnIdentity = String(
     payload.message.id
     ?? payload.message.messageId
     ?? payload.runId
@@ -154,7 +155,7 @@ function createSessionMessageUpdate(payload: {
           : [])
     : [];
   const isAssistant = payload.message.role === 'assistant';
-  const assistantItemKey = `session:${payload.sessionKey ?? ''}|assistant-turn:main:${turnIdentity}:main`;
+  const assistantItemKey = `session:${payload.sessionKey ?? ''}|assistant-turn:main:${turnIdentity}`;
   const item: SessionRenderItem = isAssistant
     ? {
         key: assistantItemKey,
@@ -162,7 +163,7 @@ function createSessionMessageUpdate(payload: {
         sessionKey: payload.sessionKey ?? '',
         role: 'assistant',
         laneKey: 'main',
-        turnKey: `main:${turnIdentity}`,
+        turnKey: turnIdentity,
         identitySource: 'run',
         identityMode: 'run',
         identityConfidence: 'strong',
@@ -244,7 +245,7 @@ function createSessionMessageUpdate(payload: {
         activeRunId: payload.runId ?? null,
         runPhase: payload.kind === 'agent_message_chunk' ? 'streaming' : 'done',
         activeTurnItemKey: payload.kind === 'agent_message_chunk' ? assistantItemKey : null,
-        pendingTurnKey: isAssistant ? `main:${turnIdentity}` : null,
+        pendingTurnKey: isAssistant ? turnIdentity : null,
         pendingTurnLaneKey: isAssistant ? 'main' : null,
         lastUserMessageAt: null,
         updatedAt: 1,
@@ -650,6 +651,50 @@ describe('gateway store event wiring', () => {
     expect(state.loadedSessions['agent:main:main']?.runtime.lastError).toBeNull();
   });
 
+  it('session_info_update applies the authoritative terminal snapshot even when the local activeRunId is stale', async () => {
+    hostApiFetchMock.mockResolvedValueOnce(createRunningGatewayStatus());
+    const handlers = new Map<string, (payload: unknown) => void>();
+    subscribeHostEventMock.mockImplementation((eventName: string, handler: (payload: unknown) => void) => {
+      handlers.set(eventName, handler);
+      return () => {};
+    });
+
+    const { useChatStore } = await import('@/stores/chat');
+    useChatStore.setState({
+      currentSessionKey: 'agent:main:main',
+      sessionCatalogStatus: {
+        status: 'ready',
+        error: null,
+        hasLoadedOnce: true,
+        lastLoadedAt: 1,
+      },
+      loadedSessions: {
+        'agent:main:main': createSessionRecord({
+          runtime: {
+            activeRunId: 'run-local-stale',
+            runPhase: 'streaming',
+          },
+        }),
+      },
+      loadHistory: vi.fn().mockResolvedValue(undefined),
+    } as never);
+
+    const { useGatewayStore } = await import('@/stores/gateway');
+    await useGatewayStore.getState().init();
+
+    handlers.get('session:update')?.(createSessionInfoUpdate({
+      phase: 'final',
+      runId: 'run-runtime-authoritative',
+      sessionKey: 'agent:main:main',
+    }));
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const runtime = useChatStore.getState().loadedSessions['agent:main:main']?.runtime;
+    expect(runtime?.activeRunId).toBeNull();
+    expect(runtime?.runPhase).toBe('done');
+  });
+
   it('run.phase error 事件应写入当前 session runtime.lastError', async () => {
     hostApiFetchMock.mockResolvedValueOnce(createRunningGatewayStatus());
     const handlers = new Map<string, (payload: unknown) => void>();
@@ -740,7 +785,7 @@ describe('gateway store event wiring', () => {
       text: 'hello timeline',
       status: 'streaming',
       laneKey: 'main',
-      turnKey: 'main:run-delta-direct-1',
+      turnKey: 'run-delta-direct-1',
     }]);
   });
 
@@ -844,7 +889,7 @@ describe('gateway store event wiring', () => {
     const [item] = getSessionItems(state, 'agent:main:main');
     expect(item).toMatchObject({
       kind: 'assistant-turn',
-      turnKey: 'main:run:run-tool-direct-1:tool:tool-1',
+      turnKey: 'run:run-tool-direct-1:tool:tool-1',
       tools: [{
         toolCallId: 'tool-1',
         name: 'memory_store',

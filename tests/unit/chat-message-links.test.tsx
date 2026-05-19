@@ -186,6 +186,40 @@ describe('chat message links', () => {
     expect(invokeIpcMock).not.toHaveBeenCalledWith('shell:openPath', '/tmp/report.pdf');
   });
 
+  it('derived image artifact without an inline preview renders as an openable file card', async () => {
+    const onOpenAttachedArtifact = vi.fn();
+    hostFileStatMock.mockResolvedValueOnce({
+      ok: true,
+      entry: {
+        name: 'chart.png',
+        path: '/tmp/chart.png',
+        isDir: false,
+        size: 4096,
+        mtimeMs: 1,
+      },
+    });
+    const message: RawMessage = {
+      role: 'assistant',
+      content: '图片已生成： /tmp/chart.png',
+    };
+
+    render(
+      <ChatAssistantTurn
+        item={buildItem(message)}
+        showThinking={false}
+        onOpenAttachedArtifact={onOpenAttachedArtifact}
+      />,
+    );
+
+    const fileButton = await screen.findByRole('button', { name: /chart\.png/i });
+    expect(screen.queryByTestId('chat-missing-image-preview')).toBeNull();
+    fireEvent.click(fileButton);
+    expect(onOpenAttachedArtifact).toHaveBeenCalledWith(expect.objectContaining({
+      filePath: '/tmp/chart.png',
+      mimeType: 'image/png',
+    }));
+  });
+
   it('opens derived pdf artifact cards on pointer down to match real pointer interaction', async () => {
     const onOpenAttachedArtifact = vi.fn();
     hostFileStatMock.mockResolvedValueOnce({

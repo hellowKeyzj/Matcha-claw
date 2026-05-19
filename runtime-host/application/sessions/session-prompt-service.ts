@@ -170,7 +170,7 @@ export class SessionPromptService {
           activeRunId: runId,
           runPhase: 'submitted',
           activeTurnItemKey: null,
-          pendingTurnKey: `main:${runId}`,
+          pendingTurnKey: runId,
           pendingTurnLaneKey: 'main',
           lastUserMessageAt: promptEntry.createdAt ?? this.deps.clock.nowMs(),
           lastError: null,

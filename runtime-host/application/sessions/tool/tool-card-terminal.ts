@@ -41,9 +41,12 @@ export function closeMissingToolResultsForRun(
     if (entry.runId !== runId || !isAssistantTurnEntry(entry)) {
       return structuredClone(entry);
     }
+    const closedSegments = entry.segments.map(closeMissingToolSegmentResult);
+    const hasToolActivity = closedSegments.some((segment) => segment.kind === 'tool');
     return {
       ...structuredClone(entry),
-      segments: entry.segments.map(closeMissingToolSegmentResult),
+      ...(hasToolActivity ? { status: 'final' as const } : {}),
+      segments: closedSegments,
       isStreaming: false,
     };
   });

@@ -231,9 +231,6 @@ export function handleStoreSessionUpdateEvent(
 
   if (sessionUpdate.sessionUpdate === 'session_info_update') {
     useTaskSnapshotStore.getState().reportSessionUpdate(sessionUpdate);
-    if (eventRunId && targetRuntime.activeRunId && targetRuntime.activeRunId !== eventRunId) {
-      return;
-    }
     applySessionLifecycleEvent({
       set,
       get,

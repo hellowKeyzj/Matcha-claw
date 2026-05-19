@@ -131,9 +131,8 @@ function resolveTimelineTurnBinding(message: RawMessage): {
 }
 
 function resolveTimelineTurnKey(message: RawMessage, entryId: string): string {
-  const laneKey = resolveTimelineLaneKey(message);
   const binding = resolveTimelineTurnBinding(message);
-  return binding.key ? `${laneKey}:${binding.key}` : `${laneKey}:entry:${entryId}`;
+  return binding.key ? binding.key : `entry:${entryId}`;
 }
 
 function toTranscriptMessage(message: RawMessage): SessionTranscriptMessage {

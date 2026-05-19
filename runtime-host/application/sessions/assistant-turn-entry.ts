@@ -34,6 +34,9 @@ import {
 import {
   resolveToolCardRenderState,
 } from './tool/tool-card-render-state';
+import {
+  extractToolResultOutputText,
+} from './tool/tool-card-content';
 import type { ContentBlockLike } from './transcript-types';
 
 export interface AssistantTurnEntryIdentity {
@@ -88,6 +91,30 @@ function buildMessageSegment(key: string, text: string): SessionAssistantMessage
   return { kind: 'message', key, text: cleaned };
 }
 
+function normalizeIncomingMessageText(
+  incomingText: string,
+  previousText: string,
+  isStreaming: boolean,
+): string {
+  const incoming = sanitizeAssistantDisplayText([{ type: 'text', text: incomingText }]);
+  if (!incoming) {
+    return previousText;
+  }
+  if (!previousText) {
+    return incoming;
+  }
+  if (incoming === previousText || incoming.startsWith(previousText)) {
+    return incoming;
+  }
+  if (previousText.startsWith(incoming)) {
+    return previousText;
+  }
+  if (isStreaming) {
+    return `${previousText}${incoming}`;
+  }
+  return incoming.length >= previousText.length ? incoming : previousText;
+}
+
 function buildMediaSegment(input: {
   key: string;
   images: ReadonlyArray<SessionRenderImage>;
@@ -134,6 +161,7 @@ export function buildSegmentsFromChatContent(input: {
   content: unknown;
   fallbackText: string;
   attachedFiles: ReadonlyArray<SessionRenderAttachedFile>;
+  toolStatuses?: ReadonlyArray<Record<string, unknown>>;
   previousSegments: ReadonlyArray<SessionAssistantTurnSegment>;
   isStreaming: boolean;
 }): ReadonlyArray<SessionAssistantTurnSegment> {
@@ -173,7 +201,12 @@ export function buildSegmentsFromChatContent(input: {
     const lastSegment = segments[segments.length - 1];
     if (lastSegment?.kind === 'message') {
       // Tail is already a message → update in place (same text position)
-      (lastSegment as SessionAssistantMessageSegment).text = sanitizeAssistantDisplayText([{ type: 'text', text: incomingText }]);
+      const previousText = (lastSegment as SessionAssistantMessageSegment).text;
+      (lastSegment as SessionAssistantMessageSegment).text = normalizeIncomingMessageText(
+        incomingText,
+        previousText,
+        input.isStreaming,
+      );
     } else {
       // Tail is a tool or thinking or empty → append new message segment
       const slot = countSegmentsOfKind(segments, 'message');
@@ -183,6 +216,19 @@ export function buildSegmentsFromChatContent(input: {
       );
       if (segment) segments.push(segment);
     }
+  }
+
+  if (
+    input.attachedFiles.length > 0
+    && !segments.some((segment) => segment.kind === 'media')
+  ) {
+    const slot = countSegmentsOfKind(segments, 'media');
+    const segment = buildMediaSegment({
+      key: buildSegmentKey(input.identity, 'media', slot),
+      images: [],
+      attachedFiles: input.attachedFiles,
+    });
+    if (segment) segments.push(segment);
   }
 
   return segments;
@@ -204,6 +250,7 @@ function buildSegmentsFromTranscriptContent(input: {
   content: unknown;
   fallbackText: string;
   attachedFiles: ReadonlyArray<SessionRenderAttachedFile>;
+  toolStatuses?: ReadonlyArray<Record<string, unknown>>;
   previousSegments: ReadonlyArray<SessionAssistantTurnSegment>;
 }): ReadonlyArray<SessionAssistantTurnSegment> {
   const segments: SessionAssistantTurnSegment[] = input.previousSegments.map((s) => structuredClone(s));
@@ -258,22 +305,29 @@ function buildSegmentsFromTranscriptContent(input: {
       }
 
       if (isToolCallContentType(type) || isToolResultContentType(type)) {
-        const name = resolveToolRecordName(row);
-        if (!name || isStateOnlyToolName(name)) {
-          continue;
-        }
         const toolCallId = resolveToolRecordCallId(row);
-        const existingIndex = toolCallId
+        let existingIndex = toolCallId
           ? segments.findIndex((segment) => (
               segment.kind === 'tool'
               && (segment.tool.toolCallId === toolCallId || segment.tool.id === toolCallId)
             ))
           : -1;
-        const existingTool = existingIndex >= 0 && segments[existingIndex]!.kind === 'tool'
-          ? (segments[existingIndex] as SessionAssistantToolSegment).tool
-          : (toolCallId ? null : findToolSegmentByName(segments, name)?.tool ?? null);
         const isCall = isToolCallContentType(type);
         const isResult = isToolResultContentType(type);
+        const rawName = resolveToolRecordName(row);
+        let existingTool = existingIndex >= 0 && segments[existingIndex]!.kind === 'tool'
+          ? (segments[existingIndex] as SessionAssistantToolSegment).tool
+          : (toolCallId || !rawName ? null : findToolSegmentByName(segments, rawName)?.tool ?? null);
+        const name = rawName || existingTool?.name || '';
+        if (!name || isStateOnlyToolName(name)) {
+          continue;
+        }
+        if (existingIndex < 0 && isResult) {
+          existingIndex = findLatestUnresolvedToolSegmentIndexByName(segments, name);
+          existingTool = existingIndex >= 0 && segments[existingIndex]!.kind === 'tool'
+            ? (segments[existingIndex] as SessionAssistantToolSegment).tool
+            : existingTool;
+        }
         const callPayload = isCall ? resolveToolRecordCallPayload(row) : existingTool?.input ?? null;
         const resultPayload = isResult ? resolveToolRecordResultPayload(row) : existingTool?.output;
         const isError = isResult && (row as { isError?: unknown; is_error?: unknown }).isError === true;
@@ -284,6 +338,7 @@ function buildSegmentsFromTranscriptContent(input: {
           name,
           input: callPayload,
           output: resultPayload,
+          outputText: isResult ? extractToolResultOutputText(resultPayload) : undefined,
         });
         const toolSegmentKey = existingIndex >= 0
           ? segments[existingIndex]!.key
@@ -330,6 +385,42 @@ function buildSegmentsFromTranscriptContent(input: {
     if (segment) segments.push(segment);
   }
 
+  if (input.toolStatuses?.length) {
+    for (const status of input.toolStatuses) {
+      const toolCallId = resolveToolRecordCallId(status);
+      const name = resolveToolRecordName(status);
+      const index = toolCallId
+        ? segments.findIndex((segment) => (
+            segment.kind === 'tool'
+            && (segment.tool.toolCallId === toolCallId || segment.tool.id === toolCallId)
+          ))
+        : (name ? segments.findIndex((segment) => segment.kind === 'tool' && segment.tool.name === name) : -1);
+      if (index < 0 || segments[index]?.kind !== 'tool') {
+        continue;
+      }
+      const target = segments[index] as SessionAssistantToolSegment;
+      const output = resolveToolRecordResultPayload(status);
+      const renderState = resolveToolCardRenderState({
+        name: target.tool.name,
+        input: target.tool.input,
+        output: output ?? target.tool.output,
+        outputText: extractToolResultOutputText(output),
+      });
+      const statusValue = typeof status.status === 'string' && ['running', 'completed', 'error', 'missing_result'].includes(status.status)
+        ? status.status as SessionRenderToolStatusKind
+        : target.tool.status;
+      segments[index] = {
+        ...target,
+        tool: {
+          ...target.tool,
+          status: statusValue,
+          ...renderState,
+          ...(output !== undefined ? { output: structuredClone(output) } : (target.tool.output !== undefined ? { output: target.tool.output } : {})),
+        },
+      };
+    }
+  }
+
   return segments;
 }
 
@@ -348,6 +439,7 @@ export function applyToolStatusToSegments(
     name: string;
     input?: unknown;
     output?: unknown;
+    outputText?: string;
     status: SessionRenderToolStatusKind;
     summary?: string;
     durationMs?: number;
@@ -370,6 +462,7 @@ export function applyToolStatusToSegments(
       ? (next[index] as SessionAssistantToolSegment).tool.input
       : null),
     output: update.output,
+    outputText: update.outputText,
   });
 
   if (index < 0) {
@@ -506,4 +599,22 @@ function findToolSegmentByName(
     }
   }
   return null;
+}
+
+function findLatestUnresolvedToolSegmentIndexByName(
+  segments: ReadonlyArray<SessionAssistantTurnSegment>,
+  name: string,
+): number {
+  for (let index = segments.length - 1; index >= 0; index -= 1) {
+    const segment = segments[index];
+    if (
+      segment?.kind === 'tool'
+      && segment.tool.name === name
+      && segment.tool.status === 'running'
+      && segment.tool.result.kind === 'none'
+    ) {
+      return index;
+    }
+  }
+  return -1;
 }

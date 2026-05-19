@@ -50,6 +50,8 @@ export interface TranscriptMessageShape {
   details?: unknown;
   isError?: unknown;
   is_error?: unknown;
+  taskCompletionEvents?: unknown;
+  _attachedFiles?: unknown;
 }
 
 export interface TranscriptLineShape {

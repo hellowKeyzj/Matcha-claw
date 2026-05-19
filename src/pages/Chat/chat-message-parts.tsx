@@ -179,6 +179,9 @@ export function UserMessageMedia({
               return <FileCard key={`local-${index}`} file={file} />;
             }
             if (!file.preview) {
+              if (file.filePath) {
+                return <FileCard key={`local-${index}`} file={file} />;
+              }
               return <MissingImagePreview key={`local-${index}`} />;
             }
             return (
@@ -239,6 +242,9 @@ export function AssistantMessageMedia({
               return <FileCard key={`local-${index}`} file={file} onOpen={onOpenFile} />;
             }
             if (!file.preview) {
+              if (file.filePath) {
+                return <FileCard key={`local-${index}`} file={file} onOpen={onOpenFile} />;
+              }
               return <MissingImagePreview key={`local-${index}`} />;
             }
             return (
@@ -703,7 +709,10 @@ function FileCard({
 
 function MissingImagePreview() {
   return (
-    <div className="w-36 h-36 rounded-xl border overflow-hidden bg-muted flex items-center justify-center text-muted-foreground">
+    <div
+      data-testid="chat-missing-image-preview"
+      className="w-36 h-36 rounded-xl border overflow-hidden bg-muted flex items-center justify-center text-muted-foreground"
+    >
       <File className="h-8 w-8" />
     </div>
   );

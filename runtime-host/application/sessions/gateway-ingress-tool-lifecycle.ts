@@ -14,6 +14,12 @@ import {
   isStateOnlyToolCallSnapshotName,
   isStateOnlyToolName,
 } from './state-only-tools';
+import {
+  extractToolResultOutputText,
+} from './tool/tool-card-content';
+import {
+  isRecord,
+} from './tool/tool-card-utils';
 import type {
   GatewayConversationToolLifecyclePayload,
   GatewaySessionIngressEvent,
@@ -123,6 +129,7 @@ export function buildToolLifecycleIngressEvents(
     ...(lifecycle.args !== undefined ? { input: lifecycle.args } : {}),
     ...(lifecycle.partialResult !== undefined ? { partialResult: lifecycle.partialResult } : {}),
     ...(lifecycle.result !== undefined ? { output: lifecycle.result } : {}),
+    ...(lifecycle.result !== undefined && !isRecord(lifecycle.result) ? { outputText: extractToolResultOutputText(lifecycle.result) } : {}),
   }];
 
   const resultSnapshot = lifecycle.phase === 'result'

@@ -27,6 +27,9 @@ import {
 } from './state-only-tools';
 import { isMalformedEmptyToolNameResult } from './tool-event-sanitizer';
 import {
+  extractToolResultOutputText,
+} from './tool/tool-card-content';
+import {
   extractImagesAsAttachedFiles,
   mergeAttachedFiles,
   readAttachedFiles,
@@ -156,7 +159,7 @@ function buildIdentityFromMessage(input: {
     runId: input.runId,
     sequenceId: input.sequenceId,
   });
-  const turnKey = turnBinding ? `${laneKey}:${turnBinding.key}` : `${laneKey}:entry:${entryId}`;
+  const turnKey = turnBinding ? turnBinding.key : `entry:${entryId}`;
   return {
     sessionKey: input.sessionKey,
     laneKey,
@@ -222,7 +225,7 @@ function buildUserMessageEntry(input: {
     runId: input.runId,
     sequenceId: input.sequenceId,
   });
-  const turnKey = turnBinding ? `${laneKey}:${turnBinding.key}` : `${laneKey}:entry:${entryId}`;
+  const turnKey = turnBinding ? turnBinding.key : `entry:${entryId}`;
   const text = resolveTranscriptDisplayText(message);
   const attachedFiles = mergeAttachedFiles(
     readAttachedFiles(message),
@@ -285,6 +288,7 @@ function buildAssistantTurnFromAssistantMessage(input: {
     content: input.message.content,
     fallbackText: text,
     attachedFiles,
+    toolStatuses: input.message.toolStatuses,
     previousSegments,
     isStreaming: input.status === 'streaming' || Boolean(input.message.streaming),
   });
@@ -348,6 +352,7 @@ function buildAssistantTurnFromToolResult(input: {
     toolCallId,
     name: toolName,
     output,
+    outputText: extractToolResultOutputText(output),
     status: message.isError ? 'error' : 'completed',
   });
 
@@ -359,6 +364,47 @@ function buildAssistantTurnFromToolResult(input: {
     ...(existingTurn.sequenceId != null ? { sequenceId: existingTurn.sequenceId } : {}),
     segments,
     isStreaming: existingTurn.isStreaming,
+  });
+}
+
+function buildTaskCompletionRows(input: {
+  sessionKey: string;
+  message: SessionTranscriptMessage;
+  sourceEntryId: string;
+  existingRows: ReadonlyArray<SessionTimelineEntry>;
+  runId?: string;
+  sequenceId?: number;
+}): SessionTimelineTaskCompletionEntry[] {
+  const completionEvents = Array.isArray(input.message.taskCompletionEvents) ? input.message.taskCompletionEvents : [];
+  return completionEvents.map((event, completionIndex) => {
+    const triggerRow = resolveCompletionTriggerRow([...input.existingRows], input.sourceEntryId);
+    const completionRow: SessionTimelineTaskCompletionEntry = {
+      key: `session:${input.sessionKey}|completion:${input.sourceEntryId}:${completionIndex}`,
+      kind: 'task-completion',
+      sessionKey: input.sessionKey,
+      role: 'system',
+      text: [event.taskLabel, event.statusLabel, event.result]
+        .filter((value) => typeof value === 'string' && value.trim())
+        .join(' · '),
+      ...(input.message.timestamp != null ? { createdAt: input.message.timestamp } : {}),
+      status: 'final',
+      ...(input.runId ? { runId: input.runId } : {}),
+      ...(input.sequenceId != null ? { sequenceId: input.sequenceId } : {}),
+      entryId: input.sourceEntryId,
+      childSessionKey: event.childSessionKey,
+      ...(event.childSessionId ? { childSessionId: event.childSessionId } : {}),
+      ...(event.childAgentId ? { childAgentId: event.childAgentId } : {}),
+      ...(event.taskLabel ? { taskLabel: event.taskLabel } : {}),
+      ...(event.statusLabel ? { statusLabel: event.statusLabel } : {}),
+      ...(event.result ? { result: event.result } : {}),
+      ...(event.statsLine ? { statsLine: event.statsLine } : {}),
+      ...(event.replyInstruction ? { replyInstruction: event.replyInstruction } : {}),
+      ...(triggerRow?.key ? { triggerItemKey: triggerRow.key } : {}),
+    };
+    if (!completionRow.text) {
+      completionRow.text = buildTaskCompletionText(completionRow);
+    }
+    return completionRow;
   });
 }
 
@@ -426,14 +472,25 @@ export function buildTimelineEntriesFromTranscriptMessage(
         entryId,
       }];
     }
-    return [buildUserMessageEntry({
+    const userEntry = buildUserMessageEntry({
       sessionKey,
       message,
       runId: options.runId,
       sequenceId: options.sequenceId,
       index: options.index,
       status,
-    })];
+    });
+    return [
+      userEntry,
+      ...buildTaskCompletionRows({
+        sessionKey,
+        message,
+        sourceEntryId: userEntry.entryId ?? `entry-${options.index}`,
+        existingRows,
+        runId: options.runId,
+        sequenceId: options.sequenceId,
+      }),
+    ];
   }
 
   const turnEntry = buildAssistantTurnFromAssistantMessage({
@@ -448,38 +505,14 @@ export function buildTimelineEntriesFromTranscriptMessage(
   });
   const rows: SessionTimelineEntry[] = [turnEntry];
 
-  const completionEvents = Array.isArray(message.taskCompletionEvents) ? message.taskCompletionEvents : [];
-  for (const [completionIndex, event] of completionEvents.entries()) {
-    const triggerRow = resolveCompletionTriggerRow(existingRows, turnEntry.entryId ?? '');
-    const entryId = turnEntry.entryId ?? `entry-${options.index}`;
-    const completionRow: SessionTimelineTaskCompletionEntry = {
-      key: `session:${sessionKey}|completion:${entryId}:${completionIndex}`,
-      kind: 'task-completion',
-      sessionKey,
-      role: 'system',
-      text: [event.taskLabel, event.statusLabel, event.result]
-        .filter((value) => typeof value === 'string' && value.trim())
-        .join(' · '),
-      ...(message.timestamp != null ? { createdAt: message.timestamp } : {}),
-      status: 'final',
-      ...(options.runId ? { runId: options.runId } : {}),
-      ...(options.sequenceId != null ? { sequenceId: options.sequenceId } : {}),
-      entryId,
-      childSessionKey: event.childSessionKey,
-      ...(event.childSessionId ? { childSessionId: event.childSessionId } : {}),
-      ...(event.childAgentId ? { childAgentId: event.childAgentId } : {}),
-      ...(event.taskLabel ? { taskLabel: event.taskLabel } : {}),
-      ...(event.statusLabel ? { statusLabel: event.statusLabel } : {}),
-      ...(event.result ? { result: event.result } : {}),
-      ...(event.statsLine ? { statsLine: event.statsLine } : {}),
-      ...(event.replyInstruction ? { replyInstruction: event.replyInstruction } : {}),
-      ...(triggerRow?.key ? { triggerItemKey: triggerRow.key } : {}),
-    };
-    if (!completionRow.text) {
-      completionRow.text = buildTaskCompletionText(completionRow);
-    }
-    rows.push(completionRow);
-  }
+  rows.push(...buildTaskCompletionRows({
+    sessionKey,
+    message,
+    sourceEntryId: turnEntry.entryId ?? `entry-${options.index}`,
+    existingRows,
+    runId: options.runId,
+    sequenceId: options.sequenceId,
+  }));
 
   return rows;
 }

@@ -512,7 +512,7 @@ describe('session runtime service', () => {
         entryId: 'run:run-live-1:assistant:0',
         sequenceId: 2,
         laneKey: 'main',
-        turnKey: 'main:run-live-1',
+        turnKey: 'run-live-1',
         status: 'streaming',
         text: 'hello',
       }],
@@ -639,14 +639,14 @@ describe('session runtime service', () => {
     expect(firstEvent.item).toMatchObject({
       kind: 'assistant-turn',
       laneKey: 'main',
-      turnKey: 'main:run-stream-merge',
+      turnKey: 'run-stream-merge',
       text: '主人，我',
       status: 'streaming',
     });
     expect(secondEvent.item).toMatchObject({
       kind: 'assistant-turn',
       laneKey: 'main',
-      turnKey: 'main:run-stream-merge',
+      turnKey: 'run-stream-merge',
       text: '主人，我拿不到你当前定位',
       status: 'streaming',
     });
@@ -786,19 +786,19 @@ describe('session runtime service', () => {
 
     expect(deltaEvent.item).toMatchObject({
       kind: 'assistant-turn',
-      turnKey: 'main:run-segment-stable-1',
+      turnKey: 'run-segment-stable-1',
       segments: [{
         kind: 'message',
-        key: 'message:main:run-segment-stable-1:main:0',
+        key: 'message:run-segment-stable-1:main:0',
         text: '主人，我先看看',
       }],
     });
     expect(finalEvent.item).toMatchObject({
       kind: 'assistant-turn',
-      turnKey: 'main:run-segment-stable-1',
+      turnKey: 'run-segment-stable-1',
       segments: [{
         kind: 'message',
-        key: 'message:main:run-segment-stable-1:main:0',
+        key: 'message:run-segment-stable-1:main:0',
         text: '主人，我先看看，已经确认完了',
       }],
       text: '主人，我先看看，已经确认完了',
@@ -846,19 +846,19 @@ describe('session runtime service', () => {
 
     expect(deltaEvent.item).toMatchObject({
       kind: 'assistant-turn',
-      turnKey: 'main:run-segment-stable-2',
+      turnKey: 'run-segment-stable-2',
       segments: [{
         kind: 'message',
-        key: 'message:main:run-segment-stable-2:main:0',
+        key: 'message:run-segment-stable-2:main:0',
         text: '第一版回复',
       }],
     });
     expect(finalEvent.item).toMatchObject({
       kind: 'assistant-turn',
-      turnKey: 'main:run-segment-stable-2',
+      turnKey: 'run-segment-stable-2',
       segments: [{
         kind: 'message',
-        key: 'message:main:run-segment-stable-2:main:0',
+        key: 'message:run-segment-stable-2:main:0',
         text: '最终版回复',
       }],
       text: '最终版回复',
@@ -967,13 +967,13 @@ describe('session runtime service', () => {
     expect(assistantTurns).toHaveLength(2);
     expect(assistantTurns[0]).toMatchObject({
       kind: 'assistant-turn',
-      turnKey: 'main:run-old-final',
+      turnKey: 'run-old-final',
       status: 'final',
       text: 'old answer',
     });
     expect(assistantTurns[1]).toMatchObject({
       kind: 'assistant-turn',
-      turnKey: 'main:user-local-new',
+      turnKey: 'user-local-new',
       status: 'streaming',
       pendingState: 'typing',
       text: '',
@@ -1046,7 +1046,7 @@ describe('session runtime service', () => {
         sessionKey: 'agent:main:main',
         runtime: {
           activeRunId: 'user-active-1',
-          pendingTurnKey: 'main:user-active-1',
+          pendingTurnKey: 'user-active-1',
         },
       },
     });
@@ -1080,7 +1080,7 @@ describe('session runtime service', () => {
     expect(snapshot.runtime).toMatchObject({
       activeRunId: 'user-atomic-1',
       runPhase: 'submitted',
-      pendingTurnKey: 'main:user-atomic-1',
+      pendingTurnKey: 'user-atomic-1',
     });
     expect(snapshot.items).toEqual([
       expect.objectContaining({
@@ -1089,7 +1089,7 @@ describe('session runtime service', () => {
       }),
       expect.objectContaining({
         kind: 'assistant-turn',
-        turnKey: 'main:user-atomic-1',
+        turnKey: 'user-atomic-1',
         status: 'streaming',
         pendingState: 'typing',
       }),
@@ -1142,7 +1142,7 @@ describe('session runtime service', () => {
       runtime: {
         activeRunId: 'user-atomic-snapshot-1',
         runPhase: 'submitted',
-        pendingTurnKey: 'main:user-atomic-snapshot-1',
+        pendingTurnKey: 'user-atomic-snapshot-1',
       },
     });
     expect(response.data.snapshot.items).not.toEqual(expect.arrayContaining([
@@ -1198,7 +1198,7 @@ describe('session runtime service', () => {
     expect(event?.snapshot.runtime).toMatchObject({
       activeRunId: 'user-new-1',
       runPhase: 'submitted',
-      pendingTurnKey: 'main:user-new-1',
+      pendingTurnKey: 'user-new-1',
     });
     expect(event && 'item' in event ? event.item : null).toBeNull();
     expect(event?.snapshot.items).not.toEqual(expect.arrayContaining([
@@ -1241,7 +1241,7 @@ describe('session runtime service', () => {
     expect(event?.snapshot.runtime).toMatchObject({
       activeRunId: 'user-unbound-1',
       runPhase: 'submitted',
-      pendingTurnKey: 'main:user-unbound-1',
+      pendingTurnKey: 'user-unbound-1',
     });
     expect(event && 'item' in event ? event.item : null).toBeNull();
   });
@@ -1272,7 +1272,7 @@ describe('session runtime service', () => {
     expect(beforeRace.data.snapshot.runtime).toMatchObject({
       activeRunId: 'user-race-final-before-bind',
       runPhase: 'submitted',
-      pendingTurnKey: 'main:user-race-final-before-bind',
+      pendingTurnKey: 'user-race-final-before-bind',
     });
 
     // race 窗口：Gateway 用同 idempotencyKey 作为 runId 回推
@@ -1451,7 +1451,7 @@ describe('session runtime service', () => {
       entries: [{
         entryId: 'run:run-team-1:agent:worker-a:assistant:0',
         laneKey: 'member:worker-a',
-        turnKey: 'member:worker-a:run-team-1',
+        turnKey: 'run-team-1',
         agentId: 'worker-a',
         status: 'final',
       }],
@@ -1527,22 +1527,11 @@ describe('session runtime service', () => {
     });
 
     expect(event).toMatchObject({
-      sessionUpdate: 'agent_message_chunk',
-      entries: [{
-        kind: 'assistant-turn',
-        entryId: 'run:run-tools-1:tool:tool-1',
-        text: '',
-        toolUses: [{
-          id: 'tool-1',
-          name: 'memory_store',
-          input: { text: '记住偏好' },
-        }],
-        toolStatuses: [{
-          toolCallId: 'tool-1',
-          name: 'memory_store',
-          status: 'running',
-        }],
-      }],
+      sessionUpdate: 'tool_status_update',
+      toolCallId: 'tool-1',
+      toolName: 'memory_store',
+      input: { text: '记住偏好' },
+      status: 'running',
     });
   });
 
@@ -1559,19 +1548,15 @@ describe('session runtime service', () => {
 
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({
-      kind: 'tool-activity',
+      kind: 'assistant-turn',
       status: 'final',
-      toolCards: [{
-        toolCallId: 'tool-historical-missing-result',
-        name: 'TaskCreate',
-        status: 'missing_result',
-        result: { kind: 'none', surface: 'tool-card' },
-      }],
-      assistantSegments: [{
+      segments: [{
         kind: 'tool',
         tool: {
           toolCallId: 'tool-historical-missing-result',
-          status: 'missing_result',
+          name: 'TaskCreate',
+          status: 'running',
+          result: { kind: 'none', surface: 'tool-card' },
         },
       }],
     });
@@ -1616,7 +1601,7 @@ describe('session runtime service', () => {
     expect(startEvent.item).toMatchObject({
       kind: 'assistant-turn',
       laneKey: 'main',
-      turnKey: 'main:run-tool-live',
+      turnKey: 'run-tool-live',
       tools: [{
         id: 'tool-1',
         name: 'memory_store',
@@ -1626,7 +1611,7 @@ describe('session runtime service', () => {
     expect(resultEvent.item).toMatchObject({
       kind: 'assistant-turn',
       laneKey: 'main',
-      turnKey: 'main:run-tool-live',
+      turnKey: 'run-tool-live',
       tools: [{
         id: 'tool-1',
         name: 'memory_store',
@@ -2278,11 +2263,11 @@ describe('session runtime service', () => {
         model: null,
       },
       items: [{
-        key: 'session:agent:main:main|assistant-turn:main:run-todo:main',
+        key: 'session:agent:main:main|assistant-turn:main:run-todo',
         kind: 'assistant-turn',
         sessionKey: 'agent:main:main',
         role: 'assistant',
-        turnKey: 'main:run-todo',
+        turnKey: 'run-todo',
         laneKey: 'main',
         identitySource: 'run',
         identityMode: 'run',
@@ -2687,8 +2672,6 @@ describe('session runtime service', () => {
       entries: [{
         kind: 'assistant-turn',
         text: '已更新任务列表。',
-        toolCards: [],
-        toolUses: [],
       }],
     });
   });
@@ -3058,7 +3041,7 @@ describe('session runtime service', () => {
 
     expect(resultEvent.item).toMatchObject({
       kind: 'assistant-turn',
-      turnKey: 'main:run-tool-live-output',
+      turnKey: 'run-tool-live-output',
       segments: [{
         kind: 'tool',
         tool: {
@@ -3210,7 +3193,7 @@ describe('session runtime service', () => {
       tools: [{
         toolCallId: 'tool-final-output',
         name: 'web_fetch',
-        status: 'missing_result',
+        status: 'running',
         result: {
           kind: 'none',
         },
@@ -3226,7 +3209,7 @@ describe('session runtime service', () => {
       tools: [{
         toolCallId: 'tool-final-output',
         name: 'web_fetch',
-        status: 'missing_result',
+        status: 'running',
         result: {
           kind: 'none',
         },
@@ -3268,7 +3251,7 @@ describe('session runtime service', () => {
     expect(finalEvent.snapshot.items).toEqual([
       expect.objectContaining({
         kind: 'assistant-turn',
-        turnKey: 'main:run-tool-missing-result',
+        turnKey: 'run-tool-missing-result',
         status: 'final',
         tools: [expect.objectContaining({
           toolCallId: 'tool-missing-result',
@@ -3430,14 +3413,14 @@ describe('session runtime service', () => {
     expect(promptResponse.status).toBe(200);
     expect(promptResponse.data.snapshot.runtime).toMatchObject({
       activeRunId: 'user-orphan-run',
-      pendingTurnKey: 'main:user-orphan-run',
+      pendingTurnKey: 'user-orphan-run',
     });
 
     const resumed = await resumeHydratedSession(service, 'agent:main:main');
     expect(resumed.status).toBe(200);
     expect(resumed.data.snapshot.runtime).toMatchObject({
       activeRunId: 'user-orphan-run',
-      pendingTurnKey: 'main:user-orphan-run',
+      pendingTurnKey: 'user-orphan-run',
       runPhase: 'submitted',
       lastError: null,
     });
@@ -3466,7 +3449,7 @@ describe('session runtime service', () => {
     expect(promptResponse.status).toBe(200);
     expect(promptResponse.data.snapshot.runtime).toMatchObject({
       activeRunId: 'user-orphan-cleanup-1',
-      pendingTurnKey: 'main:user-orphan-cleanup-1',
+      pendingTurnKey: 'user-orphan-cleanup-1',
     });
 
     service.notifyTransportConnected(2);
@@ -3531,7 +3514,7 @@ describe('session runtime service', () => {
           items: [
             {
               kind: 'assistant-turn',
-              turnKey: 'main:run-tool-batch',
+              turnKey: 'run-tool-batch',
               tools: [
                 expect.objectContaining({ toolCallId: 'tool-1', status: 'completed' }),
                 expect.objectContaining({ toolCallId: 'tool-2', status: 'completed' }),
@@ -3602,28 +3585,33 @@ describe('session runtime service', () => {
             {
               kind: 'assistant-turn',
               laneKey: 'main',
-              turnKey: 'main:run-order-1',
+              turnKey: 'run-order-1',
               segments: [
                 {
                   kind: 'message',
-                  key: 'message:main:run-order-1:main:0',
-                  text: '读完了，结论如下',
+                  key: 'message:run-order-1:main:0',
+                  text: '我先看看',
                 },
                 {
                   kind: 'tool',
                   tool: {
                     id: 'tool-read',
                     name: 'read',
-                    status: 'missing_result',
+                    status: 'running',
                   },
                 },
+                {
+                  kind: 'message',
+                  key: 'message:run-order-1:main:1',
+                  text: '读完了，结论如下',
+                },
               ],
-              text: '读完了，结论如下',
+              text: '我先看看\n读完了，结论如下',
               tools: [
                 {
                   id: 'tool-read',
                   name: 'read',
-                  status: 'missing_result',
+                  status: 'running',
                 },
               ],
             },
@@ -3749,7 +3737,7 @@ describe('session runtime service', () => {
         childSessionId: 'child-1',
         childAgentId: 'coder',
         triggerItemKey: 'session:agent:main:main|entry:user-1',
-        replyItemKey: 'session:agent:main:main|assistant-turn:member:coder:entry:assistant-1:member:coder',
+        replyItemKey: 'session:agent:main:main|assistant-turn:member:coder:anchor:completion-1',
         steps: expect.arrayContaining([
           expect.objectContaining({
             label: 'read_file',
@@ -3792,13 +3780,13 @@ describe('session runtime service', () => {
         runtime: {
           activeRunId: 'user-local-1',
           runPhase: 'submitted',
-          pendingTurnKey: 'main:user-local-1',
+          pendingTurnKey: 'user-local-1',
           pendingTurnLaneKey: 'main',
         },
         items: expect.arrayContaining([
           expect.objectContaining({
             kind: 'assistant-turn',
-            turnKey: 'main:user-local-1',
+            turnKey: 'user-local-1',
             laneKey: 'main',
             status: 'streaming',
             pendingState: 'typing',
@@ -3831,7 +3819,7 @@ describe('session runtime service', () => {
           }),
           expect.objectContaining({
             kind: 'assistant-turn',
-            turnKey: 'main:user-local-1',
+            turnKey: 'user-local-1',
             laneKey: 'main',
             status: 'streaming',
           }),
@@ -3841,7 +3829,7 @@ describe('session runtime service', () => {
         },
         runtime: {
           activeRunId: 'user-local-1',
-          pendingTurnKey: 'main:user-local-1',
+          pendingTurnKey: 'user-local-1',
           runPhase: 'submitted',
         },
       },
@@ -3868,7 +3856,7 @@ describe('session runtime service', () => {
           }),
           expect.objectContaining({
             kind: 'assistant-turn',
-            turnKey: 'main:user-local-1',
+            turnKey: 'user-local-1',
             laneKey: 'main',
             status: 'streaming',
           }),
@@ -3878,7 +3866,7 @@ describe('session runtime service', () => {
         },
         runtime: {
           activeRunId: 'user-local-1',
-          pendingTurnKey: 'main:user-local-1',
+          pendingTurnKey: 'user-local-1',
           runPhase: 'submitted',
         },
       },
@@ -3998,9 +3986,9 @@ describe('session runtime service', () => {
     expect(loadResponse.data.snapshot.items).toHaveLength(2);
     expect(loadResponse.data.snapshot.items[1]).toMatchObject({
       kind: 'assistant-turn',
-      identitySource: 'heuristic',
-      identityMode: 'heuristic',
-      identityConfidence: 'fallback',
+      identitySource: 'message',
+      identityMode: 'message',
+      identityConfidence: 'strong',
       text: '记住了，主人。你是男的。',
     });
   });
@@ -4050,7 +4038,7 @@ describe('session runtime service', () => {
     expect(loadResponse.data.snapshot.items).toMatchObject([
       {
         kind: 'assistant-turn',
-        turnKey: 'main:assistant-msg-1',
+        turnKey: 'assistant-msg-1',
         identitySource: 'message',
         identityMode: 'message',
         identityConfidence: 'strong',
@@ -4801,7 +4789,7 @@ describe('session runtime service', () => {
     expect(promptResponse.data.snapshot.runtime).toMatchObject({
       activeRunId: 'user-local-fresh',
       runPhase: 'submitted',
-      pendingTurnKey: 'main:user-local-fresh',
+      pendingTurnKey: 'user-local-fresh',
       lastError: null,
       lastIssue: null,
     });
