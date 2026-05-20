@@ -1,11 +1,12 @@
 import { memo, useCallback, useDeferredValue, useEffect, useMemo, useRef, useState, type UIEvent } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { ChevronDown } from 'lucide-react';
+import { ChevronDown, Upload } from 'lucide-react';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
 import { AgentAvatar } from '@/components/common/AgentAvatar';
+import { invokeIpc } from '@/lib/api-client';
 import { buildTemplateAvatarSeed } from '@/lib/agent-avatar';
-import { hostOpenClawGetWorkspaceDir } from '@/lib/host-api';
+import { hostFileReadText, hostFileWriteText, hostOpenClawGetWorkspaceDir } from '@/lib/host-api';
 import { useDelayedFlag } from '@/lib/use-delayed-flag';
 import { normalizeSubagentNameToSlug } from '@/features/subagents/domain/workspace';
 import {
@@ -30,6 +31,11 @@ const SUBAGENTS_HEAVY_CONTENT_IDLE_TIMEOUT_MS = 320;
 const INITIAL_TEMPLATE_CARD_BATCH = 9;
 const TEMPLATE_CARD_BATCH_SIZE = 18;
 const TEMPLATE_CARD_SCROLL_THRESHOLD_PX = 180;
+const AGENT_CONFIG_FILE_FILTERS = [
+  { name: 'MatchaClaw Agent Config', extensions: ['matchaclaw-agent.json', 'json'] },
+  { name: 'JSON', extensions: ['json'] },
+  { name: 'All Files', extensions: ['*'] },
+];
 
 const TemplateCatalogCard = memo(function TemplateCatalogCard({
   template,
@@ -135,6 +141,8 @@ export function SubAgents() {
   const createAgent = useSubagentsStore((state) => state.createAgent);
   const updateAgent = useSubagentsStore((state) => state.updateAgent);
   const deleteAgent = useSubagentsStore((state) => state.deleteAgent);
+  const exportAgentConfig = useSubagentsStore((state) => state.exportAgentConfig);
+  const importAgentConfig = useSubagentsStore((state) => state.importAgentConfig);
   const createAgentFromTemplate = useSubagentsStore((state) => state.createAgentFromTemplate);
   const generateDraftFromPrompt = useSubagentsStore((state) => state.generateDraftFromPrompt);
   const generatePreviewDiffByFile = useSubagentsStore((state) => state.generatePreviewDiffByFile);
@@ -539,6 +547,59 @@ export function SubAgents() {
     }
   };
 
+  const handleExportAgentConfig = useCallback(async (agent: SubagentSummary) => {
+    try {
+      const packageData = await exportAgentConfig(agent.id);
+      const fileNameBase = normalizeSubagentNameToSlug(packageData.agent.name) || agent.id;
+      const result = await invokeIpc<{ canceled?: boolean; filePath?: string }>('dialog:save', {
+        title: t('transfer.exportDialogTitle'),
+        defaultPath: `${fileNameBase}.matchaclaw-agent.json`,
+        filters: AGENT_CONFIG_FILE_FILTERS,
+      });
+      if (result?.canceled || !result?.filePath) {
+        return;
+      }
+      const writeResult = await hostFileWriteText({
+        path: result.filePath,
+        content: `${JSON.stringify(packageData, null, 2)}\n`,
+      });
+      if (!writeResult.ok) {
+        throw new Error(writeResult.error || 'Failed to write file');
+      }
+      toast.success(t('transfer.exportSuccess'));
+    } catch (error) {
+      toast.error(t('transfer.exportFailed', { message: error instanceof Error ? error.message : String(error) }));
+    }
+  }, [exportAgentConfig, t]);
+
+  const handleImportAgentConfig = useCallback(async () => {
+    try {
+      const result = await invokeIpc<{ canceled?: boolean; filePaths?: string[] }>('dialog:open', {
+        title: t('transfer.importDialogTitle'),
+        properties: ['openFile'],
+        filters: AGENT_CONFIG_FILE_FILTERS,
+      });
+      const filePath = result?.filePaths?.[0];
+      if (result?.canceled || !filePath) {
+        return;
+      }
+      const readResult = await hostFileReadText({ path: filePath });
+      if (!readResult.ok || typeof readResult.content !== 'string') {
+        throw new Error(readResult.error || 'Failed to read file');
+      }
+      const importResult = await importAgentConfig(JSON.parse(readResult.content) as unknown);
+      void loadPersistedFilesForAgent(importResult.agentId);
+      setManagedAgentId(importResult.agentId);
+      if (importResult.warning) {
+        toast.warning(importResult.warning);
+      } else {
+        toast.success(t('transfer.importSuccess'));
+      }
+    } catch (error) {
+      toast.error(t('transfer.importFailed', { message: error instanceof Error ? error.message : String(error) }));
+    }
+  }, [importAgentConfig, loadPersistedFilesForAgent, setManagedAgentId, t]);
+
   return (
     <section className="space-y-4">
       <header className="flex items-center justify-between">
@@ -553,6 +614,10 @@ export function SubAgents() {
               {mutating ? t('status.mutating') : t('status.refreshing')}
             </span>
           )}
+          <Button variant="outline" className="gap-2" onClick={handleImportAgentConfig}>
+            <Upload className="h-4 w-4" />
+            {t('transfer.import')}
+          </Button>
           <Button onClick={openCreateDialog}>{t('newSubagent')}</Button>
         </div>
       </header>
@@ -719,6 +784,9 @@ export function SubAgents() {
               onEdit={() => openEditDialog(agent.id)}
               onDelete={() => {
                 setDeletingAgentId(agent.id);
+              }}
+              onExport={() => {
+                void handleExportAgentConfig(agent);
               }}
               onManage={() => {
                 setManagedAgentId(agent.id);

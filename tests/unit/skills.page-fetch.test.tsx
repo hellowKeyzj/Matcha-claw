@@ -7,6 +7,7 @@ import { toast } from 'sonner';
 const fetchSkillsMock = vi.fn(async () => {});
 const enableSkillMock = vi.fn(async () => {});
 const disableSkillMock = vi.fn(async () => {});
+const batchSetSkillsEnabledMock = vi.fn(async () => {});
 const installSkillMock = vi.fn(async () => {});
 const uninstallSkillMock = vi.fn(async () => {});
 const invokeIpcMock = vi.fn();
@@ -28,7 +29,7 @@ const gatewayState = {
 };
 
 const skillsState: {
-  skills: Array<{ id: string; name: string; description: string; enabled: boolean; isBundled?: boolean; eligible?: boolean }>;
+  skills: Array<{ id: string; name: string; description: string; enabled: boolean; installed?: boolean; isBundled?: boolean; eligible?: boolean; blockedByAllowlist?: boolean; isCore?: boolean }>;
   snapshotReady: boolean;
   initialLoading: boolean;
   refreshing: boolean;
@@ -37,6 +38,7 @@ const skillsState: {
   fetchSkills: typeof fetchSkillsMock;
   enableSkill: (skillId: string) => Promise<void>;
   disableSkill: (skillId: string) => Promise<void>;
+  batchSetSkillsEnabled: (skillIds: string[], enabled: boolean) => Promise<void>;
   searchResults: unknown[];
   searchSkills: (query: string) => Promise<void>;
   installSkill: (slug: string, version?: string) => Promise<void>;
@@ -54,6 +56,7 @@ const skillsState: {
   fetchSkills: fetchSkillsMock,
   enableSkill: enableSkillMock,
   disableSkill: disableSkillMock,
+  batchSetSkillsEnabled: batchSetSkillsEnabledMock,
   searchResults: [],
   searchSkills: async () => {},
   installSkill: installSkillMock,
@@ -109,6 +112,7 @@ describe('skills page fetch behavior', () => {
     fetchSkillsMock.mockClear();
     enableSkillMock.mockClear();
     disableSkillMock.mockClear();
+    batchSetSkillsEnabledMock.mockClear();
     installSkillMock.mockClear();
     uninstallSkillMock.mockClear();
     vi.mocked(toast.error).mockClear();
@@ -199,7 +203,7 @@ describe('skills page fetch behavior', () => {
 
   it('skills 已存在时不重复触发 fetchSkills', async () => {
     skillsState.skills = [
-      { id: 's1', name: 'Skill1', description: 'd', enabled: true, isBundled: true, eligible: true },
+      { id: 's1', name: 'Skill1', description: 'd', enabled: true, installed: true, isBundled: true, eligible: true },
     ];
     skillsState.snapshotReady = true;
 
@@ -228,7 +232,7 @@ describe('skills page fetch behavior', () => {
 
   it('手动刷新按钮会请求最新技能快照', async () => {
     skillsState.skills = [
-      { id: 's1', name: 'Skill1', description: 'd', enabled: true, isBundled: true, eligible: true },
+      { id: 's1', name: 'Skill1', description: 'd', enabled: true, installed: true, isBundled: true, eligible: true },
     ];
     skillsState.snapshotReady = true;
 
@@ -249,6 +253,7 @@ describe('skills page fetch behavior', () => {
       name: `Skill ${index + 1}`,
       description: `Description ${index + 1}`,
       enabled: index % 2 === 0,
+      installed: true,
       isBundled: index % 3 === 0,
       eligible: true,
     }));
@@ -269,14 +274,12 @@ describe('skills page fetch behavior', () => {
     expect(clippedViewport).toBeNull();
   });
 
-  it('已安装列表只过滤掉平台明确不支持的技能，未测出 eligible 的默认显示', async () => {
-    // unknown-skill 同时覆盖回归点：enabled=true 且 eligible 未测出（启用瞬间的状态），
-    // 不应当从列表消失。这是“启用一下卡片消失需要刷新”那个 bug 的根因场景。
+  it('已安装列表展示后端返回的 installed=true 技能，禁用不影响显示', async () => {
     skillsState.skills = [
-      { id: 'available-skill', name: 'Available Skill', description: 'ready', enabled: true, isBundled: true, eligible: true },
-      { id: 'disabled-skill', name: 'Disabled Skill', description: 'user disabled', enabled: false, isBundled: true, eligible: true },
-      { id: 'missing-skill', name: 'Missing Skill', description: 'platform unsupported', enabled: true, isBundled: true, eligible: false },
-      { id: 'unknown-skill', name: 'Unknown Skill', description: 'eligibility not yet evaluated', enabled: true, isBundled: false },
+      { id: 'available-skill', name: 'Available Skill', description: 'ready', enabled: true, installed: true, isBundled: true, eligible: true },
+      { id: 'disabled-skill', name: 'Disabled Skill', description: 'user disabled', enabled: false, installed: true, isBundled: true, eligible: false },
+      { id: 'enabled-missing-skill', name: 'Enabled Missing Skill', description: 'installed but unavailable', enabled: true, installed: true, isBundled: false, eligible: false },
+      { id: 'config-only-skill', name: 'Config Only Skill', description: 'no manifest', enabled: true, installed: false, isBundled: false, eligible: true },
     ];
     skillsState.snapshotReady = true;
 
@@ -291,9 +294,39 @@ describe('skills page fetch behavior', () => {
     });
 
     expect(screen.getByText('Disabled Skill')).toBeInTheDocument();
-    expect(screen.getByText('Unknown Skill')).toBeInTheDocument();
-    expect(screen.queryByText('Missing Skill')).not.toBeInTheDocument();
+    expect(screen.getByText('Enabled Missing Skill')).toBeInTheDocument();
+    expect(screen.queryByText('Config Only Skill')).not.toBeInTheDocument();
     expect(screen.queryByText('filter.eligible')).not.toBeInTheDocument();
+  });
+
+  it('已安装卡片标题使用技能名，slug 不挤占标题行', async () => {
+    skillsState.skills = [
+      {
+        id: 'memory-lancedb-pro-skill',
+        slug: 'memory-lancedb-pro-skill',
+        name: 'memory-lancedb-pro',
+        description: 'This skill should be used when working with memory-lancedb-pro.',
+        enabled: true,
+        installed: true,
+        isBundled: false,
+        eligible: true,
+      },
+    ];
+    skillsState.snapshotReady = true;
+
+    render(
+      <MemoryRouter>
+        <Skills />
+      </MemoryRouter>,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByText('memory-lancedb-pro')).toBeInTheDocument();
+    });
+
+    const title = screen.getByText('memory-lancedb-pro');
+    expect(title.closest('[class*="font-mono"]')).toBeNull();
+    expect(screen.getByText('memory-lancedb-pro-skill')).toHaveClass('font-mono');
   });
 
   it('市场页移除旧手动安装提示卡，并提供上传技能入口', async () => {
@@ -535,5 +568,29 @@ describe('skills page fetch behavior', () => {
     expect(enableSkillMock).not.toHaveBeenCalled();
     expect(fetchSkillsMock).not.toHaveBeenCalledWith({ force: true, fresh: true });
     expect(toast.success).not.toHaveBeenCalled();
+  });
+
+  it('批量启用可见技能时只调用一次批量 store action', async () => {
+    skillsState.skills = [
+      { id: 'skill-a', name: 'Skill A', description: 'a', enabled: false, installed: true, isBundled: true, eligible: true },
+      { id: 'skill-b', name: 'Skill B', description: 'b', enabled: false, installed: true, isBundled: false, eligible: true },
+      { id: 'core-skill', name: 'Core Skill', description: 'core', enabled: false, installed: true, isBundled: true, eligible: true, isCore: true },
+    ];
+    skillsState.snapshotReady = true;
+
+    render(
+      <MemoryRouter>
+        <Skills />
+      </MemoryRouter>,
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'actions.enableVisible' }));
+
+    await waitFor(() => {
+      expect(batchSetSkillsEnabledMock).toHaveBeenCalledWith(['skill-a', 'skill-b'], true);
+    });
+    expect(batchSetSkillsEnabledMock).toHaveBeenCalledTimes(1);
+    expect(enableSkillMock).not.toHaveBeenCalled();
+    expect(disableSkillMock).not.toHaveBeenCalled();
   });
 });

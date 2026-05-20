@@ -45,10 +45,14 @@ import {
   type SettingsJobPort,
 } from '../../application/settings/settings-jobs';
 import { ProviderAccountsService } from '../../application/providers/accounts';
+import { CapabilityRoutingApplicationService } from '../../application/providers/capability-routing-service';
+import { OpenClawCapabilityRoutingService } from '../../application/openclaw/openclaw-capability-routing-service';
+import { ProviderModelsApplicationService } from '../../application/providers/provider-models-service';
+import { OpenClawProviderModelsService } from '../../application/openclaw/openclaw-provider-models-service';
+import { OpenClawCustomMediaPluginConfigService } from '../../application/openclaw/openclaw-custom-media-plugin-config-service';
 import {
   CREATE_PROVIDER_ACCOUNT_JOB,
   DELETE_PROVIDER_ACCOUNT_JOB,
-  SET_DEFAULT_PROVIDER_ACCOUNT_JOB,
   UPDATE_PROVIDER_ACCOUNT_JOB,
   createProviderAccountJobPort,
   type ProviderAccountJobPort,
@@ -58,6 +62,8 @@ import type { RuntimeCommandExecutorPort } from '../../application/common/runtim
 import type { OpenClawAuthProfileService } from '../../application/openclaw/openclaw-auth-profile-store';
 import { ProviderOAuthCompletionService } from '../../application/providers/oauth-runtime';
 import type { ProviderStoreRepository } from '../../application/providers/provider-store-repository';
+import { ProviderModelsStoreRepository } from '../../application/providers/provider-models-store';
+import { CapabilityRoutingStoreRepository } from '../../application/providers/capability-routing-store';
 import type { RuntimeFileSystemPort } from '../../application/common/runtime-ports';
 import type { RuntimeHostApplicationServicesContext } from '../application-services';
 import type { RuntimeHostContainer } from '../container';
@@ -84,6 +90,8 @@ export interface OpenClawApplicationServices {
   readonly channelService: ChannelService;
   readonly clawHubService: ClawHubService;
   readonly isChannelDerivedPluginId: typeof isChannelDerivedPluginId;
+  readonly capabilityRoutingService: CapabilityRoutingApplicationService;
+  readonly providerModelsService: ProviderModelsApplicationService;
   readonly openClawService: OpenClawService;
   readonly providerAccountsService: ProviderAccountsService;
   readonly settingsService: SettingsService;
@@ -148,10 +156,40 @@ export function registerOpenClawApplicationServices(
     parentShell: context.parentShell,
     oauthCompletion: scope.resolve<ProviderOAuthCompletionService>('providers.oauthCompletionService'),
     runtime: scope.resolve<ProviderAccountsRuntimePort>('providers.runtimePort'),
+    providerModels: scope.resolve<ProviderModelsApplicationService>('providers.modelsService'),
+    capabilityRouting: scope.resolve<CapabilityRoutingApplicationService>('providers.capabilityRoutingService'),
     httpClient: scope.resolve<RuntimeHttpClientPort>('runtime.httpClient'),
     clock: scope.resolve<RuntimeClockPort>('runtime.clock'),
     jobs: scope.resolve<ProviderAccountJobPort>('providers.jobs'),
   }));
+  container.register('openclaw.capabilityRoutingWriter', (scope) => new OpenClawCapabilityRoutingService(
+    scope.resolve<OpenClawConfigRepositoryPort>('openclaw.configRepository'),
+  ));
+  container.register('providers.capabilityRoutingStore', (scope) => new CapabilityRoutingStoreRepository(
+    scope.resolve<OpenClawEnvironmentRepository>('openclaw.environmentRepository'),
+    scope.resolve<RuntimeFileSystemPort>('runtime.fileSystem'),
+  ));
+  container.register('providers.capabilityRoutingService', (scope) => new CapabilityRoutingApplicationService(
+    scope.resolve<CapabilityRoutingStoreRepository>('providers.capabilityRoutingStore'),
+    scope.resolve<ProviderStoreRepository>('providers.storeRepository'),
+    scope.resolve<OpenClawCapabilityRoutingService>('openclaw.capabilityRoutingWriter'),
+  ));
+  container.register('openclaw.providerModelsWriter', (scope) => new OpenClawProviderModelsService(
+    scope.resolve<OpenClawConfigRepositoryPort>('openclaw.configRepository'),
+  ));
+  container.register('openclaw.customMediaPluginConfigWriter', (scope) => new OpenClawCustomMediaPluginConfigService(
+    scope.resolve<OpenClawConfigRepositoryPort>('openclaw.configRepository'),
+  ));
+  container.register('providers.modelsStore', (scope) => new ProviderModelsStoreRepository(
+    scope.resolve<OpenClawEnvironmentRepository>('openclaw.environmentRepository'),
+    scope.resolve<RuntimeFileSystemPort>('runtime.fileSystem'),
+  ));
+  container.register('providers.modelsService', (scope) => new ProviderModelsApplicationService(
+    scope.resolve<ProviderModelsStoreRepository>('providers.modelsStore'),
+    scope.resolve<ProviderStoreRepository>('providers.storeRepository'),
+    scope.resolve<OpenClawProviderModelsService>('openclaw.providerModelsWriter'),
+    scope.resolve<OpenClawCustomMediaPluginConfigService>('openclaw.customMediaPluginConfigWriter'),
+  ));
   container.register('providers.jobs', (scope): ProviderAccountJobPort => createProviderAccountJobPort(
     scope.resolve<RuntimeLongTaskSubmissionPort>('runtime.tasks'),
   ));
@@ -222,6 +260,8 @@ export function resolveOpenClawApplicationServices(container: RuntimeHostContain
   return {
     channelService: container.resolve<ChannelService>('channels.service'),
     clawHubService: container.resolve<ClawHubService>('clawhub.service'),
+    capabilityRoutingService: container.resolve<CapabilityRoutingApplicationService>('providers.capabilityRoutingService'),
+    providerModelsService: container.resolve<ProviderModelsApplicationService>('providers.modelsService'),
     isChannelDerivedPluginId,
     openClawService: container.resolve<OpenClawService>('openclaw.service'),
     providerAccountsService: container.resolve<ProviderAccountsService>('providers.accountsService'),
@@ -323,12 +363,6 @@ function createOpenClawApplicationJobDefinitions(
       type: CREATE_PROVIDER_ACCOUNT_JOB,
       handler: async (payload) => {
         return await container.resolve<ProviderAccountsService>('providers.accountsService').executeCreate(payload);
-      },
-    },
-    {
-      type: SET_DEFAULT_PROVIDER_ACCOUNT_JOB,
-      handler: async (payload) => {
-        return await container.resolve<ProviderAccountsService>('providers.accountsService').executeSetDefault(payload);
       },
     },
     {

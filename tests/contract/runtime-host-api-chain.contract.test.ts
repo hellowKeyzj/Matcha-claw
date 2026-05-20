@@ -40,17 +40,15 @@ describe('runtime-host API 真实链路 contract', () => {
       },
     );
     expect(created.success).toBe(true);
-    const createResult = await harness.waitForJob<{ data?: { account?: { id: string } } }>(created.job.id);
-    expect(createResult.data?.account?.id).toBe('openai-main');
+    const createResult = await harness.waitForJob<{ account?: { id: string }; credential?: { id: string } }>(created.job.id);
+    expect((createResult.credential ?? createResult.account)?.id).toBe('openai-main');
 
     const listed = await harness.dispatchOk<{
-      accounts: Array<{ id: string }>;
+      credentials: Array<{ id: string }>;
       statuses: Array<{ id: string; hasKey: boolean }>;
-      defaultAccountId: string | null;
     }>('GET', '/api/provider-accounts');
-    expect(listed.accounts.some((item) => item.id === 'openai-main')).toBe(true);
+    expect(listed.credentials.some((item) => item.id === 'openai-main')).toBe(true);
     expect(listed.statuses.some((item) => item.id === 'openai-main' && item.hasKey)).toBe(true);
-    expect(listed.defaultAccountId).toBe('openai-main');
 
     const validated = await harness.dispatchOk<{ valid: boolean }>(
       'POST',

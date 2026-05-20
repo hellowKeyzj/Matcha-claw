@@ -12,10 +12,9 @@ vi.mock('@/lib/provider-accounts', () => ({
       ? value as Record<string, unknown>
       : {};
     return {
-      accounts: Array.isArray(snapshot.accounts) ? snapshot.accounts : [],
+      credentials: Array.isArray(snapshot.credentials) ? snapshot.credentials : [],
       statuses: Array.isArray(snapshot.statuses) ? snapshot.statuses : [],
       vendors: Array.isArray(snapshot.vendors) ? snapshot.vendors : [],
-      defaultAccountId: typeof snapshot.defaultAccountId === 'string' ? snapshot.defaultAccountId : null,
     };
   },
 }));
@@ -24,7 +23,6 @@ vi.mock('@/lib/provider-runtime', () => ({
   hostProviderCreateAccount: vi.fn(),
   hostProviderDeleteAccount: vi.fn(),
   hostProviderReadApiKey: vi.fn(),
-  hostProviderSetDefaultAccount: vi.fn(),
   hostProviderUpdateAccount: vi.fn(),
   hostProviderValidate: vi.fn(),
 }));
@@ -49,9 +47,8 @@ describe('useProviderStore.init', () => {
     useProviderStore.setState({
       providerSnapshot: {
         statuses: [],
-        accounts: [],
+        credentials: [],
         vendors: [],
-        defaultAccountId: null,
       },
       snapshotReady: false,
       initialLoading: false,
@@ -65,9 +62,8 @@ describe('useProviderStore.init', () => {
   it('会触发 refreshProviderSnapshot 并写入快照', async () => {
     fetchProviderSnapshotMock.mockResolvedValueOnce({
       statuses: [{ id: 'openai-main', name: 'OpenAI', hasKey: true, keyMasked: 'sk-****' }],
-      accounts: [{ id: 'openai-main', vendorId: 'openai', label: 'OpenAI' }],
+      credentials: [{ id: 'openai-main', vendorId: 'openai', label: 'OpenAI' }],
       vendors: [{ id: 'openai', name: 'OpenAI' }],
-      defaultAccountId: 'openai-main',
     });
 
     await act(async () => {
@@ -76,8 +72,7 @@ describe('useProviderStore.init', () => {
 
     expect(fetchProviderSnapshotMock).toHaveBeenCalledTimes(1);
     const state = useProviderStore.getState();
-    expect(state.providerSnapshot.defaultAccountId).toBe('openai-main');
-    expect(state.providerSnapshot.accounts).toEqual([{ id: 'openai-main', vendorId: 'openai', label: 'OpenAI' }]);
+    expect(state.providerSnapshot.credentials).toEqual([{ id: 'openai-main', vendorId: 'openai', label: 'OpenAI' }]);
     expect(state.snapshotReady).toBe(true);
     expect(state.initialLoading).toBe(false);
     expect(state.refreshing).toBe(false);
@@ -116,9 +111,8 @@ describe('useProviderStore.init', () => {
     expect(fetchProviderSnapshotMock).toHaveBeenCalledTimes(1);
     resolveSnapshot?.({
       statuses: [],
-      accounts: [{ id: 'openai-main', vendorId: 'openai', label: 'OpenAI' }],
+      credentials: [{ id: 'openai-main', vendorId: 'openai', label: 'OpenAI' }],
       vendors: [{ id: 'openai', name: 'OpenAI' }],
-      defaultAccountId: 'openai-main',
     });
 
     await act(async () => {
@@ -128,7 +122,7 @@ describe('useProviderStore.init', () => {
     const state = useProviderStore.getState();
     expect(state.initialLoading).toBe(false);
     expect(state.refreshing).toBe(false);
-    expect(state.providerSnapshot.defaultAccountId).toBe('openai-main');
+    expect(state.providerSnapshot.credentials[0]?.id).toBe('openai-main');
   });
 
   it('快照请求长期无响应时，会超时收口 initialLoading', async () => {
@@ -158,13 +152,12 @@ describe('useProviderStore.init', () => {
     fetchProviderSnapshotMock.mockReturnValue(snapshotTask);
     useProviderStore.setState({
       providerSnapshot: {
-        accounts: [{
+        credentials: [{
           id: 'openai-main',
           vendorId: 'openai',
           label: 'OpenAI',
           authMode: 'api_key',
           enabled: true,
-          isDefault: true,
           createdAt: '2026-01-01T00:00:00.000Z',
           updatedAt: '2026-01-01T00:00:00.000Z',
         }],
@@ -189,7 +182,6 @@ describe('useProviderStore.init', () => {
           defaultAuthMode: 'api_key',
           supportsMultipleAccounts: false,
         }],
-        defaultAccountId: 'openai-main',
       },
       snapshotReady: true,
       initialLoading: false,
@@ -203,9 +195,8 @@ describe('useProviderStore.init', () => {
 
     resolveSnapshot?.({
       statuses: [{ id: 'openai-main', hasKey: true }],
-      accounts: [{ id: 'openai-main', vendorId: 'openai', label: 'OpenAI' }],
+      credentials: [{ id: 'openai-main', vendorId: 'openai', label: 'OpenAI' }],
       vendors: [{ id: 'openai', name: 'OpenAI' }],
-      defaultAccountId: 'openai-main',
     });
 
     await act(async () => {
@@ -219,9 +210,8 @@ describe('useProviderStore.init', () => {
   it('空快照也应视为已加载，后续 background 刷新走静默', async () => {
     fetchProviderSnapshotMock.mockResolvedValueOnce({
       statuses: [],
-      accounts: [],
+      credentials: [],
       vendors: [],
-      defaultAccountId: null,
     });
 
     await act(async () => {
@@ -241,9 +231,8 @@ describe('useProviderStore.init', () => {
 
     resolveSnapshot?.({
       statuses: [],
-      accounts: [],
+      credentials: [],
       vendors: [],
-      defaultAccountId: null,
     });
 
     await act(async () => {
@@ -257,9 +246,8 @@ describe('useProviderStore.init', () => {
   it('手动刷新应记录 manual telemetry 事件', async () => {
     fetchProviderSnapshotMock.mockResolvedValueOnce({
       statuses: [],
-      accounts: [],
+      credentials: [],
       vendors: [],
-      defaultAccountId: null,
     });
 
     await act(async () => {

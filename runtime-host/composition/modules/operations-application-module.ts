@@ -36,6 +36,7 @@ import {
   type SecurityJobPort,
 } from '../../application/security/security-jobs';
 import { SecurityRuntimeService } from '../../application/security/service';
+import { SecurityPluginConfigApplier } from '../../application/security/security-plugin-config-applier';
 import { SecurityPolicyRepository } from '../../application/security/security-policy-store';
 import { TeamRuntimeService, createTeamRuntimeRootResolver } from '../../application/team-runtime/service';
 import { TeamRuntimeApplicationService } from '../../application/team-runtime/team-runtime-application-service';
@@ -139,6 +140,10 @@ export function registerOperationsApplicationServices(
     scope.resolve<OpenClawConfigRepositoryPort>('openclaw.configRepository'),
     scope.resolve<RuntimeFileSystemPort>('runtime.fileSystem'),
   ));
+  container.register('security.pluginConfigApplier', (scope) => new SecurityPluginConfigApplier(
+    scope.resolve<OpenClawConfigRepositoryPort>('openclaw.configRepository'),
+    scope.resolve<SecurityPolicyRepository>('security.policyRepository'),
+  ));
   container.register('security.jobs', (scope): SecurityJobPort => createSecurityJobPort(
     scope.resolve<RuntimeLongTaskSubmissionPort>('runtime.tasks'),
   ));
@@ -153,6 +158,7 @@ export function registerOperationsApplicationServices(
     gateway: context.openclawBridge,
     policyRepository: scope.resolve<SecurityPolicyRepository>('security.policyRepository'),
     jobs: scope.resolve<SecurityJobPort>('security.jobs'),
+    timer: scope.resolve<RuntimeTimerPort>('runtime.timer'),
   }));
   container.register('teamRuntime.storageRepository', (scope) => new TeamRuntimeStorageRepository({
     fileSystem: scope.resolve<RuntimeFileSystemPort>('runtime.fileSystem'),

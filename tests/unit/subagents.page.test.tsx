@@ -10,7 +10,9 @@ import { __resetSubagentTemplateCatalogCacheForTest } from '@/services/openclaw/
 
 vi.mock('sonner', () => ({
   toast: {
+    success: vi.fn(),
     warning: vi.fn(),
+    error: vi.fn(),
   },
 }));
 
@@ -33,6 +35,22 @@ describe('subagents page', () => {
   const createAgentFromTemplate = vi.fn().mockResolvedValue({ agentId: 'brand-guardian' });
   const updateAgent = vi.fn().mockResolvedValue(undefined);
   const deleteAgent = vi.fn().mockResolvedValue(undefined);
+  const exportAgentConfig = vi.fn().mockResolvedValue({
+    schema: 'matchaclaw.agent-config',
+    version: 1,
+    agent: {
+      name: 'Alpha',
+      skills: ['web-search'],
+      skillBundles: [
+        {
+          skillKey: 'web-search',
+          files: [{ path: 'SKILL.md', content: 'web skill' }],
+        },
+      ],
+      files: {},
+    },
+  });
+  const importAgentConfig = vi.fn().mockResolvedValue({ agentId: 'imported-agent' });
   const loadAgents = vi.fn().mockResolvedValue(undefined);
   const loadAvailableModels = vi.fn().mockResolvedValue(undefined);
   const generateDraftFromPrompt = vi.fn().mockResolvedValue(undefined);
@@ -84,12 +102,16 @@ describe('subagents page', () => {
     createAgentFromTemplate.mockClear();
     updateAgent.mockClear();
     deleteAgent.mockClear();
+    exportAgentConfig.mockClear();
+    importAgentConfig.mockClear();
     loadAgents.mockClear();
     loadAvailableModels.mockClear();
     generateDraftFromPrompt.mockClear();
     cancelDraft.mockClear();
     loadPersistedFilesForAgent.mockClear();
+    vi.mocked(toast.success).mockReset();
     vi.mocked(toast.warning).mockReset();
+    vi.mocked(toast.error).mockReset();
 
     i18n.changeLanguage('en');
     useGatewayStore.setState({
@@ -183,6 +205,8 @@ describe('subagents page', () => {
       createAgentFromTemplate,
       updateAgent,
       deleteAgent,
+      exportAgentConfig,
+      importAgentConfig,
       generateDraftFromPrompt,
       cancelDraft,
     });
@@ -479,6 +503,126 @@ describe('subagents page', () => {
     expect(deleteAgent).toHaveBeenCalledWith('agent-alpha');
   });
 
+  it('exports selected agent config to a picked json path', async () => {
+    const invoke = vi.mocked(window.electron.ipcRenderer.invoke);
+    invoke.mockImplementation(async (channel, payload) => {
+      const path = (payload as { path?: string } | undefined)?.path;
+      if (channel === 'dialog:save') {
+        return { canceled: false, filePath: '/tmp/alpha.matchaclaw-agent.json' };
+      }
+      if (channel === 'hostapi:fetch' && path === '/api/files/write-text') {
+        return {
+          ok: true,
+          data: {
+            status: 200,
+            ok: true,
+            json: { ok: true, path: '/tmp/alpha.matchaclaw-agent.json' },
+          },
+        };
+      }
+      if (channel === 'hostapi:fetch' && path === '/api/openclaw/subagent-templates') {
+        return {
+          ok: true,
+          data: {
+            status: 200,
+            ok: true,
+            json: {
+              sourceDir: '/repo/integrations/openclaw',
+              templates: [],
+            },
+          },
+        };
+      }
+      return undefined;
+    });
+    renderSubagentsPage();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Export agent-alpha' }));
+
+    await waitFor(() => {
+      expect(exportAgentConfig).toHaveBeenCalledWith('agent-alpha');
+    });
+    expect(invoke).toHaveBeenCalledWith('dialog:save', expect.objectContaining({
+      defaultPath: expect.stringContaining('alpha.matchaclaw-agent.json'),
+    }));
+    const writeCall = invoke.mock.calls.find(([channel, payload]) => (
+      channel === 'hostapi:fetch'
+      && (payload as { path?: string } | undefined)?.path === '/api/files/write-text'
+    ));
+    expect(writeCall).toBeTruthy();
+    const writePayload = writeCall?.[1] as { body?: string };
+    const writeBody = JSON.parse(writePayload.body || '{}') as { path?: string; content?: string };
+    expect(writeBody.path).toBe('/tmp/alpha.matchaclaw-agent.json');
+    expect(JSON.parse(writeBody.content || '{}')).toEqual(expect.objectContaining({
+      schema: 'matchaclaw.agent-config',
+      version: 1,
+    }));
+    await waitFor(() => {
+      expect(toast.success).toHaveBeenCalledWith('Agent config exported.');
+    });
+  });
+
+  it('imports agent config from a picked json file', async () => {
+    const invoke = vi.mocked(window.electron.ipcRenderer.invoke);
+    invoke.mockImplementation(async (channel, payload) => {
+      const path = (payload as { path?: string } | undefined)?.path;
+      if (channel === 'dialog:open') {
+        return { canceled: false, filePaths: ['/tmp/shared.matchaclaw-agent.json'] };
+      }
+      if (channel === 'hostapi:fetch' && path === '/api/files/read-text') {
+        return {
+          ok: true,
+          data: {
+            status: 200,
+            ok: true,
+            json: {
+              ok: true,
+              path: '/tmp/shared.matchaclaw-agent.json',
+              content: JSON.stringify({
+                schema: 'matchaclaw.agent-config',
+                version: 1,
+                agent: {
+                  name: 'Shared Agent',
+                  files: {
+                    'AGENTS.md': 'shared agents',
+                  },
+                },
+              }),
+            },
+          },
+        };
+      }
+      if (channel === 'hostapi:fetch' && path === '/api/openclaw/subagent-templates') {
+        return {
+          ok: true,
+          data: {
+            status: 200,
+            ok: true,
+            json: {
+              sourceDir: '/repo/integrations/openclaw',
+              templates: [],
+            },
+          },
+        };
+      }
+      return undefined;
+    });
+    renderSubagentsPage();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Import Agent' }));
+
+    await waitFor(() => {
+      expect(importAgentConfig).toHaveBeenCalledWith(expect.objectContaining({
+        schema: 'matchaclaw.agent-config',
+        version: 1,
+      }));
+    });
+    expect(loadPersistedFilesForAgent).toHaveBeenCalledWith('imported-agent');
+    await waitFor(() => {
+      expect(toast.success).toHaveBeenCalledWith('Agent config imported.');
+    });
+  });
+
   it('edit dialog no longer renders skill configuration section', () => {
     renderSubagentsPage();
 
@@ -535,8 +679,9 @@ describe('subagents page', () => {
     useSubagentsStore.setState({
       availableModels: [
         {
-          id: 'custom-12345678/gpt-4o-mini',
-          provider: 'custom-12345678',
+          id: 'custom-dd749b2e/gpt-4o-mini',
+          provider: 'custom-dd749b2e',
+          credentialId: 'custom-dd749b2e-4807-4e78-bb50-7f7e3ae81d7a',
           providerLabel: '自定义',
           modelLabel: 'gpt-4o-mini',
           displayLabel: '自定义 / gpt-4o-mini',
@@ -560,7 +705,7 @@ describe('subagents page', () => {
           id: 'main',
           name: 'Main',
           workspace: '/home/dev/.openclaw/workspace',
-          model: 'custom-12345678/gpt-4o-mini',
+          model: 'custom-dd749b2e/gpt-4o-mini',
           avatarSeed: 'agent:main',
           avatarStyle: 'pixelArt',
           isDefault: true,
@@ -577,8 +722,9 @@ describe('subagents page', () => {
       ],
       availableModels: [
         {
-          id: 'custom-12345678/gpt-4o-mini',
-          provider: 'custom-12345678',
+          id: 'custom-dd749b2e/gpt-4o-mini',
+          provider: 'custom-dd749b2e',
+          credentialId: 'custom-dd749b2e-4807-4e78-bb50-7f7e3ae81d7a',
           providerLabel: '前端专家',
           modelLabel: 'gpt-4o-mini',
           displayLabel: '前端专家 / gpt-4o-mini',
@@ -596,8 +742,9 @@ describe('subagents page', () => {
     useSubagentsStore.setState({
       availableModels: [
         {
-          id: 'custom-12345678/gpt-4o-mini',
-          provider: 'custom-12345678',
+          id: 'custom-dd749b2e/gpt-4o-mini',
+          provider: 'custom-dd749b2e',
+          credentialId: 'custom-dd749b2e-4807-4e78-bb50-7f7e3ae81d7a',
           providerLabel: '前端专家',
           modelLabel: 'gpt-4o-mini',
           displayLabel: '前端专家 / gpt-4o-mini',

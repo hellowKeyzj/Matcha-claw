@@ -2,16 +2,12 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const {
   removeProviderMock,
-  setDefaultModelMock,
-  setDefaultModelWithOverrideMock,
   syncProviderConfigMock,
   getProviderApiKeyMock,
   removeProviderKeyMock,
   saveProviderKeyMock,
 } = vi.hoisted(() => ({
   removeProviderMock: vi.fn(),
-  setDefaultModelMock: vi.fn(),
-  setDefaultModelWithOverrideMock: vi.fn(),
   syncProviderConfigMock: vi.fn(),
   getProviderApiKeyMock: vi.fn(),
   removeProviderKeyMock: vi.fn(),
@@ -23,20 +19,18 @@ import { getOpenClawProviderKeyForType } from '../../runtime-host/application/pr
 import { ProviderRuntimeSyncService } from '../../runtime-host/application/providers/store-sync';
 
 function createServiceWithStore(store: {
-  defaultAccountId: string | null;
   accounts: Record<string, any>;
   apiKeys: Record<string, string>;
-}, overrides?: {
 }) {
   const writeProviderStore = vi.fn(async () => {});
+  const syncOpenClawModelsMock = vi.fn(async () => {});
+  const removeCredentialModelsMock = vi.fn(async () => {});
   const runtimeSync = new ProviderRuntimeSyncService(
     {
       saveProviderKey: saveProviderKeyMock,
       removeProviderKey: removeProviderKeyMock,
     },
     {
-      setDefaultModel: setDefaultModelMock,
-      setDefaultModelWithOverride: setDefaultModelWithOverrideMock,
       syncProviderConfig: syncProviderConfigMock,
     },
   );
@@ -69,13 +63,9 @@ function createServiceWithStore(store: {
       resolveAccountApiKey: async ({ store: runtimeStore, accountId, account }) => {
         const runtimeProviderKey = resolveRuntimeProviderKey(accountId, account as Record<string, any> | null);
         const runtimeApiKey = await getProviderApiKeyMock(runtimeProviderKey);
-        if (runtimeApiKey) {
-          return runtimeApiKey;
-        }
+        if (runtimeApiKey) return runtimeApiKey;
         const localApiKey = runtimeStore.apiKeys[accountId];
-        if (typeof localApiKey === 'string' && localApiKey.trim()) {
-          return localApiKey.trim();
-        }
+        if (typeof localApiKey === 'string' && localApiKey.trim()) return localApiKey.trim();
         if (runtimeProviderKey !== accountId) {
           const aliasedApiKey = runtimeStore.apiKeys[runtimeProviderKey];
           return typeof aliasedApiKey === 'string' && aliasedApiKey.trim() ? aliasedApiKey.trim() : undefined;
@@ -92,21 +82,25 @@ function createServiceWithStore(store: {
         await removeProviderMock(providerKey);
       },
     },
+    providerModels: {
+      removeCredentialModels: removeCredentialModelsMock,
+      syncOpenClaw: syncOpenClawModelsMock,
+    } as any,
+    capabilityRouting: {
+      removeCredentialRoutes: vi.fn(),
+    } as any,
     jobs: {
       submitCreate: vi.fn(() => ({ success: true, job: { id: 'job-create', type: 'providers.createAccount', status: 'queued', queuedAt: 1, attempts: 0, maxAttempts: 1 } })),
-      submitSetDefault: vi.fn(() => ({ success: true, job: { id: 'job-default', type: 'providers.setDefaultAccount', status: 'queued', queuedAt: 1, attempts: 0, maxAttempts: 1 } })),
       submitUpdate: vi.fn(() => ({ success: true, job: { id: 'job-update', type: 'providers.updateAccount', status: 'queued', queuedAt: 1, attempts: 0, maxAttempts: 1 } })),
       submitDelete: vi.fn(() => ({ success: true, job: { id: 'job-delete', type: 'providers.deleteAccount', status: 'queued', queuedAt: 1, attempts: 0, maxAttempts: 1 } })),
     },
   });
-  return { service, writeProviderStore };
+  return { service, writeProviderStore, syncOpenClawModelsMock, removeCredentialModelsMock };
 }
 
-describe('ProviderAccountsService list（provider-store 单一显示源）', () => {
+describe('ProviderAccountsService list', () => {
   beforeEach(() => {
     removeProviderMock.mockReset();
-    setDefaultModelMock.mockReset();
-    setDefaultModelWithOverrideMock.mockReset();
     syncProviderConfigMock.mockReset();
     getProviderApiKeyMock.mockReset();
     removeProviderKeyMock.mockReset();
@@ -114,21 +108,18 @@ describe('ProviderAccountsService list（provider-store 单一显示源）', () 
     getProviderApiKeyMock.mockResolvedValue(null);
   });
 
-  it('直接返回 provider-store 的账号列表，并保持 default 排序优先', async () => {
+  it('返回 credentials/statuses/vendors，不再返回 defaultAccountId', async () => {
     const store = {
-      defaultAccountId: 'openai-main',
       accounts: {
         'openai-main': {
           id: 'openai-main',
           vendorId: 'openai',
-          isDefault: true,
           updatedAt: '2026-04-08T00:00:00.000Z',
         },
         'custom-1': {
           id: 'custom-1',
           vendorId: 'custom',
-          isDefault: false,
-          updatedAt: '2026-04-08T00:00:00.000Z',
+          updatedAt: '2026-04-09T00:00:00.000Z',
         },
       },
       apiKeys: {
@@ -140,15 +131,16 @@ describe('ProviderAccountsService list（provider-store 单一显示源）', () 
     const { service, writeProviderStore } = createServiceWithStore(store);
     const result = await service.list();
 
-    expect(result.accounts.map((item) => item.id)).toEqual(['openai-main', 'custom-1']);
-    expect(result.statuses.map((item) => item.id)).toEqual(['openai-main', 'custom-1']);
-    expect(result.defaultAccountId).toBe('openai-main');
+    expect(result.credentials.map((item) => item.id)).toEqual(['custom-1', 'openai-main']);
+    expect(result.statuses.map((item) => item.id)).toEqual(['custom-1', 'openai-main']);
+    expect(result.vendors.find((item) => item.id === 'custom')?.modelCapabilities).toEqual(['chat', 'imageUnderstand']);
+    expect(result.vendors.find((item) => item.id === 'openai')?.modelCapabilities).toContain('imageGenerate');
+    expect(result).not.toHaveProperty('defaultAccountId');
     expect(writeProviderStore).not.toHaveBeenCalled();
   });
 
-  it('清理非法账号并重新选择默认账号', async () => {
+  it('清理非法账号但不维护默认账号字段', async () => {
     const store = {
-      defaultAccountId: 'broken',
       accounts: {
         broken: { id: 'broken' },
         'openai-main': { id: 'openai-main', vendorId: 'openai', updatedAt: '2026-04-08T00:00:00.000Z' },
@@ -164,9 +156,7 @@ describe('ProviderAccountsService list（provider-store 单一显示源）', () 
     const { service, writeProviderStore } = createServiceWithStore(store);
     const result = await service.list();
 
-    expect(result.accounts.map((item) => item.id)).toEqual(['openai-main']);
-    expect(result.statuses.map((item) => item.id)).toEqual(['openai-main']);
-    expect(result.defaultAccountId).toBe('openai-main');
+    expect(result.credentials.map((item) => item.id)).toEqual(['openai-main']);
     expect(store.accounts.broken).toBeUndefined();
     expect(store.accounts.invalid).toBeUndefined();
     expect(store.apiKeys.broken).toBeUndefined();
@@ -174,9 +164,8 @@ describe('ProviderAccountsService list（provider-store 单一显示源）', () 
     expect(writeProviderStore).toHaveBeenCalledTimes(1);
   });
 
-  it('minimax 发生同 key 重复时优先保留 CN 别名账号并清理重复项', async () => {
+  it('同 runtime key 重复时只保留一条凭证', async () => {
     const store = {
-      defaultAccountId: 'minimax-portal',
       accounts: {
         'minimax-portal': {
           id: 'minimax-portal',
@@ -198,74 +187,30 @@ describe('ProviderAccountsService list（provider-store 单一显示源）', () 
     const { service, writeProviderStore } = createServiceWithStore(store);
     const result = await service.list();
 
-    expect(result.accounts).toHaveLength(1);
-    expect(result.accounts[0].id).toBe('minimax-portal-cn-uuid');
+    expect(result.credentials).toHaveLength(1);
+    expect(result.credentials[0].id).toBe('minimax-portal-cn-uuid');
     expect(store.accounts['minimax-portal']).toBeUndefined();
     expect(store.apiKeys['minimax-portal']).toBeUndefined();
-    expect(store.defaultAccountId).toBe('minimax-portal-cn-uuid');
     expect(writeProviderStore).toHaveBeenCalledTimes(1);
-  });
-
-  it('列表状态优先使用 OpenClaw auth-profiles 中的 runtime key', async () => {
-    const store = {
-      defaultAccountId: 'custom-12345678',
-      accounts: {
-        'custom-12345678': {
-          id: 'custom-12345678',
-          vendorId: 'custom',
-          updatedAt: '2026-04-08T00:00:00.000Z',
-        },
-      },
-      apiKeys: {},
-    };
-    getProviderApiKeyMock.mockResolvedValueOnce('sk-openclaw');
-
-    const { service } = createServiceWithStore(store);
-    const result = await service.list();
-
-    expect(getProviderApiKeyMock).toHaveBeenCalledWith('custom-12345678');
-    expect(result.statuses).toEqual([
-      expect.objectContaining({ id: 'custom-12345678', hasKey: true }),
-    ]);
-  });
-
-  it('hasApiKey 在本地 store 无 key 时仍应识别 OpenClaw runtime key', async () => {
-    const store = {
-      defaultAccountId: 'custom-12345678',
-      accounts: {
-        'custom-12345678': {
-          id: 'custom-12345678',
-          vendorId: 'custom',
-          updatedAt: '2026-04-08T00:00:00.000Z',
-        },
-      },
-      apiKeys: {},
-    };
-    getProviderApiKeyMock.mockResolvedValueOnce('sk-openclaw');
-
-    const { service } = createServiceWithStore(store);
-    const result = await service.hasApiKey('custom-12345678');
-
-    expect(getProviderApiKeyMock).toHaveBeenCalledWith('custom-12345678');
-    expect(result).toEqual({ hasKey: true });
   });
 });
 
-describe('ProviderAccountsService create/setDefault（写入后立即同步 openclaw）', () => {
+describe('ProviderAccountsService mutations', () => {
   beforeEach(() => {
-    setDefaultModelMock.mockReset();
-    setDefaultModelWithOverrideMock.mockReset();
     syncProviderConfigMock.mockReset();
     saveProviderKeyMock.mockReset();
+    removeProviderMock.mockReset();
+    removeProviderKeyMock.mockReset();
+    getProviderApiKeyMock.mockReset();
+    getProviderApiKeyMock.mockResolvedValue(null);
   });
 
-  it('新增第一个 custom 账号后，会同步 auth profile 与默认模型覆盖配置', async () => {
+  it('新增 custom 凭证只同步 auth profile 与 provider config', async () => {
     const store = {
-      defaultAccountId: null,
       accounts: {},
       apiKeys: {},
     };
-    const normalizedAccount = {
+    const account = {
       id: 'custom-12345678',
       vendorId: 'custom',
       label: '自定义',
@@ -273,22 +218,13 @@ describe('ProviderAccountsService create/setDefault（写入后立即同步 open
       baseUrl: 'https://api.example.com/v1',
       apiProtocol: 'openai-completions',
       headers: { 'User-Agent': 'MatchaClaw/1.0' },
-      model: 'my-model',
-      contextWindow: 200000,
-      maxTokens: 64000,
-      fallbackModels: ['backup-model'],
       enabled: true,
-      isDefault: false,
       createdAt: '2026-04-10T00:00:00.000Z',
       updatedAt: '2026-04-10T00:00:00.000Z',
     };
 
-    const { service, writeProviderStore } = createServiceWithStore(store);
-
-    const result = await service.executeCreate({
-      account: normalizedAccount,
-      apiKey: 'sk-custom',
-    });
+    const { service, writeProviderStore, syncOpenClawModelsMock } = createServiceWithStore(store);
+    const result = await service.executeCreate({ account, apiKey: 'sk-custom' });
 
     expect(result.success).toBe(true);
     expect(writeProviderStore).toHaveBeenCalledTimes(1);
@@ -299,176 +235,41 @@ describe('ProviderAccountsService create/setDefault（写入后立即同步 open
         baseUrl: 'https://api.example.com/v1',
         api: 'openai-completions',
         headers: { 'User-Agent': 'MatchaClaw/1.0' },
-        models: [
-          {
-            id: 'my-model',
-            name: 'my-model',
-            contextWindow: 200000,
-            maxTokens: 64000,
-          },
-          {
-            id: 'backup-model',
-            name: 'backup-model',
-          },
-        ],
       }),
     );
-    expect(setDefaultModelWithOverrideMock).toHaveBeenCalledWith(
-      'custom-12345678',
-      'my-model',
-      expect.objectContaining({
-        baseUrl: 'https://api.example.com/v1',
-        api: 'openai-completions',
-        headers: { 'User-Agent': 'MatchaClaw/1.0' },
-        models: [
-          {
-            id: 'my-model',
-            name: 'my-model',
-            contextWindow: 200000,
-            maxTokens: 64000,
-          },
-          {
-            id: 'backup-model',
-            name: 'backup-model',
-          },
-        ],
-      }),
-      ['custom-12345678/backup-model'],
-    );
-    expect(setDefaultModelMock).not.toHaveBeenCalled();
+    expect(syncProviderConfigMock.mock.calls[0][1]).not.toHaveProperty('models');
+    expect(syncOpenClawModelsMock).toHaveBeenCalledTimes(1);
   });
 
-  it('新增非默认 custom 账号时也会同步 runtime provider 模型配置', async () => {
+  it('新增 custom 媒体凭证以自定义 providerKey 同步中转接口契约', async () => {
     const store = {
-      defaultAccountId: 'openai-main',
-      accounts: {
-        'openai-main': {
-          id: 'openai-main',
-          vendorId: 'openai',
-          model: 'gpt-5.4',
-          updatedAt: '2026-04-09T00:00:00.000Z',
-        },
-      },
-      apiKeys: {
-        'openai-main': 'sk-openai',
-      },
+      accounts: {},
+      apiKeys: {},
     };
-    const normalizedAccount = {
-      id: 'custom-87654321',
+    const account = {
+      id: 'custom-media-openai',
       vendorId: 'custom',
-      label: 'Codex',
+      providerKind: 'media',
+      label: 'OpenAI Images',
       authMode: 'api_key',
-      baseUrl: 'https://custom.example.com/v1',
-      apiProtocol: 'openai-completions',
-      headers: { 'x-foo': 'bar' },
-      model: 'gpt-5.4',
-      fallbackModels: [],
+      baseUrl: 'https://api.openai.com/v1',
+      mediaApiProtocol: 'openai',
       enabled: true,
-      isDefault: false,
       createdAt: '2026-04-10T00:00:00.000Z',
       updatedAt: '2026-04-10T00:00:00.000Z',
     };
 
-    const { service } = createServiceWithStore(store);
-
-    const result = await service.executeCreate({
-      account: normalizedAccount,
-      apiKey: 'sk-custom',
-    });
+    const { service, syncOpenClawModelsMock } = createServiceWithStore(store);
+    const result = await service.executeCreate({ account, apiKey: 'sk-openai-media' });
 
     expect(result.success).toBe(true);
-    expect(syncProviderConfigMock).toHaveBeenCalledWith(
-      'custom-87654321',
-      expect.objectContaining({
-        baseUrl: 'https://custom.example.com/v1',
-        api: 'openai-completions',
-        headers: { 'x-foo': 'bar' },
-        models: [
-          {
-            id: 'gpt-5.4',
-            name: 'gpt-5.4',
-          },
-        ],
-      }),
-    );
-    expect(setDefaultModelMock).toHaveBeenCalledWith(
-      'openai',
-      'gpt-5.4',
-      [],
-    );
+    expect(saveProviderKeyMock).toHaveBeenCalledWith('custom-media-openai', 'sk-openai-media');
+    expect(syncProviderConfigMock).not.toHaveBeenCalled();
+    expect(syncOpenClawModelsMock).toHaveBeenCalledTimes(1);
   });
 
-  it('切换默认账号后，会重新同步默认模型到 openclaw', async () => {
+  it('删除 custom 凭证时清理 runtime key 与原账号 key', async () => {
     const store = {
-      defaultAccountId: 'openai-main',
-      accounts: {
-        'openai-main': {
-          id: 'openai-main',
-          vendorId: 'openai',
-          model: 'gpt-5.4',
-          updatedAt: '2026-04-09T00:00:00.000Z',
-        },
-        'moonshot-main': {
-          id: 'moonshot-main',
-          vendorId: 'moonshot',
-          model: 'kimi-k2.6',
-          updatedAt: '2026-04-10T00:00:00.000Z',
-        },
-      },
-      apiKeys: {
-        'openai-main': 'sk-openai',
-        'moonshot-main': 'sk-moonshot',
-      },
-    };
-    const { service } = createServiceWithStore(store);
-
-    const result = await service.executeSetDefault({ accountId: 'moonshot-main' });
-
-    expect(result.success).toBe(true);
-    expect(setDefaultModelMock).toHaveBeenCalledWith(
-      'moonshot',
-      'kimi-k2.6',
-      [],
-    );
-  });
-
-  it('切换到 Moonshot Global 默认账号后，会同步全局 provider key 而不是 CN key', async () => {
-    const store = {
-      defaultAccountId: 'moonshot-global-main',
-      accounts: {
-        'moonshot-global-main': {
-          id: 'moonshot-global-main',
-          vendorId: 'moonshot-global',
-          model: 'kimi-k2.6',
-          updatedAt: '2026-04-10T00:00:00.000Z',
-        },
-      },
-      apiKeys: {
-        'moonshot-global-main': 'sk-moonshot-global',
-      },
-    };
-    const { service } = createServiceWithStore(store);
-
-    const result = await service.executeSetDefault({ accountId: 'moonshot-global-main' });
-
-    expect(result.success).toBe(true);
-    expect(setDefaultModelMock).toHaveBeenCalledWith(
-      'moonshot-global',
-      'kimi-k2.6',
-      [],
-    );
-  });
-});
-
-describe('ProviderAccountsService delete（删除后状态清理）', () => {
-  beforeEach(() => {
-    removeProviderMock.mockReset();
-    removeProviderKeyMock.mockReset();
-  });
-
-  it('删除 custom 账号时会同时清理 runtime key 与原账号 key', async () => {
-    const store = {
-      defaultAccountId: 'moonshot-cn',
       accounts: {
         'moonshot-cn': {
           id: 'moonshot-cn',
@@ -485,15 +286,38 @@ describe('ProviderAccountsService delete（删除后状态清理）', () => {
     const result = await service.executeDelete('moonshot-cn', false);
 
     expect(result.success).toBe(true);
-    expect(removeProviderMock).toHaveBeenCalledWith('custom-moonshot');
+    expect(removeProviderMock).toHaveBeenCalledWith('custom-moonshot-cn');
     expect(removeProviderMock).toHaveBeenCalledWith('moonshot-cn');
-    expect(removeProviderMock).toHaveBeenCalledTimes(2);
     expect(writeProviderStore).toHaveBeenCalledTimes(1);
   });
 
-  it('apiKeyOnly 删除只清理 provider key，不删除账号记录', async () => {
+  it('删除 custom 媒体凭证不删除共享 OpenClaw contract provider config', async () => {
     const store = {
-      defaultAccountId: 'openai-main',
+      accounts: {
+        'custom-media-openai': {
+          id: 'custom-media-openai',
+          vendorId: 'custom',
+          providerKind: 'media',
+          mediaApiProtocol: 'openai',
+          updatedAt: '2026-04-08T00:00:00.000Z',
+        },
+      },
+      apiKeys: {
+        'custom-media-openai': 'sk-media',
+      },
+    };
+    const { service } = createServiceWithStore(store);
+
+    const result = await service.executeDelete('custom-media-openai', false);
+
+    expect(result.success).toBe(true);
+    expect(removeProviderMock).not.toHaveBeenCalled();
+    expect(store.accounts['custom-media-openai']).toBeUndefined();
+    expect(store.apiKeys['custom-media-openai']).toBeUndefined();
+  });
+
+  it('apiKeyOnly 删除只清理 provider key，不删除凭证记录', async () => {
+    const store = {
       accounts: {
         'openai-main': {
           id: 'openai-main',
@@ -517,4 +341,3 @@ describe('ProviderAccountsService delete（删除后状态清理）', () => {
     expect(store.apiKeys['openai-main']).toBeUndefined();
   });
 });
-

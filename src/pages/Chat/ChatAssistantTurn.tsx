@@ -30,6 +30,77 @@ interface ChatAssistantTurnProps {
   onOpenAttachedArtifact?: (file: AttachedFileMeta) => void;
 }
 
+type MarkdownFenceState = {
+  marker: '`' | '~';
+  length: number;
+} | null;
+
+function readFenceMarker(line: string): { marker: '`' | '~'; length: number; closingOnly: boolean } | null {
+  const match = /^(?: {0,3})(`{3,}|~{3,})(.*)$/.exec(line);
+  if (!match) {
+    return null;
+  }
+  const fence = match[1] ?? '';
+  const rest = match[2] ?? '';
+  const marker = fence[0] === '~' ? '~' : '`';
+  return {
+    marker,
+    length: fence.length,
+    closingOnly: rest.trim().length === 0,
+  };
+}
+
+function advanceMarkdownFenceState(text: string, initialState: MarkdownFenceState): MarkdownFenceState {
+  let state = initialState;
+  for (const rawLine of text.split(/\n/)) {
+    const line = rawLine.endsWith('\r') ? rawLine.slice(0, -1) : rawLine;
+    const fence = readFenceMarker(line);
+    if (!fence) {
+      continue;
+    }
+    if (state) {
+      if (fence.marker === state.marker && fence.length >= state.length && fence.closingOnly) {
+        state = null;
+      }
+      continue;
+    }
+    state = {
+      marker: fence.marker,
+      length: fence.length,
+    };
+  }
+  return state;
+}
+
+function removeLeadingFenceClose(text: string, state: MarkdownFenceState): string {
+  if (!state) {
+    return text;
+  }
+  const match = /^(?: {0,3})(`{3,}|~{3,})[ \t]*(?:\r?\n|$)/.exec(text);
+  if (!match) {
+    return text;
+  }
+  const fence = match[1] ?? '';
+  const marker = fence[0] === '~' ? '~' : '`';
+  if (marker !== state.marker || fence.length < state.length) {
+    return text;
+  }
+  return text.slice(match[0].length);
+}
+
+function buildMessageSegmentRenderTextByKey(item: ChatAssistantTurnItem): Map<string, string> {
+  const renderTextByKey = new Map<string, string>();
+  let fenceState: MarkdownFenceState = null;
+  for (const segment of item.segments) {
+    if (segment.kind !== 'message') {
+      continue;
+    }
+    renderTextByKey.set(segment.key, removeLeadingFenceClose(segment.text, fenceState));
+    fenceState = advanceMarkdownFenceState(segment.text, fenceState);
+  }
+  return renderTextByKey;
+}
+
 export const ChatAssistantTurn = memo(function ChatAssistantTurn({
   item,
   showThinking,
@@ -51,6 +122,8 @@ export const ChatAssistantTurn = memo(function ChatAssistantTurn({
       summarizeAssistantTurnForTodoToolDebug(item),
     );
   }, [item]);
+
+  const messageRenderTextByKey = useMemo(() => buildMessageSegmentRenderTextByKey(item), [item]);
 
   const hasContentSegments = item.segments.some((segment) => {
     if (segment.kind === 'thinking') {
@@ -183,7 +256,7 @@ export const ChatAssistantTurn = memo(function ChatAssistantTurn({
               key={segment.key}
               itemKey={`${item.key}:segment:${segment.key}`}
               createdAt={item.createdAt}
-              text={segment.text}
+              text={messageRenderTextByKey.get(segment.key) ?? segment.text}
               isStreaming={isStreaming}
               onBodyClick={requestCollapse}
             />

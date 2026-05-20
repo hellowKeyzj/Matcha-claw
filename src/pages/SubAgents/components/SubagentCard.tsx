@@ -2,6 +2,7 @@ import { AgentAvatar } from '@/components/common/AgentAvatar';
 import { Button } from '@/components/ui/button';
 import type { SubagentSummary } from '@/types/subagent';
 import { useTranslation } from 'react-i18next';
+import { Download } from 'lucide-react';
 
 interface SubagentCardProps {
   agent: SubagentSummary;
@@ -12,6 +13,7 @@ interface SubagentCardProps {
   modelReady?: boolean;
   onEdit: () => void;
   onDelete: () => void;
+  onExport: () => void;
   onManage: () => void;
   onChat: () => void;
 }
@@ -25,6 +27,7 @@ export function SubagentCard({
   modelReady = true,
   onEdit,
   onDelete,
+  onExport,
   onManage,
   onChat,
 }: SubagentCardProps) {
@@ -33,25 +36,37 @@ export function SubagentCard({
 
   return (
     <article className="rounded-lg border bg-card p-4 text-card-foreground shadow-sm">
-      <div className="flex items-start gap-3">
-        <AgentAvatar
-          avatarSeed={agent.avatarSeed}
-          avatarStyle={agent.avatarStyle}
-          agentId={agent.id}
-          agentName={agent.name}
-          className="mt-0.5 h-8 w-8"
-          dataTestId={`agent-avatar-${agent.id}`}
-        />
-        <div className="space-y-1">
-          <div className="flex items-center gap-2">
-            <h2 className="text-base font-semibold">{agent.name ?? agent.id}</h2>
-            {agent.isDefault && (
-              <span className="text-xs font-medium text-primary">{t('card.default')}</span>
-            )}
+      <div className="flex items-start justify-between gap-3">
+        <div className="flex min-w-0 items-start gap-3">
+          <AgentAvatar
+            avatarSeed={agent.avatarSeed}
+            avatarStyle={agent.avatarStyle}
+            agentId={agent.id}
+            agentName={agent.name}
+            className="mt-0.5 h-8 w-8 shrink-0"
+            dataTestId={`agent-avatar-${agent.id}`}
+          />
+          <div className="min-w-0 space-y-1">
+            <div className="flex items-center gap-2">
+              <h2 className="truncate text-base font-semibold">{agent.name ?? agent.id}</h2>
+              {agent.isDefault && (
+                <span className="shrink-0 text-xs font-medium text-primary">{t('card.default')}</span>
+              )}
+            </div>
+            <p className="truncate text-xs text-muted-foreground">{agent.id}</p>
+            <p className="truncate text-sm">{modelLabel ?? t('card.modelFallback')}</p>
           </div>
-          <p className="text-xs text-muted-foreground">{agent.id}</p>
-          <p className="text-sm">{modelLabel ?? t('card.modelFallback')}</p>
         </div>
+        <Button
+          size="icon"
+          variant="outline"
+          className="h-8 w-8 shrink-0"
+          aria-label={`Export ${agent.id}`}
+          title={t('card.actions.export')}
+          onClick={onExport}
+        >
+          <Download className="h-4 w-4" />
+        </Button>
       </div>
 
       <div className="mt-4 flex flex-wrap gap-2">

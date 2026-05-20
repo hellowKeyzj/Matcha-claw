@@ -89,11 +89,6 @@
     "baseUrl": "Базовый URL",
     "modelId": "ID модели",
     "modelIdDesc": "Идентификатор модели от вашего провайдера (напр. deepseek-ai/DeepSeek-V3)",
-    "codePlanPreset": "Пресет Code Plan",
-    "codePlanMode": "Code Plan",
-    "useCodePlanPreset": "Использовать пресет Ark Code Plan",
-    "codePlanPresetDesc": "Code Plan использует https://ark.cn-beijing.volces.com/api/coding/v3 и модель ark-code-latest. Не используйте /api/v3 для трафика Code Plan.",
-    "codePlanDoc": "Документация Code Plan",
     "protocol": "Протокол",
     "protocols": {
       "openaiCompletions": "OpenAI Completions",

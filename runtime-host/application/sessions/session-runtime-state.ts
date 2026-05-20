@@ -30,7 +30,6 @@ export class SessionRuntimeStateStore {
   private readonly parentSessionsByChildSessionKey = new Map<string, Set<string>>();
   private readonly resolvedSessionModels = new Map<string, string>();
   private readonly blockedRunIdsBySessionKey = new Map<string, Set<string>>();
-  private readonly verboseConfiguredSessionKeys = new Set<string>();
   private readonly persistedStoreReady: Promise<void>;
   private activeSessionKey: string | null = null;
   private latestConnectedTransportEpoch = 0;
@@ -87,7 +86,6 @@ export class SessionRuntimeStateStore {
     }
     this.resolvedSessionModels.delete(sessionKey);
     this.blockedRunIdsBySessionKey.delete(sessionKey);
-    this.verboseConfiguredSessionKeys.delete(sessionKey);
     this.clearActiveSessionKey(sessionKey);
   }
 
@@ -110,14 +108,6 @@ export class SessionRuntimeStateStore {
 
   getResolvedSessionModel(sessionKey: string): string | null {
     return this.resolvedSessionModels.get(sessionKey) ?? null;
-  }
-
-  hasVerboseConfigured(sessionKey: string): boolean {
-    return this.verboseConfiguredSessionKeys.has(sessionKey);
-  }
-
-  markVerboseConfigured(sessionKey: string): void {
-    this.verboseConfiguredSessionKeys.add(sessionKey);
   }
 
   blockRun(sessionKey: string, runId: string | null | undefined): void {

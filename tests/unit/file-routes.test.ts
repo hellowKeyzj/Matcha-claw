@@ -1,4 +1,4 @@
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -73,6 +73,21 @@ describe('file routes', () => {
       content: '# Hello\nworld\n',
       mimeType: 'text/markdown',
     }));
+  });
+
+  it('writes text files through runtime-host file service', async () => {
+    const filePath = join(tempHome, 'exports', 'agent.matchaclaw-agent.json');
+
+    const result = await fileService.writeText({
+      path: filePath,
+      content: '{"schema":"matchaclaw.agent-config"}\n',
+    });
+
+    expect(result).toEqual({
+      ok: true,
+      path: filePath,
+    });
+    await expect(readFile(filePath, 'utf8')).resolves.toBe('{"schema":"matchaclaw.agent-config"}\n');
   });
 
   it('returns binary error for NUL-containing text preview reads', async () => {

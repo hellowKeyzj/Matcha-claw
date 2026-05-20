@@ -18,6 +18,7 @@ type SkillMock = {
   name: string;
   description: string;
   enabled: boolean;
+  installed: boolean;
   eligible?: boolean;
   icon?: string;
   filePath?: string;
@@ -50,6 +51,7 @@ describe('chat skill preview', () => {
         name: 'Create Skill',
         description: 'Create and refine reusable skills.',
         enabled: true,
+        installed: true,
         eligible: true,
         icon: '🧩',
         filePath: '/tmp/workspace/skills/create-skill/SKILL.md',

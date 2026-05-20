@@ -9,6 +9,7 @@ interface FileRouteDeps {
 
 interface FileRouteService {
   readText(payload: unknown): Promise<unknown>;
+  writeText(payload: unknown): Promise<unknown>;
   readBinary(payload: unknown): Promise<unknown>;
   stat(payload: unknown): Promise<unknown>;
   listDir(payload: unknown): Promise<unknown>;
@@ -19,6 +20,7 @@ interface FileRouteService {
 
 export const fileRoutes: readonly RuntimeRouteDefinition<FileRouteDeps>[] = [
   { method: 'POST', path: '/api/files/read-text', handle: (context, deps) => routeResponder.value(() => deps.fileService.readText(context.payload)) },
+  { method: 'POST', path: '/api/files/write-text', handle: (context, deps) => routeResponder.value(() => deps.fileService.writeText(context.payload)) },
   { method: 'POST', path: '/api/files/read-binary', handle: (context, deps) => routeResponder.value(() => deps.fileService.readBinary(context.payload)) },
   { method: 'POST', path: '/api/files/stat', handle: (context, deps) => routeResponder.value(() => deps.fileService.stat(context.payload)) },
   { method: 'POST', path: '/api/files/list-dir', handle: (context, deps) => routeResponder.value(() => deps.fileService.listDir(context.payload)) },

@@ -1,6 +1,7 @@
 import type {
   SessionRunPhase,
   SessionRuntimeStateSnapshot,
+  SessionTimelineAssistantTurnEntry,
   SessionTimelineEntry,
   TaskSnapshotEvent,
 } from '../../shared/session-adapter-types';
@@ -15,6 +16,7 @@ import {
 } from './assistant-turn-assembler';
 import {
   applyToolStatusUpdate,
+  applyTranscriptToolResultUpdates,
   findTimelineEntryIndex,
   mergeTimelineEntries,
   upsertTimelineEntry,
@@ -158,8 +160,6 @@ export class SessionTimelineRuntime {
       await this.ensureSessionHydrated(sessionKey, state);
       return;
     }
-    // 实时 tool 事件已经携带完整 result（verboseLevel='full'），
-    // 不再需要在 final 时从 transcript 文件回填 tool output。
     const closureSignal = collectPendingRunClosureSignal(state.renderItems, state.runtime);
     if (
       isRunActive(state.runtime)
@@ -178,6 +178,27 @@ export class SessionTimelineRuntime {
       : clampWindowState(state.window, state.renderItems.length);
     this.deps.executionGraphRuntime.refreshParents(sessionKey);
     this.deps.stateStore.persistStore();
+  }
+
+  async reconcileTranscriptToolResults(
+    sessionKey: string,
+  ): Promise<SessionTimelineAssistantTurnEntry[]> {
+    const state = this.getSessionState(sessionKey);
+    const replay = await this.deps.transcriptLoader.readTimelineReplay(sessionKey);
+    const result = applyTranscriptToolResultUpdates(state.timelineEntries, replay.timelineEntries);
+    if (result.updatedEntries.length === 0) {
+      return [];
+    }
+    state.timelineEntries = result.entries;
+    this.deps.executionGraphRuntime.rebuildFromTimeline(sessionKey, state);
+    this.deps.executionGraphRuntime.refreshRenderItems(state);
+    state.window = state.window.isAtLatest
+      ? createLatestWindowState(state.renderItems.length)
+      : clampWindowState(state.window, state.renderItems.length);
+    this.deps.executionGraphRuntime.refreshParents(sessionKey);
+    this.touchSessionStateMeta(state);
+    this.deps.stateStore.persistStore();
+    return result.updatedEntries;
   }
 
   async activateSession(
@@ -400,7 +421,6 @@ export class SessionTimelineRuntime {
           advanceRunEpoch: !isRunActive(this.getSessionState(sessionKey).runtime),
         }).runtime;
       case 'final':
-        await this.reconcileSessionTranscript(sessionKey);
         this.closeMissingToolResultsForRun(sessionKey, input.runId);
         return this.commitSessionTransition(sessionKey, {
           runtimePatch: this.buildTerminalRuntimePatch('done', null, null),
@@ -408,7 +428,6 @@ export class SessionTimelineRuntime {
           advanceRunEpoch: true,
         }).runtime;
       case 'error':
-        await this.reconcileSessionTranscript(sessionKey);
         this.closeMissingToolResultsForRun(sessionKey, input.runId);
         return this.commitSessionTransition(sessionKey, {
           runtimePatch: this.buildTerminalRuntimePatch('error', input.error ?? null, input.transportIssue ?? null),
@@ -417,7 +436,6 @@ export class SessionTimelineRuntime {
         }).runtime;
       case 'aborted':
         this.deps.stateStore.blockRun(sessionKey, input.runId);
-        await this.reconcileSessionTranscript(sessionKey);
         this.closeMissingToolResultsForRun(sessionKey, input.runId);
         return this.commitSessionTransition(sessionKey, {
           runtimePatch: this.buildTerminalRuntimePatch('aborted', input.error ?? null, input.transportIssue ?? null),

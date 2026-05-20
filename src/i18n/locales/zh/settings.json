@@ -38,8 +38,7 @@
       "local": "本地"
     },
     "sections": {
-      "model": "模型配置",
-      "fallback": "回退配置"
+      "credentials": "凭证配置"
     },
     "add": "添加提供商",
     "status": {
@@ -66,25 +65,9 @@
       "replaceApiKeyHelp": "如果想保留当前已保存的 API key，这里留空即可。",
       "baseUrl": "基础 URL",
       "protocol": "协议",
-      "modelId": "模型 ID",
-      "contextWindow": "上下文窗口",
-      "maxTokens": "最大输出 Token",
-      "codePlanPreset": "Code Plan 预设",
-      "codePlanMode": "Code Plan",
-      "useCodePlanPreset": "使用 Ark Code Plan 预设",
-      "codePlanPresetDesc": "Code Plan 使用 https://ark.cn-beijing.volces.com/api/coding/v3 与模型 ark-code-latest。请勿把 /api/v3 用于 Code Plan 流量。",
-      "codePlanDoc": "Code Plan 文档",
-      "fallbackModels": "回退模型",
-      "fallbackProviders": "跨 Provider 回退",
-      "expandFallback": "展开回退配置",
-      "collapseFallback": "收起回退配置",
-      "fallbackSummaryEmpty": "还没有配置回退",
-      "fallbackSummaryCount_one": "已配置 1 个回退项",
-      "fallbackSummaryCount_other": "已配置 {{count}} 个回退项",
-      "fallbackModelIds": "同 Provider 回退模型 ID",
-      "fallbackModelIdsPlaceholder": "gpt-4.1-mini\nanother-model-id",
-      "fallbackModelIdsHelp": "每行一个模型 ID。会先使用当前 provider 的这些模型，再回退到其他 provider。",
-      "noFallbackOptions": "请先添加其他 provider，才能把它设为回退目标。",
+      "chatProvider": "聊天提供商",
+      "mediaProvider": "媒体提供商",
+      "mediaContract": "接口契约",
       "cancel": "取消",
       "change": "更换提供商",
       "add": "添加提供商",
@@ -100,13 +83,9 @@
       "anthropic": "Anthropic 兼容"
     },
     "card": {
-      "default": "默认",
       "configured": "已配置",
       "noKey": "未设置 API 密钥",
       "none": "无",
-      "fallbacks_one": "回退：{{names}}",
-      "fallbacks_other": "回退（{{count}} 个）：{{names}}",
-      "setDefault": "设为默认",
       "editKey": "编辑 API 密钥",
       "delete": "删除提供商"
     },
@@ -115,12 +94,9 @@
       "failedAdd": "添加提供商失败",
       "deleted": "提供商已删除",
       "failedDelete": "删除提供商失败",
-      "defaultUpdated": "默认提供商已更新",
-      "failedDefault": "设置默认失败",
       "updated": "提供商已更新",
       "failedUpdate": "更新提供商失败",
       "invalidKey": "无效的 API 密钥",
-      "modelRequired": "需要模型 ID",
       "minimaxConflict": "不能同时添加 MiniMax 国际站和国内站的服务商。"
     },
     "oauth": {
@@ -367,5 +343,126 @@
     "installTitle": "安装 OpenClaw 命令",
     "installMessage": "安装 \"openclaw\" 命令？",
     "installDetail": "这将创建 ~/.local/bin/openclaw。确保 ~/.local/bin 在您的 PATH 中。"
+  },
+  "capabilityRouting": {
+    "title": "模型分配",
+    "description": "为聊天、图像、视频、音乐、TTS 各自指定使用哪个 credential/model。",
+    "refresh": "刷新",
+    "save": "保存",
+    "clear": "清空",
+    "primaryLabel": "主模型 (credential/model)",
+    "noModelOption": "未选择模型",
+    "noRegisteredModels": "暂无模型",
+    "fallbacksLabel": "回退模型",
+    "fallbackSelectPlaceholder": "选择回退",
+    "addFallback": "添加回退",
+    "moveFallbackUp": "上移回退模型",
+    "moveFallbackDown": "下移回退模型",
+    "removeFallback": "删除回退模型",
+    "fallbacksHelp": "主模型不可用时按顺序尝试。",
+    "timeoutLabel": "超时（毫秒，可选）",
+    "timeoutHelp": "媒体生成模型的请求超时，单次调用 timeoutMs 仍可覆盖。",
+    "advanced": {
+      "expand": "高级",
+      "collapse": "收起"
+    },
+    "errors": {
+      "invalidPrimary": "主模型必须是 credential/model 形式，例如 openai/gpt-image-2",
+      "invalidTimeout": "超时必须是大于 0 的整数毫秒",
+      "invalidProviderKey": "providerKey 仅允许字母、数字、点、下划线、连字符"
+    },
+    "capabilities": {
+      "chat": {
+        "title": "聊天主模型",
+        "description": "对应 agents.defaults.model",
+        "placeholder": "openai/gpt-5.5"
+      },
+      "imageUnderstand": {
+        "title": "图像理解",
+        "description": "对应 agents.defaults.imageModel；主模型不接受图片时使用",
+        "placeholder": "google/gemini-3.1-flash"
+      },
+      "imageGenerate": {
+        "title": "图像生成",
+        "description": "对应 agents.defaults.imageGenerationModel；image_generate 工具读取",
+        "placeholder": "openai/gpt-image-2"
+      },
+      "videoGenerate": {
+        "title": "视频生成",
+        "description": "对应 agents.defaults.videoGenerationModel；video_generate 工具读取",
+        "placeholder": "qwen/wan2.6-t2v"
+      },
+      "musicGenerate": {
+        "title": "音乐生成",
+        "description": "对应 agents.defaults.musicGenerationModel；music_generate 工具读取",
+        "placeholder": "minimax/music-2.6"
+      }
+    },
+    "tts": {
+      "title": "语音合成 (TTS)",
+      "description": "对应 messages.tts.provider；声音/音色等高级配置仍需手工编辑 openclaw.json。",
+      "providerLabel": "TTS Provider Key"
+    }
+  },
+  "providerModels": {
+    "title": "模型清单",
+    "description": "管理每个凭证下登记的模型 ID。运行时适配器会把它们写入 openclaw.json 的 models.providers.<providerKey>.models[]。",
+    "refresh": "刷新",
+    "empty": "暂无模型",
+    "codePlan": {
+      "title": "Ark Code Plan",
+      "description": "将 ark-code-latest 添加到 ark 模型清单。Ark API Key 和 coding Base URL 仍在 provider 卡片中配置。",
+      "add": "添加 ark-code-latest",
+      "added": "已添加"
+    },
+    "create": {
+      "title": "添加新的凭证模型",
+      "help": "模型只能添加到已有 Provider 凭证下面。",
+      "add": "创建"
+    },
+    "actions": {
+      "add": "添加模型",
+      "save": "保存"
+    },
+    "group": {
+      "subtitle_one": "当前 1 个模型",
+      "subtitle_other": "当前 {{count}} 个模型",
+      "vendor": "提供商类型：{{vendor}}",
+      "empty": "暂无模型"
+    },
+    "row": {
+      "modelIdLabel": "模型 ID",
+      "capabilitiesLabel": "能力",
+      "contextWindowLabel": "上下文窗口",
+      "maxTokensLabel": "最大输出 Token",
+      "timeoutMsLabel": "超时 ms",
+      "aspectRatioLabel": "比例",
+      "resolutionLabel": "清晰度",
+      "qualityLabel": "画质",
+      "defaultOption": "默认",
+      "remove": "删除"
+    },
+    "qualities": {
+      "low": "低",
+      "medium": "中",
+      "high": "高",
+      "auto": "自动"
+    },
+    "capabilities": {
+      "chat": "聊天",
+      "imageUnderstand": "图像理解",
+      "imageGenerate": "图像生成",
+      "videoGenerate": "视频",
+      "musicGenerate": "音乐",
+      "tts": "TTS",
+      "transcribe": "转录"
+    },
+    "errors": {
+      "invalidEntry": "模型项 \"{{id}}\" 无效：context/maxTokens/timeoutMs 必须为正整数",
+      "duplicate": "模型 ID \"{{id}}\" 重复",
+      "emptyKey": "credentialId 不能为空",
+      "duplicateKey": "该 credentialId 已存在",
+      "invalidKey": "credentialId 仅允许字母、数字、点、下划线、连字符"
+    }
   }
 }

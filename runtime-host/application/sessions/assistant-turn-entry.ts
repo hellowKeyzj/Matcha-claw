@@ -37,6 +37,7 @@ import {
 import {
   extractToolResultOutputText,
 } from './tool/tool-card-content';
+import { extractToolResultMediaAttachments } from './tool-result-media';
 import type { ContentBlockLike } from './transcript-types';
 
 export interface AssistantTurnEntryIdentity {
@@ -131,6 +132,92 @@ function buildMediaSegment(input: {
   };
 }
 
+function buildToolResultMediaSegmentKey(
+  identity: Pick<AssistantTurnEntryIdentity, 'turnKey' | 'laneKey'>,
+  toolCallId: string,
+): string {
+  return `media:${identity.turnKey}:${identity.laneKey}:tool:${toolCallId}`;
+}
+
+function mergeAttachedFiles(
+  existingFiles: ReadonlyArray<SessionRenderAttachedFile>,
+  incomingFiles: ReadonlyArray<SessionRenderAttachedFile>,
+): SessionRenderAttachedFile[] {
+  const merged = existingFiles.map((file) => ({ ...file }));
+  for (const file of incomingFiles) {
+    const exists = merged.some((candidate) => (
+      candidate.fileName === file.fileName
+      && candidate.mimeType === file.mimeType
+      && candidate.fileSize === file.fileSize
+      && (candidate.preview ?? null) === (file.preview ?? null)
+      && (candidate.filePath ?? null) === (file.filePath ?? null)
+      && (candidate.gatewayUrl ?? null) === (file.gatewayUrl ?? null)
+      && (candidate.source ?? null) === (file.source ?? null)
+    ));
+    if (!exists) {
+      merged.push({ ...file });
+    }
+  }
+  return merged;
+}
+
+function upsertToolResultMediaSegment(
+  segments: SessionAssistantTurnSegment[],
+  identity: Pick<AssistantTurnEntryIdentity, 'turnKey' | 'laneKey'>,
+  toolCallId: string,
+  attachedFiles: ReadonlyArray<SessionRenderAttachedFile>,
+): void {
+  if (attachedFiles.length === 0) {
+    return;
+  }
+  const key = buildToolResultMediaSegmentKey(identity, toolCallId);
+  const existingIndex = segments.findIndex((segment) => segment.kind === 'media' && segment.key === key);
+  if (existingIndex >= 0) {
+    const existing = segments[existingIndex] as SessionAssistantMediaSegment;
+    segments[existingIndex] = {
+      ...existing,
+      attachedFiles: mergeAttachedFiles(existing.attachedFiles, attachedFiles),
+    };
+    return;
+  }
+  const segment = buildMediaSegment({
+    key,
+    images: [],
+    attachedFiles,
+  });
+  if (!segment) {
+    return;
+  }
+  const toolIndex = segments.findIndex((candidate) => (
+    candidate.kind === 'tool'
+    && (candidate.tool.toolCallId === toolCallId || candidate.tool.id === toolCallId)
+  ));
+  if (toolIndex >= 0) {
+    segments.splice(toolIndex + 1, 0, segment);
+    return;
+  }
+  segments.push(segment);
+}
+
+function closeTerminalToolSegment(segment: SessionAssistantTurnSegment): SessionAssistantTurnSegment {
+  if (segment.kind !== 'tool') {
+    return segment;
+  }
+  if (segment.tool.status !== 'running') {
+    return segment;
+  }
+  if (segment.tool.result.kind !== 'none' || segment.tool.output !== undefined) {
+    return segment;
+  }
+  return {
+    ...segment,
+    tool: {
+      ...segment.tool,
+      status: 'missing_result',
+    },
+  };
+}
+
 function countSegmentsOfKind(
   segments: ReadonlyArray<SessionAssistantTurnSegment>,
   kind: SessionAssistantTurnSegment['kind'],
@@ -208,7 +295,7 @@ export function buildSegmentsFromChatContent(input: {
         input.isStreaming,
       );
     } else {
-      // Tail is a tool or thinking or empty → append new message segment
+      // Tail is a tool or thinking or empty -> append new message segment
       const slot = countSegmentsOfKind(segments, 'message');
       const segment = buildMessageSegment(
         buildSegmentKey(input.identity, 'message', slot),
@@ -364,6 +451,17 @@ function buildSegmentsFromTranscriptContent(input: {
         } else {
           segments.push(nextToolSegment);
         }
+        if (isResult) {
+          upsertToolResultMediaSegment(
+            segments,
+            input.identity,
+            toolCallId || nextToolSegment.tool.id,
+            extractToolResultMediaAttachments({
+              output: resultPayload,
+              outputText: extractToolResultOutputText(resultPayload),
+            }),
+          );
+        }
       }
     }
   }
@@ -376,7 +474,7 @@ function buildSegmentsFromTranscriptContent(input: {
     if (segment) segments.push(segment);
   }
 
-  if (!emittedInlineMedia && input.attachedFiles.length > 0) {
+  if (input.attachedFiles.length > 0) {
     const segment = buildMediaSegment({
       key: buildSegmentKey(input.identity, 'media', slots.media),
       images: [],
@@ -418,6 +516,15 @@ function buildSegmentsFromTranscriptContent(input: {
           ...(output !== undefined ? { output: structuredClone(output) } : (target.tool.output !== undefined ? { output: target.tool.output } : {})),
         },
       };
+      upsertToolResultMediaSegment(
+        segments,
+        input.identity,
+        target.tool.toolCallId ?? target.tool.id,
+        extractToolResultMediaAttachments({
+          output: output ?? target.tool.output,
+          outputText: extractToolResultOutputText(output ?? target.tool.output),
+        }),
+      );
     }
   }
 
@@ -464,6 +571,10 @@ export function applyToolStatusToSegments(
     output: update.output,
     outputText: update.outputText,
   });
+  const mediaFiles = extractToolResultMediaAttachments({
+    output: update.output,
+    outputText: update.outputText,
+  });
 
   if (index < 0) {
     // New tool → append at tail (incremental arrival)
@@ -483,6 +594,7 @@ export function applyToolStatusToSegments(
         ...(update.output !== undefined ? { output: structuredClone(update.output) } : {}),
       },
     });
+    upsertToolResultMediaSegment(next, identity, update.toolCallId, mediaFiles);
     return next;
   }
 
@@ -506,6 +618,7 @@ export function applyToolStatusToSegments(
         : (target.tool.output !== undefined ? { output: target.tool.output } : {})),
     },
   };
+  upsertToolResultMediaSegment(next, identity, update.toolCallId, mediaFiles);
   return next;
 }
 
@@ -519,6 +632,9 @@ export function buildAssistantTurnEntry(input: {
   isStreaming: boolean;
 }): SessionTimelineAssistantTurnEntry {
   const id = input.identity;
+  const segments = input.status === 'final' || input.status === 'error'
+    ? input.segments.map(closeTerminalToolSegment)
+    : input.segments;
   return {
     key: buildAssistantTurnEntryKey(id.sessionKey, id.laneKey, id.turnKey),
     kind: 'assistant-turn',
@@ -540,7 +656,7 @@ export function buildAssistantTurnEntry(input: {
     ...(id.messageId ? { messageId: id.messageId } : {}),
     ...(id.originMessageId ? { originMessageId: id.originMessageId } : {}),
     ...(id.clientId ? { clientId: id.clientId } : {}),
-    segments: input.segments,
+    segments,
     isStreaming: input.isStreaming,
   };
 }

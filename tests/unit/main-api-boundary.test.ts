@@ -18,6 +18,7 @@ describe('main api boundary', () => {
     expect(isMainOwnedRoute('/api/app/browser-relay-info')).toBe(true);
     expect(isMainOwnedRoute('/api/runtime-host/restart')).toBe(true);
     expect(isMainOwnedRoute('/api/files/save-image')).toBe(true);
+    expect(isMainOwnedRoute('/api/files/write-text')).toBe(true);
     expect(isMainOwnedRoute('/api/files/read-text')).toBe(false);
     expect(isMainOwnedRoute('/api/plugins/runtime')).toBe(false);
     expect(isMainOwnedRoute('/api/plugins/runtime/enabled-plugins')).toBe(false);

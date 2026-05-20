@@ -1,9 +1,8 @@
 /**
  * Provider Types & UI Metadata — single source of truth for the frontend.
  *
- * NOTE: Backend provider metadata is being refactored toward the new
- * account-based registry, but the renderer still keeps a local compatibility
- * layer so TypeScript project boundaries remain stable during the migration.
+ * Credentials, model catalog entries, and capability routing are separate data
+ * surfaces. Provider metadata only describes vendors and authentication.
  */
 
 export const PROVIDER_TYPES = [
@@ -46,14 +45,11 @@ export interface ProviderConfig {
   id: string;
   name: string;
   type: ProviderType;
+  providerKind?: ProviderCredentialKind;
   baseUrl?: string;
   apiProtocol?: 'openai-completions' | 'openai-responses' | 'anthropic-messages';
+  mediaApiProtocol?: CustomMediaApiProtocol;
   headers?: Record<string, string>;
-  model?: string;
-  contextWindow?: number;
-  maxTokens?: number;
-  fallbackModels?: string[];
-  fallbackProviderIds?: string[];
   enabled: boolean;
   createdAt: string;
   updatedAt: string;
@@ -70,21 +66,15 @@ export interface ProviderTypeInfo {
   icon: string;
   placeholder: string;
   model?: string;
+  modelCapabilities?: ModelCapability[];
   requiresApiKey: boolean;
   defaultBaseUrl?: string;
   showBaseUrl?: boolean;
-  showModelId?: boolean;
-  showModelIdInDevModeOnly?: boolean;
-  modelIdPlaceholder?: string;
-  defaultModelId?: string;
   isOAuth?: boolean;
   supportsApiKey?: boolean;
   apiKeyUrl?: string;
   docsUrl?: string;
   docsUrlZh?: string;
-  codePlanPresetBaseUrl?: string;
-  codePlanPresetModelId?: string;
-  codePlanDocsUrl?: string;
 }
 
 export type ProviderAuthMode =
@@ -99,6 +89,20 @@ export type ProviderVendorCategory =
   | 'local'
   | 'custom';
 
+export type ProviderCredentialKind = 'chat' | 'media';
+
+export type CustomMediaCapability =
+  | 'imageGenerate'
+  | 'videoGenerate'
+  | 'musicGenerate'
+  | 'tts'
+  | 'transcribe';
+
+export type CustomMediaApiProtocol =
+  | 'openai'
+  | 'google'
+  | 'openrouter';
+
 export interface ProviderVendorInfo extends ProviderTypeInfo {
   category: ProviderVendorCategory;
   envVar?: string;
@@ -107,21 +111,17 @@ export interface ProviderVendorInfo extends ProviderTypeInfo {
   supportsMultipleAccounts: boolean;
 }
 
-export interface ProviderAccount {
+export interface ProviderCredential {
   id: string;
   vendorId: ProviderType;
+  providerKind?: ProviderCredentialKind;
   label: string;
   authMode: ProviderAuthMode;
   baseUrl?: string;
   apiProtocol?: 'openai-completions' | 'openai-responses' | 'anthropic-messages';
+  mediaApiProtocol?: CustomMediaApiProtocol;
   headers?: Record<string, string>;
-  model?: string;
-  contextWindow?: number;
-  maxTokens?: number;
-  fallbackModels?: string[];
-  fallbackAccountIds?: string[];
   enabled: boolean;
-  isDefault: boolean;
   metadata?: {
     region?: string;
     email?: string;
@@ -131,6 +131,15 @@ export interface ProviderAccount {
   createdAt: string;
   updatedAt: string;
 }
+
+export type ModelCapability =
+  | 'chat'
+  | 'imageUnderstand'
+  | 'imageGenerate'
+  | 'videoGenerate'
+  | 'musicGenerate'
+  | 'tts'
+  | 'transcribe';
 
 import { providerIcons } from '@/assets/providers';
 
@@ -154,10 +163,6 @@ export const PROVIDER_TYPE_INFO: ProviderTypeInfo[] = [
     requiresApiKey: true,
     isOAuth: true,
     supportsApiKey: true,
-    showModelId: true,
-    showModelIdInDevModeOnly: true,
-    modelIdPlaceholder: 'gpt-5.4',
-    defaultModelId: 'gpt-5.4',
     apiKeyUrl: 'https://platform.openai.com/api-keys',
   },
   {
@@ -169,13 +174,9 @@ export const PROVIDER_TYPE_INFO: ProviderTypeInfo[] = [
     requiresApiKey: true,
     isOAuth: true,
     supportsApiKey: true,
-    showModelId: true,
-    showModelIdInDevModeOnly: true,
-    modelIdPlaceholder: 'gemini-3-pro-preview',
-    defaultModelId: 'gemini-3-pro-preview',
     apiKeyUrl: 'https://aistudio.google.com/app/apikey',
   },
-  { id: 'openrouter', name: 'OpenRouter', icon: '🌐', placeholder: 'sk-or-v1-...', model: 'Multi-Model', requiresApiKey: true, showModelId: true, modelIdPlaceholder: 'openai/gpt-5.4', defaultModelId: 'openai/gpt-5.4', docsUrl: 'https://openrouter.ai/models' },
+  { id: 'openrouter', name: 'OpenRouter', icon: '🌐', placeholder: 'sk-or-v1-...', model: 'Multi-Model', requiresApiKey: true, docsUrl: 'https://openrouter.ai/models' },
   {
     id: 'ark',
     name: 'ByteDance Ark',
@@ -185,21 +186,16 @@ export const PROVIDER_TYPE_INFO: ProviderTypeInfo[] = [
     requiresApiKey: true,
     defaultBaseUrl: 'https://ark.cn-beijing.volces.com/api/v3',
     showBaseUrl: true,
-    showModelId: true,
-    modelIdPlaceholder: 'ep-20260228000000-xxxxx',
     docsUrl: 'https://www.volcengine.com/',
-    codePlanPresetBaseUrl: 'https://ark.cn-beijing.volces.com/api/coding/v3',
-    codePlanPresetModelId: 'ark-code-latest',
-    codePlanDocsUrl: 'https://www.volcengine.com/docs/82379/1928261?lang=zh',
   },
-  { id: 'moonshot', name: 'Moonshot (CN)', icon: '🌙', placeholder: 'sk-...', model: 'Kimi', requiresApiKey: true, defaultBaseUrl: 'https://api.moonshot.cn/v1', defaultModelId: 'kimi-k2.6', docsUrl: 'https://platform.moonshot.cn/' },
-  { id: 'moonshot-global', name: 'Moonshot (Global)', icon: '🌙', placeholder: 'sk-...', model: 'Kimi', requiresApiKey: true, defaultBaseUrl: 'https://api.moonshot.ai/v1', defaultModelId: 'kimi-k2.6', docsUrl: 'https://platform.moonshot.ai/' },
-  { id: 'siliconflow', name: 'SiliconFlow (CN)', icon: '🌊', placeholder: 'sk-...', model: 'Multi-Model', requiresApiKey: true, defaultBaseUrl: 'https://api.siliconflow.cn/v1', showModelId: true, modelIdPlaceholder: 'deepseek-ai/DeepSeek-V3', defaultModelId: 'deepseek-ai/DeepSeek-V3', docsUrl: 'https://docs.siliconflow.cn/cn/userguide/introduction' },
-  { id: 'deepseek', name: 'DeepSeek', icon: '🐋', placeholder: 'sk-...', model: 'DeepSeek', requiresApiKey: true, defaultBaseUrl: 'https://api.deepseek.com/v1', showModelId: true, showModelIdInDevModeOnly: true, modelIdPlaceholder: 'deepseek-v4-pro', defaultModelId: 'deepseek-v4-pro', apiKeyUrl: 'https://platform.deepseek.com/api_keys', docsUrl: 'https://api-docs.deepseek.com/', docsUrlZh: 'https://api-docs.deepseek.com/zh-cn/' },
-  { id: 'minimax-portal', name: 'MiniMax (Global)', icon: '☁️', placeholder: 'sk-...', model: 'MiniMax', requiresApiKey: false, isOAuth: true, supportsApiKey: true, showModelId: true, showModelIdInDevModeOnly: true, modelIdPlaceholder: 'MiniMax-M2.7', defaultModelId: 'MiniMax-M2.7', apiKeyUrl: 'https://platform.minimax.io' },
-  { id: 'minimax-portal-cn', name: 'MiniMax (CN)', icon: '☁️', placeholder: 'sk-...', model: 'MiniMax', requiresApiKey: false, isOAuth: true, supportsApiKey: true, showModelId: true, showModelIdInDevModeOnly: true, modelIdPlaceholder: 'MiniMax-M2.7', defaultModelId: 'MiniMax-M2.7', apiKeyUrl: 'https://platform.minimaxi.com/' },
-  { id: 'qwen-portal', name: 'Qwen (Global)', icon: '☁️', placeholder: 'sk-...', model: 'Qwen', requiresApiKey: false, isOAuth: true, showModelId: true, showModelIdInDevModeOnly: true, modelIdPlaceholder: 'coder-model', defaultModelId: 'coder-model' },
-  { id: 'ollama', name: 'Ollama', icon: '🦙', placeholder: 'Not required', requiresApiKey: false, defaultBaseUrl: 'http://localhost:11434/v1', showBaseUrl: true, showModelId: true, modelIdPlaceholder: 'qwen3:latest' },
+  { id: 'moonshot', name: 'Moonshot (CN)', icon: '🌙', placeholder: 'sk-...', model: 'Kimi', requiresApiKey: true, defaultBaseUrl: 'https://api.moonshot.cn/v1', docsUrl: 'https://platform.moonshot.cn/' },
+  { id: 'moonshot-global', name: 'Moonshot (Global)', icon: '🌙', placeholder: 'sk-...', model: 'Kimi', requiresApiKey: true, defaultBaseUrl: 'https://api.moonshot.ai/v1', docsUrl: 'https://platform.moonshot.ai/' },
+  { id: 'siliconflow', name: 'SiliconFlow (CN)', icon: '🌊', placeholder: 'sk-...', model: 'Multi-Model', requiresApiKey: true, defaultBaseUrl: 'https://api.siliconflow.cn/v1', docsUrl: 'https://docs.siliconflow.cn/cn/userguide/introduction' },
+  { id: 'deepseek', name: 'DeepSeek', icon: '🐋', placeholder: 'sk-...', model: 'DeepSeek', requiresApiKey: true, defaultBaseUrl: 'https://api.deepseek.com/v1', apiKeyUrl: 'https://platform.deepseek.com/api_keys', docsUrl: 'https://api-docs.deepseek.com/', docsUrlZh: 'https://api-docs.deepseek.com/zh-cn/' },
+  { id: 'minimax-portal', name: 'MiniMax (Global)', icon: '☁️', placeholder: 'sk-...', model: 'MiniMax', requiresApiKey: false, isOAuth: true, supportsApiKey: true, apiKeyUrl: 'https://platform.minimax.io' },
+  { id: 'minimax-portal-cn', name: 'MiniMax (CN)', icon: '☁️', placeholder: 'sk-...', model: 'MiniMax', requiresApiKey: false, isOAuth: true, supportsApiKey: true, apiKeyUrl: 'https://platform.minimaxi.com/' },
+  { id: 'qwen-portal', name: 'Qwen (Global)', icon: '☁️', placeholder: 'sk-...', model: 'Qwen', requiresApiKey: false, isOAuth: true },
+  { id: 'ollama', name: 'Ollama', icon: '🦙', placeholder: 'Not required', requiresApiKey: false, defaultBaseUrl: 'http://localhost:11434/v1', showBaseUrl: true },
   {
     id: 'custom',
     name: 'Custom',
@@ -207,8 +203,6 @@ export const PROVIDER_TYPE_INFO: ProviderTypeInfo[] = [
     placeholder: 'API key...',
     requiresApiKey: true,
     showBaseUrl: true,
-    showModelId: true,
-    modelIdPlaceholder: 'your-provider/model-id',
     docsUrl: 'https://icnnp7d0dymg.feishu.cn/wiki/BmiLwGBcEiloZDkdYnGc8RWnn6d#Ee1ldfvKJoVGvfxc32mcILwenth',
     docsUrlZh: 'https://icnnp7d0dymg.feishu.cn/wiki/BmiLwGBcEiloZDkdYnGc8RWnn6d#IWQCdfe5fobGU3xf3UGcgbLynGh',
   },
@@ -243,28 +237,6 @@ export function getProviderDocsUrl(
     return provider.docsUrlZh;
   }
   return provider.docsUrl;
-}
-
-export function shouldShowProviderModelId(
-  provider: Pick<ProviderTypeInfo, 'showModelId' | 'showModelIdInDevModeOnly'> | undefined,
-  devModeUnlocked: boolean
-): boolean {
-  if (!provider?.showModelId) return false;
-  if (provider.showModelIdInDevModeOnly && !devModeUnlocked) return false;
-  return true;
-}
-
-export function resolveProviderModelForSave(
-  provider: Pick<ProviderTypeInfo, 'defaultModelId' | 'showModelId' | 'showModelIdInDevModeOnly'> | undefined,
-  modelId: string,
-  devModeUnlocked: boolean
-): string | undefined {
-  if (!shouldShowProviderModelId(provider, devModeUnlocked)) {
-    return undefined;
-  }
-
-  const trimmedModelId = modelId.trim();
-  return trimmedModelId || provider?.defaultModelId || undefined;
 }
 
 export function normalizeProviderApiKeyInput(apiKey: string): string {

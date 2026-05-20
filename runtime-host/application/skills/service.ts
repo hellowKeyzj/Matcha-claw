@@ -1,9 +1,10 @@
-import { basename, dirname, extname, join } from 'node:path';
+import { basename, dirname, extname, isAbsolute, join, normalize, relative, sep } from 'node:path';
 import type { GatewayRpcPort } from '../gateway/gateway-runtime-port';
-import { isGatewayReadyForSnapshot, isGatewayStartupConnectionError } from '../gateway/gateway-readiness';
+import { isGatewayReadyForSnapshot, isGatewayStartupConnectionError, type GatewayReadinessPort } from '../gateway/gateway-readiness';
 import {
   accepted,
   badRequest,
+  ok,
   serverError,
   type ApplicationResponse,
 } from '../common/application-response';
@@ -20,16 +21,16 @@ import type { OpenClawEnvironmentRepository } from '../openclaw/openclaw-environ
 import type { RuntimeHostLogger } from '../../shared/logger';
 
 interface SkillsServiceDeps {
-  repository: Pick<SkillsConfigRepository, 'getAllConfigs' | 'updateConfig' | 'setEnabled' | 'listEffective'>;
+  repository: Pick<SkillsConfigRepository, 'getAllConfigs' | 'updateConfig' | 'setEnabled' | 'setManyEnabled' | 'listEffective'>;
   readmePreviews: Pick<SkillReadmePreviewRepository, 'read'>;
-  gateway: GatewayRpcPort;
+  gateway: GatewayRpcPort & GatewayReadinessPort;
   jobs: SkillsJobPort;
   clock: RuntimeClockPort;
   fileSystem: RuntimeFileSystemPort;
   commandExecutor: RuntimeCommandExecutorPort;
   systemEnvironment: RuntimeSystemEnvironmentPort;
   workspace: Pick<OpenClawWorkspacePort, 'getSkillsDir'>;
-  environment: Pick<OpenClawEnvironmentRepository, 'getResourcesPath' | 'getWorkingDir'>;
+  environment: Pick<OpenClawEnvironmentRepository, 'getResourcesPath' | 'getWorkingDir' | 'getOpenClawDirPath'>;
   logger: RuntimeHostLogger;
 }
 
@@ -43,7 +44,12 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 }
 
+function normalizeOptionalString(value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim() ? value.trim() : undefined;
+}
+
 const SKILL_MANIFEST_FILE = 'SKILL.md';
+const BUILTIN_VISIBLE_SKILLS_MANIFEST_NAME = 'builtin-visible-skills.json';
 const PREINSTALLED_MANIFEST_NAME = 'preinstalled-manifest.json';
 const PREINSTALLED_MARKER_NAME = '.matchaclaw-preinstalled.json';
 const FRONTMATTER_PATTERN = /^---\s*\r?\n([\s\S]*?)\r?\n---\s*(?:\r?\n|$)/;
@@ -65,11 +71,32 @@ interface LocalSkillImportResult {
   sourceKind: SkillSourceKind;
 }
 
+interface SkillBundleFile {
+  path: string;
+  content: string;
+}
+
+interface SkillBundle {
+  skillKey: string;
+  files: SkillBundleFile[];
+}
+
 interface PreinstalledMarker {
   source: 'matchaclaw-preinstalled';
   slug: string;
   version: string;
   installedAt: string;
+}
+
+interface SkillInventoryEntry {
+  skillKey: string;
+  name: string;
+  description: string;
+  version?: string;
+  source: string;
+  baseDir: string;
+  filePath: string;
+  bundled: boolean;
 }
 
 export class SkillsService {
@@ -90,6 +117,251 @@ export class SkillsService {
     };
   }
 
+  private readBooleanConfig(configs: Record<string, unknown>, skillKey: string): boolean | undefined {
+    const entry = isRecord(configs[skillKey]) ? configs[skillKey] : null;
+    return typeof entry?.enabled === 'boolean' ? entry.enabled : undefined;
+  }
+
+  private readOptionalConfig(configs: Record<string, unknown>, skillKey: string): Record<string, unknown> | undefined {
+    const entry = isRecord(configs[skillKey]) ? configs[skillKey] : null;
+    if (!entry) {
+      return undefined;
+    }
+    const config: Record<string, unknown> = {};
+    if (typeof entry.apiKey === 'string') {
+      config.apiKey = entry.apiKey;
+    }
+    if (isRecord(entry.env)) {
+      config.env = entry.env;
+    }
+    return Object.keys(config).length > 0 ? config : undefined;
+  }
+
+  private resolveDisabled(configEnabled: boolean | undefined, gatewayDisabled: unknown): boolean {
+    if (typeof configEnabled === 'boolean') {
+      return !configEnabled;
+    }
+    return gatewayDisabled === true;
+  }
+
+  private async readSkillInventoryEntry(
+    rootDir: string,
+    skillKey: string,
+    input: { source: string; bundled: boolean },
+  ): Promise<SkillInventoryEntry | null> {
+    const baseDir = join(rootDir, skillKey);
+    const filePath = join(baseDir, SKILL_MANIFEST_FILE);
+    if (!(await this.deps.fileSystem.exists(filePath))) {
+      return null;
+    }
+
+    let name = skillKey;
+    let description = '';
+    try {
+      const markdown = await this.deps.fileSystem.readTextFile(filePath);
+      const frontmatter = markdown.match(FRONTMATTER_PATTERN)?.[1] ?? '';
+      const markdownFields = this.parseMarkdownSkillFields(markdown);
+      name = this.parseFrontmatterField(frontmatter, 'name') ?? markdownFields.name ?? name;
+      description = this.parseFrontmatterField(frontmatter, 'description') ?? markdownFields.description ?? description;
+    } catch (error) {
+      this.deps.logger.warn(`Failed to read skill manifest: ${filePath}: ${String(error)}`);
+    }
+
+    return {
+      skillKey,
+      name,
+      description,
+      source: input.source,
+      baseDir,
+      filePath,
+      bundled: input.bundled,
+    };
+  }
+
+  private async listSkillInventoryRoot(
+    rootDir: string,
+    input: { source: string; bundled: boolean },
+  ): Promise<SkillInventoryEntry[]> {
+    if (!(await this.deps.fileSystem.exists(rootDir))) {
+      return [];
+    }
+    const entries = await this.deps.fileSystem.listDirectory(rootDir);
+    const skills: SkillInventoryEntry[] = [];
+    for (const entry of entries) {
+      if (!entry.isDirectory) {
+        continue;
+      }
+      const skill = await this.readSkillInventoryEntry(rootDir, entry.name, input);
+      if (skill) {
+        skills.push(skill);
+      }
+    }
+    return skills;
+  }
+
+  private async listInstalledSkillInventory(): Promise<SkillInventoryEntry[]> {
+    const inventory = new Map<string, SkillInventoryEntry>();
+
+    for (const entry of await this.listConfiguredBuiltinSkillInventory()) {
+      inventory.set(entry.skillKey, entry);
+    }
+
+    for (const entry of await this.listSkillInventoryRoot(this.deps.workspace.getSkillsDir(), {
+      source: 'openclaw-managed',
+      bundled: false,
+    })) {
+      inventory.set(entry.skillKey, {
+        ...inventory.get(entry.skillKey),
+        ...entry,
+      });
+    }
+
+    return [...inventory.values()];
+  }
+
+  private getBuiltinVisibleSkillsManifestCandidates(): string[] {
+    const resourcesPath = this.deps.environment.getResourcesPath();
+    return [
+      resourcesPath ? join(resourcesPath, 'resources', 'skills', BUILTIN_VISIBLE_SKILLS_MANIFEST_NAME) : '',
+      resourcesPath ? join(resourcesPath, 'skills', BUILTIN_VISIBLE_SKILLS_MANIFEST_NAME) : '',
+      join(this.deps.environment.getWorkingDir(), 'resources', 'skills', BUILTIN_VISIBLE_SKILLS_MANIFEST_NAME),
+    ].filter((item) => item.trim().length > 0);
+  }
+
+  private getBuiltinSkillRootCandidates(): string[] {
+    const resourcesPath = this.deps.environment.getResourcesPath();
+    return [...new Set([
+      join(this.deps.environment.getOpenClawDirPath(), 'skills'),
+      join(this.deps.environment.getWorkingDir(), 'build', 'openclaw', 'skills'),
+      resourcesPath ? join(resourcesPath, 'openclaw', 'skills') : '',
+      resourcesPath ? join(resourcesPath, 'app.asar.unpacked', 'openclaw', 'skills') : '',
+      resourcesPath ? join(resourcesPath, 'app.asar.unpacked', 'build', 'openclaw', 'skills') : '',
+    ].filter((item) => item.trim().length > 0))];
+  }
+
+  private async readVisibleBuiltinSkillKeys(): Promise<string[]> {
+    const manifestPath = await this.firstExistingPath(this.getBuiltinVisibleSkillsManifestCandidates());
+    if (!manifestPath) {
+      return [];
+    }
+    try {
+      const parsed = JSON.parse(await this.deps.fileSystem.readTextFile(manifestPath));
+      const skills = isRecord(parsed) && Array.isArray(parsed.skills) ? parsed.skills : [];
+      return [...new Set(skills
+        .map((item) => typeof item === 'string' ? item.trim() : '')
+        .filter(Boolean))];
+    } catch (error) {
+      this.deps.logger.warn(`Failed to read builtin visible skills manifest: ${String(error)}`);
+      return [];
+    }
+  }
+
+  private async listConfiguredBuiltinSkillInventory(): Promise<SkillInventoryEntry[]> {
+    const skillKeys = await this.readVisibleBuiltinSkillKeys();
+    if (skillKeys.length === 0) {
+      return [];
+    }
+
+    const rootDirs = this.getBuiltinSkillRootCandidates();
+    const skills: SkillInventoryEntry[] = [];
+    for (const skillKey of skillKeys) {
+      let skill: SkillInventoryEntry | null = null;
+      for (const rootDir of rootDirs) {
+        skill = await this.readSkillInventoryEntry(rootDir, skillKey, {
+          source: 'openclaw-bundled',
+          bundled: true,
+        });
+        if (skill) {
+          break;
+        }
+      }
+      if (!skill) {
+        this.deps.logger.warn(`Configured builtin skill missing SKILL.md, skipping: ${skillKey}`);
+        continue;
+      }
+      skills.push(skill);
+    }
+    return skills;
+  }
+
+  private normalizeGatewayStatusSkills(statusSnapshot: unknown): Record<string, Record<string, unknown>> {
+    if (!isRecord(statusSnapshot) || !Array.isArray(statusSnapshot.skills)) {
+      return {};
+    }
+    const result: Record<string, Record<string, unknown>> = {};
+    for (const item of statusSnapshot.skills) {
+      if (!isRecord(item) || typeof item.skillKey !== 'string' || !item.skillKey.trim()) {
+        continue;
+      }
+      result[item.skillKey] = item;
+    }
+    return result;
+  }
+
+  private isDisplayableInstalledSkill(skill: Record<string, unknown>): boolean {
+    if (skill.installed !== true) {
+      return false;
+    }
+    if (skill.blockedByAllowlist === true) {
+      return false;
+    }
+    return true;
+  }
+
+  private async buildInstalledStatusSnapshot(statusSnapshot: unknown): Promise<Record<string, unknown>> {
+    const configs = await this.deps.repository.getAllConfigs();
+    const gatewaySkills = this.normalizeGatewayStatusSkills(statusSnapshot);
+    const bySkillKey = new Map<string, Record<string, unknown>>();
+
+    for (const inventoryEntry of await this.listInstalledSkillInventory()) {
+      const enabled = this.readBooleanConfig(configs, inventoryEntry.skillKey);
+      const config = this.readOptionalConfig(configs, inventoryEntry.skillKey);
+      bySkillKey.set(inventoryEntry.skillKey, {
+        skillKey: inventoryEntry.skillKey,
+        name: inventoryEntry.name,
+        description: inventoryEntry.description,
+        installed: true,
+        eligible: true,
+        disabled: this.resolveDisabled(enabled, undefined),
+        bundled: inventoryEntry.bundled,
+        always: false,
+        source: inventoryEntry.source,
+        baseDir: inventoryEntry.baseDir,
+        filePath: inventoryEntry.filePath,
+        ...(inventoryEntry.version ? { version: inventoryEntry.version } : {}),
+        ...(config ? { config } : {}),
+      });
+    }
+
+    for (const gatewaySkill of Object.values(gatewaySkills)) {
+      const skillKey = String(gatewaySkill.skillKey);
+      const existing = bySkillKey.get(skillKey);
+      const enabled = this.readBooleanConfig(configs, skillKey);
+      const config = this.readOptionalConfig(configs, skillKey);
+      bySkillKey.set(skillKey, {
+        ...existing,
+        ...gatewaySkill,
+        name: normalizeOptionalString(gatewaySkill.name) ?? normalizeOptionalString(existing?.name) ?? skillKey,
+        description: normalizeOptionalString(gatewaySkill.description) ?? normalizeOptionalString(existing?.description) ?? '',
+        installed: existing?.installed === true,
+        eligible: typeof gatewaySkill.eligible === 'boolean'
+          ? gatewaySkill.eligible
+          : existing?.eligible,
+        disabled: this.resolveDisabled(enabled, gatewaySkill.disabled),
+        ...(config ? { config: { ...(isRecord(gatewaySkill.config) ? gatewaySkill.config : {}), ...config } } : {}),
+      });
+    }
+
+    return {
+      ...(isRecord(statusSnapshot) ? statusSnapshot : {}),
+      skills: [...bySkillKey.values()].filter((skill) => this.isDisplayableInstalledSkill(skill)).sort((left, right) => {
+        const leftName = typeof left.name === 'string' && left.name.trim() ? left.name : String(left.skillKey ?? '');
+        const rightName = typeof right.name === 'string' && right.name.trim() ? right.name : String(right.skillKey ?? '');
+        return leftName.localeCompare(rightName, 'en');
+      }),
+    };
+  }
+
   async status() {
     if (await isGatewayReadyForSnapshot(this.deps.gateway)) {
       this.deps.jobs.submitRefreshStatus();
@@ -102,7 +374,8 @@ export class SkillsService {
       return this.buildStatusPayload();
     }
     try {
-      this.statusSnapshot = await this.deps.gateway.gatewayRpc('skills.status');
+      const gatewayStatus = await this.deps.gateway.gatewayRpc('skills.status');
+      this.statusSnapshot = await this.buildInstalledStatusSnapshot(gatewayStatus);
       this.statusSnapshotReady = true;
       this.statusSnapshotError = null;
       this.statusSnapshotUpdatedAt = this.deps.clock.nowMs();
@@ -160,6 +433,57 @@ export class SkillsService {
     return match[1].trim().replace(/^["']|["']$/g, '') || null;
   }
 
+  private parseMarkdownSkillFields(markdown: string): { name?: string; description?: string } {
+    const body = markdown.replace(FRONTMATTER_PATTERN, '').trim();
+    if (!body) {
+      return {};
+    }
+
+    const lines = body.split(/\r?\n/);
+    const headingIndex = lines.findIndex((line) => /^#\s+/.test(line.trim()));
+    const name = headingIndex >= 0
+      ? this.normalizeMarkdownText(lines[headingIndex].trim().replace(/^#\s+/, ''))
+      : undefined;
+
+    const descriptionLines: string[] = [];
+    let inFence = false;
+    for (let index = headingIndex >= 0 ? headingIndex + 1 : 0; index < lines.length; index += 1) {
+      const line = lines[index].trim();
+      if (line.startsWith('```')) {
+        inFence = !inFence;
+        continue;
+      }
+      if (inFence || /^#{1,6}\s+/.test(line)) {
+        if (descriptionLines.length > 0) {
+          break;
+        }
+        continue;
+      }
+      if (!line) {
+        if (descriptionLines.length > 0) {
+          break;
+        }
+        continue;
+      }
+      descriptionLines.push(line);
+    }
+
+    const description = this.normalizeMarkdownText(descriptionLines.join(' '));
+    return {
+      ...(name ? { name } : {}),
+      ...(description ? { description } : {}),
+    };
+  }
+
+  private normalizeMarkdownText(value: string): string {
+    return value
+      .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
+      .replace(/[`*_~]/g, '')
+      .replace(/<[^>]+>/g, '')
+      .replace(/\s+/g, ' ')
+      .trim();
+  }
+
   private readRequiredSkillManifestFrontmatter(markdown: string): { name: string; description: string } {
     const frontmatterMatch = markdown.match(FRONTMATTER_PATTERN);
     if (!frontmatterMatch) {
@@ -195,6 +519,74 @@ export class SkillsService {
         await this.deps.fileSystem.copyFile(sourcePath, targetPath);
       }
     }
+  }
+
+  private normalizeBundleFilePath(input: unknown): string | null {
+    const value = normalizeOptionalString(input);
+    if (!value || isAbsolute(value)) {
+      return null;
+    }
+    const normalized = normalize(value).replace(/\\/g, '/');
+    if (
+      normalized === '.'
+      || normalized.startsWith('../')
+      || normalized === '..'
+      || normalized.includes(`${sep}..${sep}`)
+    ) {
+      return null;
+    }
+    return normalized;
+  }
+
+  private async collectTextFiles(rootDir: string): Promise<SkillBundleFile[]> {
+    const files: SkillBundleFile[] = [];
+    const visit = async (currentDir: string): Promise<void> => {
+      const entries = await this.deps.fileSystem.listDirectory(currentDir);
+      for (const entry of entries) {
+        const entryPath = join(currentDir, entry.name);
+        if (entry.isDirectory) {
+          await visit(entryPath);
+          continue;
+        }
+        if (!entry.isFile) {
+          continue;
+        }
+        const filePath = relative(rootDir, entryPath).replace(/\\/g, '/');
+        files.push({
+          path: filePath,
+          content: await this.deps.fileSystem.readTextFile(entryPath),
+        });
+      }
+    };
+    await visit(rootDir);
+    return files.sort((left, right) => left.path.localeCompare(right.path));
+  }
+
+  private normalizeSkillBundles(input: unknown): SkillBundle[] {
+    if (!Array.isArray(input)) {
+      return [];
+    }
+    const bundles: SkillBundle[] = [];
+    for (const item of input) {
+      if (!isRecord(item)) {
+        continue;
+      }
+      const skillKey = normalizeOptionalString(item.skillKey);
+      if (!skillKey || !Array.isArray(item.files)) {
+        continue;
+      }
+      const files = item.files.flatMap((file): SkillBundleFile[] => {
+        if (!isRecord(file) || typeof file.content !== 'string') {
+          return [];
+        }
+        const filePath = this.normalizeBundleFilePath(file.path);
+        return filePath ? [{ path: filePath, content: file.content }] : [];
+      });
+      if (files.length > 0) {
+        bundles.push({ skillKey: this.normalizeSkillKey(skillKey), files });
+      }
+    }
+    return bundles;
   }
 
   private async collectSkillManifestDirs(rootDir: string): Promise<string[]> {
@@ -357,6 +749,80 @@ export class SkillsService {
     }
   }
 
+  async exportBundles(payload: unknown): Promise<SkillBundle[]> {
+    const body = isRecord(payload) ? payload : {};
+    const requestedSkillKeys = Array.isArray(body.skillKeys)
+      ? body.skillKeys.map(normalizeOptionalString).filter((value): value is string => Boolean(value))
+      : [];
+    const bundles: SkillBundle[] = [];
+    const skillsRoot = this.deps.workspace.getSkillsDir();
+    for (const requestedSkillKey of Array.from(new Set(requestedSkillKeys))) {
+      const skillKey = this.normalizeSkillKey(requestedSkillKey);
+      const skillDir = join(skillsRoot, skillKey);
+      if (!(await this.deps.fileSystem.exists(join(skillDir, SKILL_MANIFEST_FILE)))) {
+        continue;
+      }
+      bundles.push({
+        skillKey,
+        files: await this.collectTextFiles(skillDir),
+      });
+    }
+    return bundles;
+  }
+
+  async importBundles(payload: unknown): Promise<ApplicationResponse> {
+    const body = isRecord(payload) ? payload : {};
+    const bundles = this.normalizeSkillBundles(body.skillBundles);
+    if (bundles.length === 0) {
+      return ok({ ok: true, installed: [] });
+    }
+
+    try {
+      const skillsRoot = this.deps.workspace.getSkillsDir();
+      await this.deps.fileSystem.ensureDirectory(skillsRoot);
+      const installed: string[] = [];
+      const skipped: string[] = [];
+      for (const bundle of bundles) {
+        if (!bundle.files.some((file) => file.path === SKILL_MANIFEST_FILE)) {
+          throw new Error(`Skill "${bundle.skillKey}" is missing SKILL.md`);
+        }
+        const skillDir = join(skillsRoot, bundle.skillKey);
+        if (await this.deps.fileSystem.exists(skillDir)) {
+          if (!(await this.deps.fileSystem.exists(join(skillDir, SKILL_MANIFEST_FILE)))) {
+            throw new Error(`技能 "${bundle.skillKey}" 已存在但缺少 SKILL.md，请先删除旧目录后再导入。`);
+          }
+          const stateResult = await this.deps.repository.setEnabled(bundle.skillKey, true);
+          if (!stateResult.success) {
+            throw new Error(stateResult.error || `Failed to enable skill "${bundle.skillKey}"`);
+          }
+          this.deps.jobs.submitGatewayUpdate({ skillKey: bundle.skillKey, updates: { enabled: true } });
+          skipped.push(bundle.skillKey);
+          continue;
+        }
+        for (const file of bundle.files) {
+          const targetPath = join(skillDir, file.path);
+          await this.deps.fileSystem.ensureDirectory(dirname(targetPath));
+          await this.deps.fileSystem.writeTextFile(targetPath, file.content);
+        }
+        await this.validateSkillManifest(skillDir);
+        const stateResult = await this.deps.repository.setEnabled(bundle.skillKey, true);
+        if (!stateResult.success) {
+          throw new Error(stateResult.error || `Failed to enable skill "${bundle.skillKey}"`);
+        }
+        this.deps.jobs.submitGatewayUpdate({ skillKey: bundle.skillKey, updates: { enabled: true } });
+        installed.push(bundle.skillKey);
+      }
+      this.deps.jobs.submitRefreshStatus();
+      return ok({
+        ok: true,
+        installed,
+        ...(skipped.length > 0 ? { skipped } : {}),
+      });
+    } catch (error) {
+      return serverError(error instanceof Error ? error.message : String(error));
+    }
+  }
+
   private getPreinstalledManifestCandidates(): string[] {
     const resourcesPath = this.deps.environment.getResourcesPath();
     return [
@@ -469,7 +935,7 @@ export class SkillsService {
     }
 
     const lockVersions = await this.readPreinstalledLockVersions(sourceRoot);
-    const currentConfigs = await this.configs();
+    const currentConfigs = await this.deps.repository.getAllConfigs();
     const targetRoot = this.deps.workspace.getSkillsDir();
     await this.deps.fileSystem.ensureDirectory(targetRoot);
     const installed: string[] = [];
@@ -544,10 +1010,6 @@ export class SkillsService {
     return accepted(this.deps.jobs.submitGatewayUpdate({ skillKey, updates }));
   }
 
-  async configs() {
-    return await this.deps.repository.getAllConfigs();
-  }
-
   async updateConfig(payload: unknown) {
     const body = isRecord(payload) ? payload : {};
     const skillKey = typeof body.skillKey === 'string' ? body.skillKey : '';
@@ -583,6 +1045,38 @@ export class SkillsService {
       { enabled: body.enabled },
       async () => await this.deps.repository.setEnabled(skillKey, Boolean(body.enabled)),
     );
+  }
+
+  async updateBatchState(payload: unknown) {
+    const body = isRecord(payload) ? payload : {};
+    if (!Array.isArray(body.skillKeys)) {
+      return badRequest('skillKeys is required');
+    }
+    const skillKeys = [...new Set(body.skillKeys
+      .map((skillKey) => typeof skillKey === 'string' ? skillKey.trim() : '')
+      .filter(Boolean))];
+    if (skillKeys.length === 0) {
+      return badRequest('skillKeys is required');
+    }
+    if (typeof body.enabled !== 'boolean') {
+      return badRequest('enabled must be a boolean');
+    }
+
+    const localResult = await this.deps.repository.setManyEnabled(skillKeys, body.enabled);
+    if (localResult.success !== true) {
+      return serverError(localResult.error || 'Failed to persist local skills config');
+    }
+    try {
+      await this.refreshStatus();
+    } catch (error) {
+      this.deps.logger.warn(`Failed to refresh skills after batch state update: ${String(error)}`);
+    }
+
+    return ok({
+      success: true,
+      updated: skillKeys,
+      enabled: body.enabled,
+    });
   }
 
   async effective() {

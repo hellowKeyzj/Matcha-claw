@@ -1012,33 +1012,6 @@ describe('runtime-host process manager', () => {
     try {
       await manager.start();
 
-      const getResponse = await fetch(`http://127.0.0.1:${port}/dispatch`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          version: 1,
-          method: 'GET',
-          route: '/api/skills/configs',
-        }),
-      });
-      const getPayload = await getResponse.json() as {
-        success: boolean;
-        status: number;
-        data?: Record<string, { apiKey?: string; env?: Record<string, string> }>;
-      };
-
-      expect(getResponse.status).toBe(200);
-      expect(getPayload).toMatchObject({
-        success: true,
-        status: 200,
-        data: {
-          'skill.alpha': {
-            apiKey: 'old-key',
-            env: { REGION: 'cn' },
-          },
-        },
-      });
-
       const updateResponse = await fetch(`http://127.0.0.1:${port}/dispatch`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -1623,7 +1596,6 @@ describe('runtime-host process manager', () => {
               label: 'OpenAI Main',
               authMode: 'api_key',
               enabled: true,
-              isDefault: false,
               createdAt: '2026-01-01T00:00:00.000Z',
               updatedAt: '2026-01-01T00:00:00.000Z',
             },
@@ -1659,20 +1631,18 @@ describe('runtime-host process manager', () => {
         success: boolean;
         status: number;
         data?: {
-          accounts?: Array<{ id?: string }>;
+          credentials?: Array<{ id?: string }>;
           statuses?: Array<{ id?: string; hasKey?: boolean }>;
           vendors?: Array<{ id?: string }>;
-          defaultAccountId?: string;
         };
       };
       expect(listResponse.status).toBe(200);
-      expect(listPayload.data?.accounts?.[0]?.id).toBe('openai-main');
+      expect(listPayload.data?.credentials?.[0]?.id).toBe('openai-main');
       expect(listPayload.data?.statuses?.[0]).toMatchObject({
         id: 'openai-main',
         hasKey: true,
       });
       expect(listPayload.data?.vendors?.some((vendor) => vendor.id === 'openai')).toBe(true);
-      expect(listPayload.data?.defaultAccountId).toBe('openai-main');
 
       const keyResponse = await fetch(`http://127.0.0.1:${port}/dispatch`, {
         method: 'POST',

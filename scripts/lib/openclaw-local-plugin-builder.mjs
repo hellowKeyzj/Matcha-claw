@@ -30,6 +30,12 @@ const BUILD_TARGETS = [
     preserveDirStructure: true,
     runtimeFiles: ['package.json', 'openclaw.plugin.json', 'dist', 'models', 'skills'],
   },
+  {
+    pluginId: 'matchaclaw-media',
+    packageDir: 'packages/openclaw-matchaclaw-media-plugin',
+    compileDirs: ['src'],
+    runtimeFiles: ['package.json', 'openclaw.plugin.json', 'dist'],
+  },
 ]
 
 function replaceJsonImportSpecifiers(source) {

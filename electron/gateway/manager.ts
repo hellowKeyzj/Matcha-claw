@@ -34,6 +34,8 @@ import {
 import { runGatewayStartupSequence } from './startup-orchestrator';
 import type { RuntimeHostManager } from '../main/runtime-host-manager';
 
+const MANAGED_GATEWAY_CONTROL_READY_TIMEOUT_MS = 30000;
+
 export interface GatewayStatus {
   processState: GatewayLifecycleState;
   port: number;
@@ -176,7 +178,7 @@ export class GatewayManager extends EventEmitter {
             throw new Error('Gateway control ready probe is not configured');
           }
           try {
-            await this.controlReadyProbe(10000, port, externalToken);
+            await this.controlReadyProbe(MANAGED_GATEWAY_CONTROL_READY_TIMEOUT_MS, port, externalToken);
           } catch (error) {
             const reason = error instanceof Error ? error.message : String(error);
             throw new Error(`Gateway control ready check failed: ${reason}`);

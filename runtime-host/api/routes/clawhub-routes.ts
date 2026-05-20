@@ -14,7 +14,6 @@ interface ClawHubRouteService {
   login(): Promise<unknown>;
   install(body: Record<string, unknown>): unknown;
   uninstall(body: Record<string, unknown>): unknown;
-  list(): Promise<unknown>;
   openReadme(skillKeyOrSlug: string, slug?: string, baseDir?: string): Promise<unknown>;
   openPath(skillKeyOrSlug: string, slug?: string, baseDir?: string): Promise<unknown>;
 }
@@ -45,14 +44,6 @@ export const clawHubRoutes: readonly RuntimeRouteDefinition<ClawHubRouteDeps>[] 
   { method: 'POST', path: '/api/clawhub/auth/login', handle: (_context, deps) => routeResponder.value(() => deps.clawHubService.login()) },
   { method: 'POST', path: '/api/clawhub/install', handle: (context, deps) => accepted(deps.clawHubService.install(readRecord(context.payload))) },
   { method: 'POST', path: '/api/clawhub/uninstall', handle: (context, deps) => accepted(deps.clawHubService.uninstall(readRecord(context.payload))) },
-  {
-    method: 'GET',
-    path: '/api/clawhub/list',
-    handle: async (_context, deps) => routeResponder.ok({
-      success: true,
-      results: await deps.clawHubService.list(),
-    }),
-  },
   {
     method: 'POST',
     path: '/api/clawhub/open-readme',

@@ -30,6 +30,7 @@ type GatewaySkillStatus = {
   eligible?: boolean;
   blockedByAllowlist?: boolean;
   missing?: GatewaySkillMissing;
+  installed?: boolean;
   source?: string;
   baseDir?: string;
   filePath?: string;
@@ -47,13 +48,6 @@ type MarketplaceSearchResult = {
   success: boolean;
   results?: MarketplaceSkill[];
   error?: string;
-};
-
-type ClawHubListResult = {
-  slug: string;
-  version?: string;
-  source?: string;
-  baseDir?: string;
 };
 
 const MARKETPLACE_SEARCH_CACHE_TTL_MS = 2500;
@@ -174,6 +168,7 @@ interface SkillsState {
   uninstallSkill: (slug: string) => Promise<void>;
   enableSkill: (skillId: string) => Promise<void>;
   disableSkill: (skillId: string) => Promise<void>;
+  batchSetSkillsEnabled: (skillIds: string[], enabled: boolean) => Promise<void>;
   setSkills: (skills: Skill[]) => void;
   updateSkill: (skillId: string, updates: Partial<Skill>) => void;
 }
@@ -234,15 +229,7 @@ export const useSkillsStore = create<SkillsState>((set, get) => ({
         const gatewayPromise = fresh
           ? hostApiFetch<GatewaySkillsStatusResult>('/api/skills/status/refresh', { method: 'POST' })
           : hostApiFetch<GatewaySkillsStatusResult>('/api/skills/status');
-        const configPromise = hostApiFetch<Record<string, { apiKey?: string; env?: Record<string, string> }>>('/api/skills/configs');
-        const clawhubListPromise = hostApiFetch<{ success: boolean; results?: ClawHubListResult[] }>('/api/clawhub/list')
-          .catch(() => ({ success: false, results: [] }));
-
-        const [gatewayData, configResult, clawhubResult] = await Promise.all([
-          gatewayPromise,
-          configPromise,
-          clawhubListPromise,
-        ]);
+        const gatewayData = await gatewayPromise;
 
         let combinedSkills: Skill[] = [];
         const currentSkills = get().skills;
@@ -264,9 +251,6 @@ export const useSkillsStore = create<SkillsState>((set, get) => ({
         // Map gateway skills info
         if (gatewayData.skills) {
           combinedSkills = gatewayData.skills.map((s: GatewaySkillStatus) => {
-            // Merge with direct config if available
-            const directConfig = configResult[s.skillKey] || {};
-
             return {
               id: s.skillKey,
               slug: s.slug || s.skillKey,
@@ -276,13 +260,11 @@ export const useSkillsStore = create<SkillsState>((set, get) => ({
               icon: s.emoji || '📦',
               version: s.version || '1.0.0',
               author: s.author,
+              installed: s.installed !== false,
               eligible: typeof s.eligible === 'boolean' ? s.eligible : undefined,
               blockedByAllowlist: s.blockedByAllowlist === true,
               missing: normalizeMissingRequirements(s.missing),
-              config: {
-                ...(s.config || {}),
-                ...directConfig,
-              },
+              config: s.config || {},
               isCore: s.bundled && s.always,
               isBundled: s.bundled,
               source: s.source,
@@ -293,37 +275,6 @@ export const useSkillsStore = create<SkillsState>((set, get) => ({
         } else if (currentSkills.length > 0) {
           // ... if gateway down ...
           combinedSkills = [...currentSkills];
-        }
-
-        if (clawhubResult.success && Array.isArray(clawhubResult.results)) {
-          clawhubResult.results.forEach((installed) => {
-            const existing = combinedSkills.find((skill) => skill.id === installed.slug);
-            if (existing) {
-              if (!existing.baseDir && installed.baseDir) {
-                existing.baseDir = installed.baseDir;
-              }
-              if (!existing.source && installed.source) {
-                existing.source = installed.source;
-              }
-              return;
-            }
-            const directConfig = configResult[installed.slug] || {};
-            combinedSkills.push({
-              id: installed.slug,
-              slug: installed.slug,
-              name: installed.slug,
-              description: 'Recently installed, initializing...',
-              enabled: false,
-              icon: '⌛',
-              version: installed.version || 'unknown',
-              author: undefined,
-              config: directConfig,
-              isCore: false,
-              isBundled: false,
-              source: installed.source || 'openclaw-managed',
-              baseDir: installed.baseDir,
-            });
-          });
         }
 
         lastSkillsFetchAt = Date.now();
@@ -536,6 +487,66 @@ export const useSkillsStore = create<SkillsState>((set, get) => ({
     } finally {
       set((state) => {
         const nextMutating = decrementMutatingSkill(state.mutatingBySkillId, skillId);
+        return {
+          mutatingBySkillId: nextMutating,
+          mutating: hasMutatingSkills(nextMutating),
+        };
+      });
+    }
+  },
+
+  batchSetSkillsEnabled: async (skillIds, enabled) => {
+    const uniqueSkillIds = [...new Set(skillIds.map((skillId) => skillId.trim()).filter(Boolean))];
+    if (uniqueSkillIds.length === 0) {
+      return;
+    }
+    const { skills } = get();
+    if (!enabled) {
+      const coreSkill = skills.find((skill) => uniqueSkillIds.includes(skill.id) && skill.isCore);
+      if (coreSkill) {
+        throw new Error('Cannot disable core skill');
+      }
+    }
+
+    set((state) => {
+      let nextMutating = state.mutatingBySkillId;
+      for (const skillId of uniqueSkillIds) {
+        nextMutating = incrementMutatingSkill(nextMutating, skillId);
+      }
+      return {
+        mutatingBySkillId: nextMutating,
+        mutating: true,
+      };
+    });
+
+    try {
+      const result = await hostApiFetch<{ success: boolean; updated?: string[]; error?: string }>('/api/skills/state/batch', {
+        method: 'PUT',
+        body: JSON.stringify({ skillKeys: uniqueSkillIds, enabled }),
+      });
+      if (result.success !== true) {
+        throw new Error(result.error || 'Failed to update skills');
+      }
+      const updatedSkillIds = Array.isArray(result.updated) && result.updated.length > 0
+        ? result.updated
+        : uniqueSkillIds;
+      const updatedSkillIdSet = new Set(updatedSkillIds);
+      set((state) => ({
+        skills: state.skills.map((skill) =>
+          updatedSkillIdSet.has(skill.id)
+            ? { ...skill, enabled }
+            : skill
+        ),
+      }));
+    } catch (error) {
+      console.error('Failed to batch update skills:', error);
+      throw error;
+    } finally {
+      set((state) => {
+        let nextMutating = state.mutatingBySkillId;
+        for (const skillId of uniqueSkillIds) {
+          nextMutating = decrementMutatingSkill(nextMutating, skillId);
+        }
         return {
           mutatingBySkillId: nextMutating,
           mutating: hasMutatingSkills(nextMutating),

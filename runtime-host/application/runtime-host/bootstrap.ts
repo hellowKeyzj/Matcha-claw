@@ -7,13 +7,15 @@ import {
 } from '../providers/provider-registry';
 import type { RuntimePluginRepositoryPort } from '../plugins/runtime-plugin-service';
 import type { ProviderRuntimeSyncService } from '../providers/store-sync';
+import type { ProviderModelsApplicationService } from '../providers/provider-models-service';
+import type { CapabilityRoutingApplicationService } from '../providers/capability-routing-service';
 import type { ProviderStoreRepository } from '../providers/provider-store-repository';
 import type { SettingsRepository } from '../settings/store';
 import type { GatewayPrelaunchInput, RuntimeHostBootstrapJobPort } from './bootstrap-jobs';
 import type { OpenClawWorkspacePort } from '../openclaw/openclaw-workspace-service';
 import type { ProviderStoreRecord } from '../providers/provider-store-repository';
 import { normalizeProviderStoreForRuntime } from '../providers/provider-store-model';
-import type { SecurityJobPort } from '../security/security-jobs';
+import type { SecurityPluginConfigApplier } from '../security/security-plugin-config-applier';
 import type { RuntimeIdGeneratorPort } from '../common/runtime-ports';
 
 export interface GatewayPrelaunchResult {
@@ -67,11 +69,13 @@ export class RuntimeHostBootstrapService {
         'cleanupStaleBuiltinExtensionsForGatewayLaunch' | 'reconcileConfiguredChannelPluginsForGatewayLaunch' | 'ensureConfiguredManagedPluginsForGatewayLaunch'
       >;
       providerRuntimeSync: Pick<ProviderRuntimeSyncService, 'syncProviderStore'>;
+      providerModels: Pick<ProviderModelsApplicationService, 'syncOpenClaw'>;
+      capabilityRouting: Pick<CapabilityRoutingApplicationService, 'syncOpenClaw'>;
       workspace: Pick<
         OpenClawWorkspacePort,
         'ensureDefaultIdentity' | 'migrateMainAgentTemplatesIfNeeded' | 'mergeContextSnippets'
       >;
-      securityJobs: Pick<SecurityJobPort, 'submitPolicySync'>;
+      securityPluginConfig: Pick<SecurityPluginConfigApplier, 'applySavedPolicyToPluginConfig'>;
       idGenerator: Pick<RuntimeIdGeneratorPort, 'randomHex'>;
       jobs: RuntimeHostBootstrapJobPort;
     },
@@ -157,6 +161,7 @@ export class RuntimeHostBootstrapService {
     await this.deps.prelaunchPluginMaintenance.cleanupStaleBuiltinExtensionsForGatewayLaunch();
     const configuredChannels = await this.deps.prelaunchPluginMaintenance.reconcileConfiguredChannelPluginsForGatewayLaunch();
     await this.deps.prelaunchPluginMaintenance.ensureConfiguredManagedPluginsForGatewayLaunch();
+    await this.deps.securityPluginConfig.applySavedPolicyToPluginConfig();
 
     return {
       configuredChannels,
@@ -169,14 +174,8 @@ export class RuntimeHostBootstrapService {
 
   async executeProviderAuthBootstrap(): Promise<{
     syncedApiKeyCount: number;
-    defaultProviderId?: string;
   }> {
-    const store = await this.deps.providerStoreRepository.read();
-    const result = await this.deps.providerRuntimeSync.syncProviderStore(store);
-    if (result.storeModified) {
-      await this.deps.providerStoreRepository.write(store);
-    }
-    return result;
+    return await this.syncProviderStackToOpenClaw();
   }
 
   async executeWorkspaceTemplateMigration() {
@@ -191,7 +190,7 @@ export class RuntimeHostBootstrapService {
       ? payload as Record<string, unknown>
       : {};
     if (body.state === 'running') {
-      return this.deps.securityJobs.submitPolicySync();
+      return null;
     }
     return null;
   }
@@ -223,13 +222,6 @@ export class RuntimeHostBootstrapService {
       loadedProviderKeyCount++;
     };
 
-    if (store.defaultAccountId) {
-      const defaultAccount = accounts.find((account) => account.accountId === store.defaultAccountId);
-      if (defaultAccount) {
-        assignKey(defaultAccount.vendorId, defaultAccount.accountId, store);
-      }
-    }
-
     for (const account of accounts) {
       assignKey(account.vendorId, account.accountId, store);
     }
@@ -238,6 +230,17 @@ export class RuntimeHostBootstrapService {
       providerEnv,
       loadedProviderKeyCount,
     };
+  }
+
+  private async syncProviderStackToOpenClaw(): Promise<{ syncedApiKeyCount: number }> {
+    const store = await this.deps.providerStoreRepository.read();
+    const result = await this.deps.providerRuntimeSync.syncProviderStore(store);
+    if (result.storeModified) {
+      await this.deps.providerStoreRepository.write(store);
+    }
+    await this.deps.providerModels.syncOpenClaw();
+    await this.deps.capabilityRouting.syncOpenClaw();
+    return { syncedApiKeyCount: result.syncedApiKeyCount };
   }
 
   private async ensureGatewayToken(settings: Record<string, unknown>): Promise<Record<string, unknown>> {

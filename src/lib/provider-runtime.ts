@@ -3,7 +3,7 @@ import {
   waitForRuntimeJobResult,
   type RuntimeJobSubmission,
 } from '@/lib/host-api';
-import type { ProviderAccount, ProviderType } from '@/lib/providers';
+import type { ProviderCredential, ProviderType } from '@/lib/providers';
 
 async function submitProviderJob<TResult = { success: boolean; error?: string }>(
   path: string,
@@ -11,13 +11,6 @@ async function submitProviderJob<TResult = { success: boolean; error?: string }>
 ): Promise<TResult> {
   const submission = await hostApiFetch<RuntimeJobSubmission<TResult>>(path, init);
   return await waitForRuntimeJobResult<TResult>(submission.job.id);
-}
-
-export async function hostProviderSetDefaultAccount(accountId: string): Promise<{ success: boolean; error?: string }> {
-  return await submitProviderJob<{ success: boolean; error?: string }>('/api/provider-accounts/default', {
-    method: 'PUT',
-    body: JSON.stringify({ accountId }),
-  });
 }
 
 export async function hostProviderStartOAuth(input: {
@@ -48,18 +41,12 @@ export async function hostProviderReadAccount(
   accountId: string,
 ): Promise<{
   baseUrl?: string;
-  model?: string;
-  contextWindow?: number;
-  maxTokens?: number;
-  apiProtocol?: ProviderAccount['apiProtocol'];
+  apiProtocol?: ProviderCredential['apiProtocol'];
   headers?: Record<string, string>;
 } | null> {
   return await hostApiFetch<{
     baseUrl?: string;
-    model?: string;
-    contextWindow?: number;
-    maxTokens?: number;
-    apiProtocol?: ProviderAccount['apiProtocol'];
+    apiProtocol?: ProviderCredential['apiProtocol'];
     headers?: Record<string, string>;
   } | null>(
     `/api/provider-accounts/${encodeURIComponent(accountId)}`,
@@ -79,7 +66,7 @@ export async function hostProviderValidate(
     apiKey: string;
     options?: {
       baseUrl?: string;
-      apiProtocol?: ProviderAccount['apiProtocol'];
+      apiProtocol?: ProviderCredential['apiProtocol'];
       headers?: Record<string, string>;
     };
   },
@@ -91,7 +78,7 @@ export async function hostProviderValidate(
 }
 
 export async function hostProviderCreateAccount(
-  account: ProviderAccount,
+  account: ProviderCredential,
   apiKey?: string,
 ): Promise<{ success: boolean; error?: string }> {
   return await submitProviderJob<{ success: boolean; error?: string }>('/api/provider-accounts', {
@@ -102,7 +89,7 @@ export async function hostProviderCreateAccount(
 
 export async function hostProviderUpdateAccount(
   accountId: string,
-  updates: Partial<ProviderAccount>,
+  updates: Partial<ProviderCredential>,
   apiKey?: string,
 ): Promise<{ success: boolean; error?: string }> {
   return await submitProviderJob<{ success: boolean; error?: string }>(
@@ -123,18 +110,15 @@ export async function hostProviderDeleteAccount(accountId: string): Promise<{ su
   );
 }
 
-export function buildProviderAccountPayload(input: {
+export function buildProviderCredentialPayload(input: {
   accountId: string;
   providerType: ProviderType;
   label: string;
-  authMode: ProviderAccount['authMode'];
+  authMode: ProviderCredential['authMode'];
   baseUrl?: string;
-  apiProtocol?: ProviderAccount['apiProtocol'];
+  apiProtocol?: ProviderCredential['apiProtocol'];
   headers?: Record<string, string>;
-  model?: string;
-  contextWindow?: number;
-  maxTokens?: number;
-}): ProviderAccount {
+}): ProviderCredential {
   return {
     id: input.accountId,
     vendorId: input.providerType,
@@ -143,11 +127,7 @@ export function buildProviderAccountPayload(input: {
     baseUrl: input.baseUrl,
     apiProtocol: input.apiProtocol,
     headers: input.headers,
-    model: input.model,
-    contextWindow: input.contextWindow,
-    maxTokens: input.maxTokens,
     enabled: true,
-    isDefault: false,
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
   };

@@ -2,9 +2,8 @@ import type { OpenClawAuthProfileService } from '../openclaw/openclaw-auth-profi
 import {
   buildBrowserOAuthAccount,
   buildDeviceOAuthAccount,
-  type ProviderAccountLike,
+  type ProviderCredentialLike,
 } from './provider-oauth-account-service';
-import { getProviderDefaultModel } from './provider-registry';
 import {
   normalizeOAuthBaseUrl,
 } from './provider-runtime-rules';
@@ -52,7 +51,7 @@ function asRecord(value: unknown): Record<string, any> | null {
   return value as Record<string, any>;
 }
 
-function asProviderAccount(value: unknown): ProviderAccountLike | null {
+function asProviderCredential(value: unknown): ProviderCredentialLike | null {
   const record = asRecord(value);
   if (!record) {
     return null;
@@ -62,23 +61,10 @@ function asProviderAccount(value: unknown): ProviderAccountLike | null {
     && typeof record.label === 'string'
     && typeof record.authMode === 'string'
     && typeof record.enabled === 'boolean'
-    && typeof record.isDefault === 'boolean'
     && typeof record.createdAt === 'string'
     && typeof record.updatedAt === 'string'
-    ? record as ProviderAccountLike
+    ? record as ProviderCredentialLike
     : null;
-}
-
-function ensureDefaultAccountFlag(store: { defaultAccountId: string | null; accounts: Record<string, any> }, accountId: string) {
-  if (!store.defaultAccountId) {
-    store.defaultAccountId = accountId;
-  }
-  for (const account of Object.values(store.accounts)) {
-    if (!asRecord(account)) {
-      continue;
-    }
-    account.isDefault = account.id === store.defaultAccountId;
-  }
 }
 
 export class ProviderOAuthCompletionService implements ProviderOAuthCompletionPort {
@@ -93,7 +79,7 @@ export class ProviderOAuthCompletionService implements ProviderOAuthCompletionPo
 
   async completeBrowser(input: BrowserOAuthInput) {
     const store = await this.deps.storeRepository.read();
-    const existing = asProviderAccount(store.accounts[input.accountId]);
+    const existing = asProviderCredential(store.accounts[input.accountId]);
     const oauthTokenEmail = typeof input.token.email === 'string' ? input.token.email : undefined;
     const oauthTokenSubject = typeof input.token.projectId === 'string'
       ? input.token.projectId
@@ -108,7 +94,6 @@ export class ProviderOAuthCompletionService implements ProviderOAuthCompletionPo
       clock: this.deps.clock,
     });
     store.accounts[nextAccount.id] = nextAccount;
-    ensureDefaultAccountFlag(store, nextAccount.id);
     await this.deps.storeRepository.write(store);
 
     await this.deps.authProfiles.saveOAuthToken(input.runtimeProviderId, {
@@ -138,7 +123,7 @@ export class ProviderOAuthCompletionService implements ProviderOAuthCompletionPo
     });
 
     const store = await this.deps.storeRepository.read();
-    const existing = asProviderAccount(store.accounts[input.accountId]);
+    const existing = asProviderCredential(store.accounts[input.accountId]);
     const normalizedBaseUrl = normalizeOAuthBaseUrl(
       input.providerType,
       input.token.resourceUrl || (input.providerType === 'minimax-portal'
@@ -157,12 +142,10 @@ export class ProviderOAuthCompletionService implements ProviderOAuthCompletionPo
       accountId: input.accountId,
       accountLabel: input.accountLabel,
       baseUrl: baseUrl || '',
-      defaultModel: getProviderDefaultModel(input.providerType),
       existingAccount: existing ?? undefined,
       clock: this.deps.clock,
     });
     store.accounts[nextAccount.id] = nextAccount;
-    ensureDefaultAccountFlag(store, nextAccount.id);
     await this.deps.storeRepository.write(store);
     const syncResult = await this.deps.runtime.syncStoreToRuntime(store);
     if (syncResult.storeModified) {

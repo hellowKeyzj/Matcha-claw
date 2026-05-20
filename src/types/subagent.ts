@@ -28,6 +28,30 @@ export interface SubagentAvatarPresentation {
   avatarStyle?: AgentAvatarStyle;
 }
 
+export interface SubagentConfigPackage {
+  schema: 'matchaclaw.agent-config';
+  version: 1;
+  agent: {
+    name: string;
+    skills?: string[];
+    skillBundles?: SubagentSkillBundle[];
+    files: Partial<Record<SubagentTargetFile, string>>;
+  };
+}
+
+export interface SubagentSkillBundle {
+  skillKey: string;
+  files: Array<{
+    path: string;
+    content: string;
+  }>;
+}
+
+export interface SubagentImportResult {
+  agentId: string;
+  warning?: string;
+}
+
 export interface SubagentTemplateSummary {
   id: string;
   name: string;
@@ -69,6 +93,7 @@ export interface AgentsListResult {
 export interface ModelCatalogEntry {
   id: string;
   provider: string;
+  credentialId?: string;
   providerLabel: string;
   modelLabel: string;
   displayLabel: string;

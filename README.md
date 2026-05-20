@@ -107,7 +107,7 @@ Complete the entire setup—from installation to your first AI interaction—thr
 Communicate with AI agents through a modern chat experience. Support for multiple conversation contexts, message history, and rich content rendering with Markdown, including GitHub-style tables and KaTeX-powered LaTeX math via `$inline$`, `$$block$$`, `\\(inline\\)`, and `\\[block\\]`. The live thread keeps the latest 30 messages responsive, while full transcripts remain available in history mode.
 
 ### 🧠 Subagent Workspace
-Create and manage specialized subagents in a visual workspace. Built-in draft generation, line-level diff preview, and controlled apply flow help you evolve `AGENTS.md` / `SOUL.md` / `TOOLS.md` / `IDENTITY.md` / `USER.md` safely.
+Create and manage specialized subagents in a visual workspace. Built-in draft generation, line-level diff preview, controlled apply flow, and JSON import/export let teams share agent instruction files and selected skills without copying models, avatars, local workspaces, credentials, or sessions.
 
 ### ✅ Session Task Center & Team Discussion Hub
 Plan and track persistent session tasks in `/tasks`, while Chat shows the current run's `TodoWrite` checklist as part of the same task snapshot pipeline. Agent task tools use `TaskCreate` / `TaskUpdate` / `TaskList` / `TaskGet` / `TodoWrite`; the Task Center manages only persistent tasks and keeps **Long Tasks** and **Scheduled Tasks** in one place.
@@ -130,7 +130,8 @@ Environment variables for bundled search skills:
 
 ### 🔐 Secure Provider Integration
 Connect to multiple AI providers (OpenAI, Anthropic, and more) with credentials managed by the runtime-host local backend. OpenAI supports both API key and browser OAuth (Codex subscription) sign-in.
-For OpenAI-compatible gateways configured via **Custom** provider, **Settings → Models → Edit Provider** now supports model-level `Context Window` and `Max Tokens` overrides.
+Provider credentials and model entries are managed separately: edit provider cards for auth/base URL settings, and use the model catalog under **Settings → Models** for model IDs, `Context Window`, and `Max Tokens`.
+After a Volcengine Ark provider is configured, the model catalog provides a Code Plan shortcut that adds `ark-code-latest` under `ark`; the Ark API key and coding base URL remain configured on the provider card.
 
 ### 🌐 Browser Relay Window Targeting
 When Browser Relay is enabled, each Chrome profile connects as one browser instance, but the default browser control target is chosen at the **window** level. In the extension popup you use **Use This Window**, MatchaClaw remembers that window across desktop restarts, and default browser actions always run against that selected window's current attached page. `open` and `focus` also bring that page to the foreground, so the visible page and the automation page stay aligned. If no such page is attached, MatchaClaw fails fast instead of guessing another tab.

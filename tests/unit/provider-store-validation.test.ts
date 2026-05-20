@@ -10,10 +10,9 @@ vi.mock('@/lib/provider-accounts', () => ({
       ? value as Record<string, unknown>
       : {};
     return {
-      accounts: Array.isArray(snapshot.accounts) ? snapshot.accounts : [],
+      credentials: Array.isArray(snapshot.credentials) ? snapshot.credentials : [],
       statuses: Array.isArray(snapshot.statuses) ? snapshot.statuses : [],
       vendors: Array.isArray(snapshot.vendors) ? snapshot.vendors : [],
-      defaultAccountId: typeof snapshot.defaultAccountId === 'string' ? snapshot.defaultAccountId : null,
     };
   },
 }));
@@ -22,7 +21,6 @@ vi.mock('@/lib/provider-runtime', () => ({
   hostProviderCreateAccount: vi.fn(),
   hostProviderDeleteAccount: vi.fn(),
   hostProviderReadApiKey: vi.fn(),
-  hostProviderSetDefaultAccount: vi.fn(),
   hostProviderUpdateAccount: vi.fn(),
   hostProviderValidate: (...args: unknown[]) => hostProviderValidateMock(...args),
 }));
@@ -45,21 +43,19 @@ describe('useProviderStore validateAccountApiKey', () => {
     const { useProviderStore } = await import('@/stores/providers');
     useProviderStore.setState({
       providerSnapshot: {
-        accounts: [
+        credentials: [
           {
             id: 'custom-1',
             vendorId: 'custom',
             label: 'Custom',
             authMode: 'api_key',
             enabled: true,
-            isDefault: true,
             createdAt: '2026-01-01T00:00:00.000Z',
             updatedAt: '2026-01-01T00:00:00.000Z',
           },
         ],
         statuses: [],
         vendors: [],
-        defaultAccountId: 'custom-1',
       },
       snapshotReady: true,
       initialLoading: false,

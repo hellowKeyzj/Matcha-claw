@@ -15,8 +15,7 @@ import {
   type AgentAvatarStyle,
 } from '@/lib/agent-avatar';
 import { hostApiFetch, hostOpenClawGetConfigDir } from '@/lib/host-api';
-import { fetchProviderSnapshot } from '@/lib/provider-accounts';
-import { buildSelectableProviderModels } from '@/lib/provider-models';
+import { fetchSelectableProviderModels } from '@/lib/provider-models';
 import {
   waitAgentRunWithProgress,
 } from '@/services/openclaw/agent-runtime';
@@ -36,15 +35,15 @@ import {
   buildSubagentPromptPayload,
   parseDraftPayload,
 } from '@/features/subagents/domain/prompt';
-import { useProviderStore } from '@/stores/providers';
 import type {
   AgentsListResult,
   ConfigGetResult,
   DraftByFile,
   ModelCatalogEntry,
   PreviewDiffByFile,
+  SubagentConfigPackage,
+  SubagentImportResult,
   SubagentSummary,
-  SubagentAvatarPresentation,
   SubagentTemplateDetail,
   SubagentTargetFile,
 } from '@/types/subagent';
@@ -60,6 +59,8 @@ const CREATE_AGENT_RUNTIME_BARRIER_POLL_INTERVAL_MS = 120;
 const CONFIG_DISPLAY_CACHE_TTL_MS = 1000;
 const SUBAGENT_SNAPSHOT_NOT_READY_RETRY_MS = 1200;
 const SUBAGENT_AVATAR_STORAGE_KEY = 'matchaclaw-subagent-avatar-presentations';
+const SUBAGENT_CONFIG_PACKAGE_SCHEMA = 'matchaclaw.agent-config' as const;
+const SUBAGENT_CONFIG_PACKAGE_VERSION = 1 as const;
 let workspaceFallbackRootCache: string | undefined;
 let workspaceFallbackRootTask: Promise<string | undefined> | null = null;
 let configDisplayCache:
@@ -97,6 +98,17 @@ interface ConfigAgentDisplaySnapshot {
   workspace?: string;
   model?: string;
   skills?: string[];
+}
+
+interface SubagentAvatarPresentation {
+  avatarSeed?: string;
+  avatarStyle?: AgentAvatarStyle;
+}
+
+interface SkillBundleImportResult {
+  ok?: boolean;
+  installed?: string[];
+  error?: string;
 }
 
 interface ConfigDisplaySnapshot {
@@ -153,6 +165,8 @@ interface SubagentsState {
     model: string;
     localizedName?: string;
   }) => Promise<SubagentCreateResult>;
+  exportAgentConfig: (agentId: string) => Promise<SubagentConfigPackage>;
+  importAgentConfig: (input: unknown) => Promise<SubagentImportResult>;
   updateAgent: (input: {
     agentId: string;
     name: string;
@@ -216,12 +230,12 @@ function getOptionalString(value: unknown): string | undefined {
   return trimmed || undefined;
 }
 
-function getOptionalAgentAvatarStyle(value: unknown): AgentAvatarStyle | undefined {
+function getRequiredString(value: unknown, message: string): string {
   const normalized = getOptionalString(value);
   if (!normalized) {
-    return undefined;
+    throw new Error(message);
   }
-  return resolveAgentAvatarStyle(normalized);
+  return normalized;
 }
 
 function getOptionalStringArray(value: unknown): string[] {
@@ -245,6 +259,77 @@ function normalizeSkillAllowlist(value: unknown): string[] | undefined {
   }
   const deduped = Array.from(new Set(getOptionalStringArray(value)));
   return deduped;
+}
+
+function normalizeImportedFiles(value: unknown): Partial<Record<SubagentTargetFile, string>> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return {};
+  }
+  const files: Partial<Record<SubagentTargetFile, string>> = {};
+  for (const fileName of SUBAGENT_TARGET_FILES) {
+    const content = (value as Record<string, unknown>)[fileName];
+    if (typeof content === 'string') {
+      files[fileName] = content;
+    }
+  }
+  return files;
+}
+
+function normalizeImportedSkillBundles(value: unknown): SubagentConfigPackage['agent']['skillBundles'] {
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+  const bundles: NonNullable<SubagentConfigPackage['agent']['skillBundles']> = [];
+  for (const item of value) {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) {
+      continue;
+    }
+    const record = item as Record<string, unknown>;
+    const skillKey = getOptionalString(record.skillKey);
+    if (!skillKey || !Array.isArray(record.files)) {
+      continue;
+    }
+    const files = record.files.flatMap((file): Array<{ path: string; content: string }> => {
+      if (!file || typeof file !== 'object' || Array.isArray(file)) {
+        return [];
+      }
+      const fileRecord = file as Record<string, unknown>;
+      const filePath = getOptionalString(fileRecord.path);
+      return filePath && typeof fileRecord.content === 'string'
+        ? [{ path: filePath, content: fileRecord.content }]
+        : [];
+    });
+    if (files.length > 0) {
+      bundles.push({ skillKey, files });
+    }
+  }
+  return bundles.length > 0 ? bundles : undefined;
+}
+
+function normalizeSubagentConfigPackage(input: unknown): SubagentConfigPackage {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) {
+    throw new Error('Invalid agent config file');
+  }
+  const record = input as Record<string, unknown>;
+  if (record.schema !== SUBAGENT_CONFIG_PACKAGE_SCHEMA) {
+    throw new Error('Unsupported agent config schema');
+  }
+  if (record.version !== SUBAGENT_CONFIG_PACKAGE_VERSION) {
+    throw new Error('Unsupported agent config version');
+  }
+  const agentRecord = record.agent && typeof record.agent === 'object' && !Array.isArray(record.agent)
+    ? record.agent as Record<string, unknown>
+    : {};
+  return {
+    schema: SUBAGENT_CONFIG_PACKAGE_SCHEMA,
+    version: SUBAGENT_CONFIG_PACKAGE_VERSION,
+    agent: {
+      name: getRequiredString(agentRecord.name, 'Agent name is required'),
+      ...(normalizeSkillAllowlist(agentRecord.skills) ? { skills: normalizeSkillAllowlist(agentRecord.skills) } : {}),
+      ...(normalizeImportedSkillBundles(agentRecord.skillBundles) ? { skillBundles: normalizeImportedSkillBundles(agentRecord.skillBundles) } : {}),
+      files: normalizeImportedFiles(agentRecord.files),
+    },
+  };
 }
 
 function equalSkillAllowlist(
@@ -495,7 +580,7 @@ function normalizeAvatarPresentation(
   value: { avatarSeed?: unknown; avatarStyle?: unknown } | undefined,
 ): SubagentAvatarPresentation | undefined {
   const avatarSeed = getOptionalString(value?.avatarSeed);
-  const avatarStyle = getOptionalAgentAvatarStyle(value?.avatarStyle);
+  const avatarStyle = typeof value?.avatarStyle === 'string' ? resolveAgentAvatarStyle(value.avatarStyle) : undefined;
   if (avatarSeed === undefined && avatarStyle === undefined) {
     return undefined;
   }
@@ -779,6 +864,22 @@ async function updateAgentSkillsConfig(agentId: string, skills: string[] | undef
     }),
     'Missing config hash for skills update',
   );
+}
+
+async function exportSkillBundles(skillKeys: string[]): Promise<NonNullable<SubagentConfigPackage['agent']['skillBundles']>> {
+  return await hostApiFetch('/api/skills/bundles/export', {
+    method: 'POST',
+    body: JSON.stringify({ skillKeys }),
+  });
+}
+
+async function importSkillBundles(
+  skillBundles: NonNullable<SubagentConfigPackage['agent']['skillBundles']>,
+): Promise<SkillBundleImportResult> {
+  return await hostApiFetch('/api/skills/bundles/import', {
+    method: 'POST',
+    body: JSON.stringify({ skillBundles }),
+  });
 }
 
 async function updateAgentModelConfig(agentId: string, model: string | undefined): Promise<void> {
@@ -1265,11 +1366,7 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
   loadAvailableModels: async () => {
     set({ modelsLoading: true });
     try {
-      const providerState = useProviderStore.getState();
-      const snapshot = providerState.snapshotReady
-        ? providerState.providerSnapshot
-        : await fetchProviderSnapshot();
-      const normalizedModels = buildSelectableProviderModels(snapshot);
+      const normalizedModels = await fetchSelectableProviderModels();
       set({
         availableModels: normalizedModels,
         modelsLoading: false,
@@ -1367,9 +1464,6 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
         throw new Error('Subagent name is required');
       }
       const modelId = (model ?? '').trim();
-      if (!modelId) {
-        throw new Error('Model is required');
-      }
       const avatarPresentation = normalizeAvatarPresentation({
         avatarSeed,
         avatarStyle: avatarStyle === undefined ? undefined : resolveAgentAvatarStyle(avatarStyle),
@@ -1401,13 +1495,15 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
         pendingDeletedAgentIds.delete(normalizedCreatedAgentId);
       }
       const warnings: string[] = [];
-      try {
-        await updateAgentWithCreateBarrier({
-          agentId: createdAgentId,
-          model: modelId,
-        });
-      } catch (error) {
-        warnings.push(buildCreateModelWarning(createdAgentId, error));
+      if (modelId) {
+        try {
+          await updateAgentWithCreateBarrier({
+            agentId: createdAgentId,
+            model: modelId,
+          });
+        } catch (error) {
+          warnings.push(buildCreateModelWarning(createdAgentId, error));
+        }
       }
       try {
         persistAvatarPresentation(createdAgentId, avatarPresentation);
@@ -1499,6 +1595,87 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
       warnings.push(buildTemplateFilesWarning(createdAgentId, error));
     } finally {
       finishGlobalMutating(set);
+    }
+    return toSubagentCreateResult(createdAgentId, warnings);
+  },
+
+  exportAgentConfig: async (agentId) => {
+    const agent = readAgentsFromState(get()).find((entry) => entry.id === agentId);
+    if (!agent) {
+      throw new Error('Agent not found');
+    }
+    const files = await fetchPersistedFilesForAgent(agentId);
+    const skills = normalizeSkillAllowlist(agent.skills);
+    const skillBundles = skills ? await exportSkillBundles(skills) : undefined;
+    return {
+      schema: SUBAGENT_CONFIG_PACKAGE_SCHEMA,
+      version: SUBAGENT_CONFIG_PACKAGE_VERSION,
+      agent: {
+        name: getOptionalString(agent.name) ?? agent.id,
+        ...(skills ? { skills } : {}),
+        ...(skillBundles && skillBundles.length > 0 ? { skillBundles } : {}),
+        files,
+      },
+    };
+  },
+
+  importAgentConfig: async (input) => {
+    const packageData = normalizeSubagentConfigPackage(input);
+    const createResult = await get().createAgent({
+      name: packageData.agent.name,
+      workspace: '',
+    });
+    const createdAgentId = createResult.agentId;
+    const warnings = createResult.warning ? [createResult.warning] : [];
+    const fileEntries = Object.entries(packageData.agent.files)
+      .filter((entry): entry is [SubagentTargetFile, string] => {
+        const [fileName, content] = entry;
+        return SUBAGENT_TARGET_FILES.includes(fileName as SubagentTargetFile)
+          && typeof content === 'string';
+      });
+
+    if (packageData.agent.skillBundles && packageData.agent.skillBundles.length > 0) {
+      try {
+        const result = await importSkillBundles(packageData.agent.skillBundles);
+        if (!result.ok) {
+          warnings.push(buildCreateWarning(createdAgentId, `技能导入失败：${result.error || 'unknown error'}`));
+        }
+      } catch (error) {
+        warnings.push(buildCreateWarning(createdAgentId, `技能导入失败：${getErrorMessage(error)}`));
+      }
+    }
+
+    if (packageData.agent.skills !== undefined) {
+      try {
+        await updateAgentSkillsConfig(createdAgentId, packageData.agent.skills);
+      } catch (error) {
+        warnings.push(buildCreateWarning(createdAgentId, `技能配置写入失败：${getErrorMessage(error)}`));
+      }
+    }
+
+    if (fileEntries.length > 0) {
+      beginGlobalMutating(set);
+      try {
+        for (const [name, content] of fileEntries) {
+          await rpc('agents.files.set', {
+            agentId: createdAgentId,
+            name,
+            content,
+          });
+        }
+        await get().loadPersistedFilesForAgent(createdAgentId);
+      } catch (error) {
+        warnings.push(buildCreateWarning(createdAgentId, `人设文件写入失败：${getErrorMessage(error)}`));
+      } finally {
+        finishGlobalMutating(set);
+      }
+    }
+
+    invalidateConfigDisplayCache();
+    try {
+      await get().loadAgents({ silent: true });
+    } catch (error) {
+      warnings.push(buildCreateRefreshWarning(createdAgentId, error));
     }
     return toSubagentCreateResult(createdAgentId, warnings);
   },

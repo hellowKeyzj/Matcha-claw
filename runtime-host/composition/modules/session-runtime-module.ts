@@ -105,6 +105,9 @@ export function registerSessionRuntimeModule(
     snapshotService: scope.resolve('sessionSnapshotService'),
     clock: scope.resolve<RuntimeClockPort>('runtime.clock'),
     logger: scope.resolve<RuntimeHostLogger>('logger'),
+    emitSessionUpdate: (event) => {
+      void parentGatewayEvents?.emit('session:update', event).catch(() => undefined);
+    },
   }));
   container.register('sessionHydrationJobAdapter', (scope): SessionHydrationJobPort => createSessionHydrationJobPort(
     scope.resolve<RuntimeLongTaskSubmissionPort>('runtime.tasks'),

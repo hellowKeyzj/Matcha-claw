@@ -15,13 +15,7 @@ describe('skills store error mapping', () => {
   it('maps fetchSkills rate-limit error by AppError code', async () => {
     hostApiFetchMock.mockImplementation(async (path: string) => {
       if (path === '/api/skills/status') {
-        return { skills: [] };
-      }
-      if (path === '/api/skills/configs') {
         throw new Error('rate limit exceeded');
-      }
-      if (path === '/api/clawhub/list') {
-        return { success: true, results: [] };
       }
       throw new Error(`Unexpected hostApiFetch path: ${path}`);
     });
@@ -44,13 +38,7 @@ describe('skills store error mapping', () => {
   it('preserves specific fetchSkills error messages when no mapped error code exists', async () => {
     hostApiFetchMock.mockImplementation(async (path: string) => {
       if (path === '/api/skills/status') {
-        return { skills: [] };
-      }
-      if (path === '/api/skills/configs') {
         throw new Error('custom fetch failure');
-      }
-      if (path === '/api/clawhub/list') {
-        return { success: true, results: [] };
       }
       throw new Error(`Unexpected hostApiFetch path: ${path}`);
     });

@@ -2,6 +2,15 @@
   "title": "サブAgentワークスペース",
   "subtitle": "サブAgentとモデル設定を管理します。",
   "newSubagent": "新規サブAgent",
+  "transfer": {
+    "import": "Agentをインポート",
+    "importDialogTitle": "Agent設定をインポート",
+    "exportDialogTitle": "Agent設定をエクスポート",
+    "importSuccess": "Agent設定をインポートしました。",
+    "exportSuccess": "Agent設定をエクスポートしました。",
+    "importFailed": "Agent設定のインポートに失敗しました: {{message}}",
+    "exportFailed": "Agent設定のエクスポートに失敗しました: {{message}}"
+  },
   "status": {
     "refreshing": "更新中...",
     "mutating": "変更を保存中..."
@@ -109,6 +118,7 @@
     "actions": {
       "edit": "編集",
       "delete": "削除",
+      "export": "エクスポート",
       "manage": "管理",
       "chat": "会話"
     }

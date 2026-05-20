@@ -1,4 +1,4 @@
-import { basename, extname, join, resolve } from 'node:path';
+import { basename, dirname, extname, join, resolve } from 'node:path';
 import type {
   RuntimeFileSystemPort,
   RuntimeIdGeneratorPort,
@@ -136,6 +136,26 @@ export class FileService {
         mimeType: getMimeType(extname(realPath)),
         size: stat.size,
         readOnly: true,
+      };
+    } catch (error) {
+      return { ok: false, error: mapPreviewError(error) };
+    }
+  }
+
+  async writeText(payload: unknown) {
+    try {
+      const body = isRecord(payload) ? payload : {};
+      const inputPath = typeof body.path === 'string' ? body.path : '';
+      const content = typeof body.content === 'string' ? body.content : undefined;
+      if (content === undefined) {
+        throw new Error('content is required');
+      }
+      const targetPath = await this.resolveWritablePath(inputPath);
+      await this.deps.fileSystem.ensureDirectory(dirname(targetPath));
+      await this.deps.fileSystem.writeTextFile(targetPath, content);
+      return {
+        ok: true,
+        path: targetPath,
       };
     } catch (error) {
       return { ok: false, error: mapPreviewError(error) };
@@ -341,6 +361,14 @@ export class FileService {
     } catch {
       return resolve(expanded);
     }
+  }
+
+  private async resolveWritablePath(input: string): Promise<string> {
+    if (typeof input !== 'string' || !input.trim()) {
+      throw new Error('notFound');
+    }
+    const expanded = this.expandPreviewPath(input.trim());
+    return resolve(expanded);
   }
 
   private async statPreviewTarget(inputPath: string) {

@@ -28,6 +28,7 @@ export interface Skill {
   isCore?: boolean;
   isBundled?: boolean;
   dependencies?: string[];
+  installed: boolean;
   eligible?: boolean;
   blockedByAllowlist?: boolean;
   missing?: SkillMissingRequirements;

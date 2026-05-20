@@ -1,4 +1,5 @@
 import type {
+  SessionAssistantToolSegment,
   SessionRuntimeStateSnapshot,
   SessionTimelineAssistantTurnEntry,
   SessionTimelineEntry,
@@ -16,6 +17,9 @@ import {
   resolveTimelineInsertionIndex,
 } from './timeline-insertion-policy';
 import type { SessionToolStatusUpdateIngressEvent } from './gateway-ingress-types';
+import {
+  extractToolResultOutputText,
+} from './tool/tool-card-content';
 
 export {
   findTimelineEntryIndex,
@@ -53,6 +57,119 @@ export function mergeTimelineEntries(
     mergedEntries = upsertTimelineEntry(mergedEntries, entry);
   }
   return mergedEntries;
+}
+
+function listToolSegments(entry: SessionTimelineAssistantTurnEntry): SessionAssistantToolSegment[] {
+  return entry.segments.filter((segment): segment is SessionAssistantToolSegment => segment.kind === 'tool');
+}
+
+function buildTranscriptToolResultsById(
+  transcriptEntries: SessionTimelineEntry[],
+): Map<string, SessionAssistantToolSegment> {
+  const results = new Map<string, SessionAssistantToolSegment>();
+  for (const entry of transcriptEntries) {
+    if (entry.kind !== 'assistant-turn') {
+      continue;
+    }
+    for (const segment of listToolSegments(entry)) {
+      if (
+        segment.tool.result.kind === 'none'
+        && segment.tool.output === undefined
+      ) {
+        continue;
+      }
+      const ids = [
+        segment.tool.toolCallId,
+        segment.tool.id,
+      ].filter((value): value is string => typeof value === 'string' && value.trim().length > 0);
+      for (const id of ids) {
+        results.set(id, segment);
+      }
+    }
+  }
+  return results;
+}
+
+function toolNeedsTranscriptResult(segment: SessionAssistantToolSegment): boolean {
+  return segment.tool.output === undefined && segment.tool.result.kind === 'none';
+}
+
+function findTranscriptResultForTool(
+  segment: SessionAssistantToolSegment,
+  transcriptResultsById: Map<string, SessionAssistantToolSegment>,
+): SessionAssistantToolSegment | null {
+  const ids = [
+    segment.tool.toolCallId,
+    segment.tool.id,
+  ].filter((value): value is string => typeof value === 'string' && value.trim().length > 0);
+  for (const id of ids) {
+    const result = transcriptResultsById.get(id);
+    if (result) {
+      return result;
+    }
+  }
+  return null;
+}
+
+export function applyTranscriptToolResultUpdates(
+  entries: SessionTimelineEntry[],
+  transcriptEntries: SessionTimelineEntry[],
+): {
+  entries: SessionTimelineEntry[];
+  updatedEntries: SessionTimelineAssistantTurnEntry[];
+} {
+  const transcriptResultsById = buildTranscriptToolResultsById(transcriptEntries);
+  if (transcriptResultsById.size === 0) {
+    return {
+      entries,
+      updatedEntries: [],
+    };
+  }
+
+  let nextEntries: SessionTimelineEntry[] | null = null;
+  const updatedEntries: SessionTimelineAssistantTurnEntry[] = [];
+  for (const [index, entry] of entries.entries()) {
+    if (entry.kind !== 'assistant-turn') {
+      continue;
+    }
+    let nextSegments = entry.segments;
+    for (const segment of listToolSegments(entry)) {
+      if (!toolNeedsTranscriptResult(segment)) {
+        continue;
+      }
+      const transcriptSegment = findTranscriptResultForTool(segment, transcriptResultsById);
+      if (!transcriptSegment) {
+        continue;
+      }
+      nextSegments = applyToolStatusToSegments(nextSegments, buildIdentityFromTurnEntry(entry), {
+        toolCallId: segment.tool.toolCallId ?? segment.tool.id,
+        name: transcriptSegment.tool.name || segment.tool.name,
+        input: transcriptSegment.tool.input !== undefined ? transcriptSegment.tool.input : segment.tool.input,
+        output: transcriptSegment.tool.output,
+        outputText: extractToolResultOutputText(transcriptSegment.tool.output),
+        status: transcriptSegment.tool.status === 'error' ? 'error' : 'completed',
+        ...(transcriptSegment.tool.durationMs != null ? { durationMs: transcriptSegment.tool.durationMs } : {}),
+        ...(transcriptSegment.tool.updatedAt != null ? { updatedAt: transcriptSegment.tool.updatedAt } : {}),
+      });
+    }
+    if (nextSegments === entry.segments) {
+      continue;
+    }
+    const nextEntry: SessionTimelineAssistantTurnEntry = {
+      ...structuredClone(entry),
+      segments: nextSegments,
+    };
+    if (!nextEntries) {
+      nextEntries = cloneTimelineEntries(entries);
+    }
+    nextEntries[index] = nextEntry;
+    updatedEntries.push(structuredClone(nextEntry));
+  }
+
+  return {
+    entries: nextEntries ?? entries,
+    updatedEntries,
+  };
 }
 
 function findAssistantTurnIndexByToolCallId(

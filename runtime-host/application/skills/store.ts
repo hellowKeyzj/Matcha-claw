@@ -130,6 +130,40 @@ export class SkillsConfigRepository {
     }
   }
 
+  async setManyEnabled(skillKeys: readonly string[], enabled: boolean) {
+    const trimmedSkillKeys = [...new Set(skillKeys
+      .map((skillKey) => typeof skillKey === 'string' ? skillKey.trim() : '')
+      .filter(Boolean))];
+    if (trimmedSkillKeys.length === 0) {
+      return { success: false, error: 'skillKeys is required' };
+    }
+    try {
+      await withOpenClawConfigLock(async () => {
+        const config = await this.configRepository.read();
+        if (!isRecord(config.skills)) {
+          config.skills = {};
+        }
+        const skills = config.skills as Record<string, unknown>;
+        if (!isRecord(skills.entries)) {
+          skills.entries = {};
+        }
+
+        const entries = skills.entries as Record<string, unknown>;
+        for (const skillKey of trimmedSkillKeys) {
+          const current = isRecord(entries[skillKey]) ? entries[skillKey] : {};
+          entries[skillKey] = {
+            ...current,
+            enabled,
+          };
+        }
+        await this.configRepository.write(config);
+      });
+      return { success: true };
+    } catch (error) {
+      return { success: false, error: String(error) };
+    }
+  }
+
   async listEffective() {
     const configs = await this.getAllConfigs();
     const installed = await this.clawHubSkillInventory.listInstalled() as InstalledClawHubSkill[];

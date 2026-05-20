@@ -2,6 +2,15 @@
   "title": "Agent",
   "subtitle": "管理 Agent 与模型",
   "newSubagent": "新增Agent",
+  "transfer": {
+    "import": "导入Agent",
+    "importDialogTitle": "导入 Agent 配置",
+    "exportDialogTitle": "导出 Agent 配置",
+    "importSuccess": "Agent 配置已导入。",
+    "exportSuccess": "Agent 配置已导出。",
+    "importFailed": "导入 Agent 配置失败：{{message}}",
+    "exportFailed": "导出 Agent 配置失败：{{message}}"
+  },
   "status": {
     "refreshing": "正在刷新...",
     "mutating": "正在保存变更..."
@@ -112,6 +121,7 @@
     "actions": {
       "edit": "编辑",
       "delete": "删除",
+      "export": "导出",
       "manage": "人设配置",
       "chat": "会话"
     }

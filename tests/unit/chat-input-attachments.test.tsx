@@ -18,6 +18,7 @@ type SkillMock = {
   name: string;
   description: string;
   enabled: boolean;
+  installed: boolean;
   eligible?: boolean;
   icon?: string;
 };

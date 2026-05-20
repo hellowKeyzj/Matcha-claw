@@ -41,6 +41,7 @@ describe('runtime-host preinstalled skills', () => {
         getAllConfigs: async () => configs,
         updateConfig: async () => ({ success: true }),
         setEnabled,
+        setManyEnabled: async () => ({ success: true }),
         listEffective: async () => [],
       },
       readmePreviews: {
@@ -48,6 +49,7 @@ describe('runtime-host preinstalled skills', () => {
       },
       gateway: {
         isGatewayRunning: async () => false,
+        readGatewayConnectionState: async () => ({ state: 'disconnected', gatewayReady: false }),
         gatewayRpc: async () => ({}),
       },
       jobs: {

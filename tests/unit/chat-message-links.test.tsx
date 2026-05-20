@@ -5,6 +5,7 @@ import { applyAssistantPresentationToItems } from '@/pages/Chat/chat-render-item
 import { prewarmAssistantMarkdownBody } from '@/lib/chat-markdown-body';
 import type { RawMessage } from './helpers/timeline-fixtures';
 import { buildRenderItemsFromMessages } from './helpers/timeline-fixtures';
+import type { ChatAssistantTurnItem } from '@/pages/Chat/chat-render-item-model';
 
 const invokeIpcMock = vi.fn();
 const hostFileStatMock = vi.fn();
@@ -485,5 +486,57 @@ describe('chat message links', () => {
     expect(screen.getByRole('table')).toBeInTheDocument();
     expect(screen.getByRole('columnheader', { name: 'Task' })).toBeInTheDocument();
     expect(screen.getByRole('cell', { name: 'Build UI' })).toBeInTheDocument();
+  });
+
+  it('assistant markdown remains rich when a tool card splits a code fence boundary', () => {
+    const item: ChatAssistantTurnItem = {
+      key: 'assistant-turn:split-fence',
+      kind: 'assistant-turn',
+      sessionKey: 'agent:test:main',
+      role: 'assistant',
+      laneKey: 'main',
+      turnKey: 'run-split-fence',
+      identitySource: 'run',
+      identityMode: 'run',
+      identityConfidence: 'strong',
+      status: 'final',
+      segments: [
+        {
+          kind: 'message',
+          key: 'message:run-split-fence:main:0',
+          text: '先给配置：\n\n```json\n{"enabled":true}\n',
+        },
+        {
+          kind: 'tool',
+          key: 'tool:run-split-fence:main:tool-read',
+          tool: {
+            id: 'tool-read',
+            toolCallId: 'tool-read',
+            name: 'read',
+            displayTitle: 'Read',
+            input: { filePath: 'README.md' },
+            status: 'completed',
+            result: {
+              kind: 'none',
+              surface: 'tool-card',
+            },
+          },
+        },
+        {
+          kind: 'message',
+          key: 'message:run-split-fence:main:1',
+          text: '```\n\n---\n\n## 配置写入口也找到了\n\n- 可以继续改。',
+        },
+      ],
+      thinking: null,
+      tools: [],
+      text: '先给配置：\n\n```json\n{"enabled":true}\n```\n\n---\n\n## 配置写入口也找到了\n\n- 可以继续改。',
+      images: [],
+      attachedFiles: [],
+    };
+
+    render(<ChatAssistantTurn item={item} showThinking={false} />);
+
+    expect(screen.getByRole('heading', { name: '配置写入口也找到了' })).toBeInTheDocument();
   });
 });

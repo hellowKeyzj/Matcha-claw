@@ -18,6 +18,7 @@ type SkillMock = {
   name: string;
   description: string;
   enabled: boolean;
+  installed: boolean;
   eligible?: boolean;
   icon?: string;
 };
@@ -49,10 +50,10 @@ describe('chat input slash skills', () => {
 
   it('slash 只展示可用技能（enabled 且 eligible=true）', () => {
     skillsStoreState.skills = [
-      { id: 'task-manager', name: 'Task Manager', description: '', enabled: true, eligible: true, icon: '📌' },
-      { id: 'missing-skill', name: 'Missing Skill', description: '', enabled: true, eligible: false, icon: '❌' },
-      { id: 'disabled-skill', name: 'Disabled Skill', description: '', enabled: false, eligible: true, icon: '🚫' },
-      { id: 'unknown-skill', name: 'Unknown Skill', description: '', enabled: true, icon: '❓' },
+      { id: 'task-manager', name: 'Task Manager', description: '', enabled: true, installed: true, eligible: true, icon: '📌' },
+      { id: 'missing-skill', name: 'Missing Skill', description: '', enabled: true, installed: true, eligible: false, icon: '❌' },
+      { id: 'disabled-skill', name: 'Disabled Skill', description: '', enabled: false, installed: true, eligible: true, icon: '🚫' },
+      { id: 'unknown-skill', name: 'Unknown Skill', description: '', enabled: true, installed: true, icon: '❓' },
     ];
 
     render(<ChatInput onSend={vi.fn()} />);
@@ -68,8 +69,8 @@ describe('chat input slash skills', () => {
 
   it('slash 支持按当前会话 agent 的技能白名单过滤', () => {
     skillsStoreState.skills = [
-      { id: 'web-search', name: 'Web Search', description: '', enabled: true, eligible: true, icon: '🌐' },
-      { id: 'feishu-doc', name: 'Feishu Doc', description: '', enabled: true, eligible: true, icon: '📄' },
+      { id: 'web-search', name: 'Web Search', description: '', enabled: true, installed: true, eligible: true, icon: '🌐' },
+      { id: 'feishu-doc', name: 'Feishu Doc', description: '', enabled: true, installed: true, eligible: true, icon: '📄' },
     ];
 
     render(<ChatInput onSend={vi.fn()} allowedSkillIds={['feishu-doc']} />);
@@ -83,9 +84,9 @@ describe('chat input slash skills', () => {
 
   it('slash 列表按上下键切换时会滚动到激活项', async () => {
     skillsStoreState.skills = [
-      { id: 'skill-a', name: 'Skill A', description: '', enabled: true, eligible: true, icon: '🅰️' },
-      { id: 'skill-b', name: 'Skill B', description: '', enabled: true, eligible: true, icon: '🅱️' },
-      { id: 'skill-c', name: 'Skill C', description: '', enabled: true, eligible: true, icon: '🅲' },
+      { id: 'skill-a', name: 'Skill A', description: '', enabled: true, installed: true, eligible: true, icon: '🅰️' },
+      { id: 'skill-b', name: 'Skill B', description: '', enabled: true, installed: true, eligible: true, icon: '🅱️' },
+      { id: 'skill-c', name: 'Skill C', description: '', enabled: true, installed: true, eligible: true, icon: '🅲' },
     ];
 
     const scrollMock = vi.fn();

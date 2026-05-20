@@ -38,8 +38,7 @@
       "local": "Локальный"
     },
     "sections": {
-      "model": "Настройки модели",
-      "fallback": "Настройки резервного переключения"
+      "credentials": "Настройки учётных данных"
     },
     "add": "Добавить провайдера",
     "status": {
@@ -66,25 +65,9 @@
       "replaceApiKeyHelp": "Оставьте это поле пустым, чтобы сохранить текущий API-ключ.",
       "baseUrl": "Базовый URL",
       "protocol": "Протокол",
-      "modelId": "ID модели",
-      "contextWindow": "Context Window",
-      "maxTokens": "Max Tokens",
-      "codePlanPreset": "Пресет Code Plan",
-      "codePlanMode": "Code Plan",
-      "useCodePlanPreset": "Использовать пресет Ark Code Plan",
-      "codePlanPresetDesc": "Code Plan использует https://ark.cn-beijing.volces.com/api/coding/v3 и модель ark-code-latest. Не используйте /api/v3 для трафика Code Plan.",
-      "codePlanDoc": "Документация Code Plan",
-      "fallbackModels": "Резервные модели",
-      "fallbackProviders": "Резервные провайдеры",
-      "expandFallback": "Expand Fallback Settings",
-      "collapseFallback": "Collapse Fallback Settings",
-      "fallbackSummaryEmpty": "No fallback configured",
-      "fallbackSummaryCount_one": "1 fallback configured",
-      "fallbackSummaryCount_other": "{{count}} fallbacks configured",
-      "fallbackModelIds": "ID резервных моделей",
-      "fallbackModelIdsPlaceholder": "gpt-4.1-mini\nanother-model-id",
-      "fallbackModelIdsHelp": "Один ID модели на строку. Эти модели используют текущую конфигурацию провайдера перед переходом к другим провайдерам.",
-      "noFallbackOptions": "Сначала добавьте другого провайдера, чтобы использовать его как резервный.",
+      "chatProvider": "Провайдер чата",
+      "mediaProvider": "Медиа-провайдер",
+      "mediaContract": "Контракт",
       "cancel": "Отмена",
       "change": "Изменить провайдера",
       "add": "Добавить провайдера",
@@ -100,13 +83,9 @@
       "anthropic": "Совместимый с Anthropic"
     },
     "card": {
-      "default": "По умолчанию",
       "configured": "Настроен",
       "noKey": "API-ключ не задан",
       "none": "Нет",
-      "fallbacks_one": "Резервный: {{names}}",
-      "fallbacks_other": "Резервные ({{count}}): {{names}}",
-      "setDefault": "Установить по умолчанию",
       "editKey": "Редактировать API-ключ",
       "delete": "Удалить провайдера"
     },
@@ -115,12 +94,9 @@
       "failedAdd": "Не удалось добавить провайдера",
       "deleted": "Провайдер удалён",
       "failedDelete": "Не удалось удалить провайдера",
-      "defaultUpdated": "Провайдер по умолчанию обновлён",
-      "failedDefault": "Не удалось установить провайдер по умолчанию",
       "updated": "Провайдер обновлён",
       "failedUpdate": "Не удалось обновить провайдера",
       "invalidKey": "Неверный API-ключ",
-      "modelRequired": "Требуется ID модели",
       "minimaxConflict": "Нельзя добавить оба провайдера MiniMax (Global) и MiniMax (CN)."
     },
     "oauth": {
@@ -367,5 +343,126 @@
     "installTitle": "Установить команду OpenClaw",
     "installMessage": "Установить команду \"openclaw\"?",
     "installDetail": "Это создаст ~/.local/bin/openclaw. Убедитесь, что ~/.local/bin в PATH, если хотите запускать глобально."
+  },
+  "capabilityRouting": {
+    "title": "Модели по умолчанию",
+    "description": "Назначьте конкретного credential/model для чата, изображений, видео, музыки и TTS.",
+    "refresh": "Обновить",
+    "save": "Сохранить",
+    "clear": "Очистить",
+    "primaryLabel": "Основная модель (credential/model)",
+    "noModelOption": "Модель не выбрана",
+    "noRegisteredModels": "Нет моделей",
+    "fallbacksLabel": "Резервные модели",
+    "fallbackSelectPlaceholder": "Выберите резерв",
+    "addFallback": "Добавить резерв",
+    "moveFallbackUp": "Переместить резерв выше",
+    "moveFallbackDown": "Переместить резерв ниже",
+    "removeFallback": "Удалить резерв",
+    "fallbacksHelp": "Пробуются по порядку, если основная недоступна.",
+    "timeoutLabel": "Тайм-аут (мс, опционально)",
+    "timeoutHelp": "Тайм-аут запросов генерации медиа; per-call timeoutMs его переопределяет.",
+    "advanced": {
+      "expand": "Дополнительно",
+      "collapse": "Свернуть"
+    },
+    "errors": {
+      "invalidPrimary": "Основная модель должна быть в формате credential/model, например openai/gpt-image-2",
+      "invalidTimeout": "Тайм-аут должен быть положительным целым числом миллисекунд",
+      "invalidProviderKey": "providerKey может содержать только буквы, цифры, точку, подчёркивание, дефис"
+    },
+    "capabilities": {
+      "chat": {
+        "title": "Чат (основная)",
+        "description": "Соответствует agents.defaults.model",
+        "placeholder": "openai/gpt-5.5"
+      },
+      "imageUnderstand": {
+        "title": "Понимание изображений",
+        "description": "Соответствует agents.defaults.imageModel",
+        "placeholder": "google/gemini-3.1-flash"
+      },
+      "imageGenerate": {
+        "title": "Генерация изображений",
+        "description": "Соответствует agents.defaults.imageGenerationModel",
+        "placeholder": "openai/gpt-image-2"
+      },
+      "videoGenerate": {
+        "title": "Генерация видео",
+        "description": "Соответствует agents.defaults.videoGenerationModel",
+        "placeholder": "qwen/wan2.6-t2v"
+      },
+      "musicGenerate": {
+        "title": "Генерация музыки",
+        "description": "Соответствует agents.defaults.musicGenerationModel",
+        "placeholder": "minimax/music-2.6"
+      }
+    },
+    "tts": {
+      "title": "Синтез речи (TTS)",
+      "description": "Соответствует messages.tts.provider; голос/стиль настраиваются вручную в openclaw.json.",
+      "providerLabel": "Ключ провайдера TTS"
+    }
+  },
+  "providerModels": {
+    "title": "Каталог моделей",
+    "description": "Управляйте идентификаторами моделей для каждой учётной записи. Runtime-адаптер записывает их в openclaw.json как models.providers.<providerKey>.models[].",
+    "refresh": "Обновить",
+    "empty": "Нет моделей",
+    "codePlan": {
+      "title": "Ark Code Plan",
+      "description": "Добавляет ark-code-latest в каталог моделей ark. Ark API Key и coding Base URL настраиваются в карточке provider.",
+      "add": "Добавить ark-code-latest",
+      "added": "Добавлено"
+    },
+    "create": {
+      "title": "Добавить модель для учётной записи",
+      "help": "Модели добавляются только внутри существующей учётной записи провайдера.",
+      "add": "Создать"
+    },
+    "actions": {
+      "add": "Добавить модель",
+      "save": "Сохранить"
+    },
+    "group": {
+      "subtitle_one": "1 модель",
+      "subtitle_other": "{{count}} моделей",
+      "vendor": "Провайдер: {{vendor}}",
+      "empty": "Нет моделей"
+    },
+    "row": {
+      "modelIdLabel": "ID модели",
+      "capabilitiesLabel": "Возможности",
+      "contextWindowLabel": "Контекстное окно",
+      "maxTokensLabel": "Макс. выходных токенов",
+      "timeoutMsLabel": "Тайм-аут ms",
+      "aspectRatioLabel": "Формат",
+      "resolutionLabel": "Разрешение",
+      "qualityLabel": "Качество",
+      "defaultOption": "По умолчанию",
+      "remove": "Удалить"
+    },
+    "qualities": {
+      "low": "Низкое",
+      "medium": "Среднее",
+      "high": "Высокое",
+      "auto": "Авто"
+    },
+    "capabilities": {
+      "chat": "Чат",
+      "imageUnderstand": "Изображения",
+      "imageGenerate": "Ген. изображений",
+      "videoGenerate": "Видео",
+      "musicGenerate": "Музыка",
+      "tts": "TTS",
+      "transcribe": "Транскрипция"
+    },
+    "errors": {
+      "invalidEntry": "Модель \"{{id}}\" недействительна: context / maxTokens / timeoutMs должны быть положительными целыми числами",
+      "duplicate": "Идентификатор модели \"{{id}}\" повторяется",
+      "emptyKey": "credentialId не может быть пустым",
+      "duplicateKey": "Такой credentialId уже существует",
+      "invalidKey": "credentialId может содержать только буквы, цифры, точку, подчёркивание, дефис"
+    }
   }
 }

@@ -1,0 +1,20 @@
+{
+  "name": "@matchaclaw/media-plugin",
+  "version": "1.0.0",
+  "private": true,
+  "description": "MatchaClaw custom media provider plugin for OpenClaw",
+  "type": "module",
+  "main": "./dist/index.js",
+  "exports": "./dist/index.js",
+  "scripts": {
+    "build": "node ../../scripts/build-local-openclaw-plugins.mjs matchaclaw-media"
+  },
+  "openclaw": {
+    "extensions": [
+      "./dist/index.js"
+    ]
+  },
+  "peerDependencies": {
+    "openclaw": "*"
+  }
+}

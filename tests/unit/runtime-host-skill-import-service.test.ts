@@ -23,6 +23,7 @@ function createSkillsService(): SkillsService {
       getAllConfigs: async () => ({}),
       updateConfig: async () => ({ success: true }),
       setEnabled: async () => ({ success: true }),
+      setManyEnabled: async () => ({ success: true }),
       listEffective: async () => [],
     },
     readmePreviews: {
@@ -30,6 +31,7 @@ function createSkillsService(): SkillsService {
     },
     gateway: {
       isGatewayRunning: async () => false,
+      readGatewayConnectionState: async () => ({ state: 'disconnected', gatewayReady: false }),
       gatewayRpc: async () => ({}),
     },
     jobs: {

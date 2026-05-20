@@ -64,15 +64,39 @@ function createSecurityJobs() {
   };
 }
 
+function createTimer() {
+  return {
+    sleep: vi.fn(async () => {}),
+  };
+}
+
+function createSecurityService(
+  openclawBridge = createOpenclawBridge(),
+  jobs = createSecurityJobs(),
+  policyRepository = createPolicyRepository(),
+  timer = createTimer(),
+) {
+  return {
+    service: new SecurityRuntimeService({
+      gateway: openclawBridge,
+      policyRepository,
+      jobs,
+      timer,
+    }),
+    openclawBridge,
+    jobs,
+    policyRepository,
+    timer,
+  };
+}
+
 describe('security service', () => {
   beforeEach(() => {
     vi.clearAllMocks();
   });
 
   it('写入策略时只落盘并提交后台同步任务，不在请求链路触发 gateway sync', async () => {
-    const openclawBridge = createOpenclawBridge();
-    const jobs = createSecurityJobs();
-    const service = new SecurityRuntimeService({ gateway: openclawBridge, policyRepository: createPolicyRepository(), jobs });
+    const { service, openclawBridge, jobs } = createSecurityService();
 
     const response = await service.writePolicy({ preset: 'strict', securityPolicyVersion: 5 });
 
@@ -89,28 +113,48 @@ describe('security service', () => {
   });
 
   it('同步当前策略时复用同一套 service 主链', async () => {
-    const openclawBridge = createOpenclawBridge();
-    const service = new SecurityRuntimeService({ gateway: openclawBridge, policyRepository: createPolicyRepository(), jobs: createSecurityJobs() });
+    const { service, openclawBridge } = createSecurityService();
 
-    const skipped = await service.executePolicySync();
-    expect(skipped).toEqual({
+    const synced = await service.executePolicySync();
+    expect(synced).toEqual({
       synced: true as const,
       policy: expect.any(Object),
+      attempts: 1,
     });
     expect(openclawBridge.securityPolicySync).toHaveBeenCalledTimes(1);
+  });
 
-    openclawBridge.securityPolicySync.mockClear();
-    openclawBridge.isGatewayRunning.mockResolvedValue(false);
+  it('同步策略遇到 Gateway 暂时不可用会重试，成功后才完成 job', async () => {
+    const openclawBridge = createOpenclawBridge();
+    openclawBridge.securityPolicySync
+      .mockRejectedValueOnce(new Error('Gateway socket unavailable'))
+      .mockRejectedValueOnce(new Error('Gateway RPC timeout: security.policy.sync'))
+      .mockResolvedValueOnce({ success: true });
+    const { service, timer } = createSecurityService(openclawBridge);
 
-    const stopped = await service.executePolicySync();
-    expect(stopped).toEqual({ synced: false, policy: null });
-    expect(openclawBridge.securityPolicySync).not.toHaveBeenCalled();
+    const synced = await service.executePolicySync();
+
+    expect(synced).toEqual({
+      synced: true as const,
+      policy: expect.any(Object),
+      attempts: 3,
+    });
+    expect(openclawBridge.securityPolicySync).toHaveBeenCalledTimes(3);
+    expect(timer.sleep).toHaveBeenCalledTimes(2);
+  });
+
+  it('同步策略重试耗尽后让 job 失败，不返回 synced:false 成功态', async () => {
+    const openclawBridge = createOpenclawBridge();
+    openclawBridge.securityPolicySync.mockRejectedValue(new Error('Gateway RPC timeout: security.policy.sync'));
+    const { service, timer } = createSecurityService(openclawBridge);
+
+    await expect(service.executePolicySync()).rejects.toThrow('Security policy sync failed after 5 attempts');
+    expect(openclawBridge.securityPolicySync).toHaveBeenCalledTimes(5);
+    expect(timer.sleep).toHaveBeenCalledTimes(4);
   });
 
   it('应急响应请求只提交后台任务，不直接触发 policy sync 和 emergency rpc', async () => {
-    const openclawBridge = createOpenclawBridge();
-    const jobs = createSecurityJobs();
-    const service = new SecurityRuntimeService({ gateway: openclawBridge, policyRepository: createPolicyRepository(), jobs });
+    const { service, openclawBridge, jobs } = createSecurityService();
 
     const result = await service.runEmergencyResponse();
 
@@ -126,7 +170,7 @@ describe('security service', () => {
   it('后台执行应急响应时先锁定策略，再在 gateway 运行时触发 policy sync 和 emergency rpc', async () => {
     const openclawBridge = createOpenclawBridge();
     openclawBridge.securityEmergencyRun.mockResolvedValueOnce({ backend: 'security-core', incidentId: 'incident-1' });
-    const service = new SecurityRuntimeService({ gateway: openclawBridge, policyRepository: createPolicyRepository(), jobs: createSecurityJobs() });
+    const { service } = createSecurityService(openclawBridge);
 
     const result = await service.executeEmergencyResponse();
 
@@ -140,8 +184,7 @@ describe('security service', () => {
   });
 
   it('规则目录支持按平台过滤，并始终保留 universal 条目', () => {
-    const openclawBridge = createOpenclawBridge();
-    const service = new SecurityRuntimeService({ gateway: openclawBridge, policyRepository: createPolicyRepository(), jobs: createSecurityJobs() });
+    const { service } = createSecurityService();
 
     const result = service.listRuleCatalog('windows');
 
@@ -152,8 +195,7 @@ describe('security service', () => {
   });
 
   it('应急响应会把策略收紧到 block_all 和全级别 block', async () => {
-    const openclawBridge = createOpenclawBridge();
-    const service = new SecurityRuntimeService({ gateway: openclawBridge, policyRepository: createPolicyRepository(), jobs: createSecurityJobs() });
+    const { service } = createSecurityService();
 
     const result = await service.executeEmergencyResponse();
     const policy = result.policy as {
@@ -174,9 +216,7 @@ describe('security service', () => {
   });
 
   it('技能扫描在注入长任务服务后提交后台任务，不直接执行 gateway scan', async () => {
-    const openclawBridge = createOpenclawBridge();
-    const jobs = createSecurityJobs();
-    const service = new SecurityRuntimeService({ gateway: openclawBridge, policyRepository: createPolicyRepository(), jobs });
+    const { service, openclawBridge, jobs } = createSecurityService();
 
     const result = service.scanSkillsFromPayload({ scanPath: 'skills' });
 
@@ -196,9 +236,7 @@ describe('security service', () => {
   });
 
   it('安全长操作统一提交后台任务，不直接执行 gateway rpc', async () => {
-    const openclawBridge = createOpenclawBridge();
-    const jobs = createSecurityJobs();
-    const service = new SecurityRuntimeService({ gateway: openclawBridge, policyRepository: createPolicyRepository(), jobs });
+    const { service, openclawBridge, jobs } = createSecurityService();
 
     await service.runQuickAudit();
     await service.checkIntegrity();

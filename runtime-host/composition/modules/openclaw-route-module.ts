@@ -1,4 +1,6 @@
 import { channelRoutes } from '../../api/routes/channel-routes';
+import { capabilityRoutingRoutes } from '../../api/routes/capability-routing-routes';
+import { providerModelsRoutes } from '../../api/routes/provider-models-routes';
 import { clawHubRoutes } from '../../api/routes/clawhub-routes';
 import { openClawRoutes } from '../../api/routes/openclaw-routes';
 import { providerRoutes } from '../../api/routes/provider-routes';
@@ -17,6 +19,12 @@ export function registerOpenClawRoutes(
   });
   routes.registerDefinitions('provider', providerRoutes, {
     providerAccountsService: services.providerAccountsService,
+  });
+  routes.registerDefinitions('capabilityRouting', capabilityRoutingRoutes, {
+    capabilityRoutingService: services.capabilityRoutingService,
+  });
+  routes.registerDefinitions('providerModels', providerModelsRoutes, {
+    providerModelsService: services.providerModelsService,
   });
   routes.registerDefinitions('channel', channelRoutes, {
     channelService: services.channelService,

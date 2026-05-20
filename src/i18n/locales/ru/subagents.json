@@ -2,6 +2,15 @@
   "title": "Subagent Workspace",
   "subtitle": "Manage subagents and model settings.",
   "newSubagent": "New Subagent",
+  "transfer": {
+    "import": "Import Agent",
+    "importDialogTitle": "Import Agent Config",
+    "exportDialogTitle": "Export Agent Config",
+    "importSuccess": "Agent config imported.",
+    "exportSuccess": "Agent config exported.",
+    "importFailed": "Failed to import agent config: {{message}}",
+    "exportFailed": "Failed to export agent config: {{message}}"
+  },
   "status": {
     "refreshing": "Refreshing...",
     "mutating": "Saving changes..."
@@ -111,6 +120,7 @@
     "actions": {
       "edit": "Edit",
       "delete": "Delete",
+      "export": "Export",
       "manage": "Manage",
       "chat": "Chat"
     }

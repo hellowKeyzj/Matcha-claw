@@ -23,6 +23,15 @@
 4. badge 不是 `!`
 5. 目标窗口点过 **Use This Window**
 
+扩展 badge 含义：
+
+| Badge | 含义 |
+|------|------|
+| `ON` | 已连接，可执行 relay 浏览器操作 |
+| `...` | 正在连接 relay |
+| `!` | 连接失败或 relay 不可用 |
+| 空白 | relay 关闭 |
+
 ### 现象：没有当前可执行页面
 
 这通常不是“browser 工具坏了”，而是默认目标为空。
@@ -32,6 +41,18 @@
 1. 让用户在目标窗口点一次 **Use This Window**
 2. 确认该窗口里确实有正常网页，而不是 `chrome://`、扩展页之类内部页
 3. 再跑 `tabs`
+
+默认目标实现口径：
+
+| 语义 | 说明 |
+|-----|------|
+| browser instance | relay 里的 `browserInstanceId`，通常对应一个扩展连接 / Chrome profile 上下文 |
+| **Use This Window** | 写入手动选择：`browserInstanceId + windowId` |
+| `open` 自动选择 | 如果还没有选择窗口，`open` 新页面后会把该窗口写成自动选择 |
+| 默认目标 | `listAttachments()` 中同时满足 `selected && primary` 的 attached page |
+| `primary` 来源 | selected window 的 current target；没有 currentSession 时退到 active page / 单一物理 page |
+| 没有默认目标 | 直接失败，不猜别的 tab |
+| 显式传 `targetId` | 跳过默认目标，直接 resolve 该 target |
 
 ## 目标页错误
 

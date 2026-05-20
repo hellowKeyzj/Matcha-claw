@@ -2,49 +2,6 @@ import {
   OPENCLAW_PROVIDER_KEY_MOONSHOT,
   OPENCLAW_PROVIDER_KEY_MOONSHOT_GLOBAL,
 } from '../providers/provider-runtime-rules';
-import {
-  extractFallbackModelIds,
-  extractModelId,
-  normalizeModelRef,
-} from './openclaw-provider-entry-builder';
-
-export interface ProviderDefaultModelPlan {
-  model: string;
-  modelId: string;
-  fallbackModels: string[];
-  fallbackModelIds: string[];
-}
-
-export function resolveProviderDefaultModelPlan(
-  provider: string,
-  modelOverride: string | undefined,
-  fallbackModels: string[],
-): ProviderDefaultModelPlan | null {
-  const model = normalizeModelRef(provider, modelOverride);
-  if (!model) {
-    return null;
-  }
-  return {
-    model,
-    modelId: extractModelId(provider, model),
-    fallbackModels,
-    fallbackModelIds: extractFallbackModelIds(provider, fallbackModels),
-  };
-}
-
-export function applyDefaultModelToAgentsConfig(
-  config: Record<string, unknown>,
-  plan: ProviderDefaultModelPlan,
-): void {
-  const agents = (config.agents || {}) as Record<string, unknown>;
-  const defaults = (agents.defaults || {}) as Record<string, unknown>;
-  defaults.model = {
-    primary: plan.model,
-    fallbacks: plan.fallbackModels,
-  };
-  agents.defaults = defaults;
-  config.agents = agents;
-}
 
 export function ensureGatewayLocalMode(config: Record<string, unknown>): void {
   const gateway = (config.gateway || {}) as Record<string, unknown>;

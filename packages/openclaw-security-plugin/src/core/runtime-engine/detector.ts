@@ -27,8 +27,11 @@ const PROMPT_INJECTION_BASE_PATTERNS: NamedPattern[] = [
   { name: "prompt_injection_override", pattern: /(?:new|override)\s+(?:system|developer)\s+prompt/i },
   { name: "prompt_injection_you_are_now", pattern: /you\s+are\s+now\s+(?:an?\s+)?/i },
   { name: "prompt_injection_exfiltrate", pattern: /\b(?:exfiltrate|leak|dump)\b.{0,32}\b(?:secret|credential|token|key|prompt)\b/i },
-  { name: "prompt_injection_data_forward", pattern: /\b(?:forward|send|post)\b.{0,32}\b(?:to|http|https|webhook)\b/i },
 ];
+const PROMPT_INJECTION_DATA_FORWARD_PATTERN: NamedPattern = {
+  name: "prompt_injection_data_forward",
+  pattern: /\b(?:forward|send|post)\b.{0,32}\b(?:to|http|https|webhook)\b/i,
+};
 
 const PATH_HINT_KEYS = new Set([
   "path",
@@ -71,6 +74,16 @@ const DOMAIN_HINT_KEYS = new Set([
   "website",
   "webhook",
   "proxy",
+]);
+
+const WRITE_PAYLOAD_KEYS = new Set([
+  "body",
+  "content",
+  "contents",
+  "data",
+  "input",
+  "patch",
+  "text",
 ]);
 
 const URL_RE = /\bhttps?:\/\/[^\s"'<>()]+/gi;
@@ -493,10 +506,45 @@ function getPromptInjectionHit(ctx: PolicyRuleContext): string | undefined {
     ctx.cache.promptHit = firstPromptInjectionHit(
       ctx.fullText,
       ctx.runtimeConfig.extraPromptInjectionPatterns,
-    );
+    ) ?? firstDataForwardPromptInjectionHit(buildPromptInjectionInstructionText(ctx.toolName, ctx.entries, ctx.fullText));
     ctx.cache.promptHitResolved = true;
   }
   return ctx.cache.promptHit;
+}
+
+function isWritePayloadTool(toolName: string): boolean {
+  const normalized = toolName.toLowerCase().replace(/-/g, "_");
+  return (
+    normalized === "write"
+    || normalized === "apply_patch"
+    || normalized.endsWith(".write")
+    || normalized.endsWith("_write")
+    || normalized.endsWith(".apply_patch")
+    || normalized.endsWith("_apply_patch")
+    || normalized.includes("file.write")
+    || normalized.includes("filesystem.write")
+  );
+}
+
+function buildPromptInjectionInstructionText(toolName: string, entries: StringEntry[], fallbackText: string): string {
+  if (!isWritePayloadTool(toolName)) {
+    return fallbackText;
+  }
+
+  return entries
+    .filter((entry) => !WRITE_PAYLOAD_KEYS.has(entry.key.toLowerCase()))
+    .map((entry) => entry.value)
+    .join(" ");
+}
+
+function firstDataForwardPromptInjectionHit(text: string): string | undefined {
+  if (!text.trim()) {
+    return undefined;
+  }
+  if (PROMPT_INJECTION_DATA_FORWARD_PATTERN.pattern.test(text)) {
+    return PROMPT_INJECTION_DATA_FORWARD_PATTERN.name;
+  }
+  return undefined;
 }
 
 function executePathPrefixRule(ctx: PolicyRuleContext): RuntimePolicyDetection | undefined {

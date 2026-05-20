@@ -606,6 +606,12 @@ exports.default = async function afterPack(context) {
       ],
     },
     {
+      pluginId: 'matchaclaw-media',
+      localSourceCandidates: [
+        join(__dirname, '..', 'build', 'openclaw-plugins', 'matchaclaw-media'),
+      ],
+    },
+    {
       pluginId: 'openclaw-lark',
       required: true,
       localSourceCandidates: [

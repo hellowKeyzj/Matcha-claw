@@ -39,7 +39,22 @@ export const OLLAMA_PLACEHOLDER_API_KEY = 'ollama-local';
 export type ProviderProtocol =
   | 'openai-completions'
   | 'openai-responses'
+  | 'google-generative-ai'
   | 'anthropic-messages'
+  | 'openrouter';
+
+export type ProviderCredentialKind = 'chat' | 'media';
+
+export type CustomMediaCapability =
+  | 'imageGenerate'
+  | 'videoGenerate'
+  | 'musicGenerate'
+  | 'tts'
+  | 'transcribe';
+
+export type CustomMediaApiProtocol =
+  | 'openai'
+  | 'google'
   | 'openrouter';
 
 export type ProviderAuthMode =
@@ -60,11 +75,6 @@ export interface ProviderConfig {
   type: ProviderType;
   baseUrl?: string;
   headers?: Record<string, string>;
-  model?: string;
-  contextWindow?: number;
-  maxTokens?: number;
-  fallbackModels?: string[];
-  fallbackProviderIds?: string[];
   enabled: boolean;
   createdAt: string;
   updatedAt: string;
@@ -81,30 +91,19 @@ export interface ProviderTypeInfo {
   icon: string;
   placeholder: string;
   model?: string;
+  modelCapabilities?: ModelCapability[];
   requiresApiKey: boolean;
   defaultBaseUrl?: string;
   showBaseUrl?: boolean;
-  showModelId?: boolean;
-  showModelIdInDevModeOnly?: boolean;
-  modelIdPlaceholder?: string;
-  defaultModelId?: string;
   isOAuth?: boolean;
   supportsApiKey?: boolean;
   apiKeyUrl?: string;
-}
-
-export interface ProviderModelEntry extends Record<string, unknown> {
-  id: string;
-  name: string;
-  contextWindow?: number;
-  maxTokens?: number;
 }
 
 export interface ProviderBackendConfig {
   baseUrl: string;
   api: ProviderProtocol;
   apiKeyEnv: string;
-  models?: ProviderModelEntry[];
   headers?: Record<string, string>;
 }
 
@@ -117,21 +116,17 @@ export interface ProviderDefinition extends ProviderTypeInfo {
   supportsMultipleAccounts: boolean;
 }
 
-export interface ProviderAccount {
+export interface ProviderCredential {
   id: string;
   vendorId: ProviderType;
+  providerKind?: ProviderCredentialKind;
   label: string;
   authMode: ProviderAuthMode;
   baseUrl?: string;
   apiProtocol?: ProviderProtocol;
+  mediaApiProtocol?: CustomMediaApiProtocol;
   headers?: Record<string, string>;
-  model?: string;
-  contextWindow?: number;
-  maxTokens?: number;
-  fallbackModels?: string[];
-  fallbackAccountIds?: string[];
   enabled: boolean;
-  isDefault: boolean;
   metadata?: {
     region?: string;
     email?: string;
@@ -140,6 +135,47 @@ export interface ProviderAccount {
   };
   createdAt: string;
   updatedAt: string;
+}
+
+export type ModelCapability =
+  | 'chat'
+  | 'imageUnderstand'
+  | 'imageGenerate'
+  | 'videoGenerate'
+  | 'musicGenerate'
+  | 'tts'
+  | 'transcribe';
+
+export interface ProviderModel {
+  credentialId: string;
+  modelId: string;
+  capabilities: ModelCapability[];
+  contextWindow?: number;
+  maxTokens?: number;
+  timeoutMs?: number;
+  aspectRatio?: string;
+  resolution?: string;
+  quality?: string;
+}
+
+export interface ModelRef {
+  credentialId: string;
+  modelId: string;
+}
+
+export interface ModelRoute {
+  primary: ModelRef;
+  fallbacks: ModelRef[];
+  timeoutMs?: number;
+}
+
+export interface CapabilityRouting {
+  chat?: ModelRoute;
+  imageUnderstand?: ModelRoute;
+  imageGenerate?: ModelRoute;
+  videoGenerate?: ModelRoute;
+  musicGenerate?: ModelRoute;
+  tts?: ModelRoute;
 }
 
 export type ProviderSecret =

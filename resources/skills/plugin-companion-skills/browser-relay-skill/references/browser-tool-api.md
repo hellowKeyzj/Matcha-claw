@@ -1,230 +1,260 @@
 # Browser Tool API 参考
 
-## 基础原则
+工具名是 `browser`。默认使用 relay；除非用户明确要求或正在排障，不传 `connectionMode`。
 
-- 工具名是 `browser`
-- 默认连接模式是 `relay`
-- `direct-cdp` 只在明确要求或排障时使用
-- 页面理解优先走 `snapshot`
-- 页面执行优先走 `act`
+## 快速模板
 
-## 状态与目标管理
+### 新开工作页并读取
 
-### `action: "status"`
+```json
+{"action":"open","url":"https://example.com"}
+```
 
-用途：
+```json
+{"action":"snapshot","compact":true}
+```
 
-- 确认 Browser Relay 是否在线
-- 看扩展是否已连接
-- 看当前连接类型和 tab 数
+### 复用当前目标页
 
-### `action: "profiles"`
+```json
+{"action":"snapshot","compact":true}
+```
 
-用途：
+如果报“没有当前目标”，再用：
 
-- 看当前有哪些浏览器实例可用
-- 判断 relay / direct-cdp 的运行情况
+```json
+{"action":"status"}
+```
 
-### `action: "tabs"`
+```json
+{"action":"tabs"}
+```
 
-用途：
+### 选择明确 tab
 
-- 列出现有标签页
-- 判断哪个 tab 是当前目标
-- 看 `isAgent` / `isRetained` 等状态
+```json
+{"action":"tabs"}
+```
 
-### `action: "open"`
+```json
+{"action":"focus","targetId":"TARGET_ID_FROM_TABS"}
+```
 
-用途：
+### 点击
 
-- 新开页面
-- 创建 agent 自己的工作 tab
+```json
+{"action":"act","request":{"kind":"click","ref":"e5","timeoutMs":8000}}
+```
 
-常见字段：
+### 输入并回车
+
+```json
+{"action":"act","request":{"kind":"type","ref":"e3","text":"matcha claw","submit":true}}
+```
+
+### 批量填表
+
+```json
+{
+  "action":"act",
+  "request":{
+    "kind":"fill",
+    "fields":[
+      {"ref":"e3","type":"text","value":"Ada"},
+      {"ref":"e4","type":"text","value":"ada@example.com"},
+      {"ref":"e5","type":"checkbox","value":true}
+    ]
+  }
+}
+```
+
+### 等页面变化
+
+```json
+{"action":"act","request":{"kind":"wait","text":"Success","timeoutMs":15000}}
+```
+
+```json
+{"action":"snapshot","compact":true}
+```
+
+### 长页面找内容
+
+先过滤，不要先无限滚动：
+
+```json
+{
+  "action":"snapshot",
+  "compact":true,
+  "filter":{"keywords":["pricing","enterprise"],"contextLines":2,"maxMatches":20}
+}
+```
+
+需要触发懒加载时：
+
+```json
+{"action":"scroll","scrollDirection":"down","scrollAmount":900}
+```
+
+```json
+{"action":"snapshot","compact":true}
+```
+
+### 截图 / PDF 证据
+
+```json
+{"action":"screenshot","fullPage":false}
+```
+
+```json
+{"action":"screenshot","ref":"e7"}
+```
+
+```json
+{"action":"pdf","savePath":"artifacts/page.pdf"}
+```
+
+### 诊断页面
+
+```json
+{"action":"errors"}
+```
+
+```json
+{"action":"requests","filter":"api"}
+```
+
+```json
+{"action":"requests","clear":true}
+```
+
+## 动作清单
+
+### 状态与目标
+
+| action | 用途 |
+|------|------|
+| `status` | 检查 relay/扩展/连接状态 |
+| `profiles` | 查看浏览器实例概况 |
+| `tabs` | 列出可操作 tab |
+| `open` | 新建 agent 工作 tab |
+| `focus` | 切到指定 `targetId` |
+| `close` | 关闭指定 tab |
+| `close_agent_tabs` / `closeagenttabs` | 清理 agent 创建的 tab |
+
+### 页面理解
+
+| action | 用途 |
+|------|------|
+| `snapshot` | 获取 ARIA 页面结构和 refs |
+| `highlight` | 高亮 ref，确认将要操作的元素 |
+
+`snapshot` 常用字段：
 
 | 字段 | 说明 |
 |------|------|
-| `url` | 要打开的地址 |
-| `retain` | 是否保留 tab，不随 `close_agent_tabs` 一起关掉 |
-
-### `action: "focus"`
-
-用途：
-
-- 切到已知 `targetId` 的 tab
-
-### `action: "close"`
-
-用途：
-
-- 关闭指定 `targetId`
-
-### `action: "close_agent_tabs"` / `closeagenttabs`
-
-用途：
-
-- 统一清理 agent 自己创建的页面
-
-## 页面理解
-
-### `action: "snapshot"`
-
-用途：
-
-- 读取当前页面结构
-- 获取后续 `act` 需要的 ref
-- 判断当前页面是否正确
-
-常见字段：
-
-| 字段 | 说明 |
-|------|------|
-| `targetId` | 可选，显式指定目标页 |
-| `selector` | 只截取局部区域 |
+| `targetId` | 指定 tab |
+| `selector` | 截取局部 DOM |
 | `frame` | 指定 frame |
-| `interactive` | 强调交互元素 |
+| `interactive` | 只强调交互元素 |
 | `compact` / `efficient` | 紧凑输出 |
 | `depth` | 限制结构深度 |
+| `filter` | 按 keywords / roles 裁剪上下文 |
 
-### `action: "highlight"`
+### 页面执行
 
-用途：
-
-- 在真实页面高亮某个 ref
-- 操作前确认 ref 是否命中正确元素
-
-## 页面执行
-
-### `action: "act"`
-
-`act` 通过 `request.kind` 执行页面动作。
+`act` 通过 `request.kind` 执行动作。
 
 | kind | 用途 |
 |------|------|
 | `click` | 点击 |
 | `type` | 输入文本 |
-| `fill` | 一次填多个字段 |
-| `select` | 选择下拉项 |
+| `fill` | 批量填字段 |
+| `select` | 下拉选择 |
 | `press` | 键盘按键 |
 | `hover` | 悬停 |
 | `drag` | 拖拽 |
-| `scrollIntoView` | 把元素滚到视口 |
-| `wait` | 等待条件成立 |
+| `scrollIntoView` | 滚入视口 |
+| `wait` | 等待文本、URL、selector、loadState、时间或函数 |
 | `evaluate` | 页面上下文执行 JS |
-| `resize` | 改页面尺寸 |
+| `resize` | 改 viewport |
 | `scroll` | 页面内滚动 |
 | `close` | 关闭当前页 |
 
-### `action: "navigate"`
+其他执行动作：
 
-用途：
-
-- 在已有页面里跳到新 URL
-
-常见字段：
-
-| 字段 | 说明 |
+| action | 用途 |
 |------|------|
-| `url` | 新地址 |
-| `waitUntil` | 等待条件 |
-| `timeoutMs` | 超时 |
+| `navigate` | 在已有 tab 跳转 URL |
+| `scroll` | 触发页面滚动 |
+| `dialog` | 预设 alert/confirm/prompt 处理 |
+| `upload` | 设置文件输入 |
 
-### `action: "scroll"`
+### 证据与状态
 
-用途：
-
-- 触发懒加载
-- 把长页面滚到目标位置
-
-常见字段：
-
-| 字段 | 说明 |
+| action | 用途 |
 |------|------|
-| `scrollDirection` | 滚动方向 |
-| `scrollAmount` | 滚动距离 |
+| `screenshot` | 保存视觉证据 |
+| `pdf` | 导出 PDF |
+| `errors` | 读取页面 JS 错误 |
+| `requests` | 读取网络请求 |
+| `cookies` | get/set/clear cookies |
+| `storage` | get/set/clear localStorage/sessionStorage |
+| `console` | 执行 JS expression |
 
-### `action: "dialog"`
+## 恢复套路
 
-用途：
+### ref 失效
 
-- 预先处理 alert / confirm / prompt
+```json
+{"action":"snapshot","compact":true}
+```
 
-### `action: "upload"`
+重新选择 ref。必要时：
 
-用途：
+```json
+{"action":"highlight","ref":"e5","durationMs":2000}
+```
 
-- 给文件输入框设置文件
+### 页面没加载完
 
-常见字段：
+```json
+{"action":"act","request":{"kind":"wait","loadState":"domcontentloaded","timeoutMs":10000}}
+```
 
-| 字段 | 说明 |
-|------|------|
-| `paths` | 文件路径数组 |
-| `inputRef` | file input 的 ref |
-| `element` | 备用元素定位 |
+或等待具体文本/selector，再 `snapshot`。
 
-## 证据与诊断
+### 操作到了错误页面
 
-### `action: "screenshot"`
+```json
+{"action":"tabs"}
+```
 
-用途：
+选择正确 `targetId` 后：
 
-- 保存视觉证据
-- 向用户展示页面实际状态
+```json
+{"action":"focus","targetId":"TARGET_ID_FROM_TABS"}
+```
 
-常见字段：
+### 需要页面内 JS 判断
 
-| 字段 | 说明 |
-|------|------|
-| `ref` / `element` | 局部截图目标 |
-| `fullPage` | 全页截图 |
-| `type` | `png` / `jpeg` |
-| `savePath` | 保存路径，优先使用工作区内相对路径 |
+优先用 `act -> evaluate`，可绑定 ref：
 
-### `action: "pdf"`
+```json
+{
+  "action":"act",
+  "request":{
+    "kind":"evaluate",
+    "ref":"e5",
+    "fn":"(el) => ({ text: el.innerText, disabled: el.disabled === true })"
+  }
+}
+```
 
-用途：
+全页表达式可用 `console`：
 
-- 导出当前页面 PDF
+```json
+{"action":"console","expression":"document.title"}
+```
 
-### `action: "errors"`
-
-用途：
-
-- 查看页面错误
-- 用 `clear` 清空历史错误再复验
-
-### `action: "requests"`
-
-用途：
-
-- 查看网络请求
-- 用 `filter` 聚焦目标请求
-- 用 `clear` 清空后重新观察
-
-### `action: "cookies"`
-
-支持：
-
-- `operation: "get"`
-- `operation: "set"`
-- `operation: "clear"`
-
-### `action: "storage"`
-
-支持：
-
-- `storageType: "local" | "session"`
-- `operation: "get" | "set" | "clear"`
-
-### `action: "console"`
-
-用途：
-
-- 执行 JS 表达式
-
-注意：
-
-- 当前这不是“看控制台日志”的专用动作
-- 需要传 `expression`
-- 想做页面上下文判断时，也可以用 `act -> evaluate`
+注意：`console` 不是读取 console log 的工具。

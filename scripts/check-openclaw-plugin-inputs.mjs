@@ -30,6 +30,12 @@ const REQUIRED_LOCAL_PLUGINS = [
     expectedExtensions: ['./dist/index.js'],
     sourceEntries: ['./index.ts', './cli.ts', './src/embedder.ts'],
   },
+  {
+    pluginId: 'matchaclaw-media',
+    sourceDir: 'packages/openclaw-matchaclaw-media-plugin',
+    expectedExtensions: ['./dist/index.js'],
+    sourceEntries: ['./src/index.ts'],
+  },
 ];
 
 function fail(message, details = []) {

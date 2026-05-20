@@ -8,18 +8,16 @@ describe('provider accounts helper', () => {
 
   it('fetchProviderSnapshot 直接消费 /api/provider-accounts snapshot', async () => {
     hostApiFetchMock.mockResolvedValue({
-      accounts: [{ id: 'acc-1' }],
+      credentials: [{ id: 'acc-1' }],
       statuses: [{ id: 'acc-1', hasKey: true }],
       vendors: [{ id: 'openai' }],
-      defaultAccountId: 'acc-1',
     });
 
     const { fetchProviderSnapshot } = await import('../../src/lib/provider-accounts');
     await expect(fetchProviderSnapshot()).resolves.toEqual({
-      accounts: [{ id: 'acc-1' }],
+      credentials: [{ id: 'acc-1' }],
       statuses: [{ id: 'acc-1', hasKey: true }],
       vendors: [{ id: 'openai' }],
-      defaultAccountId: 'acc-1',
     });
     expect(hostApiFetchMock).toHaveBeenCalledWith('/api/provider-accounts', undefined);
   });
@@ -29,10 +27,9 @@ describe('provider accounts helper', () => {
 
     const { fetchProviderSnapshot } = await import('../../src/lib/provider-accounts');
     await expect(fetchProviderSnapshot()).resolves.toEqual({
-      accounts: [],
+      credentials: [],
       statuses: [],
       vendors: [],
-      defaultAccountId: null,
     });
   });
 });

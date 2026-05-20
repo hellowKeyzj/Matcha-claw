@@ -104,6 +104,7 @@ export function createTestSessionRuntimeService(deps: TestSessionRuntimeServiceD
     timelineRuntime,
     snapshotService,
     clock,
+    emitSessionUpdate: deps.emitSessionUpdate,
   });
   const commandService = new SessionCommandService({
     sessionCatalog,

@@ -1,4 +1,5 @@
 import {
+  getLegacyOpenClawProviderKeys,
   getOAuthApiKeyEnv,
   getOAuthProviderApi,
   normalizeOAuthBaseUrl,
@@ -6,9 +7,7 @@ import {
 } from './provider-runtime-rules';
 import {
   getOptionalString,
-  getPositiveInteger,
-  toStringArray,
-  type NormalizedProviderAccount,
+  type NormalizedProviderCredential,
   type ProviderStoreLike,
 } from './provider-store-model';
 
@@ -24,12 +23,7 @@ export type RuntimeProviderConfigOverride = {
   apiKeyEnv?: string;
   headers?: Record<string, string>;
   authHeader?: boolean;
-  models?: Array<{
-    id: string;
-    name: string;
-    contextWindow?: number;
-    maxTokens?: number;
-  }>;
+  replaceProviderKeys?: readonly string[];
 };
 
 export interface ProviderRuntimeAccountSyncPlan {
@@ -39,16 +33,8 @@ export interface ProviderRuntimeAccountSyncPlan {
   runtimeOverride?: RuntimeProviderConfigOverride;
 }
 
-export interface ProviderRuntimeDefaultModelPlan {
-  providerKey: string;
-  defaultModel?: string;
-  fallbackModels: string[];
-  runtimeOverride?: RuntimeProviderConfigOverride;
-}
-
 export interface ProviderRuntimeSyncPlan {
   accountPlans: ProviderRuntimeAccountSyncPlan[];
-  defaultModelPlan?: ProviderRuntimeDefaultModelPlan;
 }
 
 function normalizeProviderProtocol(protocol: unknown): ProviderRuntimeProtocol {
@@ -101,56 +87,6 @@ function normalizeProviderBaseUrl(
   return normalized.replace(/\/chat\/completions$/i, '');
 }
 
-function normalizeFallbackModelRefs(providerKey: string, fallbackModels: unknown): string[] {
-  const normalized: string[] = [];
-  for (const model of toStringArray(fallbackModels)) {
-    normalized.push(model.startsWith(`${providerKey}/`) ? model : `${providerKey}/${model}`);
-  }
-  return normalized;
-}
-
-function buildRuntimeProviderModels(
-  account: Record<string, unknown>,
-): Array<{
-  id: string;
-  name: string;
-  contextWindow?: number;
-  maxTokens?: number;
-}> {
-  const models: Array<{
-    id: string;
-    name: string;
-    contextWindow?: number;
-    maxTokens?: number;
-  }> = [];
-  const seen = new Set<string>();
-  const push = (
-    modelId: string | undefined,
-    capabilities?: { contextWindow?: number; maxTokens?: number },
-  ) => {
-    if (!modelId || seen.has(modelId)) {
-      return;
-    }
-    seen.add(modelId);
-    models.push({
-      id: modelId,
-      name: modelId,
-      contextWindow: capabilities?.contextWindow,
-      maxTokens: capabilities?.maxTokens,
-    });
-  };
-
-  push(getOptionalString(account.model), {
-    contextWindow: getPositiveInteger(account.contextWindow),
-    maxTokens: getPositiveInteger(account.maxTokens),
-  });
-  for (const fallbackModel of toStringArray(account.fallbackModels)) {
-    push(fallbackModel);
-  }
-
-  return models;
-}
-
 function ensureHttpsPrefix(value: string): string {
   if (value.startsWith('http://') || value.startsWith('https://')) {
     return value;
@@ -167,13 +103,19 @@ export function resolveRuntimeProviderConfigOverride(
     return undefined;
   }
 
+  if (vendorId === 'custom' && account.providerKind === 'media') {
+    return undefined;
+  }
+
   if (vendorId === 'custom' || vendorId === 'ollama') {
     const protocol = normalizeProviderProtocol(account.apiProtocol);
+    const accountId = getOptionalString(account.id) || providerKey;
+    const replaceProviderKeys = getLegacyOpenClawProviderKeys(vendorId, accountId);
     return {
       baseUrl: normalizeProviderBaseUrl(vendorId, account.baseUrl, protocol),
       api: protocol,
+      ...(replaceProviderKeys.length > 0 ? { replaceProviderKeys } : {}),
       headers: normalizeProviderHeaders(account.headers),
-      models: buildRuntimeProviderModels(account),
     };
   }
 
@@ -197,38 +139,16 @@ export function resolveRuntimeProviderConfigOverride(
 
 export function buildProviderRuntimeSyncPlan(
   store: ProviderStoreLike,
-  accounts: NormalizedProviderAccount[],
+  accounts: NormalizedProviderCredential[],
 ): ProviderRuntimeSyncPlan {
   const accountPlans = accounts.map(({ accountId, providerKey, account }) => {
     const apiKey = typeof store.apiKeys[accountId] === 'string' ? store.apiKeys[accountId].trim() : '';
     return {
       accountId,
-      providerKey,
+      providerKey: providerKey || accountId,
       apiKey: apiKey || null,
       runtimeOverride: resolveRuntimeProviderConfigOverride(providerKey, account),
     };
   });
-
-  const defaultAccountEntry = typeof store.defaultAccountId === 'string'
-    ? accounts.find((account) => account.accountId === store.defaultAccountId)
-    : null;
-  return {
-    accountPlans,
-    ...(defaultAccountEntry
-      ? {
-          defaultModelPlan: {
-            providerKey: defaultAccountEntry.providerKey,
-            defaultModel: getOptionalString(defaultAccountEntry.account.model),
-            fallbackModels: normalizeFallbackModelRefs(
-              defaultAccountEntry.providerKey,
-              defaultAccountEntry.account.fallbackModels,
-            ),
-            runtimeOverride: resolveRuntimeProviderConfigOverride(
-              defaultAccountEntry.providerKey,
-              defaultAccountEntry.account,
-            ),
-          },
-        }
-      : {}),
-  };
+  return { accountPlans };
 }

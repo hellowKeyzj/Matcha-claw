@@ -88,6 +88,28 @@ export interface ReadTextFileResult {
   error?: FilePreviewError;
 }
 
+export interface WriteTextFileResult {
+  ok: boolean;
+  path?: string;
+  error?: FilePreviewError;
+}
+
+export interface SkillBundleFile {
+  path: string;
+  content: string;
+}
+
+export interface SkillBundle {
+  skillKey: string;
+  files: SkillBundleFile[];
+}
+
+export interface SkillBundlesImportResult {
+  ok: boolean;
+  installed?: string[];
+  error?: string;
+}
+
 export interface ReadBinaryFileResult {
   ok: boolean;
   path?: string;
@@ -303,6 +325,40 @@ export async function hostFileReadText(
   },
 ): Promise<ReadTextFileResult> {
   return hostApiFetch('/api/files/read-text', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function hostFileWriteText(
+  payload: {
+    path: string;
+    content: string;
+  },
+): Promise<WriteTextFileResult> {
+  return hostApiFetch('/api/files/write-text', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function hostSkillBundlesExport(
+  payload: {
+    skillKeys: string[];
+  },
+): Promise<SkillBundle[]> {
+  return hostApiFetch('/api/skills/bundles/export', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function hostSkillBundlesImport(
+  payload: {
+    skillBundles: SkillBundle[];
+  },
+): Promise<SkillBundlesImportResult> {
+  return hostApiFetch('/api/skills/bundles/import', {
     method: 'POST',
     body: JSON.stringify(payload),
   });

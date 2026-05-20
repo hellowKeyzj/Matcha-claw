@@ -1,6 +1,7 @@
 import type {
   SessionItemChunkUpdateEvent,
   SessionRenderItem,
+  SessionTimelineAssistantTurnEntry,
   SessionUpdateEvent,
 } from '../../shared/session-adapter-types';
 import { buildSessionUpdateEventsFromGatewayConversationEvent } from './gateway-ingress';
@@ -38,6 +39,7 @@ export interface SessionGatewayIngressServiceDeps {
   snapshotService: SessionSnapshotService;
   clock: RuntimeClockPort;
   logger?: Pick<RuntimeHostLogger, 'traceDebug'>;
+  emitSessionUpdate?: (event: SessionUpdateEvent) => void;
 }
 
 export class SessionGatewayIngressService {
@@ -325,6 +327,57 @@ export class SessionGatewayIngressService {
     });
   }
 
+  private hasTimelineEntryForRun(sessionKey: string, runId: string | null): boolean {
+    if (!runId) {
+      return false;
+    }
+    return this.deps.stateStore.getSessionState(sessionKey).timelineEntries.some((entry) => entry.runId === runId);
+  }
+
+  private buildItemChunkForTimelineEntry(input: {
+    sessionKey: string;
+    runId: string | null;
+    entry: SessionTimelineAssistantTurnEntry;
+  }): SessionItemChunkUpdateEvent {
+    const state = this.deps.stateStore.getSessionState(input.sessionKey);
+    const snapshot = this.deps.snapshotService.buildSnapshot(input.sessionKey, state, {
+      window: state.window.totalItemCount > 0
+        ? state.window
+        : createLatestWindowState(state.renderItems.length),
+      replayComplete: true,
+    });
+    return {
+      sessionUpdate: 'session_item_chunk',
+      sessionKey: input.sessionKey,
+      runId: input.runId,
+      item: this.deps.snapshotService.resolvePrimaryItemFromSnapshot(snapshot, input.entry, [input.entry]) as SessionRenderItem | null,
+      snapshot,
+    };
+  }
+
+  private async reconcileTranscriptToolResults(input: {
+    sessionKey: string;
+    runId: string | null;
+  }): Promise<SessionItemChunkUpdateEvent[]> {
+    const updatedEntries = await this.deps.timelineRuntime.reconcileTranscriptToolResults(input.sessionKey);
+    return updatedEntries.map((entry) => this.buildItemChunkForTimelineEntry({
+      sessionKey: input.sessionKey,
+      runId: input.runId,
+      entry,
+    }));
+  }
+
+  private scheduleTranscriptToolResultCatchup(input: {
+    sessionKey: string;
+    runId: string | null;
+  }): void {
+    void this.reconcileTranscriptToolResults(input).then((events) => {
+      for (const update of events) {
+        this.deps.emitSessionUpdate?.(update);
+      }
+    }).catch(() => undefined);
+  }
+
   async consumeGatewayConversationEvent(payload: unknown): Promise<SessionUpdateEvent[]> {
     const normalizedPayload = this.normalizeGatewayConversationPayload(payload);
     logTodoToolDebug(this.deps.logger, 'runtime-host.ingress.normalized-payload', normalizedPayload);
@@ -451,6 +504,15 @@ export class SessionGatewayIngressService {
         runId: normalizeString(event.runId),
         phase: event.phase,
       })) {
+        if (
+          (event.phase === 'final' || event.phase === 'error' || event.phase === 'aborted')
+          && this.hasTimelineEntryForRun(sessionKey, normalizeString(event.runId))
+        ) {
+          this.scheduleTranscriptToolResultCatchup({
+            sessionKey,
+            runId: event.runId,
+          });
+        }
         return {
           sessionUpdate: 'session_info_update' as const,
           sessionKey: event.sessionKey,
@@ -487,6 +549,12 @@ export class SessionGatewayIngressService {
         ...(event._meta ? { _meta: event._meta } : {}),
       };
       logTodoToolDebug(this.deps.logger, 'runtime-host.ingress.output-event', summarizeSessionUpdateForTodoToolDebug(output));
+      if (event.phase === 'final' || event.phase === 'error' || event.phase === 'aborted') {
+        this.scheduleTranscriptToolResultCatchup({
+          sessionKey,
+          runId: event.runId,
+        });
+      }
       return output;
     }
 

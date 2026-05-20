@@ -2,19 +2,6 @@ import { describe, expect, it, vi } from 'vitest';
 import { RuntimeHostBootstrapService } from '../../runtime-host/application/runtime-host/bootstrap';
 
 function createBootstrapService() {
-  const submitPolicySync = vi.fn(() => ({
-    success: true as const,
-    job: {
-      id: 'security-sync-job',
-      type: 'security.policySync',
-      status: 'queued' as const,
-      queuedAt: 1,
-      attempts: 0,
-      maxAttempts: 1,
-      queue: 'default' as const,
-    },
-  }));
-
   const service = new RuntimeHostBootstrapService({
     settingsRepository: {
       getAll: vi.fn(),
@@ -47,8 +34,8 @@ function createBootstrapService() {
       migrateMainAgentTemplatesIfNeeded: vi.fn(),
       mergeContextSnippets: vi.fn(),
     },
-    securityJobs: {
-      submitPolicySync,
+    securityPluginConfig: {
+      applySavedPolicyToPluginConfig: vi.fn(),
     },
     idGenerator: {
       randomHex: vi.fn(() => '1'.repeat(32)),
@@ -60,31 +47,23 @@ function createBootstrapService() {
     },
   } as never);
 
-  return { service, submitPolicySync };
+  return { service };
 }
 
 describe('runtime-host gateway lifecycle', () => {
-  it('Gateway running 事件由 runtime-host 提交安全策略同步 job', () => {
-    const { service, submitPolicySync } = createBootstrapService();
+  it('Gateway running 事件不再提交安全策略同步 job', () => {
+    const { service } = createBootstrapService();
 
     const job = service.onGatewayLifecycle({ state: 'running', port: 18789 });
 
-    expect(submitPolicySync).toHaveBeenCalledTimes(1);
-    expect(job).toMatchObject({
-      success: true,
-      job: {
-        id: 'security-sync-job',
-        type: 'security.policySync',
-      },
-    });
+    expect(job).toBeNull();
   });
 
   it('非 running 生命周期事件不触发业务 job', () => {
-    const { service, submitPolicySync } = createBootstrapService();
+    const { service } = createBootstrapService();
 
     const job = service.onGatewayLifecycle({ state: 'stopped' });
 
     expect(job).toBeNull();
-    expect(submitPolicySync).not.toHaveBeenCalled();
   });
 });

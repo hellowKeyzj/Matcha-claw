@@ -75,6 +75,7 @@ describe('gateway manager start', () => {
 
     expect(waitForGatewayPortReadyMock).toHaveBeenCalledTimes(1);
     expect(controlReadyProbeMock).toHaveBeenCalledTimes(1);
+    expect(controlReadyProbeMock).toHaveBeenCalledWith(30000, 18789, undefined);
     expect(manager.getStatus()).toEqual(expect.objectContaining({
       processState: 'running',
       pid: 4242,

@@ -100,7 +100,7 @@ export function useSkillConfig(input: UseSkillConfigInput): UseSkillConfigResult
 
   const availableSkillOptions = useMemo<AgentSkillOption[]>(
     () => skills
-      .filter((skill) => skill.enabled !== false && skill.eligible !== false)
+      .filter((skill) => skill.enabled !== false && skill.eligible === true)
       .map((skill) => ({
         id: skill.id,
         name: skill.name,

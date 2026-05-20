@@ -6,8 +6,7 @@ function isRecord(value: unknown): value is Record<string, any> {
 }
 
 export interface ProviderStoreRecord {
-  schemaVersion: 1;
-  defaultAccountId: string | null;
+  schemaVersion: 2;
   accounts: Record<string, Record<string, unknown>>;
   apiKeys: Record<string, string>;
 }
@@ -37,8 +36,7 @@ function normalizeStringMap(value: unknown): Record<string, string> {
 
 function createEmptyProviderStore(): ProviderStoreRecord {
   return {
-    schemaVersion: 1,
-    defaultAccountId: null,
+    schemaVersion: 2,
     accounts: {},
     apiKeys: {},
   };
@@ -47,7 +45,6 @@ function createEmptyProviderStore(): ProviderStoreRecord {
 function cloneProviderStore(store: ProviderStoreRecord): ProviderStoreRecord {
   return {
     schemaVersion: store.schemaVersion,
-    defaultAccountId: store.defaultAccountId,
     accounts: Object.fromEntries(
       Object.entries(store.accounts).map(([id, account]) => [id, { ...account }]),
     ),
@@ -92,8 +89,7 @@ export class ProviderStoreRepository implements ProviderStorePort {
       const parsed = JSON.parse(raw);
       const normalized = isRecord(parsed)
         ? {
-          schemaVersion: 1 as const,
-          defaultAccountId: typeof parsed.defaultAccountId === 'string' ? parsed.defaultAccountId : null,
+          schemaVersion: 2 as const,
           accounts: normalizeRecordMap(parsed.accounts),
           apiKeys: normalizeStringMap(parsed.apiKeys),
         }

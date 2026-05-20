@@ -38,8 +38,7 @@
       "local": "ローカル"
     },
     "sections": {
-      "model": "モデル設定",
-      "fallback": "フォールバック設定"
+      "credentials": "認証情報設定"
     },
     "add": "プロバイダーを追加",
     "status": {
@@ -66,25 +65,9 @@
       "replaceApiKeyHelp": "現在保存されている API キーをそのまま使う場合は、この欄を空のままにしてください。",
       "baseUrl": "ベース URL",
       "protocol": "プロトコル",
-      "modelId": "モデル ID",
-      "contextWindow": "コンテキストウィンドウ",
-      "maxTokens": "最大出力トークン",
-      "codePlanPreset": "Code Plan プリセット",
-      "codePlanMode": "Code Plan",
-      "useCodePlanPreset": "Ark Code Plan プリセットを使用",
-      "codePlanPresetDesc": "Code Plan は https://ark.cn-beijing.volces.com/api/coding/v3 と model ark-code-latest を使います。Code Plan 通信に /api/v3 を使わないでください。",
-      "codePlanDoc": "Code Plan ドキュメント",
-      "fallbackModels": "フォールバックモデル",
-      "fallbackProviders": "別プロバイダーへのフォールバック",
-      "expandFallback": "フォールバック設定を開く",
-      "collapseFallback": "フォールバック設定を閉じる",
-      "fallbackSummaryEmpty": "フォールバックは未設定です",
-      "fallbackSummaryCount_one": "1 件のフォールバックを設定済み",
-      "fallbackSummaryCount_other": "{{count}} 件のフォールバックを設定済み",
-      "fallbackModelIds": "同一プロバイダーのフォールバックモデル ID",
-      "fallbackModelIdsPlaceholder": "gpt-4.1-mini\nanother-model-id",
-      "fallbackModelIdsHelp": "1 行につき 1 つのモデル ID を指定します。まず現在のプロバイダー内でこれらを試し、その後ほかのプロバイダーへフォールバックします。",
-      "noFallbackOptions": "フォールバック先にするには、先に別のプロバイダーを追加してください。",
+      "chatProvider": "チャットプロバイダー",
+      "mediaProvider": "メディアプロバイダー",
+      "mediaContract": "契約",
       "cancel": "キャンセル",
       "change": "プロバイダーを変更",
       "add": "プロバイダーを追加",
@@ -100,13 +83,9 @@
       "anthropic": "Anthropic 互換"
     },
     "card": {
-      "default": "デフォルト",
       "configured": "構成済み",
       "noKey": "API キー未設定",
       "none": "なし",
-      "fallbacks_one": "フォールバック: {{names}}",
-      "fallbacks_other": "フォールバック ({{count}}): {{names}}",
-      "setDefault": "デフォルトに設定",
       "editKey": "API キーを編集",
       "delete": "プロバイダーを削除"
     },
@@ -115,12 +94,9 @@
       "failedAdd": "プロバイダーの追加に失敗しました",
       "deleted": "プロバイダーが削除されました",
       "failedDelete": "プロバイダーの削除に失敗しました",
-      "defaultUpdated": "デフォルトプロバイダーが更新されました",
-      "failedDefault": "デフォルトの設定に失敗しました",
       "updated": "プロバイダーが更新されました",
       "failedUpdate": "プロバイダーの更新に失敗しました",
       "invalidKey": "無効な API キー",
-      "modelRequired": "モデル ID が必要です",
       "minimaxConflict": "MiniMax (Global) と MiniMax (CN) は同時に追加できません。"
     },
     "oauth": {
@@ -366,5 +342,126 @@
     "installTitle": "OpenClaw コマンドをインストール",
     "installMessage": "\"openclaw\" コマンドをインストールしますか？",
     "installDetail": "~/.local/bin/openclaw が作成されます。グローバルに実行するには ~/.local/bin が PATH に含まれていることを確認してください。"
+  },
+  "capabilityRouting": {
+    "title": "既定モデル",
+    "description": "チャット・画像・動画・音楽・TTS でそれぞれどの credential/model を使うかを指定します。",
+    "refresh": "更新",
+    "save": "保存",
+    "clear": "クリア",
+    "primaryLabel": "プライマリモデル (credential/model)",
+    "noModelOption": "モデル未選択",
+    "noRegisteredModels": "モデルなし",
+    "fallbacksLabel": "フォールバックモデル",
+    "fallbackSelectPlaceholder": "フォールバックを選択",
+    "addFallback": "フォールバックを追加",
+    "moveFallbackUp": "フォールバックを上へ移動",
+    "moveFallbackDown": "フォールバックを下へ移動",
+    "removeFallback": "フォールバックを削除",
+    "fallbacksHelp": "プライマリが利用不可のとき順番に試します。",
+    "timeoutLabel": "タイムアウト（ミリ秒、任意）",
+    "timeoutHelp": "メディア生成リクエストのデフォルトタイムアウト。呼び出しごとの timeoutMs が優先されます。",
+    "advanced": {
+      "expand": "詳細",
+      "collapse": "閉じる"
+    },
+    "errors": {
+      "invalidPrimary": "プライマリは credential/model 形式である必要があります（例: openai/gpt-image-2）",
+      "invalidTimeout": "タイムアウトは正の整数（ミリ秒）である必要があります",
+      "invalidProviderKey": "providerKey は英数字・ドット・アンダースコア・ハイフンのみ使用できます"
+    },
+    "capabilities": {
+      "chat": {
+        "title": "チャット（プライマリ）",
+        "description": "agents.defaults.model に対応",
+        "placeholder": "openai/gpt-5.5"
+      },
+      "imageUnderstand": {
+        "title": "画像理解",
+        "description": "agents.defaults.imageModel に対応",
+        "placeholder": "google/gemini-3.1-flash"
+      },
+      "imageGenerate": {
+        "title": "画像生成",
+        "description": "agents.defaults.imageGenerationModel に対応",
+        "placeholder": "openai/gpt-image-2"
+      },
+      "videoGenerate": {
+        "title": "動画生成",
+        "description": "agents.defaults.videoGenerationModel に対応",
+        "placeholder": "qwen/wan2.6-t2v"
+      },
+      "musicGenerate": {
+        "title": "音楽生成",
+        "description": "agents.defaults.musicGenerationModel に対応",
+        "placeholder": "minimax/music-2.6"
+      }
+    },
+    "tts": {
+      "title": "音声合成 (TTS)",
+      "description": "messages.tts.provider に対応。声・スタイルの詳細設定は openclaw.json を直接編集してください。",
+      "providerLabel": "TTS Provider Key"
+    }
+  },
+  "providerModels": {
+    "title": "モデルカタログ",
+    "description": "各資格情報に登録するモデル ID を管理します。ランタイムアダプターが openclaw.json の models.providers.<providerKey>.models[] に書き込みます。",
+    "refresh": "更新",
+    "empty": "モデルなし",
+    "codePlan": {
+      "title": "Ark Code Plan",
+      "description": "ark-code-latest を ark のモデルカタログに追加します。Ark API Key と coding Base URL は provider カードで設定します。",
+      "add": "ark-code-latest を追加",
+      "added": "追加済み"
+    },
+    "create": {
+      "title": "新しい資格情報モデルを追加",
+      "help": "モデルは既存の provider 資格情報の中に追加します。",
+      "add": "作成"
+    },
+    "actions": {
+      "add": "モデルを追加",
+      "save": "保存"
+    },
+    "group": {
+      "subtitle_one": "1 件のモデル",
+      "subtitle_other": "{{count}} 件のモデル",
+      "vendor": "プロバイダー: {{vendor}}",
+      "empty": "モデルなし"
+    },
+    "row": {
+      "modelIdLabel": "モデル ID",
+      "capabilitiesLabel": "能力",
+      "contextWindowLabel": "コンテキストウィンドウ",
+      "maxTokensLabel": "最大出力トークン",
+      "timeoutMsLabel": "タイムアウト ms",
+      "aspectRatioLabel": "比率",
+      "resolutionLabel": "解像度",
+      "qualityLabel": "品質",
+      "defaultOption": "デフォルト",
+      "remove": "削除"
+    },
+    "qualities": {
+      "low": "低",
+      "medium": "中",
+      "high": "高",
+      "auto": "自動"
+    },
+    "capabilities": {
+      "chat": "チャット",
+      "imageUnderstand": "画像理解",
+      "imageGenerate": "画像生成",
+      "videoGenerate": "動画",
+      "musicGenerate": "音楽",
+      "tts": "TTS",
+      "transcribe": "文字起こし"
+    },
+    "errors": {
+      "invalidEntry": "モデル \"{{id}}\" が無効です: context / maxTokens / timeoutMs は正の整数である必要があります",
+      "duplicate": "モデル ID \"{{id}}\" が重複しています",
+      "emptyKey": "credentialId は空にできません",
+      "duplicateKey": "この credentialId は既に存在します",
+      "invalidKey": "credentialId は英数字・ドット・アンダースコア・ハイフンのみ使用できます"
+    }
   }
 }

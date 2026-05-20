@@ -1,10 +1,11 @@
 import type {
+  ModelCapability,
   ProviderBackendConfig,
   ProviderDefinition,
-  ProviderModelEntry,
   ProviderType,
   ProviderTypeInfo,
 } from './provider-types';
+import { resolveProviderModelCapabilities } from './provider-model-capabilities';
 
 const EXTRA_ENV_ONLY_PROVIDERS: Record<string, { envVar: string }> = {
   groq: { envVar: 'GROQ_API_KEY' },
@@ -24,7 +25,6 @@ export const PROVIDER_DEFINITIONS: ProviderDefinition[] = [
     requiresApiKey: true,
     category: 'official',
     envVar: 'ANTHROPIC_API_KEY',
-    defaultModelId: 'claude-opus-4-6',
     supportedAuthModes: ['api_key'],
     defaultAuthMode: 'api_key',
     supportsMultipleAccounts: true,
@@ -38,12 +38,8 @@ export const PROVIDER_DEFINITIONS: ProviderDefinition[] = [
     requiresApiKey: true,
     category: 'official',
     envVar: 'OPENAI_API_KEY',
-    defaultModelId: 'gpt-5.4',
     isOAuth: true,
     supportsApiKey: true,
-    showModelId: true,
-    showModelIdInDevModeOnly: true,
-    modelIdPlaceholder: 'gpt-5.4',
     supportedAuthModes: ['api_key', 'oauth_browser'],
     defaultAuthMode: 'api_key',
     supportsMultipleAccounts: true,
@@ -62,12 +58,8 @@ export const PROVIDER_DEFINITIONS: ProviderDefinition[] = [
     requiresApiKey: true,
     category: 'official',
     envVar: 'GEMINI_API_KEY',
-    defaultModelId: 'gemini-3-pro-preview',
     isOAuth: true,
     supportsApiKey: true,
-    showModelId: true,
-    showModelIdInDevModeOnly: true,
-    modelIdPlaceholder: 'gemini-3-pro-preview',
     supportedAuthModes: ['api_key', 'oauth_browser'],
     defaultAuthMode: 'api_key',
     supportsMultipleAccounts: true,
@@ -79,9 +71,6 @@ export const PROVIDER_DEFINITIONS: ProviderDefinition[] = [
     placeholder: 'sk-or-v1-...',
     model: 'Multi-Model',
     requiresApiKey: true,
-    showModelId: true,
-    modelIdPlaceholder: 'anthropic/claude-opus-4.6',
-    defaultModelId: 'anthropic/claude-opus-4.6',
     category: 'compatible',
     envVar: 'OPENROUTER_API_KEY',
     supportedAuthModes: ['api_key'],
@@ -89,7 +78,7 @@ export const PROVIDER_DEFINITIONS: ProviderDefinition[] = [
     supportsMultipleAccounts: true,
     providerConfig: {
       baseUrl: 'https://openrouter.ai/api/v1',
-      api: 'openrouter',
+      api: 'openai-completions',
       apiKeyEnv: 'OPENROUTER_API_KEY',
       headers: {
         'HTTP-Referer': 'https://matchaclaw-x.com',
@@ -106,8 +95,6 @@ export const PROVIDER_DEFINITIONS: ProviderDefinition[] = [
     requiresApiKey: true,
     defaultBaseUrl: 'https://ark.cn-beijing.volces.com/api/v3',
     showBaseUrl: true,
-    showModelId: true,
-    modelIdPlaceholder: 'ep-20260228000000-xxxxx',
     category: 'official',
     envVar: 'ARK_API_KEY',
     supportedAuthModes: ['api_key'],
@@ -127,7 +114,6 @@ export const PROVIDER_DEFINITIONS: ProviderDefinition[] = [
     model: 'Kimi',
     requiresApiKey: true,
     defaultBaseUrl: 'https://api.moonshot.cn/v1',
-    defaultModelId: 'kimi-k2.6',
     category: 'official',
     envVar: 'MOONSHOT_API_KEY',
     supportedAuthModes: ['api_key'],
@@ -137,17 +123,6 @@ export const PROVIDER_DEFINITIONS: ProviderDefinition[] = [
       baseUrl: 'https://api.moonshot.cn/v1',
       api: 'openai-completions',
       apiKeyEnv: 'MOONSHOT_API_KEY',
-      models: [
-        {
-          id: 'kimi-k2.6',
-          name: 'Kimi K2.6',
-          reasoning: false,
-          input: ['text'],
-          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-          contextWindow: 256000,
-          maxTokens: 8192,
-        },
-      ],
     },
   },
   {
@@ -158,7 +133,6 @@ export const PROVIDER_DEFINITIONS: ProviderDefinition[] = [
     model: 'Kimi',
     requiresApiKey: true,
     defaultBaseUrl: 'https://api.moonshot.ai/v1',
-    defaultModelId: 'kimi-k2.6',
     category: 'official',
     envVar: 'MOONSHOT_GLOBAL_API_KEY',
     supportedAuthModes: ['api_key'],
@@ -168,17 +142,6 @@ export const PROVIDER_DEFINITIONS: ProviderDefinition[] = [
       baseUrl: 'https://api.moonshot.ai/v1',
       api: 'openai-completions',
       apiKeyEnv: 'MOONSHOT_GLOBAL_API_KEY',
-      models: [
-        {
-          id: 'kimi-k2.6',
-          name: 'Kimi K2.6',
-          reasoning: false,
-          input: ['text'],
-          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-          contextWindow: 256000,
-          maxTokens: 8192,
-        },
-      ],
     },
   },
   {
@@ -189,10 +152,6 @@ export const PROVIDER_DEFINITIONS: ProviderDefinition[] = [
     model: 'Multi-Model',
     requiresApiKey: true,
     defaultBaseUrl: 'https://api.siliconflow.cn/v1',
-    showModelId: true,
-    showModelIdInDevModeOnly: true,
-    modelIdPlaceholder: 'deepseek-ai/DeepSeek-V3',
-    defaultModelId: 'deepseek-ai/DeepSeek-V3',
     category: 'compatible',
     envVar: 'SILICONFLOW_API_KEY',
     supportedAuthModes: ['api_key'],
@@ -212,10 +171,6 @@ export const PROVIDER_DEFINITIONS: ProviderDefinition[] = [
     model: 'DeepSeek',
     requiresApiKey: true,
     defaultBaseUrl: 'https://api.deepseek.com/v1',
-    showModelId: true,
-    showModelIdInDevModeOnly: true,
-    modelIdPlaceholder: 'deepseek-v4-pro',
-    defaultModelId: 'deepseek-v4-pro',
     apiKeyUrl: 'https://platform.deepseek.com/api_keys',
     category: 'official',
     envVar: 'DEEPSEEK_API_KEY',
@@ -237,10 +192,6 @@ export const PROVIDER_DEFINITIONS: ProviderDefinition[] = [
     requiresApiKey: false,
     isOAuth: true,
     supportsApiKey: true,
-    defaultModelId: 'MiniMax-M2.7',
-    showModelId: true,
-    showModelIdInDevModeOnly: true,
-    modelIdPlaceholder: 'MiniMax-M2.7',
     apiKeyUrl: 'https://platform.minimax.io',
     category: 'official',
     envVar: 'MINIMAX_API_KEY',
@@ -262,10 +213,6 @@ export const PROVIDER_DEFINITIONS: ProviderDefinition[] = [
     requiresApiKey: false,
     isOAuth: true,
     supportsApiKey: true,
-    defaultModelId: 'MiniMax-M2.7',
-    showModelId: true,
-    showModelIdInDevModeOnly: true,
-    modelIdPlaceholder: 'MiniMax-M2.7',
     apiKeyUrl: 'https://platform.minimaxi.com/',
     category: 'official',
     envVar: 'MINIMAX_CN_API_KEY',
@@ -286,10 +233,6 @@ export const PROVIDER_DEFINITIONS: ProviderDefinition[] = [
     model: 'Qwen',
     requiresApiKey: false,
     isOAuth: true,
-    defaultModelId: 'coder-model',
-    showModelId: true,
-    showModelIdInDevModeOnly: true,
-    modelIdPlaceholder: 'coder-model',
     category: 'official',
     envVar: 'QWEN_API_KEY',
     supportedAuthModes: ['oauth_device'],
@@ -309,8 +252,6 @@ export const PROVIDER_DEFINITIONS: ProviderDefinition[] = [
     requiresApiKey: false,
     defaultBaseUrl: 'http://localhost:11434/v1',
     showBaseUrl: true,
-    showModelId: true,
-    modelIdPlaceholder: 'qwen3:latest',
     category: 'local',
     supportedAuthModes: ['local'],
     defaultAuthMode: 'local',
@@ -323,8 +264,6 @@ export const PROVIDER_DEFINITIONS: ProviderDefinition[] = [
     placeholder: 'API key...',
     requiresApiKey: true,
     showBaseUrl: true,
-    showModelId: true,
-    modelIdPlaceholder: 'your-provider/model-id',
     category: 'custom',
     envVar: 'CUSTOM_API_KEY',
     supportedAuthModes: ['api_key'],
@@ -355,10 +294,6 @@ export function getProviderEnvVar(type: string): string | undefined {
   return getProviderDefinition(type)?.envVar ?? EXTRA_ENV_ONLY_PROVIDERS[type]?.envVar;
 }
 
-export function getProviderDefaultModel(type: string): string | undefined {
-  return getProviderDefinition(type)?.defaultModelId;
-}
-
 export function getProviderBackendConfig(
   type: string,
 ): ProviderBackendConfig | undefined {
@@ -367,7 +302,7 @@ export function getProviderBackendConfig(
 
 export function getProviderConfig(
   type: string,
-): { baseUrl: string; api: string; apiKeyEnv: string; models?: ProviderModelEntry[]; headers?: Record<string, string> } | undefined {
+): { baseUrl: string; api: string; apiKeyEnv: string; headers?: Record<string, string> } | undefined {
   return getProviderBackendConfig(type) as ProviderBackendConfig | undefined;
 }
 
@@ -387,4 +322,8 @@ export function getKeyableProviderTypes(): string[] {
     ),
     ...Object.keys(EXTRA_ENV_ONLY_PROVIDERS),
   ];
+}
+
+export function getProviderModelCapabilities(type: ProviderType): ModelCapability[] {
+  return resolveProviderModelCapabilities({ vendorId: type });
 }

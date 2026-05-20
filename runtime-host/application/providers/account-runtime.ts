@@ -1,6 +1,11 @@
 import { PROVIDER_VENDOR_DEFINITIONS } from './provider-registry';
 import { validateApiKeyWithProvider } from './provider-validation';
 import type { RuntimeClockPort, RuntimeHttpClientPort } from '../common/runtime-ports';
+import {
+  type CustomMediaApiProtocol,
+  getCustomMediaContract,
+  isCustomMediaApiProtocol,
+} from './custom-media-provider-contracts';
 
 function isRecord(value: unknown): value is Record<string, any> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
@@ -22,12 +27,17 @@ function normalizeHeadersRecord(input: unknown): Record<string, string> | undefi
   return Object.keys(normalized).length > 0 ? normalized : undefined;
 }
 
-function normalizePositiveInteger(value: unknown): number | undefined {
-  if (typeof value !== 'number' || !Number.isFinite(value)) {
-    return undefined;
-  }
-  const normalized = Math.floor(value);
-  return normalized > 0 ? normalized : undefined;
+function normalizeProviderKind(input: Record<string, any>, current: Record<string, any> | null | undefined): 'chat' | 'media' {
+  const candidate = typeof input.providerKind === 'string'
+    ? input.providerKind
+    : (typeof current?.providerKind === 'string' ? current.providerKind : undefined);
+  return candidate === 'media' ? 'media' : 'chat';
+}
+
+function normalizeMediaApiProtocol(input: unknown, current: unknown): CustomMediaApiProtocol | undefined {
+  if (isCustomMediaApiProtocol(input)) return input;
+  if (isCustomMediaApiProtocol(current)) return current;
+  return undefined;
 }
 
 export function normalizeProviderAccountLocal(
@@ -47,21 +57,25 @@ export function normalizeProviderAccountLocal(
   if (!id || !vendorId) {
     return null;
   }
+  const providerKind = vendorId === 'custom' ? normalizeProviderKind(input, current) : 'chat';
+  const mediaApiProtocol = providerKind === 'media'
+    ? normalizeMediaApiProtocol(input.mediaApiProtocol, current?.mediaApiProtocol)
+    : undefined;
+  const mediaContract = getCustomMediaContract(mediaApiProtocol);
+  if (providerKind === 'media' && (!mediaApiProtocol || !mediaContract)) {
+    return null;
+  }
   const nowIso = clock.nowIso();
   const headers = Object.prototype.hasOwnProperty.call(input, 'headers')
     ? normalizeHeadersRecord(input.headers)
     : normalizeHeadersRecord(current?.headers);
-  const contextWindow = Object.prototype.hasOwnProperty.call(input, 'contextWindow')
-    ? normalizePositiveInteger(input.contextWindow)
-    : normalizePositiveInteger(current?.contextWindow);
-  const maxTokens = Object.prototype.hasOwnProperty.call(input, 'maxTokens')
-    ? normalizePositiveInteger(input.maxTokens)
-    : normalizePositiveInteger(current?.maxTokens);
+  const metadata = isRecord(input.metadata)
+    ? input.metadata
+    : (isRecord(current?.metadata) ? current.metadata : undefined);
   return {
-    ...current,
-    ...input,
     id,
     vendorId,
+    providerKind,
     label: typeof input.label === 'string'
       ? input.label
       : (typeof current?.label === 'string' ? current.label : vendorId),
@@ -71,12 +85,15 @@ export function normalizeProviderAccountLocal(
     enabled: typeof input.enabled === 'boolean'
       ? input.enabled
       : (typeof current?.enabled === 'boolean' ? current.enabled : true),
-    isDefault: typeof input.isDefault === 'boolean'
-      ? input.isDefault
-      : (typeof current?.isDefault === 'boolean' ? current.isDefault : false),
+    baseUrl: typeof input.baseUrl === 'string'
+      ? input.baseUrl
+      : (typeof current?.baseUrl === 'string' ? current.baseUrl : undefined),
+    apiProtocol: providerKind === 'chat' && typeof input.apiProtocol === 'string'
+      ? input.apiProtocol
+      : (providerKind === 'chat' && typeof current?.apiProtocol === 'string' ? current.apiProtocol : undefined),
+    mediaApiProtocol,
     headers,
-    contextWindow,
-    maxTokens,
+    ...(metadata ? { metadata } : {}),
     createdAt: typeof current?.createdAt === 'string' ? current.createdAt : nowIso,
     updatedAt: nowIso,
   };
@@ -98,11 +115,6 @@ export function accountToStatusLocal(account: Record<string, any>, apiKey: strin
     name: account.label,
     type: account.vendorId,
     baseUrl: account.baseUrl,
-    model: account.model,
-    contextWindow: account.contextWindow,
-    maxTokens: account.maxTokens,
-    fallbackModels: Array.isArray(account.fallbackModels) ? account.fallbackModels : [],
-    fallbackProviderIds: Array.isArray(account.fallbackAccountIds) ? account.fallbackAccountIds : [],
     enabled: account.enabled !== false,
     createdAt: account.createdAt,
     updatedAt: account.updatedAt,
@@ -111,25 +123,14 @@ export function accountToStatusLocal(account: Record<string, any>, apiKey: strin
   };
 }
 
-export function sortProviderAccountsLocal(accounts: any[], defaultAccountId: string | null) {
+export function sortProviderAccountsLocal(accounts: any[]) {
   return [...accounts].sort((left, right) => {
-    if (left.id === defaultAccountId) return -1;
-    if (right.id === defaultAccountId) return 1;
     const byUpdatedAt = String(right.updatedAt || '').localeCompare(String(left.updatedAt || ''));
     if (byUpdatedAt !== 0) {
       return byUpdatedAt;
     }
     return String(left.id).localeCompare(String(right.id));
   });
-}
-
-export function normalizeProviderFallbackAccountLocal(accounts: any[], deletedId: string) {
-  const remaining = accounts.filter((item) => item.id !== deletedId);
-  if (remaining.length === 0) {
-    return null;
-  }
-  const sorted = sortProviderAccountsLocal(remaining, null);
-  return sorted[0]?.id || null;
 }
 
 function getVendorDefinitionLocal(vendorId: string) {

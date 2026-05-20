@@ -143,15 +143,15 @@ describe('runtime-host service-injected routes', () => {
       .resolves.toEqual({ status: 200, data: { allowed: true } });
 
     const skillsService = {
-      status: vi.fn(),
-      configs: vi.fn(() => ({ skills: {} })),
+      status: vi.fn(() => ({ skills: [] })),
       updateConfig: vi.fn(),
       updateState: vi.fn(),
+      updateBatchState: vi.fn(),
       effective: vi.fn(),
       readmePreview: vi.fn(),
     };
-    await expect(dispatchRuntimeRouteDefinition(skillsRoutes, 'GET', '/api/skills/configs', undefined, { skillsService }))
-      .resolves.toEqual({ status: 200, data: { skills: {} } });
+    await expect(dispatchRuntimeRouteDefinition(skillsRoutes, 'GET', '/api/skills/status', undefined, { skillsService }))
+      .resolves.toEqual({ status: 200, data: { skills: [] } });
 
     const subagentService = {
       listAgents: vi.fn(async () => ({ status: 200, data: { agents: [] } })),

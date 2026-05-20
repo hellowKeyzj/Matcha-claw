@@ -111,10 +111,10 @@ describe('chat agent skill configuration', () => {
 
     useSkillsStore.setState({
       skills: [
-        { id: 'web-search', name: 'Web Search', description: 'web', enabled: true, eligible: true, icon: '🌐' },
-        { id: 'feishu-doc', name: 'Feishu Doc', description: 'doc', enabled: true, eligible: true, icon: '📄' },
-        { id: 'clawflow', name: 'Clawflow', description: 'flow', enabled: true, eligible: true, icon: '🪝' },
-        { id: 'disabled-skill', name: 'Disabled Skill', description: 'disabled', enabled: false, eligible: true, icon: '🚫' },
+        { id: 'web-search', name: 'Web Search', description: 'web', enabled: true, installed: true, eligible: true, icon: '🌐' },
+        { id: 'feishu-doc', name: 'Feishu Doc', description: 'doc', enabled: true, installed: true, eligible: true, icon: '📄' },
+        { id: 'clawflow', name: 'Clawflow', description: 'flow', enabled: true, installed: true, eligible: true, icon: '🪝' },
+        { id: 'disabled-skill', name: 'Disabled Skill', description: 'disabled', enabled: false, installed: true, eligible: true, icon: '🚫' },
       ],
       snapshotReady: true,
       initialLoading: false,

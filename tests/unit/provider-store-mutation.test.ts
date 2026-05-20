@@ -5,7 +5,6 @@ import { hostApiFetchMock } from './helpers/mock-gateway-client';
 const fetchProviderSnapshotMock = vi.fn();
 const hostProviderCreateAccountMock = vi.fn();
 const hostProviderDeleteAccountMock = vi.fn();
-const hostProviderSetDefaultAccountMock = vi.fn();
 const hostProviderUpdateAccountMock = vi.fn();
 const hostProviderValidateMock = vi.fn();
 const hostProviderReadApiKeyMock = vi.fn();
@@ -19,10 +18,9 @@ vi.mock('@/lib/provider-accounts', () => ({
       ? value as Record<string, unknown>
       : {};
     return {
-      accounts: Array.isArray(snapshot.accounts) ? snapshot.accounts : [],
+      credentials: Array.isArray(snapshot.credentials) ? snapshot.credentials : [],
       statuses: Array.isArray(snapshot.statuses) ? snapshot.statuses : [],
       vendors: Array.isArray(snapshot.vendors) ? snapshot.vendors : [],
-      defaultAccountId: typeof snapshot.defaultAccountId === 'string' ? snapshot.defaultAccountId : null,
     };
   },
 }));
@@ -31,7 +29,6 @@ vi.mock('@/lib/provider-runtime', () => ({
   hostProviderCreateAccount: (...args: unknown[]) => hostProviderCreateAccountMock(...args),
   hostProviderDeleteAccount: (...args: unknown[]) => hostProviderDeleteAccountMock(...args),
   hostProviderReadApiKey: (...args: unknown[]) => hostProviderReadApiKeyMock(...args),
-  hostProviderSetDefaultAccount: (...args: unknown[]) => hostProviderSetDefaultAccountMock(...args),
   hostProviderUpdateAccount: (...args: unknown[]) => hostProviderUpdateAccountMock(...args),
   hostProviderValidate: (...args: unknown[]) => hostProviderValidateMock(...args),
 }));
@@ -52,7 +49,6 @@ describe('useProviderStore mutation states', () => {
     fetchProviderSnapshotMock.mockReset();
     hostProviderCreateAccountMock.mockReset();
     hostProviderDeleteAccountMock.mockReset();
-    hostProviderSetDefaultAccountMock.mockReset();
     hostProviderUpdateAccountMock.mockReset();
     hostProviderValidateMock.mockReset();
     hostProviderReadApiKeyMock.mockReset();
@@ -63,14 +59,13 @@ describe('useProviderStore mutation states', () => {
 
     useProviderStore.setState({
       providerSnapshot: {
-        accounts: [
+        credentials: [
           {
             id: 'openai-main',
             vendorId: 'openai',
             label: 'OpenAI',
             authMode: 'api_key',
             enabled: true,
-            isDefault: true,
             createdAt: '2026-01-01T00:00:00.000Z',
             updatedAt: '2026-01-01T00:00:00.000Z',
           },
@@ -98,7 +93,6 @@ describe('useProviderStore mutation states', () => {
           defaultAuthMode: 'api_key',
           supportsMultipleAccounts: false,
         }],
-        defaultAccountId: 'openai-main',
       },
       snapshotReady: true,
       initialLoading: false,
@@ -146,7 +140,7 @@ describe('useProviderStore mutation states', () => {
     mockProviderJob('job-update');
 
     const updateTask = useProviderStore.getState().updateAccount('openai-main', {
-      model: 'gpt-5.4',
+      baseUrl: 'https://api.openai.example/v1',
     });
 
     const settled = await Promise.race([
@@ -157,22 +151,20 @@ describe('useProviderStore mutation states', () => {
     if (settled === 'timeout') {
       resolveSnapshot?.({
         statuses: [{ id: 'openai-main', hasKey: true }],
-        accounts: [{ id: 'openai-main', vendorId: 'openai', label: 'OpenAI', model: 'gpt-5.4' }],
+        credentials: [{ id: 'openai-main', vendorId: 'openai', label: 'OpenAI', baseUrl: 'https://api.openai.example/v1' }],
         vendors: [{ id: 'openai', name: 'OpenAI' }],
-        defaultAccountId: 'openai-main',
       });
       await updateTask;
     }
 
     expect(settled).toBe('resolved');
-    expect(useProviderStore.getState().providerSnapshot.accounts[0]?.model).toBe('gpt-5.4');
+    expect(useProviderStore.getState().providerSnapshot.credentials[0]?.baseUrl).toBe('https://api.openai.example/v1');
     expect(useProviderStore.getState().refreshing).toBe(true);
 
     resolveSnapshot?.({
       statuses: [{ id: 'openai-main', hasKey: true }],
-      accounts: [{ id: 'openai-main', vendorId: 'openai', label: 'OpenAI', model: 'gpt-5.4' }],
+      credentials: [{ id: 'openai-main', vendorId: 'openai', label: 'OpenAI', baseUrl: 'https://api.openai.example/v1' }],
       vendors: [{ id: 'openai', name: 'OpenAI' }],
-      defaultAccountId: 'openai-main',
     });
 
     await act(async () => {
@@ -215,9 +207,8 @@ describe('useProviderStore mutation states', () => {
     });
     fetchProviderSnapshotMock.mockResolvedValue({
       statuses: [],
-      accounts: [],
+      credentials: [],
       vendors: [{ id: 'openai', name: 'OpenAI' }],
-      defaultAccountId: null,
     });
 
     const removeTask = useProviderStore.getState().removeAccount('openai-main');

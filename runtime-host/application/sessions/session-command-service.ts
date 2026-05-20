@@ -24,7 +24,6 @@ import { SessionRuntimeStateStore } from './session-runtime-state';
 import { SessionSnapshotService } from './session-snapshot-service';
 import type { SessionStoragePort } from './session-storage-repository';
 import { SessionTimelineRuntime } from './session-timeline-runtime';
-import { ensureSessionVerboseFull } from './session-verbose-config';
 import {
   accepted,
   badRequest,
@@ -104,7 +103,6 @@ export class SessionCommandService {
   async createSession(payload: unknown): Promise<ApplicationResponseOf<SessionNewResult>> {
     const { explicitSessionKey, canonicalPrefix } = readCreateSessionRequest(payload);
     const sessionKey = explicitSessionKey || `${canonicalPrefix}:session-${this.deps.clock.nowMs()}-${this.deps.idGenerator.randomId()}`;
-    await ensureSessionVerboseFull(sessionKey, this.deps.gateway, this.deps.stateStore);
     const state = await this.deps.timelineRuntime.activateSession(sessionKey, {
       resetWindowToLatest: true,
     });
@@ -200,7 +198,6 @@ export class SessionCommandService {
     }
 
     return await this.deps.operationCoordinator.run(sessionKey, 'resume', async () => {
-      await ensureSessionVerboseFull(sessionKey, this.deps.gateway, this.deps.stateStore);
       const state = await this.deps.timelineRuntime.activateSession(sessionKey, {
         resetWindowToLatest: true,
       });
@@ -230,7 +227,6 @@ export class SessionCommandService {
     }
 
     return await this.deps.operationCoordinator.run(sessionKey, 'resume', async () => {
-      await ensureSessionVerboseFull(sessionKey, this.deps.gateway, this.deps.stateStore);
       const state = await this.deps.timelineRuntime.activateSession(sessionKey, {
         resetWindowToLatest: false,
       });

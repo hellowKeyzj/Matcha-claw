@@ -8,15 +8,20 @@ import {
 } from './security-rule-catalog';
 import type { SecurityPolicyRepository } from './security-policy-store';
 import type { SecurityJobPort } from './security-jobs';
+import type { RuntimeTimerPort } from '../common/runtime-ports';
 
 function isRecord(value: unknown): value is Record<string, any> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 }
 
+const POLICY_SYNC_MAX_ATTEMPTS = 5;
+const POLICY_SYNC_RETRY_DELAY_MS = 1000;
+
 export interface SecurityRuntimeServiceDeps {
   gateway: GatewaySecurityPort;
   policyRepository: SecurityPolicyRepository;
   jobs: SecurityJobPort;
+  timer: Pick<RuntimeTimerPort, 'sleep'>;
 }
 
 export class SecurityRuntimeService {
@@ -40,14 +45,23 @@ export class SecurityRuntimeService {
   }
 
   async executePolicySync() {
-    const gatewayRunning = await this.deps.gateway.isGatewayRunning();
-    if (!gatewayRunning) {
-      return { synced: false, policy: null as unknown };
+    const policy = await this.deps.policyRepository.read();
+    let lastError: unknown = null;
+
+    for (let attempt = 1; attempt <= POLICY_SYNC_MAX_ATTEMPTS; attempt += 1) {
+      try {
+        await this.deps.gateway.securityPolicySync(policy);
+        return { synced: true, policy, attempts: attempt };
+      } catch (error) {
+        lastError = error;
+        if (attempt < POLICY_SYNC_MAX_ATTEMPTS) {
+          await this.deps.timer.sleep(POLICY_SYNC_RETRY_DELAY_MS);
+        }
+      }
     }
 
-    const policy = await this.deps.policyRepository.read();
-    await this.deps.gateway.securityPolicySync(policy);
-    return { synced: true, policy };
+    const reason = lastError instanceof Error ? lastError.message : String(lastError);
+    throw new Error(`Security policy sync failed after ${POLICY_SYNC_MAX_ATTEMPTS} attempts: ${reason}`);
   }
 
   listRuleCatalog(platform?: string | null) {

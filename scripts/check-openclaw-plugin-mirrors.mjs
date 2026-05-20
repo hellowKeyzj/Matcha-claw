@@ -33,6 +33,10 @@ const REQUIRED_PLUGIN_MIRRORS = [
     pluginId: 'openclaw-lark',
     dir: 'feishu-openclaw-plugin',
   },
+  {
+    pluginId: 'matchaclaw-media',
+    dir: 'matchaclaw-media',
+  },
 ];
 
 function fail(message, details = []) {

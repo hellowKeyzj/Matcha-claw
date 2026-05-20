@@ -39,12 +39,6 @@ describe('skills store availability and search cache', () => {
       if (path === '/api/skills/status') {
         return await deferredStatus.promise;
       }
-      if (path === '/api/skills/configs') {
-        return {};
-      }
-      if (path === '/api/clawhub/list') {
-        return { success: true, results: [] };
-      }
       throw new Error(`Unexpected hostApiFetch path: ${path}`);
     });
 
@@ -70,12 +64,6 @@ describe('skills store availability and search cache', () => {
       if (path === '/api/skills/status') {
         return { skills: [{ skillKey: 'demo-skill', disabled: false }] };
       }
-      if (path === '/api/skills/configs') {
-        return {};
-      }
-      if (path === '/api/clawhub/list') {
-        return { success: true, results: [] };
-      }
       throw new Error(`Unexpected hostApiFetch path: ${path}`);
     });
 
@@ -85,12 +73,6 @@ describe('skills store availability and search cache', () => {
     hostApiFetchMock.mockImplementation(async (path: string) => {
       if (path === '/api/skills/status') {
         throw new Error('rate limit exceeded');
-      }
-      if (path === '/api/skills/configs') {
-        return {};
-      }
-      if (path === '/api/clawhub/list') {
-        return { success: true, results: [] };
       }
       throw new Error(`Unexpected hostApiFetch path: ${path}`);
     });
@@ -114,12 +96,6 @@ describe('skills store availability and search cache', () => {
       if (path === '/api/skills/status') {
         return await deferredStatus.promise;
       }
-      if (path === '/api/skills/configs') {
-        return {};
-      }
-      if (path === '/api/clawhub/list') {
-        return { success: true, results: [] };
-      }
       throw new Error(`Unexpected hostApiFetch path: ${path}`);
     });
 
@@ -142,12 +118,6 @@ describe('skills store availability and search cache', () => {
       }
       if (path === '/api/skills/status/refresh') {
         return { skills: [{ skillKey: 'fresh-skill', disabled: false }] };
-      }
-      if (path === '/api/skills/configs') {
-        return {};
-      }
-      if (path === '/api/clawhub/list') {
-        return { success: true, results: [] };
       }
       throw new Error(`Unexpected hostApiFetch path: ${path}`);
     });
@@ -173,12 +143,6 @@ describe('skills store availability and search cache', () => {
           return { ready: false, refreshing: true, skills: [] };
         }
         return { ready: true, skills: [{ skillKey: 'demo-skill', disabled: false }] };
-      }
-      if (path === '/api/skills/configs') {
-        return {};
-      }
-      if (path === '/api/clawhub/list') {
-        return { success: true, results: [] };
       }
       throw new Error(`Unexpected hostApiFetch path: ${path}`);
     });
@@ -260,6 +224,36 @@ describe('skills store availability and search cache', () => {
     expect(state.skills[0]?.enabled).toBe(true);
   });
 
+  it('batchSetSkillsEnabled 只请求一次批量接口并一次更新本地状态', async () => {
+    hostApiFetchMock.mockImplementation(async (path: string) => {
+      if (path === '/api/skills/state/batch') {
+        return {
+          success: true,
+          updated: ['skill-a', 'skill-b'],
+          enabled: true,
+        };
+      }
+      throw new Error(`Unexpected hostApiFetch path: ${path}`);
+    });
+
+    const { useSkillsStore } = await import('@/stores/skills');
+    useSkillsStore.getState().setSkills([
+      { id: 'skill-a', slug: 'skill-a', name: 'Skill A', description: 'a', enabled: false, icon: '🧩' },
+      { id: 'skill-b', slug: 'skill-b', name: 'Skill B', description: 'b', enabled: false, icon: '🧩' },
+    ]);
+
+    await useSkillsStore.getState().batchSetSkillsEnabled(['skill-a', 'skill-b'], true);
+
+    expect(hostApiFetchMock).toHaveBeenCalledWith('/api/skills/state/batch', {
+      method: 'PUT',
+      body: JSON.stringify({ skillKeys: ['skill-a', 'skill-b'], enabled: true }),
+    });
+    expect(hostApiFetchMock.mock.calls.filter((call) => call[0] === '/api/skills/state')).toHaveLength(0);
+    expect(hostApiFetchMock.mock.calls.filter((call) => call[0] === '/api/runtime-host/jobs/get')).toHaveLength(0);
+    expect(useSkillsStore.getState().skills.map((skill) => skill.enabled)).toEqual([true, true]);
+    expect(useSkillsStore.getState().mutating).toBe(false);
+  });
+
   it('maps skills.status availability fields into Skill model', async () => {
     hostApiFetchMock.mockImplementation(async (path: string) => {
       if (path === '/api/skills/status') {
@@ -286,12 +280,6 @@ describe('skills store availability and search cache', () => {
           ],
         };
       }
-      if (path === '/api/skills/configs') {
-        return {};
-      }
-      if (path === '/api/clawhub/list') {
-        return { success: true, results: [] };
-      }
       throw new Error(`Unexpected hostApiFetch path: ${path}`);
     });
 
@@ -301,6 +289,7 @@ describe('skills store availability and search cache', () => {
     expect(useSkillsStore.getState().skills).toHaveLength(1);
     expect(useSkillsStore.getState().skills[0]).toMatchObject({
       id: 'foo-skill',
+      installed: true,
       eligible: false,
       blockedByAllowlist: true,
       missing: {
@@ -316,7 +305,7 @@ describe('skills store availability and search cache', () => {
     });
   });
 
-  it('fills source/baseDir from clawhub list when gateway status entry is incomplete', async () => {
+  it('uses source/baseDir returned by the unified skills status payload', async () => {
     hostApiFetchMock.mockImplementation(async (path: string) => {
       if (path === '/api/skills/status') {
         return {
@@ -326,22 +315,11 @@ describe('skills store availability and search cache', () => {
           name: 'Git Helper',
           description: 'helper',
           disabled: false,
+          version: '1.2.3',
+          source: 'openclaw-managed',
+          baseDir: '/tmp/.openclaw/skills/git-helper',
         },
           ],
-        };
-      }
-      if (path === '/api/skills/configs') {
-        return {};
-      }
-      if (path === '/api/clawhub/list') {
-        return {
-          success: true,
-          results: [{
-            slug: 'git-helper',
-            version: '1.2.3',
-            source: 'openclaw-managed',
-            baseDir: '/tmp/.openclaw/skills/git-helper',
-          }],
         };
       }
       throw new Error(`Unexpected hostApiFetch path: ${path}`);

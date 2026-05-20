@@ -5,7 +5,6 @@ import {
   resetGatewayClientMocks,
 } from './helpers/mock-gateway-client';
 
-import { useProviderStore } from '@/stores/providers';
 import { useSubagentsStore } from '@/stores/subagents';
 
 const AVATAR_STORAGE_KEY = 'matchaclaw-subagent-avatar-presentations';
@@ -14,20 +13,6 @@ describe('subagents store', () => {
   beforeEach(() => {
     resetGatewayClientMocks();
     window.localStorage.removeItem(AVATAR_STORAGE_KEY);
-    useProviderStore.setState({
-      providerSnapshot: {
-        accounts: [],
-        statuses: [],
-        vendors: [],
-        defaultAccountId: null,
-      },
-      snapshotReady: false,
-      initialLoading: false,
-      refreshing: false,
-      mutating: false,
-      mutatingActionsByAccountId: {},
-      error: null,
-    });
     useSubagentsStore.setState(useSubagentsStore.getInitialState(), true);
   });
 
@@ -98,32 +83,11 @@ describe('subagents store', () => {
     const configGetTask = new Promise((resolve) => {
       resolveConfigGet = resolve;
     });
-    hostApiFetchMock.mockResolvedValue({
-      accounts: [
-        {
-          id: 'openai-main',
-          vendorId: 'openai',
-          label: 'OpenAI',
-          authMode: 'api_key',
-          model: 'gpt-4.1-mini',
-          enabled: true,
-          isDefault: true,
-          createdAt: '2026-01-01T00:00:00.000Z',
-          updatedAt: '2026-01-01T00:00:00.000Z',
-        },
-      ],
-      statuses: [],
-      vendors: [
-        {
-          id: 'openai',
-          name: 'OpenAI',
-          defaultModelId: 'gpt-5.4',
-          supportedAuthModes: ['api_key', 'oauth_browser'],
-          defaultAuthMode: 'api_key',
-          supportsMultipleAccounts: true,
-        },
-      ],
-      defaultAccountId: 'openai-main',
+    hostApiFetchMock.mockImplementation(async (path) => {
+      if (path === '/api/provider-models/selectable') {
+        return { models: [] };
+      }
+      return {};
     });
     rpc.mockImplementation(async (method) => {
       if (method === 'agents.list') {
@@ -161,7 +125,9 @@ describe('subagents store', () => {
     );
     expect(configGetCalls).toHaveLength(1);
     expect(rpc).not.toHaveBeenCalledWith('models.list', {}, undefined);
-    expect(hostApiFetchMock).toHaveBeenCalledWith('/api/provider-accounts', undefined);
+    expect(hostApiFetchMock).toHaveBeenCalledWith('/api/provider-models/selectable', undefined);
+    expect(hostApiFetchMock).not.toHaveBeenCalledWith('/api/provider-models', undefined);
+    expect(hostApiFetchMock).not.toHaveBeenCalledWith('/api/provider-accounts', undefined);
   });
 
   it('短 TTL 内重复 loadAgents 复用 config.get 结果', async () => {
@@ -336,204 +302,257 @@ describe('subagents store', () => {
     ]);
   });
 
-  it('loadAvailableModels 从 provider snapshot 生成已配置模型选项', async () => {
-    hostApiFetchMock.mockResolvedValue({
-      accounts: [
+  it('exportAgentConfig 导出可共享配置，不包含本机 workspace', async () => {
+    const rpc = gatewayClientRpcMock;
+    useSubagentsStore.setState({
+      agents: [
         {
-          id: 'custom-12345678',
-          vendorId: 'custom',
-          label: 'Custom A',
-          authMode: 'api_key',
-          model: 'gpt-4o-mini',
-          contextWindow: 200000,
-          maxTokens: 64000,
-          enabled: true,
+          id: 'writer',
+          name: 'Writer',
+          workspace: '/home/dev/.openclaw/workspace-subagents/writer',
+          model: 'custom/team-gpt',
+          skills: ['web-search', 'feishu-doc'],
           isDefault: false,
-          createdAt: '2026-01-01T00:00:00.000Z',
-          updatedAt: '2026-01-03T00:00:00.000Z',
-        },
-        {
-          id: 'ollama-87654321',
-          vendorId: 'ollama',
-          label: 'Local Ollama',
-          authMode: 'local',
-          model: 'qwen3:latest',
-          fallbackModels: ['llama3.1:8b'],
-          enabled: true,
-          isDefault: false,
-          createdAt: '2026-01-01T00:00:00.000Z',
-          updatedAt: '2026-01-02T00:00:00.000Z',
-        },
-        {
-          id: 'openai-main',
-          vendorId: 'openai',
-          label: 'OpenAI',
-          authMode: 'api_key',
-          model: 'gpt-4.1-mini',
-          enabled: true,
-          isDefault: true,
-          createdAt: '2026-01-01T00:00:00.000Z',
-          updatedAt: '2026-01-04T00:00:00.000Z',
         },
       ],
-      statuses: [],
-      vendors: [
-        {
-          id: 'custom',
-          name: 'Custom',
-          supportedAuthModes: ['api_key'],
-          defaultAuthMode: 'api_key',
-          supportsMultipleAccounts: true,
-        },
-        {
-          id: 'ollama',
-          name: 'Ollama',
-          supportedAuthModes: ['local'],
-          defaultAuthMode: 'local',
-          supportsMultipleAccounts: true,
-        },
-        {
-          id: 'openai',
-          name: 'OpenAI',
-          defaultModelId: 'gpt-5.4',
-          supportedAuthModes: ['api_key', 'oauth_browser'],
-          defaultAuthMode: 'api_key',
-          supportsMultipleAccounts: true,
-        },
-      ],
-      defaultAccountId: 'openai-main',
+    });
+    hostApiFetchMock.mockImplementation(async (path, init) => {
+      if (path === '/api/skills/bundles/export') {
+        expect(JSON.parse(String(init?.body))).toEqual({
+          skillKeys: ['web-search', 'feishu-doc'],
+        });
+        return [
+          {
+            skillKey: 'web-search',
+            files: [{ path: 'SKILL.md', content: 'web skill' }],
+          },
+          {
+            skillKey: 'feishu-doc',
+            files: [{ path: 'SKILL.md', content: 'feishu skill' }],
+          },
+        ];
+      }
+      throw new Error(`Unexpected host api path in test: ${path}`);
+    });
+    rpc.mockImplementation(async (method, params) => {
+      if (method === 'agents.files.get') {
+        const fileName = (params as { name?: string }).name;
+        return {
+          success: true,
+          result: {
+            file: {
+              content: `${fileName} shared content`,
+            },
+          },
+        };
+      }
+      throw new Error(`Unexpected rpc method in test: ${String(method)}`);
     });
 
-    await useSubagentsStore.getState().loadAvailableModels();
+    const exported = await useSubagentsStore.getState().exportAgentConfig('writer');
 
-    expect(useSubagentsStore.getState().availableModels).toEqual([
-      {
-        id: 'custom-12345678/gpt-4o-mini',
-        provider: 'custom-12345678',
-        providerLabel: 'Custom A',
-        modelLabel: 'gpt-4o-mini',
-        displayLabel: 'Custom A / gpt-4o-mini',
-        contextWindow: 200000,
-        maxTokens: 64000,
-      },
-      {
-        id: 'ollama-87654321/qwen3:latest',
-        provider: 'ollama-87654321',
-        providerLabel: 'Local Ollama',
-        modelLabel: 'qwen3:latest',
-        displayLabel: 'Local Ollama / qwen3:latest',
-      },
-      {
-        id: 'ollama-87654321/llama3.1:8b',
-        provider: 'ollama-87654321',
-        providerLabel: 'Local Ollama',
-        modelLabel: 'llama3.1:8b',
-        displayLabel: 'Local Ollama / llama3.1:8b',
-      },
-      {
-        id: 'openai/gpt-4.1-mini',
-        provider: 'openai',
-        providerLabel: 'OpenAI',
-        modelLabel: 'gpt-4.1-mini',
-        displayLabel: 'OpenAI / gpt-4.1-mini',
-      },
-    ]);
-  });
-
-  it('loadAvailableModels 优先复用 provider store 已就绪 snapshot', async () => {
-    useProviderStore.setState({
-      providerSnapshot: {
-        accounts: [
+    expect(exported).toEqual({
+      schema: 'matchaclaw.agent-config',
+      version: 1,
+      agent: {
+        name: 'Writer',
+        skills: ['web-search', 'feishu-doc'],
+        skillBundles: [
           {
-            id: 'openai-main',
-            vendorId: 'openai',
-            label: 'OpenAI',
-            authMode: 'api_key',
-            model: 'gpt-4.1-mini',
-            enabled: true,
-            isDefault: true,
-            createdAt: '2026-01-01T00:00:00.000Z',
-            updatedAt: '2026-01-01T00:00:00.000Z',
+            skillKey: 'web-search',
+            files: [{ path: 'SKILL.md', content: 'web skill' }],
+          },
+          {
+            skillKey: 'feishu-doc',
+            files: [{ path: 'SKILL.md', content: 'feishu skill' }],
           },
         ],
-        statuses: [],
-        vendors: [
-          {
-            id: 'openai',
-            name: 'OpenAI',
-            defaultModelId: 'gpt-5.4',
-            supportedAuthModes: ['api_key', 'oauth_browser'],
-            defaultAuthMode: 'api_key',
-            supportsMultipleAccounts: true,
-          },
-        ],
-        defaultAccountId: 'openai-main',
+        files: {
+          'AGENTS.md': 'AGENTS.md shared content',
+          'SOUL.md': 'SOUL.md shared content',
+          'TOOLS.md': 'TOOLS.md shared content',
+          'IDENTITY.md': 'IDENTITY.md shared content',
+          'USER.md': 'USER.md shared content',
+        },
       },
-      snapshotReady: true,
     });
-
-    await useSubagentsStore.getState().loadAvailableModels();
-
-    expect(useSubagentsStore.getState().availableModels).toEqual([
-      {
-        id: 'openai/gpt-4.1-mini',
-        provider: 'openai',
-        providerLabel: 'OpenAI',
-        modelLabel: 'gpt-4.1-mini',
-        displayLabel: 'OpenAI / gpt-4.1-mini',
-      },
-    ]);
-    expect(hostApiFetchMock).not.toHaveBeenCalled();
+    expect(JSON.stringify(exported)).not.toContain('/home/dev/.openclaw');
   });
 
-  it('loadAvailableModels 会映射 browser oauth runtime provider key', async () => {
-    hostApiFetchMock.mockResolvedValue({
-      accounts: [
-        {
-          id: 'openai-browser',
-          vendorId: 'openai',
-          label: 'OpenAI Browser',
-          authMode: 'oauth_browser',
-          model: 'gpt-5.4',
-          enabled: true,
-          isDefault: true,
-          createdAt: '2026-01-01T00:00:00.000Z',
-          updatedAt: '2026-01-01T00:00:00.000Z',
-        },
+  it('importAgentConfig 从共享配置创建 agent 并写入人设文件', async () => {
+    const rpc = gatewayClientRpcMock;
+    useSubagentsStore.setState({
+      agents: [
+        { id: 'main', name: 'Main', workspace: '/home/dev/.openclaw/workspace', isDefault: true },
       ],
-      statuses: [],
-      vendors: [
-        {
-          id: 'openai',
-          name: 'OpenAI',
-          defaultModelId: 'gpt-5.4',
-          supportedAuthModes: ['api_key', 'oauth_browser'],
-          defaultAuthMode: 'api_key',
-          supportsMultipleAccounts: true,
+    });
+    hostApiFetchMock.mockImplementation(async (path, init) => {
+      if (path === '/api/skills/bundles/import') {
+        expect(JSON.parse(String(init?.body))).toEqual({
+          skillBundles: [
+            {
+              skillKey: 'web-search',
+              files: [{ path: 'SKILL.md', content: 'web skill' }],
+            },
+          ],
+        });
+        return { ok: true, installed: ['web-search'] };
+      }
+      throw new Error(`Unexpected host api path in test: ${path}`);
+    });
+    rpc.mockImplementation(async (method, params) => {
+      if (method === 'agents.create') {
+        expect(params).toEqual({
+          name: 'Writer',
+          workspace: '/home/dev/.openclaw/workspace-subagents/writer',
+        });
+        return { success: true, result: { agentId: 'writer' } };
+      }
+      if (method === 'agents.list') {
+        return {
+          success: true,
+          result: {
+            agents: [{ id: 'writer' }],
+          },
+        };
+      }
+      if (method === 'config.get') {
+        return {
+          success: true,
+          result: {
+            hash: 'cfg-hash',
+            config: {
+              agents: {
+                list: [{ id: 'writer', model: 'custom/team-gpt' }],
+              },
+            },
+          },
+        };
+      }
+      if (method === 'config.set') {
+        const payload = params as { raw?: string; baseHash?: string };
+        expect(payload.baseHash).toBe('cfg-hash');
+        const parsed = JSON.parse(payload.raw || '{}') as {
+          agents?: { list?: Array<{ id?: string; skills?: string[] }> };
+        };
+        expect(parsed.agents?.list?.find((entry) => entry.id === 'writer')?.skills).toEqual(['web-search']);
+        return { success: true, result: {} };
+      }
+      if (method === 'agents.files.set') {
+        return { success: true, result: {} };
+      }
+      throw new Error(`Unexpected rpc method in test: ${String(method)}`);
+    });
+
+    const result = await useSubagentsStore.getState().importAgentConfig({
+      schema: 'matchaclaw.agent-config',
+      version: 1,
+      agent: {
+        name: 'Writer',
+        skills: ['web-search'],
+        skillBundles: [
+          {
+            skillKey: 'web-search',
+            files: [{ path: 'SKILL.md', content: 'web skill' }],
+          },
+        ],
+        files: {
+          'AGENTS.md': 'agents content',
+          'SOUL.md': 'soul content',
         },
-      ],
-      defaultAccountId: 'openai-browser',
+      },
+    });
+
+    expect(result).toEqual({ agentId: 'writer' });
+    expect(rpc).toHaveBeenCalledWith(
+      'agents.files.set',
+      { agentId: 'writer', name: 'AGENTS.md', content: 'agents content' },
+      undefined,
+    );
+    expect(rpc).toHaveBeenCalledWith(
+      'agents.files.set',
+      { agentId: 'writer', name: 'SOUL.md', content: 'soul content' },
+      undefined,
+    );
+    expect(rpc).not.toHaveBeenCalledWith('agents.update', expect.anything(), undefined);
+    expect(window.localStorage.getItem(AVATAR_STORAGE_KEY)).toBeNull();
+  });
+
+  it('loadAvailableModels 从模型清单读取可选模型', async () => {
+    hostApiFetchMock.mockImplementation(async (path) => {
+      if (path === '/api/provider-models/selectable') {
+        return {
+          models: [
+            {
+              credentialId: 'custom-dd749b2e-4807-4e78-bb50-7f7e3ae81d7a',
+              providerKey: 'custom-dd749b2e',
+              openClawModelRef: 'custom-dd749b2e/gpt-5.4',
+              label: '自定义',
+              modelId: 'gpt-5.4',
+              capabilities: ['chat'],
+              contextWindow: 200000,
+            },
+            {
+              credentialId: 'ark',
+              providerKey: 'ark',
+              openClawModelRef: 'ark/ark-code-latest',
+              label: 'Ark Code',
+              modelId: 'ark-code-latest',
+              capabilities: ['chat'],
+            },
+          ],
+        };
+      }
+      return {};
     });
 
     await useSubagentsStore.getState().loadAvailableModels();
 
-    expect(useSubagentsStore.getState().availableModels).toEqual([
-      {
-        id: 'openai-codex/gpt-5.4',
-        provider: 'openai-codex',
-        providerLabel: 'OpenAI Browser',
+    expect(useSubagentsStore.getState().availableModels).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        id: 'custom-dd749b2e/gpt-5.4',
+        provider: 'custom-dd749b2e',
+        credentialId: 'custom-dd749b2e-4807-4e78-bb50-7f7e3ae81d7a',
+        providerLabel: '自定义',
         modelLabel: 'gpt-5.4',
-        displayLabel: 'OpenAI Browser / gpt-5.4',
-      },
-    ]);
+        displayLabel: '自定义 / gpt-5.4',
+        contextWindow: 200000,
+        maxTokens: undefined,
+      }),
+      expect.objectContaining({
+        id: 'ark/ark-code-latest',
+        provider: 'ark',
+        credentialId: 'ark',
+        providerLabel: 'Ark Code',
+        modelLabel: 'ark-code-latest',
+        displayLabel: 'Ark Code / ark-code-latest',
+        contextWindow: undefined,
+        maxTokens: undefined,
+      }),
+    ]));
+    expect(useSubagentsStore.getState().availableModels).toHaveLength(2);
   });
 
-  it('provider snapshot 为空时，loadAvailableModels 返回空列表', async () => {
-    hostApiFetchMock.mockResolvedValue({
-      accounts: [],
-      statuses: [],
-      vendors: [],
-      defaultAccountId: null,
+  it('loadAvailableModels 不从 provider store snapshot 推断模型', async () => {
+    hostApiFetchMock.mockImplementation(async (path) => {
+      if (path === '/api/provider-models/selectable') {
+        return { models: [] };
+      }
+      return {};
+    });
+
+    await useSubagentsStore.getState().loadAvailableModels();
+
+    expect(useSubagentsStore.getState().availableModels).toEqual([]);
+    expect(hostApiFetchMock).toHaveBeenCalledWith('/api/provider-models/selectable', undefined);
+  });
+
+  it('loadAvailableModels 不再从 browser oauth 凭证推断模型', async () => {
+    hostApiFetchMock.mockImplementation(async (path) => {
+      if (path === '/api/provider-models/selectable') {
+        return { models: [] };
+      }
+      return {};
     });
 
     await useSubagentsStore.getState().loadAvailableModels();
@@ -541,8 +560,21 @@ describe('subagents store', () => {
     expect(useSubagentsStore.getState().availableModels).toEqual([]);
   });
 
-  it('loadAvailableModels 在 provider snapshot 失败时安全降级为空', async () => {
-    hostApiFetchMock.mockRejectedValueOnce(new Error('provider snapshot failed'));
+  it('模型清单为空时，loadAvailableModels 返回空列表', async () => {
+    hostApiFetchMock.mockImplementation(async (path) => {
+      if (path === '/api/provider-models/selectable') {
+        return { models: [] };
+      }
+      return {};
+    });
+
+    await useSubagentsStore.getState().loadAvailableModels();
+
+    expect(useSubagentsStore.getState().availableModels).toEqual([]);
+  });
+
+  it('loadAvailableModels 在模型清单读取失败时安全降级为空', async () => {
+    hostApiFetchMock.mockRejectedValueOnce(new Error('provider models failed'));
 
     await useSubagentsStore.getState().loadAvailableModels();
 

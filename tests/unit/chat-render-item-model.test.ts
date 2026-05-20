@@ -101,7 +101,7 @@ describe('chat render item model', () => {
     expect(item.tools).toMatchObject([{
       id: 'tool-1',
       name: 'read_file',
-      status: 'running',
+      status: 'missing_result',
     }]);
     expect(item.segments).toMatchObject([
       {
@@ -187,7 +187,7 @@ describe('chat render item model', () => {
         tool: {
           toolCallId: 'tool-b',
           name: 'grep',
-          status: 'running',
+          status: 'missing_result',
         },
       },
       {

@@ -5,14 +5,16 @@ import type { RuntimeClockPort, RuntimeHttpClientPort } from '../common/runtime-
 import type { ProviderOAuthCompletionPort } from './oauth-runtime';
 import type { ProviderAccountsRuntimePort } from './provider-accounts-runtime-port';
 import type { ProviderStorePort, ProviderStoreRecord } from './provider-store-repository';
+import type { ProviderModelsApplicationService } from './provider-models-service';
+import type { CapabilityRoutingApplicationService } from './capability-routing-service';
 import {
   accountToStatusLocal,
   normalizeProviderAccountLocal,
-  normalizeProviderFallbackAccountLocal,
   sortProviderAccountsLocal,
   validateProviderApiKeyLocal,
 } from './account-runtime';
 import { PROVIDER_VENDOR_DEFINITIONS } from './provider-registry';
+import { resolveProviderModelCapabilities } from './provider-model-capabilities';
 import {
   isRecord,
   normalizeProviderStoreForRuntime,
@@ -25,6 +27,8 @@ export interface ProviderAccountsServiceDeps {
   readonly parentShell: ParentShellPort;
   readonly oauthCompletion: ProviderOAuthCompletionPort;
   readonly runtime: ProviderAccountsRuntimePort;
+  readonly providerModels: ProviderModelsApplicationService;
+  readonly capabilityRouting: CapabilityRoutingApplicationService;
   readonly httpClient: RuntimeHttpClientPort;
   readonly clock: RuntimeClockPort;
   readonly jobs: ProviderAccountJobPort;
@@ -61,7 +65,6 @@ export class ProviderAccountsService {
 
     const sortedAccounts = sortProviderAccountsLocal(
       normalizedAccounts.map((account) => account.account),
-      store.defaultAccountId,
     );
     const statuses = await Promise.all(
       sortedAccounts.map(async (account) => (
@@ -69,10 +72,12 @@ export class ProviderAccountsService {
       )),
     );
     return {
-      accounts: sortedAccounts,
+      credentials: sortedAccounts,
       statuses,
-      vendors: PROVIDER_VENDOR_DEFINITIONS,
-      defaultAccountId: store.defaultAccountId,
+      vendors: PROVIDER_VENDOR_DEFINITIONS.map((vendor) => ({
+        ...vendor,
+        modelCapabilities: resolveProviderModelCapabilities({ vendorId: vendor.id }),
+      })),
     };
   }
 
@@ -92,39 +97,13 @@ export class ProviderAccountsService {
     if (apiKey) {
       store.apiKeys[account.id] = apiKey;
     }
-    if (!store.defaultAccountId) {
-      store.defaultAccountId = account.id;
-      store.accounts[account.id].isDefault = true;
-    }
     await this.deps.store.write(store);
     await this.syncStoreToOpenClaw(store);
+    await this.deps.providerModels.syncOpenClaw();
     return {
       success: true,
       account: store.accounts[account.id],
     };
-  }
-
-  setDefault(payload: unknown): ApplicationResponse {
-    return accepted(this.deps.jobs.submitSetDefault(payload));
-  }
-
-  async executeSetDefault(payload: unknown): Promise<{ success: true }> {
-    const body = isRecord(payload) ? payload : {};
-    const accountId = typeof body.accountId === 'string' ? body.accountId : '';
-    if (!accountId) {
-      throw new Error('accountId 参数无效');
-    }
-    const store = await this.deps.store.read();
-    if (!store.accounts[accountId]) {
-      throw new Error('Provider account not found');
-    }
-    store.defaultAccountId = accountId;
-    for (const account of Object.values(store.accounts)) {
-      account.isDefault = account.id === accountId;
-    }
-    await this.deps.store.write(store);
-    await this.syncStoreToOpenClaw(store);
-    return { success: true };
   }
 
   async validate(payload: unknown) {
@@ -274,6 +253,7 @@ export class ProviderAccountsService {
     }
     await this.deps.store.write(store);
     await this.syncStoreToOpenClaw(store);
+    await this.deps.providerModels.syncOpenClaw();
     return { success: true, account: next };
   }
 
@@ -300,14 +280,13 @@ export class ProviderAccountsService {
     }
     delete store.accounts[accountId];
     delete store.apiKeys[accountId];
-    if (store.defaultAccountId === accountId) {
-      store.defaultAccountId = normalizeProviderFallbackAccountLocal(Object.values(store.accounts), accountId);
-      for (const account of Object.values(store.accounts)) {
-        account.isDefault = Boolean(store.defaultAccountId) && account.id === store.defaultAccountId;
+    await this.deps.providerModels.removeCredentialModels(accountId);
+    await this.deps.capabilityRouting.removeCredentialRoutes(accountId);
+    const isCustomMediaCredential = existingAccount?.vendorId === 'custom' && existingAccount.providerKind === 'media';
+    if (!isCustomMediaCredential) {
+      for (const providerKey of cleanupProviderKeys) {
+        await this.runtime.removeProviderConfig(providerKey);
       }
-    }
-    for (const providerKey of cleanupProviderKeys) {
-      await this.runtime.removeProviderConfig(providerKey);
     }
     await this.deps.store.write(store);
     await this.syncStoreToOpenClaw(store);

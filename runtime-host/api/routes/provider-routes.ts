@@ -12,7 +12,6 @@ interface ProviderRouteDeps {
 interface ProviderAccountsRouteService {
   list(): Promise<unknown>;
   create(payload: unknown): ApplicationResponse;
-  setDefault(payload: unknown): ApplicationResponse;
   validate(payload: unknown): Promise<unknown>;
   startOAuth(payload: unknown): Promise<ApplicationResponse>;
   cancelOAuth(): Promise<ApplicationResponse>;
@@ -29,7 +28,6 @@ interface ProviderAccountsRouteService {
 export const providerRoutes: readonly RuntimeRouteDefinition<ProviderRouteDeps>[] = [
   { method: 'GET', path: '/api/provider-accounts', handle: (_context, deps) => routeResponder.value(() => deps.providerAccountsService.list()) },
   { method: 'POST', path: '/api/provider-accounts', handle: (context, deps) => routeResponder.result(() => deps.providerAccountsService.create(context.payload)) },
-  { method: 'PUT', path: '/api/provider-accounts/default', handle: (context, deps) => routeResponder.result(() => deps.providerAccountsService.setDefault(context.payload)) },
   { method: 'POST', path: '/api/provider-accounts/validate', handle: (context, deps) => routeResponder.value(() => deps.providerAccountsService.validate(context.payload)) },
   { method: 'POST', path: '/api/provider-accounts/oauth/start', handle: (context, deps) => routeResponder.result(() => deps.providerAccountsService.startOAuth(context.payload)) },
   { method: 'POST', path: '/api/provider-accounts/oauth/cancel', handle: (_context, deps) => routeResponder.result(() => deps.providerAccountsService.cancelOAuth()) },

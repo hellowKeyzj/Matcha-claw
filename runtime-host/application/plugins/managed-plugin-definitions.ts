@@ -49,6 +49,10 @@ export const CAPABILITY_OPENCLAW_PLUGIN_DEFINITIONS: readonly ManagedOpenClawPlu
       },
     ],
   },
+  {
+    id: 'matchaclaw-media',
+    sourceDirs: ['matchaclaw-media'],
+  },
 ] as const;
 
 export const MANAGED_OPENCLAW_PLUGIN_DEFINITIONS: readonly ManagedOpenClawPluginDefinition[] = [

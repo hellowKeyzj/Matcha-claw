@@ -1,12 +1,12 @@
 import { getOpenClawProviderKeyForType } from './provider-runtime-rules';
 
 export type ProviderStoreLike = {
-  defaultAccountId: string | null;
   accounts: Record<string, Record<string, unknown>>;
   apiKeys: Record<string, string>;
+  defaultAccountId?: unknown;
 };
 
-export type NormalizedProviderAccount = {
+export type NormalizedProviderCredential = {
   accountId: string;
   providerKey: string;
   vendorId: string;
@@ -33,13 +33,6 @@ export function getPositiveInteger(value: unknown): number | undefined {
   return normalized > 0 ? normalized : undefined;
 }
 
-export function toStringArray(value: unknown): string[] {
-  if (!Array.isArray(value)) {
-    return [];
-  }
-  return value.filter((item): item is string => typeof item === 'string' && item.trim().length > 0);
-}
-
 const EPOCH_ISO_TIMESTAMP = '1970-01-01T00:00:00.000Z';
 
 function normalizeIsoTimestamp(value: unknown): string {
@@ -48,7 +41,7 @@ function normalizeIsoTimestamp(value: unknown): string {
     : EPOCH_ISO_TIMESTAMP;
 }
 
-function compareAccountsForRuntimeKey(left: NormalizedProviderAccount, right: NormalizedProviderAccount): number {
+function compareAccountsForRuntimeKey(left: NormalizedProviderCredential, right: NormalizedProviderCredential): number {
   const leftAliasPriority = left.vendorId !== left.providerKey ? 1 : 0;
   const rightAliasPriority = right.vendorId !== right.providerKey ? 1 : 0;
   if (leftAliasPriority !== rightAliasPriority) {
@@ -62,24 +55,13 @@ function compareAccountsForRuntimeKey(left: NormalizedProviderAccount, right: No
   return left.accountId.localeCompare(right.accountId);
 }
 
-function sortAccountsForDefaultSelection(accounts: NormalizedProviderAccount[]): NormalizedProviderAccount[] {
-  return [...accounts].sort((left, right) => {
-    const byUpdatedAt = normalizeIsoTimestamp((right.account as { updatedAt?: unknown }).updatedAt)
-      .localeCompare(normalizeIsoTimestamp((left.account as { updatedAt?: unknown }).updatedAt));
-    if (byUpdatedAt !== 0) {
-      return byUpdatedAt;
-    }
-    return left.accountId.localeCompare(right.accountId);
-  });
-}
-
 export function normalizeProviderStoreForRuntime(store: ProviderStoreLike): {
-  accounts: NormalizedProviderAccount[];
+  accounts: NormalizedProviderCredential[];
   storeModified: boolean;
 } {
   let storeModified = false;
 
-  const normalizedAccounts: NormalizedProviderAccount[] = [];
+  const normalizedAccounts: NormalizedProviderCredential[] = [];
   for (const [accountId, rawAccount] of Object.entries(store.accounts)) {
     if (!isRecord(rawAccount)) {
       delete store.accounts[accountId];
@@ -102,6 +84,12 @@ export function normalizeProviderStoreForRuntime(store: ProviderStoreLike): {
       rawAccount.vendorId = vendorId;
       storeModified = true;
     }
+    for (const legacyKey of ['model', 'contextWindow', 'maxTokens', 'fallbackModels', 'fallbackAccountIds', 'isDefault']) {
+      if (Object.prototype.hasOwnProperty.call(rawAccount, legacyKey)) {
+        delete rawAccount[legacyKey];
+        storeModified = true;
+      }
+    }
     const providerKey = getOpenClawProviderKeyForType(vendorId, accountId);
     normalizedAccounts.push({
       accountId,
@@ -111,7 +99,7 @@ export function normalizeProviderStoreForRuntime(store: ProviderStoreLike): {
     });
   }
 
-  const groupedByProviderKey = new Map<string, NormalizedProviderAccount[]>();
+  const groupedByProviderKey = new Map<string, NormalizedProviderCredential[]>();
   for (const account of normalizedAccounts) {
     const group = groupedByProviderKey.get(account.providerKey) ?? [];
     group.push(account);
@@ -123,13 +111,9 @@ export function normalizeProviderStoreForRuntime(store: ProviderStoreLike): {
       continue;
     }
     const sorted = [...group].sort(compareAccountsForRuntimeKey);
-    const keep = sorted[0];
     for (const duplicated of sorted.slice(1)) {
       delete store.accounts[duplicated.accountId];
       delete store.apiKeys[duplicated.accountId];
-      if (store.defaultAccountId === duplicated.accountId) {
-        store.defaultAccountId = keep.accountId;
-      }
       storeModified = true;
     }
   }
@@ -137,27 +121,10 @@ export function normalizeProviderStoreForRuntime(store: ProviderStoreLike): {
   const dedupedAccounts = normalizedAccounts.filter(
     (account) => Boolean(store.accounts[account.accountId]),
   );
-  const dedupedAccountIds = new Set(dedupedAccounts.map((account) => account.accountId));
-  const nextDefaultAccountId = store.defaultAccountId && dedupedAccountIds.has(store.defaultAccountId)
-    ? store.defaultAccountId
-    : (() => {
-        const fallback = sortAccountsForDefaultSelection(dedupedAccounts)[0];
-        return fallback ? fallback.accountId : null;
-      })();
-
-  if (store.defaultAccountId !== nextDefaultAccountId) {
-    store.defaultAccountId = nextDefaultAccountId;
+  if (Object.prototype.hasOwnProperty.call(store, 'defaultAccountId')) {
+    delete store.defaultAccountId;
     storeModified = true;
   }
-
-  for (const account of dedupedAccounts) {
-    const shouldBeDefault = Boolean(store.defaultAccountId) && account.accountId === store.defaultAccountId;
-    if (account.account.isDefault !== shouldBeDefault) {
-      account.account.isDefault = shouldBeDefault;
-      storeModified = true;
-    }
-  }
-
   return {
     accounts: dedupedAccounts,
     storeModified,

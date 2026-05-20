@@ -322,8 +322,6 @@ describe('session runtime service', () => {
       sessionStorage: {} as never,
       stateStore: {
         flushPersistedStore: vi.fn(async () => undefined),
-        hasVerboseConfigured: vi.fn(() => false),
-        markVerboseConfigured: vi.fn(),
       } as never,
       timelineRuntime: timelineRuntime as never,
       snapshotService: {
@@ -1017,6 +1015,42 @@ describe('session runtime service', () => {
     });
   });
 
+  it('promptSession does not patch session verboseLevel to full', async () => {
+    const configDir = await createRuntimeConfigDir();
+    const gatewayRpc = vi.fn(async () => ({}));
+    const chatSend = vi.fn(async () => ({ runId: 'user-no-verbose-full' }));
+    const service = createTestSessionRuntimeService({
+      workspace: { getConfigDir: () => configDir },
+      openclawBridge: {
+        chatSend,
+        gatewayRpc,
+      },
+    });
+
+    const response = await service.promptSession({
+      sessionKey: 'agent:main:main',
+      message: 'hello without verbose full',
+      idempotencyKey: 'user-no-verbose-full',
+    });
+
+    expect(response.status).toBe(200);
+    expect(response.data).toMatchObject({
+      success: true,
+      sessionKey: 'agent:main:main',
+      runId: 'user-no-verbose-full',
+    });
+    expect(chatSend).toHaveBeenCalledWith(expect.objectContaining({
+      sessionKey: 'agent:main:main',
+      message: 'hello without verbose full',
+      idempotencyKey: 'user-no-verbose-full',
+    }));
+    expect(gatewayRpc).not.toHaveBeenCalledWith(
+      'sessions.patch',
+      expect.objectContaining({ verboseLevel: 'full' }),
+      expect.anything(),
+    );
+  });
+
   it('patchSession rejects model switching while a run is active', async () => {
     const configDir = await createRuntimeConfigDir();
     const gatewayRpc = vi.fn(async () => ({}));
@@ -1555,7 +1589,7 @@ describe('session runtime service', () => {
         tool: {
           toolCallId: 'tool-historical-missing-result',
           name: 'TaskCreate',
-          status: 'running',
+          status: 'missing_result',
           result: { kind: 'none', surface: 'tool-card' },
         },
       }],
@@ -3193,7 +3227,7 @@ describe('session runtime service', () => {
       tools: [{
         toolCallId: 'tool-final-output',
         name: 'web_fetch',
-        status: 'running',
+        status: 'missing_result',
         result: {
           kind: 'none',
         },
@@ -3209,11 +3243,198 @@ describe('session runtime service', () => {
       tools: [{
         toolCallId: 'tool-final-output',
         name: 'web_fetch',
-        status: 'running',
+        status: 'completed',
         result: {
-          kind: 'none',
+          kind: 'json',
+          bodyText: expect.stringContaining('ok from transcript'),
         },
       }],
+    });
+  });
+
+  it('terminal runs schedule transcript catch-up that only fills missing tool results', async () => {
+    const rootDir = await mkdtemp(join(tmpdir(), 'matcha-session-runtime-'));
+    const transcriptDir = join(rootDir, 'agents', 'main', 'sessions');
+    await mkdir(transcriptDir, { recursive: true });
+    await writeFile(
+      join(transcriptDir, 'sessions.json'),
+      JSON.stringify({
+        sessions: [{
+          key: 'agent:main:main',
+          sessionKey: 'agent:main:main',
+          file: 'main.jsonl',
+        }],
+      }),
+      'utf8',
+    );
+    await writeFile(join(transcriptDir, 'main.jsonl'), '', 'utf8');
+
+    const emitted: unknown[] = [];
+    const service = createTestSessionRuntimeService({
+      workspace: { getConfigDir: () => rootDir },
+      openclawBridge: {
+        chatSend: async () => ({ runId: 'run-unused' }),
+        gatewayRpc: async () => ({}),
+      },
+      emitSessionUpdate: (event) => {
+        emitted.push(event);
+      },
+    });
+
+    await service.consumeGatewayConversationEvent({
+      type: 'chat.message',
+      event: {
+        state: 'final',
+        runId: 'run-tool-transcript-catchup',
+        sessionKey: 'agent:main:main',
+        sequenceId: 1,
+        message: {
+          role: 'user',
+          id: 'user-tool-transcript-catchup',
+          content: 'fetch example',
+        },
+      },
+    });
+    await service.consumeGatewayConversationEvent({
+      type: 'chat.message',
+      event: {
+        state: 'delta',
+        runId: 'run-tool-transcript-catchup',
+        sessionKey: 'agent:main:main',
+        sequenceId: 2,
+        message: {
+          role: 'assistant',
+          content: [{ type: 'text', text: 'live before tool' }],
+        },
+      },
+    });
+    await service.consumeGatewayConversationEvent({
+      type: 'tool.lifecycle',
+      event: {
+        runId: 'run-tool-transcript-catchup',
+        sessionKey: 'agent:main:main',
+        sequenceId: 3,
+        timestamp: 1_700_000_000_000,
+        phase: 'start',
+        toolCallId: 'tool-transcript-catchup',
+        name: 'web_fetch',
+        args: { url: 'https://example.com' },
+      },
+    });
+    await service.consumeGatewayConversationEvent({
+      type: 'chat.message',
+      event: {
+        state: 'final',
+        runId: 'run-tool-transcript-catchup',
+        sessionKey: 'agent:main:main',
+        sequenceId: 4,
+        message: {
+          role: 'assistant',
+          content: [{ type: 'text', text: 'live after tool' }],
+        },
+      },
+    });
+
+    await writeFile(
+      join(transcriptDir, 'main.jsonl'),
+      [
+        JSON.stringify({
+          type: 'message',
+          id: 'user-tool-transcript-catchup',
+          timestamp: 1_700_000_000_000,
+          message: {
+            role: 'user',
+            id: 'user-tool-transcript-catchup',
+            content: 'fetch example',
+          },
+        }),
+        JSON.stringify({
+          type: 'message',
+          id: 'assistant-tool-call-transcript-catchup',
+          timestamp: 1_700_000_000_001,
+          message: {
+            role: 'assistant',
+            content: [{
+              type: 'toolCall',
+              id: 'tool-transcript-catchup',
+              name: 'web_fetch',
+              arguments: { url: 'https://example.com' },
+            }],
+          },
+        }),
+        JSON.stringify({
+          type: 'message',
+          id: 'tool-result-transcript-catchup',
+          timestamp: 1_700_000_000_002,
+          message: {
+            role: 'toolResult',
+            toolCallId: 'tool-transcript-catchup',
+            toolName: 'web_fetch',
+            content: [{ type: 'text', text: '{"status":200,"text":"ok from transcript"}' }],
+          },
+        }),
+        JSON.stringify({
+          type: 'message',
+          id: 'assistant-final-transcript-catchup',
+          timestamp: 1_700_000_000_003,
+          message: {
+            role: 'assistant',
+            content: [{ type: 'text', text: 'transcript text must stay out' }],
+          },
+        }),
+      ].join('\n'),
+      'utf8',
+    );
+
+    const [finalEvent] = await service.consumeGatewayConversationEvent({
+      type: 'run.phase',
+      phase: 'completed',
+      runId: 'run-tool-transcript-catchup',
+      sessionKey: 'agent:main:main',
+    });
+
+    expect(finalEvent.snapshot.items[1]).toMatchObject({
+      kind: 'assistant-turn',
+      text: 'live before tool\nlive after tool',
+      segments: [
+        { kind: 'message', text: 'live before tool' },
+        {
+          kind: 'tool',
+          tool: {
+            toolCallId: 'tool-transcript-catchup',
+            status: 'missing_result',
+            result: { kind: 'none' },
+          },
+        },
+        { kind: 'message', text: 'live after tool' },
+      ],
+    });
+
+    await vi.waitFor(() => {
+      expect(emitted).toContainEqual(expect.objectContaining({
+        sessionUpdate: 'session_item_chunk',
+        sessionKey: 'agent:main:main',
+        runId: 'run-tool-transcript-catchup',
+        item: expect.objectContaining({
+          kind: 'assistant-turn',
+          text: 'live before tool\nlive after tool',
+          segments: [
+            expect.objectContaining({ kind: 'message', text: 'live before tool' }),
+            expect.objectContaining({
+              kind: 'tool',
+              tool: expect.objectContaining({
+                toolCallId: 'tool-transcript-catchup',
+                status: 'completed',
+                result: expect.objectContaining({
+                  kind: 'json',
+                  bodyText: expect.stringContaining('ok from transcript'),
+                }),
+              }),
+            }),
+            expect.objectContaining({ kind: 'message', text: 'live after tool' }),
+          ],
+        }),
+      }));
     });
   });
 
@@ -3527,7 +3748,7 @@ describe('session runtime service', () => {
     });
   });
 
-  it('tool activity keeps one assistant-turn while final answer reuses the live message segment', async () => {
+  it('tool activity keeps one assistant-turn while final answer reuses the live message segment order', async () => {
     const configDir = join(tmpdir(), `matcha-session-runtime-${Date.now()}`);
     const service = createTestSessionRuntimeService({
       workspace: { getConfigDir: () => configDir },
@@ -3597,7 +3818,7 @@ describe('session runtime service', () => {
                   tool: {
                     id: 'tool-read',
                     name: 'read',
-                    status: 'running',
+                    status: 'missing_result',
                   },
                 },
                 {
@@ -3611,13 +3832,92 @@ describe('session runtime service', () => {
                 {
                   id: 'tool-read',
                   name: 'read',
-                  status: 'running',
+                  status: 'missing_result',
                 },
               ],
             },
           ],
         },
       },
+    });
+  });
+
+  it('tool activity does not split a streaming assistant markdown document', async () => {
+    const configDir = join(tmpdir(), `matcha-session-runtime-${Date.now()}`);
+    const service = createTestSessionRuntimeService({
+      workspace: { getConfigDir: () => configDir },
+      openclawBridge: {
+        chatSend: async () => ({ runId: 'run-unused' }),
+        gatewayRpc: async () => ({}),
+      },
+    });
+
+    await service.consumeGatewayConversationEvent({
+      type: 'chat.message',
+      event: {
+        state: 'delta',
+        runId: 'run-markdown-tool-1',
+        sessionKey: 'agent:main:main',
+        sequenceId: 1,
+        message: {
+          role: 'assistant',
+          content: [{ type: 'text', text: '先给配置：\n\n```json\n{"enabled":true}\n' }],
+        },
+      },
+    });
+    await service.consumeGatewayConversationEvent({
+      type: 'tool.lifecycle',
+      event: {
+        runId: 'run-markdown-tool-1',
+        sessionKey: 'agent:main:main',
+        sequenceId: 2,
+        timestamp: 1_700_000_000_000,
+        phase: 'start',
+        toolCallId: 'tool-read-config',
+        name: 'read',
+        args: { filePath: 'README.md' },
+      },
+    });
+    const [finalEvent] = await service.consumeGatewayConversationEvent({
+      type: 'chat.message',
+      event: {
+        state: 'final',
+        runId: 'run-markdown-tool-1',
+        sessionKey: 'agent:main:main',
+        sequenceId: 3,
+        message: {
+          role: 'assistant',
+          content: [{
+            type: 'text',
+            text: '```\n\n---\n\n## 配置写入口也找到了\n\n- 可以继续改。',
+          }],
+        },
+      },
+    });
+
+    expect(finalEvent.item).toMatchObject({
+      kind: 'assistant-turn',
+      turnKey: 'run-markdown-tool-1',
+      segments: [
+        {
+          kind: 'message',
+          key: 'message:run-markdown-tool-1:main:0',
+          text: '先给配置：\n\n```json\n{"enabled":true}',
+        },
+        {
+          kind: 'tool',
+          tool: {
+            id: 'tool-read-config',
+            name: 'read',
+            status: 'missing_result',
+          },
+        },
+        {
+          kind: 'message',
+          key: 'message:run-markdown-tool-1:main:1',
+          text: '```\n\n---\n\n## 配置写入口也找到了\n\n- 可以继续改。',
+        },
+      ],
     });
   });
 
@@ -4579,6 +4879,175 @@ describe('session runtime service', () => {
         },
       ],
     });
+  });
+
+  it('live chat.message toolResult with explicit media output adds assistant media segment', async () => {
+    const configDir = join(tmpdir(), `matcha-session-runtime-${Date.now()}`);
+    const service = createTestSessionRuntimeService({
+      workspace: { getConfigDir: () => configDir },
+      openclawBridge: {
+        chatSend: async () => ({ runId: 'run-unused' }),
+        gatewayRpc: async () => ({}),
+      },
+    });
+
+    await service.consumeGatewayConversationEvent({
+      type: 'chat.message',
+      event: {
+        state: 'final',
+        runId: 'run-live-media-tool-1',
+        sessionKey: 'agent:main:main',
+        sequenceId: 1,
+        message: {
+          role: 'assistant',
+          content: [{
+            type: 'toolCall',
+            id: 'tool-media-1',
+            name: 'image_generate',
+            arguments: { prompt: 'apple' },
+          }],
+        },
+      },
+    });
+
+    const [resultEvent] = await service.consumeGatewayConversationEvent({
+      type: 'chat.message',
+      event: {
+        state: 'final',
+        runId: 'run-live-media-tool-1',
+        sessionKey: 'agent:main:main',
+        sequenceId: 2,
+        message: {
+          role: 'toolResult',
+          toolCallId: 'tool-media-1',
+          toolName: 'image_generate',
+          content: [{
+            type: 'text',
+            text: 'Generated 1 image\nMEDIA:C:\\Users\\Mr.Key\\.openclaw\\media\\outbound\\apple.png',
+          }],
+          details: {
+            media: {
+              mediaUrls: ['C:\\Users\\Mr.Key\\.openclaw\\media\\outbound\\apple.png'],
+            },
+            paths: ['C:\\Users\\Mr.Key\\.openclaw\\media\\outbound\\apple.png'],
+          },
+        },
+      },
+    });
+
+    expect(resultEvent.item).toMatchObject({
+      kind: 'assistant-turn',
+      text: '',
+      tools: [
+        {
+          toolCallId: 'tool-media-1',
+          name: 'image_generate',
+          status: 'completed',
+        },
+      ],
+    });
+    expect(resultEvent.item?.kind).toBe('assistant-turn');
+    if (resultEvent.item?.kind !== 'assistant-turn') {
+      throw new Error('expected assistant turn');
+    }
+    expect(resultEvent.item.segments).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        kind: 'media',
+        attachedFiles: [
+          expect.objectContaining({
+            fileName: 'apple.png',
+            mimeType: 'image/png',
+            filePath: 'C:\\Users\\Mr.Key\\.openclaw\\media\\outbound\\apple.png',
+            source: 'tool-result',
+          }),
+        ],
+      }),
+    ]));
+  });
+
+  it('historical toolResult with explicit media output reloads as assistant media segment', async () => {
+    const rootDir = await mkdtemp(join(tmpdir(), 'matcha-session-runtime-'));
+    const transcriptDir = join(rootDir, 'agents', 'main', 'sessions');
+    await mkdir(transcriptDir, { recursive: true });
+    await writeFile(
+      join(transcriptDir, 'main.jsonl'),
+      [
+        JSON.stringify({
+          timestamp: 1,
+          message: {
+            role: 'assistant',
+            id: 'assistant-media-tool-1',
+            content: [{
+              type: 'toolCall',
+              id: 'tool-media-historical-1',
+              name: 'image_generate',
+              arguments: { prompt: 'apple' },
+            }],
+          },
+        }),
+        JSON.stringify({
+          timestamp: 2,
+          message: {
+            role: 'toolResult',
+            toolCallId: 'tool-media-historical-1',
+            toolName: 'image_generate',
+            content: [{
+              type: 'text',
+              text: 'Generated 1 image\nMEDIA:C:\\Users\\Mr.Key\\.openclaw\\media\\outbound\\apple.png',
+            }],
+            details: {
+              media: {
+                mediaUrls: ['C:\\Users\\Mr.Key\\.openclaw\\media\\outbound\\apple.png'],
+              },
+              paths: ['C:\\Users\\Mr.Key\\.openclaw\\media\\outbound\\apple.png'],
+            },
+          },
+        }),
+      ].join('\n'),
+      'utf8',
+    );
+    await writeFile(
+      join(transcriptDir, 'sessions.json'),
+      JSON.stringify({
+        sessions: [{
+          key: 'agent:main:main',
+          sessionKey: 'agent:main:main',
+          file: 'main.jsonl',
+        }],
+      }),
+      'utf8',
+    );
+
+    const service = createTestSessionRuntimeService({
+      workspace: { getConfigDir: () => rootDir },
+      openclawBridge: {
+        chatSend: async () => ({ runId: 'run-unused' }),
+        gatewayRpc: async () => ({}),
+      },
+    });
+
+    const loadResponse = await loadHydratedSession(service, 'agent:main:main');
+
+    expect(loadResponse.status).toBe(200);
+    const item = loadResponse.data.snapshot.items[0];
+    expect(item?.kind).toBe('assistant-turn');
+    if (item?.kind !== 'assistant-turn') {
+      throw new Error('expected assistant turn');
+    }
+    expect(item.text).toBe('');
+    expect(item.segments).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        kind: 'media',
+        attachedFiles: [
+          expect.objectContaining({
+            fileName: 'apple.png',
+            mimeType: 'image/png',
+            filePath: 'C:\\Users\\Mr.Key\\.openclaw\\media\\outbound\\apple.png',
+            source: 'tool-result',
+          }),
+        ],
+      }),
+    ]));
   });
 
   it('historical multiple toolResult messages in one turn keep all tool outputs after reload', async () => {

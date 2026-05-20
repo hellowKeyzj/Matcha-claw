@@ -27,6 +27,8 @@ import {
 import { WorkbenchService } from '../../application/workbench/service';
 import type { RuntimePluginRepositoryPort } from '../../application/plugins/runtime-plugin-service';
 import type { ProviderRuntimeSyncService } from '../../application/providers/store-sync';
+import type { ProviderModelsApplicationService } from '../../application/providers/provider-models-service';
+import type { CapabilityRoutingApplicationService } from '../../application/providers/capability-routing-service';
 import type { ProviderStoreRepository } from '../../application/providers/provider-store-repository';
 import type { SettingsRepository } from '../../application/settings/store';
 import type { RuntimeHostApplicationServicesContext } from '../application-services';
@@ -46,7 +48,7 @@ import type {
 import type { LicenseService } from '../../application/license/service';
 import type { RuntimeHostLogger } from '../../shared/logger';
 import type { RuntimeLongTaskSubmissionPort } from '../../application/runtime-host/runtime-task-ports';
-import type { SecurityJobPort } from '../../application/security/security-jobs';
+import type { SecurityPluginConfigApplier } from '../../application/security/security-plugin-config-applier';
 import {
   registerRuntimeLifecycleDefinitions,
   type RuntimeHostLifecycle,
@@ -110,8 +112,10 @@ export function registerRuntimeApplicationServices(
     runtimePlugins: scope.resolve<RuntimePluginRepositoryPort>('plugins.repository'),
     prelaunchPluginMaintenance: scope.resolve<PrelaunchPluginMaintenanceService>('runtimeHost.prelaunchPluginMaintenanceService'),
     providerRuntimeSync: scope.resolve<ProviderRuntimeSyncService>('providers.runtimeSyncService'),
+    providerModels: scope.resolve<ProviderModelsApplicationService>('providers.modelsService'),
+    capabilityRouting: scope.resolve<CapabilityRoutingApplicationService>('providers.capabilityRoutingService'),
     workspace: scope.resolve('openclaw.workspaceService'),
-    securityJobs: scope.resolve<SecurityJobPort>('security.jobs'),
+    securityPluginConfig: scope.resolve<SecurityPluginConfigApplier>('security.pluginConfigApplier'),
     idGenerator: scope.resolve<RuntimeIdGeneratorPort>('runtime.idGenerator'),
     jobs: scope.resolve<RuntimeHostBootstrapJobPort>('runtimeHost.bootstrapJobs'),
   }));

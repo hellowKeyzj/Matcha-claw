@@ -13,17 +13,13 @@ export { normalizeProviderStoreForRuntime } from './provider-store-model';
 
 export type ProviderStoreSyncResult = {
   syncedApiKeyCount: number;
-  defaultProviderId?: string;
   storeModified: boolean;
 };
 
 export class ProviderRuntimeSyncService {
   constructor(
     private readonly authProfiles: Pick<OpenClawAuthProfileService, 'saveProviderKey' | 'removeProviderKey'>,
-    private readonly providerConfig: Pick<
-      OpenClawProviderConfigService,
-      'syncProviderConfig' | 'setDefaultModel' | 'setDefaultModelWithOverride'
-    >,
+    private readonly providerConfig: Pick<OpenClawProviderConfigService, 'syncProviderConfig'>,
   ) {}
 
   async syncProviderStore(store: ProviderStoreLike): Promise<ProviderStoreSyncResult> {
@@ -47,26 +43,8 @@ export class ProviderRuntimeSyncService {
       }
     }
 
-    if (plan.defaultModelPlan) {
-      if (plan.defaultModelPlan.runtimeOverride) {
-        await this.providerConfig.setDefaultModelWithOverride(
-          plan.defaultModelPlan.providerKey,
-          plan.defaultModelPlan.defaultModel,
-          plan.defaultModelPlan.runtimeOverride,
-          plan.defaultModelPlan.fallbackModels,
-        );
-      } else {
-        await this.providerConfig.setDefaultModel(
-          plan.defaultModelPlan.providerKey,
-          plan.defaultModelPlan.defaultModel,
-          plan.defaultModelPlan.fallbackModels,
-        );
-      }
-    }
-
     return {
       syncedApiKeyCount,
-      ...(store.defaultAccountId ? { defaultProviderId: store.defaultAccountId } : {}),
       storeModified,
     };
   }

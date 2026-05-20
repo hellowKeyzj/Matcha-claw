@@ -107,6 +107,22 @@ describe('runtime-host proxy routes', () => {
     expect(sendJsonMock).not.toHaveBeenCalled();
   });
 
+  it('POST /api/files/write-text 由主进程文件路由处理，不转发 runtime-host', async () => {
+    const runtimeHostRequest = vi.fn();
+
+    const { handleRuntimeHostProxyRoutes } = await import('../../electron/api/routes/runtime-host-proxy');
+    const handled = await handleRuntimeHostProxyRoutes(
+      { method: 'POST' } as IncomingMessage,
+      {} as ServerResponse,
+      new URL('http://127.0.0.1:3210/api/files/write-text'),
+      { runtimeHost: { request: runtimeHostRequest } } as never,
+    );
+
+    expect(handled).toBe(false);
+    expect(runtimeHostRequest).not.toHaveBeenCalled();
+    expect(sendJsonMock).not.toHaveBeenCalled();
+  });
+
   it('插件运行态路由会走 runtime-host-proxy 转发', async () => {
     const runtimeHostRequest = vi.fn().mockResolvedValue({
       status: 200,

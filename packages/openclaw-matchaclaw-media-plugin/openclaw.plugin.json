@@ -1,0 +1,63 @@
+{
+  "id": "matchaclaw-media",
+  "name": "MatchaClaw Media",
+  "description": "Custom media generation providers configured by MatchaClaw.",
+  "contracts": {
+    "imageGenerationProviders": ["matchaclaw-media"]
+  },
+  "imageGenerationProviderMetadata": {
+    "matchaclaw-media": {
+      "configSignals": [
+        {
+          "rootPath": "plugins.entries.matchaclaw-media.config",
+          "required": ["providers"]
+        }
+      ]
+    }
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "providers": {
+        "type": "object",
+        "additionalProperties": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "label": { "type": "string" },
+            "baseUrl": { "type": "string" },
+            "apiProtocol": {
+              "type": "string",
+              "enum": ["openai", "google", "openrouter"]
+            },
+            "headers": {
+              "type": "object",
+              "additionalProperties": { "type": "string" }
+            },
+            "models": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "id": { "type": "string" },
+                  "capabilities": {
+                    "type": "array",
+                    "items": { "type": "string" }
+                  },
+                  "timeoutMs": { "type": "number" },
+                  "aspectRatio": { "type": "string" },
+                  "resolution": { "type": "string" },
+                  "quality": { "type": "string" }
+                },
+                "required": ["id"]
+              }
+            }
+          },
+          "required": ["baseUrl", "apiProtocol", "models"]
+        }
+      }
+    }
+  }
+}

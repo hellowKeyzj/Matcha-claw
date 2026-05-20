@@ -105,16 +105,12 @@ function getSkillAvailabilityKind(skill: Skill): SkillAvailabilityKind {
   if (!skill.enabled) return 'disabled';
   if (skill.eligible === true) return 'eligible';
   if (skill.blockedByAllowlist) return 'blocked';
-  if (skill.eligible === false) return 'missing';
+  if (formatMissingSummary(skill.missing)) return 'missing';
   return 'unknown';
 }
 
-// 已安装列表的可见性策略：
-// - 平台明确不支持（eligible === false）时隐藏，显示了用户也用不了
-// - 其余一律展示，eligible 未测出（undefined）默认乐观显示
-// - 切换 enabled 不影响可见性，避免“启用一下就消失”的卡片闪现
 function isInstalledSkillVisible(skill: Skill): boolean {
-  return skill.eligible !== false;
+  return skill.installed === true;
 }
 
 function getAvailabilityBadgeClass(kind: SkillAvailabilityKind): string {
@@ -888,7 +884,7 @@ interface SkillGridCardProps extends SkillGridCardViewModel {
   onUninstallSkill: (skillId: string) => void;
 }
 
-type InstalledSkillSourceFilter = 'all' | 'built-in' | 'marketplace';
+type InstalledSkillSourceFilter = 'all' | 'built-in' | 'managed';
 
 const SkillGridCard = memo(function SkillGridCard({
   skillId,
@@ -935,12 +931,12 @@ const SkillGridCard = memo(function SkillGridCard({
                 ) : (
                   <Globe className="h-3 w-3 text-purple-500/70" />
                 )}
-                {slug && slug !== skillName ? (
-                  <span className="shrink-0 rounded border border-black/10 px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground dark:border-white/10">
-                    {slug}
-                  </span>
-                ) : null}
               </CardTitle>
+              {slug ? (
+                <p className="mt-0.5 truncate font-mono text-[11px] text-muted-foreground">
+                  {slug}
+                </p>
+              ) : null}
             </div>
           </div>
           <div className="flex w-[88px] shrink-0 items-center justify-end gap-2">
@@ -1013,6 +1009,7 @@ export function Skills() {
   const fetchSkills = useSkillsStore((state) => state.fetchSkills);
   const enableSkill = useSkillsStore((state) => state.enableSkill);
   const disableSkill = useSkillsStore((state) => state.disableSkill);
+  const batchSetSkillsEnabled = useSkillsStore((state) => state.batchSetSkillsEnabled);
   const searchResults = useSkillsStore((state) => state.searchResults);
   const searchSkills = useSkillsStore((state) => state.searchSkills);
   const installSkill = useSkillsStore((state) => state.installSkill);
@@ -1139,12 +1136,9 @@ export function Skills() {
         || (skill.slug || '').toLowerCase().includes(q)
         || (skill.author || '').toLowerCase().includes(q);
 
-      let matchesSource = true;
-      if (deferredSelectedSource === 'built-in') {
-        matchesSource = !!skill.isBundled;
-      } else if (deferredSelectedSource === 'marketplace') {
-        matchesSource = !skill.isBundled;
-      }
+      const matchesSource = deferredSelectedSource === 'all'
+        || (deferredSelectedSource === 'built-in' && skill.isBundled)
+        || (deferredSelectedSource === 'managed' && !skill.isBundled);
 
       return matchesSearch && matchesSource;
     }).sort((a, b) => {
@@ -1171,14 +1165,15 @@ export function Skills() {
       const availabilityLabel = availabilityKind === 'disabled'
         ? t('detail.disabled')
         : t(`availability.${availabilityKind}`);
+      const displayName = skill.name.trim() || skill.slug?.trim() || skill.id;
       return {
         skillId: skill.id,
-        skillName: skill.name,
+        skillName: displayName,
         skillDescription: skill.description,
         skillIcon: skill.icon || '🧩',
         isCore: Boolean(skill.isCore),
         isBundled: Boolean(skill.isBundled),
-        slug: skill.slug,
+        slug: skill.slug && skill.slug !== displayName ? skill.slug : undefined,
         version: skill.version,
         enabled: skill.enabled,
         configurable: Boolean(skill.configurable),
@@ -1195,12 +1190,12 @@ export function Skills() {
 
   const sourceStats = useMemo(() => {
     if (!isAllTabActive) {
-      return { all: 0, builtIn: 0, marketplace: 0 };
+      return { all: 0, builtIn: 0, managed: 0 };
     }
     return {
       all: visibleInstalledSkills.length,
       builtIn: visibleInstalledSkills.filter((skill) => skill.isBundled).length,
-      marketplace: visibleInstalledSkills.filter((skill) => !skill.isBundled).length,
+      managed: visibleInstalledSkills.filter((skill) => !skill.isBundled).length,
     };
   }, [isAllTabActive, visibleInstalledSkills]);
 
@@ -1211,27 +1206,15 @@ export function Skills() {
       return;
     }
 
-    let succeeded = 0;
-    for (const skill of candidates) {
-      try {
-        if (enable) {
-          await enableSkill(skill.id);
-        } else {
-          await disableSkill(skill.id);
-        }
-        succeeded += 1;
-      } catch {
-        // Continue to next skill and report final summary.
-      }
+    try {
+      await batchSetSkillsEnabled(candidates.map((skill) => skill.id), enable);
+      trackUiEvent('skills.batch_toggle', { enable, total: candidates.length, succeeded: candidates.length });
+      toast.success(enable ? t('toast.batchEnabled', { count: candidates.length }) : t('toast.batchDisabled', { count: candidates.length }));
+    } catch {
+      trackUiEvent('skills.batch_toggle', { enable, total: candidates.length, succeeded: 0 });
+      toast.warning(t('toast.batchPartial', { success: 0, total: candidates.length }));
     }
-
-    trackUiEvent('skills.batch_toggle', { enable, total: candidates.length, succeeded });
-    if (succeeded === candidates.length) {
-      toast.success(enable ? t('toast.batchEnabled', { count: succeeded }) : t('toast.batchDisabled', { count: succeeded }));
-      return;
-    }
-    toast.warning(t('toast.batchPartial', { success: succeeded, total: candidates.length }));
-  }, [disableSkill, enableSkill, filteredSkills, t]);
+  }, [batchSetSkillsEnabled, filteredSkills, t]);
 
   // Handle toggle
   const handleToggle = useCallback(async (skillId: string, enable: boolean) => {
@@ -1589,13 +1572,13 @@ export function Skills() {
                 {t('filter.builtIn', { count: sourceStats.builtIn })}
               </Button>
               <Button
-                variant={selectedSource === 'marketplace' ? 'default' : 'outline'}
+                variant={selectedSource === 'managed' ? 'default' : 'outline'}
                 size="sm"
-                onClick={() => setSelectedSource('marketplace')}
+                onClick={() => setSelectedSource('managed')}
                 className="gap-2"
               >
                 <Globe className="h-3 w-3" />
-                {t('filter.marketplace', { count: sourceStats.marketplace })}
+                {t('filter.marketplace', { count: sourceStats.managed })}
               </Button>
               <Button
                 variant="outline"

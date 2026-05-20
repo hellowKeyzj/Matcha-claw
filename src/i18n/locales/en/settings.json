@@ -38,8 +38,7 @@
       "local": "Local"
     },
     "sections": {
-      "model": "Model Settings",
-      "fallback": "Fallback Settings"
+      "credentials": "Credential Settings"
     },
     "add": "Add Provider",
     "status": {
@@ -66,25 +65,9 @@
       "replaceApiKeyHelp": "Leave this field empty if you want to keep the currently stored API key.",
       "baseUrl": "Base URL",
       "protocol": "Protocol",
-      "modelId": "Model ID",
-      "contextWindow": "Context Window",
-      "maxTokens": "Max Tokens",
-      "codePlanPreset": "Code Plan Preset",
-      "codePlanMode": "Code Plan",
-      "useCodePlanPreset": "Use Ark Code Plan Preset",
-      "codePlanPresetDesc": "Code Plan uses https://ark.cn-beijing.volces.com/api/coding/v3 and model ark-code-latest. Do not use /api/v3 for Code Plan traffic.",
-      "codePlanDoc": "Code Plan docs",
-      "fallbackModels": "Fallback Models",
-      "fallbackProviders": "Fallback Providers",
-      "expandFallback": "Expand Fallback Settings",
-      "collapseFallback": "Collapse Fallback Settings",
-      "fallbackSummaryEmpty": "No fallback configured",
-      "fallbackSummaryCount_one": "1 fallback configured",
-      "fallbackSummaryCount_other": "{{count}} fallbacks configured",
-      "fallbackModelIds": "Fallback Model IDs",
-      "fallbackModelIdsPlaceholder": "gpt-4.1-mini\nanother-model-id",
-      "fallbackModelIdsHelp": "One model ID per line. These models use the current provider config before falling back to other providers.",
-      "noFallbackOptions": "Add another provider first to use it as a fallback target.",
+      "chatProvider": "Chat provider",
+      "mediaProvider": "Media provider",
+      "mediaContract": "Contract",
       "cancel": "Cancel",
       "change": "Change provider",
       "add": "Add Provider",
@@ -100,13 +83,9 @@
       "anthropic": "Anthropic Compatible"
     },
     "card": {
-      "default": "Default",
       "configured": "Configured",
       "noKey": "No API key set",
       "none": "None",
-      "fallbacks_one": "Fallback: {{names}}",
-      "fallbacks_other": "Fallbacks ({{count}}): {{names}}",
-      "setDefault": "Set as default",
       "editKey": "Edit API key",
       "delete": "Delete provider"
     },
@@ -115,12 +94,9 @@
       "failedAdd": "Failed to add provider",
       "deleted": "Provider deleted",
       "failedDelete": "Failed to delete provider",
-      "defaultUpdated": "Default provider updated",
-      "failedDefault": "Failed to set default",
       "updated": "Provider updated",
       "failedUpdate": "Failed to update provider",
       "invalidKey": "Invalid API key",
-      "modelRequired": "Model ID is required",
       "minimaxConflict": "Cannot add both MiniMax (Global) and MiniMax (CN) providers."
     },
     "oauth": {
@@ -367,5 +343,126 @@
     "installTitle": "Install OpenClaw Command",
     "installMessage": "Install the \"openclaw\" command?",
     "installDetail": "This will create ~/.local/bin/openclaw. Ensure ~/.local/bin is on your PATH if you want to run it globally."
+  },
+  "capabilityRouting": {
+    "title": "Default Models",
+    "description": "Pick which credential/model handles chat, image, video, music, and TTS.",
+    "refresh": "Refresh",
+    "save": "Save",
+    "clear": "Clear",
+    "primaryLabel": "Primary model (credential/model)",
+    "noModelOption": "No model selected",
+    "noRegisteredModels": "No models",
+    "fallbacksLabel": "Fallback models",
+    "fallbackSelectPlaceholder": "Select fallback",
+    "addFallback": "Add fallback",
+    "moveFallbackUp": "Move fallback up",
+    "moveFallbackDown": "Move fallback down",
+    "removeFallback": "Remove fallback",
+    "fallbacksHelp": "Tried in order when the primary model is unavailable.",
+    "timeoutLabel": "Timeout (ms, optional)",
+    "timeoutHelp": "Default request timeout for media generation; per-call timeoutMs still wins.",
+    "advanced": {
+      "expand": "Advanced",
+      "collapse": "Collapse"
+    },
+    "errors": {
+      "invalidPrimary": "Primary model must be credential/model, e.g. openai/gpt-image-2",
+      "invalidTimeout": "Timeout must be a positive integer in milliseconds",
+      "invalidProviderKey": "providerKey only allows letters, digits, dot, underscore, hyphen"
+    },
+    "capabilities": {
+      "chat": {
+        "title": "Chat (primary)",
+        "description": "Maps to agents.defaults.model",
+        "placeholder": "openai/gpt-5.5"
+      },
+      "imageUnderstand": {
+        "title": "Image understanding",
+        "description": "Maps to agents.defaults.imageModel",
+        "placeholder": "google/gemini-3.1-flash"
+      },
+      "imageGenerate": {
+        "title": "Image generation",
+        "description": "Maps to agents.defaults.imageGenerationModel",
+        "placeholder": "openai/gpt-image-2"
+      },
+      "videoGenerate": {
+        "title": "Video generation",
+        "description": "Maps to agents.defaults.videoGenerationModel",
+        "placeholder": "qwen/wan2.6-t2v"
+      },
+      "musicGenerate": {
+        "title": "Music generation",
+        "description": "Maps to agents.defaults.musicGenerationModel",
+        "placeholder": "minimax/music-2.6"
+      }
+    },
+    "tts": {
+      "title": "Text-to-Speech",
+      "description": "Maps to messages.tts.provider; voice/style still requires editing openclaw.json directly.",
+      "providerLabel": "TTS provider key"
+    }
+  },
+  "providerModels": {
+    "title": "Model catalog",
+    "description": "Manage model IDs under each credential. Runtime adapters write them to openclaw.json as models.providers.<providerKey>.models[].",
+    "refresh": "Refresh",
+    "empty": "No models",
+    "codePlan": {
+      "title": "Ark Code Plan",
+      "description": "Add ark-code-latest to the ark model catalog. Configure the Ark API key and coding base URL on the provider card.",
+      "add": "Add ark-code-latest",
+      "added": "Added"
+    },
+    "create": {
+      "title": "Add a new credential model",
+      "help": "Models are added inside an existing provider credential.",
+      "add": "Create"
+    },
+    "actions": {
+      "add": "Add model",
+      "save": "Save"
+    },
+    "group": {
+      "subtitle_one": "1 model registered",
+      "subtitle_other": "{{count}} models registered",
+      "vendor": "Vendor: {{vendor}}",
+      "empty": "No models"
+    },
+    "row": {
+      "modelIdLabel": "Model ID",
+      "capabilitiesLabel": "Capabilities",
+      "contextWindowLabel": "Context window",
+      "maxTokensLabel": "Max output tokens",
+      "timeoutMsLabel": "Timeout ms",
+      "aspectRatioLabel": "Ratio",
+      "resolutionLabel": "Resolution",
+      "qualityLabel": "Quality",
+      "defaultOption": "Default",
+      "remove": "Remove"
+    },
+    "qualities": {
+      "low": "Low",
+      "medium": "Medium",
+      "high": "High",
+      "auto": "Auto"
+    },
+    "capabilities": {
+      "chat": "Chat",
+      "imageUnderstand": "Image",
+      "imageGenerate": "Image gen",
+      "videoGenerate": "Video",
+      "musicGenerate": "Music",
+      "tts": "TTS",
+      "transcribe": "Transcribe"
+    },
+    "errors": {
+      "invalidEntry": "Model \"{{id}}\" is invalid: context/maxTokens/timeoutMs must be positive integers",
+      "duplicate": "Model ID \"{{id}}\" appears twice",
+      "emptyKey": "credentialId cannot be empty",
+      "duplicateKey": "This credentialId already exists",
+      "invalidKey": "credentialId only allows letters, digits, dot, underscore, hyphen"
+    }
   }
 }

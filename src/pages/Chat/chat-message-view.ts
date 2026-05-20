@@ -77,7 +77,10 @@ function readAssistantAttachedFiles(item: SessionAssistantTurnItem): ReadonlyArr
   if (!hasPrimaryContent) {
     return attachedFiles;
   }
-  return attachedFiles.filter((file) => file.source !== 'tool-result' || file.mimeType.startsWith('image/'));
+  return attachedFiles.filter((file) => (
+    file.source !== 'message-ref'
+    && (file.source !== 'tool-result' || file.mimeType.startsWith('image/'))
+  ));
 }
 
 export function getAssistantTurnPlainText(item: SessionAssistantTurnItem): string {

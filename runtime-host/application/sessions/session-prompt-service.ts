@@ -20,7 +20,6 @@ import {
 import { SessionRuntimeStateStore } from './session-runtime-state';
 import { SessionSnapshotService } from './session-snapshot-service';
 import { SessionTimelineRuntime } from './session-timeline-runtime';
-import { ensureSessionVerboseFull } from './session-verbose-config';
 import {
   badRequest,
   ok,
@@ -144,8 +143,6 @@ export class SessionPromptService {
     }
 
     const runId = requestedRunId || this.deps.idGenerator.randomId();
-
-    await ensureSessionVerboseFull(sessionKey, this.deps.gateway, this.deps.stateStore);
 
     const media = Array.isArray(mediaBody?.media)
       ? mediaBody.media as SessionPromptMediaPayload[]

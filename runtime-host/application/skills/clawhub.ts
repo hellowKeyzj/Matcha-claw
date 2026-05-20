@@ -250,10 +250,6 @@ export class ClawHubService {
     return { success: true };
   }
 
-  async list() {
-    return await this.deps.skillInventory.listInstalled();
-  }
-
   private async resolveSkillDir(skillKeyOrSlug: string, fallbackSlug?: string, preferredBaseDir?: string) {
     const preferred = typeof preferredBaseDir === 'string' ? preferredBaseDir.trim() : '';
     if (preferred && await this.deps.fileSystem.exists(preferred)) {

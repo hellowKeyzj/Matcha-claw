@@ -184,6 +184,22 @@ export class OpenClawEnvironmentRepository {
     return join(this.getRuntimeHostDataDir(), 'matchaclaw-provider-accounts.json');
   }
 
+  getProviderModelsStoreFilePath(): string {
+    const explicit = this.getEnv('MATCHACLAW_RUNTIME_HOST_PROVIDER_MODELS_STORE_FILE');
+    if (explicit) {
+      return resolve(this.expandHomePathValue(explicit));
+    }
+    return join(this.getRuntimeHostDataDir(), 'matchaclaw-provider-models.json');
+  }
+
+  getCapabilityRoutingStoreFilePath(): string {
+    const explicit = this.getEnv('MATCHACLAW_RUNTIME_HOST_CAPABILITY_ROUTING_STORE_FILE');
+    if (explicit) {
+      return resolve(this.expandHomePathValue(explicit));
+    }
+    return join(this.getRuntimeHostDataDir(), 'matchaclaw-capability-routing.json');
+  }
+
   getBundledUvPathCandidates(): string[] {
     const binName = this.getPlatform() === 'win32' ? 'uv.exe' : 'uv';
     const target = `${this.getPlatform()}-${this.getArch()}`;

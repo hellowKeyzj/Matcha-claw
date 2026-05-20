@@ -1,20 +1,50 @@
 import { hostApiFetch } from '@/lib/host-api';
 import type {
-  ProviderAccount,
+  ModelCapability,
+  ProviderCredential,
   ProviderType,
   ProviderVendorInfo,
   ProviderWithKeyInfo,
 } from '@/lib/providers';
 
 export interface ProviderSnapshot {
-  accounts: ProviderAccount[];
+  credentials: ProviderCredential[];
   statuses: ProviderWithKeyInfo[];
   vendors: ProviderVendorInfo[];
-  defaultAccountId: string | null;
+}
+
+const MODEL_CAPABILITIES = new Set<ModelCapability>([
+  'chat',
+  'imageUnderstand',
+  'imageGenerate',
+  'videoGenerate',
+  'musicGenerate',
+  'tts',
+  'transcribe',
+]);
+
+function normalizeModelCapabilities(value: unknown): ModelCapability[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const out: ModelCapability[] = [];
+  for (const raw of value) {
+    if (!MODEL_CAPABILITIES.has(raw as ModelCapability) || out.includes(raw as ModelCapability)) continue;
+    out.push(raw as ModelCapability);
+  }
+  return out.length > 0 ? out : undefined;
+}
+
+function normalizeVendor(value: unknown): ProviderVendorInfo | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const vendor = value as ProviderVendorInfo & { modelCapabilities?: unknown };
+  const modelCapabilities = normalizeModelCapabilities(vendor.modelCapabilities);
+  return {
+    ...vendor,
+    ...(modelCapabilities ? { modelCapabilities } : {}),
+  };
 }
 
 export interface ProviderListItem {
-  account: ProviderAccount;
+  account: ProviderCredential;
   vendor?: ProviderVendorInfo;
   status?: ProviderWithKeyInfo;
 }
@@ -24,10 +54,13 @@ export function normalizeProviderSnapshot(value: unknown): ProviderSnapshot {
     ? (value as Partial<ProviderSnapshot>)
     : {};
   return {
-    accounts: Array.isArray(snapshot.accounts) ? snapshot.accounts : [],
+    credentials: Array.isArray((snapshot as { credentials?: unknown }).credentials)
+      ? (snapshot as { credentials: ProviderCredential[] }).credentials
+      : [],
     statuses: Array.isArray(snapshot.statuses) ? snapshot.statuses : [],
-    vendors: Array.isArray(snapshot.vendors) ? snapshot.vendors : [],
-    defaultAccountId: typeof snapshot.defaultAccountId === 'string' ? snapshot.defaultAccountId : null,
+    vendors: Array.isArray(snapshot.vendors)
+      ? snapshot.vendors.map((vendor) => normalizeVendor(vendor)).filter((vendor): vendor is ProviderVendorInfo => vendor !== null)
+      : [],
   };
 }
 
@@ -37,7 +70,7 @@ export async function fetchProviderSnapshot(): Promise<ProviderSnapshot> {
 }
 
 export function hasConfiguredCredentials(
-  account: ProviderAccount,
+  account: ProviderCredential,
   status?: ProviderWithKeyInfo,
 ): boolean {
   if (account.authMode === 'oauth_device' || account.authMode === 'oauth_browser' || account.authMode === 'local') {
@@ -46,23 +79,7 @@ export function hasConfiguredCredentials(
   return status?.hasKey ?? false;
 }
 
-export function pickPreferredAccount(
-  accounts: ProviderAccount[],
-  defaultAccountId: string | null,
-  vendorId: ProviderType | string,
-  statusMap: Map<string, ProviderWithKeyInfo>,
-): ProviderAccount | null {
-  const sameVendor = accounts.filter((account) => account.vendorId === vendorId);
-  if (sameVendor.length === 0) return null;
-
-  return (
-    (defaultAccountId ? sameVendor.find((account) => account.id === defaultAccountId) : undefined)
-    || sameVendor.find((account) => hasConfiguredCredentials(account, statusMap.get(account.id)))
-    || sameVendor[0]
-  );
-}
-
-export function buildProviderAccountId(
+export function buildProviderCredentialId(
   vendorId: ProviderType,
   existingAccountId: string | null,
   vendors: ProviderVendorInfo[],
@@ -79,12 +96,11 @@ export function buildProviderAccountId(
 }
 
 export function buildProviderListItems(
-  accounts: ProviderAccount[],
+  credentials: ProviderCredential[],
   statuses: ProviderWithKeyInfo[],
   vendors: ProviderVendorInfo[],
-  defaultAccountId: string | null,
 ): ProviderListItem[] {
-  const safeAccounts = Array.isArray(accounts) ? accounts : [];
+  const safeAccounts = Array.isArray(credentials) ? credentials : [];
   const safeStatuses = Array.isArray(statuses) ? statuses : [];
   const safeVendors = Array.isArray(vendors) ? vendors : [];
   const vendorMap = new Map(safeVendors.map((vendor) => [vendor.id, vendor]));
@@ -97,8 +113,6 @@ export function buildProviderListItems(
       status: statusMap.get(account.id),
     }))
     .sort((left, right) => {
-      if (left.account.id === defaultAccountId) return -1;
-      if (right.account.id === defaultAccountId) return 1;
       return right.account.updatedAt.localeCompare(left.account.updatedAt);
     });
 }
