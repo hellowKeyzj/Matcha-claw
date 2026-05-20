@@ -82,7 +82,10 @@ function cleanupUnnecessaryFiles(dir) {
     'test', 'tests', '__tests__', '.github', 'examples', 'example',
   ]);
   const REMOVE_FILE_EXTS = [
-    '.d.ts', '.d.ts.map', '.js.map', '.mjs.map', '.ts.map', '.map', '.markdown',
+    '.d.ts', '.d.ts.map',
+    '.d.mts', '.d.mts.map',
+    '.d.cts', '.d.cts.map',
+    '.js.map', '.mjs.map', '.ts.map', '.map', '.markdown',
     // 调试符号文件，删除不影响运行。
     '.pdb', '.ipdb', '.iobj',
     // 链接中间产物默认不删；仅在显式开启激进瘦身时删除。
@@ -231,6 +234,72 @@ function cleanupNativePlatformPackages(nodeModulesDir, platform, arch) {
       if (!isMatch) {
         try {
           rmSync(join(nodeModulesDir, entry), { recursive: true, force: true });
+          removed++;
+        } catch { /* */ }
+      }
+    }
+  }
+
+  return removed;
+}
+
+function cleanupLanceDbPlatformPackages(nodeModulesDir, platform, arch) {
+  let removed = 0;
+
+  const lancedbScopeDir = join(nodeModulesDir, '@lancedb');
+  if (!existsSync(lancedbScopeDir)) return 0;
+
+  const pattern = /^lancedb-(darwin|linux|win32)-(x64|arm64)(?:-.+)?$/;
+  let entries;
+  try { entries = readdirSync(lancedbScopeDir); } catch { return 0; }
+
+  for (const entry of entries) {
+    const match = entry.match(pattern);
+    if (!match) continue;
+
+    const pkgPlatform = PLATFORM_ALIASES[match[1]] || match[1];
+    const pkgArch = baseArch(match[2]);
+    const isMatch = pkgPlatform === platform && pkgArch === arch;
+    if (!isMatch) {
+      try {
+        rmSync(join(lancedbScopeDir, entry), { recursive: true, force: true });
+        removed++;
+      } catch { /* */ }
+    }
+  }
+
+  return removed;
+}
+
+function cleanupOnnxRuntimeNodeBinaries(nodeModulesDir, platform, arch) {
+  const napiDir = join(nodeModulesDir, 'onnxruntime-node', 'bin', 'napi-v6');
+  if (!existsSync(napiDir)) return 0;
+
+  let removed = 0;
+  let platformEntries;
+  try { platformEntries = readdirSync(napiDir, { withFileTypes: true }); } catch { return 0; }
+
+  for (const platformEntry of platformEntries) {
+    if (!platformEntry.isDirectory()) continue;
+    const platformDir = join(napiDir, platformEntry.name);
+    const pkgPlatform = PLATFORM_ALIASES[platformEntry.name] || platformEntry.name;
+
+    if (pkgPlatform !== platform) {
+      try {
+        rmSync(platformDir, { recursive: true, force: true });
+        removed++;
+      } catch { /* */ }
+      continue;
+    }
+
+    let archEntries;
+    try { archEntries = readdirSync(platformDir, { withFileTypes: true }); } catch { continue; }
+    for (const archEntry of archEntries) {
+      if (!archEntry.isDirectory()) continue;
+      const pkgArch = baseArch(archEntry.name);
+      if (pkgArch !== arch) {
+        try {
+          rmSync(join(platformDir, archEntry.name), { recursive: true, force: true });
           removed++;
         } catch { /* */ }
       }
@@ -642,6 +711,14 @@ exports.default = async function afterPack(context) {
       if (existsSync(pluginNM)) {
         cleanupKoffi(pluginNM, platform, arch);
         cleanupNativePlatformPackages(pluginNM, platform, arch);
+        const lancedbRemoved = cleanupLanceDbPlatformPackages(pluginNM, platform, arch);
+        if (lancedbRemoved > 0) {
+          console.log(`[after-pack] ✅ ${pluginId}: removed ${lancedbRemoved} non-target LanceDB platform package(s).`);
+        }
+        const onnxRuntimeRemoved = cleanupOnnxRuntimeNodeBinaries(pluginNM, platform, arch);
+        if (onnxRuntimeRemoved > 0) {
+          console.log(`[after-pack] ✅ ${pluginId}: removed ${onnxRuntimeRemoved} non-target onnxruntime-node binary directories.`);
+        }
       }
       patchPluginIds(pluginDestDir, pluginId);
     }
@@ -661,6 +738,10 @@ exports.default = async function afterPack(context) {
   // copy to preserve the exact existing layout.
   const buildExtDir = join(__dirname, '..', 'build', 'openclaw', 'dist', 'extensions');
   const packExtDir = join(openclawRoot, 'dist', 'extensions');
+  // MatchaClaw bundles the openclaw-lark plugin separately. The built-in
+  // OpenClaw feishu extension is redundant and its mirrored deps make macOS
+  // codesign scan far more files.
+  rmSync(join(packExtDir, 'feishu'), { recursive: true, force: true });
   if (existsSync(buildExtDir)) {
     let extNMCount = 0;
     let mergedPkgCount = 0;
@@ -668,6 +749,7 @@ exports.default = async function afterPack(context) {
 
     for (const extEntry of readdirSync(buildExtDir, { withFileTypes: true })) {
       if (!extEntry.isDirectory()) continue;
+      if (extEntry.name === 'feishu') continue;
 
       const srcNM = join(buildExtDir, extEntry.name, 'node_modules');
       if (!existsSync(srcNM)) continue;
@@ -781,6 +863,14 @@ exports.default = async function afterPack(context) {
   if (nativeRemoved > 0) {
     console.log(`[after-pack] ✅ Removed ${nativeRemoved} non-target native platform packages.`);
   }
+  const lancedbRemoved = cleanupLanceDbPlatformPackages(dest, platform, arch);
+  if (lancedbRemoved > 0) {
+    console.log(`[after-pack] ✅ Removed ${lancedbRemoved} non-target LanceDB platform package(s).`);
+  }
+  const onnxRuntimeRemoved = cleanupOnnxRuntimeNodeBinaries(dest, platform, arch);
+  if (onnxRuntimeRemoved > 0) {
+    console.log(`[after-pack] ✅ Removed ${onnxRuntimeRemoved} non-target onnxruntime-node binary directories.`);
+  }
 
   // 5. [Windows only] Patch NSIS extraction to avoid the slow temp CopyFiles step.
   //
@@ -832,4 +922,6 @@ exports.__test__ = {
   UNSCOPED_NATIVE_PACKAGES,
   baseArch,
   cleanupNativePlatformPackages,
+  cleanupLanceDbPlatformPackages,
+  cleanupOnnxRuntimeNodeBinaries,
 };
