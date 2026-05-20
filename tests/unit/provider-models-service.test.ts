@@ -43,6 +43,7 @@ describe('ProviderModelsApplicationService', () => {
     expect(result.models).toEqual([
       {
         credentialId: 'custom-dd749b2e-4807-4e78-bb50-7f7e3ae81d7a',
+        label: 'custom',
         modelId: 'gpt-5.4',
         capabilities: ['chat', 'imageUnderstand'],
         contextWindow: 128000,
@@ -50,7 +51,14 @@ describe('ProviderModelsApplicationService', () => {
     ]);
     expect(writeModels).toHaveBeenCalledWith({
       schemaVersion: 1,
-      models: result.models,
+      models: [
+        {
+          credentialId: 'custom-dd749b2e-4807-4e78-bb50-7f7e3ae81d7a',
+          modelId: 'gpt-5.4',
+          capabilities: ['chat', 'imageUnderstand'],
+          contextWindow: 128000,
+        },
+      ],
     });
   });
 
@@ -247,8 +255,58 @@ describe('ProviderModelsApplicationService', () => {
     });
   });
 
+  it('returns catalog models with credential labels for model assignment display', async () => {
+    const service = new ProviderModelsApplicationService(
+      {
+        read: async () => ({
+          schemaVersion: 1,
+          models: [
+            {
+              credentialId: 'custom-media',
+              modelId: 'gpt-image-2',
+              capabilities: ['imageGenerate'],
+            },
+          ],
+        }),
+        write: async () => {},
+      },
+      {
+        read: async () => ({
+          schemaVersion: 2,
+          accounts: {
+            'custom-media': {
+              id: 'custom-media',
+              vendorId: 'custom',
+              providerKind: 'media',
+              label: 'image',
+              baseUrl: 'https://media.example.com/v1',
+              mediaApiProtocol: 'openai',
+            },
+          },
+          apiKeys: {},
+        }),
+        write: async () => {},
+      },
+      {
+        replaceAll: vi.fn(async () => {}),
+      } as any,
+    );
+
+    await expect(service.readAll()).resolves.toEqual({
+      models: [
+        {
+          credentialId: 'custom-media',
+          label: 'image',
+          modelId: 'gpt-image-2',
+          capabilities: ['imageGenerate'],
+        },
+      ],
+    });
+  });
+
   it('keeps an empty OpenClaw model array for custom credentials after model removal', async () => {
     const writer = { replaceAll: vi.fn(async () => {}) };
+    const capabilityRouting = { pruneUnavailableModelRoutes: vi.fn(async () => {}) };
     const service = new ProviderModelsApplicationService(
       {
         read: async () => ({
@@ -279,6 +337,8 @@ describe('ProviderModelsApplicationService', () => {
         write: async () => {},
       },
       writer as any,
+      undefined,
+      capabilityRouting,
     );
 
     await service.replace('custom-dd749b2e-4807-4e78-bb50-7f7e3ae81d7a', { models: [] });
@@ -291,6 +351,81 @@ describe('ProviderModelsApplicationService', () => {
         models: [],
       },
     }, []);
+    expect(capabilityRouting.pruneUnavailableModelRoutes).toHaveBeenCalledWith([]);
+  });
+
+  it('prunes model assignment routes after a credential model is deleted', async () => {
+    const writeModels = vi.fn(async () => {});
+    const writer = { replaceAll: vi.fn(async () => {}) };
+    const capabilityRouting = { pruneUnavailableModelRoutes: vi.fn(async () => {}) };
+    const service = new ProviderModelsApplicationService(
+      {
+        read: async () => ({
+          schemaVersion: 1,
+          models: [
+            {
+              credentialId: 'custom-media',
+              modelId: 'deleted-image',
+              capabilities: ['imageGenerate'],
+            },
+            {
+              credentialId: 'custom-media',
+              modelId: 'kept-image',
+              capabilities: ['imageGenerate'],
+            },
+          ],
+        }),
+        write: writeModels,
+      },
+      {
+        read: async () => ({
+          schemaVersion: 2,
+          accounts: {
+            'custom-media': {
+              id: 'custom-media',
+              vendorId: 'custom',
+              providerKind: 'media',
+              label: 'image',
+              baseUrl: 'https://media.example.com/v1',
+              mediaApiProtocol: 'openai',
+            },
+          },
+          apiKeys: {},
+        }),
+        write: async () => {},
+      },
+      writer as any,
+      { replaceAll: vi.fn(async () => {}) } as any,
+      capabilityRouting,
+    );
+
+    const result = await service.replace('custom-media', {
+      models: [
+        {
+          modelId: 'kept-image',
+          capabilities: ['imageGenerate'],
+        },
+      ],
+    });
+
+    expect(result.status).toBe(200);
+    expect(writeModels).toHaveBeenCalledWith({
+      schemaVersion: 1,
+      models: [
+        {
+          credentialId: 'custom-media',
+          modelId: 'kept-image',
+          capabilities: ['imageGenerate'],
+        },
+      ],
+    });
+    expect(capabilityRouting.pruneUnavailableModelRoutes).toHaveBeenCalledWith([
+      {
+        credentialId: 'custom-media',
+        modelId: 'kept-image',
+        capabilities: ['imageGenerate'],
+      },
+    ]);
   });
 
   it('does not write model entries for credentials without OpenClaw provider transport config', async () => {

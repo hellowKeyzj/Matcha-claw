@@ -14,7 +14,7 @@ import type {
 } from '../openclaw/openclaw-capability-routing-service';
 import type { ProviderStorePort } from './provider-store-repository';
 import type { CapabilityRoutingStorePort } from './capability-routing-store';
-import type { CapabilityRouting, ModelRef, ModelRoute } from './provider-types';
+import type { CapabilityRouting, ModelRef, ModelRoute, ProviderModel } from './provider-types';
 import {
   isRecord,
   normalizeProviderStoreForRuntime,
@@ -121,6 +121,15 @@ export class CapabilityRoutingApplicationService {
     await this.syncOpenClawRouting(next);
   }
 
+  async pruneUnavailableModelRoutes(models: readonly ProviderModel[]): Promise<void> {
+    const store = await this.store.read();
+    const next = pruneRoutesUnavailableInCatalog(store.routing, models);
+    if (JSON.stringify(next) === JSON.stringify(store.routing)) return;
+    store.routing = next;
+    await this.store.write(store);
+    await this.syncOpenClawRouting(next);
+  }
+
   private async syncOpenClawRouting(routing: CapabilityRouting): Promise<void> {
     await this.writer.replace(await this.buildOpenClawRouting(routing));
   }
@@ -190,6 +199,52 @@ function pruneCredentialRoutes(routing: CapabilityRouting, credentialId: string)
     ...(pruneRoute(routing.videoGenerate, credentialId) ? { videoGenerate: pruneRoute(routing.videoGenerate, credentialId)! } : {}),
     ...(pruneRoute(routing.musicGenerate, credentialId) ? { musicGenerate: pruneRoute(routing.musicGenerate, credentialId)! } : {}),
     ...(pruneRoute(routing.tts, credentialId) ? { tts: pruneRoute(routing.tts, credentialId)! } : {}),
+  };
+}
+
+function refKey(ref: ModelRef): string {
+  return `${ref.credentialId}\n${ref.modelId}`;
+}
+
+function availableRefsForCapability(
+  models: readonly ProviderModel[],
+  capability: keyof CapabilityRouting,
+): ReadonlySet<string> {
+  return new Set(
+    models
+      .filter((model) => model.capabilities.includes(capability))
+      .map((model) => refKey(model)),
+  );
+}
+
+function pruneRouteUnavailableInCatalog(
+  route: ModelRoute | undefined,
+  available: ReadonlySet<string>,
+): ModelRoute | undefined {
+  if (!route || !available.has(refKey(route.primary))) return undefined;
+  return {
+    ...route,
+    fallbacks: route.fallbacks.filter((fallback) => available.has(refKey(fallback))),
+  };
+}
+
+function pruneRoutesUnavailableInCatalog(
+  routing: CapabilityRouting,
+  models: readonly ProviderModel[],
+): CapabilityRouting {
+  const chat = pruneRouteUnavailableInCatalog(routing.chat, availableRefsForCapability(models, 'chat'));
+  const imageUnderstand = pruneRouteUnavailableInCatalog(routing.imageUnderstand, availableRefsForCapability(models, 'imageUnderstand'));
+  const imageGenerate = pruneRouteUnavailableInCatalog(routing.imageGenerate, availableRefsForCapability(models, 'imageGenerate'));
+  const videoGenerate = pruneRouteUnavailableInCatalog(routing.videoGenerate, availableRefsForCapability(models, 'videoGenerate'));
+  const musicGenerate = pruneRouteUnavailableInCatalog(routing.musicGenerate, availableRefsForCapability(models, 'musicGenerate'));
+  const tts = pruneRouteUnavailableInCatalog(routing.tts, availableRefsForCapability(models, 'tts'));
+  return {
+    ...(chat ? { chat } : {}),
+    ...(imageUnderstand ? { imageUnderstand } : {}),
+    ...(imageGenerate ? { imageGenerate } : {}),
+    ...(videoGenerate ? { videoGenerate } : {}),
+    ...(musicGenerate ? { musicGenerate } : {}),
+    ...(tts ? { tts } : {}),
   };
 }
 

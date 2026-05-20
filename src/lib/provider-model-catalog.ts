@@ -6,6 +6,7 @@ export type { ModelCapability } from '@/lib/providers';
 
 export interface ProviderModel {
   credentialId: string;
+  label?: string;
   modelId: string;
   capabilities: ModelCapability[];
   contextWindow?: number;
@@ -51,6 +52,7 @@ function normalizeCapabilities(value: unknown): ModelCapability[] {
 function normalizeProviderModel(value: unknown): ProviderModel | null {
   if (!isRecord(value)) return null;
   const credentialId = typeof value.credentialId === 'string' ? value.credentialId.trim() : '';
+  const label = typeof value.label === 'string' ? value.label.trim() : '';
   const modelId = typeof value.modelId === 'string' ? value.modelId.trim() : '';
   const capabilities = normalizeCapabilities(value.capabilities);
   if (!credentialId || !modelId || capabilities.length === 0) return null;
@@ -62,6 +64,7 @@ function normalizeProviderModel(value: unknown): ProviderModel | null {
   const quality = normalizeOptionalString(value.quality);
   return {
     credentialId,
+    ...(label ? { label } : {}),
     modelId,
     capabilities,
     ...(contextWindow !== undefined ? { contextWindow } : {}),

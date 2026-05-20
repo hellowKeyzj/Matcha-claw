@@ -189,6 +189,7 @@ export function registerOpenClawApplicationServices(
     scope.resolve<ProviderStoreRepository>('providers.storeRepository'),
     scope.resolve<OpenClawProviderModelsService>('openclaw.providerModelsWriter'),
     scope.resolve<OpenClawCustomMediaPluginConfigService>('openclaw.customMediaPluginConfigWriter'),
+    scope.resolve<CapabilityRoutingApplicationService>('providers.capabilityRoutingService'),
   ));
   container.register('providers.jobs', (scope): ProviderAccountJobPort => createProviderAccountJobPort(
     scope.resolve<RuntimeLongTaskSubmissionPort>('runtime.tasks'),

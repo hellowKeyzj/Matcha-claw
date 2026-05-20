@@ -223,4 +223,76 @@ describe('CapabilityRoutingApplicationService', () => {
       },
     });
   });
+
+  it('removes routes that point to models no longer present in the catalog', async () => {
+    const writeStore = vi.fn(async () => {});
+    const writer = {
+      read: vi.fn(async () => ({})),
+      replace: vi.fn(async () => {}),
+    };
+    const service = new CapabilityRoutingApplicationService(
+      {
+        read: async () => ({
+          schemaVersion: 1,
+          routing: {
+            chat: {
+              primary: { credentialId: 'custom-chat', modelId: 'gpt-5.4' },
+              fallbacks: [
+                { credentialId: 'custom-chat', modelId: 'removed-chat' },
+                { credentialId: 'custom-chat', modelId: 'gpt-5.5' },
+              ],
+            },
+            imageGenerate: {
+              primary: { credentialId: 'custom-media', modelId: 'removed-image' },
+              fallbacks: [],
+            },
+          },
+        }),
+        write: writeStore,
+      },
+      {
+        read: async () => ({
+          schemaVersion: 2,
+          accounts: {
+            'custom-chat': {
+              id: 'custom-chat',
+              vendorId: 'custom',
+            },
+            'custom-media': {
+              id: 'custom-media',
+              vendorId: 'custom',
+              providerKind: 'media',
+              mediaApiProtocol: 'openai',
+            },
+          },
+          apiKeys: {},
+        }),
+        write: async () => {},
+      },
+      writer as any,
+    );
+
+    await service.pruneUnavailableModelRoutes([
+      { credentialId: 'custom-chat', modelId: 'gpt-5.4', capabilities: ['chat'] },
+      { credentialId: 'custom-chat', modelId: 'gpt-5.5', capabilities: ['chat'] },
+    ]);
+
+    expect(writeStore).toHaveBeenCalledWith({
+      schemaVersion: 1,
+      routing: {
+        chat: {
+          primary: { credentialId: 'custom-chat', modelId: 'gpt-5.4' },
+          fallbacks: [
+            { credentialId: 'custom-chat', modelId: 'gpt-5.5' },
+          ],
+        },
+      },
+    });
+    expect(writer.replace).toHaveBeenCalledWith({
+      chat: {
+        primary: { providerKey: 'custom-chat', modelId: 'gpt-5.4' },
+        fallbacks: [{ providerKey: 'custom-chat', modelId: 'gpt-5.5' }],
+      },
+    });
+  });
 });

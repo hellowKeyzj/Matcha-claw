@@ -12,6 +12,7 @@ import type { OpenClawProviderModelsService, OpenClawProviderModelsMap } from '.
 import type { OpenClawCustomMediaPluginConfigService, OpenClawCustomMediaProviderMap } from '../openclaw/openclaw-custom-media-plugin-config-service';
 import type { ProviderStorePort } from './provider-store-repository';
 import type { ProviderModelsStorePort } from './provider-models-store';
+import type { CapabilityRoutingApplicationService } from './capability-routing-service';
 import type { ModelCapability, ProviderModel } from './provider-types';
 import {
   findDisallowedModelCapabilities,
@@ -146,10 +147,31 @@ export class ProviderModelsApplicationService {
     private readonly credentials: ProviderStorePort,
     private readonly writer: OpenClawProviderModelsService,
     private readonly customMediaWriter?: OpenClawCustomMediaPluginConfigService,
+    private readonly capabilityRouting?: Pick<CapabilityRoutingApplicationService, 'pruneUnavailableModelRoutes'>,
   ) {}
 
-  async readAll(): Promise<{ models: ProviderModel[] }> {
-    return { models: (await this.readHydratedStore()).models };
+  async readAll(): Promise<{ models: Array<ProviderModel & { label?: string }> }> {
+    const [store, providerStore] = await Promise.all([
+      this.readHydratedStore(),
+      this.credentials.read(),
+    ]);
+    const { accounts, storeModified } = normalizeProviderStoreForRuntime(providerStore);
+    if (storeModified) {
+      await this.credentials.write(providerStore);
+    }
+    const accountByCredentialId = new Map(accounts.map((account) => [account.accountId, account]));
+    return {
+      models: store.models
+        .map((model) => {
+          const account = accountByCredentialId.get(model.credentialId);
+          if (!account) return null;
+          return {
+            ...model,
+            label: getOptionalString(account.account.label) || account.vendorId || model.credentialId,
+          };
+        })
+        .filter((model): model is ProviderModel & { label?: string } => model !== null),
+    };
   }
 
   async read(credentialId: string): Promise<{ credentialId: string; models: ProviderModel[] }> {
@@ -225,6 +247,7 @@ export class ProviderModelsApplicationService {
     ];
     await this.store.write(store);
     await this.syncOpenClawModels(store.models);
+    await this.capabilityRouting?.pruneUnavailableModelRoutes(store.models);
     return ok({ success: true, credentialId: trimmed, models: nextModels });
   }
 
@@ -235,6 +258,7 @@ export class ProviderModelsApplicationService {
     store.models = next;
     await this.store.write(store);
     await this.syncOpenClawModels(store.models);
+    await this.capabilityRouting?.pruneUnavailableModelRoutes(store.models);
   }
 
   async syncOpenClaw(): Promise<void> {

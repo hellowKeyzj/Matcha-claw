@@ -4,6 +4,7 @@ import {
   persistProviderModels,
   type ProviderModel,
 } from '@/lib/provider-model-catalog';
+import { useCapabilityRoutingStore } from '@/stores/capability-routing';
 
 interface ProviderModelCatalogState {
   models: ProviderModel[];
@@ -51,6 +52,7 @@ export const useProviderModelCatalogStore = create<ProviderModelCatalogState>((s
         saving: false,
         ready: true,
       }));
+      void useCapabilityRoutingStore.getState().refresh();
     } catch (error) {
       set({ saving: false, error: String(error) });
     }

@@ -57,7 +57,7 @@ function buildModelOptions(
     .filter((model) => model.capabilities.includes(capability))
     .map((model) => {
       const value = `${model.credentialId}/${model.modelId}`;
-      const label = `${credentialLabels.get(model.credentialId) ?? model.credentialId} / ${model.modelId}`;
+      const label = `${model.label ?? credentialLabels.get(model.credentialId) ?? model.credentialId} / ${model.modelId}`;
       return { value, label };
     })
     .sort((left, right) => left.label.localeCompare(right.label));

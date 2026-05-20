@@ -34,6 +34,7 @@ vi.mock('openclaw/plugin-sdk/provider-http', () => ({
 describe('matchaclaw-media OpenClaw plugin', () => {
   beforeEach(() => {
     vi.restoreAllMocks();
+    vi.clearAllMocks();
     resolveApiKeyForProviderMock.mockResolvedValue({ apiKey: 'sk-test' });
     assertOkOrThrowHttpErrorMock.mockResolvedValue(undefined);
     resolveProviderHttpRequestConfigMock.mockImplementation((input) => ({
@@ -43,11 +44,11 @@ describe('matchaclaw-media OpenClaw plugin', () => {
     }));
   });
 
-  async function loadImageProvider() {
+  async function loadImageProvider(pluginConfig?: Record<string, unknown>) {
     vi.resetModules();
     const plugin = (await import('../../packages/openclaw-matchaclaw-media-plugin/src/index')).default;
     const registerImageGenerationProvider = vi.fn();
-    plugin.register({ registerImageGenerationProvider } as never);
+    plugin.register({ pluginConfig, registerImageGenerationProvider } as never);
     return registerImageGenerationProvider.mock.calls[0]?.[0];
   }
 
@@ -61,7 +62,7 @@ describe('matchaclaw-media OpenClaw plugin', () => {
                 'custom-592a8424': {
                   baseUrl: 'https://api.example.test/v1beta',
                   apiProtocol,
-                  models: [{ id: modelId }],
+                  models: [{ id: modelId, capabilities: ['imageGenerate'] }],
                 },
               },
             },
@@ -70,6 +71,31 @@ describe('matchaclaw-media OpenClaw plugin', () => {
       },
     };
   }
+
+  function makePluginConfig(apiProtocol: 'google' | 'openai' | 'openrouter', modelId = 'gemini-2.5-flash-image') {
+    return {
+      providers: {
+        'custom-592a8424': {
+          baseUrl: 'https://api.example.test/v1beta',
+          apiProtocol,
+          models: [{ id: modelId, capabilities: ['imageGenerate'] }],
+        },
+      },
+    };
+  }
+
+  it('registers a lazy image provider and exposes configured model refs from startup config', async () => {
+    const provider = await loadImageProvider(makePluginConfig('openai', 'gpt-image-1'));
+
+    expect(provider).toMatchObject({
+      id: 'matchaclaw-media',
+      label: 'MatchaClaw Media',
+      defaultModel: 'custom-592a8424/gpt-image-1',
+      models: ['custom-592a8424/gpt-image-1'],
+    });
+    expect(postJsonRequestMock).not.toHaveBeenCalled();
+    expect(resolveApiKeyForProviderMock).not.toHaveBeenCalled();
+  });
 
   function mockRemoteImageDownload(bytes = new Uint8Array([137, 80, 78, 71])) {
     const release = vi.fn();
@@ -120,6 +146,7 @@ describe('matchaclaw-media OpenClaw plugin', () => {
                     models: [
                       {
                         id: 'gemini-2.5-flash-image',
+                        capabilities: ['imageGenerate'],
                         timeoutMs: 90_000,
                         aspectRatio: '16:9',
                         resolution: '2K',
@@ -185,7 +212,29 @@ describe('matchaclaw-media OpenClaw plugin', () => {
       model: 'custom-592a8424/gpt-image-1',
       prompt: 'red apple',
       timeoutMs: 70_000,
-      cfg: makeConfig('openai', 'gpt-image-1'),
+      cfg: {
+        plugins: {
+          entries: {
+            'matchaclaw-media': {
+              config: {
+                providers: {
+                  'custom-592a8424': {
+                    baseUrl: 'https://api.example.test/v1beta',
+                    apiProtocol: 'openai',
+                    models: [
+                      {
+                        id: 'gpt-image-1',
+                        capabilities: ['imageGenerate'],
+                        aspectRatio: '1:1',
+                      },
+                    ],
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
     });
 
     expect(result.images).toHaveLength(1);
@@ -199,6 +248,66 @@ describe('matchaclaw-media OpenClaw plugin', () => {
         auditContext: 'MatchaClaw image result',
       }),
     );
+    expect(postJsonRequestMock).toHaveBeenCalledWith(expect.objectContaining({
+      body: expect.objectContaining({
+        size: '1:1',
+      }),
+    }));
+  });
+
+  it('classifies OpenAI-compatible async task responses as unsupported protocol output', async () => {
+    const provider = await loadImageProvider();
+
+    postJsonRequestMock.mockResolvedValue({
+      response: {
+        json: async () => ({
+          id: 'task-1',
+          object: 'generation.task',
+          status: 'queued',
+        }),
+      },
+      release: vi.fn(),
+    });
+
+    await expect(provider.generateImage({
+      model: 'custom-592a8424/gpt-image-1',
+      prompt: 'red apple',
+      cfg: makeConfig('openai', 'gpt-image-1'),
+    })).rejects.toMatchObject({
+      name: 'FailoverError',
+      reason: 'format',
+      code: 'matchaclaw_media_protocol',
+    });
+  });
+
+  it('rejects models that are not configured for image generation', async () => {
+    const provider = await loadImageProvider();
+
+    await expect(provider.generateImage({
+      model: 'custom-592a8424/text-only-model',
+      prompt: 'red apple',
+      cfg: {
+        plugins: {
+          entries: {
+            'matchaclaw-media': {
+              config: {
+                providers: {
+                  'custom-592a8424': {
+                    baseUrl: 'https://api.example.test/v1beta',
+                    apiProtocol: 'openai',
+                    models: [{ id: 'text-only-model', capabilities: ['chat'] }],
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+    })).rejects.toMatchObject({
+      name: 'FailoverError',
+      reason: 'model_not_found',
+      status: 404,
+    });
   });
 
   it('turns OpenRouter-compatible image URLs into generated image assets', async () => {
@@ -281,7 +390,7 @@ describe('matchaclaw-media OpenClaw plugin', () => {
                   'custom-592a8424': {
                     baseUrl: 'https://api.example.test/v1beta',
                     apiProtocol: 'google',
-                    models: [{ id: 'gemini-2.5-flash-image' }],
+                    models: [{ id: 'gemini-2.5-flash-image', capabilities: ['imageGenerate'] }],
                   },
                 },
               },
@@ -339,7 +448,7 @@ describe('matchaclaw-media OpenClaw plugin', () => {
                   'custom-592a8424': {
                     baseUrl: 'https://api.example.test/v1beta',
                     apiProtocol: 'google',
-                    models: [{ id: 'gemini-2.5-flash-image' }],
+                    models: [{ id: 'gemini-2.5-flash-image', capabilities: ['imageGenerate'] }],
                   },
                 },
               },

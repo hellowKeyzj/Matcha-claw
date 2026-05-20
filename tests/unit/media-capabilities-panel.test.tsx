@@ -57,7 +57,7 @@ describe('media capabilities panel', () => {
     catalogState.models = [
       { credentialId: 'openai-main', modelId: 'gpt-5.5', capabilities: ['chat'] },
       { credentialId: 'ark-main', modelId: 'ark-code-latest', capabilities: ['chat'] },
-      { credentialId: 'ark-main', modelId: 'seedream', capabilities: ['imageGenerate'] },
+      { credentialId: 'ark-main', label: 'Ark Label From Catalog', modelId: 'seedream', capabilities: ['imageGenerate'] },
       { credentialId: 'openai-main', modelId: 'tts-1', capabilities: ['tts'] },
     ];
     catalogState.ready = true;
@@ -108,5 +108,14 @@ describe('media capabilities panel', () => {
         fallbacks: [],
       });
     });
+  });
+
+  it('uses catalog credential labels before falling back to credential ids', async () => {
+    render(<MediaCapabilitiesPanel />);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Default Models' }));
+
+    expect(screen.getByRole('option', { name: 'Ark Label From Catalog / seedream' })).toBeInTheDocument();
+    expect(screen.queryByRole('option', { name: 'ark-main / seedream' })).not.toBeInTheDocument();
   });
 });
