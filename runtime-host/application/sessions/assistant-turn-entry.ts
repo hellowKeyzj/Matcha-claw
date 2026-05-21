@@ -139,6 +139,24 @@ function buildToolResultMediaSegmentKey(
   return `media:${identity.turnKey}:${identity.laneKey}:tool:${toolCallId}`;
 }
 
+function mergeImages(
+  existingImages: ReadonlyArray<SessionRenderImage>,
+  incomingImages: ReadonlyArray<SessionRenderImage>,
+): SessionRenderImage[] {
+  const merged = existingImages.map((image) => ({ ...image }));
+  for (const image of incomingImages) {
+    const exists = merged.some((candidate) => (
+      candidate.mimeType === image.mimeType
+      && (candidate.data ?? null) === (image.data ?? null)
+      && (candidate.url ?? null) === (image.url ?? null)
+    ));
+    if (!exists) {
+      merged.push({ ...image });
+    }
+  }
+  return merged;
+}
+
 function mergeAttachedFiles(
   existingFiles: ReadonlyArray<SessionRenderAttachedFile>,
   incomingFiles: ReadonlyArray<SessionRenderAttachedFile>,
@@ -165,9 +183,12 @@ function upsertToolResultMediaSegment(
   segments: SessionAssistantTurnSegment[],
   identity: Pick<AssistantTurnEntryIdentity, 'turnKey' | 'laneKey'>,
   toolCallId: string,
-  attachedFiles: ReadonlyArray<SessionRenderAttachedFile>,
+  media: {
+    images: ReadonlyArray<SessionRenderImage>;
+    attachedFiles: ReadonlyArray<SessionRenderAttachedFile>;
+  },
 ): void {
-  if (attachedFiles.length === 0) {
+  if (media.images.length === 0 && media.attachedFiles.length === 0) {
     return;
   }
   const key = buildToolResultMediaSegmentKey(identity, toolCallId);
@@ -176,14 +197,15 @@ function upsertToolResultMediaSegment(
     const existing = segments[existingIndex] as SessionAssistantMediaSegment;
     segments[existingIndex] = {
       ...existing,
-      attachedFiles: mergeAttachedFiles(existing.attachedFiles, attachedFiles),
+      images: mergeImages(existing.images, media.images),
+      attachedFiles: mergeAttachedFiles(existing.attachedFiles, media.attachedFiles),
     };
     return;
   }
   const segment = buildMediaSegment({
     key,
-    images: [],
-    attachedFiles,
+    images: media.images,
+    attachedFiles: media.attachedFiles,
   });
   if (!segment) {
     return;
@@ -197,6 +219,34 @@ function upsertToolResultMediaSegment(
     return;
   }
   segments.push(segment);
+}
+
+function extractImagesFromContent(content: unknown): SessionRenderImage[] {
+  if (!Array.isArray(content)) {
+    return [];
+  }
+  return content.flatMap((block) => (
+    block && typeof block === 'object'
+      ? extractImagesFromSingleBlock(block as ContentBlockLike)
+      : []
+  ));
+}
+
+function extractToolResultMedia(input: {
+  content?: unknown;
+  output?: unknown;
+  outputText?: string;
+}): {
+  images: SessionRenderImage[];
+  attachedFiles: SessionRenderAttachedFile[];
+} {
+  return {
+    images: extractImagesFromContent(input.content),
+    attachedFiles: extractToolResultMediaAttachments({
+      output: input.output,
+      outputText: input.outputText,
+    }),
+  };
 }
 
 function closeTerminalToolSegment(segment: SessionAssistantTurnSegment): SessionAssistantTurnSegment {
@@ -456,9 +506,10 @@ function buildSegmentsFromTranscriptContent(input: {
             segments,
             input.identity,
             toolCallId || nextToolSegment.tool.id,
-            extractToolResultMediaAttachments({
+            extractToolResultMedia({
               output: resultPayload,
               outputText: extractToolResultOutputText(resultPayload),
+              content: row.content,
             }),
           );
         }
@@ -520,7 +571,7 @@ function buildSegmentsFromTranscriptContent(input: {
         segments,
         input.identity,
         target.tool.toolCallId ?? target.tool.id,
-        extractToolResultMediaAttachments({
+        extractToolResultMedia({
           output: output ?? target.tool.output,
           outputText: extractToolResultOutputText(output ?? target.tool.output),
         }),
@@ -544,7 +595,7 @@ export function applyToolStatusToSegments(
   update: {
     toolCallId: string;
     name: string;
-    input?: unknown;
+    content?: unknown;
     output?: unknown;
     outputText?: string;
     status: SessionRenderToolStatusKind;
@@ -571,7 +622,8 @@ export function applyToolStatusToSegments(
     output: update.output,
     outputText: update.outputText,
   });
-  const mediaFiles = extractToolResultMediaAttachments({
+  const media = extractToolResultMedia({
+    content: update.content,
     output: update.output,
     outputText: update.outputText,
   });
@@ -594,7 +646,7 @@ export function applyToolStatusToSegments(
         ...(update.output !== undefined ? { output: structuredClone(update.output) } : {}),
       },
     });
-    upsertToolResultMediaSegment(next, identity, update.toolCallId, mediaFiles);
+    upsertToolResultMediaSegment(next, identity, update.toolCallId, media);
     return next;
   }
 
@@ -618,7 +670,7 @@ export function applyToolStatusToSegments(
         : (target.tool.output !== undefined ? { output: target.tool.output } : {})),
     },
   };
-  upsertToolResultMediaSegment(next, identity, update.toolCallId, mediaFiles);
+  upsertToolResultMediaSegment(next, identity, update.toolCallId, media);
   return next;
 }
 

@@ -261,7 +261,66 @@ describe('chat render item model', () => {
     ]);
   });
 
-  it('reuses unchanged decorated assistant-turn items when a sibling turn settles', () => {
+
+  it('renders tool result image content as assistant media images', () => {
+    const [item] = applyAssistantPresentationToItems({
+      items: buildRenderItemsFromMessages('agent:main:main', [
+        {
+          role: 'assistant',
+          id: 'assistant-image-tool-1',
+          content: [{
+            type: 'toolCall',
+            id: 'tool-image-1',
+            name: 'render_image',
+            input: { prompt: 'draw' },
+          }],
+        },
+        {
+          role: 'tool_result',
+          id: 'tool-result-image-1',
+          toolCallId: 'tool-image-1',
+          name: 'render_image',
+          details: { ok: true, path: '/tmp/render.png' },
+          content: [{
+            type: 'image',
+            data: 'base64-image-data',
+            mimeType: 'image/png',
+          }],
+        },
+      ]),
+      agents: [],
+      defaultAssistant: null,
+    });
+
+    if (!item || item.kind !== 'assistant-turn') {
+      throw new Error('expected assistant-turn');
+    }
+
+    expect(item.segments).toMatchObject([
+      {
+        kind: 'tool',
+        tool: {
+          toolCallId: 'tool-image-1',
+          name: 'render_image',
+          status: 'completed',
+        },
+      },
+      {
+        kind: 'media',
+        images: [{
+          mimeType: 'image/png',
+          data: 'base64-image-data',
+        }],
+        attachedFiles: [],
+      },
+    ]);
+    expect(item.images).toEqual([{
+      mimeType: 'image/png',
+      data: 'base64-image-data',
+    }]);
+  });
+
+  it('reuses previous assistant-turn item objects when their model content is unchanged', () => {
     const sessionKey = 'agent:main:main';
     const initialProtocolItems = buildRenderItemsFromMessages(sessionKey, [
       {

@@ -26,9 +26,6 @@ importers:
       '@dicebear/core':
         specifier: ^9.4.2
         version: 9.4.2
-      '@matchaclaw/plugins-sdk':
-        specifier: workspace:*
-        version: link:worktrees/plugins/sdk
       '@monaco-editor/react':
         specifier: ^4.7.0
         version: 4.7.0(monaco-editor@0.55.1)(react-dom@19.2.4(react@19.2.4))(react@19.2.4)
@@ -330,13 +327,7 @@ importers:
         specifier: npm:@lancedb/lancedb@0.22.3
         version: '@lancedb/lancedb@0.22.3(apache-arrow@18.1.0)'
 
-  runtime-host:
-    dependencies:
-      '@matchaclaw/plugins-sdk':
-        specifier: workspace:*
-        version: link:../worktrees/plugins/sdk
-
-  worktrees/plugins/sdk: {}
+  runtime-host: {}
 
 packages:
 

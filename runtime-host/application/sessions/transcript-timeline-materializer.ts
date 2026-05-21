@@ -353,6 +353,7 @@ function buildAssistantTurnFromToolResult(input: {
     name: toolName,
     output,
     outputText: extractToolResultOutputText(output),
+    content: message.content,
     status: message.isError ? 'error' : 'completed',
   });
 
