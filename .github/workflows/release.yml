@@ -156,99 +156,18 @@ jobs:
           ulimit -n 65536
           echo "File descriptor limit: $(ulimit -n)"
 
-          time_step() {
-            local name="$1"
-            shift
-            local start
-            local end
-            start="$(date +%s)"
-            echo "::group::${name}"
-            echo ">>> ${name} started at $(date -u +'%Y-%m-%dT%H:%M:%SZ')"
-            local status=0
-            if "$@"; then
-              status=0
-            else
-              status=$?
-            fi
-            end="$(date +%s)"
-            echo "<<< ${name} finished at $(date -u +'%Y-%m-%dT%H:%M:%SZ') status=${status} duration=$((end - start))s"
-            echo "::endgroup::"
-            return "$status"
-          }
-
-          report_path() {
-            local path="$1"
-            if [ -e "$path" ]; then
-              echo "::group::Path stats: ${path}"
-              du -sh "$path" || true
-              find "$path" -type f | wc -l | awk '{ print "files=" $1 }'
-              echo "::endgroup::"
-            else
-              echo "Path stats: ${path} does not exist"
-            fi
-          }
-
-          diagnose_notary_network() {
-            echo "::group::Notarization network diagnostics"
-            curl --connect-timeout 15 --retry 2 --retry-delay 5 -I https://appstoreconnect.apple.com || true
-            if [ -n "${APPLE_ID:-}" ] && [ -n "${APPLE_APP_SPECIFIC_PASSWORD:-}" ] && [ -n "${APPLE_TEAM_ID:-}" ]; then
-              xcrun notarytool history --keychain-profile "matchaclaw-notary-ci" || true
-            fi
-            echo "::endgroup::"
-          }
-
-          cleanup_macos_package_outputs() {
-            rm -rf release/mac release/mac-* || true
-            rm -f release/*-mac-*.dmg release/*-mac-*.zip release/*-mac-*.blockmap release/*-mac.yml || true
-          }
-
-          retry_time_step() {
-            local max_attempts="$1"
-            local name="$2"
-            shift 2
-            local attempt=1
-            local delay=60
-
-            while [ "$attempt" -le "$max_attempts" ]; do
-              if [ "$attempt" -gt 1 ]; then
-                cleanup_macos_package_outputs
-                echo "Retrying ${name}; attempt ${attempt}/${max_attempts}"
-              fi
-
-              if time_step "${name} (attempt ${attempt}/${max_attempts})" "$@"; then
-                return 0
-              fi
-
-              if [ "$attempt" -ge "$max_attempts" ]; then
-                return 1
-              fi
-
-              diagnose_notary_network
-              echo "Waiting ${delay}s before retry..."
-              sleep "$delay"
-              attempt=$((attempt + 1))
-              delay=$((delay * 2))
-            done
-          }
-
-          time_step "build:runtime-host-process" pnpm run build:runtime-host-process
-          time_step "build:vite" pnpm run build:vite
-          time_step "bundle-openclaw" pnpm exec zx scripts/bundle-openclaw.mjs
-          report_path "build/openclaw"
-          time_step "bundle-openclaw-plugins" pnpm exec zx scripts/bundle-openclaw-plugins.mjs
-          report_path "build/openclaw-plugins"
-          time_step "check:openclaw-plugin-mirrors" pnpm run check:openclaw-plugin-mirrors
-          time_step "bundle-preinstalled-skills" pnpm exec zx scripts/bundle-preinstalled-skills.mjs
-          report_path "build/preinstalled-skills"
-          report_path "resources/connector-guide"
+          pnpm run build:runtime-host-process
+          pnpm run build:vite
+          pnpm exec zx scripts/bundle-openclaw.mjs
+          pnpm exec zx scripts/bundle-openclaw-plugins.mjs
+          pnpm run check:openclaw-plugin-mirrors
+          pnpm exec zx scripts/bundle-preinstalled-skills.mjs
 
           BUILDER_ARGS=(--mac --publish never)
-          BUILDER_RETRIES=1
           if [ -n "${CSC_LINK:-}" ] && [ -n "${CSC_KEY_PASSWORD:-}" ]; then
             echo "Detected macOS certificate; building signed artifacts"
             if [ -n "${APPLE_ID:-}" ] && [ -n "${APPLE_APP_SPECIFIC_PASSWORD:-}" ] && [ -n "${APPLE_TEAM_ID:-}" ]; then
               echo "Detected notarization credentials; keep notarize=true from electron-builder.yml"
-              BUILDER_RETRIES=3
             else
               echo "Apple notarization credentials not complete; disable notarization for this run"
               BUILDER_ARGS+=("-c.mac.notarize=false")
@@ -260,8 +179,7 @@ jobs:
             BUILDER_ARGS+=("-c.mac.identity=null" "-c.mac.notarize=false")
           fi
 
-          retry_time_step "$BUILDER_RETRIES" "electron-builder mac package/sign/notarize" pnpm exec electron-builder "${BUILDER_ARGS[@]}"
-          report_path "release"
+          pnpm exec electron-builder "${BUILDER_ARGS[@]}"
 
       # Windows specific steps
       - name: Build Windows

@@ -85,11 +85,6 @@ mac:
   gatekeeperAssess: false
   entitlements: entitlements.mac.plist
   entitlementsInherit: entitlements.mac.plist
-  signIgnore:
-    # These are sealed when the parent bundle is signed, but do not need
-    # individual codesign calls. Keeping them out of the signing walk avoids
-    # thousands of slow timestamped signatures for bundled OpenClaw resources.
-    - '\.(?:asar|bcmap|css|dat|gif|html|icc|icns|ico|jpg|jpeg|js|json|map|md|pak|pdf|pfb|png|svg|ttf|txt|wasm|woff|woff2)$'
   notarize: true
   extendInfo:
     NSMicrophoneUsageDescription: MatchaClaw requires microphone access for voice features
