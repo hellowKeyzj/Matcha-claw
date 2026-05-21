@@ -153,6 +153,8 @@ jobs:
           APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
+          set -euo pipefail
+
           ulimit -n 65536
           echo "File descriptor limit: $(ulimit -n)"
 
@@ -163,23 +165,189 @@ jobs:
           pnpm run check:openclaw-plugin-mirrors
           pnpm exec zx scripts/bundle-preinstalled-skills.mjs
 
-          BUILDER_ARGS=(--mac --publish never)
-          if [ -n "${CSC_LINK:-}" ] && [ -n "${CSC_KEY_PASSWORD:-}" ]; then
-            echo "Detected macOS certificate; building signed artifacts"
-            if [ -n "${APPLE_ID:-}" ] && [ -n "${APPLE_APP_SPECIFIC_PASSWORD:-}" ] && [ -n "${APPLE_TEAM_ID:-}" ]; then
-              echo "Detected notarization credentials; keep notarize=true from electron-builder.yml"
-            else
-              echo "Apple notarization credentials not complete; disable notarization for this run"
-              BUILDER_ARGS+=("-c.mac.notarize=false")
-            fi
-          else
-            echo "No CSC cert credentials; building unsigned macOS artifacts"
-            unset CSC_LINK CSC_KEY_PASSWORD CSC_INSTALLER_LINK CSC_INSTALLER_KEY_PASSWORD
-            export CSC_IDENTITY_AUTO_DISCOVERY=false
-            BUILDER_ARGS+=("-c.mac.identity=null" "-c.mac.notarize=false")
+          if [ -z "${CSC_LINK:-}" ] || [ -z "${CSC_KEY_PASSWORD:-}" ]; then
+            echo "macOS code signing certificate credentials are incomplete."
+            exit 1
           fi
 
-          pnpm exec electron-builder "${BUILDER_ARGS[@]}"
+          if [ -z "${APPLE_ID:-}" ] || [ -z "${APPLE_APP_SPECIFIC_PASSWORD:-}" ] || [ -z "${APPLE_TEAM_ID:-}" ]; then
+            echo "Apple notarization credentials are incomplete."
+            exit 1
+          fi
+
+          json_field() {
+            node -e '
+              const fs = require("fs");
+              try {
+                const data = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+                const value = data[process.argv[2]];
+                if (value !== undefined && value !== null) process.stdout.write(String(value));
+              } catch {
+              }
+            ' "$1" "$2"
+          }
+
+          history_submission_id() {
+            node -e '
+              const fs = require("fs");
+              try {
+                const data = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+                const name = process.argv[2];
+                const items = data.history || data.submissions || [];
+                const hit = items.find((item) => item && item.name === name);
+                if (hit && hit.id) process.stdout.write(String(hit.id));
+              } catch {
+              }
+            ' "$1" "$2"
+          }
+
+          print_notary_log() {
+            local submission_id="$1"
+            xcrun notarytool log "$submission_id" --keychain-profile "matchaclaw-notary-ci" || true
+          }
+
+          handle_notary_status() {
+            local arch="$1"
+            local app_path="$2"
+            local json_path="$3"
+            local submission_id="$4"
+            local status
+            status="$(json_field "$json_path" status)"
+
+            case "$status" in
+              Accepted)
+                echo "Notarization accepted for ${arch}: ${submission_id}"
+                xcrun stapler staple "$app_path"
+                xcrun stapler validate "$app_path"
+                return 0
+                ;;
+              Invalid|Rejected)
+                echo "Notarization failed for ${arch}: ${submission_id} status=${status}"
+                print_notary_log "$submission_id"
+                exit 1
+                ;;
+              "In Progress"|"")
+                echo "Notarization still pending for ${arch}: ${submission_id} status=${status:-unknown}"
+                return 2
+                ;;
+              *)
+                echo "Notarization returned unexpected status for ${arch}: ${submission_id} status=${status}"
+                return 2
+                ;;
+            esac
+          }
+
+          submit_notary() {
+            local arch="$1"
+            local app_path="$2"
+            local submit_name="MatchaClaw-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${arch}.zip"
+            local zip_path="release/notary/${submit_name}"
+            local id_path="release/notary/${arch}.submission-id"
+            local submit_json="release/notary/${arch}.submit.json"
+            local history_json="release/notary/${arch}.history.json"
+
+            if [ ! -d "$app_path" ]; then
+              echo "Missing app bundle for ${arch}: ${app_path}"
+              exit 1
+            fi
+
+            mkdir -p release/notary
+            ditto -c -k --keepParent "$app_path" "$zip_path"
+
+            if [ -s "$id_path" ]; then
+              echo "Reusing recorded notarization submission for ${arch}: $(cat "$id_path")"
+              return 0
+            fi
+
+            set +e
+            xcrun notarytool submit "$zip_path" \
+              --keychain-profile "matchaclaw-notary-ci" \
+              --output-format json > "$submit_json"
+            local submit_status=$?
+            set -e
+
+            if [ "$submit_status" -eq 0 ]; then
+              json_field "$submit_json" id > "$id_path"
+            else
+              echo "Notarization submit did not complete cleanly for ${arch}; checking history before refusing to resubmit."
+              xcrun notarytool history \
+                --keychain-profile "matchaclaw-notary-ci" \
+                --output-format json > "$history_json" || true
+              history_submission_id "$history_json" "$submit_name" > "$id_path"
+            fi
+
+            if [ ! -s "$id_path" ]; then
+              echo "Could not confirm a notarization submission for ${arch}."
+              echo "Refusing to submit again automatically to avoid duplicate Apple notarization quota usage."
+              exit 1
+            fi
+
+            echo "Recorded notarization submission for ${arch}: $(cat "$id_path")"
+          }
+
+          wait_notary() {
+            local arch="$1"
+            local app_path="$2"
+            local id_path="release/notary/${arch}.submission-id"
+            local submission_id
+            local attempt=1
+            local delay=60
+            local wait_json="release/notary/${arch}.wait.json"
+            local info_json="release/notary/${arch}.info.json"
+
+            submission_id="$(cat "$id_path")"
+
+            while true; do
+              echo "Waiting for notarization ${submission_id} (${arch}) attempt ${attempt}"
+
+              set +e
+              xcrun notarytool wait "$submission_id" \
+                --keychain-profile "matchaclaw-notary-ci" \
+                --timeout 20m \
+                --output-format json > "$wait_json"
+              local wait_status=$?
+              set -e
+
+              if [ "$wait_status" -eq 0 ]; then
+                if handle_notary_status "$arch" "$app_path" "$wait_json" "$submission_id"; then
+                  return 0
+                fi
+              else
+                echo "notarytool wait failed for existing submission ${submission_id}; querying info before retrying wait."
+              fi
+
+              if xcrun notarytool info "$submission_id" \
+                --keychain-profile "matchaclaw-notary-ci" \
+                --output-format json > "$info_json"; then
+                if handle_notary_status "$arch" "$app_path" "$info_json" "$submission_id"; then
+                  return 0
+                fi
+              else
+                echo "notarytool info also failed for existing submission ${submission_id}; will retry wait only."
+              fi
+
+              echo "Waiting ${delay}s before retrying notarytool wait for ${submission_id}."
+              sleep "$delay"
+              attempt=$((attempt + 1))
+              if [ "$delay" -lt 300 ]; then
+                delay=$((delay * 2))
+                if [ "$delay" -gt 300 ]; then
+                  delay=300
+                fi
+              fi
+            done
+          }
+
+          pnpm exec electron-builder --mac dir --x64 --arm64 --publish never -c.mac.notarize=false
+
+          submit_notary x64 "release/mac/MatchaClaw.app"
+          submit_notary arm64 "release/mac-arm64/MatchaClaw.app"
+
+          wait_notary x64 "release/mac/MatchaClaw.app"
+          wait_notary arm64 "release/mac-arm64/MatchaClaw.app"
+
+          pnpm exec electron-builder --mac dmg zip --x64 --prepackaged "release/mac/MatchaClaw.app" --publish never -c.mac.notarize=false
+          pnpm exec electron-builder --mac dmg zip --arm64 --prepackaged "release/mac-arm64/MatchaClaw.app" --publish never -c.mac.notarize=false
 
       # Windows specific steps
       - name: Build Windows
