@@ -101,6 +101,9 @@ function normalizeIncomingMessageText(
   if (!incoming) {
     return previousText;
   }
+  if (isStreaming) {
+    return incoming;
+  }
   if (!previousText) {
     return incoming;
   }
@@ -109,9 +112,6 @@ function normalizeIncomingMessageText(
   }
   if (previousText.startsWith(incoming)) {
     return previousText;
-  }
-  if (isStreaming) {
-    return `${previousText}${incoming}`;
   }
   return incoming.length >= previousText.length ? incoming : previousText;
 }
@@ -315,7 +315,7 @@ export function buildSegmentsFromChatContent(input: {
     return buildSegmentsFromTranscriptContent(input);
   }
 
-  // Realtime chat stream: only text/thinking, incremental append
+  // Realtime chat stream: only text/thinking, streaming text is the current snapshot.
   const segments: SessionAssistantTurnSegment[] = input.previousSegments.map((s) => structuredClone(s));
 
   // Update or append thinking

@@ -216,7 +216,6 @@ export function handleStoreSessionUpdateEvent(
   const eventSessionKey = normalizeIdentifier(sessionUpdate.sessionKey);
   const targetSessionKey = eventSessionKey || currentSessionKey;
   const eventRunId = normalizeIdentifier(sessionUpdate.runId);
-  const targetRuntime = getSessionRuntime(stateBeforeHandle, targetSessionKey);
 
   logRendererTodoToolDebug('renderer.session-update.received', {
     sessionUpdate: sessionUpdate.sessionUpdate,
@@ -243,9 +242,6 @@ export function handleStoreSessionUpdateEvent(
 
   if (sessionUpdate.sessionUpdate === 'plan') {
     useTaskSnapshotStore.getState().reportSessionUpdate(sessionUpdate);
-    if (eventRunId && targetRuntime.activeRunId && targetRuntime.activeRunId !== eventRunId) {
-      return;
-    }
     if (shouldIgnoreRuntimeEvent({
       eventSessionKey,
       targetSessionKey,
@@ -271,10 +267,6 @@ export function handleStoreSessionUpdateEvent(
   }
   useTaskSnapshotStore.getState().reportSessionUpdate(sessionUpdate);
 
-  if (eventRunId && targetRuntime.activeRunId && targetRuntime.activeRunId !== eventRunId) {
-    return;
-  }
-
   if (shouldIgnoreRuntimeEvent({
     eventSessionKey,
     targetSessionKey,
@@ -293,7 +285,10 @@ export function handleStoreSessionUpdateEvent(
   });
 
   if (sessionUpdate.sessionUpdate === 'session_item') {
-    if (sessionUpdate.item?.kind === 'assistant-turn') {
+    if (
+      sessionUpdate.item?.kind === 'assistant-turn'
+      && sessionUpdate.snapshot.runtime.runPhase === 'done'
+    ) {
       finishChatRunTelemetry(targetSessionKey, 'completed', { stage: 'session_update_message_final' });
       clearHistoryPoll();
     }

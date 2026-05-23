@@ -117,6 +117,9 @@ function resolvePendingState(
   if (pendingTurnKey && entry.turnKey !== pendingTurnKey) {
     return null;
   }
+  if (runtime.runtimeActivity === 'compacting') {
+    return 'compacting';
+  }
   if (isWaitingTool(runtime) || deriveTools(entry.segments).length > 0) {
     return 'activity';
   }
@@ -186,7 +189,9 @@ function buildPendingTurnItem(input: {
     text: '',
     images: [],
     attachedFiles: [],
-    pendingState: waitingTool ? 'activity' : 'typing',
+    pendingState: input.runtime.runtimeActivity === 'compacting'
+      ? 'compacting'
+      : (waitingTool ? 'activity' : 'typing'),
     ...(typeof input.runtime.updatedAt === 'number' ? { updatedAt: input.runtime.updatedAt } : {}),
   };
 }

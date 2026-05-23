@@ -82,12 +82,15 @@ export type SessionRunPhase =
   | 'error'
   | 'aborted';
 
+export type SessionRuntimeActivity = 'compacting';
+
 export interface SessionRuntimeStateSnapshot {
   activeRunId: string | null;
   runPhase: SessionRunPhase;
   activeTurnItemKey: string | null;
   pendingTurnKey: string | null;
   pendingTurnLaneKey: string | null;
+  runtimeActivity: SessionRuntimeActivity | null;
   lastUserMessageAt: number | null;
   lastError: string | null;
   lastIssue: GatewayTransportIssue | null;
@@ -388,7 +391,7 @@ export interface SessionAssistantTurnItem extends SessionRenderItemBase {
   text: string;
   images: ReadonlyArray<SessionRenderImage>;
   attachedFiles: ReadonlyArray<SessionRenderAttachedFile>;
-  pendingState?: 'typing' | 'activity' | null;
+  pendingState?: 'typing' | 'activity' | 'compacting' | null;
 }
 
 export interface SessionRenderTaskCompletionItem extends SessionRenderItemBase {

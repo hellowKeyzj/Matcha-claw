@@ -116,6 +116,7 @@ export interface ChatSessionRuntimeState {
   activeTurnItemKey: string | null;
   pendingTurnKey: string | null;
   pendingTurnLaneKey: string | null;
+  runtimeActivity: 'compacting' | null;
   lastUserMessageAt: number | null;
   lastError: string | null;
   lastIssue: GatewayTransportIssue | null;

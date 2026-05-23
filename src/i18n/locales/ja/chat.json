@@ -46,7 +46,8 @@
     },
     "pending": {
         "typing": "思考中",
-        "activity": "ツールを実行中"
+        "activity": "ツールを実行中",
+        "compacting": "コンテキストを圧縮中です。完了後に返信を続けます"
     },
     "errors": {
         "activeRunDisconnected": "この実行は終了イベントを受け取る前に切断されました。",

@@ -19,6 +19,7 @@ export function createEmptySessionRuntimeState(): SessionRuntimeStateSnapshot {
     activeTurnItemKey: null,
     pendingTurnKey: null,
     pendingTurnLaneKey: null,
+    runtimeActivity: null,
     lastUserMessageAt: null,
     lastError: null,
     lastIssue: null,

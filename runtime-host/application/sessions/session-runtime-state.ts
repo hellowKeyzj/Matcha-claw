@@ -29,6 +29,7 @@ export class SessionRuntimeStateStore {
   private readonly sessionStates = new Map<string, SessionRuntimeTimelineState>();
   private readonly parentSessionsByChildSessionKey = new Map<string, Set<string>>();
   private readonly resolvedSessionModels = new Map<string, string>();
+  private readonly runAliasesBySessionKey = new Map<string, Map<string, string>>();
   private readonly blockedRunIdsBySessionKey = new Map<string, Set<string>>();
   private readonly persistedStoreReady: Promise<void>;
   private activeSessionKey: string | null = null;
@@ -85,6 +86,7 @@ export class SessionRuntimeStateStore {
       parents.delete(sessionKey);
     }
     this.resolvedSessionModels.delete(sessionKey);
+    this.runAliasesBySessionKey.delete(sessionKey);
     this.blockedRunIdsBySessionKey.delete(sessionKey);
     this.clearActiveSessionKey(sessionKey);
   }
@@ -108,6 +110,29 @@ export class SessionRuntimeStateStore {
 
   getResolvedSessionModel(sessionKey: string): string | null {
     return this.resolvedSessionModels.get(sessionKey) ?? null;
+  }
+
+  bindRunAlias(sessionKey: string, fromRunId: string | null | undefined, toRunId: string | null | undefined): void {
+    const from = normalizeString(fromRunId);
+    const to = normalizeString(toRunId);
+    if (!from || !to || from === to) {
+      return;
+    }
+    let aliases = this.runAliasesBySessionKey.get(sessionKey);
+    if (!aliases) {
+      aliases = new Map<string, string>();
+      this.runAliasesBySessionKey.set(sessionKey, aliases);
+    }
+    aliases.set(from, to);
+    aliases.set(to, from);
+  }
+
+  resolveRunAlias(sessionKey: string, runId: string | null | undefined): string {
+    const normalizedRunId = normalizeString(runId);
+    if (!normalizedRunId) {
+      return '';
+    }
+    return this.runAliasesBySessionKey.get(sessionKey)?.get(normalizedRunId) ?? normalizedRunId;
   }
 
   blockRun(sessionKey: string, runId: string | null | undefined): void {

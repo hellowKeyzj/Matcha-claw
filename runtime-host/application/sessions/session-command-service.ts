@@ -412,6 +412,7 @@ export class SessionCommandService {
           pendingTurnLaneKey: null,
           lastError: null,
           lastIssue: null,
+          runtimeActivity: null,
         },
         activeTransportEpoch: null,
         advanceRunEpoch: true,

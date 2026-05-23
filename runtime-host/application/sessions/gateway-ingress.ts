@@ -38,6 +38,16 @@ export function buildSessionUpdateEventsFromGatewayConversationEvent(
     return [];
   }
 
+  if (input.type === 'run.activity') {
+    return [{
+      sessionUpdate: 'runtime_activity',
+      sessionKey: typeof input.sessionKey === 'string' ? input.sessionKey : null,
+      runId: typeof input.runId === 'string' ? input.runId : null,
+      activity: 'compacting',
+      phase: input.phase === 'completed' ? 'completed' : 'started',
+    }];
+  }
+
   if (input.type === 'run.phase') {
     return [buildLifecycleIngressEvent(input as GatewayConversationLifecyclePayload, options.clock)];
   }

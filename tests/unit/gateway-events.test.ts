@@ -959,6 +959,103 @@ describe('gateway store event wiring', () => {
     expect(getSessionItems(useChatStore.getState(), 'agent:main:main')).toEqual([]);
   });
 
+  it('session_item final applies authoritative snapshot even when compaction leaves local activeRunId stale', async () => {
+    hostApiFetchMock.mockResolvedValueOnce(createRunningGatewayStatus());
+    const handlers = new Map<string, (payload: unknown) => void>();
+    subscribeHostEventMock.mockImplementation((eventName: string, handler: (payload: unknown) => void) => {
+      handlers.set(eventName, handler);
+      return () => {};
+    });
+
+    const { useChatStore } = await import('@/stores/chat');
+    useChatStore.setState({
+      currentSessionKey: 'agent:main:main',
+      sessionCatalogStatus: {
+        status: 'ready',
+        error: null,
+        hasLoadedOnce: true,
+        lastLoadedAt: 1,
+      },
+      loadedSessions: {
+        'agent:main:main': createSessionRecord({
+          runtime: {
+            activeRunId: 'run-before-compaction',
+            runPhase: 'streaming',
+          },
+        }),
+      },
+    } as never);
+
+    const { useGatewayStore } = await import('@/stores/gateway');
+    await useGatewayStore.getState().init();
+
+    handlers.get('session:update')?.(createSessionMessageUpdate({
+      kind: 'agent_message',
+      runId: 'run-after-compaction',
+      sessionKey: 'agent:main:main',
+      message: {
+        role: 'assistant',
+        id: 'assistant-after-compaction',
+        content: 'compaction finished response',
+      },
+    }));
+
+    const state = useChatStore.getState();
+    expect(getSessionItems(state, 'agent:main:main')).toMatchObject([{
+      kind: 'assistant-turn',
+      text: 'compaction finished response',
+      status: 'final',
+    }]);
+    expect(state.loadedSessions['agent:main:main']?.runtime).toMatchObject({
+      activeRunId: 'run-after-compaction',
+      runPhase: 'done',
+    });
+  });
+
+  it('plan session:update applies authoritative snapshot even when compaction leaves local activeRunId stale', async () => {
+    hostApiFetchMock.mockResolvedValueOnce(createRunningGatewayStatus());
+    const handlers = new Map<string, (payload: unknown) => void>();
+    subscribeHostEventMock.mockImplementation((eventName: string, handler: (payload: unknown) => void) => {
+      handlers.set(eventName, handler);
+      return () => {};
+    });
+
+    const { useChatStore } = await import('@/stores/chat');
+    useChatStore.setState({
+      currentSessionKey: 'agent:main:main',
+      sessionCatalogStatus: {
+        status: 'ready',
+        error: null,
+        hasLoadedOnce: true,
+        lastLoadedAt: 1,
+      },
+      loadedSessions: {
+        'agent:main:main': createSessionRecord({
+          runtime: {
+            activeRunId: 'run-before-compaction-plan',
+            runPhase: 'streaming',
+          },
+        }),
+      },
+    } as never);
+
+    const { useGatewayStore } = await import('@/stores/gateway');
+    await useGatewayStore.getState().init();
+
+    handlers.get('session:update')?.(createSessionPlanUpdate({
+      runId: 'run-after-compaction-plan',
+      sessionKey: 'agent:main:main',
+      items: [],
+    }));
+
+    const state = useChatStore.getState();
+    expect(getSessionItems(state, 'agent:main:main')).toEqual([]);
+    expect(state.loadedSessions['agent:main:main']?.runtime).toMatchObject({
+      activeRunId: null,
+      runPhase: 'done',
+    });
+  });
+
   it('run.phase completed 只应进入单一 session update 入口', async () => {
     hostApiFetchMock.mockResolvedValueOnce(createRunningGatewayStatus());
     const handlers = new Map<string, (payload: unknown) => void>();

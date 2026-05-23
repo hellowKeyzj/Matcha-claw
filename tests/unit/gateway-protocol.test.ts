@@ -314,6 +314,36 @@ describe('dispatchProtocolEvent', () => {
     });
   });
 
+
+  it('agent compaction stream 会作为运行态活动进入 conversation 通道', () => {
+    const emitNotification = vi.fn();
+    const emitConversationEvent = vi.fn();
+    const emitChannelStatus = vi.fn();
+    dispatchGatewayProtocolEvent(
+      { emitNotification, emitConversationEvent, emitChannelStatus },
+      'agent',
+      {
+        runId: 'run-compaction-protocol-1',
+        sessionKey: 'agent:main:main',
+        stream: 'compaction',
+        data: {
+          phase: 'start',
+        },
+      },
+    );
+
+    expect(emitConversationEvent).toHaveBeenCalledWith({
+      type: 'run.activity',
+      activity: 'compacting',
+      phase: 'started',
+      runId: 'run-compaction-protocol-1',
+      sessionKey: 'agent:main:main',
+    });
+    expect(emitNotification).toHaveBeenCalledWith(expect.objectContaining({
+      method: 'agent',
+    }));
+  });
+
   it('未知事件只透传 notification', () => {
     const emitNotification = vi.fn();
     const emitConversationEvent = vi.fn();

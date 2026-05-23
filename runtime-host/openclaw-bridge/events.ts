@@ -1,6 +1,7 @@
 import type { GatewayNotification } from './protocol';
 
 type GatewayRunPhase = 'started' | 'completed' | 'error' | 'aborted';
+type GatewayRuntimeActivityPhase = 'started' | 'completed';
 
 export type GatewayConversationEvent =
   | {
@@ -8,8 +9,19 @@ export type GatewayConversationEvent =
     event: Record<string, unknown>;
   }
   | {
+    type: 'session.message';
+    event: Record<string, unknown>;
+  }
+  | {
     type: 'tool.lifecycle';
     event: Record<string, unknown>;
+  }
+  | {
+    type: 'run.activity';
+    activity: 'compacting';
+    phase: GatewayRuntimeActivityPhase;
+    runId?: string;
+    sessionKey?: string;
   }
   | {
     type: 'run.phase';
@@ -103,6 +115,18 @@ function normalizeGatewayChatEvent(payload: unknown): Record<string, unknown> | 
   };
 }
 
+function normalizeGatewaySessionMessageEvent(payload: unknown): Record<string, unknown> | null {
+  const input = asRecord(payload);
+  if (!input) {
+    return null;
+  }
+  const sessionKey = getTrimmedString(input.sessionKey);
+  if (!sessionKey) {
+    return null;
+  }
+  return input;
+}
+
 type GatewayToolPhase = 'start' | 'update' | 'result';
 
 function parseGatewayToolPhase(value: unknown): GatewayToolPhase | null {
@@ -144,6 +168,40 @@ function normalizeGatewayToolLifecycleEvent(payload: unknown): Record<string, un
     ...(Object.prototype.hasOwnProperty.call(data, 'partialResult') ? { partialResult: data.partialResult } : {}),
     ...(Object.prototype.hasOwnProperty.call(data, 'result') ? { result: data.result } : {}),
     ...(typeof data.isError === 'boolean' ? { isError: data.isError } : {}),
+  };
+}
+
+function normalizeGatewayRunActivity(payload: unknown): {
+  activity: 'compacting';
+  phase: GatewayRuntimeActivityPhase;
+  runId?: string;
+  sessionKey?: string;
+} | null {
+  const input = asRecord(payload);
+  if (!input || input.stream !== 'compaction') {
+    return null;
+  }
+  const data = asRecord(input.data) ?? {};
+  const phaseRaw = getTrimmedString(data.phase ?? input.phase ?? data.state ?? input.state).toLowerCase();
+  const phase = (() => {
+    if (phaseRaw === 'start' || phaseRaw === 'started') {
+      return 'started' as const;
+    }
+    if (phaseRaw === 'end' || phaseRaw === 'completed' || phaseRaw === 'done' || phaseRaw === 'finished') {
+      return 'completed' as const;
+    }
+    return null;
+  })();
+  if (!phase) {
+    return null;
+  }
+  const runId = getTrimmedString(input.runId ?? data.runId);
+  const sessionKey = getTrimmedString(input.sessionKey ?? data.sessionKey);
+  return {
+    activity: 'compacting',
+    phase,
+    ...(runId ? { runId } : {}),
+    ...(sessionKey ? { sessionKey } : {}),
   };
 }
 
@@ -232,12 +290,31 @@ export function dispatchGatewayProtocolEvent(
         });
       }
       break;
+    case 'session.message':
+      {
+        const normalized = normalizeGatewaySessionMessageEvent(payload);
+        if (!normalized) {
+          break;
+        }
+        dispatcher.emitConversationEvent({
+          type: 'session.message',
+          event: normalized,
+        });
+      }
+      break;
     case 'agent': {
       const toolLifecycleEvent = normalizeGatewayToolLifecycleEvent(payload);
       if (toolLifecycleEvent) {
         dispatcher.emitConversationEvent({
           type: 'tool.lifecycle',
           event: toolLifecycleEvent,
+        });
+      }
+      const runActivity = normalizeGatewayRunActivity(payload);
+      if (runActivity) {
+        dispatcher.emitConversationEvent({
+          type: 'run.activity',
+          ...runActivity,
         });
       }
       const runPhase = normalizeGatewayRunPhase(payload);

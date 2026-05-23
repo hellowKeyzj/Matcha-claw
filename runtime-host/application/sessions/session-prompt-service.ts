@@ -27,6 +27,17 @@ import {
 } from '../common/application-response';
 import { SessionOperationCoordinator } from './session-operation-coordinator';
 
+function readGatewayRunId(value: unknown): string {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return '';
+  }
+  const record = value as Record<string, unknown>;
+  const runId = typeof record.runId === 'string'
+    ? record.runId.trim()
+    : (typeof record.id === 'string' ? record.id.trim() : '');
+  return runId;
+}
+
 export interface SessionPromptServiceDeps {
   stateStore: SessionRuntimeStateStore;
   timelineRuntime: SessionTimelineRuntime;
@@ -74,6 +85,7 @@ export class SessionPromptService {
           pendingTurnLaneKey: null,
           lastError: input.error,
           lastIssue: null,
+          runtimeActivity: null,
         },
         activeTransportEpoch: null,
         advanceRunEpoch: true,
@@ -123,7 +135,14 @@ export class SessionPromptService {
           runId: input.runId,
           error: sendResult.error ?? 'Failed to prompt session',
         });
+        return;
       }
+
+      const gatewayRunId = readGatewayRunId(sendResult.result);
+      this.deps.timelineRuntime.bindSubmittedRunId(input.sessionKey, {
+        submittedRunId: input.runId,
+        gatewayRunId,
+      });
     })().catch(() => undefined);
   }
 
@@ -172,6 +191,7 @@ export class SessionPromptService {
           lastUserMessageAt: promptEntry.createdAt ?? this.deps.clock.nowMs(),
           lastError: null,
           lastIssue: null,
+          runtimeActivity: null,
         },
         activeTransportEpoch: this.deps.stateStore.getLatestConnectedTransportEpoch() || 1,
         resetWindowToLatest: true,

@@ -7,6 +7,7 @@ import type {
 import { buildSessionUpdateEventsFromGatewayConversationEvent } from './gateway-ingress';
 import type {
   GatewaySessionIngressEvent,
+  SessionRuntimeActivityIngressEvent,
   SessionToolStatusUpdateIngressEvent,
 } from './gateway-ingress-types';
 import { SessionRuntimeStateStore } from './session-runtime-state';
@@ -191,6 +192,10 @@ export class SessionGatewayIngressService {
       return payload;
     }
 
+    if (payload.type === 'session.message') {
+      return payload;
+    }
+
     if (payload.type !== 'tool.lifecycle' || !isRecord(payload.event)) {
       return payload;
     }
@@ -243,47 +248,22 @@ export class SessionGatewayIngressService {
   }
 
   /**
-   * 守卫规则（lifecycle/plan/tool 状态）：
-   * - 不带 runId 的事件直接放行（unbound terminal 由 isUnboundTerminalLifecycle 单独处理）
-   * - 显式作废的 run（abort、重连清理、新 prompt 覆盖）一律丢
-   * - activeRunId 一致：放行（这是绝大多数正常事件）
-   * - activeRunId 不同：拒绝（属于另一条 run 的事件）
-   * - activeRunId 为空且 run 已结束（aborted/error/done）：除 aborted 外丢弃
+   * 只拦截明确作废的 run。sessionKey 已经决定状态桶，activeRunId 不能再作为
+   * Gateway 事件的硬过滤条件，否则本地运行态一旦漂移就会吞掉真实 live 事件。
    */
   private shouldIgnoreNonMessageUpdate(input: {
     sessionKey: string;
     runId: string;
-    phase?: string;
   }): boolean {
     if (!input.runId) {
       return false;
     }
-    if (this.deps.stateStore.isRunBlocked(input.sessionKey, input.runId)) {
-      return true;
-    }
-    const runtime = this.deps.stateStore.getSessionState(input.sessionKey).runtime;
-    if (runtime.activeRunId === input.runId) {
-      return false;
-    }
-    if (runtime.activeRunId == null) {
-      // 已收口的 session：忽略迟到事件，避免重新激活旧 run。
-      if (runtime.runPhase === 'aborted' || runtime.runPhase === 'error' || runtime.runPhase === 'done') {
-        return input.phase !== 'aborted';
-      }
-      // 还没绑过 run（如纯监听新 session）：放行，由事件本身把 runtime 推进起来。
-      return false;
-    }
-    return true;
+    return this.deps.stateStore.isRunBlocked(input.sessionKey, input.runId);
   }
 
   /**
-   * 守卫规则（chat.message）：
-   * - 不带 runId：放行
-   * - 显式作废：丢
-   * - activeRunId 一致：放行
-   * - activeRunId 为空且未 abort：放行（包含 run 收口后同 run 的权威补齐场景，
-   *   见 6479dc9d）
-   * - activeRunId 不同：丢（属于另一条 run）
+   * chat.message 同样只拦截明确作废的 run。消息是否属于当前 session 由
+   * sessionKey 隔离，不能再用 activeRunId 做二次否决。
    */
   private shouldIgnoreMessageUpdate(input: {
     sessionKey: string;
@@ -292,17 +272,7 @@ export class SessionGatewayIngressService {
     if (!input.runId) {
       return false;
     }
-    if (this.deps.stateStore.isRunBlocked(input.sessionKey, input.runId)) {
-      return true;
-    }
-    const runtime = this.deps.stateStore.getSessionState(input.sessionKey).runtime;
-    if (runtime.activeRunId === input.runId) {
-      return false;
-    }
-    if (runtime.activeRunId == null) {
-      return runtime.runPhase === 'aborted';
-    }
-    return true;
+    return this.deps.stateStore.isRunBlocked(input.sessionKey, input.runId);
   }
 
   private isUnboundTerminalLifecycle(input: {
@@ -378,9 +348,45 @@ export class SessionGatewayIngressService {
     }).catch(() => undefined);
   }
 
+  private async reconcileSessionTranscriptContent(input: {
+    sessionKey: string;
+    runId: string | null;
+  }): Promise<SessionItemUpdateEvent> {
+    const committed = await this.deps.timelineRuntime.reconcileSessionTranscriptContent(input.sessionKey);
+    const snapshot = this.deps.snapshotService.buildSnapshot(input.sessionKey, committed.state, {
+      window: committed.state.window.totalItemCount > 0
+        ? committed.state.window
+        : createLatestWindowState(committed.state.renderItems.length),
+      replayComplete: true,
+    });
+    const item = this.deps.snapshotService.resolvePrimaryItemFromSnapshot(
+      snapshot,
+      committed.mergedEntries[committed.mergedEntries.length - 1] ?? null,
+      committed.mergedEntries,
+    );
+    return {
+      sessionUpdate: 'session_item',
+      sessionKey: input.sessionKey,
+      runId: input.runId,
+      item,
+      snapshot,
+    };
+  }
+
   async consumeGatewayConversationEvent(payload: unknown): Promise<SessionUpdateEvent[]> {
     const normalizedPayload = this.normalizeGatewayConversationPayload(payload);
     logTodoToolDebug(this.deps.logger, 'runtime-host.ingress.normalized-payload', normalizedPayload);
+    if (isRecord(normalizedPayload) && normalizedPayload.type === 'session.message' && isRecord(normalizedPayload.event)) {
+      const sessionKey = normalizeString(normalizedPayload.event.sessionKey);
+      if (!sessionKey) {
+        return [];
+      }
+      this.deps.stateStore.setActiveSessionKey(sessionKey);
+      return [await this.reconcileSessionTranscriptContent({
+        sessionKey,
+        runId: normalizeString(normalizedPayload.event.runId) || null,
+      })];
+    }
     const currentSessionKey = isRecord(normalizedPayload) && isRecord(normalizedPayload.event) && typeof normalizedPayload.event.sessionKey === 'string'
       ? normalizedPayload.event.sessionKey
       : '';
@@ -402,7 +408,44 @@ export class SessionGatewayIngressService {
     return outputs;
   }
 
+  private translateRuntimeActivity(event: SessionRuntimeActivityIngressEvent): SessionUpdateEvent | null {
+    const sessionKey = normalizeString(event.sessionKey);
+    if (!sessionKey) {
+      return null;
+    }
+    if (this.shouldIgnoreNonMessageUpdate({
+      sessionKey,
+      runId: normalizeString(event.runId),
+    })) {
+      return null;
+    }
+    this.deps.stateStore.setActiveSessionKey(sessionKey);
+    const committed = this.deps.timelineRuntime.applyRuntimeActivity(sessionKey, {
+      activity: event.activity,
+      phase: event.phase,
+      runId: event.runId,
+    });
+    const snapshot = this.deps.snapshotService.buildSnapshot(sessionKey, committed.state, {
+      window: committed.state.window.totalItemCount > 0
+        ? committed.state.window
+        : createLatestWindowState(committed.state.renderItems.length),
+      replayComplete: true,
+    });
+    return {
+      sessionUpdate: 'session_info_update',
+      sessionKey: event.sessionKey,
+      runId: event.runId,
+      phase: 'unknown',
+      snapshot,
+      error: null,
+      ...(event._meta ? { _meta: event._meta } : {}),
+    };
+  }
+
   private async translateIngressEvent(event: GatewaySessionIngressEvent): Promise<SessionUpdateEvent | null> {
+    if (event.sessionUpdate === 'runtime_activity') {
+      return this.translateRuntimeActivity(event);
+    }
     if (event.sessionUpdate === 'tool_status_update') {
       return this.translateToolStatusUpdate(event);
     }
@@ -417,7 +460,6 @@ export class SessionGatewayIngressService {
     if (this.shouldIgnoreNonMessageUpdate({
       sessionKey,
       runId: normalizeString(event.runId),
-      phase: event.phase,
     })) {
       return null;
     }
@@ -441,7 +483,7 @@ export class SessionGatewayIngressService {
   }
 
   private async translateSessionUpdateEvent(
-    event: Exclude<GatewaySessionIngressEvent, SessionToolStatusUpdateIngressEvent>,
+    event: Exclude<GatewaySessionIngressEvent, SessionRuntimeActivityIngressEvent | SessionToolStatusUpdateIngressEvent>,
   ): Promise<SessionUpdateEvent> {
     const sessionKey = normalizeString(event.sessionKey);
     if (!sessionKey) {

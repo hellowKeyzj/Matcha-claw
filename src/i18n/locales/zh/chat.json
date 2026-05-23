@@ -46,7 +46,8 @@
     },
     "pending": {
         "typing": "正在思考",
-        "activity": "正在调用工具"
+        "activity": "正在调用工具",
+        "compacting": "正在压缩上下文，完成后会继续回复"
     },
     "errors": {
         "activeRunDisconnected": "当前这轮回复在收到结束事件前就断开了连接。",

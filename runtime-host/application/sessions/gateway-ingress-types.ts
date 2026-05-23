@@ -44,6 +44,15 @@ export interface SessionPlanIngressEvent {
   _meta?: Record<string, unknown>;
 }
 
+export interface SessionRuntimeActivityIngressEvent {
+  sessionUpdate: 'runtime_activity';
+  sessionKey: string | null;
+  runId: string | null;
+  activity: 'compacting';
+  phase: 'started' | 'completed';
+  _meta?: Record<string, unknown>;
+}
+
 export interface SessionInfoIngressEvent {
   sessionUpdate: 'session_info_update';
   sessionKey: string | null;
@@ -91,6 +100,7 @@ export interface SessionToolStatusUpdateIngressEvent {
 
 export type GatewaySessionIngressEvent =
   | SessionInfoIngressEvent
+  | SessionRuntimeActivityIngressEvent
   | SessionTimelineIngressEvent
   | SessionToolStatusUpdateIngressEvent
   | SessionPlanIngressEvent;

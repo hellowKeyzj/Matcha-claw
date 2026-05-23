@@ -46,7 +46,8 @@
     },
     "pending": {
         "typing": "Thinking",
-        "activity": "Working"
+        "activity": "Working",
+        "compacting": "Compressing context, then the reply will continue"
     },
     "errors": {
         "activeRunDisconnected": "The active run disconnected before a terminal event was received.",

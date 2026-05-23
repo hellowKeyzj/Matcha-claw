@@ -180,6 +180,38 @@ export class SessionTimelineRuntime {
     this.deps.stateStore.persistStore();
   }
 
+  async reconcileSessionTranscriptContent(
+    sessionKey: string,
+  ): Promise<CommittedSessionTransition> {
+    await this.deps.stateStore.ready();
+    const state = this.getSessionState(sessionKey);
+    const replay = await this.deps.transcriptLoader.readTimelineReplay(sessionKey);
+    state.hydrated = true;
+    const committed = this.commitSessionTransition(sessionKey, {
+      timelineEntries: replay.timelineEntries,
+      ...(replay.taskSnapshot ? { taskSnapshot: replay.taskSnapshot } : {}),
+      resetWindowToLatest: state.window.isAtLatest,
+    });
+    const closureSignal = collectPendingRunClosureSignal(committed.state.renderItems, committed.state.runtime);
+    if (
+      isRunActive(committed.runtime)
+      && !closureSignal.hasActiveAssistantStream
+      && !closureSignal.hasBlockingToolActivity
+      && closureSignal.hasFinalAssistantTurn
+    ) {
+      const closed = this.commitSessionTransition(sessionKey, {
+        runtimePatch: this.buildTerminalRuntimePatch('done', null, null),
+        activeTransportEpoch: null,
+        advanceRunEpoch: true,
+      });
+      return {
+        ...closed,
+        mergedEntries: committed.mergedEntries,
+      };
+    }
+    return committed;
+  }
+
   async reconcileTranscriptToolResults(
     sessionKey: string,
   ): Promise<SessionTimelineAssistantTurnEntry[]> {
@@ -353,6 +385,47 @@ export class SessionTimelineRuntime {
     return null;
   }
 
+  bindSubmittedRunId(
+    sessionKey: string,
+    input: {
+      submittedRunId: string;
+      gatewayRunId: string;
+    },
+  ): void {
+    const submittedRunId = normalizeString(input.submittedRunId);
+    const gatewayRunId = normalizeString(input.gatewayRunId);
+    if (!submittedRunId || !gatewayRunId || submittedRunId === gatewayRunId) {
+      return;
+    }
+    const state = this.getSessionState(sessionKey);
+    if (state.runtime.activeRunId !== submittedRunId || state.runtime.pendingTurnKey !== submittedRunId) {
+      return;
+    }
+    this.deps.stateStore.bindRunAlias(sessionKey, submittedRunId, gatewayRunId);
+  }
+
+  applyRuntimeActivity(
+    sessionKey: string,
+    input: {
+      activity: 'compacting';
+      phase: 'started' | 'completed';
+      runId: string | null;
+    },
+  ): CommittedSessionTransition {
+    const state = this.getSessionState(sessionKey);
+    const isCurrentRun = !input.runId
+      || !state.runtime.activeRunId
+      || state.runtime.activeRunId === input.runId;
+    if (!isCurrentRun || !isRunActive(state.runtime)) {
+      return this.commitSessionTransition(sessionKey, {});
+    }
+    return this.commitSessionTransition(sessionKey, {
+      runtimePatch: {
+        runtimeActivity: input.phase === 'started' ? input.activity : null,
+      },
+    });
+  }
+
   updateTaskSnapshot(
     sessionKey: string,
     taskSnapshot: TaskSnapshotEvent,
@@ -370,7 +443,7 @@ export class SessionTimelineRuntime {
       runPhase,
       activeTurnItemKey: null,
       pendingTurnKey: null,
-      pendingTurnLaneKey: null,
+      runtimeActivity: null,
       lastError,
       lastIssue,
     };
@@ -416,6 +489,7 @@ export class SessionTimelineRuntime {
             pendingTurnLaneKey: 'main',
             lastError: null,
             lastIssue: null,
+            runtimeActivity: null,
           },
           activeTransportEpoch: this.deps.stateStore.getLatestConnectedTransportEpoch() || 1,
           advanceRunEpoch: !isRunActive(this.getSessionState(sessionKey).runtime),
@@ -471,6 +545,7 @@ export class SessionTimelineRuntime {
           pendingTurnLaneKey: normalizeString(input.entry.laneKey) || currentState.runtime.pendingTurnLaneKey,
           lastError: null,
           lastIssue: null,
+          runtimeActivity: null,
           lastUserMessageAt: input.entry.role === 'user' && typeof messageTimestamp === 'number'
             ? messageTimestamp
             : currentState.runtime.lastUserMessageAt,
@@ -487,6 +562,7 @@ export class SessionTimelineRuntime {
           pendingTurnLaneKey: input.runId ? 'main' : currentState.runtime.pendingTurnLaneKey,
           lastError: null,
           lastIssue: null,
+          runtimeActivity: null,
           lastUserMessageAt: typeof messageTimestamp === 'number'
             ? messageTimestamp
             : currentState.runtime.lastUserMessageAt,
@@ -507,6 +583,7 @@ export class SessionTimelineRuntime {
           ? (input.entry.text.trim() || currentState.runtime.lastError)
           : null,
         lastIssue: null,
+        runtimeActivity: null,
       },
       advanceRunEpoch: true,
     };

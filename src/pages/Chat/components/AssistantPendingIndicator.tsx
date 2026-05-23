@@ -4,7 +4,7 @@ import { cn } from '@/lib/utils';
 import { CHAT_LAYOUT_TOKENS } from '../chat-layout-tokens';
 
 interface AssistantPendingIndicatorProps {
-  mode: 'typing' | 'activity';
+  mode: 'typing' | 'activity' | 'compacting';
 }
 
 function PendingDots() {
@@ -30,9 +30,11 @@ export const AssistantPendingIndicator = memo(function AssistantPendingIndicator
   mode,
 }: AssistantPendingIndicatorProps) {
   const { t } = useTranslation('chat');
-  const label = mode === 'activity'
-    ? t('pending.activity')
-    : t('pending.typing');
+  const label = mode === 'compacting'
+    ? t('pending.compacting')
+    : (mode === 'activity'
+        ? t('pending.activity')
+        : t('pending.typing'));
 
   return (
     <div

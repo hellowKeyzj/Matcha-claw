@@ -10,6 +10,7 @@ import { buildSessionUpdateEventsFromGatewayConversationEvent } from '../../runt
 import { parseTranscriptMessages } from '../../runtime-host/application/sessions/transcript-parser';
 import { materializeTranscriptTimelineEntries } from '../../runtime-host/application/sessions/transcript-timeline-materializer';
 import { filterStateOnlySnapshot } from '../../runtime-host/application/sessions/session-state-only-render-filter';
+import { dispatchGatewayProtocolEvent, type GatewayConversationEvent } from '../../runtime-host/openclaw-bridge/events';
 import { createTestRuntimeFileSystem } from './helpers/runtime-file-system';
 
 async function createRuntimeConfigDir() {
@@ -651,7 +652,7 @@ describe('session runtime service', () => {
     expect(secondEvent.snapshot.window.totalItemCount).toBe(1);
   });
 
-  it('same-run incremental assistant deltas append instead of replacing the visible message segment', async () => {
+  it('same-run assistant delta snapshots replace the visible message segment in place', async () => {
     const configDir = join(tmpdir(), `matcha-session-runtime-${Date.now()}`);
     const service = createTestSessionRuntimeService({
       workspace: { getConfigDir: () => configDir },
@@ -661,16 +662,16 @@ describe('session runtime service', () => {
       },
     });
 
-    await service.consumeGatewayConversationEvent({
+    const [firstEvent] = await service.consumeGatewayConversationEvent({
       type: 'chat.message',
       event: {
         state: 'delta',
-        runId: 'run-incremental-delta',
+        runId: 'run-delta-snapshot',
         sessionKey: 'agent:main:main',
         sequenceId: 1,
         message: {
           role: 'assistant',
-          content: [{ type: 'text', text: '已' }],
+          content: [{ type: 'text', text: 'Alpha beta' }],
         },
       },
     });
@@ -678,22 +679,35 @@ describe('session runtime service', () => {
       type: 'chat.message',
       event: {
         state: 'delta',
-        runId: 'run-incremental-delta',
+        runId: 'run-delta-snapshot',
         sessionKey: 'agent:main:main',
         sequenceId: 2,
         message: {
           role: 'assistant',
-          content: [{ type: 'text', text: '写入。' }],
+          content: [{ type: 'text', text: 'Alpha' }],
         },
       },
     });
 
-    expect(secondEvent.item).toMatchObject({
+    expect(firstEvent.sessionUpdate).toBe('session_item_chunk');
+    expect(secondEvent.sessionUpdate).toBe('session_item_chunk');
+
+    expect(firstEvent.item).toMatchObject({
       kind: 'assistant-turn',
-      text: '已写入。',
+      text: 'Alpha beta',
       segments: [{
         kind: 'message',
-        text: '已写入。',
+        key: 'message:run-delta-snapshot:main:0',
+        text: 'Alpha beta',
+      }],
+    });
+    expect(secondEvent.item).toMatchObject({
+      kind: 'assistant-turn',
+      text: 'Alpha',
+      segments: [{
+        kind: 'message',
+        key: 'message:run-delta-snapshot:main:0',
+        text: 'Alpha',
       }],
     });
   });
@@ -1186,6 +1200,448 @@ describe('session runtime service', () => {
     ]));
   });
 
+  it('reconciles official session.message through transcript into snapshot without closing the active run', async () => {
+    const rootDir = await mkdtemp(join(tmpdir(), 'matcha-session-runtime-'));
+    const transcriptDir = join(rootDir, 'agents', 'main', 'sessions');
+    await mkdir(transcriptDir, { recursive: true });
+    await writeFile(
+      join(transcriptDir, 'sessions.json'),
+      JSON.stringify({
+        sessions: [{
+          key: 'agent:main:main',
+          sessionKey: 'agent:main:main',
+          file: 'main.jsonl',
+        }],
+      }),
+      'utf8',
+    );
+    await writeFile(join(transcriptDir, 'main.jsonl'), '', 'utf8');
+
+    const service = createTestSessionRuntimeService({
+      workspace: { getConfigDir: () => rootDir },
+      openclawBridge: {
+        chatSend: async () => ({ runId: 'run-session-message-active' }),
+        gatewayRpc: async () => ({}),
+      },
+    });
+    const rawEvents: GatewayConversationEvent[] = [];
+    const dispatcher = {
+      emitConversationEvent: (event: GatewayConversationEvent) => {
+        rawEvents.push(event);
+      },
+      emitNotification: () => undefined,
+      emitChannelStatus: () => undefined,
+    };
+
+    await loadHydratedSession(service, 'agent:main:main');
+    await service.promptSession({
+      sessionKey: 'agent:main:main',
+      message: 'trigger transcript update',
+      idempotencyKey: 'run-session-message-active',
+    });
+    await writeFile(
+      join(transcriptDir, 'main.jsonl'),
+      [
+        JSON.stringify({
+          type: 'message',
+          id: 'user-session-message-active',
+          timestamp: 1_700_000_000_000,
+          message: {
+            role: 'user',
+            id: 'user-session-message-active',
+            content: 'trigger transcript update',
+          },
+        }),
+        JSON.stringify({
+          type: 'message',
+          id: 'assistant-session-message-active',
+          timestamp: 1_700_000_000_001,
+          message: {
+            role: 'assistant',
+            content: [{ type: 'text', text: 'transcript fact after compaction' }],
+          },
+        }),
+      ].join('\n'),
+      'utf8',
+    );
+
+    dispatchGatewayProtocolEvent(dispatcher, 'session.message', {
+      sessionKey: 'agent:main:main',
+      messageId: 'assistant-session-message-active',
+      messageSeq: 2,
+      message: {
+        role: 'assistant',
+        content: [{ type: 'text', text: 'transcript fact after compaction' }],
+      },
+    });
+
+    expect(rawEvents).toHaveLength(1);
+    const [event] = await service.consumeGatewayConversationEvent(rawEvents[0]);
+    expect(event).toMatchObject({
+      sessionUpdate: 'session_item',
+      item: expect.objectContaining({
+        kind: 'assistant-turn',
+        text: 'transcript fact after compaction',
+        status: 'final',
+      }),
+      snapshot: {
+        runtime: {
+          activeRunId: 'run-session-message-active',
+          runPhase: 'submitted',
+          pendingTurnKey: 'run-session-message-active',
+        },
+      },
+    });
+    expect(event.snapshot.items).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        kind: 'assistant-turn',
+        text: 'transcript fact after compaction',
+        status: 'final',
+      }),
+    ]));
+  });
+
+  it('accepts same-session chat output even when its runId differs from the local active run', async () => {
+    const configDir = await createRuntimeConfigDir();
+    const service = createTestSessionRuntimeService({
+      workspace: { getConfigDir: () => configDir },
+      openclawBridge: {
+        chatSend: async () => ({ runId: 'run-local-active' }),
+        gatewayRpc: async () => ({}),
+      },
+    });
+
+    await service.promptSession({
+      sessionKey: 'agent:main:main',
+      message: 'hello active run mismatch',
+      idempotencyKey: 'run-local-active',
+    });
+    await vi.waitFor(async () => {
+      const state = await getHydratedSessionState(service, 'agent:main:main');
+      expect(state.status).toBe(200);
+      if (!('snapshot' in state.data)) {
+        throw new Error('missing snapshot');
+      }
+      expect(state.data.snapshot.runtime.activeRunId).toBe('run-local-active');
+    });
+
+    const [event] = await service.consumeGatewayConversationEvent({
+      type: 'chat.message',
+      event: {
+        state: 'final',
+        runId: 'run-official-same-session',
+        sessionKey: 'agent:main:main',
+        message: {
+          role: 'assistant',
+          content: 'same session official output',
+        },
+      },
+    });
+
+    expect(event).toMatchObject({
+      sessionUpdate: 'session_item',
+      item: expect.objectContaining({
+        kind: 'assistant-turn',
+        turnKey: 'run-official-same-session',
+        text: 'same session official output',
+      }),
+    });
+  });
+
+  it('binds chat.send returned runId so gateway assistant output replaces the pending turn', async () => {
+    const configDir = await createRuntimeConfigDir();
+    const service = createTestSessionRuntimeService({
+      workspace: { getConfigDir: () => configDir },
+      openclawBridge: {
+        chatSend: async () => ({ runId: 'run-gateway-bound-1' }),
+        gatewayRpc: async () => ({}),
+      },
+    });
+
+    await service.promptSession({
+      sessionKey: 'agent:main:main',
+      message: 'hello bound run',
+      idempotencyKey: 'user-bound-1',
+    });
+    await vi.waitFor(async () => {
+      const state = await getHydratedSessionState(service, 'agent:main:main');
+      expect(state.status).toBe(200);
+      if (!('snapshot' in state.data)) {
+        throw new Error('missing snapshot');
+      }
+      expect(state.data.snapshot.runtime.activeRunId).toBe('user-bound-1');
+    });
+
+    const [event] = await service.consumeGatewayConversationEvent({
+      type: 'chat.message',
+      event: {
+        state: 'final',
+        runId: 'run-gateway-bound-1',
+        sessionKey: 'agent:main:main',
+        message: {
+          role: 'assistant',
+          content: 'bound assistant output',
+        },
+      },
+    });
+
+    expect(event).toMatchObject({
+      sessionUpdate: 'session_item',
+      item: expect.objectContaining({
+        kind: 'assistant-turn',
+        turnKey: 'run-gateway-bound-1',
+        text: 'bound assistant output',
+        status: 'final',
+        pendingState: null,
+      }),
+      snapshot: {
+        runtime: {
+          activeRunId: null,
+          runPhase: 'done',
+          pendingTurnKey: null,
+          lastError: null,
+        },
+      },
+    });
+    expect(event.snapshot.items).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        kind: 'assistant-turn',
+        turnKey: 'run-gateway-bound-1',
+        text: 'bound assistant output',
+        status: 'final',
+        pendingState: null,
+      }),
+    ]));
+    expect(event.snapshot.items).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        kind: 'assistant-turn',
+        turnKey: 'user-bound-1',
+        pendingState: 'typing',
+      }),
+    ]));
+  });
+
+  it('keeps the submitted run active through OpenClaw compaction and closes it on final message', async () => {
+    const configDir = await createRuntimeConfigDir();
+    const service = createTestSessionRuntimeService({
+      workspace: { getConfigDir: () => configDir },
+      openclawBridge: {
+        chatSend: async () => ({ runId: 'run-compaction-1' }),
+        gatewayRpc: async () => ({}),
+      },
+    });
+    const rawEvents: GatewayConversationEvent[] = [];
+    const dispatcher = {
+      emitConversationEvent: (event: GatewayConversationEvent) => {
+        rawEvents.push(event);
+      },
+      emitNotification: () => undefined,
+      emitChannelStatus: () => undefined,
+    };
+
+    await service.promptSession({
+      sessionKey: 'agent:main:main',
+      message: 'trigger compaction',
+      idempotencyKey: 'run-compaction-1',
+    });
+    await vi.waitFor(async () => {
+      const state = await getHydratedSessionState(service, 'agent:main:main');
+      expect(state.status).toBe(200);
+      if (!('snapshot' in state.data)) {
+        throw new Error('missing snapshot');
+      }
+      expect(state.data.snapshot.runtime).toMatchObject({
+        activeRunId: 'run-compaction-1',
+        runPhase: 'submitted',
+        pendingTurnKey: 'run-compaction-1',
+      });
+    });
+
+    dispatchGatewayProtocolEvent(dispatcher, 'agent', {
+      stream: 'compaction',
+      runId: 'run-compaction-1',
+      sessionKey: 'agent:main:main',
+      data: {
+        phase: 'start',
+      },
+    });
+    dispatchGatewayProtocolEvent(dispatcher, 'agent', {
+      stream: 'compaction',
+      runId: 'run-compaction-1',
+      sessionKey: 'agent:main:main',
+      data: {
+        phase: 'end',
+        willRetry: true,
+        completed: true,
+      },
+    });
+
+    expect(rawEvents).toHaveLength(2);
+    const [compactionStart] = await service.consumeGatewayConversationEvent(rawEvents[0]);
+    expect(compactionStart).toMatchObject({
+      sessionUpdate: 'session_info_update',
+      phase: 'unknown',
+      snapshot: {
+        runtime: {
+          activeRunId: 'run-compaction-1',
+          runPhase: 'submitted',
+          pendingTurnKey: 'run-compaction-1',
+          runtimeActivity: 'compacting',
+        },
+      },
+    });
+    expect(compactionStart?.snapshot.items).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        kind: 'assistant-turn',
+        pendingState: 'compacting',
+      }),
+    ]));
+
+    const [compactionEnd] = await service.consumeGatewayConversationEvent(rawEvents[1]);
+    expect(compactionEnd).toMatchObject({
+      sessionUpdate: 'session_info_update',
+      phase: 'unknown',
+      snapshot: {
+        runtime: {
+          activeRunId: 'run-compaction-1',
+          runPhase: 'submitted',
+          pendingTurnKey: 'run-compaction-1',
+          runtimeActivity: null,
+        },
+      },
+    });
+    expect(compactionEnd?.snapshot.items).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        kind: 'assistant-turn',
+        pendingState: 'typing',
+      }),
+    ]));
+    rawEvents.length = 0;
+
+    let state = await getHydratedSessionState(service, 'agent:main:main');
+    expect(state.status).toBe(200);
+    if (!('snapshot' in state.data)) {
+      throw new Error('missing snapshot');
+    }
+    expect(state.data.snapshot.runtime).toMatchObject({
+      activeRunId: 'run-compaction-1',
+      runPhase: 'submitted',
+      pendingTurnKey: 'run-compaction-1',
+    });
+
+    dispatchGatewayProtocolEvent(dispatcher, 'chat', {
+      state: 'final',
+      runId: 'run-compaction-1',
+      sessionKey: 'agent:main:main',
+      message: {
+        role: 'assistant',
+        id: 'assistant-compaction-final',
+        content: 'reply after compaction',
+      },
+    });
+    expect(rawEvents).toHaveLength(1);
+
+    const [event] = await service.consumeGatewayConversationEvent(rawEvents[0]);
+    expect(event).toMatchObject({
+      sessionUpdate: 'session_item',
+      item: expect.objectContaining({
+        kind: 'assistant-turn',
+        text: 'reply after compaction',
+        status: 'final',
+        pendingState: null,
+      }),
+      snapshot: {
+        runtime: {
+          activeRunId: null,
+          runPhase: 'done',
+          pendingTurnKey: null,
+        },
+      },
+    });
+    expect(event.snapshot.items).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        kind: 'assistant-turn',
+        pendingState: 'typing',
+      }),
+    ]));
+  });
+
+  it('keeps the submitted run active through OpenClaw compaction and closes it on final lifecycle', async () => {
+    const configDir = await createRuntimeConfigDir();
+    const service = createTestSessionRuntimeService({
+      workspace: { getConfigDir: () => configDir },
+      openclawBridge: {
+        chatSend: async () => ({ runId: 'run-compaction-lifecycle-1' }),
+        gatewayRpc: async () => ({}),
+      },
+    });
+    const rawEvents: GatewayConversationEvent[] = [];
+    const dispatcher = {
+      emitConversationEvent: (event: GatewayConversationEvent) => {
+        rawEvents.push(event);
+      },
+      emitNotification: () => undefined,
+      emitChannelStatus: () => undefined,
+    };
+
+    await service.promptSession({
+      sessionKey: 'agent:main:main',
+      message: 'trigger compaction lifecycle',
+      idempotencyKey: 'run-compaction-lifecycle-1',
+    });
+    await vi.waitFor(async () => {
+      const state = await getHydratedSessionState(service, 'agent:main:main');
+      expect(state.status).toBe(200);
+      if (!('snapshot' in state.data)) {
+        throw new Error('missing snapshot');
+      }
+      expect(state.data.snapshot.runtime.activeRunId).toBe('run-compaction-lifecycle-1');
+    });
+
+    dispatchGatewayProtocolEvent(dispatcher, 'agent', {
+      stream: 'compaction',
+      runId: 'run-compaction-lifecycle-1',
+      sessionKey: 'agent:main:main',
+      data: {
+        phase: 'start',
+      },
+    });
+    dispatchGatewayProtocolEvent(dispatcher, 'agent', {
+      stream: 'compaction',
+      runId: 'run-compaction-lifecycle-1',
+      sessionKey: 'agent:main:main',
+      data: {
+        phase: 'end',
+        willRetry: true,
+        completed: true,
+      },
+    });
+    dispatchGatewayProtocolEvent(dispatcher, 'agent', {
+      stream: 'lifecycle',
+      runId: 'run-compaction-lifecycle-1',
+      sessionKey: 'agent:main:main',
+      data: {
+        phase: 'completed',
+      },
+    });
+
+    expect(rawEvents).toHaveLength(3);
+    await service.consumeGatewayConversationEvent(rawEvents[0]);
+    await service.consumeGatewayConversationEvent(rawEvents[1]);
+    const [event] = await service.consumeGatewayConversationEvent(rawEvents[2]);
+    expect(event).toMatchObject({
+      sessionUpdate: 'session_info_update',
+      phase: 'final',
+      snapshot: {
+        runtime: {
+          activeRunId: null,
+          runPhase: 'done',
+          pendingTurnKey: null,
+        },
+      },
+    });
+  });
+
   it('ignores known old run events while a new prompt is submitted before run binding', async () => {
     const configDir = await createRuntimeConfigDir();
     const service = createTestSessionRuntimeService({
@@ -1242,7 +1698,7 @@ describe('session runtime service', () => {
     ]));
   });
 
-  it('ignores unbound run events while a submitted prompt is waiting for gateway run binding', async () => {
+  it('accepts unbound same-session run events while a submitted prompt is waiting for gateway run binding', async () => {
     const configDir = await createRuntimeConfigDir();
     const service = createTestSessionRuntimeService({
       workspace: { getConfigDir: () => configDir },
@@ -1258,6 +1714,15 @@ describe('session runtime service', () => {
       idempotencyKey: 'user-unbound-1',
     });
     const submitted = await getHydratedSessionState(service, 'agent:main:main');
+    expect(submitted.status).toBe(200);
+    if (!('snapshot' in submitted.data)) {
+      throw new Error('missing snapshot');
+    }
+    expect(submitted.data.snapshot.runtime).toMatchObject({
+      activeRunId: 'user-unbound-1',
+      runPhase: 'submitted',
+      pendingTurnKey: 'user-unbound-1',
+    });
 
     const [event] = await service.consumeGatewayConversationEvent({
       type: 'chat.message',
@@ -1267,17 +1732,26 @@ describe('session runtime service', () => {
         sessionKey: 'agent:main:main',
         message: {
           role: 'assistant',
-          content: 'should not bind implicitly',
+          content: 'same session official output',
         },
       },
     });
 
-    expect(event?.snapshot.runtime).toMatchObject({
-      activeRunId: 'user-unbound-1',
-      runPhase: 'submitted',
-      pendingTurnKey: 'user-unbound-1',
+    expect(event).toMatchObject({
+      sessionUpdate: 'session_item_chunk',
+      item: expect.objectContaining({
+        kind: 'assistant-turn',
+        turnKey: 'run-not-bound-to-current-prompt',
+        text: 'same session official output',
+      }),
+      snapshot: {
+        runtime: {
+          activeRunId: 'run-not-bound-to-current-prompt',
+          runPhase: 'streaming',
+          pendingTurnKey: 'run-not-bound-to-current-prompt',
+        },
+      },
     });
-    expect(event && 'item' in event ? event.item : null).toBeNull();
   });
 
   // race 场景：上游极快返回错误/完成，Gateway 推来 lifecycle 事件时
