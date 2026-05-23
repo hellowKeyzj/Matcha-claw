@@ -201,11 +201,19 @@ export class OpenClawEnvironmentRepository {
   }
 
   getBundledUvPathCandidates(): string[] {
-    const binName = this.getPlatform() === 'win32' ? 'uv.exe' : 'uv';
+    return this.getBundledToolPathCandidates('uv', 'MATCHACLAW_UV_BIN');
+  }
+
+  getBundledBunPathCandidates(): string[] {
+    return this.getBundledToolPathCandidates('bun', 'MATCHACLAW_BUN_BIN');
+  }
+
+  private getBundledToolPathCandidates(toolName: string, overrideEnvName: string): string[] {
+    const binName = this.getPlatform() === 'win32' ? `${toolName}.exe` : toolName;
     const target = `${this.getPlatform()}-${this.getArch()}`;
     const resourcesPath = this.getResourcesPath();
     return [...new Set([
-      this.getEnv('MATCHACLAW_UV_BIN'),
+      this.getEnv(overrideEnvName),
       join(this.getWorkingDir(), 'resources', 'bin', target, binName),
       resolve(join(__dirname, '../../../resources/bin', target, binName)),
       resourcesPath ? join(resourcesPath, 'bin', binName) : '',

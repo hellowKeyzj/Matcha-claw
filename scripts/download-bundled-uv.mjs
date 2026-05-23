@@ -56,8 +56,9 @@ async function setupTarget(id) {
 
   echo(chalk.blue`\n📦 Setting up uv for ${id}...`);
 
-  // Cleanup & Prep
-  await fs.remove(targetDir);
+  // Do not wipe the whole target folder, otherwise other bundled tools may be deleted.
+  // Also keep the old uv binary until the new one is ready, so interrupted downloads are harmless.
+  const destBin = path.join(targetDir, target.binName);
   await fs.remove(tempDir);
   await fs.ensureDir(targetDir);
   await fs.ensureDir(tempDir);
@@ -88,7 +89,6 @@ async function setupTarget(id) {
     // uv archives usually contain a folder named after the target
     const folderName = target.filename.replace('.tar.gz', '').replace('.zip', '');
     const sourceBin = path.join(tempDir, folderName, target.binName);
-    const destBin = path.join(targetDir, target.binName);
 
     if (await fs.pathExists(sourceBin)) {
       await fs.move(sourceBin, destBin, { overwrite: true });

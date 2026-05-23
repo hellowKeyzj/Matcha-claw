@@ -5,6 +5,11 @@
 - `uv` is bundled with MatchaClaw and on PATH. Do NOT use bare `python` or `pip`.
 - Run scripts: `uv run python <script>` | Install packages: `uv pip install <package>`
 
+### Bun (JavaScript/TypeScript)
+
+- `bun` is bundled with MatchaClaw and on PATH. Do NOT use `npx -y bun` or ask users to install Bun globally.
+- Run scripts: `bun <script.ts>` | Install local packages: `bun install` in the package directory only.
+
 ### Browser
 
 - Use the `browser` tool for all tasks requiring real web page interaction.

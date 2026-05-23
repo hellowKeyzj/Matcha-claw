@@ -10,7 +10,9 @@ import {
 } from './runtime-host-client';
 import { getPort } from '../utils/config';
 import { app, shell } from 'electron';
+import { join } from 'node:path';
 import { getOpenClawDir } from '../utils/paths';
+import { prependPathEntry } from '../utils/env-path';
 import type { GatewayTransportIssue } from '../../runtime-host/shared/gateway-error';
 
 type RuntimeHostLifecycle = 'idle' | 'starting' | 'running' | 'restarting' | 'stopping' | 'stopped' | 'error';
@@ -131,6 +133,22 @@ type RuntimeHostMainProcessCapabilities = {
   };
 };
 
+type RuntimeHostChildEnv = Record<string, string>;
+
+function getBundledBinDir(): string {
+  if (app.isPackaged) {
+    return join(process.resourcesPath, 'bin');
+  }
+  return join(process.cwd(), 'resources', 'bin', `${process.platform}-${process.arch}`);
+}
+
+function buildRuntimeHostChildEnv(baseEnv: RuntimeHostChildEnv): RuntimeHostChildEnv {
+  return {
+    ...prependPathEntry(process.env, getBundledBinDir()).env,
+    ...baseEnv,
+  } as RuntimeHostChildEnv;
+}
+
 export function createRuntimeHostManager(
   deps: RuntimeHostManagerDeps,
 ): RuntimeHostManager {
@@ -176,7 +194,7 @@ export function createRuntimeHostManager(
   const runtimeHostProcess = createRuntimeHostProcessManager({
     parentApiBaseUrl: `http://127.0.0.1:${hostApiPort}`,
     parentDispatchToken: internalDispatchToken,
-    childEnv: () => ({
+    childEnv: () => buildRuntimeHostChildEnv({
       MATCHACLAW_RUNTIME_HOST_GATEWAY_PORT: String(childGatewayBridgeSnapshot.port),
       MATCHACLAW_OPENCLAW_DIR: openClawDir,
       MATCHACLAW_APP_PACKAGED: app.isPackaged ? '1' : '0',

@@ -77,6 +77,12 @@
       "localDir": "resources/skills/preinstalled-skill-sources/nuwa-skill",
       "version": "2026-05-01",
       "autoEnable": false
+    },
+    {
+      "slug": "llm-wiki",
+      "localDir": "resources/skills/preinstalled-skill-sources/llm-wiki",
+      "version": "3.6.2-openclaw.1",
+      "autoEnable": false
     }
   ]
 }
