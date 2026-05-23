@@ -7,14 +7,15 @@ import { badRequest, ok, type ApplicationResponseOf } from '../common/applicatio
 import type { RuntimeClockPort } from '../common/runtime-ports';
 import type { OpenClawWorkspacePort } from '../openclaw/openclaw-workspace-service';
 import type { BackgroundTaskManager } from '../../services/background-task-manager';
-import type { TaskData, TaskSnapshotEvent, TodoItem } from '../../shared/session-adapter-types';
+import type { TaskData, TaskScopeSnapshot, TaskSnapshotEvent, TodoItem } from '../../shared/session-adapter-types';
 import { isTraceLogLevelEnabled } from '../../shared/trace-log-level';
 import { isTodoTaskToolName } from '../../shared/task-tool-contract';
 
 const TASK_RPC_TIMEOUT_MS = 60_000;
 const TASK_CAPABILITY_TIMEOUT_MS = 5_000;
 
-const TASK_WRITE_METHODS = new Set(['TaskCreate', 'TaskUpdate', 'TodoWrite']);
+const TASK_WRITE_METHODS = new Set(['TaskCreate', 'TaskUpdate']);
+const TODO_WRITE_METHODS = new Set(['TodoWrite']);
 
 function logTaskPipeline(event: string, payload: Record<string, unknown>): void {
   if (!isTraceLogLevelEnabled(process.env.MATCHACLAW_TRACE_LOG_LEVEL, 2)) {
@@ -115,11 +116,15 @@ export class TaskManagerService {
     if (!sessionKey) {
       return badRequest('sessionKey is required');
     }
+    if (!Array.isArray(body.oldTodos)) {
+      return badRequest('oldTodos is required');
+    }
     if (!Array.isArray(body.newTodos)) {
       return badRequest('newTodos is required');
     }
     return await this.callTaskTool('TodoWrite', sessionKey, {
       sessionKey,
+      oldTodos: body.oldTodos,
       newTodos: body.newTodos,
       ...this.readOptionalScopePayload(body),
     });
@@ -178,11 +183,16 @@ export class TaskManagerService {
     });
   }
 
-  async buildTaskSnapshot(sessionKey: string): Promise<TaskSnapshotEvent | null> {
-    const normalizedSessionKey = this.readString(sessionKey);
+  async buildTaskSnapshot(input: string | { sessionKey: string; teamKey?: string }): Promise<TaskSnapshotEvent | null> {
+    const normalizedSessionKey = typeof input === 'string'
+      ? this.readString(input)
+      : this.readString(input.sessionKey);
     if (!normalizedSessionKey) {
       return null;
     }
+    const scopePayload = typeof input === 'string'
+      ? {}
+      : { ...(this.readString(input.teamKey) ? { teamKey: this.readString(input.teamKey) } : {}) };
     const unavailable = await this.deps.capabilities.requirePluginMethod(
       TASK_MANAGER_GATEWAY_PLUGIN,
       'TaskList',
@@ -193,20 +203,22 @@ export class TaskManagerService {
     }
     const data = await this.deps.gateway.gatewayRpc(
       'TaskList',
-      await this.buildScopedParams(normalizedSessionKey, { sessionKey: normalizedSessionKey }),
+      await this.buildScopedParams(normalizedSessionKey, { sessionKey: normalizedSessionKey, ...scopePayload }),
       TASK_RPC_TIMEOUT_MS,
     );
     if (!data || typeof data !== 'object' || Array.isArray(data)) {
       return null;
     }
     const record = data as Record<string, unknown>;
+    const scope = this.readTaskScope(record.scope, normalizedSessionKey);
     return {
       sessionKey: normalizedSessionKey,
+      scope,
       tasks: this.readTaskList(record.tasks),
       todos: this.readTodoList(record.todos),
       source: 'replay',
       enableEdit: false,
-      uri: `agent:///${normalizedSessionKey}/tasks/${normalizedSessionKey}`,
+      uri: `agent:///${scope.key}/tasks/${scope.key}`,
     };
   }
 
@@ -253,28 +265,54 @@ export class TaskManagerService {
       });
     }
     if (TASK_WRITE_METHODS.has(method)) {
-      await this.emitAuthoritativeSnapshot(method, sessionKey);
+      const scopedParams = this.extractSnapshotScopeParams(sessionKey, params);
+      await this.emitAuthoritativeSnapshot(method, scopedParams);
+    }
+    if (TODO_WRITE_METHODS.has(method) && this.deps.emitTaskSnapshot && data && typeof data === 'object' && !Array.isArray(data)) {
+      const record = data as Record<string, unknown>;
+      this.deps.emitTaskSnapshot({
+        sessionKey,
+        todos: this.readTodoList(record.todos),
+        tasks: [],
+        source: 'todo',
+      });
     }
     return ok(data);
   }
 
-  private async emitAuthoritativeSnapshot(method: string, sessionKey: string): Promise<void> {
+  private async emitAuthoritativeSnapshot(
+    method: string,
+    scopeParams: { sessionKey: string; teamKey?: string },
+  ): Promise<void> {
     if (!this.deps.emitTaskSnapshot) {
       return;
     }
-    const snapshot = await this.buildTaskSnapshot(sessionKey);
+    const snapshot = await this.buildTaskSnapshot(scopeParams);
     if (!snapshot) {
       return;
     }
     const source: TaskSnapshotEvent['source'] = isTodoTaskToolName(method) ? 'todo' : 'tool';
     logTaskPipeline('snapshot.emit', {
       method,
-      sessionKey,
+      sessionKey: scopeParams.sessionKey,
+      teamKey: scopeParams.teamKey ?? null,
+      scopeKey: snapshot.scope?.key ?? null,
       tasksCount: snapshot.tasks.length,
       todosCount: snapshot.todos?.length ?? 0,
       source,
     });
     this.deps.emitTaskSnapshot({ ...snapshot, source });
+  }
+
+  private extractSnapshotScopeParams(
+    sessionKey: string,
+    params: Record<string, unknown>,
+  ): { sessionKey: string; teamKey?: string } {
+    const teamKey = this.readString(params.teamKey);
+    return {
+      sessionKey,
+      ...(teamKey ? { teamKey } : {}),
+    };
   }
 
   private readOptionalScopePayload(body: Record<string, unknown>): Record<string, unknown> {
@@ -305,6 +343,32 @@ export class TaskManagerService {
 
   private readString(value: unknown): string {
     return typeof value === 'string' ? value.trim() : '';
+  }
+
+  private readTaskScope(value: unknown, fallbackSessionKey: string): TaskScopeSnapshot {
+    if (this.isRecord(value)) {
+      const key = this.readString(value.key);
+      const type = value.type === 'team' ? 'team' : 'session';
+      const label = this.readString(value.label) || key || fallbackSessionKey;
+      if (key) {
+        return {
+          type,
+          key,
+          label,
+          ...(this.readString(value.sessionKey) ? { sessionKey: this.readString(value.sessionKey) } : {}),
+          ...(this.readString(value.teamKey) ? { teamKey: this.readString(value.teamKey) } : {}),
+          ...(this.readString(value.agentId) ? { agentId: this.readString(value.agentId) } : {}),
+        };
+      }
+    }
+    const agentId = /^agent:([^:]+):/.exec(fallbackSessionKey)?.[1];
+    return {
+      type: 'session',
+      key: fallbackSessionKey,
+      label: agentId ? `${agentId} · ${fallbackSessionKey.split(':').slice(2).join(':') || 'main'}` : fallbackSessionKey,
+      sessionKey: fallbackSessionKey,
+      ...(agentId ? { agentId } : {}),
+    };
   }
 
   private readTaskList(value: unknown): TaskData[] {

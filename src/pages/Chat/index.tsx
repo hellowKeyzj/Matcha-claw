@@ -334,6 +334,11 @@ export function Chat({ isActive = true }: ChatProps) {
     activeSidePanelTab,
     artifactWorkbenchFullscreen,
     unfinishedTaskCount,
+    taskInboxTasks,
+    taskInboxLoading,
+    taskInboxError,
+    refreshTaskInbox,
+    clearTaskInboxError,
     derivedPlanStatus,
     toggleSidePanel,
     setActiveSidePanelTab,
@@ -817,6 +822,11 @@ export function Chat({ isActive = true }: ChatProps) {
             onClose={closeSidePanel}
             onToggleArtifactWorkbenchFullscreen={toggleArtifactWorkbenchFullscreen}
             unfinishedTaskCount={unfinishedTaskCount}
+            taskInboxTasks={taskInboxTasks}
+            taskInboxLoading={taskInboxLoading}
+            taskInboxError={taskInboxError}
+            onRefreshTaskInbox={refreshTaskInbox}
+            onClearTaskInboxError={clearTaskInboxError}
             derivedPlanStatus={derivedPlanStatus}
             skillConfigLabel={t('toolbar.skillConfig')}
             skillConfigTitle={t('skillConfigDialog.titleWithAgent', { agent: currentAgent?.name || currentAgentId })}

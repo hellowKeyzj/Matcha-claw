@@ -1,11 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Task, TaskListSnapshot } from '@/services/openclaw/task-manager-client';
 
-const listTaskSnapshotMock = vi.fn<(sessionKey: string) => Promise<TaskListSnapshot>>();
+const listTaskSnapshotMock = vi.fn<(payload: string | { sessionKey: string; teamKey?: string }) => Promise<TaskListSnapshot>>();
 const updateTaskMock = vi.fn();
 
 vi.mock('@/services/openclaw/task-manager-client', () => ({
-  listTaskSnapshot: (...args: [string]) => listTaskSnapshotMock(...args),
+  listTaskSnapshot: (...args: [string | { sessionKey: string; teamKey?: string }]) => listTaskSnapshotMock(...args),
   updateTask: (...args: unknown[]) => updateTaskMock(...args),
 }));
 
@@ -23,8 +23,17 @@ function task(overrides: Partial<Task>): Task {
   };
 }
 
-function snapshot(tasks: Task[]): TaskListSnapshot {
-  return { tasks, todos: [] };
+function snapshot(tasks: Task[], sessionKey = 'agent:main:main'): TaskListSnapshot {
+  return {
+    scope: {
+      type: 'session',
+      key: sessionKey,
+      label: sessionKey,
+      sessionKey,
+    },
+    tasks,
+    todos: [],
+  };
 }
 
 describe('task center store', () => {
@@ -50,7 +59,7 @@ describe('task center store', () => {
     expect(state.refreshing).toBe(false);
     expect(state.initialized).toBe(true);
     expect(useTaskSnapshotStore.getState().getTaskDataList('agent:main:main').map((item) => item.id)).toEqual(['1', '2']);
-    expect(listTaskSnapshotMock).toHaveBeenCalledWith('agent:main:main');
+    expect(listTaskSnapshotMock).toHaveBeenCalledWith({ sessionKey: 'agent:main:main' });
   });
 
   it('init without session clears tasks and marks initialized', async () => {
@@ -95,13 +104,14 @@ describe('task center store', () => {
 
   it('refreshTasks isolates in-flight requests by session key', async () => {
     let resolveFirst: ((snapshot: TaskListSnapshot) => void) | null = null;
-    listTaskSnapshotMock.mockImplementation((sessionKey) => {
+    listTaskSnapshotMock.mockImplementation((payload) => {
+      const sessionKey = typeof payload === 'string' ? payload : payload.sessionKey;
       if (sessionKey === 'agent:main:first') {
         return new Promise<TaskListSnapshot>((resolve) => {
           resolveFirst = resolve;
         });
       }
-      return Promise.resolve(snapshot([task({ id: '2', subject: 'second task' })]));
+      return Promise.resolve(snapshot([task({ id: '2', subject: 'second task' })], sessionKey));
     });
     const { useTaskCenterStore } = await import('@/stores/task-center-store');
     const { useTaskSnapshotStore } = await import('@/stores/chat/task-snapshot-store');
@@ -110,11 +120,11 @@ describe('task center store', () => {
     const secondRefresh = useTaskCenterStore.getState().refreshTasks({ sessionKey: 'agent:main:second', silent: true });
     await secondRefresh;
 
-    expect(listTaskSnapshotMock).toHaveBeenCalledWith('agent:main:first');
-    expect(listTaskSnapshotMock).toHaveBeenCalledWith('agent:main:second');
+    expect(listTaskSnapshotMock).toHaveBeenCalledWith({ sessionKey: 'agent:main:first' });
+    expect(listTaskSnapshotMock).toHaveBeenCalledWith({ sessionKey: 'agent:main:second' });
     expect(useTaskSnapshotStore.getState().getTaskDataList('agent:main:second').map((item) => item.subject)).toEqual(['second task']);
 
-    resolveFirst?.(snapshot([task({ id: '1', subject: 'first task' })]));
+    resolveFirst?.(snapshot([task({ id: '1', subject: 'first task' })], 'agent:main:first'));
     await firstRefresh;
 
     expect(useTaskSnapshotStore.getState().getTaskDataList('agent:main:first').map((item) => item.subject)).toEqual(['first task']);

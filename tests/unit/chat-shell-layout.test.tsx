@@ -174,6 +174,11 @@ describe('chat shell task panel layout', () => {
     skillPreview: null,
     onClearSkillPreview: vi.fn(),
     onToggleArtifactWorkbenchFullscreen: vi.fn(),
+    taskInboxTasks: [],
+    taskInboxLoading: false,
+    taskInboxError: null,
+    onRefreshTaskInbox: vi.fn().mockResolvedValue(undefined),
+    onClearTaskInboxError: vi.fn(),
     derivedPlanStatus: null,
     artifactGroups: [],
     artifactFocusedGroupFiles: [],
@@ -363,13 +368,6 @@ describe('chat shell task panel layout', () => {
   });
 
   it('renders only persistent task rows and opens the task execution session', () => {
-    taskRows = [{
-      id: 'task-1',
-      subject: '执行任务',
-      status: 'in_progress',
-      metadata: { sessionKey: 'agent:worker:session-1' },
-    }];
-
     render(
       <ChatSidePanel
         mode="docked"
@@ -379,6 +377,18 @@ describe('chat shell task panel layout', () => {
         onClose={vi.fn()}
         unfinishedTaskCount={1}
         {...skillConfigProps}
+        taskInboxTasks={[{
+          id: 'task-1',
+          subject: '执行任务',
+          description: '',
+          status: 'in_progress',
+          blockedBy: [],
+          blocks: [],
+          createdAt: 1,
+          updatedAt: 2,
+          sourceSessionKey: 'agent:worker:session-1',
+          scopeKey: 'agent:worker:session-1',
+        }]}
       />,
     );
 
@@ -391,7 +401,37 @@ describe('chat shell task panel layout', () => {
     expect(openTaskSessionMock).toHaveBeenCalledWith('agent:worker:session-1');
   });
 
-  it('renders derived plan status from the task snapshot pipeline', () => {
+  it('renders derived plan status from the task snapshot pipeline when unfinished tasks exist', () => {
+    render(
+      <ChatSidePanel
+        mode="docked"
+        width={520}
+        activeTab="tasks"
+        onTabChange={vi.fn()}
+        onClose={vi.fn()}
+        unfinishedTaskCount={1}
+        {...skillConfigProps}
+        taskInboxTasks={[{
+          id: 'task-1',
+          subject: '执行任务',
+          description: '',
+          status: 'in_progress',
+          blockedBy: [],
+          blocks: [],
+          createdAt: 1,
+          updatedAt: 2,
+          sourceSessionKey: 'agent:worker:session-1',
+          scopeKey: 'agent:worker:session-1',
+        }]}
+        derivedPlanStatus="building"
+      />,
+    );
+
+    const taskPanel = screen.getByRole('tabpanel');
+    expect(within(taskPanel).getByText('执行中')).toBeInTheDocument();
+  });
+
+  it('hides derived plan status when there are no unfinished tasks', () => {
     render(
       <ChatSidePanel
         mode="docked"
@@ -401,12 +441,12 @@ describe('chat shell task panel layout', () => {
         onClose={vi.fn()}
         unfinishedTaskCount={0}
         {...skillConfigProps}
-        derivedPlanStatus="building"
+        derivedPlanStatus="finished"
       />,
     );
 
     const taskPanel = screen.getByRole('tabpanel');
-    expect(within(taskPanel).getByText('执行中')).toBeInTheDocument();
+    expect(within(taskPanel).queryByText('已完成')).toBeNull();
   });
 
   it('switches the top tab strip to icon-only mode when per-tab space is not enough for labels', () => {

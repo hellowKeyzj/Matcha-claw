@@ -1,10 +1,17 @@
-import { act, renderHook } from '@testing-library/react';
+import { act, renderHook, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { useChatSidePanelController } from '@/pages/Chat/useChatSidePanelController';
 import { useGatewayStore } from '@/stores/gateway';
 import { useLayoutStore } from '@/stores/layout';
-import { useTaskCenterStore } from '@/stores/task-center-store';
 import { useTaskSnapshotStore } from '@/stores/chat/task-snapshot-store';
+import { useChatStore } from '@/stores/chat';
+import { createReadyResourceStatusState } from '@/lib/resource-state';
+
+const listTaskSnapshotMock = vi.fn();
+
+vi.mock('@/services/openclaw/task-manager-client', () => ({
+  listTaskSnapshot: (...args: unknown[]) => listTaskSnapshotMock(...args),
+}));
 
 describe('chat side panel controller', () => {
   beforeEach(() => {
@@ -24,16 +31,19 @@ describe('chat side panel controller', () => {
         updatedAt: 1,
       },
     } as never);
-
-    useTaskCenterStore.setState({
-      tasks: [],
-      initialized: true,
-      loading: false,
-      error: null,
-      init: vi.fn().mockResolvedValue(undefined),
-      refreshTasks: vi.fn().mockResolvedValue(undefined),
-    } as never);
     useTaskSnapshotStore.getState().cleanup('agent:main:main');
+    useTaskSnapshotStore.getState().cleanup('agent:worker:session-1');
+
+    listTaskSnapshotMock.mockReset();
+    listTaskSnapshotMock.mockResolvedValue({ tasks: [], todos: [] });
+
+    useChatStore.setState({
+      currentSessionKey: 'agent:main:main',
+      sessionCatalogStatus: createReadyResourceStatusState(1),
+      loadedSessions: {
+        'agent:main:main': useChatStore.getState().loadedSessions['agent:main:main'],
+      },
+    } as never);
 
     useLayoutStore.setState({
       chatTakeoverMode: 'none',
@@ -52,7 +62,7 @@ describe('chat side panel controller', () => {
       value: 900,
     });
 
-    const { result } = renderHook(() => useChatSidePanelController(true, { current: layoutNode }));
+    const { result } = renderHook(() => useChatSidePanelController(false, { current: layoutNode }));
 
     expect(result.current.sidePanelOpen).toBe(true);
     expect(result.current.activeSidePanelTab).toBe('artifacts');
@@ -79,7 +89,7 @@ describe('chat side panel controller', () => {
       value: 1200,
     });
 
-    const { result } = renderHook(() => useChatSidePanelController(true, { current: layoutNode }));
+    const { result } = renderHook(() => useChatSidePanelController(false, { current: layoutNode }));
 
     expect(result.current.activeSidePanelTab).toBe('tasks');
     expect(result.current.sidePanelWidth).toBe(360);
@@ -110,7 +120,7 @@ describe('chat side panel controller', () => {
       value: 1200,
     });
 
-    const { result } = renderHook(() => useChatSidePanelController(true, { current: layoutNode }));
+    const { result } = renderHook(() => useChatSidePanelController(false, { current: layoutNode }));
 
     expect(result.current.artifactWorkbenchFullscreen).toBe(false);
 
@@ -130,12 +140,19 @@ describe('chat side panel controller', () => {
     expect(result.current.sidePanelWidth).toBe(360);
   });
 
-  it('counts only pending and in-progress tasks for the header badge', () => {
+  it('aggregates unfinished task inbox tasks from the snapshot store across loaded sessions', () => {
+    useChatStore.setState((state) => ({
+      loadedSessions: {
+        ...state.loadedSessions,
+        'agent:worker:session-1': state.loadedSessions['agent:main:main'],
+      },
+    }) as never);
+    useTaskSnapshotStore.getState().reportTaskCenterData('agent:worker:session-1', [
+      { id: '1', subject: '待做', description: '', status: 'pending', blockedBy: [], blocks: [], createdAt: 1, updatedAt: 3 },
+      { id: '2', subject: '已完成', description: '', status: 'completed', blockedBy: [], blocks: [], createdAt: 1, updatedAt: 4 },
+    ], { source: 'replay' });
     useTaskSnapshotStore.getState().reportTaskCenterData('agent:main:main', [
-      { id: '1', subject: '待做', description: '', status: 'pending', blocks: [], blockedBy: [] },
-      { id: '2', subject: '进行中', description: '', status: 'in_progress', blocks: [], blockedBy: [] },
-      { id: '3', subject: '已完成', description: '', status: 'completed', blocks: [], blockedBy: [] },
-      { id: '4', subject: '已删除', description: '', status: 'deleted', blocks: [], blockedBy: [] },
+      { id: '3', subject: '进行中', description: '', status: 'in_progress', blockedBy: [], blocks: [], createdAt: 1, updatedAt: 2 },
     ], { source: 'replay' });
 
     const layoutNode = document.createElement('div');
@@ -147,13 +164,81 @@ describe('chat side panel controller', () => {
     const { result } = renderHook(() => useChatSidePanelController(true, { current: layoutNode }));
 
     expect(result.current.unfinishedTaskCount).toBe(2);
+    expect(result.current.taskInboxTasks.map((task) => task.subject)).toEqual(['待做', '进行中']);
+    expect(result.current.taskInboxTasks.map((task) => task.sourceSessionKey)).toEqual(['agent:worker:session-1', 'agent:main:main']);
+    expect(listTaskSnapshotMock).not.toHaveBeenCalled();
   });
 
-  it('does not count session todos as task inbox tasks', () => {
-    useTaskSnapshotStore.getState().reportTodos('agent:main:main', [
+  it('manual refresh writes task snapshots into the store without automatic polling', async () => {
+    listTaskSnapshotMock.mockResolvedValue({
+      scope: { type: 'session', key: 'agent:main:main', label: 'main', sessionKey: 'agent:main:main' },
+      tasks: [
+        { id: '1', subject: '手动刷新任务', description: '', status: 'pending', blockedBy: [], blocks: [], createdAt: 1, updatedAt: 2 },
+      ],
+      todos: [],
+    });
+
+    const layoutNode = document.createElement('div');
+    Object.defineProperty(layoutNode, 'clientWidth', {
+      configurable: true,
+      value: 900,
+    });
+
+    const { result } = renderHook(() => useChatSidePanelController(true, { current: layoutNode }));
+
+    expect(listTaskSnapshotMock).not.toHaveBeenCalled();
+
+    await act(async () => {
+      await result.current.refreshTaskInbox();
+    });
+
+    expect(listTaskSnapshotMock).toHaveBeenCalledTimes(1);
+    expect(listTaskSnapshotMock).toHaveBeenCalledWith({ sessionKey: 'agent:main:main' });
+    expect(result.current.taskInboxTasks.map((task) => task.subject)).toEqual(['手动刷新任务']);
+  });
+
+  it('does not start overlapping manual task inbox refreshes', async () => {
+    let resolveSnapshot: (value: unknown) => void = () => undefined;
+    listTaskSnapshotMock.mockReturnValue(new Promise((resolve) => {
+      resolveSnapshot = resolve;
+    }));
+
+    const layoutNode = document.createElement('div');
+    Object.defineProperty(layoutNode, 'clientWidth', {
+      configurable: true,
+      value: 900,
+    });
+
+    const { result } = renderHook(() => useChatSidePanelController(true, { current: layoutNode }));
+
+    let firstRefresh: Promise<void> | undefined;
+    let secondRefresh: Promise<void> | undefined;
+    act(() => {
+      firstRefresh = result.current.refreshTaskInbox();
+      secondRefresh = result.current.refreshTaskInbox();
+    });
+
+    expect(listTaskSnapshotMock).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      resolveSnapshot({
+        scope: { type: 'session', key: 'agent:main:main', label: 'main', sessionKey: 'agent:main:main' },
+        tasks: [
+          { id: '1', subject: '单批刷新', description: '', status: 'pending', blockedBy: [], blocks: [], createdAt: 1, updatedAt: 2 },
+        ],
+        todos: [],
+      });
+      await Promise.all([firstRefresh, secondRefresh]);
+    });
+
+    expect(result.current.taskInboxTasks.map((task) => task.subject)).toEqual(['单批刷新']);
+  });
+
+  it('does not count session todos as task inbox tasks', async () => {
+    listTaskSnapshotMock.mockResolvedValue({ tasks: [], todos: [
       { content: '分析页面结构', status: 'pending' },
       { content: '实现任务状态', status: 'in_progress' },
-    ]);
+    ] });
     useTaskSnapshotStore.getState().notifyChatStarted('agent:main:main');
 
     const layoutNode = document.createElement('div');
@@ -164,6 +249,7 @@ describe('chat side panel controller', () => {
 
     const { result } = renderHook(() => useChatSidePanelController(true, { current: layoutNode }));
 
+    await waitFor(() => expect(result.current.taskInboxLoading).toBe(false));
     expect(result.current.unfinishedTaskCount).toBe(0);
     expect(result.current.derivedPlanStatus).toBeNull();
   });
@@ -180,7 +266,7 @@ describe('chat side panel controller', () => {
       value: 900,
     });
 
-    const { result } = renderHook(() => useChatSidePanelController(true, { current: layoutNode }));
+    const { result } = renderHook(() => useChatSidePanelController(false, { current: layoutNode }));
 
     expect(result.current.derivedPlanStatus).toBe('building');
   });

@@ -33,6 +33,11 @@
         "isoDatePlaceholder": "YYYY-MM-DD",
         "clear": "Clear"
     },
+    "scope": {
+        "label": "Scope",
+        "session": "Session",
+        "team": "Team"
+    },
     "listTitle": "Tasks",
     "empty": "No tasks available",
     "detailTitle": "Task Detail",

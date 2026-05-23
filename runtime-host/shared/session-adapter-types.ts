@@ -538,8 +538,18 @@ export interface TodoItem {
   owner?: string;
 }
 
+export interface TaskScopeSnapshot {
+  type: 'session' | 'team';
+  key: string;
+  label: string;
+  sessionKey?: string;
+  teamKey?: string;
+  agentId?: string;
+}
+
 export interface TaskSnapshotEvent {
   sessionKey: string;
+  scope?: TaskScopeSnapshot;
   tasks: TaskData[];
   todos?: TodoItem[];
   source: 'tool' | 'todo' | 'plan' | 'artifact' | 'replay';

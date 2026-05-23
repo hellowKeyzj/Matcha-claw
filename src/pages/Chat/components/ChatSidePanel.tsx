@@ -8,10 +8,7 @@ import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
 import { useGatewayStore } from '@/stores/gateway';
 import { useChatStore } from '@/stores/chat';
-import { useTaskCenterStore } from '@/stores/task-center-store';
-import { useTaskSnapshotStore } from '@/stores/chat/task-snapshot-store';
 import { isGatewayOperational, isGatewayPreparing } from '@/lib/gateway-status';
-import { resolveTaskExecutionSessionKey } from '@/lib/task-domain';
 import type { ChatSidePanelMode } from '../chat-workspace-layout';
 import type { ChatSidePanelTab } from '../useChatSidePanelController';
 import { AgentSkillConfigPanel, type AgentSkillOption } from './AgentSkillConfigPanel';
@@ -22,6 +19,7 @@ import { FilePreviewBody, type FilePreviewMode } from '@/components/file-preview
 import { WorkspaceBrowserBody } from '@/components/file-preview/WorkspaceBrowserBody';
 import type { ArtifactPreviewTarget } from '@/components/file-preview/types';
 import type { DerivedPlanStatus } from '@/stores/chat/task-snapshot-store';
+import type { TaskInboxTask } from '../useChatSidePanelController';
 
 interface ChatSidePanelProps {
   mode: Exclude<ChatSidePanelMode, 'hidden'>;
@@ -32,6 +30,11 @@ interface ChatSidePanelProps {
   onClose: () => void;
   onToggleArtifactWorkbenchFullscreen: () => void;
   unfinishedTaskCount: number;
+  taskInboxTasks: TaskInboxTask[];
+  taskInboxLoading: boolean;
+  taskInboxError: string | null;
+  onRefreshTaskInbox: () => Promise<void>;
+  onClearTaskInboxError: () => void;
   derivedPlanStatus: DerivedPlanStatus;
   skillConfigLabel: string;
   skillConfigTitle: string;
@@ -111,6 +114,11 @@ export const ChatSidePanel = memo(function ChatSidePanel({
   onClose,
   onToggleArtifactWorkbenchFullscreen,
   unfinishedTaskCount,
+  taskInboxTasks,
+  taskInboxLoading,
+  taskInboxError,
+  onRefreshTaskInbox,
+  onClearTaskInboxError,
   derivedPlanStatus,
   skillConfigLabel,
   skillConfigTitle,
@@ -139,14 +147,8 @@ export const ChatSidePanel = memo(function ChatSidePanel({
   const gatewayInitialized = useGatewayStore((state) => state.isInitialized);
   const isGatewayRunning = isGatewayOperational(gatewayStatus);
   const gatewayPreparing = isGatewayPreparing(gatewayStatus, gatewayInitialized);
-  const currentSessionKey = useChatStore((state) => state.currentSessionKey);
   const openTaskSession = useChatStore((state) => state.openTaskSession);
-  const tasks = useTaskSnapshotStore((state) => state.getPersistentTaskDataList(currentSessionKey));
-  const loading = useTaskCenterStore((state) => state.initialLoading || state.refreshing);
-  const initialized = useTaskCenterStore((state) => state.initialized);
-  const error = useTaskCenterStore((state) => state.error);
-  const refreshTasks = useTaskCenterStore((state) => state.refreshTasks);
-  const clearError = useTaskCenterStore((state) => state.clearError);
+  const loading = taskInboxLoading;
   const panelStyle = {
     ['--chat-side-panel-width' as string]: `${width}px`,
   } as CSSProperties;
@@ -212,13 +214,8 @@ export const ChatSidePanel = memo(function ChatSidePanel({
     }
   };
 
-  const handleOpenSession = (taskId: string) => {
-    const task = tasks.find((item) => item.id === taskId);
-    if (!task) {
-      toast.error(t('taskInbox.taskNotFound'));
-      return;
-    }
-    openTaskSession(resolveTaskExecutionSessionKey(task, currentSessionKey));
+  const handleOpenSession = (task: TaskInboxTask) => {
+    openTaskSession(task.sourceSessionKey);
   };
 
   const handleOpenRelativeArtifactFile = (offset: -1 | 1) => {
@@ -527,7 +524,7 @@ export const ChatSidePanel = memo(function ChatSidePanel({
                 {t('taskInbox.unfinishedCount', { count: unfinishedTaskCount })}
               </p>
             </div>
-            {derivedPlanStatus ? (
+            {derivedPlanStatus && unfinishedTaskCount > 0 ? (
               <Badge variant={derivedPlanStatus === 'finished' ? 'success' : 'secondary'}>
                 {t(`taskInbox.planStatus.${derivedPlanStatus}`)}
               </Badge>
@@ -537,7 +534,7 @@ export const ChatSidePanel = memo(function ChatSidePanel({
               variant="ghost"
               size="icon"
               className="h-8 w-8 shrink-0 rounded-md border border-border/40 bg-muted/30 text-muted-foreground hover:bg-secondary hover:text-foreground"
-              onClick={() => void refreshTasks({ sessionKey: currentSessionKey })}
+              onClick={() => void onRefreshTaskInbox()}
               disabled={!isGatewayRunning || loading}
               title={t('taskInbox.refresh')}
               aria-label={t('taskInbox.refresh')}
@@ -561,15 +558,15 @@ export const ChatSidePanel = memo(function ChatSidePanel({
               </div>
             ) : null}
 
-            {error ? (
+            {taskInboxError ? (
               <div className="rounded-lg border border-destructive/30 bg-destructive/8 px-3 py-2 text-xs text-destructive">
                 <div className="flex items-start gap-2">
                   <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
                   <div className="min-w-0 flex-1">
-                    <p className="break-words">{error}</p>
+                    <p className="break-words">{taskInboxError}</p>
                     <button
                       type="button"
-                      onClick={clearError}
+                      onClick={onClearTaskInboxError}
                       className="mt-1 text-[11px] underline underline-offset-2 hover:opacity-80"
                     >
                       {t('common:actions.dismiss')}
@@ -579,20 +576,20 @@ export const ChatSidePanel = memo(function ChatSidePanel({
               </div>
             ) : null}
 
-            {!loading && initialized && tasks.length === 0 ? (
+            {!loading && taskInboxTasks.length === 0 ? (
               <p className="rounded-lg border border-border/60 bg-muted/25 px-3 py-8 text-center text-sm text-muted-foreground">
                 {t('taskInbox.empty')}
               </p>
             ) : null}
 
-            {tasks.length > 0 ? (
+            {taskInboxTasks.length > 0 ? (
               <div className="divide-y divide-border/35">
-                {tasks.map((task) => {
+                {taskInboxTasks.map((task) => {
                   return (
-                    <div key={task.id} className="py-2">
+                      <div key={`${task.sourceSessionKey}:${task.id}`} className="py-2">
                       <button
                         type="button"
-                        onClick={() => handleOpenSession(task.id)}
+                        onClick={() => handleOpenSession(task)}
                         className={cn('w-full rounded-lg px-2 py-2 text-left', SIDE_PANEL_ROW_HOVER_CLASSNAME)}
                       >
                         <div className="flex items-start justify-between gap-2">

@@ -6,6 +6,7 @@ import type {
   SessionUpdateEvent,
   TaskData,
   TaskDataStatus,
+  TaskScopeSnapshot,
   TaskSnapshotEvent,
   TodoItem,
 } from '../../../runtime-host/shared/session-adapter-types';
@@ -17,6 +18,7 @@ import {
 export type DerivedPlanStatus = 'finished' | 'building' | 'ready' | null;
 
 interface SessionTaskSnapshotState {
+  scope?: TaskScopeSnapshot;
   tasks: TaskData[];
   todos: TodoItem[];
   taskDataList: TaskData[];
@@ -35,6 +37,7 @@ interface TaskSnapshotStoreState {
     sessionKey: string,
     tasks: TaskData[],
     options?: {
+      scope?: TaskScopeSnapshot;
       source?: TaskSnapshotEvent['source'];
       enableEdit?: boolean;
       uri?: string;
@@ -44,10 +47,12 @@ interface TaskSnapshotStoreState {
   reportSessionUpdate: (event: SessionUpdateEvent) => void;
   reportSessionSnapshot: (snapshot: SessionStateSnapshot, source?: TaskSnapshotEvent['source']) => void;
   getTodoList: (sessionKey: string) => TodoItem[];
-  getTaskDataList: (sessionKey: string) => TaskData[];
-  getPersistentTaskDataList: (sessionKey: string) => TaskData[];
-  getStatusMap: (sessionKey: string) => Record<string, TaskDataStatus>;
-  getDerivedPlanStatus: (sessionKey: string) => DerivedPlanStatus;
+  getTaskDataList: (scopeKey: string) => TaskData[];
+  getPersistentTaskDataList: (scopeKey: string) => TaskData[];
+  getTaskScope: (scopeKey: string) => TaskScopeSnapshot | undefined;
+  getSessionTaskScopeKey: (sessionKey: string) => string;
+  getStatusMap: (scopeKey: string) => Record<string, TaskDataStatus>;
+  getDerivedPlanStatus: (scopeKey: string) => DerivedPlanStatus;
   notifyChatStarted: (sessionKey: string) => void;
   notifyChatStopped: (sessionKey: string) => void;
   reset: (sessionKey: string) => void;
@@ -79,6 +84,57 @@ function normalizeStringList(value: unknown): string[] {
     : [];
 }
 
+function normalizeScope(raw: unknown): TaskScopeSnapshot | undefined {
+  if (!isRecord(raw)) {
+    return undefined;
+  }
+  const key = normalizeString(raw.key);
+  if (!key) {
+    return undefined;
+  }
+  return {
+    type: raw.type === 'team' ? 'team' : 'session',
+    key,
+    label: normalizeString(raw.label) || key,
+    ...(normalizeString(raw.sessionKey) ? { sessionKey: normalizeString(raw.sessionKey) } : {}),
+    ...(normalizeString(raw.teamKey) ? { teamKey: normalizeString(raw.teamKey) } : {}),
+    ...(normalizeString(raw.agentId) ? { agentId: normalizeString(raw.agentId) } : {}),
+  };
+}
+
+function taskScopeKeyForSession(sessionKey: string): string {
+  return normalizeString(sessionKey);
+}
+
+function fallbackTaskScopeForSession(sessionKey: string): TaskScopeSnapshot | undefined {
+  const normalizedSessionKey = normalizeString(sessionKey);
+  if (!normalizedSessionKey) {
+    return undefined;
+  }
+  const agentId = /^agent:([^:]+):/.exec(normalizedSessionKey)?.[1];
+  return {
+    type: 'session',
+    key: normalizedSessionKey,
+    label: agentId ? `${agentId} · ${normalizedSessionKey.split(':').slice(2).join(':') || 'main'}` : normalizedSessionKey,
+    sessionKey: normalizedSessionKey,
+    ...(agentId ? { agentId } : {}),
+  };
+}
+
+function areScopesEqual(left?: TaskScopeSnapshot, right?: TaskScopeSnapshot): boolean {
+  if (left === right) {
+    return true;
+  }
+  if (!left || !right) {
+    return false;
+  }
+  return left.type === right.type
+    && left.key === right.key
+    && left.label === right.label
+    && (left.sessionKey ?? '') === (right.sessionKey ?? '')
+    && (left.teamKey ?? '') === (right.teamKey ?? '')
+    && (left.agentId ?? '') === (right.agentId ?? '');
+}
 function normalizeTodo(raw: unknown): TodoItem | null {
   if (!isRecord(raw)) {
     return null;
@@ -254,6 +310,7 @@ function parseJsonMaybe(value: string): unknown {
 }
 
 function normalizeToolPayload(method: string, params: Record<string, unknown>): {
+  scope?: TaskScopeSnapshot;
   tasks: TaskData[];
   todos: TodoItem[];
   source: TaskSnapshotEvent['source'];
@@ -272,7 +329,7 @@ function normalizeToolPayload(method: string, params: Record<string, unknown>): 
   if (tasks.length === 0 && todos.length === 0) {
     return null;
   }
-  return { tasks, todos, source: 'tool' };
+  return { scope: normalizeScope(params.scope), tasks, todos, source: 'tool' };
 }
 
 function extractTaskArtifactPayload(value: unknown): TaskSnapshotEvent | null {
@@ -287,6 +344,7 @@ function extractTaskArtifactPayload(value: unknown): TaskSnapshotEvent | null {
   }
   return {
     sessionKey,
+    ...(normalizeScope(value.scope) ? { scope: normalizeScope(value.scope) } : {}),
     tasks: normalizeTasks(value.tasks),
     source: 'artifact',
     enableEdit: value.enableEdit === true,
@@ -308,6 +366,7 @@ function extractTasksFromTool(tool: SessionRenderToolCard, sessionKey: string): 
     if (!normalized) continue;
     return {
       sessionKey,
+      ...(normalized.scope ? { scope: normalized.scope } : {}),
       tasks: normalized.tasks,
       todos: normalized.todos,
       source: normalized.source,
@@ -384,6 +443,9 @@ export const useTaskSnapshotStore = create<TaskSnapshotStoreState>((set, get) =>
   reportTaskCenterData: (sessionKey, tasks, options) => {
     const normalizedSessionKey = normalizeString(sessionKey);
     if (!normalizedSessionKey) return;
+    const normalizedScope = normalizeScope(options?.scope) ?? fallbackTaskScopeForSession(normalizedSessionKey);
+    const snapshotKey = normalizedScope?.key || taskScopeKeyForSession(normalizedSessionKey);
+    if (!snapshotKey) return;
     const normalizedTasks = sortTasks(
       tasks
         .map(normalizeTask)
@@ -391,13 +453,14 @@ export const useTaskSnapshotStore = create<TaskSnapshotStoreState>((set, get) =>
         .filter((task) => task.status !== 'deleted'),
     );
     set((state) => {
-      const current = state.snapshots[normalizedSessionKey];
+      const current = state.snapshots[snapshotKey];
       const nextSource = options?.source ?? current?.source ?? 'tool';
       const nextEnableEdit = options?.enableEdit ?? current?.enableEdit;
       const nextUri = options?.uri ?? current?.uri;
       if (
         current
         && areTasksEqual(current.tasks, normalizedTasks)
+        && areScopesEqual(current.scope, normalizedScope)
         && current.source === nextSource
         && current.enableEdit === nextEnableEdit
         && current.uri === nextUri
@@ -407,7 +470,8 @@ export const useTaskSnapshotStore = create<TaskSnapshotStoreState>((set, get) =>
       return {
         snapshots: {
           ...state.snapshots,
-          [normalizedSessionKey]: updateSnapshot(current, {
+          [snapshotKey]: updateSnapshot(current, {
+            ...(normalizedScope ? { scope: normalizedScope } : {}),
             tasks: normalizedTasks,
             source: nextSource,
             enableEdit: nextEnableEdit,
@@ -426,6 +490,7 @@ export const useTaskSnapshotStore = create<TaskSnapshotStoreState>((set, get) =>
       return;
     }
     get().reportTaskCenterData(sessionKey, event.tasks, {
+      scope: event.scope,
       source: event.source,
       enableEdit: event.enableEdit,
       uri: event.uri,
@@ -473,23 +538,31 @@ export const useTaskSnapshotStore = create<TaskSnapshotStoreState>((set, get) =>
     return snapshot.todos;
   },
 
-  getTaskDataList: (sessionKey) => {
-    const snapshot = get().snapshots[sessionKey];
+  getTaskDataList: (scopeKey) => {
+    const snapshot = get().snapshots[scopeKey];
     if (!snapshot) return EMPTY_TASKS;
     return snapshot.taskDataList;
   },
 
-  getPersistentTaskDataList: (sessionKey) => {
-    const snapshot = get().snapshots[sessionKey];
+  getPersistentTaskDataList: (scopeKey) => {
+    const snapshot = get().snapshots[scopeKey];
     if (!snapshot) return EMPTY_TASKS;
     return snapshot.tasks;
   },
 
-  getStatusMap: (sessionKey) => get().snapshots[sessionKey]?.statusMap ?? EMPTY_STATUS_MAP,
+  getTaskScope: (scopeKey) => get().snapshots[scopeKey]?.scope,
 
-  getDerivedPlanStatus: (sessionKey) => {
-    const snapshot = get().snapshots[sessionKey];
-    const tasks = get().getPersistentTaskDataList(sessionKey);
+  getSessionTaskScopeKey: (sessionKey) => {
+    const normalizedSessionKey = normalizeString(sessionKey);
+    const defaultSessionKey = 'agent:main:main';
+    return taskScopeKeyForSession(normalizedSessionKey || defaultSessionKey);
+  },
+
+  getStatusMap: (scopeKey) => get().snapshots[scopeKey]?.statusMap ?? EMPTY_STATUS_MAP,
+
+  getDerivedPlanStatus: (scopeKey) => {
+    const snapshot = get().snapshots[scopeKey];
+    const tasks = get().getPersistentTaskDataList(scopeKey);
     if (tasks.length === 0) return null;
     if (tasks.every((task) => task.status === 'completed')) {
       return 'finished';
@@ -503,12 +576,20 @@ export const useTaskSnapshotStore = create<TaskSnapshotStoreState>((set, get) =>
   notifyChatStarted: (sessionKey) => {
     const normalizedSessionKey = normalizeString(sessionKey);
     if (!normalizedSessionKey) return;
+    const scopeKey = taskScopeKeyForSession(normalizedSessionKey);
     set((state) => ({
       snapshots: {
         ...state.snapshots,
         [normalizedSessionKey]: updateSnapshot(state.snapshots[normalizedSessionKey], {
           chatRunning: true,
         }),
+        ...(scopeKey && scopeKey !== normalizedSessionKey
+          ? {
+              [scopeKey]: updateSnapshot(state.snapshots[scopeKey], {
+                chatRunning: true,
+              }),
+            }
+          : {}),
       },
     }));
   },
@@ -516,12 +597,20 @@ export const useTaskSnapshotStore = create<TaskSnapshotStoreState>((set, get) =>
   notifyChatStopped: (sessionKey) => {
     const normalizedSessionKey = normalizeString(sessionKey);
     if (!normalizedSessionKey) return;
+    const scopeKey = taskScopeKeyForSession(normalizedSessionKey);
     set((state) => ({
       snapshots: {
         ...state.snapshots,
         [normalizedSessionKey]: updateSnapshot(state.snapshots[normalizedSessionKey], {
           chatRunning: false,
         }),
+        ...(scopeKey && scopeKey !== normalizedSessionKey
+          ? {
+              [scopeKey]: updateSnapshot(state.snapshots[scopeKey], {
+                chatRunning: false,
+              }),
+            }
+          : {}),
       },
     }));
   },
@@ -529,10 +618,12 @@ export const useTaskSnapshotStore = create<TaskSnapshotStoreState>((set, get) =>
   reset: (sessionKey) => {
     const normalizedSessionKey = normalizeString(sessionKey);
     if (!normalizedSessionKey) return;
+    const scopeKey = taskScopeKeyForSession(normalizedSessionKey);
     set((state) => ({
       snapshots: {
         ...state.snapshots,
         [normalizedSessionKey]: updateSnapshot(undefined, {}),
+        ...(scopeKey && scopeKey !== normalizedSessionKey ? { [scopeKey]: updateSnapshot(undefined, {}) } : {}),
       },
     }));
   },
@@ -540,9 +631,11 @@ export const useTaskSnapshotStore = create<TaskSnapshotStoreState>((set, get) =>
   cleanup: (sessionKey) => {
     const normalizedSessionKey = normalizeString(sessionKey);
     if (!normalizedSessionKey) return;
+    const scopeKey = taskScopeKeyForSession(normalizedSessionKey);
     set((state) => {
       const next = { ...state.snapshots };
       delete next[normalizedSessionKey];
+      delete next[scopeKey];
       return { snapshots: next };
     });
   },

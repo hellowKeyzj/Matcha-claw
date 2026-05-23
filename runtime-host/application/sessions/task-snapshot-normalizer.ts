@@ -1,4 +1,4 @@
-import type { TaskData, TaskDataStatus, TaskSnapshotEvent, TodoItem } from '../../shared/session-adapter-types';
+import type { TaskData, TaskDataStatus, TaskScopeSnapshot, TaskSnapshotEvent, TodoItem } from '../../shared/session-adapter-types';
 import {
   canonicalizeStateOnlyTaskToolName,
   canonicalizeTaskSnapshotToolName,
@@ -67,6 +67,24 @@ function normalizeTodo(raw: unknown): TodoItem | null {
   };
 }
 
+function normalizeScope(value: unknown): TaskScopeSnapshot | undefined {
+  if (!isRecord(value)) {
+    return undefined;
+  }
+  const key = normalizeString(value.key);
+  if (!key) {
+    return undefined;
+  }
+  return {
+    type: value.type === 'team' ? 'team' : 'session',
+    key,
+    label: normalizeString(value.label) || key,
+    ...(normalizeString(value.sessionKey) ? { sessionKey: normalizeString(value.sessionKey) } : {}),
+    ...(normalizeString(value.teamKey) ? { teamKey: normalizeString(value.teamKey) } : {}),
+    ...(normalizeString(value.agentId) ? { agentId: normalizeString(value.agentId) } : {}),
+  };
+}
+
 function normalizeTodos(value: unknown): TodoItem[] {
   return Array.isArray(value)
     ? value.map(normalizeTodo).filter((item): item is TodoItem => Boolean(item))
@@ -103,11 +121,13 @@ export function normalizeTaskSnapshotPayload(
   const source = rawSource === 'plan' || rawSource === 'artifact' || rawSource === 'todo' || rawSource === 'replay'
     ? rawSource
     : 'tool';
+  const scope = normalizeScope(payload.scope);
   if (tasks.length === 0 && todos.length === 0 && source !== 'todo') {
     return null;
   }
   return {
     sessionKey,
+    ...(scope ? { scope } : {}),
     tasks,
     ...(todos.length > 0 || source === 'todo' ? { todos } : {}),
     source,

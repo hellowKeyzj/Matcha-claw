@@ -230,6 +230,42 @@ function hasRenderableTimelineOutput(entry: SessionTimelineEntry): boolean {
   return true;
 }
 
+function hasStateOnlyToolResult(message: SessionTranscriptMessage): boolean {
+  if (isStateOnlyToolName(message.toolName ?? message.name) && (message.role === 'toolresult' || message.role === 'tool_result')) {
+    return true;
+  }
+  if (Array.isArray(message.toolStatuses) && message.toolStatuses.some((toolStatus) => isStateOnlyToolName(resolveToolRecordName(toolStatus)))) {
+    return true;
+  }
+  if (!Array.isArray(message.content)) {
+    return false;
+  }
+  return message.content.some((block) => (
+    isRecord(block)
+    && isToolResultContentType(block.type)
+    && isStateOnlyToolName(resolveToolRecordName(block))
+  ));
+}
+
+function buildTerminalLifecycleEvent(input: {
+  sessionKey: string | null;
+  runId: string | null;
+  status: SessionTimelineEntryStatus;
+}): GatewaySessionIngressEvent | null {
+  if (input.status !== 'final' && input.status !== 'error' && input.status !== 'aborted') {
+    return null;
+  }
+  return {
+    sessionUpdate: 'session_info_update',
+    sessionKey: input.sessionKey,
+    runId: input.runId,
+    phase: input.status === 'error'
+      ? 'error'
+      : (input.status === 'aborted' ? 'aborted' : 'final'),
+    error: null,
+  };
+}
+
 export function buildMessageIngressEvents(
   payload: GatewayConversationMessagePayload,
   options: {
@@ -267,14 +303,24 @@ export function buildMessageIngressEvents(
     isMalformedEmptyToolNameResult(conversation.message)
     || !hasRenderableMessagePayload(sanitizedMessage)
   ) {
-    return taskSnapshot
-      ? [{
-          sessionUpdate: 'plan',
-          sessionKey: taskSnapshot.sessionKey,
-          runId: conversation.runId,
-          taskSnapshot,
-        }]
-      : [];
+    if (!taskSnapshot) {
+      return [];
+    }
+    const events: GatewaySessionIngressEvent[] = [{
+      sessionUpdate: 'plan',
+      sessionKey: taskSnapshot.sessionKey,
+      runId: conversation.runId,
+      taskSnapshot,
+    }];
+    const terminalEvent = buildTerminalLifecycleEvent({
+      sessionKey: conversation.sessionKey,
+      runId: conversation.runId,
+      status: conversation.status,
+    });
+    if (terminalEvent && hasStateOnlyToolResult(conversation.message)) {
+      events.push(terminalEvent);
+    }
+    return events;
   }
   const timelineMessage = taskSnapshot
     ? stripStateOnlyToolContent(sanitizedMessage)
@@ -304,6 +350,14 @@ export function buildMessageIngressEvents(
     });
   }
   if (visibleEntries.length === 0) {
+    const terminalEvent = buildTerminalLifecycleEvent({
+      sessionKey: conversation.sessionKey,
+      runId: conversation.runId,
+      status: conversation.status,
+    });
+    if (terminalEvent && hasStateOnlyToolResult(conversation.message)) {
+      events.push(terminalEvent);
+    }
     return events;
   }
   const meta = buildMemberMeta(normalizeString(conversation.message.agentId));

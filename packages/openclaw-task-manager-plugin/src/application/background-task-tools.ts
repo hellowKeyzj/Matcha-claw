@@ -101,7 +101,7 @@ export function registerBackgroundTaskTools(api: OpenClawPluginApi): void {
   api.registerTool((toolCtx: ToolContext) => ({
     name: 'TaskOutput',
     label: 'Task Output',
-    description: 'Get current output from a background task by taskId.',
+    description: 'Read output and status from a running or completed background task by taskId. Use to inspect progress, final results, or errors before deciding whether to continue, wait, or fix failures.',
     parameters: taskOutputParameters,
     async execute(_toolCallId: string, params: ToolParams) {
       return await executeTaskOutput(api, toolCtx, params)
@@ -111,7 +111,7 @@ export function registerBackgroundTaskTools(api: OpenClawPluginApi): void {
   api.registerTool((toolCtx: ToolContext) => ({
     name: 'TaskStop',
     label: 'Task Stop',
-    description: 'Stop a running background task by taskId.',
+    description: 'Stop a running background task by taskId. Use when a task is obsolete, stuck, explicitly cancelled by the user, or no longer worth waiting for; otherwise prefer TaskOutput.',
     parameters: taskStopParameters,
     async execute(_toolCallId: string, params: ToolParams) {
       return await executeTaskStop(api, toolCtx, params)

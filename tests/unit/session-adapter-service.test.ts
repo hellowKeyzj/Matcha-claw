@@ -2601,7 +2601,8 @@ describe('session runtime service', () => {
       clock: testClock,
     });
 
-    expect(events).toEqual([expect.objectContaining({
+    expect(events).toHaveLength(2);
+    expect(events[0]).toMatchObject({
       sessionUpdate: 'plan',
       sessionKey: 'agent:main:main',
       taskSnapshot: expect.objectContaining({
@@ -2611,7 +2612,13 @@ describe('session runtime service', () => {
           { content: '验证刷新恢复', status: 'completed' },
         ],
       }),
-    })]);
+    });
+    expect(events[1]).toMatchObject({
+      sessionUpdate: 'session_info_update',
+      sessionKey: 'agent:main:main',
+      runId: 'run-chat-todo-write-status',
+      phase: 'final',
+    });
   });
 
   it('realtime chat.message TodoGet result updates todo snapshot without a visible tool item', async () => {
@@ -2648,7 +2655,8 @@ describe('session runtime service', () => {
       clock: testClock,
     });
 
-    expect(events).toEqual([expect.objectContaining({
+    expect(events).toHaveLength(2);
+    expect(events[0]).toMatchObject({
       sessionUpdate: 'plan',
       sessionKey: 'agent:main:main',
       taskSnapshot: expect.objectContaining({
@@ -2658,7 +2666,85 @@ describe('session runtime service', () => {
           { content: '验证刷新恢复', status: 'completed' },
         ],
       }),
-    })]);
+    });
+    expect(events[1]).toMatchObject({
+      sessionUpdate: 'session_info_update',
+      sessionKey: 'agent:main:main',
+      runId: 'run-chat-todo-get',
+      phase: 'final',
+    });
+  });
+
+  it('state-only final tool result closes an active prompt run without rendering todo tools', async () => {
+    const configDir = join(tmpdir(), `matcha-session-runtime-${Date.now()}`);
+    const service = createTestSessionRuntimeService({
+      workspace: { getConfigDir: () => configDir },
+      openclawBridge: {
+        chatSend: async () => new Promise(() => undefined),
+        gatewayRpc: async () => ({}),
+      },
+    });
+
+    await service.promptSession({
+      sessionKey: 'agent:main:main',
+      message: 'write todo',
+      idempotencyKey: 'run-state-only-final',
+    });
+
+    const events = await service.consumeGatewayConversationEvent({
+      type: 'chat.message',
+      event: {
+        state: 'final',
+        runId: 'run-state-only-final',
+        sessionKey: 'agent:main:main',
+        sequenceId: 7,
+        message: {
+          role: 'toolResult',
+          toolCallId: 'todo-get-final',
+          toolName: 'TodoGet',
+          content: [{
+            type: 'text',
+            text: JSON.stringify({
+              todos: [
+                { content: '验证 Todo 收口', status: 'completed' },
+              ],
+              updatedAt: 7,
+            }),
+          }],
+          details: {
+            todos: [
+              { content: '验证 Todo 收口', status: 'completed' },
+            ],
+            updatedAt: 7,
+          },
+          isError: false,
+        },
+      },
+    });
+
+    expect(events).toHaveLength(2);
+    expect(events[0]).toMatchObject({
+      sessionUpdate: 'plan',
+      taskSnapshot: {
+        source: 'todo',
+        tasks: [],
+        todos: [
+          { content: '验证 Todo 收口', status: 'completed' },
+        ],
+      },
+    });
+    expect(events[1]).toMatchObject({
+      sessionUpdate: 'session_info_update',
+      phase: 'final',
+      snapshot: {
+        runtime: {
+          activeRunId: null,
+          runPhase: 'done',
+          pendingTurnKey: null,
+        },
+      },
+    });
+    expect(JSON.stringify(events[1].snapshot.items)).not.toContain('TodoGet');
   });
 
   it('realtime mixed assistant message strips todo tools but keeps visible text', async () => {

@@ -110,16 +110,19 @@ describe('runtime-host task routes', () => {
       sessionKey: 'agent:main:main',
       taskId: '1',
       status: 'deleted',
+      addBlockedBy: ['0'],
+      addBlocks: ['2'],
     }, { taskService: deps.taskService });
     await dispatchRuntimeRouteDefinition(taskRoutes, 'POST', '/api/tasks/todos/write', {
       sessionKey: 'agent:main:main',
+      oldTodos: [],
       newTodos: [{ content: 'done', status: 'completed' }],
     }, { taskService: deps.taskService });
     await dispatchRuntimeRouteDefinition(taskRoutes, 'POST', '/api/tasks/todos/get', {
       sessionKey: 'agent:main:main',
     }, { taskService: deps.taskService });
 
-    // 写方法（TaskCreate / TaskUpdate / TodoWrite）成功后会追加一次 TaskList 推送权威全量。
+    // 写方法（TaskCreate / TaskUpdate）成功后追加 TaskList 推送 task 权威全量；TodoWrite 直接推送 todo snapshot。
     expect(gatewayRpc.mock.calls.map((call) => call[0])).toEqual([
       'TaskCreate',
       'TaskList',
@@ -127,11 +130,14 @@ describe('runtime-host task routes', () => {
       'TaskUpdate',
       'TaskList',
       'TodoWrite',
-      'TaskList',
       'TodoGet',
     ]);
+    expect(gatewayRpc.mock.calls[3][1]).toMatchObject({
+      addBlockedBy: ['0'],
+      addBlocks: ['2'],
+    });
     expect(gatewayRpc.mock.calls.map((call) => call[1].workspaceDir)).toEqual(
-      Array(8).fill('C:\\Users\\Dev\\.openclaw\\workspace'),
+      Array(7).fill('C:\\Users\\Dev\\.openclaw\\workspace'),
     );
   });
 

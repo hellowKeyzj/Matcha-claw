@@ -7,7 +7,7 @@ import { TaskStoreError } from '../shared/errors.js'
 import { toNonEmptyString } from '../shared/params.js'
 import { parseTaskCreateInput, parseTaskUpdateInput } from './task-inputs.js'
 import { asTaskDetailPayload } from './task-payloads.js'
-import { getStore, getTodoStore, resolveScopeKey } from './task-store-context.js'
+import { getStore, getTodoStore, resolveTaskScope, resolveTodoScopeKey } from './task-store-context.js'
 import { parseTodoWriteInput } from './todo-inputs.js'
 
 type ToolParams = Record<string, unknown>
@@ -95,15 +95,14 @@ function renderTaskDetail(task: TaskItem): string {
 }
 
 async function executeTaskCreate(api: OpenClawPluginApi, toolCtx: ToolContext, params: ToolParams) {
-  const scopeKey = resolveScopeKey({ params, sessionKey: toolCtx.sessionKey })
+  const scope = resolveTaskScope({ params, sessionKey: toolCtx.sessionKey })
   const store = getStore({ api, workspaceDir: toolCtx.workspaceDir })
   const input = parseTaskCreateInput(params)
-  const task = await store.create(scopeKey, {
+  const task = await store.create(scope.key, {
     ...input,
     activeForm: input.activeForm || generateActiveForm(input.subject),
   })
-  const todos = await loadStoredTodos(api, toolCtx, scopeKey)
-  const payload = { task: asTaskDetailPayload(task), todos }
+  const payload = { scope, task: asTaskDetailPayload(task) }
   return {
     content: [{ type: 'text' as const, text: `Task #${task.id} created successfully: ${task.subject}` }],
     rawResponse: payload,
@@ -113,17 +112,17 @@ async function executeTaskCreate(api: OpenClawPluginApi, toolCtx: ToolContext, p
 }
 
 async function executeTaskUpdate(api: OpenClawPluginApi, toolCtx: ToolContext, params: ToolParams) {
-  const scopeKey = resolveScopeKey({ params, sessionKey: toolCtx.sessionKey })
+  const scope = resolveTaskScope({ params, sessionKey: toolCtx.sessionKey })
   const store = getStore({ api, workspaceDir: toolCtx.workspaceDir })
   const input = parseTaskUpdateInput(params)
   const { taskId } = input
   if (input.status === 'deleted') {
-    const deleted = await store.delete(scopeKey, taskId)
+    const deleted = await store.delete(scope.key, taskId)
     if (!deleted) {
       throw new TaskStoreError('task_not_found', `Task not found: ${taskId}`)
     }
-    const todos = await loadStoredTodos(api, toolCtx, scopeKey)
-    const payload = { taskId, deleted: true, todos }
+    const todos = await loadStoredTodos(api, toolCtx, resolveTodoScopeKey({ params, sessionKey: toolCtx.sessionKey }))
+    const payload = { scope, taskId, deleted: true, todos }
     return {
       content: [{ type: 'text' as const, text: `Task ${taskId} deleted successfully` }],
       rawResponse: payload,
@@ -131,12 +130,11 @@ async function executeTaskUpdate(api: OpenClawPluginApi, toolCtx: ToolContext, p
       renderer: { type: 'todo' },
     }
   }
-  const task = await store.update(scopeKey, taskId, input)
+  const task = await store.update(scope.key, taskId, input)
   if (!task) {
     throw new TaskStoreError('task_not_found', `Task not found: ${taskId}`)
   }
-  const todos = await loadStoredTodos(api, toolCtx, scopeKey)
-  const payload = { task: asTaskDetailPayload(task), todos }
+  const payload = { scope, task: asTaskDetailPayload(task) }
   return {
     content: [{ type: 'text' as const, text: `Updated task #${task.id}` }],
     rawResponse: payload,
@@ -146,19 +144,19 @@ async function executeTaskUpdate(api: OpenClawPluginApi, toolCtx: ToolContext, p
 }
 
 async function executeTaskList(api: OpenClawPluginApi, toolCtx: ToolContext, params: ToolParams) {
-  const scopeKey = resolveScopeKey({ params, sessionKey: toolCtx.sessionKey })
-  const tasks = await getStore({ api, workspaceDir: toolCtx.workspaceDir }).list(scopeKey)
-  const todos = await loadStoredTodos(api, toolCtx, scopeKey)
+  const scope = resolveTaskScope({ params, sessionKey: toolCtx.sessionKey })
+  const tasks = await getStore({ api, workspaceDir: toolCtx.workspaceDir }).list(scope.key)
   logTaskPipeline(api, 'tool.TaskList', {
-    scopeKey,
+    scopeKey: scope.key,
+    scopeType: scope.type,
     toolCtxSessionKey: toolCtx.sessionKey ?? null,
     paramSessionKey: typeof params.sessionKey === 'string' ? params.sessionKey : null,
     workspaceDir: toolCtx.workspaceDir ?? null,
     storageRoot: readPluginStorageRoot(api),
     tasksCount: tasks.length,
-    todosCount: todos.length,
   })
-  const payload = { tasks: tasks.map(asTaskDetailPayload), todos }
+  const todos = await loadStoredTodos(api, toolCtx, resolveTodoScopeKey({ params, sessionKey: toolCtx.sessionKey }))
+  const payload = { scope, tasks: tasks.map(asTaskDetailPayload), todos }
   return {
     content: [{ type: 'text' as const, text: renderTaskList(tasks) }],
     rawResponse: payload,
@@ -168,13 +166,13 @@ async function executeTaskList(api: OpenClawPluginApi, toolCtx: ToolContext, par
 }
 
 async function executeTaskGet(api: OpenClawPluginApi, toolCtx: ToolContext, params: ToolParams) {
-  const scopeKey = resolveScopeKey({ params, sessionKey: toolCtx.sessionKey })
+  const scope = resolveTaskScope({ params, sessionKey: toolCtx.sessionKey })
   const taskId = toNonEmptyString(params.taskId, 'taskId')
-  const task = await getStore({ api, workspaceDir: toolCtx.workspaceDir }).get(scopeKey, taskId)
+  const task = await getStore({ api, workspaceDir: toolCtx.workspaceDir }).get(scope.key, taskId)
   if (!task) {
     throw new TaskStoreError('task_not_found', `Task not found: ${taskId}`)
   }
-  const payload = { task: asTaskDetailPayload(task) }
+  const payload = { scope, task: asTaskDetailPayload(task) }
   return {
     content: [{ type: 'text' as const, text: renderTaskDetail(task) }],
     rawResponse: payload,
@@ -184,9 +182,9 @@ async function executeTaskGet(api: OpenClawPluginApi, toolCtx: ToolContext, para
 }
 
 async function executeTodoWrite(api: OpenClawPluginApi, toolCtx: ToolContext, params: ToolParams) {
-  const scopeKey = resolveScopeKey({ params, sessionKey: toolCtx.sessionKey })
+  const scopeKey = resolveTodoScopeKey({ params, sessionKey: toolCtx.sessionKey })
   const input = parseTodoWriteInput(params)
-  const result = await getTodoStore({ api, workspaceDir: toolCtx.workspaceDir }).save(scopeKey, input.newTodos)
+  const result = await getTodoStore({ api, workspaceDir: toolCtx.workspaceDir }).save(scopeKey, input.oldTodos, input.newTodos)
   logTaskPipeline(api, 'tool.TodoWrite', {
     scopeKey,
     toolCtxSessionKey: toolCtx.sessionKey ?? null,
@@ -205,7 +203,7 @@ async function executeTodoWrite(api: OpenClawPluginApi, toolCtx: ToolContext, pa
 }
 
 async function executeTodoGet(api: OpenClawPluginApi, toolCtx: ToolContext, params: ToolParams) {
-  const scopeKey = resolveScopeKey({ params, sessionKey: toolCtx.sessionKey })
+  const scopeKey = resolveTodoScopeKey({ params, sessionKey: toolCtx.sessionKey })
   const result = await getTodoStore({ api, workspaceDir: toolCtx.workspaceDir }).load(scopeKey)
   const payload = { todos: result.todos, updatedAt: result.updatedAt }
   return {
@@ -220,7 +218,7 @@ export function registerTaskTools(api: OpenClawPluginApi): void {
   api.registerTool((toolCtx: ToolContext) => ({
     name: 'TaskCreate',
     label: 'Task Create',
-    description: 'Create one persisted task. Requires subject and description.',
+    description: 'Create a persisted task for durable, cross-session, or multi-agent work. Use for complex multi-step work, user-requested task tracking, or work that needs owner/dependency/status management.',
     parameters: taskCreateParameters,
     async execute(_toolCallId: string, params: ToolParams) {
       return await executeTaskCreate(api, toolCtx, params)
@@ -230,7 +228,7 @@ export function registerTaskTools(api: OpenClawPluginApi): void {
   api.registerTool((toolCtx: ToolContext) => ({
     name: 'TaskUpdate',
     label: 'Task Update',
-    description: 'Update an existing task. Requires taskId plus at least one update field. status=deleted removes it.',
+    description: 'Update a persisted task as work progresses. Use to mark in_progress/completed immediately, claim owner, change details, add or remove dependencies, or delete obsolete tasks.',
     parameters: taskUpdateParameters,
     async execute(_toolCallId: string, params: ToolParams) {
       return await executeTaskUpdate(api, toolCtx, params)
@@ -240,7 +238,7 @@ export function registerTaskTools(api: OpenClawPluginApi): void {
   api.registerTool((toolCtx: ToolContext) => ({
     name: 'TaskList',
     label: 'Task List',
-    description: 'List persisted tasks and todos for the current session. Takes no parameters.',
+    description: 'List persisted tasks and current session todos. Use before creating duplicate tasks, when choosing available unblocked work, after completing tasks, or when recovering task context.',
     parameters: taskListParameters,
     async execute(_toolCallId: string, params: ToolParams) {
       return await executeTaskList(api, toolCtx, params)
@@ -250,7 +248,7 @@ export function registerTaskTools(api: OpenClawPluginApi): void {
   api.registerTool((toolCtx: ToolContext) => ({
     name: 'TaskGet',
     label: 'Task Get',
-    description: 'Get one persisted task by taskId.',
+    description: 'Get full details for one persisted task by taskId. Use before starting assigned work, before updates where stale state matters, or when inspecting dependencies and acceptance criteria.',
     parameters: taskGetParameters,
     async execute(_toolCallId: string, params: ToolParams) {
       return await executeTaskGet(api, toolCtx, params)
@@ -260,7 +258,7 @@ export function registerTaskTools(api: OpenClawPluginApi): void {
   api.registerTool((toolCtx: ToolContext) => ({
     name: 'TodoWrite',
     label: 'Todo Write',
-    description: 'Replace the current session todo list. Requires newTodos: an array of {content, status}; use newTodos: [] to clear.',
+    description: 'Create and manage the current session todo list for multi-step work. Requires oldTodos from the latest TodoGet/TaskList/tool result and newTodos as the full replacement list; use newTodos: [] to clear completed temporary todos.',
     parameters: todoWriteParameters,
     async execute(_toolCallId: string, params: ToolParams) {
       return await executeTodoWrite(api, toolCtx, params)
@@ -270,7 +268,7 @@ export function registerTaskTools(api: OpenClawPluginApi): void {
   api.registerTool((toolCtx: ToolContext) => ({
     name: 'TodoGet',
     label: 'Todo Get',
-    description: 'Get the current session todo list. Takes no parameters.',
+    description: 'Get the current session todo list. Use before TodoWrite when you need latest oldTodos, after stale update rejection, or before clearing todos. Takes no parameters.',
     parameters: todoGetParameters,
     async execute(_toolCallId: string, params: ToolParams) {
       return await executeTodoGet(api, toolCtx, params)

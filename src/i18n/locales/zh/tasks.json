@@ -33,6 +33,11 @@
         "isoDatePlaceholder": "YYYY-MM-DD",
         "clear": "清除筛选"
     },
+    "scope": {
+        "label": "范围",
+        "session": "会话",
+        "team": "团队"
+    },
     "listTitle": "任务列表",
     "empty": "暂无任务",
     "detailTitle": "任务详情",

@@ -102,7 +102,42 @@ describe('task manager client', () => {
     });
   });
 
-  it('writeTodos posts newTodos to TodoWrite route', async () => {
+  it('updateTask forwards dependency fields', async () => {
+    hostApiFetchMock.mockResolvedValueOnce({
+      task: {
+        id: '3',
+        subject: '接入接口',
+        description: '验证依赖添加',
+        status: 'pending',
+        blockedBy: ['1'],
+        blocks: ['4'],
+        createdAt: 1,
+        updatedAt: 2,
+      },
+      todos: [],
+    });
+    const { updateTask } = await import('@/services/openclaw/task-manager-client');
+
+    const result = await updateTask({
+      sessionKey: 'agent:main:main',
+      taskId: '3',
+      addBlockedBy: ['1'],
+      addBlocks: ['4'],
+    });
+
+    expect(result.task).toMatchObject({ id: '3', blockedBy: ['1'], blocks: ['4'] });
+    expect(hostApiFetchMock).toHaveBeenCalledWith('/api/tasks/update', {
+      method: 'POST',
+      body: JSON.stringify({
+        sessionKey: 'agent:main:main',
+        taskId: '3',
+        addBlockedBy: ['1'],
+        addBlocks: ['4'],
+      }),
+      timeoutMs: 60000,
+    });
+  });
+  it('writeTodos posts oldTodos and newTodos to TodoWrite route', async () => {
     hostApiFetchMock.mockResolvedValueOnce({
       todos: [{ content: 'done', status: 'completed' }],
       updatedAt: 12,
@@ -111,6 +146,7 @@ describe('task manager client', () => {
 
     const result = await writeTodos({
       sessionKey: 'agent:main:main',
+      oldTodos: [],
       newTodos: [{ content: 'done', status: 'completed' }],
     });
 
@@ -120,6 +156,7 @@ describe('task manager client', () => {
       method: 'POST',
       body: JSON.stringify({
         sessionKey: 'agent:main:main',
+        oldTodos: [],
         newTodos: [{ content: 'done', status: 'completed' }],
       }),
       timeoutMs: 60000,

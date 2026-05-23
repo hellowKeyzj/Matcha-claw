@@ -137,20 +137,91 @@ export class TaskStore {
     await rename(tmpPath, filePath)
   }
 
-  private async nextTaskIdUnsafe(scopeKey: string): Promise<string> {
+  private async listUnsafe(scopeKey: string): Promise<TaskItem[]> {
     const entries = await readdir(this.tasksDir(scopeKey), { withFileTypes: true })
-    let maxId = 0
+    const tasks: TaskItem[] = []
     for (const entry of entries) {
       if (!entry.isFile() || extname(entry.name) !== '.json' || entry.name.includes('.tmp.')) {
         continue
       }
-      const id = entry.name.slice(0, -'.json'.length)
-      const parsed = Number.parseInt(id, 10)
+      const text = await readFile(join(this.tasksDir(scopeKey), entry.name), 'utf8')
+      const normalized = normalizeTaskRecord(JSON.parse(text) as unknown)
+      if (normalized) {
+        tasks.push(normalized)
+      }
+    }
+    tasks.sort((a, b) => compareTaskIds(a.id, b.id))
+    return tasks
+  }
+
+
+  private async nextTaskIdUnsafe(scopeKey: string): Promise<string> {
+    const tasks = await this.listUnsafe(scopeKey)
+    let maxId = 0
+    for (const task of tasks) {
+      const parsed = Number.parseInt(task.id, 10)
       if (Number.isFinite(parsed)) {
         maxId = Math.max(maxId, parsed)
       }
     }
     return String(maxId + 1)
+  }
+
+  private addUnique(target: string[], values: string[]): boolean {
+    let changed = false
+    for (const value of values) {
+      if (!target.includes(value)) {
+        target.push(value)
+        changed = true
+      }
+    }
+    return changed
+  }
+
+  private removeValues(target: string[], values: string[]): boolean {
+    if (values.length === 0) {
+      return false
+    }
+    const blocked = new Set(values)
+    const originalLength = target.length
+    const kept = target.filter(value => !blocked.has(value))
+    target.length = 0
+    target.push(...kept)
+    return target.length !== originalLength
+  }
+
+  private async applyDependencyChangesUnsafe(scopeKey: string, task: TaskItem, input: TaskUpdateInput): Promise<void> {
+    const addBlockedBy = normalizeStringList(input.addBlockedBy)
+    const addBlocks = normalizeStringList(input.addBlocks)
+    const changedTasks = new Map<string, TaskItem>()
+    const markChanged = (changedTask: TaskItem) => {
+      changedTask.updatedAt = nowTs()
+      changedTasks.set(changedTask.id, changedTask)
+    }
+
+    if (this.addUnique(task.blockedBy, addBlockedBy)) {
+      markChanged(task)
+    }
+    if (this.addUnique(task.blocks, addBlocks)) {
+      markChanged(task)
+    }
+
+    for (const blockerId of addBlockedBy) {
+      const blocker = await this.readTaskUnsafe(scopeKey, blockerId)
+      if (blocker && this.addUnique(blocker.blocks, [task.id])) {
+        markChanged(blocker)
+      }
+    }
+    for (const blockedId of addBlocks) {
+      const blocked = await this.readTaskUnsafe(scopeKey, blockedId)
+      if (blocked && this.addUnique(blocked.blockedBy, [task.id])) {
+        markChanged(blocked)
+      }
+    }
+
+    for (const changedTask of changedTasks.values()) {
+      await this.writeTaskUnsafe(scopeKey, changedTask)
+    }
   }
 
   async create(scopeKey: string, input: TaskCreateInput): Promise<TaskItem> {
@@ -206,19 +277,7 @@ export class TaskStore {
         task.owner = toNonEmptyString(input.owner, 'owner')
       }
 
-      const addBlockedBy = normalizeStringList(input.addBlockedBy)
-      for (const blockerId of addBlockedBy) {
-        if (!task.blockedBy.includes(blockerId)) {
-          task.blockedBy.push(blockerId)
-        }
-      }
-
-      const addBlocks = normalizeStringList(input.addBlocks)
-      for (const blockedId of addBlocks) {
-        if (!task.blocks.includes(blockedId)) {
-          task.blocks.push(blockedId)
-        }
-      }
+      await this.applyDependencyChangesUnsafe(scopeKey, task, input)
 
       if (input.metadata && typeof input.metadata === 'object' && !Array.isArray(input.metadata)) {
         const nextMetadata = { ...(task.metadata ?? {}) }
@@ -249,6 +308,17 @@ export class TaskStore {
       if (!existsSync(filePath)) {
         return false
       }
+      const tasks = await this.listUnsafe(scopeKey)
+      for (const task of tasks) {
+        if (task.id === safeTaskId) {
+          continue
+        }
+        const changed = this.removeValues(task.blockedBy, [safeTaskId]) || this.removeValues(task.blocks, [safeTaskId])
+        if (changed) {
+          task.updatedAt = nowTs()
+          await this.writeTaskUnsafe(scopeKey, task)
+        }
+      }
       await rm(filePath, { force: true })
       return true
     })
@@ -261,19 +331,6 @@ export class TaskStore {
 
   async list(scopeKey: string): Promise<TaskItem[]> {
     await this.ensureInitialized(scopeKey)
-    const entries = await readdir(this.tasksDir(scopeKey), { withFileTypes: true })
-    const tasks: TaskItem[] = []
-    for (const entry of entries) {
-      if (!entry.isFile() || extname(entry.name) !== '.json' || entry.name.includes('.tmp.')) {
-        continue
-      }
-      const text = await readFile(join(this.tasksDir(scopeKey), entry.name), 'utf8')
-      const normalized = normalizeTaskRecord(JSON.parse(text) as unknown)
-      if (normalized) {
-        tasks.push(normalized)
-      }
-    }
-    tasks.sort((a, b) => compareTaskIds(a.id, b.id))
-    return tasks
+    return await this.listUnsafe(scopeKey)
   }
 }

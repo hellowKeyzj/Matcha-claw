@@ -3,6 +3,7 @@ import type { TodoStatus } from '../domain/task-status.js'
 import { TaskStoreError } from '../shared/errors.js'
 
 type TodoWriteInput = {
+  oldTodos: TodoItem[]
   newTodos: TodoItem[]
 }
 
@@ -24,8 +25,8 @@ function optionalNonEmptyString(item: Record<string, unknown>, field: string, pa
   return value.trim()
 }
 
-function parseTodoItem(value: unknown, index: number): TodoItem {
-  const path = `newTodos[${index}]`
+function parseTodoItem(value: unknown, field: 'oldTodos' | 'newTodos', index: number): TodoItem {
+  const path = `${field}[${index}]`
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     throw new TaskStoreError('invalid_params', `${path} must be an object`)
   }
@@ -51,18 +52,22 @@ function parseTodoItem(value: unknown, index: number): TodoItem {
   }
 }
 
-function parseTodoItems(value: unknown): TodoItem[] {
+function parseTodoItems(value: unknown, field: 'oldTodos' | 'newTodos'): TodoItem[] {
   if (!Array.isArray(value)) {
-    throw new TaskStoreError('invalid_params', 'newTodos must be an array')
+    throw new TaskStoreError('invalid_params', `${field} must be an array`)
   }
-  return value.map(parseTodoItem)
+  return value.map((item, index) => parseTodoItem(item, field, index))
 }
 
 export function parseTodoWriteInput(params: Record<string, unknown>): TodoWriteInput {
+  if (!Object.prototype.hasOwnProperty.call(params, 'oldTodos')) {
+    throw new TaskStoreError('invalid_params', 'oldTodos is required')
+  }
   if (!Object.prototype.hasOwnProperty.call(params, 'newTodos')) {
     throw new TaskStoreError('invalid_params', 'newTodos is required')
   }
   return {
-    newTodos: parseTodoItems(params.newTodos),
+    oldTodos: parseTodoItems(params.oldTodos, 'oldTodos'),
+    newTodos: parseTodoItems(params.newTodos, 'newTodos'),
   }
 }

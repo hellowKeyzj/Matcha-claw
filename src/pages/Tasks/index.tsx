@@ -22,14 +22,15 @@ import { TaskCenterStatCard } from '@/components/task-center/stat-card';
 import { TASK_CENTER_SURFACE_CARD_CLASS } from '@/components/task-center/styles';
 import { useGatewayStore } from '@/stores/gateway';
 import { useTaskCenterStore } from '@/stores/task-center-store';
-import { useTaskSnapshotStore } from '@/stores/chat/task-snapshot-store';
 import { isGatewayOperational, isGatewayPreparing } from '@/lib/gateway-status';
 import { scheduleIdleReady } from '@/lib/idle-ready';
 import { useDelayedFlag } from '@/lib/use-delayed-flag';
 import { cn } from '@/lib/utils';
 import { Cron } from '@/pages/Cron';
-import type { Task } from '@/services/openclaw/task-manager-client';
+import { listTaskSnapshot, type Task } from '@/services/openclaw/task-manager-client';
 import { useChatStore } from '@/stores/chat';
+import { readSessionsFromState, parseAgentIdFromSessionKey } from '@/stores/chat/session-helpers';
+import { useTeamsStore } from '@/stores/teams';
 
 function statusVariant(status: string): 'default' | 'secondary' | 'destructive' | 'success' {
   if (status === 'completed') return 'success';
@@ -46,7 +47,12 @@ function statusDotClass(status: string): string {
 
 type TaskCenterTab = 'long' | 'scheduled';
 type TaskStatsWindow = 'all' | '7d' | '30d';
+type TaskCenterScopeFilter =
+  | { type: 'agent'; agentId: string }
+  | { type: 'team'; teamId: string };
+
 type TaskStatusFilter = 'all' | 'running' | 'waiting' | 'completed' | 'incomplete';
+type ScopedTask = Task & { scopeKey?: string; scopeType?: 'agent' | 'team'; sourceSessionKey?: string; sourceTeamKey?: string };
 
 const TASK_POLLING_FAST_MS = 5_000;
 const TASK_POLLING_NORMAL_MS = 20_000;
@@ -95,6 +101,30 @@ function resolveDateRangeMs(dateFrom: string, dateTo: string): { startMs: number
   };
 }
 
+function formatFilterValue(filter: TaskCenterScopeFilter): string {
+  return filter.type === 'team' ? `team:${filter.teamId}` : `agent:${filter.agentId}`;
+}
+
+function parseFilterValue(value: string): TaskCenterScopeFilter | null {
+  if (value.startsWith('team:')) {
+    const teamId = value.slice('team:'.length).trim();
+    return teamId ? { type: 'team', teamId } : null;
+  }
+  if (value.startsWith('agent:')) {
+    const agentId = value.slice('agent:'.length).trim();
+    return agentId ? { type: 'agent', agentId } : null;
+  }
+  return null;
+}
+
+function uniqueSorted(values: string[]): string[] {
+  return Array.from(new Set(values.filter((value) => value.trim().length > 0))).sort((left, right) => left.localeCompare(right));
+}
+
+function taskViewKey(task: ScopedTask): string {
+  return `${task.scopeKey ?? task.sourceSessionKey ?? task.sourceTeamKey ?? 'task'}:${task.id}`;
+}
+
 function isIncompleteTask(task: Task): boolean {
   return task.status !== 'completed';
 }
@@ -120,7 +150,10 @@ export function TasksPage() {
   const gatewayStatus = useGatewayStore((state) => state.status);
   const gatewayInitialized = useGatewayStore((state) => state.isInitialized);
   const currentSessionKey = useChatStore((state) => state.currentSessionKey);
-  const tasks = useTaskSnapshotStore((state) => state.getPersistentTaskDataList(currentSessionKey)) as Task[];
+  const sessions = useChatStore((state) => readSessionsFromState(state));
+  const sessionsLoadedOnce = useChatStore((state) => state.sessionCatalogStatus.hasLoadedOnce);
+  const loadSessions = useChatStore((state) => state.loadSessions);
+  const teams = useTeamsStore((state) => state.teams);
   const {
     initialLoading,
     refreshing,
@@ -132,6 +165,11 @@ export function TasksPage() {
     deleteTaskById,
   } = useTaskCenterStore();
 
+  const [scopeFilter, setScopeFilter] = useState<TaskCenterScopeFilter>(() => ({
+    type: 'agent',
+    agentId: parseAgentIdFromSessionKey(currentSessionKey) ?? 'main',
+  }));
+  const [scopedTasks, setScopedTasks] = useState<ScopedTask[]>([]);
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
   const [statsWindow, setStatsWindow] = useState<TaskStatsWindow>('all');
   const [statusFilter, setStatusFilter] = useState<TaskStatusFilter>('all');
@@ -139,10 +177,19 @@ export function TasksPage() {
   const [dateTo, setDateTo] = useState('');
   const [statsNowMs, setStatsNowMs] = useState<number>(() => Date.now());
   const [visibleTaskCount, setVisibleTaskCount] = useState(INITIAL_TASK_LIST_BATCH);
+  const agentIds = useMemo(() => {
+    return uniqueSorted([
+      parseAgentIdFromSessionKey(currentSessionKey) ?? 'main',
+      ...sessions.map((session) => session.agentId ?? parseAgentIdFromSessionKey(session.key) ?? ''),
+    ]);
+  }, [currentSessionKey, sessions]);
+  const tasks = scopedTasks;
   const [taskHeavyContentReady, setTaskHeavyContentReady] = useState(() => tasks.length > 0 || initialized);
   const [taskToDelete, setTaskToDelete] = useState<{ id: string } | null>(null);
+
   const [taskListScrollTop, setTaskListScrollTop] = useState(0);
   const [taskListViewportHeight, setTaskListViewportHeight] = useState(0);
+  const scopedTasksRequestSeqRef = useRef(0);
   const taskListScrollRef = useRef<HTMLDivElement | null>(null);
   const activeTab = resolveTaskCenterTab(searchParams.get('tab'));
   const gatewayOperational = isGatewayOperational(gatewayStatus);
@@ -162,6 +209,80 @@ export function TasksPage() {
     }
     void refreshTasks({ sessionKey: currentSessionKey, silent: true });
   }, [currentSessionKey, init, initialized, refreshTasks]);
+
+  const loadScopedTasks = useCallback(async () => {
+    const requestSeq = scopedTasksRequestSeqRef.current + 1;
+    scopedTasksRequestSeqRef.current = requestSeq;
+    const chatState = useChatStore.getState();
+    const activeSessionKey = chatState.currentSessionKey;
+    const activeSessions = readSessionsFromState(chatState);
+    if (!activeSessionKey) {
+      setScopedTasks([]);
+      return;
+    }
+    if (scopeFilter.type === 'team') {
+      const snapshot = await listTaskSnapshot({ sessionKey: activeSessionKey, teamKey: scopeFilter.teamId });
+      if (scopedTasksRequestSeqRef.current !== requestSeq) {
+        return;
+      }
+      setScopedTasks(snapshot.tasks.map((task) => ({
+        ...task,
+        scopeKey: snapshot.scope?.key ?? `team:${scopeFilter.teamId}`,
+        scopeType: 'team',
+        sourceTeamKey: scopeFilter.teamId,
+      })));
+      return;
+    }
+    const sessionKeys = activeSessions
+      .filter((session) => (session.agentId ?? parseAgentIdFromSessionKey(session.key)) === scopeFilter.agentId)
+      .map((session) => session.key);
+    const uniqueSessionKeys = uniqueSorted(sessionKeys);
+    const snapshots = await Promise.all(uniqueSessionKeys.map(async (sessionKey) => ({
+      sessionKey,
+      snapshot: await listTaskSnapshot({ sessionKey }),
+    })));
+    if (scopedTasksRequestSeqRef.current !== requestSeq) {
+      return;
+    }
+    setScopedTasks(snapshots.flatMap(({ sessionKey, snapshot }) => snapshot.tasks.map((task) => ({
+      ...task,
+      scopeKey: snapshot.scope?.key ?? sessionKey,
+      scopeType: 'agent' as const,
+      sourceSessionKey: sessionKey,
+    }))));
+  }, [scopeFilter]);
+
+  useEffect(() => {
+    if (!sessionsLoadedOnce) {
+      void loadSessions();
+    }
+  }, [loadSessions, sessionsLoadedOnce]);
+
+  useEffect(() => {
+    if (!sessionsLoadedOnce) {
+      return;
+    }
+    void loadScopedTasks().catch(() => {
+      setScopedTasks([]);
+    });
+  }, [loadScopedTasks, sessions, sessionsLoadedOnce]);
+
+  useEffect(() => {
+    let disposed = false;
+    const refreshVisibleTasks = async () => {
+      try {
+        await loadScopedTasks();
+      } catch {
+        if (!disposed) {
+          setScopedTasks([]);
+        }
+      }
+    };
+    void refreshVisibleTasks();
+    return () => {
+      disposed = true;
+    };
+  }, [loadScopedTasks]);
 
   useEffect(() => {
     const updateNow = () => {
@@ -241,7 +362,9 @@ export function TasksPage() {
       clearTimer();
       timer = window.setTimeout(() => {
         void refreshTasks({ silent: true }).finally(() => {
-          scheduleNext();
+          void loadScopedTasks().finally(() => {
+            scheduleNext();
+          });
         });
       }, resolveDelay());
     };
@@ -253,7 +376,9 @@ export function TasksPage() {
       clearTimer();
       if (document.visibilityState === 'visible') {
         void refreshTasks({ silent: true }).finally(() => {
-          scheduleNext();
+          void loadScopedTasks().finally(() => {
+            scheduleNext();
+          });
         });
         return;
       }
@@ -267,7 +392,7 @@ export function TasksPage() {
       clearTimer();
       document.removeEventListener('visibilitychange', handleVisibilityChange);
     };
-  }, [gatewayOperational, hasActiveTasks, refreshTasks]);
+  }, [gatewayOperational, hasActiveTasks, loadScopedTasks, refreshTasks]);
 
   const dateRange = useMemo(() => resolveDateRangeMs(dateFrom, dateTo), [dateFrom, dateTo]);
   const longTasks = useMemo(() => {
@@ -432,14 +557,14 @@ export function TasksPage() {
     if (filteredTasks.length === 0) {
       return null;
     }
-    if (selectedTaskId && filteredTasks.some((task) => task.id === selectedTaskId)) {
+    if (selectedTaskId && filteredTasks.some((task) => taskViewKey(task) === selectedTaskId)) {
       return selectedTaskId;
     }
-    return filteredTasks[0].id;
+    return taskViewKey(filteredTasks[0]);
   }, [filteredTasks, selectedTaskId]);
 
   const selectedTask = useMemo(
-    () => filteredTasks.find((task) => task.id === effectiveSelectedTaskId) ?? null,
+    () => filteredTasks.find((task) => taskViewKey(task) === effectiveSelectedTaskId) ?? null,
     [effectiveSelectedTaskId, filteredTasks],
   );
 
@@ -468,11 +593,11 @@ export function TasksPage() {
   const completedCount = taskStatusSummary.completed;
   const incompleteCount = taskStatusSummary.incomplete;
 
-  const handleDeleteTask = (taskId: string) => {
-    if (!taskId) {
+  const handleDeleteTask = (task: ScopedTask) => {
+    if (!task.id) {
       return;
     }
-    setTaskToDelete({ id: taskId });
+    setTaskToDelete({ id: task.id });
   };
 
   const confirmDeleteTask = async () => {
@@ -480,14 +605,19 @@ export function TasksPage() {
     if (!deletingTaskId) {
       return;
     }
-    await deleteTaskById({ taskId: deletingTaskId });
+    const selected = selectedTask;
+    await deleteTaskById({
+      taskId: deletingTaskId,
+      ...(selected?.sourceSessionKey ? { sessionKey: selected.sourceSessionKey } : {}),
+      ...(selected?.sourceTeamKey ? { teamKey: selected.sourceTeamKey } : {}),
+    });
     const next = useTaskCenterStore.getState();
     if (next.error) {
       toast.error(next.error);
       return;
     }
     toast.success(t('toast.deleted'));
-    if (selectedTaskId === deletingTaskId) {
+    if (selectedTaskId === (selected ? taskViewKey(selected) : deletingTaskId)) {
       setSelectedTaskId(null);
     }
     setTaskToDelete(null);
@@ -608,7 +738,9 @@ export function TasksPage() {
                 className="h-9 w-9"
                 aria-label={t('refresh')}
                 title={t('refresh')}
-                onClick={() => void refreshTasks()}
+                onClick={() => {
+                  void loadSessions().then(() => loadScopedTasks());
+                }}
                 disabled={manualRefreshBusy}
               >
                 <RefreshCw className={cn('h-4 w-4', refreshing && 'animate-spin')} />
@@ -709,7 +841,32 @@ export function TasksPage() {
             <div className="grid grid-cols-1 gap-4 lg:grid-cols-[380px_minmax(0,1fr)]">
               <Card className={cn(TASK_CENTER_SURFACE_CARD_CLASS, 'flex h-[70vh] flex-col overflow-hidden')}>
                 <CardHeader className="shrink-0">
-                  <CardTitle>{t('listTitle')}</CardTitle>
+                  <div className="flex items-center justify-between gap-3">
+                    <CardTitle>{t('listTitle')}</CardTitle>
+                    <select
+                      value={formatFilterValue(scopeFilter)}
+                      onChange={(event) => {
+                        const next = parseFilterValue(event.target.value);
+                        if (next) {
+                          setScopeFilter(next);
+                          setSelectedTaskId(null);
+                        }
+                      }}
+                      className="h-8 max-w-[220px] shrink-0 rounded-md border border-input bg-background px-2 text-sm"
+                      aria-label={t('scope.label', { defaultValue: 'Scope' })}
+                    >
+                      {agentIds.map((agentId) => (
+                        <option key={`agent:${agentId}`} value={`agent:${agentId}`}>
+                          Agent: {agentId}
+                        </option>
+                      ))}
+                      {teams.map((team) => (
+                        <option key={`team:${team.id}`} value={`team:${team.id}`}>
+                          Team: {team.name || team.id}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
                 </CardHeader>
                 <CardContent ref={taskListScrollRef} className="min-h-0 flex-1 overflow-y-auto pb-6" onScroll={handleTaskListScroll}>
                   {!taskHeavyContentReady ? (
@@ -731,13 +888,13 @@ export function TasksPage() {
                       ) : null}
                       {virtualWindow.tasks.map((task) => (
                         <button
-                          key={task.id}
+                          key={taskViewKey(task)}
                           type="button"
                           className={cn(
                             'w-full rounded-lg border p-3 text-left transition-colors',
-                            effectiveSelectedTaskId === task.id ? 'border-primary bg-primary/5' : 'hover:bg-accent/40',
+                            effectiveSelectedTaskId === taskViewKey(task) ? 'border-primary bg-primary/5' : 'hover:bg-accent/40',
                           )}
-                          onClick={() => setSelectedTaskId(task.id)}
+                          onClick={() => setSelectedTaskId(taskViewKey(task))}
                         >
                           <div className="flex items-start justify-between gap-2">
                             <p className="line-clamp-2 text-sm font-medium">{task.subject}</p>
@@ -786,7 +943,7 @@ export function TasksPage() {
                         size="sm"
                         variant="ghost"
                         className="shrink-0"
-                        onClick={() => void handleDeleteTask(selectedTask.id)}
+                        onClick={() => void handleDeleteTask(selectedTask)}
                         disabled={mutating}
                       >
                         <Trash2 className="h-4 w-4 text-destructive" />

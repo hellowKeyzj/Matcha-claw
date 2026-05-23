@@ -4,6 +4,7 @@ export type TaskStoreErrorCode =
   | 'already_claimed'
   | 'blocked'
   | 'invalid_transition'
+  | 'stale_todos'
   | 'store_unavailable'
 
 export class TaskStoreError extends Error {
@@ -36,6 +37,7 @@ export function mapTaskStoreError(error: unknown): TaskStoreErrorPayload {
       case 'already_claimed':
       case 'blocked':
       case 'invalid_transition':
+      case 'stale_todos':
         return { code: error.code, message: error.message, statusCode: 409 }
       case 'store_unavailable':
       default:
