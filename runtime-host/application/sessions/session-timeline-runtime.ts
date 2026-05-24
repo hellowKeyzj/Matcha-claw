@@ -3,6 +3,8 @@ import type {
   SessionRuntimeStateSnapshot,
   SessionTimelineAssistantTurnEntry,
   SessionTimelineEntry,
+  type SessionTurnToolResultsRequest,
+  type SessionTurnToolResultsResult,
   TaskSnapshotEvent,
 } from '../../shared/session-adapter-types';
 import { isRunActive } from '../../shared/session-adapter-types';
@@ -12,6 +14,7 @@ import {
 } from './transcript-timeline-materializer';
 import type { SessionTranscriptMessage } from './transcript-types';
 import {
+  assembleAuthoritativeAssistantTurns,
   resolveAssistantTurnItemKeyFromTimelineEntry,
 } from './assistant-turn-assembler';
 import {
@@ -231,6 +234,69 @@ export class SessionTimelineRuntime {
     this.touchSessionStateMeta(state);
     this.deps.stateStore.persistStore();
     return result.updatedEntries;
+  }
+
+  async reconcileTurnToolResults(
+    request: SessionTurnToolResultsRequest,
+  ): Promise<SessionTurnToolResultsResult> {
+    const sessionKey = normalizeString(request.sessionKey);
+    const state = this.getSessionState(sessionKey);
+    const replay = await this.deps.transcriptLoader.readTimelineReplay(sessionKey);
+    const result = applyTranscriptToolResultUpdates(state.timelineEntries, replay.timelineEntries);
+    const updatedEntry = this.resolveTurnToolResultEntry(result.updatedEntries, request);
+    if (updatedEntry) {
+      state.timelineEntries = result.entries;
+      this.deps.executionGraphRuntime.rebuildFromTimeline(sessionKey, state);
+      this.deps.executionGraphRuntime.refreshRenderItems(state);
+      state.window = state.window.isAtLatest
+        ? createLatestWindowState(state.renderItems.length)
+        : clampWindowState(state.window, state.renderItems.length);
+      this.deps.executionGraphRuntime.refreshParents(sessionKey);
+      this.touchSessionStateMeta(state);
+      this.deps.stateStore.persistStore();
+    }
+    const item = updatedEntry
+      ? assembleAuthoritativeAssistantTurns({
+          sessionKey,
+          timelineEntries: [updatedEntry],
+          runtime: state.runtime,
+        }).itemsByEntryKey.get(updatedEntry.key) ?? null
+      : null;
+    return {
+      sessionKey,
+      turnKey: updatedEntry?.turnKey ?? (normalizeString(request.turnKey) || null),
+      item,
+      runtime: cloneSessionRuntimeState(state.runtime),
+    };
+  }
+
+  private resolveTurnToolResultEntry(
+    entries: SessionTimelineAssistantTurnEntry[],
+    request: SessionTurnToolResultsRequest,
+  ): SessionTimelineAssistantTurnEntry | null {
+    const turnKey = normalizeString(request.turnKey);
+    const runId = normalizeString(request.runId);
+    const toolCallIds = new Set((request.toolCallIds ?? []).map(normalizeString).filter(Boolean));
+    for (let index = entries.length - 1; index >= 0; index -= 1) {
+      const entry = entries[index]!;
+      if (turnKey && entry.turnKey !== turnKey) {
+        continue;
+      }
+      if (runId && entry.runId !== runId) {
+        continue;
+      }
+      if (toolCallIds.size > 0 && !entry.segments.some((segment) => (
+        segment.kind === 'tool'
+        && (
+          toolCallIds.has(segment.tool.toolCallId ?? '')
+          || toolCallIds.has(segment.tool.id)
+        )
+      ))) {
+        continue;
+      }
+      return entry;
+    }
+    return null;
   }
 
   async activateSession(

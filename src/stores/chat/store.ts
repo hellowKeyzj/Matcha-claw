@@ -6,7 +6,7 @@
 import { create } from 'zustand';
 import type { GatewayStatus } from '@/types/gateway';
 import { createIdleResourceStatusState } from '@/lib/resource-state';
-import { hostSessionApprovals, hostSessionRename, hostSessionResolveApproval } from '@/lib/host-api';
+import { hostSessionApprovals, hostSessionRename, hostSessionResolveApproval, hostSessionTurnToolResults } from '@/lib/host-api';
 import { useGatewayStore } from '../gateway';
 import { executeStoreAbortRun } from './abort-handlers';
 import {
@@ -43,7 +43,7 @@ import {
   DEFAULT_SESSION_KEY,
   type ChatStoreState,
 } from './types';
-import { createEmptySessionRecord, getSessionRuntime } from './store-state-helpers';
+import { createEmptySessionRecord, getSessionRuntime, patchSessionRecord, patchSessionTurnItem } from './store-state-helpers';
 import { finishChatRunTelemetry } from './telemetry';
 import { buildRuntimeErrorDismissMarker } from './runtime-error-view';
 
@@ -99,7 +99,11 @@ export const useChatStore = create<ChatStoreState>((set, get) => {
       if (!normalizedSessionKey) {
         return Promise.resolve();
       }
-      return executeHistoryLoad({
+      const currentTask = historyRuntime.getHistoryLoadInFlight(normalizedSessionKey);
+      if (currentTask) {
+        return currentTask;
+      }
+      const task = executeHistoryLoad({
         set,
         get,
         historyRuntime,
@@ -108,6 +112,37 @@ export const useChatStore = create<ChatStoreState>((set, get) => {
       }, {
         ...request,
         sessionKey: normalizedSessionKey,
+      });
+      historyRuntime.setHistoryLoadInFlight(normalizedSessionKey, task);
+      void task.then(
+        () => historyRuntime.clearHistoryLoadInFlight(normalizedSessionKey, task),
+        () => historyRuntime.clearHistoryLoadInFlight(normalizedSessionKey, task),
+      );
+      return task;
+    },
+    loadTurnToolResults: async (request) => {
+      const sessionKey = request.sessionKey.trim();
+      if (!sessionKey) return;
+      const result = await hostSessionTurnToolResults({
+        sessionKey,
+        ...(request.runId ? { runId: request.runId } : {}),
+        ...(request.turnKey ? { turnKey: request.turnKey } : {}),
+        ...(request.toolCallIds && request.toolCallIds.length > 0 ? { toolCallIds: request.toolCallIds } : {}),
+      });
+      if (!result.item) return;
+      set((state) => {
+        const current = state.loadedSessions[sessionKey];
+        if (!current) return state;
+        return {
+          loadedSessions: patchSessionRecord({
+            loadedSessions: patchSessionTurnItem(state, sessionKey, result.item!),
+          }, sessionKey, {
+            runtime: {
+              ...current.runtime,
+              ...result.runtime,
+            },
+          }),
+        };
       });
     },
     loadOlderViewportItems: (sessionKey) => executeLoadOlderViewportItems(sessionInput, sessionKey),
@@ -222,7 +257,7 @@ export const useChatStore = create<ChatStoreState>((set, get) => {
       return true;
     },
     handleSessionUpdateEvent: (event) => {
-      handleStoreSessionUpdateEvent({ set, get }, event);
+      handleStoreSessionUpdateEvent({ set, get, historyRuntime }, event);
     },
     toggleThinking: () => set((state) => ({ showThinking: !state.showThinking })),
     refresh: async () => {

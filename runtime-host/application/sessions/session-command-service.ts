@@ -3,6 +3,7 @@ import type {
   SessionLoadResult,
   SessionNewResult,
   SessionWindowResult,
+  type SessionTurnToolResultsResult,
 } from '../../shared/session-adapter-types';
 import {
   createLatestWindowState,
@@ -30,7 +31,6 @@ import {
   conflict,
   notFound,
   ok,
-  serverError,
   type ApplicationResponseOf,
 } from '../common/application-response';
 import type { GatewayRpcPort } from '../gateway/gateway-runtime-port';
@@ -62,11 +62,11 @@ export interface SessionCommandServiceDeps {
   emitTaskSnapshot?: (event: TaskSnapshotEvent) => void;
 }
 
-type SessionHydratingLoadResult = SessionLoadResult & {
+type SessionHydratingLoadResult = Partial<SessionLoadResult> & {
   hydrationJob: SessionHydrationJobSubmission['job'];
 };
 
-type SessionHydratingWindowResult = SessionWindowResult & {
+type SessionHydratingWindowResult = Partial<SessionWindowResult> & {
   hydrationJob: SessionHydrationJobSubmission['job'];
 };
 
@@ -81,6 +81,15 @@ export class SessionCommandService {
       sessionKey: input.sessionKey,
       snapshot: input.snapshot,
     }).job;
+  }
+
+  private acceptHydrationJob(input: {
+    sessionKey: string;
+    snapshot: Parameters<SessionHydrationJobPort['submitSessionHydration']>[0]['snapshot'];
+  }): ApplicationResponseOf<SessionHydratingLoadResult | SessionHydratingWindowResult> {
+    return accepted({
+      hydrationJob: this.submitHydrationJob(input),
+    });
   }
 
   private withTaskSnapshot<T extends { snapshot: SessionLoadResult['snapshot'] }>(
@@ -196,27 +205,9 @@ export class SessionCommandService {
     if (!sessionKey) {
       return badRequest('sessionKey is required');
     }
-
-    return await this.deps.operationCoordinator.run(sessionKey, 'resume', async () => {
-      const state = await this.deps.timelineRuntime.activateSession(sessionKey, {
-        resetWindowToLatest: true,
-      });
-      const result: SessionLoadResult = this.withTaskSnapshot(sessionKey, {
-        snapshot: await this.deps.snapshotService.buildLatestSnapshotAsync(sessionKey, state, {
-          replayComplete: state.hydrated,
-        }),
-      });
-      await this.deps.stateStore.flushPersistedStore();
-      if (!state.hydrated) {
-        return accepted({
-          ...result,
-          hydrationJob: this.submitHydrationJob({
-            sessionKey,
-            snapshot: { kind: 'latest' },
-          }),
-        });
-      }
-      return ok(result);
+    return this.acceptHydrationJob({
+      sessionKey,
+      snapshot: { kind: 'latest' },
     });
   }
 
@@ -225,30 +216,9 @@ export class SessionCommandService {
     if (!sessionKey) {
       return badRequest('sessionKey is required');
     }
-
-    return await this.deps.operationCoordinator.run(sessionKey, 'resume', async () => {
-      const state = await this.deps.timelineRuntime.activateSession(sessionKey, {
-        resetWindowToLatest: false,
-      });
-      const result: SessionLoadResult = this.withTaskSnapshot(sessionKey, {
-        snapshot: await this.deps.snapshotService.buildSnapshotAsync(sessionKey, state, {
-          window: state.window.totalItemCount > 0
-            ? state.window
-            : createLatestWindowState(state.renderItems.length),
-          replayComplete: state.hydrated,
-        }),
-      });
-      await this.deps.stateStore.flushPersistedStore();
-      if (!state.hydrated) {
-        return accepted({
-          ...result,
-          hydrationJob: this.submitHydrationJob({
-            sessionKey,
-            snapshot: { kind: 'state' },
-          }),
-        });
-      }
-      return ok(result);
+    return this.acceptHydrationJob({
+      sessionKey,
+      snapshot: { kind: 'state' },
     });
   }
 
@@ -323,27 +293,9 @@ export class SessionCommandService {
     if (!sessionKey) {
       return badRequest('sessionKey is required');
     }
-    return await this.deps.operationCoordinator.run(sessionKey, 'resume', async () => {
-      const state = await this.deps.timelineRuntime.activateSession(sessionKey);
-      const data: SessionLoadResult = this.withTaskSnapshot(sessionKey, {
-        snapshot: await this.deps.snapshotService.buildSnapshotAsync(sessionKey, state, {
-          window: state.window.totalItemCount > 0
-            ? state.window
-            : createLatestWindowState(state.renderItems.length),
-          replayComplete: state.hydrated,
-        }),
-      });
-      await this.deps.stateStore.flushPersistedStore();
-      if (!state.hydrated) {
-        return accepted({
-          ...data,
-          hydrationJob: this.submitHydrationJob({
-            sessionKey,
-            snapshot: { kind: 'state' },
-          }),
-        });
-      }
-      return ok(data);
+    return this.acceptHydrationJob({
+      sessionKey,
+      snapshot: { kind: 'state' },
     });
   }
 
@@ -362,40 +314,14 @@ export class SessionCommandService {
       return badRequest(`offset is required for mode: ${mode}`);
     }
 
-    return await this.deps.operationCoordinator.run(sessionKey, 'resume', async () => {
-      const state = await this.deps.timelineRuntime.activateSession(sessionKey);
-      if (!state.hydrated) {
-        const result: SessionWindowResult = this.withTaskSnapshot(sessionKey, {
-          snapshot: await this.deps.snapshotService.buildSnapshotAsync(sessionKey, state, {
-            window: state.window.totalItemCount > 0
-              ? state.window
-              : createLatestWindowState(state.renderItems.length),
-            replayComplete: false,
-          }),
-        });
-        await this.deps.stateStore.flushPersistedStore();
-        return accepted({
-          ...result,
-          hydrationJob: this.submitHydrationJob({
-            sessionKey,
-            snapshot: {
-              kind: 'window',
-              mode,
-              limit,
-              offset,
-            },
-          }),
-        });
-      }
-      const result: SessionWindowResult = this.withTaskSnapshot(sessionKey, {
-        snapshot: await this.deps.snapshotService.buildWindowSnapshotAsync(sessionKey, state, {
-          mode,
-          limit,
-          offset,
-        }),
-      });
-      await this.deps.stateStore.flushPersistedStore();
-      return ok(result);
+    return this.acceptHydrationJob({
+      sessionKey,
+      snapshot: {
+        kind: 'window',
+        mode,
+        limit,
+        offset,
+      },
     });
   }
 
@@ -456,6 +382,29 @@ export class SessionCommandService {
     const response = await this.commitAbortSession(sessionKey);
     void this.deps.gateway.gatewayRpc('chat.abort', { sessionKey }, 5000).catch(() => undefined);
     return response;
+  }
+
+  async loadTurnToolResults(payload: unknown): Promise<ApplicationResponseOf<SessionTurnToolResultsResult | { success: false; error: string }>> {
+    const body = payload && typeof payload === 'object' && !Array.isArray(payload)
+      ? payload as Record<string, unknown>
+      : {};
+    const sessionKey = readRequiredSessionKey(payload);
+    if (!sessionKey) {
+      return badRequest('sessionKey is required');
+    }
+    const turnKey = typeof body.turnKey === 'string' ? body.turnKey.trim() : '';
+    const runId = typeof body.runId === 'string' ? body.runId.trim() : '';
+    const toolCallIds = Array.isArray(body.toolCallIds)
+      ? body.toolCallIds.filter((value): value is string => typeof value === 'string' && value.trim().length > 0)
+      : [];
+    return ok(await this.deps.operationCoordinator.run(sessionKey, 'tool-results', async () => (
+      await this.deps.timelineRuntime.reconcileTurnToolResults({
+        sessionKey,
+        ...(turnKey ? { turnKey } : {}),
+        ...(runId ? { runId } : {}),
+        ...(toolCallIds.length > 0 ? { toolCallIds } : {}),
+      })
+    )));
   }
 
   async listPendingApprovals(): Promise<ApplicationResponseOf<unknown>> {

@@ -256,7 +256,7 @@ function resolveViewportFetchLimit(itemCount: number): number {
 }
 
 function resolveViewportWindowRequestState(input: {
-  payload: Awaited<ReturnType<typeof hostSessionWindowFetch>>;
+  payload: SessionWindowResult;
 }) {
   const window = input.payload.snapshot.window;
   return {
@@ -325,7 +325,12 @@ export async function executeViewportWindowLoad(
     });
     const payload = initialPayload.hydrationJob
       ? await waitForRuntimeJobResult<SessionWindowResult>(initialPayload.hydrationJob.id)
-      : initialPayload;
+      : initialPayload.snapshot
+        ? initialPayload as SessionWindowResult
+        : null;
+    if (!payload) {
+      throw new Error('session window did not return a snapshot');
+    }
     useTaskSnapshotStore.getState().reportSessionSnapshot(payload.snapshot, 'replay');
     const nextViewportRequestState = resolveViewportWindowRequestState({ payload });
     deps.set((state) => ({

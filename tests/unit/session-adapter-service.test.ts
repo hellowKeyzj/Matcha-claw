@@ -333,16 +333,33 @@ describe('session runtime service', () => {
       operationCoordinator: new SessionOperationCoordinator(),
       clock: testClock,
       idGenerator: { randomId: () => 'id' },
-      sessionHydrationJobs: {} as never,
+      sessionHydrationJobs: {
+        submitSessionHydration: vi.fn(({ sessionKey }) => ({
+          success: true,
+          job: {
+            id: `test-session-hydration:${sessionKey}:latest`,
+            type: 'sessions.hydrateTimeline',
+            queue: 'low',
+            status: 'queued',
+            queuedAt: 1,
+            attempts: 0,
+            maxAttempts: 1,
+          },
+        } as const)),
+      },
       readTaskSnapshot,
       emitTaskSnapshot: vi.fn(),
     });
 
-    await expect(service.loadSession({ sessionKey: 'agent:main:main' })).resolves.toEqual({
-      status: 200,
-      data: { snapshot },
+    await expect(service.loadSession({ sessionKey: 'agent:main:main' })).resolves.toMatchObject({
+      status: 202,
+      data: {
+        hydrationJob: {
+          type: 'sessions.hydrateTimeline',
+        },
+      },
     });
-    expect(readTaskSnapshot).toHaveBeenCalledWith('agent:main:main');
+    expect(readTaskSnapshot).not.toHaveBeenCalled();
   });
 
   it('createSession returns an empty authoritative render-item snapshot', async () => {
@@ -428,11 +445,8 @@ describe('session runtime service', () => {
       hydrationJob: {
         type: 'sessions.hydrateTimeline',
       },
-      snapshot: {
-        replayComplete: false,
-        items: [],
-      },
     });
+    expect(response.data).not.toHaveProperty('snapshot');
 
     const hydrated = await service.executeSessionHydration({
       sessionKey: 'agent:main:main',
@@ -748,7 +762,7 @@ describe('session runtime service', () => {
         args: { file_path: 'package.json' },
       },
     });
-    const [event] = await service.consumeGatewayConversationEvent({
+    await service.consumeGatewayConversationEvent({
       type: 'chat.message',
       event: {
         state: 'delta',
@@ -758,6 +772,19 @@ describe('session runtime service', () => {
         message: {
           role: 'assistant',
           content: [{ type: 'text', text: '我先检查文件，现在开始读取配置' }],
+        },
+      },
+    });
+    const [event] = await service.consumeGatewayConversationEvent({
+      type: 'chat.message',
+      event: {
+        state: 'delta',
+        runId: 'run-live-snapshot-tool',
+        sessionKey: 'agent:main:main',
+        sequenceId: 4,
+        message: {
+          role: 'assistant',
+          content: [{ type: 'text', text: '我先检查文件，现在开始读取配置并确认依赖' }],
         },
       },
     });
@@ -771,7 +798,7 @@ describe('session runtime service', () => {
       segments: [
         { kind: 'message', text: '我先检查文件' },
         { kind: 'tool', tool: { toolCallId: 'tool-read-1', name: 'Read' } },
-        { kind: 'message', text: '，现在开始读取配置' },
+        { kind: 'message', text: '，现在开始读取配置并确认依赖' },
       ],
     });
   });
@@ -4759,14 +4786,16 @@ describe('session runtime service', () => {
       },
     });
 
-    const windowResponse = await service.getSessionWindow({
+    const windowResponse = await service.executeSessionHydration({
       sessionKey: 'agent:main:main',
-      mode: 'latest',
-      limit: 20,
-      includeCanonical: true,
+      snapshot: {
+        kind: 'window',
+        mode: 'latest',
+        limit: 20,
+        offset: null,
+      },
     });
-    expect(windowResponse.status).toBe(200);
-    expect(windowResponse.data).toMatchObject({
+    expect(windowResponse).toMatchObject({
       snapshot: {
         items: expect.arrayContaining([
           expect.objectContaining({

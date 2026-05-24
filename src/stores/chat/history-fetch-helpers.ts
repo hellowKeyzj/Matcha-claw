@@ -45,7 +45,12 @@ export async function fetchHistoryWindow(
     ? await waitForRuntimeJobResult<SessionLoadResult>(initial.hydrationJob.id, {
         timeoutMs,
       })
-    : initial;
+    : initial.snapshot
+      ? initial as SessionLoadResult
+      : null;
+  if (!data) {
+    throw new Error('session load did not return a snapshot');
+  }
   return {
     snapshot: data.snapshot,
     thinkingLevel: resolveSessionThinkingLevelFromList(sessions, requestedSessionKey),

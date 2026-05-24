@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { applyStoreSendStart, executeStoreSend } from '@/stores/chat/send-handlers';
+import { applyStoreSendStart, executeStoreSend, startStoreSendWatchers } from '@/stores/chat/send-handlers';
 import { createStoreSessionRunCache } from '@/stores/chat/session-run-cache';
 import type { ChatStoreState } from '@/stores/chat/types';
 import type { RawMessage } from './helpers/timeline-fixtures';
@@ -179,6 +179,56 @@ describe('chat send handlers', () => {
     expect(getSessionItems(state, sessionKey)[0]).toMatchObject({
       messageId: 'user-local-1',
     });
+  });
+
+  it('does not poll history while a run is active', async () => {
+    vi.useFakeTimers();
+    try {
+      const sessionKey = 'agent:main:session-1';
+      let state = {
+        currentSessionKey: sessionKey,
+        loadedSessions: {
+          [sessionKey]: {
+            ...createSessionRecord({ sessionKey }),
+            runtime: {
+              activeRunId: 'run-1',
+              runPhase: 'waiting_tool' as const,
+              activeTurnItemKey: null,
+              pendingTurnKey: 'run-1',
+              pendingTurnLaneKey: 'main',
+              runtimeActivity: null,
+              lastUserMessageAt: 1,
+              lastError: null,
+              lastIssue: null,
+              updatedAt: 1,
+            },
+          },
+        },
+        loadHistory: vi.fn().mockResolvedValue(undefined),
+        syncPendingApprovals: vi.fn().mockResolvedValue(undefined),
+      } as unknown as ChatStoreState;
+      const set = (
+        partial: Partial<ChatStoreState> | ((current: ChatStoreState) => Partial<ChatStoreState> | ChatStoreState),
+      ) => {
+        const patch = typeof partial === 'function' ? partial(state) : partial;
+        state = { ...state, ...patch } as ChatStoreState;
+      };
+      const get = () => state;
+
+      startStoreSendWatchers({
+        set,
+        get,
+        sessionKey,
+        onSafetyTimeout: vi.fn(),
+      });
+
+      await vi.advanceTimersByTimeAsync(60_000);
+
+      expect(state.loadHistory).not.toHaveBeenCalled();
+      expect(state.syncPendingApprovals).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('ignores a second send while the current session is already sending', async () => {

@@ -20,6 +20,12 @@ function createHistoryRuntimeHarness(): StoreHistoryCache {
     },
     replaceHistoryLoadAbortController: () => null,
     clearHistoryLoadAbortController: () => {},
+    resetTerminalHistoryReconcile: () => {},
+    markTerminalHistoryReconcileNeeded: () => {},
+    consumeTerminalHistoryReconcileNeeded: () => false,
+    getHistoryLoadInFlight: () => null,
+    setHistoryLoadInFlight: () => {},
+    clearHistoryLoadInFlight: () => {},
     historyFingerprintBySession: new Map<string, string>(),
     historyRenderFingerprintBySession: new Map<string, string>(),
   };

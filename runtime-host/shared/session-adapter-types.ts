@@ -428,6 +428,20 @@ export interface SessionStateSnapshot {
   window: SessionWindowStateSnapshot;
 }
 
+export interface SessionTurnToolResultsRequest {
+  sessionKey: string;
+  turnKey?: string;
+  runId?: string;
+  toolCallIds?: string[];
+}
+
+export interface SessionTurnToolResultsResult {
+  sessionKey: string;
+  turnKey: string | null;
+  item: SessionAssistantTurnItem | null;
+  runtime: SessionRuntimeStateSnapshot;
+}
+
 export interface SessionLoadResult {
   snapshot: SessionStateSnapshot;
 }

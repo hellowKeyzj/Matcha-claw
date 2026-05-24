@@ -7,11 +7,13 @@ import type { SessionRenderItem } from '../../runtime-host/shared/session-adapte
 
 const hostApiFetchMock = vi.fn();
 const hostSessionAbortMock = vi.fn();
+const hostSessionTurnToolResultsMock = vi.fn();
 const subscribeHostEventMock = vi.fn();
 
 vi.mock('@/lib/host-api', () => ({
   hostApiFetch: (...args: unknown[]) => hostApiFetchMock(...args),
   hostSessionAbort: (...args: unknown[]) => hostSessionAbortMock(...args),
+  hostSessionTurnToolResults: (...args: unknown[]) => hostSessionTurnToolResultsMock(...args),
 }));
 
 vi.mock('@/lib/host-events', () => ({
@@ -320,6 +322,7 @@ describe('gateway store event wiring', () => {
     vi.resetModules();
     vi.clearAllMocks();
     hostSessionAbortMock.mockReset();
+    hostSessionTurnToolResultsMock.mockReset();
   });
 
   it('subscribes to host events through subscribeHostEvent on init', async () => {
@@ -895,6 +898,91 @@ describe('gateway store event wiring', () => {
         name: 'memory_store',
         status: 'running',
       }],
+    });
+  });
+
+  it('tool session:update reloads history once after terminal assistant item', async () => {
+    hostApiFetchMock.mockResolvedValueOnce(createRunningGatewayStatus());
+    const handlers = new Map<string, (payload: unknown) => void>();
+    subscribeHostEventMock.mockImplementation((eventName: string, handler: (payload: unknown) => void) => {
+      handlers.set(eventName, handler);
+      return () => {};
+    });
+
+    hostSessionTurnToolResultsMock.mockResolvedValueOnce({
+      sessionKey: 'agent:main:main',
+      turnKey: 'run:run-tool-reconcile-1',
+      item: null,
+      runtime: createSessionRecord().runtime,
+    });
+    const { useChatStore } = await import('@/stores/chat');
+    const loadHistoryMock = vi.fn().mockResolvedValue(undefined);
+    useChatStore.setState({
+      currentSessionKey: 'agent:main:main',
+      sessionCatalogStatus: {
+        status: 'ready',
+        error: null,
+        hasLoadedOnce: true,
+        lastLoadedAt: 1,
+      },
+      loadedSessions: {
+        'agent:main:main': createSessionRecord({
+          runtime: {
+            activeRunId: 'run-tool-reconcile-1',
+            runPhase: 'streaming',
+          },
+        }),
+      },
+      loadHistory: loadHistoryMock,
+    } as never);
+
+    const { useGatewayStore } = await import('@/stores/gateway');
+    await useGatewayStore.getState().init();
+
+    handlers.get('session:update')?.(createSessionMessageUpdate({
+      kind: 'agent_message_chunk',
+      runId: 'run-tool-reconcile-1',
+      sessionKey: 'agent:main:main',
+      sequenceId: 1,
+      message: {
+        role: 'assistant',
+        id: 'run:run-tool-reconcile-1:tool:tool-1',
+        content: [{
+          type: 'toolCall',
+          id: 'tool-1',
+          name: 'Read',
+          input: { file_path: 'demo.txt' },
+        }],
+      },
+    }));
+
+    expect(loadHistoryMock).not.toHaveBeenCalled();
+
+    handlers.get('session:update')?.(createSessionMessageUpdate({
+      kind: 'agent_message',
+      runId: 'run-tool-reconcile-1',
+      sessionKey: 'agent:main:main',
+      message: {
+        role: 'assistant',
+        id: 'assistant-final-tool-1',
+        content: 'done',
+      },
+    }));
+    handlers.get('session:update')?.(createSessionInfoUpdate({
+      phase: 'final',
+      runId: 'run-tool-reconcile-1',
+      sessionKey: 'agent:main:main',
+    }));
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(loadHistoryMock).not.toHaveBeenCalled();
+    expect(hostSessionTurnToolResultsMock).toHaveBeenCalledTimes(1);
+    expect(hostSessionTurnToolResultsMock).toHaveBeenCalledWith({
+      sessionKey: 'agent:main:main',
+      runId: 'run-tool-reconcile-1',
+      turnKey: 'run:run-tool-reconcile-1:tool:tool-1',
+      toolCallIds: ['tool-1'],
     });
   });
 

@@ -134,6 +134,37 @@ function resolveLiveSnapshotSuffix(
   return incoming.slice(previous.length).trimStart();
 }
 
+function resolveLiveSnapshotTailMessageText(input: {
+  incomingText: string;
+  previousSnapshotText: string | undefined;
+  previousMessageText: string;
+}): string {
+  const incoming = sanitizeAssistantDisplayText([{ type: 'text', text: input.incomingText }]);
+  const previousSnapshot = sanitizeAssistantDisplayText([{ type: 'text', text: input.previousSnapshotText ?? '' }]);
+  const previousMessage = sanitizeAssistantDisplayText([{ type: 'text', text: input.previousMessageText }]);
+  if (!incoming) {
+    return previousMessage;
+  }
+  if (!previousSnapshot || !previousMessage) {
+    return previousMessage || incoming;
+  }
+  if (previousSnapshot.endsWith(previousMessage)) {
+    const stablePrefix = previousSnapshot.slice(0, previousSnapshot.length - previousMessage.length);
+    if (stablePrefix && incoming.startsWith(stablePrefix)) {
+      return incoming.slice(stablePrefix.length).trimStart();
+    }
+  }
+  if (incoming.startsWith(previousSnapshot)) {
+    const delta = incoming.slice(previousSnapshot.length).trimStart();
+    return delta ? `${previousMessage}${delta}` : previousMessage;
+  }
+  return previousMessage;
+}
+
+function hasToolSegmentBeforeTail(segments: ReadonlyArray<SessionAssistantTurnSegment>): boolean {
+  return segments.slice(0, -1).some((segment) => segment.kind === 'tool');
+}
+
 function buildMediaSegment(input: {
   key: string;
   images: ReadonlyArray<SessionRenderImage>;
@@ -356,13 +387,18 @@ export function buildSegmentsFromChatContent(input: {
   if (incomingText.trim()) {
     const lastSegment = segments[segments.length - 1];
     if (lastSegment?.kind === 'message') {
-      // Tail is already a message → update in place (same text position)
       const previousText = (lastSegment as SessionAssistantMessageSegment).text;
-      (lastSegment as SessionAssistantMessageSegment).text = normalizeIncomingMessageText(
-        incomingText,
-        previousText,
-        input.isStreaming,
-      );
+      (lastSegment as SessionAssistantMessageSegment).text = input.isStreaming && hasToolSegmentBeforeTail(segments)
+        ? resolveLiveSnapshotTailMessageText({
+            incomingText,
+            previousSnapshotText: input.previousSnapshotText,
+            previousMessageText: previousText,
+          })
+        : normalizeIncomingMessageText(
+            incomingText,
+            previousText,
+            input.isStreaming,
+          );
     } else {
       const appendText = input.isStreaming
         ? resolveLiveSnapshotSuffix(incomingText, input.previousSnapshotText)

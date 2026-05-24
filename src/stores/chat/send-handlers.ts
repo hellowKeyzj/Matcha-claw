@@ -10,7 +10,6 @@ import {
   clearHistoryPoll,
   clearSendSafetyTimer,
   getLastChatEventAt,
-  setHistoryPollTimer,
   setLastChatEventAt,
   setSendSafetyTimer,
 } from './timers';
@@ -65,7 +64,6 @@ interface StartStoreSendWatchersParams {
   set: ChatStoreSetFn;
   get: ChatStoreGetFn;
   sessionKey: string;
-  source: 'send' | 'resume';
   onSafetyTimeout: () => void;
 }
 
@@ -74,43 +72,13 @@ export function startStoreSendWatchers(params: StartStoreSendWatchersParams): vo
     set,
     get,
     sessionKey,
-    source,
     onSafetyTimeout,
   } = params;
-  const pollReason = source === 'resume' ? 'switch_session_poll' : 'send_poll';
 
   setLastChatEventAt(Date.now());
   clearHistoryPoll();
   clearErrorRecoveryTimer();
   clearSendSafetyTimer();
-
-  const POLL_START_DELAY_MS = 3_000;
-  const POLL_INTERVAL_MS = 4_000;
-  const pollHistory = () => {
-    const state = get();
-    if (state.currentSessionKey !== sessionKey) {
-      clearHistoryPoll();
-      return;
-    }
-    const runtime = getSessionRuntime(state, sessionKey);
-    if (!isRunActive(runtime)) {
-      clearHistoryPoll();
-      return;
-    }
-    if (hasActiveStreamingRun(runtime)) {
-      setHistoryPollTimer(setTimeout(pollHistory, POLL_INTERVAL_MS));
-      return;
-    }
-    void state.loadHistory({
-      sessionKey,
-      mode: 'quiet',
-      scope: 'foreground',
-      reason: pollReason,
-    });
-    void state.syncPendingApprovals(sessionKey);
-    setHistoryPollTimer(setTimeout(pollHistory, POLL_INTERVAL_MS));
-  };
-  setHistoryPollTimer(setTimeout(pollHistory, POLL_START_DELAY_MS));
 
   const SAFETY_TIMEOUT_MS = 90_000;
   const SAFETY_RETRY_INTERVAL_MS = 10_000;
@@ -159,7 +127,6 @@ export function resumeActiveStoreSend(
   }
   startStoreSendWatchers({
     ...params,
-    source: 'resume',
     onSafetyTimeout: () => {},
   });
 }
@@ -249,7 +216,6 @@ export async function executeStoreSend(params: ExecuteStoreSendParams): Promise<
     set,
     get,
     sessionKey: currentSessionKey,
-    source: 'send',
     onSafetyTimeout: () => {},
   });
 

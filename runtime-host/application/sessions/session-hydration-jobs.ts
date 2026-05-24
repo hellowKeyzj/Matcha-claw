@@ -24,11 +24,19 @@ export interface SessionHydrationJobPort {
   ): SessionHydrationJobSubmission;
 }
 
+function buildSessionHydrationDedupeKey(payload: SessionHydrationJobPayload): string {
+  const { snapshot } = payload;
+  if (snapshot.kind === 'window') {
+    return `${HYDRATE_SESSION_TIMELINE_JOB}:${payload.sessionKey}:window:${snapshot.mode}:${snapshot.limit}:${snapshot.offset ?? ''}`;
+  }
+  return `${HYDRATE_SESSION_TIMELINE_JOB}:${payload.sessionKey}:${snapshot.kind}`;
+}
+
 export function createSessionHydrationJobPort(tasks: RuntimeLongTaskSubmissionPort): SessionHydrationJobPort {
   return {
     submitSessionHydration: (payload) => tasks.submit(HYDRATE_SESSION_TIMELINE_JOB, payload, {
       queue: 'low',
-      dedupeKey: `${HYDRATE_SESSION_TIMELINE_JOB}:${payload.sessionKey}:${payload.snapshot.kind}`,
+      dedupeKey: buildSessionHydrationDedupeKey(payload),
     }),
   };
 }

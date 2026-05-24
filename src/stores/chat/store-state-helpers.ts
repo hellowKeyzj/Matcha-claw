@@ -660,6 +660,21 @@ export function patchSessionItemsAndViewport(
   });
 }
 
+export function patchSessionTurnItem(
+  state: Pick<ChatStoreState, 'loadedSessions'>,
+  sessionKey: string,
+  item: SessionRenderItem,
+): Record<string, ChatSessionRecord> {
+  const current = getSessionRecord(state, sessionKey);
+  const index = current.items.findIndex((candidate) => candidate.key === item.key);
+  if (index < 0) {
+    return state.loadedSessions;
+  }
+  const items = [...current.items];
+  items[index] = item;
+  return patchSessionRecord(state, sessionKey, { items });
+}
+
 export function patchSessionSnapshot(
   state: Pick<ChatStoreState, 'loadedSessions'>,
   sessionKey: string,

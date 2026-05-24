@@ -22,6 +22,7 @@ import {
   summarizeItemsForTodoToolDebug,
   summarizeSnapshotForTodoToolDebug,
 } from './todo-tool-debug';
+import type { StoreHistoryCache } from './history-cache';
 import type { ChatStoreState } from './types';
 import type {
   SessionItemChunkUpdateEvent,
@@ -40,6 +41,7 @@ type ChatStoreGetFn = () => ChatStoreState;
 interface CreateStoreRuntimeEventActionsInput {
   set: ChatStoreSetFn;
   get: ChatStoreGetFn;
+  historyRuntime: StoreHistoryCache;
 }
 
 function normalizeIdentifier(value: unknown): string {
@@ -69,6 +71,29 @@ function patchSessionSnapshotWithTodoToolDebug(
   return nextLoadedSessions;
 }
 
+function collectAssistantTurnToolCallIds(event: SessionItemChunkUpdateEvent | SessionItemUpdateEvent): string[] {
+  if (event.item?.kind !== 'assistant-turn') {
+    return [];
+  }
+  return event.item.segments
+    .filter((segment) => segment.kind === 'tool')
+    .map((segment) => segment.tool.toolCallId ?? segment.tool.id)
+    .filter((value) => value.trim().length > 0);
+}
+
+function reconcileTerminalToolResultsIfNeeded(input: {
+  get: ChatStoreGetFn;
+  historyRuntime: StoreHistoryCache;
+  sessionKey: string;
+}): void {
+  const { get, historyRuntime, sessionKey } = input;
+  const target = historyRuntime.consumeTerminalHistoryReconcileNeeded(sessionKey);
+  if (!target) {
+    return;
+  }
+  void get().loadTurnToolResults(target);
+}
+
 function applySessionLifecycleEvent(
   input: CreateStoreRuntimeEventActionsInput & {
     targetSessionKey: string;
@@ -79,6 +104,7 @@ function applySessionLifecycleEvent(
   const {
     set,
     get,
+    historyRuntime,
     targetSessionKey,
     currentSessionKey,
     event,
@@ -102,6 +128,10 @@ function applySessionLifecycleEvent(
     )
   ) {
     void stateBeforeHandle.loadSessions();
+  }
+
+  if (event.phase === 'started') {
+    historyRuntime.resetTerminalHistoryReconcile(targetSessionKey);
   }
 
   if (
@@ -155,6 +185,11 @@ function applySessionLifecycleEvent(
 
   if (event.phase === 'final') {
     finishChatRunTelemetry(targetSessionKey, 'completed', { stage: 'session_update_final' });
+    reconcileTerminalToolResultsIfNeeded({
+      get,
+      historyRuntime,
+      sessionKey: targetSessionKey,
+    });
   } else if (event.phase === 'aborted') {
     finishChatRunTelemetry(targetSessionKey, 'aborted', { stage: 'session_update_aborted' });
   }
@@ -168,6 +203,7 @@ function applySessionMessageEvent(
 ): void {
   const {
     set,
+    historyRuntime,
     targetSessionKey,
     event,
   } = input;
@@ -182,6 +218,16 @@ function applySessionMessageEvent(
         return segment.images.length > 0 || segment.attachedFiles.length > 0;
       })
     : false;
+
+  const toolCallIds = collectAssistantTurnToolCallIds(event);
+  if (toolCallIds.length > 0 && event.item?.kind === 'assistant-turn') {
+    historyRuntime.markTerminalHistoryReconcileNeeded({
+      sessionKey: targetSessionKey,
+      ...(normalizeIdentifier(event.runId) ? { runId: normalizeIdentifier(event.runId) } : {}),
+      ...(event.item.turnKey ? { turnKey: event.item.turnKey } : {}),
+      toolCallIds,
+    });
+  }
 
   if (
     hasAssistantOutput
@@ -210,7 +256,7 @@ export function handleStoreSessionUpdateEvent(
     return;
   }
 
-  const { set, get } = input;
+  const { set, get, historyRuntime } = input;
   const stateBeforeHandle = get();
   const currentSessionKey = stateBeforeHandle.currentSessionKey;
   const eventSessionKey = normalizeIdentifier(sessionUpdate.sessionKey);
@@ -236,6 +282,7 @@ export function handleStoreSessionUpdateEvent(
       targetSessionKey,
       currentSessionKey,
       event: sessionUpdate,
+      historyRuntime,
     });
     return;
   }
@@ -282,6 +329,7 @@ export function handleStoreSessionUpdateEvent(
     get,
     targetSessionKey,
     event: sessionUpdate,
+    historyRuntime,
   });
 
   if (sessionUpdate.sessionUpdate === 'session_item') {
@@ -291,6 +339,11 @@ export function handleStoreSessionUpdateEvent(
     ) {
       finishChatRunTelemetry(targetSessionKey, 'completed', { stage: 'session_update_message_final' });
       clearHistoryPoll();
+      reconcileTerminalToolResultsIfNeeded({
+        get,
+        historyRuntime,
+        sessionKey: targetSessionKey,
+      });
     }
   }
 }

@@ -6,8 +6,9 @@ import {
   hostSessionList,
   hostSessionPrompt,
   hostSessionWindowFetch,
+  waitForRuntimeJobResult,
 } from '@/lib/host-api';
-import type { SessionRenderItem } from '../../../runtime-host/shared/session-adapter-types';
+import type { SessionRenderItem, SessionWindowResult } from '../../../runtime-host/shared/session-adapter-types';
 import type { ChatSession } from '@/stores/chat/types';
 import {
   findLatestAssistantSnapshotFromItems,
@@ -49,21 +50,26 @@ export interface ListSessionsInput {
 const DEFAULT_CHAT_HISTORY_LIMIT = 20;
 
 function resolveAuthoritativeItems(
-  payload: Awaited<ReturnType<typeof hostSessionWindowFetch>>,
+  payload: SessionWindowResult,
 ): SessionRenderItem[] {
-  return Array.isArray(payload?.snapshot?.items) ? payload.snapshot.items : [];
+  return Array.isArray(payload.snapshot.items) ? payload.snapshot.items : [];
 }
 
 export async function fetchChatTimeline(
   input: FetchChatTimelineInput,
 ): Promise<SessionRenderItem[]> {
-  const history = await hostSessionWindowFetch({
+  const initial = await hostSessionWindowFetch({
     sessionKey: input.sessionKey,
     mode: 'latest',
     limit: input.limit ?? DEFAULT_CHAT_HISTORY_LIMIT,
     includeCanonical: true,
   });
-  return resolveAuthoritativeItems(history);
+  const history = initial.hydrationJob
+    ? await waitForRuntimeJobResult<SessionWindowResult>(initial.hydrationJob.id)
+    : initial.snapshot
+      ? initial as SessionWindowResult
+      : null;
+  return history ? resolveAuthoritativeItems(history) : [];
 }
 
 export async function fetchLatestAssistantText(

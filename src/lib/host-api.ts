@@ -13,6 +13,8 @@ import type {
   SessionListResult,
   SessionNewResult,
   SessionPromptResult,
+  SessionTurnToolResultsRequest,
+  SessionTurnToolResultsResult,
   SessionWindowResult,
 } from '../../runtime-host/shared/session-adapter-types';
 
@@ -140,11 +142,11 @@ export interface OpenClawCliCommandPayload {
 
 export type HostSessionCatalogItem = SessionCatalogItem;
 
-export type HostSessionLoadResult = SessionLoadResult & {
+export type HostSessionLoadResult = Partial<SessionLoadResult> & {
   hydrationJob?: RuntimeJobSnapshot<SessionLoadResult>;
 };
 
-export type HostSessionWindowResult = SessionWindowResult & {
+export type HostSessionWindowResult = Partial<SessionWindowResult> & {
   hydrationJob?: RuntimeJobSnapshot<SessionWindowResult>;
 };
 
@@ -558,6 +560,15 @@ export async function hostSessionUpdateStatus(
   },
 ): Promise<{ success: boolean; sessionKey?: string; status?: string; error?: string }> {
   return hostApiFetch('/api/sessions/status', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function hostSessionTurnToolResults(
+  payload: SessionTurnToolResultsRequest,
+): Promise<SessionTurnToolResultsResult> {
+  return hostApiFetch('/api/session/turn/tool-results', {
     method: 'POST',
     body: JSON.stringify(payload),
   });

@@ -129,9 +129,15 @@ async function requestSessionLifecycleSnapshot(
     method: 'POST',
     body: JSON.stringify({ sessionKey }),
   });
-  return result.hydrationJob
+  const data = result.hydrationJob
     ? await waitForRuntimeJobResult<SessionLoadResult>(result.hydrationJob.id)
-    : result;
+    : result.snapshot
+      ? result as SessionLoadResult
+      : null;
+  if (!data) {
+    throw new Error('session lifecycle request did not return a snapshot');
+  }
+  return data;
 }
 
 function applyBackendSessionSnapshot(
