@@ -11,6 +11,7 @@ import { parseTranscriptMessages } from '../../runtime-host/application/sessions
 import { materializeTranscriptTimelineEntries } from '../../runtime-host/application/sessions/transcript-timeline-materializer';
 import { filterStateOnlySnapshot } from '../../runtime-host/application/sessions/session-state-only-render-filter';
 import { dispatchGatewayProtocolEvent, type GatewayConversationEvent } from '../../runtime-host/openclaw-bridge/events';
+import type { SessionRenderItem } from '../../runtime-host/shared/session-adapter-types';
 import { createTestRuntimeFileSystem } from './helpers/runtime-file-system';
 
 async function createRuntimeConfigDir() {
@@ -22,6 +23,7 @@ type TestSessionRuntimeService = ReturnType<typeof createTestSessionRuntimeServi
 const testClock = {
   nowMs: () => 1_700_000_000_000,
   nowIso: () => '2023-11-14T22:13:20.000Z',
+  toIsoString: (ms: number) => new Date(ms).toISOString(),
 };
 
 function createDeferred<T>() {
@@ -32,6 +34,37 @@ function createDeferred<T>() {
     reject = innerReject;
   });
   return { promise, resolve, reject };
+}
+
+function buildTranscriptContent(messages: Array<Record<string, unknown>>): string {
+  return messages.map((message, index) => JSON.stringify({
+    timestamp: 1_700_000_000_000 + index,
+    message,
+  })).join('\n');
+}
+
+function countItemsByKindAndText(
+  items: ReadonlyArray<SessionRenderItem>,
+  kind: SessionRenderItem['kind'],
+  text: string,
+): number {
+  return items.filter((item) => item.kind === kind && 'text' in item && item.text === text).length;
+}
+
+async function readCurrentSnapshotItems(
+  service: TestSessionRuntimeService,
+  sessionKey: string,
+): Promise<ReadonlyArray<SessionRenderItem>> {
+  const [event] = await service.consumeGatewayConversationEvent({
+    type: 'run.phase',
+    sessionKey,
+    phase: 'final',
+  });
+  const items = event?.snapshot?.items;
+  if (!items) {
+    throw new Error('Expected current session snapshot');
+  }
+  return items;
 }
 
 async function loadHydratedSession(
@@ -609,6 +642,252 @@ describe('session runtime service', () => {
         text: '你喜欢温柔甜美类型的小姐姐。',
       }),
     ]);
+  });
+
+  it('transcript tool result catchup keeps current message count unchanged', async () => {
+    const configDir = await createRuntimeConfigDir();
+    const storage = new SessionStorageRepository({
+      workspace: { getConfigDir: () => configDir },
+      fileSystem: createTestRuntimeFileSystem(),
+    });
+    vi.spyOn(storage, 'readTranscriptContent').mockResolvedValue(buildTranscriptContent([
+      {
+        role: 'user',
+        id: 'transcript-user-1',
+        content: 'please read config',
+      },
+      {
+        role: 'assistant',
+        id: 'transcript-assistant-1',
+        content: [
+          { type: 'text', text: 'I will read it' },
+          { type: 'toolCall', id: 'tool-read-1', name: 'Read', input: { file_path: 'package.json' } },
+          { type: 'toolResult', id: 'tool-read-1', name: 'Read', result: 'package content' },
+        ],
+      },
+    ]));
+    vi.spyOn(storage, 'findStorageDescriptor').mockResolvedValue({
+      sessionKey: 'agent:main:main',
+      agentId: 'main',
+      sessionsDir: configDir,
+      sessionsJsonPath: null,
+      sessionsJson: null,
+      sessionStoreEntry: null,
+      transcriptPath: join(configDir, 'main.jsonl'),
+    });
+    const service = createTestSessionRuntimeService({
+      workspace: { getConfigDir: () => configDir },
+      sessionStorage: storage,
+      openclawBridge: {
+        chatSend: async () => ({ runId: 'run-tool-catchup' }),
+        gatewayRpc: async () => ({}),
+      },
+    });
+
+    await service.promptSession({
+      sessionKey: 'agent:main:main',
+      message: 'please read config',
+      runId: 'run-tool-catchup',
+    });
+    await service.consumeGatewayConversationEvent({
+      type: 'chat.message',
+      event: {
+        state: 'delta',
+        runId: 'run-tool-catchup',
+        sessionKey: 'agent:main:main',
+        sequenceId: 1,
+        message: {
+          role: 'assistant',
+          content: [{ type: 'text', text: 'I will read it' }],
+        },
+      },
+    });
+    await service.consumeGatewayConversationEvent({
+      type: 'tool.lifecycle',
+      event: {
+        phase: 'start',
+        runId: 'run-tool-catchup',
+        sessionKey: 'agent:main:main',
+        sequenceId: 2,
+        timestamp: 1_700_000_000_000,
+        toolCallId: 'tool-read-1',
+        name: 'Read',
+        args: { file_path: 'package.json' },
+      },
+    });
+    const beforeItems = await readCurrentSnapshotItems(service, 'agent:main:main');
+
+    const response = await service.loadTurnToolResults({
+      sessionKey: 'agent:main:main',
+      runId: 'run-tool-catchup',
+      toolCallIds: ['tool-read-1'],
+    });
+    const afterItems = await readCurrentSnapshotItems(service, 'agent:main:main');
+
+    expect(response.status).toBe(200);
+    expect(afterItems).toHaveLength(beforeItems.length);
+    expect(countItemsByKindAndText(afterItems, 'user-message', 'please read config')).toBe(1);
+    expect(countItemsByKindAndText(afterItems, 'assistant-turn', 'I will read it')).toBe(1);
+    expect(response.data).toMatchObject({
+      item: {
+        kind: 'assistant-turn',
+        tools: [expect.objectContaining({
+          toolCallId: 'tool-read-1',
+          status: 'completed',
+          output: 'package content',
+        })],
+      },
+    });
+  });
+
+  it('transcript run closure catchup marks done without adding transcript messages', async () => {
+    const configDir = await createRuntimeConfigDir();
+    const storage = new SessionStorageRepository({
+      workspace: { getConfigDir: () => configDir },
+      fileSystem: createTestRuntimeFileSystem(),
+    });
+    vi.spyOn(storage, 'readTranscriptContent').mockResolvedValue(buildTranscriptContent([
+      {
+        role: 'user',
+        id: 'run-closure-catchup',
+        content: 'say done',
+      },
+      {
+        role: 'assistant',
+        id: 'transcript-assistant-2',
+        content: 'done from transcript',
+      },
+    ]));
+    vi.spyOn(storage, 'findStorageDescriptor').mockResolvedValue({
+      sessionKey: 'agent:main:main',
+      agentId: 'main',
+      sessionsDir: configDir,
+      sessionsJsonPath: null,
+      sessionsJson: null,
+      sessionStoreEntry: null,
+      transcriptPath: join(configDir, 'main.jsonl'),
+    });
+    const service = createTestSessionRuntimeService({
+      workspace: { getConfigDir: () => configDir },
+      sessionStorage: storage,
+      openclawBridge: {
+        chatSend: async () => ({ runId: 'run-closure-catchup' }),
+        gatewayRpc: async () => ({}),
+      },
+    });
+
+    await service.promptSession({
+      sessionKey: 'agent:main:main',
+      message: 'say done',
+      runId: 'run-closure-catchup',
+    });
+    await service.consumeGatewayConversationEvent({
+      type: 'chat.message',
+      event: {
+        state: 'delta',
+        runId: 'run-closure-catchup',
+        sessionKey: 'agent:main:main',
+        sequenceId: 1,
+        message: {
+          role: 'assistant',
+          content: [{ type: 'text', text: 'done from live stream' }],
+        },
+      },
+    });
+    const beforeItems = await readCurrentSnapshotItems(service, 'agent:main:main');
+
+    const response = await service.reconcileRunClosure({
+      sessionKey: 'agent:main:main',
+      runId: 'run-closure-catchup',
+    });
+    const afterItems = await readCurrentSnapshotItems(service, 'agent:main:main');
+
+    expect(response.status).toBe(200);
+    expect(response.data).toMatchObject({
+      closed: true,
+      reason: 'final-assistant-turn',
+      runtime: { runPhase: 'done', activeRunId: null },
+    });
+    expect(afterItems).toHaveLength(beforeItems.length);
+    expect(countItemsByKindAndText(afterItems, 'user-message', 'say done')).toBe(1);
+    expect(countItemsByKindAndText(afterItems, 'assistant-turn', 'done from live stream')).toBe(1);
+    expect(countItemsByKindAndText(afterItems, 'assistant-turn', 'done from transcript')).toBe(0);
+  });
+
+  it('missing transcript tool target does not fallback merge ordinary transcript messages', async () => {
+    const configDir = await createRuntimeConfigDir();
+    const storage = new SessionStorageRepository({
+      workspace: { getConfigDir: () => configDir },
+      fileSystem: createTestRuntimeFileSystem(),
+    });
+    vi.spyOn(storage, 'readTranscriptContent').mockResolvedValue(buildTranscriptContent([
+      {
+        role: 'user',
+        id: 'transcript-user-3',
+        content: 'missing tool request from transcript',
+      },
+      {
+        role: 'assistant',
+        id: 'transcript-assistant-3',
+        content: [
+          { type: 'text', text: 'transcript assistant only' },
+          { type: 'toolCall', id: 'tool-other', name: 'Read', input: { file_path: 'other.json' } },
+          { type: 'toolResult', id: 'tool-other', name: 'Read', result: 'other content' },
+        ],
+      },
+    ]));
+    vi.spyOn(storage, 'findStorageDescriptor').mockResolvedValue({
+      sessionKey: 'agent:main:main',
+      agentId: 'main',
+      sessionsDir: configDir,
+      sessionsJsonPath: null,
+      sessionsJson: null,
+      sessionStoreEntry: null,
+      transcriptPath: join(configDir, 'main.jsonl'),
+    });
+    const service = createTestSessionRuntimeService({
+      workspace: { getConfigDir: () => configDir },
+      sessionStorage: storage,
+      openclawBridge: {
+        chatSend: async () => ({ runId: 'run-missing-tool' }),
+        gatewayRpc: async () => ({}),
+      },
+    });
+
+    await service.promptSession({
+      sessionKey: 'agent:main:main',
+      message: 'live request',
+      runId: 'run-missing-tool',
+    });
+    await service.consumeGatewayConversationEvent({
+      type: 'chat.message',
+      event: {
+        state: 'delta',
+        runId: 'run-missing-tool',
+        sessionKey: 'agent:main:main',
+        sequenceId: 1,
+        message: {
+          role: 'assistant',
+          content: [{ type: 'text', text: 'live assistant only' }],
+        },
+      },
+    });
+    const beforeItems = await readCurrentSnapshotItems(service, 'agent:main:main');
+
+    const response = await service.loadTurnToolResults({
+      sessionKey: 'agent:main:main',
+      runId: 'run-missing-tool',
+      toolCallIds: ['tool-missing'],
+    });
+    const afterItems = await readCurrentSnapshotItems(service, 'agent:main:main');
+
+    expect(response.status).toBe(200);
+    expect(response.data).toMatchObject({ item: null });
+    expect(afterItems).toHaveLength(beforeItems.length);
+    expect(countItemsByKindAndText(afterItems, 'user-message', 'live request')).toBe(1);
+    expect(countItemsByKindAndText(afterItems, 'assistant-turn', 'live assistant only')).toBe(1);
+    expect(countItemsByKindAndText(afterItems, 'user-message', 'missing tool request from transcript')).toBe(0);
+    expect(countItemsByKindAndText(afterItems, 'assistant-turn', 'transcript assistant only')).toBe(0);
   });
 
   it('same-run assistant deltas merge into one assistant-turn item', async () => {

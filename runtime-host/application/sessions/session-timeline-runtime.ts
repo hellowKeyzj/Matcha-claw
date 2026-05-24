@@ -1,5 +1,6 @@
 import type {
   SessionRunPhase,
+  SessionRenderItem,
   SessionRuntimeStateSnapshot,
   SessionTimelineAssistantTurnEntry,
   SessionTimelineEntry,
@@ -32,6 +33,7 @@ import {
 } from './session-storage-repository';
 import { SessionRuntimeStateStore } from './session-runtime-state';
 import {
+  buildRenderItemsFromTimeline,
   collectPendingRunClosureSignal,
   cloneRenderItems,
 } from './session-render-model';
@@ -246,10 +248,24 @@ export class SessionTimelineRuntime {
     const replay = await this.deps.transcriptLoader.readTimelineReplay(sessionKey);
     const result = applyTranscriptToolResultUpdates(state.timelineEntries, replay.timelineEntries);
     const updatedEntry = this.resolveTurnToolResultEntry(result.updatedEntries, request);
-    const nextEntries = updatedEntry
-      ? result.entries
-      : mergeTimelineEntries(state.timelineEntries, replay.timelineEntries);
-    state.timelineEntries = nextEntries;
+    if (!updatedEntry) {
+      const requestedToolCallIds = (request.toolCallIds ?? []).map(normalizeString).filter(Boolean);
+      const closure = requestedToolCallIds.length > 0
+        ? null
+        : this.reconcileRunClosureFromState(state, request, buildRenderItemsFromTimeline({
+            sessionKey,
+            timelineEntries: replay.timelineEntries,
+            executionGraphItems: [],
+            runtime: state.runtime,
+          }));
+      return {
+        sessionKey,
+        turnKey: closure?.turnKey ?? (normalizeString(request.turnKey) || normalizeString(request.runId) || state.runtime.pendingTurnKey),
+        item: null,
+        runtime: closure?.runtime ?? cloneSessionRuntimeState(state.runtime),
+      };
+    }
+    state.timelineEntries = result.entries;
     state.hydrated = true;
     this.deps.executionGraphRuntime.rebuildFromTimeline(sessionKey, state);
     this.deps.executionGraphRuntime.refreshRenderItems(state);
@@ -260,16 +276,14 @@ export class SessionTimelineRuntime {
     this.touchSessionStateMeta(state);
     this.deps.stateStore.persistStore();
     const closure = this.reconcileRunClosureFromState(state, request);
-    const item = updatedEntry
-      ? assembleAuthoritativeAssistantTurns({
-          sessionKey,
-          timelineEntries: [updatedEntry],
-          runtime: state.runtime,
-        }).itemsByEntryKey.get(updatedEntry.key) ?? null
-      : null;
+    const item = assembleAuthoritativeAssistantTurns({
+      sessionKey,
+      timelineEntries: [updatedEntry],
+      runtime: state.runtime,
+    }).itemsByEntryKey.get(updatedEntry.key) ?? null;
     return {
       sessionKey,
-      turnKey: updatedEntry?.turnKey ?? closure.turnKey,
+      turnKey: updatedEntry.turnKey ?? closure.turnKey,
       item,
       runtime: cloneSessionRuntimeState(state.runtime),
     };
@@ -281,20 +295,19 @@ export class SessionTimelineRuntime {
     const sessionKey = normalizeString(request.sessionKey);
     const state = this.getSessionState(sessionKey);
     const replay = await this.deps.transcriptLoader.readTimelineReplay(sessionKey);
-    state.timelineEntries = mergeTimelineEntries(state.timelineEntries, replay.timelineEntries);
-    state.hydrated = true;
-    this.deps.executionGraphRuntime.rebuildFromTimeline(sessionKey, state);
-    this.deps.executionGraphRuntime.refreshRenderItems(state);
-    state.window = state.window.isAtLatest
-      ? createLatestWindowState(state.renderItems.length)
-      : clampWindowState(state.window, state.renderItems.length);
-    this.deps.executionGraphRuntime.refreshParents(sessionKey);
-    return this.reconcileRunClosureFromState(state, request);
+    const evidenceItems = buildRenderItemsFromTimeline({
+      sessionKey,
+      timelineEntries: replay.timelineEntries,
+      executionGraphItems: [],
+      runtime: state.runtime,
+    });
+    return this.reconcileRunClosureFromState(state, request, evidenceItems);
   }
 
   private reconcileRunClosureFromState(
     state: SessionRuntimeTimelineState,
     request: SessionRunClosureRequest,
+    evidenceItems: ReadonlyArray<SessionRenderItem> = state.renderItems,
   ): SessionRunClosureResult {
     const sessionKey = normalizeString(request.sessionKey);
     const runtime = state.runtime;
@@ -310,11 +323,12 @@ export class SessionTimelineRuntime {
         runtime: cloneSessionRuntimeState(runtime),
       };
     }
-    const signal = collectPendingRunClosureSignal(state.renderItems, {
+    const evidenceSignal = collectPendingRunClosureSignal(evidenceItems, {
       ...runtime,
       activeRunId: runId,
       pendingTurnKey: turnKey,
     });
+    const signal = evidenceSignal;
     if (signal.hasActiveAssistantStream) {
       return {
         sessionKey,
