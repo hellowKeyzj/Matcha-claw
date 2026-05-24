@@ -3,12 +3,12 @@ Create Web Platform Atlas assets from platform materials and live browser eviden
 </purpose>
 
 <required_reading>
-@resources/skills/plugin-companion-skills/browser-flow-create/references/authoring-contract.md
-@resources/skills/plugin-companion-skills/browser-flow-create/references/capability-contract.md
-@resources/skills/plugin-companion-skills/browser-flow-create/references/parameter-contract.md
-@resources/skills/plugin-companion-skills/browser-flow-create/references/validation-contract.md
-@resources/skills/plugin-companion-skills/browser-flow-create/references/agent-runner-contract.md
-@resources/skills/plugin-companion-skills/browser-flow-create/references/generated-output-contract.md
+references/authoring-contract.md
+references/capability-contract.md
+references/parameter-contract.md
+references/validation-contract.md
+references/agent-runner-contract.md
+references/generated-output-contract.md
 </required_reading>
 
 <downstream_awareness>
@@ -163,7 +163,7 @@ python resources/skills/plugin-companion-skills/browser-flow-create/runtime/dist
   --default-asset-update-mode execution
 ```
 
-Generated outputs must accept params. Generated Python must be a thin entrypoint into that workspace-local runtime; TypeScript and CLI outputs must invoke the Python entrypoint or `_runtime/agent_browser_flow_runner.py` instead of reimplementing workflow logic.
+Generated outputs must accept params. Generated Python must be a thin entrypoint into that workspace-local runtime; TypeScript and CLI outputs must invoke the Python entrypoint or `_runtime/agent_browser_flow_runner.py` instead of reimplementing workflow logic. Report the actual generated Python invocation shape, preferably `python <flow-id>.py @params.json`; do not document recipe params as guessed Python flags such as `--tagName` unless the entrypoint explicitly implements them.
 </step>
 
 <step name="platform_index">

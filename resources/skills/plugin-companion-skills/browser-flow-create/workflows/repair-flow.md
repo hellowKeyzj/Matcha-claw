@@ -3,11 +3,11 @@ Repair an executable Browser Flow recipe or its supporting atlas records after A
 </purpose>
 
 <required_reading>
-@resources/skills/plugin-companion-skills/browser-flow-create/references/authoring-contract.md
-@resources/skills/plugin-companion-skills/browser-flow-create/references/capability-contract.md
-@resources/skills/plugin-companion-skills/browser-flow-create/references/parameter-contract.md
-@resources/skills/plugin-companion-skills/browser-flow-create/references/validation-contract.md
-@resources/skills/plugin-companion-skills/browser-flow-create/references/agent-runner-contract.md
+references/authoring-contract.md
+references/capability-contract.md
+references/parameter-contract.md
+references/validation-contract.md
+references/agent-runner-contract.md
 </required_reading>
 
 <process>
@@ -68,7 +68,7 @@ evidence/archaeology/<timestamp>-<scope>.trace.json
 browser-flows/INDEX.md if platform, surface, or executable capability summary changed
 ```
 
-Regenerate the Python runner or TypeScript/CLI entrypoints if requested, if existing generated outputs would become stale, or if `browser-flow-use` reports missing `_runtime`. Run `runtime/distribute_workspace_runtime.py` first, then replace any generated Python that implements its own browser client, uses `openclaw tool browser`, or returns plan-only success.
+Regenerate the Python runner or TypeScript/CLI entrypoints if requested, if existing generated outputs would become stale, or if `browser-flow-use` reports missing `_runtime`. Run `runtime/distribute_workspace_runtime.py` first, then replace any generated Python that implements its own browser client, uses `openclaw tool browser`, returns plan-only success, or documents recipe params as guessed Python flags instead of the entrypoint's actual JSON or `@params.json` interface.
 </step>
 
 <step name="report_repair">

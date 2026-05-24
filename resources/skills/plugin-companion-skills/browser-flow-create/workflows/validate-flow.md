@@ -3,12 +3,12 @@ Audit existing Web Platform Atlas and Browser Flow recipe assets for completenes
 </purpose>
 
 <required_reading>
-@resources/skills/plugin-companion-skills/browser-flow-create/references/authoring-contract.md
-@resources/skills/plugin-companion-skills/browser-flow-create/references/capability-contract.md
-@resources/skills/plugin-companion-skills/browser-flow-create/references/parameter-contract.md
-@resources/skills/plugin-companion-skills/browser-flow-create/references/validation-contract.md
-@resources/skills/plugin-companion-skills/browser-flow-create/references/agent-runner-contract.md
-@resources/skills/plugin-companion-skills/browser-flow-create/references/generated-output-contract.md
+references/authoring-contract.md
+references/capability-contract.md
+references/parameter-contract.md
+references/validation-contract.md
+references/agent-runner-contract.md
+references/generated-output-contract.md
 </required_reading>
 
 <process>
@@ -44,7 +44,7 @@ For each recipe, verify it references an existing capability, has explicit busin
 </step>
 
 <step name="check_generated_outputs">
-If generated outputs exist or were requested, verify `browser-flows/_runtime/agent_browser_flow_runner.py` and `browser-flows/_runtime/openclaw_browser_client.py` exist, the Python entrypoint accepts params, calls the recipe by id through the workspace-local runtime, and TypeScript/CLI entrypoints invoke it instead of reimplementing workflow logic. They must not be one-off scripts with fixed sample paths, titles, accounts, dates, custom browser clients, `openclaw tool browser`, or plan-only success output.
+If generated outputs exist or were requested, verify `browser-flows/_runtime/agent_browser_flow_runner.py` and `browser-flows/_runtime/openclaw_browser_client.py` exist, the Python entrypoint accepts params through its documented JSON positional or `@params.json` interface, calls the recipe by id through the workspace-local runtime, and TypeScript/CLI entrypoints invoke it instead of reimplementing workflow logic. They must not be one-off scripts with fixed sample paths, titles, accounts, dates, custom browser clients, `openclaw tool browser`, plan-only success output, or docs that imply guessed Python flags such as `--tagName` unless the entrypoint explicitly implements them.
 </step>
 
 <step name="score_assets">

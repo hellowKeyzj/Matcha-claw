@@ -3,12 +3,12 @@ Maintain existing Web Platform Atlas assets when platform surfaces/views/compone
 </purpose>
 
 <required_reading>
-@resources/skills/plugin-companion-skills/browser-flow-create/references/authoring-contract.md
-@resources/skills/plugin-companion-skills/browser-flow-create/references/capability-contract.md
-@resources/skills/plugin-companion-skills/browser-flow-create/references/parameter-contract.md
-@resources/skills/plugin-companion-skills/browser-flow-create/references/validation-contract.md
-@resources/skills/plugin-companion-skills/browser-flow-create/references/agent-runner-contract.md
-@resources/skills/plugin-companion-skills/browser-flow-create/references/generated-output-contract.md
+references/authoring-contract.md
+references/capability-contract.md
+references/parameter-contract.md
+references/validation-contract.md
+references/agent-runner-contract.md
+references/generated-output-contract.md
 </required_reading>
 
 <process>
@@ -65,7 +65,7 @@ Validate changed atlas assets against browser evidence. For changed recipes, exe
 </step>
 
 <step name="refresh_generated_outputs">
-If the user requested a Python runner or TypeScript/CLI entrypoints, existing generated outputs would become stale, or `browser-flow-use` reports missing `_runtime`, regenerate derived outputs by running `runtime/distribute_workspace_runtime.py` first. Verify the Python entrypoint accepts params, invokes `_runtime/agent_browser_flow_runner.py`, and TypeScript/CLI invoke it without duplicating runtime logic or shelling out to `openclaw tool browser`.
+If the user requested a Python runner or TypeScript/CLI entrypoints, existing generated outputs would become stale, or `browser-flow-use` reports missing `_runtime`, regenerate derived outputs by running `runtime/distribute_workspace_runtime.py` first. Verify the Python entrypoint accepts params as documented JSON or `@params.json`, invokes `_runtime/agent_browser_flow_runner.py`, and TypeScript/CLI invoke it without duplicating runtime logic or shelling out to `openclaw tool browser`. Verify generated docs/report do not imply guessed Python flags such as `--tagName` unless the entrypoint explicitly implements them.
 </step>
 
 <step name="report_maintenance_diff">

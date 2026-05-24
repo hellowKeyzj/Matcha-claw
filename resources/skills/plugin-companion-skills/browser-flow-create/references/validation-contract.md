@@ -24,7 +24,7 @@ Do not report atlas or recipe work as completed unless all relevant items pass:
 16. Success state or extracted data is proven by trace evidence for executable recipes.
 17. UI steps that can block on readiness, transition, refresh, upload, navigation, or confirmation are bounded by timeout or bounded wait conditions.
 18. Executable recipes declare a reliability level (`draft`, `usable`, `partial-verification`, `validated`, or `hardened`) that matches the evidence; weak verification is allowed only when reported honestly with repair notes.
-19. Requested generated outputs accept params, keep Python as the canonical runner, and use the minimal OpenClaw browser gateway client for `browser.request`.
+19. Requested generated outputs accept params through documented interfaces, keep Python as the canonical runner, and use the minimal OpenClaw browser gateway client for `browser.request`; generated Python uses JSON or `@params.json` unless it explicitly implements semantic flags.
 20. Unsupported Browser Relay primitives, login, permission, popup, download, raw CDP, active-session fetch, or unobservable success gaps are marked partial or blocked.
 21. Environment/context/freshness are explicit.
 22. `<workspace>/browser-flows/INDEX.md` is updated.
@@ -46,7 +46,7 @@ Do not report atlas or recipe work as completed unless all relevant items pass:
 | Bounded execution | UI waits and actions that can block have timeout or bounded wait conditions and fail with evidence instead of hanging |
 | Reliability | recipe declares `draft`, `usable`, `partial-verification`, `validated`, or `hardened`; level matches trace evidence, verification strength, failure classification, and repair notes |
 | Trace | archaeology/execution trace records sources, observations, actions, errors, requests, recovery, unknowns |
-| Generated output | Python runner accepts params, targets the v1 runner contract, and calls `browser.request` through the minimal OpenClaw browser gateway client; TypeScript/CLI entrypoints invoke Python without duplicating runtime logic or adding separate ad hoc browser verification |
+| Generated output | Python runner accepts params through documented JSON or `@params.json` unless it explicitly implements flags, targets the v1 runner contract, and calls `browser.request` through the minimal OpenClaw browser gateway client; TypeScript/CLI entrypoints invoke Python without duplicating runtime logic or adding separate ad hoc browser verification |
 | Environment/context | sandbox/staging/production/unknown and read-only/dry-run/manual-confirm/auto/blocked/not-suitable policy are explicit |
 | Unsupported primitives | unsupported Browser Relay needs are recorded as partial or blocked |
 | Index | platform, key surfaces, and important executable capabilities are discoverable in `browser-flows/INDEX.md` |

@@ -18,6 +18,26 @@ They must:
 - avoid embedding validation sample values as fixed workflow logic
 - preserve the canonical runner's bounded timeout behavior and business outcome verification; generated code must not reinterpret exit code or the final Browser Relay action as success
 
+## Invocation Interfaces
+
+Generated output types have different invocation contracts. Do not infer one from another.
+
+Generated Python entrypoints accept params as one positional JSON object or `@params.json`:
+
+```bash
+python browser-flows/platforms/<platform-id>/generated/python/<flow-id>.py @params.json
+```
+
+or:
+
+```bash
+python browser-flows/platforms/<platform-id>/generated/python/<flow-id>.py '{"title":"Bug report","body":"Steps to reproduce..."}'
+```
+
+Recipe param names do not automatically become Python CLI flags. A recipe param named `tagName` does not imply the Python entrypoint accepts `--tagName` unless that exact flag is explicitly implemented by the entrypoint.
+
+Generated CLI entrypoints may expose semantic flags, but those flags belong to the CLI entrypoint only. They must not be documented as the generated Python interface unless the Python file implements them.
+
 ## Generic CLI Entrypoint
 
 The generic CLI shape should invoke the Python runner with recipe id and params:
@@ -41,7 +61,7 @@ browser-flow run \
 
 ## Platform CLI Entrypoint
 
-If a platform CLI entrypoint is generated, it should expose semantic flags derived from recipe params:
+If a platform CLI entrypoint is generated, it may expose semantic flags derived from recipe params:
 
 ```bash
 github-flow create-issue \
@@ -51,7 +71,7 @@ github-flow create-issue \
   --submit-mode draft
 ```
 
-CLI entrypoints are convenience outputs. They must invoke the Python runner and must not duplicate platform-specific logic outside the recipe.
+CLI entrypoints are convenience outputs. They must invoke the Python runner and must not duplicate platform-specific logic outside the recipe. Semantic CLI flags must be documented as CLI-only unless the generated Python entrypoint explicitly implements the same flags.
 
 ## Workspace Runtime Distribution
 
@@ -79,7 +99,7 @@ For create, maintain, repair, or validate workflows that should learn from the r
 
 ## Python Output
 
-Generated Python output is a convenience entrypoint into the workspace-local runtime. It should accept params as JSON input or `@params.json`, forward them to `_runtime/agent_browser_flow_runner.py`, and stream the canonical runner's structured JSON result unchanged.
+Generated Python output is a convenience entrypoint into the workspace-local runtime. It should accept params as JSON input or `@params.json`, forward them to `_runtime/agent_browser_flow_runner.py`, and stream the canonical runner's structured JSON result unchanged. Its README or report must show the real invocation shape, preferably `python <flow-id>.py @params.json`, and must not imply recipe params can be passed as guessed flags such as `--tagName` unless those flags are actually implemented.
 
 Generated Python must not implement its own browser client, shell out to `openclaw tool browser`, import Playwright, attach to CDP, start Chrome, or call a plugin-native `runFlow`/`compileFlow`. If the active runtime cannot provide gateway env vars for `browser.request`, the canonical runner must report `failed` or `blocked` rather than silently falling back to a second browser kernel or returning plan-only success.
 
