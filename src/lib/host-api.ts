@@ -13,6 +13,8 @@ import type {
   SessionListResult,
   SessionNewResult,
   SessionPromptResult,
+  SessionRunClosureRequest,
+  SessionRunClosureResult,
   SessionTurnToolResultsRequest,
   SessionTurnToolResultsResult,
   SessionWindowResult,
@@ -569,6 +571,15 @@ export async function hostSessionTurnToolResults(
   payload: SessionTurnToolResultsRequest,
 ): Promise<SessionTurnToolResultsResult> {
   return hostApiFetch('/api/session/turn/tool-results', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function hostSessionRunClosure(
+  payload: SessionRunClosureRequest,
+): Promise<SessionRunClosureResult> {
+  return hostApiFetch('/api/session/run/closure', {
     method: 'POST',
     body: JSON.stringify(payload),
   });

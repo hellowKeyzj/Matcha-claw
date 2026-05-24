@@ -2,8 +2,9 @@ import type {
   SessionListResult,
   SessionLoadResult,
   SessionNewResult,
+  SessionRunClosureResult,
   SessionWindowResult,
-  type SessionTurnToolResultsResult,
+  SessionTurnToolResultsResult,
 } from '../../shared/session-adapter-types';
 import {
   createLatestWindowState,
@@ -403,6 +404,25 @@ export class SessionCommandService {
         ...(turnKey ? { turnKey } : {}),
         ...(runId ? { runId } : {}),
         ...(toolCallIds.length > 0 ? { toolCallIds } : {}),
+      })
+    )));
+  }
+
+  async reconcileRunClosure(payload: unknown): Promise<ApplicationResponseOf<SessionRunClosureResult | { success: false; error: string }>> {
+    const body = payload && typeof payload === 'object' && !Array.isArray(payload)
+      ? payload as Record<string, unknown>
+      : {};
+    const sessionKey = readRequiredSessionKey(payload);
+    if (!sessionKey) {
+      return badRequest('sessionKey is required');
+    }
+    const turnKey = typeof body.turnKey === 'string' ? body.turnKey.trim() : '';
+    const runId = typeof body.runId === 'string' ? body.runId.trim() : '';
+    return ok(await this.deps.operationCoordinator.run(sessionKey, 'run-closure', async () => (
+      await this.deps.timelineRuntime.reconcileRunClosure({
+        sessionKey,
+        ...(runId ? { runId } : {}),
+        ...(turnKey ? { turnKey } : {}),
       })
     )));
   }

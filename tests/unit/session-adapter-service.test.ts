@@ -3903,6 +3903,160 @@ describe('session runtime service', () => {
     });
   });
 
+  it('run closure reconcile closes an active run from a final transcript assistant turn', async () => {
+    const rootDir = await mkdtemp(join(tmpdir(), 'matcha-session-runtime-'));
+    const transcriptDir = join(rootDir, 'agents', 'main', 'sessions');
+    await mkdir(transcriptDir, { recursive: true });
+    await writeFile(
+      join(transcriptDir, 'sessions.json'),
+      JSON.stringify({
+        sessions: [{
+          key: 'agent:main:main',
+          sessionKey: 'agent:main:main',
+          file: 'main.jsonl',
+        }],
+      }),
+      'utf8',
+    );
+    await writeFile(join(transcriptDir, 'main.jsonl'), '', 'utf8');
+
+    const service = createTestSessionRuntimeService({
+      workspace: { getConfigDir: () => rootDir },
+      openclawBridge: {
+        chatSend: async () => ({ runId: 'run-closure-1' }),
+        gatewayRpc: async () => ({}),
+      },
+    });
+
+    await service.promptSession({
+      sessionKey: 'agent:main:main',
+      message: 'closure check',
+      idempotencyKey: 'run-closure-1',
+    });
+    await writeFile(
+      join(transcriptDir, 'main.jsonl'),
+      [
+        JSON.stringify({
+          type: 'message',
+          id: 'run-closure-1',
+          timestamp: 1_700_000_000_000,
+          message: {
+            role: 'user',
+            id: 'run-closure-1',
+            content: 'closure check',
+          },
+        }),
+        JSON.stringify({
+          type: 'message',
+          id: 'assistant-closure-1',
+          timestamp: 1_700_000_000_001,
+          message: {
+            role: 'assistant',
+            clientId: 'run-closure-1',
+            content: [{ type: 'text', text: 'closure reply' }],
+          },
+        }),
+      ].join('\n'),
+      'utf8',
+    );
+
+    const response = await service.reconcileRunClosure({
+      sessionKey: 'agent:main:main',
+      runId: 'run-closure-1',
+      turnKey: 'run-closure-1',
+    });
+
+    expect(response.status).toBe(200);
+    expect(response.data).toMatchObject({
+      sessionKey: 'agent:main:main',
+      runId: 'run-closure-1',
+      turnKey: 'run-closure-1',
+      closed: true,
+      reason: 'final-assistant-turn',
+      runtime: {
+        activeRunId: null,
+        runPhase: 'done',
+        pendingTurnKey: null,
+      },
+    });
+  });
+
+  it('turn tool result reconcile also returns terminal runtime when transcript proves the run is closed', async () => {
+    const rootDir = await mkdtemp(join(tmpdir(), 'matcha-session-runtime-'));
+    const transcriptDir = join(rootDir, 'agents', 'main', 'sessions');
+    await mkdir(transcriptDir, { recursive: true });
+    await writeFile(
+      join(transcriptDir, 'sessions.json'),
+      JSON.stringify({
+        sessions: [{
+          key: 'agent:main:main',
+          sessionKey: 'agent:main:main',
+          file: 'main.jsonl',
+        }],
+      }),
+      'utf8',
+    );
+    await writeFile(join(transcriptDir, 'main.jsonl'), '', 'utf8');
+
+    const service = createTestSessionRuntimeService({
+      workspace: { getConfigDir: () => rootDir },
+      openclawBridge: {
+        chatSend: async () => ({ runId: 'run-tool-closure-1' }),
+        gatewayRpc: async () => ({}),
+      },
+    });
+
+    await service.promptSession({
+      sessionKey: 'agent:main:main',
+      message: 'tool closure check',
+      idempotencyKey: 'run-tool-closure-1',
+    });
+    await writeFile(
+      join(transcriptDir, 'main.jsonl'),
+      [
+        JSON.stringify({
+          type: 'message',
+          id: 'run-tool-closure-1',
+          timestamp: 1_700_000_000_000,
+          message: {
+            role: 'user',
+            id: 'run-tool-closure-1',
+            content: 'tool closure check',
+          },
+        }),
+        JSON.stringify({
+          type: 'message',
+          id: 'assistant-tool-closure-1',
+          timestamp: 1_700_000_000_001,
+          message: {
+            role: 'assistant',
+            clientId: 'run-tool-closure-1',
+            content: [{ type: 'text', text: 'tool closure reply' }],
+          },
+        }),
+      ].join('\n'),
+      'utf8',
+    );
+
+    const response = await service.loadTurnToolResults({
+      sessionKey: 'agent:main:main',
+      runId: 'run-tool-closure-1',
+      turnKey: 'run-tool-closure-1',
+    });
+
+    expect(response.status).toBe(200);
+    expect(response.data).toMatchObject({
+      sessionKey: 'agent:main:main',
+      turnKey: 'run-tool-closure-1',
+      item: null,
+      runtime: {
+        activeRunId: null,
+        runPhase: 'done',
+        pendingTurnKey: null,
+      },
+    });
+  });
+
   it('terminal runs schedule transcript catch-up that only fills missing tool results', async () => {
     const rootDir = await mkdtemp(join(tmpdir(), 'matcha-session-runtime-'));
     const transcriptDir = join(rootDir, 'agents', 'main', 'sessions');

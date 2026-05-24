@@ -442,6 +442,28 @@ export interface SessionTurnToolResultsResult {
   runtime: SessionRuntimeStateSnapshot;
 }
 
+export interface SessionRunClosureRequest {
+  sessionKey: string;
+  runId?: string;
+  turnKey?: string;
+}
+
+export type SessionRunClosureReason =
+  | 'final-assistant-turn'
+  | 'still-streaming'
+  | 'running-tool'
+  | 'not-found'
+  | 'not-active';
+
+export interface SessionRunClosureResult {
+  sessionKey: string;
+  runId: string | null;
+  turnKey: string | null;
+  closed: boolean;
+  reason: SessionRunClosureReason;
+  runtime: SessionRuntimeStateSnapshot;
+}
+
 export interface SessionLoadResult {
   snapshot: SessionStateSnapshot;
 }

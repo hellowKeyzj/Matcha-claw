@@ -54,8 +54,9 @@ export function collectPendingRunClosureSignal(
     if (!hasAssistantTurnOutput(item)) {
       continue;
     }
+    const itemTurnKey = normalizeString(item.turnKey);
     const samePendingTurn = pendingTurnKey
-      && item.turnKey === pendingTurnKey
+      && (itemTurnKey === pendingTurnKey || itemTurnKey === `anchor:${pendingTurnKey}`)
       && (!pendingTurnLaneKey || item.laneKey === pendingTurnLaneKey);
     const sameRun = activeRunId && normalizeString(item.runId) === activeRunId;
     if (!samePendingTurn && !sameRun) {

@@ -211,6 +211,7 @@ export interface ChatStoreActions {
   cleanupEmptySession: () => void;
   loadHistory: (request: ChatHistoryLoadRequest) => Promise<void>;
   loadTurnToolResults: (request: { sessionKey: string; runId?: string; turnKey?: string; toolCallIds?: string[] }) => Promise<void>;
+  reconcileRunClosure: (request: { sessionKey: string; runId?: string; turnKey?: string }) => Promise<boolean>;
   loadOlderViewportItems: (sessionKey?: string) => Promise<void>;
   jumpViewportToLatest: (sessionKey?: string) => Promise<void>;
   setViewportAnchorItemKey: (itemKey: string | null, sessionKey?: string) => void;

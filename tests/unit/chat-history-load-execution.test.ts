@@ -186,6 +186,41 @@ describe('chat history load execution', () => {
     ]);
   });
 
+  it('foreground refresh keeps current items when the hydration snapshot is empty', async () => {
+    const { executeHistoryLoad } = await import('@/stores/chat/history-load-execution');
+    const requestedSessionKey = 'agent:main:main';
+    const currentMessages: RawMessage[] = [
+      { role: 'user', content: 'hello', timestamp: 1, id: 'user-1' },
+      { role: 'assistant', content: 'streaming reply', timestamp: 2, id: 'assistant-1' },
+    ];
+    const { set, get } = createStateHarness({
+      currentSessionKey: requestedSessionKey,
+      loadedSessions: {
+        [requestedSessionKey]: {
+          ...createEmptySessionRecord(),
+          items: buildRenderItemsFromMessages(requestedSessionKey, currentMessages),
+        },
+      },
+    });
+    fetchHistoryWindowMock.mockResolvedValueOnce(createWindowResult(requestedSessionKey, []));
+
+    await executeHistoryLoad({
+      set,
+      get,
+      historyRuntime: createHistoryRuntimeHarness(),
+      loadingTimeoutMs: 1000,
+    }, {
+      sessionKey: requestedSessionKey,
+      mode: 'quiet',
+      scope: 'foreground',
+    });
+
+    expect(get().loadedSessions[requestedSessionKey]?.meta.historyStatus).toBe('ready');
+    expect(getSessionItems(get(), requestedSessionKey).map((item) => item.key)).toEqual(
+      buildRenderItemsFromMessages(requestedSessionKey, currentMessages).map((item) => item.key),
+    );
+  });
+
   it('background load updates the target session without touching foreground loading ui', async () => {
     const { executeHistoryLoad } = await import('@/stores/chat/history-load-execution');
     const requestedSessionKey = 'agent:worker:main';

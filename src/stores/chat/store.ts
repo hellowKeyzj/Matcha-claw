@@ -6,7 +6,7 @@
 import { create } from 'zustand';
 import type { GatewayStatus } from '@/types/gateway';
 import { createIdleResourceStatusState } from '@/lib/resource-state';
-import { hostSessionApprovals, hostSessionRename, hostSessionResolveApproval, hostSessionTurnToolResults } from '@/lib/host-api';
+import { hostSessionApprovals, hostSessionRename, hostSessionResolveApproval, hostSessionRunClosure, hostSessionTurnToolResults } from '@/lib/host-api';
 import { useGatewayStore } from '../gateway';
 import { executeStoreAbortRun } from './abort-handlers';
 import {
@@ -129,14 +129,14 @@ export const useChatStore = create<ChatStoreState>((set, get) => {
         ...(request.turnKey ? { turnKey: request.turnKey } : {}),
         ...(request.toolCallIds && request.toolCallIds.length > 0 ? { toolCallIds: request.toolCallIds } : {}),
       });
-      if (!result.item) return;
       set((state) => {
         const current = state.loadedSessions[sessionKey];
         if (!current) return state;
+        const loadedSessions = result.item
+          ? patchSessionTurnItem(state, sessionKey, result.item)
+          : state.loadedSessions;
         return {
-          loadedSessions: patchSessionRecord({
-            loadedSessions: patchSessionTurnItem(state, sessionKey, result.item!),
-          }, sessionKey, {
+          loadedSessions: patchSessionRecord({ loadedSessions }, sessionKey, {
             runtime: {
               ...current.runtime,
               ...result.runtime,
@@ -144,6 +144,28 @@ export const useChatStore = create<ChatStoreState>((set, get) => {
           }),
         };
       });
+    },
+    reconcileRunClosure: async (request) => {
+      const sessionKey = request.sessionKey.trim();
+      if (!sessionKey) return false;
+      const result = await hostSessionRunClosure({
+        sessionKey,
+        ...(request.runId ? { runId: request.runId } : {}),
+        ...(request.turnKey ? { turnKey: request.turnKey } : {}),
+      });
+      set((state) => {
+        const current = state.loadedSessions[sessionKey];
+        if (!current) return state;
+        return {
+          loadedSessions: patchSessionRecord(state, sessionKey, {
+            runtime: {
+              ...current.runtime,
+              ...result.runtime,
+            },
+          }),
+        };
+      });
+      return result.closed;
     },
     loadOlderViewportItems: (sessionKey) => executeLoadOlderViewportItems(sessionInput, sessionKey),
     jumpViewportToLatest: (sessionKey) => executeJumpViewportToLatest(sessionInput, sessionKey),

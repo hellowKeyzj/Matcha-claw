@@ -19,7 +19,6 @@ import {
   buildItemHistoryFingerprint,
   buildItemRenderFingerprint,
   getSessionItems,
-  getSessionRuntime,
   getSessionViewportState,
   patchSessionMeta,
   patchSessionRecord,
@@ -31,7 +30,6 @@ import { useTaskSnapshotStore } from './task-snapshot-store';
 import { isHistoryLoadAbortError, throwIfHistoryLoadAborted } from './history-abort';
 import type { StoreHistoryCache } from './history-cache';
 import type { ChatHistoryLoadRequest, ChatStoreState } from './types';
-import { isRunActive } from './types';
 import type {
   SessionRenderItem,
   SessionWindowResult,
@@ -228,7 +226,7 @@ async function fetchHistoryWindowWithStartupRetry(input: {
   throw lastError ?? new Error('Failed to load chat history');
 }
 
-function shouldPreserveActiveForegroundItems(input: {
+function shouldPreserveForegroundItems(input: {
   state: ChatStoreState;
   requestedSessionKey: string;
   snapshot: HistoryWindowResult['snapshot'];
@@ -237,18 +235,10 @@ function shouldPreserveActiveForegroundItems(input: {
   if (!snapshot || state.currentSessionKey !== requestedSessionKey) {
     return false;
   }
-  const currentRuntime = getSessionRuntime(state, requestedSessionKey);
-  const snapshotRuntime = snapshot.runtime;
-  if (!isRunActive(currentRuntime) || !isRunActive(snapshotRuntime)) {
-    return false;
-  }
-  if (!currentRuntime.activeRunId || currentRuntime.activeRunId !== snapshotRuntime.activeRunId) {
-    return false;
-  }
   if (snapshot.items.length > 0) {
     return false;
   }
-  return true;
+  return getSessionItems(state, requestedSessionKey).length > 0;
 }
 
 function resolveViewportFetchLimit(itemCount: number): number {
@@ -418,7 +408,7 @@ export function createApplyLoadedMessagesPipeline(
     const didMessageListChange = previousRenderFingerprint !== renderFingerprint;
 
     set((state) => {
-      const nextSnapshot = shouldPreserveActiveForegroundItems({
+      const nextSnapshot = shouldPreserveForegroundItems({
         state,
         requestedSessionKey,
         snapshot,

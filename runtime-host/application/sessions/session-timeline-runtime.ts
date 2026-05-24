@@ -3,8 +3,10 @@ import type {
   SessionRuntimeStateSnapshot,
   SessionTimelineAssistantTurnEntry,
   SessionTimelineEntry,
-  type SessionTurnToolResultsRequest,
-  type SessionTurnToolResultsResult,
+  SessionRunClosureRequest,
+  SessionRunClosureResult,
+  SessionTurnToolResultsRequest,
+  SessionTurnToolResultsResult,
   TaskSnapshotEvent,
 } from '../../shared/session-adapter-types';
 import { isRunActive } from '../../shared/session-adapter-types';
@@ -244,17 +246,20 @@ export class SessionTimelineRuntime {
     const replay = await this.deps.transcriptLoader.readTimelineReplay(sessionKey);
     const result = applyTranscriptToolResultUpdates(state.timelineEntries, replay.timelineEntries);
     const updatedEntry = this.resolveTurnToolResultEntry(result.updatedEntries, request);
-    if (updatedEntry) {
-      state.timelineEntries = result.entries;
-      this.deps.executionGraphRuntime.rebuildFromTimeline(sessionKey, state);
-      this.deps.executionGraphRuntime.refreshRenderItems(state);
-      state.window = state.window.isAtLatest
-        ? createLatestWindowState(state.renderItems.length)
-        : clampWindowState(state.window, state.renderItems.length);
-      this.deps.executionGraphRuntime.refreshParents(sessionKey);
-      this.touchSessionStateMeta(state);
-      this.deps.stateStore.persistStore();
-    }
+    const nextEntries = updatedEntry
+      ? result.entries
+      : mergeTimelineEntries(state.timelineEntries, replay.timelineEntries);
+    state.timelineEntries = nextEntries;
+    state.hydrated = true;
+    this.deps.executionGraphRuntime.rebuildFromTimeline(sessionKey, state);
+    this.deps.executionGraphRuntime.refreshRenderItems(state);
+    state.window = state.window.isAtLatest
+      ? createLatestWindowState(state.renderItems.length)
+      : clampWindowState(state.window, state.renderItems.length);
+    this.deps.executionGraphRuntime.refreshParents(sessionKey);
+    this.touchSessionStateMeta(state);
+    this.deps.stateStore.persistStore();
+    const closure = this.reconcileRunClosureFromState(state, request);
     const item = updatedEntry
       ? assembleAuthoritativeAssistantTurns({
           sessionKey,
@@ -264,9 +269,94 @@ export class SessionTimelineRuntime {
       : null;
     return {
       sessionKey,
-      turnKey: updatedEntry?.turnKey ?? (normalizeString(request.turnKey) || null),
+      turnKey: updatedEntry?.turnKey ?? closure.turnKey,
       item,
       runtime: cloneSessionRuntimeState(state.runtime),
+    };
+  }
+
+  async reconcileRunClosure(
+    request: SessionRunClosureRequest,
+  ): Promise<SessionRunClosureResult> {
+    const sessionKey = normalizeString(request.sessionKey);
+    const state = this.getSessionState(sessionKey);
+    const replay = await this.deps.transcriptLoader.readTimelineReplay(sessionKey);
+    state.timelineEntries = mergeTimelineEntries(state.timelineEntries, replay.timelineEntries);
+    state.hydrated = true;
+    this.deps.executionGraphRuntime.rebuildFromTimeline(sessionKey, state);
+    this.deps.executionGraphRuntime.refreshRenderItems(state);
+    state.window = state.window.isAtLatest
+      ? createLatestWindowState(state.renderItems.length)
+      : clampWindowState(state.window, state.renderItems.length);
+    this.deps.executionGraphRuntime.refreshParents(sessionKey);
+    return this.reconcileRunClosureFromState(state, request);
+  }
+
+  private reconcileRunClosureFromState(
+    state: SessionRuntimeTimelineState,
+    request: SessionRunClosureRequest,
+  ): SessionRunClosureResult {
+    const sessionKey = normalizeString(request.sessionKey);
+    const runtime = state.runtime;
+    const runId = normalizeString(request.runId) || runtime.activeRunId;
+    const turnKey = normalizeString(request.turnKey) || runtime.pendingTurnKey;
+    if (!isRunActive(runtime)) {
+      return {
+        sessionKey,
+        runId,
+        turnKey,
+        closed: false,
+        reason: 'not-active',
+        runtime: cloneSessionRuntimeState(runtime),
+      };
+    }
+    const signal = collectPendingRunClosureSignal(state.renderItems, {
+      ...runtime,
+      activeRunId: runId,
+      pendingTurnKey: turnKey,
+    });
+    if (signal.hasActiveAssistantStream) {
+      return {
+        sessionKey,
+        runId,
+        turnKey,
+        closed: false,
+        reason: 'still-streaming',
+        runtime: cloneSessionRuntimeState(runtime),
+      };
+    }
+    if (signal.hasBlockingToolActivity) {
+      return {
+        sessionKey,
+        runId,
+        turnKey,
+        closed: false,
+        reason: 'running-tool',
+        runtime: cloneSessionRuntimeState(runtime),
+      };
+    }
+    if (!signal.hasMatchingRunEvidence || !signal.hasFinalAssistantTurn) {
+      return {
+        sessionKey,
+        runId,
+        turnKey,
+        closed: false,
+        reason: 'not-found',
+        runtime: cloneSessionRuntimeState(runtime),
+      };
+    }
+    const committed = this.commitSessionTransition(sessionKey, {
+      runtimePatch: this.buildTerminalRuntimePatch('done', null, null),
+      activeTransportEpoch: null,
+      advanceRunEpoch: true,
+    });
+    return {
+      sessionKey,
+      runId,
+      turnKey,
+      closed: true,
+      reason: 'final-assistant-turn',
+      runtime: committed.runtime,
     };
   }
 

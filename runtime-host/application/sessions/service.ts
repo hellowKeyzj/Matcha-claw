@@ -137,6 +137,14 @@ export class SessionRuntimeService {
     return await this.deps.commandService.abortSession(payload);
   }
 
+  async loadTurnToolResults(payload: unknown) {
+    return await this.deps.commandService.loadTurnToolResults(payload);
+  }
+
+  async reconcileRunClosure(payload: unknown) {
+    return await this.deps.commandService.reconcileRunClosure(payload);
+  }
+
   async listPendingApprovals() {
     return await this.deps.commandService.listPendingApprovals();
   }

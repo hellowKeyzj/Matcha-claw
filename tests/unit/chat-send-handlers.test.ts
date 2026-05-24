@@ -205,6 +205,7 @@ describe('chat send handlers', () => {
           },
         },
         loadHistory: vi.fn().mockResolvedValue(undefined),
+        reconcileRunClosure: vi.fn().mockResolvedValue(false),
         syncPendingApprovals: vi.fn().mockResolvedValue(undefined),
       } as unknown as ChatStoreState;
       const set = (
@@ -225,7 +226,67 @@ describe('chat send handlers', () => {
       await vi.advanceTimersByTimeAsync(60_000);
 
       expect(state.loadHistory).not.toHaveBeenCalled();
+      expect(state.reconcileRunClosure).not.toHaveBeenCalled();
       expect(state.syncPendingApprovals).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('reconciles stuck active runs before showing the safety timeout error', async () => {
+    vi.useFakeTimers();
+    try {
+      const sessionKey = 'agent:main:session-1';
+      const onSafetyTimeout = vi.fn();
+      let state = {
+        currentSessionKey: sessionKey,
+        loadedSessions: {
+          [sessionKey]: {
+            ...createSessionRecord({ sessionKey }),
+            runtime: {
+              activeRunId: 'run-1',
+              runPhase: 'streaming' as const,
+              activeTurnItemKey: null,
+              pendingTurnKey: 'turn-1',
+              pendingTurnLaneKey: 'main',
+              runtimeActivity: null,
+              lastUserMessageAt: 1,
+              lastError: null,
+              lastIssue: null,
+              updatedAt: 1,
+            },
+          },
+        },
+        error: null,
+        loadHistory: vi.fn().mockResolvedValue(undefined),
+        reconcileRunClosure: vi.fn().mockResolvedValue(true),
+        syncPendingApprovals: vi.fn().mockResolvedValue(undefined),
+      } as unknown as ChatStoreState;
+      const set = (
+        partial: Partial<ChatStoreState> | ((current: ChatStoreState) => Partial<ChatStoreState> | ChatStoreState),
+      ) => {
+        const patch = typeof partial === 'function' ? partial(state) : partial;
+        state = { ...state, ...patch } as ChatStoreState;
+      };
+      const get = () => state;
+
+      startStoreSendWatchers({
+        set,
+        get,
+        sessionKey,
+        onSafetyTimeout,
+      });
+
+      await vi.advanceTimersByTimeAsync(130_000);
+
+      expect(state.reconcileRunClosure).toHaveBeenCalledWith({
+        sessionKey,
+        runId: 'run-1',
+        turnKey: 'turn-1',
+      });
+      expect(state.loadHistory).not.toHaveBeenCalled();
+      expect(onSafetyTimeout).not.toHaveBeenCalled();
+      expect(state.error).toBeNull();
     } finally {
       vi.useRealTimers();
     }
