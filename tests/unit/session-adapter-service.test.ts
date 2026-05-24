@@ -712,6 +712,70 @@ describe('session runtime service', () => {
     });
   });
 
+  it('appends only live snapshot suffix after an interleaved tool segment', async () => {
+    const configDir = join(tmpdir(), `matcha-session-runtime-${Date.now()}`);
+    const service = createTestSessionRuntimeService({
+      workspace: { getConfigDir: () => configDir },
+      openclawBridge: {
+        chatSend: async () => ({ runId: 'run-unused' }),
+        gatewayRpc: async () => ({}),
+      },
+    });
+
+    await service.consumeGatewayConversationEvent({
+      type: 'chat.message',
+      event: {
+        state: 'delta',
+        runId: 'run-live-snapshot-tool',
+        sessionKey: 'agent:main:main',
+        sequenceId: 1,
+        message: {
+          role: 'assistant',
+          content: [{ type: 'text', text: '我先检查文件' }],
+        },
+      },
+    });
+    await service.consumeGatewayConversationEvent({
+      type: 'tool.lifecycle',
+      event: {
+        runId: 'run-live-snapshot-tool',
+        sessionKey: 'agent:main:main',
+        sequenceId: 2,
+        timestamp: 1_700_000_000_000,
+        phase: 'start',
+        toolCallId: 'tool-read-1',
+        name: 'Read',
+        args: { file_path: 'package.json' },
+      },
+    });
+    const [event] = await service.consumeGatewayConversationEvent({
+      type: 'chat.message',
+      event: {
+        state: 'delta',
+        runId: 'run-live-snapshot-tool',
+        sessionKey: 'agent:main:main',
+        sequenceId: 3,
+        message: {
+          role: 'assistant',
+          content: [{ type: 'text', text: '我先检查文件，现在开始读取配置' }],
+        },
+      },
+    });
+
+    expect(event.sessionUpdate).toBe('session_item_chunk');
+    if (event.sessionUpdate !== 'session_item_chunk') {
+      throw new Error(`Unexpected session update: ${event.sessionUpdate}`);
+    }
+    expect(event.item).toMatchObject({
+      kind: 'assistant-turn',
+      segments: [
+        { kind: 'message', text: '我先检查文件' },
+        { kind: 'tool', tool: { toolCallId: 'tool-read-1', name: 'Read' } },
+        { kind: 'message', text: '，现在开始读取配置' },
+      ],
+    });
+  });
+
   it('same-run short final text must not truncate accumulated streaming output', async () => {
     const configDir = join(tmpdir(), `matcha-session-runtime-${Date.now()}`);
     const service = createTestSessionRuntimeService({

@@ -116,6 +116,24 @@ function normalizeIncomingMessageText(
   return incoming.length >= previousText.length ? incoming : previousText;
 }
 
+function resolveLiveSnapshotSuffix(
+  incomingText: string,
+  previousSnapshotText: string | undefined,
+): string {
+  const incoming = sanitizeAssistantDisplayText([{ type: 'text', text: incomingText }]);
+  const previous = sanitizeAssistantDisplayText([{ type: 'text', text: previousSnapshotText ?? '' }]);
+  if (!incoming) {
+    return '';
+  }
+  if (!previous) {
+    return incoming;
+  }
+  if (!incoming.startsWith(previous)) {
+    return '';
+  }
+  return incoming.slice(previous.length).trimStart();
+}
+
 function buildMediaSegment(input: {
   key: string;
   images: ReadonlyArray<SessionRenderImage>;
@@ -300,6 +318,7 @@ export function buildSegmentsFromChatContent(input: {
   attachedFiles: ReadonlyArray<SessionRenderAttachedFile>;
   toolStatuses?: ReadonlyArray<Record<string, unknown>>;
   previousSegments: ReadonlyArray<SessionAssistantTurnSegment>;
+  previousSnapshotText?: string;
   isStreaming: boolean;
 }): ReadonlyArray<SessionAssistantTurnSegment> {
   const incomingText = extractTextFromContent(input.content) || input.fallbackText;
@@ -345,11 +364,13 @@ export function buildSegmentsFromChatContent(input: {
         input.isStreaming,
       );
     } else {
-      // Tail is a tool or thinking or empty -> append new message segment
+      const appendText = input.isStreaming
+        ? resolveLiveSnapshotSuffix(incomingText, input.previousSnapshotText)
+        : incomingText;
       const slot = countSegmentsOfKind(segments, 'message');
       const segment = buildMessageSegment(
         buildSegmentKey(input.identity, 'message', slot),
-        incomingText,
+        appendText,
       );
       if (segment) segments.push(segment);
     }

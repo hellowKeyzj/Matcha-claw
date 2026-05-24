@@ -290,6 +290,7 @@ function buildAssistantTurnFromAssistantMessage(input: {
     attachedFiles,
     toolStatuses: input.message.toolStatuses,
     previousSegments,
+    previousSnapshotText: existing?.text,
     isStreaming: input.status === 'streaming' || Boolean(input.message.streaming),
   });
   return buildAssistantTurnEntry({
