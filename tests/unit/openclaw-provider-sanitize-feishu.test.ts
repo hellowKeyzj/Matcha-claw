@@ -118,6 +118,12 @@ function createSanitizeNeutralConfig(): Record<string, unknown> {
         visibility: 'all',
       },
     },
+    agents: {
+      defaults: {
+        bootstrapMaxChars: 32_000,
+        bootstrapTotalMaxChars: 100_000,
+      },
+    },
     plugins: {
       allow: [],
       entries: {},
@@ -248,7 +254,7 @@ describe('sanitizeOpenClawConfig feishu plugin migration', () => {
     expect(nextConfig.plugins.entries['wecom-openclaw-plugin']).toBeUndefined();
   });
 
-  it('会把 legacy qqbot 插件 ID 迁移为 openclaw-qqbot', async () => {
+  it('保留官方 qqbot 插件 ID', async () => {
     readOpenClawJsonMock.mockResolvedValue({
       ...createSanitizeNeutralConfig(),
       plugins: {
@@ -261,15 +267,10 @@ describe('sanitizeOpenClawConfig feishu plugin migration', () => {
 
     await sanitizeMockConfig();
 
-    expect(writeOpenClawJsonMock).toHaveBeenCalledTimes(1);
-    const nextConfig = writeOpenClawJsonMock.mock.calls[0][0] as Record<string, any>;
-    expect(nextConfig.plugins.allow).toContain('openclaw-qqbot');
-    expect(nextConfig.plugins.allow).not.toContain('qqbot');
-    expect(nextConfig.plugins.entries['openclaw-qqbot']).toMatchObject({ enabled: true, foo: 'bar' });
-    expect(nextConfig.plugins.entries.qqbot).toBeUndefined();
+    expect(writeOpenClawJsonMock).not.toHaveBeenCalled();
   });
 
-  it('会清理 legacy plugins.entries.whatsapp 并同步 built-in allowlist', async () => {
+  it('保留官方 whatsapp 插件注册并同步 built-in allowlist', async () => {
     readOpenClawJsonMock.mockResolvedValue({
       ...createSanitizeNeutralConfig(),
       plugins: {
@@ -295,10 +296,10 @@ describe('sanitizeOpenClawConfig feishu plugin migration', () => {
 
     expect(writeOpenClawJsonMock).toHaveBeenCalledTimes(1);
     const nextConfig = writeOpenClawJsonMock.mock.calls[0][0] as Record<string, any>;
-    expect(nextConfig.plugins.entries?.whatsapp).toBeUndefined();
+    expect(nextConfig.plugins.entries?.whatsapp).toMatchObject({ enabled: true });
     expect(nextConfig.plugins.allow).toContain('dingtalk');
     expect(nextConfig.plugins.allow).toContain('telegram');
-    expect(nextConfig.plugins.allow).not.toContain('whatsapp');
+    expect(nextConfig.plugins.allow).toContain('whatsapp');
   });
 
   it('会移除 dingtalk strict-schema 不兼容的 accounts/defaultAccount', async () => {

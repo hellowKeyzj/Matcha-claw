@@ -3,7 +3,6 @@ import { normalizePluginIds } from '../../bootstrap/runtime-config';
 export const LEGACY_PLUGIN_ID_MAP: Record<string, string> = {
   'feishu-openclaw-plugin': 'openclaw-lark',
   'wecom-openclaw-plugin': 'wecom',
-  qqbot: 'openclaw-qqbot',
 };
 
 export function isRecord(value: unknown): value is Record<string, unknown> {

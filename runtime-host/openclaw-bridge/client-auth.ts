@@ -16,6 +16,7 @@ export const DEFAULT_GATEWAY_OPERATOR_SCOPES = [
   'operator.approvals',
 ] as const;
 
+const GATEWAY_PROTOCOL_VERSION = 4;
 const GATEWAY_CLIENT_ID = 'gateway-client';
 const GATEWAY_CLIENT_VERSION = '0.1.0';
 const GATEWAY_CLIENT_MODE = 'backend';
@@ -68,8 +69,8 @@ export class GatewayAuthService {
       id: connectId,
       method: 'connect',
       params: {
-        minProtocol: 3,
-        maxProtocol: 3,
+        minProtocol: GATEWAY_PROTOCOL_VERSION,
+        maxProtocol: GATEWAY_PROTOCOL_VERSION,
         client: {
           id: GATEWAY_CLIENT_ID,
           displayName: GATEWAY_CLIENT_DISPLAY_NAME,

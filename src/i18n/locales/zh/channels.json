@@ -358,7 +358,7 @@
             ]
         },
         "qqbot": {
-            "description": "通过 @tencent-connect/openclaw-qqbot 插件连接 QQ 机器人",
+            "description": "通过官方 @openclaw/qqbot 插件连接 QQ 机器人",
             "fields": {
                 "appId": {
                     "label": "App ID",

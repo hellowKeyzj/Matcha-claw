@@ -355,7 +355,7 @@ describe('runtime-host process channel routes', () => {
     });
   });
 
-  it('直接提交型渠道任务执行时才保存配置并触发 gateway_restart', async () => {
+  it('直接提交型渠道任务执行时即使配置不变也会保存配置并触发 gateway_restart', async () => {
     const deps = createDeps();
 
     const result = await deps.routeDeps.channelService.activateDirect({

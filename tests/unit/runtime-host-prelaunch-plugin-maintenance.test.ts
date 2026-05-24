@@ -157,21 +157,21 @@ describe('runtime-host prelaunch plugin maintenance', () => {
     expect(readFileSync(markerPath, 'utf8')).toBe('keep-me');
   });
 
-  it('启动期会在 runtime-host 侧清理 OpenClaw 内置渠道扩展旧副本', async () => {
+  it('启动期会在 runtime-host 侧清理仍是内置渠道的扩展旧副本', async () => {
     const discordDir = join(configDir, 'extensions', 'discord');
     const telegramDir = join(configDir, 'extensions', 'telegram');
     const externalDir = join(configDir, 'extensions', 'openclaw-weixin');
     mkdirSync(discordDir, { recursive: true });
     mkdirSync(telegramDir, { recursive: true });
     mkdirSync(externalDir, { recursive: true });
-    writeFileSync(join(discordDir, 'marker.txt'), 'stale', 'utf8');
+    writeFileSync(join(discordDir, 'marker.txt'), 'keep', 'utf8');
     writeFileSync(join(telegramDir, 'marker.txt'), 'stale', 'utf8');
     writeFileSync(join(externalDir, 'marker.txt'), 'keep', 'utf8');
 
     const removed = await createMaintenanceService().cleanupStaleBuiltinExtensionsForGatewayLaunch();
 
-    expect(removed.sort()).toEqual(['discord', 'telegram']);
-    expect(() => readFileSync(join(discordDir, 'marker.txt'), 'utf8')).toThrow();
+    expect(removed).toEqual(['telegram']);
+    expect(readFileSync(join(discordDir, 'marker.txt'), 'utf8')).toBe('keep');
     expect(() => readFileSync(join(telegramDir, 'marker.txt'), 'utf8')).toThrow();
     expect(readFileSync(join(externalDir, 'marker.txt'), 'utf8')).toBe('keep');
   });

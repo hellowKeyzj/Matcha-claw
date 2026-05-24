@@ -251,14 +251,14 @@ describe('channel-runtime config save', () => {
     });
   }, 15000);
 
-  it('保存 QQBot 配置时会迁移到 openclaw-qqbot 插件 ID', async () => {
+  it('保存 QQBot 配置时会启用官方 qqbot 插件 ID', async () => {
     await writeFile(
       join(tempDir, 'openclaw.json'),
       `${JSON.stringify({
         plugins: {
           allow: ['qqbot'],
           entries: {
-            qqbot: { enabled: true, legacy: true },
+            qqbot: { enabled: true },
           },
         },
         channels: {},
@@ -280,11 +280,18 @@ describe('channel-runtime config save', () => {
       await readFile(join(tempDir, 'openclaw.json'), 'utf8'),
     ) as Record<string, any>;
 
-    expect(config.plugins.allow).toContain('openclaw-qqbot');
-    expect(config.plugins.allow).not.toContain('qqbot');
-    expect(config.plugins.entries['openclaw-qqbot']).toBeDefined();
-    expect(config.plugins.entries['openclaw-qqbot'].enabled).toBe(true);
-    expect(config.plugins.entries.qqbot).toBeUndefined();
+    expect(config.plugins.allow).toContain('qqbot');
+    expect(config.plugins.entries.qqbot).toMatchObject({
+      enabled: true,
+      defaultAccount: 'acc1',
+      accounts: {
+        acc1: {
+          appId: 'qq-app-id',
+          clientSecret: 'qq-secret',
+          enabled: true,
+        },
+      },
+    });
   });
 
   it('仅插件启用但没有频道配置时不再识别为已配置频道', async () => {
@@ -292,9 +299,9 @@ describe('channel-runtime config save', () => {
       join(tempDir, 'openclaw.json'),
       `${JSON.stringify({
         plugins: {
-          allow: ['openclaw-qqbot'],
+          allow: ['qqbot'],
           entries: {
-            'openclaw-qqbot': { enabled: true },
+            qqbot: { enabled: true },
           },
         },
         channels: {},
@@ -349,27 +356,11 @@ describe('channel-runtime config save', () => {
     expect(config.plugins.allow).toEqual(['openclaw-lark']);
   });
 
-  it('保存 whatsapp 配置时会清理 legacy plugins.entries.whatsapp', async () => {
-    await writeFile(
-      join(tempDir, 'openclaw.json'),
-      `${JSON.stringify({
-        plugins: {
-          allow: ['whatsapp'],
-          entries: {
-            whatsapp: { enabled: true },
-          },
-        },
-        channels: {},
-      }, null, 2)}\n`,
-      'utf8',
-    );
-
+  it('保存 WhatsApp 配置时会启用官方 whatsapp 插件并镜像账号', async () => {
     await repository.saveChannelConfig({
       channelType: 'whatsapp',
       accountId: 'default',
-      config: {
-        phoneNumber: '+861234567890',
-      },
+      config: {},
       enabled: true,
     });
 
@@ -377,8 +368,23 @@ describe('channel-runtime config save', () => {
       await readFile(join(tempDir, 'openclaw.json'), 'utf8'),
     ) as Record<string, any>;
 
-    expect(config.plugins).toBeUndefined();
-  });
+    expect(config.channels.whatsapp.enabled).toBe(true);
+    expect(config.channels.whatsapp.defaultAccount).toBe('default');
+    expect(config.channels.whatsapp.accounts.default).toMatchObject({
+      enabled: true,
+      updatedAt: '2023-11-14T22:13:20.000Z',
+    });
+    expect(config.plugins.allow).toContain('whatsapp');
+    expect(config.plugins.entries.whatsapp).toMatchObject({
+      enabled: true,
+      defaultAccount: 'default',
+      accounts: {
+        default: {
+          enabled: true,
+        },
+      },
+    });
+  }, 15000);
 
   it('删除外部频道配置时会同步禁用对应插件', async () => {
     await repository.saveChannelConfig({
@@ -398,8 +404,84 @@ describe('channel-runtime config save', () => {
     ) as Record<string, any>;
 
     expect(config.channels?.qqbot).toBeUndefined();
-    expect(config.plugins.entries['openclaw-qqbot'].enabled).toBe(false);
-    expect(config.plugins.allow).not.toContain('openclaw-qqbot');
+    expect(config.plugins.entries.qqbot.enabled).toBe(false);
+    expect(config.plugins.allow).not.toContain('qqbot');
+  });
+
+  it('保存 Discord 配置时会启用官方 discord 插件并写入 schema 有效的 guild channel 配置', async () => {
+    await repository.saveChannelConfig({
+      channelType: 'discord',
+      accountId: 'default',
+      config: {
+        token: 'discord-token',
+        guildId: 'guild-1',
+        channelId: 'channel-1',
+      },
+      enabled: true,
+    });
+
+    const config = JSON.parse(
+      await readFile(join(tempDir, 'openclaw.json'), 'utf8'),
+    ) as Record<string, any>;
+
+    expect(config.channels.discord.accounts.default).toMatchObject({
+      token: 'discord-token',
+      guilds: {
+        'guild-1': {
+          channels: {
+            'channel-1': { requireMention: true },
+          },
+        },
+      },
+    });
+    expect(config.channels.discord.accounts.default).not.toHaveProperty('guildId');
+    expect(config.channels.discord.accounts.default).not.toHaveProperty('channelId');
+    expect(config.channels.discord.accounts.default.guilds['guild-1'].channels['channel-1']).not.toHaveProperty('allow');
+    expect(config.plugins.allow).toContain('discord');
+    expect(config.plugins.entries.discord.accounts.default).toMatchObject(config.channels.discord.accounts.default);
+  });
+
+  it('保存 Discord 配置时会清理已有 allow 标记', async () => {
+    await writeFile(
+      join(tempDir, 'openclaw.json'),
+      `${JSON.stringify({
+        channels: {
+          discord: {
+            enabled: true,
+            defaultAccount: 'default',
+            accounts: {
+              default: {
+                token: 'discord-token',
+                guilds: {
+                  'guild-1': {
+                    channels: {
+                      '*': { allow: false, requireMention: true },
+                    },
+                  },
+                },
+              },
+            },
+          },
+        },
+      }, null, 2)}\n`,
+      'utf8',
+    );
+
+    await repository.saveChannelConfig({
+      channelType: 'discord',
+      accountId: 'default',
+      config: { token: 'discord-token' },
+      enabled: true,
+    });
+
+    const config = JSON.parse(
+      await readFile(join(tempDir, 'openclaw.json'), 'utf8'),
+    ) as Record<string, any>;
+    const channelConfig = config.channels.discord.accounts.default.guilds['guild-1'].channels['*'];
+
+    expect(channelConfig).toMatchObject({ enabled: false, requireMention: true });
+    expect(channelConfig).not.toHaveProperty('allow');
+    expect(config.plugins.entries.discord.accounts.default.guilds['guild-1'].channels['*']).not.toHaveProperty('allow');
   });
 
   it('保存 dingtalk 配置时使用 strict-schema 顶层结构，不写 accounts/defaultAccount', async () => {

@@ -379,7 +379,6 @@ function patchBrokenModules(nodeModulesDir) {
 // openclaw.plugin.json 声明不一致，网关会拒绝加载。
 const PLUGIN_ID_FIXES = {
   'wecom-openclaw-plugin': 'wecom',
-  qqbot: 'openclaw-qqbot',
 };
 
 function patchPluginIds(pluginDir, expectedId) {
@@ -649,7 +648,9 @@ exports.default = async function afterPack(context) {
     { npmName: '@soimy/dingtalk', pluginId: 'dingtalk' },
     { npmName: '@wecom/wecom-openclaw-plugin', pluginId: 'wecom' },
     { npmName: '@tencent-weixin/openclaw-weixin', pluginId: 'openclaw-weixin' },
-    { npmName: '@tencent-connect/openclaw-qqbot', pluginId: 'openclaw-qqbot' },
+    { npmName: '@openclaw/discord', pluginId: 'discord' },
+    { npmName: '@openclaw/qqbot', pluginId: 'qqbot' },
+    { npmName: '@openclaw/whatsapp', pluginId: 'whatsapp' },
     {
       pluginId: 'memory-lancedb-pro',
       localSourceCandidates: [

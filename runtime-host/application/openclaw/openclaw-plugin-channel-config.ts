@@ -12,10 +12,16 @@ function channelSectionHasEnabledAccount(sectionRaw: unknown): boolean {
     return false;
   }
   const accounts = isRecord(sectionRaw.accounts) ? sectionRaw.accounts : null;
-  if (!accounts) {
-    return false;
+  if (accounts) {
+    return Object.values(accounts).some((item) => !isRecord(item) || item.enabled !== false);
   }
-  return Object.values(accounts).some((item) => !isRecord(item) || item.enabled !== false);
+  return Object.entries(sectionRaw).some(([key, value]) => (
+    key !== 'enabled'
+    && key !== 'updatedAt'
+    && key !== 'defaultAccount'
+    && value !== undefined
+    && value !== null
+  ));
 }
 
 export function listConfiguredBuiltinChannelIdsFromConfig(config: Record<string, unknown>): string[] {

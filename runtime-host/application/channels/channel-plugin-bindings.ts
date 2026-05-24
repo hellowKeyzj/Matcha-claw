@@ -21,19 +21,26 @@ export const EXTERNAL_CHANNEL_PLUGIN_BINDINGS: readonly ExternalChannelPluginBin
   },
   {
     channelType: 'qqbot',
-    pluginId: 'openclaw-qqbot',
-    legacyPluginIds: ['qqbot'],
+    pluginId: 'qqbot',
   },
   {
     channelType: 'openclaw-weixin',
     pluginId: 'openclaw-weixin',
   },
+  {
+    channelType: 'discord',
+    pluginId: 'discord',
+  },
+  {
+    channelType: 'whatsapp',
+    pluginId: 'whatsapp',
+  },
 ] as const;
 
+export const PLUGIN_BACKED_CHANNEL_IDS = new Set(['discord', 'qqbot', 'whatsapp']);
+
 export const BUILTIN_CHANNEL_IDS = new Set([
-  'discord',
   'telegram',
-  'whatsapp',
   'slack',
   'signal',
   'imessage',
@@ -44,7 +51,6 @@ export const BUILTIN_CHANNEL_IDS = new Set([
   'mattermost',
 ]);
 
-export const LEGACY_BUILTIN_CHANNEL_PLUGIN_IDS = new Set(['whatsapp']);
 export const STRICT_SCHEMA_CHANNEL_IDS = new Set(['dingtalk']);
 
 const externalChannelPluginIdByType = new Map<string, string>();
@@ -72,6 +78,5 @@ export function isBuiltinChannelId(channelId: string): boolean {
 
 export function isChannelDerivedPluginId(pluginId: string): boolean {
   return isBuiltinChannelId(pluginId)
-    || LEGACY_BUILTIN_CHANNEL_PLUGIN_IDS.has(pluginId)
     || getExternalChannelTypeByPluginId(pluginId) !== undefined;
 }

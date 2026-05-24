@@ -198,6 +198,10 @@ describe('runtime-host process gateway rpc client', () => {
       expect(methods).toEqual(['channels.status', 'cron.list']);
       expect(connectionCount).toBe(1);
       expect(connectParamsSnapshot).toBeTruthy();
+      expect(connectParamsSnapshot).toMatchObject({
+        minProtocol: 4,
+        maxProtocol: 4,
+      });
       expect((connectParamsSnapshot as { scopes?: string[] }).scopes).toContain('operator.read');
       expect((connectParamsSnapshot as { scopes?: string[] }).scopes).toContain('operator.write');
       expect((connectParamsSnapshot as { caps?: string[] }).caps).toContain('tool-events');

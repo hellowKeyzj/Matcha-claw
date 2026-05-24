@@ -8,6 +8,9 @@
  *   - @soimy/dingtalk -> build/openclaw-plugins/dingtalk
  *   - @wecom/wecom-openclaw-plugin -> build/openclaw-plugins/wecom
  *   - @tencent-weixin/openclaw-weixin -> build/openclaw-plugins/openclaw-weixin
+ *   - @openclaw/discord -> build/openclaw-plugins/discord
+ *   - @openclaw/qqbot -> build/openclaw-plugins/qqbot
+ *   - @openclaw/whatsapp -> build/openclaw-plugins/whatsapp
  *   - memory-lancedb-pro -> build/openclaw-plugins/memory-lancedb-pro
  *
  * The output plugin directory contains:
@@ -66,7 +69,9 @@ const PLUGINS = [
   { npmName: '@soimy/dingtalk', pluginId: 'dingtalk' },
   { npmName: '@wecom/wecom-openclaw-plugin', pluginId: 'wecom' },
   { npmName: '@tencent-weixin/openclaw-weixin', pluginId: 'openclaw-weixin' },
-  { npmName: '@tencent-connect/openclaw-qqbot', pluginId: 'openclaw-qqbot' },
+  { npmName: '@openclaw/discord', pluginId: 'discord' },
+  { npmName: '@openclaw/qqbot', pluginId: 'qqbot' },
+  { npmName: '@openclaw/whatsapp', pluginId: 'whatsapp' },
   ...LOCAL_OPENCLAW_PLUGIN_BUILD_TARGETS.map((target) => ({
     localPath: path.join(ROOT, target.packageDir),
     pluginId: target.pluginId,
@@ -305,7 +310,6 @@ function patchPluginId(pluginDir, expectedId) {
 
   const ID_FIXES = {
     'wecom-openclaw-plugin': 'wecom',
-    qqbot: 'openclaw-qqbot',
   };
 
   for (const entry of entryFiles) {

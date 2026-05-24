@@ -357,7 +357,7 @@
             ]
         },
         "qqbot": {
-            "description": "@tencent-connect/openclaw-qqbot プラグイン経由で QQ ボットに接続します",
+            "description": "公式 @openclaw/qqbot プラグイン経由で QQ ボットに接続します",
             "fields": {
                 "appId": {
                     "label": "App ID",

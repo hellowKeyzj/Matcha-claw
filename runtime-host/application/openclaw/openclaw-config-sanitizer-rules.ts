@@ -4,9 +4,7 @@ import { STRICT_SCHEMA_CHANNEL_IDS } from '../channels/channel-plugin-bindings';
 
 const BUILTIN_CHANNEL_IDS = new Set([
   'feishu',
-  'discord',
   'telegram',
-  'whatsapp',
   'slack',
   'signal',
   'imessage',
@@ -314,6 +312,70 @@ function sanitizeStrictSchemaChannels(config: Record<string, unknown>, deps: Ope
   return modified;
 }
 
+function sanitizeDiscordGuildChannelConfig(channelConfig: unknown): boolean {
+  if (!channelConfig || typeof channelConfig !== 'object' || Array.isArray(channelConfig)) {
+    return false;
+  }
+  const channel = channelConfig as Record<string, unknown>;
+  let modified = false;
+  if (channel.allow === false && channel.enabled === undefined) {
+    channel.enabled = false;
+    modified = true;
+  }
+  if ('allow' in channel) {
+    delete channel.allow;
+    modified = true;
+  }
+  return modified;
+}
+
+function sanitizeDiscordGuilds(target: unknown): boolean {
+  if (!target || typeof target !== 'object' || Array.isArray(target)) {
+    return false;
+  }
+  const guilds = (target as Record<string, unknown>).guilds;
+  if (!guilds || typeof guilds !== 'object' || Array.isArray(guilds)) {
+    return false;
+  }
+  let modified = false;
+  for (const guildConfig of Object.values(guilds as Record<string, unknown>)) {
+    if (!guildConfig || typeof guildConfig !== 'object' || Array.isArray(guildConfig)) {
+      continue;
+    }
+    const channels = (guildConfig as Record<string, unknown>).channels;
+    if (!channels || typeof channels !== 'object' || Array.isArray(channels)) {
+      continue;
+    }
+    for (const channelConfig of Object.values(channels as Record<string, unknown>)) {
+      modified = sanitizeDiscordGuildChannelConfig(channelConfig) || modified;
+    }
+  }
+  return modified;
+}
+
+function sanitizeDiscordChannelConfig(config: Record<string, unknown>, deps: OpenClawConfigSanitizerRulesDeps): boolean {
+  const channels = (
+    config.channels && typeof config.channels === 'object' && !Array.isArray(config.channels)
+      ? config.channels as Record<string, Record<string, unknown>>
+      : {}
+  );
+  const discord = channels.discord;
+  if (!discord || typeof discord !== 'object' || Array.isArray(discord)) {
+    return false;
+  }
+  let modified = sanitizeDiscordGuilds(discord);
+  const accounts = discord.accounts && typeof discord.accounts === 'object' && !Array.isArray(discord.accounts)
+    ? discord.accounts as Record<string, unknown>
+    : {};
+  for (const accountConfig of Object.values(accounts)) {
+    modified = sanitizeDiscordGuilds(accountConfig) || modified;
+  }
+  if (modified) {
+    deps.info('[sanitize] Removed incompatible Discord channel allow flags');
+  }
+  return modified;
+}
+
 function migrateFeishuDefaultAccountToTopLevel(
   config: Record<string, unknown>,
   deps: OpenClawConfigSanitizerRulesDeps,
@@ -412,14 +474,12 @@ async function sanitizePlugins(config: Record<string, unknown>, deps: OpenClawCo
 
   modified = migrateAllowId(allowList, 'feishu-openclaw-plugin', 'openclaw-lark', deps) || modified;
   modified = migrateAllowId(allowList, 'wecom-openclaw-plugin', 'wecom', deps) || modified;
-  modified = migrateAllowId(allowList, 'qqbot', 'openclaw-qqbot', deps) || modified;
   if (modified) {
     pluginsObj.allow = allowList;
   }
 
   modified = migrateEntryId(entries, 'feishu-openclaw-plugin', 'openclaw-lark', deps) || modified;
   modified = migrateEntryId(entries, 'wecom-openclaw-plugin', 'wecom', deps) || modified;
-  modified = migrateEntryId(entries, 'qqbot', 'openclaw-qqbot', deps) || modified;
 
   const hasNewFeishu = allowList.includes('openclaw-lark') || Boolean(entries['openclaw-lark']);
   if (hasNewFeishu) {
@@ -438,12 +498,6 @@ async function sanitizePlugins(config: Record<string, unknown>, deps: OpenClawCo
     };
     modified = true;
     deps.info('[sanitize] Disabled plugins.entries.feishu because openclaw-lark is configured');
-  }
-
-  if (entries.whatsapp) {
-    delete entries.whatsapp;
-    modified = true;
-    deps.info('[sanitize] Removed legacy plugins.entries.whatsapp for built-in channel');
   }
 
   const providers = ((config.models as Record<string, unknown> | undefined)?.providers as Record<string, unknown> | undefined) || {};
@@ -541,6 +595,7 @@ export async function applyOpenClawConfigSanitizerRules(
   modified = enforceBootstrapCharLimits(config, deps) || modified;
   modified = await sanitizePluginsLoadPaths(config, deps) || modified;
   modified = sanitizeStrictSchemaChannels(config, deps) || modified;
+  modified = sanitizeDiscordChannelConfig(config, deps) || modified;
   modified = migrateFeishuDefaultAccountToTopLevel(config, deps) || modified;
   modified = await sanitizePlugins(config, deps) || modified;
   return modified;

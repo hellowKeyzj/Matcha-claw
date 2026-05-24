@@ -14,8 +14,10 @@ export const CHANNEL_OPENCLAW_PLUGIN_DEFINITIONS: readonly ManagedOpenClawPlugin
   { id: 'dingtalk', sourceDirs: ['dingtalk'] },
   { id: 'openclaw-lark', sourceDirs: ['openclaw-lark', 'feishu-openclaw-plugin'] },
   { id: 'wecom', sourceDirs: ['wecom', 'wecom-openclaw-plugin'] },
-  { id: 'openclaw-qqbot', sourceDirs: ['openclaw-qqbot', 'qqbot'] },
+  { id: 'qqbot', sourceDirs: ['qqbot'] },
   { id: 'openclaw-weixin', sourceDirs: ['openclaw-weixin'] },
+  { id: 'discord', sourceDirs: ['discord'] },
+  { id: 'whatsapp', sourceDirs: ['whatsapp'] },
 ] as const;
 
 export const CAPABILITY_OPENCLAW_PLUGIN_DEFINITIONS: readonly ManagedOpenClawPluginDefinition[] = [

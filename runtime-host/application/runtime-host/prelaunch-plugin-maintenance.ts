@@ -61,7 +61,7 @@ async function buildManagedPluginMaintenanceCacheKey(
   });
 }
 
-const STALE_BUILTIN_EXTENSION_IDS = ['discord', 'telegram'] as const;
+const STALE_BUILTIN_EXTENSION_IDS = ['telegram'] as const;
 
 export class PrelaunchPluginMaintenanceService {
   constructor(

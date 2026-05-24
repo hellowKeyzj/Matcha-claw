@@ -10,7 +10,7 @@ import { withOpenClawConfigLock } from '../openclaw/openclaw-config-mutex';
 import type { OpenClawConfigRepositoryPort } from '../openclaw/openclaw-config-repository';
 import type { RuntimeClockPort } from '../common/runtime-ports';
 import {
-  LEGACY_BUILTIN_CHANNEL_PLUGIN_IDS,
+  PLUGIN_BACKED_CHANNEL_IDS,
   getExternalChannelPluginId,
   STRICT_SCHEMA_CHANNEL_IDS,
 } from './channel-plugin-bindings';
@@ -45,64 +45,16 @@ function normalizeChannelConfigValueLocal(value: unknown) {
   return '';
 }
 
-function cleanupPluginContainer(config: Record<string, any>): void {
-  if (!isRecord(config.plugins)) {
-    return;
-  }
-  const plugins = config.plugins as Record<string, unknown>;
-  if (Array.isArray(plugins.allow) && plugins.allow.length === 0) {
-    delete plugins.allow;
-  }
-  if (isRecord(plugins.entries) && Object.keys(plugins.entries).length === 0) {
-    delete plugins.entries;
-  }
-  if (Object.keys(plugins).length === 0) {
-    delete config.plugins;
-  }
-}
-
-function removePluginRegistration(config: Record<string, any>, pluginId: string): boolean {
-  if (!isRecord(config.plugins)) {
-    return false;
-  }
-
-  const plugins = config.plugins as Record<string, unknown>;
-  let modified = false;
-
-  if (Array.isArray(plugins.allow)) {
-    const allow = plugins.allow.filter((item): item is string => typeof item === 'string');
-    const nextAllow = allow.filter((item) => item !== pluginId);
-    if (nextAllow.length !== allow.length) {
-      plugins.allow = nextAllow;
-      modified = true;
-    }
-  }
-
-  if (isRecord(plugins.entries) && Object.prototype.hasOwnProperty.call(plugins.entries, pluginId)) {
-    delete (plugins.entries as Record<string, unknown>)[pluginId];
-    modified = true;
-  }
-
-  if (modified) {
-    cleanupPluginContainer(config);
-  }
-
-  return modified;
-}
-
-function cleanupLegacyBuiltInChannelPluginRegistrationLocal(config: Record<string, any>, channelType: string): boolean {
-  if (!LEGACY_BUILTIN_CHANNEL_PLUGIN_IDS.has(channelType)) {
-    return false;
-  }
-  return removePluginRegistration(config, channelType);
-}
-
 function isStrictSchemaChannel(channelType: string): boolean {
   return STRICT_SCHEMA_CHANNEL_IDS.has(channelType);
 }
 
 function usesTopLevelDefaultAccount(channelType: string): boolean {
   return channelType === 'feishu';
+}
+
+function isPluginBackedChannel(channelType: string): boolean {
+  return PLUGIN_BACKED_CHANNEL_IDS.has(channelType);
 }
 
 function isDefaultAccountId(accountId: string): boolean {
@@ -123,6 +75,129 @@ function ensureChannelAccountsMap(channelSection: Record<string, any>): Record<s
   }
   channelSection.accounts = {};
   return channelSection.accounts as Record<string, Record<string, any>>;
+}
+
+const DISCORD_GUILD_CHANNEL_KEYS_TO_KEEP = new Set([
+  'autoArchiveDuration',
+  'autoThread',
+  'autoThreadName',
+  'enabled',
+  'ignoreOtherMentions',
+  'includeThreadStarter',
+  'requireMention',
+  'roles',
+  'skills',
+  'systemPrompt',
+  'tools',
+  'toolsBySender',
+  'users',
+]);
+
+function cloneRecordLocal(value: Record<string, any>): Record<string, any> {
+  return JSON.parse(JSON.stringify(value)) as Record<string, any>;
+}
+
+function sanitizeDiscordGuildChannelConfig(channelConfig: unknown): void {
+  if (!isRecord(channelConfig)) {
+    return;
+  }
+  if (channelConfig.allow === false && channelConfig.enabled === undefined) {
+    channelConfig.enabled = false;
+  }
+  for (const key of Object.keys(channelConfig)) {
+    if (key === 'allow' || !DISCORD_GUILD_CHANNEL_KEYS_TO_KEEP.has(key)) {
+      delete channelConfig[key];
+    }
+  }
+}
+
+function sanitizeDiscordGuilds(config: unknown): void {
+  if (!isRecord(config) || !isRecord(config.guilds)) {
+    return;
+  }
+  for (const guildConfig of Object.values(config.guilds)) {
+    if (!isRecord(guildConfig) || !isRecord(guildConfig.channels)) {
+      continue;
+    }
+    for (const channelConfig of Object.values(guildConfig.channels)) {
+      sanitizeDiscordGuildChannelConfig(channelConfig);
+    }
+  }
+}
+
+function normalizeChannelBodyConfig(channelType: string, bodyConfig: Record<string, any>): Record<string, any> {
+  const next = { ...bodyConfig };
+  if (channelType === 'discord') {
+    const guildId = normalizeChannelConfigValueLocal(next.guildId).trim();
+    const channelId = normalizeChannelConfigValueLocal(next.channelId).trim();
+    delete next.guildId;
+    delete next.channelId;
+    if (guildId) {
+      const guilds = isRecord(next.guilds) ? cloneRecordLocal(next.guilds) : {};
+      const guild = isRecord(guilds[guildId]) ? guilds[guildId] : {};
+      const channels = isRecord(guild.channels) ? guild.channels : {};
+      channels[channelId || '*'] = {
+        ...(isRecord(channels[channelId || '*']) ? channels[channelId || '*'] : {}),
+        requireMention: true,
+      };
+      guild.channels = channels;
+      guilds[guildId] = guild;
+      next.guilds = guilds;
+    }
+    sanitizeDiscordGuilds(next);
+  }
+  if (channelType === 'whatsapp') {
+    next.enabled = next.enabled ?? true;
+  }
+  return next;
+}
+
+function sanitizeChannelSectionBeforeMirror(channelType: string, section: Record<string, any>): void {
+  if (channelType !== 'discord') {
+    return;
+  }
+  sanitizeDiscordGuilds(section);
+  const accounts = getChannelAccountsMap(section);
+  if (!accounts) {
+    return;
+  }
+  for (const accountConfig of Object.values(accounts)) {
+    sanitizeDiscordGuilds(accountConfig);
+  }
+}
+
+function mirrorPluginBackedChannelState(config: Record<string, any>, channelType: string): void {
+  if (!isPluginBackedChannel(channelType) || !isRecord(config.channels)) {
+    return;
+  }
+  const pluginId = getExternalChannelPluginId(channelType);
+  const channelSection = config.channels[channelType];
+  if (!pluginId || !isRecord(channelSection)) {
+    return;
+  }
+  sanitizeChannelSectionBeforeMirror(channelType, channelSection);
+  if (!isRecord(config.plugins)) {
+    config.plugins = {};
+  }
+  const plugins = config.plugins as Record<string, any>;
+  if (!isRecord(plugins.entries)) {
+    plugins.entries = {};
+  }
+  const entries = plugins.entries as Record<string, any>;
+  const entry = isRecord(entries[pluginId]) ? entries[pluginId] : {};
+  entry.enabled = channelSection.enabled !== false;
+  if (typeof channelSection.defaultAccount === 'string') {
+    entry.defaultAccount = channelSection.defaultAccount;
+  } else {
+    delete entry.defaultAccount;
+  }
+  const accounts = getChannelAccountsMap(channelSection);
+  if (accounts) {
+    entry.accounts = cloneRecordLocal(accounts);
+  } else {
+    delete entry.accounts;
+  }
+  entries[pluginId] = entry;
 }
 
 function channelHasAnyAccount(channelType: string, channelSection: Record<string, any>): boolean {
@@ -234,7 +309,6 @@ export class ChannelConfigRepository {
         ? input.staleAccountIds.filter((item): item is string => typeof item === 'string' && item.trim().length > 0)
         : [];
       let config = await this.configRepository.read();
-      cleanupLegacyBuiltInChannelPluginRegistrationLocal(config, channelType);
       if (!isRecord(config.channels)) {
         config.channels = {};
       }
@@ -244,7 +318,7 @@ export class ChannelConfigRepository {
       }
 
       const section = channels[channelType] as Record<string, any>;
-      const bodyConfig = isRecord(input.config) ? input.config : {};
+      const bodyConfig = normalizeChannelBodyConfig(channelType, isRecord(input.config) ? input.config : {});
       if (isStrictSchemaChannel(channelType)) {
         const nextAccountConfig = {
           ...section,
@@ -299,6 +373,7 @@ export class ChannelConfigRepository {
         section.defaultAccount = accountId;
         section.enabled = input.enabled !== false;
       }
+      mirrorPluginBackedChannelState(config, channelType);
       config = await reconcileChannelDerivedPluginStateLocal(this.configRepository, this.pluginFileSystem, config);
       await this.configRepository.write(config);
     });

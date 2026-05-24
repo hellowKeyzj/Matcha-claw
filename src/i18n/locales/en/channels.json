@@ -357,7 +357,7 @@
             ]
         },
         "qqbot": {
-            "description": "Connect QQ Bot via @tencent-connect/openclaw-qqbot plugin",
+            "description": "Connect QQ Bot via the official @openclaw/qqbot plugin",
             "fields": {
                 "appId": {
                     "label": "App ID",
