@@ -40,11 +40,11 @@ Verify first-class atlas coverage:
 </step>
 
 <step name="check_recipe_completeness">
-For each recipe, verify it references an existing capability, has explicit business intent through that capability, complete params schema, no hardcoded sample values, semantic targets, interaction patterns, no primary snapshot refs or brittle selectors, success criteria, extraction targets when applicable, risk metadata, confirmation boundary, browser trace evidence, prerequisites, environment/context policy, freshness, async or complex component notes, and evidence boundary.
+For each recipe, verify it references an existing capability, has explicit business intent through that capability, complete params schema, no hardcoded sample values, semantic targets, interaction patterns, no primary snapshot refs or brittle selectors, success criteria, extraction targets when applicable, risk metadata, confirmation boundary, browser trace evidence, reliability level, verification strength, repair notes when verification is weak, prerequisites, environment/context policy, freshness, async or complex component notes, evidence boundary, and recent `patchStatus` evidence when the recipe has been run through the v1 runner.
 </step>
 
 <step name="check_generated_outputs">
-If generated outputs exist or were requested, verify the Python runner accepts params, calls the recipe by id or embedded recipe with params, and uses the minimal OpenClaw browser gateway client for `browser.request`. Verify TypeScript and CLI entrypoints invoke the Python runner instead of reimplementing workflow logic. They must not be one-off scripts with fixed sample paths, titles, accounts, or dates.
+If generated outputs exist or were requested, verify `browser-flows/_runtime/agent_browser_flow_runner.py` and `browser-flows/_runtime/openclaw_browser_client.py` exist, the Python entrypoint accepts params, calls the recipe by id through the workspace-local runtime, and TypeScript/CLI entrypoints invoke it instead of reimplementing workflow logic. They must not be one-off scripts with fixed sample paths, titles, accounts, dates, custom browser clients, `openclaw tool browser`, or plan-only success output.
 </step>
 
 <step name="score_assets">
@@ -57,11 +57,11 @@ Classify each atlas asset and recipe:
 - `unknown`: not enough evidence yet
 - `not-suitable`: unsafe or cannot be represented honestly
 
-Route `needs-maintenance` and `blocked` cases to maintain or repair workflow.
+Route `needs-maintenance` and `blocked` cases to maintain or repair workflow. For executable recipes that need live confirmation, run the canonical runner in `learning` mode; `patchStatus: no_changes` is evidence that the persisted model still satisfies the observed page and user goal, while `suggest_only` or failed validation requires repair judgment.
 </step>
 
 <step name="report_validation">
-Report an `AtlasValidationReport` with platform, audited surfaces/views/components/capabilities/recipes, ready assets, partial gaps, needs-maintenance reasons, blockers, generated output status, index status, evidence paths, and recommended next workflow.
+Report an `AtlasValidationReport` with platform, audited surfaces/views/components/capabilities/recipes, ready assets, partial gaps, needs-maintenance reasons, blockers, generated output status, `reliabilityByRecipe`, index status, evidence paths, and recommended next workflow.
 </step>
 
 </process>
@@ -71,6 +71,7 @@ Report an `AtlasValidationReport` with platform, audited surfaces/views/componen
 - Atlas surface/view/component/capability coverage checked
 - Recipe parameterization checked where recipes exist
 - Browser trace evidence checked
+- Recipe reliability levels match verification evidence and weak verification is not claimed as validated
 - Generated outputs checked for parameterized execution
 - Unsupported Browser Relay primitive gaps are explicit
 - Each asset receives ready/partial/needs-maintenance/blocked/unknown/not-suitable status

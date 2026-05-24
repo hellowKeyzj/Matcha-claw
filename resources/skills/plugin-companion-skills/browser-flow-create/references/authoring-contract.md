@@ -183,7 +183,10 @@ Record freshness metadata for atlas records and recipes: `lastObservedAt`, `last
 ## Evidence Rules
 
 - Use `snapshot` for semantic page understanding, short-lived refs, ARIA/visible structure, and current state.
-- Use `screenshot`, `requests`, `errors`, `console`, `pdf`, `storage`, or `cookies` only when useful and supported by the current Browser Relay action contract.
+- Treat snapshot output as scoped evidence, not an always-complete DOM or business database. Compact snapshots, diff snapshots, empty interactive refs, virtualized tables, pagination, and delayed renders must be interpreted with their evidence boundary recorded.
+- Use full snapshots, screenshots, requests, errors, console, pdf, storage, cookies, or bounded page checks only when useful and supported by the current Browser Relay action contract.
+- Choose click, type, fill, select, wait, scroll, upload, or evaluate strategies from current browser evidence and component behavior; do not turn a component-specific tactic into a universal rule.
+- Every UI step that can wait on page state, element readiness, modal transitions, table refresh, upload, navigation, or confirmation must declare a bounded timeout or bounded wait. Recipes must fail with evidence instead of appearing to hang indefinitely.
 - Use `act.evaluate` only as bounded in-page logic for declared page reads or checks; never use it to click, fill, submit, navigate, execute local files, run shells, run package managers, or replace semantic targets.
 - Unsupported download capture, popup handling, active-session fetch, raw CDP, or unobservable success must be recorded as partial or blocked.
 - Locator fallbacks are evidence, not primary atlas identity.

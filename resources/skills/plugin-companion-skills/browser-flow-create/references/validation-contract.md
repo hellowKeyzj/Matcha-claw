@@ -22,10 +22,12 @@ Do not report atlas or recipe work as completed unless all relevant items pass:
 14. At least one safe real param set was validated in browser for each `validated` recipe.
 15. Missing required params fail clearly for executable recipes.
 16. Success state or extracted data is proven by trace evidence for executable recipes.
-17. Requested generated outputs accept params, keep Python as the canonical runner, and use the minimal OpenClaw browser gateway client for `browser.request`.
-18. Unsupported Browser Relay primitives, login, permission, popup, download, raw CDP, active-session fetch, or unobservable success gaps are marked partial or blocked.
-19. Environment/context/freshness are explicit.
-20. `<workspace>/browser-flows/INDEX.md` is updated.
+17. UI steps that can block on readiness, transition, refresh, upload, navigation, or confirmation are bounded by timeout or bounded wait conditions.
+18. Executable recipes declare a reliability level (`draft`, `usable`, `partial-verification`, `validated`, or `hardened`) that matches the evidence; weak verification is allowed only when reported honestly with repair notes.
+19. Requested generated outputs accept params, keep Python as the canonical runner, and use the minimal OpenClaw browser gateway client for `browser.request`.
+20. Unsupported Browser Relay primitives, login, permission, popup, download, raw CDP, active-session fetch, or unobservable success gaps are marked partial or blocked.
+21. Environment/context/freshness are explicit.
+22. `<workspace>/browser-flows/INDEX.md` is updated.
 
 ## Validation Matrix
 
@@ -34,15 +36,17 @@ Do not report atlas or recipe work as completed unless all relevant items pass:
 | Platform | boundary, domains/base URL, type, terminology, context, risk rules |
 | Surfaces | entry patterns, related views, entities, context, evidence refs |
 | Views | regions, components, capabilities, route/entry path, freshness, evidence refs |
-| Components | type, label, fields/actions/options/columns, interaction pattern, evidence refs |
+| Components | type, label, fields/actions/options/columns, interaction pattern, disambiguation context, evidence refs |
 | Capabilities | intent, inputs, outputs, risk, execution mode, automation status, prerequisites, success signals |
 | Params | schema, required/optional/defaults, no hardcoded samples for recipes |
 | Safe execution | Agent-side Browser Flow Protocol v1 execution succeeds with safe params for validated recipes |
 | Missing input | required param omission fails with clear error for executable recipes |
 | Risk boundary | destructive/submit/bulk/payment/approval/social/external actions stop before confirmation unless approved |
-| Success | toast, URL, table row, entity state, extraction result, file evidence, request, or visible state proves completion |
+| Success | toast, URL, row present/absent, dialog closed, table count/result change, entity state, extraction result, file evidence, request, async job state, or visible state proves completion |
+| Bounded execution | UI waits and actions that can block have timeout or bounded wait conditions and fail with evidence instead of hanging |
+| Reliability | recipe declares `draft`, `usable`, `partial-verification`, `validated`, or `hardened`; level matches trace evidence, verification strength, failure classification, and repair notes |
 | Trace | archaeology/execution trace records sources, observations, actions, errors, requests, recovery, unknowns |
-| Generated output | Python runner accepts params, targets the v1 runner contract, and calls `browser.request` through the minimal OpenClaw browser gateway client; TypeScript/CLI entrypoints invoke Python without duplicating runtime logic |
+| Generated output | Python runner accepts params, targets the v1 runner contract, and calls `browser.request` through the minimal OpenClaw browser gateway client; TypeScript/CLI entrypoints invoke Python without duplicating runtime logic or adding separate ad hoc browser verification |
 | Environment/context | sandbox/staging/production/unknown and read-only/dry-run/manual-confirm/auto/blocked/not-suitable policy are explicit |
 | Unsupported primitives | unsupported Browser Relay needs are recorded as partial or blocked |
 | Index | platform, key surfaces, and important executable capabilities are discoverable in `browser-flows/INDEX.md` |
@@ -64,20 +68,25 @@ type AtlasValidationReport = {
   statusByAsset: Record<string, 'ready' | 'partial' | 'needs-maintenance' | 'blocked' | 'unknown' | 'not-suitable'>
   checks: Array<{
     assetId: string
-    dimension: 'platform' | 'surface' | 'view' | 'component' | 'capability' | 'params' | 'safe-execution' | 'missing-input' | 'risk-boundary' | 'success' | 'trace' | 'generated-output' | 'environment-context' | 'unsupported-primitive' | 'index'
+    dimension: 'platform' | 'surface' | 'view' | 'component' | 'capability' | 'params' | 'safe-execution' | 'missing-input' | 'risk-boundary' | 'success' | 'bounded-execution' | 'reliability' | 'trace' | 'generated-output' | 'environment-context' | 'unsupported-primitive' | 'index'
     status: 'pass' | 'partial' | 'fail' | 'blocked'
     evidence: string[]
     gap?: string
     nextWorkflow?: 'create-flow' | 'maintain-flow' | 'repair-flow' | 'validate-flow'
   }>
   generatedOutputs: Record<string, Array<'python' | 'typescript' | 'cli'>>
+  reliabilityByRecipe: Record<string, {
+    level: 'draft' | 'usable' | 'partial-verification' | 'validated' | 'hardened'
+    verificationStrength: 'none' | 'action-only' | 'weak' | 'scoped' | 'strong'
+    repairNotes?: string[]
+  }>
   tracePaths: string[]
   blockers: string[]
   recommendedNextWorkflow?: 'create-flow' | 'maintain-flow' | 'repair-flow' | 'validate-flow'
 }
 ```
 
-A report without evidence paths or explicit blockers is incomplete.
+A report without evidence paths or explicit blockers is incomplete. A validated or hardened recipe with `none`, `action-only`, or `weak` verification strength is invalid unless the report downgrades the reliability level and lists repair notes.
 
 ## Status Labels
 
@@ -97,5 +106,6 @@ Block instead of pretending completion when:
 - source material conflicts with browser evidence and cannot be resolved
 - the final action is destructive, payment, purchase, public posting, external message, permission change, or approval without explicit approval
 - success cannot be observed or extracted
+- UI operations can hang without bounded timeout or bounded wait behavior
 - generated outputs cannot accept params
 - current Browser Relay primitives cannot support the required browser operation

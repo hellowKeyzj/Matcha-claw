@@ -97,6 +97,7 @@ A component record should capture:
 - component id, view id, region id, type, label/name/title when visible
 - fields, columns, actions, row actions, tabs, filters, options, visible states, or extracted values when observable
 - interaction patterns such as paginated table, virtual table, infinite feed, combobox, cascader, tree selector, rich text editor, media player, upload control, drag-and-drop target, modal confirmation, drawer form, iframe step, diff viewer, SKU selector, map, calendar, or checkout block
+- disambiguation context when observable: containing form/modal/drawer/table/card, row key, column name, dialog title, active tab, newly opened region, or relationship to the previous step
 - capabilities it supports
 - evidence refs, unknowns, blockers
 
@@ -119,7 +120,7 @@ Capabilities are the main platform-function catalog. A capability record should 
 | `automationStatus` | unknown, discovered, mapped, candidate, recipe-ready, validated, generated, partial, blocked, or not-suitable |
 | `recipeId` | optional executable projection |
 | `preconditions` | required login, role, page state, existing records, safe test data, or prior output |
-| `successSignals` | visible state, toast, URL, row/entity appears, file evidence, request status, or extracted value |
+| `successSignals` | visible state, toast, URL, row/entity appears or disappears, dialog closes, table count/result changes, file evidence, request status, async job state, or extracted value |
 | `evidenceRefs` | source ids, trace ids, screenshot ids, request ids, snapshot ids, or observations |
 | `unknowns` / `blockers` | unresolved facts and blockers |
 

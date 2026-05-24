@@ -27,6 +27,8 @@ The runner is responsible for:
 - extracting structured values from snapshots or bounded in-page evaluation
 - writing execution trace evidence
 - validating success criteria
+- classifying whether persisted atlas/recipe assets still match the observed page and user goal
+- applying verified non-risky incremental write-back when explicitly running in learning mode
 - reporting blockers and unsupported primitives honestly
 
 The minimal gateway client is responsible only for:
@@ -87,6 +89,50 @@ class OpenClawBrowserGatewayClient:
 
 Do not generate Python that imports Playwright, opens Chrome, connects to CDP, or calls a plugin-native `runFlow`. Those would create a second browser kernel.
 
+## Asset Update Modes
+
+The runner supports two explicit modes:
+
+- `--asset-update-mode execution`: execute the saved recipe and write trace evidence. If the model still satisfies the observed page and user goal, report `patchStatus: no_changes`; if execution fails or evidence suggests drift, report suggestions without changing assets.
+- `--asset-update-mode learning`: used by create, maintain, repair, and validate workflows. After execution, compare stable observed evidence against the persisted model and write back only verified deltas.
+
+Patch status values:
+
+- `no_changes`: the persisted model still works for the observed page and user goal; do not rewrite assets.
+- `write_back`: missing facts, fresh validation evidence, recovered failures, stable component metadata, or failure evidence must be persisted.
+- `suggest_only`: evidence is useful but not safe or certain enough to write automatically.
+- `blocked`: risk, permission, or execution boundaries prevent automatic update.
+
+Write-back is result-driven, not time-driven. Repeating the same successful run with the same stable observed signature must leave asset files byte-for-byte unchanged. TTL or age can prompt validation, but it must not by itself rewrite model assets.
+
+Learning mode may update freshness, failure counts, evidence refs, supported Browser Relay actions, missing capability/component shells, stable observed labels/roles, and the managed `INDEX.md` section. It must not delete assets, lower risk, change `manual-confirm` to `auto`, rewrite recipe steps from guesses, or persist snapshot refs, raw selectors, XPath, `nth-child`, cookies, tokens, passwords, authorization headers, or sensitive request bodies.
+
+`--validation-smoke` reruns the same read-safe recipe after write-back through `browser.request` to verify the updated assets can be reloaded and executed. Risky recipes skip external side-effect replay and use structural/risk validation only.
+
+## Reliability Levels
+
+Browser Flow uses progressive hardening. First executable recipes should target production-usable reliability for the known happy path, not throwaway click scripts, while still allowing honest partial output when browser evidence is limited.
+
+Minimum first-run runner quality:
+
+- parameterized business inputs with no hardcoded sample values in workflow logic
+- canonical workspace runtime and trace writing
+- risk metadata and confirmation boundary for side-effecting actions
+- bounded timeout or bounded wait behavior for every UI step that can block
+- semantic targets with enough context to avoid obvious duplicate-label ambiguity
+- in-run outcome verification appropriate to the capability risk
+- clear failure classification when params, target resolution, page state, verification, risk, or browser target handling fails
+
+Reliability statuses:
+
+- `draft`: executable shape exists but browser validation or outcome evidence is incomplete; use only for repair/learning.
+- `usable`: known happy path is parameterized, bounded, traceable, risk-aware, and has basic in-run outcome verification.
+- `partial-verification`: runner is usable but verification evidence is weak, fallback-based, or scoped; report verification strength and repair notes.
+- `validated`: a safe real param set or approved risk boundary proves the outcome through trace evidence.
+- `hardened`: repeated validation, strong structure-shaped verification, clear failure categories, and no-change behavior are proven.
+
+Do not block all generated output only because the strongest possible verification primitive is unavailable. Do not mark a runner `validated` or `hardened` when it is only an action sequence, has weak verification, or depends on separate ad hoc post-run browser checks.
+
 ## Execution Loop
 
 To execute a recipe, the runner must:
@@ -100,9 +146,12 @@ To execute a recipe, the runner must:
    - call the matching Browser Relay primitive
    - record the primitive call, result, resolved target, and evidence refs
    - verify step-level expectations when declared
+   - enforce bounded timeouts for UI operations that can block on readiness, transition, refresh, upload, navigation, or confirmation
 5. Stop before any dry-run or manual-confirm boundary unless the user explicitly approves continuing.
-6. Verify success criteria or extracted data.
-7. Write trace evidence and report success, partial status, or blockers.
+6. Verify success criteria or extracted data against the business outcome, not just absence of runtime/browser errors.
+7. Classify model delta from stable evidence: required actions, step kinds, resolved semantic target metadata, success/failure class, missing capability/component refs, and output/visible-state mismatch.
+8. In learning mode, write verified deltas and a patch bundle under `evidence/patches/`; in execution mode, report suggestions without changing assets.
+9. Write trace evidence and report success, partial status, or blockers.
 
 ## Semantic Target Resolution
 
@@ -119,12 +168,26 @@ Primary target fields may include:
 Resolution order:
 
 1. Match atlas scope.
-2. Match role or interaction kind.
-3. Match label, accessible name, visible text, title, or nearby text.
-4. Match business context such as entity, table column, row key, form label, card field, modal title, or component action.
-5. Use a bounded runtime fallback only for the current run.
+2. Match active context such as current modal, drawer, focused panel, active tab, newly opened region, table/card row, or frame when the recipe or prior step establishes one.
+3. Match role or interaction kind.
+4. Match label, accessible name, visible text, title, or nearby text.
+5. Match business context such as entity, table column, row key, form label, card field, modal title, or component action.
+6. Use a bounded runtime fallback only for the current run.
+
+When multiple targets share the same role/name, the resolver or recipe must use durable context to disambiguate: containing component, dialog/drawer title, form section, row key, column/action meaning, newly appeared subtree, or previous-step context. Runtime order, ref ordinal, raw DOM position, or `nth-child` may break ties only as non-persisted recovery evidence, never as the primary target identity.
 
 Snapshot refs, raw selectors, component-library classes, XPath, and `nth-child` paths are runtime evidence or recovery hints only. Do not persist them as primary recipe targets.
+
+## Recipe Step Quality
+
+Recipe steps must be bounded, evidence-driven, and component-aware:
+
+- Do not encode one component tactic as a global recipe rule. For example, direct `type`, click-then-type, `fill`, keyboard input, or upload handling must be chosen from observed component behavior and current Browser Relay support.
+- Every step that can wait on UI readiness, modal or drawer transitions, table refresh, pagination, upload/download, navigation, async job state, or confirmation must include a bounded `timeoutMs`, bounded wait condition, or explicit blocked status when the success state cannot be observed.
+- Success cannot be inferred from the last action completing. Recipes must declare success criteria or extraction targets that prove the user-visible or business outcome.
+- Prefer structure-shaped verification when the page exposes it: row present/absent, dialog closed, table result count changed, selected item visible, upload artifact listed, export/download evidence, async job state, request status, final URL, toast, or extracted typed fields.
+- `assertNoErrors` is supporting evidence only; it must not be the sole success proof for create, edit, delete, submit, upload, export, approval, payment, or external-message workflows.
+- If a postcondition is not observable with current Browser Relay primitives, the recipe is `partial` or `blocked`; do not move verification into a separate ad hoc browser check and call the runner complete.
 
 ## Primitive Mapping
 
@@ -159,6 +222,15 @@ Snapshot refs, raw selectors, component-library classes, XPath, and `nth-child` 
 | `assertRequest` | `browser` `requests` |
 | `assertNoErrors` | `browser` `errors` |
 
+## Snapshot and Verification Evidence Boundary
+
+The runner may use snapshots for target resolution, extraction, and verification, but snapshot evidence has boundaries:
+
+- Compact or diff snapshots prove only the returned scope and changed refs, not the entire page state.
+- Empty interactive refs can mean the page is still settling, the scope is wrong, the element is non-interactive, or the Browser Relay primitive lacks enough evidence; retry boundedly, then classify the failure.
+- Virtualized, paginated, filtered, or asynchronously refreshed lists require row/key/result-count verification in the relevant scope instead of assuming absence from a partial snapshot means absence from the platform.
+- If visible state cannot prove the outcome, use supported request/error/console/file evidence or mark the recipe partial/blocked; do not hide uncertainty behind a successful final action.
+
 ## Trace Evidence
 
 Every execution or validation trace must record:
@@ -170,7 +242,9 @@ Every execution or validation trace must record:
 - semantic targets and resolved runtime refs or fallbacks
 - snapshots, screenshots, requests, errors, console output, or extraction evidence used for verification
 - success criteria status
+- business outcome evidence, such as created entity present, deleted entity absent, extracted result shape, download/upload artifact evidence, final URL, toast, request, or visible state
 - recovery evidence, atlas/recipe change suggestions, unknowns, and blockers
+- failure classification when execution does not complete, using precise categories such as target resolution failure, ambiguous target, dialog or drawer not appeared, postcondition failed, verification inconclusive, browser target lost, unsupported primitive, unbounded wait risk, permission/login boundary, or risk boundary
 
 Do not store credentials, cookies, tokens, sensitive request bodies, or long raw DOM dumps.
 

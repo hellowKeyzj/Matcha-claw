@@ -24,7 +24,7 @@ Inspect current assets:
 <workspace>/browser-flows/platforms/<platform-id>/evidence/**/*.trace.json
 ```
 
-Classify the maintenance request as missing surface/view/component/capability coverage, stale page structure, stale platform metadata, incomplete capability inputs, stale recipe params, failed run follow-up, user correction, or generated output refresh.
+Classify the maintenance request as missing surface/view/component/capability coverage, stale page structure, stale platform metadata, incomplete capability inputs, stale recipe params, failed run follow-up, output or visible-state mismatch, user correction, or generated output refresh. If a runner trace has `patchStatus`, use it as evidence: `no_changes` means the model still satisfied the goal, `write_back` means verified deltas were persisted, and `suggest_only` means maintain/repair must decide the structural update.
 </step>
 
 <step name="rebuild_affected_context">
@@ -54,18 +54,18 @@ Update only the affected assets:
 - `atlas/components/*.component.json` for component type, labels, fields/actions/options/columns, interaction patterns, and supported capabilities
 - `atlas/entities/*.entity.json` and `atlas/contexts/*.context.json` when entity/context modeling changes
 - `atlas/capabilities/*.capability.json` for intent, inputs, outputs, risk, execution mode, automation status, prerequisites, success signals, evidence, unknowns, and blockers
-- `flows/<flow-id>.recipe.json` only when an executable capability's steps, params, semantic targets, success criteria, extraction targets, or risk metadata change
+- `flows/<flow-id>.recipe.json` only when an executable capability's steps, params, semantic targets, success criteria, extraction targets, risk metadata, or reliability metadata change
 - `browser-flows/INDEX.md` for platform, key surface, or executable capability discoverability changes
 
 Generated files are derived outputs; regenerate only after atlas or recipe source changes.
 </step>
 
 <step name="validate_changed_assets" gate="required">
-Validate changed atlas assets against browser evidence. For changed recipes, execute through Agent-side Browser Flow Protocol v1 with safe params. If shared platform metadata or component identity changed, validate at least one representative capability or recipe using that metadata.
+Validate changed atlas assets against browser evidence. For changed recipes, execute through Agent-side Browser Flow Protocol v1 with safe params in `learning` mode so verified freshness, evidence refs, stable component observations, and evidence-matched reliability metadata are written back. Use `--validation-smoke` for safe recipes when the patch itself must be proven reloadable. If shared platform metadata or component identity changed, validate at least one representative capability or recipe using that metadata.
 </step>
 
 <step name="refresh_generated_outputs">
-If the user requested a Python runner or TypeScript/CLI entrypoints, or existing generated outputs would become stale, regenerate derived outputs and verify the Python runner accepts params, uses the minimal OpenClaw browser gateway client for `browser.request`, and TypeScript/CLI invoke it without duplicating runtime logic.
+If the user requested a Python runner or TypeScript/CLI entrypoints, existing generated outputs would become stale, or `browser-flow-use` reports missing `_runtime`, regenerate derived outputs by running `runtime/distribute_workspace_runtime.py` first. Verify the Python entrypoint accepts params, invokes `_runtime/agent_browser_flow_runner.py`, and TypeScript/CLI invoke it without duplicating runtime logic or shelling out to `openclaw tool browser`.
 </step>
 
 <step name="report_maintenance_diff">
@@ -79,6 +79,7 @@ Report reason, affected atlas slice, assets changed, recipes validated, generate
 - Affected context rebuilt from atlas assets + browser evidence
 - Atlas records updated before dependent recipes
 - Changed recipes validated through Agent-side Browser Flow Protocol v1
+- Changed recipe reliability levels match verification evidence and weak verification is not claimed as validated
 - Params remain parameterized with no hardcoded samples
 - Unsupported Browser Relay primitive needs are recorded as partial or blocked
 - `INDEX.md` updated when platform, surface, or executable capability discoverability changes

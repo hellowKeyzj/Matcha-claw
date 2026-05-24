@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest'
-import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import { spawn, spawnSync } from 'node:child_process'
 import { createServer } from 'node:http'
@@ -144,10 +144,26 @@ async function writeWorkspace(
   return workspace
 }
 
-async function withFakeGateway<T>(handler: (port: number, calls: Record<string, unknown>[]) => Promise<T>): Promise<T> {
+type SnapshotPayload = {
+  snapshot: string
+  refs: Record<string, unknown>
+}
+
+const defaultSnapshot: SnapshotPayload = {
+  snapshot: '- button "Search" [ref=button-1]\nResult: matcha',
+  refs: {
+    'button-1': { role: 'button', name: 'Search', componentId: 'demo.search-button' },
+  },
+}
+
+async function withFakeGateway<T>(
+  handler: (port: number, calls: Record<string, unknown>[]) => Promise<T>,
+  snapshots: SnapshotPayload[] = [defaultSnapshot],
+): Promise<T> {
   const port = await findFreePort()
   const token = 'runner-test-token'
   const calls: Record<string, unknown>[] = []
+  let snapshotIndex = 0
   const wss = new WebSocketServer({ host: '127.0.0.1', port })
   wss.on('connection', (socket) => {
     socket.send(JSON.stringify({
@@ -186,16 +202,15 @@ async function withFakeGateway<T>(handler: (port: number, calls: Record<string, 
       calls.push(params)
       const action = params.action
       if (action === 'snapshot') {
+        const snapshot = snapshots[Math.min(snapshotIndex, snapshots.length - 1)] || defaultSnapshot
+        snapshotIndex += 1
         socket.send(JSON.stringify({
           type: 'res',
           id: message.id,
           ok: true,
           payload: {
             ok: true,
-            snapshot: '- button "Search" [ref=button-1]\nResult: matcha',
-            refs: {
-              'button-1': { role: 'button', name: 'Search', componentId: 'demo.search-button' },
-            },
+            ...snapshot,
           },
         }))
         return
@@ -323,6 +338,233 @@ describe('agent Browser Flow runner', () => {
       const tracePath = result.parsed.tracePath
       expect(typeof tracePath).toBe('string')
       expect(existsSync(tracePath as string)).toBe(true)
+    })
+  })
+
+  it('retries target snapshots when refs are initially empty', async () => {
+    const workspace = await writeWorkspace({
+      steps: [
+        { id: 'click-search', kind: 'click', target: { role: 'button', name: 'Search' } },
+      ],
+    })
+
+    await withFakeGateway(async (port, calls) => {
+      const result = await runRunner([
+        '--workspace-dir', workspace,
+        '--recipe-id', 'demo.search',
+        '--params-json', '{"query":"matcha"}',
+      ], {
+        MATCHACLAW_RUNTIME_HOST_GATEWAY_PORT: String(port),
+        MATCHACLAW_RUNTIME_HOST_GATEWAY_TOKEN: 'runner-test-token',
+      })
+
+      expect(result.status).toBe(0)
+      expect(calls.map((call) => call.action)).toEqual(['snapshot', 'snapshot', 'act'])
+      expect(calls[2]).toMatchObject({
+        action: 'act',
+        request: { ref: 'button-1' },
+      })
+    }, [
+      { snapshot: '', refs: {} },
+      defaultSnapshot,
+    ])
+  })
+
+  it('normalizes target labels without falling back to ref order', async () => {
+    const workspace = await writeWorkspace({
+      steps: [
+        { id: 'type-name', kind: 'type', target: { role: 'textbox', name: '标签名称' }, text: '抹茶' },
+        { id: 'confirm', kind: 'click', target: { role: 'button', name: '确定' } },
+      ],
+    })
+
+    await withFakeGateway(async (port, calls) => {
+      const result = await runRunner([
+        '--workspace-dir', workspace,
+        '--recipe-id', 'demo.search',
+        '--params-json', '{"query":"matcha"}',
+      ], {
+        MATCHACLAW_RUNTIME_HOST_GATEWAY_PORT: String(port),
+        MATCHACLAW_RUNTIME_HOST_GATEWAY_TOKEN: 'runner-test-token',
+      })
+
+      expect(result.status).toBe(0)
+      expect(calls[1]).toMatchObject({
+        action: 'act',
+        request: { kind: 'type', ref: 'field-2' },
+      })
+      expect(calls[3]).toMatchObject({
+        action: 'act',
+        request: { kind: 'click', ref: 'button-1' },
+      })
+    }, [
+      {
+        snapshot: '- textbox "* 标签名称" [ref=field-2]',
+        refs: {
+          'field-2': { role: 'textbox', name: '* 标签名称', componentId: 'demo.tag-name' },
+        },
+      },
+      {
+        snapshot: '- button "确 定" [ref=button-1]\n- button "确 定" [ref=button-9]',
+        refs: {
+          'button-1': { role: 'button', name: '确 定', componentId: 'demo.confirm-primary' },
+          'button-9': { role: 'button', name: '确 定', componentId: 'demo.confirm-secondary' },
+        },
+      },
+    ])
+  })
+
+  it('fails instead of sending untargeted act requests when target resolution is insufficient', async () => {
+    const workspace = await writeWorkspace({
+      steps: [
+        { id: 'click-missing', kind: 'click', target: { role: 'button', name: 'Missing' } },
+      ],
+    })
+
+    await withFakeGateway(async (port, calls) => {
+      const result = await runRunner([
+        '--workspace-dir', workspace,
+        '--recipe-id', 'demo.search',
+        '--params-json', '{"query":"matcha"}',
+      ], {
+        MATCHACLAW_RUNTIME_HOST_GATEWAY_PORT: String(port),
+        MATCHACLAW_RUNTIME_HOST_GATEWAY_TOKEN: 'runner-test-token',
+      })
+
+      expect(result.status).toBe(2)
+      expect(result.parsed).toMatchObject({
+        ok: false,
+        status: 'failed',
+        error: { code: 'target_unresolved' },
+      })
+      expect(calls.map((call) => call.action)).toEqual(['snapshot'])
+    })
+  })
+
+  it('writes validated freshness and evidence in learning mode', async () => {
+    const workspace = await writeWorkspace({
+      steps: [
+        { id: 'status', kind: 'status' },
+        { id: 'click-search', kind: 'click', target: { role: 'button', name: 'Search', componentId: 'demo.search-button' } },
+        { id: 'extract-result', kind: 'extract', pattern: 'Result: (\\w+)', output: 'resultText' },
+      ],
+    })
+
+    await withFakeGateway(async (port) => {
+      const result = await runRunner([
+        '--workspace-dir', workspace,
+        '--recipe-id', 'demo.search',
+        '--params-json', '{"query":"matcha","apiToken":"secret-token"}',
+        '--asset-update-mode', 'learning',
+      ], {
+        MATCHACLAW_RUNTIME_HOST_GATEWAY_PORT: String(port),
+        MATCHACLAW_RUNTIME_HOST_GATEWAY_TOKEN: 'runner-test-token',
+      })
+
+      expect(result.stderr).toBe('')
+      expect(result.status).toBe(0)
+      expect(result.parsed.patchStatus).toBe('write_back')
+      expect(result.parsed.changedAssets).toEqual(expect.arrayContaining([
+        'platforms/demo/flows/demo.search.recipe.json',
+        'platforms/demo/atlas/capabilities/demo.search.capability.json',
+        'platforms/demo/platform.json',
+        'platforms/demo/atlas/components/demo.search-button.component.json',
+      ]))
+      const recipe = JSON.parse(await readFile(path.join(workspace, 'browser-flows/platforms/demo/flows/demo.search.recipe.json'), 'utf8'))
+      expect(recipe.freshness.failureCount).toBe(0)
+      expect(recipe.evidenceRefs.join('\n')).not.toContain('secret-token')
+      const component = JSON.parse(await readFile(path.join(workspace, 'browser-flows/platforms/demo/atlas/components/demo.search-button.component.json'), 'utf8'))
+      expect(component.observedRoles).toContain('button')
+      expect(component.observedLabels).toContain('Search')
+    })
+  })
+
+  it('does not rewrite assets when the observed signature is unchanged', async () => {
+    const workspace = await writeWorkspace({
+      steps: [
+        { id: 'click-search', kind: 'click', target: { role: 'button', name: 'Search', componentId: 'demo.search-button' } },
+      ],
+    })
+
+    await withFakeGateway(async (port) => {
+      const env = {
+        MATCHACLAW_RUNTIME_HOST_GATEWAY_PORT: String(port),
+        MATCHACLAW_RUNTIME_HOST_GATEWAY_TOKEN: 'runner-test-token',
+      }
+      const args = [
+        '--workspace-dir', workspace,
+        '--recipe-id', 'demo.search',
+        '--params-json', '{"query":"matcha"}',
+        '--asset-update-mode', 'learning',
+      ]
+      const first = await runRunner(args, env)
+      expect(first.status).toBe(0)
+      expect(first.parsed.patchStatus).toBe('write_back')
+      const recipePath = path.join(workspace, 'browser-flows/platforms/demo/flows/demo.search.recipe.json')
+      const platformPath = path.join(workspace, 'browser-flows/platforms/demo/platform.json')
+      const recipeBefore = await readFile(recipePath, 'utf8')
+      const platformBefore = await readFile(platformPath, 'utf8')
+
+      const second = await runRunner(args, env)
+      expect(second.status).toBe(0)
+      expect(second.parsed.patchStatus).toBe('no_changes')
+      expect(second.parsed.changedAssets).toEqual([])
+      expect(await readFile(recipePath, 'utf8')).toBe(recipeBefore)
+      expect(await readFile(platformPath, 'utf8')).toBe(platformBefore)
+    })
+  })
+
+  it('updates failure evidence without mutating recipe steps', async () => {
+    const workspace = await writeWorkspace({
+      steps: [
+        { id: 'assert-result', kind: 'assertText', text: 'Missing: matcha' },
+      ],
+    })
+    const recipePath = path.join(workspace, 'browser-flows/platforms/demo/flows/demo.search.recipe.json')
+    const before = JSON.parse(await readFile(recipePath, 'utf8'))
+
+    await withFakeGateway(async (port) => {
+      const result = await runRunner([
+        '--workspace-dir', workspace,
+        '--recipe-id', 'demo.search',
+        '--params-json', '{"query":"matcha"}',
+        '--asset-update-mode', 'learning',
+      ], {
+        MATCHACLAW_RUNTIME_HOST_GATEWAY_PORT: String(port),
+        MATCHACLAW_RUNTIME_HOST_GATEWAY_TOKEN: 'runner-test-token',
+      })
+
+      expect(result.status).toBe(2)
+      expect(result.parsed.patchStatus).toBe('write_back')
+      const after = JSON.parse(await readFile(recipePath, 'utf8'))
+      expect(after.steps).toEqual(before.steps)
+      expect(after.freshness.failureCount).toBe(1)
+      expect(after.blockers).toContain('assertion_failed')
+    })
+  })
+
+  it('runs validation smoke after write-back when requested', async () => {
+    const workspace = await writeWorkspace({
+      steps: [
+        { id: 'status', kind: 'status' },
+      ],
+    })
+
+    await withFakeGateway(async (port, calls) => {
+      const result = await runRunner([
+        '--workspace-dir', workspace,
+        '--recipe-id', 'demo.search',
+        '--params-json', '{"query":"matcha"}',
+        '--asset-update-mode', 'learning',
+        '--validation-smoke',
+      ], {
+        MATCHACLAW_RUNTIME_HOST_GATEWAY_PORT: String(port),
+        MATCHACLAW_RUNTIME_HOST_GATEWAY_TOKEN: 'runner-test-token',
+      })
+
+      expect(result.status).toBe(0)
+      expect(result.parsed.postWriteBackValidation).toMatchObject({ ok: true, status: 'success' })
+      expect(calls.map((call) => call.action)).toEqual(['status', 'status'])
     })
   })
 })

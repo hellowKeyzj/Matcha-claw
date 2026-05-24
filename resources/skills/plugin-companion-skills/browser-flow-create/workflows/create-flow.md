@@ -133,20 +133,37 @@ Author recipes only for selected capabilities:
 A recipe must reference its `capabilityId`, surface/view/component ids when useful, param schema, semantic targets, success criteria, extraction targets, and risk metadata.
 
 Use semantic targets first. Use `valueFrom` or equivalent param references for business inputs. Do not persist snapshot refs, component-library classes, raw CSS selectors, long XPath, or nth-child paths as primary targets. Browser Relay resolves executable locators from current page evidence at action time.
+
+Choose interaction tactics from observed component behavior rather than hardcoding global rules such as always clicking before typing or always typing directly. Every UI step that can block on readiness, transitions, refresh, upload, navigation, or confirmation must have bounded timeout or bounded wait behavior.
+
+Executable recipes must be self-verifying: create/edit/delete/submit/upload/export recipes need success criteria or extraction outputs that prove the business outcome inside the runner trace. `assertNoErrors` and a final successful click are supporting evidence only, not completion proof.
+
+Declare a reliability level for every executable recipe. First generated recipes should target `usable` for the known happy path: parameterized inputs, bounded UI operations, trace evidence, risk boundary, semantic disambiguation, and at least scoped in-run outcome verification. Use `draft` or `partial-verification` only when evidence is genuinely limited, and include repair notes instead of blocking all output or claiming validation.
 </step>
 
 <step name="browser_validation" gate="required_when_recipe_selected">
 Execute each selected recipe through Agent-side Browser Flow Protocol v1 with safe real params.
 
-The runner must call existing Browser Relay primitives step by step through `browser.request`, resolve semantic targets from live page evidence, write trace evidence, and verify required params, clear missing-param failure, safe/draft path success, risky confirmation boundary, success criteria, and extraction targets. If the minimal OpenClaw browser gateway client is unavailable, validation is blocked rather than replaced with raw CDP or Playwright.
+The runner must call existing Browser Relay primitives step by step through `browser.request`, resolve semantic targets from live page evidence, write trace evidence, and verify required params, clear missing-param failure, safe/draft path success, risky confirmation boundary, success criteria, and extraction targets. For create/learning runs, use `--asset-update-mode learning`; use `--validation-smoke` when a safe recipe write-back should be reloaded and re-executed immediately. If the minimal OpenClaw browser gateway client is unavailable, validation is blocked rather than replaced with raw CDP or Playwright.
 
 Do not mark a recipe verified until browser evidence proves success state or extracted data. Atlas-only capabilities can be mapped without recipe validation, but their automation status must not be `validated`.
+
+Assign `reliabilityByRecipe` in the validation report. Downgrade action-only or weakly verified recipes to `draft` or `partial-verification`; do not label them `validated` only because the Browser Relay action sequence returned without error.
 </step>
 
-<step name="generated_outputs">
+<step name="generated_outputs" gate="required_when_generated_output_requested">
 If requested, generate the canonical `python` runner or thin `typescript`/`cli` entrypoints according to the Generated Output Contract.
 
-Generated outputs must accept params. Python executes Agent-side Browser Flow Protocol v1 through the minimal OpenClaw browser gateway client for `browser.request`; TypeScript and CLI outputs must invoke the Python runner instead of reimplementing workflow logic.
+Hard gate: before writing or validating any executable generated output, run the runtime distribution step from the skill runtime:
+
+```bash
+python resources/skills/plugin-companion-skills/browser-flow-create/runtime/distribute_workspace_runtime.py \
+  --workspace-dir <workspace> \
+  --recipe-id <recipe-id> \
+  --default-asset-update-mode execution
+```
+
+Generated outputs must accept params. Generated Python must be a thin entrypoint into that workspace-local runtime; TypeScript and CLI outputs must invoke the Python entrypoint or `_runtime/agent_browser_flow_runner.py` instead of reimplementing workflow logic.
 </step>
 
 <step name="platform_index">
@@ -175,6 +192,7 @@ Report atlas coverage, mapped surfaces/views/components/capabilities, executable
 - Risk classification and confirmation boundary are explicit
 - Browser Relay primitive support is truthful; unsupported needs are partial or blocked
 - Agent-side Browser Flow Protocol v1 validates selected recipes with safe params and trace evidence
+- Executable recipes declare an evidence-matched reliability level and do not claim `validated` with action-only or weak verification
 - Requested generated Python runner or entrypoints accept params and execute through the v1 contract
 - `browser-flows/INDEX.md` is updated
 - Final report includes atlas coverage, callable interfaces when present, and blockers
