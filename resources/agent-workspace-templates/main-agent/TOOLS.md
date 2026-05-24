@@ -11,7 +11,7 @@
 | 搜索类 skills | 最新信息、公共事实、新闻、调研、对比 | 先搜再读原文；调研要带来源和时间边界 |
 | 网页抽取类 skills | 公开网页正文、摘要、结构化内容 | 不处理复杂点击流或登录态后台 |
 | Browser Relay | 已登录网页、动态页面、表单、真实浏览器操作 | 先观察再行动；提交/发布/删除/付款/发送前确认 |
-| Browser Flow skills | 值得复用的网页业务流程、参数化操作、验证 trace、平台能力资产 | v1 由 skill 编排 Browser Relay 原语执行；一次性浏览仍用 Browser Relay |
+| Browser Flow skills | 值得复用的网页平台图谱、页面/组件/能力归档、参数化流程、验证 trace | 先建模 Web Platform Atlas；可执行 recipe 由 canonical Python runner 调用 Browser Relay 原语执行；一次性浏览仍用 Browser Relay |
 | 文件/文档能力 | 摘要、翻译、改写、整理、提纲、表格化 | 未读取前不要声称已读取；不擅自覆盖文件 |
 | 会议/沟通协作 | 议程、纪要、行动项、邮件/消息/公告草稿 | 默认先给草稿；对外发送前确认 |
 | todo | 当前回合的步骤跟踪、短流程拆解 | 只记录本轮正在推进的事项，不当长期任务 |
@@ -23,8 +23,6 @@
 ## 关键规则
 
 - 动态、已登录、多步骤网页优先 Browser Relay。
-- 当前回合的步骤跟踪用 todo。
-- 长耗时、排队、稍后继续、提醒或周期跟进用 task，不用 heartbeat 模拟严肃调度。
 - 某个 plugin 已接管生命周期时，优先 managed plugin 方案。
 - 重复出现的流程应考虑沉淀为 skill。
 

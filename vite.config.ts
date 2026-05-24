@@ -6,6 +6,15 @@ import { resolve } from 'path';
 
 const nativeAddonExternal = ['node-llama-cpp', /^@node-llama-cpp\//];
 const qrTerminalExternal = ['qrcode-terminal', /^qrcode-terminal\//];
+const ignoredWorkspaceDirs = [
+  '**/.claude/**',
+  '**/.planning/**',
+  '**/.tmp/**',
+  '**/.tmp_openclaw_repo/**',
+  '**/build/.tmp-*/**',
+  '**/release/**',
+  '**/third_party/**',
+];
 
 function clearElectronRunAsNodeForDev(): void {
   if (process.env.ELECTRON_RUN_AS_NODE === '1') {
@@ -130,6 +139,11 @@ export default defineConfig({
           options.startup();
         },
         vite: {
+          server: {
+            watch: {
+              ignored: ignoredWorkspaceDirs,
+            },
+          },
           build: {
             outDir: 'dist-electron/main',
             rollupOptions: {
@@ -151,6 +165,11 @@ export default defineConfig({
           options.reload();
         },
         vite: {
+          server: {
+            watch: {
+              ignored: ignoredWorkspaceDirs,
+            },
+          },
           build: {
             outDir: 'dist-electron/preload',
             rollupOptions: {
@@ -170,6 +189,9 @@ export default defineConfig({
   },
   server: {
     port: 5173,
+    watch: {
+      ignored: ignoredWorkspaceDirs,
+    },
   },
   build: {
     outDir: 'dist',

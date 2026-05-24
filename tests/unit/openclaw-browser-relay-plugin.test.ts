@@ -3,9 +3,9 @@ import { createCipheriv, createDecipheriv, publicEncrypt, randomBytes } from 'no
 import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
-import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
+import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import { createServer } from 'node:http'
-import WebSocket from 'ws'
+import WebSocket, { WebSocketServer } from 'ws'
 import {
   BrowserRelayServer,
   RELAY_AUTH_HEADER,
@@ -18,6 +18,7 @@ import {
   type RelayOwnerRecord,
 } from '../../packages/openclaw-browser-relay-plugin/src/relay/ownership'
 import { readRelaySelection, writeRelaySelection } from '../../packages/openclaw-browser-relay-plugin/src/relay/selection-state'
+import { registerBrowserRelayRuntime } from '../../packages/openclaw-browser-relay-plugin/src/application/browser-relay-runtime'
 
 const ENCRYPTED_PREFIX = 'E:'
 const logger = {
@@ -256,7 +257,205 @@ async function spawnListeningProcess(port: number, body: string): Promise<ChildP
   return child
 }
 
+function resolvePythonCommand(): string | null {
+  for (const command of ['python', 'python3', 'py']) {
+    const result = spawnSync(command, ['--version'], { encoding: 'utf8' })
+    if (result.status === 0) {
+      return command
+    }
+  }
+  return null
+}
+
+async function runPythonBrowserClient(
+  port: number,
+  env: Record<string, string> = {},
+): Promise<{ status: number | null; stdout: string; stderr: string }> {
+  const python = resolvePythonCommand()
+  if (!python) {
+    throw new Error('Python executable not found')
+  }
+
+  const scriptPath = path.join(
+    process.cwd(),
+    'resources/skills/plugin-companion-skills/browser-flow-create/runtime/openclaw_browser_client.py',
+  )
+
+  return await new Promise((resolve, reject) => {
+    const child = spawn(python, [scriptPath, '--action', 'status'], {
+      env: {
+        ...process.env,
+        ...env,
+        MATCHACLAW_RUNTIME_HOST_GATEWAY_PORT: String(port),
+      },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    })
+    let stdout = ''
+    let stderr = ''
+    child.stdout.on('data', (chunk) => {
+      stdout += chunk.toString()
+    })
+    child.stderr.on('data', (chunk) => {
+      stderr += chunk.toString()
+    })
+    child.once('error', reject)
+    child.once('exit', (status) => {
+      resolve({ status, stdout, stderr })
+    })
+  })
+}
+
 describe('openclaw browser relay plugin', () => {
+  it('handles browser.request through the registered gateway method', async () => {
+    const gatewayMethods = new Map<string, (options: Record<string, unknown>) => Promise<void> | void>()
+    const services: Array<{ start: (ctx: Record<string, unknown>) => Promise<void> | void; stop: () => Promise<void> | void }> = []
+    const stateDir = await ensureTempStateDir()
+
+    registerBrowserRelayRuntime({
+      logger,
+      registerService(service: unknown) {
+        services.push(service as { start: (ctx: Record<string, unknown>) => Promise<void> | void; stop: () => Promise<void> | void })
+      },
+      registerGatewayMethod(name: string, handler: (options: Record<string, unknown>) => Promise<void> | void) {
+        gatewayMethods.set(name, handler)
+      },
+      registerTool: vi.fn(),
+    } as never)
+
+    const relayPort = await findFreePort()
+
+    await services[0]?.start({
+      config: { plugins: { entries: { 'browser-relay': { config: { port: relayPort } } } } },
+      logger,
+      stateDir,
+    })
+
+    const gatewayHandler = gatewayMethods.get('browser.request')
+    expect(gatewayHandler).toBeTypeOf('function')
+
+    const respond = vi.fn()
+    await gatewayHandler?.({
+      params: { action: 'status' },
+      respond,
+    })
+
+    expect(respond).toHaveBeenCalledWith(
+      true,
+      expect.objectContaining({
+        ok: true,
+        enabled: true,
+        relayPort: expect.any(Number),
+      }),
+    )
+
+    await services[0]?.stop()
+  })
+
+  it('allows the Python browser gateway client to call browser.request', async () => {
+    const gatewayMethods = new Map<string, (options: Record<string, unknown>) => Promise<void> | void>()
+    const services: Array<{ start: (ctx: Record<string, unknown>) => Promise<void> | void; stop: () => Promise<void> | void }> = []
+    const stateDir = await ensureTempStateDir()
+
+    registerBrowserRelayRuntime({
+      logger,
+      registerService(service: unknown) {
+        services.push(service as { start: (ctx: Record<string, unknown>) => Promise<void> | void; stop: () => Promise<void> | void })
+      },
+      registerGatewayMethod(name: string, handler: (options: Record<string, unknown>) => Promise<void> | void) {
+        gatewayMethods.set(name, handler)
+      },
+      registerTool: vi.fn(),
+    } as never)
+
+    const relayPort = await findFreePort()
+    await services[0]?.start({
+      config: { plugins: { entries: { 'browser-relay': { config: { port: relayPort } } } } },
+      logger,
+      stateDir,
+    })
+
+    const gatewayPort = await findFreePort()
+    const gatewayToken = 'test-browser-flow-gateway-token'
+    let receivedToken = ''
+    const wss = new WebSocketServer({ host: '127.0.0.1', port: gatewayPort })
+    wss.on('connection', (socket) => {
+      socket.send(JSON.stringify({
+        type: 'event',
+        event: 'connect.challenge',
+        payload: { nonce: `nonce-${Date.now()}` },
+      }))
+      socket.on('message', (rawData) => {
+        const message = JSON.parse(rawData.toString()) as Record<string, unknown>
+        if (message.type !== 'req' || typeof message.id !== 'string') {
+          return
+        }
+        if (message.method === 'connect') {
+          const params = message.params && typeof message.params === 'object'
+            ? message.params as Record<string, unknown>
+            : {}
+          const auth = params.auth && typeof params.auth === 'object'
+            ? params.auth as Record<string, unknown>
+            : {}
+          receivedToken = typeof auth.token === 'string' ? auth.token : ''
+          if (receivedToken !== gatewayToken) {
+            socket.send(JSON.stringify({
+              type: 'res',
+              id: message.id,
+              ok: false,
+              error: { code: 'FORBIDDEN', message: 'invalid token' },
+            }))
+            return
+          }
+          socket.send(JSON.stringify({
+            type: 'res',
+            id: message.id,
+            ok: true,
+            payload: { features: { methods: ['browser.request'] } },
+          }))
+          return
+        }
+        if (message.method === 'browser.request') {
+          void gatewayMethods.get('browser.request')?.({
+            params: message.params,
+            respond(ok: boolean, data: unknown, error: unknown) {
+              socket.send(JSON.stringify({
+                type: 'res',
+                id: message.id,
+                ok,
+                ...(ok ? { payload: data } : { error }),
+              }))
+            },
+          })
+        }
+      })
+    })
+
+    try {
+      const result = await runPythonBrowserClient(gatewayPort, {
+        MATCHACLAW_RUNTIME_HOST_GATEWAY_TOKEN: gatewayToken,
+      })
+      expect(receivedToken).toBe(gatewayToken)
+      expect(result.stderr).toBe('')
+      expect(result.status).toBe(0)
+      expect(JSON.parse(result.stdout)).toMatchObject({
+        ok: true,
+        enabled: true,
+        relayPort,
+      })
+    } finally {
+      await services[0]?.stop()
+      await new Promise<void>((resolve, reject) => {
+        wss.close((error) => {
+          if (error) {
+            reject(error)
+            return
+          }
+          resolve()
+        })
+      })
+    }
+  })
+
   it('serves relay health endpoints', async () => {
     await startRelayServer()
 

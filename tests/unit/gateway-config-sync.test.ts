@@ -221,6 +221,10 @@ describe('gateway config sync', () => {
       '--allow-unconfigured',
     ]);
     expect(context.channelStartupSummary).toBe('skipped(no configured channels)');
+    expect(context.forkEnv.OPENCLAW_GATEWAY_PORT).toBe('18789');
+    expect(context.forkEnv.OPENCLAW_GATEWAY_TOKEN).toBe('matchaclaw-token-1');
+    expect(context.forkEnv.MATCHACLAW_RUNTIME_HOST_GATEWAY_PORT).toBe('18789');
+    expect(context.forkEnv.MATCHACLAW_RUNTIME_HOST_GATEWAY_TOKEN).toBe('matchaclaw-token-1');
     expect(hoisted.runtimeHostRequestMock).toHaveBeenCalledWith(
       'GET',
       '/api/runtime-host/host-bootstrap-settings',
