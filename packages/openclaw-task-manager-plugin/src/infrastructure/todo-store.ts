@@ -19,20 +19,6 @@ function sanitizeScopeKey(scopeKey: string): string {
   return trimmed.replace(/[<>:"/\\|?*\x00-\x1F]/g, '_')
 }
 
-function normalizeTodoForCompare(todo: TodoItem): TodoItem {
-  return {
-    ...(todo.id ? { id: todo.id } : {}),
-    content: todo.content,
-    ...(todo.activeForm ? { activeForm: todo.activeForm } : {}),
-    status: todo.status,
-    ...(todo.owner ? { owner: todo.owner } : {}),
-  }
-}
-
-function todosEqual(left: TodoItem[], right: TodoItem[]): boolean {
-  return JSON.stringify(left.map(normalizeTodoForCompare)) === JSON.stringify(right.map(normalizeTodoForCompare))
-}
-
 async function acquireFileLock(lockPath: string): Promise<() => Promise<void>> {
   const deadline = Date.now() + 8_000
   while (Date.now() < deadline) {
@@ -101,14 +87,10 @@ export class TodoStore {
     }
   }
 
-  async save(scopeKey: string, oldTodos: TodoItem[], newTodos: TodoItem[]): Promise<{ todos: TodoItem[]; updatedAt: number }> {
+  async save(scopeKey: string, newTodos: TodoItem[]): Promise<{ todos: TodoItem[]; updatedAt: number }> {
     await this.ensureInitialized()
     const release = await acquireFileLock(this.lockPath(scopeKey))
     try {
-      const current = await this.readUnsafe(scopeKey)
-      if (!todosEqual(current.todos, oldTodos)) {
-        throw new TaskStoreError('stale_todos', 'TodoWrite oldTodos does not match the current todo list; call TodoGet and retry')
-      }
       const payload = {
         todos: newTodos,
         updatedAt: nowTs(),

@@ -150,7 +150,7 @@ function buildStateReminder(tasks: TaskItem[], todos: TodoItem[]): string | null
   if (todos.length > 0) {
     lines.push('', 'Todos:')
     lines.push(...todos.map(formatTodoLine))
-    lines.push('', 'Call TodoGet before TodoWrite if you need the latest oldTodos for stale update detection.')
+    lines.push('', 'Use TodoWrite to keep the visible todo list current.')
   }
   lines.push('', 'Keep task and todo statuses current before summarizing progress to the user.', '</system-reminder>')
   return lines.join('\n')

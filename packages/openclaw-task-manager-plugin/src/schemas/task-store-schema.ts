@@ -70,7 +70,7 @@ Returns full task details:
 
 export const todoGetParameters = {
   type: 'object',
-  description: 'Get the current session todo list. Use this before TodoWrite when you need the latest oldTodos for stale update detection. No parameters.',
+  description: 'Get the current session todo list. Use this before TodoWrite when you need to inspect current todos. No parameters.',
   additionalProperties: false,
   properties: {},
 } as const
@@ -394,15 +394,13 @@ Here is an example of what was accomplished using this tool:
 
 This is non-negotiable. Every task session must end with an empty newTodos array and explicit user confirmation.
 
-Always pass oldTodos exactly as last returned by TodoGet, TodoWrite, TaskList, or a task tool result; stale oldTodos will be rejected.
-
 When in doubt, use this tool. Being proactive with task management demonstrates attentiveness and ensures you complete all requirements successfully.`,
   additionalProperties: false,
   required: ['oldTodos', 'newTodos'],
   properties: {
     oldTodos: {
       type: 'array',
-      description: 'Required. Current todo list before the update, exactly as last returned by TodoGet, TodoWrite, TaskList, or a task tool result. Used for stale update detection.',
+      description: 'Required. Previous todo list before the update.',
       items: todoItemParameters,
     },
     newTodos: {

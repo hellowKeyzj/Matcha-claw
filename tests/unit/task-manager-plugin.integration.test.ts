@@ -197,7 +197,7 @@ describe('task-manager semantics', () => {
     expect(context).toContain('Current task manager state:')
     expect(context).toContain('- #1 [pending] 实现动态提醒 (owner: agent-a)')
     expect(context).toContain('- [in_progress] 同步 todo 状态 (owner: agent-a)')
-    expect(context).toContain('Call TodoGet before TodoWrite')
+    expect(context).toContain('Use TodoWrite to keep the visible todo list current')
   })
 
 
@@ -212,7 +212,7 @@ describe('task-manager semantics', () => {
         required: ['oldTodos', 'newTodos'],
         properties: {
           oldTodos: {
-            description: expect.stringContaining('stale update detection'),
+            description: expect.stringContaining('Previous todo list'),
             items: {
               required: ['content', 'status'],
             },
@@ -230,7 +230,6 @@ describe('task-manager semantics', () => {
         },
       },
     })
-    expect((todoWrite.parameters as { description: string }).description).toContain('stale oldTodos will be rejected')
     expect((todoWrite.parameters as { description: string }).description).toContain('empty newTodos array')
     expect((todoWrite.parameters as { description: string }).description).toContain('oldTodos')
   })
@@ -660,36 +659,36 @@ describe('task-manager semantics', () => {
     })
   })
 
-  it('TodoWrite rejects stale oldTodos before replacing the todo list', async () => {
-    const workspaceDir = mkdtempSync(join(tmpdir(), 'task-manager-plugin-todos-stale-'))
+  it('TodoWrite replaces todos with newTodos regardless of oldTodos contents', async () => {
+    const workspaceDir = mkdtempSync(join(tmpdir(), 'task-manager-plugin-todos-replace-'))
     tempDirs.push(workspaceDir)
     const harness = createPluginHarness()
-    const sessionKey = 'session-todo-stale'
+    const sessionKey = 'session-todo-replace'
     const todoWrite = harness.getTool('TodoWrite', { workspaceDir, sessionKey })
-    const currentTodos = [{ content: '当前 todo', status: 'pending' }]
 
     await todoWrite.execute('call-write', {
       oldTodos: [],
-      newTodos: currentTodos,
+      newTodos: [{ content: '当前 todo', status: 'pending' }],
     })
 
-    await expect(todoWrite.execute('call-stale', {
+    const replaced = await todoWrite.execute('call-replace', {
       oldTodos: [],
-      newTodos: [{ content: '覆盖 todo', status: 'pending' }],
-    })).rejects.toThrow('TodoWrite oldTodos does not match the current todo list; call TodoGet and retry')
+      newTodos: [{ content: '覆盖 todo', status: 'in_progress' }],
+    })
+    expect(replaced.details).toMatchObject({
+      todos: [{ content: '覆盖 todo', status: 'in_progress' }],
+    })
 
     const gatewayResult = await harness.callGateway('TodoWrite', {
       workspaceDir,
       sessionKey,
-      oldTodos: [],
-      newTodos: [],
+      oldTodos: [{ content: '任意旧状态', status: 'pending' }],
+      newTodos: [{ content: '网关覆盖 todo', status: 'completed' }],
     })
-    expect(gatewayResult).toEqual({
-      success: false,
-      data: undefined,
-      error: {
-        code: 'stale_todos',
-        message: 'TodoWrite oldTodos does not match the current todo list; call TodoGet and retry',
+    expect(gatewayResult).toMatchObject({
+      success: true,
+      data: {
+        todos: [{ content: '网关覆盖 todo', status: 'completed' }],
       },
     })
   })

@@ -117,7 +117,7 @@ export function registerTaskGatewayMethods(api: OpenClawPluginApi): void {
     await withGatewayGuard(options, async () => {
       const scopeKey = resolveTodoScopeKey({ params: options.params, sessionKey: options.params.sessionKey as string | undefined })
       const input = parseTodoWriteInput(options.params)
-      const result = await getTodoStore({ api, workspaceDir: options.params.workspaceDir }).save(scopeKey, input.oldTodos, input.newTodos)
+      const result = await getTodoStore({ api, workspaceDir: options.params.workspaceDir }).save(scopeKey, input.newTodos)
       logTaskPipeline(api, 'gateway.TodoWrite', {
         scopeKey,
         paramSessionKey: typeof options.params.sessionKey === 'string' ? options.params.sessionKey : null,

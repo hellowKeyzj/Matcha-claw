@@ -184,7 +184,7 @@ async function executeTaskGet(api: OpenClawPluginApi, toolCtx: ToolContext, para
 async function executeTodoWrite(api: OpenClawPluginApi, toolCtx: ToolContext, params: ToolParams) {
   const scopeKey = resolveTodoScopeKey({ params, sessionKey: toolCtx.sessionKey })
   const input = parseTodoWriteInput(params)
-  const result = await getTodoStore({ api, workspaceDir: toolCtx.workspaceDir }).save(scopeKey, input.oldTodos, input.newTodos)
+  const result = await getTodoStore({ api, workspaceDir: toolCtx.workspaceDir }).save(scopeKey, input.newTodos)
   logTaskPipeline(api, 'tool.TodoWrite', {
     scopeKey,
     toolCtxSessionKey: toolCtx.sessionKey ?? null,
@@ -258,7 +258,7 @@ export function registerTaskTools(api: OpenClawPluginApi): void {
   api.registerTool((toolCtx: ToolContext) => ({
     name: 'TodoWrite',
     label: 'Todo Write',
-    description: 'Create and manage the current session todo list for multi-step work. Requires oldTodos from the latest TodoGet/TaskList/tool result and newTodos as the full replacement list; use newTodos: [] to clear completed temporary todos.',
+    description: 'Create and manage the current session todo list for multi-step work. Requires oldTodos and newTodos; newTodos is the full replacement list. Use newTodos: [] to clear completed temporary todos.',
     parameters: todoWriteParameters,
     async execute(_toolCallId: string, params: ToolParams) {
       return await executeTodoWrite(api, toolCtx, params)
@@ -268,7 +268,7 @@ export function registerTaskTools(api: OpenClawPluginApi): void {
   api.registerTool((toolCtx: ToolContext) => ({
     name: 'TodoGet',
     label: 'Todo Get',
-    description: 'Get the current session todo list. Use before TodoWrite when you need latest oldTodos, after stale update rejection, or before clearing todos. Takes no parameters.',
+    description: 'Get the current session todo list. Use before TodoWrite when you need to inspect current todos, or before clearing todos. Takes no parameters.',
     parameters: todoGetParameters,
     async execute(_toolCallId: string, params: ToolParams) {
       return await executeTodoGet(api, toolCtx, params)
