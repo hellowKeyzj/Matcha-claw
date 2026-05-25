@@ -116,6 +116,8 @@ PLACEHOLDER_PATTERN = re.compile(r"\{\{\s*([A-Za-z0-9_.-]+)\s*\}\}")
 INDEX_START_PATTERN = re.compile(r"<!-- browser-flow:index:start platform=([^ >]+) -->")
 INDEX_END_TEMPLATE = "<!-- browser-flow:index:end platform={platform_id} -->"
 RUNTIME_REF_PATTERN = re.compile(r"^(?:ref=)?[A-Za-z_-]+-?\d+$")
+RPC_TIMEOUT_PADDING_SECONDS = 2.0
+MIN_RPC_TIMEOUT_SECONDS = 1.0
 
 
 class BrowserFlowRunnerError(RuntimeError):
@@ -197,10 +199,18 @@ class RunnerContext:
     status: str = "success"
     started_at: float = field(default_factory=time.time)
 
-    def request_browser(self, request: dict[str, Any]) -> dict[str, Any]:
+    def request_browser(self, request: dict[str, Any], *, timeout: float | None = None) -> dict[str, Any]:
         if self.client is None:
             self.client = OpenClawBrowserGatewayClient.from_environment()
-        return self.client.request(request)
+        return self.client.request(request, timeout=timeout)
+
+    def close_browser(self) -> None:
+        if self.client is None:
+            return
+        try:
+            self.client.close()
+        finally:
+            self.client = None
 
 
 def load_json(path: Path) -> dict[str, Any]:
@@ -623,13 +633,40 @@ def run_assert_no_errors(ctx: RunnerContext, step: dict[str, Any], record: dict[
 
 
 def browser_call(ctx: RunnerContext, request: dict[str, Any], record: dict[str, Any], note: str | None = None) -> dict[str, Any]:
-    record.setdefault("calls", []).append({"request": redact(request), **({"note": note} if note else {})})
+    rpc_timeout = browser_rpc_timeout_seconds(request)
+    call_record = {"request": redact(request), **({"note": note} if note else {})}
+    if rpc_timeout is not None:
+        call_record["rpcTimeoutMs"] = round(rpc_timeout * 1000)
+    record.setdefault("calls", []).append(call_record)
     try:
-        result = ctx.request_browser(request)
+        result = ctx.request_browser(request, timeout=rpc_timeout)
     except OpenClawBrowserGatewayError as exc:
         raise BrowserFlowRunnerError(str(exc), code=str(exc.code or "gateway_error"), details=exc.details) from exc
     record["calls"][-1]["result"] = sanitize_result(result)
     return result
+
+
+def _timeout_ms_to_seconds(value: Any) -> float | None:
+    if not isinstance(value, (int, float)) or isinstance(value, bool) or not value > 0:
+        return None
+    return max(MIN_RPC_TIMEOUT_SECONDS, (float(value) / 1000.0) + RPC_TIMEOUT_PADDING_SECONDS)
+
+
+def browser_rpc_timeout_seconds(request: dict[str, Any]) -> float | None:
+    direct_timeout = _timeout_ms_to_seconds(request.get("timeoutMs"))
+    if direct_timeout is not None:
+        return direct_timeout
+
+    nested = request.get("request")
+    if request.get("action") != "act" or not isinstance(nested, dict):
+        return None
+
+    nested_timeout = _timeout_ms_to_seconds(nested.get("timeoutMs"))
+    if nested_timeout is not None:
+        return nested_timeout
+    if nested.get("kind") == "wait":
+        return _timeout_ms_to_seconds(nested.get("timeMs"))
+    return None
 
 
 def snapshot_request(step: dict[str, Any]) -> dict[str, Any]:
@@ -1328,6 +1365,9 @@ def main(argv: list[str] | None = None) -> int:
             ctx.status = "failed"
             return finish_with_context(ctx, {"error": error_payload(exc)}, exit_code=2)
         return emit_failure(args, exc, status="failed", exit_code=2)
+    finally:
+        if ctx is not None:
+            ctx.close_browser()
 
 
 def emit_failure(args: argparse.Namespace, exc: Exception, *, status: str, exit_code: int) -> int:

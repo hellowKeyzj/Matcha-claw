@@ -5,7 +5,7 @@ import { spawn, spawnSync } from 'node:child_process'
 import { createServer } from 'node:http'
 import os from 'node:os'
 import path from 'node:path'
-import { WebSocketServer } from 'ws'
+import { WebSocketServer, type WebSocket } from 'ws'
 
 let tempDirs: string[] = []
 
@@ -156,41 +156,75 @@ const defaultSnapshot: SnapshotPayload = {
   },
 }
 
+type FakeGatewayStats = {
+  connectionCount: number
+  connectCount: number
+  pongCount: number
+}
+
+type FakeGatewayOptions = {
+  delayByActionMs?: Record<string, number>
+  delayByCallIndexMs?: Record<number, number>
+  eventBeforeResponse?: boolean
+  pingBeforeResponse?: boolean
+  closeOnAction?: string
+}
+
 async function withFakeGateway<T>(
-  handler: (port: number, calls: Record<string, unknown>[]) => Promise<T>,
+  handler: (port: number, calls: Record<string, unknown>[], stats: FakeGatewayStats) => Promise<T>,
   snapshots: SnapshotPayload[] = [defaultSnapshot],
+  options: FakeGatewayOptions = {},
 ): Promise<T> {
   const port = await findFreePort()
   const token = 'runner-test-token'
   const calls: Record<string, unknown>[] = []
+  const stats: FakeGatewayStats = { connectionCount: 0, connectCount: 0, pongCount: 0 }
   let snapshotIndex = 0
   const wss = new WebSocketServer({ host: '127.0.0.1', port })
+  const sendJson = (socket: WebSocket, payload: Record<string, unknown>, delayMs = 0) => {
+    const send = () => {
+      if (socket.readyState === WebSocket.OPEN) {
+        socket.send(JSON.stringify(payload))
+      }
+    }
+    if (delayMs > 0) {
+      setTimeout(send, delayMs)
+      return
+    }
+    send()
+  }
+
   wss.on('connection', (socket) => {
-    socket.send(JSON.stringify({
+    stats.connectionCount += 1
+    sendJson(socket, {
       type: 'event',
       event: 'connect.challenge',
       payload: { nonce: 'runner-test' },
-    }))
+    })
+    socket.on('pong', () => {
+      stats.pongCount += 1
+    })
     socket.on('message', (rawData) => {
       const message = JSON.parse(rawData.toString()) as Record<string, unknown>
       if (message.type !== 'req' || typeof message.id !== 'string') {
         return
       }
       if (message.method === 'connect') {
+        stats.connectCount += 1
         const params = message.params && typeof message.params === 'object'
           ? message.params as Record<string, unknown>
           : {}
         const auth = params.auth && typeof params.auth === 'object'
           ? params.auth as Record<string, unknown>
           : {}
-        socket.send(JSON.stringify({
+        sendJson(socket, {
           type: 'res',
           id: message.id,
           ok: auth.token === token,
           ...(auth.token === token
             ? { payload: { features: { methods: ['browser.request'] } } }
             : { error: { code: 'FORBIDDEN', message: 'invalid token' } }),
-        }))
+        })
         return
       }
       if (message.method !== 'browser.request') {
@@ -200,11 +234,28 @@ async function withFakeGateway<T>(
         ? message.params as Record<string, unknown>
         : {}
       calls.push(params)
-      const action = params.action
+      const callIndex = calls.length - 1
+      const action = typeof params.action === 'string' ? params.action : ''
+      const delayMs = options.delayByCallIndexMs?.[callIndex] ?? options.delayByActionMs?.[action] ?? 0
+      if (options.eventBeforeResponse) {
+        sendJson(socket, {
+          type: 'event',
+          event: 'tick',
+          payload: { ts: Date.now() },
+          seq: callIndex + 1,
+        })
+      }
+      if (options.pingBeforeResponse) {
+        socket.ping()
+      }
+      if (options.closeOnAction === action) {
+        socket.close(1012, 'service restart')
+        return
+      }
       if (action === 'snapshot') {
         const snapshot = snapshots[Math.min(snapshotIndex, snapshots.length - 1)] || defaultSnapshot
         snapshotIndex += 1
-        socket.send(JSON.stringify({
+        sendJson(socket, {
           type: 'res',
           id: message.id,
           ok: true,
@@ -212,20 +263,20 @@ async function withFakeGateway<T>(
             ok: true,
             ...snapshot,
           },
-        }))
+        }, delayMs)
         return
       }
-      socket.send(JSON.stringify({
+      sendJson(socket, {
         type: 'res',
         id: message.id,
         ok: true,
         payload: { ok: true, action },
-      }))
+      }, delayMs)
     })
   })
 
   try {
-    return await handler(port, calls)
+    return await handler(port, calls, stats)
   } finally {
     await new Promise<void>((resolve, reject) => {
       wss.close((error) => {
@@ -341,6 +392,107 @@ describe('agent Browser Flow runner', () => {
     })
   })
 
+  it('reuses one gateway websocket across browser calls in a runner execution', async () => {
+    const workspace = await writeWorkspace({
+      steps: [
+        { id: 'status', kind: 'status' },
+        { id: 'click-search', kind: 'click', target: { role: 'button', name: 'Search' } },
+        { id: 'assert-result', kind: 'assertText', text: 'Result: matcha' },
+      ],
+    })
+
+    await withFakeGateway(async (port, calls, stats) => {
+      const result = await runRunner([
+        '--workspace-dir', workspace,
+        '--recipe-id', 'demo.search',
+        '--params-json', '{"query":"matcha"}',
+      ], {
+        MATCHACLAW_RUNTIME_HOST_GATEWAY_PORT: String(port),
+        MATCHACLAW_RUNTIME_HOST_GATEWAY_TOKEN: 'runner-test-token',
+      })
+
+      expect(result.status).toBe(0)
+      expect(calls.map((call) => call.action)).toEqual(['status', 'snapshot', 'act', 'snapshot'])
+      expect(stats.connectionCount).toBe(1)
+      expect(stats.connectCount).toBe(1)
+    })
+  })
+
+  it('keeps resolving browser responses while gateway events are interleaved', async () => {
+    const workspace = await writeWorkspace({
+      steps: [
+        { id: 'status', kind: 'status' },
+        { id: 'navigate', kind: 'navigate', url: 'https://example.test/search?q={{query}}' },
+      ],
+    })
+
+    await withFakeGateway(async (port, calls, stats) => {
+      const result = await runRunner([
+        '--workspace-dir', workspace,
+        '--recipe-id', 'demo.search',
+        '--params-json', '{"query":"matcha"}',
+      ], {
+        MATCHACLAW_RUNTIME_HOST_GATEWAY_PORT: String(port),
+        MATCHACLAW_RUNTIME_HOST_GATEWAY_TOKEN: 'runner-test-token',
+      })
+
+      expect(result.status).toBe(0)
+      expect(calls.map((call) => call.action)).toEqual(['status', 'navigate'])
+      expect(stats.connectionCount).toBe(1)
+      expect(stats.connectCount).toBe(1)
+    }, [defaultSnapshot], { eventBeforeResponse: true })
+  })
+
+  it('responds to gateway websocket ping while waiting for browser response', async () => {
+    const workspace = await writeWorkspace({
+      steps: [
+        { id: 'status', kind: 'status' },
+      ],
+    })
+
+    await withFakeGateway(async (port, _calls, stats) => {
+      const result = await runRunner([
+        '--workspace-dir', workspace,
+        '--recipe-id', 'demo.search',
+        '--params-json', '{"query":"matcha"}',
+      ], {
+        MATCHACLAW_RUNTIME_HOST_GATEWAY_PORT: String(port),
+        MATCHACLAW_RUNTIME_HOST_GATEWAY_TOKEN: 'runner-test-token',
+      })
+
+      expect(result.status).toBe(0)
+      expect(stats.pongCount).toBeGreaterThan(0)
+      expect(stats.connectionCount).toBe(1)
+      expect(stats.connectCount).toBe(1)
+    }, [defaultSnapshot], { pingBeforeResponse: true, delayByActionMs: { status: 50 } })
+  })
+
+  it('fails the pending browser call when the gateway socket closes', async () => {
+    const workspace = await writeWorkspace({
+      steps: [
+        { id: 'status', kind: 'status' },
+      ],
+    })
+
+    await withFakeGateway(async (port) => {
+      const result = await runRunner([
+        '--workspace-dir', workspace,
+        '--recipe-id', 'demo.search',
+        '--params-json', '{"query":"matcha"}',
+      ], {
+        MATCHACLAW_RUNTIME_HOST_GATEWAY_PORT: String(port),
+        MATCHACLAW_RUNTIME_HOST_GATEWAY_TOKEN: 'runner-test-token',
+      })
+
+      expect(result.status).toBe(2)
+      expect(result.parsed).toMatchObject({
+        ok: false,
+        status: 'failed',
+        error: { code: 'websocket_closed' },
+      })
+    }, [defaultSnapshot], { closeOnAction: 'status' })
+  })
+
   it('retries target snapshots when refs are initially empty', async () => {
     const workspace = await writeWorkspace({
       steps: [
@@ -368,6 +520,94 @@ describe('agent Browser Flow runner', () => {
       { snapshot: '', refs: {} },
       defaultSnapshot,
     ])
+  })
+
+  it('fails with rpc_timeout when browser call exceeds default rpc timeout', async () => {
+    const workspace = await writeWorkspace({
+      steps: [
+        { id: 'status', kind: 'status' },
+      ],
+    })
+
+    await withFakeGateway(async (port) => {
+      const result = await runRunner([
+        '--workspace-dir', workspace,
+        '--recipe-id', 'demo.search',
+        '--params-json', '{"query":"matcha"}',
+      ], {
+        MATCHACLAW_RUNTIME_HOST_GATEWAY_PORT: String(port),
+        MATCHACLAW_RUNTIME_HOST_GATEWAY_TOKEN: 'runner-test-token',
+        MATCHACLAW_BROWSER_GATEWAY_RPC_TIMEOUT_SECONDS: '0.25',
+      })
+
+      expect(result.status).toBe(2)
+      expect(result.parsed).toMatchObject({
+        ok: false,
+        status: 'failed',
+        error: { code: 'rpc_timeout' },
+      })
+    }, [defaultSnapshot], { delayByActionMs: { status: 800 } })
+  })
+
+  it('uses wait timeMs as a per-call gateway rpc timeout', async () => {
+    const workspace = await writeWorkspace({
+      steps: [
+        { id: 'wait-ready', kind: 'wait', timeMs: 1000 },
+      ],
+    })
+
+    await withFakeGateway(async (port, calls) => {
+      const result = await runRunner([
+        '--workspace-dir', workspace,
+        '--recipe-id', 'demo.search',
+        '--params-json', '{"query":"matcha"}',
+      ], {
+        MATCHACLAW_RUNTIME_HOST_GATEWAY_PORT: String(port),
+        MATCHACLAW_RUNTIME_HOST_GATEWAY_TOKEN: 'runner-test-token',
+        MATCHACLAW_BROWSER_GATEWAY_RPC_TIMEOUT_SECONDS: '0.25',
+      })
+
+      expect(result.status).toBe(0)
+      expect(calls).toEqual([
+        expect.objectContaining({
+          action: 'act',
+          request: expect.objectContaining({ kind: 'wait', timeMs: 1000 }),
+        }),
+      ])
+      expect(result.parsed.steps).toEqual([
+        expect.objectContaining({
+          calls: [expect.objectContaining({ rpcTimeoutMs: 3000 })],
+        }),
+      ])
+    }, [defaultSnapshot], { delayByActionMs: { act: 500 } })
+  })
+
+  it('ignores removed legacy browser gateway timeout env', async () => {
+    const workspace = await writeWorkspace({
+      steps: [
+        { id: 'status', kind: 'status' },
+      ],
+    })
+
+    await withFakeGateway(async (port) => {
+      const result = await runRunner([
+        '--workspace-dir', workspace,
+        '--recipe-id', 'demo.search',
+        '--params-json', '{"query":"matcha"}',
+      ], {
+        MATCHACLAW_RUNTIME_HOST_GATEWAY_PORT: String(port),
+        MATCHACLAW_RUNTIME_HOST_GATEWAY_TOKEN: 'runner-test-token',
+        MATCHACLAW_BROWSER_GATEWAY_RPC_TIMEOUT_SECONDS: '0.25',
+        MATCHACLAW_BROWSER_GATEWAY_TIMEOUT_SECONDS: '2',
+      })
+
+      expect(result.status).toBe(2)
+      expect(result.parsed).toMatchObject({
+        ok: false,
+        status: 'failed',
+        error: { code: 'rpc_timeout' },
+      })
+    }, [defaultSnapshot], { delayByActionMs: { status: 800 } })
   })
 
   it('normalizes target labels without falling back to ref order', async () => {
@@ -550,7 +790,7 @@ describe('agent Browser Flow runner', () => {
       ],
     })
 
-    await withFakeGateway(async (port, calls) => {
+    await withFakeGateway(async (port, calls, stats) => {
       const result = await runRunner([
         '--workspace-dir', workspace,
         '--recipe-id', 'demo.search',
@@ -565,6 +805,8 @@ describe('agent Browser Flow runner', () => {
       expect(result.status).toBe(0)
       expect(result.parsed.postWriteBackValidation).toMatchObject({ ok: true, status: 'success' })
       expect(calls.map((call) => call.action)).toEqual(['status', 'status'])
+      expect(stats.connectionCount).toBe(1)
+      expect(stats.connectCount).toBe(1)
     })
   })
 })
