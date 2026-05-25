@@ -3,7 +3,7 @@
  */
 
 import type { Command } from "commander";
-import { type Dirent } from "node:fs";
+import type { Dirent } from "node:fs";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import path from "node:path";
@@ -1595,9 +1595,10 @@ export function registerMemoryCLI(program: Command, context: CLIContext): void {
     .option("--scope <scope>", "Only upgrade memories in this scope")
     .action(async (options) => {
       try {
+        const llmClient = options.llm === false ? null : await context.getLlmClient?.() ?? null;
         const upgrader = createMemoryUpgrader(
           context.store,
-          options.llm === false ? null : (context.getLlmClient ? await context.getLlmClient() : null),
+          llmClient,
           { log: console.log },
         );
 

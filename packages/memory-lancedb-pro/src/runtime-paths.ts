@@ -1,9 +1,13 @@
-import { readFileSync } from "node:fs";
-import { dirname, basename, join } from "node:path";
+import { existsSync, readFileSync } from "node:fs";
+import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 export function getPluginPackageRoot(metaUrl: string): string {
   const moduleDir = dirname(fileURLToPath(metaUrl));
+  if (existsSync(join(moduleDir, "package.json"))) {
+    return moduleDir;
+  }
+
   if (basename(moduleDir) === "dist") {
     return dirname(moduleDir);
   }

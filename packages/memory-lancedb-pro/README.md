@@ -64,7 +64,7 @@ That's the difference an **AI Memory Assistant** makes — it learns your style,
 | **Hybrid Retrieval** | Vector + BM25 full-text search, fused with cross-encoder reranking |
 | **Context Injection** | Relevant memories automatically surface before each reply |
 | **Multi-Scope Isolation** | Per-agent, per-user, per-project memory boundaries |
-| **Any Provider** | OpenAI, Jina, Gemini, Ollama, or any OpenAI-compatible API |
+| **Any Provider** | OpenAI, Jina, Gemini, Ollama, local MiniLM, or any OpenAI-compatible API |
 | **Full Toolkit** | CLI, backup, migration, upgrade, export/import — production-ready |
 
 ---
@@ -130,6 +130,7 @@ Add to your `openclaw.json`:
 - `autoRecall` → relevant memories are injected before each reply
 - `extractMinMessages: 2` → extraction triggers in normal two-turn chats
 - `sessionMemory.enabled: false` → avoids polluting retrieval with session summaries on day one
+- No `llm` block is required for smart extraction by default; OpenClaw's runtime LLM handles model/provider/auth
 
 ---
 
@@ -484,11 +485,6 @@ Query → BM25 FTS ─────┘
     "messageCount": 15
   },
   "smartExtraction": true,
-  "llm": {
-    "apiKey": "${OPENAI_API_KEY}",
-    "model": "gpt-4o-mini",
-    "baseURL": "https://api.openai.com/v1"
-  },
   "extractMinMessages": 2,
   "extractMaxChars": 8000
 }
@@ -499,15 +495,32 @@ Query → BM25 FTS ─────┘
 <details>
 <summary><strong>Embedding Providers</strong></summary>
 
-Works with **any OpenAI-compatible embedding API**:
+Works with local MiniLM and **any OpenAI-compatible embedding API**:
 
 | Provider | Model | Base URL | Dimensions |
 | --- | --- | --- | --- |
-| **Jina** (recommended) | `jina-embeddings-v5-text-small` | `https://api.jina.ai/v1` | 1024 |
+| **Local MiniLM** | `Xenova/all-MiniLM-L6-v2` | none | 384 |
+| **Jina** (recommended remote) | `jina-embeddings-v5-text-small` | `https://api.jina.ai/v1` | 1024 |
 | **OpenAI** | `text-embedding-3-small` | `https://api.openai.com/v1` | 1536 |
 | **Voyage** | `voyage-4-lite` / `voyage-4` | `https://api.voyageai.com/v1` | 1024 / 1024 |
 | **Google Gemini** | `gemini-embedding-001` | `https://generativelanguage.googleapis.com/v1beta/openai/` | 3072 |
-| **Ollama** (local) | `nomic-embed-text` | `http://localhost:11434/v1` | provider-specific |
+| **Ollama** (local server) | `nomic-embed-text` | `http://localhost:11434/v1` | provider-specific |
+
+Local MiniLM needs no API key:
+
+```json
+{
+  "embedding": {
+    "provider": "local-minilm"
+  }
+}
+```
+
+To prefetch the local model cache before first use:
+
+```bash
+npm run download:local-minilm
+```
 
 </details>
 
@@ -532,13 +545,15 @@ Any Jina-compatible rerank endpoint also works — set `rerankProvider: "jina"` 
 
 When `smartExtraction` is enabled (default: `true`), the plugin uses an LLM to intelligently extract and classify memories instead of regex-based triggers.
 
+By default, smart extraction uses OpenClaw's host-owned runtime LLM via `api.runtime.llm.complete(...)`. Configure `llm.*` only when you want this plugin to override the host runtime with its own API-key or OAuth-backed LLM client.
+
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `smartExtraction` | boolean | `true` | Enable/disable LLM-powered 6-category extraction |
-| `llm.auth` | string | `api-key` | `api-key` uses `llm.apiKey`, then `embedding.apiKey`, then OpenClaw's default model source when available; `oauth` uses a plugin-scoped OAuth token file by default |
-| `llm.apiKey` | string | *(falls back to `embedding.apiKey`, then OpenClaw default LLM source)* | API key for the LLM provider |
-| `llm.model` | string | `openai/gpt-oss-120b` | LLM model name. If omitted, the plugin inherits OpenClaw's default model on startup when available |
-| `llm.baseURL` | string | *(falls back to OpenClaw default LLM source, then `embedding.baseURL`)* | LLM API endpoint |
+| `llm.auth` | string | *(runtime LLM)* | Set `api-key` or `oauth` only to override the OpenClaw runtime LLM |
+| `llm.apiKey` | string | none | API key for an explicit plugin-managed LLM provider |
+| `llm.model` | string | host default | Optional model override, subject to host/runtime policy |
+| `llm.baseURL` | string | none | API endpoint for an explicit plugin-managed LLM provider |
 | `llm.oauthProvider` | string | `openai-codex` | OAuth provider id used when `llm.auth` is `oauth` |
 | `llm.oauthPath` | string | `~/.openclaw/.memory-lancedb-pro/oauth.json` | OAuth token file used when `llm.auth` is `oauth` |
 | `llm.timeoutMs` | number | `30000` | LLM request timeout in milliseconds |
@@ -546,7 +561,7 @@ When `smartExtraction` is enabled (default: `true`), the plugin uses an LLM to i
 | `extractMaxChars` | number | `8000` | Maximum characters sent to the LLM |
 
 
-OAuth `llm` config (use existing Codex / ChatGPT login cache for LLM calls):
+OAuth `llm` config for overriding the runtime LLM with an existing Codex / ChatGPT login cache:
 ```json
 {
   "llm": {

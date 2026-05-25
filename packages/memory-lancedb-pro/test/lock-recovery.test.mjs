@@ -5,7 +5,6 @@ import {
   existsSync,
   mkdtempSync,
   mkdirSync,
-  lstatSync,
   rmSync,
   statSync,
   utimesSync,
@@ -127,18 +126,20 @@ describe("runWithFileLock recovery", () => {
       await store.store(makeEntry(1));
 
       const lockPath = join(dir, ".memory-write.lock");
-      assert.strictEqual(existsSync(lockPath), false);
+      assert.strictEqual(existsSync(lockPath), true);
+      assert.strictEqual(existsSync(`${lockPath}.lock`), false);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
   });
 
-  it("recovers from a legacy sentinel lock file", async () => {
+  it("recovers from an artificially stale lock directory", async () => {
     const { store, dir } = makeStore();
     const lockPath = join(dir, ".memory-write.lock");
 
     try {
-      writeFileSync(lockPath, "", "utf8");
+      mkdirSync(lockPath, { recursive: true });
+
       const oldTime = new Date(Date.now() - 120_000);
       utimesSync(lockPath, oldTime, oldTime);
 
@@ -150,29 +151,6 @@ describe("runWithFileLock recovery", () => {
 
       const all = await store.list(undefined, undefined, 20, 0);
       assert.strictEqual(all.length, 1);
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
-  });
-
-  it("uses .memory-write.lock as a directory while a process holds the lock", async () => {
-    const { dir } = makeStore();
-
-    try {
-      const lockfileModule = await import("proper-lockfile");
-      const lockfile = lockfileModule.default ?? lockfileModule;
-      const lockPath = join(dir, ".memory-write.lock");
-
-      const release = await lockfile.lock(dir, {
-        lockfilePath: lockPath,
-        stale: 10000,
-        retries: 0,
-      });
-
-      assert.strictEqual(existsSync(lockPath), true);
-      assert.strictEqual(lstatSync(lockPath).isDirectory(), true);
-      await release();
-      assert.strictEqual(existsSync(lockPath), false);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

@@ -10,10 +10,7 @@
 
 import OpenAI from "openai";
 import { createHash } from "node:crypto";
-import { existsSync } from "node:fs";
-import { join } from "node:path";
 import { smartChunk } from "./chunker.js";
-import { getPluginPackageRoot } from "./runtime-paths.js";
 
 // ============================================================================
 // Embedding Cache (LRU with TTL)
@@ -107,6 +104,8 @@ class EmbeddingCache {
 
 export type EmbeddingProvider = "openai-compatible" | "azure-openai" | "local-minilm";
 
+export const LOCAL_MINILM_CANONICAL_MODEL = "Xenova/all-MiniLM-L6-v2";
+
 export interface EmbeddingConfig {
   provider: EmbeddingProvider;
   apiVersion?: string;
@@ -168,11 +167,10 @@ const EMBEDDING_DIMENSIONS: Record<string, number> = {
   "gemini-embedding-001": 3072,
   "nomic-embed-text": 768,
   "mxbai-embed-large": 1024,
+  "bge-m3": 1024,
   "BAAI/bge-m3": 1024,
+  [LOCAL_MINILM_CANONICAL_MODEL]: 384,
   "all-MiniLM-L6-v2": 384,
-  "sentence-transformers/all-MiniLM-L6-v2": 384,
-  "Xenova/all-MiniLM-L6-v2": 384,
-  "onnx-community/all-MiniLM-L6-v2-ONNX": 384,
   "all-mpnet-base-v2": 512,
 
   // Jina v5
@@ -190,29 +188,16 @@ const EMBEDDING_DIMENSIONS: Record<string, number> = {
   "voyage-3-large": 1024,
 };
 
-const DEFAULT_EMBEDDING_MODEL: Record<EmbeddingProvider, string> = {
-  "openai-compatible": "text-embedding-3-small",
-  "azure-openai": "text-embedding-3-small",
-  "local-minilm": "all-MiniLM-L6-v2",
-};
-
-const LOCAL_MINILM_CANONICAL_MODEL = "Xenova/all-MiniLM-L6-v2";
-const LOCAL_MINILM_ALIASES = new Set([
-  "",
-  "all-MiniLM-L6-v2",
-  "sentence-transformers/all-MiniLM-L6-v2",
-  LOCAL_MINILM_CANONICAL_MODEL,
-  "onnx-community/all-MiniLM-L6-v2-ONNX",
-]);
-
-const LOCAL_MINILM_DTYPE = "fp32";
-const PLUGIN_ROOT = getPluginPackageRoot(import.meta.url);
-const BUNDLED_MODELS_ROOT = join(PLUGIN_ROOT, "models");
-const LOCAL_MINILM_ONNX_FILE = "onnx/model.onnx";
-
 // ============================================================================
 // Utility Functions
 // ============================================================================
+
+export function resolveEmbeddingModel(provider: EmbeddingProvider, configuredModel?: string): string {
+  if (configuredModel?.trim()) {
+    return configuredModel.trim();
+  }
+  return provider === "local-minilm" ? LOCAL_MINILM_CANONICAL_MODEL : "text-embedding-3-small";
+}
 
 function resolveEnvVars(value: string): string {
   return value.replace(/\$\{([^}]+)\}/g, (_, envVar) => {
@@ -477,114 +462,11 @@ export function getEffectiveVectorDimensions(
   return getVectorDimensions(model, requestDimensions ?? dimensions);
 }
 
-export function resolveEmbeddingModel(provider: EmbeddingProvider, model?: string): string {
-  const trimmed = model?.trim() || "";
-  if (provider === "local-minilm") {
-    return LOCAL_MINILM_ALIASES.has(trimmed)
-      ? LOCAL_MINILM_CANONICAL_MODEL
-      : trimmed || LOCAL_MINILM_CANONICAL_MODEL;
-  }
-
-  return trimmed || DEFAULT_EMBEDDING_MODEL[provider];
-}
-
-function averageEmbeddings(vectors: number[][], dimensions: number): number[] {
-  const summed = vectors.reduce(
-    (sum, embedding) => {
-      for (let i = 0; i < embedding.length; i++) {
-        sum[i] += embedding[i];
-      }
-      return sum;
-    },
-    new Array(dimensions).fill(0),
-  );
-
-  return summed.map((value) => value / vectors.length);
-}
-
-function asNumberArray(value: unknown): number[] | null {
-  if (!Array.isArray(value)) return null;
-  if (value.some((item) => typeof item !== "number")) return null;
-  return value as number[];
-}
-
-function normalizeLocalEmbeddingVector(value: unknown): number[] {
-  let current = value;
-
-  while (Array.isArray(current) && current.length > 0) {
-    const asVector = asNumberArray(current);
-    if (asVector) return asVector;
-    current = current[0];
-  }
-
-  throw new Error("Local MiniLM embedder returned an unexpected tensor shape");
-}
-
-function normalizeLocalEmbeddingBatch(output: any): number[][] {
-  const raw =
-    typeof output?.tolist === "function"
-      ? output.tolist()
-      : output?.data && ArrayBuffer.isView(output.data)
-        ? [Array.from(output.data)]
-        : output;
-
-  if (!Array.isArray(raw)) {
-    throw new Error("Local MiniLM embedder returned a non-array output");
-  }
-
-  const directVector = asNumberArray(raw);
-  if (directVector) {
-    return [directVector];
-  }
-
-  return raw.map((entry) => normalizeLocalEmbeddingVector(entry));
-}
-
-type LocalFeatureExtractor = (
-  input: string | string[],
-  options?: Record<string, unknown>,
-) => Promise<any>;
-
-const localMiniLmExtractors = new Map<string, Promise<LocalFeatureExtractor>>();
-
-async function loadLocalMiniLmExtractor(model: string): Promise<LocalFeatureExtractor> {
-  let pending = localMiniLmExtractors.get(model);
-  if (!pending) {
-    pending = (async () => {
-      const { env, pipeline } = await import("@huggingface/transformers");
-      env.allowLocalModels = true;
-      env.localModelPath = BUNDLED_MODELS_ROOT;
-      env.cacheDir = BUNDLED_MODELS_ROOT;
-
-      if (process.env.HF_ENDPOINT?.trim()) {
-        const endpoint = process.env.HF_ENDPOINT.trim().replace(/\/+$/, "");
-        env.remoteHost = `${endpoint}/`;
-      }
-
-      const bundledModelPath = join(BUNDLED_MODELS_ROOT, model, LOCAL_MINILM_ONNX_FILE);
-      const hasBundledModel = existsSync(bundledModelPath);
-      env.allowRemoteModels = !hasBundledModel;
-
-      return await pipeline("feature-extraction", model, {
-        cache_dir: BUNDLED_MODELS_ROOT,
-        local_files_only: hasBundledModel,
-        dtype: LOCAL_MINILM_DTYPE,
-      });
-    })();
-    localMiniLmExtractors.set(model, pending);
-  }
-
-  try {
-    return await pending;
-  } catch (error) {
-    localMiniLmExtractors.delete(model);
-    throw error;
-  }
-}
-
 // ============================================================================
 // Embedder Class
 // ============================================================================
+
+type TransformersPipeline = (text: string | string[], options: { pooling: "mean"; normalize: boolean }) => Promise<unknown>;
 
 export class Embedder {
   /** Pool of OpenAI clients — one per API key for round-robin rotation. */
@@ -595,6 +477,7 @@ export class Embedder {
   public readonly dimensions: number;
   private readonly _cache: EmbeddingCache;
 
+  private readonly _provider: EmbeddingProvider;
   private readonly _model: string;
   private readonly _baseURL?: string;
   private readonly _taskQuery?: string;
@@ -608,17 +491,14 @@ export class Embedder {
   private readonly _omitDimensions: boolean;
   /** Enable automatic chunking for long documents (default: true) */
   private readonly _autoChunk: boolean;
+  private _localPipelinePromise: Promise<TransformersPipeline> | null = null;
 
   constructor(config: EmbeddingConfig & { chunking?: boolean }) {
-    if (!config.apiKey) {
-      throw new Error(`embedding.apiKey is required for provider ${config.provider}`);
-    }
-
-    // Normalize apiKey to array and resolve environment variables
-    const apiKeys = Array.isArray(config.apiKey) ? config.apiKey : [config.apiKey];
+    const apiKeys = config.apiKey === undefined ? [] : Array.isArray(config.apiKey) ? config.apiKey : [config.apiKey];
     const resolvedKeys = apiKeys.map(k => resolveEnvVars(k));
 
-    this._model = resolveEmbeddingModel(config.provider, config.model);
+    this._provider = config.provider;
+    this._model = config.model;
     this._baseURL = config.baseURL;
     this._taskQuery = config.taskQuery;
     this._taskPassage = config.taskPassage;
@@ -629,6 +509,10 @@ export class Embedder {
     this._autoChunk = config.chunking !== false;
     const profile = detectEmbeddingProviderProfile(this._baseURL, this._model);
     this._capabilities = getEmbeddingCapabilities(profile);
+
+    if (config.provider !== "local-minilm" && resolvedKeys.length === 0) {
+      throw new Error("embedding.apiKey is required for remote embedding providers");
+    }
 
     // Warn if configured fields will be silently ignored by this provider profile
     if (config.normalized !== undefined && !this._capabilities.normalized) {
@@ -643,32 +527,34 @@ export class Embedder {
     }
 
     // Create a client pool — one OpenAI client per key
-    this.clients = resolvedKeys.map(key => {
-      let defaultHeaders: Record<string, string> = {};
-      let baseURL = config.baseURL;
+    this.clients = config.provider === "local-minilm"
+      ? []
+      : resolvedKeys.map(key => {
+          let defaultHeaders: Record<string, string> = {};
+          let baseURL = config.baseURL;
 
-      if (config.provider === "azure-openai" || profile === "azure-openai") {
-        defaultHeaders["api-key"] = key;
-        if (baseURL && config.apiVersion) {
-          const url = new URL(baseURL);
-          url.searchParams.set("api-version", config.apiVersion);
-          baseURL = url.toString();
-        }
-      }
+          if (config.provider === "azure-openai" || profile === "azure-openai") {
+            defaultHeaders["api-key"] = key;
+            if (baseURL && config.apiVersion) {
+              const url = new URL(baseURL);
+              url.searchParams.set("api-version", config.apiVersion);
+              baseURL = url.toString();
+            }
+          }
 
-      return new OpenAI({
-        apiKey: key,
-        ...(baseURL ? { baseURL } : {}),
-        defaultHeaders: Object.keys(defaultHeaders).length > 0 ? defaultHeaders : undefined,
-      });
-    });
+          return new OpenAI({
+            apiKey: key,
+            ...(baseURL ? { baseURL } : {}),
+            defaultHeaders: Object.keys(defaultHeaders).length > 0 ? defaultHeaders : undefined,
+          });
+        });
 
     if (this.clients.length > 1) {
       console.log(`[memory-lancedb-pro] Initialized ${this.clients.length} API keys for round-robin rotation`);
     }
 
     this.dimensions = getEffectiveVectorDimensions(
-      this._model,
+      config.model,
       config.dimensions,
       config.requestDimensions,
     );
@@ -734,6 +620,63 @@ export class Embedder {
    * See: https://github.com/CortexReach/memory-lancedb-pro/issues/620
    * Fix: https://github.com/CortexReach/memory-lancedb-pro/issues/629
    */
+  private async getLocalPipeline(): Promise<TransformersPipeline> {
+    if (!this._localPipelinePromise) {
+      this._localPipelinePromise = import("@huggingface/transformers").then(async ({ pipeline }) => {
+        return await pipeline("feature-extraction", this._model) as TransformersPipeline;
+      });
+    }
+    return this._localPipelinePromise;
+  }
+
+  private vectorsFromLocalOutput(output: unknown): number[][] {
+    if (Array.isArray(output)) {
+      if (output.every((value) => typeof value === "number")) {
+        return [output.map(Number)];
+      }
+      if (output.every(Array.isArray)) {
+        return output.map((row) => row.map(Number));
+      }
+    }
+
+    const maybeTensor = output as { data?: ArrayLike<number>; dims?: number[]; tolist?: () => unknown };
+    if (typeof maybeTensor?.tolist === "function") {
+      return this.vectorsFromLocalOutput(maybeTensor.tolist());
+    }
+    if (maybeTensor?.data) {
+      const values = Array.from(maybeTensor.data, Number);
+      const dims = maybeTensor.dims ?? [];
+      if (dims.length >= 2) {
+        const rows = dims[0];
+        const cols = dims[dims.length - 1];
+        return Array.from({ length: rows }, (_, row) => values.slice(row * cols, (row + 1) * cols));
+      }
+      return [values];
+    }
+
+    throw new Error("Local MiniLM returned an unsupported embedding shape");
+  }
+
+  private async embedWithLocalMiniLm(input: string | string[], signal?: AbortSignal): Promise<any> {
+    if (signal?.aborted) {
+      throw signal.reason ?? new Error("aborted");
+    }
+
+    const pipeline = await this.getLocalPipeline();
+    const output = await pipeline(input, { pooling: "mean", normalize: this._normalized !== false });
+    if (signal?.aborted) {
+      throw signal.reason ?? new Error("aborted");
+    }
+
+    const vectors = this.vectorsFromLocalOutput(output);
+    const expectedCount = Array.isArray(input) ? input.length : 1;
+    if (vectors.length !== expectedCount) {
+      throw new Error(`Local MiniLM returned ${vectors.length} embedding(s) for ${expectedCount} input(s)`);
+    }
+
+    return { data: vectors.map((embedding) => ({ embedding })) };
+  }
+
   private async embedWithNativeFetch(payload: any, signal?: AbortSignal): Promise<any> {
     if (!this._baseURL) {
       throw new Error("embedWithNativeFetch requires a baseURL");
@@ -770,7 +713,7 @@ export class Embedder {
         );
       }
 
-      const data = await response.json();
+      const data = await response.json() as any;
 
       // Validate response count and non-empty embeddings
       if (
@@ -810,7 +753,7 @@ export class Embedder {
       );
     }
 
-    const data = await response.json();
+    const data = await response.json() as any;
 
     // Ollama /api/embeddings returns { embedding: number[] },
     // convert to OpenAI-compatible shape { data: [{ embedding: number[] }] }
@@ -827,6 +770,10 @@ export class Embedder {
    * through the SDK's HTTP client on Node.js.
    */
   private async embedWithRetry(payload: any, signal?: AbortSignal): Promise<any> {
+    if (this._provider === "local-minilm") {
+      return this.embedWithLocalMiniLm(payload.input, signal);
+    }
+
     // Use native fetch for Ollama to ensure proper AbortController support
     if (this.isOllamaProvider()) {
       try {
@@ -1280,253 +1227,10 @@ export class Embedder {
   }
 }
 
-export class LocalMiniLmEmbedder {
-  public readonly dimensions: number;
-
-  private readonly _cache: EmbeddingCache;
-  private readonly _model: string;
-  private readonly _autoChunk: boolean;
-
-  constructor(config: EmbeddingConfig & { chunking?: boolean }) {
-    this._model = resolveEmbeddingModel(config.provider, config.model);
-    this.dimensions = getVectorDimensions(this._model, config.dimensions);
-    this._autoChunk = config.chunking !== false;
-    this._cache = new EmbeddingCache(256, 30);
-  }
-
-  get keyCount(): number {
-    return 1;
-  }
-
-  get model(): string {
-    return this._model;
-  }
-
-  get cacheStats() {
-    return {
-      ...this._cache.stats,
-      keyCount: 1,
-    };
-  }
-
-  async embed(text: string): Promise<number[]> {
-    return this.embedPassage(text);
-  }
-
-  async embedBatch(texts: string[]): Promise<number[][]> {
-    return this.embedBatchPassage(texts);
-  }
-
-  async embedQuery(text: string, signal?: AbortSignal): Promise<number[]> {
-    return this.embedSingle(text, "query", 0, signal);
-  }
-
-  async embedPassage(text: string, signal?: AbortSignal): Promise<number[]> {
-    return this.embedSingle(text, "passage", 0, signal);
-  }
-
-  async embedBatchQuery(texts: string[], signal?: AbortSignal): Promise<number[][]> {
-    return this.embedMany(texts, "query", signal);
-  }
-
-  async embedBatchPassage(texts: string[], signal?: AbortSignal): Promise<number[][]> {
-    return this.embedMany(texts, "passage", signal);
-  }
-
-  async test(): Promise<{ success: boolean; error?: string; dimensions?: number }> {
-    try {
-      const testEmbedding = await this.embedPassage("test");
-      return {
-        success: true,
-        dimensions: testEmbedding.length,
-      };
-    } catch (error) {
-      return {
-        success: false,
-        error: error instanceof Error ? error.message : String(error),
-      };
-    }
-  }
-
-  private validateEmbedding(embedding: number[]): void {
-    if (!Array.isArray(embedding)) {
-      throw new Error(`Embedding is not an array (got ${typeof embedding})`);
-    }
-    if (embedding.length !== this.dimensions) {
-      throw new Error(
-        `Embedding dimension mismatch: expected ${this.dimensions}, got ${embedding.length}`,
-      );
-    }
-  }
-
-  private async runLocalExtractor(input: string | string[], signal?: AbortSignal): Promise<number[][]> {
-    const extractor = await loadLocalMiniLmExtractor(this._model);
-    if (signal?.aborted) {
-      throw signal.reason ?? new Error("aborted");
-    }
-
-    const output = await extractor(input, {
-      pooling: "mean",
-      normalize: true,
-    });
-
-    const vectors = normalizeLocalEmbeddingBatch(output);
-    vectors.forEach((embedding) => this.validateEmbedding(embedding));
-    return vectors;
-  }
-
-  private async embedSingle(
-    text: string,
-    task: string,
-    depth: number = 0,
-    signal?: AbortSignal,
-  ): Promise<number[]> {
-    if (!text || text.trim().length === 0) {
-      throw new Error("Cannot embed empty text");
-    }
-
-    if (depth >= MAX_EMBED_DEPTH) {
-      const safeLimit = Math.floor(text.length * STRICT_REDUCTION_FACTOR);
-      if (safeLimit < 100) {
-        throw new Error(
-          `[memory-lancedb-pro] Failed to embed: input too large for model context after ${MAX_EMBED_DEPTH} retries`,
-        );
-      }
-      text = text.slice(0, safeLimit);
-    }
-
-    const cached = this._cache.get(text, task);
-    if (cached) return cached;
-
-    try {
-      const [embedding] = await this.runLocalExtractor(text, signal);
-      if (!embedding) {
-        throw new Error("No embedding returned from local MiniLM model");
-      }
-      this._cache.set(text, task, embedding);
-      return embedding;
-    } catch (error) {
-      const errorMsg = error instanceof Error ? error.message : String(error);
-      const isContextError = /context|too long|exceed|length|max_position_embeddings|sequence length/i.test(errorMsg);
-
-      if (isContextError && this._autoChunk) {
-        const chunkResult = smartChunk(text, this._model);
-        if (chunkResult.chunks.length === 0) {
-          throw new Error(`Failed to chunk document: ${errorMsg}`);
-        }
-
-        if (
-          chunkResult.chunks.length === 1 &&
-          chunkResult.chunks[0].length > text.length * 0.9
-        ) {
-          const safeLimit = Math.floor(text.length * STRICT_REDUCTION_FACTOR);
-          if (safeLimit < 100) {
-            throw new Error(
-              `[memory-lancedb-pro] Failed to embed: chunking couldn't reduce input size enough for model context`,
-            );
-          }
-          return this.embedSingle(text.slice(0, safeLimit), task, depth + 1, signal);
-        }
-
-        const embeddings = await Promise.all(
-          chunkResult.chunks.map((chunk) => this.embedSingle(chunk, task, depth + 1, signal)),
-        );
-        const averaged = averageEmbeddings(embeddings, this.dimensions);
-        this._cache.set(text, task, averaged);
-        return averaged;
-      }
-
-      const downloadHint = /fetch failed|UND_ERR_CONNECT_TIMEOUT|ENOTFOUND|ECONNREFUSED|ETIMEDOUT/i.test(errorMsg)
-        ? " Initial model download uses Hugging Face. Check network access, configure HF_ENDPOINT/HF_HOME if needed, or prewarm the model cache first."
-        : "";
-      throw new Error(`Failed to generate embedding from local MiniLM: ${errorMsg}${downloadHint}`, {
-        cause: error instanceof Error ? error : undefined,
-      });
-    }
-  }
-
-  private async embedMany(
-    texts: string[],
-    task: string,
-    signal?: AbortSignal,
-  ): Promise<number[][]> {
-    if (!texts || texts.length === 0) {
-      return [];
-    }
-
-    const results: number[][] = new Array(texts.length);
-    const missingTexts: string[] = [];
-    const missingIndices: number[] = [];
-
-    texts.forEach((text, index) => {
-      if (!text || text.trim().length === 0) {
-        results[index] = [];
-        return;
-      }
-
-      const cached = this._cache.get(text, task);
-      if (cached) {
-        results[index] = cached;
-        return;
-      }
-
-      missingTexts.push(text);
-      missingIndices.push(index);
-    });
-
-    if (missingTexts.length === 0) {
-      return results;
-    }
-
-    try {
-      const embeddings = await this.runLocalExtractor(missingTexts, signal);
-      if (embeddings.length !== missingTexts.length) {
-        throw new Error(
-          `Local MiniLM embedder returned ${embeddings.length} vectors for ${missingTexts.length} inputs`,
-        );
-      }
-
-      embeddings.forEach((embedding, idx) => {
-        const text = missingTexts[idx];
-        const originalIndex = missingIndices[idx];
-        this._cache.set(text, task, embedding);
-        results[originalIndex] = embedding;
-      });
-
-      return results;
-    } catch (error) {
-      const errorMsg = error instanceof Error ? error.message : String(error);
-      const isContextError = /context|too long|exceed|length|max_position_embeddings|sequence length/i.test(errorMsg);
-
-      if (!isContextError || !this._autoChunk) {
-        const downloadHint = /fetch failed|UND_ERR_CONNECT_TIMEOUT|ENOTFOUND|ECONNREFUSED|ETIMEDOUT/i.test(errorMsg)
-          ? " Initial model download uses Hugging Face. Check network access, configure HF_ENDPOINT/HF_HOME if needed, or prewarm the model cache first."
-          : "";
-        throw new Error(`Failed to generate batch embeddings from local MiniLM: ${errorMsg}${downloadHint}`, {
-          cause: error instanceof Error ? error : undefined,
-        });
-      }
-
-      await Promise.all(
-        missingTexts.map(async (text, idx) => {
-          const embedding = await this.embedSingle(text, task, 0, signal);
-          results[missingIndices[idx]] = embedding;
-        }),
-      );
-
-      return results;
-    }
-  }
-}
-
 // ============================================================================
 // Factory Function
 // ============================================================================
 
-export function createEmbedder(config: EmbeddingConfig): Embedder | LocalMiniLmEmbedder {
-  if (config.provider === "local-minilm") {
-    return new LocalMiniLmEmbedder(config);
-  }
-
+export function createEmbedder(config: EmbeddingConfig): Embedder {
   return new Embedder(config);
 }

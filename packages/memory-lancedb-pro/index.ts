@@ -3,9 +3,9 @@
  * Enhanced LanceDB-backed long-term memory with hybrid retrieval and multi-scope isolation
  */
 
-import type { OpenClawConfig, OpenClawPluginApi } from "openclaw/plugin-sdk";
+import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
 import { homedir, tmpdir } from "node:os";
-import { join, dirname, basename } from "node:path";
+import { join, dirname, basename, win32 as winPath } from "node:path";
 import { readFile, readdir, writeFile, mkdir, appendFile, unlink, stat } from "node:fs/promises";
 import { readFileSync } from "node:fs";
 import { createHash } from "node:crypto";
@@ -20,11 +20,12 @@ import { spawn } from "node:child_process";
 const isCliMode = () => process.env.OPENCLAW_CLI === "1";
 
 // Import core components
-import { MemoryStore, validateStoragePath } from "./src/store.js";
+import { MemoryStore, normalizeStoragePath, type MemoryEntry } from "./src/store.js";
 import {
   createEmbedder,
   getEffectiveVectorDimensions,
   resolveEmbeddingModel,
+  type EmbeddingProvider,
 } from "./src/embedder.js";
 import { createRetriever, DEFAULT_RETRIEVAL_CONFIG } from "./src/retriever.js";
 import { createScopeManager, resolveScopeFilter, isSystemBypassId, parseAgentIdFromSessionKey } from "./src/scopes.js";
@@ -46,7 +47,10 @@ import {
   storeReflectionToLanceDB,
   loadAgentReflectionSlicesFromEntries,
   DEFAULT_REFLECTION_DERIVED_MAX_AGE_MS,
+  isOwnedByAgent,
+  isReflectionMetadataType,
 } from "./src/reflection-store.js";
+import { parseReflectionMetadata } from "./src/reflection-metadata.js";
 import {
   extractReflectionLearningGovernanceCandidates,
   extractInjectableReflectionMappedMemoryItems,
@@ -63,13 +67,15 @@ import { readPluginPackageVersion } from "./src/runtime-paths.js";
 import { SmartExtractor, createExtractionRateLimiter } from "./src/smart-extractor.js";
 import { compressTexts, estimateConversationValue } from "./src/session-compressor.js";
 import { NoisePrototypeBank } from "./src/noise-prototypes.js";
-import { createLlmClient } from "./src/llm-client.js";
+import { createLlmClient, createRuntimeLlmClient, type LlmClient } from "./src/llm-client.js";
 import { createDecayEngine, DEFAULT_DECAY_CONFIG } from "./src/decay-engine.js";
+import { createTierManager, DEFAULT_TIER_CONFIG } from "./src/tier-manager.js";
 import { createMemoryUpgrader } from "./src/memory-upgrader.js";
 import {
   buildSmartMetadata,
   parseSmartMetadata,
   stringifySmartMetadata,
+  toLifecycleMemory,
 } from "./src/smart-metadata.js";
 import {
   computeTier1Patch,
@@ -96,10 +102,9 @@ import { analyzeIntent, applyCategoryBoost } from "./src/intent-analyzer.js";
 
 interface PluginConfig {
   embedding: {
-    provider: "openai-compatible" | "azure-openai" | "local-minilm";
+    provider: EmbeddingProvider;
     apiKey?: string | string[];
-    apiVersion?: string;
-    model?: string;
+    model: string;
     baseURL?: string;
     dimensions?: number;
     requestDimensions?: number;
@@ -212,6 +217,7 @@ interface PluginConfig {
     beforeResetNote?: boolean;
     skipSubagentBootstrap?: boolean;
     ensureLearningFiles?: boolean;
+    maxEntries?: number;
   };
   memoryReflection?: {
     enabled?: boolean;
@@ -269,6 +275,7 @@ interface PluginConfig {
      */
     categoryField?: string;
   };
+  declaredAgents?: Set<string>;
 }
 
 type ReflectionThinkLevel = "off" | "minimal" | "low" | "medium" | "high";
@@ -309,122 +316,12 @@ function resolveEnvVars(value: string): string {
   });
 }
 
-function resolveFirstApiKey(apiKey: string | string[] | undefined): string {
+function resolveFirstApiKey(apiKey: string | string[]): string {
   const key = Array.isArray(apiKey) ? apiKey[0] : apiKey;
   if (!key) {
     throw new Error("embedding.apiKey is empty");
   }
   return resolveEnvVars(key);
-}
-
-interface ResolvedOpenClawDefaultLlmConfig {
-  provider: string;
-  model: string;
-  baseURL?: string;
-}
-
-interface ResolvedSmartExtractionLlmConfig {
-  auth: "api-key" | "oauth";
-  apiKey?: string;
-  model: string;
-  baseURL?: string;
-  oauthProvider?: string;
-  oauthPath?: string;
-  timeoutMs: number;
-}
-
-function resolveOpenClawDefaultLlmConfig(config: OpenClawConfig): ResolvedOpenClawDefaultLlmConfig | undefined {
-  const parsed = config as Record<string, unknown>;
-  const agents = parsed.agents as Record<string, unknown> | undefined;
-  const defaults = agents?.defaults as Record<string, unknown> | undefined;
-  const modelConfig = defaults?.model as Record<string, unknown> | undefined;
-  const defaultModelRef = asNonEmptyString(modelConfig?.primary);
-  if (!defaultModelRef) {
-    return undefined;
-  }
-
-  const { provider, model } = splitProviderModel(defaultModelRef);
-  if (!provider || !model) {
-    throw new Error(`OpenClaw default model must use provider/model format: ${defaultModelRef}`);
-  }
-
-  const models = parsed.models as Record<string, unknown> | undefined;
-  const providers = models?.providers as Record<string, unknown> | undefined;
-  const providerEntry = (
-    providers?.[provider]
-    && typeof providers[provider] === "object"
-    && !Array.isArray(providers[provider])
-  )
-    ? providers[provider] as Record<string, unknown>
-    : {};
-
-  const providerApi = asNonEmptyString(providerEntry.api);
-  if (
-    providerApi
-    && providerApi !== "openai-completions"
-    && providerApi !== "openai-responses"
-  ) {
-    throw new Error(
-      `OpenClaw default model provider "${provider}" uses unsupported API "${providerApi}" for smart extraction`,
-    );
-  }
-
-  return {
-    provider,
-    model,
-    baseURL: asNonEmptyString(providerEntry.baseUrl) ?? asNonEmptyString(providerEntry.baseURL),
-  };
-}
-
-async function resolveSmartExtractionLlmConfig(
-  api: Pick<OpenClawPluginApi, "config" | "resolvePath" | "runtime">,
-  config: PluginConfig,
-): Promise<ResolvedSmartExtractionLlmConfig> {
-  const llmAuth = config.llm?.auth || "api-key";
-  const shouldResolveOpenClawDefaultLlm = llmAuth !== "oauth" && (
-    !config.llm?.model
-    || (!config.llm?.baseURL && !config.embedding.baseURL)
-    || (!config.llm?.apiKey && !config.embedding.apiKey && !process.env.OPENAI_API_KEY?.trim())
-  );
-  const openClawDefaultLlm = shouldResolveOpenClawDefaultLlm
-    ? resolveOpenClawDefaultLlmConfig(api.config)
-    : undefined;
-
-  if (llmAuth === "oauth") {
-    return {
-      auth: llmAuth,
-      model: config.llm?.model || "openai/gpt-oss-120b",
-      baseURL: config.llm?.baseURL ? resolveEnvVars(config.llm.baseURL) : undefined,
-      oauthProvider: config.llm?.oauthProvider,
-      oauthPath: resolveOptionalPathWithEnv(api, config.llm?.oauthPath, ".memory-lancedb-pro/oauth.json"),
-      timeoutMs: resolveLlmTimeoutMs(config),
-    };
-  }
-
-  let inheritedApiKey: string | undefined;
-  if (!config.llm?.apiKey && !config.embedding.apiKey && openClawDefaultLlm?.provider) {
-    const auth = await api.runtime.modelAuth.resolveApiKeyForProvider({
-      provider: openClawDefaultLlm.provider,
-      cfg: api.config,
-    });
-    inheritedApiKey = auth.apiKey?.trim() || undefined;
-  }
-
-  return {
-    auth: llmAuth,
-    apiKey: config.llm?.apiKey
-      ? resolveEnvVars(config.llm.apiKey)
-      : config.embedding.apiKey
-        ? resolveFirstApiKey(config.embedding.apiKey)
-        : inheritedApiKey
-          ?? (process.env.OPENAI_API_KEY?.trim() || undefined),
-    model: config.llm?.model || openClawDefaultLlm?.model || "openai/gpt-oss-120b",
-    baseURL: config.llm?.baseURL
-      ? resolveEnvVars(config.llm.baseURL)
-      : openClawDefaultLlm?.baseURL
-        ?? config.embedding.baseURL,
-    timeoutMs: resolveLlmTimeoutMs(config),
-  };
 }
 
 function resolveOptionalPathWithEnv(
@@ -473,6 +370,47 @@ function clampInt(value: number, min: number, max: number): number {
 
 function resolveLlmTimeoutMs(config: PluginConfig): number {
   return parsePositiveInt(config.llm?.timeoutMs) ?? 30000;
+}
+
+function hasExplicitPluginLlmConfig(config: PluginConfig): boolean {
+  return Boolean(config.llm?.auth || config.llm?.apiKey || config.llm?.baseURL || config.llm?.oauthPath || config.llm?.oauthProvider);
+}
+
+function createConfiguredLlmClient(
+  api: OpenClawPluginApi,
+  config: PluginConfig,
+  log: (msg: string) => void,
+  warnLog?: (msg: string) => void,
+): LlmClient {
+  const llmAuth = config.llm?.auth || "api-key";
+  const llmApiKey = llmAuth === "oauth"
+    ? undefined
+    : config.llm?.apiKey
+      ? resolveEnvVars(config.llm.apiKey)
+      : config.embedding.apiKey
+        ? resolveFirstApiKey(config.embedding.apiKey)
+        : undefined;
+  const llmBaseURL = llmAuth === "oauth"
+    ? (config.llm?.baseURL ? resolveEnvVars(config.llm.baseURL) : undefined)
+    : config.llm?.baseURL
+      ? resolveEnvVars(config.llm.baseURL)
+      : config.embedding.baseURL;
+  const llmOauthPath = llmAuth === "oauth"
+    ? resolveOptionalPathWithEnv(api, config.llm?.oauthPath, ".memory-lancedb-pro/oauth.json")
+    : undefined;
+  const llmOauthProvider = llmAuth === "oauth" ? config.llm?.oauthProvider : undefined;
+
+  return createLlmClient({
+    auth: llmAuth,
+    apiKey: llmApiKey,
+    model: config.llm?.model || "openai/gpt-oss-120b",
+    baseURL: llmBaseURL,
+    oauthProvider: llmOauthProvider,
+    oauthPath: llmOauthPath,
+    timeoutMs: resolveLlmTimeoutMs(config),
+    log,
+    warnLog,
+  });
 }
 
 function resolveHookAgentId(
@@ -563,24 +501,34 @@ function summarizeAgentEndMessages(messages: unknown[]): string {
   return `messages=${messages.length}, roles=[${roles}], stringContents=${stringContents}, arrayContents=${arrayContents}, textBlocks=${textBlocks}`;
 }
 
-const DEFAULT_SELF_IMPROVEMENT_REMINDER = `## Self-Improvement Reminder
+const DEFAULT_SELF_IMPROVEMENT_REMINDER = [
+  "## Self-Improvement Reminder",
+  "",
+  "After completing tasks, evaluate if any learnings should be captured:",
+  "",
+  "**Log when:**",
+  "- User corrects you -> .learnings/LEARNINGS.md",
+  "- Command/operation fails -> .learnings/ERRORS.md",
+  "- You discover your knowledge was wrong -> .learnings/LEARNINGS.md",
+  "- You find a better approach -> .learnings/LEARNINGS.md",
+  "",
+  "**Promote when pattern is proven:**",
+  "- Behavioral patterns -> SOUL.md",
+  "- Workflow improvements -> AGENTS.md",
+  "- Tool gotchas -> TOOLS.md",
+  "",
+  "Keep entries simple: date, title, what happened, what to do differently.",
+].join("\n");
 
-After completing tasks, evaluate if any learnings should be captured:
-
-**Log when:**
-- User corrects you -> .learnings/LEARNINGS.md
-- Command/operation fails -> .learnings/ERRORS.md
-- You discover your knowledge was wrong -> .learnings/LEARNINGS.md
-- You find a better approach -> .learnings/LEARNINGS.md
-
-**Promote when pattern is proven:**
-- Behavioral patterns -> SOUL.md
-- Workflow improvements -> AGENTS.md
-- Tool gotchas -> TOOLS.md
-
-Keep entries simple: date, title, what happened, what to do differently.`;
-
-const SELF_IMPROVEMENT_NOTE_PREFIX = "/note self-improvement (before reset):";
+const SELF_IMPROVEMENT_RESET_REMINDER_CONTEXT = [
+  "<self-improvement-reminder>",
+  "If anything was learned/corrected in the previous session, log it now:",
+  "- .learnings/LEARNINGS.md (corrections/best practices)",
+  "- .learnings/ERRORS.md (failures/root causes)",
+  "- Distill reusable rules to AGENTS.md / SOUL.md / TOOLS.md.",
+  "- If reusable across tasks, extract a new skill from the learning.",
+  "</self-improvement-reminder>",
+].join("\n");
 const DEFAULT_REFLECTION_MESSAGE_COUNT = 120;
 const DEFAULT_REFLECTION_MAX_INPUT_CHARS = 24_000;
 const DEFAULT_REFLECTION_TIMEOUT_MS = 20_000;
@@ -647,50 +595,78 @@ export function isLayer1CircuitOpen(): boolean {
   return recentFailures.length >= LAYER1_FAILURE_THRESHOLD;
 }
 
-export function toImportSpecifier(value: string): string {
+export function toImportSpecifier(
+  value: string,
+  platform: NodeJS.Platform = process.platform,
+): string {
   const trimmed = value.trim();
   if (!trimmed) return "";
   if (trimmed.startsWith("file://")) return trimmed;
-  if (trimmed.startsWith("/")) return pathToFileURL(trimmed).href;
+  if (trimmed.startsWith("/")) return pathToFileURL(trimmed, { windows: false }).href;
   // Handle Windows absolute paths (e.g. C:\Users\... or D:/Program Files/...) — PR #593
-  if (process.platform === 'win32' && /^[a-zA-Z]:[/\\]/.test(trimmed)) return pathToFileURL(trimmed).href;
+  if (platform === 'win32' && /^[a-zA-Z]:[/\\]/.test(trimmed)) {
+    return pathToFileURL(trimmed, { windows: true }).href;
+  }
   // Handle UNC paths (\\server\share or \\?\UNC\\server\share) — PR #593
   // Regex breakdown: ^\\\\  = starts with \\
   //                  [^\\]+   = server name (one or more non-backslash chars)
   //                  \\[^\\]+ = \ + share name (one or more non-backslash chars)
   // Examples matched: \\server\share, \\fileserver\company-share, \\?\UNC\server\share
   // Examples NOT matched: C:\path (drive letter, handled above), /unix/path (POSIX)
-  if (process.platform === 'win32' && /^\\\\[^\\]+\\[^\\]+/.test(trimmed)) {
+  if (platform === 'win32' && /^\\\\[^\\]+\\[^\\]+/.test(trimmed)) {
     // Extended prefix \\?\UNC\\ means "long UNC name" — already normalized.
     // Pass directly so we don't double-normalize (e.g. avoid \\?\UNC\\?\UNC\\...).
-    if (trimmed.startsWith('\\\\?\\UNC\\')) return pathToFileURL(trimmed).href;
+    if (trimmed.startsWith('\\\\?\\UNC\\')) {
+      return pathToFileURL(trimmed, { windows: true }).href;
+    }
     // Standard UNC: \\server\share -> \\?\UNC\\server\share -> file://server/share
     // strip leading \\ (2 chars) -> server\share, then prefix \\?\UNC\\
     const normalized = '\\\\?\\UNC\\' + trimmed.slice(2);
-    return pathToFileURL(normalized).href;
+    return pathToFileURL(normalized, { windows: true }).href;
   }
   return trimmed;
 }
-export function getExtensionApiImportSpecifiers(): string[] {
-  const envPath = process.env.OPENCLAW_EXTENSION_API_PATH?.trim();
+
+type ExtensionImportSpecifierOptions = {
+  platform?: NodeJS.Platform;
+  env?: NodeJS.ProcessEnv;
+  resolveOpenClawExtensionApi?: () => string;
+};
+
+export function getExtensionApiImportSpecifiers(
+  options: ExtensionImportSpecifierOptions = {},
+): string[] {
+  const platform = options.platform ?? process.platform;
+  const env = options.env ?? process.env;
+  const envPath = env.OPENCLAW_EXTENSION_API_PATH?.trim();
+  const joinForPlatform = platform === "win32" ? winPath.join : join;
   const specifiers: string[] = [];
 
-  if (envPath) specifiers.push(toImportSpecifier(envPath));
+  if (envPath) specifiers.push(toImportSpecifier(envPath, platform));
   specifiers.push("openclaw/dist/extensionAPI.js");
 
   try {
-    specifiers.push(toImportSpecifier(requireFromHere.resolve("openclaw/dist/extensionAPI.js")));
+    const resolved = options.resolveOpenClawExtensionApi
+      ? options.resolveOpenClawExtensionApi()
+      : requireFromHere.resolve("openclaw/dist/extensionAPI.js");
+    specifiers.push(toImportSpecifier(resolved, platform));
   } catch {
     // ignore resolve failures and continue fallback probing
   }
 
-  specifiers.push(toImportSpecifier("/usr/lib/node_modules/openclaw/dist/extensionAPI.js"));
-  specifiers.push(toImportSpecifier("/usr/local/lib/node_modules/openclaw/dist/extensionAPI.js"));
-  specifiers.push(toImportSpecifier("/opt/homebrew/lib/node_modules/openclaw/dist/extensionAPI.js"));
-
-  if (process.platform === "win32" && process.env.APPDATA) {
-    const windowsNpmPath = join(process.env.APPDATA, "npm", "node_modules", "openclaw", "dist", "extensionAPI.js");
-    specifiers.push(toImportSpecifier(windowsNpmPath));
+  if (platform === "win32") {
+    if (env.APPDATA) {
+      const windowsNpmPath = joinForPlatform(env.APPDATA, "npm", "node_modules", "openclaw", "dist", "extensionAPI.js");
+      specifiers.push(toImportSpecifier(windowsNpmPath, platform));
+    }
+    if (env.ProgramFiles) {
+      const windowsProgramFilesPath = joinForPlatform(env.ProgramFiles, "nodejs", "node_modules", "openclaw", "dist", "extensionAPI.js");
+      specifiers.push(toImportSpecifier(windowsProgramFilesPath, platform));
+    }
+  } else {
+    specifiers.push(toImportSpecifier("/usr/lib/node_modules/openclaw/dist/extensionAPI.js", platform));
+    specifiers.push(toImportSpecifier("/usr/local/lib/node_modules/openclaw/dist/extensionAPI.js", platform));
+    specifiers.push(toImportSpecifier("/opt/homebrew/lib/node_modules/openclaw/dist/extensionAPI.js", platform));
   }
 
   return [...new Set(specifiers.filter(Boolean))];
@@ -707,7 +683,7 @@ export function getExtensionApiImportSpecifiers(): string[] {
 export async function loadEmbeddedPiRunner(api: OpenClawPluginApi): Promise<EmbeddedPiRunner> {
   // Layer 1: 嘗試新 SDK API (with circuit breaker)
   if (!isLayer1CircuitOpen()) {
-    const newApi = (api as unknown as Record<string, unknown>).runtime?.agent;
+    const newApi = ((api as unknown as { runtime?: { agent?: Record<string, unknown> } }).runtime?.agent);
     if (typeof newApi?.runEmbeddedPiAgent === "function") {
       const runner = newApi.runEmbeddedPiAgent.bind(newApi);
       // Bug 2 fix: 將 Layer 1 結果寫入 cache，避免後續並發呼叫時 Layer 2 覆蓋掉 Layer 1
@@ -845,7 +821,8 @@ async function runReflectionViaCli(params: {
   ];
 
   return await new Promise<string>((resolve, reject) => {
-    const child = spawn(cliBin, args, {
+    const spawnCommand = buildReflectionCliSpawnCommand(cliBin, args);
+    const child = spawn(spawnCommand.command, spawnCommand.args, {
       cwd: params.workspaceDir,
       env: { ...process.env, NO_COLOR: "1" },
       stdio: ["ignore", "pipe", "pipe"],
@@ -910,6 +887,22 @@ async function runReflectionViaCli(params: {
       }
     });
   });
+}
+
+export function buildReflectionCliSpawnCommand(
+  cliBin: string,
+  args: string[],
+  platform: NodeJS.Platform = process.platform,
+  comSpec = process.env.ComSpec?.trim(),
+): { command: string; args: string[] } {
+  if (platform === "win32") {
+    return {
+      command: comSpec || "cmd.exe",
+      args: ["/c", cliBin, ...args],
+    };
+  }
+
+  return { command: cliBin, args };
 }
 
 async function loadSelfImprovementReminderContent(workspaceDir?: string): Promise<string> {
@@ -1793,9 +1786,7 @@ async function findPreviousSessionFile(
       );
       if (nonReset.length > 0) return join(sessionsDir, nonReset[0]);
     }
-  } catch {
-    // Best-effort fallback: callers already handle the unresolved path case.
-  }
+  } catch { }
 }
 
 // ============================================================================
@@ -2015,10 +2006,12 @@ interface PluginSingletonState {
   resolvedDbPath: string;
   store: MemoryStore;
   embedder: ReturnType<typeof createEmbedder>;
+  decayEngine: ReturnType<typeof createDecayEngine>;
+  tierManager: ReturnType<typeof createTierManager>;
   retriever: ReturnType<typeof createRetriever>;
   scopeManager: ReturnType<typeof createScopeManager>;
   migrator: ReturnType<typeof createMigrator>;
-  getSmartExtractionLlmClient: () => Promise<import("./src/llm-client.js").LlmClient | null>;
+  getSmartExtractionLlmClient: () => Promise<LlmClient | null>;
   getSmartExtractor: () => Promise<SmartExtractor | null>;
   extractionRateLimiter: ReturnType<typeof createExtractionRateLimiter>;
   // Session Maps — persist across scope refreshes instead of being recreated
@@ -2037,32 +2030,22 @@ let _singletonState: PluginSingletonState | null = null;
 
 function _initPluginState(api: OpenClawPluginApi): PluginSingletonState {
   const config = parsePluginConfig(api.pluginConfig);
-  const resolvedDbPath = api.resolvePath(config.dbPath || getDefaultDbPath());
+  let resolvedDbPath = normalizeStoragePath(api.resolvePath(config.dbPath || getDefaultDbPath()));
 
-  try {
-    validateStoragePath(resolvedDbPath);
-  } catch (err) {
-    api.logger.warn(
-      `memory-lancedb-pro: storage path issue — ${String(err)}\n` +
-      `  The plugin will still attempt to start, but writes may fail.`,
-    );
-  }
-
-  const embeddingModel = resolveEmbeddingModel(
-    config.embedding.provider,
-    config.embedding.model,
-  );
   const vectorDim = getEffectiveVectorDimensions(
-    embeddingModel,
+    config.embedding.model,
     config.embedding.dimensions,
     config.embedding.requestDimensions,
   );
-  const store = new MemoryStore({ dbPath: resolvedDbPath, vectorDim });
+  const store = new MemoryStore({
+    dbPath: resolvedDbPath,
+    vectorDim,
+    onStoragePathWarning: (message) => api.logger.warn(message),
+  });
   const embedder = createEmbedder({
     provider: config.embedding.provider,
     apiKey: config.embedding.apiKey,
-    apiVersion: config.embedding.apiVersion,
-    model: embeddingModel,
+    model: config.embedding.model,
     baseURL: config.embedding.baseURL,
     dimensions: config.embedding.dimensions,
     requestDimensions: config.embedding.requestDimensions,
@@ -2075,6 +2058,10 @@ function _initPluginState(api: OpenClawPluginApi): PluginSingletonState {
   const decayEngine = createDecayEngine({
     ...DEFAULT_DECAY_CONFIG,
     ...(config.decay || {}),
+  });
+  const tierManager = createTierManager({
+    ...DEFAULT_TIER_CONFIG,
+    ...(config.tier || {}),
   });
   const retriever = createRetriever(
     store,
@@ -2091,79 +2078,55 @@ function _initPluginState(api: OpenClawPluginApi): PluginSingletonState {
   }
 
   const migrator = createMigrator(store);
-  let smartExtractionLlmConfig: ResolvedSmartExtractionLlmConfig | null = null;
-  let smartExtractionLlmClient: import("./src/llm-client.js").LlmClient | null = null;
-  let smartExtractionLlmClientPromise: Promise<import("./src/llm-client.js").LlmClient | null> | null = null;
-  let smartExtractor: SmartExtractor | null = null;
+
+  let llmClientPromise: Promise<LlmClient | null> | null = null;
   let smartExtractorPromise: Promise<SmartExtractor | null> | null = null;
-  let noiseBank: NoisePrototypeBank | null = null;
 
-  const getNoiseBank = (): NoisePrototypeBank => {
-    if (!noiseBank) {
-      noiseBank = new NoisePrototypeBank((msg: string) => api.logger.debug(msg));
-      noiseBank.init(embedder).catch((err) =>
-        api.logger.debug(`memory-lancedb-pro: noise bank init: ${String(err)}`),
-      );
+  const getSmartExtractionLlmClient = async (): Promise<LlmClient | null> => {
+    if (config.smartExtraction === false) return null;
+    if (!llmClientPromise) {
+      llmClientPromise = Promise.resolve().then(() => {
+        if (hasExplicitPluginLlmConfig(config)) {
+          return createConfiguredLlmClient(
+            api,
+            config,
+            (msg: string) => api.logger.debug(msg),
+            (msg: string) => api.logger.warn(msg),
+          );
+        }
+
+        if (api.runtime?.llm?.complete) {
+          return createRuntimeLlmClient({
+            runtimeLlm: api.runtime.llm,
+            model: config.llm?.model,
+            timeoutMs: resolveLlmTimeoutMs(config),
+            log: (msg: string) => api.logger.debug(msg),
+            warnLog: (msg: string) => api.logger.warn(msg),
+          });
+        }
+
+        throw new Error("OpenClaw runtime llm.complete is unavailable and no explicit llm config was provided");
+      }).catch((err) => {
+        api.logger.warn(`memory-lancedb-pro: smart extraction LLM init failed, falling back to regex: ${String(err)}`);
+        return null;
+      });
     }
-    return noiseBank;
-  };
-
-  const admissionRejectionAuditWriter = createAdmissionRejectionAuditWriter(config, resolvedDbPath, api);
-
-  const getSmartExtractionLlmClient = async (): Promise<import("./src/llm-client.js").LlmClient | null> => {
-    if (config.smartExtraction === false) {
-      return null;
-    }
-    if (smartExtractionLlmClient) {
-      return smartExtractionLlmClient;
-    }
-    if (smartExtractionLlmClientPromise) {
-      return await smartExtractionLlmClientPromise;
-    }
-
-    smartExtractionLlmClientPromise = (async () => {
-      try {
-        const llmConfig = await resolveSmartExtractionLlmConfig(api, config);
-        smartExtractionLlmConfig = llmConfig;
-        smartExtractionLlmClient = createLlmClient({
-          auth: llmConfig.auth,
-          apiKey: llmConfig.apiKey,
-          model: llmConfig.model,
-          baseURL: llmConfig.baseURL,
-          oauthProvider: llmConfig.oauthProvider,
-          oauthPath: llmConfig.oauthPath,
-          timeoutMs: llmConfig.timeoutMs,
-          log: (msg: string) => api.logger.debug(msg),
-          warnLog: (msg: string) => api.logger.warn(msg),
-        });
-        return smartExtractionLlmClient;
-      } catch (err) {
-        smartExtractionLlmClientPromise = null;
-        throw err;
-      }
-    })();
-
-    return await smartExtractionLlmClientPromise;
+    return llmClientPromise;
   };
 
   const getSmartExtractor = async (): Promise<SmartExtractor | null> => {
-    if (config.smartExtraction === false) {
-      return null;
-    }
-    if (smartExtractor) {
-      return smartExtractor;
-    }
-    if (smartExtractorPromise) {
-      return await smartExtractorPromise;
-    }
-
-    smartExtractorPromise = (async () => {
-      try {
+    if (config.smartExtraction === false) return null;
+    if (!smartExtractorPromise) {
+      smartExtractorPromise = (async () => {
         const llmClient = await getSmartExtractionLlmClient();
-        if (!llmClient) {
-          return null;
-        }
+        if (!llmClient) return null;
 
+        const noiseBank = new NoisePrototypeBank((msg: string) => api.logger.debug(msg));
+        noiseBank.init(embedder).catch((err) =>
+          api.logger.debug(`memory-lancedb-pro: noise bank init: ${String(err)}`),
+        );
+
+        const admissionRejectionAuditWriter = createAdmissionRejectionAuditWriter(config, resolvedDbPath, api);
         const extractor = new SmartExtractor(store, embedder, llmClient, {
           user: "User",
           extractMinMessages: config.extractMinMessages ?? 4,
@@ -2174,31 +2137,19 @@ function _initPluginState(api: OpenClawPluginApi): PluginSingletonState {
           onAdmissionRejected: admissionRejectionAuditWriter ?? undefined,
           log: (msg: string) => api.logger.info(msg),
           debugLog: (msg: string) => api.logger.debug(msg),
-          noiseBank: getNoiseBank(),
+          noiseBank,
         });
 
-        const llmConfig = smartExtractionLlmConfig;
         (isCliMode() ? api.logger.debug : api.logger.info)(
-          "memory-lancedb-pro: smart extraction enabled (LLM model: "
-          + (llmConfig?.model || "unknown")
-          + ", timeoutMs: "
-          + (llmConfig?.timeoutMs ?? resolveLlmTimeoutMs(config))
-          + ", noise bank: ON)",
+          `memory-lancedb-pro: smart extraction enabled (LLM: ${hasExplicitPluginLlmConfig(config) ? config.llm?.model || "openai/gpt-oss-120b" : "OpenClaw runtime default"}, timeoutMs: ${resolveLlmTimeoutMs(config)}, noise bank: ON)`,
         );
-
-        smartExtractor = extractor;
         return extractor;
-      } catch (err) {
-        smartExtractionLlmConfig = null;
-        smartExtractionLlmClient = null;
-        smartExtractionLlmClientPromise = null;
-        smartExtractorPromise = null;
+      })().catch((err) => {
         api.logger.warn(`memory-lancedb-pro: smart extraction init failed, falling back to regex: ${String(err)}`);
         return null;
-      }
-    })();
-
-    return await smartExtractorPromise;
+      });
+    }
+    return smartExtractorPromise;
   };
 
   const extractionRateLimiter = createExtractionRateLimiter({
@@ -2219,7 +2170,7 @@ function _initPluginState(api: OpenClawPluginApi): PluginSingletonState {
   const logReg = isCliMode() ? api.logger.debug : api.logger.info;
   logReg(
     `memory-lancedb-pro@${pluginVersion}: plugin registered [singleton init] `
-    + `(db: ${resolvedDbPath}, model: ${embeddingModel})`,
+    + `(db: ${resolvedDbPath}, model: ${config.embedding.model || "text-embedding-3-small"})`,
   );
   logReg(`memory-lancedb-pro: diagnostic build tag loaded (${DIAG_BUILD_TAG})`);
 
@@ -2228,6 +2179,8 @@ function _initPluginState(api: OpenClawPluginApi): PluginSingletonState {
     resolvedDbPath,
     store,
     embedder,
+    decayEngine,
+    tierManager,
     retriever,
     scopeManager,
     migrator,
@@ -2330,6 +2283,8 @@ const memoryLanceDBProPlugin = {
       migrator,
       getSmartExtractionLlmClient,
       getSmartExtractor,
+      decayEngine,
+      tierManager,
       extractionRateLimiter,
       reflectionErrorStateBySession,
       reflectionDerivedBySession,
@@ -2352,6 +2307,7 @@ const memoryLanceDBProPlugin = {
       limit: number;
       scopeFilter?: string[];
       category?: string;
+      source?: "manual" | "auto-recall" | "cli";
     }) {
       let results = await retriever.retrieve(params);
       if (results.length === 0) {
@@ -2359,6 +2315,92 @@ const memoryLanceDBProPlugin = {
         results = await retriever.retrieve(params);
       }
       return results;
+    }
+
+    async function runRecallLifecycle(
+      results: Array<{ entry: { id: string; text: string; category: "preference" | "fact" | "decision" | "entity" | "other"; scope: string; importance: number; timestamp: number; metadata?: string } }>,
+      scopeFilter?: string[],
+    ): Promise<Map<string, string>> {
+      const now = Date.now();
+      type LifecycleEntry = {
+        id: string;
+        text: string;
+        category: MemoryEntry["category"];
+        scope: string;
+        importance: number;
+        timestamp: number;
+        metadata?: string;
+      };
+      const lifecycleEntries = new Map<string, LifecycleEntry>();
+      const tierOverrides = new Map<string, string>();
+
+      await Promise.allSettled(
+        results.map(async (result) => {
+          const metadata = parseSmartMetadata(result.entry.metadata, result.entry);
+          const updated = await store.patchMetadata(
+            result.entry.id,
+            {
+              access_count: metadata.access_count + 1,
+              last_accessed_at: now,
+            },
+            scopeFilter,
+          );
+          lifecycleEntries.set(result.entry.id, updated ?? result.entry);
+        }),
+      );
+
+      try {
+        if (scopeFilter !== undefined) {
+          const recentEntries = await store.list(scopeFilter, undefined, 100, 0);
+          for (const entry of recentEntries) {
+            if (!lifecycleEntries.has(entry.id)) {
+              lifecycleEntries.set(entry.id, entry);
+            }
+          }
+        } else {
+          api.logger.debug(`memory-lancedb-pro: skipping tier maintenance preload for bypass scope filter`);
+        }
+      } catch (err) {
+        api.logger.warn(`memory-lancedb-pro: tier maintenance preload failed: ${String(err)}`);
+      }
+
+      const candidates = Array.from(lifecycleEntries.values())
+        .filter((entry): entry is NonNullable<typeof entry> => Boolean(entry))
+        .filter((entry) => parseSmartMetadata(entry.metadata, entry).type !== "session-summary");
+
+      if (candidates.length === 0) {
+        return tierOverrides;
+      }
+
+      try {
+        const memories = candidates.map((entry) => toLifecycleMemory(entry.id, entry));
+        const decayScores = decayEngine.scoreAll(memories, now);
+        const transitions = tierManager.evaluateAll(memories, decayScores, now);
+
+        await Promise.allSettled(
+          transitions.map(async (transition) => {
+            await store.patchMetadata(
+              transition.memoryId,
+              {
+                tier: transition.toTier,
+                tier_updated_at: now,
+              },
+              scopeFilter,
+            );
+            tierOverrides.set(transition.memoryId, transition.toTier);
+          }),
+        );
+
+        if (transitions.length > 0) {
+          api.logger.info(
+            `memory-lancedb-pro: tier maintenance applied ${transitions.length} transition(s)`,
+          );
+        }
+      } catch (err) {
+        api.logger.warn(`memory-lancedb-pro: tier maintenance failed: ${String(err)}`);
+      }
+
+      return tierOverrides;
     }
 
     const pruneOldestByUpdatedAt = <T extends { updatedAt: number }>(map: Map<string, T>, maxSize: number) => {
@@ -2485,7 +2527,7 @@ const memoryLanceDBProPlugin = {
 
     const logReg = isCliMode() ? api.logger.debug : api.logger.info;
     logReg(
-      `memory-lancedb-pro@${pluginVersion}: plugin registered (db: ${resolvedDbPath}, model: ${config.embedding.model || "text-embedding-3-small"}, smartExtraction: ${config.smartExtraction !== false ? "ENABLED" : "OFF"})`
+      `memory-lancedb-pro@${pluginVersion}: plugin registered (db: ${resolvedDbPath}, model: ${config.embedding.model}, smartExtraction: ${config.smartExtraction !== false ? 'ON' : 'OFF'})`
     );
     logReg(`memory-lancedb-pro: diagnostic build tag loaded (${DIAG_BUILD_TAG})`);
 
@@ -2593,6 +2635,7 @@ const memoryLanceDBProPlugin = {
         workspaceDir: getDefaultWorkspaceDir(),
         mdMirror,
         workspaceBoundary: config.workspaceBoundary,
+        selfImprovementMaxEntries: config.selfImprovement?.maxEntries,
       },
       {
         enableManagementTools: config.enableManagementTools,
@@ -2621,7 +2664,7 @@ const memoryLanceDBProPlugin = {
           .then(async (should) => {
             if (!should) return;
             await recordCompactionRun(compactionStateFile);
-            const result = await runCompaction(store, embedder, compactionCfg, undefined, api.logger);
+            const result = await runCompaction(store as any, embedder, compactionCfg, undefined, api.logger);
             if (result.clustersFound > 0) {
               api.logger.info(
                 `memory-compactor [auto]: compacted ${result.memoriesDeleted} → ${result.memoriesCreated} entries`,
@@ -2735,7 +2778,7 @@ const memoryLanceDBProPlugin = {
         // See: https://github.com/CortexReach/memory-lancedb-pro/issues/253
         let autoRecallTimedOut = false;
         let lateAutoRecallLogged = false;
-        const recallWork = async (): Promise<{ prependContext: string } | undefined> => {
+        const recallWork = async (): Promise<{ prependContext: string; ephemeral?: boolean } | undefined> => {
           // Determine agent ID and accessible scopes
           const agentId = resolveHookAgentId(ctx?.agentId, (event as any).sessionKey);
           if (isInvalidAgentIdFormat(agentId, config.declaredAgents)) {
@@ -2899,7 +2942,7 @@ const memoryLanceDBProPlugin = {
                 // Reading from raw JSON (not metaObj) avoids relying on parseSmartMetadata
                 // passing through unknown fields.
                 const categoryFieldName = config.recallPrefix?.categoryField;
-                let effectiveCategory = displayCategory;
+                let effectiveCategory: string = displayCategory;
                 if (categoryFieldName) {
                   try {
                     const rawMeta: Record<string, unknown> = r.entry.metadata
@@ -2986,17 +3029,6 @@ const memoryLanceDBProPlugin = {
               config.autoRecallSuppressionDurationMs ?? TIER1_DEFAULT_SUPPRESSION_DURATION_MS,
             minRepeated,
           };
-          await Promise.allSettled(
-            selected.map(async (item) =>
-              store.patchMetadata(
-                item.id,
-                computeTier1Patch(item.meta, tier1PatchOpts),
-                accessibleScopes,
-              ),
-            ),
-          );
-
-          if (shouldDropLateAutoRecall("pre-context")) return;
 
           const memoryContext = selected.map((item) => item.line).join("\n");
 
@@ -3020,6 +3052,28 @@ const memoryLanceDBProPlugin = {
             responseText: "", // Will be populated by agent_end
             injectedAt: Date.now(),
           });
+
+          void Promise.allSettled(
+            selected.map(async (item) =>
+              store.patchMetadata(
+                item.id,
+                computeTier1Patch(item.meta, tier1PatchOpts),
+                accessibleScopes,
+              ),
+            ),
+          ).then((settled) => {
+            const rejected = settled.filter((result) => result.status === "rejected");
+            if (rejected.length > 0) {
+              api.logger.warn?.(
+                `memory-lancedb-pro: background auto-recall metadata patch failed for ${rejected.length}/${settled.length} memories`,
+              );
+            }
+          }).catch((err) => {
+            api.logger.warn?.(
+              `memory-lancedb-pro: background auto-recall metadata patch crashed: ${String(err)}`,
+            );
+          });
+
           return {
             prependContext:
               `<relevant-memories>\n` +
@@ -3219,8 +3273,9 @@ const memoryLanceDBProPlugin = {
               `memory-lancedb-pro: auto-capture narrowed ${eligibleTexts.length} eligible history text(s) to ${texts.length} new text(s) for agent ${agentId}`,
             );
           }
+          const smartExtractor = await getSmartExtractor();
           api.logger.debug(
-            `memory-lancedb-pro: auto-capture collected ${texts.length} text(s) for agent ${agentId} (minMessages=${minMessages}, smartExtraction=${config.smartExtraction !== false ? "enabled" : "off"})`,
+            `memory-lancedb-pro: auto-capture collected ${texts.length} text(s) for agent ${agentId} (minMessages=${minMessages}, smartExtraction=${smartExtractor ? "on" : "off"})`,
           );
           if (texts.length === 0) {
             api.logger.debug(
@@ -3268,67 +3323,62 @@ const memoryLanceDBProPlugin = {
           // Rate limiter charged AFTER successful extraction, not before,
           // so no-op sessions don't consume the hourly quota.
           // ----------------------------------------------------------------
-          if (config.smartExtraction !== false) {
-            const smartExtractor = await getSmartExtractor();
-            if (!smartExtractor) {
+          if (smartExtractor) {
+            // Pre-filter: embedding-based noise detection (language-agnostic)
+            const cleanTexts = await smartExtractor.filterNoiseByEmbedding(texts);
+            if (cleanTexts.length === 0) {
               api.logger.debug(
-                `memory-lancedb-pro: smart extraction unavailable for agent ${agentId}; using regex fallback`,
+                `memory-lancedb-pro: all texts filtered as embedding noise for agent ${agentId}`,
               );
-            } else {
-              // Pre-filter: embedding-based noise detection (language-agnostic)
-              const cleanTexts = await smartExtractor.filterNoiseByEmbedding(texts);
-              if (cleanTexts.length === 0) {
-                api.logger.debug(
-                  `memory-lancedb-pro: all texts filtered as embedding noise for agent ${agentId}`,
+              return;
+            }
+            if (cumulativeCount >= minMessages) {
+              api.logger.debug(
+                `memory-lancedb-pro: auto-capture running smart extraction for agent ${agentId} (cumulative=${cumulativeCount} >= minMessages=${minMessages}, cleanTexts=${cleanTexts.length})`,
+              );
+              const conversationText = cleanTexts.join("\n");
+              // issue #417 Fix #10: prevent hook crash on LLM API errors / network timeouts
+              let stats: Awaited<ReturnType<typeof smartExtractor.extractAndPersist>> | null = null;
+              try {
+                stats = await smartExtractor.extractAndPersist(
+                  conversationText, sessionKey,
+                  { scope: defaultScope, scopeFilter: accessibleScopes },
+                );
+              } catch (err) {
+                api.logger.error(
+                  `memory-lancedb-pro: smart-extract failed for agent ${agentId}: ${String(err)}`,
+                );
+                return; // prevent hook crash — fall through to regex fallback is intentionally skipped
+              }
+              // Charge rate limiter only after successful extraction
+              extractionRateLimiter.recordExtraction();
+              if (stats.created > 0 || stats.merged > 0) {
+                api.logger.info(
+                  `memory-lancedb-pro: smart-extracted ${stats.created} created, ${stats.merged} merged, ${stats.skipped} skipped for agent ${agentId}`,
+                );
+                // issue #417 Fix #5: reset counter after successful extraction
+                autoCaptureSeenTextCount.set(sessionKey, 0);
+                return; // Smart extraction handled everything
+              }
+
+              if ((stats.boundarySkipped ?? 0) === 0) {
+                api.logger.info(
+                  `memory-lancedb-pro: smart extraction produced no candidates and no boundary texts for agent ${agentId}; skipping regex fallback`,
                 );
                 return;
               }
-              if (cumulativeCount >= minMessages) {
-                api.logger.debug(
-                  `memory-lancedb-pro: auto-capture running smart extraction for agent ${agentId} (cumulative=${cumulativeCount} >= minMessages=${minMessages}, cleanTexts=${cleanTexts.length})`,
-                );
-                const conversationText = cleanTexts.join("\n");
-                let stats: Awaited<ReturnType<typeof smartExtractor.extractAndPersist>> | null = null;
-                try {
-                  stats = await smartExtractor.extractAndPersist(
-                    conversationText, sessionKey,
-                    { scope: defaultScope, scopeFilter: accessibleScopes },
-                  );
-                } catch (err) {
-                  api.logger.error(
-                    `memory-lancedb-pro: smart-extract failed for agent ${agentId}: ${String(err)}`,
-                  );
-                  return;
-                }
-                // Charge rate limiter only after successful extraction
-                extractionRateLimiter.recordExtraction();
-                if (stats.created > 0 || stats.merged > 0) {
-                  api.logger.info(
-                    `memory-lancedb-pro: smart-extracted ${stats.created} created, ${stats.merged} merged, ${stats.skipped} skipped for agent ${agentId}`,
-                  );
-                  autoCaptureSeenTextCount.set(sessionKey, 0);
-                  return; // Smart extraction handled everything
-                }
 
-                if ((stats.boundarySkipped ?? 0) === 0) {
-                  api.logger.info(
-                    `memory-lancedb-pro: smart extraction produced no candidates and no boundary texts for agent ${agentId}; skipping regex fallback`,
-                  );
-                  return;
-                }
+              api.logger.info(
+                `memory-lancedb-pro: smart extraction skipped ${stats.boundarySkipped} USER.md-exclusive candidate(s) for agent ${agentId}; continuing to regex fallback for non-boundary texts`,
+              );
 
-                api.logger.info(
-                  `memory-lancedb-pro: smart extraction skipped ${stats.boundarySkipped} USER.md-exclusive candidate(s) for agent ${agentId}; continuing to regex fallback for non-boundary texts`,
-                );
-
-                api.logger.info(
-                  `memory-lancedb-pro: smart extraction produced no persisted memories for agent ${agentId} (created=${stats.created}, merged=${stats.merged}, skipped=${stats.skipped}); falling back to regex capture`,
-                );
-              } else {
-                api.logger.debug(
-                  `memory-lancedb-pro: auto-capture skipped smart extraction for agent ${agentId} (cumulative=${cumulativeCount} < minMessages=${minMessages}, cleanTexts=${cleanTexts.length})`,
-                );
-              }
+              api.logger.info(
+                `memory-lancedb-pro: smart extraction produced no persisted memories for agent ${agentId} (created=${stats.created}, merged=${stats.merged}, skipped=${stats.skipped}); falling back to regex capture`,
+              );
+            } else {
+              api.logger.debug(
+                `memory-lancedb-pro: auto-capture skipped smart extraction for agent ${agentId} (cumulative=${cumulativeCount} < minMessages=${minMessages}, cleanTexts=${cleanTexts.length})`,
+              );
             }
           }
 
@@ -3594,7 +3644,7 @@ const memoryLanceDBProPlugin = {
           // placeholder metadata.
           const entry = await store.getById(recallId, undefined);
           if (!entry) continue;
-          const meta = parseSmartMetadata(entry.metadata, entry);
+          const meta = parseSmartMetadata(entry.metadata, entry) as Record<string, any>;
 
           if (usedRecall) {
             // Recall was used - increase importance (cap at 1.0).
@@ -3658,6 +3708,23 @@ const memoryLanceDBProPlugin = {
     // ========================================================================
 
     if (config.selfImprovement?.enabled !== false) {
+      const pendingSelfImprovementResetReminderBySession = new Set<string>();
+      const getSelfImprovementSessionKey = (event: any, ctx?: any): string => {
+        const candidates = [
+          event?.sessionKey,
+          ctx?.sessionKey,
+          event?.context?.sessionKey,
+          event?.context?.sessionId,
+          ctx?.sessionId,
+        ];
+        for (const candidate of candidates) {
+          if (typeof candidate === "string" && candidate.trim().length > 0) {
+            return candidate.trim();
+          }
+        }
+        return "";
+      };
+
       api.registerHook("agent:bootstrap", async (event) => {
         const context = (event.context || {}) as Record<string, unknown>;
         const sessionKey = typeof event.sessionKey === "string" ? event.sessionKey : "";
@@ -3699,25 +3766,24 @@ const memoryLanceDBProPlugin = {
       });
 
       if (config.selfImprovement?.beforeResetNote !== false) {
-        const appendSelfImprovementNote = async (event: any) => {
-          // Basic validation BEFORE dedup — skip events that will legitimately return anyway
-          if (!Array.isArray(event.messages)) {
-            api.logger.warn(`self-improvement: command:${String(event?.action || "unknown")} missing event.messages array; skip note inject`);
+        const markSelfImprovementResetReminder = async (event: any) => {
+          const action = String(event?.action || "unknown");
+          const sessionKey = getSelfImprovementSessionKey(event);
+          if (!sessionKey) {
+            api.logger.warn(`self-improvement: command:${action} missing sessionKey; skip reminder mark`);
             return;
           }
 
           if (_dedupHookEvent("selfImprovement", event)) return;
 
           try {
-            const action = String(event?.action || "unknown");
-            const sessionKeyForLog = typeof event?.sessionKey === "string" ? event.sessionKey : "";
             const contextForLog = (event?.context && typeof event.context === "object")
               ? (event.context as Record<string, unknown>)
               : {};
             const commandSource = typeof contextForLog.commandSource === "string" ? contextForLog.commandSource : "";
             const contextKeys = Object.keys(contextForLog).slice(0, 8).join(",");
             api.logger.info(
-              `self-improvement: command:${action} hook start; sessionKey=${sessionKeyForLog || "(none)"}; source=${commandSource || "(unknown)"}; hasMessages=${Array.isArray(event?.messages)}; contextKeys=${contextKeys || "(none)"}`
+              `self-improvement: command:${action} hook start; sessionKey=${sessionKey}; source=${commandSource || "(unknown)"}; contextKeys=${contextKeys || "(none)"}`
             );
 
             // Skip self-improvement note on Discord channel (non-thread) resets
@@ -3726,8 +3792,9 @@ const memoryLanceDBProPlugin = {
             // postRotationStartupUntilMs mechanism (PR #49001).
             // Note: Provider lives in sessionEntry.Provider; MessageThreadId lives in
             // sessionEntry.threadId (populated from ctx.MessageThreadId at session creation).
-            const provider = contextForLog.sessionEntry?.Provider ?? "";
-            const threadId = contextForLog.sessionEntry?.threadId;
+            const sessionEntryForLog = (contextForLog as { sessionEntry?: Record<string, any> }).sessionEntry;
+            const provider = sessionEntryForLog?.Provider ?? "";
+            const threadId = sessionEntryForLog?.threadId;
             if (provider === "discord" && (threadId == null || threadId === "")) {
               api.logger.info(
                 `self-improvement: command:${action} skipped on Discord channel (non-thread) reset to avoid startup race; use /new in thread or restart gateway if startup is incomplete`
@@ -3735,38 +3802,39 @@ const memoryLanceDBProPlugin = {
               return;
             }
 
-            const exists = event.messages.some((m: unknown) => typeof m === "string" && m.includes(SELF_IMPROVEMENT_NOTE_PREFIX));
-            if (exists) {
-              api.logger.info(`self-improvement: command:${action} note already present; skip duplicate inject`);
-              return;
-            }
-
-            event.messages.push(
-              [
-                SELF_IMPROVEMENT_NOTE_PREFIX,
-                "- If anything was learned/corrected, log it now:",
-                "  - .learnings/LEARNINGS.md (corrections/best practices)",
-                "  - .learnings/ERRORS.md (failures/root causes)",
-                "- Distill reusable rules to AGENTS.md / SOUL.md / TOOLS.md.",
-                "- If reusable across tasks, extract a new skill from the learning.",
-                "- Then proceed with the new session.",
-              ].join("\n")
-            );
-            api.logger.info(
-              `self-improvement: command:${action} injected note; messages=${event.messages.length}`
-            );
+            pendingSelfImprovementResetReminderBySession.add(sessionKey);
+            api.logger.info(`self-improvement: command:${action} queued silent reminder for next prompt`);
           } catch (err) {
-            api.logger.warn(`self-improvement: note inject failed: ${String(err)}`);
+            api.logger.warn(`self-improvement: reminder mark failed: ${String(err)}`);
           }
         };
 
-        api.registerHook("command:new", appendSelfImprovementNote, {
-          name: "memory-lancedb-pro.self-improvement.command-new",
-          description: "Append self-improvement note before /new",
+        api.on("before_prompt_build", async (event: any, ctx: any) => {
+          const sessionKey = getSelfImprovementSessionKey(event, ctx);
+          if (!sessionKey || !pendingSelfImprovementResetReminderBySession.delete(sessionKey)) {
+            return;
+          }
+          return {
+            prependContext: SELF_IMPROVEMENT_RESET_REMINDER_CONTEXT,
+            ephemeral: true,
+          };
+        }, {
+          name: "memory-lancedb-pro.self-improvement.before-prompt-build",
+          description: "Inject self-improvement reminder silently after /new or /reset",
         });
-        api.registerHook("command:reset", appendSelfImprovementNote, {
+
+        api.on("session_end", (_event: any, ctx: any) => {
+          const sessionKey = getSelfImprovementSessionKey(_event, ctx);
+          if (sessionKey) pendingSelfImprovementResetReminderBySession.delete(sessionKey);
+        }, { priority: 20 });
+
+        api.registerHook("command:new", markSelfImprovementResetReminder, {
+          name: "memory-lancedb-pro.self-improvement.command-new",
+          description: "Queue self-improvement reminder before /new",
+        });
+        api.registerHook("command:reset", markSelfImprovementResetReminder, {
           name: "memory-lancedb-pro.self-improvement.command-reset",
-          description: "Append self-improvement note before /reset",
+          description: "Queue self-improvement reminder before /reset",
         });
       }
 
@@ -4193,7 +4261,7 @@ const memoryLanceDBProPlugin = {
           const reflectionGovernanceCandidates = extractReflectionLearningGovernanceCandidates(reflectionText);
           if (config.selfImprovement?.enabled !== false && reflectionGovernanceCandidates.length > 0) {
             for (const candidate of reflectionGovernanceCandidates) {
-              await appendSelfImprovementEntry({
+              const appendResult = await appendSelfImprovementEntry({
                 baseDir: workspaceDir,
                 type: "learning",
                 summary: candidate.summary,
@@ -4204,7 +4272,13 @@ const memoryLanceDBProPlugin = {
                 priority: candidate.priority || "medium",
                 status: candidate.status || "pending",
                 source: `memory-lancedb-pro/reflection:${relPath}`,
+                maxEntries: config.selfImprovement?.maxEntries,
               });
+              if (appendResult.skipped) {
+                api.logger.warn(
+                  `self-improvement: skipped reflection learning candidate because .learnings limit was reached (${appendResult.entryCount}/${appendResult.maxEntries})`,
+                );
+              }
             }
           }
 
@@ -4262,7 +4336,7 @@ const memoryLanceDBProPlugin = {
               text: mapped.text,
               vector,
               importance,
-              category: mapped.category,
+              category: mapped.category as MemoryEntry["category"],
               scope: targetScope,
               metadata,
             });
@@ -4553,8 +4627,6 @@ const memoryLanceDBProPlugin = {
     api.registerService({
       id: "memory-lancedb-pro",
       start: async () => {
-        await getSmartExtractor();
-
         // IMPORTANT: Do not block gateway startup on external network calls.
         // If embedding/retrieval tests hang (bad network / slow provider), the gateway
         // may never bind its HTTP port, causing restart timeouts.
@@ -4666,7 +4738,7 @@ export function parsePluginConfig(value: unknown): PluginConfig {
     throw new Error("embedding config is required");
   }
 
-  const provider =
+  const embeddingProvider: EmbeddingProvider =
     embedding.provider === "azure-openai" || embedding.provider === "local-minilm"
       ? embedding.provider
       : "openai-compatible";
@@ -4676,6 +4748,7 @@ export function parsePluginConfig(value: unknown): PluginConfig {
   if (typeof embedding.apiKey === "string") {
     apiKey = embedding.apiKey;
   } else if (Array.isArray(embedding.apiKey) && embedding.apiKey.length > 0) {
+    // Validate every element is a non-empty string
     const invalid = embedding.apiKey.findIndex(
       (k: unknown) => typeof k !== "string" || (k as string).trim().length === 0,
     );
@@ -4686,17 +4759,20 @@ export function parsePluginConfig(value: unknown): PluginConfig {
     }
     apiKey = embedding.apiKey as string[];
   } else if (embedding.apiKey !== undefined) {
+    // apiKey is present but wrong type — throw, don't silently fall back
     throw new Error("embedding.apiKey must be a string or non-empty array of strings");
-  } else if (provider !== "local-minilm") {
+  } else if (embeddingProvider !== "local-minilm") {
     apiKey = process.env.OPENAI_API_KEY || "";
   }
 
-  if (
-    provider !== "local-minilm" &&
-    (!apiKey || (Array.isArray(apiKey) && apiKey.length === 0))
-  ) {
-    throw new Error("embedding.apiKey is required (set directly or via OPENAI_API_KEY env var)");
+  if (embeddingProvider !== "local-minilm" && (!apiKey || (Array.isArray(apiKey) && apiKey.length === 0))) {
+    throw new Error("embedding.apiKey is required for remote embedding providers (set directly or via OPENAI_API_KEY env var)");
   }
+
+  const embeddingModel = resolveEmbeddingModel(
+    embeddingProvider,
+    typeof embedding.model === "string" ? embedding.model : undefined,
+  );
 
   const memoryReflectionRaw = typeof cfg.memoryReflection === "object" && cfg.memoryReflection !== null
     ? cfg.memoryReflection as Record<string, unknown>
@@ -4732,18 +4808,9 @@ export function parsePluginConfig(value: unknown): PluginConfig {
 
   return {
     embedding: {
-      provider,
+      provider: embeddingProvider,
       apiKey,
-      apiVersion:
-        typeof embedding.apiVersion === "string"
-          ? embedding.apiVersion
-          : undefined,
-      model:
-        typeof embedding.model === "string"
-          ? embedding.model
-          : provider === "local-minilm"
-            ? "all-MiniLM-L6-v2"
-            : "text-embedding-3-small",
+      model: embeddingModel,
       baseURL:
         typeof embedding.baseURL === "string"
           ? resolveEnvVars(embedding.baseURL)
@@ -4861,12 +4928,14 @@ export function parsePluginConfig(value: unknown): PluginConfig {
         beforeResetNote: (cfg.selfImprovement as Record<string, unknown>).beforeResetNote !== false,
         skipSubagentBootstrap: (cfg.selfImprovement as Record<string, unknown>).skipSubagentBootstrap !== false,
         ensureLearningFiles: (cfg.selfImprovement as Record<string, unknown>).ensureLearningFiles !== false,
+        maxEntries: parsePositiveInt((cfg.selfImprovement as Record<string, unknown>).maxEntries) ?? 500,
       }
       : {
         enabled: true,
         beforeResetNote: true,
         skipSubagentBootstrap: true,
         ensureLearningFiles: true,
+        maxEntries: 500,
       },
     memoryReflection: memoryReflectionRaw
       ? {

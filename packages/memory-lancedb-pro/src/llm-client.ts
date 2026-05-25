@@ -34,11 +34,33 @@ export interface LlmClient {
   getLastError(): string | null;
 }
 
+export interface RuntimeLlmComplete {
+  complete(request: {
+    systemPrompt?: string;
+    messages: Array<{ role: "system" | "user" | "assistant"; content: string }>;
+    purpose?: string;
+    temperature?: number;
+    maxTokens?: number;
+    model?: string;
+    agentId?: string;
+  }): Promise<{ text?: string } | string>;
+}
+
+export interface RuntimeLlmClientConfig {
+  runtimeLlm: RuntimeLlmComplete;
+  model?: string;
+  timeoutMs?: number;
+  log?: (msg: string) => void;
+  warnLog?: (msg: string) => void;
+}
+
 /**
  * Extract JSON from an LLM response that may be wrapped in markdown fences
  * or contain surrounding text.
  */
 function extractJsonFromResponse(text: string): string | null {
+  text = stripReasoningTrace(text);
+
   const fenceMatch = text.match(/```(?:json)?\s*\n?([\s\S]*?)```/);
   if (fenceMatch) {
     return fenceMatch[1].trim();
@@ -62,6 +84,16 @@ function extractJsonFromResponse(text: string): string | null {
 
   if (lastBrace === -1) return null;
   return text.substring(firstBrace, lastBrace + 1);
+}
+
+function stripReasoningTrace(text: string): string {
+  const closingThinkTag = text.toLowerCase().lastIndexOf("</think>");
+  if (closingThinkTag === -1) return text;
+  return text.slice(closingThinkTag + "</think>".length).trim();
+}
+
+function shouldDisableReasoningForJson(model: string): boolean {
+  return /qwen3|deepseek.*r1|qwq/i.test(model);
 }
 
 function previewText(value: string, maxLen = 200): string {
@@ -190,7 +222,7 @@ function createApiKeyClient(config: LlmClientConfig, log: (msg: string) => void,
     async completeJson<T>(prompt: string, label = "generic"): Promise<T | null> {
       lastError = null;
       try {
-        const response = await client.chat.completions.create({
+        const request = {
           model: config.model,
           messages: [
             {
@@ -201,7 +233,12 @@ function createApiKeyClient(config: LlmClientConfig, log: (msg: string) => void,
             { role: "user", content: prompt },
           ],
           temperature: 0.1,
-        });
+          ...(shouldDisableReasoningForJson(config.model)
+            ? { chat_template_kwargs: { enable_thinking: false } }
+            : {}),
+        };
+
+        const response = await client.chat.completions.create(request as any);
 
         const raw = response.choices?.[0]?.message?.content;
         if (!raw) {
@@ -253,6 +290,81 @@ function createApiKeyClient(config: LlmClientConfig, log: (msg: string) => void,
           `memory-lancedb-pro: llm-client [${label}] request failed for model ${config.model}: ${err instanceof Error ? err.message : String(err)}`;
         (warnLog ?? log)(lastError);
         return null;
+      }
+    },
+    getLastError(): string | null {
+      return lastError;
+    },
+  };
+}
+
+export function createRuntimeLlmClient(config: RuntimeLlmClientConfig): LlmClient {
+  const log = config.log ?? (() => {});
+  const warnLog = config.warnLog;
+  let lastError: string | null = null;
+
+  return {
+    async completeJson<T>(prompt: string, label = "generic"): Promise<T | null> {
+      lastError = null;
+      const { signal, dispose } = createTimeoutSignal(config.timeoutMs);
+      try {
+        const completionPromise = config.runtimeLlm.complete({
+          ...(config.model ? { model: config.model } : {}),
+          purpose: `memory-lancedb-pro ${label}`,
+          systemPrompt: "You are a memory extraction assistant. Always respond with valid JSON only.",
+          messages: [{ role: "user", content: prompt }],
+          temperature: 0.1,
+        });
+        const abortPromise = new Promise<never>((_, reject) => {
+          signal.addEventListener("abort", () => reject(new Error("runtime LLM request timed out")), { once: true });
+        });
+        const response = await Promise.race([completionPromise, abortPromise]);
+        const raw = typeof response === "string" ? response : response.text;
+
+        if (!raw) {
+          lastError = `memory-lancedb-pro: llm-client [${label}] empty OpenClaw runtime response content`;
+          log(lastError);
+          return null;
+        }
+
+        const jsonStr = extractJsonFromResponse(raw);
+        if (!jsonStr) {
+          lastError =
+            `memory-lancedb-pro: llm-client [${label}] no JSON object found in OpenClaw runtime response (chars=${raw.length}, preview=${JSON.stringify(previewText(raw))})`;
+          log(lastError);
+          return null;
+        }
+
+        try {
+          return JSON.parse(jsonStr) as T;
+        } catch (err) {
+          const repairedJsonStr = repairCommonJson(jsonStr);
+          if (repairedJsonStr !== jsonStr) {
+            try {
+              const repaired = JSON.parse(repairedJsonStr) as T;
+              log(
+                `memory-lancedb-pro: llm-client [${label}] recovered malformed OpenClaw runtime JSON via heuristic repair (jsonChars=${jsonStr.length})`,
+              );
+              return repaired;
+            } catch (repairErr) {
+              lastError =
+                `memory-lancedb-pro: llm-client [${label}] OpenClaw runtime JSON.parse failed: ${err instanceof Error ? err.message : String(err)}; repair failed: ${repairErr instanceof Error ? repairErr.message : String(repairErr)} (jsonChars=${jsonStr.length}, jsonPreview=${JSON.stringify(previewText(jsonStr))})`;
+              log(lastError);
+              return null;
+            }
+          }
+          lastError =
+            `memory-lancedb-pro: llm-client [${label}] OpenClaw runtime JSON.parse failed: ${err instanceof Error ? err.message : String(err)} (jsonChars=${jsonStr.length}, jsonPreview=${JSON.stringify(previewText(jsonStr))})`;
+          log(lastError);
+          return null;
+        }
+      } catch (err) {
+        lastError =
+          `memory-lancedb-pro: llm-client [${label}] OpenClaw runtime request failed: ${err instanceof Error ? err.message : String(err)}`;
+        (warnLog ?? log)(lastError);
+        return null;
+      } finally {
+        dispose();
       }
     },
     getLastError(): string | null {
@@ -421,4 +533,4 @@ export function createLlmClient(config: LlmClientConfig): LlmClient {
   return createApiKeyClient(config, log, warnLog);
 }
 
-export { extractJsonFromResponse, repairCommonJson };
+export { extractJsonFromResponse, repairCommonJson, shouldDisableReasoningForJson, stripReasoningTrace };

@@ -55,7 +55,7 @@
 | **混合检索** | 向量 + BM25 全文搜索，融合交叉编码器重排序 |
 | **上下文注入** | 相关记忆在每次回复前自动浮现 |
 | **多作用域隔离** | 按智能体、按用户、按项目隔离记忆边界 |
-| **任意 Provider** | OpenAI、Jina、Gemini、Ollama 或任意 OpenAI 兼容 API |
+| **任意 Provider** | OpenAI、Jina、Gemini、Ollama、本地 MiniLM 或任意 OpenAI 兼容 API |
 | **完整工具链** | CLI、备份、迁移、升级、导入导出——生产可用 |
 
 ---
@@ -121,6 +121,7 @@ npm i memory-lancedb-pro@beta
 - `autoRecall` → 相关记忆在每次回复前自动注入
 - `extractMinMessages: 2` → 正常两轮对话即触发提取
 - `sessionMemory.enabled: false` → 避免会话摘要在初期污染检索结果
+- 默认不需要配置 `llm` 块；智能提取会使用 OpenClaw runtime LLM 处理模型、provider 和认证
 
 验证并重启：
 
@@ -453,11 +454,6 @@ git clone https://github.com/CortexReach/memory-lancedb-pro-skill.git ~/.opencla
     "messageCount": 15
   },
   "smartExtraction": true,
-  "llm": {
-    "apiKey": "${OPENAI_API_KEY}",
-    "model": "gpt-4o-mini",
-    "baseURL": "https://api.openai.com/v1"
-  },
   "extractMinMessages": 2,
   "extractMaxChars": 8000
 }
@@ -468,15 +464,32 @@ git clone https://github.com/CortexReach/memory-lancedb-pro-skill.git ~/.opencla
 <details>
 <summary><strong>Embedding 服务商</strong></summary>
 
-兼容 **任意 OpenAI 兼容 Embedding API**：
+支持本地 MiniLM，也兼容 **任意 OpenAI 兼容 Embedding API**：
 
 | 服务商 | 模型 | Base URL | 维度 |
 | --- | --- | --- | --- |
-| **Jina**（推荐） | `jina-embeddings-v5-text-small` | `https://api.jina.ai/v1` | 1024 |
+| **本地 MiniLM** | `Xenova/all-MiniLM-L6-v2` | 无 | 384 |
+| **Jina**（推荐远程） | `jina-embeddings-v5-text-small` | `https://api.jina.ai/v1` | 1024 |
 | **OpenAI** | `text-embedding-3-small` | `https://api.openai.com/v1` | 1536 |
 | **Voyage** | `voyage-4-lite` / `voyage-4` | `https://api.voyageai.com/v1` | 1024 / 1024 |
 | **Google Gemini** | `gemini-embedding-001` | `https://generativelanguage.googleapis.com/v1beta/openai/` | 3072 |
-| **Ollama**（本地） | `nomic-embed-text` | `http://localhost:11434/v1` | 取决于模型 |
+| **Ollama**（本地服务） | `nomic-embed-text` | `http://localhost:11434/v1` | 取决于模型 |
+
+本地 MiniLM 不需要 API key：
+
+```json
+{
+  "embedding": {
+    "provider": "local-minilm"
+  }
+}
+```
+
+如需在首次使用前预下载本地模型缓存：
+
+```bash
+npm run download:local-minilm
+```
 
 </details>
 
@@ -501,13 +514,15 @@ git clone https://github.com/CortexReach/memory-lancedb-pro-skill.git ~/.opencla
 
 当 `smartExtraction` 启用（默认 `true`）时，插件使用 LLM 智能提取和分类记忆，替代基于正则的触发方式。
 
+默认情况下，智能提取通过 `api.runtime.llm.complete(...)` 使用 OpenClaw 宿主 runtime LLM。只有在你想让插件覆盖宿主 runtime、改用插件自己的 API key 或 OAuth LLM client 时，才需要配置 `llm.*`。
+
 | 字段 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
 | `smartExtraction` | boolean | `true` | 是否启用 LLM 智能 6 类别提取 |
-| `llm.auth` | string | `api-key` | `api-key` 依次使用 `llm.apiKey`、`embedding.apiKey`，再回退到 OpenClaw 默认模型来源；`oauth` 默认使用 plugin 级 OAuth token 文件 |
-| `llm.apiKey` | string | *（先复用 `embedding.apiKey`，再回退到 OpenClaw 默认 LLM 来源）* | LLM 提供商 API Key |
-| `llm.model` | string | `openai/gpt-oss-120b` | LLM 模型名称。未配置时，插件启动会优先继承 OpenClaw 默认模型 |
-| `llm.baseURL` | string | *（先回退到 OpenClaw 默认 LLM 来源，再复用 `embedding.baseURL`）* | LLM API 端点 |
+| `llm.auth` | string | *runtime LLM* | 仅在覆盖 OpenClaw runtime LLM 时设置为 `api-key` 或 `oauth` |
+| `llm.apiKey` | string | 无 | 显式插件托管 LLM provider 的 API Key |
+| `llm.model` | string | 宿主默认 | 可选模型覆盖，受宿主/runtime 策略约束 |
+| `llm.baseURL` | string | 无 | 显式插件托管 LLM provider 的 API 端点 |
 | `llm.oauthProvider` | string | `openai-codex` | `llm.auth` 为 `oauth` 时使用的 OAuth provider id |
 | `llm.oauthPath` | string | `~/.openclaw/.memory-lancedb-pro/oauth.json` | `llm.auth` 为 `oauth` 时使用的 OAuth token 文件 |
 | `llm.timeoutMs` | number | `30000` | LLM 请求超时（毫秒） |
@@ -515,7 +530,7 @@ git clone https://github.com/CortexReach/memory-lancedb-pro-skill.git ~/.opencla
 | `extractMaxChars` | number | `8000` | 发送给 LLM 的最大字符数 |
 
 
-OAuth `llm` 配置（使用现有 Codex / ChatGPT 登录缓存来发送 LLM 请求）：
+OAuth `llm` 配置：用于用现有 Codex / ChatGPT 登录缓存覆盖 runtime LLM：
 ```json
 {
   "llm": {

@@ -20,7 +20,11 @@
 import jitiFactory from "jiti";
 
 const jiti = jitiFactory(import.meta.url, { interopDefault: true });
-const { createEmbedder } = jiti("../src/embedder.ts");
+const {
+  LOCAL_MINILM_CANONICAL_MODEL,
+  createEmbedder,
+  resolveEmbeddingModel,
+} = jiti("../src/embedder.ts");
 
 async function testEmbedderCreation() {
   console.log("Testing embedder creation...");
@@ -67,37 +71,44 @@ async function testCacheSmoke() {
   return true;
 }
 
-async function testLocalMiniLmConstruction() {
-  console.log("Testing local MiniLM embedder construction...");
+async function testLocalMiniLmCreation() {
+  console.log("Testing local MiniLM creation...");
+
+  const model = resolveEmbeddingModel("local-minilm");
+  if (model !== LOCAL_MINILM_CANONICAL_MODEL) {
+    throw new Error(`Expected ${LOCAL_MINILM_CANONICAL_MODEL}, got ${model}`);
+  }
 
   const embedder = createEmbedder({
     provider: "local-minilm",
-    model: "all-MiniLM-L6-v2",
+    model,
   });
 
-  const stats = embedder.cacheStats;
-  console.log("Local MiniLM model=" + embedder.model + ", keyCount=" + stats.keyCount);
-
-  if (embedder.model !== "Xenova/all-MiniLM-L6-v2") {
-    console.error("FAIL: local MiniLM model was not normalized to the ONNX-ready model id");
-    process.exit(1);
+  if (embedder.dimensions !== 384) {
+    throw new Error(`Expected 384 dimensions, got ${embedder.dimensions}`);
   }
 
-  console.log("PASS  local MiniLM constructor smoke");
+  const stats = embedder.cacheStats;
+  if (stats.keyCount !== 0) {
+    throw new Error(`Expected local MiniLM keyCount=0, got ${stats.keyCount}`);
+  }
+
+  console.log("PASS  local MiniLM created without API key");
+  return embedder;
 }
 
 async function main() {
   console.log("Running embedder-cache smoke tests...\n");
-  
+
   try {
     await testEmbedderCreation();
     await testCacheSmoke();
-    await testLocalMiniLmConstruction();
+    await testLocalMiniLmCreation();
 
     console.log("\n=== ALL TESTS PASSED ===");
     console.log("embedder creation: OK");
     console.log("cache smoke: OK");
-    console.log("local MiniLM constructor: OK");
+    console.log("local MiniLM creation: OK");
     console.log("Note: Full _evictExpired() on set() requires OLLAMA server");
     process.exit(0);
   } catch (err) {

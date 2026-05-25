@@ -20,11 +20,14 @@
   "id": "memory-lancedb-pro",
   "name": "Memory (LanceDB Pro)",
   "description": "Enhanced LanceDB-backed long-term memory with hybrid retrieval, multi-scope isolation, long-context chunking, and management CLI",
-  "version": "1.1.0-beta.10",
+  "version": "1.1.0-beta.11",
   "kind": "memory",
   "skills": [
     "./skills"
   ],
+  "hooks": {
+    "allowConversationAccess": true
+  },
   "configSchema": {
     "type": "object",
     "additionalProperties": false,
@@ -39,8 +42,7 @@
               "openai-compatible",
               "azure-openai",
               "local-minilm"
-            ],
-            "description": "Embedding provider. local-minilm runs all-MiniLM-L6-v2 locally through ONNX without an external embedding API."
+            ]
           },
           "apiKey": {
             "oneOf": [
@@ -57,7 +59,7 @@
                 "minItems": 1
               }
             ],
-            "description": "Single API key or array of keys for round-robin rotation"
+            "description": "Single API key or array of keys for round-robin rotation. Required for remote embedding providers; not used by local-minilm."
           },
           "model": {
             "type": "string"
@@ -211,13 +213,16 @@
       },
       "autoRecallExcludeAgents": {
         "type": "array",
-        "items": { "type": "string" },
-        "default": [],
-        "description": "Blacklist mode for auto-recall injection. Agents in this list are skipped. Agent resolution falls back to 'main' when no explicit agentId is available. If autoRecallIncludeAgents is also set, include wins."
+        "items": {
+          "type": "string"
+        },
+        "description": "Agent/session patterns excluded from auto-recall and reflection injection. Supports exact match, wildcard prefix (e.g. pi-), and temp:*."
       },
       "autoRecallIncludeAgents": {
         "type": "array",
-        "items": { "type": "string" },
+        "items": {
+          "type": "string"
+        },
         "default": [],
         "description": "Whitelist mode for auto-recall injection. Only agents in this list receive auto-recall. Agent resolution falls back to 'main' when no explicit agentId is available. If both include and exclude are set, autoRecallIncludeAgents takes precedence (whitelist wins)."
       },
@@ -696,6 +701,12 @@
           "ensureLearningFiles": {
             "type": "boolean",
             "default": true
+          },
+          "maxEntries": {
+            "type": "integer",
+            "minimum": 1,
+            "default": 500,
+            "description": "Maximum number of entries to retain per .learnings file before new appends are skipped."
           }
         }
       },
@@ -976,13 +987,6 @@
             "description": "Maximum number of auto-capture extractions allowed per hour"
           }
         }
-      },
-      "autoRecallExcludeAgents": {
-        "type": "array",
-        "items": {
-          "type": "string"
-        },
-        "description": "Agent/session patterns excluded from auto-recall and reflection injection. Supports exact match, wildcard prefix (e.g. pi-), and temp:*."
       }
     },
     "required": [
@@ -990,25 +994,21 @@
     ]
   },
   "uiHints": {
-    "embedding.provider": {
-      "label": "Embedding Provider",
-      "help": "Choose OpenAI-compatible / Azure OpenAI for remote embeddings, or local-minilm to run all-MiniLM-L6-v2 locally via ONNX with no embedding API key."
-    },
     "embedding.apiKey": {
       "label": "API Key(s)",
       "sensitive": true,
       "placeholder": "sk-proj-... or [\"key1\", \"key2\"] for rotation",
-      "help": "Single API key or array of keys for round-robin rotation with automatic failover on rate limits (or use ${OPENAI_API_KEY}). Not required when embedding.provider=local-minilm."
+      "help": "Single API key or array of keys for remote embedding providers (or use ${OPENAI_API_KEY}). Not needed when embedding.provider is local-minilm."
     },
     "embedding.model": {
       "label": "Embedding Model",
-      "placeholder": "text-embedding-3-small or all-MiniLM-L6-v2",
-      "help": "Embedding model name. local-minilm defaults to all-MiniLM-L6-v2 and resolves it to a local ONNX-compatible MiniLM model automatically."
+      "placeholder": "text-embedding-3-small or Xenova/all-MiniLM-L6-v2",
+      "help": "Embedding model name. Defaults to text-embedding-3-small for remote providers and Xenova/all-MiniLM-L6-v2 for local-minilm."
     },
     "embedding.baseURL": {
       "label": "Base URL",
       "placeholder": "https://api.openai.com/v1",
-      "help": "Custom base URL for remote embedding endpoints (e.g. https://generativelanguage.googleapis.com/v1beta/openai/ for Gemini, http://localhost:11434/v1 for Ollama). Ignored when embedding.provider=local-minilm.",
+      "help": "Custom base URL for OpenAI-compatible embedding endpoints (e.g. https://generativelanguage.googleapis.com/v1beta/openai/ for Gemini, http://localhost:11434/v1 for Ollama)",
       "advanced": true
     },
     "embedding.dimensions": {
@@ -1064,12 +1064,12 @@
       "label": "LLM API Key",
       "sensitive": true,
       "placeholder": "sk-... or ${GROQ_API_KEY}",
-      "help": "API key for the smart-extraction LLM. If omitted, the plugin first falls back to embedding.apiKey, then to OpenClaw's default model source when available."
+      "help": "Optional API key for overriding the OpenClaw runtime LLM used by smart memory extraction. If omitted, smart extraction uses api.runtime.llm.complete()."
     },
     "llm.model": {
       "label": "LLM Model",
       "placeholder": "openai/gpt-oss-120b",
-      "help": "OpenAI-compatible chat model for memory extraction/summary. If omitted, the plugin inherits OpenClaw's default model on startup when available."
+      "help": "Optional model override for memory extraction/summary. Without explicit llm auth/baseURL/apiKey, this is passed to OpenClaw runtime LLM subject to host policy."
     },
     "llm.baseURL": {
       "label": "LLM Base URL",
@@ -1287,7 +1287,7 @@
     },
     "decay.intrinsicWeight": {
       "label": "Decay Intrinsic Weight",
-      "help": "Weight of importance × confidence in lifecycle score.",
+      "help": "Weight of importance \u00d7 confidence in lifecycle score.",
       "advanced": true
     },
     "decay.betaCore": {
@@ -1357,6 +1357,11 @@
     "selfImprovement.ensureLearningFiles": {
       "label": "Ensure Learning Files",
       "help": "Auto-create .learnings files when missing",
+      "advanced": true
+    },
+    "selfImprovement.maxEntries": {
+      "label": "Max Learning Entries",
+      "help": "Maximum entries per .learnings file before new appends are skipped",
       "advanced": true
     },
     "memoryReflection.storeToLanceDB": {
@@ -1464,7 +1469,7 @@
     },
     "llm.auth": {
       "label": "LLM Auth",
-      "help": "api-key uses llm.apiKey, then embedding.apiKey, then OpenClaw's default model source when available. oauth uses a plugin-scoped OAuth token file by default.",
+      "help": "api-key uses llm.apiKey or embedding.apiKey. oauth uses a plugin-scoped OAuth token file by default.",
       "advanced": true
     },
     "llm.oauthProvider": {
@@ -1494,7 +1499,7 @@
     },
     "memoryCompaction.similarityThreshold": {
       "label": "Similarity Threshold",
-      "help": "How similar two memories must be to merge (0–1). 0.88 is a good starting point; raise to 0.92+ for conservative merges.",
+      "help": "How similar two memories must be to merge (0\u20131). 0.88 is a good starting point; raise to 0.92+ for conservative merges.",
       "advanced": true
     },
     "memoryCompaction.cooldownHours": {
@@ -1530,5 +1535,23 @@
       "help": "Whitelist mode. Only these agents receive auto-recall. If agentId is unavailable it falls back to 'main'. Includes take precedence over excludes.",
       "advanced": true
     }
+  },
+  "contracts": {
+    "tools": [
+      "memory_recall",
+      "memory_store",
+      "memory_update",
+      "memory_forget",
+      "memory_list",
+      "memory_stats",
+      "memory_debug",
+      "memory_compact",
+      "memory_archive",
+      "memory_promote",
+      "memory_explain_rank",
+      "self_improvement_log",
+      "self_improvement_extract_skill",
+      "self_improvement_review"
+    ]
   }
 }

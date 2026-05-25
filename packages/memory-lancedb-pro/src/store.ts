@@ -12,16 +12,26 @@ import {
   mkdirSync,
   realpathSync,
   lstatSync,
+  statSync,
   unlinkSync,
+  rmdirSync,
+  writeFileSync,
 } from "node:fs";
+import {
+  access as accessAsync,
+  lstat as lstatAsync,
+  mkdir as mkdirAsync,
+  realpath as realpathAsync,
+} from "node:fs/promises";
 import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { buildSmartMetadata, isMemoryActiveAt, parseSmartMetadata, stringifySmartMetadata } from "./smart-metadata.js";
 
 // ============================================================================
 // Types
 // ============================================================================
 
-export interface MemoryEntry {
+export interface MemoryEntry extends Record<string, unknown> {
   id: string;
   text: string;
   vector: number[];
@@ -40,6 +50,7 @@ export interface MemorySearchResult {
 export interface StoreConfig {
   dbPath: string;
   vectorDim: number;
+  onStoragePathWarning?: (message: string) => void;
 }
 
 export interface MetadataPatch {
@@ -50,11 +61,22 @@ export interface MetadataPatch {
 // LanceDB Dynamic Import
 // ============================================================================
 
+export const DEFAULT_LANCEDB_PACKAGE = "@lancedb/lancedb";
+export const INTEL_MAC_LANCEDB_COMPAT_PACKAGE = "@matchaclaw/lancedb-darwin-x64-compat";
+
 let lancedbImportPromise: Promise<typeof import("@lancedb/lancedb")> | null =
   null;
-const requireFromHere = createRequire(import.meta.url);
-const DEFAULT_LANCEDB_PACKAGE = "@lancedb/lancedb";
-const INTEL_MAC_LANCEDB_COMPAT_PACKAGE = "@matchaclaw/lancedb-darwin-x64-compat";
+const requireCJS = createRequire(import.meta.url);
+
+export function resolveLanceDbRuntimePackageName(
+  platform: NodeJS.Platform = process.platform,
+  arch: string = process.arch,
+): string {
+  if (platform === "darwin" && arch === "x64") {
+    return INTEL_MAC_LANCEDB_COMPAT_PACKAGE;
+  }
+  return DEFAULT_LANCEDB_PACKAGE;
+}
 
 // =========================================================================
 // Cross-Process File Lock (proper-lockfile)
@@ -78,10 +100,12 @@ export const loadLanceDB = async (): Promise<
   typeof import("@lancedb/lancedb")
 > => {
   if (!lancedbImportPromise) {
+    // Use a createRequire-built require() so LanceDB's CommonJS native bindings
+    // keep Windows-safe CJS semantics while still working in pure ESM runtimes.
+    // Do not name this binding "require": bundlers may rewrite bare require()
+    // calls to their ESM shim, which is what broke OpenClaw 2026.5+ loading.
     lancedbImportPromise = Promise.resolve(
-      requireFromHere(
-        resolveLanceDbRuntimePackageName(),
-      ) as typeof import("@lancedb/lancedb"),
+      requireCJS(resolveLanceDbRuntimePackageName()) as typeof import("@lancedb/lancedb"),
     );
   }
   try {
@@ -94,16 +118,6 @@ export const loadLanceDB = async (): Promise<
   }
 };
 
-export function resolveLanceDbRuntimePackageName(
-  platform: NodeJS.Platform = process.platform,
-  arch: string = process.arch,
-): string {
-  if (platform === "darwin" && arch === "x64") {
-    return INTEL_MAC_LANCEDB_COMPAT_PACKAGE;
-  }
-  return DEFAULT_LANCEDB_PACKAGE;
-}
-
 // ============================================================================
 // Utility Functions
 // ============================================================================
@@ -111,6 +125,93 @@ export function resolveLanceDbRuntimePackageName(
 function clampInt(value: number, min: number, max: number): number {
   if (!Number.isFinite(value)) return min;
   return Math.min(max, Math.max(min, Math.floor(value)));
+}
+
+const LEGACY_SECONDS_TIMESTAMP_MAX = 1_000_000_000_000;
+
+export function normalizeMemoryTimestamp(value: unknown, fallback = Date.now()): number {
+  const raw = value instanceof Date
+    ? value.getTime()
+    : typeof value === "number"
+      ? value
+      : Number(value);
+
+  if (!Number.isFinite(raw) || raw <= 0) {
+    return fallback;
+  }
+
+  const timestamp = Math.floor(raw);
+  return timestamp < LEGACY_SECONDS_TIMESTAMP_MAX ? timestamp * 1000 : timestamp;
+}
+
+function normalizePredicateTimestamp(value: unknown): number | null {
+  const raw = value instanceof Date
+    ? value.getTime()
+    : typeof value === "number"
+      ? value
+      : Number(value);
+
+  if (!Number.isFinite(raw) || raw <= 0) {
+    return null;
+  }
+
+  return normalizeMemoryTimestamp(raw);
+}
+
+function isLegacySecondTimestamp(value: unknown): boolean {
+  const raw = value instanceof Date
+    ? value.getTime()
+    : typeof value === "number"
+      ? value
+      : Number(value);
+  return Number.isFinite(raw) && raw > 0 && Math.floor(raw) < LEGACY_SECONDS_TIMESTAMP_MAX;
+}
+
+function timestampBeforePredicate(column: string, value: unknown): string {
+  const maxTimestamp = normalizePredicateTimestamp(value);
+  if (maxTimestamp == null) {
+    return "(FALSE)";
+  }
+  const legacySecondsCutoff = Math.ceil(maxTimestamp / 1000);
+  return `((${column} >= ${LEGACY_SECONDS_TIMESTAMP_MAX} AND ${column} < ${maxTimestamp}) OR ` +
+    `(${column} > 0 AND ${column} < ${LEGACY_SECONDS_TIMESTAMP_MAX} AND ${column} < ${legacySecondsCutoff}))`;
+}
+
+function parseMetadataObject(value: unknown): Record<string, unknown> | null {
+  if (typeof value === "string" && value.trim()) {
+    try {
+      const parsed = JSON.parse(value);
+      return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+        ? parsed as Record<string, unknown>
+        : {};
+    } catch {
+      return null;
+    }
+  } else if (value && typeof value === "object" && !Array.isArray(value)) {
+    return { ...(value as Record<string, unknown>) };
+  } else {
+    return {};
+  }
+}
+
+function metadataHasLegacySecondTimestamp(value: unknown): boolean {
+  const metadata = parseMetadataObject(value);
+  return metadata != null &&
+    Object.prototype.hasOwnProperty.call(metadata, "last_accessed_at") &&
+    isLegacySecondTimestamp(metadata.last_accessed_at);
+}
+
+function normalizeLegacyTimestampMetadata(value: unknown): string {
+  const metadata = parseMetadataObject(value);
+  if (metadata == null) {
+    return typeof value === "string" ? value : "{}";
+  }
+
+  if (Object.prototype.hasOwnProperty.call(metadata, "last_accessed_at")) {
+    metadata.last_accessed_at = normalizeMemoryTimestamp(metadata.last_accessed_at, 0);
+  }
+
+  return JSON.stringify(metadata);
 }
 
 function escapeSqlLiteral(value: string): string {
@@ -145,13 +246,45 @@ function scoreLexicalHit(query: string, candidates: Array<{ text: string; weight
 // Storage Path Validation
 // ============================================================================
 
+function fileUrlToWindowsPath(url: URL): string {
+  const host = url.hostname && url.hostname !== "localhost" ? url.hostname : "";
+  const pathname = decodeURIComponent(url.pathname);
+
+  if (host) {
+    return `\\\\${host}${pathname.replace(/\//g, "\\")}`;
+  }
+
+  const withoutDriveSlash = /^\/[a-zA-Z]:/.test(pathname)
+    ? pathname.slice(1)
+    : pathname;
+  return withoutDriveSlash.replace(/\//g, "\\");
+}
+
+export function normalizeStoragePath(
+  dbPath: string,
+  platform: NodeJS.Platform = process.platform,
+): string {
+  const trimmed = dbPath.trim();
+  if (!trimmed.startsWith("file://")) return dbPath;
+
+  try {
+    const url = new URL(trimmed);
+    if (url.protocol !== "file:") return dbPath;
+    return platform === "win32"
+      ? fileUrlToWindowsPath(url)
+      : fileURLToPath(url);
+  } catch {
+    return dbPath;
+  }
+}
+
 /**
  * Validate and prepare the storage directory before LanceDB connection.
  * Resolves symlinks, creates missing directories, and checks write permissions.
  * Returns the resolved absolute path on success, or throws a descriptive error.
  */
 export function validateStoragePath(dbPath: string): string {
-  let resolvedPath = dbPath;
+  let resolvedPath = normalizeStoragePath(dbPath);
 
   // Resolve symlinks (including dangling symlinks)
   try {
@@ -210,6 +343,78 @@ export function validateStoragePath(dbPath: string): string {
   return resolvedPath;
 }
 
+/**
+ * Async variant of {@link validateStoragePath}. Use this on runtime paths so
+ * slow filesystems do not block OpenClaw's event loop during startup.
+ */
+export async function validateStoragePathAsync(dbPath: string): Promise<string> {
+  let resolvedPath = normalizeStoragePath(dbPath);
+
+  // Resolve symlinks (including dangling symlinks)
+  try {
+    const stats = await lstatAsync(dbPath);
+    if (stats.isSymbolicLink()) {
+      try {
+        resolvedPath = await realpathAsync(dbPath);
+      } catch (err: any) {
+        throw new Error(
+          `dbPath "${dbPath}" is a symlink whose target does not exist.\n` +
+          `  Fix: Create the target directory, or update the symlink to point to a valid path.\n` +
+          `  Details: ${err.code || ""} ${err.message}`,
+        );
+      }
+    }
+  } catch (err: any) {
+    // Missing path is OK (it will be created below)
+    if (err?.code === "ENOENT") {
+      // no-op
+    } else if (
+      typeof err?.message === "string" &&
+      err.message.includes("symlink whose target does not exist")
+    ) {
+      throw err;
+    } else {
+      // Other lstat failures — continue with original path
+    }
+  }
+
+  // Create directory if it doesn't exist
+  let pathExists = false;
+  try {
+    await accessAsync(resolvedPath, constants.F_OK);
+    pathExists = true;
+  } catch {
+    pathExists = false;
+  }
+
+  if (!pathExists) {
+    try {
+      await mkdirAsync(resolvedPath, { recursive: true });
+    } catch (err: any) {
+      throw new Error(
+        `Failed to create dbPath directory "${resolvedPath}".\n` +
+        `  Fix: Ensure the parent directory "${dirname(resolvedPath)}" exists and is writable,\n` +
+        `       or create it manually: mkdir -p "${resolvedPath}"\n` +
+        `  Details: ${err.code || ""} ${err.message}`,
+      );
+    }
+  }
+
+  // Check write permissions
+  try {
+    await accessAsync(resolvedPath, constants.W_OK);
+  } catch (err: any) {
+    throw new Error(
+      `dbPath directory "${resolvedPath}" is not writable.\n` +
+      `  Fix: Check permissions with: ls -la "${dirname(resolvedPath)}"\n` +
+      `       Or grant write access: chmod u+w "${resolvedPath}"\n` +
+      `  Details: ${err.code || ""} ${err.message}`,
+    );
+  }
+
+  return resolvedPath;
+}
+
 // ============================================================================
 // Memory Store
 // ============================================================================
@@ -250,22 +455,26 @@ export class MemoryStore {
   // 當 pending callers 超過此值時，block 並同步 flush，確保 pendingBatch 不會無限膨胀。
   private static readonly MAX_PENDING_BATCH_SIZE = 1000;
 
-  constructor(private readonly config: StoreConfig) { }
+  private readonly config: StoreConfig;
 
-  private cleanupLegacyWriteLockFile(lockPath: string): void {
-    if (!existsSync(lockPath)) return;
-
-    try {
-      const stats = lstatSync(lockPath);
-      if (!stats.isDirectory()) {
-        unlinkSync(lockPath);
-      }
-    } catch {}
+  constructor(config: StoreConfig) {
+    this.config = {
+      ...config,
+      dbPath: normalizeStoragePath(config.dbPath),
+    };
   }
 
   private async runWithFileLock<T>(fn: () => Promise<T>): Promise<T> {
     const lockfile = await loadLockfile();
     const lockPath = join(this.config.dbPath, ".memory-write.lock");
+    const lockArtifactPath = `${lockPath}.lock`;
+    const ensureLockTargetExists = async () => {
+      if (!existsSync(lockPath)) {
+        try { mkdirSync(dirname(lockPath), { recursive: true }); } catch {}
+        try { const { writeFileSync } = await import("node:fs"); writeFileSync(lockPath, "", { flag: "wx" }); } catch {}
+      }
+    };
+    await ensureLockTargetExists();
     // 【修復 #415】調整 retries：max wait 從 ~3100ms → ~151秒
     // 指數退避：1s, 2s, 4s, 8s, 16s, 30s×5，總計約 151 秒
     // ECOMPROMISED 透過 onCompromised callback 觸發（非 throw），使用 flag 機制正確處理
@@ -274,24 +483,62 @@ export class MemoryStore {
     let fnSucceeded = false;
     let fnError: unknown = null;
 
-    // Older builds created a sentinel file at the same path. The actual
-    // proper-lockfile lock object is a directory, so clear legacy files first.
-    this.cleanupLegacyWriteLockFile(lockPath);
+    // Proactive cleanup of stale proper-lockfile artifacts（from PR #626）.
+    // proper-lockfile locks the target by creating `${target}.lock`; the
+    // target file itself is expected to persist and must not be treated stale.
+    if (existsSync(lockArtifactPath)) {
+      try {
+        const stat = statSync(lockArtifactPath);
+        const ageMs = Date.now() - stat.mtimeMs;
+        const staleThresholdMs = 5 * 60 * 1000;
+        if (ageMs > staleThresholdMs) {
+          try {
+            if (stat.isDirectory()) {
+              rmdirSync(lockArtifactPath);
+            } else {
+              unlinkSync(lockArtifactPath);
+            }
+            console.warn(`[memory-lancedb-pro] cleared stale lock artifact: ${lockArtifactPath} ageMs=${ageMs}`);
+          } catch {}
+        }
+      } catch {}
+    }
 
-    const release = await lockfile.lock(this.config.dbPath, {
-      lockfilePath: lockPath,
+    const acquireLock = async () => lockfile.lock(lockPath, {
+      // 【修復 #670】realpath:false — 避免 proactive cleanup 刪除 stale lock artifact 後，
+      // proper-lockfile v4 的 realpath() 在已刪除檔案上被呼叫，導致 ENOENT。
+      // 情境：T=0 proactive cleanup 刪除 stale lock → T=3ms lock() 的 realpath() → ENOENT
+      // 根本原因：v4 proper-lockfile 的 resolveCanonicalPath 預設呼叫 fs.realpath()。
+      // 解決：realpath:false 完全繞過 realpath()，對 lock file 場景完全無副作用。
+      realpath: false,
       retries: {
         retries: 10,
         factor: 2,
-        minTimeout: 1000,
-        maxTimeout: 30000,
+        minTimeout: 1000, // James 保守設定：避免高負載下過度密集重試
+        maxTimeout: 30000, // James 保守設定：支撐更久的 event loop 阻塞
       },
-      stale: 10000,
+      stale: 10000, // 10 秒後視為 stale，觸發 ECOMPROMISED callback
+                     // 注意：ECOMPROMISED 是 ambiguous degradation 訊號，mtime 無法區分
+                     // "holder 崩潰" vs "holder event loop 阻塞"，所以不嘗試區分
       onCompromised: (err: unknown) => {
+        // 【修復 #415 關鍵】必須是同步 callback
+        // setLockAsCompromised() 不等待 Promise，async throw 無法傳回 caller
         isCompromised = true;
         compromisedErr = err;
       },
     });
+
+    let release: Awaited<ReturnType<typeof acquireLock>>;
+    try {
+      release = await acquireLock();
+    } catch (err: unknown) {
+      if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+        await ensureLockTargetExists();
+        release = await acquireLock();
+      } else {
+        throw err;
+      }
+    }
 
     try {
       const result = await fn();
@@ -353,6 +600,15 @@ export class MemoryStore {
   }
 
   private async doInitialize(): Promise<void> {
+    try {
+      this.config.dbPath = await validateStoragePathAsync(this.config.dbPath);
+    } catch (err) {
+      this.config.onStoragePathWarning?.(
+        `memory-lancedb-pro: storage path issue — ${String(err)}\n` +
+        `  The plugin will still attempt to start, but writes may fail.`,
+      );
+    }
+
     const lancedb = await loadLanceDB();
 
     let db: LanceDB.Connection;
@@ -438,6 +694,8 @@ export class MemoryStore {
       }
     }
 
+    await this.backfillLegacySecondTimestamps(table);
+
     // Validate vector dimensions
     // Note: LanceDB returns Arrow Vector objects, not plain JS arrays.
     // Array.isArray() returns false for Arrow Vectors, so use .length instead.
@@ -465,6 +723,117 @@ export class MemoryStore {
 
     this.db = db;
     this.table = table;
+  }
+
+  private async backfillLegacySecondTimestamps(table: LanceDB.Table): Promise<void> {
+    try {
+      let normalizedCount = 0;
+
+      await this.runWithFileLock(async () => {
+        const candidateRows = await table.query()
+          .where(
+            `(timestamp > 0 AND timestamp < ${LEGACY_SECONDS_TIMESTAMP_MAX}) OR ` +
+            `(metadata IS NOT NULL AND metadata != '{}' AND metadata != '')`
+          )
+          .toArray();
+
+        if (candidateRows.length === 0) return;
+
+        const legacyRows = candidateRows.filter((row) =>
+          isLegacySecondTimestamp(row.timestamp) ||
+          metadataHasLegacySecondTimestamp(row.metadata)
+        );
+
+        if (legacyRows.length === 0) return;
+
+        for (const row of legacyRows) {
+          const originalRow = {
+            ...row,
+            vector: Array.from(row.vector as Iterable<number>),
+            scope: (row.scope as string | undefined) ?? "global",
+            metadata: (row.metadata as string | undefined) || "{}",
+          };
+          const normalizedRow = {
+            ...originalRow,
+            metadata: normalizeLegacyTimestampMetadata(row.metadata),
+            timestamp: normalizeMemoryTimestamp(row.timestamp, 0),
+          };
+          const safeId = escapeSqlLiteral(row.id as string);
+          const backupPath = this.writeLegacyTimestampBackfillBackup(originalRow);
+
+          await table.delete(`id = '${safeId}'`);
+          try {
+            await table.add([normalizedRow]);
+            this.clearLegacyTimestampBackfillBackup(backupPath);
+            normalizedCount += 1;
+          } catch (addError) {
+            const currentRows = await table.query()
+              .where(`id = '${safeId}'`)
+              .limit(1)
+              .toArray()
+              .catch(() => []);
+
+            if (currentRows.length > 0) {
+              this.clearLegacyTimestampBackfillBackup(backupPath);
+              throw new Error(
+                `legacy timestamp normalization failed for ${row.id}: replacement write failed after delete, but an existing record was preserved. ` +
+                `Write error: ${addError instanceof Error ? addError.message : String(addError)}`,
+              );
+            }
+
+            if (currentRows.length === 0) {
+              try {
+                await table.add([originalRow]);
+                this.clearLegacyTimestampBackfillBackup(backupPath);
+              } catch (rollbackError) {
+                throw new Error(
+                  `legacy timestamp normalization failed for ${row.id}: replacement write failed after delete, and rollback also failed. ` +
+                  `Durable backup saved at ${backupPath}. ` +
+                  `Write error: ${addError instanceof Error ? addError.message : String(addError)}. ` +
+                  `Rollback error: ${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}`,
+                );
+              }
+            }
+
+            throw new Error(
+              `legacy timestamp normalization failed for ${row.id}: replacement write failed after delete, original row restored. ` +
+              `Write error: ${addError instanceof Error ? addError.message : String(addError)}`,
+            );
+          }
+        }
+      });
+
+      if (normalizedCount > 0) {
+        console.log(`memory-lancedb-pro: normalized ${normalizedCount} legacy second timestamp row(s)`);
+      }
+    } catch (err) {
+      console.warn("memory-lancedb-pro: could not normalize legacy second timestamps:", err);
+      if (String(err).includes("Durable backup saved at")) {
+        throw err;
+      }
+    }
+  }
+
+  private writeLegacyTimestampBackfillBackup(row: Record<string, unknown>): string {
+    const backupDir = join(this.config.dbPath, ".legacy-timestamp-backfill-backups");
+    mkdirSync(backupDir, { recursive: true });
+    const backupPath = join(backupDir, `${encodeURIComponent(String(row.id))}.json`);
+    writeFileSync(
+      backupPath,
+      `${JSON.stringify({ version: 1, createdAt: new Date().toISOString(), row }, null, 2)}\n`,
+      "utf8",
+    );
+    return backupPath;
+  }
+
+  private clearLegacyTimestampBackfillBackup(backupPath: string): void {
+    try {
+      unlinkSync(backupPath);
+    } catch (err: any) {
+      if (err?.code !== "ENOENT") {
+        console.warn(`memory-lancedb-pro: could not remove legacy timestamp backup ${backupPath}:`, err);
+      }
+    }
   }
 
   private async createFtsIndex(table: LanceDB.Table): Promise<void> {
@@ -529,9 +898,16 @@ export class MemoryStore {
     await this.ensureInitialized();
 
     // Filter out invalid entries（undefined, null, missing text/vector）
-    const validEntries = entries.filter(
-      (entry) => entry && entry.text && entry.text.length > 0 && entry.vector && entry.vector.length > 0
-    );
+    const validEntries = entries.filter((entry) => {
+      const candidate = entry as { text?: unknown; vector?: unknown };
+      return (
+        !!candidate &&
+        typeof candidate.text === "string" &&
+        candidate.text.length > 0 &&
+        Array.isArray(candidate.vector) &&
+        candidate.vector.length > 0
+      );
+    });
 
     // Early return for empty array（skip accumulation）
     if (validEntries.length === 0) {
@@ -544,7 +920,7 @@ export class MemoryStore {
       id: randomUUID(),
       timestamp: Date.now(),
       metadata: entry.metadata || "{}",
-    }));
+    }) as MemoryEntry);
 
     // 【MR2 fix】當 pendingBatch 達到上限時，等待前一個 flush 完成後再加入
     // 這確保 pendingBatch 有上限，不會无限增长
@@ -851,9 +1227,7 @@ export class MemoryStore {
       ...entry,
       scope: entry.scope || "global",
       importance: Number.isFinite(entry.importance) ? entry.importance : 0.7,
-      timestamp: Number.isFinite(entry.timestamp)
-        ? entry.timestamp
-        : Date.now(),
+      timestamp: normalizeMemoryTimestamp(entry.timestamp),
       metadata: entry.metadata || "{}",
     };
 
@@ -907,7 +1281,7 @@ export class MemoryStore {
       category: row.category as MemoryEntry["category"],
       scope: rowScope,
       importance: Number(row.importance),
-      timestamp: Number(row.timestamp),
+      timestamp: normalizeMemoryTimestamp(row.timestamp, 0),
       metadata: (row.metadata as string) || "{}",
     };
   }
@@ -961,7 +1335,7 @@ export class MemoryStore {
         category: row.category as MemoryEntry["category"],
         scope: rowScope,
         importance: Number(row.importance),
-        timestamp: Number(row.timestamp),
+        timestamp: normalizeMemoryTimestamp(row.timestamp, 0),
         metadata: (row.metadata as string) || "{}",
       };
 
@@ -1039,7 +1413,7 @@ export class MemoryStore {
             category: row.category as MemoryEntry["category"],
             scope: rowScope,
             importance: Number(row.importance),
-            timestamp: Number(row.timestamp),
+            timestamp: normalizeMemoryTimestamp(row.timestamp, 0),
             metadata: (row.metadata as string) || "{}",
         };
 
@@ -1103,7 +1477,7 @@ export class MemoryStore {
         category: row.category as MemoryEntry["category"],
         scope: rowScope,
         importance: Number(row.importance),
-        timestamp: Number(row.timestamp),
+        timestamp: normalizeMemoryTimestamp(row.timestamp, 0),
         metadata: (row.metadata as string) || "{}",
       };
 
@@ -1199,8 +1573,6 @@ export class MemoryStore {
 
     if (isExplicitDenyAllScopeFilter(scopeFilter)) return [];
 
-    let query = this.table!.query();
-
     // Build where conditions
     const conditions: string[] = [];
 
@@ -1215,13 +1587,13 @@ export class MemoryStore {
       conditions.push(`category = '${escapeSqlLiteral(category)}'`);
     }
 
-    if (conditions.length > 0) {
-      query = query.where(conditions.join(" AND "));
-    }
+    const applyConditions = (query: any) =>
+      conditions.length > 0 ? query.where(conditions.join(" AND ")) : query;
 
     // Fetch all matching rows (no pre-limit) so app-layer sort is correct across full dataset
-    const results = await query
-      .select([
+    const results = await this.queryRowsWithProjectionFallback(
+      applyConditions,
+      [
         "id",
         "text",
         "category",
@@ -1229,8 +1601,8 @@ export class MemoryStore {
         "importance",
         "timestamp",
         "metadata",
-      ])
-      .toArray();
+      ],
+    );
 
     return results
       .map(
@@ -1241,12 +1613,30 @@ export class MemoryStore {
           category: row.category as MemoryEntry["category"],
           scope: (row.scope as string | undefined) ?? "global",
           importance: Number(row.importance),
-          timestamp: Number(row.timestamp),
+          timestamp: normalizeMemoryTimestamp(row.timestamp, 0),
           metadata: (row.metadata as string) || "{}",
         }),
       )
       .sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0))
       .slice(offset, offset + limit);
+  }
+
+  private async queryRowsWithProjectionFallback(
+    applyFilters: (query: any) => any,
+    columns: string[],
+  ): Promise<any[]> {
+    const projectedRows = await applyFilters(this.table!.query())
+      .select(columns)
+      .toArray();
+
+    if (projectedRows.length > 0) {
+      return projectedRows;
+    }
+
+    // Some LanceDB upgrades have returned empty projected metadata reads while
+    // the underlying table still has rows. Retry the identical query without
+    // projection so list/stats stay aligned with recall/vector reads.
+    return await applyFilters(this.table!.query()).toArray();
   }
 
   async stats(scopeFilter?: string[]): Promise<{
@@ -1264,16 +1654,21 @@ export class MemoryStore {
       };
     }
 
-    let query = this.table!.query();
-
+    const conditions: string[] = [];
     if (scopeFilter && scopeFilter.length > 0) {
       const scopeConditions = scopeFilter
         .map((scope) => `scope = '${escapeSqlLiteral(scope)}'`)
         .join(" OR ");
-      query = query.where(`((${scopeConditions}) OR scope IS NULL)`);
+      conditions.push(`((${scopeConditions}) OR scope IS NULL)`);
     }
 
-    const results = await query.select(["scope", "category"]).toArray();
+    const applyConditions = (query: any) =>
+      conditions.length > 0 ? query.where(conditions.join(" AND ")) : query;
+
+    const results = await this.queryRowsWithProjectionFallback(
+      applyConditions,
+      ["scope", "category"],
+    );
 
     const scopeCounts: Record<string, number> = {};
     const categoryCounts: Record<string, number> = {};
@@ -1373,7 +1768,7 @@ export class MemoryStore {
         category: row.category as MemoryEntry["category"],
         scope: rowScope,
         importance: Number(row.importance),
-        timestamp: Number(row.timestamp),
+        timestamp: normalizeMemoryTimestamp(row.timestamp, 0),
         metadata: (row.metadata as string) || "{}",
       };
 
@@ -1472,8 +1867,8 @@ export class MemoryStore {
       conditions.push(`(${scopeConditions})`);
     }
 
-    if (beforeTimestamp) {
-      conditions.push(`timestamp < ${beforeTimestamp}`);
+    if (beforeTimestamp != null) {
+      conditions.push(timestampBeforePredicate("timestamp", beforeTimestamp));
     }
 
     if (conditions.length === 0) {
@@ -1558,7 +1953,7 @@ export class MemoryStore {
   ): Promise<MemoryEntry[]> {
     await this.ensureInitialized();
 
-    const conditions: string[] = [`timestamp < ${maxTimestamp}`];
+    const conditions: string[] = [timestampBeforePredicate("timestamp", maxTimestamp)];
 
     if (scopeFilter && scopeFilter.length > 0) {
       const scopeConditions = scopeFilter
@@ -1584,7 +1979,7 @@ export class MemoryStore {
           category: row.category as MemoryEntry["category"],
           scope: (row.scope as string | undefined) ?? "global",
           importance: Number(row.importance),
-          timestamp: Number(row.timestamp),
+          timestamp: normalizeMemoryTimestamp(row.timestamp, 0),
           metadata: (row.metadata as string) || "{}",
         }),
       );

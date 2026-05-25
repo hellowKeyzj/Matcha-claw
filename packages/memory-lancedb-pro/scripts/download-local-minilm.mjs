@@ -11,7 +11,6 @@ const pluginRoot = dirname(__dirname);
 const MODEL_ID = "Xenova/all-MiniLM-L6-v2";
 const MODELS_ROOT = join(pluginRoot, "models");
 const MODEL_DIR = join(MODELS_ROOT, ...MODEL_ID.split("/"));
-const MODEL_ONNX = join(MODEL_DIR, "onnx", "model.onnx");
 const DTYPE = "fp32";
 
 const args = new Set(process.argv.slice(2));
@@ -87,12 +86,12 @@ async function main() {
     await rm(MODEL_DIR, { recursive: true, force: true });
   }
 
-  if (!checkOnly && !existsSync(MODEL_ONNX)) {
+  if (!checkOnly && !existsSync(MODEL_DIR)) {
     await downloadModel();
   } else if (checkOnly) {
     console.log(`[minilm] Checking local model at ${MODEL_DIR}`);
   } else {
-    console.log(`[minilm] Reusing existing local model at ${MODEL_ONNX}`);
+    console.log(`[minilm] Reusing existing local model at ${MODEL_DIR}`);
   }
 
   await verifyLocalModel();

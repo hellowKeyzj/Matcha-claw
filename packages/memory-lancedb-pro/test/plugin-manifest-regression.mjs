@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import http from "node:http";
 import Module from "node:module";
 import { tmpdir } from "node:os";
@@ -105,6 +105,15 @@ assert.equal(
   true,
   "embedding.chunking schema default should match runtime default",
 );
+assert.ok(
+  manifest.configSchema.properties.embedding.properties.provider.enum.includes("local-minilm"),
+  "embedding.provider schema should include local-minilm",
+);
+assert.equal(
+  manifest.configSchema.properties.embedding.required,
+  undefined,
+  "embedding.apiKey should not be globally required because local-minilm is keyless",
+);
 assert.equal(
   manifest.configSchema.properties.embedding.properties.omitDimensions?.type,
   "boolean",
@@ -128,14 +137,6 @@ assert.ok(
   manifest.configSchema.properties.retrieval.properties.rerankProvider.enum.includes("tei"),
   "rerankProvider schema should include tei",
 );
-assert.ok(
-  manifest.configSchema.properties.embedding.properties.provider.enum.includes("local-minilm"),
-  "embedding.provider schema should include local-minilm",
-);
-assert.ok(
-  !manifest.configSchema.properties.embedding.required,
-  "embedding.apiKey should not be globally required because local-minilm is keyless",
-);
 
 assert.equal(
   manifest.version,
@@ -143,9 +144,28 @@ assert.equal(
   "openclaw.plugin.json version should stay aligned with package.json",
 );
 assert.equal(
+  manifest.hooks?.allowConversationAccess,
+  true,
+  "openclaw.plugin.json should declare conversation hook access for non-bundled OpenClaw plugins",
+);
+assert.equal(
   pkg.dependencies["apache-arrow"],
   "18.1.0",
   "package.json should declare apache-arrow directly so OpenClaw plugin installs do not miss the LanceDB runtime dependency",
+);
+assert.ok(
+  pkg.dependencies["@huggingface/transformers"],
+  "package.json should declare @huggingface/transformers for local-minilm embeddings",
+);
+assert.deepEqual(
+  pkg.openclaw?.extensions,
+  ["./index.ts"],
+  "package.json should expose the source extension entry for local development",
+);
+assert.deepEqual(
+  pkg.openclaw?.runtimeExtensions,
+  ["./dist/index.js"],
+  "package.json should expose the built runtime extension entry for installed packages",
 );
 
 const workDir = mkdtempSync(path.join(tmpdir(), "memory-plugin-regression-"));
@@ -153,9 +173,10 @@ const services = [];
 const embeddingRequests = [];
 
 try {
+  const startupDbPath = path.join(workDir, "db");
   const api = createMockApi(
     {
-      dbPath: path.join(workDir, "db"),
+      dbPath: startupDbPath,
       autoRecall: false,
       embedding: {
         provider: "openai-compatible",
@@ -168,7 +189,13 @@ try {
     { services },
   );
   resetRegistration();
+  assert.equal(existsSync(startupDbPath), false, "test dbPath should start missing");
   plugin.register(api);
+  assert.equal(
+    existsSync(startupDbPath),
+    false,
+    "plugin registration should not synchronously create or validate dbPath",
+  );
   assert.equal(services.length, 1, "plugin should register its background service");
   assert.equal(typeof api.hooks.agent_end, "function", "autoCapture should remain enabled by default");
   assert.equal(typeof api.hooks["command:new"], "function", "selfImprovement command:new hook should be registered by default (#391)");
@@ -224,25 +251,6 @@ try {
     typeof sessionEnabledApi.hooks["command:new"],
     "function",
     "command:new hook should be registered (selfImprovement default-on since #391)",
-  );
-
-  const localMiniLmApi = createMockApi(
-    {
-      dbPath: path.join(workDir, "db-local-minilm"),
-      autoCapture: false,
-      autoRecall: false,
-      smartExtraction: false,
-      embedding: {
-        provider: "local-minilm",
-        model: "all-MiniLM-L6-v2",
-        dimensions: 384,
-      },
-    },
-    { services: [] },
-  );
-  assert.doesNotThrow(
-    () => plugin.register(localMiniLmApi),
-    "plugin should accept local-minilm configs without embedding.apiKey",
   );
 
   const longText = `${"Long embedding payload. ".repeat(420)}tail`;

@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, existsSync, lstatSync } from "node:fs";
+import { mkdtempSync, rmSync, existsSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import jitiFactory from "jiti";
@@ -26,11 +26,11 @@ function makeEntry(i) {
 }
 
 describe("Cross-process file lock", () => {
-  it("does not leave .memory-write.lock behind after a successful write", async () => {
+  it("creates .memory-write.lock file on first write", async () => {
     const { store, dir } = makeStore();
     try {
       await store.store(makeEntry(1));
-      assert.strictEqual(existsSync(join(dir, ".memory-write.lock")), false);
+      assert.ok(existsSync(join(dir, ".memory-write.lock")), "lock file should exist");
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -112,31 +112,34 @@ describe("Cross-process file lock", () => {
 
       const all = await store.list(undefined, undefined, 20, 0);
       assert.strictEqual(all.length, 2, "should have 2 entries after store+store+delete+store");
-      assert.strictEqual(existsSync(join(dir, ".memory-write.lock")), false);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
   });
 
-  it("creates .memory-write.lock as a directory while an operation is holding the lock", async () => {
-    const { dir } = makeStore();
+  it("does not treat persistent lock target file as stale lock artifact", async () => {
+    const { store, dir } = makeStore();
+    const lockTarget = join(dir, ".memory-write.lock");
+    const oldTime = new Date(Date.now() - 10 * 60 * 1000);
+    const warnings = [];
+    const originalWarn = console.warn;
 
     try {
-      const lockfileModule = await import("proper-lockfile");
-      const lockfile = lockfileModule.default ?? lockfileModule;
-      const lockPath = join(dir, ".memory-write.lock");
+      writeFileSync(lockTarget, "");
+      utimesSync(lockTarget, oldTime, oldTime);
+      console.warn = (...args) => {
+        warnings.push(args.join(" "));
+      };
 
-      const release = await lockfile.lock(dir, {
-        lockfilePath: lockPath,
-        stale: 10000,
-        retries: 0,
-      });
+      await store.store(makeEntry(1));
 
-      assert.strictEqual(existsSync(lockPath), true);
-      assert.strictEqual(lstatSync(lockPath).isDirectory(), true);
-      await release();
-      assert.strictEqual(existsSync(lockPath), false);
+      assert.ok(existsSync(lockTarget), "persistent lock target file should remain");
+      assert.ok(
+        !warnings.some((message) => message.includes("cleared stale lock")),
+        "old lock target file should not emit stale-lock cleanup warnings",
+      );
     } finally {
+      console.warn = originalWarn;
       rmSync(dir, { recursive: true, force: true });
     }
   });

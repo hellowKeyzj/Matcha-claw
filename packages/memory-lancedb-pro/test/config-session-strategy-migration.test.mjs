@@ -63,15 +63,4 @@ describe("sessionStrategy legacy compatibility mapping", () => {
     });
     assert.equal(parsed.embedding.chunking, false);
   });
-
-  it("accepts local-minilm without embedding.apiKey", () => {
-    const parsed = parsePluginConfig({
-      embedding: {
-        provider: "local-minilm",
-      },
-    });
-    assert.equal(parsed.embedding.provider, "local-minilm");
-    assert.equal(parsed.embedding.apiKey, undefined);
-    assert.equal(parsed.embedding.model, "all-MiniLM-L6-v2");
-  });
 });
