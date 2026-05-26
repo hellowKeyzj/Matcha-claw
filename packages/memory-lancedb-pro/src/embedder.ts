@@ -10,6 +10,8 @@
 
 import OpenAI from "openai";
 import { createHash } from "node:crypto";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { smartChunk } from "./chunker.js";
 
 // ============================================================================
@@ -106,6 +108,9 @@ export type EmbeddingProvider = "openai-compatible" | "azure-openai" | "local-mi
 
 export const LOCAL_MINILM_CANONICAL_MODEL = "Xenova/all-MiniLM-L6-v2";
 
+const LOCAL_MINILM_MODELS_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "models");
+const LOCAL_MINILM_DTYPE = "fp32";
+
 export interface EmbeddingConfig {
   provider: EmbeddingProvider;
   apiVersion?: string;
@@ -170,7 +175,6 @@ const EMBEDDING_DIMENSIONS: Record<string, number> = {
   "bge-m3": 1024,
   "BAAI/bge-m3": 1024,
   [LOCAL_MINILM_CANONICAL_MODEL]: 384,
-  "all-MiniLM-L6-v2": 384,
   "all-mpnet-base-v2": 512,
 
   // Jina v5
@@ -622,8 +626,16 @@ export class Embedder {
    */
   private async getLocalPipeline(): Promise<TransformersPipeline> {
     if (!this._localPipelinePromise) {
-      this._localPipelinePromise = import("@huggingface/transformers").then(async ({ pipeline }) => {
-        return await pipeline("feature-extraction", this._model) as TransformersPipeline;
+      this._localPipelinePromise = import("@huggingface/transformers").then(async ({ env, pipeline }) => {
+        env.allowLocalModels = true;
+        env.allowRemoteModels = false;
+        env.localModelPath = LOCAL_MINILM_MODELS_ROOT;
+        env.cacheDir = LOCAL_MINILM_MODELS_ROOT;
+        return await pipeline("feature-extraction", this._model, {
+          cache_dir: LOCAL_MINILM_MODELS_ROOT,
+          local_files_only: true,
+          dtype: LOCAL_MINILM_DTYPE,
+        }) as TransformersPipeline;
       });
     }
     return this._localPipelinePromise;

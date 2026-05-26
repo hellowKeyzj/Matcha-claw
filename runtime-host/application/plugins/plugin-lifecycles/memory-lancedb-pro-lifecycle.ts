@@ -2,7 +2,7 @@ import type { RuntimePluginLifecycle } from '../plugin-lifecycle-types';
 
 const MEMORY_PLUGIN_ID = 'memory-lancedb-pro';
 const LOCAL_MINILM_PROVIDER = 'local-minilm';
-const LOCAL_MINILM_MODEL = 'all-MiniLM-L6-v2';
+const LOCAL_MINILM_MODEL = 'Xenova/all-MiniLM-L6-v2';
 const DEFAULT_EXTRACT_MAX_CHARS = 8000;
 const DEFAULT_EXTRACT_MIN_MESSAGES = 5;
 const DEFAULT_AUTO_RECALL_MIN_LENGTH = 5;

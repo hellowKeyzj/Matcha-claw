@@ -26,6 +26,7 @@
   "license": "MIT",
   "files": [
     "dist/**/*",
+    "models/**/*",
     "openclaw.plugin.json",
     "README*.md",
     "CHANGELOG*.md",
@@ -57,7 +58,7 @@
   },
   "openclaw": {
     "extensions": [
-      "./index.ts"
+      "./dist/index.js"
     ],
     "runtimeExtensions": [
       "./dist/index.js"

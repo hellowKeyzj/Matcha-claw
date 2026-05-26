@@ -56,7 +56,7 @@ export const EMBEDDING_CONTEXT_LIMITS: Record<string, number> = {
 
   // Local/common
   "nomic-embed-text": 8192,
-  "all-MiniLM-L6-v2": 512,
+  "Xenova/all-MiniLM-L6-v2": 512,
   "all-mpnet-base-v2": 512,
 };
 
