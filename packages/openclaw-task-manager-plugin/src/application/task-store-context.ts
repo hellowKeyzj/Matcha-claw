@@ -1,4 +1,4 @@
-import type { OpenClawPluginApi } from 'openclaw/plugin-sdk'
+import type { OpenClawPluginApi } from 'openclaw/plugin-sdk/plugin-entry'
 import { join } from 'node:path'
 import { TaskStore } from '../infrastructure/session-task-store.js'
 import { TodoStore } from '../infrastructure/todo-store.js'

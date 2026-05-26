@@ -1,4 +1,4 @@
-import type { OpenClawPluginApi } from 'openclaw/plugin-sdk'
+import type { OpenClawPluginApi } from 'openclaw/plugin-sdk/plugin-entry'
 import { TaskStoreError, mapTaskStoreError } from '../shared/errors.js'
 import { toNonEmptyString } from '../shared/params.js'
 import { executeTaskOutput, executeTaskStop } from './background-task-tools.js'

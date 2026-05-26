@@ -1,4 +1,4 @@
-import type { OpenClawPluginApi, TaskRunCancelResult, TaskRunDetail } from 'openclaw/plugin-sdk'
+import type { OpenClawPluginApi } from 'openclaw/plugin-sdk/plugin-entry'
 import { taskOutputParameters, taskStopParameters } from '../schemas/task-store-schema.js'
 import { toNonEmptyString } from '../shared/params.js'
 
@@ -8,6 +8,8 @@ type ToolContext = {
   deliveryContext?: unknown
 }
 type TaskRunsRuntime = ReturnType<OpenClawPluginApi['runtime']['tasks']['runs']['fromToolContext']>
+type TaskRunDetail = NonNullable<ReturnType<TaskRunsRuntime['resolve']>>
+type TaskRunCancelResult = Awaited<ReturnType<TaskRunsRuntime['cancel']>>
 
 function asJsonText(value: unknown): string {
   return JSON.stringify(value, null, 2)

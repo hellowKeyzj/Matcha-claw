@@ -1,4 +1,4 @@
-import type { OpenClawPluginApi } from 'openclaw/plugin-sdk'
+import type { OpenClawPluginApi } from 'openclaw/plugin-sdk/plugin-entry'
 import type { TaskItem, TodoItem } from '../domain/task-item.js'
 import { taskCreateParameters } from '../schemas/task-create-schema.js'
 import { taskGetParameters, taskListParameters, todoGetParameters, todoWriteParameters } from '../schemas/task-store-schema.js'

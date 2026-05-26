@@ -2,6 +2,21 @@
   "id": "task-manager",
   "name": "Task Manager",
   "description": "Claude-style persistent task list and scheduling plugin.",
+  "activation": {
+    "onStartup": true
+  },
+  "contracts": {
+    "tools": [
+      "TaskCreate",
+      "TaskUpdate",
+      "TaskList",
+      "TaskGet",
+      "TodoWrite",
+      "TodoGet",
+      "TaskOutput",
+      "TaskStop"
+    ]
+  },
   "configSchema": {
     "type": "object",
     "additionalProperties": false,

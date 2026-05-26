@@ -1,4 +1,4 @@
-import type { OpenClawPluginApi } from 'openclaw/plugin-sdk'
+import type { OpenClawPluginApi } from 'openclaw/plugin-sdk/plugin-entry'
 import type { TaskItem, TodoItem } from '../domain/task-item.js'
 import { getStore, getTodoStore, resolveTaskScope, resolveTodoScopeKey } from './task-store-context.js'
 
