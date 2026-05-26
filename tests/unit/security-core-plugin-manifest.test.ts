@@ -30,16 +30,23 @@ describe('security-core 插件规范对齐', () => {
   it('manifest 具备稳定发现/升级所需关键字段', () => {
     expect(pluginManifest.version).toBe(packageJson.version);
     expect(pluginManifest.category).toBe('security');
+    expect(pluginManifest.activation).toEqual({
+      onStartup: true,
+      onCapabilities: ['hook'],
+    });
     expect(pluginManifest.configSchema).toMatchObject({
       type: "object",
       additionalProperties: false,
     });
   });
 
-  it('package 扩展入口仍指向规范的单一入口文件', () => {
-    const openclawMeta = packageJson.openclaw as { extensions?: unknown } | undefined;
-    expect(Array.isArray(openclawMeta?.extensions)).toBe(true);
-    expect(openclawMeta?.extensions).toContain('./dist/index.js');
+  it('package 扩展入口声明源码入口和构建后运行时入口', () => {
+    const openclawMeta = packageJson.openclaw as {
+      extensions?: unknown;
+      runtimeExtensions?: unknown;
+    } | undefined;
+    expect(openclawMeta?.extensions).toEqual(['./src/index.ts']);
+    expect(openclawMeta?.runtimeExtensions).toEqual(['./dist/index.js']);
     expect(typeof plugin.register).toBe('function');
   });
 });

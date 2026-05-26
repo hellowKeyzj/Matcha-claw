@@ -4,6 +4,10 @@
   "version": "0.1.0",
   "category": "security",
   "description": "Standalone security plugin based on SecureClaw original code with trimmed runtime guard.",
+  "activation": {
+    "onStartup": true,
+    "onCapabilities": ["hook"]
+  },
   "configSchema": {
     "type": "object",
     "additionalProperties": false,
