@@ -11,6 +11,9 @@
   },
   "openclaw": {
     "extensions": [
+      "./src/index.ts"
+    ],
+    "runtimeExtensions": [
       "./dist/index.js"
     ]
   },

@@ -1,7 +1,4 @@
-import {
-  parseGeminiAuth,
-  resolveApiKeyForProvider,
-} from 'openclaw/plugin-sdk/image-generation-core'
+import { resolveApiKeyForProvider } from 'openclaw/plugin-sdk/provider-auth-runtime'
 import { resolveProviderHttpRequestConfig } from 'openclaw/plugin-sdk/provider-http'
 import {
   findConfiguredModel,
@@ -92,7 +89,10 @@ export function resolveProviderHttpRuntime(
 }
 
 export function resolveGoogleHeaders(apiKey: string): Record<string, string> {
-  return parseGeminiAuth(apiKey).headers
+  return {
+    'x-goog-api-key': apiKey,
+    'Content-Type': 'application/json',
+  }
 }
 
 export function ensureSupportedProtocol(provider: CustomMediaProviderConfig): void {

@@ -6,13 +6,7 @@ const fetchWithTimeoutGuardedMock = vi.fn();
 const assertOkOrThrowHttpErrorMock = vi.fn();
 const resolveProviderHttpRequestConfigMock = vi.fn();
 
-vi.mock('openclaw/plugin-sdk/image-generation-core', () => ({
-  parseGeminiAuth: (apiKey: string) => ({
-    headers: {
-      'x-goog-api-key': apiKey,
-      'Content-Type': 'application/json',
-    },
-  }),
+vi.mock('openclaw/plugin-sdk/provider-auth-runtime', () => ({
   resolveApiKeyForProvider: resolveApiKeyForProviderMock,
 }));
 

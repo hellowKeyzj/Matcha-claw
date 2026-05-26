@@ -46,6 +46,7 @@ export const generateGoogleImage: ImageProtocolHandler = async ({
     timeoutMs,
     fetchFn: fetch,
     allowPrivateNetwork: http.allowPrivateNetwork,
+    ssrfPolicy: req.ssrfPolicy,
     dispatcherPolicy: http.dispatcherPolicy,
   })
   try {

@@ -2,6 +2,10 @@
   "id": "matchaclaw-media",
   "name": "MatchaClaw Media",
   "description": "Custom media generation providers configured by MatchaClaw.",
+  "activation": {
+    "onStartup": false
+  },
+  "providers": ["matchaclaw-media"],
   "contracts": {
     "imageGenerationProviders": ["matchaclaw-media"]
   },
