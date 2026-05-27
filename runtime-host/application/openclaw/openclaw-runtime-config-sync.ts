@@ -57,6 +57,34 @@ function markRestartCommand(config: Record<string, unknown>): void {
   config.commands = commands;
 }
 
+function syncOfficialBrowserDenylist(config: Record<string, unknown>, shouldDeny: boolean): void {
+  const plugins = (
+    config.plugins && typeof config.plugins === 'object'
+      ? { ...(config.plugins as Record<string, unknown>) }
+      : {}
+  ) as Record<string, unknown>;
+  const deny = Array.isArray(plugins.deny)
+    ? (plugins.deny as unknown[]).filter((value): value is string => typeof value === 'string')
+    : [];
+  const nextDeny = deny.filter((pluginId) => pluginId !== 'browser');
+
+  if (shouldDeny) {
+    nextDeny.push('browser');
+  }
+
+  if (nextDeny.length > 0) {
+    plugins.deny = nextDeny;
+  } else {
+    delete plugins.deny;
+  }
+
+  if (Object.keys(plugins).length > 0) {
+    config.plugins = plugins;
+  } else {
+    delete config.plugins;
+  }
+}
+
 export async function syncGatewayTokenToConfig(
   configRepository: OpenClawConfigRepositoryPort,
   token: string,
@@ -160,13 +188,14 @@ export async function syncBrowserModeToOpenClaw(
         : {}
     ) as Record<string, unknown>;
 
-    browser.enabled = browserMode !== 'off';
+    browser.enabled = browserMode === 'native';
     if (browserMode === 'native') {
       browser.defaultProfile = 'openclaw';
     } else {
       delete browser.defaultProfile;
     }
     applyDefaultBrowserSsrfPolicy(browser);
+    syncOfficialBrowserDenylist(config, browserMode !== 'native');
 
     const currentEnabledPluginIds = await readManuallyEnabledPluginIdsFromOpenClawConfig(configRepository, pluginFileSystem, config);
     const currentManagedPluginIds = await readManuallyManagedPluginIdsFromConfig(configRepository, pluginFileSystem, config);
@@ -174,7 +203,11 @@ export async function syncBrowserModeToOpenClaw(
       (pluginId) => pluginId !== 'browser' && pluginId !== 'browser-relay',
     );
     for (const pluginId of currentManagedPluginIds) {
-      if (!nextEnabledPluginIds.includes(pluginId)) {
+      if (
+        pluginId !== 'browser'
+        && pluginId !== 'browser-relay'
+        && !nextEnabledPluginIds.includes(pluginId)
+      ) {
         nextEnabledPluginIds.push(pluginId);
       }
     }

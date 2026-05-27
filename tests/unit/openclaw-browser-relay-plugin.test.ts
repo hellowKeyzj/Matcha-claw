@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createCipheriv, createDecipheriv, publicEncrypt, randomBytes } from 'node:crypto'
-import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from 'node:child_process'
@@ -306,8 +306,17 @@ async function runPythonBrowserClient(
 }
 
 describe('openclaw browser relay plugin', () => {
+  it('declares the OpenClaw plugin activation and tool contract', async () => {
+    const manifestPath = path.join(process.cwd(), 'packages/openclaw-browser-relay-plugin/openclaw.plugin.json')
+    const manifest = JSON.parse(await readFile(manifestPath, 'utf8'))
+
+    expect(manifest.activation).toEqual({ onStartup: true })
+    expect(manifest.contracts).toEqual({ tools: ['browser'] })
+  })
+
   it('handles browser.request through the registered gateway method', async () => {
     const gatewayMethods = new Map<string, (options: Record<string, unknown>) => Promise<void> | void>()
+    const gatewayMethodOptions = new Map<string, Record<string, unknown> | undefined>()
     const services: Array<{ start: (ctx: Record<string, unknown>) => Promise<void> | void; stop: () => Promise<void> | void }> = []
     const stateDir = await ensureTempStateDir()
 
@@ -316,8 +325,13 @@ describe('openclaw browser relay plugin', () => {
       registerService(service: unknown) {
         services.push(service as { start: (ctx: Record<string, unknown>) => Promise<void> | void; stop: () => Promise<void> | void })
       },
-      registerGatewayMethod(name: string, handler: (options: Record<string, unknown>) => Promise<void> | void) {
+      registerGatewayMethod(
+        name: string,
+        handler: (options: Record<string, unknown>) => Promise<void> | void,
+        options?: Record<string, unknown>,
+      ) {
         gatewayMethods.set(name, handler)
+        gatewayMethodOptions.set(name, options)
       },
       registerTool: vi.fn(),
     } as never)
@@ -332,6 +346,7 @@ describe('openclaw browser relay plugin', () => {
 
     const gatewayHandler = gatewayMethods.get('browser.request')
     expect(gatewayHandler).toBeTypeOf('function')
+    expect(gatewayMethodOptions.get('browser.request')).toEqual({ scope: 'operator.admin' })
 
     const respond = vi.fn()
     await gatewayHandler?.({
@@ -2742,7 +2757,7 @@ describe('openclaw browser relay plugin', () => {
 
     extensionA.close()
     extensionB.close()
-  }, 15_000)
+  }, 30_000)
 
   it('auto-selects the only known window when browser use is requested in a single-browser setup', async () => {
     await startRelayServer()

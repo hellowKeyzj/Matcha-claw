@@ -429,12 +429,13 @@ describe('openclaw plugin config service', () => {
       browser: { enabled?: boolean; defaultProfile?: string };
       plugins: {
         allow: string[];
+        deny: string[];
         entries: Record<string, { enabled?: boolean }>;
       };
     };
 
     expect(nextConfig.browser).toEqual({
-      enabled: true,
+      enabled: false,
       ssrfPolicy: {
         dangerouslyAllowPrivateNetwork: true,
       },
@@ -442,8 +443,65 @@ describe('openclaw plugin config service', () => {
     expect(nextConfig.plugins.allow).toContain('browser-relay');
     expect(nextConfig.plugins.allow).toContain('task-manager');
     expect(nextConfig.plugins.allow).not.toContain('browser');
+    expect(nextConfig.plugins.deny).toContain('browser');
     expect(nextConfig.plugins.entries.browser).toMatchObject({ enabled: false });
     expect(nextConfig.plugins.entries['browser-relay']).toMatchObject({ enabled: true });
+    expect(nextConfig.plugins.entries['task-manager']).toMatchObject({ enabled: true });
+  });
+
+  it('同步 browserMode=native 时会恢复 bundled browser 并移除官方 browser deny', async () => {
+    const browserPluginDir = join(openclawDir, 'dist', 'extensions', 'browser');
+    mkdirSync(browserPluginDir, { recursive: true });
+    writeFileSync(join(browserPluginDir, 'openclaw.plugin.json'), JSON.stringify({
+      id: 'browser',
+      enabledByDefault: true,
+    }, null, 2));
+    writeFileSync(join(configDir, 'openclaw.json'), JSON.stringify({
+      browser: {
+        enabled: false,
+      },
+      plugins: {
+        allow: ['browser-relay', 'task-manager'],
+        deny: ['browser', 'unit-disabled'],
+        entries: {
+          browser: { enabled: false },
+          'browser-relay': { enabled: true },
+          'task-manager': { enabled: true },
+        },
+      },
+    }, null, 2));
+
+    const { syncBrowserModeToOpenClaw } = await import('../../runtime-host/application/openclaw/openclaw-runtime-config-sync');
+
+    await syncBrowserModeToOpenClaw(
+      createConfigRepository(configDir, openclawDir),
+      createTestPluginFileSystem(),
+      'native',
+      createTestRuntimeLogger('openclaw-plugin-config-test'),
+    );
+
+    const nextConfig = JSON.parse(readFileSync(join(configDir, 'openclaw.json'), 'utf8')) as {
+      browser: { enabled?: boolean; defaultProfile?: string };
+      plugins: {
+        allow: string[];
+        deny: string[];
+        entries: Record<string, { enabled?: boolean }>;
+      };
+    };
+
+    expect(nextConfig.browser).toEqual({
+      enabled: true,
+      defaultProfile: 'openclaw',
+      ssrfPolicy: {
+        dangerouslyAllowPrivateNetwork: true,
+      },
+    });
+    expect(nextConfig.plugins.allow).toContain('task-manager');
+    expect(nextConfig.plugins.allow).not.toContain('browser');
+    expect(nextConfig.plugins.allow).not.toContain('browser-relay');
+    expect(nextConfig.plugins.deny).toEqual(['unit-disabled']);
+    expect(nextConfig.plugins.entries.browser).toMatchObject({ enabled: true });
+    expect(nextConfig.plugins.entries['browser-relay']).toMatchObject({ enabled: false });
     expect(nextConfig.plugins.entries['task-manager']).toMatchObject({ enabled: true });
   });
 

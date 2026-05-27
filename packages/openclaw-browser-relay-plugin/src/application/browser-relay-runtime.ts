@@ -1,6 +1,9 @@
-import type { OpenClawConfig, OpenClawPluginApi, PluginLogger } from 'openclaw/plugin-sdk'
-import { definePluginEntry } from 'openclaw/plugin-sdk/core'
-import type { GatewayRequestHandlerOptions } from 'openclaw/plugin-sdk/core'
+import {
+  definePluginEntry,
+  type OpenClawConfig,
+  type OpenClawPluginApi,
+  type PluginLogger,
+} from 'openclaw/plugin-sdk/plugin-entry'
 import type { BrowserActionParams } from '../browser-action-contract.js'
 import { BROWSER_RELAY_PLUGIN_DESCRIPTION, BROWSER_RELAY_PLUGIN_ID, BROWSER_RELAY_PLUGIN_NAME, DEFAULT_BROWSER_RELAY_PORT } from '../manifest.js'
 import { BrowserRelayServer } from '../relay/server.js'
@@ -9,6 +12,11 @@ import { createBrowserRelayTool } from './browser-relay-tool.js'
 
 type BrowserRelayPluginConfig = {
   port: number
+}
+
+type GatewayRequestOptions = {
+  params: Record<string, unknown>
+  respond: (success: boolean, data?: unknown, error?: { code: string; message: string }) => void
 }
 
 class BrowserRelayRuntime {
@@ -78,7 +86,7 @@ function resolvePluginConfig(config: OpenClawConfig | undefined): BrowserRelayPl
 }
 
 async function withGatewayGuard(
-  options: Pick<GatewayRequestHandlerOptions, 'respond'>,
+  options: Pick<GatewayRequestOptions, 'respond'>,
   task: () => Promise<unknown> | unknown,
 ): Promise<void> {
   try {
@@ -103,10 +111,12 @@ export function registerBrowserRelayRuntime(api: OpenClawPluginApi): void {
     },
   })
 
-  api.registerGatewayMethod('browser.request', async (options: GatewayRequestHandlerOptions) => {
+  api.registerGatewayMethod('browser.request', async (options: GatewayRequestOptions) => {
     await withGatewayGuard(options, async () => (
       runtime.requireControl().handleRequest(options.params as BrowserActionParams)
     ))
+  }, {
+    scope: 'operator.admin',
   })
 
   api.registerTool((toolCtx) =>

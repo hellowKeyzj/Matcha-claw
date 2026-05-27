@@ -4,6 +4,14 @@
   "version": "0.1.0",
   "category": "tools",
   "description": "Local Chrome extension relay service for browser control.",
+  "activation": {
+    "onStartup": true
+  },
+  "contracts": {
+    "tools": [
+      "browser"
+    ]
+  },
   "configSchema": {
     "type": "object",
     "additionalProperties": false,
