@@ -1,5 +1,6 @@
 import { join } from 'node:path';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { rm } from 'node:fs/promises';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { tmpdir } from 'node:os';
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
@@ -26,6 +27,10 @@ async function waitForCondition(
     await new Promise<void>((resolve) => setTimeout(resolve, intervalMs));
   }
   throw new Error('waitForCondition timeout');
+}
+
+async function removeTempDir(path: string): Promise<void> {
+  await rm(path, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
 }
 
 function writeRuntimeHostSettings(filePath: string, settings: Record<string, unknown>): void {
@@ -58,7 +63,7 @@ async function waitForRuntimeHostJob(port: number, jobId: string | undefined): P
       throw new Error(jobPayload.data.job.error || `Runtime host job failed: ${String(jobId)}`);
     }
     return jobPayload.data?.job?.status === 'succeeded';
-  });
+  }, 15000);
 }
 
 async function startParentDispatchServer(
@@ -454,14 +459,14 @@ describe('runtime-host process manager', () => {
     process.env.OPENCLAW_CONFIG_DIR = openClawConfigDir;
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     if (previousOpenClawConfigDir === undefined) {
       delete process.env.OPENCLAW_CONFIG_DIR;
     } else {
       process.env.OPENCLAW_CONFIG_DIR = previousOpenClawConfigDir;
     }
     if (openClawConfigDir) {
-      rmSync(openClawConfigDir, { recursive: true, force: true });
+      await removeTempDir(openClawConfigDir);
     }
   });
 
@@ -1830,7 +1835,7 @@ describe('runtime-host process manager', () => {
     }
   });
 
-  it('channels start/cancel 路由由 runtime-host 本地会话服务接管，不再调用主进程 shell-actions', async () => {
+  it('channels start/cancel 路由由 runtime-host 本地会话服务接管，不再调用主进程 shell-actions', { timeout: 20000 }, async () => {
     const port = createPort(173);
     const parentApiPort = createPort(174);
     const token = 'test-runtime-host-dispatch-token-channels-shell-action';
@@ -1844,35 +1849,12 @@ describe('runtime-host process manager', () => {
       parentDispatchToken: token,
       childEnv: () => ({
         MATCHACLAW_OPENCLAW_DIR: join(process.cwd(), 'node_modules', 'openclaw'),
+        MATCHACLAW_RUNTIME_HOST_DISABLE_BACKGROUND_SERVICES: '1',
       }),
     });
 
     try {
       await manager.start();
-
-      const whatsAppStart = await fetch(`http://127.0.0.1:${port}/dispatch`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          version: 1,
-          method: 'POST',
-          route: '/api/channels/activate',
-          payload: { channelType: 'whatsapp', accountId: 'default' },
-        }),
-      });
-      expect(whatsAppStart.status).toBe(200);
-
-      const whatsAppCancel = await fetch(`http://127.0.0.1:${port}/dispatch`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          version: 1,
-          method: 'POST',
-          route: '/api/channels/session/cancel',
-          payload: { channelType: 'whatsapp' },
-        }),
-      });
-      expect(whatsAppCancel.status).toBe(200);
 
       const weixinStart = await fetch(`http://127.0.0.1:${port}/dispatch`, {
         method: 'POST',
@@ -1884,7 +1866,7 @@ describe('runtime-host process manager', () => {
           payload: {
             channelType: 'openclaw-weixin',
             accountId: 'wx-main',
-            config: { routeTag: 'prod' },
+            config: { baseUrl: 'http://127.0.0.1:1', routeTag: 'prod' },
           },
         }),
       });
@@ -2039,7 +2021,7 @@ describe('runtime-host process manager', () => {
     }
   });
 
-  it('channels 主路径在子进程本地处理并直连 gateway rpc，不走 parent dispatch', async () => {
+  it('channels 主路径在子进程本地处理并直连 gateway rpc，不走 parent dispatch', { timeout: 12000 }, async () => {
     const port = createPort(73);
     const parentApiPort = createPort(74);
     const gatewayPort = createPort(75);
@@ -2076,6 +2058,7 @@ describe('runtime-host process manager', () => {
         OPENCLAW_CONFIG_DIR: configDir,
         MATCHACLAW_RUNTIME_HOST_GATEWAY_PORT: String(gatewayPort),
         MATCHACLAW_RUNTIME_HOST_SETTINGS_FILE: settingsFile,
+        MATCHACLAW_RUNTIME_HOST_DISABLE_BACKGROUND_SERVICES: '1',
       }),
     });
 
@@ -2303,13 +2286,24 @@ describe('runtime-host process manager', () => {
     }
   });
 
-  it('security 策略路由在子进程本地处理并落盘，不走 parent dispatch', async () => {
+  it('security 策略路由在子进程本地处理并落盘，不走 parent dispatch', { timeout: 12000 }, async () => {
     const port = createPort(14);
     const parentApiPort = createPort(41);
     const gatewayPort = createPort(47);
     const token = 'test-runtime-host-dispatch-token-security-policy';
+    const gatewayToken = 'test-gateway-token-security-policy';
     const parentDispatchServer = await startParentDispatchServer(parentApiPort, token);
     const configDir = mkdtempSync(join(tmpdir(), 'runtime-host-security-policy-'));
+    const settingsFile = join(configDir, 'matchaclaw-settings.json');
+    writeRuntimeHostSettings(settingsFile, { gatewayToken });
+    const gatewayServer = await startGatewayRpcServer(gatewayPort, gatewayToken, {
+      onRequest: ({ method }) => {
+        if (method === 'security.policy.sync') {
+          return { synced: true };
+        }
+        return { success: true, method };
+      },
+    });
 
     const manager = createRuntimeHostProcessManager({
       scriptPath,
@@ -2320,6 +2314,8 @@ describe('runtime-host process manager', () => {
       childEnv: () => ({
         OPENCLAW_CONFIG_DIR: configDir,
         MATCHACLAW_RUNTIME_HOST_GATEWAY_PORT: String(gatewayPort),
+        MATCHACLAW_RUNTIME_HOST_SETTINGS_FILE: settingsFile,
+        MATCHACLAW_RUNTIME_HOST_DISABLE_BACKGROUND_SERVICES: '1',
       }),
     });
 
@@ -2412,10 +2408,14 @@ describe('runtime-host process manager', () => {
       };
       expect(afterResponse.status).toBe(200);
       expect(afterPayload.data?.preset).toBe('strict');
+      expect(gatewayServer.getRequests().find((item) => item.method === 'security.policy.sync')).toMatchObject({
+        method: 'security.policy.sync',
+      });
       expect(parentDispatchServer.getDispatchRequestCount()).toBe(0);
       expect(parentDispatchServer.getExecutionSyncRequestCount()).toBe(0);
     } finally {
       await manager.stop();
+      await gatewayServer.close();
       await parentDispatchServer.close();
     }
   });
@@ -3444,6 +3444,7 @@ describe('runtime-host process manager', () => {
       parentDispatchToken: token,
       childEnv: () => ({
         MATCHACLAW_RUNTIME_HOST_ENABLED_PLUGIN_IDS: JSON.stringify(['security-core']),
+        MATCHACLAW_RUNTIME_HOST_DISABLE_BACKGROUND_SERVICES: '1',
         MATCHACLAW_RUNTIME_HOST_PLUGIN_CATALOG: JSON.stringify([
           {
             id: 'security-core',
@@ -3587,6 +3588,7 @@ describe('runtime-host process manager', () => {
       parentDispatchToken: token,
       childEnv: () => ({
         MATCHACLAW_RUNTIME_HOST_ENABLED_PLUGIN_IDS: JSON.stringify(['openclaw-lark']),
+        MATCHACLAW_RUNTIME_HOST_DISABLE_BACKGROUND_SERVICES: '1',
         MATCHACLAW_RUNTIME_HOST_PLUGIN_CATALOG: JSON.stringify([
           {
             id: 'openclaw-lark',

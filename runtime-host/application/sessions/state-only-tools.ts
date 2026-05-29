@@ -95,6 +95,9 @@ export function resolveToolRecordResultPayload(value: unknown): unknown {
   if (Object.prototype.hasOwnProperty.call(source, 'result')) {
     return source.result;
   }
+  if (Object.prototype.hasOwnProperty.call(source, 'output')) {
+    return source.output;
+  }
   if (Object.prototype.hasOwnProperty.call(source, 'partialResult')) {
     return source.partialResult;
   }
@@ -112,9 +115,12 @@ export function isStateOnlyToolCallSnapshotName(toolName: unknown): boolean {
   return isStateOnlyTaskToolCallSnapshotName(toolName);
 }
 
-export function isStateOnlyToolCard(value: unknown): boolean {
+export function isStateOnlyToolContentBlock(value: unknown): boolean {
   if (!isRecord(value)) {
     return false;
   }
-  return isStateOnlyToolName(value.name);
+  if (!isToolCallContentType(value.type) && !isToolResultContentType(value.type)) {
+    return false;
+  }
+  return isStateOnlyToolName(resolveToolRecordName(value));
 }

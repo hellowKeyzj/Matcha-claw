@@ -26,6 +26,7 @@ import {
   summarizeSnapshotForTodoToolDebug,
 } from './todo-tool-debug';
 import { findLatestAssistantTextFromItems } from './timeline-message';
+import { sanitizeCanonicalUserText } from './message-helpers';
 import { syncViewportState } from './viewport-state';
 
 export function toMs(ts: number): number {
@@ -257,27 +258,6 @@ function buildProtocolItemSignature(item: SessionRenderItem): string {
       buildAttachedFilesSignature(item.attachedFiles),
     ].join('|'));
   }
-  if (item.kind === 'task-completion') {
-    return hashStringDjb2([
-      item.key,
-      item.kind,
-      item.role,
-      item.createdAt ?? '',
-      item.updatedAt ?? '',
-      hashText(item.text),
-      item.childSessionKey,
-      item.childSessionId ?? '',
-      item.childAgentId ?? '',
-      item.taskLabel ?? '',
-      item.statusLabel ?? '',
-      item.result ?? '',
-      item.statsLine ?? '',
-      item.replyInstruction ?? '',
-      item.anchorItemKey ?? '',
-      item.triggerItemKey ?? '',
-      item.replyItemKey ?? '',
-    ].join('|'));
-  }
   const systemItem: SessionRenderSystemItem = item;
   return hashStringDjb2([
     systemItem.key,
@@ -289,6 +269,58 @@ function buildProtocolItemSignature(item: SessionRenderItem): string {
   ].join('|'));
 }
 
+function isPendingUserItem(item: SessionRenderItem): boolean {
+  if (item.kind !== 'user-message') {
+    return false;
+  }
+  const status = (item as { status?: unknown }).status;
+  return status === 'pending' || status === 'sending';
+}
+
+function buildUserConfirmationKey(item: SessionRenderItem): string | null {
+  if (item.kind !== 'user-message') {
+    return null;
+  }
+  const messageId = item.messageId?.trim();
+  if (messageId) {
+    return `message:${messageId}`;
+  }
+  const text = sanitizeCanonicalUserText(item.text).trim();
+  const createdAt = item.createdAt ?? null;
+  if (!text || createdAt == null) {
+    return null;
+  }
+  return `echo:${hashStringDjb2(text)}:${createdAt}`;
+}
+
+function dropReconciledOptimisticUserItems(
+  currentItems: SessionRenderItem[],
+  nextItems: SessionRenderItem[],
+): SessionRenderItem[] {
+  const pendingUserKeys = new Set(
+    currentItems.flatMap((item) => {
+      const key = buildUserConfirmationKey(item);
+      return key && isPendingUserItem(item) ? [key] : [];
+    }),
+  );
+  if (pendingUserKeys.size === 0) {
+    return nextItems;
+  }
+  const authoritativeUserKeys = new Set(
+    nextItems.flatMap((item) => {
+      const key = buildUserConfirmationKey(item);
+      return key && !isPendingUserItem(item) ? [key] : [];
+    }),
+  );
+  if (authoritativeUserKeys.size === 0) {
+    return nextItems;
+  }
+  return nextItems.filter((item) => {
+    const key = buildUserConfirmationKey(item);
+    return !key || !isPendingUserItem(item) || !pendingUserKeys.has(key) || !authoritativeUserKeys.has(key);
+  });
+}
+
 export function reconcileSessionItems(
   currentItems: SessionRenderItem[],
   nextItems: SessionRenderItem[],
@@ -296,16 +328,17 @@ export function reconcileSessionItems(
   if (currentItems === nextItems) {
     return currentItems;
   }
-  if (nextItems.length === 0) {
-    return currentItems.length === 0 ? currentItems : nextItems;
+  const canonicalNextItems = dropReconciledOptimisticUserItems(currentItems, nextItems);
+  if (canonicalNextItems.length === 0) {
+    return currentItems.length === 0 ? currentItems : canonicalNextItems;
   }
 
   const currentByKey = new Map(
     currentItems.map((item) => [item.key, item] as const),
   );
-  let changed = currentItems.length !== nextItems.length;
+  let changed = currentItems.length !== canonicalNextItems.length || canonicalNextItems.length !== nextItems.length;
 
-  const reconciled = nextItems.map((nextItem, index) => {
+  const reconciled = canonicalNextItems.map((nextItem, index) => {
     const currentItem = currentByKey.get(nextItem.key);
     if (!currentItem || currentItem.kind !== nextItem.kind) {
       changed = true;
@@ -373,32 +406,10 @@ export function buildItemHistoryFingerprint(
 }
 
 export function buildItemRenderFingerprint(items: SessionRenderItem[]): string {
-  const count = items.length;
-  if (count === 0) {
+  if (items.length === 0) {
     return hashStringDjb2('0');
   }
-  const first = items[0];
-  const last = items[count - 1];
-  const stride = Math.max(1, Math.floor(count / 8));
-  const parts: string[] = [
-    String(count),
-    String(stride),
-    first?.key ?? '',
-    String(first?.createdAt ?? ''),
-    last?.key ?? '',
-    String(last?.createdAt ?? ''),
-  ];
-  for (let index = 0; index < count; index += stride) {
-    const item = items[index];
-    parts.push([
-      item?.key ?? '',
-      item?.kind ?? '',
-      item?.role ?? '',
-      String(item?.createdAt ?? ''),
-      hashStringDjb2(safeStableStringify(item)),
-    ].join(':'));
-  }
-  return hashStringDjb2(parts.join('|'));
+  return hashStringDjb2(items.map(buildProtocolItemSignature).join('|'));
 }
 
 const EMPTY_ITEMS: SessionRenderItem[] = [];
@@ -462,14 +473,81 @@ export function createEmptySessionViewportState(): ChatSessionViewportState {
   return EMPTY_VIEWPORT_STATE;
 }
 
-export function resolveSessionRuntime(session: ChatSessionRecord | undefined): ChatSessionRuntimeState {
-  if (!session?.runtime) {
-    return createEmptySessionRuntime();
+function areSessionMetaEquivalent(left: ChatSessionMetaState, right: ChatSessionMetaState): boolean {
+  return left.agentId === right.agentId
+    && left.kind === right.kind
+    && left.preferred === right.preferred
+    && left.label === right.label
+    && left.titleSource === right.titleSource
+    && left.displayName === right.displayName
+    && left.model === right.model
+    && left.lastActivityAt === right.lastActivityAt
+    && left.historyStatus === right.historyStatus
+    && left.thinkingLevel === right.thinkingLevel;
+}
+
+function areSessionRuntimeEquivalent(left: ChatSessionRuntimeState, right: ChatSessionRuntimeState): boolean {
+  return left.activeRunId === right.activeRunId
+    && left.runPhase === right.runPhase
+    && left.activeTurnItemKey === right.activeTurnItemKey
+    && left.pendingTurnKey === right.pendingTurnKey
+    && left.pendingTurnLaneKey === right.pendingTurnLaneKey
+    && left.runtimeActivity === right.runtimeActivity
+    && left.lastUserMessageAt === right.lastUserMessageAt
+    && left.lastError === right.lastError
+    && safeStableStringify(left.lastIssue) === safeStableStringify(right.lastIssue)
+    && left.updatedAt === right.updatedAt;
+}
+
+function areSessionViewportEquivalent(left: ChatSessionViewportState, right: ChatSessionViewportState): boolean {
+  return left.totalItemCount === right.totalItemCount
+    && left.windowStartOffset === right.windowStartOffset
+    && left.windowEndOffset === right.windowEndOffset
+    && left.hasMore === right.hasMore
+    && left.hasNewer === right.hasNewer
+    && left.isLoadingMore === right.isLoadingMore
+    && left.isLoadingNewer === right.isLoadingNewer
+    && left.isAtLatest === right.isAtLatest
+    && left.anchorItemKey === right.anchorItemKey;
+}
+
+type ApprovalComparable = Omit<ApprovalItem, 'allowedDecisions'> & {
+  allowedDecisions: readonly ApprovalItem['allowedDecisions'][number][];
+};
+
+function areApprovalItemsEquivalent(left: ApprovalComparable, right: ApprovalComparable): boolean {
+  return left.id === right.id
+    && left.sessionKey === right.sessionKey
+    && left.runId === right.runId
+    && left.title === right.title
+    && left.command === right.command
+    && left.createdAtMs === right.createdAtMs
+    && left.expiresAtMs === right.expiresAtMs
+    && left.decision === right.decision
+    && left.allowedDecisions.length === right.allowedDecisions.length
+    && left.allowedDecisions.every((decision, index) => decision === right.allowedDecisions[index])
+    && safeStableStringify(left.request) === safeStableStringify(right.request);
+}
+
+function areApprovalListsEquivalent(left: readonly ApprovalComparable[], right: readonly ApprovalComparable[]): boolean {
+  if (left === right) {
+    return true;
   }
-  return {
-    ...createEmptySessionRuntime(),
-    ...session.runtime,
-  };
+  if (left.length !== right.length) {
+    return false;
+  }
+  for (let index = 0; index < left.length; index += 1) {
+    const leftItem = left[index];
+    const rightItem = right[index];
+    if (!leftItem || !rightItem || !areApprovalItemsEquivalent(leftItem, rightItem)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+export function resolveSessionRuntime(session: ChatSessionRecord | undefined): ChatSessionRuntimeState {
+  return session?.runtime ?? createEmptySessionRuntime();
 }
 
 export function resolveSessionMeta(session: ChatSessionRecord | undefined): ChatSessionMetaState {
@@ -495,15 +573,7 @@ export function getSessionItemCount(
 }
 
 export function resolveSessionRecord(session: ChatSessionRecord | undefined): ChatSessionRecord {
-  if (!session) {
-    return createEmptySessionRecord();
-  }
-  return {
-    meta: resolveSessionMeta(session),
-    runtime: resolveSessionRuntime(session),
-    items: resolveSessionItems(session),
-    window: resolveSessionViewportState(session),
-  };
+  return session ?? createEmptySessionRecord();
 }
 
 export function resolveSessionViewportState(session: ChatSessionRecord | undefined): ChatSessionViewportState {
@@ -555,14 +625,23 @@ export function patchSessionRecord(
   patch: ChatSessionRecordPatch,
 ): Record<string, ChatSessionRecord> {
   const current = getSessionRecord(state, sessionKey);
+  const nextRecord = {
+    meta: patch.meta ?? current.meta,
+    runtime: patch.runtime ?? current.runtime,
+    items: patch.items ?? current.items,
+    window: patch.window ?? current.window,
+  };
+  if (
+    current.meta === nextRecord.meta
+    && current.runtime === nextRecord.runtime
+    && current.items === nextRecord.items
+    && current.window === nextRecord.window
+  ) {
+    return state.loadedSessions;
+  }
   return {
     ...state.loadedSessions,
-    [sessionKey]: {
-      meta: patch.meta ?? current.meta,
-      runtime: patch.runtime ?? current.runtime,
-      items: patch.items ?? current.items,
-      window: patch.window ?? current.window,
-    },
+    [sessionKey]: nextRecord,
   };
 }
 
@@ -572,14 +651,18 @@ export function patchSessionMeta(
   patch: Partial<ChatSessionMetaState>,
 ): Record<string, ChatSessionRecord> {
   const current = getSessionRecord(state, sessionKey);
+  const nextMeta = {
+    ...current.meta,
+    ...patch,
+  };
+  if (areSessionMetaEquivalent(current.meta, nextMeta)) {
+    return state.loadedSessions;
+  }
   return {
     ...state.loadedSessions,
     [sessionKey]: {
       ...current,
-      meta: {
-        ...current.meta,
-        ...patch,
-      },
+      meta: nextMeta,
     },
   };
 }
@@ -597,7 +680,7 @@ export function patchSessionViewportState(
   viewport: ChatSessionViewportState,
 ): Record<string, ChatSessionRecord> {
   const current = getSessionRecord(state, sessionKey);
-  if (current.window === viewport) {
+  if (current.window === viewport || areSessionViewportEquivalent(current.window, viewport)) {
     return state.loadedSessions;
   }
   return {
@@ -683,6 +766,41 @@ export function patchSessionSnapshot(
   const current = getSessionRecord(state, sessionKey);
   const catalog = snapshot.catalog;
   const nextItems = reconcileSessionItems(current.items, snapshot.items);
+  const nextMeta = {
+    ...current.meta,
+    agentId: catalog.agentId,
+    kind: catalog.kind,
+    preferred: catalog.preferred,
+    label: catalog.label ?? null,
+    titleSource: catalog.titleSource ?? 'none',
+    displayName: catalog.displayName ?? current.meta.displayName,
+    model: catalog.model ?? current.meta.model ?? null,
+    lastActivityAt: typeof catalog.updatedAt === 'number' ? catalog.updatedAt : current.meta.lastActivityAt,
+  };
+  const nextRuntime = {
+    ...current.runtime,
+    activeRunId: snapshot.runtime.activeRunId,
+    runPhase: snapshot.runtime.runPhase,
+    activeTurnItemKey: snapshot.runtime.activeTurnItemKey,
+    pendingTurnKey: snapshot.runtime.pendingTurnKey,
+    pendingTurnLaneKey: snapshot.runtime.pendingTurnLaneKey,
+    lastUserMessageAt: snapshot.runtime.lastUserMessageAt,
+    runtimeActivity: snapshot.runtime.runtimeActivity,
+    lastError: snapshot.runtime.lastError,
+    lastIssue: snapshot.runtime.lastIssue,
+    updatedAt: snapshot.runtime.updatedAt,
+  };
+  const nextWindow = syncViewportState(current.window, {
+    totalItemCount: snapshot.window.totalItemCount,
+    windowStartOffset: snapshot.window.windowStartOffset,
+    windowEndOffset: snapshot.window.windowEndOffset,
+    hasMore: snapshot.window.hasMore,
+    hasNewer: snapshot.window.hasNewer,
+    isLoadingMore: false,
+    isLoadingNewer: false,
+    isAtLatest: snapshot.window.isAtLatest,
+    anchorItemKey: current.window.anchorItemKey,
+  });
   logPatchSessionSnapshotTodoToolDebug({
     sessionKey,
     currentItems: current.items,
@@ -690,43 +808,29 @@ export function patchSessionSnapshot(
     nextItems,
   });
   return patchSessionRecord(state, sessionKey, {
-    meta: {
-      ...current.meta,
-      agentId: catalog.agentId,
-      kind: catalog.kind,
-      preferred: catalog.preferred,
-      label: catalog.label ?? null,
-      titleSource: catalog.titleSource ?? 'none',
-      displayName: catalog.displayName ?? current.meta.displayName,
-      model: catalog.model ?? current.meta.model ?? null,
-      lastActivityAt: typeof catalog.updatedAt === 'number' ? catalog.updatedAt : current.meta.lastActivityAt,
-    },
+    meta: areSessionMetaEquivalent(current.meta, nextMeta) ? current.meta : nextMeta,
     items: nextItems,
-    runtime: {
-      ...current.runtime,
-      activeRunId: snapshot.runtime.activeRunId,
-      runPhase: snapshot.runtime.runPhase,
-      activeTurnItemKey: snapshot.runtime.activeTurnItemKey,
-      pendingTurnKey: snapshot.runtime.pendingTurnKey,
-      pendingTurnLaneKey: snapshot.runtime.pendingTurnLaneKey,
-      lastUserMessageAt: snapshot.runtime.lastUserMessageAt,
-      runtimeActivity: snapshot.runtime.runtimeActivity,
-      lastError: snapshot.runtime.lastError,
-      lastIssue: snapshot.runtime.lastIssue,
-      updatedAt: snapshot.runtime.updatedAt,
-    },
-    window: syncViewportState(current.window, {
-      totalItemCount: snapshot.window.totalItemCount,
-      windowStartOffset: snapshot.window.windowStartOffset,
-      windowEndOffset: snapshot.window.windowEndOffset,
-      hasMore: snapshot.window.hasMore,
-      hasNewer: snapshot.window.hasNewer,
-      isLoadingMore: false,
-      isLoadingNewer: false,
-      isAtLatest: snapshot.window.isAtLatest,
-      anchorItemKey: current.window.anchorItemKey,
-    }),
+    runtime: areSessionRuntimeEquivalent(current.runtime, nextRuntime) ? current.runtime : nextRuntime,
+    window: areSessionViewportEquivalent(current.window, nextWindow) ? current.window : nextWindow,
   });
+}
+
+export function patchPendingApprovalsFromSnapshot(
+  state: Pick<ChatStoreState, 'pendingApprovalsBySession'>,
+  sessionKey: string,
+  snapshot: SessionStateSnapshot,
+): Record<string, ApprovalItem[]> {
+  const current = state.pendingApprovalsBySession[sessionKey] ?? EMPTY_APPROVALS;
+  if (areApprovalListsEquivalent(current, snapshot.approvals)) {
+    return state.pendingApprovalsBySession;
+  }
+  return {
+    ...state.pendingApprovalsBySession,
+    [sessionKey]: snapshot.approvals.map((approval) => ({
+      ...approval,
+      allowedDecisions: [...approval.allowedDecisions],
+    })),
+  };
 }
 
 export function getPendingApprovals(

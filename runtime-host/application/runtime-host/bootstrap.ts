@@ -161,6 +161,7 @@ export class RuntimeHostBootstrapService {
     await this.deps.prelaunchPluginMaintenance.cleanupStaleBuiltinExtensionsForGatewayLaunch();
     const configuredChannels = await this.deps.prelaunchPluginMaintenance.reconcileConfiguredChannelPluginsForGatewayLaunch();
     await this.deps.prelaunchPluginMaintenance.ensureConfiguredManagedPluginsForGatewayLaunch();
+    await this.syncProviderStackToOpenClaw();
     await this.deps.securityPluginConfig.applySavedPolicyToPluginConfig();
 
     return {

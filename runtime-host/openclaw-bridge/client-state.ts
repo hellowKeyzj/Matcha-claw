@@ -39,9 +39,7 @@ export function sameDiagnosticsSnapshot(
   left: GatewayDiagnosticsSnapshot,
   right: GatewayDiagnosticsSnapshot,
 ): boolean {
-  return left.lastAliveAt === right.lastAliveAt
-    && left.lastRpcSuccessAt === right.lastRpcSuccessAt
-    && left.lastRpcFailureAt === right.lastRpcFailureAt
+  return left.lastRpcFailureAt === right.lastRpcFailureAt
     && left.lastRpcFailureMethod === right.lastRpcFailureMethod
     && left.lastHeartbeatTimeoutAt === right.lastHeartbeatTimeoutAt
     && left.consecutiveHeartbeatMisses === right.consecutiveHeartbeatMisses
@@ -74,6 +72,8 @@ export function createGatewayTransportIssue(input: {
   clock: RuntimeClockPort;
   code?: string;
   details?: unknown;
+  retryable?: boolean;
+  retryAfterMs?: number;
 }): GatewayTransportIssue {
   return {
     message: input.message,
@@ -81,5 +81,7 @@ export function createGatewayTransportIssue(input: {
     at: input.clock.nowMs(),
     ...(input.code ? { code: input.code } : {}),
     ...(input.details !== undefined ? { details: input.details } : {}),
+    ...(input.retryable !== undefined ? { retryable: input.retryable } : {}),
+    ...(input.retryAfterMs !== undefined ? { retryAfterMs: input.retryAfterMs } : {}),
   };
 }

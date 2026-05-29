@@ -6,7 +6,6 @@ import {
 } from '../openclaw/openclaw-plugin-config-service';
 import { findChannelOpenClawPluginDefinition } from '../plugins/managed-plugin-definitions';
 import type { ManagedPluginInstaller } from '../plugins/managed-plugin-installer';
-import { withOpenClawConfigLock } from '../openclaw/openclaw-config-mutex';
 import type { OpenClawConfigRepositoryPort } from '../openclaw/openclaw-config-repository';
 import type { RuntimeClockPort } from '../common/runtime-ports';
 import {
@@ -33,6 +32,16 @@ const CHANNEL_UNIQUE_CREDENTIAL_KEY: Record<string, string> = {
 
 function isRecord(value: unknown): value is Record<string, any> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+function replaceConfigContents(target: Record<string, any>, source: Record<string, any>): void {
+  if (target === source) {
+    return;
+  }
+  for (const key of Object.keys(target)) {
+    delete target[key];
+  }
+  Object.assign(target, source);
 }
 
 function normalizeChannelConfigValueLocal(value: unknown) {
@@ -268,9 +277,9 @@ export class ChannelConfigRepository {
       }
     }
 
-    await withOpenClawConfigLock(async () => {
-      const config = await reconcileChannelDerivedPluginStateLocal(this.configRepository, this.pluginFileSystem, await this.configRepository.read());
-      await this.configRepository.write(config);
+    await this.configRepository.update(async (config) => {
+      const nextConfig = await reconcileChannelDerivedPluginStateLocal(this.configRepository, this.pluginFileSystem, config);
+      replaceConfigContents(config, nextConfig);
     });
 
     return configuredChannels;
@@ -301,18 +310,18 @@ export class ChannelConfigRepository {
     // Install the plugin first so the upcoming reload sees a consistent state.
     await this.prepareChannelPlugin(channelType);
 
-    await withOpenClawConfigLock(async () => {
+    await this.configRepository.update(async (config) => {
       const accountId = typeof input.accountId === 'string' && input.accountId.trim()
         ? input.accountId.trim()
         : DEFAULT_ACCOUNT_ID;
       const staleAccountIds = Array.isArray(input.staleAccountIds)
         ? input.staleAccountIds.filter((item): item is string => typeof item === 'string' && item.trim().length > 0)
         : [];
-      let config = await this.configRepository.read();
-      if (!isRecord(config.channels)) {
-        config.channels = {};
+      let nextConfig = config;
+      if (!isRecord(nextConfig.channels)) {
+        nextConfig.channels = {};
       }
-      const channels = config.channels as Record<string, any>;
+      const channels = nextConfig.channels as Record<string, any>;
       if (!isRecord(channels[channelType])) {
         channels[channelType] = {};
       }
@@ -373,9 +382,9 @@ export class ChannelConfigRepository {
         section.defaultAccount = accountId;
         section.enabled = input.enabled !== false;
       }
-      mirrorPluginBackedChannelState(config, channelType);
-      config = await reconcileChannelDerivedPluginStateLocal(this.configRepository, this.pluginFileSystem, config);
-      await this.configRepository.write(config);
+      mirrorPluginBackedChannelState(nextConfig, channelType);
+      nextConfig = await reconcileChannelDerivedPluginStateLocal(this.configRepository, this.pluginFileSystem, nextConfig);
+      replaceConfigContents(config, nextConfig);
     });
   }
 
@@ -401,16 +410,16 @@ export class ChannelConfigRepository {
   }
 
   async deleteChannelConfig(channelType: string) {
-    await withOpenClawConfigLock(async () => {
+    await this.configRepository.update(async (config) => {
       if (!channelType) {
         throw new Error('channelType is required');
       }
-      let config = await this.configRepository.read();
-      if (isRecord(config.channels) && Object.prototype.hasOwnProperty.call(config.channels, channelType)) {
-        delete config.channels[channelType];
+      let nextConfig = config;
+      if (isRecord(nextConfig.channels) && Object.prototype.hasOwnProperty.call(nextConfig.channels, channelType)) {
+        delete nextConfig.channels[channelType];
       }
-      config = await reconcileChannelDerivedPluginStateLocal(this.configRepository, this.pluginFileSystem, config);
-      await this.configRepository.write(config);
+      nextConfig = await reconcileChannelDerivedPluginStateLocal(this.configRepository, this.pluginFileSystem, nextConfig);
+      replaceConfigContents(config, nextConfig);
     });
   }
 

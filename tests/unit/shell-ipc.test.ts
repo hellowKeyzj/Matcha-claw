@@ -1,5 +1,5 @@
 import { homedir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { join, normalize, resolve } from 'node:path';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const registeredHandlers = new Map<string, (...args: unknown[]) => unknown>();
@@ -50,11 +50,10 @@ describe('shell ipc', () => {
 
     const result = await openResourcePathHandler?.({}, 'connector-guide/wechat.html');
 
-    expect(openPathMock).toHaveBeenCalledWith(resolve(process.cwd(), 'resources', 'connector-guide', 'wechat.html'));
-    expect(result).toEqual({
-      success: true,
-      resolvedPath: resolve(process.cwd(), 'resources', 'connector-guide', 'wechat.html'),
-    });
+    const expectedPath = normalize(resolve(process.cwd(), 'resources', 'connector-guide', 'wechat.html')).toLowerCase();
+    expect(normalize(String(openPathMock.mock.calls[0]?.[0])).toLowerCase()).toBe(expectedPath);
+    expect(result).toMatchObject({ success: true });
+    expect(normalize(String((result as { resolvedPath?: string }).resolvedPath)).toLowerCase()).toBe(expectedPath);
   });
 
   it('rejects resource paths that escape the resources directory', async () => {

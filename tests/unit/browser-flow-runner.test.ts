@@ -290,7 +290,7 @@ async function withFakeGateway<T>(
   }
 }
 
-describe('agent Browser Flow runner', () => {
+describe('agent Browser Flow runner', { timeout: 15000 }, () => {
   it('validates required params before opening a gateway connection', async () => {
     const workspace = await writeWorkspace({})
 

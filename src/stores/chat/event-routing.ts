@@ -6,7 +6,7 @@ export interface RuntimeEventFilterInput {
 }
 
 export function shouldIgnoreRuntimeEvent(input: RuntimeEventFilterInput): boolean {
-  if (input.eventSessionKey != null && input.eventSessionKey !== input.targetSessionKey) {
+  if (input.eventSessionKey && input.eventSessionKey !== input.targetSessionKey) {
     return true;
   }
   return false;

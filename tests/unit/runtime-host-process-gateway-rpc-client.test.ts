@@ -1,6 +1,7 @@
 import net from 'node:net';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { WebSocketServer } from 'ws';
+import { DEFAULT_GATEWAY_BASE_METHODS } from '../../runtime-host/application/gateway/gateway-runtime-port';
 import { createGatewayClient } from '../../runtime-host/openclaw-bridge';
 import { parseGatewayPort } from '../../runtime-host/openclaw-bridge/client-auth';
 import {
@@ -304,7 +305,67 @@ describe('runtime-host process gateway rpc client', () => {
     }
   });
 
-  it('ensureGatewayReady 会完成握手并验证轻量 RPC', async () => {
+  it('inspectGatewayControlReadiness 会保留 OpenClaw V4 startup retryable 语义', async () => {
+    const port = 48200 + Math.floor(Math.random() * 300);
+    process.env.MATCHACLAW_RUNTIME_HOST_GATEWAY_PORT = String(port);
+    gatewayToken = 'gateway-starting-token';
+
+    const wss = new WebSocketServer({ host: '127.0.0.1', port });
+    wss.on('connection', (socket) => {
+      socket.send(JSON.stringify({
+        type: 'event',
+        event: 'connect.challenge',
+        payload: { nonce: `nonce-${Date.now()}` },
+      }));
+
+      socket.on('message', (rawData) => {
+        const message = JSON.parse(rawData.toString()) as Record<string, unknown>;
+        if (message.type !== 'req' || message.method !== 'connect' || typeof message.id !== 'string') {
+          return;
+        }
+        socket.send(JSON.stringify({
+          type: 'res',
+          id: message.id,
+          ok: false,
+          error: {
+            code: 'UNAVAILABLE',
+            message: 'gateway starting; retry shortly',
+            retryable: true,
+            retryAfterMs: 750,
+            details: { reason: 'startup-sidecars-pending' },
+          },
+        }));
+        socket.close(1013, 'gateway starting');
+      });
+    });
+
+    let client: ReturnType<typeof createTestGatewayClient> | null = null;
+    try {
+      client = createTestGatewayClient();
+      await expect(client.inspectGatewayControlReadiness(['status'], 3000)).resolves.toMatchObject({
+        ready: false,
+        phase: 'starting',
+        retryable: true,
+        retryAfterMs: 750,
+        code: 'UNAVAILABLE',
+        error: 'Gateway connect failed: gateway starting; retry shortly',
+      });
+      client.close();
+    } finally {
+      client?.close();
+      await new Promise<void>((resolve, reject) => {
+        wss.close((error) => {
+          if (error) {
+            reject(error);
+            return;
+          }
+          resolve();
+        });
+      });
+    }
+  });
+
+  it('ensureGatewayReady 完成握手后必须用 system-presence 证明 control plane live', async () => {
     const port = 48300 + Math.floor(Math.random() * 300);
     process.env.MATCHACLAW_RUNTIME_HOST_GATEWAY_PORT = String(port);
     gatewayToken = 'gateway-ready-token';
@@ -351,7 +412,7 @@ describe('runtime-host process gateway rpc client', () => {
     try {
       client = createTestGatewayClient();
       await expect(client.ensureGatewayReady(3000)).resolves.toBeUndefined();
-      expect(methods).toEqual(['connect', 'status']);
+      expect(methods).toEqual(['connect', 'system-presence']);
       client.close();
     } finally {
       client?.close();
@@ -366,6 +427,73 @@ describe('runtime-host process gateway rpc client', () => {
       });
     }
   });
+
+  it('inspectGatewayControlReadiness 在 liveness RPC 失败时不会误报 ready', async () => {
+    const port = 48600 + Math.floor(Math.random() * 300);
+    process.env.MATCHACLAW_RUNTIME_HOST_GATEWAY_PORT = String(port);
+    gatewayToken = 'gateway-liveness-failure-token';
+
+    const wss = new WebSocketServer({ host: '127.0.0.1', port });
+    wss.on('connection', (socket) => {
+      socket.send(JSON.stringify({
+        type: 'event',
+        event: 'connect.challenge',
+        payload: { nonce: `nonce-${Date.now()}` },
+      }));
+
+      socket.on('message', (rawData) => {
+        const message = JSON.parse(rawData.toString()) as Record<string, unknown>;
+        if (message.type !== 'req' || typeof message.id !== 'string') {
+          return;
+        }
+        if (message.method === 'connect') {
+          socket.send(JSON.stringify({
+            type: 'res',
+            id: message.id,
+            ok: true,
+            payload: {
+              features: {
+                methods: ['status', 'config.get', 'agents.list', 'skills.status', 'system-presence'],
+              },
+            },
+          }));
+          return;
+        }
+        if (message.method === 'system-presence') {
+          socket.send(JSON.stringify({
+            type: 'res',
+            id: message.id,
+            ok: false,
+            error: { code: 'UNAVAILABLE', message: 'control plane busy', retryable: true },
+          }));
+        }
+      });
+    });
+
+    let client: ReturnType<typeof createTestGatewayClient> | null = null;
+    try {
+      client = createTestGatewayClient();
+      await expect(client.inspectGatewayControlReadiness(DEFAULT_GATEWAY_BASE_METHODS, 3000)).resolves.toMatchObject({
+        ready: false,
+        phase: 'starting',
+        retryable: true,
+        code: 'UNAVAILABLE',
+        error: 'Gateway RPC failed (system-presence): control plane busy',
+      });
+    } finally {
+      client?.close();
+      await new Promise<void>((resolve, reject) => {
+        wss.close((error) => {
+          if (error) {
+            reject(error);
+            return;
+          }
+          resolve();
+        });
+      });
+    }
+  });
+
 
   it('诊断快照变化会继续透传，不会被状态相同误吞', async () => {
     const port = 48400 + Math.floor(Math.random() * 300);

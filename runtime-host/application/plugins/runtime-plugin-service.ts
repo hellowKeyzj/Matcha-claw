@@ -10,7 +10,6 @@ import {
   readManuallyManagedPluginIdsFromConfig,
   resolveEffectivePluginIdsForConfig,
 } from '../openclaw/openclaw-plugin-config-service';
-import { withOpenClawConfigLock } from '../openclaw/openclaw-config-mutex';
 import type { OpenClawConfigRepositoryPort } from '../openclaw/openclaw-config-repository';
 import type { PluginFileSystemPort } from '../../plugin-engine/plugin-file-system';
 import { isChannelDerivedPluginId } from '../channels/channel-plugin-bindings';
@@ -20,6 +19,16 @@ import type { ManagedPluginInstaller, ManagedRegistryPluginSnapshot } from './ma
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+function replaceConfigContents(target: Record<string, unknown>, source: Record<string, unknown>): void {
+  if (target === source) {
+    return;
+  }
+  for (const key of Object.keys(target)) {
+    delete target[key];
+  }
+  Object.assign(target, source);
 }
 
 function normalizeManualPluginIds(pluginIds: readonly string[]): string[] {
@@ -171,17 +180,17 @@ export class RuntimePluginRepository implements RuntimePluginRepositoryPort {
       newlyDisabledPluginIds: [],
     };
 
-    await withOpenClawConfigLock(async () => {
+    await this.configRepository.update(async (config) => {
       let nextConfig = await applyManuallyManagedPluginIdsToOpenClawConfig(
         this.configRepository,
         this.pluginFileSystem,
-        await this.configRepository.read(),
+        config,
         manualPluginIds,
       );
       const nextEnabledPluginIds = resolveEffectivePluginIdsForConfig(nextConfig, manualPluginIds);
       transitionState = computeTransitionLifecycleState(previousEnabledPluginIds, nextEnabledPluginIds);
       nextConfig = await this.lifecycleRunner.applyTransitionConfig(nextConfig, transitionState);
-      await this.configRepository.write(nextConfig);
+      replaceConfigContents(config, nextConfig);
     });
 
     await this.lifecycleRunner.runTransitionSideEffects(transitionState);
@@ -189,13 +198,9 @@ export class RuntimePluginRepository implements RuntimePluginRepositoryPort {
   }
 
   private async reconcileStartupPluginLifecycles(enabledPluginIds: readonly string[]): Promise<void> {
-    await withOpenClawConfigLock(async () => {
-      const currentConfig = await this.configRepository.read();
-      const previousSerialized = JSON.stringify(currentConfig);
-      const nextConfig = await this.lifecycleRunner.applyStartupConfig(currentConfig, enabledPluginIds);
-      if (JSON.stringify(nextConfig) !== previousSerialized) {
-        await this.configRepository.write(nextConfig);
-      }
+    await this.configRepository.update(async (config) => {
+      const nextConfig = await this.lifecycleRunner.applyStartupConfig(config, enabledPluginIds);
+      replaceConfigContents(config, nextConfig);
     });
 
     await this.lifecycleRunner.runStartupSideEffects(enabledPluginIds);

@@ -7,7 +7,13 @@ import { dispatchRuntimeRouteDefinition } from './helpers/runtime-route';
 function createDeps() {
   const openclawBridge = {
     gatewayRpc: vi.fn(async () => ({ ok: true })),
-    ensureGatewayReady: vi.fn(async () => undefined),
+    inspectGatewayControlReadiness: vi.fn(async (methods: readonly string[]) => ({
+      ready: true,
+      phase: 'ready' as const,
+      requiredMethods: methods,
+      missingMethods: [],
+      retryable: false,
+    })),
     readGatewayConnectionState: vi.fn(async () => ({
       state: 'connected',
       portReachable: true,
@@ -58,12 +64,15 @@ describe('runtime-host process gateway routes', () => {
       deps,
     );
 
-    expect(deps.openclawBridge.ensureGatewayReady).toHaveBeenCalledWith(8000);
+    expect(deps.openclawBridge.inspectGatewayControlReadiness).toHaveBeenCalledWith(DEFAULT_GATEWAY_BASE_METHODS, 8000);
     expect(result).toEqual({
       status: 200,
       data: {
         success: true,
+        phase: 'ready',
+        retryable: false,
         requiredMethods: DEFAULT_GATEWAY_BASE_METHODS,
+        missingMethods: [],
       },
     });
   });

@@ -1,26 +1,103 @@
 import { beforeAll, afterAll, describe, expect, it } from 'vitest';
+import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { join } from 'node:path';
-import { createRuntimeHostProcessManager } from '../../electron/main/runtime-host-process-manager';
+import { createRuntimeHostProcessManager, type RuntimeHostProcessManager } from '../../electron/main/runtime-host-process-manager';
 import { RUNTIME_HOST_TRANSPORT_VERSION } from '../../electron/main/runtime-host-contract';
 
 const scriptPath = join(process.cwd(), 'runtime-host', 'host-process.cjs');
-const port = 46391;
 
-const manager = createRuntimeHostProcessManager({
-  scriptPath,
-  port,
-  startTimeoutMs: 8000,
-  parentApiBaseUrl: 'http://127.0.0.1:3210',
-  parentDispatchToken: 'test-runtime-host-dispatch-token-contract',
-});
+let port = 0;
+let manager: RuntimeHostProcessManager | null = null;
+let parentServer: Awaited<ReturnType<typeof startParentApiServer>> | null = null;
+
+async function findFreePort(): Promise<number> {
+  return await new Promise<number>((resolvePort, rejectPort) => {
+    const server = createServer();
+    server.once('error', rejectPort);
+    server.listen(0, '127.0.0.1', () => {
+      const address = server.address();
+      if (!address || typeof address === 'string') {
+        server.close(() => rejectPort(new Error('无法分配可用端口')));
+        return;
+      }
+      server.close((error) => {
+        if (error) {
+          rejectPort(error);
+          return;
+        }
+        resolvePort(address.port);
+      });
+    });
+  });
+}
+
+function writeParentResponse(res: ServerResponse, payload: unknown, statusCode = 200): void {
+  res.statusCode = statusCode;
+  res.setHeader('Content-Type', 'application/json; charset=utf-8');
+  res.end(JSON.stringify(payload));
+}
+
+async function startParentApiServer(parentPort: number, token: string): Promise<{ close: () => Promise<void> }> {
+  const server = createServer(async (req: IncomingMessage, res: ServerResponse) => {
+    if (req.headers['x-runtime-host-dispatch-token'] !== token) {
+      writeParentResponse(res, {
+        version: RUNTIME_HOST_TRANSPORT_VERSION,
+        success: false,
+        status: 403,
+        error: { code: 'FORBIDDEN', message: 'invalid dispatch token' },
+      }, 403);
+      return;
+    }
+    writeParentResponse(res, {
+      version: RUNTIME_HOST_TRANSPORT_VERSION,
+      success: true,
+      status: 200,
+      data: { ok: true },
+    });
+  });
+
+  await new Promise<void>((resolveListen, rejectListen) => {
+    server.once('error', rejectListen);
+    server.listen(parentPort, '127.0.0.1', resolveListen);
+  });
+
+  return {
+    close: async () => {
+      await new Promise<void>((resolveClose, rejectClose) => {
+        server.close((error) => {
+          if (error) {
+            rejectClose(error);
+            return;
+          }
+          resolveClose();
+        });
+      });
+    },
+  };
+}
 
 describe('runtime-host transport v1 contract', () => {
   beforeAll(async () => {
+    const [runtimeHostPort, parentPort] = await Promise.all([findFreePort(), findFreePort()]);
+    const token = 'test-runtime-host-dispatch-token-contract';
+    parentServer = await startParentApiServer(parentPort, token);
+    port = runtimeHostPort;
+    manager = createRuntimeHostProcessManager({
+      scriptPath,
+      port,
+      startTimeoutMs: 12000,
+      parentApiBaseUrl: `http://127.0.0.1:${parentPort}`,
+      parentDispatchToken: token,
+      childEnv: () => ({
+        MATCHACLAW_RUNTIME_HOST_DISABLE_BACKGROUND_SERVICES: '1',
+      }),
+    });
     await manager.start();
-  });
+  }, 15000);
 
   afterAll(async () => {
-    await manager.stop();
+    await manager?.stop();
+    await parentServer?.close();
   });
 
   it('GET /health 返回 v1 固定字段', async () => {

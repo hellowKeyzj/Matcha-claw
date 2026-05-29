@@ -3,7 +3,10 @@ import {
   hydrateAttachedFilesFromItems,
   reconcileHydratedAttachmentItems,
 } from '@/stores/chat/attachment-helpers';
-import { reconcileSessionItems } from '@/stores/chat/store-state-helpers';
+import {
+  buildItemRenderFingerprint,
+  reconcileSessionItems,
+} from '@/stores/chat/store-state-helpers';
 import type { SessionRenderItem } from '../../runtime-host/shared/session-adapter-types';
 import { buildRenderItemsFromMessages } from './helpers/timeline-fixtures';
 
@@ -115,9 +118,97 @@ describe('chat attachment helpers', () => {
     const reconciled = reconcileSessionItems(currentItems, nextItems);
 
     expect(reconciled).toHaveLength(2);
-    expect(reconciled[0]).toBe(nextItems[0]);
-    expect(reconciled[1]).toBe(currentItems[0]);
+    expect(reconciled[0]).toBe(currentItems[0]);
+    expect(reconciled[1]).toBe(nextItems[1]);
     expect(reconciled.map((item) => item.key)).toEqual(nextItems.map((item) => item.key));
+  });
+
+  it('includes every item signature in render fingerprints', () => {
+    const baseItems = buildRenderItemsFromMessages('agent:test:main', [
+      { role: 'assistant', content: 'first', id: 'assistant-1', timestamp: 1 },
+      {
+        role: 'assistant',
+        content: 'middle',
+        id: 'assistant-2',
+        timestamp: 2,
+        _attachedFiles: [{
+          fileName: 'artifact.png',
+          mimeType: 'image/png',
+          fileSize: 0,
+          preview: null,
+          filePath: 'E:\\code\\Matcha-claw\\artifact.png',
+          source: 'tool-result',
+        }],
+      },
+      { role: 'assistant', content: 'last', id: 'assistant-3', timestamp: 3 },
+    ]) as SessionRenderItem[];
+    const previewItems = buildRenderItemsFromMessages('agent:test:main', [
+      { role: 'assistant', content: 'first', id: 'assistant-1', timestamp: 1 },
+      {
+        role: 'assistant',
+        content: 'middle',
+        id: 'assistant-2',
+        timestamp: 2,
+        _attachedFiles: [{
+          fileName: 'artifact.png',
+          mimeType: 'image/png',
+          fileSize: 0,
+          preview: 'data:image/png;base64,abc',
+          filePath: 'E:\\code\\Matcha-claw\\artifact.png',
+          source: 'tool-result',
+        }],
+      },
+      { role: 'assistant', content: 'last', id: 'assistant-3', timestamp: 3 },
+    ]) as SessionRenderItem[];
+
+    expect(buildItemRenderFingerprint(previewItems)).not.toBe(buildItemRenderFingerprint(baseItems));
+  });
+
+  it('merges hydrated previews without rolling back current item content', () => {
+    const currentItems = buildRenderItemsFromMessages('agent:test:main', [
+      {
+        role: 'assistant',
+        content: 'new assistant text',
+        id: 'assistant-1',
+        timestamp: 1,
+        _attachedFiles: [{
+          fileName: 'artifact.png',
+          mimeType: 'image/png',
+          fileSize: 0,
+          preview: null,
+          filePath: 'E:\\code\\Matcha-claw\\artifact.png',
+          source: 'tool-result',
+        }],
+      },
+    ]) as SessionRenderItem[];
+    const hydratedOldItems = buildRenderItemsFromMessages('agent:test:main', [
+      {
+        role: 'assistant',
+        content: 'old assistant text',
+        id: 'assistant-1',
+        timestamp: 1,
+        _attachedFiles: [{
+          fileName: 'artifact.png',
+          mimeType: 'image/png',
+          fileSize: 123,
+          preview: 'data:image/png;base64,abc',
+          filePath: 'E:\\code\\Matcha-claw\\artifact.png',
+          source: 'tool-result',
+        }],
+      },
+    ]) as SessionRenderItem[];
+
+    const reconciled = reconcileHydratedAttachmentItems(currentItems, hydratedOldItems);
+
+    expect(reconciled[0]).toMatchObject({
+      kind: 'assistant-turn',
+      text: 'new assistant text',
+      attachedFiles: [{
+        fileName: 'artifact.png',
+        fileSize: 123,
+        preview: 'data:image/png;base64,abc',
+      }],
+    });
   });
 
   it('keeps newer snapshot items when old hydrated previews resolve later', () => {

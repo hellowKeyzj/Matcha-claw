@@ -11,4 +11,6 @@ export interface GatewayTransportIssue {
   readonly at: number;
   readonly code?: string;
   readonly details?: unknown;
+  readonly retryable?: boolean;
+  readonly retryAfterMs?: number;
 }

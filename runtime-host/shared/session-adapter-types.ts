@@ -251,7 +251,6 @@ export interface SessionTimelineEntryBase {
   kind:
     | 'user-message'
     | 'assistant-turn'
-    | 'task-completion'
     | 'execution-graph'
     | 'system';
   sessionKey: string;
@@ -284,15 +283,10 @@ export interface SessionTimelineUserMessageEntry extends SessionTimelineEntryBas
 }
 
 /**
- * One assistant turn = one timeline entry.
+ * Render projection for one assistant turn.
  *
- * Authoritative ordering for the turn lives in `segments`. The `segments`
- * array is built from the chat stream's `message.content` array order.
- *
- * Tool runtime state (running/completed/error + result data) is updated
- * independently via `tool-status-update` events keyed by `toolCallId`.
- * Tool ordering is never derived from the tool stream; it follows the
- * position of the corresponding `toolCall` block in the chat content array.
+ * Authoritative ordering lives in `segments`, projected from canonical message
+ * snapshots and canonical tool events for the same run/lane.
  */
 export interface SessionTimelineAssistantTurnEntry extends SessionTimelineEntryBase {
   kind: 'assistant-turn';
@@ -302,22 +296,6 @@ export interface SessionTimelineAssistantTurnEntry extends SessionTimelineEntryB
   messageId?: string;
   originMessageId?: string;
   clientId?: string;
-}
-
-export interface SessionTimelineTaskCompletionEntry extends SessionTimelineEntryBase {
-  kind: 'task-completion';
-  role: 'system';
-  childSessionKey: string;
-  childSessionId?: string;
-  childAgentId?: string;
-  taskLabel?: string;
-  statusLabel?: string;
-  result?: string;
-  statsLine?: string;
-  replyInstruction?: string;
-  anchorItemKey?: string;
-  triggerItemKey?: string;
-  replyItemKey?: string;
 }
 
 export interface SessionRenderExecutionGraphItem extends SessionTimelineEntryBase {
@@ -346,7 +324,6 @@ export interface SessionRenderSystemItem extends SessionTimelineEntryBase {
 export type SessionTimelineEntry =
   | SessionTimelineUserMessageEntry
   | SessionTimelineAssistantTurnEntry
-  | SessionTimelineTaskCompletionEntry
   | SessionRenderExecutionGraphItem
   | SessionRenderSystemItem;
 
@@ -354,7 +331,7 @@ export type SessionExecutionGraphItem = SessionRenderExecutionGraphItem;
 
 export interface SessionRenderItemBase {
   key: string;
-  kind: 'user-message' | 'assistant-turn' | 'task-completion' | 'execution-graph' | 'system';
+  kind: 'user-message' | 'assistant-turn' | 'execution-graph' | 'system';
   sessionKey: string;
   createdAt?: number;
   updatedAt?: number;
@@ -380,10 +357,7 @@ export interface SessionAssistantTurnItem extends SessionRenderItemBase {
   identityMode: SessionTurnIdentityMode;
   identityConfidence: SessionTurnIdentityConfidence;
   status: 'streaming' | 'waiting_tool' | 'final' | 'error' | 'aborted';
-  /**
-   * Authoritative presentation order. Built from the chat stream's
-   * `message.content` array order. Mirrors `entry.segments` 1:1.
-   */
+  /** Authoritative presentation order projected from canonical state. */
   segments: ReadonlyArray<SessionAssistantTurnSegment>;
   thinking: string | null;
   tools: ReadonlyArray<SessionRenderToolCard>;
@@ -394,74 +368,55 @@ export interface SessionAssistantTurnItem extends SessionRenderItemBase {
   pendingState?: 'typing' | 'activity' | 'compacting' | null;
 }
 
-export interface SessionRenderTaskCompletionItem extends SessionRenderItemBase {
-  kind: 'task-completion';
-  role: 'system';
-  text: string;
-  childSessionKey: string;
-  childSessionId?: string;
-  childAgentId?: string;
-  taskLabel?: string;
-  statusLabel?: string;
-  result?: string;
-  statsLine?: string;
-  replyInstruction?: string;
-  anchorItemKey?: string;
-  triggerItemKey?: string;
-  replyItemKey?: string;
-}
-
 export type SessionRenderItem =
   | SessionRenderUserMessageItem
   | SessionAssistantTurnItem
-  | SessionRenderTaskCompletionItem
   | SessionRenderExecutionGraphItem
   | SessionRenderSystemItem;
+
+export type SessionTimelineItem = SessionTimelineEntry;
+
+export type SessionApprovalDecision = 'allow-once' | 'allow-always' | 'deny';
+
+export interface SessionApprovalRequestItem {
+  id: string;
+  sessionKey: string;
+  runId?: string;
+  title: string;
+  command?: string;
+  allowedDecisions: ReadonlyArray<SessionApprovalDecision>;
+  request?: Record<string, unknown>;
+  createdAtMs: number;
+  expiresAtMs?: number;
+}
+
+export interface SessionUsageSnapshotItem {
+  id: string;
+  sessionKey: string;
+  runId?: string;
+  timestamp?: number;
+  payload: unknown;
+}
+
+export interface SessionArtifactSnapshotItem {
+  id: string;
+  sessionKey: string;
+  runId?: string;
+  timestamp?: number;
+  payload: unknown;
+}
 
 export interface SessionStateSnapshot {
   sessionKey: string;
   catalog: SessionCatalogItem;
   items: SessionRenderItem[];
+  approvals: SessionApprovalRequestItem[];
+  usage: SessionUsageSnapshotItem[];
+  artifacts: SessionArtifactSnapshotItem[];
   taskSnapshot?: TaskSnapshotEvent;
   replayComplete: boolean;
   runtime: SessionRuntimeStateSnapshot;
   window: SessionWindowStateSnapshot;
-}
-
-export interface SessionTurnToolResultsRequest {
-  sessionKey: string;
-  turnKey?: string;
-  runId?: string;
-  toolCallIds?: string[];
-}
-
-export interface SessionTurnToolResultsResult {
-  sessionKey: string;
-  turnKey: string | null;
-  item: SessionAssistantTurnItem | null;
-  runtime: SessionRuntimeStateSnapshot;
-}
-
-export interface SessionRunClosureRequest {
-  sessionKey: string;
-  runId?: string;
-  turnKey?: string;
-}
-
-export type SessionRunClosureReason =
-  | 'final-assistant-turn'
-  | 'still-streaming'
-  | 'running-tool'
-  | 'not-found'
-  | 'not-active';
-
-export interface SessionRunClosureResult {
-  sessionKey: string;
-  runId: string | null;
-  turnKey: string | null;
-  closed: boolean;
-  reason: SessionRunClosureReason;
-  runtime: SessionRuntimeStateSnapshot;
 }
 
 export interface SessionLoadResult {

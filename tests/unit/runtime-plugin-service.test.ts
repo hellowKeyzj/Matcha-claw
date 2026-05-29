@@ -181,7 +181,7 @@ describe('runtime plugin service', () => {
       config: {
         embedding: {
           provider: 'local-minilm',
-          model: 'all-MiniLM-L6-v2',
+          model: 'Xenova/all-MiniLM-L6-v2',
         },
         autoCapture: true,
         autoRecall: true,
@@ -210,7 +210,7 @@ describe('runtime plugin service', () => {
             config: {
               embedding: {
                 provider: 'local-minilm',
-                model: 'all-MiniLM-L6-v2',
+                model: 'Xenova/all-MiniLM-L6-v2',
               },
             },
           },
@@ -243,7 +243,7 @@ describe('runtime plugin service', () => {
       config: {
         embedding: {
           provider: 'local-minilm',
-          model: 'all-MiniLM-L6-v2',
+          model: 'Xenova/all-MiniLM-L6-v2',
         },
       },
     });
@@ -359,7 +359,7 @@ describe('runtime plugin service', () => {
       config: {
         embedding: {
           provider: 'local-minilm',
-          model: 'all-MiniLM-L6-v2',
+          model: 'Xenova/all-MiniLM-L6-v2',
         },
         autoCapture: true,
         autoRecall: true,

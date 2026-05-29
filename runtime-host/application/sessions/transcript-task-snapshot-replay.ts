@@ -96,20 +96,6 @@ function extractSnapshotFromToolCall(
   return normalizeTaskToolSnapshot(name, readToolCallPayload(toolCall), sessionKey);
 }
 
-function extractSnapshotFromToolStatus(
-  sessionKey: string,
-  toolStatus: unknown,
-): TaskSnapshotEvent | null {
-  if (!isRecord(toolStatus)) {
-    return null;
-  }
-  const name = resolveToolRecordName(toolStatus);
-  if (!isStateOnlyToolName(name)) {
-    return null;
-  }
-  return normalizeTaskToolSnapshot(name, readToolResultPayload(toolStatus), sessionKey);
-}
-
 export function extractTaskSnapshotFromTranscriptMessage(
   sessionKey: string,
   message: SessionTranscriptMessage,
@@ -141,12 +127,6 @@ export function extractTaskSnapshotFromTranscriptMessage(
   if (Array.isArray(toolCalls)) {
     for (const toolCall of toolCalls) {
       latest = extractSnapshotFromToolCall(sessionKey, toolCall) ?? latest;
-    }
-  }
-
-  if (Array.isArray(message.toolStatuses)) {
-    for (const toolStatus of message.toolStatuses) {
-      latest = extractSnapshotFromToolStatus(sessionKey, toolStatus) ?? latest;
     }
   }
 

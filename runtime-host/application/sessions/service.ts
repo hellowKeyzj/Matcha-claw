@@ -1,7 +1,7 @@
+import type { GatewayCapabilitiesSnapshot, GatewayConnectionStatePayload, GatewayControlReadiness } from '../gateway/gateway-runtime-port';
 import type {
   SessionUpdateEvent,
 } from '../../shared/session-adapter-types';
-import { isRunActive } from '../../shared/session-adapter-types';
 import type { SessionCatalogPort } from './session-catalog';
 import { SessionCommandService } from './session-command-service';
 import { SessionGatewayIngressService } from './session-gateway-ingress-service';
@@ -25,52 +25,31 @@ interface SessionRuntimeServiceDeps {
 export class SessionRuntimeService {
   constructor(private readonly deps: SessionRuntimeServiceDeps) {}
 
-  notifyTransportConnected(transportEpoch: number): void {
-    if (!this.deps.stateStore.markTransportConnected(transportEpoch)) {
-      return;
+  consumeGatewayConnectionState(payload: GatewayConnectionStatePayload): SessionUpdateEvent[] {
+    if (payload.state === 'connected') {
+      this.deps.stateStore.markTransportConnected(payload.transportEpoch);
+      this.deps.stateStore.expireTransportControlIssues(payload.transportEpoch);
     }
-    for (const [sessionKey, state] of this.deps.stateStore.listSessionStates()) {
-      if (!isRunActive(state.runtime)) {
-        continue;
-      }
-      if (state.activeTransportEpoch == null || state.activeTransportEpoch >= transportEpoch) {
-        continue;
-      }
-      void this.deps.operationCoordinator.run(sessionKey, 'reconcile', async () => {
-        const latestState = this.deps.stateStore.getSessionState(sessionKey);
-        if (!isRunActive(latestState.runtime)) {
-          return;
-        }
-        if (latestState.activeTransportEpoch == null || latestState.activeTransportEpoch >= transportEpoch) {
-          return;
-        }
-        this.deps.stateStore.blockRuns(sessionKey, [
-          latestState.runtime.activeRunId,
-          ...latestState.timelineEntries.map((entry) => entry.runId),
-        ]);
-        const committed = this.deps.timelineRuntime.commitSessionTransition(sessionKey, {
-          runtimePatch: this.deps.timelineRuntime.buildTerminalRuntimePatch(
-            'error',
-            'The active run disconnected before a terminal event was received.',
-            null,
-          ),
-          activeTransportEpoch: null,
-          advanceRunEpoch: true,
-        });
-        const snapshot = {
-          ...await this.deps.snapshotService.buildLatestSnapshotAsync(sessionKey, committed.state, {
-            replayComplete: committed.state.hydrated,
-          }),
-          runtime: committed.runtime,
-        };
-        await this.deps.stateStore.flushPersistedStore();
-        return snapshot;
-      }).catch(() => undefined);
+    return this.deps.ingressService.consumeGatewayConnectionState(payload);
+  }
+
+  consumeGatewayControlReadiness(payload: GatewayControlReadiness): SessionUpdateEvent[] {
+    if (payload.ready) {
+      this.deps.stateStore.expireTransportControlIssues(this.deps.stateStore.getLatestConnectedTransportEpoch());
     }
+    return this.deps.ingressService.consumeGatewayControlReadiness(payload);
+  }
+
+  consumeGatewayCapabilities(payload: GatewayCapabilitiesSnapshot | null): SessionUpdateEvent[] {
+    return this.deps.ingressService.consumeGatewayCapabilities(payload);
   }
 
   async consumeGatewayConversationEvent(payload: unknown): Promise<SessionUpdateEvent[]> {
     return await this.deps.ingressService.consumeGatewayConversationEvent(payload);
+  }
+
+  consumeGatewayNotification(payload: Parameters<SessionGatewayIngressService['consumeGatewayNotification']>[0]): SessionUpdateEvent[] {
+    return this.deps.ingressService.consumeGatewayNotification(payload);
   }
 
   async createSession(payload: unknown) {
@@ -135,14 +114,6 @@ export class SessionRuntimeService {
 
   async abortSession(payload: unknown) {
     return await this.deps.commandService.abortSession(payload);
-  }
-
-  async loadTurnToolResults(payload: unknown) {
-    return await this.deps.commandService.loadTurnToolResults(payload);
-  }
-
-  async reconcileRunClosure(payload: unknown) {
-    return await this.deps.commandService.reconcileRunClosure(payload);
   }
 
   async listPendingApprovals() {

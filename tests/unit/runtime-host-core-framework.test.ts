@@ -105,6 +105,21 @@ describe('runtime-host core framework', () => {
     });
   });
 
+  it('job queue 支持成功后丢弃大型结果，只保留完成状态', async () => {
+    const registry = new RuntimeJobRegistry();
+    registry.register('sessions.hydrateTimeline', () => ({ snapshot: { items: new Array(1000).fill({ text: 'large' }) } }));
+    const queue = new RuntimeJobQueue(registry, logger, scheduler, clock);
+
+    const job = queue.enqueue('sessions.hydrateTimeline', null, { resultRetention: 'drop' });
+
+    await vi.waitFor(() => {
+      expect(queue.get(job.id)).toMatchObject({
+        status: 'succeeded',
+      });
+    });
+    expect(queue.get(job.id)).not.toHaveProperty('result');
+  });
+
   it('job handler 可以上报进度，队列快照会保留最新进度', async () => {
     const registry = new RuntimeJobRegistry();
     registry.register('progress.job', (_payload, context) => {
@@ -136,6 +151,35 @@ describe('runtime-host core framework', () => {
         },
       });
     });
+  });
+
+  it('job handler 可以协作式 yield 并在 checkpoint 上报进度', async () => {
+    const registry = new RuntimeJobRegistry();
+    const events: string[] = [];
+    registry.register('yield.job', async (_payload, context) => {
+      events.push('start');
+      await context.checkpoint('halfway');
+      events.push('after-checkpoint');
+      await context.yieldIfNeeded();
+      events.push('done');
+      return { ok: true };
+    });
+    const queue = new RuntimeJobQueue(registry, logger, scheduler, clock);
+
+    const job = queue.enqueue('yield.job', null);
+
+    await vi.waitFor(() => {
+      expect(queue.get(job.id)).toMatchObject({
+        status: 'succeeded',
+        progress: {
+          message: 'halfway',
+        },
+        result: {
+          ok: true,
+        },
+      });
+    });
+    expect(events).toEqual(['start', 'after-checkpoint', 'done']);
   });
 
   it('job queue 拒绝未注册任务类型，避免请求入口绕过注册机制', () => {

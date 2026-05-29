@@ -56,3 +56,28 @@ export function extractGatewayErrorDetails(payload: unknown): unknown {
   }
   return error.details;
 }
+
+export function extractGatewayErrorRetryable(payload: unknown): boolean | undefined {
+  if (!isRecord(payload)) {
+    return undefined;
+  }
+  const error = payload.error;
+  if (!isRecord(error)) {
+    return undefined;
+  }
+  return typeof error.retryable === 'boolean' ? error.retryable : undefined;
+}
+
+export function extractGatewayErrorRetryAfterMs(payload: unknown): number | undefined {
+  if (!isRecord(payload)) {
+    return undefined;
+  }
+  const error = payload.error;
+  if (!isRecord(error)) {
+    return undefined;
+  }
+  const retryAfterMs = error.retryAfterMs;
+  return typeof retryAfterMs === 'number' && Number.isFinite(retryAfterMs) && retryAfterMs > 0
+    ? retryAfterMs
+    : undefined;
+}

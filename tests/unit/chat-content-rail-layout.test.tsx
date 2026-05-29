@@ -399,14 +399,15 @@ describe('chat content rail layout', () => {
         role: 'assistant',
         agentId: 'agent-a',
         messageId: 'turn-a',
-        content: 'Alpha',
-        streaming: true,
-        toolStatuses: [{
+        content: [{
+          type: 'text',
+          text: 'Alpha',
+        }, {
+          type: 'toolCall',
           id: 'tool-a',
           name: 'read_file',
-          status: 'running',
-          updatedAt: 1,
         }],
+        streaming: true,
       },
       {
         id: 'assistant-b',
@@ -420,12 +421,6 @@ describe('chat content rail layout', () => {
           input: { q: 'hello' },
         }],
         streaming: true,
-        toolStatuses: [{
-          id: 'tool-b',
-          name: 'search',
-          status: 'running',
-          updatedAt: 2,
-        }],
       },
     ]));
 

@@ -1,5 +1,4 @@
 import type { RuntimeHostLogger } from '../../shared/logger';
-import { withOpenClawConfigLock } from './openclaw-config-mutex';
 import type { OpenClawConfigRepositoryPort } from './openclaw-config-repository';
 import type { OpenClawOAuthPluginRegistrationService } from './openclaw-oauth-plugin-registration';
 import { applyOpenClawConfigSanitizerRules } from './openclaw-config-sanitizer-rules';
@@ -21,19 +20,14 @@ export async function sanitizeOpenClawConfig(
   environment: OpenClawEnvironmentRepository,
   logger: RuntimeHostLogger,
 ): Promise<void> {
-  await withOpenClawConfigLock(async () => {
-    const openclawConfigPath = configRepository.getConfigFilePath();
-    if (!(await environment.pathExists(openclawConfigPath))) {
-      logger.info('[sanitize] openclaw.json does not exist yet, skipping sanitization');
-      return;
-    }
+  const openclawConfigPath = configRepository.getConfigFilePath();
+  if (!(await environment.pathExists(openclawConfigPath))) {
+    logger.info('[sanitize] openclaw.json does not exist yet, skipping sanitization');
+    return;
+  }
 
-    const config = await configRepository.read();
-    if (!config || typeof config !== 'object' || Array.isArray(config)) {
-      logger.warn('[sanitize] openclaw.json is unreadable, skipping sanitization to avoid accidental overwrite');
-      return;
-    }
-
+  let sanitized = false;
+  await configRepository.update(async (config) => {
     const modified = await applyOpenClawConfigSanitizerRules(config, {
       fileExists: (pathname) => environment.pathExists(pathname),
       discoverBundledPluginIds: async () => (await oauthPlugins.discoverBundledPlugins()).all,
@@ -44,8 +38,10 @@ export async function sanitizeOpenClawConfig(
 
     if (modified) {
       markRestartCommand(config);
-      await configRepository.write(config);
-      logger.info('[sanitize] openclaw.json sanitized successfully');
+      sanitized = true;
     }
   });
+  if (sanitized) {
+    logger.info('[sanitize] openclaw.json sanitized successfully');
+  }
 }

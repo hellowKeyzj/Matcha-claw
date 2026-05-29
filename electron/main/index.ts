@@ -23,6 +23,7 @@ import {
 } from './quit-lifecycle';
 import { createSignalQuitHandler } from './signal-quit';
 import { acquireProcessInstanceFileLock } from './process-instance-lock';
+import { waitForGatewayControlReady } from './gateway-control-ready-probe';
 
 const WINDOWS_APP_USER_MODEL_ID = 'app.matchaclaw.desktop';
 const isE2EMode = process.env.MATCHACLAW_E2E === '1';
@@ -177,17 +178,13 @@ if (gotTheLock) {
   });
   gatewayManager.setRuntimeHostManager(runtimeHostManager);
   gatewayManager.setControlReadyProbe(async (timeoutMs) => {
-    const result = await runtimeHostManager.request<{
-      success?: boolean;
-      error?: string;
-      missingMethods?: string[];
-    }>('POST', '/api/gateway/ready', { timeoutMs }, { timeoutMs: timeoutMs + 2000 });
-    if (result.data?.success !== true) {
-      const missingMethods = Array.isArray(result.data?.missingMethods)
-        ? ` missingMethods=${result.data.missingMethods.join(',')}`
-        : '';
-      throw new Error(result.data?.error || `Gateway control ready probe failed${missingMethods}`);
-    }
+    await waitForGatewayControlReady({
+      runtimeHostManager,
+      nowMs: () => Date.now(),
+      delay: async (ms) => {
+        await new Promise((resolve) => setTimeout(resolve, ms));
+      },
+    }, timeoutMs);
   });
 
   // Application lifecycle

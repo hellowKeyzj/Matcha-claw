@@ -39,6 +39,17 @@ export function readRequiredSessionKey(payload: unknown): string {
   return normalizeString(body.sessionKey);
 }
 
+export function readSessionLoadRequest(payload: unknown): {
+  sessionKey: string;
+  limit: number;
+} {
+  const body = isRecord(payload) ? payload as SessionLoadPayload : {};
+  return {
+    sessionKey: normalizeString(body.sessionKey),
+    limit: normalizeWindowLimit(body.limit),
+  };
+}
+
 export function readAbortSessionKey(payload: unknown, fallbackSessionKey: string | null): string {
   const body = isRecord(payload) ? payload as SessionAbortRuntimePayload : {};
   return normalizeString(body.sessionKey) || fallbackSessionKey || '';

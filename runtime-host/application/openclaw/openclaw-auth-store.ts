@@ -104,14 +104,4 @@ export class OpenClawAuthRepository {
     return await this.configRepository.read();
   }
 
-  async writeOpenClawJson(config: Record<string, unknown>): Promise<void> {
-    const commands = (
-      config.commands && typeof config.commands === 'object'
-        ? { ...(config.commands as Record<string, unknown>) }
-        : {}
-    ) as Record<string, unknown>;
-    commands.restart = true;
-    config.commands = commands;
-    await this.configRepository.write(config);
-  }
 }

@@ -9,7 +9,6 @@ import {
 } from './openclaw-auth-store';
 import { removeProfilesForProvider } from './openclaw-auth-profile-store';
 import type { RuntimeHostLogger } from '../../shared/logger';
-import { withOpenClawConfigLock } from './openclaw-config-mutex';
 import type { OpenClawConfigRepositoryPort } from './openclaw-config-repository';
 import type { OpenClawOAuthPluginRegistrationService } from './openclaw-oauth-plugin-registration';
 import type { OpenClawAgentModelRepositoryPort } from './openclaw-agent-model-repository';
@@ -38,8 +37,7 @@ export class OpenClawProviderConfigService {
     provider: string,
     override: RuntimeProviderConfigOverride,
   ): Promise<void> {
-    await withOpenClawConfigLock(async () => {
-      const config = await this.configRepository.read();
+    await this.configRepository.update(async (config) => {
       ensureMoonshotKimiWebSearchBaseUrl(config, provider);
 
       if (override.baseUrl && override.api) {
@@ -57,8 +55,6 @@ export class OpenClawProviderConfigService {
       if (isOpenClawOAuthPluginProviderKey(provider) && await this.oauthPlugins.ensureOAuthPluginEnabled(config, provider)) {
         this.logger.info(`Enabled OpenClaw OAuth plugin for provider "${provider}"`);
       }
-
-      await this.configRepository.write(config);
     });
   }
 
@@ -92,8 +88,7 @@ export class OpenClawProviderConfigService {
     }
 
     try {
-      await withOpenClawConfigLock(async () => {
-        const config = await this.configRepository.read();
+      await this.configRepository.update(async (config) => {
         let modified = false;
 
         if (await this.oauthPlugins.removeOAuthPluginRegistrations(config, provider)) {
@@ -121,7 +116,7 @@ export class OpenClawProviderConfigService {
         }
 
         if (modified) {
-          await this.writeOpenClawJson(config);
+          this.markRestartCommand(config);
         }
       });
     } catch (error) {
@@ -129,7 +124,7 @@ export class OpenClawProviderConfigService {
     }
   }
 
-  private async writeOpenClawJson(config: Record<string, unknown>): Promise<void> {
+  private markRestartCommand(config: Record<string, unknown>): void {
     const commands = (
       config.commands && typeof config.commands === 'object'
         ? { ...(config.commands as Record<string, unknown>) }
@@ -137,7 +132,6 @@ export class OpenClawProviderConfigService {
     ) as Record<string, unknown>;
     commands.restart = true;
     config.commands = commands;
-    await this.configRepository.write(config);
   }
 }
 

@@ -86,6 +86,10 @@ function getValidationProfile(
   providerType: string,
   options?: ValidationOptions,
 ): ValidationProfile {
+  if (providerType === 'openrouter') {
+    return 'openrouter';
+  }
+
   const providerApi = options?.apiProtocol || getProviderConfig(providerType)?.api;
 
   if (providerApi === 'anthropic-messages') {
@@ -101,8 +105,6 @@ function getValidationProfile(
   switch (providerType) {
     case 'google':
       return 'google-query-key';
-    case 'openrouter':
-      return 'openrouter';
     case 'ollama':
       return 'none';
     default:

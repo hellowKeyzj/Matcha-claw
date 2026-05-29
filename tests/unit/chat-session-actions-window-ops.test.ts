@@ -34,10 +34,6 @@ function createHistoryRuntimeHarness(): StoreHistoryCache {
     },
     replaceHistoryLoadAbortController: () => null,
     clearHistoryLoadAbortController: () => {},
-    resetTerminalHistoryReconcile: () => {},
-    markTerminalHistoryReconcileNeeded: () => {},
-    consumeTerminalHistoryReconcileNeeded: () => false,
-    getHistoryLoadInFlight: () => null,
     setHistoryLoadInFlight: () => {},
     clearHistoryLoadInFlight: () => {},
     historyFingerprintBySession: new Map<string, string>(),
@@ -76,6 +72,7 @@ function buildWindowSnapshotResult(input: {
         updatedAt: input.messages[input.messages.length - 1]?.timestamp,
       },
       items: buildRenderItemsFromMessages(input.sessionKey, input.messages),
+      approvals: [],
       replayComplete: true,
       runtime: {
         activeRunId: null,
@@ -114,6 +111,7 @@ function buildSessionSnapshotResult(input: {
         updatedAt: input.messages[input.messages.length - 1]?.timestamp,
       },
       items: buildRenderItemsFromMessages(input.sessionKey, input.messages),
+      approvals: [],
       replayComplete: true,
       runtime: {
         activeRunId: null,

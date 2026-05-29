@@ -41,7 +41,7 @@ describe('dispatchProtocolEvent', () => {
     __resetGatewayChatEventDedupStateForTest();
   });
 
-  it('chat 事件无明确终态字段时，会归一化为结构化 delta 再下发', () => {
+  it('chat 事件缺少 V4 必需字段时不会进入 conversation 通道', () => {
     const emitNotification = vi.fn();
     const emitConversationEvent = vi.fn();
     const emitChannelStatus = vi.fn();
@@ -56,17 +56,10 @@ describe('dispatchProtocolEvent', () => {
     );
 
     expect(emitNotification).not.toHaveBeenCalled();
-    expect(emitConversationEvent).toHaveBeenCalledTimes(1);
-    expect(emitConversationEvent).toHaveBeenCalledWith({
-      type: 'chat.message',
-      event: {
-        state: 'delta',
-        message: { role: 'assistant', content: 'hello' },
-      },
-    });
+    expect(emitConversationEvent).not.toHaveBeenCalled();
   });
 
-  it('chat 事件包含 stopReason 时，应归一化为 final', () => {
+  it('chat 事件只接受显式 V4 final state', () => {
     const emitNotification = vi.fn();
     const emitConversationEvent = vi.fn();
     const emitChannelStatus = vi.fn();
@@ -75,9 +68,14 @@ describe('dispatchProtocolEvent', () => {
       { emitNotification, emitConversationEvent, emitChannelStatus },
       'chat',
       {
-        role: 'assistant',
-        content: 'all done',
-        stopReason: 'end_turn',
+        state: 'final',
+        runId: 'run-final-1',
+        sessionKey: 'agent:main:main',
+        seq: 1,
+        message: {
+          role: 'assistant',
+          content: 'all done',
+        },
       },
     );
 
@@ -86,52 +84,49 @@ describe('dispatchProtocolEvent', () => {
       type: 'chat.message',
       event: expect.objectContaining({
         state: 'final',
+        runId: 'run-final-1',
+        sessionKey: 'agent:main:main',
+        seq: 1,
       }),
     });
   });
 
-  it('连续相同 final chat 事件也应全部下发，不能在 ingress 层按文本语义折叠', () => {
+  it('连续相同 final chat 事件也应全部下发，不能在 bridge 层按文本语义折叠', () => {
     const emitNotification = vi.fn();
     const emitConversationEvent = vi.fn();
     const emitChannelStatus = vi.fn();
 
+    const event = {
+      state: 'final',
+      runId: 'run-final-2',
+      sessionKey: 'agent:main:main',
+      seq: 2,
+      message: { role: 'assistant', content: 'same final' },
+    };
+
     dispatchGatewayProtocolEvent(
       { emitNotification, emitConversationEvent, emitChannelStatus },
       'chat',
-      {
-        role: 'assistant',
-        content: 'same final',
-        stopReason: 'end_turn',
-      },
+      event,
     );
     dispatchGatewayProtocolEvent(
       { emitNotification, emitConversationEvent, emitChannelStatus },
       'chat',
-      {
-        role: 'assistant',
-        content: 'same final',
-        stopReason: 'end_turn',
-      },
+      event,
     );
 
     expect(emitConversationEvent).toHaveBeenCalledTimes(2);
     expect(emitConversationEvent).toHaveBeenNthCalledWith(1, {
       type: 'chat.message',
-      event: {
-        state: 'final',
-        message: { role: 'assistant', content: 'same final', stopReason: 'end_turn' },
-      },
+      event,
     });
     expect(emitConversationEvent).toHaveBeenNthCalledWith(2, {
       type: 'chat.message',
-      event: {
-        state: 'final',
-        message: { role: 'assistant', content: 'same final', stopReason: 'end_turn' },
-      },
+      event,
     });
   });
 
-  it('chat 事件会保留 sequenceId 与 agentId', () => {
+  it('chat 事件会保留 V4 seq 并拒绝旧 sequenceId fallback', () => {
     const emitNotification = vi.fn();
     const emitConversationEvent = vi.fn();
     const emitChannelStatus = vi.fn();
@@ -140,9 +135,10 @@ describe('dispatchProtocolEvent', () => {
       { emitNotification, emitConversationEvent, emitChannelStatus },
       'chat',
       {
+        state: 'delta',
         runId: 'run-identity-1',
         sessionKey: 'agent:main:main',
-        sequenceId: 9,
+        seq: 9,
         agentId: 'agent-main',
         message: {
           role: 'assistant',
@@ -157,8 +153,7 @@ describe('dispatchProtocolEvent', () => {
         state: 'delta',
         runId: 'run-identity-1',
         sessionKey: 'agent:main:main',
-        sequenceId: 9,
-        agentId: 'agent-main',
+        seq: 9,
       }),
     });
   });
@@ -189,6 +184,34 @@ describe('dispatchProtocolEvent', () => {
     );
   });
 
+  it('session.message 事件会作为 transcript message 事实进入 conversation 通道', () => {
+    const emitNotification = vi.fn();
+    const emitConversationEvent = vi.fn();
+    const emitChannelStatus = vi.fn();
+    dispatchGatewayProtocolEvent(
+      { emitNotification, emitConversationEvent, emitChannelStatus },
+      'session.message',
+      {
+        sessionKey: 'agent:main:main',
+        message: {
+          role: 'assistant',
+          content: [{ type: 'text', text: '历史消息' }],
+        },
+      },
+    );
+
+    expect(emitConversationEvent).toHaveBeenCalledWith({
+      type: 'session.message',
+      event: expect.objectContaining({
+        sessionKey: 'agent:main:main',
+        message: expect.objectContaining({ role: 'assistant' }),
+      }),
+    });
+    expect(emitNotification).toHaveBeenCalledWith(expect.objectContaining({
+      method: 'session.message',
+    }));
+  });
+
   it('agent tool stream 会作为 OpenClaw tool lifecycle 进入 conversation 通道', () => {
     const emitNotification = vi.fn();
     const emitConversationEvent = vi.fn();
@@ -216,7 +239,7 @@ describe('dispatchProtocolEvent', () => {
       event: expect.objectContaining({
         runId: 'run-tool-1',
         sessionKey: 'agent:main:main',
-        sequenceId: 7,
+        seq: 7,
         timestamp: 1_700_000_000_000,
         phase: 'start',
         toolCallId: 'tool-1',
@@ -226,7 +249,7 @@ describe('dispatchProtocolEvent', () => {
     });
   });
 
-  it('session.tool 事件也会作为 tool timeline 消息进入 conversation 通道', () => {
+  it('session.tool 事件会作为 transcript tool 事实进入 conversation 通道', () => {
     const emitNotification = vi.fn();
     const emitConversationEvent = vi.fn();
     const emitChannelStatus = vi.fn();
@@ -249,11 +272,11 @@ describe('dispatchProtocolEvent', () => {
     );
 
     expect(emitConversationEvent).toHaveBeenCalledWith({
-      type: 'tool.lifecycle',
+      type: 'session.tool',
       event: expect.objectContaining({
         runId: 'run-tool-2',
         sessionKey: 'agent:main:main',
-        sequenceId: 8,
+        seq: 8,
         timestamp: 1_700_000_000_001,
         phase: 'result',
         toolCallId: 'tool-2',
@@ -290,7 +313,35 @@ describe('dispatchProtocolEvent', () => {
     }));
   });
 
-  it('agent 生命周期事件会归一化为 run.phase conversation 事件', () => {
+  it('usage 和 artifact 事件会作为 canonical fact 进入 conversation 通道', () => {
+    const emitNotification = vi.fn();
+    const emitConversationEvent = vi.fn();
+    const emitChannelStatus = vi.fn();
+
+    dispatchGatewayProtocolEvent(
+      { emitNotification, emitConversationEvent, emitChannelStatus },
+      'usage',
+      { sessionKey: 'agent:main:main', usage: { totalTokens: 10 } },
+    );
+    dispatchGatewayProtocolEvent(
+      { emitNotification, emitConversationEvent, emitChannelStatus },
+      'artifact',
+      { sessionKey: 'agent:main:main', artifact: { id: 'artifact-1' } },
+    );
+
+    expect(emitConversationEvent).toHaveBeenNthCalledWith(1, {
+      type: 'usage',
+      event: { sessionKey: 'agent:main:main', usage: { totalTokens: 10 } },
+    });
+    expect(emitConversationEvent).toHaveBeenNthCalledWith(2, {
+      type: 'artifact',
+      event: { sessionKey: 'agent:main:main', artifact: { id: 'artifact-1' } },
+    });
+    expect(emitNotification).toHaveBeenCalledWith(expect.objectContaining({ method: 'usage' }));
+    expect(emitNotification).toHaveBeenCalledWith(expect.objectContaining({ method: 'artifact' }));
+  });
+
+  it('agent lifecycle stream 会归一化为 run.phase conversation 事件', () => {
     const emitNotification = vi.fn();
     const emitConversationEvent = vi.fn();
     const emitChannelStatus = vi.fn();
@@ -300,8 +351,9 @@ describe('dispatchProtocolEvent', () => {
       {
         runId: 'run-2',
         sessionKey: 'agent:main:main',
+        stream: 'lifecycle',
         data: {
-          phase: 'started',
+          phase: 'start',
         },
       },
     );

@@ -1,10 +1,39 @@
 import { describe, expect, it, vi } from 'vitest';
 import { ProviderModelsApplicationService } from '../../runtime-host/application/providers/provider-models-service';
 
+type ProviderModelsServiceArgs = ConstructorParameters<typeof ProviderModelsApplicationService>;
+
+const ZERO_COST = {
+  input: 0,
+  output: 0,
+  cacheRead: 0,
+  cacheWrite: 0,
+};
+
+function createProviderModelsService(
+  store: ProviderModelsServiceArgs[0],
+  credentials: ProviderModelsServiceArgs[1],
+  writer: ProviderModelsServiceArgs[2],
+  customMediaWriter: ProviderModelsServiceArgs[3] = { readAll: vi.fn(async () => ({})), replaceAll: vi.fn(async () => {}) } as any,
+  capabilityRouting: ProviderModelsServiceArgs[4] = { pruneUnavailableModelRoutes: vi.fn(async () => {}) } as any,
+  authRepository: ProviderModelsServiceArgs[5] = { discoverAgentIds: vi.fn(async () => ['main']) },
+  agentModels: ProviderModelsServiceArgs[6] = { upsertProviderInAgentModels: vi.fn(async () => []) },
+): ProviderModelsApplicationService {
+  return new ProviderModelsApplicationService(
+    store,
+    credentials,
+    writer,
+    customMediaWriter,
+    capabilityRouting,
+    authRepository,
+    agentModels,
+  );
+}
+
 describe('ProviderModelsApplicationService', () => {
   it('hydrates an empty catalog from existing OpenClaw provider models', async () => {
     const writeModels = vi.fn(async () => {});
-    const service = new ProviderModelsApplicationService(
+    const service = createProviderModelsService(
       {
         read: async () => ({ schemaVersion: 1, models: [] }),
         write: writeModels,
@@ -31,6 +60,7 @@ describe('ProviderModelsApplicationService', () => {
               modelId: 'gpt-5.4',
               contextWindow: 128000,
               input: ['text', 'image'],
+            cost: ZERO_COST,
             },
           ],
         })),
@@ -64,7 +94,7 @@ describe('ProviderModelsApplicationService', () => {
 
   it('adapts credentialId models to OpenClaw provider entries with transport config', async () => {
     const writeModels = vi.fn(async () => {});
-    const service = new ProviderModelsApplicationService(
+    const service = createProviderModelsService(
       {
         read: async () => ({ schemaVersion: 1, models: [] }),
         write: writeModels,
@@ -111,6 +141,7 @@ describe('ProviderModelsApplicationService', () => {
             modelId: 'gpt-5.4',
             input: ['text'],
             contextWindow: 128000,
+            cost: ZERO_COST,
           },
         ],
       },
@@ -119,7 +150,7 @@ describe('ProviderModelsApplicationService', () => {
 
   it('marks image-understanding models as text and image input for OpenClaw', async () => {
     const writer = { readAll: vi.fn(async () => ({})), replaceAll: vi.fn(async () => {}) };
-    const service = new ProviderModelsApplicationService(
+    const service = createProviderModelsService(
       {
         read: async () => ({ schemaVersion: 1, models: [] }),
         write: async () => {},
@@ -159,6 +190,7 @@ describe('ProviderModelsApplicationService', () => {
           {
             modelId: 'qwen2.5vl:7b',
             input: ['text', 'image'],
+            cost: ZERO_COST,
           },
         ],
       },
@@ -167,7 +199,7 @@ describe('ProviderModelsApplicationService', () => {
 
   it('rejects media capabilities unsupported by custom text providers', async () => {
     const writer = { replaceAll: vi.fn(async () => {}) };
-    const service = new ProviderModelsApplicationService(
+    const service = createProviderModelsService(
       {
         read: async () => ({ schemaVersion: 1, models: [] }),
         write: async () => {},
@@ -204,7 +236,7 @@ describe('ProviderModelsApplicationService', () => {
   });
 
   it('returns selectable models using OpenClaw provider refs', async () => {
-    const service = new ProviderModelsApplicationService(
+    const service = createProviderModelsService(
       {
         read: async () => ({
           schemaVersion: 1,
@@ -256,7 +288,7 @@ describe('ProviderModelsApplicationService', () => {
   });
 
   it('returns catalog models with credential labels for model assignment display', async () => {
-    const service = new ProviderModelsApplicationService(
+    const service = createProviderModelsService(
       {
         read: async () => ({
           schemaVersion: 1,
@@ -307,7 +339,7 @@ describe('ProviderModelsApplicationService', () => {
   it('keeps an empty OpenClaw model array for custom credentials after model removal', async () => {
     const writer = { replaceAll: vi.fn(async () => {}) };
     const capabilityRouting = { pruneUnavailableModelRoutes: vi.fn(async () => {}) };
-    const service = new ProviderModelsApplicationService(
+    const service = createProviderModelsService(
       {
         read: async () => ({
           schemaVersion: 1,
@@ -358,7 +390,7 @@ describe('ProviderModelsApplicationService', () => {
     const writeModels = vi.fn(async () => {});
     const writer = { replaceAll: vi.fn(async () => {}) };
     const capabilityRouting = { pruneUnavailableModelRoutes: vi.fn(async () => {}) };
-    const service = new ProviderModelsApplicationService(
+    const service = createProviderModelsService(
       {
         read: async () => ({
           schemaVersion: 1,
@@ -428,9 +460,9 @@ describe('ProviderModelsApplicationService', () => {
     ]);
   });
 
-  it('does not write model entries for credentials without OpenClaw provider transport config', async () => {
+  it('writes builtin provider model entries using registry transport config', async () => {
     const writer = { replaceAll: vi.fn(async () => {}) };
-    const service = new ProviderModelsApplicationService(
+    const service = createProviderModelsService(
       {
         read: async () => ({ schemaVersion: 1, models: [] }),
         write: async () => {},
@@ -460,13 +492,25 @@ describe('ProviderModelsApplicationService', () => {
       ],
     });
 
-    expect(writer.replaceAll).toHaveBeenCalledWith({}, []);
+    expect(writer.replaceAll).toHaveBeenCalledWith({
+      openai: {
+        baseUrl: 'https://api.openai.com/v1',
+        api: 'openai-responses',
+        models: [
+          {
+            modelId: 'gpt-5.4',
+            input: ['text'],
+            cost: ZERO_COST,
+          },
+        ],
+      },
+    }, ['openai/gpt-5.4']);
   });
 
   it('writes custom media provider transport with an empty model list before models are added', async () => {
     const writer = { readAll: vi.fn(async () => ({})), replaceAll: vi.fn(async () => {}) };
     const customMediaWriter = { readAll: vi.fn(async () => ({})), replaceAll: vi.fn(async () => {}) };
-    const service = new ProviderModelsApplicationService(
+    const service = createProviderModelsService(
       {
         read: async () => ({ schemaVersion: 1, models: [] }),
         write: async () => {},
@@ -508,7 +552,7 @@ describe('ProviderModelsApplicationService', () => {
   it('adds custom media models without requiring a chat provider override', async () => {
     const writer = { replaceAll: vi.fn(async () => {}) };
     const customMediaWriter = { replaceAll: vi.fn(async () => {}) };
-    const service = new ProviderModelsApplicationService(
+    const service = createProviderModelsService(
       {
         read: async () => ({ schemaVersion: 1, models: [] }),
         write: async () => {},
@@ -570,9 +614,61 @@ describe('ProviderModelsApplicationService', () => {
     });
   });
 
+  it('syncs agent models without copying provider API keys into models.json', async () => {
+    const writer = { replaceAll: vi.fn(async () => {}) };
+    const agentModels = { upsertProviderInAgentModels: vi.fn(async () => []) };
+    const service = createProviderModelsService(
+      {
+        read: async () => ({
+          schemaVersion: 1,
+          models: [
+            {
+              credentialId: 'custom-12345678',
+              modelId: 'gpt-5.4',
+              capabilities: ['chat'],
+            },
+          ],
+        }),
+        write: async () => {},
+      },
+      {
+        read: async () => ({
+          schemaVersion: 2,
+          accounts: {
+            'custom-12345678': {
+              id: 'custom-12345678',
+              vendorId: 'custom',
+              baseUrl: 'https://api.example.com/v1',
+              apiProtocol: 'openai-completions',
+            },
+          },
+          apiKeys: {
+            'custom-12345678': 'sk-custom',
+          },
+        }),
+        write: async () => {},
+      },
+      writer as any,
+      undefined,
+      undefined,
+      undefined,
+      agentModels as any,
+    );
+
+    await service.syncOpenClaw();
+
+    expect(agentModels.upsertProviderInAgentModels).toHaveBeenCalledWith({
+      agentIds: ['main'],
+      provider: 'custom-12345678',
+      entry: expect.not.objectContaining({
+        apiKey: 'sk-custom',
+      }),
+    });
+  });
+
   it('syncs the existing catalog to OpenClaw with current valid model refs', async () => {
     const writer = { replaceAll: vi.fn(async () => {}) };
-    const service = new ProviderModelsApplicationService(
+    const service = createProviderModelsService(
       {
         read: async () => ({
           schemaVersion: 1,
@@ -615,6 +711,7 @@ describe('ProviderModelsApplicationService', () => {
           {
             modelId: 'gpt-5.4',
             input: ['text'],
+            cost: ZERO_COST,
           },
         ],
       },

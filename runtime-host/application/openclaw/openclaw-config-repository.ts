@@ -28,7 +28,12 @@ export class OpenClawConfigRepository implements OpenClawConfigRepositoryPort {
   async update<T>(mutate: (config: Record<string, unknown>) => Promise<T> | T): Promise<T> {
     return await withOpenClawConfigLock(async () => {
       const config = await this.read();
-      return await mutate(config);
+      const previousSerialized = JSON.stringify(config);
+      const result = await mutate(config);
+      if (JSON.stringify(config) !== previousSerialized) {
+        await this.write(config);
+      }
+      return result;
     });
   }
 

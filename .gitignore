@@ -79,3 +79,7 @@ patch-audit-matrix.json
 patches/
 spec/
 clawsuite-main/
+.planning/
+.claude/
+.tmp/
+identity/

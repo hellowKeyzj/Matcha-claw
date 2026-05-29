@@ -1,80 +1,103 @@
 import { describe, expect, it } from 'vitest';
-import { deriveExecutionGraphSteps } from '../../runtime-host/application/sessions/execution-graphs';
-import type { SessionTimelineEntry } from '../../runtime-host/shared/session-adapter-types';
+import { buildExecutionGraphItemsFromCanonicalState } from '../../runtime-host/application/sessions/canonical/canonical-projection';
+import { createEmptyCanonicalSessionState, reduceCanonicalSessionEvents } from '../../runtime-host/application/sessions/canonical/canonical-reducer';
+import type { CanonicalSessionEvent } from '../../runtime-host/application/sessions/canonical/canonical-events';
 
-function buildAssistantMessageEntry(
-  partial: Partial<SessionTimelineEntry>,
-): SessionTimelineEntry {
+function base(eventId: string): Pick<CanonicalSessionEvent, 'eventId' | 'provider' | 'source' | 'sessionId' | 'runId' | 'laneKey' | 'origin'> {
   return {
-    key: partial.key ?? 'entry-1',
-    kind: 'message',
-    sessionKey: 'agent:main:main',
-    role: 'assistant',
-    text: '',
-    status: 'final',
+    eventId,
+    provider: 'openclaw-v4',
+    source: 'live',
+    sessionId: 'agent:main:main',
+    runId: 'run-1',
     laneKey: 'main',
-    turnKey: 'main:run-1',
-    thinking: null,
-    assistantSegments: [],
-    images: [],
-    toolUses: [],
-    attachedFiles: [],
-    toolStatuses: [],
-    toolCards: [],
-    isStreaming: false,
-    ...partial,
-  } as SessionTimelineEntry;
+    origin: {
+      providerEventType: 'test',
+      providerIds: {
+        sessionKey: 'agent:main:main',
+        runId: 'run-1',
+      },
+    },
+  };
 }
 
-describe('deriveExecutionGraphSteps', () => {
-  it('keeps completed historical tool steps visible while a later tool is still streaming', () => {
-    const steps = deriveExecutionGraphSteps([
-      buildAssistantMessageEntry({
-        key: 'history',
-        toolUses: [{ id: 'tool-read', name: 'read', input: { filePath: '/tmp/a.md' } }],
-        toolCards: [{ id: 'tool-read', name: 'read', displayTitle: 'read', input: { filePath: '/tmp/a.md' }, status: 'completed', result: { kind: 'none', surface: 'tool-card' } }],
-      }),
-      buildAssistantMessageEntry({
-        key: 'stream',
-        status: 'streaming',
-        toolUses: [{ id: 'tool-grep', name: 'grep', input: { pattern: 'TODO' } }],
-        toolStatuses: [{ toolCallId: 'tool-grep', name: 'grep', status: 'running' }],
-        toolCards: [{ id: 'tool-grep', toolCallId: 'tool-grep', name: 'grep', displayTitle: 'grep', input: { pattern: 'TODO' }, status: 'running', result: { kind: 'none', surface: 'tool-card' } }],
-        isStreaming: true,
-      }),
-    ]);
+describe('ACP execution graph projection', () => {
+  it('projects team completion events with completed and running tool steps', () => {
+    const state = createEmptyCanonicalSessionState('agent:main:main');
+    reduceCanonicalSessionEvents(state, [{
+      ...base('tool-read-start'),
+      type: 'tool_call',
+      toolCallId: 'tool-read',
+      name: 'read',
+      input: { filePath: '/tmp/a.md' },
+    }, {
+      ...base('tool-read-result'),
+      type: 'tool_result',
+      toolCallId: 'tool-read',
+      name: 'read',
+      output: 'done',
+      isError: false,
+    }, {
+      ...base('tool-grep-start'),
+      type: 'tool_call',
+      toolCallId: 'tool-grep',
+      name: 'grep',
+      input: { pattern: 'TODO' },
+    }, {
+      ...base('team-1'),
+      source: 'replay',
+      type: 'team',
+      event: {
+        kind: 'task_completion',
+        source: 'subagent',
+        childSessionKey: 'agent:coder:main',
+        childAgentId: 'coder',
+      },
+    }]);
 
-    expect(steps).toEqual([
-      expect.objectContaining({
-        id: 'tool-read',
-        label: 'read',
-        status: 'completed',
-      }),
-      expect.objectContaining({
-        id: 'tool-grep',
-        label: 'grep',
-        status: 'running',
-      }),
-    ]);
+    const [graph] = buildExecutionGraphItemsFromCanonicalState(state);
+
+    expect(graph).toMatchObject({
+      kind: 'execution-graph',
+      childSessionKey: 'agent:coder:main',
+      childAgentId: 'coder',
+      steps: [
+        expect.objectContaining({ id: 'tool-read', label: 'read', status: 'completed' }),
+        expect.objectContaining({ id: 'tool-grep', label: 'grep', status: 'running' }),
+      ],
+    });
   });
 
-  it('upgrades a historical tool step when streaming status reports a newer state', () => {
-    const steps = deriveExecutionGraphSteps([
-      buildAssistantMessageEntry({
-        key: 'history',
-        toolUses: [{ id: 'tool-read', name: 'read', input: { filePath: '/tmp/a.md' } }],
-        toolCards: [{ id: 'tool-read', toolCallId: 'tool-read', name: 'read', displayTitle: 'read', input: { filePath: '/tmp/a.md' }, status: 'completed', result: { kind: 'none', surface: 'tool-card' } }],
-      }),
-      buildAssistantMessageEntry({
-        key: 'stream',
-        status: 'streaming',
-        toolStatuses: [{ toolCallId: 'tool-read', name: 'read', status: 'error', summary: 'Permission denied' }],
-        toolCards: [{ id: 'tool-read', toolCallId: 'tool-read', name: 'read', displayTitle: 'read', input: { filePath: '/tmp/a.md' }, status: 'error', summary: 'Permission denied', result: { kind: 'none', surface: 'tool-card' } }],
-        isStreaming: true,
-      }),
-    ]);
+  it('projects tool result errors into graph steps', () => {
+    const state = createEmptyCanonicalSessionState('agent:main:main');
+    reduceCanonicalSessionEvents(state, [{
+      ...base('tool-read-start'),
+      type: 'tool_call',
+      toolCallId: 'tool-read',
+      name: 'read',
+      input: { filePath: '/tmp/a.md' },
+    }, {
+      ...base('tool-read-result'),
+      type: 'tool_result',
+      toolCallId: 'tool-read',
+      name: 'read',
+      output: 'Permission denied',
+      outputText: 'Permission denied',
+      isError: true,
+    }, {
+      ...base('team-1'),
+      source: 'replay',
+      type: 'team',
+      event: {
+        kind: 'task_completion',
+        source: 'subagent',
+        childSessionKey: 'agent:coder:main',
+      },
+    }]);
 
-    expect(steps).toEqual([
+    const [graph] = buildExecutionGraphItemsFromCanonicalState(state);
+
+    expect(graph?.steps).toEqual([
       expect.objectContaining({
         id: 'tool-read',
         label: 'read',
@@ -82,5 +105,44 @@ describe('deriveExecutionGraphSteps', () => {
         detail: 'Permission denied',
       }),
     ]);
+  });
+
+  it('uses task completion turnKey to collect graph steps when the team event has no runId', () => {
+    const state = createEmptyCanonicalSessionState('agent:main:main');
+    reduceCanonicalSessionEvents(state, [{
+      ...base('tool-read-start'),
+      type: 'tool_call',
+      toolCallId: 'tool-read',
+      name: 'read',
+      input: { filePath: '/tmp/a.md' },
+    }, {
+      ...base('tool-read-result'),
+      type: 'tool_result',
+      toolCallId: 'tool-read',
+      name: 'read',
+      output: 'done',
+      isError: false,
+    }, {
+      ...base('team-1'),
+      runId: undefined,
+      source: 'replay',
+      type: 'team',
+      event: {
+        kind: 'task_completion',
+        source: 'subagent',
+        childSessionKey: 'agent:coder:main',
+        turnKey: 'run-1',
+      },
+    }]);
+
+    const [graph] = buildExecutionGraphItemsFromCanonicalState(state);
+
+    expect(graph).toMatchObject({
+      runId: 'run-1',
+      turnKey: 'run-1',
+      steps: [
+        expect.objectContaining({ id: 'tool-read', label: 'read', status: 'completed' }),
+      ],
+    });
   });
 });

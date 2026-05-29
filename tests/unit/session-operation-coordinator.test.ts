@@ -15,6 +15,9 @@ function createSnapshot(updatedAt: number): SessionStateSnapshot {
       titleSource: 'none',
     },
     items: [],
+    approvals: [],
+    usage: [],
+    artifacts: [],
     replayComplete: true,
     runtime: {
       activeRunId: null,
@@ -22,6 +25,7 @@ function createSnapshot(updatedAt: number): SessionStateSnapshot {
       activeTurnItemKey: null,
       pendingTurnKey: null,
       pendingTurnLaneKey: null,
+      runtimeActivity: null,
       lastUserMessageAt: null,
       lastError: null,
       lastIssue: null,

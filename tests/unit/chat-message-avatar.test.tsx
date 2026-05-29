@@ -133,12 +133,6 @@ describe('chat message avatar', () => {
     const toolItem = buildRenderItem({
       role: 'assistant',
       content: [{ type: 'toolCall', id: 'tool-1', name: 'read', input: { filePath: 'README.md' } }],
-      toolStatuses: [{
-        toolCallId: 'tool-1',
-        name: 'read',
-        status: 'running',
-        updatedAt: 1,
-      }],
     });
     if (thinkingItem.kind !== 'assistant-turn' || toolItem.kind !== 'assistant-turn') {
       throw new Error('expected assistant turns');
@@ -183,12 +177,6 @@ describe('chat message avatar', () => {
         id: 'tool-1',
         name: 'read',
         input: { filePath: 'README.md' },
-      }],
-      toolStatuses: [{
-        toolCallId: 'tool-1',
-        name: 'read',
-        status: 'running',
-        updatedAt: 1,
       }],
       streaming: true,
     });
@@ -279,14 +267,11 @@ describe('chat message avatar', () => {
         id: 'tool-1',
         name: 'read',
         input: { filePath: 'README.md' },
-      }],
-      toolStatuses: [{
+      }, {
+        type: 'tool_result',
         toolCallId: 'tool-1',
         name: 'read',
-        status: 'completed',
-        updatedAt: 1,
         result: { text: 'tool output body' },
-        outputText: '{"text":"tool output body"}',
       }],
     });
     if (item.kind !== 'assistant-turn') {
@@ -305,7 +290,7 @@ describe('chat message avatar', () => {
     const toolRail = document.querySelector('[data-compact-rail="tool"]');
     expect(toolRail?.textContent).toContain('读取，README.md');
     expect(toolRail?.textContent).toContain('完成');
-    expect(toolRail?.textContent).toContain('tool output body');
+    expect(toolRail?.textContent).not.toContain('tool output body');
 
     const toggle = screen.getByLabelText('展开工具 read') as HTMLButtonElement | null;
     act(() => {
@@ -329,7 +314,7 @@ describe('chat message avatar', () => {
   });
 
   it('hides TodoWrite tool calls from historical assistant messages', () => {
-    const item = buildRenderItem({
+    const items = buildRenderItemsFromMessages('agent:test:main', [{
       role: 'assistant',
       content: [{
         type: 'toolCall',
@@ -341,88 +326,23 @@ describe('chat message avatar', () => {
             { content: '修改聊天展示', status: 'in_progress' },
           ],
         },
-      }],
-      toolStatuses: [{
+      }, {
+        type: 'tool_result',
         toolCallId: 'todo-write-1',
         name: 'TodoWrite',
-        status: 'completed',
-        updatedAt: 1,
         result: {
           todos: [
             { content: '分析需求', status: 'completed' },
             { content: '修改聊天展示', status: 'in_progress' },
           ],
         },
-        outputText: JSON.stringify({
-          todos: [
-            { content: '分析需求', status: 'completed' },
-            { content: '修改聊天展示', status: 'in_progress' },
-          ],
-        }),
       }],
-    });
-    if (item.kind !== 'assistant-turn') {
-      throw new Error('expected assistant turn');
-    }
+    }]);
 
-    render(
-      <ChatAssistantTurn
-        item={item}
-        showThinking={false}
-      />,
-    );
-
-    expect(document.querySelector('[data-compact-rail="todo-tool"]')).toBeNull();
-    expect(document.querySelector('[data-compact-rail="tool"]')).toBeNull();
+    expect(items).toEqual([]);
   });
 
   it('renders the current session todo list from the task snapshot store', () => {
-    const item = buildRenderItem({
-      role: 'assistant',
-      content: [{
-        type: 'toolCall',
-        id: 'todo-write-live',
-        name: 'TodoWrite',
-        input: {
-          newTodos: [
-            { content: '分析页面结构', status: 'pending' },
-            { content: '实现任务状态', status: 'pending' },
-            { content: '验证刷新恢复', status: 'pending' },
-          ],
-        },
-      }],
-      toolStatuses: [{
-        toolCallId: 'todo-write-live',
-        name: 'TodoWrite',
-        status: 'completed',
-        updatedAt: 1,
-        result: {
-          todos: [
-            { content: '分析页面结构', status: 'pending' },
-            { content: '实现任务状态', status: 'pending' },
-            { content: '验证刷新恢复', status: 'pending' },
-          ],
-        },
-        outputText: JSON.stringify({
-          todos: [
-            { content: '分析页面结构', status: 'pending' },
-            { content: '实现任务状态', status: 'pending' },
-            { content: '验证刷新恢复', status: 'pending' },
-          ],
-        }),
-      }],
-    });
-    if (item.kind !== 'assistant-turn') {
-      throw new Error('expected assistant turn');
-    }
-
-    render(
-      <ChatAssistantTurn
-        item={item}
-        showThinking={false}
-      />,
-    );
-
     expect(screen.queryByTestId('session-todo-panel')).toBeNull();
 
     act(() => {
@@ -464,14 +384,11 @@ describe('chat message avatar', () => {
         id: 'tool-json-1',
         name: 'read',
         input: { filePath: 'README.md' },
-      }],
-      toolStatuses: [{
+      }, {
+        type: 'tool_result',
         toolCallId: 'tool-json-1',
         name: 'read',
-        status: 'completed',
-        updatedAt: 1,
-        result: { text: 'tool output body', ok: true },
-        outputText: '{"text":"tool output body","ok":true}',
+        result: '{"text":"tool output body","ok":true}',
       }],
     });
     if (item.kind !== 'assistant-turn') {
@@ -510,14 +427,11 @@ describe('chat message avatar', () => {
         id: 'tool-raw-1',
         name: 'read',
         input: { filePath: 'README.md' },
-      }],
-      toolStatuses: [{
+      }, {
+        type: 'tool_result',
         toolCallId: 'tool-raw-1',
         name: 'read',
-        status: 'completed',
-        updatedAt: 1,
         result: "{'status': 'error', 'message': 'store_failed', 'tool': 'read'}",
-        outputText: "{'status': 'error', 'message': 'store_failed', 'tool': 'read'}",
       }],
     });
     if (item.kind !== 'assistant-turn') {
@@ -532,8 +446,16 @@ describe('chat message avatar', () => {
     );
 
     const railText = document.querySelector('[data-compact-rail="tool"]')?.textContent ?? '';
-    expect(railText).toContain('store_failed');
+    expect(railText).not.toContain('store_failed');
     expect(railText).not.toContain("{'status'");
+
+    act(() => {
+      screen.getByLabelText('展开工具 read').click();
+    });
+    act(() => {
+      screen.getByLabelText('展开输出结果').click();
+    });
+    expect(screen.getByText(/store_failed/)).toBeInTheDocument();
   });
 
   it('collapsed tool header avoids exposing raw object-like input payload text', () => {
@@ -544,14 +466,11 @@ describe('chat message avatar', () => {
         id: 'tool-raw-input-1',
         name: 'multi-search-engine',
         input: "--- name: 'multi-search-engine' description: 'GitHub trending search' ---",
-      }],
-      toolStatuses: [{
+      }, {
+        type: 'tool_result',
         toolCallId: 'tool-raw-input-1',
         name: 'multi-search-engine',
-        status: 'completed',
-        updatedAt: 1,
         result: "{'status': 'error', 'tool': 'web_search', 'message': 'search_failed'}",
-        outputText: "{'status': 'error', 'tool': 'web_search', 'message': 'search_failed'}",
       }],
     });
     if (item.kind !== 'assistant-turn') {
@@ -568,8 +487,16 @@ describe('chat message avatar', () => {
     const railText = document.querySelector('[data-compact-rail="tool"]')?.textContent ?? '';
     expect(railText).toContain('GitHub trending search');
     expect(railText).not.toContain("--- name:");
-    expect(railText).toContain('search_failed');
+    expect(railText).not.toContain('search_failed');
     expect(railText).not.toContain("{'status'");
+
+    act(() => {
+      screen.getByLabelText('展开工具 multi-search-engine').click();
+    });
+    act(() => {
+      screen.getByLabelText('展开输出结果').click();
+    });
+    expect(screen.getByText(/search_failed/)).toBeInTheDocument();
   });
 
   it('clicking the assistant body collapses open thinking and tool sections in the same turn', () => {
@@ -578,16 +505,9 @@ describe('chat message avatar', () => {
       content: [
         { type: 'thinking', thinking: 'reviewing options' },
         { type: 'toolCall', id: 'tool-1', name: 'read', input: { filePath: 'README.md' } },
+        { type: 'tool_result', toolCallId: 'tool-1', name: 'read', result: { text: 'tool output body' } },
         { type: 'text', text: 'final answer body' },
       ],
-      toolStatuses: [{
-        toolCallId: 'tool-1',
-        name: 'read',
-        status: 'completed',
-        updatedAt: 1,
-        result: { text: 'tool output body' },
-        outputText: '{"text":"tool output body"}',
-      }],
     });
     if (item.kind !== 'assistant-turn') {
       throw new Error('expected assistant turn');
@@ -623,7 +543,7 @@ describe('chat message avatar', () => {
 
     expect(screen.queryByText(/reviewing options/)).toBeNull();
     expect(document.querySelector('[data-compact-rail="tool"]')?.textContent).toContain('README.md');
-    expect(document.querySelector('[data-compact-rail="tool"]')?.textContent).toContain('tool output body');
+    expect(document.querySelector('[data-compact-rail="tool"]')?.textContent).not.toContain('tool output body');
   });
 
   it('long tool output uses its own scroll region instead of expanding the chat column indefinitely', () => {
@@ -635,14 +555,11 @@ describe('chat message avatar', () => {
         id: 'tool-long-output',
         name: 'read',
         input: { filePath: 'README.md' },
-      }],
-      toolStatuses: [{
+      }, {
+        type: 'tool_result',
         toolCallId: 'tool-long-output',
         name: 'read',
-        status: 'completed',
-        updatedAt: 1,
         result: { text: longOutput },
-        outputText: JSON.stringify({ text: longOutput }),
       }],
     });
     if (item.kind !== 'assistant-turn') {
@@ -680,12 +597,10 @@ describe('chat message avatar', () => {
         id: 'tool-canvas-1',
         name: 'canvas_render',
         input: { source: { type: 'handle', id: 'cv-inline' } },
-      }],
-      toolStatuses: [{
+      }, {
+        type: 'tool_result',
         toolCallId: 'tool-canvas-1',
         name: 'canvas_render',
-        status: 'completed',
-        updatedAt: 1,
         result: {
           kind: 'canvas',
           view: {
@@ -699,19 +614,6 @@ describe('chat message avatar', () => {
             target: 'assistant_message',
           },
         },
-        outputText: JSON.stringify({
-          kind: 'canvas',
-          view: {
-            backend: 'canvas',
-            id: 'cv-inline',
-            url: '/__openclaw__/canvas/documents/cv_inline/index.html',
-            title: 'Inline demo',
-            preferred_height: 320,
-          },
-          presentation: {
-            target: 'assistant_message',
-          },
-        }),
       }],
     });
     if (item.kind !== 'assistant-turn') {
@@ -730,7 +632,7 @@ describe('chat message avatar', () => {
     expect(embeddedIframe?.getAttribute('src')).toBe('/__openclaw__/canvas/documents/cv_inline/index.html');
 
     const toggle = screen.getByLabelText('展开工具 canvas_render') as HTMLButtonElement | null;
-    expect(document.querySelector('[data-compact-rail="tool"]')?.textContent).toContain('已生成画布');
+    expect(document.querySelector('[data-compact-rail="tool"]')?.textContent).not.toContain('已生成画布');
     act(() => {
       toggle?.click();
     });

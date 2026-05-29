@@ -1,5 +1,4 @@
 import type { RuntimeHostLogger } from '../../shared/logger';
-import { withOpenClawConfigLock } from './openclaw-config-mutex';
 import type { OpenClawConfigRepositoryPort } from './openclaw-config-repository';
 
 export interface ProxySettings {
@@ -39,8 +38,9 @@ export async function syncProxyConfigToOpenClaw(
   logger: RuntimeHostLogger,
   options: SyncProxyOptions = {},
 ): Promise<void> {
-  await withOpenClawConfigLock(async () => {
-    const config = await configRepository.read();
+  let syncedProxy = '';
+  let skipped = false;
+  await configRepository.update((config) => {
     const channels = isRecord(config.channels) ? config.channels : {};
     const telegramSection = channels.telegram;
 
@@ -66,7 +66,7 @@ export async function syncProxyConfigToOpenClaw(
     const currentProxy = typeof currentDefault.proxy === 'string' ? currentDefault.proxy : '';
 
     if (!settings.proxyEnabled && preserveExistingWhenDisabled && currentProxy) {
-      logger.info('Skipped Telegram proxy sync because proxy is disabled and preserve mode is enabled');
+      skipped = true;
       return;
     }
 
@@ -84,8 +84,12 @@ export async function syncProxyConfigToOpenClaw(
     if ('proxy' in telegramSection) {
       delete telegramSection.proxy;
     }
-
-    await configRepository.write(config);
-    logger.info(`Synced Telegram proxy to OpenClaw config (${nextProxy || 'disabled'})`);
+    syncedProxy = nextProxy || 'disabled';
   });
+  if (skipped) {
+    logger.info('Skipped Telegram proxy sync because proxy is disabled and preserve mode is enabled');
+  }
+  if (syncedProxy) {
+    logger.info(`Synced Telegram proxy to OpenClaw config (${syncedProxy})`);
+  }
 }

@@ -14,7 +14,6 @@ import { SessionTimelineRuntime } from '../../../runtime-host/application/sessio
 import { SessionOperationCoordinator } from '../../../runtime-host/application/sessions/session-operation-coordinator';
 import type { SessionHydrationJobPort } from '../../../runtime-host/application/sessions/session-hydration-jobs';
 import type { SessionCatalogJobPort } from '../../../runtime-host/application/sessions/session-catalog-jobs';
-import { PendingApprovalStore } from '../../../runtime-host/application/sessions/pending-approval-store';
 import type { OpenClawWorkspacePort } from '../../../runtime-host/application/openclaw/openclaw-workspace-service';
 import { createTestRuntimeFileSystem } from './runtime-file-system';
 import { createTestRuntimeIdGenerator } from './runtime-id-generator';
@@ -129,7 +128,6 @@ export function createTestSessionRuntimeService(deps: TestSessionRuntimeServiceD
     timelineRuntime,
     snapshotService,
     gateway: deps.openclawBridge,
-    pendingApprovals: new PendingApprovalStore({ clock }),
     operationCoordinator,
     clock,
     idGenerator,

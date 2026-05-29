@@ -21,7 +21,6 @@ import { createChatScrollChromeStore, type ChatScrollChromeStore } from '../chat
 import type {
   ChatExecutionGraphItem,
   ChatRenderItem,
-  ChatTaskCompletionItem,
   ChatUserMessageItem,
 } from '../chat-render-item-model';
 import { ChatMessage } from '../ChatMessage';
@@ -104,11 +103,8 @@ function getMessageDataAttributes(item: ChatRenderItem) {
   };
 }
 
-function SystemInfoRow({ item }: { item: ChatTaskCompletionItem | ChatRenderItem }) {
-  const text = item.text.trim()
-    || (item.kind === 'task-completion'
-      ? [item.taskLabel, item.statusLabel, item.result].filter(Boolean).join(' · ')
-      : '');
+function SystemInfoRow({ item }: { item: ChatRenderItem }) {
+  const text = item.text.trim();
   if (!text) {
     return null;
   }
@@ -179,7 +175,7 @@ function renderChatItem(input: {
       </div>
     );
   }
-  if (input.item.kind === 'task-completion' || input.item.kind === 'system') {
+  if (input.item.kind === 'system') {
     return <SystemInfoRow item={input.item} />;
   }
   return (

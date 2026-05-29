@@ -1,3 +1,4 @@
+import { getProviderBackendConfig } from './provider-registry';
 import {
   getLegacyOpenClawProviderKeys,
   getOAuthApiKeyEnv,
@@ -15,7 +16,8 @@ type ProviderRuntimeProtocol =
   | 'openai-completions'
   | 'openai-responses'
   | 'anthropic-messages'
-  | 'openrouter';
+  | 'openrouter'
+  | 'google-generative-ai';
 
 export type RuntimeProviderConfigOverride = {
   baseUrl?: string;
@@ -119,21 +121,30 @@ export function resolveRuntimeProviderConfigOverride(
     };
   }
 
-  if (account.authMode !== 'oauth_device') {
-    return undefined;
-  }
-  const oauthApi = getOAuthProviderApi(vendorId);
-  if (!oauthApi) {
-    return undefined;
+  if (account.authMode === 'oauth_device') {
+    const oauthApi = getOAuthProviderApi(vendorId);
+    if (!oauthApi) {
+      return undefined;
+    }
+
+    const normalizedOAuthBaseUrl = normalizeOAuthBaseUrl(vendorId, getOptionalString(account.baseUrl));
+    const apiKeyEnv = getOAuthApiKeyEnv(providerKey);
+    return {
+      ...(normalizedOAuthBaseUrl ? { baseUrl: ensureHttpsPrefix(normalizedOAuthBaseUrl) } : {}),
+      api: oauthApi,
+      ...(apiKeyEnv ? { apiKeyEnv } : {}),
+      ...(usesOAuthAuthHeader(providerKey) ? { authHeader: true } : {}),
+    };
   }
 
-  const normalizedOAuthBaseUrl = normalizeOAuthBaseUrl(vendorId, getOptionalString(account.baseUrl));
-  const apiKeyEnv = getOAuthApiKeyEnv(providerKey);
+  const providerConfig = getProviderBackendConfig(vendorId);
+  if (!providerConfig) {
+    return undefined;
+  }
   return {
-    ...(normalizedOAuthBaseUrl ? { baseUrl: ensureHttpsPrefix(normalizedOAuthBaseUrl) } : {}),
-    api: oauthApi,
-    ...(apiKeyEnv ? { apiKeyEnv } : {}),
-    ...(usesOAuthAuthHeader(providerKey) ? { authHeader: true } : {}),
+    baseUrl: normalizeProviderBaseUrl(vendorId, getOptionalString(account.baseUrl) ?? providerConfig.baseUrl, providerConfig.api),
+    api: providerConfig.api,
+    headers: normalizeProviderHeaders(providerConfig.headers),
   };
 }
 

@@ -16,7 +16,6 @@
  */
 
 import type { OpenClawConfigRepositoryPort } from './openclaw-config-repository';
-import { withOpenClawConfigLock } from './openclaw-config-mutex';
 
 export interface ModelRouteRef {
   readonly providerKey: string;
@@ -185,8 +184,7 @@ export class OpenClawCapabilityRoutingService {
   }
 
   async replace(routing: CapabilityRoutingValue): Promise<void> {
-    return await withOpenClawConfigLock(async () => {
-      const config = await this.configRepository.read();
+    return await this.configRepository.update((config) => {
       const defaults = ensureAgentsDefaults(config);
       for (const capability of ROUTE_CAPABILITIES) {
         applyRouteToAgentsDefaults(defaults, AGENTS_DEFAULTS_KEY[capability], routing[capability]);
@@ -197,7 +195,6 @@ export class OpenClawCapabilityRoutingService {
         delete defaults.mediaGenerationAutoProviderFallback;
       }
       applyTtsProvider(config, routing.tts?.providerKey);
-      await this.configRepository.write(config);
     });
   }
 }

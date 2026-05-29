@@ -9,6 +9,13 @@ export interface RuntimeJobProgress {
   readonly message?: string;
 }
 
+export type RuntimeJobResultRetention = 'retain' | 'drop';
+
+export interface RuntimeJobResultEnvelope {
+  readonly value: unknown;
+  readonly retention?: RuntimeJobResultRetention;
+}
+
 export interface RuntimeJobSnapshot {
   readonly id: string;
   readonly type: string;
@@ -41,4 +48,5 @@ export interface RuntimeJobEnqueueOptions {
   readonly dedupeCooldownMs?: number;
   readonly maxAttempts?: number;
   readonly retryDelayMs?: number;
+  readonly resultRetention?: RuntimeJobResultRetention;
 }

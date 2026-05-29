@@ -4,6 +4,8 @@ import { ChatList } from '@/pages/Chat/components/ChatList';
 import { createEmptySessionRecord } from '@/stores/chat/store-state-helpers';
 import { buildRenderItemsFromMessages } from './helpers/timeline-fixtures';
 import { applyAssistantPresentationToItems } from '@/pages/Chat/chat-render-item-model';
+import { buildRenderItemsFromCanonicalState } from '../../runtime-host/application/sessions/canonical/canonical-projection';
+import { createEmptyCanonicalSessionState, reduceCanonicalSessionEvents } from '../../runtime-host/application/sessions/canonical/canonical-reducer';
 import { createViewportWindowState } from '@/stores/chat/viewport-state';
 import type { RawMessage } from './helpers/timeline-fixtures';
 
@@ -31,6 +33,42 @@ function buildCurrentSession(messages: RawMessage[]) {
       totalItemCount: messages.length,
       windowStartOffset: 0,
       windowEndOffset: messages.length,
+      isAtLatest: true,
+    }),
+  };
+}
+
+function buildStreamingShellSession() {
+  const state = createEmptyCanonicalSessionState('agent:test:main');
+  reduceCanonicalSessionEvents(state, [{
+    id: 'assistant-empty-stream',
+    type: 'message_snapshot',
+    provider: 'openclaw-v4',
+    source: 'live',
+    sessionKey: 'agent:test:main',
+    runId: 'run-1',
+    laneKey: 'main',
+    role: 'assistant',
+    content: '',
+    text: '',
+    status: 'streaming',
+  }]);
+  const items = buildRenderItemsFromCanonicalState({ state }).map((item) => (
+    item.kind === 'assistant-turn'
+      ? { ...item, pendingState: 'typing' as const }
+      : item
+  ));
+  return {
+    runtime: state.runtime,
+    items: applyAssistantPresentationToItems({
+      items,
+      agents: [],
+      defaultAssistant: { agentId: 'test', agentName: 'Test Agent' },
+    }),
+    window: createViewportWindowState({
+      totalItemCount: items.length,
+      windowStartOffset: 0,
+      windowEndOffset: items.length,
       isAtLatest: true,
     }),
   };
@@ -164,20 +202,7 @@ describe('chat list streaming render', () => {
   });
 
   it('renders a single assistant streaming shell before the first assistant token lands', () => {
-    const streamingShellSession = buildCurrentSession([
-      {
-        id: 'assistant-1',
-        role: 'assistant',
-        content: '',
-        timestamp: Date.now() / 1000,
-        streaming: true,
-      },
-    ]);
-    streamingShellSession.items = streamingShellSession.items.map((item) => (
-      item.kind === 'assistant-turn'
-        ? { ...item, pendingState: 'typing' }
-        : item
-    ));
+    const streamingShellSession = buildStreamingShellSession();
 
     render(
       <ChatList

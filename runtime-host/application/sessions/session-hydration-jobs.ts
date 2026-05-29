@@ -37,6 +37,7 @@ export function createSessionHydrationJobPort(tasks: RuntimeLongTaskSubmissionPo
     submitSessionHydration: (payload) => tasks.submit(HYDRATE_SESSION_TIMELINE_JOB, payload, {
       queue: 'low',
       dedupeKey: buildSessionHydrationDedupeKey(payload),
+      resultRetention: 'drop',
     }),
   };
 }

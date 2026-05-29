@@ -8,6 +8,7 @@ import {
 import {
   createLatestWindowState,
 } from './session-window-model';
+import { createEmptyCanonicalSessionState } from './canonical/canonical-reducer';
 import type {
   SessionRuntimeTimelineState,
 } from './session-runtime-types';
@@ -30,12 +31,19 @@ export function createEmptySessionRuntimeState(): SessionRuntimeStateSnapshot {
 export function createEmptyTimelineState(
   patch: Partial<SessionRuntimeTimelineState> = {},
 ): SessionRuntimeTimelineState {
+  const sessionKey = patch.sessionKey ?? '';
   return {
-    sessionKey: '',
+    sessionKey,
     runEpoch: 0,
+    canonical: createEmptyCanonicalSessionState(sessionKey),
     timelineEntries: [],
     executionGraphItems: [],
     renderItems: [],
+    renderItemIndexByKey: new Map(),
+    renderItemKeyIndex: {
+      messageItemKeyByCanonicalKey: new Map(),
+      toolItemKeyByCanonicalKey: new Map(),
+    },
     taskSnapshot: null,
     hydrated: false,
     runtime: createEmptySessionRuntimeState(),

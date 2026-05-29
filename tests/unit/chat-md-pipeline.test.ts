@@ -68,7 +68,6 @@ describe('chat markdown pipeline cache', () => {
         preview: null,
         filePath: 'C:/workspace/TOOLS.md',
       }],
-      toolStatuses: [],
       toolCards: [],
       isStreaming: false,
       messageId: 'assistant-cache-hit',

@@ -10,8 +10,9 @@ import type {
   SessionTurnIdentityMode,
 } from '../../../runtime-host/shared/session-adapter-types';
 import { extractMessageText, normalizeOptionalString } from '../../../runtime-host/shared/chat-message-normalization';
-import { materializeTranscriptTimelineEntries } from '../../../runtime-host/application/sessions/transcript-timeline-materializer';
-import { buildRenderItemsFromTimeline } from '../../../runtime-host/application/sessions/session-render-model';
+import { buildCanonicalReplayEventsFromTranscriptMessages } from '../../../runtime-host/application/sessions/canonical/canonical-transcript-replay';
+import { buildRenderItemsFromCanonicalState, buildTimelineEntriesFromCanonicalState } from '../../../runtime-host/application/sessions/canonical/canonical-projection';
+import { createEmptyCanonicalSessionState, reduceCanonicalSessionEvents } from '../../../runtime-host/application/sessions/canonical/canonical-reducer';
 import type { SessionTranscriptMessage } from '../../../runtime-host/application/sessions/transcript-types';
 
 export interface MessageTimelineMeta {
@@ -49,7 +50,6 @@ export interface RawMessage {
   metadata?: Record<string, unknown>;
   name?: string;
   details?: unknown;
-  toolStatuses?: Array<Record<string, unknown>>;
   taskCompletionEvents?: SessionTaskCompletionEvent[];
   isError?: boolean;
   _timeline?: MessageTimelineMeta;
@@ -154,9 +154,6 @@ function toTranscriptMessage(message: RawMessage): SessionTranscriptMessage {
     ...(message.metadata ? { metadata: message.metadata } : {}),
     ...(message.name ? { name: message.name } : {}),
     ...(message.details !== undefined ? { details: message.details } : {}),
-    ...(message.toolStatuses ? {
-      toolStatuses: message.toolStatuses.map((toolStatus) => ({ ...toolStatus })),
-    } : {}),
     ...(message.taskCompletionEvents ? {
       taskCompletionEvents: message.taskCompletionEvents.map((event) => ({ ...event })),
     } : {}),
@@ -256,35 +253,28 @@ export function materializeTimelineMessages(
   return entries.map((entry) => materializeTimelineMessage(entry));
 }
 
+function buildCanonicalStateFromMessages(sessionKey: string, messages: RawMessage[]) {
+  const state = createEmptyCanonicalSessionState(sessionKey);
+  reduceCanonicalSessionEvents(
+    state,
+    buildCanonicalReplayEventsFromTranscriptMessages(sessionKey, messages.map((message) => toTranscriptMessage(message))),
+  );
+  return state;
+}
+
 export function buildRenderableTimelineEntriesFromMessages(
   sessionKey: string,
   messages: RawMessage[],
 ): SessionTimelineEntry[] {
-  return materializeTranscriptTimelineEntries(
-    sessionKey,
-    messages.map((message) => toTranscriptMessage(message)),
-  );
+  return buildTimelineEntriesFromCanonicalState(buildCanonicalStateFromMessages(sessionKey, messages));
 }
 
 export function buildRenderItemsFromMessages(
   sessionKey: string,
   messages: RawMessage[],
 ): SessionRenderItem[] {
-  const entries = buildRenderableTimelineEntriesFromMessages(sessionKey, messages);
-  return buildRenderItemsFromTimeline({
-    sessionKey,
-    timelineEntries: entries,
+  return buildRenderItemsFromCanonicalState({
+    state: buildCanonicalStateFromMessages(sessionKey, messages),
     executionGraphItems: [],
-    runtime: {
-      activeRunId: null,
-      runPhase: 'idle',
-      activeTurnItemKey: null,
-      pendingTurnKey: null,
-      pendingTurnLaneKey: null,
-      lastUserMessageAt: null,
-      lastError: null,
-      lastIssue: null,
-      updatedAt: null,
-    },
   });
 }

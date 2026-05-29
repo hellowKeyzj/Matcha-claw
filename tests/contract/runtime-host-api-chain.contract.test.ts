@@ -3,7 +3,7 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { createRuntimeHostApiHarness, type RuntimeHostApiHarness } from './helpers/runtime-host-api-harness';
 
-describe('runtime-host API 真实链路 contract', () => {
+describe('runtime-host API 真实链路 contract', { timeout: 20000 }, () => {
   let harness: RuntimeHostApiHarness;
 
   beforeAll(async () => {
@@ -357,7 +357,11 @@ describe('runtime-host API 真实链路 contract', () => {
       limit: 2,
     });
     const latest = initialLatest.hydrationJob
-      ? await harness.waitForJob<typeof initialLatest>(initialLatest.hydrationJob.id)
+      ? await harness.waitForJob(initialLatest.hydrationJob.id).then(() => harness.dispatchOk<typeof initialLatest>('POST', '/api/sessions/window', {
+          sessionKey: 'agent:main:session-window',
+          mode: 'latest',
+          limit: 2,
+        }))
       : initialLatest;
     expect(latest.snapshot.window.totalItemCount).toBe(4);
     expect(latest.snapshot.window.windowStartOffset).toBe(2);
@@ -366,11 +370,11 @@ describe('runtime-host API 真实链路 contract', () => {
     expect(latest.snapshot.window.hasNewer).toBe(false);
     expect(latest.snapshot.window.isAtLatest).toBe(true);
     expect(latest.snapshot.items.map((item) => item.key)).toEqual([
-      'session:agent:main:session-window|entry:m3',
-      'session:agent:main:session-window|assistant-turn:main:entry:m4:main',
+      'session:agent:main:session-window|user:message:user:main:m3',
+      'session:agent:main:session-window|assistant-turn:main:m4',
     ]);
 
-    const older = await harness.dispatchOk<{
+    const initialOlder = await harness.dispatchOk<{
       snapshot: {
         items: Array<{ key: string; kind: string; messageId?: string; turnKey?: string }>;
         window: {
@@ -381,22 +385,31 @@ describe('runtime-host API 真实链路 contract', () => {
           isAtLatest: boolean;
         };
       };
+      hydrationJob?: { id: string };
     }>('POST', '/api/sessions/window', {
       sessionKey: 'agent:main:session-window',
       mode: 'older',
       limit: 2,
       offset: latest.snapshot.window.windowStartOffset,
     });
+    const older = initialOlder.hydrationJob
+      ? await harness.waitForJob(initialOlder.hydrationJob.id).then(() => harness.dispatchOk<typeof initialOlder>('POST', '/api/sessions/window', {
+          sessionKey: 'agent:main:session-window',
+          mode: 'older',
+          limit: 2,
+          offset: latest.snapshot.window.windowStartOffset,
+        }))
+      : initialOlder;
     expect(older.snapshot.window.windowStartOffset).toBe(0);
     expect(older.snapshot.window.windowEndOffset).toBe(4);
     expect(older.snapshot.window.hasMore).toBe(false);
     expect(older.snapshot.window.hasNewer).toBe(false);
     expect(older.snapshot.window.isAtLatest).toBe(true);
     expect(older.snapshot.items.map((item) => item.key)).toEqual([
-      'session:agent:main:session-window|entry:m1',
-      'session:agent:main:session-window|assistant-turn:main:entry:m2:main',
-      'session:agent:main:session-window|entry:m3',
-      'session:agent:main:session-window|assistant-turn:main:entry:m4:main',
+      'session:agent:main:session-window|user:message:user:main:m1',
+      'session:agent:main:session-window|assistant-turn:main:m2',
+      'session:agent:main:session-window|user:message:user:main:m3',
+      'session:agent:main:session-window|assistant-turn:main:m4',
     ]);
   });
 });

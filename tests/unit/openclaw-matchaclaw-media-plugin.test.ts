@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const resolveApiKeyForProviderMock = vi.fn();
@@ -77,6 +79,12 @@ describe('matchaclaw-media OpenClaw plugin', () => {
       },
     };
   }
+
+  it('keeps provider apiKey out of the OpenClaw plugin config schema', () => {
+    const manifest = JSON.parse(readFileSync(join(process.cwd(), 'packages/openclaw-matchaclaw-media-plugin/openclaw.plugin.json'), 'utf8')) as any;
+
+    expect(manifest.configSchema.properties.providers.additionalProperties.properties).not.toHaveProperty('apiKey');
+  });
 
   it('registers a lazy image provider and exposes configured model refs from startup config', async () => {
     const provider = await loadImageProvider(makePluginConfig('openai', 'gpt-image-1'));

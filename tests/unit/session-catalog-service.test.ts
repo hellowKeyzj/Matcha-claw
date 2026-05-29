@@ -43,14 +43,14 @@ describe('session adapter service catalog', () => {
     mkdirSync(sessionsDir, { recursive: true });
     writeFileSync(join(sessionsDir, 'sessions.json'), JSON.stringify({
       sessions: [
-        { key: 'agent:alpha:main', id: 'main' },
+        { key: 'agent:alpha:main', id: 'main', label: 'indexed catalog title' },
       ],
     }, null, 2));
     writeFileSync(join(sessionsDir, 'main.jsonl'), [
       buildTranscriptLine({
         timestamp: '2026-04-10T10:00:00.000Z',
         role: 'user',
-        content: '独立 catalog service',
+        content: 'transcript content is not read by catalog',
         id: 'message-1',
       }),
     ].join('\n'));
@@ -70,12 +70,12 @@ describe('session adapter service catalog', () => {
           agentId: 'alpha',
           key: 'agent:alpha:main',
           kind: 'main',
-          label: '独立 catalog service',
+          label: 'indexed catalog title',
           preferred: true,
           status: 'completed',
           titleSource: 'user',
-          displayName: 'agent:alpha:main',
-          updatedAt: Date.parse('2026-04-10T10:00:00.000Z'),
+          displayName: 'indexed catalog title',
+          updatedAt: expect.any(Number),
         },
       ],
     });
@@ -124,7 +124,7 @@ describe('session adapter service catalog', () => {
     });
   });
 
-  it('reuses parsed transcript timelines while the transcript fingerprint is unchanged', async () => {
+  it('catalog refresh reads transcript content only when catalog label is missing', async () => {
     const configDir = mkdtempSync(join(tmpdir(), 'matchaclaw-session-catalog-'));
     tempDirs.push(configDir);
 
@@ -133,15 +133,24 @@ describe('session adapter service catalog', () => {
     mkdirSync(sessionsDir, { recursive: true });
     writeFileSync(join(sessionsDir, 'sessions.json'), JSON.stringify({
       sessions: [
-        { key: 'agent:alpha:main', id: 'main' },
+        { key: 'agent:alpha:main', id: 'main', label: 'cached title' },
+        { key: 'agent:alpha:session-1', id: 'session-1' },
       ],
     }, null, 2));
     writeFileSync(transcriptPath, [
       buildTranscriptLine({
         timestamp: '2026-04-10T10:00:00.000Z',
         role: 'user',
-        content: 'cached title',
+        content: 'transcript title is ignored',
         id: 'message-1',
+      }),
+    ].join('\n'));
+    writeFileSync(join(sessionsDir, 'session-1.jsonl'), [
+      buildTranscriptLine({
+        timestamp: '2026-04-10T10:05:00.000Z',
+        role: 'user',
+        content: 'catalog transcript title',
+        id: 'message-2',
       }),
     ].join('\n'));
 
@@ -164,26 +173,135 @@ describe('session adapter service catalog', () => {
     });
 
     await service.refreshCache();
-    await service.listSessions();
+    const response = await service.listSessions();
+    expect(response.sessions).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        key: 'agent:alpha:session-1',
+        label: 'catalog transcript title',
+        titleSource: 'user',
+        displayName: 'catalog transcript title',
+        updatedAt: expect.any(Number),
+      }),
+      expect.objectContaining({
+        key: 'agent:alpha:main',
+        label: 'cached title',
+        displayName: 'cached title',
+        updatedAt: expect.any(Number),
+      }),
+    ]));
     expect(storageRepository.readCount).toBe(1);
+  });
 
-    writeFileSync(transcriptPath, [
+  it('filters transcript-backed sessions that have no renderable content', async () => {
+    const configDir = mkdtempSync(join(tmpdir(), 'matchaclaw-session-catalog-'));
+    tempDirs.push(configDir);
+
+    const sessionsDir = join(configDir, 'agents', 'alpha', 'sessions');
+    mkdirSync(sessionsDir, { recursive: true });
+    writeFileSync(join(sessionsDir, 'sessions.json'), JSON.stringify({
+      sessions: [
+        { key: 'agent:alpha:session-empty', id: 'session-empty' },
+        { key: 'agent:alpha:session-control', id: 'session-control' },
+        { key: 'agent:alpha:session-visible', id: 'session-visible' },
+        { key: 'agent:alpha:session-manual', id: 'session-manual', label: 'manual empty title' },
+      ],
+    }, null, 2));
+    writeFileSync(join(sessionsDir, 'session-empty.jsonl'), '');
+    writeFileSync(join(sessionsDir, 'session-control.jsonl'), [
       buildTranscriptLine({
         timestamp: '2026-04-10T10:00:00.000Z',
-        role: 'user',
-        content: 'cached title changed',
-        id: 'message-1',
+        role: 'assistant',
+        content: 'NO_REPLY',
+        id: 'message-control',
       }),
     ].join('\n'));
-    await service.refreshCache();
-    await expect(service.listSessions()).resolves.toMatchObject({
-      sessions: [
-        {
-          label: 'cached title changed',
-        },
-      ],
+    writeFileSync(join(sessionsDir, 'session-visible.jsonl'), [
+      buildTranscriptLine({
+        timestamp: '2026-04-10T10:01:00.000Z',
+        role: 'user',
+        content: 'visible title',
+        id: 'message-visible',
+      }),
+    ].join('\n'));
+    writeFileSync(join(sessionsDir, 'session-manual.jsonl'), '');
+
+    const service = createTestSessionCatalogService({
+      workspace: { getConfigDir: () => configDir },
     });
-    expect(storageRepository.readCount).toBe(2);
+
+    await service.refreshCache();
+    const response = await service.listSessions();
+
+    expect(response.sessions.map((session) => session.key)).toEqual(expect.arrayContaining([
+      'agent:alpha:session-visible',
+      'agent:alpha:session-manual',
+    ]));
+    expect(response.sessions.map((session) => session.key)).not.toEqual(expect.arrayContaining([
+      'agent:alpha:session-empty',
+      'agent:alpha:session-control',
+    ]));
+  });
+
+  it('bounds catalog scan transcript fingerprint concurrency', async () => {
+    let active = 0;
+    let maxActive = 0;
+    let releaseNext: (() => void) | null = null;
+    const releaseQueue: Array<() => void> = [];
+    const releaseOne = () => {
+      const release = releaseQueue.shift();
+      if (release) {
+        release();
+      }
+    };
+    const descriptors = Array.from({ length: 20 }, (_, index) => ({
+      sessionKey: `agent:alpha:session-${index}`,
+      agentId: 'alpha',
+      sessionsDir: '',
+      sessionsJsonPath: null,
+      sessionsJson: null,
+      sessionStoreEntry: null,
+      transcriptPath: `/tmp/session-${index}.jsonl`,
+    }));
+    const service = createTestSessionCatalogService({
+      workspace: { getConfigDir: () => '' },
+      storageRepository: {
+        listStorageDescriptors: async () => descriptors,
+        findStorageDescriptor: async () => null,
+        getTranscriptFingerprint: async (pathname) => {
+          active += 1;
+          maxActive = Math.max(maxActive, active);
+          await new Promise<void>((resolve) => {
+            releaseQueue.push(resolve);
+            releaseNext = releaseOne;
+          });
+          active -= 1;
+          return { path: pathname, size: 1, mtimeMs: 1 };
+        },
+        readTranscriptContent: async () => null,
+        readTranscriptDescriptorContent: async () => null,
+        deleteSession: async () => false,
+        renameSession: async () => false,
+        updateSessionStatus: async () => false,
+      },
+      metadataRepository: {
+        resolveSessionModel: async () => null,
+        readSessionMetadata: async () => null,
+        writeSessionMetadata: async () => undefined,
+      },
+    });
+
+    const scan = service.scanSessions();
+    while (releaseQueue.length < 8) {
+      await Promise.resolve();
+    }
+    expect(maxActive).toBe(8);
+    expect(releaseQueue).toHaveLength(8);
+    for (let index = 0; index < descriptors.length; index += 1) {
+      releaseNext?.();
+      await Promise.resolve();
+    }
+    await expect(scan).resolves.toMatchObject({ sessions: expect.any(Array) });
+    expect(maxActive).toBe(8);
   });
 
   it('listSessions reads the cached catalog snapshot without rescanning transcripts', async () => {
@@ -194,14 +312,14 @@ describe('session adapter service catalog', () => {
     mkdirSync(sessionsDir, { recursive: true });
     writeFileSync(join(sessionsDir, 'sessions.json'), JSON.stringify({
       sessions: [
-        { key: 'agent:alpha:main', id: 'main' },
+        { key: 'agent:alpha:main', id: 'main', label: 'cached snapshot' },
       ],
     }, null, 2));
     writeFileSync(join(sessionsDir, 'main.jsonl'), [
       buildTranscriptLine({
         timestamp: '2026-04-10T10:00:00.000Z',
         role: 'user',
-        content: 'cached snapshot',
+        content: 'transcript content is ignored',
         id: 'message-1',
       }),
     ].join('\n'));
@@ -225,7 +343,7 @@ describe('session adapter service catalog', () => {
     });
 
     await service.refreshCache();
-    expect(storageRepository.readCount).toBe(1);
+    expect(storageRepository.readCount).toBe(0);
     await expect(service.listSessions()).resolves.toMatchObject({
       sessions: [
         {
@@ -234,10 +352,10 @@ describe('session adapter service catalog', () => {
       ],
     });
     await service.listSessions();
-    expect(storageRepository.readCount).toBe(1);
+    expect(storageRepository.readCount).toBe(0);
   });
 
-  it('runtime listSessions returns a refreshing snapshot until the catalog cache is ready', async () => {
+  it('runtime listSessions builds the lightweight catalog when the cache is cold', async () => {
     const configDir = mkdtempSync(join(tmpdir(), 'matchaclaw-session-catalog-'));
     tempDirs.push(configDir);
     const submitRefreshCatalog = vi.fn(() => ({
@@ -252,15 +370,7 @@ describe('session adapter service catalog', () => {
         maxAttempts: 1,
       },
     }));
-    const getRefreshCatalogJob = vi.fn(() => ({
-      id: 'job-refresh-session-catalog',
-      type: 'sessions.refreshCatalog',
-      queue: 'low' as const,
-      status: 'queued' as const,
-      queuedAt: 1_700_000_000_000,
-      attempts: 0,
-      maxAttempts: 1,
-    }));
+    const getRefreshCatalogJob = vi.fn(() => null);
     const service = createTestSessionRuntimeService({
       workspace: { getConfigDir: () => configDir },
       sessionCatalogJobs: {
@@ -275,21 +385,21 @@ describe('session adapter service catalog', () => {
 
     const response = await service.listSessions();
 
-    expect(submitRefreshCatalog).toHaveBeenCalledTimes(1);
+    expect(submitRefreshCatalog).not.toHaveBeenCalled();
     expect(getRefreshCatalogJob).toHaveBeenCalledTimes(1);
     expect(response).toEqual({
       status: 200,
       data: {
         sessions: [],
-        ready: false,
-        refreshing: true,
-        updatedAt: null,
+        ready: true,
+        refreshing: false,
+        updatedAt: expect.any(Number),
         error: null,
       },
     });
   });
 
-  it('lists only sessions backed by real transcripts and resolves labels from the transcript content', async () => {
+  it('lists only sessions backed by real transcripts and resolves labels from the session index', async () => {
     const configDir = mkdtempSync(join(tmpdir(), 'matchaclaw-session-catalog-'));
     tempDirs.push(configDir);
 
@@ -305,9 +415,9 @@ describe('session adapter service catalog', () => {
     mkdirSync(sessionsDir, { recursive: true });
     writeFileSync(join(sessionsDir, 'sessions.json'), JSON.stringify({
       sessions: [
-        { key: 'agent:alpha:session-1', id: 'session-1' },
-        { key: 'agent:alpha:session-2', id: 'session-2' },
-        { key: 'agent:alpha:session-missing', id: 'session-missing' },
+        { key: 'agent:alpha:session-1', id: 'session-1', label: 'indexed session one', updatedAt: Date.parse('2026-04-10T10:10:00.000Z') },
+        { key: 'agent:alpha:session-2', id: 'session-2', label: 'indexed session two', updatedAt: Date.parse('2026-04-11T08:00:00.000Z') },
+        { key: 'agent:alpha:session-missing', id: 'session-missing', label: 'missing transcript' },
       ],
     }, null, 2));
 
@@ -353,10 +463,10 @@ describe('session adapter service catalog', () => {
           agentId: 'alpha',
           key: 'agent:alpha:session-2',
           kind: 'named',
-          label: '没有 user 时用 assistant 兜底',
+          label: 'indexed session two',
           preferred: false,
-          titleSource: 'assistant',
-          displayName: 'agent:alpha:session-2',
+          titleSource: 'user',
+          displayName: 'indexed session two',
           model: 'openai/gpt-5.4',
           updatedAt: Date.parse('2026-04-11T08:00:00.000Z'),
         },
@@ -364,10 +474,10 @@ describe('session adapter service catalog', () => {
           agentId: 'alpha',
           key: 'agent:alpha:session-1',
           kind: 'named',
-          label: '最终标题来自这里',
+          label: 'indexed session one',
           preferred: false,
           titleSource: 'user',
-          displayName: 'agent:alpha:session-1',
+          displayName: 'indexed session one',
           model: 'openai/gpt-5.4',
           updatedAt: Date.parse('2026-04-10T10:10:00.000Z'),
         },
@@ -385,6 +495,7 @@ describe('session adapter service catalog', () => {
       'agent:alpha:main': {
         sessionId: 'session-main',
         sessionFile: join(sessionsDir, 'session-main.jsonl'),
+        label: 'indexed alpha main',
         updatedAt: Date.parse('2026-04-12T10:00:00.000Z'),
         modelProvider: 'openai',
         model: 'gpt-5.4',
@@ -392,6 +503,7 @@ describe('session adapter service catalog', () => {
       'agent:alpha:session-2': {
         sessionId: 'session-2',
         sessionFile: join(sessionsDir, 'session-2.jsonl'),
+        label: 'indexed alpha session two',
         updatedAt: Date.parse('2026-04-13T10:00:00.000Z'),
         providerOverride: 'anthropic',
         modelOverride: 'claude-opus-4-6',
@@ -434,10 +546,10 @@ describe('session adapter service catalog', () => {
           agentId: 'alpha',
           key: 'agent:alpha:session-2',
           kind: 'named',
-          label: 'alpha session two',
+          label: 'indexed alpha session two',
           preferred: false,
-          titleSource: 'assistant',
-          displayName: 'agent:alpha:session-2',
+          titleSource: 'user',
+          displayName: 'indexed alpha session two',
           model: 'anthropic/claude-opus-4-6',
           updatedAt: Date.parse('2026-04-13T10:00:00.000Z'),
         },
@@ -445,10 +557,10 @@ describe('session adapter service catalog', () => {
           agentId: 'alpha',
           key: 'agent:alpha:main',
           kind: 'main',
-          label: 'alpha main title',
+          label: 'indexed alpha main',
           preferred: true,
           titleSource: 'user',
-          displayName: 'agent:alpha:main',
+          displayName: 'indexed alpha main',
           model: 'openai/gpt-5.4',
           updatedAt: Date.parse('2026-04-12T10:00:00.000Z'),
         },
@@ -464,7 +576,7 @@ describe('session adapter service catalog', () => {
     mkdirSync(sessionsDir, { recursive: true });
     writeFileSync(join(sessionsDir, 'sessions.json'), JSON.stringify({
       sessions: [
-        { key: 'agent:alpha:session-1', id: 'session-1' },
+        { key: 'agent:alpha:session-1', id: 'session-1', label: 'indexed title' },
       ],
     }, null, 2));
     writeFileSync(join(sessionsDir, 'session-1.jsonl'), [
@@ -528,14 +640,14 @@ describe('session adapter service catalog', () => {
     mkdirSync(sessionsDir, { recursive: true });
     writeFileSync(join(sessionsDir, 'sessions.json'), JSON.stringify({
       sessions: [
-        { key: 'agent:alpha:main', id: 'main' },
+        { key: 'agent:alpha:main', id: 'main', label: 'alpha main title' },
       ],
     }, null, 2));
     writeFileSync(join(sessionsDir, 'main.jsonl'), [
       buildTranscriptLine({
         timestamp: '2026-04-13T10:00:00.000Z',
         role: 'user',
-        content: 'alpha main title',
+        content: 'transcript content is ignored',
         id: 'message-main',
       }),
     ].join('\n'));
@@ -592,10 +704,10 @@ describe('session adapter service catalog', () => {
           key: 'agent:orphan-agent:session-1778000000000',
           kind: 'session',
           label: 'orphan transcript title',
-          preferred: false,
           titleSource: 'user',
-          displayName: 'agent:orphan-agent:session-1778000000000',
-          updatedAt: Date.parse('2026-04-15T10:00:00.000Z'),
+          preferred: false,
+          displayName: 'orphan transcript title',
+          updatedAt: expect.any(Number),
         },
       ],
     });

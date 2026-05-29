@@ -8,20 +8,21 @@ import type {
 import {
   type SessionStorageDescriptor,
   type SessionStoragePort,
-  type SessionTranscriptFingerprint,
   readSessionStoreLabel,
 } from './session-storage-repository';
 import type { SessionMetadataPort } from './session-metadata-repository';
+import { iterateTranscriptMessages } from './transcript-parser';
 import {
-  materializeTranscriptTimelineEntries,
-} from './transcript-timeline-materializer';
-import {
-  parseTranscriptMessages,
-} from './transcript-parser';
+  canProjectTranscriptMessage,
+} from './canonical/canonical-transcript-replay';
 import {
   resolveSessionLabelDetailsFromTimelineEntries,
+  resolveSessionLabelDetailsFromTranscriptMessages,
+  type SessionResolvedLabel,
 } from './transcript-labels';
 import { resolveTimelineLastActivityAt } from './timeline-state';
+
+const SESSION_CATALOG_SCAN_CONCURRENCY = 8;
 
 export interface SessionCatalogRuntimeOverlay {
   sessionKey: string;
@@ -77,22 +78,87 @@ function resolveSessionCatalogKind(sessionKey: string): SessionCatalogKind {
   return 'named';
 }
 
+function readSessionStoreStatus(entry: Record<string, unknown> | null): SessionCatalogItem['status'] {
+  const status = entry?.status;
+  return status === 'archived'
+    || status === 'deleted'
+    || status === 'completed'
+    || status === 'active'
+    ? status
+    : 'completed';
+}
+
+function readSessionStoreUpdatedAt(entry: Record<string, unknown> | null): number | null {
+  const updatedAt = entry?.updatedAt ?? entry?.updated_at ?? entry?.lastActivityAt ?? entry?.last_activity_at;
+  if (typeof updatedAt === 'number' && Number.isFinite(updatedAt)) {
+    return updatedAt;
+  }
+  if (typeof updatedAt === 'string') {
+    const parsed = Date.parse(updatedAt);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  return null;
+}
+
+interface SessionTranscriptCatalogDetails extends SessionResolvedLabel {
+  hasRenderableContent: boolean;
+}
+
+async function resolveTranscriptCatalogDetails(input: {
+  storageRepository: SessionStoragePort;
+  storageDescriptor: SessionStorageDescriptor;
+}): Promise<SessionTranscriptCatalogDetails> {
+  const content = await input.storageRepository.readTranscriptDescriptorContent(input.storageDescriptor);
+  let userLabel: string | null = null;
+  let assistantLabel: string | null = null;
+  let hasRenderableContent = false;
+  for (const message of content ? iterateTranscriptMessages(content) : []) {
+    const details = resolveSessionLabelDetailsFromTranscriptMessages([message]);
+    if (details.titleSource === 'user') {
+      userLabel = details.label;
+    } else if (details.titleSource === 'assistant') {
+      assistantLabel = details.label;
+    }
+    hasRenderableContent ||= canProjectTranscriptMessage(input.storageDescriptor.sessionKey, message);
+  }
+  if (userLabel) {
+    return { label: userLabel, titleSource: 'user', hasRenderableContent };
+  }
+  if (assistantLabel) {
+    return { label: assistantLabel, titleSource: 'assistant', hasRenderableContent };
+  }
+  return { label: null, titleSource: 'none', hasRenderableContent };
+}
+
 async function buildSessionCatalogItem(input: {
   sessionKey: string;
-  timelineEntries: SessionTimelineEntry[];
-  runtime: SessionRuntimeStateSnapshot;
-  storageDescriptor?: SessionStorageDescriptor | null;
+  storageDescriptor: SessionStorageDescriptor;
+  transcriptUpdatedAt?: number | null;
   runtimeModel?: string | null;
   metadataRepository: SessionMetadataPort;
-}): Promise<SessionCatalogItem> {
-  const agentId = parseSessionKeyAgent(input.sessionKey) ?? 'main';
-  const storeLabel = readSessionStoreLabel(input.storageDescriptor?.sessionStoreEntry ?? null);
-  const timelineLabel = resolveSessionLabelDetailsFromTimelineEntries(input.timelineEntries);
-  const updatedAt = resolveTimelineLastActivityAt(input.timelineEntries, input.runtime);
+  storageRepository: SessionStoragePort;
+}): Promise<SessionCatalogItem | null> {
+  if (!input.storageDescriptor.transcriptPath) {
+    return null;
+  }
+  const agentId = parseSessionKeyAgent(input.sessionKey) ?? input.storageDescriptor.agentId;
+  const storeLabel = readSessionStoreLabel(input.storageDescriptor.sessionStoreEntry);
+  const transcriptDetails = storeLabel
+    ? { label: null, titleSource: 'none' as const, hasRenderableContent: true }
+    : await resolveTranscriptCatalogDetails({
+        storageRepository: input.storageRepository,
+        storageDescriptor: input.storageDescriptor,
+      });
+  if (!storeLabel && !transcriptDetails.hasRenderableContent) {
+    return null;
+  }
+  const label = storeLabel ?? transcriptDetails.label;
+  const titleSource = storeLabel ? 'user' : transcriptDetails.titleSource;
+  const updatedAt = readSessionStoreUpdatedAt(input.storageDescriptor.sessionStoreEntry) ?? input.transcriptUpdatedAt ?? null;
   const kind = resolveSessionCatalogKind(input.sessionKey);
   const resolvedModel = await input.metadataRepository.resolveSessionModel({
     sessionKey: input.sessionKey,
-    storageDescriptor: input.storageDescriptor ?? null,
+    storageDescriptor: input.storageDescriptor,
     runtimeModel: input.runtimeModel ?? null,
   });
   return {
@@ -100,34 +166,12 @@ async function buildSessionCatalogItem(input: {
     agentId,
     kind,
     preferred: kind === 'main',
-    status: input.storageDescriptor?.sessionStoreEntry?.status === 'archived'
-      || input.storageDescriptor?.sessionStoreEntry?.status === 'deleted'
-      || input.storageDescriptor?.sessionStoreEntry?.status === 'completed'
-      || input.storageDescriptor?.sessionStoreEntry?.status === 'active'
-      ? input.storageDescriptor.sessionStoreEntry.status
-      : 'completed',
-    ...(storeLabel || timelineLabel.label ? { label: storeLabel ?? timelineLabel.label ?? undefined } : {}),
-    ...(storeLabel
-      ? { titleSource: 'user' as const }
-      : (timelineLabel.titleSource !== 'none' ? { titleSource: timelineLabel.titleSource } : {})),
-    displayName: input.sessionKey,
+    status: readSessionStoreStatus(input.storageDescriptor.sessionStoreEntry),
+    ...(label ? { label } : {}),
+    ...(titleSource !== 'none' ? { titleSource } : {}),
+    displayName: label ?? input.sessionKey,
     ...(resolvedModel ? { model: resolvedModel } : {}),
     ...(typeof updatedAt === 'number' ? { updatedAt } : {}),
-  };
-}
-
-function createEmptySessionRuntimeState(): SessionRuntimeStateSnapshot {
-  return {
-    activeRunId: null,
-    runPhase: 'idle',
-    activeTurnItemKey: null,
-    pendingTurnKey: null,
-    pendingTurnLaneKey: null,
-    runtimeActivity: null,
-    lastUserMessageAt: null,
-    lastError: null,
-    lastIssue: null,
-    updatedAt: null,
   };
 }
 
@@ -135,13 +179,25 @@ function shouldExposeRuntimeOnlySession(runtime: SessionRuntimeStateSnapshot): b
   return typeof runtime.updatedAt === 'number';
 }
 
+async function forEachWithConcurrency<T>(
+  items: readonly T[],
+  concurrency: number,
+  worker: (item: T) => Promise<void>,
+): Promise<void> {
+  let nextIndex = 0;
+  const workerCount = Math.min(Math.max(1, concurrency), items.length);
+  await Promise.all(Array.from({ length: workerCount }, async () => {
+    while (nextIndex < items.length) {
+      const item = items[nextIndex]!;
+      nextIndex += 1;
+      await worker(item);
+    }
+  }));
+}
+
 export class SessionCatalogService implements SessionCatalogPort {
   private readonly storageRepository: SessionStoragePort;
   private readonly metadataRepository: SessionMetadataPort;
-  private readonly transcriptTimelineCache = new Map<string, {
-    fingerprint: SessionTranscriptFingerprint;
-    timelineEntries: SessionTimelineEntry[];
-  }>();
   private cachedSessions: SessionCatalogItem[] = [];
   private cacheReady = false;
   private cacheUpdatedAt: number | null = null;
@@ -209,26 +265,27 @@ export class SessionCatalogService implements SessionCatalogPort {
   async scanSessions(): Promise<SessionListResult> {
     const sessionsByKey = new Map<string, SessionCatalogItem>();
     const descriptors = await this.listStorageDescriptors();
-    const liveTranscriptPaths = new Set<string>();
 
-    await Promise.all(descriptors.map(async (descriptor) => {
-      const timelineEntries = await this.resolveTranscriptTimelineEntries(descriptor);
-      if (!timelineEntries || timelineEntries.length === 0) {
+    await forEachWithConcurrency(descriptors, SESSION_CATALOG_SCAN_CONCURRENCY, async (descriptor) => {
+      if (!descriptor.transcriptPath) {
         return;
       }
-      if (descriptor.transcriptPath) {
-        liveTranscriptPaths.add(descriptor.transcriptPath);
+      const fingerprint = await this.storageRepository.getTranscriptFingerprint(descriptor.transcriptPath);
+      if (!fingerprint) {
+        return;
       }
-      sessionsByKey.set(descriptor.sessionKey, await buildSessionCatalogItem({
+      const item = await buildSessionCatalogItem({
         sessionKey: descriptor.sessionKey,
-        timelineEntries,
-        runtime: createEmptySessionRuntimeState(),
         storageDescriptor: descriptor,
+        transcriptUpdatedAt: fingerprint.mtimeMs,
         runtimeModel: null,
         metadataRepository: this.metadataRepository,
-      }));
-    }));
-    this.pruneTranscriptTimelineCache(liveTranscriptPaths);
+        storageRepository: this.storageRepository,
+      });
+      if (item) {
+        sessionsByKey.set(descriptor.sessionKey, item);
+      }
+    });
 
     const sessions = Array.from(sessionsByKey.values());
     this.sortSessions(sessions);
@@ -263,7 +320,7 @@ export class SessionCatalogService implements SessionCatalogPort {
       status: cached?.status ?? 'completed',
       ...(label ? { label } : {}),
       ...(titleSource !== 'none' ? { titleSource } : {}),
-      displayName: cached?.displayName ?? overlay.sessionKey,
+      displayName: label ?? cached?.displayName ?? overlay.sessionKey,
       ...(overlay.runtimeModel ? { model: overlay.runtimeModel } : {}),
       ...(typeof updatedAt === 'number' ? { updatedAt } : {}),
     };
@@ -280,50 +337,4 @@ export class SessionCatalogService implements SessionCatalogPort {
     });
   }
 
-  private async resolveTranscriptTimelineEntries(
-    descriptor: SessionStorageDescriptor,
-  ): Promise<SessionTimelineEntry[] | null> {
-    if (!descriptor.transcriptPath) {
-      return null;
-    }
-
-    const fingerprint = await this.storageRepository.getTranscriptFingerprint(descriptor.transcriptPath);
-    if (!fingerprint) {
-      this.transcriptTimelineCache.delete(descriptor.transcriptPath);
-      return null;
-    }
-
-    const cached = this.transcriptTimelineCache.get(descriptor.transcriptPath);
-    if (
-      cached
-      && cached.fingerprint.size === fingerprint.size
-      && cached.fingerprint.mtimeMs === fingerprint.mtimeMs
-    ) {
-      return cached.timelineEntries;
-    }
-
-    const content = await this.storageRepository.readTranscriptDescriptorContent(descriptor);
-    if (!content) {
-      this.transcriptTimelineCache.delete(descriptor.transcriptPath);
-      return null;
-    }
-
-    const timelineEntries = materializeTranscriptTimelineEntries(
-      descriptor.sessionKey,
-      parseTranscriptMessages(content),
-    );
-    this.transcriptTimelineCache.set(descriptor.transcriptPath, {
-      fingerprint,
-      timelineEntries,
-    });
-    return timelineEntries;
-  }
-
-  private pruneTranscriptTimelineCache(liveTranscriptPaths: Set<string>): void {
-    for (const cachedPath of this.transcriptTimelineCache.keys()) {
-      if (!liveTranscriptPaths.has(cachedPath)) {
-        this.transcriptTimelineCache.delete(cachedPath);
-      }
-    }
-  }
 }

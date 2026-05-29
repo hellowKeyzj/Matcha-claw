@@ -15,8 +15,6 @@ interface SessionRouteService {
   switchSession: (payload: unknown) => Promise<ApplicationResponse>;
   resumeSession: (payload: unknown) => Promise<ApplicationResponse>;
   getSessionStateSnapshot: (payload: unknown) => Promise<ApplicationResponse>;
-  loadTurnToolResults: (payload: unknown) => Promise<ApplicationResponse>;
-  reconcileRunClosure: (payload: unknown) => Promise<ApplicationResponse>;
   abortSession: (payload: unknown) => Promise<ApplicationResponse>;
   listPendingApprovals: () => Promise<ApplicationResponse>;
   resolveApproval: (payload: unknown) => Promise<ApplicationResponse>;
@@ -37,8 +35,6 @@ export const sessionRoutes: readonly RuntimeRouteDefinition<SessionRouteService>
   { method: 'POST', path: '/api/session/switch', handle: (context, service) => routeResponder.result(() => service.switchSession(context.payload)) },
   { method: 'POST', path: '/api/session/resume', handle: (context, service) => routeResponder.result(() => service.resumeSession(context.payload)) },
   { method: 'POST', path: '/api/session/state', handle: (context, service) => routeResponder.result(() => service.getSessionStateSnapshot(context.payload)) },
-  { method: 'POST', path: '/api/session/turn/tool-results', handle: (context, service) => routeResponder.result(() => service.loadTurnToolResults(context.payload)) },
-  { method: 'POST', path: '/api/session/run/closure', handle: (context, service) => routeResponder.result(() => service.reconcileRunClosure(context.payload)) },
   { method: 'POST', path: '/api/session/abort', handle: (context, service) => routeResponder.result(() => service.abortSession(context.payload)) },
   { method: 'GET', path: '/api/session/approvals', handle: (_context, service) => routeResponder.result(() => service.listPendingApprovals()) },
   { method: 'POST', path: '/api/session/approval/resolve', handle: (context, service) => routeResponder.result(() => service.resolveApproval(context.payload)) },

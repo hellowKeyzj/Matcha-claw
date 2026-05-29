@@ -6,6 +6,7 @@ const hoisted = vi.hoisted(() => ({
   saveProviderKeyMock: vi.fn(async () => {}),
   removeProviderKeyMock: vi.fn(async () => {}),
   syncProviderConfigMock: vi.fn(async () => {}),
+  upsertProviderInAgentModelsMock: vi.fn(async () => []),
   syncOpenClawModelsMock: vi.fn(async () => {}),
   syncOpenClawRoutingMock: vi.fn(async () => {}),
   runtimeConfigSyncProxyMock: vi.fn(async () => {}),
@@ -35,6 +36,16 @@ const hoisted = vi.hoisted(() => ({
 vi.mock('../../runtime-host/application/providers/provider-registry', () => ({
   getKeyableProviderTypes: vi.fn(() => []),
   getProviderEnvVar: vi.fn(() => undefined),
+  getProviderBackendConfig: vi.fn((type: string) => {
+    if (type === 'openai') {
+      return {
+        baseUrl: 'https://api.openai.com/v1',
+        api: 'openai-responses',
+        apiKeyEnv: 'OPENAI_API_KEY',
+      };
+    }
+    return undefined;
+  }),
 }));
 
 function createProviderRuntimeSync() {
@@ -48,6 +59,12 @@ function createProviderRuntimeSync() {
         },
         {
           syncProviderConfig: hoisted.syncProviderConfigMock,
+        },
+        {
+          discoverAgentIds: async () => ['main'],
+        },
+        {
+          upsertProviderInAgentModels: hoisted.upsertProviderInAgentModelsMock,
         },
       ).syncProviderStore(store);
     },
@@ -117,6 +134,8 @@ vi.mock('../../runtime-host/application/providers/provider-runtime-rules', () =>
 describe('runtime-host bootstrap provider sync', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    hoisted.saveProviderKeyMock.mockResolvedValue(undefined);
+    hoisted.removeProviderKeyMock.mockResolvedValue(undefined);
     hoisted.getAllSettingsMock.mockResolvedValue({ browserMode: 'relay', gatewayToken: '' });
     hoisted.cleanupStaleBuiltinExtensionsForGatewayLaunchMock.mockResolvedValue([]);
     hoisted.reconcileConfiguredChannelPluginsForGatewayLaunchMock.mockResolvedValue([]);
@@ -194,8 +213,8 @@ describe('runtime-host bootstrap provider sync', () => {
     expect(hoisted.ensureManagedPluginInstalledMock).toHaveBeenCalledWith('browser-relay');
     expect(hoisted.runtimeConfigSyncBrowserModeMock).toHaveBeenCalledWith('relay');
     expect(hoisted.runtimeConfigSyncSessionIdleMinutesMock).toHaveBeenCalledTimes(1);
-    expect(hoisted.syncOpenClawModelsMock).not.toHaveBeenCalled();
-    expect(hoisted.syncOpenClawRoutingMock).not.toHaveBeenCalled();
+    expect(hoisted.syncOpenClawModelsMock).toHaveBeenCalledTimes(1);
+    expect(hoisted.syncOpenClawRoutingMock).toHaveBeenCalledTimes(1);
     expect(hoisted.reconcileConfiguredChannelPluginsForGatewayLaunchMock).toHaveBeenCalledTimes(1);
     expect(hoisted.ensureConfiguredManagedPluginsForGatewayLaunchMock).toHaveBeenCalledTimes(1);
     expect(hoisted.applySavedPolicyToPluginConfigMock).toHaveBeenCalledTimes(1);
@@ -223,6 +242,15 @@ describe('runtime-host bootstrap provider sync', () => {
     await service.executeProviderAuthBootstrap();
 
     expect(hoisted.saveProviderKeyMock).toHaveBeenCalledWith('ollama-ollama-main', 'ollama-local');
+    expect(hoisted.removeProviderKeyMock).not.toHaveBeenCalledWith('ollama-ollama-main');
+    expect(hoisted.upsertProviderInAgentModelsMock).toHaveBeenCalledWith({
+      agentIds: ['main'],
+      provider: 'ollama-ollama-main',
+      entry: expect.objectContaining({
+        baseUrl: 'http://localhost:11434/v1',
+        api: 'openai-completions',
+      }),
+    });
     expect(hoisted.syncProviderConfigMock).toHaveBeenCalledWith(
       'ollama-ollama-main',
       expect.objectContaining({
@@ -234,7 +262,7 @@ describe('runtime-host bootstrap provider sync', () => {
     expect(hoisted.syncOpenClawRoutingMock).toHaveBeenCalledTimes(1);
   });
 
-  it('普通凭证只同步密钥，不写默认模型', async () => {
+  it('普通凭证同步 provider config 与 per-agent models.json provider，不写默认模型', async () => {
     hoisted.readProviderStoreMock.mockResolvedValue({
       accounts: {
         'openai-main': {
@@ -252,7 +280,22 @@ describe('runtime-host bootstrap provider sync', () => {
     await service.executeProviderAuthBootstrap();
 
     expect(hoisted.saveProviderKeyMock).toHaveBeenCalledWith('openai-openai-main', 'sk-openai');
-    expect(hoisted.syncProviderConfigMock).not.toHaveBeenCalled();
+    expect(hoisted.removeProviderKeyMock).not.toHaveBeenCalledWith('openai-openai-main');
+    expect(hoisted.upsertProviderInAgentModelsMock).toHaveBeenCalledWith({
+      agentIds: ['main'],
+      provider: 'openai-openai-main',
+      entry: expect.objectContaining({
+        baseUrl: 'https://api.openai.com/v1',
+        api: 'openai-responses',
+      }),
+    });
+    expect(hoisted.syncProviderConfigMock).toHaveBeenCalledWith(
+      'openai-openai-main',
+      expect.objectContaining({
+        baseUrl: 'https://api.openai.com/v1',
+        api: 'openai-responses',
+      }),
+    );
     expect(hoisted.syncOpenClawModelsMock).toHaveBeenCalledTimes(1);
     expect(hoisted.syncOpenClawRoutingMock).toHaveBeenCalledTimes(1);
   });

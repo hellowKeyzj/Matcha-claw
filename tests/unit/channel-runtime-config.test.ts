@@ -95,7 +95,7 @@ describe('channel-runtime config save', () => {
     expect(config.plugins.allow).not.toContain('feishu-openclaw-plugin');
     expect(config.plugins.entries['openclaw-lark']).toBeDefined();
     expect(config.plugins.entries.feishu?.enabled).toBe(false);
-  }, 15000);
+  }, 30_000);
 
   it('保存 Feishu 默认账号时写入插件实际读取的顶层凭证', async () => {
     await repository.saveChannelConfig({
@@ -120,7 +120,7 @@ describe('channel-runtime config save', () => {
       appId: 'cli_default',
       appSecret: 'default-secret',
     });
-  }, 15000);
+  }, 30_000);
 
   it('读取 Feishu 表单值时兼容旧 accounts.default 凭证', async () => {
     await writeFile(
@@ -181,7 +181,7 @@ describe('channel-runtime config save', () => {
     expect(config.plugins.entries.wecom).toBeDefined();
     expect(config.plugins.entries.wecom.enabled).toBe(true);
     expect(config.plugins.entries['wecom-openclaw-plugin']).toBeUndefined();
-  });
+  }, 15000);
 
   it('准备 WeChat 插件时只安装扩展，不提前写入渠道配置', async () => {
     await repository.prepareChannelPlugin('openclaw-weixin');

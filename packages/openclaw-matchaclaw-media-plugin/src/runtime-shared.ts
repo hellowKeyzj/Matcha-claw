@@ -41,8 +41,6 @@ export async function resolveApiKey(
   providerKey: string,
   provider: CustomMediaProviderConfig,
 ): Promise<string> {
-  const headerValue = provider.headers?.Authorization ?? provider.headers?.authorization ?? ''
-  if (headerValue.trim()) return headerValue.replace(/^Bearer\s+/i, '').trim()
   const auth = await resolveApiKeyForProvider({
     provider: providerKey,
     cfg: req.cfg,

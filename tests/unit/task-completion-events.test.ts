@@ -22,4 +22,13 @@ describe('task completion events normalization', () => {
   it('does not parse injected completion text fallback', () => {
     expect(normalizeTaskCompletionEvents([])).toBeUndefined();
   });
+
+  it('rejects old alias fields', () => {
+    expect(normalizeTaskCompletionEvents([{
+      type: 'task_completion',
+      source: 'subagent',
+      child_session_key: 'agent:coder:main',
+      child_session_id: 'child-1',
+    }])).toBeUndefined();
+  });
 });

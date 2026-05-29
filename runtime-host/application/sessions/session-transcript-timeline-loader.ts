@@ -1,22 +1,9 @@
-import type {
-  SessionTimelineEntry,
-  TaskSnapshotEvent,
-} from '../../shared/session-adapter-types';
+import type { CanonicalSessionEvent } from './canonical/canonical-events';
+import { iterateCanonicalReplayEventsFromTranscriptMessages } from './canonical/canonical-transcript-replay';
 import {
-  materializeTranscriptTimelineEntries,
-} from './transcript-timeline-materializer';
-import {
-  parseTranscriptMessages,
+  iterateTranscriptMessages,
 } from './transcript-parser';
-import {
-  extractLatestTaskSnapshotFromTranscriptMessages,
-} from './transcript-task-snapshot-replay';
 import type { SessionStoragePort } from './session-storage-repository';
-
-export interface SessionTranscriptReplay {
-  timelineEntries: SessionTimelineEntry[];
-  taskSnapshot: TaskSnapshotEvent | null;
-}
 
 interface SessionTranscriptTimelineLoaderDeps {
   sessionStorage: SessionStoragePort;
@@ -25,22 +12,12 @@ interface SessionTranscriptTimelineLoaderDeps {
 export class SessionTranscriptTimelineLoader {
   constructor(private readonly deps: SessionTranscriptTimelineLoaderDeps) {}
 
-  async readTimelineEntries(sessionKey: string): Promise<SessionTimelineEntry[]> {
-    return (await this.readTimelineReplay(sessionKey)).timelineEntries;
+  async readCanonicalReplayEvents(sessionId: string): Promise<Iterable<CanonicalSessionEvent>> {
+    const content = await this.deps.sessionStorage.readTranscriptContent(sessionId);
+    return iterateCanonicalReplayEventsFromTranscriptMessages(
+      sessionId,
+      content ? iterateTranscriptMessages(content) : [],
+    );
   }
 
-  async readTimelineReplay(sessionKey: string): Promise<SessionTranscriptReplay> {
-    const content = await this.deps.sessionStorage.readTranscriptContent(sessionKey);
-    if (!content) {
-      return {
-        timelineEntries: [],
-        taskSnapshot: null,
-      };
-    }
-    const messages = parseTranscriptMessages(content);
-    return {
-      timelineEntries: materializeTranscriptTimelineEntries(sessionKey, messages),
-      taskSnapshot: extractLatestTaskSnapshotFromTranscriptMessages(sessionKey, messages),
-    };
-  }
 }

@@ -48,6 +48,7 @@ import {
   DEFAULT_GATEWAY_BASE_METHODS,
   inspectGatewayMethods,
   type GatewayCapabilitiesSnapshot,
+  type GatewayControlReadiness,
   type GatewayMethodReadiness,
 } from './capabilities';
 import type { RuntimeHostLogger } from '../shared/logger';
@@ -93,6 +94,7 @@ export function createGatewayClient(options: GatewayClientOptions) {
   let gatewayCapabilities: GatewayCapabilitiesSnapshot | null = null;
   let reconnectTimer: RuntimeScheduledTask | null = null;
   let reconnectAttempts = 0;
+  let restartRequestedForTransportEpoch: number | null = null;
   const connectionTracker = new GatewayConnectionTracker(options.clock, options.onGatewayConnectionState);
   const pendingRpcRequests = new GatewayPendingRpcRequests(options.scheduler);
   const authService = new GatewayAuthService({
@@ -289,6 +291,7 @@ export function createGatewayClient(options: GatewayClientOptions) {
     reconnectAttempts = 0;
     connectedAt = options.clock.nowMs();
     transportEpoch += 1;
+    restartRequestedForTransportEpoch = null;
     gatewayReady = false;
     updateDiagnostics({
       consecutiveHeartbeatMisses: 0,
@@ -320,6 +323,10 @@ export function createGatewayClient(options: GatewayClientOptions) {
     if (typeof options.requestGatewayRestart !== 'function') {
       return;
     }
+    if (restartRequestedForTransportEpoch === transportEpoch) {
+      return;
+    }
+    restartRequestedForTransportEpoch = transportEpoch;
     try {
       await options.requestGatewayRestart('transport-unresponsive');
     } catch (error) {
@@ -476,9 +483,59 @@ export function createGatewayClient(options: GatewayClientOptions) {
     return snapshot.portReachable;
   }
 
+  async function inspectGatewayControlReadiness(
+    methods: readonly string[],
+    timeoutMs = GATEWAY_CONNECT_TIMEOUT_MS,
+  ): Promise<GatewayControlReadiness> {
+    const requiredMethods = methods.length > 0 ? methods : DEFAULT_GATEWAY_BASE_METHODS;
+    try {
+      const capabilities = await readGatewayCapabilities(timeoutMs);
+      const readiness = inspectGatewayMethods(capabilities, requiredMethods);
+      if (!readiness.ready) {
+        return {
+          ready: false,
+          phase: 'unavailable',
+          requiredMethods: readiness.methods,
+          missingMethods: readiness.missingMethods,
+          retryable: false,
+          code: 'GATEWAY_METHODS_UNAVAILABLE',
+          ...(capabilities ? { capabilities } : {}),
+        };
+      }
+      await gatewayRpc('system-presence', {}, Math.max(1000, Math.min(timeoutMs, 5000)));
+      return {
+        ready: true,
+        phase: 'ready',
+        requiredMethods: readiness.methods,
+        missingMethods: [],
+        retryable: false,
+        ...(capabilities ? { capabilities } : {}),
+      };
+    } catch (error) {
+      const state = connectionTracker.snapshot.lastIssue
+        ? connectionTracker.snapshot
+        : await readGatewayConnectionState(250);
+      const issue = state.lastIssue;
+      const retryable = issue?.retryable === true;
+      return {
+        ready: false,
+        phase: retryable ? 'starting' : 'unavailable',
+        requiredMethods,
+        missingMethods: [],
+        retryable,
+        ...(issue?.code ? { code: issue.code } : {}),
+        error: issue?.message ?? (error instanceof Error ? error.message : String(error)),
+        ...(issue?.details !== undefined ? { details: issue.details } : {}),
+        ...(issue?.retryAfterMs !== undefined ? { retryAfterMs: issue.retryAfterMs } : {}),
+      };
+    }
+  }
+
   async function ensureGatewayReady(timeoutMs = GATEWAY_CONNECT_TIMEOUT_MS): Promise<void> {
-    await ensureGatewayMethods(DEFAULT_GATEWAY_BASE_METHODS, timeoutMs);
-    await gatewayRpc('status', {}, Math.max(1000, timeoutMs));
+    const readiness = await inspectGatewayControlReadiness(DEFAULT_GATEWAY_BASE_METHODS, timeoutMs);
+    if (!readiness.ready) {
+      throw new Error(readiness.error ?? readiness.code ?? 'Gateway control plane unavailable');
+    }
   }
 
   async function readGatewayCapabilities(
@@ -553,6 +610,7 @@ export function createGatewayClient(options: GatewayClientOptions) {
   connectionTracker.emitInitial();
 
   return {
+    inspectGatewayControlReadiness,
     ensureGatewayReady,
     ensureGatewayMethods,
     gatewayRpc,

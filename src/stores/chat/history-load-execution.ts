@@ -22,6 +22,7 @@ import {
   getSessionViewportState,
   patchSessionMeta,
   patchSessionRecord,
+  patchPendingApprovalsFromSnapshot,
   patchSessionSnapshot,
   patchSessionViewportState,
 } from './store-state-helpers';
@@ -258,6 +259,19 @@ function resolveViewportWindowRequestState(input: {
   };
 }
 
+function isViewportWindowRequestCurrent(input: {
+  state: ChatStoreState;
+  sessionKey: string;
+  mode: ViewportWindowLoadRequest['mode'];
+  requestedStartOffset: number;
+}): boolean {
+  const viewport = getSessionViewportState(input.state, input.sessionKey);
+  if (input.mode === 'older') {
+    return viewport.isLoadingMore && viewport.windowStartOffset === input.requestedStartOffset;
+  }
+  return viewport.isLoadingNewer;
+}
+
 function setViewportLoadingState(input: {
   set: ChatStoreSetFn;
   sessionKey: string;
@@ -314,25 +328,62 @@ export async function executeViewportWindowLoad(
       includeCanonical: true,
     });
     const payload = initialPayload.hydrationJob
-      ? await waitForRuntimeJobResult<SessionWindowResult>(initialPayload.hydrationJob.id)
+      ? await waitForRuntimeJobResult(initialPayload.hydrationJob.id).then(async () => {
+          if (!isViewportWindowRequestCurrent({
+            state: deps.get(),
+            sessionKey,
+            mode: request.mode,
+            requestedStartOffset: beforeViewport.windowStartOffset,
+          })) {
+            return null;
+          }
+          const window = await hostSessionWindowFetch({
+            sessionKey,
+            mode: request.mode,
+            limit: resolveViewportFetchLimit(currentItems.length),
+            ...(request.mode === 'older' ? { offset: beforeViewport.windowStartOffset } : {}),
+            includeCanonical: true,
+          });
+          return window.snapshot ? window as SessionWindowResult : null;
+        })
       : initialPayload.snapshot
         ? initialPayload as SessionWindowResult
         : null;
     if (!payload) {
-      throw new Error('session window did not return a snapshot');
+      return;
+    }
+    if (!isViewportWindowRequestCurrent({
+      state: deps.get(),
+      sessionKey,
+      mode: request.mode,
+      requestedStartOffset: beforeViewport.windowStartOffset,
+    })) {
+      return;
     }
     useTaskSnapshotStore.getState().reportSessionSnapshot(payload.snapshot, 'replay');
     const nextViewportRequestState = resolveViewportWindowRequestState({ payload });
-    deps.set((state) => ({
-      loadedSessions: patchSessionSnapshot(state, sessionKey, {
+    deps.set((state) => {
+      if (!isViewportWindowRequestCurrent({
+        state,
+        sessionKey,
+        mode: request.mode,
+        requestedStartOffset: beforeViewport.windowStartOffset,
+      })) {
+        return state;
+      }
+      const nextSnapshot = {
         ...payload.snapshot,
         items: hydrateAttachedFilesFromItems(payload.snapshot.items),
         window: {
           ...payload.snapshot.window,
           ...nextViewportRequestState,
         },
-      }),
-    }));
+      };
+      return {
+        loadedSessions: patchSessionSnapshot(state, sessionKey, nextSnapshot),
+        pendingApprovalsBySession: patchPendingApprovalsFromSnapshot(state, sessionKey, nextSnapshot),
+      };
+    });
   } catch {
     setViewportLoadingState({
       set: deps.set,
@@ -433,6 +484,7 @@ export function createApplyLoadedMessagesPipeline(
             thinkingLevel: window.thinkingLevel,
           },
         ),
+        pendingApprovalsBySession: patchPendingApprovalsFromSnapshot(state, requestedSessionKey, nextSnapshot),
       };
     });
     historyRuntime.historyRenderFingerprintBySession.set(requestedSessionKey, renderFingerprint);

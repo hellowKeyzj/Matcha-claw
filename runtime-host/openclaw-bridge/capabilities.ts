@@ -3,5 +3,6 @@ export {
   inspectGatewayMethods,
   normalizeGatewayMethods,
   type GatewayCapabilitiesSnapshot,
+  type GatewayControlReadiness,
   type GatewayMethodReadiness,
 } from '../application/gateway/gateway-runtime-port';

@@ -21,7 +21,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 export interface GatewayServiceDeps {
-  readonly gateway: GatewayChatPort & Pick<GatewayRpcPort, 'gatewayRpc'> & Pick<GatewayConnectionPort, 'ensureGatewayReady' | 'inspectGatewayMethodReadiness' | 'readGatewayConnectionState'>;
+  readonly gateway: GatewayChatPort & Pick<GatewayRpcPort, 'gatewayRpc'> & Pick<GatewayConnectionPort, 'inspectGatewayControlReadiness' | 'readGatewayConnectionState'>;
   readonly fileSystem: RuntimeFileSystemPort;
 }
 
@@ -41,26 +41,21 @@ export class GatewayService {
       ? body.timeoutMs
       : undefined;
     const requiredMethods = normalizeGatewayMethods(body.requiredMethods);
-    try {
-      if (requiredMethods.length > 0) {
-        const readiness = await this.deps.gateway.inspectGatewayMethodReadiness(requiredMethods, timeoutMs);
-        if (!readiness.ready) {
-          return ok({
-            success: false,
-            code: 'GATEWAY_METHODS_UNAVAILABLE',
-            missingMethods: readiness.missingMethods,
-          });
-        }
-      } else {
-        await this.deps.gateway.ensureGatewayReady(timeoutMs);
-      }
-      return ok({
-        success: true,
-        requiredMethods: requiredMethods.length > 0 ? requiredMethods : DEFAULT_GATEWAY_BASE_METHODS,
-      });
-    } catch (error) {
-      return ok({ success: false, error: String(error) });
-    }
+    const readiness = await this.deps.gateway.inspectGatewayControlReadiness(
+      requiredMethods.length > 0 ? requiredMethods : DEFAULT_GATEWAY_BASE_METHODS,
+      timeoutMs,
+    );
+    return ok({
+      success: readiness.ready,
+      phase: readiness.phase,
+      retryable: readiness.retryable,
+      requiredMethods: readiness.requiredMethods,
+      missingMethods: readiness.missingMethods,
+      ...(readiness.code ? { code: readiness.code } : {}),
+      ...(readiness.error ? { error: readiness.error } : {}),
+      ...(readiness.details !== undefined ? { details: readiness.details } : {}),
+      ...(readiness.retryAfterMs !== undefined ? { retryAfterMs: readiness.retryAfterMs } : {}),
+    });
   }
 
   async sendMedia(payload: unknown) {

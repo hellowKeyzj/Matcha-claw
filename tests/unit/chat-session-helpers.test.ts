@@ -7,6 +7,7 @@ import {
   resolvePreferredSessionKeyForAgent,
   resolveSessionThinkingLevelFromList,
   shouldKeepMissingCurrentSession,
+  shouldRetainLocalSessionRecord,
 } from '@/stores/chat/session-helpers';
 import type { RawMessage } from './helpers/timeline-fixtures';
 import { buildRenderItemsFromMessages } from './helpers/timeline-fixtures';
@@ -163,6 +164,32 @@ describe('chat session helpers', () => {
       2,
     );
     expect(keepLocalEmptyDraft).toBe(true);
+  });
+
+  it('does not retain non-current empty local drafts in the session list', () => {
+    const retainEmptyCurrent = shouldRetainLocalSessionRecord(
+      'agent:foo:session-current',
+      {
+        currentSessionKey: 'agent:foo:session-current',
+        loadedSessions: {
+          'agent:foo:session-current': createSessionRecord(),
+        },
+        pendingApprovalsBySession: {},
+      } as never,
+    );
+    expect(retainEmptyCurrent).toBe(true);
+
+    const retainEmptyBackground = shouldRetainLocalSessionRecord(
+      'agent:foo:session-background',
+      {
+        currentSessionKey: 'agent:foo:session-current',
+        loadedSessions: {
+          'agent:foo:session-background': createSessionRecord(),
+        },
+        pendingApprovalsBySession: {},
+      } as never,
+    );
+    expect(retainEmptyBackground).toBe(false);
   });
 
   it('builds task bridge state from current session runtime flags', () => {

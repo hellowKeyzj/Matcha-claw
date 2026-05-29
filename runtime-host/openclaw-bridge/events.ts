@@ -9,11 +9,23 @@ export type GatewayConversationEvent =
     event: Record<string, unknown>;
   }
   | {
+    type: 'tool.lifecycle';
+    event: Record<string, unknown>;
+  }
+  | {
     type: 'session.message';
     event: Record<string, unknown>;
   }
   | {
-    type: 'tool.lifecycle';
+    type: 'session.tool';
+    event: Record<string, unknown>;
+  }
+  | {
+    type: 'usage';
+    event: Record<string, unknown>;
+  }
+  | {
+    type: 'artifact';
     event: Record<string, unknown>;
   }
   | {
@@ -62,31 +74,11 @@ function getFiniteNumber(value: unknown): number | null {
   return null;
 }
 
-function normalizeGatewayChatState(
-  payload: Record<string, unknown>,
-  message: Record<string, unknown>,
-): string {
-  const fromPayload = getTrimmedString(payload.state || payload.phase).toLowerCase();
-  const fromMessage = getTrimmedString(message.state || message.phase).toLowerCase();
-  const state = fromPayload || fromMessage;
-  if (state) {
-    if (state === 'completed' || state === 'done' || state === 'finished' || state === 'end') {
-      return 'final';
-    }
-    return state;
-  }
-
-  const stopReason = payload.stopReason ?? payload.stop_reason ?? message.stopReason ?? message.stop_reason;
-  if (stopReason != null) {
-    return 'final';
-  }
-  if (message.role != null || message.content != null || message.text != null) {
-    // Legacy chat payloads often omit explicit state while still being part of
-    // a streaming sequence. Default to delta and let explicit state/stopReason
-    // close the turn as final.
-    return 'delta';
-  }
-  return '';
+function normalizeGatewayChatState(payload: Record<string, unknown>): string {
+  const state = getTrimmedString(payload.state).toLowerCase();
+  return state === 'delta' || state === 'final' || state === 'error' || state === 'aborted'
+    ? state
+    : '';
 }
 
 function normalizeGatewayChatEvent(payload: unknown): Record<string, unknown> | null {
@@ -95,36 +87,27 @@ function normalizeGatewayChatEvent(payload: unknown): Record<string, unknown> | 
     return null;
   }
   const nestedMessage = asRecord(input.message);
-  const message = nestedMessage ?? input;
-  const state = normalizeGatewayChatState(input, message);
+  const message = nestedMessage ?? {};
+  const state = normalizeGatewayChatState(input);
   if (!state) {
     return null;
   }
 
-  const runId = getTrimmedString(input.runId ?? message.runId);
-  const sessionKey = getTrimmedString(input.sessionKey ?? message.sessionKey);
-  const sequenceId = getFiniteNumber(input.sequenceId ?? input.sequence_id ?? message.sequenceId ?? message.sequence_id);
-  const agentId = getTrimmedString(input.agentId ?? input.agent_id ?? message.agentId ?? message.agent_id);
+  const runId = getTrimmedString(input.runId);
+  const sessionKey = getTrimmedString(input.sessionKey);
+  const seq = getFiniteNumber(input.seq);
+  if (!runId || !sessionKey || seq == null) {
+    return null;
+  }
   return {
     state,
-    ...(runId ? { runId } : {}),
-    ...(sessionKey ? { sessionKey } : {}),
-    ...(sequenceId != null ? { sequenceId } : {}),
-    ...(agentId ? { agentId } : {}),
+    runId,
+    sessionKey,
+    seq,
+    ...(Object.prototype.hasOwnProperty.call(input, 'deltaText') ? { deltaText: input.deltaText } : {}),
+    ...(input.replace === true ? { replace: true } : {}),
     message,
   };
-}
-
-function normalizeGatewaySessionMessageEvent(payload: unknown): Record<string, unknown> | null {
-  const input = asRecord(payload);
-  if (!input) {
-    return null;
-  }
-  const sessionKey = getTrimmedString(input.sessionKey);
-  if (!sessionKey) {
-    return null;
-  }
-  return input;
 }
 
 type GatewayToolPhase = 'start' | 'update' | 'result';
@@ -146,20 +129,20 @@ function normalizeGatewayToolLifecycleEvent(payload: unknown): Record<string, un
   const toolCallId = getTrimmedString(data.toolCallId);
   const runId = getTrimmedString(input.runId);
   const sessionKey = getTrimmedString(input.sessionKey);
-  const sequenceId = getFiniteNumber(input.seq);
+  const seq = getFiniteNumber(input.seq);
   const timestamp = getFiniteNumber(input.ts);
-  if (!phase || !toolCallId || !runId || !sessionKey || sequenceId == null || timestamp == null) {
+  if (!phase || !toolCallId || !runId || !sessionKey || seq == null || timestamp == null) {
     return null;
   }
 
   const toolName = getTrimmedString(data.name);
-  if (phase === 'start' && !toolName) {
+  if (!toolName) {
     return null;
   }
   return {
     runId,
     sessionKey,
-    sequenceId,
+    seq,
     timestamp,
     phase,
     toolCallId,
@@ -182,12 +165,12 @@ function normalizeGatewayRunActivity(payload: unknown): {
     return null;
   }
   const data = asRecord(input.data) ?? {};
-  const phaseRaw = getTrimmedString(data.phase ?? input.phase ?? data.state ?? input.state).toLowerCase();
+  const phaseRaw = getTrimmedString(data.phase).toLowerCase();
   const phase = (() => {
-    if (phaseRaw === 'start' || phaseRaw === 'started') {
+    if (phaseRaw === 'start') {
       return 'started' as const;
     }
-    if (phaseRaw === 'end' || phaseRaw === 'completed' || phaseRaw === 'done' || phaseRaw === 'finished') {
+    if (phaseRaw === 'end') {
       return 'completed' as const;
     }
     return null;
@@ -195,8 +178,8 @@ function normalizeGatewayRunActivity(payload: unknown): {
   if (!phase) {
     return null;
   }
-  const runId = getTrimmedString(input.runId ?? data.runId);
-  const sessionKey = getTrimmedString(input.sessionKey ?? data.sessionKey);
+  const runId = getTrimmedString(input.runId);
+  const sessionKey = getTrimmedString(input.sessionKey);
   return {
     activity: 'compacting',
     phase,
@@ -206,7 +189,7 @@ function normalizeGatewayRunActivity(payload: unknown): {
 }
 
 function normalizeGatewayRunPhase(payload: unknown): {
-  phase: GatewayRunPhase;
+  phase: 'started' | 'completed' | 'error' | 'aborted';
   runId?: string;
   sessionKey?: string;
   error?: string;
@@ -214,47 +197,30 @@ function normalizeGatewayRunPhase(payload: unknown): {
   errorCode?: string;
   errorDetails?: unknown;
 } | null {
-  const input = asRecord(payload) ?? {};
-  const stream = getTrimmedString(input.stream);
-  if (stream && stream !== 'lifecycle') {
+  const input = asRecord(payload);
+  const data = asRecord(input?.data);
+  if (!input || !data || input.stream !== 'lifecycle') {
     return null;
   }
-  const data = asRecord(input.data) ?? {};
-  const phaseRaw = getTrimmedString(data.phase ?? input.phase ?? data.state ?? input.state).toLowerCase();
-  if (!phaseRaw) {
-    return null;
-  }
-
-  const phase = (() => {
-    if (phaseRaw === 'start' || phaseRaw === 'started') {
-      return 'started' as const;
-    }
-    if (phaseRaw === 'completed' || phaseRaw === 'done' || phaseRaw === 'finished' || phaseRaw === 'end') {
-      return 'completed' as const;
-    }
-    if (phaseRaw === 'error' || phaseRaw === 'failed') {
-      return 'error' as const;
-    }
-    if (phaseRaw === 'aborted' || phaseRaw === 'abort' || phaseRaw === 'cancelled' || phaseRaw === 'canceled') {
-      return 'aborted' as const;
-    }
-    return null;
-  })();
+  const rawPhase = getTrimmedString(data.phase).toLowerCase();
+  const phase = rawPhase === 'start'
+    ? 'started'
+    : rawPhase === 'end'
+      ? 'completed'
+      : rawPhase === 'error' || rawPhase === 'aborted'
+        ? rawPhase
+        : null;
   if (!phase) {
     return null;
   }
 
-  const runId = getTrimmedString(input.runId ?? data.runId);
-  const sessionKey = getTrimmedString(input.sessionKey ?? data.sessionKey);
-  const errorMessage = getTrimmedString(data.errorMessage ?? input.errorMessage);
-  const error = getTrimmedString(data.error ?? input.error);
-  const rawError = asRecord(data.error ?? input.error);
-  const errorCode = getTrimmedString(
-    data.errorCode
-    ?? input.errorCode
-    ?? rawError?.code,
-  );
-  const errorDetails = data.errorDetails ?? input.errorDetails ?? rawError?.details;
+  const runId = getTrimmedString(input.runId);
+  const sessionKey = getTrimmedString(input.sessionKey);
+  const errorMessage = getTrimmedString(data.errorMessage);
+  const error = getTrimmedString(data.error);
+  const rawError = asRecord(data.error);
+  const errorCode = getTrimmedString(data.errorCode ?? rawError?.code);
+  const errorDetails = data.errorDetails ?? rawError?.details;
   return {
     phase,
     ...(runId ? { runId } : {}),
@@ -290,18 +256,20 @@ export function dispatchGatewayProtocolEvent(
         });
       }
       break;
-    case 'session.message':
-      {
-        const normalized = normalizeGatewaySessionMessageEvent(payload);
-        if (!normalized) {
-          break;
-        }
+    case 'session.message': {
+      const normalized = asRecord(payload);
+      if (normalized) {
         dispatcher.emitConversationEvent({
           type: 'session.message',
           event: normalized,
         });
       }
+      dispatcher.emitNotification({
+        method: event,
+        params: payload,
+      } satisfies GatewayNotification);
       break;
+    }
     case 'agent': {
       const toolLifecycleEvent = normalizeGatewayToolLifecycleEvent(payload);
       if (toolLifecycleEvent) {
@@ -334,8 +302,23 @@ export function dispatchGatewayProtocolEvent(
       const toolLifecycleEvent = normalizeGatewayToolLifecycleEvent(payload);
       if (toolLifecycleEvent) {
         dispatcher.emitConversationEvent({
-          type: 'tool.lifecycle',
+          type: 'session.tool',
           event: toolLifecycleEvent,
+        });
+      }
+      dispatcher.emitNotification({
+        method: event,
+        params: payload,
+      } satisfies GatewayNotification);
+      break;
+    }
+    case 'usage':
+    case 'artifact': {
+      const normalized = asRecord(payload);
+      if (normalized) {
+        dispatcher.emitConversationEvent({
+          type: event,
+          event: normalized,
         });
       }
       dispatcher.emitNotification({

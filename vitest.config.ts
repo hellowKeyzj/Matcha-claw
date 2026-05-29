@@ -19,6 +19,7 @@ export default defineConfig({
     alias: {
       '@': resolve(__dirname, 'src'),
       '@electron': resolve(__dirname, 'electron'),
+      'openclaw/plugin-sdk/browser-support': resolve(__dirname, 'build/openclaw/dist/plugin-sdk/browser-support.js'),
     },
   },
 });

@@ -390,12 +390,6 @@ export function registerOperationsLifecycle(
   registerRuntimeLifecycleDefinitions(deps.lifecycle, {
     backgroundServices: [
       {
-        name: 'usage.history-refresh',
-        start: () => {
-          container.resolve<TokenUsageHistoryJobPort>('usage.tokenHistoryJobs').submitRefreshHistory();
-        },
-      },
-      {
         name: 'cron.jobs-refresh',
         start: () => {
           void container.resolve<CronService>('cron.service').listJobs();

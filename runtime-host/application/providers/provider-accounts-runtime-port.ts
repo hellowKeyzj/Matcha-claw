@@ -37,7 +37,7 @@ function resolveRuntimeProviderKey(accountId: string, account: Record<string, un
 
 export class OpenClawProviderAccountsRuntimePort implements ProviderAccountsRuntimePort {
   constructor(
-    private readonly authProfiles: Pick<OpenClawAuthProfileService, 'getProviderApiKey' | 'removeProviderKey'>,
+    private readonly authProfiles: Pick<OpenClawAuthProfileService, 'removeProviderKey'>,
     private readonly runtimeSync: Pick<ProviderRuntimeSyncService, 'syncProviderStore'>,
     private readonly providerConfig: Pick<OpenClawProviderConfigService, 'removeProvider'>,
   ) {}
@@ -52,10 +52,6 @@ export class OpenClawProviderAccountsRuntimePort implements ProviderAccountsRunt
     account: Record<string, unknown> | null;
   }): Promise<string | undefined> {
     const runtimeProviderKey = resolveRuntimeProviderKey(input.accountId, input.account);
-    const runtimeApiKey = await this.authProfiles.getProviderApiKey(runtimeProviderKey);
-    if (runtimeApiKey) {
-      return runtimeApiKey;
-    }
     const localApiKey = getStoredApiKey(input.store, input.accountId);
     if (localApiKey) {
       return localApiKey;

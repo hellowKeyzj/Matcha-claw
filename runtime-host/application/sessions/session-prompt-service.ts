@@ -26,17 +26,8 @@ import {
   type ApplicationResponseOf,
 } from '../common/application-response';
 import { SessionOperationCoordinator } from './session-operation-coordinator';
+import type { CanonicalSessionEvent } from './canonical/canonical-events';
 
-function readGatewayRunId(value: unknown): string {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) {
-    return '';
-  }
-  const record = value as Record<string, unknown>;
-  const runId = typeof record.runId === 'string'
-    ? record.runId.trim()
-    : (typeof record.id === 'string' ? record.id.trim() : '');
-  return runId;
-}
 
 export interface SessionPromptServiceDeps {
   stateStore: SessionRuntimeStateStore;
@@ -66,38 +57,44 @@ export class SessionPromptService {
   }
 
   private async failSubmittedPrompt(input: {
-    sessionKey: string;
+    sessionId: string;
     runId: string;
     error: string;
   }): Promise<void> {
-    await this.deps.operationCoordinator.run(input.sessionKey, 'prompt', async () => {
-      const state = this.deps.stateStore.getSessionState(input.sessionKey);
+    await this.deps.operationCoordinator.run(input.sessionId, 'prompt', async () => {
+      const state = this.deps.stateStore.getSessionState(input.sessionId);
       if (state.runtime.activeRunId !== input.runId) {
         // 已被 abort/新 prompt/lifecycle 终态覆盖，跳过失败收尾。
         return;
       }
-      const committed = this.deps.timelineRuntime.commitSessionTransition(input.sessionKey, {
-        runtimePatch: {
-          activeRunId: null,
-          runPhase: 'error',
-          activeTurnItemKey: null,
-          pendingTurnKey: null,
-          pendingTurnLaneKey: null,
-          lastError: input.error,
-          lastIssue: null,
-          runtimeActivity: null,
+      const committed = this.deps.timelineRuntime.appendCanonicalEvents(input.sessionId, [{
+        eventId: `local:lifecycle:${input.sessionId}:${input.runId}:error`,
+        type: 'lifecycle',
+        provider: 'openclaw-v4',
+        source: 'live',
+        sessionId: input.sessionId,
+        runId: input.runId,
+        timestamp: this.deps.clock.nowMs(),
+        laneKey: 'main',
+        origin: {
+          providerEventType: 'local.prompt.failed',
+          providerIds: {
+            sessionKey: input.sessionId,
+            runId: input.runId,
+          },
         },
-        activeTransportEpoch: null,
-        advanceRunEpoch: true,
-      });
+        phase: 'error',
+        runPhase: 'error',
+        error: input.error,
+      }]);
       const snapshot = {
-        ...await this.deps.snapshotService.buildLatestSnapshotAsync(input.sessionKey, committed.state),
+        ...await this.deps.snapshotService.buildLatestSnapshotAsync(input.sessionId, committed.state),
         runtime: committed.runtime,
       };
       await this.deps.stateStore.flushPersistedStore();
       this.emitSessionInfoUpdate({
         sessionUpdate: 'session_info_update',
-        sessionKey: input.sessionKey,
+        sessionKey: input.sessionId,
         runId: input.runId,
         phase: 'error',
         snapshot,
@@ -110,7 +107,7 @@ export class SessionPromptService {
   private startGatewaySendInBackground(input: {
     directBody: ReturnType<typeof readPromptSessionRequest>['directBody'];
     mediaBody: ReturnType<typeof readPromptSessionRequest>['mediaBody'];
-    sessionKey: string;
+    sessionId: string;
     message: string;
     runId: string;
   }): void {
@@ -118,12 +115,12 @@ export class SessionPromptService {
       const sendResult = input.mediaBody
         ? await sendWithMediaViaGateway(this.deps.fileSystem, this.deps.gateway, {
             ...input.mediaBody,
-            sessionKey: input.sessionKey,
+            sessionKey: input.sessionId,
             message: input.message,
             idempotencyKey: input.runId,
           })
         : await sendWithMediaViaGateway(this.deps.fileSystem, this.deps.gateway, {
-            sessionKey: input.sessionKey,
+            sessionKey: input.sessionId,
             message: input.message,
             idempotencyKey: input.runId,
             ...(typeof input.directBody.deliver === 'boolean' ? { deliver: input.directBody.deliver } : {}),
@@ -131,18 +128,12 @@ export class SessionPromptService {
 
       if (!sendResult.success) {
         await this.failSubmittedPrompt({
-          sessionKey: input.sessionKey,
+          sessionId: input.sessionId,
           runId: input.runId,
           error: sendResult.error ?? 'Failed to prompt session',
         });
         return;
       }
-
-      const gatewayRunId = readGatewayRunId(sendResult.result);
-      this.deps.timelineRuntime.bindSubmittedRunId(input.sessionKey, {
-        submittedRunId: input.runId,
-        gatewayRunId,
-      });
     })().catch(() => undefined);
   }
 
@@ -154,7 +145,8 @@ export class SessionPromptService {
       message,
       requestedRunId,
     } = readPromptSessionRequest(payload);
-    if (!sessionKey) {
+    const sessionId = sessionKey;
+    if (!sessionId) {
       return badRequest('sessionKey is required');
     }
     if (!message.trim() && !(Array.isArray(mediaBody?.media) && mediaBody.media.length > 0)) {
@@ -166,44 +158,69 @@ export class SessionPromptService {
     const media = Array.isArray(mediaBody?.media)
       ? mediaBody.media as SessionPromptMediaPayload[]
       : undefined;
-    const submitted = await this.deps.operationCoordinator.run(sessionKey, 'prompt', async () => {
-      const state = await this.deps.timelineRuntime.activateSession(sessionKey, {
+    const submitted = await this.deps.operationCoordinator.run(sessionId, 'prompt', async () => {
+      await this.deps.timelineRuntime.activateSession(sessionId, {
         resetWindowToLatest: true,
       });
-      this.deps.stateStore.blockRuns(sessionKey, [
-        state.runtime.activeRunId,
-        ...state.timelineEntries.map((entry) => entry.runId),
-      ]);
-      const promptEntry = this.deps.timelineRuntime.buildPromptUserEntry({
-        sessionKey,
+      const now = this.deps.clock.nowMs();
+      const attachedFiles = (media ?? []).map((file) => ({
+        fileName: file.fileName,
+        mimeType: file.mimeType,
+        fileSize: file.fileSize ?? 0,
+        preview: file.preview ?? null,
+        filePath: file.filePath,
+        source: 'user-upload' as const,
+      }));
+      const events: CanonicalSessionEvent[] = [{
+        eventId: `local:user:${sessionId}:${runId}`,
+        type: 'message_snapshot',
+        provider: 'openclaw-v4',
+        source: 'live',
+        sessionId,
         runId,
-        message,
-        media,
-      });
-      const committed = this.deps.timelineRuntime.commitSessionTransition(sessionKey, {
-        timelineEntries: [promptEntry],
-        runtimePatch: {
-          activeRunId: runId,
-          runPhase: 'submitted',
-          activeTurnItemKey: null,
-          pendingTurnKey: runId,
-          pendingTurnLaneKey: 'main',
-          lastUserMessageAt: promptEntry.createdAt ?? this.deps.clock.nowMs(),
-          lastError: null,
-          lastIssue: null,
-          runtimeActivity: null,
+        timestamp: now,
+        laneKey: 'main',
+        origin: {
+          providerEventType: 'local.prompt.user',
+          providerIds: {
+            sessionKey: sessionId,
+            runId,
+          },
         },
-        activeTransportEpoch: this.deps.stateStore.getLatestConnectedTransportEpoch() || 1,
-        resetWindowToLatest: true,
-        advanceRunEpoch: true,
-      });
+        role: 'user',
+        messageId: runId,
+        content: message,
+        text: message,
+        status: 'final',
+        attachedFiles,
+      }, {
+        eventId: `local:lifecycle:${sessionId}:${runId}:started`,
+        type: 'lifecycle',
+        provider: 'openclaw-v4',
+        source: 'live',
+        sessionId,
+        runId,
+        timestamp: now,
+        laneKey: 'main',
+        origin: {
+          providerEventType: 'local.prompt.started',
+          providerIds: {
+            sessionKey: sessionId,
+            runId,
+          },
+        },
+        phase: 'started',
+        runPhase: 'submitted',
+        error: null,
+      }];
+      const committed = this.deps.timelineRuntime.appendCanonicalEvents(sessionId, events);
       const snapshot = {
-        ...await this.deps.snapshotService.buildLatestSnapshotAsync(sessionKey, committed.state),
+        ...await this.deps.snapshotService.buildLatestSnapshotAsync(sessionId, committed.state),
         runtime: committed.runtime,
       };
       await this.deps.stateStore.flushPersistedStore();
       return {
-        entryKey: committed.mergedEntries[0]?.key ?? promptEntry.key,
+        entryKey: snapshot.items.find((item) => item.kind === 'user-message' && item.runId === runId)?.key ?? '',
         snapshot,
       };
     });
@@ -211,14 +228,14 @@ export class SessionPromptService {
     this.startGatewaySendInBackground({
       directBody,
       mediaBody,
-      sessionKey,
+      sessionId,
       message,
       runId,
     });
 
     return ok({
       success: true,
-      sessionKey,
+      sessionKey: sessionId,
       runId,
       item: submitted.snapshot.items.find((candidate) => candidate.key === submitted.entryKey) ?? null,
       snapshot: submitted.snapshot,

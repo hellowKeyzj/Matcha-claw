@@ -70,6 +70,8 @@ export function registerOpenClawInfrastructure(container: RuntimeHostContainer):
   container.register('providers.runtimeSyncService', (scope) => new ProviderRuntimeSyncService(
     scope.resolve('openclaw.authProfileService'),
     scope.resolve('openclaw.providerConfigService'),
+    scope.resolve('openclaw.authRepository'),
+    scope.resolve('openclaw.agentModelRepository'),
   ));
   container.register('openclaw.subagentTemplateService', (scope) => new SubagentTemplateService(
     scope.resolve('openclaw.environmentRepository'),

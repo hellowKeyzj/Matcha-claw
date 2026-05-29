@@ -12,6 +12,8 @@ import {
   extractGatewayErrorCode,
   extractGatewayErrorDetails,
   extractGatewayErrorMessageFromResponse,
+  extractGatewayErrorRetryable,
+  extractGatewayErrorRetryAfterMs,
   isRecord,
 } from './client-errors';
 import {
@@ -29,7 +31,7 @@ export interface GatewayClientFrameHandlerDeps {
   settleConnectSuccess(): void;
   settleConnectFailure(
     error: unknown,
-    issuePatch?: Pick<GatewayTransportIssue, 'code' | 'details'>,
+    issuePatch?: Pick<GatewayTransportIssue, 'code' | 'details' | 'retryable' | 'retryAfterMs'>,
   ): void;
   markConnected(): void;
   markAlive(source: 'message' | 'rpc'): void;
@@ -118,6 +120,8 @@ export class GatewayClientFrameHandler {
         {
           code: extractGatewayErrorCode({ error: parsed.error }),
           details: extractGatewayErrorDetails({ error: parsed.error }),
+          retryable: extractGatewayErrorRetryable({ error: parsed.error }),
+          retryAfterMs: extractGatewayErrorRetryAfterMs({ error: parsed.error }),
         },
       );
       return true;
@@ -152,6 +156,8 @@ export class GatewayClientFrameHandler {
         clock: this.deps.clock,
         code: extractGatewayErrorCode({ error: parsed.error }),
         details: extractGatewayErrorDetails({ error: parsed.error }),
+        retryable: extractGatewayErrorRetryable({ error: parsed.error }),
+        retryAfterMs: extractGatewayErrorRetryAfterMs({ error: parsed.error }),
       });
       this.deps.recordRpcFailure(pending.method, issue);
       pending.reject(new Error(issue.message));

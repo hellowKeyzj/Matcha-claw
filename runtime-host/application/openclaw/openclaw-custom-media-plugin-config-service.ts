@@ -1,6 +1,5 @@
 import { MATCHACLAW_MEDIA_PLUGIN_ID, MATCHACLAW_MEDIA_PROVIDER_ID } from '../providers/custom-media-openclaw';
 import type { OpenClawConfigRepositoryPort } from './openclaw-config-repository';
-import { withOpenClawConfigLock } from './openclaw-config-mutex';
 
 export interface OpenClawCustomMediaModelEntry {
   readonly modelId: string;
@@ -159,8 +158,7 @@ export class OpenClawCustomMediaPluginConfigService {
   }
 
   async replaceAll(providerMap: OpenClawCustomMediaProviderMap): Promise<void> {
-    return await withOpenClawConfigLock(async () => {
-      const config = await this.configRepository.read();
+    return await this.configRepository.update((config) => {
       const providerKeys = new Set(Object.keys(providerMap));
       if (providerKeys.size > 0) {
         ensurePluginEnabled(config);
@@ -194,7 +192,6 @@ export class OpenClawCustomMediaPluginConfigService {
       pluginConfig.providers = providers;
       entry.config = pluginConfig;
       rewriteLegacyMediaRoutes(config, providerKeys);
-      await this.configRepository.write(config);
     });
   }
 }

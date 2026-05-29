@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { applyStoreSendStart, executeStoreSend, startStoreSendWatchers } from '@/stores/chat/send-handlers';
+import { applyStoreSendStart, executeStoreSend, NO_RESPONSE_RECEIVED_ERROR, startStoreSendWatchers } from '@/stores/chat/send-handlers';
 import { createStoreSessionRunCache } from '@/stores/chat/session-run-cache';
 import type { ChatStoreState } from '@/stores/chat/types';
 import type { RawMessage } from './helpers/timeline-fixtures';
@@ -205,7 +205,6 @@ describe('chat send handlers', () => {
           },
         },
         loadHistory: vi.fn().mockResolvedValue(undefined),
-        reconcileRunClosure: vi.fn().mockResolvedValue(false),
         syncPendingApprovals: vi.fn().mockResolvedValue(undefined),
       } as unknown as ChatStoreState;
       const set = (
@@ -226,14 +225,13 @@ describe('chat send handlers', () => {
       await vi.advanceTimersByTimeAsync(60_000);
 
       expect(state.loadHistory).not.toHaveBeenCalled();
-      expect(state.reconcileRunClosure).not.toHaveBeenCalled();
       expect(state.syncPendingApprovals).not.toHaveBeenCalled();
     } finally {
       vi.useRealTimers();
     }
   });
 
-  it('reconciles stuck active runs before showing the safety timeout error', async () => {
+  it('shows the safety timeout error for stuck active runs without runtime reconciliation', async () => {
     vi.useFakeTimers();
     try {
       const sessionKey = 'agent:main:session-1';
@@ -259,7 +257,6 @@ describe('chat send handlers', () => {
         },
         error: null,
         loadHistory: vi.fn().mockResolvedValue(undefined),
-        reconcileRunClosure: vi.fn().mockResolvedValue(true),
         syncPendingApprovals: vi.fn().mockResolvedValue(undefined),
       } as unknown as ChatStoreState;
       const set = (
@@ -279,14 +276,9 @@ describe('chat send handlers', () => {
 
       await vi.advanceTimersByTimeAsync(130_000);
 
-      expect(state.reconcileRunClosure).toHaveBeenCalledWith({
-        sessionKey,
-        runId: 'run-1',
-        turnKey: 'turn-1',
-      });
       expect(state.loadHistory).not.toHaveBeenCalled();
-      expect(onSafetyTimeout).not.toHaveBeenCalled();
-      expect(state.error).toBeNull();
+      expect(onSafetyTimeout).toHaveBeenCalledTimes(1);
+      expect(state.error).toBe(NO_RESPONSE_RECEIVED_ERROR);
     } finally {
       vi.useRealTimers();
     }

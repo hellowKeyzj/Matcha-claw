@@ -4,6 +4,7 @@ export {
   inspectGatewayMethods,
   normalizeGatewayMethods,
   type GatewayCapabilitiesSnapshot,
+  type GatewayControlReadiness,
   type GatewayMethodReadiness,
 } from './capabilities';
 export { createGatewayClient, type GatewayConnectionState, type GatewayConnectionStatePayload, type GatewayClientOptions } from './client';

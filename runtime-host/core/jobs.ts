@@ -7,12 +7,16 @@ import type {
   RuntimeJobQueueSnapshot,
   RuntimeJobSnapshot,
   RuntimeJobStatus,
+  type RuntimeJobResultEnvelope,
+  type RuntimeJobResultRetention,
 } from '../application/common/runtime-contracts';
 
 export interface RuntimeJobHandlerContext {
   readonly jobId: string;
   readonly logger: RuntimeHostLogger;
   readonly reportProgress: (progress: Omit<RuntimeJobProgress, 'updatedAt'>) => void;
+  readonly yieldIfNeeded: () => Promise<void>;
+  readonly checkpoint: (message?: string) => Promise<void>;
 }
 
 export type RuntimeJobHandler = (
@@ -37,7 +41,13 @@ interface RuntimeJobRecord extends RuntimeJobSnapshot {
   finishedAt?: number;
   progress?: RuntimeJobProgress;
   result?: unknown;
+  resultRetention: RuntimeJobResultRetention;
   error?: string;
+  yieldState?: RuntimeJobYieldState;
+}
+
+interface RuntimeJobYieldState {
+  sliceStartedAt: number;
 }
 
 export interface RuntimeJobEventSink {
@@ -56,6 +66,13 @@ export interface RuntimeJobQueueOptions {
 }
 
 const RUNTIME_JOB_QUEUE_ORDER: readonly RuntimeJobQueueName[] = ['critical', 'default', 'low'] as const;
+const DEFAULT_JOB_SLICE_MS = 12;
+
+function waitForNextTurn(): Promise<void> {
+  return new Promise((resolve) => {
+    setImmediate(resolve);
+  });
+}
 
 export class RuntimeJobRegistry {
   private readonly handlers = new Map<string, RuntimeJobHandler>();
@@ -172,6 +189,7 @@ export class RuntimeJobQueue {
       attempts: 0,
       maxAttempts: Math.max(1, Math.floor(options.maxAttempts ?? this.defaultMaxAttempts)),
       retryDelayMs: Math.max(0, Math.floor(options.retryDelayMs ?? this.defaultRetryDelayMs)),
+      resultRetention: options.resultRetention ?? 'retain',
     };
     this.jobs.set(job.id, job);
     let typeBucket = this.jobIdsByType.get(job.type);
@@ -314,27 +332,17 @@ export class RuntimeJobQueue {
     job.attempts += 1;
     job.startedAt = this.clock.nowMs();
     job.finishedAt = undefined;
+    job.yieldState = { sliceStartedAt: Date.now() };
     try {
-      job.result = await this.registry.get(job.type)(job.payload, {
-        jobId: job.id,
-        logger: this.logger,
-        reportProgress: (progress) => {
-          job.progress = {
-            updatedAt: this.clock.nowMs(),
-            ...(typeof progress.percent === 'number'
-              ? { percent: Math.max(0, Math.min(100, progress.percent)) }
-              : {}),
-            ...(progress.message ? { message: progress.message } : {}),
-          };
-          this.eventSink?.emitProgress(this.snapshot(job));
-        },
-      });
+      const result = await this.registry.get(job.type)(job.payload, this.createHandlerContext(job));
+      this.applyJobResult(job, result);
       this.finish(job, 'succeeded');
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       job.error = message;
       if (!this.stopped && job.attempts < job.maxAttempts) {
         job.status = 'queued';
+        job.yieldState = undefined;
         this.logger.warn(`runtime job retrying: ${job.type}`, error);
         const retryTask = this.scheduler.schedule(job.retryDelayMs, () => {
           this.retryTasks.delete(job.id);
@@ -350,10 +358,64 @@ export class RuntimeJobQueue {
       this.finish(job, 'failed', message);
       this.logger.warn(`runtime job failed: ${job.type}`, error);
     } finally {
+      job.yieldState = undefined;
       this.activeCount = Math.max(0, this.activeCount - 1);
       this.drain();
       this.resolveIdleWaitersIfIdle();
     }
+  }
+
+  private isResultEnvelope(value: unknown): value is RuntimeJobResultEnvelope {
+    return Boolean(value && typeof value === 'object' && !Array.isArray(value) && Object.prototype.hasOwnProperty.call(value, 'value'));
+  }
+
+  private applyJobResult(job: RuntimeJobRecord, result: unknown): void {
+    if (this.isResultEnvelope(result)) {
+      job.resultRetention = result.retention ?? job.resultRetention;
+      job.result = job.resultRetention === 'drop' ? undefined : result.value;
+      return;
+    }
+    job.result = job.resultRetention === 'drop' ? undefined : result;
+  }
+
+  private createHandlerContext(job: RuntimeJobRecord): RuntimeJobHandlerContext {
+    if (!job.yieldState) {
+      throw new Error(`Runtime job missing execution context: ${job.id}`);
+    }
+    const yieldNow = async () => {
+      await waitForNextTurn();
+      if (job.yieldState) {
+        job.yieldState.sliceStartedAt = Date.now();
+      }
+    };
+    const reportProgress = (progress: Omit<RuntimeJobProgress, 'updatedAt'>) => {
+      job.progress = {
+        updatedAt: this.clock.nowMs(),
+        ...(typeof progress.percent === 'number'
+          ? { percent: Math.max(0, Math.min(100, progress.percent)) }
+          : {}),
+        ...(progress.message ? { message: progress.message } : {}),
+      };
+      this.eventSink?.emitProgress(this.snapshot(job));
+    };
+    return {
+      jobId: job.id,
+      logger: this.logger,
+      reportProgress,
+      yieldIfNeeded: async () => {
+        const elapsedMs = Date.now() - (job.yieldState?.sliceStartedAt ?? Date.now());
+        if (elapsedMs < DEFAULT_JOB_SLICE_MS) {
+          return;
+        }
+        await yieldNow();
+      },
+      checkpoint: async (message) => {
+        if (message) {
+          reportProgress({ message });
+        }
+        await yieldNow();
+      },
+    };
   }
 
   private finish(job: RuntimeJobRecord, status: 'succeeded' | 'failed', error?: string): void {

@@ -65,7 +65,15 @@ export async function fetchChatTimeline(
     includeCanonical: true,
   });
   const history = initial.hydrationJob
-    ? await waitForRuntimeJobResult<SessionWindowResult>(initial.hydrationJob.id)
+    ? await waitForRuntimeJobResult(initial.hydrationJob.id).then(async () => {
+        const window = await hostSessionWindowFetch({
+          sessionKey: input.sessionKey,
+          mode: 'latest',
+          limit: input.limit ?? DEFAULT_CHAT_HISTORY_LIMIT,
+          includeCanonical: true,
+        });
+        return window.snapshot ? window as SessionWindowResult : null;
+      })
     : initial.snapshot
       ? initial as SessionWindowResult
       : null;

@@ -23,6 +23,7 @@ describe('browser relay actions', () => {
       closeConnections: vi.fn(async () => {}),
       ensurePageState: vi.fn(),
       logPageSnapshot: vi.fn(),
+      clearPrevSnapshotState: vi.fn(),
     }
 
     const actions = new PlaywrightActions(session as any)

@@ -8,15 +8,12 @@ import {
 } from './host-api-transport-contract';
 import { subscribeHostEvent } from './host-events';
 import type {
+  SessionApprovalRequestItem,
   SessionCatalogItem,
   SessionLoadResult,
   SessionListResult,
   SessionNewResult,
   SessionPromptResult,
-  SessionRunClosureRequest,
-  SessionRunClosureResult,
-  SessionTurnToolResultsRequest,
-  SessionTurnToolResultsResult,
   SessionWindowResult,
 } from '../../runtime-host/shared/session-adapter-types';
 
@@ -25,6 +22,9 @@ const HOST_API_BASE = `http://127.0.0.1:${HOST_API_PORT}`;
 const SESSION_ABORT_TIMEOUT_MS = 5_000;
 const SESSION_PROMPT_TIMEOUT_MS = 10_000;
 const SESSION_PATCH_TIMEOUT_MS = 15_000;
+const RUNTIME_JOB_INITIAL_POLL_MS = 500;
+const RUNTIME_JOB_MAX_POLL_MS = 5_000;
+const RUNTIME_JOB_NOT_FOUND_GRACE_MS = 2_000;
 let cachedHostApiToken: string | null = null;
 
 type HostApiRequestInit = RequestInit & {
@@ -418,46 +418,83 @@ export async function hostRuntimeJobGet<TResult = unknown>(jobId: string): Promi
   });
 }
 
-export async function waitForRuntimeJobResult<TResult>(
+export async function waitForRuntimeJobResult<TResult = void>(
   jobId: string,
   options: {
     timeoutMs?: number;
     intervalMs?: number;
   } = {},
 ): Promise<TResult> {
-  void options.intervalMs;
   const timeoutMs = options.timeoutMs ?? 120000;
+  const intervalMs = options.intervalMs ?? RUNTIME_JOB_INITIAL_POLL_MS;
 
   return await new Promise<TResult>((resolve, reject) => {
     let settled = false;
+    const startedAt = Date.now();
     let timeoutHandle: number | null = null;
+    let pollHandle: number | null = null;
     let unsubscribe: (() => void) | null = null;
+    let pollIntervalMs = intervalMs;
+
+    const clearHandles = () => {
+      if (timeoutHandle !== null) {
+        window.clearTimeout(timeoutHandle);
+        timeoutHandle = null;
+      }
+      if (pollHandle !== null) {
+        window.clearTimeout(pollHandle);
+        pollHandle = null;
+      }
+      unsubscribe?.();
+      unsubscribe = null;
+    };
 
     const finalize = (action: () => void) => {
       if (settled) {
         return;
       }
       settled = true;
-      if (timeoutHandle !== null) {
-        window.clearTimeout(timeoutHandle);
-        timeoutHandle = null;
-      }
-      unsubscribe?.();
-      unsubscribe = null;
+      clearHandles();
       action();
     };
 
-    const handleSnapshot = (snapshot: RuntimeJobSnapshot<TResult> | null | undefined) => {
-      if (!snapshot || snapshot.id !== jobId) {
-        return;
+    const handleSnapshot = (snapshot: RuntimeJobSnapshot<TResult> | null | undefined): boolean => {
+      if (!snapshot) {
+        if (Date.now() - startedAt >= RUNTIME_JOB_NOT_FOUND_GRACE_MS) {
+          finalize(() => reject(new Error(`runtime job not found: ${jobId}`)));
+          return true;
+        }
+        return false;
+      }
+      if (snapshot.id !== jobId) {
+        return false;
       }
       if (snapshot.status === 'succeeded') {
         finalize(() => resolve(snapshot.result as TResult));
-        return;
+        return true;
       }
       if (snapshot.status === 'failed') {
         finalize(() => reject(new Error(snapshot.error || `runtime job failed: ${snapshot.type}`)));
+        return true;
       }
+      return false;
+    };
+
+    const poll = () => {
+      if (settled) {
+        return;
+      }
+      void hostRuntimeJobGet<TResult>(jobId)
+        .then((response) => {
+          if (settled || handleSnapshot(response.job)) {
+            return;
+          }
+          pollHandle = window.setTimeout(poll, pollIntervalMs);
+          pollIntervalMs = Math.min(Math.max(pollIntervalMs * 2, intervalMs), RUNTIME_JOB_MAX_POLL_MS);
+        })
+        .catch((error) => {
+          finalize(() => reject(error));
+        });
     };
 
     unsubscribe = subscribeHostEvent<RuntimeJobSnapshot<TResult>>('runtime-job:done', (snapshot) => {
@@ -468,17 +505,7 @@ export async function waitForRuntimeJobResult<TResult>(
       finalize(() => reject(new Error(`runtime job timed out: ${jobId}`)));
     }, timeoutMs);
 
-    void hostRuntimeJobGet<TResult>(jobId)
-      .then((response) => {
-        if (!response.job) {
-          finalize(() => reject(new Error(`runtime job not found: ${jobId}`)));
-          return;
-        }
-        handleSnapshot(response.job);
-      })
-      .catch((error) => {
-        finalize(() => reject(error));
-      });
+    poll();
   });
 }
 
@@ -567,27 +594,10 @@ export async function hostSessionUpdateStatus(
   });
 }
 
-export async function hostSessionTurnToolResults(
-  payload: SessionTurnToolResultsRequest,
-): Promise<SessionTurnToolResultsResult> {
-  return hostApiFetch('/api/session/turn/tool-results', {
-    method: 'POST',
-    body: JSON.stringify(payload),
-  });
-}
-
-export async function hostSessionRunClosure(
-  payload: SessionRunClosureRequest,
-): Promise<SessionRunClosureResult> {
-  return hostApiFetch('/api/session/run/closure', {
-    method: 'POST',
-    body: JSON.stringify(payload),
-  });
-}
-
 export async function hostSessionLoad(
   payload: {
     sessionKey: string;
+    limit?: number;
   },
   options?: {
     timeoutMs?: number;
@@ -603,6 +613,7 @@ export async function hostSessionLoad(
 export async function hostSessionSwitch(
   payload: {
     sessionKey: string;
+    limit?: number;
   },
 ): Promise<HostSessionLoadResult> {
   return hostApiFetch('/api/session/switch', {
@@ -646,7 +657,7 @@ export async function hostSessionAbort(
   });
 }
 
-export async function hostSessionApprovals(): Promise<unknown> {
+export async function hostSessionApprovals(): Promise<{ approvals: SessionApprovalRequestItem[] }> {
   return hostApiFetch('/api/session/approvals');
 }
 

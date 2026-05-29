@@ -136,6 +136,8 @@ describe('runtime-host route composition', () => {
       'platform',
       'settings',
       'provider',
+      'capabilityRouting',
+      'providerModels',
       'channel',
       'openclaw',
       'skills',

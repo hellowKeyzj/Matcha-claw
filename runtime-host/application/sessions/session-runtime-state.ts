@@ -3,6 +3,7 @@ import type {
   SessionRuntimeStateSnapshot,
   SessionTimelineEntry,
 } from '../../shared/session-adapter-types';
+import type { RuntimeHostLogger } from '../../shared/logger';
 import type { SessionRuntimeStorePort } from './session-runtime-store-repository';
 import {
   createEmptyTimelineState,
@@ -23,16 +24,37 @@ export interface SessionRuntimeOverlay {
 
 export interface SessionRuntimeStateStoreDeps {
   runtimeStore: SessionRuntimeStorePort;
+  logger?: Pick<RuntimeHostLogger, 'warn'>;
+}
+
+function clearRuntimeIssueIfMatches(
+  runtime: SessionRuntimeStateSnapshot,
+  issue: SessionRuntimeStateSnapshot['lastIssue'],
+): SessionRuntimeStateSnapshot {
+  if (
+    !runtime.lastIssue
+    || !issue
+    || runtime.lastIssue.source !== issue.source
+    || runtime.lastIssue.message !== issue.message
+    || runtime.lastIssue.at !== issue.at
+  ) {
+    return runtime;
+  }
+  return {
+    ...runtime,
+    lastError: null,
+    lastIssue: null,
+  };
 }
 
 export class SessionRuntimeStateStore {
   private readonly sessionStates = new Map<string, SessionRuntimeTimelineState>();
   private readonly parentSessionsByChildSessionKey = new Map<string, Set<string>>();
   private readonly resolvedSessionModels = new Map<string, string>();
-  private readonly runAliasesBySessionKey = new Map<string, Map<string, string>>();
-  private readonly blockedRunIdsBySessionKey = new Map<string, Set<string>>();
   private readonly persistedStoreReady: Promise<void>;
   private activeSessionKey: string | null = null;
+  private activeSessionKeyInitialized = false;
+  private activeSessionKeyChangedBeforeLoad = false;
   private latestConnectedTransportEpoch = 0;
 
   constructor(private readonly deps: SessionRuntimeStateStoreDeps) {
@@ -40,7 +62,11 @@ export class SessionRuntimeStateStore {
   }
 
   private async loadPersistedStore(): Promise<void> {
-    this.activeSessionKey = (await this.deps.runtimeStore.load()).activeSessionKey;
+    const store = await this.deps.runtimeStore.load();
+    if (!this.activeSessionKeyChangedBeforeLoad) {
+      this.activeSessionKey = store.activeSessionKey;
+    }
+    this.activeSessionKeyInitialized = true;
   }
 
   async ready(): Promise<void> {
@@ -52,6 +78,9 @@ export class SessionRuntimeStateStore {
   }
 
   setActiveSessionKey(sessionKey: string | null): void {
+    if (!this.activeSessionKeyInitialized) {
+      this.activeSessionKeyChangedBeforeLoad = true;
+    }
     this.activeSessionKey = sessionKey;
   }
 
@@ -86,8 +115,6 @@ export class SessionRuntimeStateStore {
       parents.delete(sessionKey);
     }
     this.resolvedSessionModels.delete(sessionKey);
-    this.runAliasesBySessionKey.delete(sessionKey);
-    this.blockedRunIdsBySessionKey.delete(sessionKey);
     this.clearActiveSessionKey(sessionKey);
   }
 
@@ -112,55 +139,6 @@ export class SessionRuntimeStateStore {
     return this.resolvedSessionModels.get(sessionKey) ?? null;
   }
 
-  bindRunAlias(sessionKey: string, fromRunId: string | null | undefined, toRunId: string | null | undefined): void {
-    const from = normalizeString(fromRunId);
-    const to = normalizeString(toRunId);
-    if (!from || !to || from === to) {
-      return;
-    }
-    let aliases = this.runAliasesBySessionKey.get(sessionKey);
-    if (!aliases) {
-      aliases = new Map<string, string>();
-      this.runAliasesBySessionKey.set(sessionKey, aliases);
-    }
-    aliases.set(from, to);
-    aliases.set(to, from);
-  }
-
-  resolveRunAlias(sessionKey: string, runId: string | null | undefined): string {
-    const normalizedRunId = normalizeString(runId);
-    if (!normalizedRunId) {
-      return '';
-    }
-    return this.runAliasesBySessionKey.get(sessionKey)?.get(normalizedRunId) ?? normalizedRunId;
-  }
-
-  blockRun(sessionKey: string, runId: string | null | undefined): void {
-    const normalizedRunId = normalizeString(runId);
-    if (!normalizedRunId) {
-      return;
-    }
-    let runIds = this.blockedRunIdsBySessionKey.get(sessionKey);
-    if (!runIds) {
-      runIds = new Set<string>();
-      this.blockedRunIdsBySessionKey.set(sessionKey, runIds);
-    }
-    runIds.add(normalizedRunId);
-  }
-
-  blockRuns(sessionKey: string, runIds: Iterable<string | null | undefined>): void {
-    for (const runId of runIds) {
-      this.blockRun(sessionKey, runId);
-    }
-  }
-
-  isRunBlocked(sessionKey: string, runId: string | null | undefined): boolean {
-    const normalizedRunId = normalizeString(runId);
-    if (!normalizedRunId) {
-      return false;
-    }
-    return this.blockedRunIdsBySessionKey.get(sessionKey)?.has(normalizedRunId) ?? false;
-  }
 
   updateExecutionGraphDependencyIndex(
     sessionKey: string,
@@ -202,15 +180,60 @@ export class SessionRuntimeStateStore {
     return true;
   }
 
+  expireTransportControlIssues(transportEpoch: number): string[] {
+    if (!Number.isFinite(transportEpoch) || transportEpoch <= 0) {
+      return [];
+    }
+    const expiredSessionKeys: string[] = [];
+    for (const [sessionKey, state] of this.sessionStates.entries()) {
+      const issueEpoch = state.canonical.control.issueTransportEpoch;
+      if (issueEpoch == null || issueEpoch > transportEpoch || !state.canonical.control.issue) {
+        continue;
+      }
+      const expiredIssue = state.canonical.control.issue;
+      state.canonical.control = {
+        ...state.canonical.control,
+        issue: null,
+        issueTransportEpoch: null,
+      };
+      state.canonical.runtime = clearRuntimeIssueIfMatches(state.canonical.runtime, expiredIssue);
+      state.runtime = clearRuntimeIssueIfMatches(state.runtime, expiredIssue);
+      expiredSessionKeys.push(sessionKey);
+    }
+    if (expiredSessionKeys.length > 0) {
+      this.persistStore();
+    }
+    return expiredSessionKeys;
+  }
+
+  private pendingPersist: Promise<void> | null = null;
+  private persistQueued = false;
+
   persistStore(): void {
-    void this.deps.runtimeStore.save({
-      version: 3,
-      activeSessionKey: this.activeSessionKey,
-    }).catch(() => undefined);
+    this.persistQueued = true;
+    if (this.pendingPersist) {
+      return;
+    }
+    this.pendingPersist = (async () => {
+      while (this.persistQueued) {
+        await this.flushPersistedStore();
+      }
+    })()
+      .catch((error) => {
+        this.persistQueued = true;
+        this.deps.logger?.warn('[sessions] runtime state persist failed', error);
+      })
+      .finally(() => {
+        this.pendingPersist = null;
+      });
   }
 
   async flushPersistedStore(): Promise<void> {
     await this.persistedStoreReady;
+    if (!this.persistQueued) {
+      return;
+    }
+    this.persistQueued = false;
     await this.deps.runtimeStore.save({
       version: 3,
       activeSessionKey: this.activeSessionKey,

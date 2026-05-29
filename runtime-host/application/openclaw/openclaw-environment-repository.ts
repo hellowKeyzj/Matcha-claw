@@ -37,6 +37,14 @@ function parseJsonRecord(raw: string): Record<string, unknown> | null {
   }
 }
 
+function parseRequiredJsonRecord(raw: string, path: string): Record<string, unknown> {
+  const parsed = parseJsonRecord(raw);
+  if (!parsed) {
+    throw new Error(`Invalid OpenClaw config JSON: ${path}`);
+  }
+  return parsed;
+}
+
 export class OpenClawEnvironmentRepository {
   constructor(
     private readonly system: RuntimeSystemEnvironmentPort,
@@ -148,11 +156,11 @@ export class OpenClawEnvironmentRepository {
   }
 
   async readOpenClawConfigJson(): Promise<Record<string, unknown>> {
-    try {
-      return parseJsonRecord(await this.fileSystem.readTextFile(this.getOpenClawConfigFilePath())) ?? {};
-    } catch {
+    const path = this.getOpenClawConfigFilePath();
+    if (!(await this.fileSystem.exists(path))) {
       return {};
     }
+    return parseRequiredJsonRecord(await this.fileSystem.readTextFile(path), path);
   }
 
   async writeOpenClawConfigJson(config: Record<string, unknown>): Promise<void> {

@@ -1,5 +1,4 @@
 import type { ClawHubSkillInventory } from './clawhub';
-import { withOpenClawConfigLock } from '../openclaw/openclaw-config-mutex';
 import type { OpenClawConfigRepositoryPort } from '../openclaw/openclaw-config-repository';
 import type { OpenClawWorkspacePort } from '../openclaw/openclaw-workspace-service';
 import type { RuntimeFileSystemPort } from '../common/runtime-ports';
@@ -42,8 +41,7 @@ export class SkillsConfigRepository {
       return { success: false, error: 'updates is required' };
     }
     try {
-      await withOpenClawConfigLock(async () => {
-        const config = await this.configRepository.read();
+      await this.configRepository.update((config) => {
         if (!isRecord(config.skills)) {
           config.skills = {};
         }
@@ -92,7 +90,6 @@ export class SkillsConfigRepository {
           }
         }
         entries[trimmedSkillKey] = entry;
-        await this.configRepository.write(config);
       });
       return { success: true };
     } catch (error) {
@@ -106,8 +103,7 @@ export class SkillsConfigRepository {
       return { success: false, error: 'skillKey is required' };
     }
     try {
-      await withOpenClawConfigLock(async () => {
-        const config = await this.configRepository.read();
+      await this.configRepository.update((config) => {
         if (!isRecord(config.skills)) {
           config.skills = {};
         }
@@ -122,7 +118,6 @@ export class SkillsConfigRepository {
           ...current,
           enabled,
         };
-        await this.configRepository.write(config);
       });
       return { success: true };
     } catch (error) {
@@ -138,8 +133,7 @@ export class SkillsConfigRepository {
       return { success: false, error: 'skillKeys is required' };
     }
     try {
-      await withOpenClawConfigLock(async () => {
-        const config = await this.configRepository.read();
+      await this.configRepository.update((config) => {
         if (!isRecord(config.skills)) {
           config.skills = {};
         }
@@ -156,7 +150,6 @@ export class SkillsConfigRepository {
             enabled,
           };
         }
-        await this.configRepository.write(config);
       });
       return { success: true };
     } catch (error) {

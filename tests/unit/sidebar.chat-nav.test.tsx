@@ -16,6 +16,10 @@ import { buildRenderItemsFromMessages } from './helpers/timeline-fixtures';
 import type { RawMessage } from './helpers/timeline-fixtures';
 import { createViewportWindowState } from '@/stores/chat/viewport-state';
 
+vi.mock('@/features/teams/feature-flag', () => ({
+  TEAMS_FEATURE_ENABLED: true,
+}));
+
 function LocationEcho() {
   const location = useLocation();
   return <div data-testid="location-echo">{`${location.pathname}${location.search}`}</div>;

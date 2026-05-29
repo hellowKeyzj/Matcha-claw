@@ -28,6 +28,7 @@ function createSessionRecord(input?: {
   sessionKey?: string;
   messages?: RawMessage[];
   label?: string | null;
+  displayName?: string | null;
   lastActivityAt?: number | null;
   historyStatus?: 'idle' | 'loading' | 'ready' | 'error';
 }) {
@@ -42,6 +43,7 @@ function createSessionRecord(input?: {
       preferred: sessionKey.endsWith(':main'),
       label: input?.label ?? null,
       titleSource: input?.label ? 'user' : 'none',
+      displayName: input?.displayName ?? null,
       lastActivityAt: input?.lastActivityAt ?? null,
       historyStatus: input?.historyStatus ?? 'idle',
     },
@@ -196,6 +198,38 @@ describe('agent sessions pane', () => {
 
     fireEvent.click(screen.getByTestId('agent-new-session-test'));
     expect(newSession).toHaveBeenCalledWith('test');
+  });
+
+  it('优先使用 catalog displayName 展示未 hydrate 历史会话标题', () => {
+    const now = Date.now();
+    useChatStore.setState({
+      currentSessionKey: 'agent:main:main',
+      sessionCatalogStatus: buildReadySessionCatalogStatus([
+        { key: 'agent:main:main', displayName: 'agent:main:main' },
+        { key: 'agent:test:main', displayName: 'agent:test:main' },
+        { key: 'agent:test:session-2', displayName: 'catalog title from transcript' },
+      ]),
+      loadedSessions: {
+        'agent:main:main': createSessionRecord({ sessionKey: 'agent:main:main', historyStatus: 'ready' }),
+        'agent:test:main': createSessionRecord({ sessionKey: 'agent:test:main', historyStatus: 'ready' }),
+        'agent:test:session-2': createSessionRecord({
+          sessionKey: 'agent:test:session-2',
+          historyStatus: 'idle',
+          displayName: 'catalog title from transcript',
+          lastActivityAt: now,
+        }),
+      },
+      switchSession: vi.fn(),
+      newSession: vi.fn(),
+      deleteSession: vi.fn().mockResolvedValue(undefined),
+      loadSessions: vi.fn().mockResolvedValue(undefined),
+    } as never);
+
+    renderPane();
+
+    expect(screen.getByText('catalog title from transcript')).toBeInTheDocument();
+    expect(screen.queryByText('New Session')).not.toBeInTheDocument();
+    expect(screen.queryByText('Untitled Session')).not.toBeInTheDocument();
   });
 
   it('点击历史会话项时，应立即切换 current session，不走额外导航链路', () => {
@@ -548,13 +582,13 @@ describe('agent sessions pane', () => {
     expect(screen.queryByText('旧标题')).not.toBeInTheDocument();
   });
 
-  it('会话列表不应把 displayName 当成正式标题 fallback', () => {
+  it('会话列表不应把裸 session key displayName 当成正式标题 fallback', () => {
     const now = Date.now();
     useChatStore.setState({
       currentSessionKey: 'agent:test:session-1710000000000',
       sessionCatalogStatus: buildReadySessionCatalogStatus([
         { key: 'agent:test:main', displayName: 'agent:test:main' },
-        { key: 'agent:test:session-1710000000000', displayName: 'MatchaClaw Runtime Host' },
+        { key: 'agent:test:session-1710000000000', displayName: 'agent:test:session-1710000000000' },
       ]),
       loadedSessions: {
         'agent:test:main': createSessionRecord({ sessionKey: 'agent:test:main', historyStatus: 'ready' }),
@@ -574,7 +608,7 @@ describe('agent sessions pane', () => {
 
     renderPane();
 
-    expect(screen.queryByText('MatchaClaw Runtime Host')).not.toBeInTheDocument();
+    expect(screen.queryByText('agent:test:session-1710000000000')).not.toBeInTheDocument();
   });
 
   it('会话资源加载中时，不应阻塞 agent 列表渲染', () => {

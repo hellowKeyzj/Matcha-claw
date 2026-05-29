@@ -6,6 +6,8 @@ import type {
   SessionTimelineEntry,
   SessionWindowStateSnapshot,
 } from '../../shared/session-adapter-types';
+import type { CanonicalProjectionRenderItemKeyIndex } from './canonical/canonical-projection';
+import type { CanonicalSessionState } from './canonical/canonical-state';
 
 export interface SessionNewPayload {
   sessionKey?: unknown;
@@ -15,6 +17,7 @@ export interface SessionNewPayload {
 
 export interface SessionLoadPayload {
   sessionKey?: unknown;
+  limit?: unknown;
 }
 
 export interface SessionWindowPayload {
@@ -59,21 +62,17 @@ export interface SessionPromptMediaPayload {
 export interface SessionRuntimeTimelineState {
   sessionKey: string;
   runEpoch: number;
+  canonical: CanonicalSessionState;
   timelineEntries: SessionTimelineEntry[];
   executionGraphItems: SessionExecutionGraphItem[];
   renderItems: SessionRenderItem[];
+  renderItemIndexByKey: Map<string, number>;
+  renderItemKeyIndex: CanonicalProjectionRenderItemKeyIndex;
   taskSnapshot: TaskSnapshotEvent | null;
   hydrated: boolean;
   runtime: SessionRuntimeStateSnapshot;
   window: SessionWindowStateSnapshot;
   activeTransportEpoch: number | null;
-}
-
-export interface PendingRunClosureSignal {
-  hasActiveAssistantStream: boolean;
-  hasBlockingToolActivity: boolean;
-  hasFinalAssistantTurn: boolean;
-  hasMatchingRunEvidence: boolean;
 }
 
 export interface CommittedSessionTransition {

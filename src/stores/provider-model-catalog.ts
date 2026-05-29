@@ -41,8 +41,9 @@ export const useProviderModelCatalogStore = create<ProviderModelCatalogState>((s
     try {
       const result = await persistProviderModels(credentialId, next);
       if (!result.success) {
-        set({ saving: false, error: result.error || 'Failed to persist provider models' });
-        return;
+        const message = result.error || 'Failed to persist provider models';
+        set({ saving: false, error: message });
+        throw new Error(message);
       }
       set((state) => ({
         models: [
@@ -54,7 +55,9 @@ export const useProviderModelCatalogStore = create<ProviderModelCatalogState>((s
       }));
       void useCapabilityRoutingStore.getState().refresh();
     } catch (error) {
-      set({ saving: false, error: String(error) });
+      const message = error instanceof Error ? error.message : String(error);
+      set({ saving: false, error: message });
+      throw error;
     }
   },
 }));

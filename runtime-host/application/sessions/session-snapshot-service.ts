@@ -1,7 +1,9 @@
 import type {
+  SessionArtifactSnapshotItem,
   SessionRenderItem,
   SessionStateSnapshot,
   SessionTimelineEntry,
+  SessionUsageSnapshotItem,
   SessionWindowStateSnapshot,
 } from '../../shared/session-adapter-types';
 import type { SessionMetadataPort } from './session-metadata-repository';
@@ -19,10 +21,6 @@ import {
   cloneSessionRuntimeState,
   createEmptySessionRuntimeState,
 } from './session-state-model';
-import {
-  filterStateOnlyRenderItem,
-  filterStateOnlyRenderItems,
-} from './session-state-only-render-filter';
 import {
   createSessionCatalogItem,
 } from './session-catalog-model';
@@ -43,6 +41,26 @@ export interface SessionSnapshotServiceDeps {
 export class SessionSnapshotService {
   constructor(private readonly deps: SessionSnapshotServiceDeps) {}
 
+  private buildUsageSnapshotItems(state: SessionRuntimeTimelineState): SessionUsageSnapshotItem[] {
+    return state.canonical.usage.map((event) => ({
+      id: event.eventId,
+      sessionKey: event.sessionId,
+      ...(event.runId ? { runId: event.runId } : {}),
+      ...(event.timestamp != null ? { timestamp: event.timestamp } : {}),
+      payload: structuredClone(event.payload),
+    }));
+  }
+
+  private buildArtifactSnapshotItems(state: SessionRuntimeTimelineState): SessionArtifactSnapshotItem[] {
+    return state.canonical.artifacts.map((event) => ({
+      id: event.eventId,
+      sessionKey: event.sessionId,
+      ...(event.runId ? { runId: event.runId } : {}),
+      ...(event.timestamp != null ? { timestamp: event.timestamp } : {}),
+      payload: structuredClone(event.payload),
+    }));
+  }
+
   buildEmptySnapshot(sessionKey = ''): SessionStateSnapshot {
     return {
       sessionKey,
@@ -54,6 +72,9 @@ export class SessionSnapshotService {
         resolvedModel: null,
       }),
       items: [],
+      approvals: [],
+      usage: [],
+      artifacts: [],
       replayComplete: true,
       runtime: createEmptySessionRuntimeState(),
       window: createLatestWindowState(0),
@@ -71,7 +92,7 @@ export class SessionSnapshotService {
       label?: string | null;
     } = {},
   ): SessionStateSnapshot {
-    const allItems = filterStateOnlyRenderItems(options.items ?? state.renderItems);
+    const allItems = options.items ?? state.renderItems;
     const baseWindow = cloneSessionWindowState(
       options.window
       ?? (
@@ -102,6 +123,9 @@ export class SessionSnapshotService {
         label: options.label,
       }),
       items: cloneRenderItems(allItems.slice(start, end)),
+      approvals: state.canonical.approvals.map((approval) => structuredClone(approval)),
+      usage: this.buildUsageSnapshotItems(state),
+      artifacts: this.buildArtifactSnapshotItems(state),
       ...(state.taskSnapshot ? { taskSnapshot: structuredClone(state.taskSnapshot) } : {}),
       replayComplete: options.replayComplete ?? true,
       runtime: cloneSessionRuntimeState(state.runtime),
@@ -170,8 +194,6 @@ export class SessionSnapshotService {
       hasNewer: end < totalItemCount,
       isAtLatest: end >= totalItemCount,
     });
-    state.window = window;
-    this.deps.stateStore.persistStore();
     return await this.buildSnapshotAsync(sessionKey, state, {
       items: allItems,
       window,
@@ -189,12 +211,10 @@ export class SessionSnapshotService {
       return null;
     }
     if (isAssistantTurnTimelineEntry(source)) {
-      const item = snapshot.items.find((candidate) => (
+      return snapshot.items.find((candidate) => (
         candidate.kind === 'assistant-turn' && candidate.key === source.key
       )) ?? null;
-      return filterStateOnlyRenderItem(item);
     }
-    const item = snapshot.items.find((candidate) => candidate.key === source.key) ?? null;
-    return filterStateOnlyRenderItem(item);
+    return snapshot.items.find((candidate) => candidate.key === source.key) ?? null;
   }
 }

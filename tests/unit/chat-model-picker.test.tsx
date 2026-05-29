@@ -263,6 +263,120 @@ describe('chat model picker', () => {
     });
   });
 
+  it('uses the first available model for sessions without a session or agent default model', async () => {
+    const sessionKey = 'agent:test:main';
+    const current = useChatStore.getState().loadedSessions[sessionKey]!;
+    useChatStore.setState({
+      loadedSessions: {
+        [sessionKey]: {
+          ...current,
+          meta: {
+            ...current.meta,
+            model: null,
+          },
+        },
+      },
+    } as never);
+    useSubagentsStore.setState({
+      agentsResource: {
+        status: 'ready',
+        data: [
+          {
+            id: 'test',
+            name: 'Test Agent',
+            workspace: '.',
+            skills: [],
+            isDefault: false,
+            createdAt: 1,
+            updatedAt: 1,
+          },
+        ],
+        error: null,
+        loading: false,
+        hasLoadedOnce: true,
+        loadedAt: 1,
+      },
+      agents: [
+        {
+          id: 'test',
+          name: 'Test Agent',
+          workspace: '.',
+          skills: [],
+          isDefault: false,
+          createdAt: 1,
+          updatedAt: 1,
+        },
+      ],
+    } as never);
+
+    renderChat();
+
+    expect(await screen.findByTestId('chat-model-picker')).toHaveTextContent('openai / gpt-5.4');
+    await waitFor(() => {
+      expect(hostSessionPatchMock).toHaveBeenCalledWith({
+        sessionKey: 'agent:test:main',
+        model: 'openai/gpt-5.4',
+      });
+    });
+  });
+
+  it('replaces a stale session model with the current available model', async () => {
+    const sessionKey = 'agent:test:main';
+    const current = useChatStore.getState().loadedSessions[sessionKey]!;
+    useChatStore.setState({
+      loadedSessions: {
+        [sessionKey]: {
+          ...current,
+          meta: {
+            ...current.meta,
+            model: 'custom-4ee8e78e/gpt-5.4',
+          },
+        },
+      },
+    } as never);
+    useSubagentsStore.setState({
+      agentsResource: {
+        status: 'ready',
+        data: [
+          {
+            id: 'test',
+            name: 'Test Agent',
+            workspace: '.',
+            skills: [],
+            isDefault: false,
+            createdAt: 1,
+            updatedAt: 1,
+          },
+        ],
+        error: null,
+        loading: false,
+        hasLoadedOnce: true,
+        loadedAt: 1,
+      },
+      agents: [
+        {
+          id: 'test',
+          name: 'Test Agent',
+          workspace: '.',
+          skills: [],
+          isDefault: false,
+          createdAt: 1,
+          updatedAt: 1,
+        },
+      ],
+    } as never);
+
+    renderChat();
+
+    expect(await screen.findByTestId('chat-model-picker')).toHaveTextContent('openai / gpt-5.4');
+    await waitFor(() => {
+      expect(hostSessionPatchMock).toHaveBeenCalledWith({
+        sessionKey: 'agent:test:main',
+        model: 'openai/gpt-5.4',
+      });
+    });
+  });
+
   it('loads chat model options from the shared subagent model catalog instead of models.list', async () => {
     const loadAvailableModels = vi.fn().mockResolvedValue(undefined);
     useSubagentsStore.setState({

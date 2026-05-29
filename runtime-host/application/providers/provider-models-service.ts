@@ -8,6 +8,8 @@
  */
 
 import { badRequest, ok, type ApplicationResponse } from '../common/application-response';
+import type { OpenClawAgentModelRepositoryPort } from '../openclaw/openclaw-agent-model-repository';
+import type { OpenClawAuthRepository } from '../openclaw/openclaw-auth-store';
 import type { OpenClawProviderModelsService, OpenClawProviderModelsMap } from '../openclaw/openclaw-provider-models-service';
 import type { OpenClawCustomMediaPluginConfigService, OpenClawCustomMediaProviderMap } from '../openclaw/openclaw-custom-media-plugin-config-service';
 import type { ProviderStorePort } from './provider-store-repository';
@@ -36,6 +38,12 @@ import {
 } from './provider-store-model';
 
 const MODEL_CAPABILITY_SET = new Set<ModelCapability>(MODEL_CAPABILITIES);
+const OPENCLAW_ZERO_MODEL_COST = {
+  input: 0,
+  output: 0,
+  cacheRead: 0,
+  cacheWrite: 0,
+} as const;
 
 function normalizePositiveInteger(value: unknown): number | undefined {
   if (typeof value !== 'number' || !Number.isFinite(value)) return undefined;
@@ -146,8 +154,10 @@ export class ProviderModelsApplicationService {
     private readonly store: ProviderModelsStorePort,
     private readonly credentials: ProviderStorePort,
     private readonly writer: OpenClawProviderModelsService,
-    private readonly customMediaWriter?: OpenClawCustomMediaPluginConfigService,
-    private readonly capabilityRouting?: Pick<CapabilityRoutingApplicationService, 'pruneUnavailableModelRoutes'>,
+    private readonly customMediaWriter: OpenClawCustomMediaPluginConfigService,
+    private readonly capabilityRouting: Pick<CapabilityRoutingApplicationService, 'pruneUnavailableModelRoutes'>,
+    private readonly authRepository: Pick<OpenClawAuthRepository, 'discoverAgentIds'>,
+    private readonly agentModels: Pick<OpenClawAgentModelRepositoryPort, 'upsertProviderInAgentModels'>,
   ) {}
 
   async readAll(): Promise<{ models: Array<ProviderModel & { label?: string }> }> {
@@ -247,7 +257,7 @@ export class ProviderModelsApplicationService {
     ];
     await this.store.write(store);
     await this.syncOpenClawModels(store.models);
-    await this.capabilityRouting?.pruneUnavailableModelRoutes(store.models);
+    await this.capabilityRouting.pruneUnavailableModelRoutes(store.models);
     return ok({ success: true, credentialId: trimmed, models: nextModels });
   }
 
@@ -258,7 +268,7 @@ export class ProviderModelsApplicationService {
     store.models = next;
     await this.store.write(store);
     await this.syncOpenClawModels(store.models);
-    await this.capabilityRouting?.pruneUnavailableModelRoutes(store.models);
+    await this.capabilityRouting.pruneUnavailableModelRoutes(store.models);
   }
 
   async syncOpenClaw(): Promise<void> {
@@ -349,6 +359,7 @@ export class ProviderModelsApplicationService {
         input: modelCapabilitiesToOpenClawInput(model.capabilities),
         ...(model.contextWindow !== undefined ? { contextWindow: model.contextWindow } : {}),
         ...(model.maxTokens !== undefined ? { maxTokens: model.maxTokens } : {}),
+        cost: OPENCLAW_ZERO_MODEL_COST,
       });
       providerMap[providerKey] = {
         ...entry,
@@ -356,7 +367,27 @@ export class ProviderModelsApplicationService {
       };
     }
     await this.writer.replaceAll(providerMap, validModelRefs);
-    await this.customMediaWriter?.replaceAll(customMediaProviderMap);
+    await this.customMediaWriter.replaceAll(customMediaProviderMap);
+    const agentIds = await this.authRepository.discoverAgentIds();
+    for (const [provider, entry] of Object.entries(providerMap)) {
+      await this.agentModels.upsertProviderInAgentModels({
+        agentIds,
+        provider,
+        entry: {
+          baseUrl: entry.baseUrl,
+          api: entry.api,
+          ...(entry.headers ? { headers: entry.headers } : {}),
+          ...(entry.authHeader !== undefined ? { authHeader: entry.authHeader } : {}),
+          models: entry.models.map((model) => ({
+            id: model.modelId,
+            input: model.input,
+            contextWindow: model.contextWindow,
+            maxTokens: model.maxTokens,
+            cost: model.cost,
+          })),
+        },
+      });
+    }
   }
 
   private async readHydratedStore(): Promise<{ schemaVersion: 1; models: ProviderModel[] }> {

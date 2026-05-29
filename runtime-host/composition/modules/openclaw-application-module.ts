@@ -172,6 +172,7 @@ export function registerOpenClawApplicationServices(
   container.register('providers.capabilityRoutingService', (scope) => new CapabilityRoutingApplicationService(
     scope.resolve<CapabilityRoutingStoreRepository>('providers.capabilityRoutingStore'),
     scope.resolve<ProviderStoreRepository>('providers.storeRepository'),
+    scope.resolve<ProviderModelsStoreRepository>('providers.modelsStore'),
     scope.resolve<OpenClawCapabilityRoutingService>('openclaw.capabilityRoutingWriter'),
   ));
   container.register('openclaw.providerModelsWriter', (scope) => new OpenClawProviderModelsService(
@@ -190,6 +191,8 @@ export function registerOpenClawApplicationServices(
     scope.resolve<OpenClawProviderModelsService>('openclaw.providerModelsWriter'),
     scope.resolve<OpenClawCustomMediaPluginConfigService>('openclaw.customMediaPluginConfigWriter'),
     scope.resolve<CapabilityRoutingApplicationService>('providers.capabilityRoutingService'),
+    scope.resolve('openclaw.authRepository'),
+    scope.resolve('openclaw.agentModelRepository'),
   ));
   container.register('providers.jobs', (scope): ProviderAccountJobPort => createProviderAccountJobPort(
     scope.resolve<RuntimeLongTaskSubmissionPort>('runtime.tasks'),

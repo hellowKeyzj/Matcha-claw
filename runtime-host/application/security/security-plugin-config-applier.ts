@@ -5,7 +5,6 @@ import {
   cloneNormalizedPluginEntries,
   isRecord,
 } from '../openclaw/openclaw-plugin-config-model';
-import { withOpenClawConfigLock } from '../openclaw/openclaw-config-mutex';
 import type { SecurityPolicyRepository } from './security-policy-store';
 
 const SECURITY_CORE_PLUGIN_ID = 'security-core';
@@ -18,10 +17,10 @@ export class SecurityPluginConfigApplier {
 
   async applySavedPolicyToPluginConfig(): Promise<void> {
     const policy = await this.policyRepository.read();
-    await withOpenClawConfigLock(async () => {
-      const config = cloneConfig(await this.configRepository.read());
-      const plugins = isRecord(config.plugins) ? { ...config.plugins } : {};
-      const entries = cloneNormalizedPluginEntries(config);
+    await this.configRepository.update((config) => {
+      const nextConfig = cloneConfig(config);
+      const plugins = isRecord(nextConfig.plugins) ? { ...nextConfig.plugins } : {};
+      const entries = cloneNormalizedPluginEntries(nextConfig);
       const currentEntry = entries[SECURITY_CORE_PLUGIN_ID] ?? {};
       const currentConfig = isRecord(currentEntry.config) ? currentEntry.config : {};
 
@@ -33,10 +32,15 @@ export class SecurityPluginConfigApplier {
         },
       };
       plugins.entries = entries;
-      config.plugins = plugins;
-      cleanupPluginContainer(config);
+      nextConfig.plugins = plugins;
+      cleanupPluginContainer(nextConfig);
 
-      await this.configRepository.write(config);
+      if (config !== nextConfig) {
+        for (const key of Object.keys(config)) {
+          delete config[key];
+        }
+        Object.assign(config, nextConfig);
+      }
     });
   }
 }

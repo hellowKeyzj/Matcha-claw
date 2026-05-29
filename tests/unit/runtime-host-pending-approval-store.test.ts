@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
-import { PendingApprovalStore } from '../../runtime-host/application/sessions/pending-approval-store';
+import { createEmptyCanonicalSessionState, reduceCanonicalSessionEvents } from '../../runtime-host/application/sessions/canonical/canonical-reducer';
+import { buildCanonicalApprovalEventsFromGatewayNotification } from '../../runtime-host/application/sessions/canonical/canonical-approval-events';
 import { SessionCommandService } from '../../runtime-host/application/sessions/session-command-service';
 import { SessionOperationCoordinator } from '../../runtime-host/application/sessions/session-operation-coordinator';
 
@@ -9,11 +10,11 @@ const testClock = {
   toIsoString: (ms: number) => new Date(ms).toISOString(),
 };
 
-describe('runtime-host pending approval store', () => {
-  it('mirrors pending exec approvals from gateway requested and resolved events', () => {
-    const store = new PendingApprovalStore({ clock: testClock });
+describe('runtime-host ACP approvals', () => {
+  it('reduces pending exec approvals from gateway requested and resolved events', () => {
+    const state = createEmptyCanonicalSessionState('agent:main:main');
 
-    store.consumeGatewayNotification({
+    reduceCanonicalSessionEvents(state, buildCanonicalApprovalEventsFromGatewayNotification({
       method: 'exec.approval.requested',
       params: {
         id: 'approval-1',
@@ -27,9 +28,9 @@ describe('runtime-host pending approval store', () => {
         createdAtMs: 1_700_000_000_010,
         expiresAtMs: 1_700_000_060_000,
       },
-    });
+    }, testClock.nowMs()));
 
-    expect(store.list()).toEqual([{
+    expect(state.approvals).toEqual([{
       id: 'approval-1',
       sessionKey: 'agent:main:main',
       runId: 'run-1',
@@ -47,20 +48,21 @@ describe('runtime-host pending approval store', () => {
       expiresAtMs: 1_700_000_060_000,
     }]);
 
-    store.consumeGatewayNotification({
+    reduceCanonicalSessionEvents(state, buildCanonicalApprovalEventsFromGatewayNotification({
       method: 'exec.approval.resolved',
       params: {
         id: 'approval-1',
+        sessionKey: 'agent:main:main',
       },
-    });
+    }, testClock.nowMs()));
 
-    expect(store.list()).toEqual([]);
+    expect(state.approvals).toEqual([]);
   });
 
-  it('drops expired approvals when listing the mirror', () => {
-    const store = new PendingApprovalStore({ clock: testClock });
+  it('drops expired approvals while reducing pending approval events', () => {
+    const state = createEmptyCanonicalSessionState('agent:main:main');
 
-    store.consumeGatewayNotification({
+    reduceCanonicalSessionEvents(state, buildCanonicalApprovalEventsFromGatewayNotification({
       method: 'exec.approval.requested',
       params: {
         id: 'approval-expired',
@@ -68,15 +70,15 @@ describe('runtime-host pending approval store', () => {
         createdAtMs: 1_699_999_000_000,
         expiresAtMs: 1_699_999_999_999,
       },
-    });
+    }, testClock.nowMs()));
 
-    expect(store.list()).toEqual([]);
+    expect(state.approvals).toEqual([]);
   });
 
-  it('mirrors plugin approvals with nested data payloads', () => {
-    const store = new PendingApprovalStore({ clock: testClock });
+  it('reduces plugin approvals with nested data payloads', () => {
+    const state = createEmptyCanonicalSessionState('agent:plugin:main');
 
-    store.consumeGatewayNotification({
+    reduceCanonicalSessionEvents(state, buildCanonicalApprovalEventsFromGatewayNotification({
       method: 'plugin.approval.requested',
       params: {
         data: {
@@ -90,9 +92,9 @@ describe('runtime-host pending approval store', () => {
           },
         },
       },
-    });
+    }, testClock.nowMs()));
 
-    expect(store.list()).toMatchObject([{
+    expect(state.approvals).toMatchObject([{
       id: 'approval-plugin-1',
       sessionKey: 'agent:plugin:main',
       runId: 'run-plugin-1',
@@ -101,22 +103,31 @@ describe('runtime-host pending approval store', () => {
       allowedDecisions: ['allow-once', 'deny'],
     }]);
 
-    store.consumeGatewayNotification({
+    reduceCanonicalSessionEvents(state, buildCanonicalApprovalEventsFromGatewayNotification({
       method: 'plugin.approval.resolved',
       params: {
         data: {
           id: 'approval-plugin-1',
+          sessionKey: 'agent:plugin:main',
         },
       },
-    });
+    }, testClock.nowMs()));
 
-    expect(store.list()).toEqual([]);
+    expect(state.approvals).toEqual([]);
   });
 });
 
 describe('session approval command service', () => {
-  it('lists pending approvals from the local mirror without calling gateway policy RPC', async () => {
+  it('lists pending approvals from ACP session states without calling gateway policy RPC', async () => {
     const gatewayRpc = vi.fn();
+    const canonical = createEmptyCanonicalSessionState('agent:main:main');
+    canonical.approvals = [{
+      id: 'approval-1',
+      sessionKey: 'agent:main:main',
+      title: 'gateway',
+      allowedDecisions: ['allow-once', 'deny'],
+      createdAtMs: 1_700_000_000_010,
+    }];
     const service = new SessionCommandService({
       sessionCatalog: {} as never,
       sessionCatalogJobs: {
@@ -124,19 +135,12 @@ describe('session approval command service', () => {
         getRefreshCatalogJob: vi.fn(() => null),
       },
       sessionStorage: {} as never,
-      stateStore: {} as never,
+      stateStore: {
+        listSessionStates: () => [['agent:main:main', { canonical }]],
+      } as never,
       timelineRuntime: {} as never,
       snapshotService: {} as never,
       gateway: { gatewayRpc },
-      pendingApprovals: {
-        list: () => [{
-          id: 'approval-1',
-          sessionKey: 'agent:main:main',
-          title: 'gateway',
-          allowedDecisions: ['allow-once', 'deny'],
-          createdAtMs: 1_700_000_000_010,
-        }],
-      },
       operationCoordinator: new SessionOperationCoordinator(),
       clock: testClock,
       idGenerator: { randomId: () => 'id', randomHex: () => 'hex' },

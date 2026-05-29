@@ -89,7 +89,7 @@ export function connectGatewaySocketSession(deps: GatewaySocketSessionDeps): Pro
 
     const settleConnectFailure = (
       error: unknown,
-      issuePatch?: Pick<GatewayTransportIssue, 'code' | 'details'>,
+      issuePatch?: Pick<GatewayTransportIssue, 'code' | 'details' | 'retryable' | 'retryAfterMs'>,
     ) => {
       if (connectSettled) {
         return;
@@ -116,6 +116,8 @@ export function connectGatewaySocketSession(deps: GatewaySocketSessionDeps): Pro
           clock: deps.clock,
           ...(issuePatch?.code ? { code: issuePatch.code } : {}),
           ...(issuePatch?.details !== undefined ? { details: issuePatch.details } : {}),
+          ...(issuePatch?.retryable !== undefined ? { retryable: issuePatch.retryable } : {}),
+          ...(issuePatch?.retryAfterMs !== undefined ? { retryAfterMs: issuePatch.retryAfterMs } : {}),
         }),
         diagnostics: deps.getDiagnostics(),
       });
@@ -200,6 +202,9 @@ export function connectGatewaySocketSession(deps: GatewaySocketSessionDeps): Pro
       );
       const closedDuringConnect = !deps.isConnected();
       const closedByClient = deps.consumeClosingSocketFlag();
+      if (closedDuringConnect && connectSettled) {
+        return;
+      }
       deps.clearConnectionState();
       deps.rejectAllPending(closeError);
       const issue = createGatewayTransportIssue({

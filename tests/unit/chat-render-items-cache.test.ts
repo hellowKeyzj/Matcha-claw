@@ -67,11 +67,8 @@ describe('chat render items cache', () => {
       },
     ];
 
-    const nextAssistantItem = buildRenderItemsFromMessages(sessionKey, [nextMessages[1]!])[0]!;
-    const secondEntry = getOrBuildStaticRenderItemsCacheEntry(sessionKey, [
-      initialItems[0]!,
-      nextAssistantItem,
-    ]);
+    const nextItems = buildRenderItemsFromMessages(sessionKey, nextMessages);
+    const secondEntry = getOrBuildStaticRenderItemsCacheEntry(sessionKey, nextItems);
 
     expect(secondEntry.items[0]).toBe(firstEntry.items[0]);
     expect(secondEntry.items[1]).not.toBe(firstEntry.items[1]);

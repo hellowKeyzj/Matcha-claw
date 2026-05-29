@@ -210,15 +210,11 @@ export interface ChatStoreActions {
   renameSession: (key: string, label: string) => Promise<void>;
   cleanupEmptySession: () => void;
   loadHistory: (request: ChatHistoryLoadRequest) => Promise<void>;
-  loadTurnToolResults: (request: { sessionKey: string; runId?: string; turnKey?: string; toolCallIds?: string[] }) => Promise<void>;
-  reconcileRunClosure: (request: { sessionKey: string; runId?: string; turnKey?: string }) => Promise<boolean>;
   loadOlderViewportItems: (sessionKey?: string) => Promise<void>;
   jumpViewportToLatest: (sessionKey?: string) => Promise<void>;
   setViewportAnchorItemKey: (itemKey: string | null, sessionKey?: string) => void;
   sendMessage: (text: string, attachments?: ChatSendAttachment[]) => Promise<void>;
   abortRun: () => Promise<void>;
-  handleApprovalRequested: (payload: Record<string, unknown>) => void;
-  handleApprovalResolved: (payload: Record<string, unknown>) => void;
   resolveApproval: (id: string, decision: ApprovalDecision) => Promise<void>;
   syncPendingApprovals: (sessionKeyHint?: string) => Promise<void>;
   getTaskBridgeState: () => TaskChatBridgeState;

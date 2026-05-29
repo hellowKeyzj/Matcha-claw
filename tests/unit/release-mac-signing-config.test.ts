@@ -8,12 +8,14 @@ describe('release mac signing config', () => {
     expect(config).toContain('notarize: true');
   });
 
-  it('uses workflow conditional CLI overrides for unsigned/signed mac builds', async () => {
+  it('builds signed mac apps with a single explicit notarization submission per arch', async () => {
     const workflow = await readFile('.github/workflows/release.yml', 'utf8');
-    expect(workflow).toContain('if [ -n "${CSC_LINK:-}" ] && [ -n "${CSC_KEY_PASSWORD:-}" ]; then');
-    expect(workflow).toContain('BUILDER_ARGS=(--mac --publish never)');
-    expect(workflow).toContain('pnpm exec electron-builder "${BUILDER_ARGS[@]}"');
-    expect(workflow).toContain('-c.mac.identity=null');
-    expect(workflow).toContain('-c.mac.notarize=false');
+    expect(workflow).toContain('if [ -z "${CSC_LINK:-}" ] || [ -z "${CSC_KEY_PASSWORD:-}" ]; then');
+    expect(workflow).toContain('if [ -z "${APPLE_ID:-}" ] || [ -z "${APPLE_APP_SPECIFIC_PASSWORD:-}" ] || [ -z "${APPLE_TEAM_ID:-}" ]; then');
+    expect(workflow).toContain('pnpm exec electron-builder --mac dir --x64 --arm64 --publish never -c.mac.notarize=false');
+    expect(workflow).toContain('submit_notary x64 "release/mac/MatchaClaw.app"');
+    expect(workflow).toContain('submit_notary arm64 "release/mac-arm64/MatchaClaw.app"');
+    expect(workflow).toContain('Refusing to submit again automatically to avoid duplicate Apple notarization quota usage.');
+    expect(workflow).not.toContain('-c.mac.identity=null');
   });
 });

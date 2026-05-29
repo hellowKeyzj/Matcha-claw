@@ -791,7 +791,13 @@ export class ChannelLoginSessionService {
         });
       }
       const { state, saveCreds } = await initAuth(authDir);
+      if (!this.whatsappActive || this.whatsappAccountId !== accountId) {
+        return;
+      }
       const { version } = await fetchLatestBaileysVersion();
+      if (!this.whatsappActive || this.whatsappAccountId !== accountId) {
+        return;
+      }
       this.whatsappSocket = makeWASocket({
         version,
         auth: state,

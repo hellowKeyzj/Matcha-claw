@@ -3,17 +3,15 @@ import type { RawMessage } from './helpers/timeline-fixtures';
 import { getSessionItems } from '@/stores/chat/store-state-helpers';
 import { createViewportWindowState } from '@/stores/chat/viewport-state';
 import { buildRenderItemsFromMessages } from './helpers/timeline-fixtures';
-import type { SessionRenderItem } from '../../runtime-host/shared/session-adapter-types';
+import type { SessionApprovalRequestItem, SessionRenderItem } from '../../runtime-host/shared/session-adapter-types';
 
 const hostApiFetchMock = vi.fn();
 const hostSessionAbortMock = vi.fn();
-const hostSessionTurnToolResultsMock = vi.fn();
 const subscribeHostEventMock = vi.fn();
 
 vi.mock('@/lib/host-api', () => ({
   hostApiFetch: (...args: unknown[]) => hostApiFetchMock(...args),
   hostSessionAbort: (...args: unknown[]) => hostSessionAbortMock(...args),
-  hostSessionTurnToolResults: (...args: unknown[]) => hostSessionTurnToolResultsMock(...args),
 }));
 
 vi.mock('@/lib/host-events', () => ({
@@ -75,6 +73,7 @@ function createSessionInfoUpdate(payload: {
   runId?: string | null;
   sessionKey?: string | null;
   error?: string | null;
+  approvals?: SessionApprovalRequestItem[];
 }) {
   const sessionKey = payload.sessionKey ?? 'agent:main:main';
   return {
@@ -93,6 +92,7 @@ function createSessionInfoUpdate(payload: {
         displayName: sessionKey,
       },
       items: [],
+      approvals: payload.approvals ?? [],
       replayComplete: true,
       runtime: {
         activeRunId: payload.phase === 'started' ? (payload.runId ?? null) : null,
@@ -122,8 +122,8 @@ function createSessionInfoUpdate(payload: {
   };
 }
 
-function createSessionMessageUpdate(payload: {
-  kind: 'agent_message' | 'agent_message_chunk';
+function createSessionItemUpdate(payload: {
+  sessionUpdate: 'session_item' | 'session_item_chunk';
   runId?: string | null;
   sessionKey?: string | null;
   sequenceId?: number;
@@ -136,7 +136,7 @@ function createSessionMessageUpdate(payload: {
     ?? (
       payload.runId && payload.sequenceId != null
         ? `run:${payload.runId}:seq:${payload.sequenceId}`
-        : `${payload.kind}-entry`
+        : `${payload.sessionUpdate}-entry`
     ),
   );
     const turnIdentity = String(
@@ -169,7 +169,7 @@ function createSessionMessageUpdate(payload: {
         identitySource: 'run',
         identityMode: 'run',
         identityConfidence: 'strong',
-        status: payload.kind === 'agent_message_chunk'
+        status: payload.sessionUpdate === 'session_item_chunk'
           ? 'streaming'
           : 'final',
         segments: typeof payload.message.content === 'string'
@@ -211,7 +211,7 @@ function createSessionMessageUpdate(payload: {
         text: typeof payload.message.content === 'string' ? payload.message.content : '',
         images: [],
         attachedFiles: [],
-        pendingState: payload.kind === 'agent_message_chunk' ? 'typing' : null,
+        pendingState: payload.sessionUpdate === 'session_item_chunk' ? 'typing' : null,
         createdAt: 1,
         updatedAt: 1,
       }
@@ -228,7 +228,7 @@ function createSessionMessageUpdate(payload: {
         updatedAt: 1,
       };
   return {
-    sessionUpdate: payload.kind === 'agent_message_chunk' ? 'session_item_chunk' : 'session_item',
+    sessionUpdate: payload.sessionUpdate,
     runId: payload.runId ?? null,
     sessionKey: payload.sessionKey ?? null,
     item,
@@ -242,11 +242,12 @@ function createSessionMessageUpdate(payload: {
         displayName: sessionKey,
       },
       items: [item],
+      approvals: [],
       replayComplete: true,
       runtime: {
         activeRunId: payload.runId ?? null,
-        runPhase: payload.kind === 'agent_message_chunk' ? 'streaming' : 'done',
-        activeTurnItemKey: payload.kind === 'agent_message_chunk' ? assistantItemKey : null,
+        runPhase: payload.sessionUpdate === 'session_item_chunk' ? 'streaming' : 'done',
+        activeTurnItemKey: payload.sessionUpdate === 'session_item_chunk' ? assistantItemKey : null,
         pendingTurnKey: isAssistant ? turnIdentity : null,
         pendingTurnLaneKey: isAssistant ? 'main' : null,
         lastUserMessageAt: null,
@@ -293,6 +294,7 @@ function createSessionPlanUpdate(payload: {
         displayName: sessionKey,
       },
       items,
+      approvals: [],
       replayComplete: true,
       runtime: {
         activeRunId: null,
@@ -322,7 +324,6 @@ describe('gateway store event wiring', () => {
     vi.resetModules();
     vi.clearAllMocks();
     hostSessionAbortMock.mockReset();
-    hostSessionTurnToolResultsMock.mockReset();
   });
 
   it('subscribes to host events through subscribeHostEvent on init', async () => {
@@ -348,7 +349,6 @@ describe('gateway store event wiring', () => {
 
     expect(subscribeHostEventMock).toHaveBeenCalledWith('gateway:status', expect.any(Function));
     expect(subscribeHostEventMock).toHaveBeenCalledWith('gateway:error', expect.any(Function));
-    expect(subscribeHostEventMock).toHaveBeenCalledWith('gateway:notification', expect.any(Function));
     expect(subscribeHostEventMock).toHaveBeenCalledWith('session:update', expect.any(Function));
     expect(subscribeHostEventMock).toHaveBeenCalledWith('task:snapshot', expect.any(Function));
     expect(subscribeHostEventMock).toHaveBeenCalledWith('gateway:channel-status', expect.any(Function));
@@ -566,20 +566,20 @@ describe('gateway store event wiring', () => {
     const { useGatewayStore } = await import('@/stores/gateway');
     await useGatewayStore.getState().init();
 
-    handlers.get('gateway:notification')?.({
-      method: 'exec.approval.requested',
-      params: {
+    handlers.get('session:update')?.(createSessionInfoUpdate({
+      phase: 'unknown',
+      runId: 'run-evt-1',
+      sessionKey: 'agent:main:main',
+      approvals: [{
         id: 'approval-evt-1',
+        sessionKey: 'agent:main:main',
         runId: 'run-evt-1',
-        request: {
-          sessionKey: 'agent:main:main',
-          runId: 'run-evt-1',
-          command: 'Remove-Item demo.txt',
-          host: 'gateway',
-          allowedDecisions: ['allow-once', 'deny'],
-        },
-      },
-    });
+        title: 'gateway',
+        command: 'Remove-Item demo.txt',
+        allowedDecisions: ['allow-once', 'deny'],
+        createdAtMs: 1,
+      }],
+    }));
 
     await new Promise((resolve) => setTimeout(resolve, 0));
 
@@ -594,14 +594,12 @@ describe('gateway store event wiring', () => {
       allowedDecisions: ['allow-once', 'deny'],
     });
 
-    handlers.get('gateway:notification')?.({
-      method: 'exec.approval.resolved',
-      params: {
-        id: 'approval-evt-1',
-        sessionKey: 'agent:main:main',
-        decision: 'deny',
-      },
-    });
+    handlers.get('session:update')?.(createSessionInfoUpdate({
+      phase: 'unknown',
+      runId: 'run-evt-1',
+      sessionKey: 'agent:main:main',
+      approvals: [],
+    }));
 
     await new Promise((resolve) => setTimeout(resolve, 0));
 
@@ -771,8 +769,8 @@ describe('gateway store event wiring', () => {
     const { useGatewayStore } = await import('@/stores/gateway');
     await useGatewayStore.getState().init();
 
-    handlers.get('session:update')?.(createSessionMessageUpdate({
-      kind: 'agent_message_chunk',
+    handlers.get('session:update')?.(createSessionItemUpdate({
+      sessionUpdate: 'session_item_chunk',
       runId: 'run-delta-direct-1',
       sessionKey: 'agent:main:main',
       sequenceId: 1,
@@ -818,8 +816,8 @@ describe('gateway store event wiring', () => {
     const { useGatewayStore } = await import('@/stores/gateway');
     await useGatewayStore.getState().init();
 
-    handlers.get('session:update')?.(createSessionMessageUpdate({
-      kind: 'agent_message_chunk',
+    handlers.get('session:update')?.(createSessionItemUpdate({
+      sessionUpdate: 'session_item_chunk',
       runId: 'run-other-1',
       sessionKey: 'agent:other:main',
       sequenceId: 1,
@@ -866,8 +864,8 @@ describe('gateway store event wiring', () => {
     const { useGatewayStore } = await import('@/stores/gateway');
     await useGatewayStore.getState().init();
 
-    handlers.get('session:update')?.(createSessionMessageUpdate({
-      kind: 'agent_message_chunk',
+    handlers.get('session:update')?.(createSessionItemUpdate({
+      sessionUpdate: 'session_item_chunk',
       runId: 'run-tool-direct-1',
       sessionKey: 'agent:main:main',
       sequenceId: 8,
@@ -879,11 +877,6 @@ describe('gateway store event wiring', () => {
           id: 'tool-1',
           name: 'memory_store',
           input: { text: '记住偏好' },
-        }],
-        toolStatuses: [{
-          toolCallId: 'tool-1',
-          name: 'memory_store',
-          status: 'running',
         }],
       },
     }));
@@ -901,7 +894,7 @@ describe('gateway store event wiring', () => {
     });
   });
 
-  it('tool session:update reloads history once after terminal assistant item', async () => {
+  it('terminal assistant updates do not trigger renderer-side tool result reconciliation', async () => {
     hostApiFetchMock.mockResolvedValueOnce(createRunningGatewayStatus());
     const handlers = new Map<string, (payload: unknown) => void>();
     subscribeHostEventMock.mockImplementation((eventName: string, handler: (payload: unknown) => void) => {
@@ -909,12 +902,6 @@ describe('gateway store event wiring', () => {
       return () => {};
     });
 
-    hostSessionTurnToolResultsMock.mockResolvedValueOnce({
-      sessionKey: 'agent:main:main',
-      turnKey: 'run:run-tool-reconcile-1',
-      item: null,
-      runtime: createSessionRecord().runtime,
-    });
     const { useChatStore } = await import('@/stores/chat');
     const loadHistoryMock = vi.fn().mockResolvedValue(undefined);
     useChatStore.setState({
@@ -939,8 +926,8 @@ describe('gateway store event wiring', () => {
     const { useGatewayStore } = await import('@/stores/gateway');
     await useGatewayStore.getState().init();
 
-    handlers.get('session:update')?.(createSessionMessageUpdate({
-      kind: 'agent_message_chunk',
+    handlers.get('session:update')?.(createSessionItemUpdate({
+      sessionUpdate: 'session_item_chunk',
       runId: 'run-tool-reconcile-1',
       sessionKey: 'agent:main:main',
       sequenceId: 1,
@@ -956,10 +943,8 @@ describe('gateway store event wiring', () => {
       },
     }));
 
-    expect(loadHistoryMock).not.toHaveBeenCalled();
-
-    handlers.get('session:update')?.(createSessionMessageUpdate({
-      kind: 'agent_message',
+    handlers.get('session:update')?.(createSessionItemUpdate({
+      sessionUpdate: 'session_item',
       runId: 'run-tool-reconcile-1',
       sessionKey: 'agent:main:main',
       message: {
@@ -977,13 +962,6 @@ describe('gateway store event wiring', () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
 
     expect(loadHistoryMock).not.toHaveBeenCalled();
-    expect(hostSessionTurnToolResultsMock).toHaveBeenCalledTimes(1);
-    expect(hostSessionTurnToolResultsMock).toHaveBeenCalledWith({
-      sessionKey: 'agent:main:main',
-      runId: 'run-tool-reconcile-1',
-      turnKey: 'run:run-tool-reconcile-1:tool:tool-1',
-      toolCallIds: ['tool-1'],
-    });
   });
 
   it('plan session:update applies authoritative snapshot to clear stale visible tool cards', async () => {
@@ -1015,8 +993,8 @@ describe('gateway store event wiring', () => {
     const { useGatewayStore } = await import('@/stores/gateway');
     await useGatewayStore.getState().init();
 
-    handlers.get('session:update')?.(createSessionMessageUpdate({
-      kind: 'agent_message_chunk',
+    handlers.get('session:update')?.(createSessionItemUpdate({
+      sessionUpdate: 'session_item_chunk',
       runId: 'run-todo-plan-1',
       sessionKey: 'agent:main:main',
       sequenceId: 8,
@@ -1077,8 +1055,8 @@ describe('gateway store event wiring', () => {
     const { useGatewayStore } = await import('@/stores/gateway');
     await useGatewayStore.getState().init();
 
-    handlers.get('session:update')?.(createSessionMessageUpdate({
-      kind: 'agent_message',
+    handlers.get('session:update')?.(createSessionItemUpdate({
+      sessionUpdate: 'session_item',
       runId: 'run-after-compaction',
       sessionKey: 'agent:main:main',
       message: {
@@ -1218,25 +1196,8 @@ describe('gateway store event wiring', () => {
     const { useGatewayStore } = await import('@/stores/gateway');
     await useGatewayStore.getState().init();
 
-    const agentPayload = {
-      method: 'agent',
-      params: {
-        runId: 'run-1',
-        sessionKey: 'agent:main:main',
-        data: {
-          state: 'final',
-          message: {
-            role: 'assistant',
-            id: 'assistant-final-1',
-            content: 'hello',
-          },
-        },
-      },
-    };
-
-    handlers.get('gateway:notification')?.(agentPayload);
-    handlers.get('session:update')?.(createSessionMessageUpdate({
-      kind: 'agent_message',
+    handlers.get('session:update')?.(createSessionItemUpdate({
+      sessionUpdate: 'session_item',
       runId: 'run-1',
       sessionKey: 'agent:main:main',
       message: {
@@ -1250,8 +1211,8 @@ describe('gateway store event wiring', () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
 
     expect(handleSessionUpdateEventMock).toHaveBeenCalledTimes(1);
-    expect(handleSessionUpdateEventMock).toHaveBeenCalledWith(createSessionMessageUpdate({
-      kind: 'agent_message',
+    expect(handleSessionUpdateEventMock).toHaveBeenCalledWith(createSessionItemUpdate({
+      sessionUpdate: 'session_item',
       runId: 'run-1',
       sessionKey: 'agent:main:main',
       message: {
@@ -1305,7 +1266,7 @@ describe('gateway store event wiring', () => {
 
     await new Promise((resolve) => setTimeout(resolve, 0));
 
-    expect(handleSessionUpdateEventMock).toHaveBeenCalledTimes(1);
+    expect(handleSessionUpdateEventMock).not.toHaveBeenCalled();
   });
 
   it('legacy chat 与结构化 final 同时到达时，应只消费结构化 final', async () => {
@@ -1348,8 +1309,8 @@ describe('gateway store event wiring', () => {
         content: '[[reply_to_current]]你好呀！有什么想让我帮你做的吗?',
       },
     });
-    handlers.get('session:update')?.(createSessionMessageUpdate({
-      kind: 'agent_message',
+    handlers.get('session:update')?.(createSessionItemUpdate({
+      sessionUpdate: 'session_item',
       runId: 'run-legacy-1',
       sessionKey: 'agent:main:main',
       message: {
@@ -1360,9 +1321,9 @@ describe('gateway store event wiring', () => {
 
     await new Promise((resolve) => setTimeout(resolve, 0));
 
-    expect(handleSessionUpdateEventMock).toHaveBeenCalledTimes(2);
-    expect(handleSessionUpdateEventMock).toHaveBeenLastCalledWith(createSessionMessageUpdate({
-      kind: 'agent_message',
+    expect(handleSessionUpdateEventMock).toHaveBeenCalledTimes(1);
+    expect(handleSessionUpdateEventMock).toHaveBeenLastCalledWith(createSessionItemUpdate({
+      sessionUpdate: 'session_item',
       runId: 'run-legacy-1',
       sessionKey: 'agent:main:main',
       message: {
@@ -1412,8 +1373,8 @@ describe('gateway store event wiring', () => {
         content: '[Tue 2026-04-14 20:11 GMT+8]你好',
       },
     });
-    handlers.get('session:update')?.(createSessionMessageUpdate({
-      kind: 'agent_message',
+    handlers.get('session:update')?.(createSessionItemUpdate({
+      sessionUpdate: 'session_item',
       runId: 'run-user-1',
       sessionKey: 'agent:main:main',
       message: {
@@ -1424,9 +1385,9 @@ describe('gateway store event wiring', () => {
 
     await new Promise((resolve) => setTimeout(resolve, 0));
 
-    expect(handleSessionUpdateEventMock).toHaveBeenCalledTimes(2);
-    expect(handleSessionUpdateEventMock).toHaveBeenLastCalledWith(createSessionMessageUpdate({
-      kind: 'agent_message',
+    expect(handleSessionUpdateEventMock).toHaveBeenCalledTimes(1);
+    expect(handleSessionUpdateEventMock).toHaveBeenLastCalledWith(createSessionItemUpdate({
+      sessionUpdate: 'session_item',
       runId: 'run-user-1',
       sessionKey: 'agent:main:main',
       message: {
@@ -1476,8 +1437,8 @@ describe('gateway store event wiring', () => {
         content: '我能做的事情挺多，  简单说：\n\n- 回答问题，陪你聊天',
       },
     });
-    handlers.get('session:update')?.(createSessionMessageUpdate({
-      kind: 'agent_message',
+    handlers.get('session:update')?.(createSessionItemUpdate({
+      sessionUpdate: 'session_item',
       runId: 'run-assistant-1',
       sessionKey: 'agent:main:main',
       message: {
@@ -1488,9 +1449,9 @@ describe('gateway store event wiring', () => {
 
     await new Promise((resolve) => setTimeout(resolve, 0));
 
-    expect(handleSessionUpdateEventMock).toHaveBeenCalledTimes(2);
-    expect(handleSessionUpdateEventMock).toHaveBeenLastCalledWith(createSessionMessageUpdate({
-      kind: 'agent_message',
+    expect(handleSessionUpdateEventMock).toHaveBeenCalledTimes(1);
+    expect(handleSessionUpdateEventMock).toHaveBeenLastCalledWith(createSessionItemUpdate({
+      sessionUpdate: 'session_item',
       runId: 'run-assistant-1',
       sessionKey: 'agent:main:main',
       message: {

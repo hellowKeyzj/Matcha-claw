@@ -1,12 +1,56 @@
+import type { GatewayTransportIssue } from '../../shared/gateway-error';
+
+export type GatewayConnectionState = 'connected' | 'reconnecting' | 'disconnected';
+export type GatewayHealthSummary = 'healthy' | 'degraded' | 'unresponsive';
+
+export interface GatewayDiagnosticsSnapshot {
+  readonly lastAliveAt?: number;
+  readonly lastRpcSuccessAt?: number;
+  readonly lastRpcFailureAt?: number;
+  readonly lastRpcFailureMethod?: string;
+  readonly lastHeartbeatTimeoutAt?: number;
+  readonly consecutiveHeartbeatMisses: number;
+  readonly lastSocketCloseAt?: number;
+  readonly lastSocketCloseCode?: number;
+  readonly consecutiveRpcFailures: number;
+}
+
+export interface GatewayConnectionStatePayload {
+  readonly state: GatewayConnectionState;
+  readonly portReachable: boolean;
+  readonly gatewayReady: boolean;
+  readonly healthSummary: GatewayHealthSummary;
+  readonly transportEpoch: number;
+  readonly lastError?: string;
+  readonly lastIssue?: GatewayTransportIssue;
+  readonly diagnostics: GatewayDiagnosticsSnapshot;
+  readonly updatedAt: number;
+}
+
 export interface GatewayCapabilitiesSnapshot {
   readonly methods: readonly string[];
   readonly updatedAt: number;
 }
 
+export type GatewayControlReadinessPhase = 'ready' | 'starting' | 'unavailable';
+
 export interface GatewayMethodReadiness {
   readonly ready: boolean;
   readonly methods: readonly string[];
   readonly missingMethods: readonly string[];
+  readonly capabilities?: GatewayCapabilitiesSnapshot;
+}
+
+export interface GatewayControlReadiness {
+  readonly ready: boolean;
+  readonly phase: GatewayControlReadinessPhase;
+  readonly requiredMethods: readonly string[];
+  readonly missingMethods: readonly string[];
+  readonly retryable: boolean;
+  readonly code?: string;
+  readonly error?: string;
+  readonly details?: unknown;
+  readonly retryAfterMs?: number;
   readonly capabilities?: GatewayCapabilitiesSnapshot;
 }
 
@@ -53,6 +97,7 @@ export interface GatewayRpcPort {
 }
 
 export interface GatewayConnectionPort {
+  inspectGatewayControlReadiness(methods: readonly string[], timeoutMs?: number): Promise<GatewayControlReadiness>;
   ensureGatewayReady(timeoutMs?: number): Promise<void>;
   ensureGatewayMethods(methods: readonly string[], timeoutMs?: number): Promise<GatewayMethodReadiness>;
   inspectGatewayMethodReadiness(methods: readonly string[], timeoutMs?: number): Promise<GatewayMethodReadiness>;

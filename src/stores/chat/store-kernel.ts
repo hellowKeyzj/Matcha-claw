@@ -1,4 +1,4 @@
-import type { StoreHistoryCache, TerminalToolReconcileTarget } from './history-cache';
+import type { StoreHistoryCache } from './history-cache';
 import { createStoreSessionRunCache, type StoreSessionRunCache } from './session-run-cache';
 import type { ChatStoreState } from './types';
 
@@ -21,7 +21,6 @@ export function createChatStoreKernel(set: ChatStoreSetFn): ChatStoreKernel {
   const historyFingerprintBySession = new Map<string, string>();
   const historyRenderFingerprintBySession = new Map<string, string>();
   const historyLoadAbortControllerBySession = new Map<string, AbortController>();
-  const terminalHistoryReconcileBySession = new Map<string, TerminalToolReconcileTarget>();
   const historyLoadInFlightBySession = new Map<string, Promise<void>>();
   const sessionRunCache = createStoreSessionRunCache();
 
@@ -59,28 +58,6 @@ export function createChatStoreKernel(set: ChatStoreSetFn): ChatStoreKernel {
         historyLoadAbortControllerBySession.delete(sessionKey);
       }
     },
-    resetTerminalHistoryReconcile: (sessionKey) => {
-      terminalHistoryReconcileBySession.delete(sessionKey);
-    },
-    markTerminalHistoryReconcileNeeded: (target) => {
-      const current = terminalHistoryReconcileBySession.get(target.sessionKey);
-      const toolCallIds = new Set([
-        ...(current?.toolCallIds ?? []),
-        ...target.toolCallIds,
-      ]);
-      terminalHistoryReconcileBySession.set(target.sessionKey, {
-        sessionKey: target.sessionKey,
-        runId: target.runId ?? current?.runId,
-        turnKey: target.turnKey ?? current?.turnKey,
-        toolCallIds: Array.from(toolCallIds),
-      });
-    },
-    consumeTerminalHistoryReconcileNeeded: (sessionKey) => {
-      const target = terminalHistoryReconcileBySession.get(sessionKey) ?? null;
-      terminalHistoryReconcileBySession.delete(sessionKey);
-      return target;
-    },
-    getHistoryLoadInFlight: (sessionKey) => historyLoadInFlightBySession.get(sessionKey) ?? null,
     setHistoryLoadInFlight: (sessionKey, task) => {
       historyLoadInFlightBySession.set(sessionKey, task);
     },

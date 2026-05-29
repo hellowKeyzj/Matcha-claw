@@ -1,12 +1,14 @@
 import type { GatewayConnectionStatePayload } from './client';
 import type {
   GatewayCapabilitiesSnapshot,
+  GatewayControlReadiness,
   GatewayMethodReadiness,
 } from './capabilities';
 import { buildGatewayChatSendParams } from '../shared/gateway-chat-send-params';
 import type { RunContext, ToolSource } from '../shared/platform-runtime-contracts';
 
 export interface OpenClawGatewayClient {
+  inspectGatewayControlReadiness: (methods: readonly string[], timeoutMs?: number) => Promise<GatewayControlReadiness>;
   ensureGatewayReady: (timeoutMs?: number) => Promise<void>;
   ensureGatewayMethods: (methods: readonly string[], timeoutMs?: number) => Promise<GatewayMethodReadiness>;
   inspectGatewayMethodReadiness: (methods: readonly string[], timeoutMs?: number) => Promise<GatewayMethodReadiness>;
@@ -18,6 +20,7 @@ export interface OpenClawGatewayClient {
 }
 
 export interface OpenClawBridge {
+  inspectGatewayControlReadiness: (methods: readonly string[], timeoutMs?: number) => Promise<GatewayControlReadiness>;
   ensureGatewayReady: (timeoutMs?: number) => Promise<void>;
   ensureGatewayMethods: (methods: readonly string[], timeoutMs?: number) => Promise<GatewayMethodReadiness>;
   inspectGatewayMethodReadiness: (methods: readonly string[], timeoutMs?: number) => Promise<GatewayMethodReadiness>;
@@ -57,6 +60,7 @@ export interface OpenClawBridge {
 
 export function createOpenClawBridge(client: OpenClawGatewayClient): OpenClawBridge {
   return {
+    inspectGatewayControlReadiness: (methods, timeoutMs) => client.inspectGatewayControlReadiness(methods, timeoutMs),
     ensureGatewayReady: (timeoutMs) => client.ensureGatewayReady(timeoutMs),
     ensureGatewayMethods: (methods, timeoutMs) => client.ensureGatewayMethods(methods, timeoutMs),
     inspectGatewayMethodReadiness: (methods, timeoutMs) => client.inspectGatewayMethodReadiness(methods, timeoutMs),

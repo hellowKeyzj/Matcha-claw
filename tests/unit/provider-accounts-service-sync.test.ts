@@ -3,15 +3,15 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 const {
   removeProviderMock,
   syncProviderConfigMock,
-  getProviderApiKeyMock,
-  removeProviderKeyMock,
   saveProviderKeyMock,
+  removeProviderKeyMock,
+  upsertProviderInAgentModelsMock,
 } = vi.hoisted(() => ({
   removeProviderMock: vi.fn(),
   syncProviderConfigMock: vi.fn(),
-  getProviderApiKeyMock: vi.fn(),
-  removeProviderKeyMock: vi.fn(),
   saveProviderKeyMock: vi.fn(),
+  removeProviderKeyMock: vi.fn(),
+  upsertProviderInAgentModelsMock: vi.fn(),
 }));
 
 import { ProviderAccountsService } from '../../runtime-host/application/providers/accounts';
@@ -32,6 +32,12 @@ function createServiceWithStore(store: {
     },
     {
       syncProviderConfig: syncProviderConfigMock,
+    },
+    {
+      discoverAgentIds: async () => ['main'],
+    },
+    {
+      upsertProviderInAgentModels: upsertProviderInAgentModelsMock,
     },
   );
   const resolveRuntimeProviderKey = (accountId: string, account: Record<string, any> | null) => {
@@ -62,8 +68,6 @@ function createServiceWithStore(store: {
       syncStoreToRuntime: async (runtimeStore) => await runtimeSync.syncProviderStore(runtimeStore),
       resolveAccountApiKey: async ({ store: runtimeStore, accountId, account }) => {
         const runtimeProviderKey = resolveRuntimeProviderKey(accountId, account as Record<string, any> | null);
-        const runtimeApiKey = await getProviderApiKeyMock(runtimeProviderKey);
-        if (runtimeApiKey) return runtimeApiKey;
         const localApiKey = runtimeStore.apiKeys[accountId];
         if (typeof localApiKey === 'string' && localApiKey.trim()) return localApiKey.trim();
         if (runtimeProviderKey !== accountId) {
@@ -102,10 +106,9 @@ describe('ProviderAccountsService list', () => {
   beforeEach(() => {
     removeProviderMock.mockReset();
     syncProviderConfigMock.mockReset();
-    getProviderApiKeyMock.mockReset();
-    removeProviderKeyMock.mockReset();
     saveProviderKeyMock.mockReset();
-    getProviderApiKeyMock.mockResolvedValue(null);
+    removeProviderKeyMock.mockReset();
+    upsertProviderInAgentModelsMock.mockReset();
   });
 
   it('返回 credentials/statuses/vendors，不再返回 defaultAccountId', async () => {
@@ -198,14 +201,13 @@ describe('ProviderAccountsService list', () => {
 describe('ProviderAccountsService mutations', () => {
   beforeEach(() => {
     syncProviderConfigMock.mockReset();
-    saveProviderKeyMock.mockReset();
     removeProviderMock.mockReset();
+    saveProviderKeyMock.mockReset();
     removeProviderKeyMock.mockReset();
-    getProviderApiKeyMock.mockReset();
-    getProviderApiKeyMock.mockResolvedValue(null);
+    upsertProviderInAgentModelsMock.mockReset();
   });
 
-  it('新增 custom 凭证只同步 auth profile 与 provider config', async () => {
+  it('新增 custom 凭证同步 provider config 与 per-agent models.json provider', async () => {
     const store = {
       accounts: {},
       apiKeys: {},
@@ -229,6 +231,7 @@ describe('ProviderAccountsService mutations', () => {
     expect(result.success).toBe(true);
     expect(writeProviderStore).toHaveBeenCalledTimes(1);
     expect(saveProviderKeyMock).toHaveBeenCalledWith('custom-12345678', 'sk-custom');
+    expect(removeProviderKeyMock).not.toHaveBeenCalledWith('custom-12345678');
     expect(syncProviderConfigMock).toHaveBeenCalledWith(
       'custom-12345678',
       expect.objectContaining({
@@ -237,6 +240,15 @@ describe('ProviderAccountsService mutations', () => {
         headers: { 'User-Agent': 'MatchaClaw/1.0' },
       }),
     );
+    expect(upsertProviderInAgentModelsMock).toHaveBeenCalledWith({
+      agentIds: ['main'],
+      provider: 'custom-12345678',
+      entry: expect.objectContaining({
+        baseUrl: 'https://api.example.com/v1',
+        api: 'openai-completions',
+        headers: { 'User-Agent': 'MatchaClaw/1.0' },
+      }),
+    });
     expect(syncProviderConfigMock.mock.calls[0][1]).not.toHaveProperty('models');
     expect(syncOpenClawModelsMock).toHaveBeenCalledTimes(1);
   });
@@ -264,6 +276,8 @@ describe('ProviderAccountsService mutations', () => {
 
     expect(result.success).toBe(true);
     expect(saveProviderKeyMock).toHaveBeenCalledWith('custom-media-openai', 'sk-openai-media');
+    expect(removeProviderKeyMock).not.toHaveBeenCalledWith('custom-media-openai');
+    expect(upsertProviderInAgentModelsMock).not.toHaveBeenCalled();
     expect(syncProviderConfigMock).not.toHaveBeenCalled();
     expect(syncOpenClawModelsMock).toHaveBeenCalledTimes(1);
   });

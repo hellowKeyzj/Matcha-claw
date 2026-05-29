@@ -25,53 +25,28 @@ function normalizeTaskCompletionEventRecord(
   if (!record) {
     return null;
   }
-  const kind = normalizeOptionalString(record.kind ?? record.type)?.toLowerCase();
+  const kind = normalizeOptionalString(record.kind)?.toLowerCase();
   if (kind !== 'task_completion') {
     return null;
   }
-  const childSessionKey = normalizeOptionalString(
-    record.childSessionKey
-    ?? record.sessionKey
-    ?? record.child_session_key
-    ?? record.session_key,
-  );
+  const childSessionKey = normalizeOptionalString(record.childSessionKey);
   if (!childSessionKey) {
     return null;
   }
-  const childSessionId = normalizeOptionalString(
-    record.childSessionId
-    ?? record.sessionId
-    ?? record.child_session_id
-    ?? record.session_id,
-  );
-  const childAgentId = normalizeOptionalString(
-    record.childAgentId
-    ?? record.agentId
-    ?? record.child_agent_id
-    ?? record.agent_id,
-  ) ?? resolveChildAgentId(childSessionKey);
+  const childSessionId = normalizeOptionalString(record.childSessionId);
+  const childAgentId = normalizeOptionalString(record.childAgentId) ?? resolveChildAgentId(childSessionKey);
   return {
     kind: 'task_completion',
     source: normalizeCompletionSource(record.source),
     childSessionKey,
     ...(childSessionId ? { childSessionId } : {}),
     ...(childAgentId ? { childAgentId } : {}),
-    ...(normalizeOptionalString(record.announceType ?? record.announce_type)
-      ? { announceType: normalizeOptionalString(record.announceType ?? record.announce_type)! }
-      : {}),
-    ...(normalizeOptionalString(record.taskLabel ?? record.task ?? record.task_label)
-      ? { taskLabel: normalizeOptionalString(record.taskLabel ?? record.task ?? record.task_label)! }
-      : {}),
-    ...(normalizeOptionalString(record.statusLabel ?? record.status_label)
-      ? { statusLabel: normalizeOptionalString(record.statusLabel ?? record.status_label)! }
-      : {}),
+    ...(normalizeOptionalString(record.announceType) ? { announceType: normalizeOptionalString(record.announceType)! } : {}),
+    ...(normalizeOptionalString(record.taskLabel) ? { taskLabel: normalizeOptionalString(record.taskLabel)! } : {}),
+    ...(normalizeOptionalString(record.statusLabel) ? { statusLabel: normalizeOptionalString(record.statusLabel)! } : {}),
     ...(normalizeOptionalString(record.result) ? { result: normalizeOptionalString(record.result)! } : {}),
-    ...(normalizeOptionalString(record.statsLine ?? record.stats_line)
-      ? { statsLine: normalizeOptionalString(record.statsLine ?? record.stats_line)! }
-      : {}),
-    ...(normalizeOptionalString(record.replyInstruction ?? record.reply_instruction)
-      ? { replyInstruction: normalizeOptionalString(record.replyInstruction ?? record.reply_instruction)! }
-      : {}),
+    ...(normalizeOptionalString(record.statsLine) ? { statsLine: normalizeOptionalString(record.statsLine)! } : {}),
+    ...(normalizeOptionalString(record.replyInstruction) ? { replyInstruction: normalizeOptionalString(record.replyInstruction)! } : {}),
   };
 }
 

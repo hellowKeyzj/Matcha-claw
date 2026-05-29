@@ -48,6 +48,15 @@ type MockSession = {
   updatedAt: number;
 };
 
+type MockSubagent = {
+  id: string;
+  name: string;
+  workspace: string;
+  model: string;
+  skills: string[];
+  isDefault: boolean;
+};
+
 type MockMessage = {
   role: 'user' | 'assistant';
   id: string;
@@ -84,6 +93,7 @@ interface E2EChatMockState {
   historySessionKey: string;
   artifactSessionKey: string;
   counter: number;
+  subagents: MockSubagent[];
 }
 
 const isE2EMode = process.env.MATCHACLAW_E2E === '1';
@@ -97,6 +107,7 @@ const state: E2EChatMockState = {
   historySessionKey: '',
   artifactSessionKey: '',
   counter: 0,
+  subagents: [],
 };
 
 const ARTIFACT_WORKSPACE_ROOT = '/workspace';
@@ -307,6 +318,7 @@ function emitFinal(runId: string, sessionKey: string, content: string): void {
   if (run) {
     run.status = 'done';
     run.partialText = undefined;
+    run.approvalId = undefined;
   }
   appendMessage(sessionKey, {
     role: 'assistant',
@@ -627,6 +639,17 @@ function buildSnapshotForSession(sessionKey: string): SessionStateSnapshot {
     sessionKey,
     catalog: makeCatalog(sessionKey),
     items,
+    approvals: state.approvals
+      .filter((approval) => approval.sessionKey === sessionKey)
+      .map((approval) => ({
+        id: approval.id,
+        sessionKey: approval.sessionKey,
+        runId: approval.runId,
+        title: approval.title,
+        command: approval.command,
+        allowedDecisions: approval.allowedDecisions,
+        createdAtMs: approval.createdAt,
+      })),
     replayComplete: true,
     runtime: {
       activeRunId: activeRun?.runId ?? null,
@@ -657,7 +680,7 @@ function createRun(sessionKey: string, userText: string, mode: MockRun['mode']):
   if (mode === 'default') {
     setTimeout(() => emitRunStarted(runId, sessionKey), 10);
     setTimeout(() => emitDelta(runId, sessionKey, 'Mock streaming...'), 40);
-    setTimeout(() => emitFinal(runId, sessionKey, `Mock reply: ${userText}`), 100);
+    setTimeout(() => emitFinal(runId, sessionKey, `Mock reply: ${userText}`), 900);
   } else if (mode === 'approval') {
     setTimeout(() => emitRunStarted(runId, sessionKey), 10);
     setTimeout(() => emitDelta(runId, sessionKey, 'Waiting for approval...'), 40);
@@ -704,6 +727,16 @@ function seedState(): void {
   state.counter = 0;
   state.runsById = {};
   state.approvals = [];
+  state.subagents = [
+    {
+      id: 'main',
+      name: 'Agent',
+      workspace: ARTIFACT_WORKSPACE_ROOT,
+      model: 'mock/default',
+      skills: [],
+      isDefault: true,
+    },
+  ];
   state.sessions = [
     {
       key: state.mainSessionKey,
@@ -771,6 +804,57 @@ export function handleE2EHostApiFetch(request: HostApiFetchRequest): HostApiProx
       hasUsableCache: true,
       nextRevalidateAtMs: null,
     });
+  }
+
+  if (path === '/api/subagents/list' && method === 'POST') {
+    return toSuccessEnvelope({
+      agents: state.subagents,
+      defaultId: 'main',
+      mainKey: 'agent:main',
+      scope: 'e2e',
+      ready: true,
+      refreshing: false,
+      updatedAt: Date.now(),
+      error: null,
+    });
+  }
+
+  if (path === '/api/subagents/config/get' && method === 'POST') {
+    return toSuccessEnvelope({
+      ready: true,
+      config: {
+        defaultModel: 'mock/default',
+        defaultWorkspace: ARTIFACT_WORKSPACE_ROOT,
+        agents: {
+          list: state.subagents.map((agent) => ({
+            id: agent.id,
+            default: agent.isDefault,
+            model: agent.model,
+            workspace: agent.workspace,
+            skills: agent.skills,
+          })),
+        },
+      },
+    });
+  }
+
+  if (path === '/api/provider-models/selectable' && method === 'GET') {
+    return toSuccessEnvelope({
+      models: [
+        {
+          credentialId: 'mock',
+          providerKey: 'mock',
+          openClawModelRef: 'mock/default',
+          label: 'Mock',
+          modelId: 'default',
+          capabilities: ['chat'],
+        },
+      ],
+    });
+  }
+
+  if (path === '/api/openclaw/config-dir' && method === 'GET') {
+    return toSuccessEnvelope('/tmp/openclaw-config');
   }
 
   if (path === '/api/chat/send-with-media' && method === 'POST') {
@@ -850,6 +934,42 @@ export function handleE2EHostApiFetch(request: HostApiFetchRequest): HostApiProx
       success: true,
       snapshot: buildSnapshotForSession(sessionKey),
     });
+  }
+
+  if (path === '/api/session/approvals' && method === 'GET') {
+    return toSuccessEnvelope({
+      success: true,
+      approvals: state.approvals.map((approval) => ({
+        id: approval.id,
+        sessionKey: approval.sessionKey,
+        runId: approval.runId,
+        title: approval.title,
+        command: approval.command,
+        allowedDecisions: approval.allowedDecisions,
+        createdAtMs: approval.createdAt,
+      })),
+    });
+  }
+
+  if (path === '/api/session/approval/resolve' && method === 'POST') {
+    const payload = parseJsonBody(request.body);
+    const approvalId = typeof payload.id === 'string' ? payload.id : '';
+    const approval = state.approvals.find((item) => item.id === approvalId);
+    if (!approval) {
+      return toSuccessEnvelope({ success: false, error: 'approval_not_found' }, 404, false);
+    }
+    state.approvals = state.approvals.filter((item) => item.id !== approvalId);
+    emitHostEvent('gateway:notification', {
+      method: 'exec.approval.resolved',
+      params: {
+        approvalId,
+        id: approvalId,
+        sessionKey: approval.sessionKey,
+        runId: approval.runId,
+      },
+    });
+    setTimeout(() => emitFinal(approval.runId, approval.sessionKey, 'Approved result'), 40);
+    return toSuccessEnvelope({ success: true });
   }
 
   if (path === '/api/session/prompt' && method === 'POST') {

@@ -33,7 +33,7 @@ export function findLatestAssistantTextFromItems(
   }
 
   for (const item of items) {
-    if (item.kind !== 'user-message' && item.kind !== 'task-completion' && item.kind !== 'system') {
+    if (item.kind !== 'user-message' && item.kind !== 'system') {
       continue;
     }
     const text = 'text' in item && typeof item.text === 'string'

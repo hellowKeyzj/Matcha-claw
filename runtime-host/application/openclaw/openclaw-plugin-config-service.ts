@@ -6,7 +6,6 @@ import {
   isChannelDerivedPluginId,
 } from '../channels/channel-plugin-bindings';
 import { CAPABILITY_OPENCLAW_PLUGIN_DEFINITIONS } from '../plugins/managed-plugin-definitions';
-import { withOpenClawConfigLock } from './openclaw-config-mutex';
 import type { OpenClawConfigRepositoryPort } from './openclaw-config-repository';
 import {
   LEGACY_PLUGIN_ID_MAP,
@@ -282,15 +281,15 @@ export class OpenClawPluginConfigService {
     const normalizedManualPluginIds = normalizePluginIds(pluginIds).filter((pluginId) => !isChannelDerivedPluginId(pluginId));
     let effectivePluginIds: string[] = [];
     let finalConfig: Record<string, unknown> | null = null;
-    await withOpenClawConfigLock(async () => {
+    await this.configRepository.update(async (config) => {
       const nextConfig = await applyManuallyManagedPluginIdsToOpenClawConfig(
         this.configRepository,
         this.pluginFileSystem,
-        await this.configRepository.read(),
+        config,
         normalizedManualPluginIds,
       );
       effectivePluginIds = resolveEffectivePluginIdsForConfig(nextConfig, normalizedManualPluginIds);
-      await this.configRepository.write(nextConfig);
+      replaceConfigContents(config, nextConfig);
       finalConfig = nextConfig;
     });
     if (finalConfig) {
@@ -298,4 +297,14 @@ export class OpenClawPluginConfigService {
     }
     return effectivePluginIds;
   }
+}
+
+function replaceConfigContents(target: Record<string, unknown>, source: Record<string, unknown>): void {
+  if (target === source) {
+    return;
+  }
+  for (const key of Object.keys(target)) {
+    delete target[key];
+  }
+  Object.assign(target, source);
 }

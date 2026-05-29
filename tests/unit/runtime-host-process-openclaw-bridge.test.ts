@@ -4,6 +4,13 @@ import { createOpenClawBridge } from '../../runtime-host/openclaw-bridge';
 function createGatewayClientStub() {
   return {
     gatewayRpc: vi.fn(async () => ({ success: true })),
+    inspectGatewayControlReadiness: vi.fn(async (methods: readonly string[]) => ({
+      ready: true,
+      phase: 'ready' as const,
+      requiredMethods: methods,
+      missingMethods: [],
+      retryable: false,
+    })),
     ensureGatewayReady: vi.fn(async () => undefined),
     isGatewayRunning: vi.fn(async () => true),
     readGatewayConnectionState: vi.fn(async () => ({
@@ -144,11 +151,14 @@ describe('runtime-host openclaw bridge', () => {
     expect(client.readGatewayConnectionState).toHaveBeenCalledTimes(1);
   });
 
-  it('gateway ready 探测走统一客户端接口', async () => {
+  it('gateway ready 探测走统一客户端结构化接口', async () => {
     const client = createGatewayClientStub();
     const bridge = createOpenClawBridge(client);
 
-    await expect(bridge.ensureGatewayReady(8000)).resolves.toBeUndefined();
-    expect(client.ensureGatewayReady).toHaveBeenCalledWith(8000);
+    await expect(bridge.inspectGatewayControlReadiness(['status'], 8000)).resolves.toMatchObject({
+      ready: true,
+      phase: 'ready',
+    });
+    expect(client.inspectGatewayControlReadiness).toHaveBeenCalledWith(['status'], 8000);
   });
 });

@@ -22,6 +22,10 @@ import {
   patchSessionSnapshot,
 } from '@/stores/chat/store-state-helpers';
 import { hasVisibleRuntimeError } from '@/stores/chat/runtime-error-view';
+import {
+  TRANSIENT_RUNTIME_ERROR_BANNER_DELAY_MS,
+  shouldShowRuntimeErrorBannerImmediately,
+} from './runtime-error-banner';
 import { ChatShell } from './components/ChatShell';
 import { ChatSidePanel } from './components/ChatSidePanel';
 import { ChatOffline } from './components/ChatOffline';
@@ -241,13 +245,20 @@ function parseAgentIdFromSessionKey(sessionKey: string): string {
 function resolveEffectiveChatModelId(
   sessionModel: string | null | undefined,
   agentDefaultModel: string | null | undefined,
+  fallbackModel: string | null | undefined,
+  availableModelIds: ReadonlySet<string>,
 ): string {
-  const normalizedSessionModel = typeof sessionModel === 'string' ? sessionModel.trim() : '';
-  if (normalizedSessionModel) {
-    return normalizedSessionModel;
-  }
-  const normalizedAgentDefaultModel = typeof agentDefaultModel === 'string' ? agentDefaultModel.trim() : '';
-  return normalizedAgentDefaultModel;
+  const normalizedFallbackModel = typeof fallbackModel === 'string' ? fallbackModel.trim() : '';
+  const hasCatalog = availableModelIds.size > 0;
+  const normalizeAvailableModel = (model: string | null | undefined): string => {
+    const normalized = typeof model === 'string' ? model.trim() : '';
+    if (!normalized) return '';
+    return !hasCatalog || availableModelIds.has(normalized) ? normalized : '';
+  };
+
+  return normalizeAvailableModel(sessionModel)
+    || normalizeAvailableModel(agentDefaultModel)
+    || normalizedFallbackModel;
 }
 
 export function Chat({ isActive = true }: ChatProps) {
@@ -306,9 +317,11 @@ export function Chat({ isActive = true }: ChatProps) {
   const [artifactFocusedFilePath, setArtifactFocusedFilePath] = useState<string | null>(null);
   const [artifactFocusedFileOverride, setArtifactFocusedFileOverride] = useState<ArtifactPreviewTarget | null>(null);
   const [artifactViewMode, setArtifactViewMode] = useState<'preview' | 'diff'>('diff');
+  const [visibleRuntimeError, setVisibleRuntimeError] = useState<string | null>(null);
   const skillPreviewRequestSeqRef = useRef(0);
   const previousRenderedItemsRef = useRef<ChatRenderItem[] | null>(null);
   const artifactAutoOpenedSessionKeyRef = useRef<string | null>(null);
+  const autoDefaultModelPatchRef = useRef<string | null>(null);
 
   const chatLayoutRef = useRef<HTMLDivElement>(null);
   const viewportPaneRef = useRef<ChatListHandle>(null);
@@ -583,14 +596,14 @@ export function Chat({ isActive = true }: ChatProps) {
     setArtifactViewMode('preview');
   }, [artifactActiveSection, artifactFocusedFile]);
   const localizedRuntimeError = useMemo(() => {
-    const visibleRuntimeError = hasVisibleRuntimeError({
+    const hasRuntimeError = hasVisibleRuntimeError({
       runtime: currentSession.runtime,
       dismissedMarker: dismissedRuntimeError,
     });
-    const localizedRuntimeIssue = visibleRuntimeError
+    const localizedRuntimeIssue = hasRuntimeError
       ? localizeGatewayIssue(currentSession.runtime.lastIssue ?? undefined, t)
       : null;
-    const runtimeMessage = visibleRuntimeError
+    const runtimeMessage = hasRuntimeError
       ? (localizedRuntimeIssue ?? currentSession.runtime.lastError)
       : null;
     const fallbackGatewayRuntimeError = (
@@ -611,9 +624,31 @@ export function Chat({ isActive = true }: ChatProps) {
     }
     return effectiveRuntimeError;
   }, [currentSession.runtime, dismissedRuntimeError, localizedGatewayIssue, t]);
+  useEffect(() => {
+    if (!localizedRuntimeError) {
+      setVisibleRuntimeError(null);
+      return;
+    }
+
+    if (shouldShowRuntimeErrorBannerImmediately({
+      runtime: currentSession.runtime,
+      gatewayIssue: gatewayStatus.lastIssue,
+      message: localizedRuntimeError,
+    })) {
+      setVisibleRuntimeError(localizedRuntimeError);
+      return;
+    }
+
+    const timeout = window.setTimeout(() => {
+      setVisibleRuntimeError(localizedRuntimeError);
+    }, TRANSIENT_RUNTIME_ERROR_BANNER_DELAY_MS);
+    return () => window.clearTimeout(timeout);
+  }, [currentSession.runtime, gatewayStatus.lastIssue, localizedRuntimeError]);
+  const fallbackModelId = availableModels[0]?.id ?? '';
+  const availableModelIds = useMemo(() => new Set(availableModels.map((model) => model.id)), [availableModels]);
   const effectiveCurrentModelId = useMemo(() => {
-    return resolveEffectiveChatModelId(currentSession.meta.model, currentAgent?.model);
-  }, [currentAgent?.model, currentSession.meta.model]);
+    return resolveEffectiveChatModelId(currentSession.meta.model, currentAgent?.model, fallbackModelId, availableModelIds);
+  }, [availableModelIds, currentAgent?.model, currentSession.meta.model, fallbackModelId]);
   const modelPicker = useMemo(() => {
     const currentModelId = effectiveCurrentModelId;
     if (!currentModelId) {
@@ -657,13 +692,13 @@ export function Chat({ isActive = true }: ChatProps) {
   const handleComposerGeometryChange = useCallback(() => {
     viewportPaneRef.current?.notifyComposerGeometryChanged();
   }, []);
-  const handleSelectModel = useCallback(async (nextModelId: string) => {
+  const handleSelectModel = useCallback(async (nextModelId: string, options?: { forcePatch?: boolean }) => {
     const normalizedNextModelId = nextModelId.trim();
     const currentModelId = effectiveCurrentModelId;
     if (!currentSessionKey) {
       return;
     }
-    if (!normalizedNextModelId || normalizedNextModelId === currentModelId) {
+    if (!normalizedNextModelId || (!options?.forcePatch && normalizedNextModelId === currentModelId)) {
       return;
     }
     if (
@@ -703,6 +738,33 @@ export function Chat({ isActive = true }: ChatProps) {
       toast.error(t('input.modelSwitchFailed', { error: message }));
     }
   }, [currentSession.meta.model, currentSession.runtime, currentSessionKey, effectiveCurrentModelId, loadSessions, t]);
+
+  useEffect(() => {
+    const normalizedSessionModel = currentSession.meta.model?.trim() || '';
+    const normalizedAgentModel = currentAgent?.model?.trim() || '';
+    const normalizedEffectiveModel = effectiveCurrentModelId.trim();
+    const hasAvailableModels = availableModelIds.size > 0;
+    const sessionModelAvailable = normalizedSessionModel && availableModelIds.has(normalizedSessionModel);
+    const agentModelAvailable = normalizedAgentModel && availableModelIds.has(normalizedAgentModel);
+    if (
+      !normalizedEffectiveModel
+      || !currentSessionKey
+      || currentSession.meta.historyStatus !== 'ready'
+      || isRunActive(currentSession.runtime)
+      || currentSession.runtime.activeRunId != null
+      || (hasAvailableModels && (sessionModelAvailable || (!normalizedSessionModel && agentModelAvailable)))
+      || (!hasAvailableModels && (normalizedSessionModel || normalizedAgentModel))
+    ) {
+      return;
+    }
+    const patchKey = `${currentSessionKey}:${normalizedEffectiveModel}`;
+    if (autoDefaultModelPatchRef.current === patchKey) {
+      return;
+    }
+    autoDefaultModelPatchRef.current = patchKey;
+    void handleSelectModel(normalizedEffectiveModel, { forcePatch: true });
+  }, [availableModelIds, currentAgent?.model, currentSession.meta.historyStatus, currentSession.meta.model, currentSession.runtime, currentSessionKey, effectiveCurrentModelId, handleSelectModel]);
+
   const handlePreviewSkill = useCallback(async (skill: {
     id: string;
     name: string;
@@ -907,9 +969,9 @@ export function Chat({ isActive = true }: ChatProps) {
             jumpToBottomLabel={t('liveThread.jumpToBottom')}
           />
         )}
-        errorBanner={localizedRuntimeError ? (
+        errorBanner={visibleRuntimeError ? (
           <ChatErrorBanner
-            error={localizedRuntimeError}
+            error={visibleRuntimeError}
             dismissLabel={t('common:actions.dismiss')}
             onDismiss={clearError}
           />

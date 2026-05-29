@@ -3,6 +3,7 @@ import {
   hostSessionDelete,
   hostSessionList,
   hostSessionNew,
+  hostSessionWindowFetch,
   waitForRuntimeJobResult,
 } from '@/lib/host-api';
 import {
@@ -127,13 +128,22 @@ async function requestSessionLifecycleSnapshot(
     hydrationJob?: { id: string };
   }>(path, {
     method: 'POST',
-    body: JSON.stringify({ sessionKey }),
+    body: JSON.stringify({ sessionKey, limit: 200 }),
   });
-  const data = result.hydrationJob
-    ? await waitForRuntimeJobResult<SessionLoadResult>(result.hydrationJob.id)
-    : result.snapshot
-      ? result as SessionLoadResult
-      : null;
+  if (result.hydrationJob) {
+    await waitForRuntimeJobResult(result.hydrationJob.id);
+    const window = await hostSessionWindowFetch({
+      sessionKey,
+      mode: 'latest',
+      limit: 200,
+    });
+    if (window.snapshot) {
+      return { snapshot: window.snapshot };
+    }
+  }
+  const data = result.snapshot
+    ? result as SessionLoadResult
+    : null;
   if (!data) {
     throw new Error('session lifecycle request did not return a snapshot');
   }

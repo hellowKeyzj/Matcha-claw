@@ -55,6 +55,10 @@ export function resolveSessionListLabel(
   if (explicit) {
     return explicit;
   }
+  const displayName = normalizeSessionLabel(meta.displayName);
+  if (displayName && displayName !== sessionKey) {
+    return displayName;
+  }
   const items = getSessionItems(state, sessionKey);
   for (let index = items.length - 1; index >= 0; index -= 1) {
     const item = items[index];

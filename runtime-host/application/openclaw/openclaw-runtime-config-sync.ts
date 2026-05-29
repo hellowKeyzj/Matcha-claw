@@ -1,5 +1,4 @@
 import type { RuntimeHostLogger } from '../../shared/logger';
-import { withOpenClawConfigLock } from './openclaw-config-mutex';
 import type { OpenClawConfigRepositoryPort } from './openclaw-config-repository';
 import type { PluginFileSystemPort } from '../../plugin-engine/plugin-file-system';
 import {
@@ -57,6 +56,16 @@ function markRestartCommand(config: Record<string, unknown>): void {
   config.commands = commands;
 }
 
+function replaceConfigContents(target: Record<string, unknown>, source: Record<string, unknown>): void {
+  if (target === source) {
+    return;
+  }
+  for (const key of Object.keys(target)) {
+    delete target[key];
+  }
+  Object.assign(target, source);
+}
+
 function syncOfficialBrowserDenylist(config: Record<string, unknown>, shouldDeny: boolean): void {
   const plugins = (
     config.plugins && typeof config.plugins === 'object'
@@ -90,8 +99,8 @@ export async function syncGatewayTokenToConfig(
   token: string,
   logger: RuntimeHostLogger,
 ): Promise<void> {
-  await withOpenClawConfigLock(async () => {
-    const config = await configRepository.read();
+  let synced = false;
+  await configRepository.update((config) => {
     const previousSerialized = JSON.stringify(config);
 
     const gateway = (
@@ -125,18 +134,19 @@ export async function syncGatewayTokenToConfig(
     }
 
     markRestartCommand(config);
-    await configRepository.write(config);
-    logger.info('Synced gateway token to openclaw.json');
+    synced = true;
   });
+  if (synced) {
+    logger.info('Synced gateway token to openclaw.json');
+  }
 }
 
 export async function syncBrowserConfigToOpenClaw(
   configRepository: OpenClawConfigRepositoryPort,
   logger: RuntimeHostLogger,
 ): Promise<void> {
-  await withOpenClawConfigLock(async () => {
-    const config = await configRepository.read();
-
+  let synced = false;
+  await configRepository.update((config) => {
     const browser = (
       config.browser && typeof config.browser === 'object'
         ? { ...(config.browser as Record<string, unknown>) }
@@ -165,9 +175,11 @@ export async function syncBrowserConfigToOpenClaw(
 
     config.browser = browser;
     markRestartCommand(config);
-    await configRepository.write(config);
-    logger.info('Synced browser config to openclaw.json');
+    synced = true;
   });
+  if (synced) {
+    logger.info('Synced browser config to openclaw.json');
+  }
 }
 
 export async function syncBrowserModeToOpenClaw(
@@ -177,9 +189,9 @@ export async function syncBrowserModeToOpenClaw(
   logger: RuntimeHostLogger,
 ): Promise<void> {
   const browserMode = normalizeBrowserMode(modeInput);
+  let synced = false;
 
-  await withOpenClawConfigLock(async () => {
-    const config = await configRepository.read();
+  await configRepository.update(async (config) => {
     const previousSerialized = JSON.stringify(config);
 
     const browser = (
@@ -223,9 +235,12 @@ export async function syncBrowserModeToOpenClaw(
     if (JSON.stringify(nextConfig) === previousSerialized) {
       return;
     }
-    await configRepository.write(nextConfig);
-    logger.info(`Synced browser mode "${browserMode}" to openclaw.json`);
+    replaceConfigContents(config, nextConfig);
+    synced = true;
   });
+  if (synced) {
+    logger.info(`Synced browser mode "${browserMode}" to openclaw.json`);
+  }
 }
 
 export async function syncSessionIdleMinutesToOpenClaw(
@@ -233,8 +248,8 @@ export async function syncSessionIdleMinutesToOpenClaw(
   logger: RuntimeHostLogger,
 ): Promise<void> {
   const DEFAULT_IDLE_MINUTES = 10_080;
-  await withOpenClawConfigLock(async () => {
-    const config = await configRepository.read();
+  let synced = false;
+  await configRepository.update((config) => {
     const previousSerialized = JSON.stringify(config);
     const session = (
       config.session && typeof config.session === 'object'
@@ -259,7 +274,9 @@ export async function syncSessionIdleMinutesToOpenClaw(
       return;
     }
     markRestartCommand(config);
-    await configRepository.write(config);
-    logger.info(`Synced session.idleMinutes=${DEFAULT_IDLE_MINUTES} to openclaw.json`);
+    synced = true;
   });
+  if (synced) {
+    logger.info(`Synced session.idleMinutes=${DEFAULT_IDLE_MINUTES} to openclaw.json`);
+  }
 }

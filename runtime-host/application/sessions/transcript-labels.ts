@@ -1,5 +1,7 @@
 import {
   extractMessageText,
+  isInternalAssistantControlMessage,
+  isInternalRuntimeDisplayMessage,
   normalizeAssistantFinalText as normalizeAssistantFinalTextShared,
   sanitizeCanonicalUserText,
 } from '../../shared/chat-message-normalization';
@@ -7,6 +9,7 @@ import type {
   SessionCatalogTitleSource,
   SessionTimelineEntry,
 } from '../../shared/session-adapter-types';
+import type { SessionTranscriptMessage } from './transcript-types';
 
 const SESSION_LABEL_MAX_LENGTH = 50;
 const ASSISTANT_SESSION_LABEL_TEMPLATE_PATTERNS: RegExp[] = [
@@ -52,6 +55,47 @@ function shouldIgnoreAssistantSessionLabel(text: string): boolean {
 
 export function resolveSessionLabelFromTimelineEntries(entries: SessionTimelineEntry[]): string | null {
   return resolveSessionLabelDetailsFromTimelineEntries(entries).label;
+}
+
+function canUseTranscriptMessageForLabel(message: SessionTranscriptMessage): boolean {
+  const role = message.role;
+  return (role === 'user' || role === 'assistant')
+    && !isInternalRuntimeDisplayMessage(message)
+    && !isInternalAssistantControlMessage(message);
+}
+
+export function resolveSessionLabelDetailsFromTranscriptMessages(messages: Iterable<SessionTranscriptMessage>): SessionResolvedLabel {
+  let userLabel: string | null = null;
+  let assistantLabel: string | null = null;
+  for (const message of messages) {
+    if (!canUseTranscriptMessageForLabel(message)) {
+      continue;
+    }
+    if (message.role === 'user') {
+      userLabel = resolveUserLabelCandidate(message.content) || userLabel;
+      continue;
+    }
+    const candidate = resolveAssistantLabelCandidate(message.content);
+    if (candidate && !shouldIgnoreAssistantSessionLabel(candidate)) {
+      assistantLabel = candidate;
+    }
+  }
+  if (userLabel) {
+    return {
+      label: userLabel,
+      titleSource: 'user',
+    };
+  }
+  if (assistantLabel) {
+    return {
+      label: assistantLabel,
+      titleSource: 'assistant',
+    };
+  }
+  return {
+    label: null,
+    titleSource: 'none',
+  };
 }
 
 export function resolveSessionLabelDetailsFromTimelineEntries(entries: SessionTimelineEntry[]): SessionResolvedLabel {

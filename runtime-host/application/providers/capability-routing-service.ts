@@ -14,6 +14,7 @@ import type {
 } from '../openclaw/openclaw-capability-routing-service';
 import type { ProviderStorePort } from './provider-store-repository';
 import type { CapabilityRoutingStorePort } from './capability-routing-store';
+import type { ProviderModelsStorePort } from './provider-models-store';
 import type { CapabilityRouting, ModelRef, ModelRoute, ProviderModel } from './provider-types';
 import {
   isRecord,
@@ -78,11 +79,17 @@ export class CapabilityRoutingApplicationService {
   constructor(
     private readonly store: CapabilityRoutingStorePort,
     private readonly credentials: ProviderStorePort,
+    private readonly models: ProviderModelsStorePort,
     private readonly writer: OpenClawCapabilityRoutingService,
   ) {}
 
   async read(): Promise<CapabilityRouting> {
     const store = await this.store.read();
+    const prunedRouting = pruneRoutesUnavailableInCatalog(store.routing, (await this.models.read()).models);
+    if (JSON.stringify(prunedRouting) !== JSON.stringify(store.routing)) {
+      store.routing = prunedRouting;
+      await this.store.write(store);
+    }
     if (hasRouting(store.routing)) {
       await this.syncOpenClawRoutingIfStale(store.routing);
       return store.routing;

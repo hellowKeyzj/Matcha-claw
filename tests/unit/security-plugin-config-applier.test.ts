@@ -24,6 +24,12 @@ describe('security plugin config applier', () => {
       async write(nextConfig: Record<string, unknown>) {
         openclawConfig = nextConfig;
       },
+      async update<T>(mutate: (config: Record<string, unknown>) => Promise<T> | T) {
+        const nextConfig = structuredClone(openclawConfig);
+        const result = await mutate(nextConfig);
+        openclawConfig = nextConfig;
+        return result;
+      },
     };
     const policyRepository = {
       read: vi.fn(async () => normalizeSecurityPolicyPayload({

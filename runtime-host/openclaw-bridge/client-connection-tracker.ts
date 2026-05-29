@@ -81,6 +81,8 @@ export class GatewayConnectionTracker {
       && this.currentSnapshot.lastIssue?.message === nextSnapshot.lastIssue?.message
       && this.currentSnapshot.lastIssue?.source === nextSnapshot.lastIssue?.source
       && this.currentSnapshot.lastIssue?.code === nextSnapshot.lastIssue?.code
+      && this.currentSnapshot.lastIssue?.retryable === nextSnapshot.lastIssue?.retryable
+      && this.currentSnapshot.lastIssue?.retryAfterMs === nextSnapshot.lastIssue?.retryAfterMs
       && sameDiagnosticsSnapshot(this.currentSnapshot.diagnostics, nextSnapshot.diagnostics);
     if (unchanged) {
       return this.currentSnapshot;

@@ -2,6 +2,11 @@ import {
   createGatewayClient,
   type GatewayConnectionStatePayload,
 } from '../openclaw-bridge';
+import {
+  DEFAULT_GATEWAY_BASE_METHODS,
+  type GatewayCapabilitiesSnapshot,
+  type GatewayControlReadiness,
+} from '../application/gateway/gateway-runtime-port';
 import type { GatewayConversationEvent } from '../openclaw-bridge/events';
 import type { ParentTransportClient } from './parent-transport-client';
 import type { RuntimeRouteResponse } from '../api/dispatch/runtime-route-dispatcher';
@@ -18,7 +23,6 @@ import type {
 } from '../openclaw-bridge/client-auth-ports';
 import type { RuntimeHostLogger } from '../shared/logger';
 import type { SessionUpdateEvent } from '../shared/session-adapter-types';
-import type { PendingApprovalStore } from '../application/sessions/pending-approval-store';
 import {
   containsTodoToolDebugSignal,
   logTodoToolDebug,
@@ -28,14 +32,16 @@ import { GatewayAutoRecovery } from './gateway-auto-recovery';
 
 export interface GatewaySessionRuntimePort {
   consumeGatewayConversationEvent(payload: GatewayConversationEvent): Promise<unknown[]>;
-  notifyTransportConnected(transportEpoch: number): void;
+  consumeGatewayNotification(payload: unknown): unknown[];
+  consumeGatewayConnectionState(payload: GatewayConnectionStatePayload): unknown[];
+  consumeGatewayControlReadiness(payload: GatewayControlReadiness): unknown[];
+  consumeGatewayCapabilities(payload: GatewayCapabilitiesSnapshot | null): unknown[];
 }
 
 export interface RuntimeHostGatewayBridgeDeps {
   readonly parentTransport: Pick<ParentTransportClient, 'requestParentShellAction' | 'emitParentGatewayEvent'>;
   readonly dispatchRoute: (method: string, route: string, payload: unknown) => Promise<RuntimeRouteResponse | null>;
   readonly getSessionRuntime: () => GatewaySessionRuntimePort | null;
-  readonly pendingApprovals: Pick<PendingApprovalStore, 'consumeGatewayNotification'>;
   readonly runtimeHostDataDir: string;
   readonly gatewayPort: number;
   readonly readGatewayToken: () => Promise<string>;
@@ -52,6 +58,30 @@ export interface RuntimeHostGatewayBridgeDeps {
 export function createRuntimeHostGatewayClient(deps: RuntimeHostGatewayBridgeDeps) {
   let latestObservedTransportEpoch = 0;
   let conversationEventChain: Promise<void> = Promise.resolve();
+  const pendingNotifications: unknown[] = [];
+  let pendingConnectionState: GatewayConnectionStatePayload | null = null;
+
+  const emitSessionUpdates = (sessionUpdates: unknown[]): void => {
+    for (const sessionUpdate of sessionUpdates) {
+      autoRecovery.observe(sessionUpdate as SessionUpdateEvent);
+      void deps.parentTransport.emitParentGatewayEvent('session:update', sessionUpdate).catch(() => undefined);
+    }
+  };
+
+  const flushPendingRuntimeEvents = (runtime: GatewaySessionRuntimePort | null): void => {
+    if (!runtime) {
+      return;
+    }
+    if (pendingConnectionState) {
+      const payload = pendingConnectionState;
+      pendingConnectionState = null;
+      emitSessionUpdates(runtime.consumeGatewayConnectionState(payload));
+    }
+    while (pendingNotifications.length > 0) {
+      const notification = pendingNotifications.shift()!;
+      emitSessionUpdates(runtime.consumeGatewayNotification(notification));
+    }
+  };
 
   const requestGatewayRestart = async (reason: string): Promise<void> => {
     const result = await deps.parentTransport.requestParentShellAction('gateway_restart', { reason });
@@ -81,14 +111,23 @@ export function createRuntimeHostGatewayClient(deps: RuntimeHostGatewayBridgeDep
     tcpProbe: deps.tcpProbe,
     logger: deps.logger,
     onGatewayNotification: (notification) => {
-      deps.pendingApprovals.consumeGatewayNotification(notification);
-      void deps.parentTransport.emitParentGatewayEvent('gateway:notification', notification).catch(() => undefined);
+      const runtime = deps.getSessionRuntime();
+      if (!runtime) {
+        pendingNotifications.push(notification);
+        return;
+      }
+      flushPendingRuntimeEvents(runtime);
+      emitSessionUpdates(runtime.consumeGatewayNotification(notification));
     },
     onGatewayConversationEvent: (payload) => {
       logTodoToolDebug(deps.logger, 'gateway.raw-conversation-event', payload);
       conversationEventChain = conversationEventChain.then(async () => {
         const runtime = deps.getSessionRuntime();
-        const sessionUpdates = runtime ? await runtime.consumeGatewayConversationEvent(payload) : [];
+        if (!runtime) {
+          return;
+        }
+        flushPendingRuntimeEvents(runtime);
+        const sessionUpdates = await runtime.consumeGatewayConversationEvent(payload);
         for (const sessionUpdate of sessionUpdates) {
           if (containsTodoToolDebugSignal(sessionUpdate)) {
             logTodoToolDebug(
@@ -97,9 +136,8 @@ export function createRuntimeHostGatewayClient(deps: RuntimeHostGatewayBridgeDep
               summarizeSessionUpdateForTodoToolDebug(sessionUpdate as SessionUpdateEvent),
             );
           }
-          autoRecovery.observe(sessionUpdate as SessionUpdateEvent);
-          void deps.parentTransport.emitParentGatewayEvent('session:update', sessionUpdate).catch(() => undefined);
         }
+        emitSessionUpdates(sessionUpdates);
       }).catch(() => undefined);
     },
     onGatewayChannelStatus: (payload) => {
@@ -120,6 +158,14 @@ export function createRuntimeHostGatewayClient(deps: RuntimeHostGatewayBridgeDep
       // 替代 renderer 30s 轮询 /api/gateway/status 的盲区兜底。
       void deps.parentTransport.emitParentGatewayEvent('gateway:lifecycle', payload).catch(() => undefined);
 
+      const runtime = deps.getSessionRuntime();
+      if (runtime) {
+        flushPendingRuntimeEvents(runtime);
+        emitSessionUpdates(runtime.consumeGatewayConnectionState(payload));
+      } else {
+        pendingConnectionState = payload;
+      }
+
       if (payload.state !== 'connected') {
         return;
       }
@@ -137,7 +183,21 @@ export function createRuntimeHostGatewayClient(deps: RuntimeHostGatewayBridgeDep
           updatedAt: deps.clock.nowMs(),
         },
       ).catch(() => undefined);
-      deps.getSessionRuntime()?.notifyTransportConnected(payload.transportEpoch);
+      const observedTransportEpoch = payload.transportEpoch;
+      void gatewayClient.inspectGatewayControlReadiness(DEFAULT_GATEWAY_BASE_METHODS).then((readiness) => {
+        if (observedTransportEpoch !== latestObservedTransportEpoch) {
+          return;
+        }
+        const currentRuntime = deps.getSessionRuntime();
+        if (!currentRuntime) {
+          return;
+        }
+        flushPendingRuntimeEvents(currentRuntime);
+        emitSessionUpdates([
+          ...currentRuntime.consumeGatewayControlReadiness(readiness),
+          ...currentRuntime.consumeGatewayCapabilities(readiness.capabilities ?? null),
+        ]);
+      }).catch(() => undefined);
     },
     requestGatewayRestart: requestGatewayRestart,
   });

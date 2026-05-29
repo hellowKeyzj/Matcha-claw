@@ -1,92 +1,82 @@
 import { describe, expect, it } from 'vitest';
 import {
-  normalizeApprovalDecision,
-  normalizeApprovalTimestampMs,
-  parseGatewayApprovalResponse,
-  resolveApprovalSessionKey,
-} from '@/stores/chat/approval-helpers';
+  buildApprovalResolvedPatch,
+  buildSyncPendingApprovalsPatch,
+  groupApprovalsBySession,
+} from '@/stores/chat/approval-handlers';
+import type { ApprovalItem } from '@/stores/chat/types';
 
-describe('chat approval helpers', () => {
-  it('normalizes approval decision variants', () => {
-    expect(normalizeApprovalDecision('allow_once')).toBe('allow-once');
-    expect(normalizeApprovalDecision('ALLOW-ALWAYS')).toBe('allow-always');
-    expect(normalizeApprovalDecision('deny')).toBe('deny');
-    expect(normalizeApprovalDecision('unknown')).toBeUndefined();
+function approval(input: Partial<ApprovalItem> & Pick<ApprovalItem, 'id' | 'sessionKey' | 'createdAtMs'>): ApprovalItem {
+  return {
+    title: input.title ?? 'approval',
+    allowedDecisions: input.allowedDecisions ?? ['allow-once', 'deny'],
+    ...input,
+  };
+}
+
+describe('chat approval handlers', () => {
+  it('groups canonical approvals by session and sorts by creation time', () => {
+    const grouped = groupApprovalsBySession([
+      approval({ id: 'approval-b', sessionKey: 'agent:main:main', createdAtMs: 2 }),
+      approval({ id: 'approval-a', sessionKey: 'agent:main:main', createdAtMs: 1 }),
+      approval({ id: 'approval-c', sessionKey: 'agent:foo:main', createdAtMs: 3 }),
+    ]);
+
+    expect(grouped['agent:main:main']?.map((item) => item.id)).toEqual(['approval-a', 'approval-b']);
+    expect(grouped['agent:foo:main']?.map((item) => item.id)).toEqual(['approval-c']);
   });
 
-  it('resolves approval session key from direct and nested payload', () => {
-    expect(resolveApprovalSessionKey({ sessionKey: 'agent:main:main' })).toBe('agent:main:main');
-    expect(resolveApprovalSessionKey({ data: { sessionKey: 'agent:data:main' } })).toBe('agent:data:main');
-    expect(resolveApprovalSessionKey({ data: { request: { sessionKey: 'agent:data-request:main' } } })).toBe('agent:data-request:main');
-    expect(resolveApprovalSessionKey({ request: { sessionKey: 'agent:foo:main' } })).toBe('agent:foo:main');
-    expect(resolveApprovalSessionKey({})).toBeUndefined();
-  });
-
-  it('normalizes approval timestamp in seconds and milliseconds', () => {
-    expect(normalizeApprovalTimestampMs(1_700_000_000)).toBe(1_700_000_000_000);
-    expect(normalizeApprovalTimestampMs(1_700_000_000_123)).toBe(1_700_000_000_123);
-    expect(normalizeApprovalTimestampMs('1700')).toBeUndefined();
-  });
-
-  it('preserves top-level approval details from Gateway events', () => {
-    const parsed = parseGatewayApprovalResponse({
-      id: 'approval-root',
-      sessionKey: 'agent:main:main',
-      title: 'gateway',
-      command: 'Remove-Item demo.txt',
-      allowedDecisions: ['allow-once', 'deny'],
+  it('syncs pending approvals from canonical runtime-host response', () => {
+    const patch = buildSyncPendingApprovalsPatch({
+      state: {
+        pendingApprovalsBySession: {
+          'agent:old:main': [approval({ id: 'old', sessionKey: 'agent:old:main', createdAtMs: 0 })],
+        },
+      } as never,
+      grouped: {
+        'agent:main:main': [approval({ id: 'approval-a', sessionKey: 'agent:main:main', createdAtMs: 1 })],
+      },
     });
 
-    expect(parsed.items[0]).toMatchObject({
-      id: 'approval-root',
-      sessionKey: 'agent:main:main',
-      title: 'gateway',
-      command: 'Remove-Item demo.txt',
-      allowedDecisions: ['allow-once', 'deny'],
+    expect(patch.pendingApprovalsBySession).toEqual({
+      'agent:main:main': [expect.objectContaining({ id: 'approval-a' })],
     });
   });
 
-  it('parses gateway approval payload and deduplicates by session/id', () => {
-    const now = Date.now();
-    const parsed = parseGatewayApprovalResponse({
-      approvals: [
-        {
-          id: 'approval-a',
-          sessionKey: 'agent:main:main',
-          createdAt: now - 1_000,
+  it('can sync only the hinted session without discarding other session approvals', () => {
+    const patch = buildSyncPendingApprovalsPatch({
+      state: {
+        pendingApprovalsBySession: {
+          'agent:main:main': [approval({ id: 'stale', sessionKey: 'agent:main:main', createdAtMs: 1 })],
+          'agent:other:main': [approval({ id: 'other', sessionKey: 'agent:other:main', createdAtMs: 2 })],
         },
-        {
-          id: 'approval-a',
-          sessionKey: 'agent:main:main',
-          createdAt: now,
-        },
-        {
-          approvalId: 'approval-b',
-          request: {
-            sessionKey: 'agent:foo:main',
-            requestedAt: now - 500,
-            command: 'Remove-Item demo.txt',
-            host: 'gateway',
-            allowedDecisions: ['allow-once', 'deny'],
-          },
-        },
-      ],
+      } as never,
+      grouped: {},
+      sessionKeyHint: 'agent:main:main',
     });
 
-    expect(parsed.recognized).toBe(true);
-    expect(parsed.items).toHaveLength(2);
-    expect(parsed.items.some((item) => item.id === 'approval-a' && item.sessionKey === 'agent:main:main')).toBe(true);
-    expect(parsed.items.some((item) => (
-      item.id === 'approval-b'
-      && item.sessionKey === 'agent:foo:main'
-      && item.title === 'gateway'
-      && item.command === 'Remove-Item demo.txt'
-      && item.allowedDecisions.join(',') === 'allow-once,deny'
-    ))).toBe(true);
+    expect(patch.pendingApprovalsBySession).toEqual({
+      'agent:main:main': [],
+      'agent:other:main': [expect.objectContaining({ id: 'other' })],
+    });
   });
 
-  it('returns unrecognized for unrelated payload', () => {
-    const parsed = parseGatewayApprovalResponse({ hello: 'world' });
-    expect(parsed).toEqual({ recognized: false, items: [] });
+  it('removes resolved approvals from the matching session', () => {
+    const patch = buildApprovalResolvedPatch({
+      state: {
+        currentSessionKey: 'agent:main:main',
+        pendingApprovalsBySession: {
+          'agent:main:main': [approval({ id: 'approval-a', sessionKey: 'agent:main:main', createdAtMs: 1 })],
+        },
+      } as never,
+      id: 'approval-a',
+      decision: 'allow-once',
+    });
+
+    expect(patch).toEqual({
+      pendingApprovalsBySession: {
+        'agent:main:main': [],
+      },
+    });
   });
 });

@@ -5,6 +5,23 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { createTestSessionRuntimeService } from './helpers/session-runtime-fixture';
 
+async function resolveHydrationResponse(
+  service: ReturnType<typeof createTestSessionRuntimeService>,
+  response: Awaited<ReturnType<ReturnType<typeof createTestSessionRuntimeService>['getSessionWindow']>>,
+  payload: {
+    sessionKey: string;
+    snapshot: Parameters<ReturnType<typeof createTestSessionRuntimeService>['executeSessionHydration']>[0]['snapshot'];
+  },
+) {
+  if (response.status !== 202) {
+    return response;
+  }
+  return {
+    status: 200,
+    data: await service.executeSessionHydration(payload),
+  };
+}
+
 async function hydrateSessionWindow(
   service: ReturnType<typeof createTestSessionRuntimeService>,
   payload: {
@@ -15,22 +32,15 @@ async function hydrateSessionWindow(
     includeCanonical?: boolean;
   },
 ) {
-  const response = await service.getSessionWindow(payload);
-  if (response.status !== 202) {
-    return response;
-  }
-  return {
-    status: 200,
-    data: await service.executeSessionHydration({
-      sessionKey: payload.sessionKey,
-      snapshot: {
-        kind: 'window',
-        mode: payload.mode ?? 'latest',
-        limit: payload.limit ?? 80,
-        offset: payload.offset ?? null,
-      },
-    }),
-  };
+  return resolveHydrationResponse(service, await service.getSessionWindow(payload), {
+    sessionKey: payload.sessionKey,
+    snapshot: {
+      kind: 'window',
+      mode: payload.mode ?? 'latest',
+      limit: payload.limit ?? 80,
+      offset: payload.offset ?? null,
+    },
+  });
 }
 
 function buildTranscriptLine(index: number) {
@@ -102,9 +112,9 @@ describe('session runtime service window', () => {
       },
     });
     expect(response.data.snapshot.items.map((item) => item.key)).toEqual([
-      'session:agent:main:session-a|entry:message-3',
-      'session:agent:main:session-a|assistant-turn:main:entry:message-4:main',
-      'session:agent:main:session-a|entry:message-5',
+      'session:agent:main:session-a|user:message:user:main:message-3',
+      'session:agent:main:session-a|assistant-turn:main:message-4',
+      'session:agent:main:session-a|user:message:user:main:message-5',
     ]);
   });
 
@@ -154,10 +164,10 @@ describe('session runtime service window', () => {
       },
     });
     expect(older.data.snapshot.items.map((item) => item.key)).toEqual([
-      'session:agent:main:session-a|entry:message-3',
-      'session:agent:main:session-a|assistant-turn:main:entry:message-4:main',
-      'session:agent:main:session-a|entry:message-5',
-      'session:agent:main:session-a|assistant-turn:main:entry:message-6:main',
+      'session:agent:main:session-a|user:message:user:main:message-3',
+      'session:agent:main:session-a|assistant-turn:main:message-4',
+      'session:agent:main:session-a|user:message:user:main:message-5',
+      'session:agent:main:session-a|assistant-turn:main:message-6',
     ]);
 
     const newer = await hydrateSessionWindow(service, {
@@ -179,8 +189,8 @@ describe('session runtime service window', () => {
       },
     });
     expect(newer.data.snapshot.items.map((item) => item.key)).toEqual([
-      'session:agent:main:session-a|entry:message-5',
-      'session:agent:main:session-a|assistant-turn:main:entry:message-6:main',
+      'session:agent:main:session-a|user:message:user:main:message-5',
+      'session:agent:main:session-a|assistant-turn:main:message-6',
     ]);
   });
 
@@ -217,8 +227,8 @@ describe('session runtime service window', () => {
 
     expect(response.status).toBe(200);
     expect(response.data.snapshot.items.map((item) => item.key)).toEqual([
-      'session:agent:main:session-a|entry:message-3',
-      'session:agent:main:session-a|assistant-turn:main:entry:message-4:main',
+      'session:agent:main:session-a|user:message:user:main:message-3',
+      'session:agent:main:session-a|assistant-turn:main:message-4',
     ]);
   });
 
@@ -264,10 +274,60 @@ describe('session runtime service window', () => {
     expect(response.data.snapshot.items).toMatchObject([
       {
         kind: 'user-message',
-        key: 'session:agent:main:session-a|entry:transcript-user-1',
+        key: 'session:agent:main:session-a|user:message:user:member:agent-main:transcript-user-1',
         text: 'hello world',
       },
     ]);
+  });
+
+  it('returns a snapshot directly for an already hydrated session window request', async () => {
+    const configDir = mkdtempSync(join(tmpdir(), 'matchaclaw-session-window-'));
+    tempDirs.push(configDir);
+    const sessionsDir = join(configDir, 'agents', 'main', 'sessions');
+    mkdirSync(sessionsDir, { recursive: true });
+    writeFileSync(join(sessionsDir, 'sessions.json'), JSON.stringify({
+      sessions: [
+        { key: 'agent:main:session-a', id: 'session-a' },
+      ],
+    }, null, 2));
+    writeFileSync(join(sessionsDir, 'session-a.jsonl'), [
+      buildTranscriptLine(1),
+      buildTranscriptLine(2),
+      buildTranscriptLine(3),
+    ].join('\n'));
+
+    const service = createTestSessionRuntimeService({
+      workspace: { getConfigDir: () => configDir },
+      openclawBridge: {
+        chatSend: async () => ({}),
+        gatewayRpc: async () => ({}),
+      },
+    });
+
+    const initial = await hydrateSessionWindow(service, {
+      sessionKey: 'agent:main:session-a',
+      mode: 'latest',
+      limit: 2,
+    });
+    expect(initial.status).toBe(200);
+
+    const second = await service.getSessionWindow({
+      sessionKey: 'agent:main:session-a',
+      mode: 'latest',
+      limit: 2,
+    });
+
+    expect(second.status).toBe(200);
+    expect(second.data).not.toHaveProperty('hydrationJob');
+    expect(second.data).toMatchObject({
+      snapshot: {
+        window: {
+          totalItemCount: 3,
+          windowStartOffset: 1,
+          windowEndOffset: 3,
+        },
+      },
+    });
   });
 
   it('rejects older/newer requests without offset', async () => {
@@ -335,8 +395,11 @@ describe('session runtime service window', () => {
     });
     expect(older.status).toBe(200);
 
-    const resumed = await service.resumeSession({
+    const resumed = await resolveHydrationResponse(service, await service.resumeSession({
       sessionKey: 'agent:main:session-a',
+    }), {
+      sessionKey: 'agent:main:session-a',
+      snapshot: { kind: 'state' },
     });
     expect(resumed.status).toBe(200);
     expect(resumed.data).toMatchObject({
@@ -348,8 +411,11 @@ describe('session runtime service window', () => {
       },
     });
 
-    const switched = await service.switchSession({
+    const switched = await resolveHydrationResponse(service, await service.switchSession({
       sessionKey: 'agent:main:session-a',
+    }), {
+      sessionKey: 'agent:main:session-a',
+      snapshot: { kind: 'window', mode: 'latest', limit: 80, offset: null },
     });
     expect(switched.status).toBe(200);
     expect(switched.data).toMatchObject({

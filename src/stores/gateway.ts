@@ -7,10 +7,6 @@ import { hostApiFetch } from '@/lib/host-api';
 import { subscribeHostEvent } from '@/lib/host-events';
 import type { SessionUpdateEvent, TaskSnapshotEvent } from '../../runtime-host/shared/session-adapter-types';
 import type { GatewayStatus } from '../types/gateway';
-import {
-  normalizeGatewayNotificationEvent,
-  type ChatDomainEvent,
-} from './chat/event-normalizer';
 import { useChatStore } from './chat';
 import { useTaskSnapshotStore } from './chat/task-snapshot-store';
 import { useChannelsStore } from './channels';
@@ -88,31 +84,21 @@ function syncPendingApprovalsFromChatStore(): void {
   }
 }
 
-function handleGatewayNotification(notification: { method?: string; params?: Record<string, unknown> } | undefined): void {
-  const payload = notification;
-  if (!payload || !payload.params || typeof payload.params !== 'object') {
+function isSessionUpdateEvent(value: unknown): value is SessionUpdateEvent {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return false;
+  }
+  const update = (value as { sessionUpdate?: unknown }).sessionUpdate;
+  return update === 'session_item'
+    || update === 'session_item_chunk'
+    || update === 'session_info_update'
+    || update === 'plan';
+}
+
+function handleSessionUpdateEvent(event: unknown): void {
+  if (!isSessionUpdateEvent(event)) {
     return;
   }
-  const domainEvent = normalizeGatewayNotificationEvent(payload);
-  if (domainEvent) {
-    handleChatDomainEvent(domainEvent);
-  }
-}
-
-function handleChatDomainEvent(event: ChatDomainEvent): void {
-  try {
-    const state = useChatStore.getState();
-    if (event.kind === 'chat.approval.requested') {
-      state.handleApprovalRequested(event.payload);
-      return;
-    }
-    state.handleApprovalResolved(event.payload);
-  } catch {
-    // ignore
-  }
-}
-
-function handleSessionUpdateEvent(event: SessionUpdateEvent): void {
   try {
     useChatStore.getState().handleSessionUpdateEvent(event);
   } catch {
@@ -191,13 +177,7 @@ export const useGatewayStore = create<GatewayState>((set, get) => ({
               },
             }));
           }));
-          unsubscribers.push(subscribeHostEvent<{ method?: string; params?: Record<string, unknown> }>(
-            'gateway:notification',
-            (payload) => {
-              handleGatewayNotification(payload);
-            },
-          ));
-          unsubscribers.push(subscribeHostEvent<SessionUpdateEvent>('session:update', (payload) => {
+          unsubscribers.push(subscribeHostEvent<unknown>('session:update', (payload) => {
             handleSessionUpdateEvent(payload);
           }));
           unsubscribers.push(subscribeHostEvent<TaskSnapshotEvent>(

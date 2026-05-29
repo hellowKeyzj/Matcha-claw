@@ -67,19 +67,6 @@ interface StartStoreSendWatchersParams {
   onSafetyTimeout: () => void;
 }
 
-async function reconcileStuckRunClosure(input: {
-  get: ChatStoreGetFn;
-  sessionKey: string;
-}): Promise<boolean> {
-  const state = input.get();
-  const runtime = getSessionRuntime(state, input.sessionKey);
-  return await state.reconcileRunClosure({
-    sessionKey: input.sessionKey,
-    ...(runtime.activeRunId ? { runId: runtime.activeRunId } : {}),
-    ...(runtime.pendingTurnKey ? { turnKey: runtime.pendingTurnKey } : {}),
-  });
-}
-
 export function startStoreSendWatchers(params: StartStoreSendWatchersParams): void {
   const {
     set,
@@ -118,32 +105,15 @@ export function startStoreSendWatchers(params: StartStoreSendWatchersParams): vo
 
     clearHistoryPoll();
     clearSendSafetyTimer();
-    void reconcileStuckRunClosure({ get, sessionKey })
-      .then((closed) => {
-        if (closed) {
-          return;
-        }
-        onSafetyTimeout();
-        set((current) => {
-          if (current.currentSessionKey !== sessionKey) {
-            return current;
-          }
-          return {
-            error: NO_RESPONSE_RECEIVED_ERROR,
-          };
-        });
-      })
-      .catch(() => {
-        onSafetyTimeout();
-        set((current) => {
-          if (current.currentSessionKey !== sessionKey) {
-            return current;
-          }
-          return {
-            error: NO_RESPONSE_RECEIVED_ERROR,
-          };
-        });
-      });
+    onSafetyTimeout();
+    set((current) => {
+      if (current.currentSessionKey !== sessionKey) {
+        return current;
+      }
+      return {
+        error: NO_RESPONSE_RECEIVED_ERROR,
+      };
+    });
   };
   setSendSafetyTimer(setTimeout(checkStuck, SAFETY_INITIAL_DELAY_MS));
 }

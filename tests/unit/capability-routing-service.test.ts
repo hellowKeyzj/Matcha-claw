@@ -29,6 +29,10 @@ describe('CapabilityRoutingApplicationService', () => {
         write: async () => {},
       },
       {
+        read: async () => ({ schemaVersion: 1, models: [] }),
+        write: async () => {},
+      },
+      {
         read: vi.fn(async () => ({
           chat: {
             primary: { providerKey: 'custom-dd749b2e', modelId: 'gpt-5.4' },
@@ -86,6 +90,10 @@ describe('CapabilityRoutingApplicationService', () => {
         }),
         write: async () => {},
       },
+      {
+        read: async () => ({ schemaVersion: 1, models: [] }),
+        write: async () => {},
+      },
       writer as any,
     );
 
@@ -139,6 +147,10 @@ describe('CapabilityRoutingApplicationService', () => {
           },
           apiKeys: {},
         }),
+        write: async () => {},
+      },
+      {
+        read: async () => ({ schemaVersion: 1, models: [] }),
         write: async () => {},
       },
       writer as any,
@@ -201,6 +213,13 @@ describe('CapabilityRoutingApplicationService', () => {
             },
           },
           apiKeys: {},
+        }),
+        write: async () => {},
+      },
+      {
+        read: async () => ({
+          schemaVersion: 1,
+          models: [{ credentialId: 'custom-media-new', modelId: 'new-image', capabilities: ['imageGenerate'] }],
         }),
         write: async () => {},
       },
@@ -267,6 +286,10 @@ describe('CapabilityRoutingApplicationService', () => {
           },
           apiKeys: {},
         }),
+        write: async () => {},
+      },
+      {
+        read: async () => ({ schemaVersion: 1, models: [] }),
         write: async () => {},
       },
       writer as any,

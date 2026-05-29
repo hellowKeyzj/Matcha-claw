@@ -79,6 +79,7 @@ export function registerSessionRuntimeModule(
   ));
   container.register('sessionRuntimeStateStore', (scope) => new SessionRuntimeStateStore({
     runtimeStore: scope.resolve('sessionRuntimeStoreRepository'),
+    logger: scope.resolve<RuntimeHostLogger>('logger'),
   }));
   container.register('sessionOperationCoordinator', () => new SessionOperationCoordinator());
   container.register('sessionTranscriptTimelineLoader', (scope) => new SessionTranscriptTimelineLoader({
@@ -120,7 +121,6 @@ export function registerSessionRuntimeModule(
     timelineRuntime: scope.resolve('sessionTimelineRuntime'),
     snapshotService: scope.resolve('sessionSnapshotService'),
     gateway: gateway(),
-    pendingApprovals: scope.resolve('session.pendingApprovals'),
     operationCoordinator: scope.resolve('sessionOperationCoordinator'),
     clock: scope.resolve<RuntimeClockPort>('runtime.clock'),
     idGenerator: scope.resolve<RuntimeIdGeneratorPort>('runtime.idGenerator'),

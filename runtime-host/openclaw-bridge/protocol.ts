@@ -2,6 +2,8 @@ export interface GatewayResponseError {
   code?: string | number;
   message?: string;
   details?: unknown;
+  retryable?: boolean;
+  retryAfterMs?: number;
 }
 
 export interface GatewayResponseFrame {

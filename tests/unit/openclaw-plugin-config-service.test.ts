@@ -11,9 +11,12 @@ function createConfigRepository(configDir: string, openclawDir: string) {
     write: async (config: Record<string, unknown>) => {
       writeFileSync(join(configDir, 'openclaw.json'), JSON.stringify(config, null, 2), 'utf8');
     },
-    update: async <T>(mutate: (config: Record<string, unknown>) => Promise<T> | T) => await mutate(
-      JSON.parse(readFileSync(join(configDir, 'openclaw.json'), 'utf8')) as Record<string, unknown>,
-    ),
+    update: async <T>(mutate: (config: Record<string, unknown>) => Promise<T> | T) => {
+      const config = JSON.parse(readFileSync(join(configDir, 'openclaw.json'), 'utf8')) as Record<string, unknown>;
+      const result = await mutate(config);
+      writeFileSync(join(configDir, 'openclaw.json'), JSON.stringify(config, null, 2), 'utf8');
+      return result;
+    },
     getConfigDir: () => configDir,
     getConfigFilePath: () => join(configDir, 'openclaw.json'),
     getOpenClawDirPath: () => openclawDir,

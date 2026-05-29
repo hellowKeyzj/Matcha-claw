@@ -8,7 +8,12 @@ function createService(initialConfig: Record<string, unknown>) {
     write: async (next) => {
       config = structuredClone(next);
     },
-    update: async () => undefined as never,
+    update: async (mutate) => {
+      const next = structuredClone(config);
+      const result = await mutate(next);
+      config = structuredClone(next);
+      return result;
+    },
     getConfigDir: () => '',
     getConfigFilePath: () => '',
     getOpenClawDirPath: () => '',
@@ -45,6 +50,12 @@ describe('OpenClawProviderModelsService', () => {
           input: ['text'],
           contextWindow: 128000,
           maxTokens: 8192,
+          cost: {
+            input: 0,
+            output: 0,
+            cacheRead: 0,
+            cacheWrite: 0,
+          },
         },
       ],
     });
@@ -110,6 +121,12 @@ describe('OpenClawProviderModelsService', () => {
           {
             id: 'gpt-5.4',
             name: 'gpt-5.4',
+            cost: {
+              input: 0,
+              output: 0,
+              cacheRead: 0,
+              cacheWrite: 0,
+            },
           },
         ],
       },

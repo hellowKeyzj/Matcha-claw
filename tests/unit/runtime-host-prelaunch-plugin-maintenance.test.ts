@@ -157,6 +157,35 @@ describe('runtime-host prelaunch plugin maintenance', () => {
     expect(readFileSync(markerPath, 'utf8')).toBe('keep-me');
   });
 
+  it('启动期 managed 插件源内容变化时会重新覆盖同版本旧副本', async () => {
+    writeManagedPluginSource('matchaclaw-media', '1.0.0', 'Media v1');
+    writeOpenClawConfig({
+      plugins: {
+        allow: ['matchaclaw-media'],
+        entries: {
+          'matchaclaw-media': { enabled: true },
+        },
+      },
+    });
+
+    const service = createMaintenanceService();
+    await service.ensureConfiguredManagedPluginsForGatewayLaunch();
+    writeManagedPluginSource('matchaclaw-media', '1.0.0', 'Media v2');
+
+    await service.ensureConfiguredManagedPluginsForGatewayLaunch();
+
+    const installedManifest = JSON.parse(
+      readFileSync(join(configDir, 'extensions', 'matchaclaw-media', 'openclaw.plugin.json'), 'utf8'),
+    ) as {
+      name: string;
+      version: string;
+    };
+    expect(installedManifest).toMatchObject({
+      name: 'Media v2',
+      version: '1.0.0',
+    });
+  });
+
   it('启动期会在 runtime-host 侧清理仍是内置渠道的扩展旧副本', async () => {
     const discordDir = join(configDir, 'extensions', 'discord');
     const telegramDir = join(configDir, 'extensions', 'telegram');

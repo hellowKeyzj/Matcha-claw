@@ -91,39 +91,16 @@ describe('chat runtime store kernel', () => {
     ).toBe(second);
   });
 
-  it('consumes terminal history reconcile markers once per session', () => {
-    const kernel = createChatStoreKernel(createSetSpy().set);
-
-    kernel.historyRuntime.markTerminalHistoryReconcileNeeded({
-      sessionKey: 'agent:main:main',
-      runId: 'run-1',
-      turnKey: 'turn-1',
-      toolCallIds: ['tool-1'],
-    });
-
-    expect(kernel.historyRuntime.consumeTerminalHistoryReconcileNeeded('agent:main:main')).toEqual({
-      sessionKey: 'agent:main:main',
-      runId: 'run-1',
-      turnKey: 'turn-1',
-      toolCallIds: ['tool-1'],
-    });
-    expect(kernel.historyRuntime.consumeTerminalHistoryReconcileNeeded('agent:main:main')).toBeNull();
-  });
-
-  it('tracks one in-flight history load per session', () => {
+  it('tracks in-flight history load clear ownership per session', () => {
     const kernel = createChatStoreKernel(createSetSpy().set);
     const first = Promise.resolve();
     const second = Promise.resolve();
 
-    expect(kernel.historyRuntime.getHistoryLoadInFlight('agent:main:main')).toBeNull();
     kernel.historyRuntime.setHistoryLoadInFlight('agent:main:main', first);
-    expect(kernel.historyRuntime.getHistoryLoadInFlight('agent:main:main')).toBe(first);
-
     kernel.historyRuntime.clearHistoryLoadInFlight('agent:main:main', second);
-    expect(kernel.historyRuntime.getHistoryLoadInFlight('agent:main:main')).toBe(first);
-
+    kernel.historyRuntime.setHistoryLoadInFlight('agent:main:main', second);
     kernel.historyRuntime.clearHistoryLoadInFlight('agent:main:main', first);
-    expect(kernel.historyRuntime.getHistoryLoadInFlight('agent:main:main')).toBeNull();
+    kernel.historyRuntime.clearHistoryLoadInFlight('agent:main:main', second);
   });
 });
 

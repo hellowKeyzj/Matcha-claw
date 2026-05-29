@@ -1,4 +1,4 @@
-import { hostSessionLoad, waitForRuntimeJobResult } from '@/lib/host-api';
+import { hostSessionLoad, hostSessionWindowFetch, waitForRuntimeJobResult } from '@/lib/host-api';
 import type {
   SessionLoadResult,
   SessionStateSnapshot,
@@ -38,12 +38,20 @@ export async function fetchHistoryWindow(
 
   const initial = await hostSessionLoad({
     sessionKey: requestedSessionKey,
+    limit,
   }, {
     timeoutMs,
   });
   const data = initial.hydrationJob
-    ? await waitForRuntimeJobResult<SessionLoadResult>(initial.hydrationJob.id, {
+    ? await waitForRuntimeJobResult(initial.hydrationJob.id, {
         timeoutMs,
+      }).then(async () => {
+        const window = await hostSessionWindowFetch({
+          sessionKey: requestedSessionKey,
+          mode: 'latest',
+          limit,
+        });
+        return window.snapshot ? { snapshot: window.snapshot } : null;
       })
     : initial.snapshot
       ? initial as SessionLoadResult

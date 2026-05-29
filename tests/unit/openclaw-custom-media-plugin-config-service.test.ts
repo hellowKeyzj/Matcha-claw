@@ -8,7 +8,12 @@ function createService(initialConfig: Record<string, unknown>) {
     write: async (next) => {
       config = structuredClone(next);
     },
-    update: async () => undefined as never,
+    update: async (mutate) => {
+      const next = structuredClone(config);
+      const result = await mutate(next);
+      config = structuredClone(next);
+      return result;
+    },
     getConfigDir: () => '',
     getConfigFilePath: () => '',
     getOpenClawDirPath: () => '',
@@ -20,7 +25,7 @@ function createService(initialConfig: Record<string, unknown>) {
 }
 
 describe('OpenClawCustomMediaPluginConfigService', () => {
-  it('writes custom media providers to the MatchaClaw media plugin config', async () => {
+  it('writes custom media providers without API keys to the MatchaClaw media plugin config', async () => {
     const { service, readConfig } = createService({});
 
     await service.replaceAll({
@@ -64,6 +69,37 @@ describe('OpenClawCustomMediaPluginConfigService', () => {
         },
       },
     });
+  });
+
+  it('removes stale inline API keys from custom media plugin config', async () => {
+    const { service, readConfig } = createService({
+      plugins: {
+        entries: {
+          'matchaclaw-media': {
+            config: {
+              providers: {
+                'custom-592a8424': {
+                  baseUrl: 'http://pic2api.com/v1beta',
+                  apiKey: 'stale-key',
+                  apiProtocol: 'google',
+                  models: [{ id: 'gemini-2.5-flash-image', capabilities: ['imageGenerate'] }],
+                },
+              },
+            },
+          },
+        },
+      },
+    });
+
+    await service.replaceAll({
+      'custom-592a8424': {
+        baseUrl: 'http://pic2api.com/v1beta',
+        apiProtocol: 'google',
+        models: [{ modelId: 'gemini-2.5-flash-image', capabilities: ['imageGenerate'] }],
+      },
+    });
+
+    expect((readConfig().plugins as any).entries['matchaclaw-media'].config.providers['custom-592a8424']).not.toHaveProperty('apiKey');
   });
 
   it('reads model-level timeoutMs from custom media plugin config', async () => {

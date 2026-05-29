@@ -2,7 +2,6 @@ import { basename, isAbsolute, join, resolve } from 'node:path';
 import { normalizePluginIds } from '../../bootstrap/runtime-config';
 import { createPluginDiscovery } from '../../plugin-engine/plugin-discovery';
 import type { PluginFileSystemPort } from '../../plugin-engine/plugin-file-system';
-import { withOpenClawConfigLock } from './openclaw-config-mutex';
 import type { OpenClawConfigRepositoryPort } from './openclaw-config-repository';
 import { isRecord } from './openclaw-plugin-config-model';
 
@@ -147,14 +146,18 @@ export async function syncPluginSkillsToOpenClawConfig(
   fileSystem: PluginSkillFileSystem,
   enabledPluginIds: readonly string[],
 ): Promise<void> {
-  await withOpenClawConfigLock(async () => {
-    await configRepository.write(
-      await applyPluginSkillStateToConfig(
-        configRepository,
-        fileSystem,
-        await configRepository.read(),
-        enabledPluginIds,
-      ),
+  await configRepository.update(async (config) => {
+    const nextConfig = await applyPluginSkillStateToConfig(
+      configRepository,
+      fileSystem,
+      config,
+      enabledPluginIds,
     );
+    if (config !== nextConfig) {
+      for (const key of Object.keys(config)) {
+        delete config[key];
+      }
+      Object.assign(config, nextConfig);
+    }
   });
 }

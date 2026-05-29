@@ -166,6 +166,22 @@ export function hydrateAttachedFilesFromItems(items: SessionRenderItem[]): Sessi
   return changed ? nextItems : items;
 }
 
+function mergeHydratedAttachmentItem(
+  currentItem: SessionRenderUserMessageItem | SessionAssistantTurnItem,
+  hydratedItem: SessionRenderUserMessageItem | SessionAssistantTurnItem,
+): SessionRenderUserMessageItem | SessionAssistantTurnItem {
+  if (currentItem.attachedFiles === hydratedItem.attachedFiles) {
+    return currentItem;
+  }
+  if (currentItem.attachedFiles.length === 0 && hydratedItem.attachedFiles.length === 0) {
+    return currentItem;
+  }
+  return {
+    ...currentItem,
+    attachedFiles: hydratedItem.attachedFiles,
+  };
+}
+
 export function reconcileHydratedAttachmentItems(
   currentItems: SessionRenderItem[],
   hydratedItems: SessionRenderItem[],
@@ -177,18 +193,21 @@ export function reconcileHydratedAttachmentItems(
   const hydratedByKey = new Map(
     hydratedItems.map((item) => [item.key, item] as const),
   );
-  let changed = currentItems.length !== hydratedItems.length;
+  let changed = false;
 
   const nextItems = currentItems.map((currentItem) => {
     const hydratedItem = hydratedByKey.get(currentItem.key);
     if (!hydratedItem || hydratedItem.kind !== currentItem.kind) {
       return currentItem;
     }
-    if (hydratedItem === currentItem) {
+    if (!isAttachmentBearingItem(currentItem) || !isAttachmentBearingItem(hydratedItem)) {
       return currentItem;
     }
-    changed = true;
-    return hydratedItem;
+    const nextItem = mergeHydratedAttachmentItem(currentItem, hydratedItem);
+    if (nextItem !== currentItem) {
+      changed = true;
+    }
+    return nextItem;
   });
 
   return changed ? reconcileSessionItems(currentItems, nextItems) : currentItems;

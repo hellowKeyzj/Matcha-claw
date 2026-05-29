@@ -19,7 +19,6 @@ export interface SessionTranscriptMessage {
   metadata?: Record<string, unknown>;
   name?: string;
   details?: unknown;
-  toolStatuses?: Array<Record<string, unknown>>;
   taskCompletionEvents?: SessionTaskCompletionEvent[];
   _attachedFiles?: Array<Record<string, unknown>>;
   isError?: boolean;

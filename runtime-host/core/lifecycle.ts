@@ -77,20 +77,23 @@ export class RuntimeHostLifecycle {
   }
 
   startBackgroundServices(): void {
-    for (const service of this.backgroundServices) {
-      if (this.state === 'stopped') {
-        return;
-      }
-      if (this.startedBackgroundServiceNames.has(service.name)) {
-        continue;
-      }
-      this.startedBackgroundServiceNames.add(service.name);
-      Promise.resolve()
-        .then(() => service.start())
-        .catch((error) => {
+    if (process.env.MATCHACLAW_RUNTIME_HOST_DISABLE_BACKGROUND_SERVICES === '1') {
+      return;
+    }
+    setImmediate(() => {
+      for (const service of this.backgroundServices) {
+        if (this.state === 'stopped') {
+          return;
+        }
+        if (this.startedBackgroundServiceNames.has(service.name)) {
+          continue;
+        }
+        this.startedBackgroundServiceNames.add(service.name);
+        Promise.resolve(service.start()).catch((error) => {
           this.logger.warn(`background service failed: ${service.name}`, error);
         });
-    }
+      }
+    });
   }
 
   async stop(): Promise<void> {

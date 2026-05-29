@@ -155,6 +155,9 @@ export class ManagedPluginInstaller {
             sourceDir: registryPlugin.sourceDir,
             version: registryPlugin.version,
             manifestId: registryPlugin.manifestId,
+            manifest: await this.readPathSignature(join(registryPlugin.sourceDir, 'openclaw.plugin.json')),
+            packageJson: await this.readPathSignature(join(registryPlugin.sourceDir, 'package.json')),
+            dist: await this.readPathSignature(join(registryPlugin.sourceDir, 'dist')),
           }
         : 'missing';
     }

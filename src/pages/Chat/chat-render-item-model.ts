@@ -6,7 +6,6 @@ import type {
   SessionRenderExecutionGraphItem,
   SessionRenderItem,
   SessionRenderSystemItem,
-  SessionRenderTaskCompletionItem,
   SessionRenderUserMessageItem,
 } from '../../../runtime-host/shared/session-adapter-types';
 
@@ -25,14 +24,12 @@ interface ChatRenderItemBase {
 export type ChatUserMessageItem = SessionRenderUserMessageItem & ChatRenderItemBase;
 export type ChatAssistantTurnItem = SessionAssistantTurnItem & ChatRenderItemBase;
 export type ChatExecutionGraphItem = SessionRenderExecutionGraphItem & ChatRenderItemBase;
-export type ChatTaskCompletionItem = SessionRenderTaskCompletionItem & ChatRenderItemBase;
 export type ChatSystemItem = SessionRenderSystemItem & ChatRenderItemBase;
 
 export type ChatRenderItem =
   | ChatUserMessageItem
   | ChatAssistantTurnItem
   | ChatExecutionGraphItem
-  | ChatTaskCompletionItem
   | ChatSystemItem;
 
 export interface ChatAssistantCatalogAgent extends ChatAssistantPresentation {

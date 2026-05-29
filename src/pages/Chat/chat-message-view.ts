@@ -1,9 +1,5 @@
 import type { AttachedFileMeta } from '@/stores/chat';
 import type {
-  SessionAssistantMediaSegment,
-  SessionAssistantMessageSegment,
-  SessionAssistantThinkingSegment,
-  SessionAssistantToolSegment,
   SessionAssistantTurnItem,
   SessionRenderImage,
   SessionRenderUserMessageItem,
@@ -42,69 +38,21 @@ function normalizeToolUses(toolUses: ReadonlyArray<{ id: string; name: string; i
   }));
 }
 
-function readAssistantThinking(item: SessionAssistantTurnItem): string | null {
-  const text = item.segments
-    .filter((segment): segment is SessionAssistantThinkingSegment => segment.kind === 'thinking')
-    .map((segment) => segment.text.trim())
-    .filter(Boolean)
-    .join('\n')
-    .trim();
-  return text || null;
-}
-
-function readAssistantImages(item: SessionAssistantTurnItem): ReadonlyArray<ChatMessageImage> {
-  return normalizeImages(item.segments
-    .filter((segment): segment is SessionAssistantMediaSegment => segment.kind === 'media')
-    .flatMap((segment) => segment.images));
-}
-
-function readAssistantAttachedFiles(item: SessionAssistantTurnItem): ReadonlyArray<AttachedFileMeta> {
-  const attachedFiles = item.segments
-    .filter((segment): segment is SessionAssistantMediaSegment => segment.kind === 'media')
-    .flatMap((segment) => segment.attachedFiles) as unknown as AttachedFileMeta[];
-  const hasPrimaryContent = item.segments.some((segment) => {
-    if (segment.kind === 'thinking') {
-      return segment.text.trim().length > 0;
-    }
-    if (segment.kind === 'message') {
-      return segment.text.trim().length > 0;
-    }
-    if (segment.kind === 'tool') {
-      return true;
-    }
-    return segment.images.length > 0;
-  });
-  if (!hasPrimaryContent) {
-    return attachedFiles;
-  }
-  return attachedFiles.filter((file) => (
-    file.source !== 'message-ref'
-    && (file.source !== 'tool-result' || file.mimeType.startsWith('image/'))
-  ));
-}
-
 export function getAssistantTurnPlainText(item: SessionAssistantTurnItem): string {
-  return item.segments
-    .filter((segment): segment is SessionAssistantMessageSegment => segment.kind === 'message')
-    .map((segment) => segment.text.trim())
-    .filter(Boolean)
-    .join('\n')
-    .trim();
+  return item.text.trim();
 }
 
 export function getOrBuildChatMessageView(item: ChatRenderableMessageItem): ChatMessageView {
   if (item.kind === 'assistant-turn') {
     return {
-      thinking: readAssistantThinking(item),
-      images: readAssistantImages(item),
-      toolUses: normalizeToolUses(item.segments
-        .filter((segment): segment is SessionAssistantToolSegment => segment.kind === 'tool')
-        .map((segment) => ({
-          id: segment.tool.id,
-          name: segment.tool.name,
-          input: segment.tool.input,
-        }))),
-      attachedFiles: readAssistantAttachedFiles(item),
+      thinking: item.thinking,
+      images: normalizeImages(item.images),
+      toolUses: normalizeToolUses(item.tools.map((tool) => ({
+        id: tool.id,
+        name: tool.name,
+        input: tool.input,
+      }))),
+      attachedFiles: item.attachedFiles as unknown as AttachedFileMeta[],
     };
   }
 

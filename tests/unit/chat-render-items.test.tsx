@@ -148,15 +148,13 @@ describe('chat render item fixtures', () => {
         id: 'tool-1',
         name: 'read_file',
         input: { filePath: 'README.md' },
+      }, {
+        type: 'tool_result',
+        toolCallId: 'tool-1',
+        name: 'read_file',
       }],
       timestamp: 1,
       id: 'assistant-tool-1',
-      toolStatuses: [{
-        toolCallId: 'tool-1',
-        name: 'read_file',
-        status: 'completed',
-        updatedAt: 1,
-      }],
     }]);
 
     expect(items).toHaveLength(1);
@@ -166,7 +164,7 @@ describe('chat render item fixtures', () => {
         id: 'tool-1',
         name: 'read_file',
         input: { filePath: 'README.md' },
-        status: 'running',
+        status: 'completed',
       }],
       text: '',
     });

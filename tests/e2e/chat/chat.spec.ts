@@ -44,7 +44,7 @@ test.describe('Chat e2e', () => {
     await input.fill('e2e default message');
     await page.getByTitle('Send').click();
 
-    await expect(page.getByTitle('Stop')).toBeVisible();
+    await expect(page.getByText('Mock streaming...')).toBeVisible();
     await expect(page.getByText('Mock reply: e2e default message')).toBeVisible();
     await expect(page.getByTitle('Send')).toBeVisible();
   });
@@ -58,7 +58,7 @@ test.describe('Chat e2e', () => {
 
     const approvalDock = page.getByTestId('chat-approval-dock');
     await expect(approvalDock).toBeVisible();
-    await approvalDock.locator('button').first().click();
+    await approvalDock.getByRole('button', { name: /Allow once|允许一次|同意一次/i }).click();
 
     await expect(page.getByText('Approved result')).toBeVisible();
     await expect(approvalDock).toBeHidden();

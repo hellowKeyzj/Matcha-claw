@@ -8,7 +8,6 @@
  */
 
 import type { OpenClawConfigRepositoryPort } from './openclaw-config-repository';
-import { withOpenClawConfigLock } from './openclaw-config-mutex';
 import { pruneUnknownModelRefsInAgentsConfig } from './openclaw-provider-model-pruning';
 
 export interface ProviderModelEntry {
@@ -16,6 +15,7 @@ export interface ProviderModelEntry {
   readonly contextWindow?: number;
   readonly maxTokens?: number;
   readonly input?: readonly string[];
+  readonly cost?: Record<string, number>;
 }
 
 export interface OpenClawProviderModelsEntry {
@@ -50,6 +50,7 @@ function decodeModelEntry(value: unknown): ProviderModelEntry | null {
     ...(contextWindow !== undefined ? { contextWindow } : {}),
     ...(maxTokens !== undefined ? { maxTokens } : {}),
     ...(Array.isArray(value.input) ? { input: value.input.filter((item): item is string => typeof item === 'string') } : {}),
+    ...(normalizeCost(value.cost) ? { cost: normalizeCost(value.cost) } : {}),
   };
 }
 
@@ -83,6 +84,26 @@ function normalizeHeaders(value: unknown): Record<string, string> | undefined {
     .filter((entry): entry is [string, string] => typeof entry[1] === 'string' && entry[0].trim().length > 0 && entry[1].trim().length > 0)
     .map(([key, item]) => [key, item.trim()] as const);
   return entries.length > 0 ? Object.fromEntries(entries) : undefined;
+}
+
+function normalizeCost(value: unknown): Record<string, number> | undefined {
+  if (!isRecord(value)) return undefined;
+  const out: Record<string, number> = {};
+  for (const [key, item] of Object.entries(value)) {
+    if (typeof item === 'number' && Number.isFinite(item) && item >= 0) {
+      out[key] = item;
+    }
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
+function zeroCost(): Record<string, number> {
+  return {
+    input: 0,
+    output: 0,
+    cacheRead: 0,
+    cacheWrite: 0,
+  };
 }
 
 function applyModelsToProviderNode(
@@ -125,6 +146,7 @@ function applyModelsToProviderNode(
     if (entry.input) out.input = entry.input;
     if (entry.contextWindow !== undefined) out.contextWindow = entry.contextWindow;
     if (entry.maxTokens !== undefined) out.maxTokens = entry.maxTokens;
+    out.cost = normalizeCost(entry.cost) ?? zeroCost();
     return out;
   });
 }
@@ -151,8 +173,7 @@ export class OpenClawProviderModelsService {
   }
 
   async replaceAll(providerMap: OpenClawProviderModelsMap, validModelRefs?: readonly string[]): Promise<void> {
-    return await withOpenClawConfigLock(async () => {
-      const config = await this.configRepository.read();
+    return await this.configRepository.update((config) => {
       for (const [providerKey, entry] of Object.entries(providerMap)) {
         const normalized = entry.models
           .map((entry) => decodeModelEntry(entry))
@@ -165,7 +186,6 @@ export class OpenClawProviderModelsService {
       if (validModelRefs) {
         pruneUnknownModelRefsInAgentsConfig(config, new Set(validModelRefs));
       }
-      await this.configRepository.write(config);
     });
   }
 }

@@ -6,16 +6,10 @@
 import { create } from 'zustand';
 import type { GatewayStatus } from '@/types/gateway';
 import { createIdleResourceStatusState } from '@/lib/resource-state';
-import { hostSessionApprovals, hostSessionRename, hostSessionResolveApproval, hostSessionRunClosure, hostSessionTurnToolResults } from '@/lib/host-api';
+import { hostSessionApprovals, hostSessionRename, hostSessionResolveApproval } from '@/lib/host-api';
 import { useGatewayStore } from '../gateway';
 import { executeStoreAbortRun } from './abort-handlers';
 import {
-  normalizeApprovalDecision,
-  parseGatewayApprovalResponse,
-  resolveApprovalSessionKey,
-} from './approval-helpers';
-import {
-  buildApprovalRequestedPatch,
   buildApprovalResolvedPatch,
   buildSyncPendingApprovalsPatch,
   groupApprovalsBySession,
@@ -43,7 +37,7 @@ import {
   DEFAULT_SESSION_KEY,
   type ChatStoreState,
 } from './types';
-import { createEmptySessionRecord, getSessionRuntime, patchSessionRecord, patchSessionTurnItem } from './store-state-helpers';
+import { createEmptySessionRecord, getSessionRuntime } from './store-state-helpers';
 import { finishChatRunTelemetry } from './telemetry';
 import { buildRuntimeErrorDismissMarker } from './runtime-error-view';
 
@@ -99,10 +93,6 @@ export const useChatStore = create<ChatStoreState>((set, get) => {
       if (!normalizedSessionKey) {
         return Promise.resolve();
       }
-      const currentTask = historyRuntime.getHistoryLoadInFlight(normalizedSessionKey);
-      if (currentTask) {
-        return currentTask;
-      }
       const task = executeHistoryLoad({
         set,
         get,
@@ -119,53 +109,6 @@ export const useChatStore = create<ChatStoreState>((set, get) => {
         () => historyRuntime.clearHistoryLoadInFlight(normalizedSessionKey, task),
       );
       return task;
-    },
-    loadTurnToolResults: async (request) => {
-      const sessionKey = request.sessionKey.trim();
-      if (!sessionKey) return;
-      const result = await hostSessionTurnToolResults({
-        sessionKey,
-        ...(request.runId ? { runId: request.runId } : {}),
-        ...(request.turnKey ? { turnKey: request.turnKey } : {}),
-        ...(request.toolCallIds && request.toolCallIds.length > 0 ? { toolCallIds: request.toolCallIds } : {}),
-      });
-      set((state) => {
-        const current = state.loadedSessions[sessionKey];
-        if (!current) return state;
-        const loadedSessions = result.item
-          ? patchSessionTurnItem(state, sessionKey, result.item)
-          : state.loadedSessions;
-        return {
-          loadedSessions: patchSessionRecord({ loadedSessions }, sessionKey, {
-            runtime: {
-              ...current.runtime,
-              ...result.runtime,
-            },
-          }),
-        };
-      });
-    },
-    reconcileRunClosure: async (request) => {
-      const sessionKey = request.sessionKey.trim();
-      if (!sessionKey) return false;
-      const result = await hostSessionRunClosure({
-        sessionKey,
-        ...(request.runId ? { runId: request.runId } : {}),
-        ...(request.turnKey ? { turnKey: request.turnKey } : {}),
-      });
-      set((state) => {
-        const current = state.loadedSessions[sessionKey];
-        if (!current) return state;
-        return {
-          loadedSessions: patchSessionRecord(state, sessionKey, {
-            runtime: {
-              ...current.runtime,
-              ...result.runtime,
-            },
-          }),
-        };
-      });
-      return result.closed;
     },
     loadOlderViewportItems: (sessionKey) => executeLoadOlderViewportItems(sessionInput, sessionKey),
     jumpViewportToLatest: (sessionKey) => executeJumpViewportToLatest(sessionInput, sessionKey),
@@ -196,10 +139,10 @@ export const useChatStore = create<ChatStoreState>((set, get) => {
     syncPendingApprovals: async (sessionKeyHint) => {
       try {
         const payload = await hostSessionApprovals();
-        const parsed = parseGatewayApprovalResponse(payload);
-        if (!parsed.recognized) return;
-
-        const grouped = groupApprovalsBySession(parsed.items);
+        const grouped = groupApprovalsBySession(payload.approvals.map((approval) => ({
+          ...approval,
+          allowedDecisions: [...approval.allowedDecisions],
+        })));
         set((state) => buildSyncPendingApprovalsPatch({
           state,
           grouped,
@@ -209,45 +152,27 @@ export const useChatStore = create<ChatStoreState>((set, get) => {
         // ignore
       }
     },
-    handleApprovalRequested: (payload) => {
-      const parsed = parseGatewayApprovalResponse(payload);
-      const approval = parsed.items[0];
-      if (!approval) return;
-
-      set((state) => buildApprovalRequestedPatch({ state, approval }));
-    },
-    handleApprovalResolved: (payload) => {
-      const id = typeof payload.id === 'string' ? payload.id.trim() : '';
-      if (!id) return;
-      set((state) => {
-        const patch = buildApprovalResolvedPatch({
-          state,
-          id,
-          resolvedSessionKey: resolveApprovalSessionKey(payload),
-          decision: normalizeApprovalDecision(payload.decision),
-        });
-        return patch ?? state;
-      });
-    },
     resolveApproval: async (id, decision) => {
       const approvalId = id.trim();
       if (!approvalId) return;
       beginMutating();
       try {
         await hostSessionResolveApproval({ id: approvalId, decision });
-        get().handleApprovalResolved({
+        set((state) => buildApprovalResolvedPatch({
+          state,
           id: approvalId,
+          resolvedSessionKey: get().currentSessionKey,
           decision,
-          sessionKey: get().currentSessionKey,
-        });
+        }) ?? state);
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         if (isStaleApprovalResolveError(message)) {
-          get().handleApprovalResolved({
+          set((state) => buildApprovalResolvedPatch({
+            state,
             id: approvalId,
+            resolvedSessionKey: get().currentSessionKey,
             decision: 'deny',
-            sessionKey: get().currentSessionKey,
-          });
+          }) ?? state);
         }
         set({ error: message });
         await get().syncPendingApprovals(get().currentSessionKey);
@@ -279,7 +204,7 @@ export const useChatStore = create<ChatStoreState>((set, get) => {
       return true;
     },
     handleSessionUpdateEvent: (event) => {
-      handleStoreSessionUpdateEvent({ set, get, historyRuntime }, event);
+      handleStoreSessionUpdateEvent({ set, get }, event);
     },
     toggleThinking: () => set((state) => ({ showThinking: !state.showThinking })),
     refresh: async () => {

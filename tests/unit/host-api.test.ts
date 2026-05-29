@@ -163,6 +163,112 @@ describe('host-api', () => {
     );
   });
 
+  it('waitForRuntimeJobResult 在 done 事件缺失时轮询到终态', async () => {
+    vi.useFakeTimers();
+    try {
+      invokeIpcMock
+        .mockResolvedValueOnce({
+          ok: true,
+          data: {
+            status: 200,
+            ok: true,
+            json: {
+              success: true,
+              job: {
+                id: 'job-1',
+                type: 'sessions.hydrateTimeline',
+                status: 'queued',
+                queuedAt: 1,
+                attempts: 0,
+                maxAttempts: 1,
+              },
+            },
+          },
+        })
+        .mockResolvedValueOnce({
+          ok: true,
+          data: {
+            status: 200,
+            ok: true,
+            json: {
+              success: true,
+              job: {
+                id: 'job-1',
+                type: 'sessions.hydrateTimeline',
+                status: 'running',
+                queuedAt: 1,
+                startedAt: 2,
+                attempts: 1,
+                maxAttempts: 1,
+              },
+            },
+          },
+        })
+        .mockResolvedValueOnce({
+          ok: true,
+          data: {
+            status: 200,
+            ok: true,
+            json: {
+              success: true,
+              job: {
+                id: 'job-1',
+                type: 'sessions.hydrateTimeline',
+                status: 'succeeded',
+                queuedAt: 1,
+                startedAt: 2,
+                finishedAt: 3,
+                attempts: 1,
+                maxAttempts: 1,
+              },
+            },
+          },
+        });
+
+      const { waitForRuntimeJobResult } = await import('@/lib/host-api');
+      const result = waitForRuntimeJobResult('job-1', { intervalMs: 50, timeoutMs: 1000 });
+
+      await vi.advanceTimersByTimeAsync(50);
+      await vi.advanceTimersByTimeAsync(100);
+
+      await expect(result).resolves.toBeUndefined();
+      expect(invokeIpcMock).toHaveBeenCalledTimes(3);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('waitForRuntimeJobResult 对缺失 job 使用宽限期后失败，避免无限轮询', async () => {
+    vi.useFakeTimers();
+    try {
+      invokeIpcMock.mockResolvedValue({
+        ok: true,
+        data: {
+          status: 200,
+          ok: true,
+          json: {
+            success: true,
+            job: null,
+          },
+        },
+      });
+
+      const { waitForRuntimeJobResult } = await import('@/lib/host-api');
+      const assertion = expect(
+        waitForRuntimeJobResult('missing-job', { intervalMs: 500, timeoutMs: 5000 }),
+      ).rejects.toThrow('runtime job not found: missing-job');
+
+      await vi.advanceTimersByTimeAsync(500);
+      await vi.advanceTimersByTimeAsync(1000);
+      await vi.advanceTimersByTimeAsync(2000);
+
+      await assertion;
+      expect(invokeIpcMock).toHaveBeenCalledTimes(4);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('hostSessionLoad 透传调用方指定的 timeoutMs', async () => {
     invokeIpcMock.mockResolvedValueOnce({
       ok: true,

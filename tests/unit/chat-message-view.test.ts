@@ -70,8 +70,7 @@ describe('chat message view', () => {
       mimeType: 'image/png',
       data: 'base64-image',
     }]);
-    expect(view.attachedFiles).toHaveLength(1);
-    expect(view.attachedFiles[0]?.fileName).toBe('README.md');
+    expect(view.attachedFiles.map((file) => file.fileName)).toEqual(['README.md']);
   });
 
   it('returns the latest item fields on repeated reads', () => {
@@ -139,46 +138,48 @@ describe('chat message view', () => {
     expect(item.embeddedToolResults).toHaveLength(1);
   });
 
-  it('hides tool-result-only attachments when the same turn already has text content', () => {
-    const item = buildItem([
-      { type: 'text', text: '分析完了，结论如下。' },
-    ]);
-    if (item.kind !== 'assistant-turn') {
-      throw new Error('expected assistant-turn');
-    }
-
-    item.segments = [{
-      kind: 'message',
-      key: 'message:main:0',
-      text: '分析完了，结论如下。',
-    }, {
-      kind: 'media',
-      key: 'media:main:0',
-      images: [],
-      attachedFiles: [{
-        fileName: 'CHECKLIST.md',
-        mimeType: 'text/markdown',
-        fileSize: 433,
-        preview: null,
-        filePath: 'C:/workspace/CHECKLIST.md',
-        source: 'tool-result',
+  it('uses Runtime Host projected assistant attachments without segment re-filtering', () => {
+    const item = buildAssistantTurnItem({
+      segments: [{
+        kind: 'message',
+        key: 'message:main:0',
+        text: '分析完了，结论如下。',
+      }, {
+        kind: 'media',
+        key: 'media:main:0',
+        images: [],
+        attachedFiles: [{
+          fileName: 'CHECKLIST.md',
+          mimeType: 'text/markdown',
+          fileSize: 433,
+          preview: null,
+          filePath: 'C:/workspace/CHECKLIST.md',
+          source: 'tool-result',
+        }],
       }],
-    }];
+      text: '分析完了，结论如下。',
+      attachedFiles: [],
+    });
 
     const view = getOrBuildChatMessageView(item);
     expect(view.attachedFiles).toEqual([]);
   });
 
-  it('keeps attachment-only assistant replies visible even for tool-result attachments', () => {
-    const item = buildItem([]);
-    if (item.kind !== 'assistant-turn') {
-      throw new Error('expected assistant-turn');
-    }
-
-    item.segments = [{
-      kind: 'media',
-      key: 'media:main:0',
-      images: [],
+  it('uses Runtime Host projected attachment-only assistant replies', () => {
+    const item = buildAssistantTurnItem({
+      segments: [{
+        kind: 'media',
+        key: 'media:main:0',
+        images: [],
+        attachedFiles: [{
+          fileName: 'artifact.png',
+          mimeType: 'image/png',
+          fileSize: 0,
+          preview: 'data:image/png;base64,abc',
+          filePath: 'C:/workspace/artifact.png',
+          source: 'tool-result',
+        }],
+      }],
       attachedFiles: [{
         fileName: 'artifact.png',
         mimeType: 'image/png',
@@ -187,7 +188,7 @@ describe('chat message view', () => {
         filePath: 'C:/workspace/artifact.png',
         source: 'tool-result',
       }],
-    }];
+    });
 
     const view = getOrBuildChatMessageView(item);
     expect(view.attachedFiles).toEqual([
