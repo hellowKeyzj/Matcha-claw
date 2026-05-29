@@ -1,5 +1,6 @@
 import type { CanonicalLifecyclePhase, CanonicalMessageStatus, CanonicalSessionEvent } from '../canonical-events';
 import type { GatewayTransportIssue } from '../../../../shared/gateway-error';
+import { OPENCLAW_RUNTIME_PROTOCOL_ID, OPENCLAW_RUNTIME_PROVIDER_ID } from '../../runtime-providers/runtime-provider-types';
 import { extractToolResultOutputText } from '../../tool/tool-card-content';
 import {
   normalizeTaskArtifactSnapshot,
@@ -139,10 +140,11 @@ function openClawBase(input: {
   toolCallId?: string;
   source?: 'live' | 'replay';
   raw?: unknown;
-}): Pick<CanonicalSessionEvent, 'eventId' | 'provider' | 'source' | 'sessionId' | 'runId' | 'seq' | 'timestamp' | 'laneKey' | 'agentId' | 'origin'> {
+}): Pick<CanonicalSessionEvent, 'eventId' | 'protocolId' | 'runtimeProviderId' | 'source' | 'sessionId' | 'runId' | 'seq' | 'timestamp' | 'laneKey' | 'agentId' | 'origin'> {
   return {
     eventId: input.eventId,
-    provider: 'openclaw-v4',
+    protocolId: OPENCLAW_RUNTIME_PROTOCOL_ID,
+    runtimeProviderId: OPENCLAW_RUNTIME_PROVIDER_ID,
     source: input.source ?? 'live',
     sessionId: input.sessionKey,
     ...(input.runId ? { runId: input.runId } : {}),

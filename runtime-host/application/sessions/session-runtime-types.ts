@@ -13,6 +13,8 @@ export interface SessionNewPayload {
   sessionKey?: unknown;
   agentId?: unknown;
   canonicalPrefix?: unknown;
+  runtimeProviderId?: unknown;
+  protocolId?: unknown;
 }
 
 export interface SessionLoadPayload {
@@ -35,6 +37,7 @@ export interface SessionPromptPayload {
   runId?: unknown;
   idempotencyKey?: unknown;
   media?: unknown;
+  runtimeProviderId?: unknown;
 }
 
 export interface SessionAbortRuntimePayload {
@@ -43,7 +46,7 @@ export interface SessionAbortRuntimePayload {
 
 export interface SessionPatchPayload {
   sessionKey?: unknown;
-  model?: unknown;
+  runtimeModelRef?: unknown;
 }
 
 export interface SessionRenamePayload {

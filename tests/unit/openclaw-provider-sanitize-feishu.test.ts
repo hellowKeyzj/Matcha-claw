@@ -57,7 +57,15 @@ function createMockConfigRepository() {
   return {
     read: async () => await readOpenClawJsonMock(),
     write: async (config: Record<string, unknown>) => await writeOpenClawJsonMock(config),
-    update: async <T>(mutate: (config: Record<string, unknown>) => Promise<T> | T) => await mutate(await readOpenClawJsonMock()),
+    update: async <T>(mutate: (config: Record<string, unknown>) => Promise<T> | T) => {
+      const config = await readOpenClawJsonMock();
+      const previousSerialized = JSON.stringify(config);
+      const result = await mutate(config);
+      if (JSON.stringify(config) !== previousSerialized) {
+        await writeOpenClawJsonMock(config);
+      }
+      return result;
+    },
     getConfigDir: () => '/mock',
     getConfigFilePath: () => '/mock/openclaw.json',
     getOpenClawDirPath: () => String(process.env.MATCHACLAW_OPENCLAW_DIR || '/mock/openclaw'),

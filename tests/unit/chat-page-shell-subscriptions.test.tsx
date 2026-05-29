@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { forwardRef, type ReactNode, useImperativeHandle } from 'react';
 import { MemoryRouter } from 'react-router-dom';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -456,7 +456,7 @@ describe('chat 顶层订阅收口', () => {
     expect(screen.getByTestId('chat-offline-description')).toHaveTextContent('gatewayPreparing.description');
   });
 
-  it('当前会话仍在发送时，应优先把 gateway transport issue 映射为本地化错误 banner', () => {
+  it('当前会话仍在发送时，应延迟显示 gateway transport issue banner', async () => {
     useGatewayStore.setState({
       status: {
         processState: 'running',
@@ -498,7 +498,51 @@ describe('chat 顶层订阅收口', () => {
       </MemoryRouter>,
     );
 
-    expect(screen.getByTestId('chat-error-banner')).toHaveTextContent('errors.gatewayRpcTimeout');
+    expect(screen.queryByTestId('chat-error-banner')).not.toBeInTheDocument();
+    await waitFor(() => {
+      expect(screen.getByTestId('chat-error-banner')).toHaveTextContent('errors.gatewayRpcTimeout');
+    });
+  });
+
+  it('当前会话仍在发送且只有 gateway 错误文本时，不应立即闪现错误 banner', () => {
+    useGatewayStore.setState({
+      status: {
+        processState: 'running',
+        port: 18789,
+        gatewayReady: true,
+        healthSummary: 'degraded',
+        transportState: 'connected',
+        portReachable: true,
+        lastError: 'Gateway RPC timeout: chat.send',
+        diagnostics: {
+          consecutiveHeartbeatMisses: 0,
+          consecutiveRpcFailures: 1,
+        },
+        updatedAt: 2,
+      },
+    } as never);
+    useChatStore.setState((state) => ({
+      loadedSessions: {
+        ...state.loadedSessions,
+        'agent:main:main': buildSessionRecord({
+          sessionKey: 'agent:main:main',
+          runtime: {
+            ...state.loadedSessions['agent:main:main']!.runtime,
+            runPhase: 'submitted',
+            lastError: null,
+            lastIssue: null,
+          },
+        }),
+      },
+    }));
+
+    render(
+      <MemoryRouter>
+        <Chat isActive={false} />
+      </MemoryRouter>,
+    );
+
+    expect(screen.queryByTestId('chat-error-banner')).not.toBeInTheDocument();
   });
 
   it('当前会话 runtime.lastIssue 的错误码应优先映射为本地化文案 key', () => {

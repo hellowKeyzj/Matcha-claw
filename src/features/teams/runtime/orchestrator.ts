@@ -3,7 +3,7 @@ import { waitAgentRunWithProgress } from '@/services/openclaw/agent-runtime';
 import {
   fetchChatTimeline,
   sendChatMessage,
-} from '@/services/openclaw/session-runtime';
+} from '@/services/runtime/session-runtime';
 import type { TeamMailboxMessage, TeamTask } from '@/features/teams/api/runtime-client';
 import { deriveAutoBlockedDecision, deriveTaskTitleFromProposal, parseBlockedDecision } from '@/features/teams/domain/runner-automation';
 import { isGatewayOperational } from '@/lib/gateway-status';

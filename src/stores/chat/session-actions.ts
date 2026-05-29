@@ -229,6 +229,8 @@ async function executeLoadSessionsNow(input: CreateStoreSessionActionsInput): Pr
       const sessions: ChatSession[] = rawSessions.map((session) => ({
         key: session.key || '',
         agentId: typeof session.agentId === 'string' ? session.agentId : undefined,
+        protocolId: typeof session.protocolId === 'string' ? session.protocolId : undefined,
+        runtimeProviderId: typeof session.runtimeProviderId === 'string' ? session.runtimeProviderId : undefined,
         kind: session.kind === 'main' || session.kind === 'subsession' || session.kind === 'session' || session.kind === 'named'
           ? session.kind
           : undefined,
@@ -286,6 +288,8 @@ async function executeLoadSessionsNow(input: CreateStoreSessionActionsInput): Pr
           const explicitLabel = normalizeCatalogString(session.label);
           loadedSessions = patchSessionMeta({ loadedSessions }, session.key, {
             agentId: normalizeCatalogString(session.agentId) ?? currentMeta.agentId,
+            protocolId: normalizeCatalogString(session.protocolId) ?? currentMeta.protocolId,
+            runtimeProviderId: normalizeCatalogString(session.runtimeProviderId) ?? currentMeta.runtimeProviderId,
             kind: session.kind ?? currentMeta.kind,
             preferred: session.preferred ?? currentMeta.preferred,
             label: explicitLabel && explicitLabel !== session.key ? explicitLabel : currentMeta.label,

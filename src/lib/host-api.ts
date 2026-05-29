@@ -529,6 +529,8 @@ export async function hostSessionNew(
     sessionKey?: string;
     agentId?: string;
     canonicalPrefix?: string;
+    runtimeProviderId?: string;
+    protocolId?: string;
   },
 ): Promise<SessionNewResult> {
   return hostApiFetch('/api/session/new', {
@@ -676,7 +678,7 @@ export async function hostSessionResolveApproval(
 export async function hostSessionPatch(
   payload: {
     sessionKey: string;
-    model: string;
+    runtimeModelRef: string;
   },
 ): Promise<SessionLoadResult & { success?: boolean; error?: string }> {
   return hostApiFetch('/api/session/patch', {

@@ -142,7 +142,7 @@ vi.spyOn(hostApiModule, 'hostSessionList').mockImplementation(async () => await 
 vi.spyOn(hostApiModule, 'hostSessionPatch').mockImplementation(async (
   payload: {
     sessionKey: string;
-    model: string;
+    runtimeModelRef: string;
   },
 ) => await hostSessionPatchMock(payload));
 

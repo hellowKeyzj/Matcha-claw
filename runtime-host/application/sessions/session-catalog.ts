@@ -21,6 +21,7 @@ import {
   type SessionResolvedLabel,
 } from './transcript-labels';
 import { resolveTimelineLastActivityAt } from './timeline-state';
+import { createOpenClawRuntimeSessionContext } from './runtime-providers/session-runtime-context';
 
 const SESSION_CATALOG_SCAN_CONCURRENCY = 8;
 
@@ -141,6 +142,7 @@ async function buildSessionCatalogItem(input: {
   if (!input.storageDescriptor.transcriptPath) {
     return null;
   }
+  const context = createOpenClawRuntimeSessionContext(input.sessionKey);
   const agentId = parseSessionKeyAgent(input.sessionKey) ?? input.storageDescriptor.agentId;
   const storeLabel = readSessionStoreLabel(input.storageDescriptor.sessionStoreEntry);
   const transcriptDetails = storeLabel
@@ -164,6 +166,8 @@ async function buildSessionCatalogItem(input: {
   return {
     key: input.sessionKey,
     agentId,
+    protocolId: context.protocolId,
+    runtimeProviderId: context.runtimeProviderId,
     kind,
     preferred: kind === 'main',
     status: readSessionStoreStatus(input.storageDescriptor.sessionStoreEntry),
@@ -314,6 +318,8 @@ export class SessionCatalogService implements SessionCatalogPort {
     return {
       key: overlay.sessionKey,
       agentId,
+      protocolId: overlay.protocolId,
+      runtimeProviderId: overlay.runtimeProviderId,
       kind,
       preferred: kind === 'main',
       ...(cached ?? {}),

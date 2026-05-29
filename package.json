@@ -26,7 +26,16 @@
         "arm64"
       ]
     },
-    "patchedDependencies": {}
+    "patchedDependencies": {},
+    "ignoredBuiltDependencies": [
+      "@google/genai",
+      "baileys",
+      "electron",
+      "electron-winstaller",
+      "esbuild",
+      "openclaw",
+      "tree-sitter-bash"
+    ]
   },
   "description": "MatchaClaw - Graphical AI Assistant based on OpenClaw",
   "main": "dist-electron/main/index.js",

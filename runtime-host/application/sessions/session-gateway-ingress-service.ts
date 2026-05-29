@@ -3,8 +3,8 @@ import type {
   SessionRenderItem,
   SessionUpdateEvent,
 } from '../../shared/session-adapter-types';
-import { buildCanonicalApprovalEventsFromGatewayNotification, type CanonicalApprovalNotification } from './canonical/canonical-approval-events';
-import { OpenClawV4Adapter, type OpenClawV4ConversationEvent } from './canonical/providers/openclaw-v4-adapter';
+import type { CanonicalApprovalNotification } from './canonical/canonical-approval-events';
+import { OpenClawApprovalAdapter } from './runtime-providers/openclaw/openclaw-approval-adapter';
 import type { CanonicalSessionEvent } from './canonical/canonical-events';
 import { buildCanonicalMessageStateKey, buildCanonicalToolStateKey } from './canonical/canonical-reducer';
 import { SessionRuntimeStateStore } from './session-runtime-state';
@@ -23,6 +23,8 @@ import {
 } from './todo-tool-debug';
 import type { RuntimeClockPort } from '../common/runtime-ports';
 import type { RuntimeHostLogger } from '../../shared/logger';
+import { OPENCLAW_RUNTIME_PROTOCOL_ID, OPENCLAW_RUNTIME_PROVIDER_ID, type RuntimeProviderId } from './runtime-providers/runtime-provider-types';
+import { RuntimeProviderRegistry } from './runtime-providers/runtime-provider-registry';
 
 export interface SessionGatewayIngressServiceDeps {
   stateStore: SessionRuntimeStateStore;
@@ -30,11 +32,12 @@ export interface SessionGatewayIngressServiceDeps {
   snapshotService: SessionSnapshotService;
   clock: RuntimeClockPort;
   logger?: Pick<RuntimeHostLogger, 'traceDebug'>;
+  runtimeProviderRegistry: RuntimeProviderRegistry;
   emitSessionUpdate?: (event: SessionUpdateEvent) => void;
 }
 
 export class SessionGatewayIngressService {
-  private readonly openClawV4Adapter = new OpenClawV4Adapter();
+  private readonly openClawApprovalAdapter = new OpenClawApprovalAdapter();
 
   constructor(private readonly deps: SessionGatewayIngressServiceDeps) {}
 
@@ -44,10 +47,11 @@ export class SessionGatewayIngressService {
     providerEventType: string;
     timestamp: number;
     raw?: unknown;
-  }): Pick<CanonicalSessionEvent, 'eventId' | 'provider' | 'source' | 'sessionId' | 'timestamp' | 'origin'> {
+  }): Pick<CanonicalSessionEvent, 'eventId' | 'protocolId' | 'runtimeProviderId' | 'source' | 'sessionId' | 'timestamp' | 'origin'> {
     return {
       eventId: input.eventId,
-      provider: 'openclaw-v4',
+      protocolId: OPENCLAW_RUNTIME_PROTOCOL_ID,
+      runtimeProviderId: OPENCLAW_RUNTIME_PROVIDER_ID,
       source: 'control',
       sessionId: input.sessionId,
       timestamp: input.timestamp,
@@ -285,20 +289,58 @@ export class SessionGatewayIngressService {
     return this.commitCanonicalEvents([this.buildCapabilitiesControlEvent(sessionId, capabilities)]);
   }
 
-  consumeGatewayNotification(notification: CanonicalApprovalNotification): SessionUpdateEvent[] {
-    const canonicalEvents = buildCanonicalApprovalEventsFromGatewayNotification(notification, this.deps.clock.nowMs());
+  private readProviderEventSessionKey(payload: Record<string, unknown>): string {
+    const event = isRecord(payload.event) ? payload.event : null;
+    const params = isRecord(payload.params) ? payload.params : null;
+    const candidates = [payload.sessionKey, event?.sessionKey, params?.sessionKey];
+    for (const candidate of candidates) {
+      if (typeof candidate === 'string' && candidate.trim().length > 0) {
+        return candidate.trim();
+      }
+    }
+    return this.deps.stateStore.getActiveSessionKey() ?? '';
+  }
+
+  consumeProviderNotification(runtimeProviderId: RuntimeProviderId, notification: CanonicalApprovalNotification): SessionUpdateEvent[] {
+    const profile = this.deps.runtimeProviderRegistry.getProfile(runtimeProviderId);
+    if (profile.protocolId !== OPENCLAW_RUNTIME_PROTOCOL_ID) {
+      return [];
+    }
+    const canonicalEvents = this.openClawApprovalAdapter.translateNotification(notification, this.deps.clock.nowMs());
     return this.commitCanonicalEvents(canonicalEvents);
   }
 
-  async consumeGatewayConversationEvent(payload: unknown): Promise<SessionUpdateEvent[]> {
+  consumeGatewayNotification(notification: CanonicalApprovalNotification): SessionUpdateEvent[] {
+    return this.consumeProviderNotification(OPENCLAW_RUNTIME_PROVIDER_ID, notification);
+  }
+
+  async consumeProviderConversationEvent(runtimeProviderId: RuntimeProviderId, payload: unknown): Promise<SessionUpdateEvent[]> {
     if (!isRecord(payload)) {
       return [];
     }
-    const canonicalEvents = this.openClawV4Adapter.translate(payload as OpenClawV4ConversationEvent);
+    const registry = this.deps.runtimeProviderRegistry;
+    const profile = registry.getProfile(runtimeProviderId);
+    const protocol = registry.getProtocol(profile.protocolId);
+    const sessionKey = this.readProviderEventSessionKey(payload);
+    if (!sessionKey) {
+      return [];
+    }
+    const context = registry.resolveSessionContext(sessionKey, {
+      protocolId: profile.protocolId,
+      runtimeProviderId: profile.id,
+    });
+    if (!protocol.eventAdapter.canTranslate(payload, context)) {
+      return [];
+    }
+    const canonicalEvents = protocol.eventAdapter.translate(payload, context);
     if (containsTodoToolDebugSignal(payload) || containsTodoToolDebugSignal(canonicalEvents)) {
       logTodoToolDebug(this.deps.logger, 'runtime-host.ingress.canonical-events', canonicalEvents);
     }
     return this.commitCanonicalEvents(canonicalEvents);
+  }
+
+  async consumeGatewayConversationEvent(payload: unknown): Promise<SessionUpdateEvent[]> {
+    return await this.consumeProviderConversationEvent(OPENCLAW_RUNTIME_PROVIDER_ID, payload);
   }
 
 }

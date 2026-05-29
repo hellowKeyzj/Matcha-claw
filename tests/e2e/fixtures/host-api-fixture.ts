@@ -844,7 +844,7 @@ export function handleE2EHostApiFetch(request: HostApiFetchRequest): HostApiProx
         {
           credentialId: 'mock',
           providerKey: 'mock',
-          openClawModelRef: 'mock/default',
+          runtimeModelRef: 'mock/default',
           label: 'Mock',
           modelId: 'default',
           capabilities: ['chat'],

@@ -7,6 +7,7 @@ import { buildCanonicalReplayEventsFromTranscriptMessages } from '../../runtime-
 import { createEmptyCanonicalSessionState, reduceCanonicalSessionEvents } from '../../runtime-host/application/sessions/canonical/canonical-reducer';
 import { buildRenderItemsFromCanonicalState } from '../../runtime-host/application/sessions/canonical/canonical-projection';
 import type { SessionItemUpdateEvent } from '../../runtime-host/shared/session-adapter-types';
+import { OPENCLAW_RUNTIME_PROTOCOL_ID, OPENCLAW_RUNTIME_PROVIDER_ID } from '../../runtime-host/application/sessions/runtime-providers/runtime-provider-types';
 
 function configDir(): string {
   return join(tmpdir(), `matcha-session-runtime-${Date.now()}-${Math.random().toString(16).slice(2)}`);
@@ -272,7 +273,8 @@ describe('session runtime ACP adapter service', () => {
     expect(events[0]).toMatchObject({
       eventId: 'openclaw-v4:session-message:agent:main:main:run-history:assistant-history-1',
       type: 'message_snapshot',
-      provider: 'openclaw-v4',
+      protocolId: OPENCLAW_RUNTIME_PROTOCOL_ID,
+      runtimeProviderId: OPENCLAW_RUNTIME_PROVIDER_ID,
       source: 'replay',
       sessionId: 'agent:main:main',
       role: 'assistant',
@@ -306,7 +308,8 @@ describe('session runtime ACP adapter service', () => {
     expect(events[0]).toMatchObject({
       eventId: 'openclaw-v4:tool-result:agent:main:main:run-tool-history:8:tool-2',
       type: 'tool_result',
-      provider: 'openclaw-v4',
+      protocolId: OPENCLAW_RUNTIME_PROTOCOL_ID,
+      runtimeProviderId: OPENCLAW_RUNTIME_PROVIDER_ID,
       source: 'replay',
       sessionId: 'agent:main:main',
       runId: 'run-tool-history',

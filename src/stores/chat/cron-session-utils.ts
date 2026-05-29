@@ -5,20 +5,21 @@ export interface CronSessionKeyParts {
 }
 
 export function parseCronSessionKey(sessionKey: string): CronSessionKeyParts | null {
-  if (!sessionKey.startsWith('agent:')) return null;
+  if (!sessionKey.trim()) return null;
   const parts = sessionKey.split(':');
-  if (parts.length < 4 || parts[2] !== 'cron') return null;
+  const cronIndex = parts[0] === 'agent' ? 2 : 1;
+  if (parts.length < cronIndex + 2 || parts[cronIndex] !== 'cron') return null;
 
-  const agentId = parts[1] || 'main';
-  const jobId = parts[3];
+  const agentId = parts[0] === 'agent' ? parts[1] || 'main' : parts[0] || 'main';
+  const jobId = parts[cronIndex + 1];
   if (!jobId) return null;
 
-  if (parts.length === 4) {
+  if (parts.length === cronIndex + 2) {
     return { agentId, jobId };
   }
 
-  if (parts.length === 6 && parts[4] === 'run' && parts[5]) {
-    return { agentId, jobId, runSessionId: parts[5] };
+  if (parts.length === cronIndex + 4 && parts[cronIndex + 2] === 'run' && parts[cronIndex + 3]) {
+    return { agentId, jobId, runSessionId: parts[cronIndex + 3] };
   }
 
   return null;

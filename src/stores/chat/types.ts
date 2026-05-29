@@ -39,6 +39,8 @@ export interface ContentBlock {
 export interface ChatSession {
   key: string;
   agentId?: string;
+  protocolId?: string;
+  runtimeProviderId?: string;
   kind?: SessionCatalogKind;
   preferred?: boolean;
   label?: string;
@@ -130,6 +132,8 @@ export interface ChatRuntimeErrorDismissMarker {
 
 export interface ChatSessionMetaState {
   agentId: string | null;
+  protocolId: string | null;
+  runtimeProviderId: string | null;
   kind: SessionCatalogKind | null;
   preferred: boolean;
   label: string | null;

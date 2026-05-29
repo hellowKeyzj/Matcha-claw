@@ -59,7 +59,7 @@ export function normalizeSendWithMediaInput(value: unknown): SendWithMediaInput 
   };
 }
 
-async function buildSendWithMediaGatewayParams(
+export async function buildSendWithMediaGatewayParams(
   fileSystem: RuntimeFileSystemPort,
   input: SendWithMediaInput,
 ): Promise<Record<string, unknown>> {

@@ -11,7 +11,7 @@ import type {
   CanonicalTeamEvent,
   CanonicalUsageEvent,
 } from './canonical-events';
-import type { CanonicalMessageStatus, CanonicalProvider } from './canonical-events';
+import type { CanonicalMessageStatus, RuntimeProtocolId, RuntimeProviderId } from './canonical-events';
 
 export interface CanonicalMessageState {
   key: string;
@@ -72,7 +72,8 @@ export interface CanonicalControlState {
 
 export interface CanonicalSessionState {
   sessionId: string;
-  provider: CanonicalProvider;
+  protocolId: RuntimeProtocolId;
+  runtimeProviderId: RuntimeProviderId;
   eventIds: string[];
   eventIdSet: Set<string>;
   messageIndexByKey: Map<string, number>;

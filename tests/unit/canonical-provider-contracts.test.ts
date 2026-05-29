@@ -2,12 +2,15 @@ import { describe, expect, it } from 'vitest';
 import { buildRenderItemsFromCanonicalState } from '../../runtime-host/application/sessions/canonical/canonical-projection';
 import { createEmptyCanonicalSessionState, reduceCanonicalSessionEvents } from '../../runtime-host/application/sessions/canonical/canonical-reducer';
 import { OpenClawV4Adapter } from '../../runtime-host/application/sessions/canonical/providers/openclaw-v4-adapter';
-import type { CanonicalProvider, CanonicalSessionEvent } from '../../runtime-host/application/sessions/canonical/canonical-events';
+import type { CanonicalSessionEvent } from '../../runtime-host/application/sessions/canonical/canonical-events';
+import { createRuntimeSessionContext } from '../../runtime-host/application/sessions/runtime-providers/session-runtime-context';
+import { OPENCLAW_RUNTIME_PROTOCOL_ID, OPENCLAW_RUNTIME_PROVIDER_ID } from '../../runtime-host/application/sessions/runtime-providers/runtime-provider-types';
 
-function expectCanonicalBase(event: CanonicalSessionEvent, provider: CanonicalProvider, sessionId: string): void {
+function expectCanonicalBase(event: CanonicalSessionEvent, protocolId: string, runtimeProviderId: string, sessionId: string): void {
   expect(event.eventId).toEqual(expect.any(String));
   expect(event.eventId).not.toBe('');
-  expect(event.provider).toBe(provider);
+  expect(event.protocolId).toBe(protocolId);
+  expect(event.runtimeProviderId).toBe(runtimeProviderId);
   expect(event.sessionId).toBe(sessionId);
   expect(event.source).toEqual(expect.stringMatching(/^(live|replay|imported|snapshot|control)$/));
   expect(event.origin).toEqual(expect.objectContaining({
@@ -51,7 +54,7 @@ describe('canonical provider contracts', () => {
 
     expect(events).toHaveLength(2);
     for (const event of events) {
-      expectCanonicalBase(event, 'openclaw-v4', 'agent:main:main');
+      expectCanonicalBase(event, OPENCLAW_RUNTIME_PROTOCOL_ID, OPENCLAW_RUNTIME_PROVIDER_ID, 'agent:main:main');
       expect(event.origin.providerIds).toMatchObject({
         sessionKey: 'agent:main:main',
         runId: 'run-openclaw',
@@ -200,11 +203,17 @@ describe('canonical provider contracts', () => {
   });
 
   it('represents Claude Code session/project/toolUse identity without provider raw leaking into projection', () => {
-    const state = createEmptyCanonicalSessionState('claude-code:project:e-code-matcha-claw');
+    const state = createEmptyCanonicalSessionState('claude-code:project:e-code-matcha-claw', createRuntimeSessionContext({
+      sessionKey: 'claude-code:project:e-code-matcha-claw',
+      protocolId: 'acp',
+      runtimeProviderId: 'claude-code',
+      providerSessionId: 'session-1',
+    }));
     const events: CanonicalSessionEvent[] = [{
       eventId: 'claude-code:message:session-1:turn-1',
       type: 'message_snapshot',
-      provider: 'claude-code',
+      protocolId: 'acp',
+      runtimeProviderId: 'claude-code',
       source: 'live',
       sessionId: 'claude-code:project:e-code-matcha-claw',
       runId: 'turn-1',
@@ -229,7 +238,8 @@ describe('canonical provider contracts', () => {
     }, {
       eventId: 'claude-code:tool:session-1:toolu-1:start',
       type: 'tool_call',
-      provider: 'claude-code',
+      protocolId: 'acp',
+      runtimeProviderId: 'claude-code',
       source: 'live',
       sessionId: 'claude-code:project:e-code-matcha-claw',
       runId: 'turn-1',
@@ -256,7 +266,7 @@ describe('canonical provider contracts', () => {
     const items = buildRenderItemsFromCanonicalState({ state, executionGraphItems: [] });
 
     for (const event of events) {
-      expectCanonicalBase(event, 'claude-code', 'claude-code:project:e-code-matcha-claw');
+      expectCanonicalBase(event, 'acp', 'claude-code', 'claude-code:project:e-code-matcha-claw');
     }
     expect(state.eventIds).toEqual(['claude-code:message:session-1:turn-1', 'claude-code:tool:session-1:toolu-1:start']);
     expect(items).toMatchObject([{
@@ -271,11 +281,17 @@ describe('canonical provider contracts', () => {
   });
 
   it('represents Codex session/turn identity through the same canonical reducer and projection', () => {
-    const state = createEmptyCanonicalSessionState('codex:session:codex-session-1');
+    const state = createEmptyCanonicalSessionState('codex:session:codex-session-1', createRuntimeSessionContext({
+      sessionKey: 'codex:session:codex-session-1',
+      protocolId: 'acp',
+      runtimeProviderId: 'codex',
+      providerSessionId: 'codex-session-1',
+    }));
     const events: CanonicalSessionEvent[] = [{
       eventId: 'codex:message:codex-session-1:turn-7',
       type: 'message_snapshot',
-      provider: 'codex',
+      protocolId: 'acp',
+      runtimeProviderId: 'codex',
       source: 'live',
       sessionId: 'codex:session:codex-session-1',
       runId: 'turn-7',
@@ -298,7 +314,8 @@ describe('canonical provider contracts', () => {
     }, {
       eventId: 'codex:usage:codex-session-1:turn-7',
       type: 'usage',
-      provider: 'codex',
+      protocolId: 'acp',
+      runtimeProviderId: 'codex',
       source: 'live',
       sessionId: 'codex:session:codex-session-1',
       runId: 'turn-7',
@@ -320,7 +337,7 @@ describe('canonical provider contracts', () => {
     const items = buildRenderItemsFromCanonicalState({ state, executionGraphItems: [] });
 
     for (const event of events) {
-      expectCanonicalBase(event, 'codex', 'codex:session:codex-session-1');
+      expectCanonicalBase(event, 'acp', 'codex', 'codex:session:codex-session-1');
     }
     expect(state.usage).toMatchObject([{ payload: { inputTokens: 11, outputTokens: 13 } }]);
     expect(items).toMatchObject([{

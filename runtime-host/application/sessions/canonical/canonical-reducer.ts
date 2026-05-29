@@ -4,6 +4,8 @@ import type {
   SessionRunPhase,
 } from '../../../shared/session-adapter-types';
 import { createEmptySessionRuntimeState } from '../session-state-model';
+import { createOpenClawRuntimeSessionContext } from '../runtime-providers/session-runtime-context';
+import type { RuntimeSessionContext } from '../runtime-providers/runtime-provider-types';
 import type {
   CanonicalApprovalEvent,
   CanonicalLifecycleEvent,
@@ -342,10 +344,14 @@ function applyToolRuntime(state: CanonicalSessionState, event: CanonicalToolCall
   }
 }
 
-export function createEmptyCanonicalSessionState(sessionId: string): CanonicalSessionState {
+export function createEmptyCanonicalSessionState(
+  sessionId: string,
+  context: RuntimeSessionContext = createOpenClawRuntimeSessionContext(sessionId),
+): CanonicalSessionState {
   return {
     sessionId,
-    provider: 'openclaw-v4',
+    protocolId: context.protocolId,
+    runtimeProviderId: context.runtimeProviderId,
     eventIds: [],
     eventIdSet: new Set<string>(),
     messageIndexByKey: new Map<string, number>(),
@@ -377,6 +383,9 @@ export function createEmptyCanonicalSessionState(sessionId: string): CanonicalSe
 }
 
 export function reduceCanonicalSessionEvent(state: CanonicalSessionState, event: CanonicalSessionEvent): boolean {
+  if (state.protocolId !== event.protocolId || state.runtimeProviderId !== event.runtimeProviderId) {
+    return false;
+  }
   if (state.eventIdSet.has(event.eventId)) {
     return false;
   }

@@ -7,6 +7,7 @@ import type { SessionRenderAttachedFile } from '../../../shared/session-adapter-
 import { extractImagesAsAttachedFiles } from '../assistant-segment-media';
 import type { CanonicalSessionEvent } from './canonical-events';
 import type { SessionTranscriptMessage } from '../transcript-types';
+import { OPENCLAW_RUNTIME_PROTOCOL_ID, OPENCLAW_RUNTIME_PROVIDER_ID } from '../runtime-providers/runtime-provider-types';
 import { extractTaskSnapshotFromTranscriptMessage } from '../transcript-task-snapshot-replay';
 import { readMessageContent, resolveTranscriptDisplayText } from '../transcript-content-extractors';
 import { isRecord, normalizeString } from '../session-value-normalization';
@@ -35,10 +36,11 @@ function replayBase(input: {
   agentId?: string;
   toolCallId?: string;
   seq?: number;
-}): Pick<CanonicalSessionEvent, 'eventId' | 'provider' | 'source' | 'sessionId' | 'runId' | 'timestamp' | 'laneKey' | 'agentId' | 'seq' | 'origin'> {
+}): Pick<CanonicalSessionEvent, 'eventId' | 'protocolId' | 'runtimeProviderId' | 'source' | 'sessionId' | 'runId' | 'timestamp' | 'laneKey' | 'agentId' | 'seq' | 'origin'> {
   return {
     eventId: input.eventId,
-    provider: 'openclaw-v4',
+    protocolId: OPENCLAW_RUNTIME_PROTOCOL_ID,
+    runtimeProviderId: OPENCLAW_RUNTIME_PROVIDER_ID,
     source: 'replay',
     sessionId: input.sessionId,
     ...(input.runId ? { runId: input.runId } : {}),

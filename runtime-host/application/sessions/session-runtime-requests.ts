@@ -23,6 +23,8 @@ export function readCreateSessionRequest(payload: unknown): {
   explicitSessionKey: string;
   agentId: string;
   canonicalPrefix: string;
+  runtimeProviderId: string;
+  protocolId: string;
 } {
   const body = isRecord(payload) ? payload as SessionNewPayload : {};
   const explicitSessionKey = normalizeString(body.sessionKey);
@@ -31,6 +33,8 @@ export function readCreateSessionRequest(payload: unknown): {
     explicitSessionKey,
     agentId,
     canonicalPrefix: normalizeString(body.canonicalPrefix) || `agent:${agentId}`,
+    runtimeProviderId: normalizeString(body.runtimeProviderId),
+    protocolId: normalizeString(body.protocolId),
   };
 }
 
@@ -57,12 +61,12 @@ export function readAbortSessionKey(payload: unknown, fallbackSessionKey: string
 
 export function readPatchSessionRequest(payload: unknown): {
   sessionKey: string;
-  model: string;
+  runtimeModelRef: string;
 } {
   const body = isRecord(payload) ? payload as SessionPatchPayload : {};
   return {
     sessionKey: normalizeString(body.sessionKey),
-    model: normalizeString(body.model),
+    runtimeModelRef: normalizeString(body.runtimeModelRef),
   };
 }
 
@@ -100,6 +104,7 @@ export function readPromptSessionRequest(payload: unknown): {
   sessionKey: string;
   message: string;
   requestedRunId: string;
+  runtimeProviderId: string;
 } {
   const directBody = isRecord(payload) ? payload as SessionPromptPayload : {};
   const mediaBody = normalizeSendWithMediaInput(payload);
@@ -116,5 +121,6 @@ export function readPromptSessionRequest(payload: unknown): {
       ?? directBody.idempotencyKey
       ?? mediaBody?.idempotencyKey,
     ),
+    runtimeProviderId: normalizeString(directBody.runtimeProviderId),
   };
 }

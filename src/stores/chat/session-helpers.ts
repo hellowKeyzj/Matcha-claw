@@ -76,6 +76,8 @@ function areChatSessionsEqual(left: ChatSession | undefined, right: ChatSession)
   return (
     left.key === right.key
     && (left.agentId ?? null) === (right.agentId ?? null)
+    && (left.protocolId ?? null) === (right.protocolId ?? null)
+    && (left.runtimeProviderId ?? null) === (right.runtimeProviderId ?? null)
     && (left.kind ?? null) === (right.kind ?? null)
     && (left.preferred ?? false) === (right.preferred ?? false)
     && (left.label ?? null) === (right.label ?? null)
@@ -111,6 +113,8 @@ export function readSessionsFromState(
     const nextSession = {
       key: sessionKey,
       agentId: meta.agentId ?? undefined,
+      protocolId: meta.protocolId ?? undefined,
+      runtimeProviderId: meta.runtimeProviderId ?? undefined,
       kind: meta.kind ?? undefined,
       preferred: meta.preferred,
       label: normalizeSessionLabel(meta.label) ?? undefined,
@@ -183,9 +187,9 @@ export function getCanonicalPrefixFromSessions(
   sessions: ChatSession[],
   preferredSessionKey?: string,
 ): string | null {
-  const candidate = preferredSessionKey && preferredSessionKey.startsWith('agent:')
+  const candidate = preferredSessionKey && preferredSessionKey.trim()
     ? preferredSessionKey
-    : sessions.find((s) => s.key.startsWith('agent:'))?.key;
+    : sessions[0]?.key;
   if (!candidate) return null;
   const parts = candidate.split(':');
   if (parts.length < 2) return null;

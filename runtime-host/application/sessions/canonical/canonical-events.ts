@@ -10,8 +10,9 @@ import type {
   SessionTaskCompletionEvent,
   TaskSnapshotEvent,
 } from '../../../shared/session-adapter-types';
+import type { RuntimeProtocolId, RuntimeProviderId } from '../runtime-providers/runtime-provider-types';
 
-export type CanonicalProvider = 'openclaw-v4' | 'claude-code' | 'codex';
+export type { RuntimeProtocolId, RuntimeProviderId } from '../runtime-providers/runtime-provider-types';
 export type CanonicalEventSource = 'live' | 'replay' | 'imported' | 'snapshot' | 'control';
 export type CanonicalMessageStatus = 'streaming' | 'final' | 'error' | 'aborted';
 export type CanonicalLifecyclePhase = 'started' | 'final' | 'error' | 'aborted';
@@ -39,7 +40,8 @@ export interface CanonicalOrigin {
 export interface CanonicalEventBase {
   eventId: string;
   type: string;
-  provider: CanonicalProvider;
+  protocolId: RuntimeProtocolId;
+  runtimeProviderId: RuntimeProviderId;
   source: CanonicalEventSource;
   sessionId: string;
   runId?: string;

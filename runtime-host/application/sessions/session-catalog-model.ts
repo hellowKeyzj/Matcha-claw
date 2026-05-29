@@ -11,6 +11,7 @@ import {
 import {
   resolveTimelineLastActivityAt,
 } from './timeline-state';
+import { createOpenClawRuntimeSessionContext } from './runtime-providers/session-runtime-context';
 
 function readSessionKeySuffix(sessionKey: string): string {
   const parts = sessionKey.split(':');
@@ -39,7 +40,8 @@ export function createSessionCatalogItem(input: {
   resolvedModel?: string | null;
   label?: string | null;
 }): SessionCatalogItem {
-  const agentId = parseSessionKeyAgent(input.sessionKey) ?? 'main';
+  const context = createOpenClawRuntimeSessionContext(input.sessionKey);
+  const agentId = parseSessionKeyAgent(input.sessionKey) ?? context.agentId ?? 'main';
   const inputLabel = typeof input.label === 'string' ? input.label.trim() : '';
   const timelineLabel = resolveSessionLabelDetailsFromTimelineEntries(input.timelineEntries);
   const label = inputLabel || timelineLabel.label;
@@ -50,6 +52,8 @@ export function createSessionCatalogItem(input: {
   return {
     key: input.sessionKey,
     agentId,
+    protocolId: context.protocolId,
+    runtimeProviderId: context.runtimeProviderId,
     kind,
     preferred: kind === 'main',
     ...(label ? { label } : {}),

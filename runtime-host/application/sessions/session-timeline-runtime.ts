@@ -22,6 +22,7 @@ import type {
 import { SessionTranscriptTimelineLoader } from './session-transcript-timeline-loader';
 import { SessionExecutionGraphRuntime } from './session-execution-graph-runtime';
 import type { RuntimeClockPort } from '../common/runtime-ports';
+import type { RuntimeSessionContext } from './runtime-providers/runtime-provider-types';
 
 export interface SessionTimelineRuntimeDeps {
   stateStore: SessionRuntimeStateStore;
@@ -121,10 +122,11 @@ export class SessionTimelineRuntime {
     options: {
       hydrate?: boolean;
       resetWindowToLatest?: boolean;
+      context?: RuntimeSessionContext;
     } = {},
   ): Promise<SessionRuntimeTimelineState> {
     await this.deps.stateStore.ready();
-    const state = this.getSessionState(sessionKey);
+    const state = this.deps.stateStore.getSessionState(sessionKey, options.context);
     const previousWindow = cloneSessionWindowState(state.window);
     this.deps.stateStore.setActiveSessionKey(sessionKey);
     this.deps.executionGraphRuntime.refreshRenderItems(state);

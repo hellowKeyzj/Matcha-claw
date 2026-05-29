@@ -1,5 +1,6 @@
 import type { SessionApprovalDecision, SessionApprovalRequestItem } from '../../../shared/session-adapter-types';
 import type { CanonicalApprovalEvent } from './canonical-events';
+import { OPENCLAW_RUNTIME_PROTOCOL_ID, OPENCLAW_RUNTIME_PROVIDER_ID } from '../runtime-providers/runtime-provider-types';
 
 export interface CanonicalApprovalNotification {
   method: string;
@@ -166,11 +167,12 @@ function buildEventBase(input: {
   runId?: string;
   timestamp: number;
   raw?: unknown;
-}): Pick<CanonicalApprovalEvent, 'eventId' | 'type' | 'provider' | 'source' | 'sessionId' | 'runId' | 'timestamp' | 'laneKey' | 'origin'> {
+}): Pick<CanonicalApprovalEvent, 'eventId' | 'type' | 'protocolId' | 'runtimeProviderId' | 'source' | 'sessionId' | 'runId' | 'timestamp' | 'laneKey' | 'origin'> {
   return {
     eventId: input.eventId,
     type: 'approval',
-    provider: 'openclaw-v4',
+    protocolId: OPENCLAW_RUNTIME_PROTOCOL_ID,
+    runtimeProviderId: OPENCLAW_RUNTIME_PROVIDER_ID,
     source: 'live',
     sessionId: input.sessionKey,
     ...(input.runId ? { runId: input.runId } : {}),

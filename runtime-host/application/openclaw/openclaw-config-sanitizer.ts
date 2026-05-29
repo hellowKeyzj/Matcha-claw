@@ -28,6 +28,9 @@ export async function sanitizeOpenClawConfig(
 
   let sanitized = false;
   await configRepository.update(async (config) => {
+    if (!config || typeof config !== 'object' || Array.isArray(config)) {
+      return;
+    }
     const modified = await applyOpenClawConfigSanitizerRules(config, {
       fileExists: (pathname) => environment.pathExists(pathname),
       discoverBundledPluginIds: async () => (await oauthPlugins.discoverBundledPlugins()).all,

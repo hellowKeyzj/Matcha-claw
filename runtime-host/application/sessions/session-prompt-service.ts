@@ -3,14 +3,13 @@ import type {
   SessionPromptResult,
 } from '../../shared/session-adapter-types';
 import {
-  sendWithMediaViaGateway,
+  buildSendWithMediaGatewayParams,
 } from '../chat/send-media';
 import type {
   RuntimeClockPort,
   RuntimeFileSystemPort,
   RuntimeIdGeneratorPort,
 } from '../common/runtime-ports';
-import type { GatewayChatPort, GatewayRpcPort } from '../gateway/gateway-runtime-port';
 import type {
   SessionPromptMediaPayload,
 } from './session-runtime-types';
@@ -27,6 +26,8 @@ import {
 } from '../common/application-response';
 import { SessionOperationCoordinator } from './session-operation-coordinator';
 import type { CanonicalSessionEvent } from './canonical/canonical-events';
+import { OPENCLAW_RUNTIME_PROVIDER_ID, type RuntimeSessionContext } from './runtime-providers/runtime-provider-types';
+import { RuntimeProviderRegistry } from './runtime-providers/runtime-provider-registry';
 
 
 export interface SessionPromptServiceDeps {
@@ -36,7 +37,7 @@ export interface SessionPromptServiceDeps {
   fileSystem: RuntimeFileSystemPort;
   idGenerator: RuntimeIdGeneratorPort;
   clock: RuntimeClockPort;
-  gateway: GatewayChatPort & Pick<GatewayRpcPort, 'gatewayRpc'>;
+  runtimeProviderRegistry: RuntimeProviderRegistry;
   operationCoordinator: SessionOperationCoordinator;
   emitSessionUpdate?: (event: SessionInfoUpdateEvent) => void;
 }
@@ -56,13 +57,26 @@ export class SessionPromptService {
     this.deps.emitSessionUpdate?.(event);
   }
 
+  private resolveContext(sessionId: string, runtimeProviderId?: string): RuntimeSessionContext {
+    if (runtimeProviderId) {
+      const profile = this.deps.runtimeProviderRegistry.getProfile(runtimeProviderId);
+      return this.deps.runtimeProviderRegistry.resolveSessionContext(sessionId, {
+        runtimeProviderId: profile.id,
+        protocolId: profile.protocolId,
+      });
+    }
+    return this.deps.runtimeProviderRegistry.resolveSessionContext(sessionId);
+  }
+
   private async failSubmittedPrompt(input: {
     sessionId: string;
     runId: string;
     error: string;
+    context?: RuntimeSessionContext;
   }): Promise<void> {
     await this.deps.operationCoordinator.run(input.sessionId, 'prompt', async () => {
-      const state = this.deps.stateStore.getSessionState(input.sessionId);
+      const context = input.context ?? this.resolveContext(input.sessionId);
+      const state = this.deps.stateStore.getSessionState(input.sessionId, context);
       if (state.runtime.activeRunId !== input.runId) {
         // 已被 abort/新 prompt/lifecycle 终态覆盖，跳过失败收尾。
         return;
@@ -70,7 +84,8 @@ export class SessionPromptService {
       const committed = this.deps.timelineRuntime.appendCanonicalEvents(input.sessionId, [{
         eventId: `local:lifecycle:${input.sessionId}:${input.runId}:error`,
         type: 'lifecycle',
-        provider: 'openclaw-v4',
+        protocolId: context.protocolId,
+        runtimeProviderId: context.runtimeProviderId,
         source: 'live',
         sessionId: input.sessionId,
         runId: input.runId,
@@ -104,33 +119,44 @@ export class SessionPromptService {
     });
   }
 
-  private startGatewaySendInBackground(input: {
+  private startRuntimeSendInBackground(input: {
     directBody: ReturnType<typeof readPromptSessionRequest>['directBody'];
     mediaBody: ReturnType<typeof readPromptSessionRequest>['mediaBody'];
     sessionId: string;
     message: string;
     runId: string;
+    runtimeProviderId: string;
   }): void {
     void (async () => {
-      const sendResult = input.mediaBody
-        ? await sendWithMediaViaGateway(this.deps.fileSystem, this.deps.gateway, {
+      const context = this.resolveContext(input.sessionId, input.runtimeProviderId);
+      const profile = this.deps.runtimeProviderRegistry.getProfile(context.runtimeProviderId);
+      const protocol = this.deps.runtimeProviderRegistry.getProtocol(profile.protocolId);
+      const payload = await buildSendWithMediaGatewayParams(this.deps.fileSystem, input.mediaBody
+        ? {
             ...input.mediaBody,
             sessionKey: input.sessionId,
             message: input.message,
             idempotencyKey: input.runId,
-          })
-        : await sendWithMediaViaGateway(this.deps.fileSystem, this.deps.gateway, {
+          }
+        : {
             sessionKey: input.sessionId,
             message: input.message,
             idempotencyKey: input.runId,
             ...(typeof input.directBody.deliver === 'boolean' ? { deliver: input.directBody.deliver } : {}),
           });
+      const sendResult = await protocol.createTransport(profile).sendPrompt({
+        context,
+        message: input.message,
+        runId: input.runId,
+        payload,
+      });
 
       if (!sendResult.success) {
         await this.failSubmittedPrompt({
           sessionId: input.sessionId,
           runId: input.runId,
           error: sendResult.error ?? 'Failed to prompt session',
+          context,
         });
         return;
       }
@@ -144,6 +170,7 @@ export class SessionPromptService {
       sessionKey,
       message,
       requestedRunId,
+      runtimeProviderId,
     } = readPromptSessionRequest(payload);
     const sessionId = sessionKey;
     if (!sessionId) {
@@ -154,6 +181,7 @@ export class SessionPromptService {
     }
 
     const runId = requestedRunId || this.deps.idGenerator.randomId();
+    const context = this.resolveContext(sessionId, runtimeProviderId || OPENCLAW_RUNTIME_PROVIDER_ID);
 
     const media = Array.isArray(mediaBody?.media)
       ? mediaBody.media as SessionPromptMediaPayload[]
@@ -161,6 +189,7 @@ export class SessionPromptService {
     const submitted = await this.deps.operationCoordinator.run(sessionId, 'prompt', async () => {
       await this.deps.timelineRuntime.activateSession(sessionId, {
         resetWindowToLatest: true,
+        context,
       });
       const now = this.deps.clock.nowMs();
       const attachedFiles = (media ?? []).map((file) => ({
@@ -174,7 +203,8 @@ export class SessionPromptService {
       const events: CanonicalSessionEvent[] = [{
         eventId: `local:user:${sessionId}:${runId}`,
         type: 'message_snapshot',
-        provider: 'openclaw-v4',
+        protocolId: context.protocolId,
+        runtimeProviderId: context.runtimeProviderId,
         source: 'live',
         sessionId,
         runId,
@@ -196,7 +226,8 @@ export class SessionPromptService {
       }, {
         eventId: `local:lifecycle:${sessionId}:${runId}:started`,
         type: 'lifecycle',
-        provider: 'openclaw-v4',
+        protocolId: context.protocolId,
+        runtimeProviderId: context.runtimeProviderId,
         source: 'live',
         sessionId,
         runId,
@@ -225,12 +256,13 @@ export class SessionPromptService {
       };
     });
 
-    this.startGatewaySendInBackground({
+    this.startRuntimeSendInBackground({
       directBody,
       mediaBody,
       sessionId,
       message,
       runId,
+      runtimeProviderId: context.runtimeProviderId,
     });
 
     return ok({

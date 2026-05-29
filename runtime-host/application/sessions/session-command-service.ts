@@ -34,7 +34,6 @@ import {
   ok,
   type ApplicationResponseOf,
 } from '../common/application-response';
-import type { GatewayRpcPort } from '../gateway/gateway-runtime-port';
 import { isRunActive } from '../../shared/session-adapter-types';
 import type { RuntimeClockPort, RuntimeIdGeneratorPort } from '../common/runtime-ports';
 import type {
@@ -45,6 +44,8 @@ import type { SessionCatalogJobPort } from './session-catalog-jobs';
 import type { TaskSnapshotEvent } from '../../shared/session-adapter-types';
 import { SessionOperationCoordinator } from './session-operation-coordinator';
 import type { CanonicalSessionEvent } from './canonical/canonical-events';
+import { OPENCLAW_RUNTIME_PROVIDER_ID, type RuntimeSessionContext } from './runtime-providers/runtime-provider-types';
+import { RuntimeProviderRegistry } from './runtime-providers/runtime-provider-registry';
 
 export interface SessionCommandServiceDeps {
   sessionCatalog: SessionCatalogPort;
@@ -53,7 +54,7 @@ export interface SessionCommandServiceDeps {
   stateStore: SessionRuntimeStateStore;
   timelineRuntime: SessionTimelineRuntime;
   snapshotService: SessionSnapshotService;
-  gateway: Pick<GatewayRpcPort, 'gatewayRpc'>;
+  runtimeProviderRegistry: RuntimeProviderRegistry;
   operationCoordinator: SessionOperationCoordinator;
   clock: RuntimeClockPort;
   idGenerator: RuntimeIdGeneratorPort;
@@ -72,6 +73,22 @@ type SessionHydratingWindowResult = Partial<SessionWindowResult> & {
 
 export class SessionCommandService {
   constructor(private readonly deps: SessionCommandServiceDeps) {}
+
+  private resolveContext(sessionKey: string, runtimeProviderId?: string): RuntimeSessionContext {
+    if (runtimeProviderId) {
+      const profile = this.deps.runtimeProviderRegistry.getProfile(runtimeProviderId);
+      return this.deps.runtimeProviderRegistry.resolveSessionContext(sessionKey, {
+        runtimeProviderId: profile.id,
+        protocolId: profile.protocolId,
+      });
+    }
+    return this.deps.runtimeProviderRegistry.resolveSessionContext(sessionKey);
+  }
+
+  private resolveTransport(context: RuntimeSessionContext) {
+    const profile = this.deps.runtimeProviderRegistry.getProfile(context.runtimeProviderId);
+    return this.deps.runtimeProviderRegistry.getProtocol(profile.protocolId).createTransport(profile);
+  }
 
   private submitHydrationJob(input: {
     sessionKey: string;
@@ -110,10 +127,21 @@ export class SessionCommandService {
   }
 
   async createSession(payload: unknown): Promise<ApplicationResponseOf<SessionNewResult>> {
-    const { explicitSessionKey, canonicalPrefix } = readCreateSessionRequest(payload);
-    const sessionKey = explicitSessionKey || `${canonicalPrefix}:session-${this.deps.clock.nowMs()}-${this.deps.idGenerator.randomId()}`;
+    const { explicitSessionKey, canonicalPrefix, runtimeProviderId, protocolId } = readCreateSessionRequest(payload);
+    const resolvedRuntimeProviderId = runtimeProviderId || OPENCLAW_RUNTIME_PROVIDER_ID;
+    const prefix = runtimeProviderId && !explicitSessionKey ? runtimeProviderId : canonicalPrefix;
+    const sessionKey = explicitSessionKey || `${prefix}:session-${this.deps.clock.nowMs()}-${this.deps.idGenerator.randomId()}`;
+    const context = protocolId
+      ? this.deps.runtimeProviderRegistry.rememberSessionContext({
+          sessionKey,
+          protocolId,
+          runtimeProviderId: resolvedRuntimeProviderId,
+          providerSessionId: sessionKey,
+        })
+      : this.resolveContext(sessionKey, resolvedRuntimeProviderId);
     const state = await this.deps.timelineRuntime.activateSession(sessionKey, {
       resetWindowToLatest: true,
+      context,
     });
     const result: SessionNewResult = this.withTaskSnapshot(sessionKey, {
       success: true,
@@ -126,8 +154,8 @@ export class SessionCommandService {
 
   async deleteSession(payload: unknown): Promise<ApplicationResponseOf> {
     const sessionKey = readRequiredSessionKey(payload);
-    if (!sessionKey || !sessionKey.startsWith('agent:')) {
-      return badRequest(`Invalid sessionKey: ${sessionKey}`);
+    if (!sessionKey) {
+      return badRequest('sessionKey is required');
     }
     const hasStorage = Boolean(await this.deps.timelineRuntime.findStorageDescriptor(sessionKey));
     if (!this.deps.stateStore.hasSessionState(sessionKey) && !hasStorage) {
@@ -231,18 +259,20 @@ export class SessionCommandService {
   }
 
   async patchSession(payload: unknown): Promise<ApplicationResponseOf> {
-    const { sessionKey, model } = readPatchSessionRequest(payload);
+    const { sessionKey, runtimeModelRef } = readPatchSessionRequest(payload);
     if (!sessionKey) {
       return badRequest('sessionKey is required');
     }
-    if (!model) {
-      return badRequest('model is required');
+    if (!runtimeModelRef) {
+      return badRequest('runtimeModelRef is required');
     }
     return await this.deps.operationCoordinator.run(sessionKey, 'patch-model', async () => {
-      const current = this.deps.stateStore.getSessionState(sessionKey).runtime;
+      const context = this.resolveContext(sessionKey);
+      const current = this.deps.stateStore.getSessionState(sessionKey, context).runtime;
       if (isRunActive(current) || current.activeRunId) {
         const state = await this.deps.timelineRuntime.activateSession(sessionKey, {
           resetWindowToLatest: false,
+          context,
         });
         const snapshot = await this.deps.snapshotService.buildLatestSnapshotAsync(sessionKey, state, {
           replayComplete: state.hydrated,
@@ -254,14 +284,16 @@ export class SessionCommandService {
           snapshot,
         });
       }
-      const patchResult = await this.deps.gateway.gatewayRpc('sessions.patch', {
-        key: sessionKey,
-        model,
-      }, 10000);
-      this.deps.stateStore.setResolvedSessionModel(sessionKey, readPatchedSessionResolvedModel(model, patchResult));
+      const transport = this.resolveTransport(context);
+      if (!transport.patchSessionModel) {
+        return badRequest(`Runtime provider does not support model patch: ${context.runtimeProviderId}`);
+      }
+      const patchResult = await transport.patchSessionModel({ context, runtimeModelRef });
+      this.deps.stateStore.setResolvedSessionModel(sessionKey, readPatchedSessionResolvedModel(runtimeModelRef, patchResult.payload));
 
       const state = await this.deps.timelineRuntime.activateSession(sessionKey, {
         resetWindowToLatest: false,
+        context,
       });
       const snapshot = await this.deps.snapshotService.buildLatestSnapshotAsync(sessionKey, state, {
         replayComplete: state.hydrated,
@@ -277,8 +309,8 @@ export class SessionCommandService {
 
   async renameSession(payload: unknown): Promise<ApplicationResponseOf> {
     const { sessionKey, label } = readRenameSessionRequest(payload);
-    if (!sessionKey || !sessionKey.startsWith('agent:')) {
-      return badRequest(`Invalid sessionKey: ${sessionKey}`);
+    if (!sessionKey) {
+      return badRequest('sessionKey is required');
     }
     if (!label) {
       return badRequest('label is required');
@@ -345,13 +377,14 @@ export class SessionCommandService {
     });
   }
 
-  private async commitAbortSession(sessionKey: string): Promise<ApplicationResponseOf<SessionLoadResult & { success: boolean } | { success: false; error: string }>> {
+  private async commitAbortSession(sessionKey: string, context: RuntimeSessionContext): Promise<ApplicationResponseOf<SessionLoadResult & { success: boolean } | { success: false; error: string }>> {
     return await this.deps.operationCoordinator.run(sessionKey, 'abort', async () => {
-      const currentRunId = this.deps.stateStore.getSessionState(sessionKey).runtime.activeRunId ?? undefined;
+      const currentRunId = this.deps.stateStore.getSessionState(sessionKey, context).runtime.activeRunId ?? undefined;
       const committed = this.deps.timelineRuntime.appendCanonicalEvents(sessionKey, [{
         eventId: `local:lifecycle:${sessionKey}:${currentRunId ?? 'active'}:aborted`,
         type: 'lifecycle',
-        provider: 'openclaw-v4',
+        protocolId: context.protocolId,
+        runtimeProviderId: context.runtimeProviderId,
         source: 'live',
         sessionId: sessionKey,
         ...(currentRunId ? { runId: currentRunId } : {}),
@@ -393,19 +426,13 @@ export class SessionCommandService {
       ? payload as Record<string, unknown>
       : {};
     const rawApprovalIds = Array.isArray(body.approvalIds) ? body.approvalIds : [];
-    void Promise.all(rawApprovalIds.map((rawApprovalId) => {
+    const approvalIds = rawApprovalIds.flatMap((rawApprovalId) => {
       const approvalId = typeof rawApprovalId === 'string' ? rawApprovalId.trim() : '';
-      if (!approvalId) {
-        return Promise.resolve();
-      }
-      return this.deps.gateway.gatewayRpc('exec.approval.resolve', {
-        id: approvalId,
-        decision: 'deny',
-      }, 5000).catch(() => undefined);
-    })).catch(() => undefined);
-
-    const response = await this.commitAbortSession(sessionKey);
-    void this.deps.gateway.gatewayRpc('chat.abort', { sessionKey }, 5000).catch(() => undefined);
+      return approvalId ? [approvalId] : [];
+    });
+    const context = this.resolveContext(sessionKey);
+    const response = await this.commitAbortSession(sessionKey, context);
+    void this.resolveTransport(context).abortSession({ context, approvalIds }).catch(() => undefined);
     return response;
   }
 
@@ -431,12 +458,13 @@ export class SessionCommandService {
     return null;
   }
 
-  private appendResolvedApprovalEvent(input: { id: string; decision: SessionApprovalDecision; sessionKey: string; runId?: string }): void {
+  private appendResolvedApprovalEvent(input: { id: string; decision: SessionApprovalDecision; sessionKey: string; runId?: string; context: RuntimeSessionContext }): void {
     const now = this.deps.clock.nowMs();
     const event: CanonicalSessionEvent = {
       eventId: `local:approval:resolved:${input.sessionKey}:${input.id}:${input.decision}`,
       type: 'approval',
-      provider: 'openclaw-v4',
+      protocolId: input.context.protocolId,
+      runtimeProviderId: input.context.runtimeProviderId,
       source: 'live',
       sessionId: input.sessionKey,
       ...(input.runId ? { runId: input.runId } : {}),
@@ -476,13 +504,19 @@ export class SessionCommandService {
       return badRequest('approval decision is required');
     }
     const pendingApproval = this.findPendingApproval(id);
-    const result = await this.deps.gateway.gatewayRpc('exec.approval.resolve', { id, decision });
+    const sessionKey = pendingApproval?.sessionKey ?? this.deps.stateStore.getActiveSessionKey() ?? '';
+    if (!sessionKey) {
+      return badRequest('approval sessionKey is required');
+    }
+    const context = this.resolveContext(sessionKey);
+    const result = await this.resolveTransport(context).resolveApproval({ context, id, decision });
     if (pendingApproval) {
       this.appendResolvedApprovalEvent({
         id,
         decision,
         sessionKey: pendingApproval.sessionKey,
         ...(pendingApproval.runId ? { runId: pendingApproval.runId } : {}),
+        context,
       });
     }
     return ok(result);

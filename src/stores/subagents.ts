@@ -23,7 +23,7 @@ import {
   deleteSession,
   fetchLatestAssistantTurnText,
   sendChatMessage,
-} from '@/services/openclaw/session-runtime';
+} from '@/services/runtime/session-runtime';
 import {
   buildSubagentWorkspacePath,
   buildWorkspaceSubagentsRootFromConfigDir,

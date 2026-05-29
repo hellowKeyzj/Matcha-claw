@@ -6,7 +6,7 @@ import type { ModelCatalogEntry } from '@/types/subagent';
 type SelectableProviderModel = {
   credentialId: string;
   providerKey: string;
-  openClawModelRef: string;
+  runtimeModelRef: string;
   label?: string;
   modelId: string;
   capabilities: ModelCapability[];
@@ -45,17 +45,17 @@ function normalizeSelectableModel(value: unknown): SelectableProviderModel | nul
   const credentialId = typeof value.credentialId === 'string' ? value.credentialId.trim() : '';
   const providerKey = typeof value.providerKey === 'string' ? value.providerKey.trim() : '';
   const modelId = typeof value.modelId === 'string' ? value.modelId.trim() : '';
-  const openClawModelRef = typeof value.openClawModelRef === 'string' ? value.openClawModelRef.trim() : '';
+  const runtimeModelRef = typeof value.runtimeModelRef === 'string' ? value.runtimeModelRef.trim() : '';
   const label = typeof value.label === 'string' ? value.label.trim() : '';
   const capabilities = normalizeCapabilities(value.capabilities);
-  if (!credentialId || !providerKey || !modelId || !openClawModelRef || capabilities.length === 0) return null;
+  if (!credentialId || !providerKey || !modelId || !runtimeModelRef || capabilities.length === 0) return null;
   const contextWindow = normalizePositiveInteger(value.contextWindow);
   const maxTokens = normalizePositiveInteger(value.maxTokens);
   return {
     credentialId,
     providerKey,
     modelId,
-    openClawModelRef,
+    runtimeModelRef,
     label,
     capabilities,
     ...(contextWindow !== undefined ? { contextWindow } : {}),
@@ -67,7 +67,7 @@ export function buildSelectableProviderModels(models: readonly SelectableProvide
   const out: ModelCatalogEntry[] = [];
   const seen = new Set<string>();
   for (const model of models) {
-    const modelRef = model.openClawModelRef?.trim();
+    const modelRef = model.runtimeModelRef?.trim();
     if (!modelRef) continue;
     if (seen.has(modelRef)) continue;
     seen.add(modelRef);

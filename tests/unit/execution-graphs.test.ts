@@ -2,11 +2,13 @@ import { describe, expect, it } from 'vitest';
 import { buildExecutionGraphItemsFromCanonicalState } from '../../runtime-host/application/sessions/canonical/canonical-projection';
 import { createEmptyCanonicalSessionState, reduceCanonicalSessionEvents } from '../../runtime-host/application/sessions/canonical/canonical-reducer';
 import type { CanonicalSessionEvent } from '../../runtime-host/application/sessions/canonical/canonical-events';
+import { OPENCLAW_RUNTIME_PROTOCOL_ID, OPENCLAW_RUNTIME_PROVIDER_ID } from '../../runtime-host/application/sessions/runtime-providers/runtime-provider-types';
 
-function base(eventId: string): Pick<CanonicalSessionEvent, 'eventId' | 'provider' | 'source' | 'sessionId' | 'runId' | 'laneKey' | 'origin'> {
+function base(eventId: string): Pick<CanonicalSessionEvent, 'eventId' | 'protocolId' | 'runtimeProviderId' | 'source' | 'sessionId' | 'runId' | 'laneKey' | 'origin'> {
   return {
     eventId,
-    provider: 'openclaw-v4',
+    protocolId: OPENCLAW_RUNTIME_PROTOCOL_ID,
+    runtimeProviderId: OPENCLAW_RUNTIME_PROVIDER_ID,
     source: 'live',
     sessionId: 'agent:main:main',
     runId: 'run-1',

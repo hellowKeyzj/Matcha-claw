@@ -12,6 +12,7 @@ import { createEmptyCanonicalSessionState } from './canonical/canonical-reducer'
 import type {
   SessionRuntimeTimelineState,
 } from './session-runtime-types';
+import type { RuntimeSessionContext } from './runtime-providers/runtime-provider-types';
 
 export function createEmptySessionRuntimeState(): SessionRuntimeStateSnapshot {
   return {
@@ -30,12 +31,13 @@ export function createEmptySessionRuntimeState(): SessionRuntimeStateSnapshot {
 
 export function createEmptyTimelineState(
   patch: Partial<SessionRuntimeTimelineState> = {},
+  context?: RuntimeSessionContext,
 ): SessionRuntimeTimelineState {
-  const sessionKey = patch.sessionKey ?? '';
+  const sessionKey = patch.sessionKey ?? context?.sessionKey ?? '';
   return {
     sessionKey,
     runEpoch: 0,
-    canonical: createEmptyCanonicalSessionState(sessionKey),
+    canonical: createEmptyCanonicalSessionState(sessionKey, context),
     timelineEntries: [],
     executionGraphItems: [],
     renderItems: [],

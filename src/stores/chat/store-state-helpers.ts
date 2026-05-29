@@ -370,6 +370,8 @@ export function areSessionsEquivalent(left: ChatSession[], right: ChatSession[])
     if (
       a.key !== b.key
       || (a.agentId ?? null) !== (b.agentId ?? null)
+      || (a.protocolId ?? null) !== (b.protocolId ?? null)
+      || (a.runtimeProviderId ?? null) !== (b.runtimeProviderId ?? null)
       || (a.kind ?? null) !== (b.kind ?? null)
       || (a.preferred ?? false) !== (b.preferred ?? false)
       || (a.label ?? null) !== (b.label ?? null)
@@ -444,6 +446,8 @@ export function createEmptySessionRuntime(): ChatSessionRuntimeState {
 export function createEmptySessionMeta(): ChatSessionMetaState {
   return {
     agentId: null,
+    protocolId: null,
+    runtimeProviderId: null,
     kind: null,
     preferred: false,
     label: null,
@@ -475,6 +479,8 @@ export function createEmptySessionViewportState(): ChatSessionViewportState {
 
 function areSessionMetaEquivalent(left: ChatSessionMetaState, right: ChatSessionMetaState): boolean {
   return left.agentId === right.agentId
+    && (left.protocolId ?? null) === (right.protocolId ?? null)
+    && (left.runtimeProviderId ?? null) === (right.runtimeProviderId ?? null)
     && left.kind === right.kind
     && left.preferred === right.preferred
     && left.label === right.label
@@ -769,6 +775,8 @@ export function patchSessionSnapshot(
   const nextMeta = {
     ...current.meta,
     agentId: catalog.agentId,
+    protocolId: catalog.protocolId ?? null,
+    runtimeProviderId: catalog.runtimeProviderId ?? null,
     kind: catalog.kind,
     preferred: catalog.preferred,
     label: catalog.label ?? null,

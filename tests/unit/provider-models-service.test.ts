@@ -277,7 +277,7 @@ describe('ProviderModelsApplicationService', () => {
         {
           credentialId: 'custom-dd749b2e-4807-4e78-bb50-7f7e3ae81d7a',
           providerKey: 'custom-dd749b2e',
-          openClawModelRef: 'custom-dd749b2e/gpt-5.4',
+          runtimeModelRef: 'custom-dd749b2e/gpt-5.4',
           label: '自定义',
           modelId: 'gpt-5.4',
           capabilities: ['chat'],

@@ -58,7 +58,7 @@ describe('chat model picker', () => {
       },
     ]);
 
-    hostSessionPatchMock.mockImplementation(async (payload: { sessionKey: string; model: string }) => ({
+    hostSessionPatchMock.mockImplementation(async (payload: { sessionKey: string; runtimeModelRef: string }) => ({
       success: true,
       snapshot: {
         sessionKey: payload.sessionKey,
@@ -68,7 +68,7 @@ describe('chat model picker', () => {
           kind: 'main',
           preferred: true,
           displayName: payload.sessionKey,
-          model: payload.model,
+          model: payload.runtimeModelRef,
           updatedAt: 10,
         },
         items: messages,
@@ -229,7 +229,7 @@ describe('chat model picker', () => {
     await waitFor(() => {
       expect(hostSessionPatchMock).toHaveBeenCalledWith({
         sessionKey: 'agent:test:main',
-        model: 'anthropic/claude-opus-4-6',
+        runtimeModelRef: 'anthropic/claude-opus-4-6',
       });
     });
 
@@ -315,7 +315,7 @@ describe('chat model picker', () => {
     await waitFor(() => {
       expect(hostSessionPatchMock).toHaveBeenCalledWith({
         sessionKey: 'agent:test:main',
-        model: 'openai/gpt-5.4',
+        runtimeModelRef: 'openai/gpt-5.4',
       });
     });
   });
@@ -372,7 +372,7 @@ describe('chat model picker', () => {
     await waitFor(() => {
       expect(hostSessionPatchMock).toHaveBeenCalledWith({
         sessionKey: 'agent:test:main',
-        model: 'openai/gpt-5.4',
+        runtimeModelRef: 'openai/gpt-5.4',
       });
     });
   });

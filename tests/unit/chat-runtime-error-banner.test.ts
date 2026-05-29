@@ -72,4 +72,24 @@ describe('chat runtime error banner visibility', () => {
       message: gatewayIssue.message,
     })).toBe(true);
   });
+
+  it('delays gateway fallback text without a structured issue while a run is active', () => {
+    const state = runtime({ runPhase: 'submitted' });
+
+    expect(shouldShowRuntimeErrorBannerImmediately({
+      runtime: state,
+      message: 'Gateway RPC timeout: chat.send',
+    })).toBe(false);
+  });
+
+  it('keeps non-retryable gateway fallback issues immediate while a run is active', () => {
+    const state = runtime({ runPhase: 'submitted' });
+    const gatewayIssue = issue({ source: 'rpc', message: 'Authentication failed', retryable: false });
+
+    expect(shouldShowRuntimeErrorBannerImmediately({
+      runtime: state,
+      gatewayIssue,
+      message: gatewayIssue.message,
+    })).toBe(true);
+  });
 });

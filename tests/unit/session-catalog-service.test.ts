@@ -72,6 +72,8 @@ describe('session adapter service catalog', () => {
           kind: 'main',
           label: 'indexed catalog title',
           preferred: true,
+          protocolId: 'openclaw-v4',
+          runtimeProviderId: 'openclaw',
           status: 'completed',
           titleSource: 'user',
           displayName: 'indexed catalog title',
@@ -485,6 +487,50 @@ describe('session adapter service catalog', () => {
     });
   });
 
+  it('lists sessions when the session index uses provider-namespaced object-map keys', async () => {
+    const configDir = mkdtempSync(join(tmpdir(), 'matchaclaw-session-catalog-'));
+    tempDirs.push(configDir);
+
+    const sessionsDir = join(configDir, 'agents', 'claude-code', 'sessions');
+    mkdirSync(sessionsDir, { recursive: true });
+    writeFileSync(join(sessionsDir, 'sessions.json'), JSON.stringify({
+      'claude-code:session-1': {
+        sessionId: 'session-1',
+        sessionFile: join(sessionsDir, 'session-1.jsonl'),
+        label: 'claude code indexed session',
+        updatedAt: Date.parse('2026-04-14T10:00:00.000Z'),
+      },
+    }, null, 2));
+    writeFileSync(join(sessionsDir, 'session-1.jsonl'), [
+      buildTranscriptLine({
+        timestamp: '2026-04-14T10:00:00.000Z',
+        role: 'user',
+        content: 'provider namespaced title',
+        id: 'message-provider',
+      }),
+    ].join('\n'));
+
+    const service = createTestSessionRuntimeService({
+      workspace: { getConfigDir: () => configDir },
+      openclawBridge: {
+        chatSend: async () => ({}),
+        gatewayRpc: async () => ({}),
+      },
+    });
+
+    await service.refreshSessionCatalog();
+    const response = await service.listSessions();
+
+    expect(response.status).toBe(200);
+    expect(response.data.sessions[0]).toMatchObject({
+      agentId: 'claude-code',
+      key: 'claude-code:session-1',
+      label: 'claude code indexed session',
+      displayName: 'claude code indexed session',
+      updatedAt: Date.parse('2026-04-14T10:00:00.000Z'),
+    });
+  });
+
   it('lists sessions when OpenClaw sessions.json uses native object-map format', async () => {
     const configDir = mkdtempSync(join(tmpdir(), 'matchaclaw-session-catalog-'));
     tempDirs.push(configDir);
@@ -565,6 +611,58 @@ describe('session adapter service catalog', () => {
           updatedAt: Date.parse('2026-04-12T10:00:00.000Z'),
         },
       ],
+    });
+  });
+
+  it('renames a provider-namespaced session through runtime-host storage', async () => {
+    const configDir = mkdtempSync(join(tmpdir(), 'matchaclaw-session-catalog-'));
+    tempDirs.push(configDir);
+
+    const sessionsDir = join(configDir, 'agents', 'claude-code', 'sessions');
+    mkdirSync(sessionsDir, { recursive: true });
+    writeFileSync(join(sessionsDir, 'sessions.json'), JSON.stringify({
+      'claude-code:session-1': {
+        sessionId: 'session-1',
+        sessionFile: join(sessionsDir, 'session-1.jsonl'),
+        label: 'indexed title',
+      },
+    }, null, 2));
+    writeFileSync(join(sessionsDir, 'session-1.jsonl'), [
+      buildTranscriptLine({
+        timestamp: '2026-04-10T10:00:00.000Z',
+        role: 'user',
+        content: 'transcript title',
+        id: 'message-1',
+      }),
+    ].join('\n'));
+
+    const service = createTestSessionRuntimeService({
+      workspace: { getConfigDir: () => configDir },
+      openclawBridge: {
+        chatSend: async () => ({}),
+        gatewayRpc: async () => ({}),
+      },
+    });
+
+    await expect(service.renameSession({
+      sessionKey: 'claude-code:session-1',
+      label: 'manual provider title',
+    })).resolves.toEqual({
+      status: 200,
+      data: {
+        success: true,
+        sessionKey: 'claude-code:session-1',
+        label: 'manual provider title',
+      },
+    });
+
+    const response = await service.listSessions();
+
+    expect(response.status).toBe(200);
+    expect(response.data.sessions[0]).toMatchObject({
+      key: 'claude-code:session-1',
+      label: 'manual provider title',
+      titleSource: 'user',
     });
   });
 

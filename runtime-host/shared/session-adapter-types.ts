@@ -426,6 +426,8 @@ export interface SessionLoadResult {
 export interface SessionCatalogItem {
   key: string;
   agentId: string;
+  protocolId: string;
+  runtimeProviderId: string;
   kind: SessionCatalogKind;
   preferred: boolean;
   status?: 'active' | 'completed' | 'archived' | 'deleted';

@@ -44,6 +44,11 @@ import type {
   RuntimeLongTaskLookupPort,
   RuntimeLongTaskSubmissionPort,
 } from '../../application/runtime-host/runtime-task-ports';
+import { RuntimeProviderRegistry } from '../../application/sessions/runtime-providers/runtime-provider-registry';
+import { OpenClawV4ProtocolAdapter } from '../../application/sessions/runtime-providers/openclaw/openclaw-v4-protocol-adapter';
+import { openClawRuntimeProviderProfile } from '../../application/sessions/runtime-providers/openclaw/openclaw-profile';
+import { AcpProtocolAdapter } from '../../application/sessions/runtime-providers/acp/acp-protocol-adapter';
+import { acpRuntimeProviderProfiles } from '../../application/sessions/runtime-providers/acp/acp-profiles';
 
 export interface SessionRuntimeModule {
   readonly sessionRuntime: SessionRuntimeService;
@@ -77,13 +82,27 @@ export function registerSessionRuntimeModule(
     scope.resolve<RuntimeLongTaskSubmissionPort>('runtime.tasks'),
     scope.resolve<RuntimeLongTaskLookupPort>('runtime.taskLookup'),
   ));
+  container.register('sessionOperationCoordinator', () => new SessionOperationCoordinator());
+  container.register('sessionRuntimeProviderRegistry', () => {
+    const registry = new RuntimeProviderRegistry();
+    registry.register({
+      protocol: new OpenClawV4ProtocolAdapter(gateway()),
+      profiles: [openClawRuntimeProviderProfile],
+    });
+    registry.register({
+      protocol: new AcpProtocolAdapter(),
+      profiles: acpRuntimeProviderProfiles,
+    });
+    return registry;
+  });
   container.register('sessionRuntimeStateStore', (scope) => new SessionRuntimeStateStore({
     runtimeStore: scope.resolve('sessionRuntimeStoreRepository'),
+    runtimeProviderRegistry: scope.resolve('sessionRuntimeProviderRegistry'),
     logger: scope.resolve<RuntimeHostLogger>('logger'),
   }));
-  container.register('sessionOperationCoordinator', () => new SessionOperationCoordinator());
   container.register('sessionTranscriptTimelineLoader', (scope) => new SessionTranscriptTimelineLoader({
     sessionStorage: scope.resolve('sessionStorageRepository'),
+    runtimeProviderRegistry: scope.resolve('sessionRuntimeProviderRegistry'),
   }));
   container.register('sessionExecutionGraphRuntime', (scope) => new SessionExecutionGraphRuntime({
     stateStore: scope.resolve('sessionRuntimeStateStore'),
@@ -106,6 +125,7 @@ export function registerSessionRuntimeModule(
     snapshotService: scope.resolve('sessionSnapshotService'),
     clock: scope.resolve<RuntimeClockPort>('runtime.clock'),
     logger: scope.resolve<RuntimeHostLogger>('logger'),
+    runtimeProviderRegistry: scope.resolve('sessionRuntimeProviderRegistry'),
     emitSessionUpdate: (event) => {
       void parentGatewayEvents?.emit('session:update', event).catch(() => undefined);
     },
@@ -120,7 +140,7 @@ export function registerSessionRuntimeModule(
     stateStore: scope.resolve('sessionRuntimeStateStore'),
     timelineRuntime: scope.resolve('sessionTimelineRuntime'),
     snapshotService: scope.resolve('sessionSnapshotService'),
-    gateway: gateway(),
+    runtimeProviderRegistry: scope.resolve('sessionRuntimeProviderRegistry'),
     operationCoordinator: scope.resolve('sessionOperationCoordinator'),
     clock: scope.resolve<RuntimeClockPort>('runtime.clock'),
     idGenerator: scope.resolve<RuntimeIdGeneratorPort>('runtime.idGenerator'),
@@ -143,7 +163,7 @@ export function registerSessionRuntimeModule(
     fileSystem: scope.resolve<RuntimeFileSystemPort>('runtime.fileSystem'),
     idGenerator: scope.resolve<RuntimeIdGeneratorPort>('runtime.idGenerator'),
     clock: scope.resolve<RuntimeClockPort>('runtime.clock'),
-    gateway: gateway(),
+    runtimeProviderRegistry: scope.resolve('sessionRuntimeProviderRegistry'),
     operationCoordinator: scope.resolve('sessionOperationCoordinator'),
     emitSessionUpdate: (event) => {
       void parentGatewayEvents?.emit('session:update', event).catch(() => undefined);

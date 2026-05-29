@@ -196,7 +196,7 @@ export class ProviderModelsApplicationService {
   async readSelectable(): Promise<{
     models: Array<ProviderModel & {
       providerKey: string;
-      openClawModelRef: string;
+      runtimeModelRef: string;
       label: string;
     }>;
   }> {
@@ -214,17 +214,17 @@ export class ProviderModelsApplicationService {
         const account = accountByCredentialId.get(model.credentialId);
         if (!account) return null;
         const label = getOptionalString(account.account.label) || account.vendorId || model.credentialId;
-        const openClawModelRef = isCustomMediaCredential(account.account)
+        const runtimeModelRef = isCustomMediaCredential(account.account)
           ? toMatchaClawMediaModelRef(account.providerKey, model.modelId)
           : `${account.providerKey}/${model.modelId}`;
         return {
           ...model,
           providerKey: account.providerKey,
-          openClawModelRef,
+          runtimeModelRef,
           label,
         };
       })
-      .filter((model): model is ProviderModel & { providerKey: string; openClawModelRef: string; label: string } => model !== null)
+      .filter((model): model is ProviderModel & { providerKey: string; runtimeModelRef: string; label: string } => model !== null)
       .sort((left, right) => `${left.label} / ${left.modelId}`.localeCompare(`${right.label} / ${right.modelId}`));
     return { models };
   }

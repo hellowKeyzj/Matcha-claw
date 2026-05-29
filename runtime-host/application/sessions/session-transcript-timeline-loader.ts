@@ -1,12 +1,10 @@
 import type { CanonicalSessionEvent } from './canonical/canonical-events';
-import { iterateCanonicalReplayEventsFromTranscriptMessages } from './canonical/canonical-transcript-replay';
-import {
-  iterateTranscriptMessages,
-} from './transcript-parser';
 import type { SessionStoragePort } from './session-storage-repository';
+import { RuntimeProviderRegistry } from './runtime-providers/runtime-provider-registry';
 
 interface SessionTranscriptTimelineLoaderDeps {
   sessionStorage: SessionStoragePort;
+  runtimeProviderRegistry: RuntimeProviderRegistry;
 }
 
 export class SessionTranscriptTimelineLoader {
@@ -14,10 +12,10 @@ export class SessionTranscriptTimelineLoader {
 
   async readCanonicalReplayEvents(sessionId: string): Promise<Iterable<CanonicalSessionEvent>> {
     const content = await this.deps.sessionStorage.readTranscriptContent(sessionId);
-    return iterateCanonicalReplayEventsFromTranscriptMessages(
-      sessionId,
-      content ? iterateTranscriptMessages(content) : [],
-    );
+    const registry = this.deps.runtimeProviderRegistry;
+    const context = registry.resolveSessionContext(sessionId);
+    const protocol = registry.getProtocol(context.protocolId);
+    return protocol.replayAdapter.replayTranscript(sessionId, content ?? '', context);
   }
 
 }

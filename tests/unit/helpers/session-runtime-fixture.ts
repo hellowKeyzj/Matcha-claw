@@ -17,6 +17,9 @@ import type { SessionCatalogJobPort } from '../../../runtime-host/application/se
 import type { OpenClawWorkspacePort } from '../../../runtime-host/application/openclaw/openclaw-workspace-service';
 import { createTestRuntimeFileSystem } from './runtime-file-system';
 import { createTestRuntimeIdGenerator } from './runtime-id-generator';
+import { RuntimeProviderRegistry } from '../../../runtime-host/application/sessions/runtime-providers/runtime-provider-registry';
+import { OpenClawV4ProtocolAdapter } from '../../../runtime-host/application/sessions/runtime-providers/openclaw/openclaw-v4-protocol-adapter';
+import { openClawRuntimeProviderProfile } from '../../../runtime-host/application/sessions/runtime-providers/openclaw/openclaw-profile';
 
 export interface TestSessionRuntimeServiceDeps {
   workspace: Pick<OpenClawWorkspacePort, 'getConfigDir'>;
@@ -76,12 +79,19 @@ export function createTestSessionRuntimeService(deps: TestSessionRuntimeServiceD
     storageRepository: sessionStorage,
     metadataRepository: sessionMetadata,
   });
+  const operationCoordinator = new SessionOperationCoordinator();
+  const runtimeProviderRegistry = new RuntimeProviderRegistry();
+  runtimeProviderRegistry.register({
+    protocol: new OpenClawV4ProtocolAdapter(deps.openclawBridge),
+    profiles: [openClawRuntimeProviderProfile],
+  });
   const stateStore = new SessionRuntimeStateStore({
     runtimeStore: sessionRuntimeStore,
+    runtimeProviderRegistry,
   });
-  const operationCoordinator = new SessionOperationCoordinator();
   const transcriptLoader = new SessionTranscriptTimelineLoader({
     sessionStorage,
+    runtimeProviderRegistry,
   });
   const executionGraphRuntime = new SessionExecutionGraphRuntime({
     stateStore,
@@ -103,6 +113,7 @@ export function createTestSessionRuntimeService(deps: TestSessionRuntimeServiceD
     timelineRuntime,
     snapshotService,
     clock,
+    runtimeProviderRegistry,
     emitSessionUpdate: deps.emitSessionUpdate,
   });
   const commandService = new SessionCommandService({
@@ -127,7 +138,7 @@ export function createTestSessionRuntimeService(deps: TestSessionRuntimeServiceD
     stateStore,
     timelineRuntime,
     snapshotService,
-    gateway: deps.openclawBridge,
+    runtimeProviderRegistry,
     operationCoordinator,
     clock,
     idGenerator,
@@ -152,7 +163,7 @@ export function createTestSessionRuntimeService(deps: TestSessionRuntimeServiceD
     fileSystem,
     idGenerator,
     clock,
-    gateway: deps.openclawBridge,
+    runtimeProviderRegistry,
     operationCoordinator,
     emitSessionUpdate: deps.emitSessionUpdate,
   });

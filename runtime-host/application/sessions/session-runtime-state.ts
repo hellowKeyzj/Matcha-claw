@@ -14,9 +14,13 @@ import type {
 import {
   normalizeString,
 } from './session-value-normalization';
+import type { RuntimeProviderRegistry } from './runtime-providers/runtime-provider-registry';
+import type { RuntimeSessionContext } from './runtime-providers/runtime-provider-types';
 
 export interface SessionRuntimeOverlay {
   sessionKey: string;
+  protocolId: string;
+  runtimeProviderId: string;
   timelineEntries: SessionTimelineEntry[];
   runtime: SessionRuntimeStateSnapshot;
   runtimeModel: string | null;
@@ -24,6 +28,7 @@ export interface SessionRuntimeOverlay {
 
 export interface SessionRuntimeStateStoreDeps {
   runtimeStore: SessionRuntimeStorePort;
+  runtimeProviderRegistry: RuntimeProviderRegistry;
   logger?: Pick<RuntimeHostLogger, 'warn'>;
 }
 
@@ -90,12 +95,13 @@ export class SessionRuntimeStateStore {
     }
   }
 
-  getSessionState(sessionKey: string): SessionRuntimeTimelineState {
+  getSessionState(sessionKey: string, context?: RuntimeSessionContext): SessionRuntimeTimelineState {
     const existing = this.sessionStates.get(sessionKey);
     if (existing) {
       return existing;
     }
-    const created = createEmptyTimelineState({ sessionKey });
+    const resolvedContext = context ?? this.deps.runtimeProviderRegistry.resolveSessionContext(sessionKey);
+    const created = createEmptyTimelineState({ sessionKey }, resolvedContext);
     this.sessionStates.set(sessionKey, created);
     return created;
   }
@@ -125,6 +131,8 @@ export class SessionRuntimeStateStore {
   listRuntimeOverlays(): SessionRuntimeOverlay[] {
     return this.listSessionStates().map(([sessionKey, state]) => ({
       sessionKey,
+      protocolId: state.canonical.protocolId,
+      runtimeProviderId: state.canonical.runtimeProviderId,
       timelineEntries: state.timelineEntries,
       runtime: state.runtime,
       runtimeModel: this.getResolvedSessionModel(sessionKey),

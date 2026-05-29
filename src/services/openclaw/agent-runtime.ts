@@ -1,5 +1,5 @@
 import type { GatewayRpcInvoker } from '@/services/openclaw/types';
-import { fetchLatestAssistantSnapshot } from '@/services/openclaw/session-runtime';
+import { fetchLatestAssistantSnapshot } from '@/services/runtime/session-runtime';
 
 interface AgentRunResult {
   runId?: unknown;

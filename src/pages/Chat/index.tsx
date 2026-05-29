@@ -716,7 +716,7 @@ export function Chat({ isActive = true }: ChatProps) {
     try {
       const result = await hostSessionPatch({
         sessionKey: currentSessionKey,
-        model: normalizedNextModelId,
+        runtimeModelRef: normalizedNextModelId,
       });
       if (result.snapshot) {
         useChatStore.setState((state) => ({

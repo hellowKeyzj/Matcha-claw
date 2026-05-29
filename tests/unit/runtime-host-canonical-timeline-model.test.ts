@@ -7,15 +7,17 @@ import type { CanonicalSessionEvent } from '../../runtime-host/application/sessi
 import type {
   SessionRuntimeTimelineState,
 } from '../../runtime-host/application/sessions/session-runtime-types';
+import { OPENCLAW_RUNTIME_PROTOCOL_ID, OPENCLAW_RUNTIME_PROVIDER_ID } from '../../runtime-host/application/sessions/runtime-providers/runtime-provider-types';
 
 function buildRuntimeState(): ReturnType<typeof createEmptySessionRuntimeState> {
   return createEmptySessionRuntimeState();
 }
 
-function base(eventId: string): Pick<CanonicalSessionEvent, 'eventId' | 'provider' | 'source' | 'sessionId' | 'runId' | 'seq' | 'timestamp' | 'laneKey' | 'origin'> {
+function base(eventId: string): Pick<CanonicalSessionEvent, 'eventId' | 'protocolId' | 'runtimeProviderId' | 'source' | 'sessionId' | 'runId' | 'seq' | 'timestamp' | 'laneKey' | 'origin'> {
   return {
     eventId,
-    provider: 'openclaw-v4',
+    protocolId: OPENCLAW_RUNTIME_PROTOCOL_ID,
+    runtimeProviderId: OPENCLAW_RUNTIME_PROVIDER_ID,
     source: 'live',
     sessionId: 'agent:main:main',
     runId: 'run-1',
@@ -253,7 +255,8 @@ describe('Runtime Host canonical ACP projection', () => {
     reduceCanonicalSessionEvents(state, [{
       eventId: 'control-issue-1',
       type: 'control',
-      provider: 'openclaw-v4',
+      protocolId: OPENCLAW_RUNTIME_PROTOCOL_ID,
+      runtimeProviderId: OPENCLAW_RUNTIME_PROVIDER_ID,
       source: 'control',
       sessionId: 'agent:main:main',
       timestamp: 1,
@@ -279,7 +282,8 @@ describe('Runtime Host canonical ACP projection', () => {
     reduceCanonicalSessionEvents(state, [{
       eventId: 'control-connected-1',
       type: 'control',
-      provider: 'openclaw-v4',
+      protocolId: OPENCLAW_RUNTIME_PROTOCOL_ID,
+      runtimeProviderId: OPENCLAW_RUNTIME_PROVIDER_ID,
       source: 'control',
       sessionId: 'agent:main:main',
       timestamp: 2,
@@ -294,7 +298,8 @@ describe('Runtime Host canonical ACP projection', () => {
     }, {
       eventId: 'control-capabilities-1',
       type: 'control',
-      provider: 'openclaw-v4',
+      protocolId: OPENCLAW_RUNTIME_PROTOCOL_ID,
+      runtimeProviderId: OPENCLAW_RUNTIME_PROVIDER_ID,
       source: 'control',
       sessionId: 'agent:main:main',
       timestamp: 3,

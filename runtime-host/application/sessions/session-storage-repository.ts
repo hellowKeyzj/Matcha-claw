@@ -120,7 +120,8 @@ function listAgentStorageDescriptors(input: {
   }
 
   for (const [sessionKey, value] of Object.entries(input.sessionsJson)) {
-    if (!sessionKey.startsWith('agent:')) {
+    const normalizedSessionKey = normalizeString(sessionKey);
+    if (!normalizedSessionKey) {
       continue;
     }
     if (typeof value === 'string' && value.trim()) {
@@ -474,7 +475,7 @@ export class SessionStorageRepository implements SessionStoragePort {
   }
 
   async findStorageDescriptor(sessionKey: string): Promise<SessionStorageDescriptor | null> {
-    if (!sessionKey.startsWith('agent:')) {
+    if (!normalizeString(sessionKey)) {
       return null;
     }
     for (const descriptor of await this.listStorageDescriptors()) {
