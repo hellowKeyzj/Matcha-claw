@@ -83,3 +83,4 @@ clawsuite-main/
 .claude/
 .tmp/
 identity/
+matcha-agent/spec

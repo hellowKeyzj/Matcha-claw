@@ -23,6 +23,11 @@ on:
           - mac
           - linux
           - all
+      build_matcha_agent:
+        description: 'Build and package matcha-agent'
+        required: false
+        default: false
+        type: boolean
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -66,7 +71,9 @@ jobs:
         include: ${{ fromJSON(needs.resolve-matrix.outputs.include) }}
 
     runs-on: ${{ matrix.os }}
-    
+    env:
+      BUILD_MATCHA_AGENT: ${{ github.event.inputs.build_matcha_agent == 'true' && '1' || '' }}
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
@@ -83,6 +90,12 @@ jobs:
         with:
           node-version: '24'
           cache: 'pnpm'
+
+      - name: Setup Bun
+        if: env.BUILD_MATCHA_AGENT == '1'
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.5
 
       - name: Prefer HTTPS for public GitHub git dependencies
         run: |
@@ -165,6 +178,7 @@ jobs:
 
           pnpm run build:runtime-host-process
           pnpm run build:vite
+          pnpm run build:matcha-agent
           pnpm exec zx scripts/bundle-openclaw.mjs
           pnpm exec zx scripts/bundle-openclaw-plugins.mjs
           pnpm run check:openclaw-plugin-mirrors
@@ -359,14 +373,14 @@ jobs:
         if: matrix.platform == 'win'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: pnpm run build:runtime-host-process && pnpm run build:vite && pnpm exec zx scripts/bundle-openclaw.mjs && pnpm exec zx scripts/bundle-openclaw-plugins.mjs && pnpm run check:openclaw-plugin-mirrors && pnpm exec zx scripts/bundle-preinstalled-skills.mjs && pnpm exec electron-builder --win --publish never
+        run: pnpm run build:runtime-host-process && pnpm run build:vite && pnpm run build:matcha-agent && pnpm exec zx scripts/bundle-openclaw.mjs && pnpm exec zx scripts/bundle-openclaw-plugins.mjs && pnpm run check:openclaw-plugin-mirrors && pnpm exec zx scripts/bundle-preinstalled-skills.mjs && pnpm exec electron-builder --win --publish never
 
       # Linux specific steps
       - name: Build Linux
         if: matrix.platform == 'linux'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: pnpm run build:runtime-host-process && pnpm run build:vite && pnpm exec zx scripts/bundle-openclaw.mjs && pnpm exec zx scripts/bundle-openclaw-plugins.mjs && pnpm run check:openclaw-plugin-mirrors && pnpm exec zx scripts/bundle-preinstalled-skills.mjs && pnpm exec electron-builder --linux --publish never
+        run: pnpm run build:runtime-host-process && pnpm run build:vite && pnpm run build:matcha-agent && pnpm exec zx scripts/bundle-openclaw.mjs && pnpm exec zx scripts/bundle-openclaw-plugins.mjs && pnpm run check:openclaw-plugin-mirrors && pnpm exec zx scripts/bundle-preinstalled-skills.mjs && pnpm exec electron-builder --linux --publish never
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
