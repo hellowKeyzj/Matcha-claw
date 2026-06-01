@@ -102,6 +102,15 @@ export const SDKControlInterruptRequestSchema = lazySchema(() =>
     .describe('Interrupts the currently running conversation turn.'),
 )
 
+export const SDKControlEndSessionRequestSchema = lazySchema(() =>
+  z
+    .object({
+      subtype: z.literal('end_session'),
+      reason: z.string().optional(),
+    })
+    .describe('Ends the headless session and closes the input loop.'),
+)
+
 export const SDKControlPermissionRequestSchema = lazySchema(() =>
   z
     .object({
@@ -359,6 +368,59 @@ export const SDKControlSeedReadStateRequestSchema = lazySchema(() =>
     ),
 )
 
+export const SDKControlReadFileRequestSchema = lazySchema(() =>
+  z
+    .object({
+      subtype: z.literal('read_file'),
+      path: z.string(),
+      maxBytes: z.number().optional(),
+      encoding: z.string().optional(),
+    })
+    .describe('Reads a file through the CLI read-file semantics.'),
+)
+
+export const SDKControlReadFileResponseSchema = lazySchema(() =>
+  z
+    .object({
+      contents: z.string(),
+      absPath: z.string(),
+      truncated: z.boolean().optional(),
+      mtime: z.number().optional(),
+    })
+    .describe('Result of a read_file control request.'),
+)
+
+export const SDKControlReadFileContentRequestSchema = lazySchema(() =>
+  z
+    .object({
+      subtype: z.literal('read_file_content'),
+      path: z.string(),
+      offset: z.number().optional(),
+      limit: z.number().optional(),
+      pages: z.string().optional(),
+      maxTokens: z.number().optional(),
+      maxSizeBytes: z.number().optional(),
+    })
+    .describe('Reads a file through the CLI Read tool content semantics.'),
+)
+
+const SDKReadFileContentBlockSchema = lazySchema(() =>
+  z.object({ type: z.string() }).catchall(z.unknown()),
+)
+
+export const SDKControlReadFileContentResponseSchema = lazySchema(() =>
+  z
+    .object({
+      data: z.unknown(),
+      content: z.union([z.string(), z.array(SDKReadFileContentBlockSchema())]),
+      supplementalContent: z
+        .array(z.union([z.string(), z.array(SDKReadFileContentBlockSchema())]))
+        .optional(),
+      toolUseId: z.string(),
+    })
+    .describe('Result of a read_file_content control request.'),
+)
+
 export const SDKHookCallbackRequestSchema = lazySchema(() =>
   z
     .object({
@@ -450,6 +512,89 @@ export const SDKControlMcpToggleRequestSchema = lazySchema(() =>
     .describe('Enables or disables an MCP server.'),
 )
 
+export const SDKControlChannelEnableRequestSchema = lazySchema(() =>
+  z
+    .object({
+      subtype: z.literal('channel_enable'),
+      serverName: z.string(),
+    })
+    .describe('Enables channel notifications for an MCP server.'),
+)
+
+export const SDKControlMcpAuthenticateRequestSchema = lazySchema(() =>
+  z
+    .object({
+      subtype: z.literal('mcp_authenticate'),
+      serverName: z.string(),
+    })
+    .describe('Starts an MCP OAuth authentication flow.'),
+)
+
+export const SDKControlMcpAuthenticateResponseSchema = lazySchema(() =>
+  z
+    .object({
+      authUrl: z.string().optional(),
+      requiresUserAction: z.boolean(),
+    })
+    .describe('MCP OAuth authentication start result.'),
+)
+
+export const SDKControlMcpOAuthCallbackUrlRequestSchema = lazySchema(() =>
+  z
+    .object({
+      subtype: z.literal('mcp_oauth_callback_url'),
+      serverName: z.string(),
+      callbackUrl: z.string(),
+    })
+    .describe('Submits the OAuth redirect URL for an MCP server.'),
+)
+
+export const SDKControlMcpClearAuthRequestSchema = lazySchema(() =>
+  z
+    .object({
+      subtype: z.literal('mcp_clear_auth'),
+      serverName: z.string(),
+    })
+    .describe('Clears stored OAuth credentials for an MCP server.'),
+)
+
+export const SDKControlClaudeAuthenticateRequestSchema = lazySchema(() =>
+  z
+    .object({
+      subtype: z.literal('claude_authenticate'),
+      loginWithClaudeAi: z.boolean().optional(),
+    })
+    .describe('Starts a Claude OAuth authentication flow.'),
+)
+
+export const SDKControlClaudeAuthenticateResponseSchema = lazySchema(() =>
+  z
+    .object({
+      manualUrl: z.string(),
+      automaticUrl: z.string(),
+    })
+    .describe('Claude OAuth URLs for manual and automatic authentication.'),
+)
+
+export const SDKControlClaudeOAuthCallbackRequestSchema = lazySchema(() =>
+  z
+    .object({
+      subtype: z.literal('claude_oauth_callback'),
+      authorizationCode: z.string(),
+      state: z.string(),
+    })
+    .describe('Submits a manual Claude OAuth authorization code.'),
+)
+
+export const SDKControlClaudeOAuthWaitForCompletionRequestSchema = lazySchema(
+  () =>
+    z
+      .object({
+        subtype: z.literal('claude_oauth_wait_for_completion'),
+      })
+      .describe('Waits for the active Claude OAuth flow to complete.'),
+)
+
 export const SDKControlStopTaskRequestSchema = lazySchema(() =>
   z
     .object({
@@ -457,6 +602,89 @@ export const SDKControlStopTaskRequestSchema = lazySchema(() =>
       task_id: z.string(),
     })
     .describe('Stops a running task.'),
+)
+
+export const SDKControlBackgroundTasksRequestSchema = lazySchema(() =>
+  z
+    .object({
+      subtype: z.literal('background_tasks'),
+      tool_use_id: z.string().optional(),
+    })
+    .describe('Backgrounds foreground shell/agent tasks.'),
+)
+
+export const SDKControlBackgroundTasksResponseSchema = lazySchema(() =>
+  z
+    .object({
+      backgrounded: z.boolean(),
+      task_ids: z.array(z.string()),
+    })
+    .describe('Result of a background_tasks control request.'),
+)
+
+export const SDKControlGenerateSessionTitleRequestSchema = lazySchema(() =>
+  z
+    .object({
+      subtype: z.literal('generate_session_title'),
+      description: z.string(),
+      persist: z.boolean().optional(),
+    })
+    .describe('Generates a title for the current session.'),
+)
+
+export const SDKControlGenerateSessionTitleResponseSchema = lazySchema(() =>
+  z
+    .object({
+      title: z.string().nullable(),
+    })
+    .describe('Generated session title result.'),
+)
+
+export const SDKControlSideQuestionRequestSchema = lazySchema(() =>
+  z
+    .object({
+      subtype: z.literal('side_question'),
+      question: z.string(),
+    })
+    .describe(
+      'Runs a cache-safe side question against the current conversation.',
+    ),
+)
+
+export const SDKControlSideQuestionResponseSchema = lazySchema(() =>
+  z
+    .object({
+      response: z.string(),
+    })
+    .describe('Side question response.'),
+)
+
+export const SDKControlSetProactiveRequestSchema = lazySchema(() =>
+  z
+    .object({
+      subtype: z.literal('set_proactive'),
+      enabled: z.boolean(),
+    })
+    .describe('Enables or disables proactive runtime behavior.'),
+)
+
+export const SDKControlRemoteControlRequestSchema = lazySchema(() =>
+  z
+    .object({
+      subtype: z.literal('remote_control'),
+      enabled: z.boolean(),
+    })
+    .describe('Enables or disables Remote Control for the current session.'),
+)
+
+export const SDKControlRemoteControlResponseSchema = lazySchema(() =>
+  z
+    .object({
+      session_url: z.string().optional(),
+      connect_url: z.string().optional(),
+      environment_id: z.string().optional(),
+    })
+    .describe('Remote Control enable result.'),
 )
 
 export const SDKControlApplyFlagSettingsRequestSchema = lazySchema(() =>
@@ -549,6 +777,7 @@ export const SDKControlElicitationResponseSchema = lazySchema(() =>
 export const SDKControlRequestInnerSchema = lazySchema(() =>
   z.union([
     SDKControlInterruptRequestSchema(),
+    SDKControlEndSessionRequestSchema(),
     SDKControlPermissionRequestSchema(),
     SDKControlInitializeRequestSchema(),
     SDKControlSetPermissionModeRequestSchema(),
@@ -561,11 +790,25 @@ export const SDKControlRequestInnerSchema = lazySchema(() =>
     SDKControlRewindFilesRequestSchema(),
     SDKControlCancelAsyncMessageRequestSchema(),
     SDKControlSeedReadStateRequestSchema(),
+    SDKControlReadFileRequestSchema(),
+    SDKControlReadFileContentRequestSchema(),
     SDKControlMcpSetServersRequestSchema(),
     SDKControlReloadPluginsRequestSchema(),
     SDKControlMcpReconnectRequestSchema(),
     SDKControlMcpToggleRequestSchema(),
+    SDKControlChannelEnableRequestSchema(),
+    SDKControlMcpAuthenticateRequestSchema(),
+    SDKControlMcpOAuthCallbackUrlRequestSchema(),
+    SDKControlMcpClearAuthRequestSchema(),
+    SDKControlClaudeAuthenticateRequestSchema(),
+    SDKControlClaudeOAuthCallbackRequestSchema(),
+    SDKControlClaudeOAuthWaitForCompletionRequestSchema(),
     SDKControlStopTaskRequestSchema(),
+    SDKControlBackgroundTasksRequestSchema(),
+    SDKControlGenerateSessionTitleRequestSchema(),
+    SDKControlSideQuestionRequestSchema(),
+    SDKControlSetProactiveRequestSchema(),
+    SDKControlRemoteControlRequestSchema(),
     SDKControlApplyFlagSettingsRequestSchema(),
     SDKControlGetSettingsRequestSchema(),
     SDKControlElicitationRequestSchema(),

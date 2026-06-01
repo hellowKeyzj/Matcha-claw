@@ -1,5 +1,6 @@
 import { readdir, readFile, writeFile, cp } from 'fs/promises'
 import { join } from 'path'
+import { $ } from 'bun'
 import { getMacroDefines } from './scripts/defines.ts'
 import { DEFAULT_BUILD_FEATURES } from './scripts/defines.ts'
 
@@ -17,7 +18,7 @@ const features = [...new Set([...DEFAULT_BUILD_FEATURES, ...envFeatures])]
 
 // Step 2: Bundle with splitting
 const result = await Bun.build({
-  entrypoints: ['src/entrypoints/cli.tsx'],
+  entrypoints: ['src/entrypoints/cli.tsx', 'src/entrypoints/agentSdkTypes.ts'],
   outdir,
   target: 'bun',
   splitting: true,
@@ -92,13 +93,22 @@ const ripgrepDir = join(outdir, 'vendor', 'ripgrep')
 await cp('src/utils/vendor/ripgrep', ripgrepDir, { recursive: true })
 console.log(`Copied src/utils/vendor/ripgrep/ → ${ripgrepDir}/`)
 
-// Step 5: Generate cli-bun and cli-node executable entry points
+// Step 5: Generate stable CLI and SDK entry points
 const cliBun = join(outdir, 'cli-bun.js')
 const cliNode = join(outdir, 'cli-node.js')
+const sdkEntry = join(outdir, 'sdk.js')
 
 await writeFile(cliBun, '#!/usr/bin/env bun\nimport "./cli.js"\n')
 
 await writeFile(cliNode, '#!/usr/bin/env node\nimport "./cli.js"\n')
+
+await writeFile(sdkEntry, 'export * from "./agentSdkTypes.js"\n')
+
+await $`bunx tsc -p tsconfig.sdk.json`
+await writeFile(
+  join(outdir, 'sdk.d.ts'),
+  'export * from "./entrypoints/sdk/publicApi.js"\n',
+)
 
 // Make both executable
 const { chmodSync } = await import('fs')

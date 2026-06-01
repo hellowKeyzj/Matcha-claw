@@ -13,6 +13,14 @@ import type {
   SDKControlMcpSetServersResponseSchema,
   SDKControlReloadPluginsResponseSchema,
   SDKControlPermissionRequestSchema,
+  SDKControlReadFileContentResponseSchema,
+  SDKControlReadFileResponseSchema,
+  SDKControlMcpAuthenticateResponseSchema,
+  SDKControlClaudeAuthenticateResponseSchema,
+  SDKControlBackgroundTasksResponseSchema,
+  SDKControlGenerateSessionTitleResponseSchema,
+  SDKControlSideQuestionResponseSchema,
+  SDKControlRemoteControlResponseSchema,
   SDKControlCancelRequestSchema,
   SDKControlRequestInnerSchema,
   StdoutMessageSchema,
@@ -38,6 +46,30 @@ export type SDKControlMcpSetServersResponse = z.infer<
 >
 export type SDKControlReloadPluginsResponse = z.infer<
   ReturnType<typeof SDKControlReloadPluginsResponseSchema>
+>
+export type SDKControlReadFileResponse = z.infer<
+  ReturnType<typeof SDKControlReadFileResponseSchema>
+>
+export type SDKControlReadFileContentResponse = z.infer<
+  ReturnType<typeof SDKControlReadFileContentResponseSchema>
+>
+export type SDKControlMcpAuthenticateResponse = z.infer<
+  ReturnType<typeof SDKControlMcpAuthenticateResponseSchema>
+>
+export type SDKControlClaudeAuthenticateResponse = z.infer<
+  ReturnType<typeof SDKControlClaudeAuthenticateResponseSchema>
+>
+export type SDKControlBackgroundTasksResponse = z.infer<
+  ReturnType<typeof SDKControlBackgroundTasksResponseSchema>
+>
+export type SDKControlGenerateSessionTitleResponse = z.infer<
+  ReturnType<typeof SDKControlGenerateSessionTitleResponseSchema>
+>
+export type SDKControlSideQuestionResponse = z.infer<
+  ReturnType<typeof SDKControlSideQuestionResponseSchema>
+>
+export type SDKControlRemoteControlResponse = z.infer<
+  ReturnType<typeof SDKControlRemoteControlResponseSchema>
 >
 export type StdinMessage = z.infer<ReturnType<typeof StdinMessageSchema>>
 export type SDKPartialAssistantMessage = z.infer<
