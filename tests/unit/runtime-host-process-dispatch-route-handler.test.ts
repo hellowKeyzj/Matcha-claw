@@ -1,5 +1,6 @@
 import { EventEmitter } from 'node:events';
 import { describe, expect, it, vi } from 'vitest';
+import { DISPATCH_ENVELOPE_MAX_BODY_BYTES } from '../../runtime-host/api/dispatch/dispatch-envelope';
 import { handleDispatchRoute } from '../../runtime-host/api/dispatch/dispatch-route-handler';
 
 class FakeRequest extends EventEmitter {
@@ -175,5 +176,31 @@ describe('runtime-host process dispatch route handler', () => {
     expect(logger.debug).not.toHaveBeenCalled();
     expect(logger.traceDebug).toHaveBeenCalledWith(2, '[dispatch] start', expect.any(Object));
     expect(logger.traceDebug).toHaveBeenCalledWith(2, '[dispatch] finish', expect.any(Object));
+  });
+
+  it('读取 HTTP body 时超过上限直接拒绝且不进入 runtime route dispatch', async () => {
+    const transportStats = createTransportStats();
+    const dispatchRuntimeRoute = vi.fn(async () => ({
+      status: 200,
+      data: { success: true },
+    }));
+    const req = new FakeRequest(`{${' '.repeat(DISPATCH_ENVELOPE_MAX_BODY_BYTES)}}`);
+    const res = new FakeResponse();
+
+    handleDispatchRoute(req, res, {
+      transportStats,
+      dispatchRuntimeRoute,
+    });
+    req.start();
+    await res.done;
+
+    expect(res.statusCode).toBe(413);
+    expect(JSON.parse(res.bodyText || '{}')).toMatchObject({
+      success: false,
+      error: { code: 'PAYLOAD_TOO_LARGE' },
+    });
+    expect(dispatchRuntimeRoute).not.toHaveBeenCalled();
+    expect(transportStats.badRequestRejected).toBe(1);
+    expect(transportStats.dispatchInternalError).toBe(0);
   });
 });

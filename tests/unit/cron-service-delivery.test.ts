@@ -1,5 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { OpenClawChannelPluginProjection } from '../../runtime-host/application/adapters/openclaw/projections/openclaw-channel-config-projection';
 import { CronService } from '../../runtime-host/application/cron/service';
+import { CronJobMutationWorkflow } from '../../runtime-host/application/workflows/cron/cron-job-mutation-workflow';
+import { CronOperationsWorkflow } from '../../runtime-host/application/workflows/cron/cron-operations-workflow';
+import { ScheduledAgentTriggerWorkflow } from '../../runtime-host/application/workflows/scheduled-agent/scheduled-agent-trigger-workflow';
 import { createImmediateRuntimeTimer } from './helpers/runtime-scheduler';
 
 function createBridgeMock() {
@@ -103,6 +107,8 @@ function createCronJobsMock() {
   };
 }
 
+const deliveryChannelProjection = new OpenClawChannelPluginProjection();
+
 describe('cron service delivery', () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -114,14 +120,29 @@ describe('cron service delivery', () => {
     toIsoString: (ms: number) => new Date(ms).toISOString(),
   };
 
-  function createCronService(gateway = createBridgeMock()): CronService {
-    return new CronService({
+  function createCronService(gateway = createBridgeMock(), jobs = createCronJobsMock()): CronService {
+    const scheduledAgentTriggerWorkflow = new ScheduledAgentTriggerWorkflow({
       gateway,
-      sessionHistory: { read: vi.fn() },
-      usageHistory: { recent: vi.fn(() => []) } as any,
-      timer: createImmediateRuntimeTimer(),
       clock,
-      jobs: createCronJobsMock(),
+      timer: createImmediateRuntimeTimer(),
+    });
+    const jobMutationWorkflow = new CronJobMutationWorkflow({
+      gateway,
+      clock,
+      jobs,
+      scheduledAgentTriggerWorkflow,
+      deliveryChannelProjection,
+    });
+    const operationsWorkflow = new CronOperationsWorkflow({
+      gateway,
+      usageHistory: { recent: vi.fn(() => []), isReady: vi.fn(() => true), refreshCache: vi.fn() } as any,
+      jobs,
+      jobMutationWorkflow,
+      deliveryChannelProjection,
+    });
+    return new CronService({
+      sessionHistory: { read: vi.fn() },
+      operationsWorkflow,
     });
   }
 
@@ -241,12 +262,30 @@ describe('cron service delivery', () => {
     }));
   });
 
+  it('createJob 缺少 agentId 时拒绝', async () => {
+    const bridge = createBridgeMock();
+    const service = createCronService(bridge);
+
+    const response = await service.createJob({
+      name: 'Daily Report',
+      message: 'summarize today',
+      schedule: '0 9 * * *',
+      delivery: { mode: 'none' },
+    });
+
+    expect(response.status).toBe(400);
+    expect((response.data as { success: boolean; error?: string }).success).toBe(false);
+    expect((response.data as { error?: string }).error).toBe('Invalid cron create payload');
+    expect(bridge.addCronJob).not.toHaveBeenCalled();
+  });
+
   it('createJob 在 WeChat 定时投递缺少 accountId 时拒绝', async () => {
     const bridge = createBridgeMock();
     const service = createCronService(bridge);
 
     const response = await service.createJob({
       name: 'WeChat Push',
+      agentId: 'wechat-agent',
       message: 'ping',
       schedule: '0 9 * * *',
       delivery: {
@@ -306,7 +345,21 @@ describe('cron service delivery', () => {
     }));
   });
 
-  it('listJobs 会把缺失的 agentId 归一为 main', async () => {
+  it('updateJob 缺少 agentId 时拒绝', async () => {
+    const bridge = createBridgeMock();
+    const service = createCronService(bridge);
+
+    const response = await service.updateJob('job-2', {
+      agentId: ' ',
+    });
+
+    expect(response.status).toBe(400);
+    expect((response.data as { success: boolean; error?: string }).success).toBe(false);
+    expect((response.data as { error?: string }).error).toBe('agentId is required');
+    expect(bridge.updateCronJob).not.toHaveBeenCalled();
+  });
+
+  it('listJobs 会过滤缺失 agentId 的任务', async () => {
     const bridge = createBridgeMock();
     bridge.listCronJobs.mockResolvedValue({
       jobs: [
@@ -323,14 +376,7 @@ describe('cron service delivery', () => {
       ],
     });
     const jobsPort = createCronJobsMock();
-    const service = new CronService({
-      gateway: bridge,
-      sessionHistory: { read: vi.fn() },
-      usageHistory: { recent: vi.fn(() => []) } as any,
-      timer: createImmediateRuntimeTimer(),
-      clock,
-      jobs: jobsPort,
-    });
+    const service = createCronService(bridge, jobsPort);
 
     await expect(service.listJobs()).resolves.toMatchObject({
       success: true,
@@ -352,8 +398,7 @@ describe('cron service delivery', () => {
       updatedAt: 4567,
       error: null,
     });
-    expect(snapshot.jobs).toHaveLength(1);
-    expect(snapshot.jobs[0]?.agentId).toBe('main');
+    expect(snapshot.jobs).toHaveLength(0);
   });
 
   it('listJobs 发现旧 delivery 配置时只返回修复后的读模型并提交后台修复', async () => {
@@ -364,6 +409,7 @@ describe('cron service delivery', () => {
         {
           id: 'job-repair',
           name: 'Repair Delivery',
+          agentId: 'repair-agent',
           payload: { kind: 'agentTurn', message: 'hello' },
           schedule: { kind: 'cron', expr: '0 9 * * *' },
           delivery: { mode: 'announce' },
@@ -378,14 +424,7 @@ describe('cron service delivery', () => {
         },
       ],
     });
-    const service = new CronService({
-      gateway: bridge,
-      sessionHistory: { read: vi.fn() },
-      usageHistory: { recent: vi.fn(() => []) } as any,
-      timer: createImmediateRuntimeTimer(),
-      clock,
-      jobs: jobsPort,
-    });
+    const service = createCronService(bridge, jobsPort);
 
     await expect(service.listJobs()).resolves.toMatchObject({
       success: true,
@@ -428,14 +467,7 @@ describe('cron service delivery', () => {
   it('trigger 只提交后台任务，不在请求链路执行 runCronJob', () => {
     const bridge = createBridgeMock();
     const jobs = createCronJobsMock();
-    const service = new CronService({
-      gateway: bridge,
-      sessionHistory: { read: vi.fn() },
-      usageHistory: { recent: vi.fn(() => []) } as any,
-      timer: createImmediateRuntimeTimer(),
-      clock,
-      jobs,
-    });
+    const service = createCronService(bridge, jobs);
 
     const response = service.trigger({ id: 'job-trigger' });
 
@@ -447,14 +479,7 @@ describe('cron service delivery', () => {
   it('deleteJob 和 toggleJob 只提交后台任务，不在请求链路改 gateway', async () => {
     const bridge = createBridgeMock();
     const jobs = createCronJobsMock();
-    const service = new CronService({
-      gateway: bridge,
-      sessionHistory: { read: vi.fn() },
-      usageHistory: { recent: vi.fn(() => []) } as any,
-      timer: createImmediateRuntimeTimer(),
-      clock,
-      jobs,
-    });
+    const service = createCronService(bridge, jobs);
 
     const deleteResponse = await service.deleteJob('job-delete');
     const toggleResponse = service.toggleJob({ id: 'job-toggle', enabled: false });
@@ -484,10 +509,15 @@ describe('cron service delivery', () => {
             channel: 'openclaw-weixin',
             to: 'wxid_123@im.wechat',
           },
+          enabled: true,
+          createdAtMs: 1_700_000_000_000,
+          updatedAtMs: 1_700_000_000_000,
+          state: {},
         },
       ],
     });
     const service = createCronService(bridge);
+    await service.refreshJobsSnapshot();
 
     const response = await service.updateJob('job-wx-2', {
       delivery: {

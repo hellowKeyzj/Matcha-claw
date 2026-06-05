@@ -440,9 +440,9 @@ const SessionListSection = memo(function SessionListSection({
                       key={session.key}
                       session={session}
                       sessionTitle={viewModel?.title ?? fallbackUntitledLabel(session)}
-                      sessionMeta={viewModel?.meta ?? readSessionSuffix(session.key)}
-                      agentId={viewModel?.agentId ?? session.agentId ?? 'main'}
-                      agentName={viewModel?.agentName ?? session.agentId ?? 'main'}
+                      sessionMeta={viewModel?.meta ?? readSessionSuffix(session)}
+                      agentId={viewModel?.agentId ?? session.agentId}
+                      agentName={viewModel?.agentName ?? session.agentId}
                       avatarSeed={viewModel?.avatarSeed}
                       avatarStyle={viewModel?.avatarStyle}
                       isCurrent={currentSessionKey === session.key}
@@ -488,6 +488,7 @@ export const AgentSessionsPane = memo(function AgentSessionsPane({
     sessionsLoadedOnce,
     sessionsError,
     currentSessionKey,
+    currentAgentId,
     switchSession,
     openAgentConversation,
     newSession,
@@ -512,7 +513,7 @@ export const AgentSessionsPane = memo(function AgentSessionsPane({
     sessionsLoading,
     sessionsLoadedOnce,
     sessionsError,
-    currentSessionKey,
+    currentAgentId,
     locale: i18n.language,
     t,
   });
@@ -538,6 +539,9 @@ export const AgentSessionsPane = memo(function AgentSessionsPane({
   }, [openAgentConversation]);
 
   const handleCreateSessionForAgent = useCallback((agentId: string) => {
+    if (!agentId.trim()) {
+      return;
+    }
     newSession(agentId);
   }, [newSession]);
 

@@ -9,8 +9,8 @@ describe('runtime-host process runtime route dispatcher', () => {
       data: { success: true },
     }));
     const dispatcher = createRuntimeRouteDispatcher([
-      { key: 'workbench', matcher: { type: 'exact', path: '/api/workbench/bootstrap' }, handle: first },
-      { key: 'runtime_host', matcher: { type: 'prefix', prefix: '/api/runtime-host/' }, handle: second },
+      { key: 'workbench', method: 'GET', matcher: { type: 'exact', path: '/api/workbench/bootstrap' }, handle: first },
+      { key: 'runtime_host', method: 'GET', matcher: { type: 'prefix', prefix: '/api/runtime-host/' }, handle: second },
     ]);
 
     const result = await dispatcher('GET', '/api/runtime-host/health?x=1', undefined);
@@ -34,10 +34,119 @@ describe('runtime-host process runtime route dispatcher', () => {
       data: { success: true },
     }));
     const dispatcher = createRuntimeRouteDispatcher([
-      { key: 'runtime_host', matcher: { type: 'prefix', prefix: '/api/runtime-host/' }, handle: handler },
+      { key: 'runtime_host', method: 'GET', matcher: { type: 'prefix', prefix: '/api/runtime-host/' }, handle: handler },
     ]);
 
     await expect(dispatcher('GET', '/api/unknown', undefined)).resolves.toBeNull();
     expect(handler).not.toHaveBeenCalled();
+  });
+
+  it('exact 路由通过 method/path 索引直达，不扫描同 method fallback', async () => {
+    const exact = vi.fn(() => ({
+      status: 200,
+      data: { success: true, route: 'exact' },
+    }));
+    const fallback = vi.fn(() => ({
+      status: 200,
+      data: { success: true, route: 'fallback' },
+    }));
+    const otherMethod = vi.fn(() => ({
+      status: 200,
+      data: { success: true, route: 'other' },
+    }));
+    const dispatcher = createRuntimeRouteDispatcher([
+      { key: 'runtime_host.POST /api/runtime-host/jobs/get', method: 'POST', matcher: { type: 'exact', path: '/api/runtime-host/jobs/get' }, handle: exact },
+      { key: 'runtime_host.POST /api/runtime-host/', method: 'POST', matcher: { type: 'prefix', prefix: '/api/runtime-host/' }, handle: fallback },
+      { key: 'runtime_host.GET /api/runtime-host/', method: 'GET', matcher: { type: 'prefix', prefix: '/api/runtime-host/' }, handle: otherMethod },
+    ]);
+
+    await expect(dispatcher('POST', '/api/runtime-host/jobs/get', undefined)).resolves.toEqual({
+      status: 200,
+      data: { success: true, route: 'exact' },
+    });
+    expect(exact).toHaveBeenCalledTimes(1);
+    expect(fallback).not.toHaveBeenCalled();
+    expect(otherMethod).not.toHaveBeenCalled();
+  });
+
+  it('exact 路由在大路由表中仍只调用目标 handler', async () => {
+    const exact = vi.fn(() => ({
+      status: 200,
+      data: { route: 'exact' },
+    }));
+    const fallbackHandlers = Array.from({ length: 1000 }, (_, index) => vi.fn(() => ({
+      status: 200,
+      data: { route: `fallback-${index}` },
+    })));
+    const dispatcher = createRuntimeRouteDispatcher([
+      ...fallbackHandlers.map((handle, index) => ({
+        key: `pattern-${index}`,
+        method: 'POST',
+        matcher: { type: 'pattern' as const, pattern: new RegExp(`^/api/pattern-${index}/`) },
+        handle,
+      })),
+      { key: 'target', method: 'POST', matcher: { type: 'exact', path: '/api/target' }, handle: exact },
+    ]);
+
+    await expect(dispatcher('POST', '/api/target', undefined)).resolves.toEqual({
+      status: 200,
+      data: { route: 'exact' },
+    });
+    expect(exact).toHaveBeenCalledTimes(1);
+    expect(fallbackHandlers.every((handle) => handle.mock.calls.length === 0)).toBe(true);
+  });
+
+  it('exact handler 返回 null 时继续检查同 method fallback', async () => {
+    const exact = vi.fn(() => null);
+    const fallback = vi.fn(() => ({
+      status: 200,
+      data: { success: true, route: 'fallback' },
+    }));
+    const dispatcher = createRuntimeRouteDispatcher([
+      { key: 'runtime_host.POST /api/runtime-host/jobs/get', method: 'POST', matcher: { type: 'exact', path: '/api/runtime-host/jobs/get' }, handle: exact },
+      { key: 'runtime_host.POST /api/runtime-host/', method: 'POST', matcher: { type: 'prefix', prefix: '/api/runtime-host/' }, handle: fallback },
+    ]);
+
+    await expect(dispatcher('POST', '/api/runtime-host/jobs/get', undefined)).resolves.toEqual({
+      status: 200,
+      data: { success: true, route: 'fallback' },
+    });
+    expect(exact).toHaveBeenCalledTimes(1);
+    expect(fallback).toHaveBeenCalledTimes(1);
+  });
+
+  it('rejects duplicate exact routes for the same method and path', () => {
+    expect(() => createRuntimeRouteDispatcher([
+      { key: 'first', method: 'POST', matcher: { type: 'exact', path: '/api/runtime-host/jobs/get' }, handle: vi.fn() },
+      { key: 'second', method: 'POST', matcher: { type: 'exact', path: '/api/runtime-host/jobs/get' }, handle: vi.fn() },
+    ])).toThrow('Duplicate exact runtime route: POST /api/runtime-host/jobs/get (first vs second)');
+  });
+
+  it('prefix trie 只调用匹配分支并保留 fallback 注册顺序', async () => {
+    const unmatchedPrefix = vi.fn(() => ({
+      status: 200,
+      data: { route: 'unmatched-prefix' },
+    }));
+    const pattern = vi.fn(() => ({
+      status: 200,
+      data: { route: 'pattern' },
+    }));
+    const prefix = vi.fn(() => ({
+      status: 200,
+      data: { route: 'prefix' },
+    }));
+    const dispatcher = createRuntimeRouteDispatcher([
+      { key: 'unmatched', method: 'GET', matcher: { type: 'prefix', prefix: '/api/unmatched/' }, handle: unmatchedPrefix },
+      { key: 'pattern', method: 'GET', matcher: { type: 'pattern', pattern: /^\/api\/runtime-host\/jobs\// }, handle: pattern },
+      { key: 'prefix', method: 'GET', matcher: { type: 'prefix', prefix: '/api/runtime-host/' }, handle: prefix },
+    ]);
+
+    await expect(dispatcher('GET', '/api/runtime-host/jobs/list', undefined)).resolves.toEqual({
+      status: 200,
+      data: { route: 'pattern' },
+    });
+    expect(unmatchedPrefix).not.toHaveBeenCalled();
+    expect(pattern).toHaveBeenCalledTimes(1);
+    expect(prefix).not.toHaveBeenCalled();
   });
 });

@@ -1,6 +1,8 @@
 import { execFile } from 'node:child_process';
 import { randomBytes, randomUUID } from 'node:crypto';
+import { createReadStream } from 'node:fs';
 import { access, copyFile, mkdir, open, readFile, readdir, realpath, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { createInterface } from 'node:readline';
 import net from 'node:net';
 import { homedir, tmpdir } from 'node:os';
 import { promisify } from 'node:util';
@@ -157,6 +159,16 @@ export class NodeRuntimeFileSystem implements RuntimeFileSystemPort {
 
   async readTextFile(pathname: string): Promise<string> {
     return await readFile(pathname, 'utf8');
+  }
+
+  async *readTextFileLines(pathname: string): AsyncIterable<string> {
+    const lines = createInterface({
+      input: createReadStream(pathname, { encoding: 'utf8' }),
+      crlfDelay: Infinity,
+    });
+    for await (const line of lines) {
+      yield line;
+    }
   }
 
   async readBinaryFile(pathname: string): Promise<Uint8Array> {

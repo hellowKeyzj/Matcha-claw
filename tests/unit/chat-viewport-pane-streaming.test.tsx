@@ -8,7 +8,8 @@ import { buildRenderItemsFromCanonicalState } from '../../runtime-host/applicati
 import { createEmptyCanonicalSessionState, reduceCanonicalSessionEvents } from '../../runtime-host/application/sessions/canonical/canonical-reducer';
 import { createViewportWindowState } from '@/stores/chat/viewport-state';
 import type { RawMessage } from './helpers/timeline-fixtures';
-import { OPENCLAW_RUNTIME_PROTOCOL_ID, OPENCLAW_RUNTIME_PROVIDER_ID } from '../../runtime-host/application/sessions/runtime-providers/runtime-provider-types';
+import { OPENCLAW_RUNTIME_PROTOCOL_ID, OPENCLAW_RUNTIME_ENDPOINT_ID } from '../../runtime-host/application/adapters/openclaw/runtime/openclaw-runtime-identity';
+import { createOpenClawTestRuntimeContext } from './helpers/runtime-address-fixtures';
 
 vi.mock('react-i18next', () => ({
   useTranslation: () => ({
@@ -40,19 +41,19 @@ function buildCurrentSession(messages: RawMessage[]) {
 }
 
 function buildStreamingShellSession() {
-  const state = createEmptyCanonicalSessionState('agent:test:main');
+  const state = createEmptyCanonicalSessionState('agent:test:main', createOpenClawTestRuntimeContext('agent:test:main'));
   reduceCanonicalSessionEvents(state, [{
     eventId: 'assistant-empty-stream',
     type: 'message_snapshot',
     protocolId: OPENCLAW_RUNTIME_PROTOCOL_ID,
-    runtimeProviderId: OPENCLAW_RUNTIME_PROVIDER_ID,
+    runtimeEndpointId: OPENCLAW_RUNTIME_ENDPOINT_ID,
     source: 'live',
     sessionId: 'agent:test:main',
     runId: 'run-1',
     laneKey: 'main',
     origin: {
-      providerEventType: 'test',
-      providerIds: { sessionKey: 'agent:test:main' },
+      runtimeEventType: 'test',
+      runtimeIds: { sessionKey: 'agent:test:main' },
     },
     role: 'assistant',
     content: '',

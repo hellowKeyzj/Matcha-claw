@@ -21,6 +21,7 @@ import {
   hasTimeoutSignal,
   isRecoverableChatSendTimeout,
 } from './store-state-helpers';
+import { resolveSessionOperationTarget } from './session-identity';
 import type { ChatSendAttachment, ChatStoreState } from './types';
 import { isRunActive, isWaitingTool } from './types';
 
@@ -199,6 +200,13 @@ export async function executeStoreSend(params: ExecuteStoreSendParams): Promise<
   const stateBeforeSend = get();
   const { currentSessionKey } = stateBeforeSend;
   const runtimeBeforeSend = getSessionRuntime(stateBeforeSend, currentSessionKey);
+  let target;
+  try {
+    target = resolveSessionOperationTarget(stateBeforeSend, currentSessionKey);
+  } catch (error) {
+    set({ error: error instanceof Error ? error.message : String(error) });
+    return;
+  }
   if (isRunActive(runtimeBeforeSend)) {
     return;
   }
@@ -226,7 +234,8 @@ export async function executeStoreSend(params: ExecuteStoreSendParams): Promise<
     }
 
     const sendResult = await sendChatTransport({
-      sessionKey: currentSessionKey,
+      sessionKey: target.sessionKey,
+      runtimeAddress: target.runtimeAddress,
       message: trimmed,
       idempotencyKey: clientMessageId,
       attachments,

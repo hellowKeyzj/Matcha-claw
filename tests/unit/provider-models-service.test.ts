@@ -1,7 +1,28 @@
 import { describe, expect, it, vi } from 'vitest';
-import { ProviderModelsApplicationService } from '../../runtime-host/application/providers/provider-models-service';
-
-type ProviderModelsServiceArgs = ConstructorParameters<typeof ProviderModelsApplicationService>;
+import {
+  ProviderModelsApplicationService,
+  type CustomMediaProviderProjectionPort,
+  type ProviderModelsAgentIdentityPort,
+  type ProviderModelsAgentProjectionPort,
+  type ProviderModelsProjectionPort,
+} from '../../runtime-host/application/providers/provider-models-service';
+import { ProviderModelsOperationsWorkflow } from '../../runtime-host/application/workflows/provider-model/provider-models-operations-workflow';
+import { ProviderModelsProjectionWorkflow } from '../../runtime-host/application/workflows/provider-model/provider-models-projection-workflow';
+import {
+  getLegacyOpenClawProviderKeys,
+  getOAuthApiKeyEnv,
+  getOAuthProviderApi,
+  getOAuthProviderDefaultBaseUrl,
+  getOAuthProviderTokenKey,
+  getOpenClawProviderKeyForType,
+  normalizeOAuthBaseUrl,
+  usesOAuthAuthHeader,
+} from '../../runtime-host/application/adapters/openclaw/projections/openclaw-provider-projection-rules';
+import type { CapabilityRoutingApplicationService } from '../../runtime-host/application/providers/capability-routing-service';
+import type { ProviderModelsStorePort } from '../../runtime-host/application/providers/provider-models-store';
+import type { ProviderStorePort } from '../../runtime-host/application/providers/provider-store-repository';
+import type { ProviderProjectionKeyResolverPort } from '../../runtime-host/application/providers/provider-store-model';
+import type { ProviderProjectionPolicyPort } from '../../runtime-host/application/providers/provider-projection-sync-plan';
 
 const ZERO_COST = {
   input: 0,
@@ -10,16 +31,32 @@ const ZERO_COST = {
   cacheWrite: 0,
 };
 
+const projectionKeys: ProviderProjectionKeyResolverPort = {
+  resolveProviderKey: ({ vendorId, accountId }) => getOpenClawProviderKeyForType(vendorId, accountId),
+};
+
+const projectionPolicy: ProviderProjectionPolicyPort = {
+  getReplaceProviderKeys: ({ vendorId, accountId }) => getLegacyOpenClawProviderKeys(vendorId, accountId),
+  getOAuthProviderApi,
+  getOAuthProviderTokenKey,
+  getOAuthProviderDefaultBaseUrl,
+  normalizeOAuthBaseUrl,
+  getOAuthApiKeyEnv,
+  usesOAuthAuthHeader,
+};
+
 function createProviderModelsService(
-  store: ProviderModelsServiceArgs[0],
-  credentials: ProviderModelsServiceArgs[1],
-  writer: ProviderModelsServiceArgs[2],
-  customMediaWriter: ProviderModelsServiceArgs[3] = { readAll: vi.fn(async () => ({})), replaceAll: vi.fn(async () => {}) } as any,
-  capabilityRouting: ProviderModelsServiceArgs[4] = { pruneUnavailableModelRoutes: vi.fn(async () => {}) } as any,
-  authRepository: ProviderModelsServiceArgs[5] = { discoverAgentIds: vi.fn(async () => ['main']) },
-  agentModels: ProviderModelsServiceArgs[6] = { upsertProviderInAgentModels: vi.fn(async () => []) },
+  store: ProviderModelsStorePort,
+  credentials: ProviderStorePort,
+  writer: ProviderModelsProjectionPort,
+  customMediaWriter: CustomMediaProviderProjectionPort = { readAll: vi.fn(async () => ({})), replaceAll: vi.fn(async () => {}) },
+  capabilityRouting: Pick<CapabilityRoutingApplicationService, 'pruneUnavailableModelRoutes'> = { pruneUnavailableModelRoutes: vi.fn(async () => {}) },
+  authRepository: ProviderModelsAgentIdentityPort = { discoverAgentIds: vi.fn(async () => ['main']) },
+  agentModels: ProviderModelsAgentProjectionPort = { upsertProviderInAgentModels: vi.fn(async () => {}) },
+  providerProjectionKeys: ProviderProjectionKeyResolverPort = projectionKeys,
+  providerProjectionPolicy: ProviderProjectionPolicyPort = projectionPolicy,
 ): ProviderModelsApplicationService {
-  return new ProviderModelsApplicationService(
+  const projectionWorkflow = new ProviderModelsProjectionWorkflow({
     store,
     credentials,
     writer,
@@ -27,7 +64,16 @@ function createProviderModelsService(
     capabilityRouting,
     authRepository,
     agentModels,
-  );
+    projectionKeys: providerProjectionKeys,
+    projectionPolicy: providerProjectionPolicy,
+  });
+  return new ProviderModelsApplicationService({
+    operationsWorkflow: new ProviderModelsOperationsWorkflow({
+      credentials,
+      projectionKeys: providerProjectionKeys,
+      projectionWorkflow,
+    }),
+  });
 }
 
 describe('ProviderModelsApplicationService', () => {
@@ -94,6 +140,7 @@ describe('ProviderModelsApplicationService', () => {
 
   it('adapts credentialId models to OpenClaw provider entries with transport config', async () => {
     const writeModels = vi.fn(async () => {});
+    const writer = { replaceAll: vi.fn(async () => {}) };
     const service = createProviderModelsService(
       {
         read: async () => ({ schemaVersion: 1, models: [] }),
@@ -114,9 +161,7 @@ describe('ProviderModelsApplicationService', () => {
         }),
         write: async () => {},
       },
-      {
-        replaceAll: vi.fn(async () => {}),
-      } as any,
+      writer as any,
     );
 
     const result = await service.replace('custom-dd749b2e-4807-4e78-bb50-7f7e3ae81d7a', {
@@ -130,8 +175,7 @@ describe('ProviderModelsApplicationService', () => {
     });
 
     expect(result.status).toBe(200);
-    const writer = (service as any).writer.replaceAll as ReturnType<typeof vi.fn>;
-    expect(writer).toHaveBeenCalledWith({
+    expect(writer.replaceAll).toHaveBeenCalledWith({
       'custom-dd749b2e': {
         baseUrl: 'https://api.example.com/v1',
         api: 'openai-completions',
@@ -536,7 +580,7 @@ describe('ProviderModelsApplicationService', () => {
       customMediaWriter as any,
     );
 
-    await service.syncOpenClaw();
+    await service.syncRuntimeProjection();
 
     expect(writer.replaceAll).toHaveBeenCalledWith({}, []);
     expect(customMediaWriter.replaceAll).toHaveBeenCalledWith({
@@ -655,7 +699,7 @@ describe('ProviderModelsApplicationService', () => {
       agentModels as any,
     );
 
-    await service.syncOpenClaw();
+    await service.syncRuntimeProjection();
 
     expect(agentModels.upsertProviderInAgentModels).toHaveBeenCalledWith({
       agentIds: ['main'],
@@ -700,7 +744,7 @@ describe('ProviderModelsApplicationService', () => {
       writer as any,
     );
 
-    await service.syncOpenClaw();
+    await service.syncRuntimeProjection();
 
     expect(writer.replaceAll).toHaveBeenCalledWith({
       'custom-dd749b2e': {

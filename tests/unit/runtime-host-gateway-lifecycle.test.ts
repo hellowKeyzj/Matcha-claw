@@ -3,49 +3,19 @@ import { RuntimeHostBootstrapService } from '../../runtime-host/application/runt
 
 function createBootstrapService() {
   const service = new RuntimeHostBootstrapService({
-    settingsRepository: {
-      getAll: vi.fn(),
-      setValue: vi.fn(),
-    },
-    providerStoreRepository: {
-      read: vi.fn(),
-      write: vi.fn(),
-    },
-    runtimeConfig: {
-      syncProxy: vi.fn(),
-      syncGatewayToken: vi.fn(),
-      sanitize: vi.fn(),
-      syncBrowserMode: vi.fn(),
-      syncSessionIdleMinutes: vi.fn(),
-    },
-    runtimePlugins: {
-      ensureManagedPluginInstalled: vi.fn(),
-    },
-    prelaunchPluginMaintenance: {
-      cleanupStaleBuiltinExtensionsForGatewayLaunch: vi.fn(),
-      reconcileConfiguredChannelPluginsForGatewayLaunch: vi.fn(),
-      ensureConfiguredManagedPluginsForGatewayLaunch: vi.fn(),
-    },
-    providerRuntimeSync: {
-      syncProviderStore: vi.fn(),
-    },
-    workspace: {
-      ensureDefaultIdentity: vi.fn(),
-      migrateMainAgentTemplatesIfNeeded: vi.fn(),
-      mergeContextSnippets: vi.fn(),
-    },
-    securityPluginConfig: {
-      applySavedPolicyToPluginConfig: vi.fn(),
-    },
-    idGenerator: {
-      randomHex: vi.fn(() => '1'.repeat(32)),
+    gatewayPrelaunchWorkflow: {
+      getHostBootstrapSettings: vi.fn(),
+      buildGatewayLaunchPlan: vi.fn(),
+      executeGatewayPrelaunch: vi.fn(),
+      executeProviderAuthBootstrap: vi.fn(),
+      executeWorkspaceTemplateMigration: vi.fn(),
     },
     jobs: {
       submitGatewayPrelaunch: vi.fn(),
       submitProviderAuthBootstrap: vi.fn(),
       submitWorkspaceTemplateMigration: vi.fn(),
     },
-  } as never);
+  });
 
   return { service };
 }

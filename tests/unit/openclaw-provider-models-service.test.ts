@@ -1,23 +1,26 @@
 import { describe, expect, it } from 'vitest';
-import { OpenClawProviderModelsService } from '../../runtime-host/application/openclaw/openclaw-provider-models-service';
+import { OpenClawProviderModelsService } from '../../runtime-host/application/adapters/openclaw/projections/openclaw-provider-models-service';
+import { OpenClawProviderModelsProjectionWorkflow } from '../../runtime-host/application/adapters/openclaw/workflows/openclaw-provider/openclaw-provider-models-projection-workflow';
 
 function createService(initialConfig: Record<string, unknown>) {
   let config = structuredClone(initialConfig);
-  const service = new OpenClawProviderModelsService({
+  const service = new OpenClawProviderModelsService(new OpenClawProviderModelsProjectionWorkflow({
     read: async () => structuredClone(config),
     write: async (next) => {
       config = structuredClone(next);
     },
-    update: async (mutate) => {
+    updateDirty: async (mutate) => {
       const next = structuredClone(config);
-      const result = await mutate(next);
-      config = structuredClone(next);
-      return result;
+      const update = await mutate(next);
+      if (update.changed) {
+        config = structuredClone(next);
+      }
+      return update.result;
     },
     getConfigDir: () => '',
     getConfigFilePath: () => '',
     getOpenClawDirPath: () => '',
-  });
+  }));
   return {
     service,
     readConfig: () => config,

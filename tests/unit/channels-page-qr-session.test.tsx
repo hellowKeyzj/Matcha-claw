@@ -3,6 +3,15 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import i18n from '@/i18n';
 import { Channels } from '@/pages/Channels';
 import { useChannelsStore } from '@/stores/channels';
+import type { RuntimeAddress } from '../../runtime-host/shared/runtime-address';
+
+const integrationChannelAddress: RuntimeAddress = {
+  kind: 'native-runtime',
+  capabilityId: 'integration.channel',
+  runtimeAdapterId: 'openclaw',
+  runtimeInstanceId: 'local',
+  agentId: 'default',
+};
 
 const hostChannelsActivateMock = vi.fn();
 const hostChannelsCancelSessionMock = vi.fn();
@@ -56,21 +65,25 @@ vi.mock('@/lib/api-client', () => ({
   invokeIpc: (...args: unknown[]) => invokeIpcMock(...args),
 }));
 
+vi.mock('@/lib/host-api', () => ({
+  resolveSingleCapabilityRuntimeAddress: async () => integrationChannelAddress,
+}));
+
 vi.mock('@/stores/gateway', () => ({
   useGatewayStore: (selector: (state: {
     status: {
-      state: string;
+      processState: string;
+      transportState: string;
       gatewayReady: boolean;
-      portReachable: boolean;
-      gatewayRunning: boolean;
+      healthSummary: string;
     };
     isInitialized: boolean;
   }) => unknown) => selector({
     status: {
-      state: 'connected',
+      processState: 'running',
+      transportState: 'connected',
       gatewayReady: true,
-      portReachable: true,
-      gatewayRunning: true,
+      healthSummary: 'healthy',
     },
     isInitialized: true,
   }),
@@ -174,7 +187,7 @@ describe('Channels page QR session lifecycle', () => {
         channelType: 'openclaw-weixin',
         accountId: 'default',
         config: {},
-      });
+      }, integrationChannelAddress);
     });
 
     const channelStatusHandlers = subscribedHostEvents.get('gateway:channel-status');
@@ -227,7 +240,7 @@ describe('Channels page QR session lifecycle', () => {
       expect(hostChannelsApprovePairingRequestMock).toHaveBeenCalledWith('feishu', {
         code: 'RTHZA8EP',
         accountId: 'default',
-      });
+      }, integrationChannelAddress);
     });
     expect(hostChannelsListPairingRequestsMock).toHaveBeenCalledTimes(2);
   });

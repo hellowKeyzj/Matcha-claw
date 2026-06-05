@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { StoreHistoryCache } from '@/stores/chat/history-cache';
 import type { ChatStoreState } from '@/stores/chat/types';
 import type { GatewayStatus } from '@/types/gateway';
+import type { RuntimeAddress } from '../../runtime-host/shared/runtime-address';
 import type { RawMessage } from './helpers/timeline-fixtures';
 import {
   createEmptySessionRecord,
@@ -75,6 +76,28 @@ function createSnapshot(sessionKey: string, messages: RawMessage[]) {
   };
 }
 
+function createTestRuntimeAddress(sessionKey: string): RuntimeAddress {
+  return {
+    kind: 'native-runtime',
+    capabilityId: 'session.prompt',
+    runtimeAdapterId: 'openclaw',
+    runtimeInstanceId: 'local',
+    agentId: 'default',
+    sessionKey,
+  };
+}
+
+function createTestSessionRecord(sessionKey: string) {
+  const record = createEmptySessionRecord();
+  return {
+    ...record,
+    meta: {
+      ...record.meta,
+      runtimeAddress: createTestRuntimeAddress(sessionKey),
+    },
+  };
+}
+
 function createWindowResult(sessionKey: string, messages: RawMessage[] = []) {
   return {
     snapshot: createSnapshot(sessionKey, messages),
@@ -92,7 +115,7 @@ function createStateHarness(overrides: Partial<ChatStoreState>) {
   let state = {
     currentSessionKey: 'agent:main:main',
     loadedSessions: {
-      'agent:main:main': createEmptySessionRecord(),
+      'agent:main:main': createTestSessionRecord('agent:main:main'),
     },
     foregroundHistorySessionKey: null,
     pendingApprovalsBySession: {},
@@ -153,7 +176,7 @@ describe('chat history load execution', () => {
     const { set, get } = createStateHarness({
       currentSessionKey: requestedSessionKey,
       loadedSessions: {
-        [requestedSessionKey]: createEmptySessionRecord(),
+        [requestedSessionKey]: createTestSessionRecord('agent:main:main'),
       },
     });
     let sawLoadingState = false;
@@ -199,7 +222,7 @@ describe('chat history load execution', () => {
       currentSessionKey: requestedSessionKey,
       loadedSessions: {
         [requestedSessionKey]: {
-          ...createEmptySessionRecord(),
+          ...createTestSessionRecord('agent:main:main'),
           items: buildRenderItemsFromMessages(requestedSessionKey, currentMessages),
         },
       },
@@ -233,8 +256,8 @@ describe('chat history load execution', () => {
       currentSessionKey: 'agent:main:main',
       foregroundHistorySessionKey: null,
       loadedSessions: {
-        'agent:main:main': createEmptySessionRecord(),
-        [requestedSessionKey]: createEmptySessionRecord(),
+        'agent:main:main': createTestSessionRecord('agent:main:main'),
+        [requestedSessionKey]: createTestSessionRecord(requestedSessionKey),
       },
       error: 'keep',
     });

@@ -6,9 +6,10 @@ const hoisted = vi.hoisted(() => ({
   saveProviderKeyMock: vi.fn(async () => {}),
   removeProviderKeyMock: vi.fn(async () => {}),
   syncProviderConfigMock: vi.fn(async () => {}),
+  removeProviderMock: vi.fn(async () => {}),
   upsertProviderInAgentModelsMock: vi.fn(async () => []),
-  syncOpenClawModelsMock: vi.fn(async () => {}),
-  syncOpenClawRoutingMock: vi.fn(async () => {}),
+  syncRuntimeModelProjectionMock: vi.fn(async () => {}),
+  syncRuntimeRoutingProjectionMock: vi.fn(async () => {}),
   runtimeConfigSyncProxyMock: vi.fn(async () => {}),
   runtimeConfigSyncGatewayTokenMock: vi.fn(async () => {}),
   runtimeConfigSanitizeMock: vi.fn(async () => {}),
@@ -48,31 +49,45 @@ vi.mock('../../runtime-host/application/providers/provider-registry', () => ({
   }),
 }));
 
-function createProviderRuntimeSync() {
+function createProviderProjectionSync() {
   return {
     syncProviderStore: async (store: import('../../runtime-host/application/providers/store-sync').ProviderStoreLike) => {
-      const { ProviderRuntimeSyncService } = await import('../../runtime-host/application/providers/store-sync');
-      return await new ProviderRuntimeSyncService(
-        {
+      const { ProviderProjectionSyncService } = await import('../../runtime-host/application/providers/store-sync');
+      const { ProviderProjectionSyncWorkflow } = await import('../../runtime-host/application/workflows/provider-projection-sync/provider-projection-sync-workflow');
+      return await new ProviderProjectionSyncService(new ProviderProjectionSyncWorkflow({
+        authProfiles: {
           saveProviderKey: hoisted.saveProviderKeyMock,
           removeProviderKey: hoisted.removeProviderKeyMock,
         },
-        {
+        providerConfig: {
           syncProviderConfig: hoisted.syncProviderConfigMock,
         },
-        {
+        authRepository: {
           discoverAgentIds: async () => ['main'],
         },
-        {
+        agentModels: {
           upsertProviderInAgentModels: hoisted.upsertProviderInAgentModelsMock,
         },
-      ).syncProviderStore(store);
+        projectionKeys: {
+          resolveProviderKey: ({ vendorId, accountId }) => hoisted.getOpenClawProviderKeyForTypeMock(vendorId, accountId),
+        },
+        projectionPolicy: {
+          getReplaceProviderKeys: () => [],
+          getOAuthProviderApi: () => undefined,
+          getOAuthProviderTokenKey: (vendorId) => vendorId,
+          getOAuthProviderDefaultBaseUrl: () => undefined,
+          normalizeOAuthBaseUrl: (_vendorId, baseUrl) => baseUrl,
+          getOAuthApiKeyEnv: () => undefined,
+          usesOAuthAuthHeader: () => false,
+        },
+      })).syncProviderStore(store);
     },
   };
 }
 
-function createBootstrapService(RuntimeHostBootstrapService: typeof import('../../runtime-host/application/runtime-host/bootstrap').RuntimeHostBootstrapService) {
-  return new RuntimeHostBootstrapService({
+async function createBootstrapService(RuntimeHostBootstrapService: typeof import('../../runtime-host/application/runtime-host/bootstrap').RuntimeHostBootstrapService) {
+  const { GatewayPrelaunchWorkflow } = await import('../../runtime-host/application/workflows/runtime-bootstrap/gateway-prelaunch-workflow');
+  const gatewayPrelaunchWorkflow = new GatewayPrelaunchWorkflow({
     settingsRepository: {
       getAll: hoisted.getAllSettingsMock,
       setValue: hoisted.setSettingValueMock,
@@ -96,12 +111,15 @@ function createBootstrapService(RuntimeHostBootstrapService: typeof import('../.
       reconcileConfiguredChannelPluginsForGatewayLaunch: hoisted.reconcileConfiguredChannelPluginsForGatewayLaunchMock,
       ensureConfiguredManagedPluginsForGatewayLaunch: hoisted.ensureConfiguredManagedPluginsForGatewayLaunchMock,
     },
-    providerRuntimeSync: createProviderRuntimeSync(),
+    providerProjectionSync: createProviderProjectionSync(),
+    providerProjectionKeys: {
+      resolveProviderKey: ({ vendorId, accountId }) => hoisted.getOpenClawProviderKeyForTypeMock(vendorId, accountId),
+    },
     providerModels: {
-      syncOpenClaw: hoisted.syncOpenClawModelsMock,
+      syncRuntimeProjection: hoisted.syncRuntimeModelProjectionMock,
     },
     capabilityRouting: {
-      syncOpenClaw: hoisted.syncOpenClawRoutingMock,
+      syncRuntimeProjection: hoisted.syncRuntimeRoutingProjectionMock,
     },
     workspace: {
       ensureDefaultIdentity: hoisted.ensureDefaultIdentityMock,
@@ -114,6 +132,9 @@ function createBootstrapService(RuntimeHostBootstrapService: typeof import('../.
     idGenerator: {
       randomHex: vi.fn(() => '1'.repeat(32)),
     },
+  });
+  return new RuntimeHostBootstrapService({
+    gatewayPrelaunchWorkflow,
     jobs: {
       submitGatewayPrelaunch: hoisted.submitLongTaskMock,
       submitProviderAuthBootstrap: hoisted.submitLongTaskMock,
@@ -122,9 +143,11 @@ function createBootstrapService(RuntimeHostBootstrapService: typeof import('../.
   });
 }
 
-vi.mock('../../runtime-host/application/providers/provider-runtime-rules', () => ({
+vi.mock('../../runtime-host/application/adapters/openclaw/projections/openclaw-provider-projection-rules', () => ({
   getOpenClawProviderKeyForType: (...args: unknown[]) => hoisted.getOpenClawProviderKeyForTypeMock(...args),
   getOAuthProviderApi: vi.fn(() => undefined),
+  getOAuthProviderTokenKey: vi.fn((providerType: string) => providerType),
+  getOAuthProviderDefaultBaseUrl: vi.fn(() => undefined),
   getOAuthApiKeyEnv: vi.fn(() => undefined),
   normalizeOAuthBaseUrl: vi.fn((_providerType: string, baseUrl?: string) => baseUrl),
   usesOAuthAuthHeader: vi.fn(() => false),
@@ -147,8 +170,8 @@ describe('runtime-host bootstrap provider sync', () => {
       replacedTemplateFiles: [],
       removedBootstrapFiles: [],
     });
-    hoisted.syncOpenClawModelsMock.mockResolvedValue(undefined);
-    hoisted.syncOpenClawRoutingMock.mockResolvedValue(undefined);
+    hoisted.syncRuntimeModelProjectionMock.mockResolvedValue(undefined);
+    hoisted.syncRuntimeRoutingProjectionMock.mockResolvedValue(undefined);
     hoisted.submitLongTaskMock.mockReturnValue({
       success: true,
       job: {
@@ -161,7 +184,7 @@ describe('runtime-host bootstrap provider sync', () => {
 
   it('RuntimeHostBootstrapService 会把 gateway prelaunch 提交给任务系统', async () => {
     const { RuntimeHostBootstrapService } = await import('../../runtime-host/application/runtime-host/bootstrap');
-    const service = createBootstrapService(RuntimeHostBootstrapService);
+    const service = await createBootstrapService(RuntimeHostBootstrapService);
     const result = service.submitGatewayPrelaunch({
       gatewayToken: 'matchaclaw-token-1',
       proxyEnabled: true,
@@ -176,7 +199,7 @@ describe('runtime-host bootstrap provider sync', () => {
 
   it('RuntimeHostBootstrapService 会把 provider auth bootstrap 提交给任务系统', async () => {
     const { RuntimeHostBootstrapService } = await import('../../runtime-host/application/runtime-host/bootstrap');
-    const service = createBootstrapService(RuntimeHostBootstrapService);
+    const service = await createBootstrapService(RuntimeHostBootstrapService);
     const result = service.submitProviderAuthBootstrap();
 
     expect(hoisted.submitLongTaskMock).toHaveBeenCalledWith();
@@ -191,7 +214,7 @@ describe('runtime-host bootstrap provider sync', () => {
     hoisted.reconcileConfiguredChannelPluginsForGatewayLaunchMock.mockResolvedValue(['openclaw-weixin']);
 
     const { RuntimeHostBootstrapService } = await import('../../runtime-host/application/runtime-host/bootstrap');
-    const service = createBootstrapService(RuntimeHostBootstrapService);
+    const service = await createBootstrapService(RuntimeHostBootstrapService);
     const result = await service.executeGatewayPrelaunch({
       gatewayToken: 'matchaclaw-token-1',
       proxyEnabled: true,
@@ -213,8 +236,8 @@ describe('runtime-host bootstrap provider sync', () => {
     expect(hoisted.ensureManagedPluginInstalledMock).toHaveBeenCalledWith('browser-relay');
     expect(hoisted.runtimeConfigSyncBrowserModeMock).toHaveBeenCalledWith('relay');
     expect(hoisted.runtimeConfigSyncSessionIdleMinutesMock).toHaveBeenCalledTimes(1);
-    expect(hoisted.syncOpenClawModelsMock).toHaveBeenCalledTimes(1);
-    expect(hoisted.syncOpenClawRoutingMock).toHaveBeenCalledTimes(1);
+    expect(hoisted.syncRuntimeModelProjectionMock).toHaveBeenCalledTimes(1);
+    expect(hoisted.syncRuntimeRoutingProjectionMock).toHaveBeenCalledTimes(1);
     expect(hoisted.reconcileConfiguredChannelPluginsForGatewayLaunchMock).toHaveBeenCalledTimes(1);
     expect(hoisted.ensureConfiguredManagedPluginsForGatewayLaunchMock).toHaveBeenCalledTimes(1);
     expect(hoisted.applySavedPolicyToPluginConfigMock).toHaveBeenCalledTimes(1);
@@ -238,7 +261,7 @@ describe('runtime-host bootstrap provider sync', () => {
     });
 
     const { RuntimeHostBootstrapService } = await import('../../runtime-host/application/runtime-host/bootstrap');
-    const service = createBootstrapService(RuntimeHostBootstrapService);
+    const service = await createBootstrapService(RuntimeHostBootstrapService);
     await service.executeProviderAuthBootstrap();
 
     expect(hoisted.saveProviderKeyMock).toHaveBeenCalledWith('ollama-ollama-main', 'ollama-local');
@@ -258,8 +281,8 @@ describe('runtime-host bootstrap provider sync', () => {
         api: 'openai-completions',
       }),
     );
-    expect(hoisted.syncOpenClawModelsMock).toHaveBeenCalledTimes(1);
-    expect(hoisted.syncOpenClawRoutingMock).toHaveBeenCalledTimes(1);
+    expect(hoisted.syncRuntimeModelProjectionMock).toHaveBeenCalledTimes(1);
+    expect(hoisted.syncRuntimeRoutingProjectionMock).toHaveBeenCalledTimes(1);
   });
 
   it('普通凭证同步 provider config 与 per-agent models.json provider，不写默认模型', async () => {
@@ -276,7 +299,7 @@ describe('runtime-host bootstrap provider sync', () => {
     });
 
     const { RuntimeHostBootstrapService } = await import('../../runtime-host/application/runtime-host/bootstrap');
-    const service = createBootstrapService(RuntimeHostBootstrapService);
+    const service = await createBootstrapService(RuntimeHostBootstrapService);
     await service.executeProviderAuthBootstrap();
 
     expect(hoisted.saveProviderKeyMock).toHaveBeenCalledWith('openai-openai-main', 'sk-openai');
@@ -296,7 +319,7 @@ describe('runtime-host bootstrap provider sync', () => {
         api: 'openai-responses',
       }),
     );
-    expect(hoisted.syncOpenClawModelsMock).toHaveBeenCalledTimes(1);
-    expect(hoisted.syncOpenClawRoutingMock).toHaveBeenCalledTimes(1);
+    expect(hoisted.syncRuntimeModelProjectionMock).toHaveBeenCalledTimes(1);
+    expect(hoisted.syncRuntimeRoutingProjectionMock).toHaveBeenCalledTimes(1);
   });
 });

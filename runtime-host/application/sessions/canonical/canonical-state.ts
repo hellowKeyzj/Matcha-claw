@@ -6,12 +6,13 @@ import type {
   SessionRuntimeStateSnapshot,
   TaskSnapshotEvent,
 } from '../../../shared/session-adapter-types';
+import type { RuntimeSessionContext } from '../../agent-runtime/contracts/runtime-endpoint-types';
 import type {
   CanonicalArtifactEvent,
   CanonicalTeamEvent,
   CanonicalUsageEvent,
 } from './canonical-events';
-import type { CanonicalMessageStatus, RuntimeProtocolId, RuntimeProviderId } from './canonical-events';
+import type { CanonicalMessageStatus, RuntimeProtocolId, RuntimeEndpointId } from './canonical-events';
 
 export interface CanonicalMessageState {
   key: string;
@@ -73,7 +74,8 @@ export interface CanonicalControlState {
 export interface CanonicalSessionState {
   sessionId: string;
   protocolId: RuntimeProtocolId;
-  runtimeProviderId: RuntimeProviderId;
+  runtimeEndpointId: RuntimeEndpointId;
+  context: RuntimeSessionContext;
   eventIds: string[];
   eventIdSet: Set<string>;
   messageIndexByKey: Map<string, number>;

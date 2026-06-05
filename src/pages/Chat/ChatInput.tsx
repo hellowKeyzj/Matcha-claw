@@ -10,7 +10,8 @@ import { memo, useState, useRef, useEffect, useCallback, useMemo, type ReactNode
 import { Send, Square, X, Paperclip, FileText, Film, Music, FileArchive, File, Loader2, ImageIcon, AlertCircle, Check, ChevronDown } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
-import { hostApiFetch } from '@/lib/host-api';
+import { hostFileStageBuffer, hostFileStagePaths } from '@/lib/host-api';
+import type { RuntimeAddress } from '../../../runtime-host/shared/runtime-address';
 import { invokeIpc } from '@/lib/api-client';
 import { useSkillsStore } from '@/stores/skills';
 import { cn } from '@/lib/utils';
@@ -45,15 +46,6 @@ interface SelectedSkill {
   baseDir?: string;
 }
 
-interface StagedFilePayload {
-  id: string;
-  fileName: string;
-  mimeType: string;
-  fileSize: number;
-  stagedPath: string;
-  preview: string | null;
-}
-
 interface ModelPickerOption {
   id: string;
   label: string;
@@ -81,6 +73,7 @@ interface ChatInputProps {
   approvalWaiting?: boolean;
   mentionCandidates?: MentionCandidate[];
   allowedSkillIds?: string[] | null;
+  runtimeAddress: RuntimeAddress | null;
 }
 
 function resolveInputPlaceholder(
@@ -274,6 +267,7 @@ export const ChatInput = memo(function ChatInput({
   approvalWaiting = false,
   mentionCandidates = [],
   allowedSkillIds = null,
+  runtimeAddress,
 }: ChatInputProps) {
   const { t } = useTranslation('chat');
   const [input, setInput] = useState('');
@@ -532,10 +526,12 @@ export const ChatInput = memo(function ChatInput({
       });
       setAttachments((prev) => [...prev, ...stagingAttachments]);
 
-      // Stage all files via IPC
-      const staged = await hostApiFetch<StagedFilePayload[]>('/api/files/stage-paths', {
-        method: 'POST',
-        body: JSON.stringify({ filePaths: result.filePaths }),
+      if (!runtimeAddress) {
+        throw new Error('RuntimeAddress is required');
+      }
+      const staged = await hostFileStagePaths({
+        filePaths: result.filePaths,
+        runtimeAddress,
       });
 
       // Update each placeholder with real data
@@ -565,7 +561,7 @@ export const ChatInput = memo(function ChatInput({
           : attachment
       )));
     }
-  }, []);
+  }, [runtimeAddress]);
 
   // ── Stage browser File objects (paste / drag-drop) ─────────────
 
@@ -600,13 +596,14 @@ export const ChatInput = memo(function ChatInput({
       async ({ file, tempId, fallback }) => {
         try {
           const base64 = await readFileAsBase64(file);
-          const staged = await hostApiFetch<StagedFilePayload>('/api/files/stage-buffer', {
-            method: 'POST',
-            body: JSON.stringify({
-              base64,
-              fileName: file.name,
-              mimeType: file.type || 'application/octet-stream',
-            }),
+          if (!runtimeAddress) {
+            throw new Error('RuntimeAddress is required');
+          }
+          const staged = await hostFileStageBuffer({
+            base64,
+            fileName: file.name,
+            mimeType: file.type || 'application/octet-stream',
+            runtimeAddress,
           });
           return { tempId, attachment: { ...staged, status: 'ready' as const } };
         } catch (err) {
@@ -627,7 +624,7 @@ export const ChatInput = memo(function ChatInput({
       results.map((result) => [result.tempId, result.attachment] as const),
     );
     setAttachments((prev) => prev.map((attachment) => updatesByTempId.get(attachment.id) ?? attachment));
-  }, []);
+  }, [runtimeAddress]);
 
   // ── Attachment management ──────────────────────────────────────
 

@@ -1,3 +1,4 @@
+import { buildRuntimeScopeKey } from './session-identity';
 import type {
   ApprovalStatus,
   ApprovalItem,
@@ -371,7 +372,8 @@ export function areSessionsEquivalent(left: ChatSession[], right: ChatSession[])
       a.key !== b.key
       || (a.agentId ?? null) !== (b.agentId ?? null)
       || (a.protocolId ?? null) !== (b.protocolId ?? null)
-      || (a.runtimeProviderId ?? null) !== (b.runtimeProviderId ?? null)
+      || (a.runtimeEndpointId ?? null) !== (b.runtimeEndpointId ?? null)
+      || safeStableStringify(a.runtimeAddress ?? null) !== safeStableStringify(b.runtimeAddress ?? null)
       || (a.kind ?? null) !== (b.kind ?? null)
       || (a.preferred ?? false) !== (b.preferred ?? false)
       || (a.label ?? null) !== (b.label ?? null)
@@ -445,9 +447,12 @@ export function createEmptySessionRuntime(): ChatSessionRuntimeState {
 
 export function createEmptySessionMeta(): ChatSessionMetaState {
   return {
+    backendSessionKey: '',
+    runtimeScopeKey: null,
     agentId: null,
     protocolId: null,
-    runtimeProviderId: null,
+    runtimeEndpointId: null,
+    runtimeAddress: null,
     kind: null,
     preferred: false,
     label: null,
@@ -478,9 +483,12 @@ export function createEmptySessionViewportState(): ChatSessionViewportState {
 }
 
 function areSessionMetaEquivalent(left: ChatSessionMetaState, right: ChatSessionMetaState): boolean {
-  return left.agentId === right.agentId
+  return left.backendSessionKey === right.backendSessionKey
+    && left.runtimeScopeKey === right.runtimeScopeKey
+    && left.agentId === right.agentId
     && (left.protocolId ?? null) === (right.protocolId ?? null)
-    && (left.runtimeProviderId ?? null) === (right.runtimeProviderId ?? null)
+    && (left.runtimeEndpointId ?? null) === (right.runtimeEndpointId ?? null)
+    && safeStableStringify(left.runtimeAddress) === safeStableStringify(right.runtimeAddress)
     && left.kind === right.kind
     && left.preferred === right.preferred
     && left.label === right.label
@@ -524,12 +532,14 @@ type ApprovalComparable = Omit<ApprovalItem, 'allowedDecisions'> & {
 function areApprovalItemsEquivalent(left: ApprovalComparable, right: ApprovalComparable): boolean {
   return left.id === right.id
     && left.sessionKey === right.sessionKey
+    && left.backendSessionKey === right.backendSessionKey
     && left.runId === right.runId
     && left.title === right.title
     && left.command === right.command
     && left.createdAtMs === right.createdAtMs
     && left.expiresAtMs === right.expiresAtMs
     && left.decision === right.decision
+    && safeStableStringify(left.runtimeAddress) === safeStableStringify(right.runtimeAddress)
     && left.allowedDecisions.length === right.allowedDecisions.length
     && left.allowedDecisions.every((decision, index) => decision === right.allowedDecisions[index])
     && safeStableStringify(left.request) === safeStableStringify(right.request);
@@ -774,9 +784,12 @@ export function patchSessionSnapshot(
   const nextItems = reconcileSessionItems(current.items, snapshot.items);
   const nextMeta = {
     ...current.meta,
+    backendSessionKey: snapshot.sessionKey,
+    runtimeScopeKey: buildRuntimeScopeKey(catalog.runtimeAddress),
     agentId: catalog.agentId,
     protocolId: catalog.protocolId ?? null,
-    runtimeProviderId: catalog.runtimeProviderId ?? null,
+    runtimeEndpointId: catalog.runtimeEndpointId ?? null,
+    runtimeAddress: catalog.runtimeAddress,
     kind: catalog.kind,
     preferred: catalog.preferred,
     label: catalog.label ?? null,
@@ -829,15 +842,18 @@ export function patchPendingApprovalsFromSnapshot(
   snapshot: SessionStateSnapshot,
 ): Record<string, ApprovalItem[]> {
   const current = state.pendingApprovalsBySession[sessionKey] ?? EMPTY_APPROVALS;
-  if (areApprovalListsEquivalent(current, snapshot.approvals)) {
+  const nextApprovals = snapshot.approvals.map((approval) => ({
+    ...approval,
+    sessionKey,
+    backendSessionKey: approval.sessionKey,
+    allowedDecisions: [...approval.allowedDecisions],
+  }));
+  if (areApprovalListsEquivalent(current, nextApprovals)) {
     return state.pendingApprovalsBySession;
   }
   return {
     ...state.pendingApprovalsBySession,
-    [sessionKey]: snapshot.approvals.map((approval) => ({
-      ...approval,
-      allowedDecisions: [...approval.allowedDecisions],
-    })),
+    [sessionKey]: nextApprovals,
   };
 }
 

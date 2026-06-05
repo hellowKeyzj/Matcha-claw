@@ -1,16 +1,16 @@
 export type ChannelActivationMode = 'direct-config' | 'login-session';
 
-const LOGIN_SESSION_CHANNEL_TYPES = new Set([
-  'whatsapp',
-  'openclaw-weixin',
-]);
-
-export function resolveChannelActivationMode(channelType: string): ChannelActivationMode {
-  return LOGIN_SESSION_CHANNEL_TYPES.has(channelType)
-    ? 'login-session'
-    : 'direct-config';
+export interface ChannelActivationStrategyPort {
+  resolveChannelActivationMode(channelType: string): ChannelActivationMode;
 }
 
-export function channelUsesLoginSession(channelType: string): boolean {
-  return resolveChannelActivationMode(channelType) === 'login-session';
+export const DIRECT_CHANNEL_ACTIVATION_STRATEGY: ChannelActivationStrategyPort = {
+  resolveChannelActivationMode: () => 'direct-config',
+};
+
+export function channelUsesLoginSession(
+  strategy: ChannelActivationStrategyPort,
+  channelType: string,
+): boolean {
+  return strategy.resolveChannelActivationMode(channelType) === 'login-session';
 }

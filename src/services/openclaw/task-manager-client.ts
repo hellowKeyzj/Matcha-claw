@@ -1,4 +1,5 @@
-import { hostApiFetch } from '@/lib/host-api';
+import { hostCapabilityExecute } from '@/lib/host-api';
+import type { RuntimeAddress } from '../../../runtime-host/shared/runtime-address';
 
 export type TaskStatus = 'pending' | 'in_progress' | 'completed' | 'deleted';
 
@@ -39,12 +40,56 @@ export interface TaskListSnapshot {
   todos: TodoItem[];
 }
 
-async function taskApi<T>(path: string, payload?: unknown): Promise<T> {
-  return await hostApiFetch<T>(path, {
-    method: 'POST',
-    body: JSON.stringify(payload ?? {}),
-    timeoutMs: 60_000,
-  });
+const TOOL_INVOKE_CAPABILITY_ID = 'tool.invoke';
+const TASK_CONTROL_CAPABILITY_ID = 'task.control';
+
+function runtimeAddressForToolInvoke(address: RuntimeAddress): RuntimeAddress {
+  return {
+    ...address,
+    capabilityId: TOOL_INVOKE_CAPABILITY_ID,
+  };
+}
+
+async function taskToolApi<T>(operationId: string, payload: {
+  runtimeAddress: RuntimeAddress;
+  method: string;
+  params: Record<string, unknown>;
+}): Promise<T> {
+  const runtimeAddress = runtimeAddressForToolInvoke(payload.runtimeAddress);
+  return await hostCapabilityExecute<T>({
+    id: TOOL_INVOKE_CAPABILITY_ID,
+    operationId,
+    runtimeAddress,
+    input: {
+      ...payload,
+      runtimeAddress,
+    },
+  }, { timeoutMs: 60_000 });
+}
+
+function runtimeAddressForTaskControl(address: RuntimeAddress): RuntimeAddress {
+  return {
+    ...address,
+    capabilityId: TASK_CONTROL_CAPABILITY_ID,
+  };
+}
+
+async function taskControlApi<T>(operationId: string, payload: {
+  runtimeAddress: RuntimeAddress;
+  taskId: string;
+  wait?: boolean;
+  timeoutMs?: number;
+}): Promise<T> {
+  const runtimeAddress = runtimeAddressForTaskControl(payload.runtimeAddress);
+  return await hostCapabilityExecute<T>({
+    id: TASK_CONTROL_CAPABILITY_ID,
+    operationId,
+    runtimeAddress,
+    input: {
+      ...payload,
+      runtimeAddress,
+    },
+  }, { timeoutMs: payload.timeoutMs ?? 60_000 });
 }
 
 function normalizeStatus(raw: unknown): TaskStatus {
@@ -114,31 +159,57 @@ function normalizeScope(raw: unknown): TaskScope | undefined {
   };
 }
 
-export async function listTaskSnapshot(payload: string | {
+export async function listTaskSnapshot(payload: {
   sessionKey: string;
+  runtimeAddress: RuntimeAddress;
   teamKey?: string;
 }): Promise<TaskListSnapshot> {
-  const request = typeof payload === 'string' ? { sessionKey: payload } : payload;
-  const result = await taskApi<{ scope?: unknown; tasks?: unknown[]; todos?: unknown[] }>('/api/tasks/list', request);
+  const result = await taskToolApi<{ scope?: unknown; tasks?: unknown[]; todos?: unknown[] }>('tools.invoke', {
+    runtimeAddress: payload.runtimeAddress,
+    method: 'TaskList',
+    params: {
+      sessionKey: payload.sessionKey,
+      ...(payload.teamKey ? { teamKey: payload.teamKey } : {}),
+    },
+  });
   const tasks = Array.isArray(result.tasks) ? result.tasks.map(normalizeTask) : [];
   const todos = Array.isArray(result.todos) ? result.todos.map(normalizeTodo) : [];
   return { ...(normalizeScope(result.scope) ? { scope: normalizeScope(result.scope) } : {}), tasks, todos };
 }
 
-export async function getTask(payload: { sessionKey: string; taskId: string }): Promise<Task | null> {
-  const result = await taskApi<{ task?: unknown | null }>('/api/tasks/get', payload);
+export async function getTask(payload: { sessionKey: string; runtimeAddress: RuntimeAddress; taskId: string }): Promise<Task | null> {
+  const result = await taskToolApi<{ task?: unknown | null }>('tools.invoke', {
+    runtimeAddress: payload.runtimeAddress,
+    method: 'TaskGet',
+    params: {
+      sessionKey: payload.sessionKey,
+      taskId: payload.taskId,
+    },
+  });
   return result.task ? normalizeTask(result.task) : null;
 }
 
 export async function createTask(payload: {
   sessionKey: string;
+  runtimeAddress: RuntimeAddress;
   subject: string;
   description: string;
   activeForm?: string;
   metadata?: Record<string, unknown>;
   owner?: string;
 }): Promise<{ task: Task; todos: TodoItem[] }> {
-  const result = await taskApi<{ task: unknown; todos?: unknown[] }>('/api/tasks/create', payload);
+  const result = await taskToolApi<{ task: unknown; todos?: unknown[] }>('tools.invoke', {
+    runtimeAddress: payload.runtimeAddress,
+    method: 'TaskCreate',
+    params: {
+      sessionKey: payload.sessionKey,
+      subject: payload.subject,
+      description: payload.description,
+      ...(payload.activeForm ? { activeForm: payload.activeForm } : {}),
+      ...(payload.metadata ? { metadata: payload.metadata } : {}),
+      ...(payload.owner ? { owner: payload.owner } : {}),
+    },
+  });
   return {
     task: normalizeTask(result.task),
     todos: Array.isArray(result.todos) ? result.todos.map(normalizeTodo) : [],
@@ -147,6 +218,7 @@ export async function createTask(payload: {
 
 export async function updateTask(payload: {
   sessionKey: string;
+  runtimeAddress: RuntimeAddress;
   taskId: string;
   teamKey?: string;
   status?: TaskStatus;
@@ -158,7 +230,23 @@ export async function updateTask(payload: {
   addBlocks?: string[];
   metadata?: Record<string, unknown>;
 }): Promise<{ task?: Task; taskId?: string; deleted?: boolean; todos: TodoItem[] }> {
-  const result = await taskApi<{ task?: unknown; taskId?: string; deleted?: boolean; todos?: unknown[] }>('/api/tasks/update', payload);
+  const result = await taskToolApi<{ task?: unknown; taskId?: string; deleted?: boolean; todos?: unknown[] }>('tools.invoke', {
+    runtimeAddress: payload.runtimeAddress,
+    method: 'TaskUpdate',
+    params: {
+      sessionKey: payload.sessionKey,
+      taskId: payload.taskId,
+      ...(payload.teamKey ? { teamKey: payload.teamKey } : {}),
+      ...(payload.status ? { status: payload.status } : {}),
+      ...(payload.subject ? { subject: payload.subject } : {}),
+      ...(typeof payload.description === 'string' ? { description: payload.description } : {}),
+      ...(payload.activeForm ? { activeForm: payload.activeForm } : {}),
+      ...(payload.owner ? { owner: payload.owner } : {}),
+      ...(payload.addBlockedBy ? { addBlockedBy: payload.addBlockedBy } : {}),
+      ...(payload.addBlocks ? { addBlocks: payload.addBlocks } : {}),
+      ...(payload.metadata ? { metadata: payload.metadata } : {}),
+    },
+  });
   return {
     ...(result.task ? { task: normalizeTask(result.task) } : {}),
     ...(typeof result.taskId === 'string' ? { taskId: result.taskId } : {}),
@@ -169,10 +257,19 @@ export async function updateTask(payload: {
 
 export async function writeTodos(payload: {
   sessionKey: string;
+  runtimeAddress: RuntimeAddress;
   oldTodos: TodoItem[];
   newTodos: TodoItem[];
 }): Promise<{ todos: TodoItem[]; updatedAt?: number }> {
-  const result = await taskApi<{ todos?: unknown[]; updatedAt?: unknown }>('/api/tasks/todos/write', payload);
+  const result = await taskToolApi<{ todos?: unknown[]; updatedAt?: unknown }>('tools.invoke', {
+    runtimeAddress: payload.runtimeAddress,
+    method: 'TodoWrite',
+    params: {
+      sessionKey: payload.sessionKey,
+      oldTodos: payload.oldTodos,
+      newTodos: payload.newTodos,
+    },
+  });
   return {
     todos: Array.isArray(result.todos) ? result.todos.map(normalizeTodo) : [],
     ...(typeof result.updatedAt === 'number' ? { updatedAt: result.updatedAt } : {}),
@@ -181,8 +278,15 @@ export async function writeTodos(payload: {
 
 export async function getTodos(payload: {
   sessionKey: string;
+  runtimeAddress: RuntimeAddress;
 }): Promise<{ todos: TodoItem[]; updatedAt?: number }> {
-  const result = await taskApi<{ todos?: unknown[]; updatedAt?: unknown }>('/api/tasks/todos/get', payload);
+  const result = await taskToolApi<{ todos?: unknown[]; updatedAt?: unknown }>('tools.invoke', {
+    runtimeAddress: payload.runtimeAddress,
+    method: 'TodoGet',
+    params: {
+      sessionKey: payload.sessionKey,
+    },
+  });
   return {
     todos: Array.isArray(result.todos) ? result.todos.map(normalizeTodo) : [],
     ...(typeof result.updatedAt === 'number' ? { updatedAt: result.updatedAt } : {}),
@@ -190,17 +294,17 @@ export async function getTodos(payload: {
 }
 
 export async function getTaskOutput(payload: {
-  sessionKey?: string;
+  runtimeAddress: RuntimeAddress;
   taskId: string;
   wait?: boolean;
   timeoutMs?: number;
 }): Promise<unknown> {
-  return await taskApi('/api/tasks/output', payload);
+  return await taskControlApi('tasks.output', payload);
 }
 
 export async function stopTask(payload: {
-  sessionKey?: string;
+  runtimeAddress: RuntimeAddress;
   taskId: string;
 }): Promise<unknown> {
-  return await taskApi('/api/tasks/stop', payload);
+  return await taskControlApi('tasks.stop', payload);
 }

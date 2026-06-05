@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { GatewayService } from '../../runtime-host/application/gateway/service';
 import { DEFAULT_GATEWAY_BASE_METHODS } from '../../runtime-host/application/gateway/gateway-runtime-port';
+import { GatewayReadinessWorkflow } from '../../runtime-host/application/workflows/gateway-readiness/gateway-readiness-workflow';
 
 describe('runtime-host gateway ready service', () => {
   function createFileSystem() {
@@ -21,7 +22,7 @@ describe('runtime-host gateway ready service', () => {
       readGatewayConnectionState: vi.fn(),
       chatSend: vi.fn(),
     };
-    const service = new GatewayService({ gateway, fileSystem: createFileSystem() });
+    const service = new GatewayService({ readinessWorkflow: new GatewayReadinessWorkflow({ gateway }) });
 
     await expect(service.ready({
       timeoutMs: 3000,
@@ -53,7 +54,7 @@ describe('runtime-host gateway ready service', () => {
       readGatewayConnectionState: vi.fn(),
       chatSend: vi.fn(),
     };
-    const service = new GatewayService({ gateway, fileSystem: createFileSystem() });
+    const service = new GatewayService({ readinessWorkflow: new GatewayReadinessWorkflow({ gateway }) });
 
     await expect(service.ready({ timeoutMs: 3000 })).resolves.toMatchObject({
       status: 200,
@@ -83,7 +84,7 @@ describe('runtime-host gateway ready service', () => {
       readGatewayConnectionState: vi.fn(),
       chatSend: vi.fn(),
     };
-    const service = new GatewayService({ gateway, fileSystem: createFileSystem() });
+    const service = new GatewayService({ readinessWorkflow: new GatewayReadinessWorkflow({ gateway }) });
 
     await expect(service.ready({ timeoutMs: 3000 })).resolves.toEqual({
       status: 200,

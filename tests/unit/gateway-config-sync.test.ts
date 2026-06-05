@@ -59,6 +59,14 @@ vi.mock('../../electron/gateway/config-sync-env', () => ({
   stripSystemdSupervisorEnv: vi.fn((env: Record<string, string | undefined>) => env),
 }));
 
+const runtimeHostAddress = {
+  kind: 'native-runtime',
+  capabilityId: 'runtime.host',
+  runtimeAdapterId: 'openclaw',
+  runtimeInstanceId: 'local',
+  agentId: 'default',
+};
+
 function createFakeRuntimeHostManager() {
   let registeredHandler:
     | ((eventName: 'runtime-job:done' | 'runtime-job:progress', payload: unknown) => void)
@@ -82,12 +90,25 @@ function createFakeRuntimeHostManager() {
 
 describe('gateway config sync', () => {
   beforeEach(() => {
+    vi.resetModules();
     vi.clearAllMocks();
     const openclawDir = path.join(process.cwd(), '.tmp', 'gateway-config-sync-openclaw');
     rmSync(openclawDir, { recursive: true, force: true });
     mkdirSync(openclawDir, { recursive: true });
     writeFileSync(path.join(openclawDir, 'openclaw.mjs'), '', 'utf8');
     hoisted.runtimeHostRequestMock.mockImplementation(async (_method: string, route: string) => {
+      if (route === '/api/capabilities/list') {
+        return {
+          status: 200,
+          data: {
+            capabilities: [{
+              id: 'runtime.host',
+              availability: 'available',
+              address: runtimeHostAddress,
+            }],
+          },
+        };
+      }
       if (route === '/api/runtime-host/host-bootstrap-settings') {
         return {
           status: 200,
@@ -104,22 +125,7 @@ describe('gateway config sync', () => {
           },
         };
       }
-      if (route === '/api/runtime-host/gateway-launch-plan') {
-        return {
-          status: 200,
-          data: {
-            success: true,
-            plan: {
-              gatewayToken: 'matchaclaw-token-1',
-              providerEnv: {},
-              loadedProviderKeyCount: 0,
-              skipChannels: true,
-              channelStartupSummary: 'skipped(no configured channels)',
-            },
-          },
-        };
-      }
-      if (route === '/api/runtime-host/prepare-gateway-launch') {
+      if (route === '/api/capabilities/execute') {
         return {
           status: 202,
           data: {
@@ -141,6 +147,16 @@ describe('gateway config sync', () => {
               id: 'job-prelaunch-1',
               type: 'runtimeHost.gatewayPrelaunch',
               status: 'succeeded',
+              result: {
+                configuredChannels: [],
+                launchPlan: {
+                  gatewayToken: 'matchaclaw-token-1',
+                  providerEnv: {},
+                  loadedProviderKeyCount: 0,
+                  skipChannels: true,
+                  channelStartupSummary: 'skipped(no configured channels)',
+                },
+              },
             },
           },
         };
@@ -160,8 +176,17 @@ describe('gateway config sync', () => {
     });
 
     expect(hoisted.runtimeHostRequestMock).toHaveBeenCalledWith(
+      'GET',
+      '/api/capabilities/list',
+    );
+    expect(hoisted.runtimeHostRequestMock).toHaveBeenCalledWith(
       'POST',
-      '/api/runtime-host/prepare-gateway-launch',
+      '/api/capabilities/execute',
+      expect.objectContaining({
+        id: 'runtime.host',
+        operationId: 'runtimeHost.prepareGatewayLaunch',
+        runtimeAddress: runtimeHostAddress,
+      }),
     );
     expect(hoisted.runtimeHostRequestMock).toHaveBeenCalledWith(
       'POST',
@@ -184,8 +209,13 @@ describe('gateway config sync', () => {
     })).rejects.toThrow('runtime-host offline');
 
     expect(hoisted.runtimeHostRequestMock).toHaveBeenCalledWith(
+      'GET',
+      '/api/capabilities/list',
+    );
+    expect(hoisted.runtimeHostRequestMock).not.toHaveBeenCalledWith(
       'POST',
-      '/api/runtime-host/prepare-gateway-launch',
+      '/api/capabilities/execute',
+      expect.anything(),
     );
   });
 
@@ -229,7 +259,7 @@ describe('gateway config sync', () => {
       'GET',
       '/api/runtime-host/host-bootstrap-settings',
     );
-    expect(hoisted.runtimeHostRequestMock).toHaveBeenCalledWith(
+    expect(hoisted.runtimeHostRequestMock).not.toHaveBeenCalledWith(
       'GET',
       '/api/runtime-host/gateway-launch-plan',
     );

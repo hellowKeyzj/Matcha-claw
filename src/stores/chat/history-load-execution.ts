@@ -1,4 +1,4 @@
-import { hostSessionWindowFetch, waitForRuntimeJobResult } from '@/lib/host-api';
+import { hostSessionWindowFetch, resolveHydratedSessionSnapshot } from '@/lib/host-api';
 import { normalizeAppError } from '@/lib/error-model';
 import {
   hasPendingItemPreviewLoads,
@@ -28,6 +28,7 @@ import {
 } from './store-state-helpers';
 import { readSessionsFromState } from './session-helpers';
 import { useTaskSnapshotStore } from './task-snapshot-store';
+import { resolveSessionOperationTarget } from './session-identity';
 import { isHistoryLoadAbortError, throwIfHistoryLoadAborted } from './history-abort';
 import type { StoreHistoryCache } from './history-cache';
 import type { ChatHistoryLoadRequest, ChatStoreState } from './types';
@@ -201,8 +202,11 @@ async function fetchHistoryWindowWithStartupRetry(input: {
   for (let attempt = 0; attempt <= CHAT_HISTORY_STARTUP_RETRY_DELAYS_MS.length; attempt += 1) {
     throwIfHistoryLoadAborted(abortSignal, shouldAbortHistoryProcessing);
     try {
+      const target = resolveSessionOperationTarget(get(), requestedSessionKey);
       return await fetchHistoryWindow({
-        requestedSessionKey,
+        recordKey: requestedSessionKey,
+        backendSessionKey: target.sessionKey,
+        runtimeAddress: target.runtimeAddress,
         sessions: readSessionsFromState(get()),
         limit: CHAT_HISTORY_FULL_LIMIT,
         ...(startupColdLoad ? { timeoutMs: CHAT_HISTORY_STARTUP_REQUEST_TIMEOUT_MS } : {}),
@@ -319,39 +323,41 @@ export async function executeViewportWindowLoad(
 
   try {
     const currentState = deps.get();
+    const target = resolveSessionOperationTarget(currentState, sessionKey);
     const currentItems = getSessionItems(currentState, sessionKey);
     const initialPayload = await hostSessionWindowFetch({
-      sessionKey,
+      sessionKey: target.sessionKey,
+      runtimeAddress: target.runtimeAddress,
       mode: request.mode,
       limit: resolveViewportFetchLimit(currentItems.length),
       ...(request.mode === 'older' ? { offset: beforeViewport.windowStartOffset } : {}),
       includeCanonical: true,
     });
-    const payload = initialPayload.hydrationJob
-      ? await waitForRuntimeJobResult(initialPayload.hydrationJob.id).then(async () => {
-          if (!isViewportWindowRequestCurrent({
-            state: deps.get(),
-            sessionKey,
-            mode: request.mode,
-            requestedStartOffset: beforeViewport.windowStartOffset,
-          })) {
-            return null;
-          }
-          const window = await hostSessionWindowFetch({
-            sessionKey,
-            mode: request.mode,
-            limit: resolveViewportFetchLimit(currentItems.length),
-            ...(request.mode === 'older' ? { offset: beforeViewport.windowStartOffset } : {}),
-            includeCanonical: true,
-          });
-          return window.snapshot ? window as SessionWindowResult : null;
-        })
-      : initialPayload.snapshot
-        ? initialPayload as SessionWindowResult
-        : null;
-    if (!payload) {
+    const snapshot = await resolveHydratedSessionSnapshot({
+      initial: initialPayload,
+      refetch: async () => {
+        if (!isViewportWindowRequestCurrent({
+          state: deps.get(),
+          sessionKey,
+          mode: request.mode,
+          requestedStartOffset: beforeViewport.windowStartOffset,
+        })) {
+          return {};
+        }
+        return await hostSessionWindowFetch({
+          sessionKey: target.sessionKey,
+          runtimeAddress: target.runtimeAddress,
+          mode: request.mode,
+          limit: resolveViewportFetchLimit(currentItems.length),
+          ...(request.mode === 'older' ? { offset: beforeViewport.windowStartOffset } : {}),
+          includeCanonical: true,
+        });
+      },
+    });
+    if (!snapshot) {
       return;
     }
+    const payload: SessionWindowResult = { snapshot };
     if (!isViewportWindowRequestCurrent({
       state: deps.get(),
       sessionKey,

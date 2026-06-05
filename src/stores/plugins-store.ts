@@ -1,5 +1,6 @@
 import { create } from 'zustand';
-import { hostApiFetch, waitForRuntimeJobResult, type RuntimeJobSubmission } from '@/lib/host-api';
+import { hostApiFetch, hostCapabilityExecute, waitForRuntimeJobResult, type RuntimeJobSubmission } from '@/lib/host-api';
+import type { RuntimeAddress } from '../../runtime-host/shared/runtime-address';
 
 export type PluginCatalogItem = {
   id: string;
@@ -60,6 +61,7 @@ type PluginRefreshOptions = PluginFetchOptions & {
 
 const PLUGIN_LOAD_FAILED_KEY = 'plugins:errors.loadFailed';
 const PLUGIN_CACHE_FRESH_MS = 30_000;
+const PLUGIN_RUNTIME_CAPABILITY_ID = 'plugin.runtime';
 const RUNTIME_HOST_READY_TIMEOUT_MS = 15_000;
 const RUNTIME_HOST_READY_RETRY_MS = 300;
 const EMPTY_CATALOG: PluginCatalogItem[] = [];
@@ -109,6 +111,22 @@ function hasFreshCatalogCache(): boolean {
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => {
     window.setTimeout(resolve, ms);
+  });
+}
+
+async function pluginRuntimeCapabilityExecute<TResult>(
+  operationId: string,
+  runtimeAddress: RuntimeAddress,
+  input: Record<string, unknown>,
+): Promise<TResult> {
+  return await hostCapabilityExecute<TResult>({
+    id: PLUGIN_RUNTIME_CAPABILITY_ID,
+    operationId,
+    runtimeAddress,
+    input: {
+      ...input,
+      runtimeAddress,
+    },
   });
 }
 
@@ -204,7 +222,7 @@ interface PluginsStoreState {
   refreshCatalog: (options?: PluginFetchOptions) => Promise<void>;
   refreshSnapshot: (options?: PluginRefreshOptions) => Promise<void>;
   restartHost: () => Promise<void>;
-  togglePluginEnabled: (pluginId: string, nextEnabled: boolean) => Promise<void>;
+  togglePluginEnabled: (pluginId: string, nextEnabled: boolean, runtimeAddress: RuntimeAddress) => Promise<void>;
   clearError: () => void;
 }
 
@@ -361,7 +379,7 @@ export const usePluginsStore = create<PluginsStoreState>((set, get) => ({
     }
   },
 
-  togglePluginEnabled: async (pluginId, nextEnabled) => {
+  togglePluginEnabled: async (pluginId, nextEnabled, runtimeAddress) => {
     const runtime = get().runtime;
     if (!runtime) {
       return;
@@ -375,10 +393,11 @@ export const usePluginsStore = create<PluginsStoreState>((set, get) => ({
       : manuallyManagedEnabledPluginIds.filter((id) => id !== pluginId);
     set({ mutatingPluginId: pluginId, mutating: true, error: null });
     try {
-      const submission = await hostApiFetch<RuntimeJobSubmission<RuntimePayload>>('/api/plugins/runtime/enabled-plugins', {
-        method: 'PUT',
-        body: JSON.stringify({ pluginIds: nextIds }),
-      });
+      const submission = await pluginRuntimeCapabilityExecute<RuntimeJobSubmission<RuntimePayload>>(
+        'plugins.setEnabled',
+        runtimeAddress,
+        { pluginIds: nextIds },
+      );
       const payload = await waitForRuntimeJobResult<RuntimePayload>(submission.job.id);
       set({
         runtime: writeRuntimeCache(payload),

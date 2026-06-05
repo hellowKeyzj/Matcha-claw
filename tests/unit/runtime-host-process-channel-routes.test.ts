@@ -1,13 +1,46 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { channelRoutes } from '../../runtime-host/api/routes/channel-routes';
+import { createChannelIntegrationCapabilityOperationRoutes } from '../../runtime-host/application/capabilities/integration/channel-integration-capability';
 import { ChannelService } from '../../runtime-host/application/channels/service';
+import { ChannelActivationWorkflow } from '../../runtime-host/application/workflows/channel-runtime/channel-activation-workflow';
+import { ChannelConfigMutationWorkflow } from '../../runtime-host/application/workflows/channel-runtime/channel-config-mutation-workflow';
+import { ChannelRuntimeWorkflow } from '../../runtime-host/application/workflows/channel-runtime/channel-runtime-workflow';
 import { dispatchRuntimeRouteDefinition } from './helpers/runtime-route';
+import type { CapabilityOperationContext } from '../../runtime-host/application/capabilities/contracts/capability-router';
+import { createOpenClawTestRuntimeAddress } from './helpers/runtime-address-fixtures';
 
 const clock = {
   nowMs: () => 1234,
   nowIso: () => '1970-01-01T00:00:01.234Z',
   toIsoString: (ms: number) => new Date(ms).toISOString(),
 };
+
+async function dispatchChannelIntegrationCapability(
+  channelService: ChannelService,
+  operationId: string,
+  payload: Record<string, unknown> = {},
+) {
+  const route = createChannelIntegrationCapabilityOperationRoutes({ channelService })
+    .find((candidate) => candidate.operationId === operationId);
+  if (!route) {
+    throw new Error(`Missing channel integration operation: ${operationId}`);
+  }
+  return await route.handle(channelIntegrationContext(operationId, payload));
+}
+
+function channelIntegrationContext(
+  operationId: string,
+  payload: Record<string, unknown>,
+): CapabilityOperationContext {
+  const address = createOpenClawTestRuntimeAddress('agent:main:main');
+  return {
+    capabilityId: 'integration.channel',
+    operationId,
+    address: { ...address, capabilityId: 'integration.channel' },
+    input: { ...payload, runtimeAddress: { ...address, capabilityId: 'integration.channel' } },
+    domainInput: payload,
+  };
+}
 
 function createDeps() {
   const deps = {
@@ -103,39 +136,64 @@ function createDeps() {
     })),
     cancelLoginSession: vi.fn(async () => {}),
   };
+  const channelConfig = {
+    listConfiguredChannels: deps.listConfiguredChannels,
+    validateChannelConfig: deps.validateChannelConfig,
+    validateChannelCredentials: deps.validateChannelCredentials,
+    prepareChannelPlugin: deps.prepareChannelPlugin,
+    saveChannelConfig: deps.saveChannelConfig,
+    getChannelFormValues: deps.getChannelFormValues,
+    deleteChannelConfig: deps.deleteChannelConfig,
+  };
+  const parentShell = {
+    request: deps.requestParentShellAction,
+    mapResponse: deps.mapParentTransportResponse,
+  };
+  const configMutationWorkflow = new ChannelConfigMutationWorkflow({
+    channelConfig,
+    parentShell,
+  });
+  const runtimeWorkflow = new ChannelRuntimeWorkflow({
+    gateway: deps.openclawBridge,
+    channelConfig,
+    clock,
+  });
+  const jobs = {
+    submitRefreshSnapshot: deps.submitRefreshSnapshot,
+    submitProbeSnapshot: deps.submitProbeSnapshot,
+    submitActivateDirectChannel: deps.submitActivateDirectChannel,
+    submitDeleteChannelConfig: deps.submitDeleteChannelConfig,
+  };
+  const loginSessions = {
+    start: deps.startLoginSession,
+    cancel: deps.cancelLoginSession,
+  };
+  const activationStrategy = {
+    resolveChannelActivationMode: (channelType: string) => (
+      channelType === 'whatsapp' || channelType === 'openclaw-weixin'
+        ? 'login-session' as const
+        : 'direct-config' as const
+    ),
+  };
+  const activationWorkflow = new ChannelActivationWorkflow({
+    channelConfig,
+    loginSessions,
+    jobs,
+    activationStrategy,
+  });
   return {
     ...deps,
     routeDeps: {
       channelService: new ChannelService({
-        gateway: deps.openclawBridge,
-        channelConfig: {
-          listConfiguredChannels: deps.listConfiguredChannels,
-          validateChannelConfig: deps.validateChannelConfig,
-          validateChannelCredentials: deps.validateChannelCredentials,
-          prepareChannelPlugin: deps.prepareChannelPlugin,
-          saveChannelConfig: deps.saveChannelConfig,
-          getChannelFormValues: deps.getChannelFormValues,
-          deleteChannelConfig: deps.deleteChannelConfig,
-        },
-        parentShell: {
-          request: deps.requestParentShellAction,
-          mapResponse: deps.mapParentTransportResponse,
-        },
-        loginSessions: {
-          start: deps.startLoginSession,
-          cancel: deps.cancelLoginSession,
-        },
+        channelConfig,
+        activationWorkflow,
+        configMutationWorkflow,
+        runtimeWorkflow,
         pairing: {
           listRequests: deps.listPairingRequests,
           approveRequest: deps.approvePairingRequest,
         },
-        jobs: {
-          submitRefreshSnapshot: deps.submitRefreshSnapshot,
-          submitProbeSnapshot: deps.submitProbeSnapshot,
-          submitActivateDirectChannel: deps.submitActivateDirectChannel,
-          submitDeleteChannelConfig: deps.submitDeleteChannelConfig,
-        },
-        clock,
+        jobs,
       }),
     },
   };
@@ -288,29 +346,23 @@ describe('runtime-host process channel routes', () => {
     });
   });
 
-  it('connect/disconnect/request-qr 统一走 openclawBridge 并刷新快照', async () => {
+  it('connect/disconnect/request-qr capability 统一走 openclawBridge 并刷新快照', async () => {
     const deps = createDeps();
 
-    const connectResult = await dispatchRuntimeRouteDefinition(channelRoutes, 
-      'POST',
-      '/api/channels/connect',
-      new URL('http://127.0.0.1/api/channels/connect'),
-      { channelId: 'wecom-main' },
-      deps.routeDeps,
+    const connectResult = await dispatchChannelIntegrationCapability(
+      deps.routeDeps.channelService,
+      'channels.connect',
+      { channelType: 'wecom', accountId: 'main' },
     );
-    const disconnectResult = await dispatchRuntimeRouteDefinition(channelRoutes, 
-      'POST',
-      '/api/channels/disconnect',
-      new URL('http://127.0.0.1/api/channels/disconnect'),
-      { channelId: 'wecom-main' },
-      deps.routeDeps,
+    const disconnectResult = await dispatchChannelIntegrationCapability(
+      deps.routeDeps.channelService,
+      'channels.disconnect',
+      { channelType: 'wecom', accountId: 'main' },
     );
-    const qrResult = await dispatchRuntimeRouteDefinition(channelRoutes, 
-      'POST',
-      '/api/channels/request-qr',
-      new URL('http://127.0.0.1/api/channels/request-qr'),
+    const qrResult = await dispatchChannelIntegrationCapability(
+      deps.routeDeps.channelService,
+      'channels.requestQr',
       { channelType: 'whatsapp' },
-      deps.routeDeps,
     );
 
     expect(deps.openclawBridge.channelsStatus).toHaveBeenCalledTimes(3);
@@ -322,15 +374,13 @@ describe('runtime-host process channel routes', () => {
     expect(qrResult).toEqual({ status: 200, data: { success: true, qrCode: 'qr-code', sessionId: 'session-1' } });
   });
 
-  it('直接提交型渠道激活只提交后台任务', async () => {
+  it('直接提交型渠道激活 capability 只提交后台任务', async () => {
     const deps = createDeps();
 
-    const result = await dispatchRuntimeRouteDefinition(channelRoutes, 
-      'POST',
-      '/api/channels/activate',
-      new URL('http://127.0.0.1/api/channels/activate'),
+    const result = await dispatchChannelIntegrationCapability(
+      deps.routeDeps.channelService,
+      'channels.activate',
       { channelType: 'wecom', config: { botId: 'bot-1', secret: 'secret-1' } },
-      deps.routeDeps,
     );
 
     expect(deps.submitActivateDirectChannel).toHaveBeenCalledWith({
@@ -368,15 +418,13 @@ describe('runtime-host process channel routes', () => {
     expect(result).toEqual({ success: true });
   });
 
-  it('登录会话型渠道激活时不会立即写配置或重启 gateway', async () => {
+  it('登录会话型渠道激活 capability 不会立即写配置或重启 gateway', async () => {
     const deps = createDeps();
 
-    const result = await dispatchRuntimeRouteDefinition(channelRoutes, 
-      'POST',
-      '/api/channels/activate',
-      new URL('http://127.0.0.1/api/channels/activate'),
+    const result = await dispatchChannelIntegrationCapability(
+      deps.routeDeps.channelService,
+      'channels.activate',
       { channelType: 'openclaw-weixin', accountId: 'wx-main', config: { routeTag: 'prod' } },
-      deps.routeDeps,
     );
 
     expect(deps.saveChannelConfig).not.toHaveBeenCalled();
@@ -393,15 +441,13 @@ describe('runtime-host process channel routes', () => {
     expect(result).toEqual({ status: 200, data: { success: true, queued: true, sessionKey: 'wx-main' } });
   });
 
-  it('登录会话型渠道取消时走统一 session cancel', async () => {
+  it('登录会话型渠道取消 capability 走统一 session cancel', async () => {
     const deps = createDeps();
 
-    const result = await dispatchRuntimeRouteDefinition(channelRoutes, 
-      'POST',
-      '/api/channels/session/cancel',
-      new URL('http://127.0.0.1/api/channels/session/cancel'),
+    const result = await dispatchChannelIntegrationCapability(
+      deps.routeDeps.channelService,
+      'channels.cancelSession',
       { channelType: 'whatsapp' },
-      deps.routeDeps,
     );
 
     expect(deps.cancelLoginSession).toHaveBeenCalledWith('whatsapp');
@@ -409,15 +455,13 @@ describe('runtime-host process channel routes', () => {
     expect(result).toEqual({ status: 200, data: { success: true } });
   });
 
-  it('删除渠道配置只提交后台任务', async () => {
+  it('删除渠道配置 capability 只提交后台任务', async () => {
     const deps = createDeps();
 
-    const result = await dispatchRuntimeRouteDefinition(channelRoutes, 
-      'DELETE',
-      '/api/channels/config/wecom',
-      new URL('http://127.0.0.1/api/channels/config/wecom'),
-      undefined,
-      deps.routeDeps,
+    const result = await dispatchChannelIntegrationCapability(
+      deps.routeDeps.channelService,
+      'channels.deleteConfig',
+      { channelType: 'wecom' },
     );
 
     expect(deps.submitDeleteChannelConfig).toHaveBeenCalledWith({ channelType: 'wecom' });
@@ -439,15 +483,12 @@ describe('runtime-host process channel routes', () => {
     });
   });
 
-  it('深度 probe 渠道只提交后台任务，不会同步访问 gateway', async () => {
+  it('深度 probe 渠道 capability 只提交后台任务，不会同步访问 gateway', async () => {
     const deps = createDeps();
 
-    const result = await dispatchRuntimeRouteDefinition(channelRoutes,
-      'POST',
-      '/api/channels/probe',
-      new URL('http://127.0.0.1/api/channels/probe'),
-      undefined,
-      deps.routeDeps,
+    const result = await dispatchChannelIntegrationCapability(
+      deps.routeDeps.channelService,
+      'channels.probe',
     );
 
     expect(deps.submitProbeSnapshot).toHaveBeenCalledTimes(1);
@@ -478,12 +519,10 @@ describe('runtime-host process channel routes', () => {
       undefined,
       deps.routeDeps,
     );
-    const approveResult = await dispatchRuntimeRouteDefinition(channelRoutes,
-      'POST',
-      '/api/channels/pairing/feishu/approve',
-      new URL('http://127.0.0.1/api/channels/pairing/feishu/approve'),
-      { code: ' RTHZA8EP ', accountId: 'default' },
-      deps.routeDeps,
+    const approveResult = await dispatchChannelIntegrationCapability(
+      deps.routeDeps.channelService,
+      'channels.approvePairing',
+      { channelType: 'feishu', code: ' RTHZA8EP ', accountId: 'default' },
     );
 
     expect(deps.listPairingRequests).toHaveBeenCalledWith({

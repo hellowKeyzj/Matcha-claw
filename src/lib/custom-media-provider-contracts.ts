@@ -6,7 +6,7 @@ import type {
 export type CustomMediaContract = {
   readonly id: CustomMediaApiProtocol;
   readonly label: string;
-  readonly openClawApi: 'openai-responses' | 'google-generative-ai' | 'openai-completions';
+  readonly runtimeApiProtocol: 'openai-responses' | 'google-generative-ai' | 'openai-completions';
   readonly capabilities: readonly CustomMediaCapability[];
   readonly defaultBaseUrl?: string;
   readonly defaultModelByCapability: Partial<Record<CustomMediaCapability, string>>;
@@ -16,7 +16,7 @@ export const CUSTOM_MEDIA_CONTRACTS: readonly CustomMediaContract[] = [
   {
     id: 'openai',
     label: 'OpenAI',
-    openClawApi: 'openai-responses',
+    runtimeApiProtocol: 'openai-responses',
     capabilities: ['imageGenerate', 'videoGenerate', 'tts', 'transcribe'],
     defaultBaseUrl: 'https://api.openai.com/v1',
     defaultModelByCapability: {
@@ -29,7 +29,7 @@ export const CUSTOM_MEDIA_CONTRACTS: readonly CustomMediaContract[] = [
   {
     id: 'google',
     label: 'Google Gemini',
-    openClawApi: 'google-generative-ai',
+    runtimeApiProtocol: 'google-generative-ai',
     capabilities: ['imageGenerate', 'videoGenerate', 'musicGenerate', 'tts'],
     defaultBaseUrl: 'https://generativelanguage.googleapis.com/v1beta',
     defaultModelByCapability: {
@@ -42,7 +42,7 @@ export const CUSTOM_MEDIA_CONTRACTS: readonly CustomMediaContract[] = [
   {
     id: 'openrouter',
     label: 'OpenRouter',
-    openClawApi: 'openai-completions',
+    runtimeApiProtocol: 'openai-completions',
     capabilities: ['imageGenerate', 'videoGenerate', 'tts', 'transcribe'],
     defaultBaseUrl: 'https://openrouter.ai/api/v1',
     defaultModelByCapability: {

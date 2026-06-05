@@ -2,10 +2,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { CronJob } from '@/types/cron';
 
 const hostApiFetchMock = vi.fn();
+const hostCapabilityExecuteMock = vi.fn();
 const waitForRuntimeJobResultMock = vi.fn();
 
 vi.mock('@/lib/host-api', () => ({
   hostApiFetch: (...args: unknown[]) => hostApiFetchMock(...args),
+  hostCapabilityExecute: (...args: unknown[]) => hostCapabilityExecuteMock(...args),
   waitForRuntimeJobResult: (...args: unknown[]) => waitForRuntimeJobResultMock(...args),
 }));
 
@@ -33,10 +35,21 @@ function jobsSnapshot(jobs: CronJob[], ready = true) {
   };
 }
 
+describe('cron session utils', () => {
+  it('rejects cron session keys without an explicit agent id', async () => {
+    const { parseCronSessionKey, isCronSessionKey } = await import('@/stores/chat/cron-session-utils');
+
+    expect(parseCronSessionKey('agent::cron:job-1')).toBeNull();
+    expect(isCronSessionKey('agent::cron:job-1')).toBe(false);
+    expect(parseCronSessionKey('agent:test:cron:job-1')).toEqual({ agentId: 'test', jobId: 'job-1' });
+  });
+});
+
 describe('cron store', () => {
   beforeEach(() => {
     vi.resetModules();
     hostApiFetchMock.mockReset();
+    hostCapabilityExecuteMock.mockReset();
     waitForRuntimeJobResultMock.mockReset();
   });
 
@@ -134,8 +147,8 @@ describe('cron store', () => {
     useCronStore.getState().setJobs([job]);
 
     let resolveUpdate: (() => void) | null = null;
-    hostApiFetchMock.mockImplementation(async (path: string) => {
-      if (path === '/api/cron/jobs/job-4') {
+    hostCapabilityExecuteMock.mockImplementation(async (payload: { operationId?: string }) => {
+      if (payload.operationId === 'cron.update') {
         await new Promise<void>((resolve) => {
           resolveUpdate = resolve;
         });
@@ -151,7 +164,7 @@ describe('cron store', () => {
           },
         };
       }
-      throw new Error(`unexpected path: ${path}`);
+      throw new Error(`unexpected operation: ${payload.operationId}`);
     });
     waitForRuntimeJobResultMock.mockResolvedValueOnce({ success: true });
 
@@ -171,7 +184,7 @@ describe('cron store', () => {
 
   it('createJob 会保留返回的 agentId', async () => {
     const createdJob = { ...buildJob('job-5'), agentId: 'agent-alpha' };
-    hostApiFetchMock.mockResolvedValueOnce({
+    hostCapabilityExecuteMock.mockResolvedValueOnce({
       success: true,
       job: {
         id: 'runtime-job-5',
@@ -193,9 +206,10 @@ describe('cron store', () => {
       enabled: true,
     });
 
-    expect(hostApiFetchMock).toHaveBeenCalledWith('/api/cron/jobs', expect.objectContaining({
-      method: 'POST',
-      body: JSON.stringify({
+    expect(hostCapabilityExecuteMock).toHaveBeenCalledWith(expect.objectContaining({
+      id: 'scheduler.cron',
+      operationId: 'cron.create',
+      input: expect.objectContaining({
         name: createdJob.name,
         agentId: 'agent-alpha',
         message: createdJob.message,
@@ -211,7 +225,13 @@ describe('cron store', () => {
     const job = buildJob('job-6');
     const refreshedJob = { ...job, updatedAt: '2026-01-01T00:01:00.000Z' };
     hostApiFetchMock.mockImplementation(async (path: string) => {
-      if (path === '/api/cron/trigger') {
+      if (path === '/api/cron/jobs') {
+        return jobsSnapshot([refreshedJob]);
+      }
+      throw new Error(`unexpected path: ${path}`);
+    });
+    hostCapabilityExecuteMock.mockImplementation(async (payload: { operationId?: string }) => {
+      if (payload.operationId === 'cron.trigger') {
         return {
           success: true,
           job: {
@@ -224,10 +244,7 @@ describe('cron store', () => {
           },
         };
       }
-      if (path === '/api/cron/jobs') {
-        return jobsSnapshot([refreshedJob]);
-      }
-      throw new Error(`unexpected path: ${path}`);
+      throw new Error(`unexpected operation: ${payload.operationId}`);
     });
     waitForRuntimeJobResultMock.mockResolvedValueOnce({ ok: true, ran: true });
 
@@ -236,9 +253,10 @@ describe('cron store', () => {
 
     const result = await useCronStore.getState().triggerJob('job-6');
 
-    expect(hostApiFetchMock).toHaveBeenCalledWith('/api/cron/trigger', expect.objectContaining({
-      method: 'POST',
-      body: JSON.stringify({ id: 'job-6' }),
+    expect(hostCapabilityExecuteMock).toHaveBeenCalledWith(expect.objectContaining({
+      id: 'scheduler.cron',
+      operationId: 'cron.trigger',
+      input: expect.objectContaining({ id: 'job-6' }),
     }));
     expect(waitForRuntimeJobResultMock).toHaveBeenCalledWith('runtime-job-6');
     expect(result).toEqual({ ran: true, reason: undefined });

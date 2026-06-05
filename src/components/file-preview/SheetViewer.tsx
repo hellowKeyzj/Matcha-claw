@@ -6,12 +6,14 @@ import { Button } from '@/components/ui/button';
 import { StructuredTablePreview } from '@/pages/Chat/components/StructuredTablePreview';
 import { hostFileReadBinary } from '@/lib/host-api';
 import { cn } from '@/lib/utils';
+import type { RuntimeAddress } from '../../../runtime-host/shared/runtime-address';
 
 const SHEET_MAX_BYTES = 50 * 1024 * 1024;
 const ROWS_PER_PAGE = 200;
 
 interface SheetViewerProps {
   filePath: string;
+  runtimeAddress?: RuntimeAddress;
   className?: string;
 }
 
@@ -76,6 +78,7 @@ function formatCell(value: unknown): string {
 
 export function SheetViewer({
   filePath,
+  runtimeAddress,
   className,
 }: SheetViewerProps) {
   const { t } = useTranslation('chat');
@@ -91,9 +94,13 @@ export function SheetViewer({
 
     void (async () => {
       try {
+        if (!runtimeAddress) {
+          throw new Error('RuntimeAddress is required');
+        }
         const result = await hostFileReadBinary({
           path: filePath,
           maxBytes: SHEET_MAX_BYTES,
+          runtimeAddress,
         });
         if (cancelled) {
           return;
@@ -152,7 +159,7 @@ export function SheetViewer({
     return () => {
       cancelled = true;
     };
-  }, [filePath]);
+  }, [filePath, runtimeAddress]);
 
   const activeSheet = state.status === 'ready' ? state.sheets[sheetIndex] ?? null : null;
   const totalRows = activeSheet?.rowCount ?? 0;

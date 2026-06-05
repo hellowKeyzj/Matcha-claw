@@ -11,16 +11,21 @@ describe('runtime-host platform root', () => {
     const platformEnableTool = vi.fn().mockResolvedValue(undefined);
     const platformDisableTool = vi.fn().mockResolvedValue(undefined);
     const platformListToolsCatalog = vi.fn().mockResolvedValue([{ id: 'p1', source: 'plugin', enabled: false }]);
-    registerRuntimeHostPlatformRoot(container, () => ({
-      isGatewayRunning: vi.fn().mockResolvedValue(true),
-      platformInstallTool: vi.fn(),
-      platformUninstallTool: vi.fn(),
-      platformEnableTool,
-      platformDisableTool,
-      platformListToolsCatalog,
-      platformStartRun: vi.fn().mockResolvedValue({ runId: 'run-1' }),
-      platformAbortRun: vi.fn(),
-    }));
+    container.registerValue('gateway.runtime', {});
+    container.registerValue('platform.runtimeDriverFactory', {
+      createRuntimeDriver: () => ({
+        initialize: vi.fn(async () => undefined),
+        healthCheck: vi.fn(async () => ({ status: 'running' })),
+        installTool: vi.fn(async () => 'tool-1'),
+        uninstallTool: vi.fn(async () => undefined),
+        enableTool: platformEnableTool,
+        disableTool: platformDisableTool,
+        listInstalledTools: platformListToolsCatalog,
+        execute: vi.fn(async () => 'run-1'),
+        abort: vi.fn(async () => undefined),
+      }),
+    });
+    registerRuntimeHostPlatformRoot(container);
     const root = resolveRuntimeHostPlatformRoot(container);
 
     expect(root.runtimeManager).toBeDefined();

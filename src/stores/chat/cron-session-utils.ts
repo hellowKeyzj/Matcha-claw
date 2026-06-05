@@ -10,7 +10,8 @@ export function parseCronSessionKey(sessionKey: string): CronSessionKeyParts | n
   const cronIndex = parts[0] === 'agent' ? 2 : 1;
   if (parts.length < cronIndex + 2 || parts[cronIndex] !== 'cron') return null;
 
-  const agentId = parts[0] === 'agent' ? parts[1] || 'main' : parts[0] || 'main';
+  const agentId = parts[0] === 'agent' ? parts[1]?.trim() : parts[0]?.trim();
+  if (!agentId) return null;
   const jobId = parts[cronIndex + 1];
   if (!jobId) return null;
 

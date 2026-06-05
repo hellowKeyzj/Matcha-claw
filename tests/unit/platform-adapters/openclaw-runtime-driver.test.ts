@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { OpenClawRuntimeDriver } from '../../../runtime-host/application/platform-runtime/openclaw-runtime-driver';
+import { OpenClawRuntimeDriver } from '../../../runtime-host/application/adapters/openclaw/runtime/openclaw-runtime-driver';
 
 const idGenerator = {
   randomId: () => 'runtime-id',

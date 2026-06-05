@@ -15,6 +15,7 @@ import {
   type TeamTask,
   type TeamTaskStatus,
 } from '@/features/teams/api/runtime-client';
+import type { RuntimeAddress } from '../../runtime-host/shared/runtime-address';
 
 export interface TeamMeta {
   id: string;
@@ -42,7 +43,7 @@ interface TeamsState {
   }) => string;
   setActiveTeam: (teamId: string | null) => void;
   deleteTeam: (teamId: string) => void;
-  initRuntime: (teamId: string) => Promise<void>;
+  initRuntime: (teamId: string, runtimeAddress: RuntimeAddress) => Promise<void>;
   refreshSnapshot: (teamId: string) => Promise<void>;
   planUpsert: (
     teamId: string,
@@ -83,6 +84,14 @@ function resolveTeamMeta(teams: TeamMeta[], teamId: string): TeamMeta {
     throw new Error(`Team not found: ${teamId}`);
   }
   return team;
+}
+
+function resolveTeamRuntimeAddress(runMetaByTeamId: Record<string, TeamRunMeta | undefined>, teamId: string): RuntimeAddress {
+  const runtimeAddress = runMetaByTeamId[teamId]?.runtimeAddress;
+  if (!runtimeAddress) {
+    throw new Error(`Team runtimeAddress is required: ${teamId}`);
+  }
+  return runtimeAddress;
 }
 
 function upsertTaskList(current: TeamTask[], task: TeamTask): TeamTask[] {
@@ -185,7 +194,7 @@ export const useTeamsStore = create<TeamsState>()(
           Object.entries(state.errorByTeamId).filter(([key]) => key !== teamId),
         ),
       })),
-      initRuntime: async (teamId) => {
+      initRuntime: async (teamId, runtimeAddress) => {
         const team = resolveTeamMeta(get().teams, teamId);
         set((state) => ({
           loadingByTeamId: { ...state.loadingByTeamId, [teamId]: true },
@@ -194,6 +203,7 @@ export const useTeamsStore = create<TeamsState>()(
         try {
           const result = await teamInit({
             teamId,
+            runtimeAddress,
             leadAgentId: team.leadAgentId,
           });
           set((state) => ({
@@ -231,9 +241,12 @@ export const useTeamsStore = create<TeamsState>()(
         }
 
         const run = async () => {
-          const cursor = get().mailboxCursorByTeamId[teamId];
+          const state = get();
+          const cursor = state.mailboxCursorByTeamId[teamId];
+          const runtimeAddress = resolveTeamRuntimeAddress(state.runMetaByTeamId, teamId);
           const snapshot = await teamSnapshot({
             teamId,
+            runtimeAddress,
             mailboxCursor: cursor,
             mailboxLimit: 200,
           });
@@ -274,7 +287,8 @@ export const useTeamsStore = create<TeamsState>()(
         }
       },
       planUpsert: async (teamId, tasks) => {
-        const result = await teamPlanUpsert({ teamId, tasks });
+        const runtimeAddress = resolveTeamRuntimeAddress(get().runMetaByTeamId, teamId);
+        const result = await teamPlanUpsert({ teamId, runtimeAddress, tasks });
         set((state) => ({
           tasksByTeamId: {
             ...state.tasksByTeamId,
@@ -283,7 +297,8 @@ export const useTeamsStore = create<TeamsState>()(
         }));
       },
       claimNext: async (teamId, agentId, sessionKey) => {
-        const result = await teamClaimNext({ teamId, agentId, sessionKey });
+        const runtimeAddress = resolveTeamRuntimeAddress(get().runMetaByTeamId, teamId);
+        const result = await teamClaimNext({ teamId, runtimeAddress, agentId, sessionKey });
         if (!result.task) {
           return null;
         }
@@ -296,7 +311,8 @@ export const useTeamsStore = create<TeamsState>()(
         return result.task;
       },
       heartbeat: async (teamId, taskId, agentId, sessionKey) => {
-        const result = await teamHeartbeat({ teamId, taskId, agentId, sessionKey });
+        const runtimeAddress = resolveTeamRuntimeAddress(get().runMetaByTeamId, teamId);
+        const result = await teamHeartbeat({ teamId, runtimeAddress, taskId, agentId, sessionKey });
         if (result.ok && result.task) {
           set((state) => ({
             tasksByTeamId: {
@@ -308,14 +324,17 @@ export const useTeamsStore = create<TeamsState>()(
         return result.ok;
       },
       updateTaskStatus: async (teamId, taskId, status, options) => {
+        const runtimeAddress = resolveTeamRuntimeAddress(get().runMetaByTeamId, teamId);
         const payload: {
           teamId: string;
+          runtimeAddress: RuntimeAddress;
           taskId: string;
           status: TeamTaskStatus;
           resultSummary?: string;
           error?: string;
         } = {
           teamId,
+          runtimeAddress,
           taskId,
           status,
         };
@@ -336,8 +355,10 @@ export const useTeamsStore = create<TeamsState>()(
         }));
       },
       postMailbox: async (teamId, message) => {
+        const runtimeAddress = resolveTeamRuntimeAddress(get().runMetaByTeamId, teamId);
         const result = await teamMailboxPost({
           teamId,
+          runtimeAddress,
           message: {
             ...message,
             createdAt: message.createdAt ?? Date.now(),
@@ -364,8 +385,10 @@ export const useTeamsStore = create<TeamsState>()(
         }
 
         const run = async () => {
-          const cursor = get().mailboxCursorByTeamId[teamId];
-          const result = await teamMailboxPull({ teamId, cursor, limit });
+          const state = get();
+          const cursor = state.mailboxCursorByTeamId[teamId];
+          const runtimeAddress = resolveTeamRuntimeAddress(state.runMetaByTeamId, teamId);
+          const result = await teamMailboxPull({ teamId, runtimeAddress, cursor, limit });
           set((state) => ({
             mailboxByTeamId: {
               ...state.mailboxByTeamId,
@@ -388,7 +411,8 @@ export const useTeamsStore = create<TeamsState>()(
         }
       },
       releaseClaim: async (teamId, taskId, agentId, sessionKey) => {
-        const result = await teamReleaseClaim({ teamId, taskId, agentId, sessionKey });
+        const runtimeAddress = resolveTeamRuntimeAddress(get().runMetaByTeamId, teamId);
+        const result = await teamReleaseClaim({ teamId, runtimeAddress, taskId, agentId, sessionKey });
         if (result.task) {
           set((state) => ({
             tasksByTeamId: {

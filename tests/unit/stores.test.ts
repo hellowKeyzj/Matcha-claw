@@ -6,12 +6,13 @@ import { waitFor } from '@testing-library/react';
 import { useLayoutStore } from '@/stores/layout';
 import { useSettingsStore } from '@/stores/settings';
 import { useGatewayStore } from '@/stores/gateway';
-import { hostApiFetchMock, resetGatewayClientMocks } from './helpers/mock-gateway-client';
+import { hostApiFetchMock, hostCapabilityExecuteMock, resetGatewayClientMocks } from './helpers/mock-gateway-client';
 
 describe('Settings Store', () => {
   beforeEach(() => {
     // Reset store to default state
     hostApiFetchMock.mockReset();
+    hostCapabilityExecuteMock.mockReset();
     useSettingsStore.setState({
       theme: 'system',
       language: 'en',
@@ -31,17 +32,17 @@ describe('Settings Store', () => {
     expect(state.gatewayAutoStart).toBe(true);
   });
   
-  it('should update theme', () => {
+  it('should update theme', async () => {
     hostApiFetchMock.mockResolvedValueOnce({ success: true });
     const { setTheme } = useSettingsStore.getState();
-    setTheme('dark');
+    await setTheme('dark');
     expect(useSettingsStore.getState().theme).toBe('dark');
   });
-  
-  it('should unlock dev mode', () => {
+
+  it('should unlock dev mode', async () => {
     hostApiFetchMock.mockResolvedValueOnce({ success: true });
     const { setDevModeUnlocked } = useSettingsStore.getState();
-    setDevModeUnlocked(true);
+    await setDevModeUnlocked(true);
     expect(useSettingsStore.getState().devModeUnlocked).toBe(true);
   });
 
@@ -52,26 +53,28 @@ describe('Settings Store', () => {
       .mockResolvedValueOnce({ success: true });
 
     const { setAutoCheckUpdate, setDevModeUnlocked } = useSettingsStore.getState();
-    setAutoCheckUpdate(false);
-    setDevModeUnlocked(true);
+    await setAutoCheckUpdate(false);
+    await setDevModeUnlocked(true);
 
     expect(useSettingsStore.getState().autoCheckUpdate).toBe(false);
     expect(useSettingsStore.getState().devModeUnlocked).toBe(true);
 
     await waitFor(() => {
-      expect(hostApiFetchMock).toHaveBeenCalledWith(
-        '/api/settings/autoCheckUpdate',
+      expect(hostCapabilityExecuteMock).toHaveBeenCalledWith(
         expect.objectContaining({
-          method: 'PUT',
-          body: JSON.stringify({ value: false }),
+          id: 'settings.runtime',
+          operationId: 'settings.setValue',
+          input: expect.objectContaining({ key: 'autoCheckUpdate', value: false }),
         }),
+        undefined,
       );
-      expect(hostApiFetchMock).toHaveBeenCalledWith(
-        '/api/settings/devModeUnlocked',
+      expect(hostCapabilityExecuteMock).toHaveBeenCalledWith(
         expect.objectContaining({
-          method: 'PUT',
-          body: JSON.stringify({ value: true }),
+          id: 'settings.runtime',
+          operationId: 'settings.setValue',
+          input: expect.objectContaining({ key: 'devModeUnlocked', value: true }),
         }),
+        undefined,
       );
     });
   });
@@ -80,18 +83,27 @@ describe('Settings Store', () => {
     hostApiFetchMock.mockResolvedValueOnce({ success: true });
 
     const { setLaunchAtStartup } = useSettingsStore.getState();
-    setLaunchAtStartup(true);
+    await setLaunchAtStartup(true);
 
     expect(useSettingsStore.getState().launchAtStartup).toBe(true);
     await waitFor(() => {
-      expect(hostApiFetchMock).toHaveBeenCalledWith(
-        '/api/settings/launchAtStartup',
+      expect(hostCapabilityExecuteMock).toHaveBeenCalledWith(
         expect.objectContaining({
-          method: 'PUT',
-          body: JSON.stringify({ value: true }),
+          id: 'settings.runtime',
+          operationId: 'settings.setValue',
+          input: expect.objectContaining({ key: 'launchAtStartup', value: true }),
         }),
+        undefined,
       );
     });
+  });
+
+  it('should keep previous local value when host settings write fails', async () => {
+    hostApiFetchMock.mockRejectedValueOnce(new Error('write failed'));
+    const { setTheme } = useSettingsStore.getState();
+
+    await expect(setTheme('dark')).rejects.toThrow('write failed');
+    expect(useSettingsStore.getState().theme).toBe('system');
   });
 });
 

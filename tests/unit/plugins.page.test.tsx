@@ -4,7 +4,21 @@ import { MemoryRouter } from 'react-router-dom';
 import i18n from '@/i18n';
 
 const hostApiFetchMock = vi.fn();
+const hostCapabilityExecuteMock = vi.fn();
+const waitForRuntimeJobResultMock = vi.fn();
 const initGatewayEventsMock = vi.fn(async () => {});
+
+function capabilityAddress(capabilityId: string) {
+  return {
+    kind: 'native-runtime' as const,
+    capabilityId,
+    runtimeAdapterId: 'openclaw',
+    runtimeInstanceId: 'local',
+    agentId: 'default',
+  };
+}
+
+const pluginRuntimeAddress = capabilityAddress('plugin.runtime');
 
 type RuntimeHostState = {
   lifecycle: 'unknown' | 'starting' | 'running' | 'restarting' | 'degraded' | 'error' | 'stopped';
@@ -26,6 +40,9 @@ const gatewayStoreState: {
 
 vi.mock('@/lib/host-api', () => ({
   hostApiFetch: (...args: unknown[]) => hostApiFetchMock(...args),
+  hostCapabilityExecute: (...args: unknown[]) => hostCapabilityExecuteMock(...args),
+  resolveSingleCapabilityRuntimeAddress: async (capabilityId: string) => capabilityAddress(capabilityId),
+  waitForRuntimeJobResult: (...args: unknown[]) => waitForRuntimeJobResultMock(...args),
 }));
 
 vi.mock('@/stores/gateway', () => ({
@@ -77,6 +94,24 @@ describe('plugins page', () => {
       restartCount: 0,
     };
     hostApiFetchMock.mockImplementation(async (path: string) => {
+      if (path === '/api/capabilities/list') {
+        return {
+          capabilities: [
+            {
+              id: 'plugin.runtime',
+              kind: 'plugin.runtime',
+              address: pluginRuntimeAddress,
+              runtimeAdapterId: 'openclaw',
+              runtimeInstanceId: 'local',
+              targetAgentIds: ['default'],
+              supportLevel: 'native',
+              availability: 'available',
+              operations: [],
+              policyScope: 'plugin.runtime',
+            },
+          ],
+        };
+      }
       if (path === '/api/plugins/runtime') {
         return buildRuntimePayload();
       }
@@ -318,6 +353,24 @@ describe('plugins page', () => {
   it('切换插件时只提交 catalog 中的能力插件 ID，不带回渠道或 bundled 运行态 ID', async () => {
     const { PluginsPage } = await import('@/pages/Plugins');
     hostApiFetchMock.mockImplementation(async (path: string) => {
+      if (path === '/api/capabilities/list') {
+        return {
+          capabilities: [
+            {
+              id: 'plugin.runtime',
+              kind: 'plugin.runtime',
+              address: pluginRuntimeAddress,
+              runtimeAdapterId: 'openclaw',
+              runtimeInstanceId: 'local',
+              targetAgentIds: ['default'],
+              supportLevel: 'native',
+              availability: 'available',
+              operations: [],
+              policyScope: 'plugin.runtime',
+            },
+          ],
+        };
+      }
       if (path === '/api/plugins/runtime') {
         return buildRuntimePayload({ enabledPluginIds: ['openclaw-lark', 'browser', 'task-manager'] });
       }
@@ -351,11 +404,20 @@ describe('plugins page', () => {
           ],
         };
       }
-      if (path === '/api/plugins/runtime/enabled-plugins') {
-        return buildRuntimePayload({ enabledPluginIds: ['memory-lancedb-pro'] });
-      }
       throw new Error(`unexpected path: ${path}`);
     });
+    hostCapabilityExecuteMock.mockResolvedValue({
+      success: true,
+      job: {
+        id: 'job-plugins-set-enabled',
+        type: 'plugins.setEnabled',
+        status: 'queued',
+        queuedAt: 1,
+        attempts: 0,
+        maxAttempts: 1,
+      },
+    });
+    waitForRuntimeJobResultMock.mockResolvedValue(buildRuntimePayload({ enabledPluginIds: ['memory-lancedb-pro'] }));
 
     render(
       <MemoryRouter>
@@ -365,13 +427,21 @@ describe('plugins page', () => {
 
     expect(await screen.findByText('Memory')).toBeInTheDocument();
     const switches = screen.getAllByRole('switch');
+    await waitFor(() => {
+      expect(switches[switches.length - 1]!).toBeEnabled();
+    });
     fireEvent.click(switches[switches.length - 1]!);
 
     await waitFor(() => {
-      expect(hostApiFetchMock).toHaveBeenCalledWith('/api/plugins/runtime/enabled-plugins', {
-        method: 'PUT',
-        body: JSON.stringify({ pluginIds: ['task-manager', 'memory-lancedb-pro'] }),
-      });
+      expect(hostCapabilityExecuteMock).toHaveBeenCalledWith(expect.objectContaining({
+        id: 'plugin.runtime',
+        operationId: 'plugins.setEnabled',
+        runtimeAddress: pluginRuntimeAddress,
+        input: expect.objectContaining({
+          pluginIds: ['task-manager', 'memory-lancedb-pro'],
+          runtimeAddress: pluginRuntimeAddress,
+        }),
+      }));
     });
   });
 });

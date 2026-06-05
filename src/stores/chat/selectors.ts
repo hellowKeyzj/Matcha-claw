@@ -1,5 +1,9 @@
 import type { ChatSession, ChatStoreState } from './types';
-import { readSessionCatalogStatusShell, readSessionsFromState, resolveSessionListLabel } from './session-helpers';
+import {
+  readSessionCatalogStatusShell,
+  readSessionsFromState,
+  resolveSessionListLabel,
+} from './session-helpers';
 import {
   getSessionMeta,
   getSessionRuntime,
@@ -26,6 +30,11 @@ function normalizeAgentPaneSessionLabel(value: string | null | undefined): strin
   }
   const trimmed = value.trim();
   return trimmed.length > 0 ? trimmed : null;
+}
+
+function resolveCurrentAgentId(state: ChatStoreState): string {
+  const meta = getSessionMeta(state, state.currentSessionKey);
+  return meta.agentId ?? meta.runtimeAddress?.agentId ?? '';
 }
 
 function buildAgentPaneSessionEntries(state: ChatStoreState): AgentSessionsPaneSessionEntry[] {
@@ -81,6 +90,7 @@ function buildAgentSessionsPaneState(state: ChatStoreState, sessionEntries: Agen
     sessionEntries,
     ...sessionCatalogStatus,
     currentSessionKey: state.currentSessionKey,
+    currentAgentId: resolveCurrentAgentId(state),
     switchSession: state.switchSession,
     openAgentConversation: state.openAgentConversation,
     newSession: state.newSession,
@@ -141,6 +151,7 @@ export function selectAgentSessionsPaneState(state: ChatStoreState) {
     && cachedAgentSessionsPaneState.sessionsLoadedOnce === sessionCatalogStatus.sessionsLoadedOnce
     && cachedAgentSessionsPaneState.sessionsError === sessionCatalogStatus.sessionsError
     && cachedAgentSessionsPaneState.currentSessionKey === state.currentSessionKey
+    && cachedAgentSessionsPaneState.currentAgentId === resolveCurrentAgentId(state)
     && cachedAgentSessionsPaneState.switchSession === state.switchSession
     && cachedAgentSessionsPaneState.openAgentConversation === state.openAgentConversation
     && cachedAgentSessionsPaneState.newSession === state.newSession

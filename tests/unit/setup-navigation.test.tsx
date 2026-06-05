@@ -6,11 +6,13 @@ import { useGatewayStore } from '@/stores/gateway';
 import { useSettingsStore } from '@/stores/settings';
 
 const hostApiFetchMock = vi.fn();
+const hostCapabilityExecuteMock = vi.fn();
 const hostOpenClawGetStatusMock = vi.fn();
 const hostUvInstallAllMock = vi.fn();
 
 vi.mock('@/lib/host-api', () => ({
   hostApiFetch: (...args: unknown[]) => hostApiFetchMock(...args),
+  hostCapabilityExecute: (...args: unknown[]) => hostCapabilityExecuteMock(...args),
   hostOpenClawGetStatus: (...args: unknown[]) => hostOpenClawGetStatusMock(...args),
   hostUvInstallAll: (...args: unknown[]) => hostUvInstallAllMock(...args),
 }));
@@ -54,13 +56,6 @@ describe('setup navigation', () => {
           lastValidation: null,
         };
       }
-      if (path === '/api/license/validate') {
-        return {
-          valid: true,
-          code: 'valid',
-          normalizedKey: 'MATCHACLAW-TEST-KEY-0000-0000-0000',
-        };
-      }
       if (path === '/api/logs') {
         return { content: '' };
       }
@@ -68,6 +63,12 @@ describe('setup navigation', () => {
         return { dir: null };
       }
       throw new Error(`Unexpected hostApiFetch path: ${path}`);
+    });
+
+    hostCapabilityExecuteMock.mockResolvedValue({
+      valid: true,
+      code: 'valid',
+      normalizedKey: 'MATCHACLAW-TEST-KEY-0000-0000-0000',
     });
 
     hostOpenClawGetStatusMock.mockResolvedValue({

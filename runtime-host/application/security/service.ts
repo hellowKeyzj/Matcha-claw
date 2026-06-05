@@ -1,67 +1,56 @@
-import type { GatewaySecurityPort } from '../gateway/gateway-runtime-port';
-import { accepted, type ApplicationResponse } from '../common/application-response';
-import {
-  createSecurityEmergencyLockdownPayload,
-} from './security-emergency-policy';
 import {
   listSecurityRuleCatalog,
 } from './security-rule-catalog';
-import type { SecurityPolicyRepository } from './security-policy-store';
-import type { SecurityJobPort } from './security-jobs';
-import type { RuntimeTimerPort } from '../common/runtime-ports';
-
-function isRecord(value: unknown): value is Record<string, any> {
-  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
-}
-
-const POLICY_SYNC_MAX_ATTEMPTS = 5;
-const POLICY_SYNC_RETRY_DELAY_MS = 1000;
+import type { SecurityOperationsWorkflow } from '../workflows/security-operations/security-operations-workflow';
 
 export interface SecurityRuntimeServiceDeps {
-  gateway: GatewaySecurityPort;
-  policyRepository: SecurityPolicyRepository;
-  jobs: SecurityJobPort;
-  timer: Pick<RuntimeTimerPort, 'sleep'>;
+  operationsWorkflow: Pick<SecurityOperationsWorkflow,
+    | 'readPolicy'
+    | 'writePolicy'
+    | 'syncCurrentPolicyToGatewayIfRunning'
+    | 'executePolicySync'
+    | 'queryAudit'
+    | 'runQuickAudit'
+    | 'executeQuickAudit'
+    | 'runEmergencyResponse'
+    | 'executeEmergencyResponse'
+    | 'checkIntegrity'
+    | 'executeIntegrityCheck'
+    | 'rebaselineIntegrity'
+    | 'executeIntegrityRebaseline'
+    | 'executeSkillsScan'
+    | 'scanSkillsFromPayload'
+    | 'checkAdvisories'
+    | 'executeAdvisoriesCheck'
+    | 'checkAdvisoriesFromUrl'
+    | 'previewRemediation'
+    | 'executeRemediationPreview'
+    | 'applyRemediation'
+    | 'executeRemediationApply'
+    | 'applyRemediationFromPayload'
+    | 'rollbackRemediation'
+    | 'executeRemediationRollback'
+    | 'rollbackRemediationFromPayload'
+  >;
 }
 
 export class SecurityRuntimeService {
   constructor(private readonly deps: SecurityRuntimeServiceDeps) {}
 
   async readPolicy() {
-    return await this.deps.policyRepository.read();
+    return await this.deps.operationsWorkflow.readPolicy();
   }
 
-  async writePolicy(payload: unknown): Promise<ApplicationResponse> {
-    const normalized = await this.deps.policyRepository.write(payload);
-    return accepted({
-      success: true,
-      policy: normalized,
-      sync: this.deps.jobs.submitPolicySync(),
-    });
+  async writePolicy(payload: unknown) {
+    return await this.deps.operationsWorkflow.writePolicy(payload);
   }
 
-  syncCurrentPolicyToGatewayIfRunning(): ApplicationResponse {
-    return accepted(this.deps.jobs.submitPolicySync());
+  syncCurrentPolicyToGatewayIfRunning() {
+    return this.deps.operationsWorkflow.syncCurrentPolicyToGatewayIfRunning();
   }
 
   async executePolicySync() {
-    const policy = await this.deps.policyRepository.read();
-    let lastError: unknown = null;
-
-    for (let attempt = 1; attempt <= POLICY_SYNC_MAX_ATTEMPTS; attempt += 1) {
-      try {
-        await this.deps.gateway.securityPolicySync(policy);
-        return { synced: true, policy, attempts: attempt };
-      } catch (error) {
-        lastError = error;
-        if (attempt < POLICY_SYNC_MAX_ATTEMPTS) {
-          await this.deps.timer.sleep(POLICY_SYNC_RETRY_DELAY_MS);
-        }
-      }
-    }
-
-    const reason = lastError instanceof Error ? lastError.message : String(lastError);
-    throw new Error(`Security policy sync failed after ${POLICY_SYNC_MAX_ATTEMPTS} attempts: ${reason}`);
+    return await this.deps.operationsWorkflow.executePolicySync();
   }
 
   listRuleCatalog(platform?: string | null) {
@@ -69,129 +58,90 @@ export class SecurityRuntimeService {
   }
 
   async queryAudit(routeUrl: URL) {
-    return await this.deps.gateway.securityAuditQueryFromUrl(routeUrl);
+    return await this.deps.operationsWorkflow.queryAudit(routeUrl);
   }
 
   runQuickAudit() {
-    return this.deps.jobs.submitQuickAudit();
+    return this.deps.operationsWorkflow.runQuickAudit();
   }
 
   async executeQuickAudit() {
-    return await this.deps.gateway.securityQuickAuditRun();
+    return await this.deps.operationsWorkflow.executeQuickAudit();
   }
 
   runEmergencyResponse() {
-    return this.deps.jobs.submitEmergencyResponse();
+    return this.deps.operationsWorkflow.runEmergencyResponse();
   }
 
   async executeEmergencyResponse() {
-    const current = await this.deps.policyRepository.read();
-    const emergencyPayload = createSecurityEmergencyLockdownPayload(current);
-    const normalizedPolicy = await this.deps.policyRepository.write(emergencyPayload);
-    const gatewayRunning = await this.deps.gateway.isGatewayRunning();
-
-    let syncError: string | null = null;
-    if (gatewayRunning) {
-      try {
-        await this.deps.gateway.securityPolicySync(normalizedPolicy);
-      } catch (error) {
-        syncError = String(error);
-      }
-    }
-
-    let emergency: unknown = null;
-    let emergencyError: string | null = null;
-    if (gatewayRunning) {
-      try {
-        emergency = await this.deps.gateway.securityEmergencyRun();
-      } catch (error) {
-        emergencyError = String(error);
-      }
-    }
-
-    return {
-      success: true,
-      lockdownApplied: true,
-      policy: normalizedPolicy,
-      syncError,
-      emergency,
-      emergencyError,
-    };
+    return await this.deps.operationsWorkflow.executeEmergencyResponse();
   }
 
   checkIntegrity() {
-    return this.deps.jobs.submitIntegrityCheck();
+    return this.deps.operationsWorkflow.checkIntegrity();
   }
 
   async executeIntegrityCheck() {
-    return await this.deps.gateway.securityIntegrityCheck();
+    return await this.deps.operationsWorkflow.executeIntegrityCheck();
   }
 
   rebaselineIntegrity() {
-    return this.deps.jobs.submitIntegrityRebaseline();
+    return this.deps.operationsWorkflow.rebaselineIntegrity();
   }
 
   async executeIntegrityRebaseline() {
-    return await this.deps.gateway.securityIntegrityRebaseline();
+    return await this.deps.operationsWorkflow.executeIntegrityRebaseline();
   }
 
   async executeSkillsScan(scanPath?: string) {
-    return await this.deps.gateway.securitySkillsScan(scanPath);
+    return await this.deps.operationsWorkflow.executeSkillsScan(scanPath);
   }
 
   scanSkillsFromPayload(payload: unknown) {
-    const body = isRecord(payload) ? payload : {};
-    const scanPath = typeof body.scanPath === 'string' ? body.scanPath : undefined;
-    return this.deps.jobs.submitSkillsScan(scanPath);
+    return this.deps.operationsWorkflow.scanSkillsFromPayload(payload);
   }
 
   checkAdvisories(feedUrl?: string | null) {
-    return this.deps.jobs.submitAdvisoriesCheck(feedUrl);
+    return this.deps.operationsWorkflow.checkAdvisories(feedUrl);
   }
 
   async executeAdvisoriesCheck(feedUrl?: string | null) {
-    return await this.deps.gateway.securityAdvisoriesCheck(feedUrl);
+    return await this.deps.operationsWorkflow.executeAdvisoriesCheck(feedUrl);
   }
 
   checkAdvisoriesFromUrl(routeUrl: URL) {
-    return this.checkAdvisories(routeUrl.searchParams.get('feedUrl'));
+    return this.deps.operationsWorkflow.checkAdvisoriesFromUrl(routeUrl);
   }
 
   previewRemediation() {
-    return this.deps.jobs.submitRemediationPreview();
+    return this.deps.operationsWorkflow.previewRemediation();
   }
 
   async executeRemediationPreview() {
-    return await this.deps.gateway.securityRemediationPreview();
+    return await this.deps.operationsWorkflow.executeRemediationPreview();
   }
 
   applyRemediation(actions: string[]) {
-    return this.deps.jobs.submitRemediationApply(actions);
+    return this.deps.operationsWorkflow.applyRemediation(actions);
   }
 
   async executeRemediationApply(actions: string[]) {
-    return await this.deps.gateway.securityRemediationApply(actions);
+    return await this.deps.operationsWorkflow.executeRemediationApply(actions);
   }
 
   applyRemediationFromPayload(payload: unknown) {
-    const body = isRecord(payload) ? payload : {};
-    const actions = Array.isArray(body.actions)
-      ? body.actions.filter((item) => typeof item === 'string')
-      : [];
-    return this.applyRemediation(actions);
+    return this.deps.operationsWorkflow.applyRemediationFromPayload(payload);
   }
 
   rollbackRemediation(snapshotId?: string) {
-    return this.deps.jobs.submitRemediationRollback(snapshotId);
+    return this.deps.operationsWorkflow.rollbackRemediation(snapshotId);
   }
 
   async executeRemediationRollback(snapshotId?: string) {
-    return await this.deps.gateway.securityRemediationRollback(snapshotId);
+    return await this.deps.operationsWorkflow.executeRemediationRollback(snapshotId);
   }
 
   rollbackRemediationFromPayload(payload: unknown) {
-    const body = isRecord(payload) ? payload : {};
-    const snapshotId = typeof body.snapshotId === 'string' ? body.snapshotId : undefined;
-    return this.rollbackRemediation(snapshotId);
+    return this.deps.operationsWorkflow.rollbackRemediationFromPayload(payload);
   }
 }

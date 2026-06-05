@@ -1,4 +1,5 @@
 import type { ResourceStatusState } from '@/lib/resource-state';
+import type { RuntimeAddress } from '../../../runtime-host/shared/runtime-address';
 import type { SessionUpdateEvent } from '../../../runtime-host/shared/session-adapter-types';
 import type { SessionRenderAttachedFile, SessionRenderItem } from '../../../runtime-host/shared/session-adapter-types';
 import type { SessionCatalogKind, SessionCatalogTitleSource } from '../../../runtime-host/shared/session-adapter-types';
@@ -38,9 +39,11 @@ export interface ContentBlock {
 /** Session from session catalog */
 export interface ChatSession {
   key: string;
-  agentId?: string;
+  backendSessionKey: string;
+  agentId: string;
   protocolId?: string;
-  runtimeProviderId?: string;
+  runtimeEndpointId?: string;
+  runtimeAddress: RuntimeAddress;
   kind?: SessionCatalogKind;
   preferred?: boolean;
   label?: string;
@@ -96,6 +99,8 @@ export type ApprovalDecision = 'allow-once' | 'allow-always' | 'deny';
 export interface ApprovalItem {
   id: string;
   sessionKey: string;
+  backendSessionKey: string;
+  runtimeAddress: RuntimeAddress;
   runId?: string;
   title: string;
   command?: string;
@@ -131,9 +136,12 @@ export interface ChatRuntimeErrorDismissMarker {
 }
 
 export interface ChatSessionMetaState {
+  backendSessionKey: string;
+  runtimeScopeKey: string | null;
   agentId: string | null;
   protocolId: string | null;
-  runtimeProviderId: string | null;
+  runtimeEndpointId: string | null;
+  runtimeAddress: RuntimeAddress | null;
   kind: SessionCatalogKind | null;
   preferred: boolean;
   label: string | null;
@@ -143,6 +151,26 @@ export interface ChatSessionMetaState {
   lastActivityAt: number | null;
   historyStatus: ChatSessionHistoryStatus;
   thinkingLevel: string | null;
+}
+
+export interface ChatSessionRuntimeEndpointTarget {
+  endpointId: string;
+  protocolId: string;
+  runtimeAdapterId?: string;
+  runtimeInstanceId?: string;
+  connectorId?: string;
+  displayName: string;
+  agentIds: string[];
+  acceptsDynamicAgents: boolean;
+  sessionPromptAddresses: RuntimeAddress[];
+  defaultSessionPromptAddress: RuntimeAddress;
+}
+
+export interface ChatSessionRuntimeCatalogState {
+  status: 'idle' | 'loading' | 'ready' | 'error';
+  error: string | null;
+  endpoints: ChatSessionRuntimeEndpointTarget[];
+  defaultRuntimeAddress: RuntimeAddress | null;
 }
 
 export interface ChatSessionRecord {
@@ -174,6 +202,7 @@ export interface ChatViewState {
 
 export interface ChatStoreBaseState extends ChatViewState {
   currentSessionKey: string;
+  sessionRuntimeCatalog: ChatSessionRuntimeCatalogState;
   loadedSessions: Record<string, ChatSessionRecord>;
   pendingApprovalsBySession: Record<string, ApprovalItem[]>;
   dismissedRuntimeErrorBySession: Record<string, ChatRuntimeErrorDismissMarker | undefined>;
@@ -206,6 +235,7 @@ export interface ChatHistoryLoadRequest {
 }
 
 export interface ChatStoreActions {
+  bootstrapSessionRuntime: () => Promise<void>;
   loadSessions: () => Promise<void>;
   openAgentConversation: (agentId: string) => void;
   switchSession: (key: string) => void;
@@ -221,6 +251,7 @@ export interface ChatStoreActions {
   abortRun: () => Promise<void>;
   resolveApproval: (id: string, decision: ApprovalDecision) => Promise<void>;
   syncPendingApprovals: (sessionKeyHint?: string) => Promise<void>;
+  setSessionRuntimeAddress: (sessionKey: string, runtimeAddress: RuntimeAddress) => void;
   getTaskBridgeState: () => TaskChatBridgeState;
   openTaskSession: (sessionKey: string) => string;
   sendTaskRecoveryPrompt: (sessionKey: string, prompt: string) => Promise<boolean>;
@@ -234,6 +265,7 @@ export type ChatStoreState = ChatStoreBaseState & ChatStoreActions;
 
 export const CHAT_BASE_STATE_KEYS = [
   'currentSessionKey',
+  'sessionRuntimeCatalog',
   'loadedSessions',
   'pendingApprovalsBySession',
   'dismissedRuntimeErrorBySession',

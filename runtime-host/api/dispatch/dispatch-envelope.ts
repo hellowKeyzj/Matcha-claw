@@ -1,5 +1,7 @@
 import { REQUEST_METHODS, TRANSPORT_VERSION } from '../../shared/runtime-host-constants';
 
+export const DISPATCH_ENVELOPE_MAX_BODY_BYTES = 1_000_000;
+
 export interface DispatchEnvelope {
   method: string;
   route: string;
@@ -13,9 +15,9 @@ interface DispatchEnvelopeValidationSuccess {
 
 interface DispatchEnvelopeValidationFailure {
   ok: false;
-  status: 400;
+  status: 400 | 413;
   error: {
-    code: 'BAD_REQUEST';
+    code: 'BAD_REQUEST' | 'PAYLOAD_TOO_LARGE';
     message: string;
   };
 }
@@ -25,6 +27,16 @@ export type DispatchEnvelopeValidationResult =
   | DispatchEnvelopeValidationFailure;
 
 export function parseDispatchEnvelope(rawBody: string): DispatchEnvelopeValidationResult {
+  if (Buffer.byteLength(rawBody, 'utf8') > DISPATCH_ENVELOPE_MAX_BODY_BYTES) {
+    return {
+      ok: false,
+      status: 413,
+      error: {
+        code: 'PAYLOAD_TOO_LARGE',
+        message: `Dispatch envelope exceeds ${DISPATCH_ENVELOPE_MAX_BODY_BYTES} bytes`,
+      },
+    };
+  }
   const parsed = rawBody ? JSON.parse(rawBody) : {};
   if (parsed.version !== TRANSPORT_VERSION) {
     return {

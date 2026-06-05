@@ -2,20 +2,21 @@ import { describe, expect, it } from 'vitest';
 import { buildExecutionGraphItemsFromCanonicalState } from '../../runtime-host/application/sessions/canonical/canonical-projection';
 import { createEmptyCanonicalSessionState, reduceCanonicalSessionEvents } from '../../runtime-host/application/sessions/canonical/canonical-reducer';
 import type { CanonicalSessionEvent } from '../../runtime-host/application/sessions/canonical/canonical-events';
-import { OPENCLAW_RUNTIME_PROTOCOL_ID, OPENCLAW_RUNTIME_PROVIDER_ID } from '../../runtime-host/application/sessions/runtime-providers/runtime-provider-types';
+import { OPENCLAW_RUNTIME_PROTOCOL_ID, OPENCLAW_RUNTIME_ENDPOINT_ID } from '../../runtime-host/application/adapters/openclaw/runtime/openclaw-runtime-identity';
+import { createOpenClawTestRuntimeContext } from './helpers/runtime-address-fixtures';
 
-function base(eventId: string): Pick<CanonicalSessionEvent, 'eventId' | 'protocolId' | 'runtimeProviderId' | 'source' | 'sessionId' | 'runId' | 'laneKey' | 'origin'> {
+function base(eventId: string): Pick<CanonicalSessionEvent, 'eventId' | 'protocolId' | 'runtimeEndpointId' | 'source' | 'sessionId' | 'runId' | 'laneKey' | 'origin'> {
   return {
     eventId,
     protocolId: OPENCLAW_RUNTIME_PROTOCOL_ID,
-    runtimeProviderId: OPENCLAW_RUNTIME_PROVIDER_ID,
+    runtimeEndpointId: OPENCLAW_RUNTIME_ENDPOINT_ID,
     source: 'live',
     sessionId: 'agent:main:main',
     runId: 'run-1',
     laneKey: 'main',
     origin: {
-      providerEventType: 'test',
-      providerIds: {
+      runtimeEventType: 'test',
+      runtimeIds: {
         sessionKey: 'agent:main:main',
         runId: 'run-1',
       },
@@ -25,7 +26,7 @@ function base(eventId: string): Pick<CanonicalSessionEvent, 'eventId' | 'protoco
 
 describe('ACP execution graph projection', () => {
   it('projects team completion events with completed and running tool steps', () => {
-    const state = createEmptyCanonicalSessionState('agent:main:main');
+    const state = createEmptyCanonicalSessionState('agent:main:main', createOpenClawTestRuntimeContext('agent:main:main'));
     reduceCanonicalSessionEvents(state, [{
       ...base('tool-read-start'),
       type: 'tool_call',
@@ -71,7 +72,7 @@ describe('ACP execution graph projection', () => {
   });
 
   it('projects tool result errors into graph steps', () => {
-    const state = createEmptyCanonicalSessionState('agent:main:main');
+    const state = createEmptyCanonicalSessionState('agent:main:main', createOpenClawTestRuntimeContext('agent:main:main'));
     reduceCanonicalSessionEvents(state, [{
       ...base('tool-read-start'),
       type: 'tool_call',
@@ -110,7 +111,7 @@ describe('ACP execution graph projection', () => {
   });
 
   it('uses task completion turnKey to collect graph steps when the team event has no runId', () => {
-    const state = createEmptyCanonicalSessionState('agent:main:main');
+    const state = createEmptyCanonicalSessionState('agent:main:main', createOpenClawTestRuntimeContext('agent:main:main'));
     reduceCanonicalSessionEvents(state, [{
       ...base('tool-read-start'),
       type: 'tool_call',

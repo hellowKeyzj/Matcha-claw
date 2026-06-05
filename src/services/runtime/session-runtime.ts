@@ -6,9 +6,10 @@ import {
   hostSessionList,
   hostSessionPrompt,
   hostSessionWindowFetch,
-  waitForRuntimeJobResult,
+  resolveHydratedSessionSnapshot,
 } from '@/lib/host-api';
-import type { SessionRenderItem, SessionWindowResult } from '../../../runtime-host/shared/session-adapter-types';
+import type { RuntimeAddress } from '../../../runtime-host/shared/runtime-address';
+import type { SessionRenderItem, SessionStateSnapshot } from '../../../runtime-host/shared/session-adapter-types';
 import type { ChatSession } from '@/stores/chat/types';
 import {
   findLatestAssistantSnapshotFromItems,
@@ -23,16 +24,19 @@ export interface AssistantSnapshot {
 
 export interface FetchChatHistoryInput {
   sessionKey: string;
+  runtimeAddress: RuntimeAddress;
   limit?: number;
 }
 
 export interface FetchChatTimelineInput {
   sessionKey: string;
+  runtimeAddress: RuntimeAddress;
   limit?: number;
 }
 
 export interface SendChatMessageInput {
   sessionKey: string;
+  runtimeAddress: RuntimeAddress;
   message: string;
   deliver?: boolean;
   idempotencyKey?: string;
@@ -40,9 +44,11 @@ export interface SendChatMessageInput {
 
 export interface DeleteSessionInput {
   key: string;
+  runtimeAddress: RuntimeAddress;
 }
 
 export interface ListSessionsInput {
+  runtimeAddress: RuntimeAddress;
   limit?: number;
   offset?: number;
 }
@@ -50,9 +56,9 @@ export interface ListSessionsInput {
 const DEFAULT_CHAT_HISTORY_LIMIT = 20;
 
 function resolveAuthoritativeItems(
-  payload: SessionWindowResult,
+  snapshot: SessionStateSnapshot,
 ): SessionRenderItem[] {
-  return Array.isArray(payload.snapshot.items) ? payload.snapshot.items : [];
+  return Array.isArray(snapshot.items) ? snapshot.items : [];
 }
 
 export async function fetchChatTimeline(
@@ -60,24 +66,22 @@ export async function fetchChatTimeline(
 ): Promise<SessionRenderItem[]> {
   const initial = await hostSessionWindowFetch({
     sessionKey: input.sessionKey,
+    runtimeAddress: input.runtimeAddress,
     mode: 'latest',
     limit: input.limit ?? DEFAULT_CHAT_HISTORY_LIMIT,
     includeCanonical: true,
   });
-  const history = initial.hydrationJob
-    ? await waitForRuntimeJobResult(initial.hydrationJob.id).then(async () => {
-        const window = await hostSessionWindowFetch({
-          sessionKey: input.sessionKey,
-          mode: 'latest',
-          limit: input.limit ?? DEFAULT_CHAT_HISTORY_LIMIT,
-          includeCanonical: true,
-        });
-        return window.snapshot ? window as SessionWindowResult : null;
-      })
-    : initial.snapshot
-      ? initial as SessionWindowResult
-      : null;
-  return history ? resolveAuthoritativeItems(history) : [];
+  const snapshot = await resolveHydratedSessionSnapshot({
+    initial,
+    refetch: async () => await hostSessionWindowFetch({
+      sessionKey: input.sessionKey,
+      runtimeAddress: input.runtimeAddress,
+      mode: 'latest',
+      limit: input.limit ?? DEFAULT_CHAT_HISTORY_LIMIT,
+      includeCanonical: true,
+    }),
+  });
+  return snapshot ? resolveAuthoritativeItems(snapshot) : [];
 }
 
 export async function fetchLatestAssistantText(
@@ -85,6 +89,7 @@ export async function fetchLatestAssistantText(
 ): Promise<string> {
   const items = await fetchChatTimeline({
     sessionKey: input.sessionKey,
+    runtimeAddress: input.runtimeAddress,
     limit: input.limit,
   });
   return findLatestAssistantTextFromItems(items);
@@ -95,6 +100,7 @@ export async function fetchLatestAssistantTurnText(
 ): Promise<string> {
   const items = await fetchChatTimeline({
     sessionKey: input.sessionKey,
+    runtimeAddress: input.runtimeAddress,
     limit: input.limit,
   });
   return findLatestAssistantTurnTextFromItems(items);
@@ -105,6 +111,7 @@ export async function fetchLatestAssistantSnapshot(
 ): Promise<AssistantSnapshot> {
   const items = await fetchChatTimeline({
     sessionKey: input.sessionKey,
+    runtimeAddress: input.runtimeAddress,
     limit: input.limit,
   });
   return findLatestAssistantSnapshotFromItems(items);
@@ -115,6 +122,7 @@ export async function sendChatMessage(
 ): Promise<Awaited<ReturnType<typeof hostSessionPrompt>>> {
   return await hostSessionPrompt({
     sessionKey: input.sessionKey,
+    runtimeAddress: input.runtimeAddress,
     message: input.message,
     deliver: input.deliver,
     idempotencyKey: input.idempotencyKey,
@@ -126,35 +134,39 @@ export async function deleteSession(
 ): Promise<void> {
   await hostSessionDelete({
     sessionKey: input.key,
+    runtimeAddress: input.runtimeAddress,
   });
 }
 
 export async function archiveSession(input: DeleteSessionInput): Promise<void> {
   await hostSessionArchive({
     sessionKey: input.key,
+    runtimeAddress: input.runtimeAddress,
   });
 }
 
 export async function unarchiveSession(input: DeleteSessionInput): Promise<void> {
   await hostSessionUnarchive({
     sessionKey: input.key,
+    runtimeAddress: input.runtimeAddress,
   });
 }
 
 export async function updateSessionStatus(input: {
   key: string;
+  runtimeAddress: RuntimeAddress;
   status: 'active' | 'completed' | 'archived' | 'deleted';
 }): Promise<void> {
   await hostSessionUpdateStatus({
     sessionKey: input.key,
+    runtimeAddress: input.runtimeAddress,
     status: input.status,
   });
 }
 
 export async function listSessions(
-  input?: ListSessionsInput,
+  input: ListSessionsInput,
 ): Promise<ChatSession[]> {
-  void input;
-  const result = await hostSessionList();
+  const result = await hostSessionList({ runtimeAddress: input.runtimeAddress });
   return Array.isArray(result.sessions) ? result.sessions as ChatSession[] : [];
 }

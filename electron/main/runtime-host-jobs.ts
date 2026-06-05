@@ -1,9 +1,10 @@
 import type { RuntimeHostManager } from './runtime-host-manager';
 
-export type RuntimeHostJobSnapshot = {
+export type RuntimeHostJobSnapshot<TResult = unknown> = {
   id: string;
   type: string;
   status: 'queued' | 'running' | 'succeeded' | 'failed';
+  result?: TResult;
   error?: string;
 };
 
@@ -11,6 +12,7 @@ type RuntimeHostJobEventPayload = {
   id?: string;
   type?: string;
   status?: string;
+  result?: unknown;
   error?: string;
 };
 
@@ -18,7 +20,7 @@ function isJobEventPayload(value: unknown): value is RuntimeHostJobEventPayload 
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 }
 
-function asJobSnapshot(payload: RuntimeHostJobEventPayload): RuntimeHostJobSnapshot | null {
+function asJobSnapshot<TResult = unknown>(payload: RuntimeHostJobEventPayload): RuntimeHostJobSnapshot<TResult> | null {
   if (typeof payload.id !== 'string' || typeof payload.type !== 'string') {
     return null;
   }
@@ -32,18 +34,19 @@ function asJobSnapshot(payload: RuntimeHostJobEventPayload): RuntimeHostJobSnaps
     id: payload.id,
     type: payload.type,
     status: payload.status,
+    ...(payload.result !== undefined ? { result: payload.result as TResult } : {}),
     ...(typeof payload.error === 'string' ? { error: payload.error } : {}),
   };
 }
 
-export async function waitForRuntimeHostJob(
+export async function waitForRuntimeHostJob<TResult = unknown>(
   runtimeHost: RuntimeHostManager,
   jobId: string,
   options: {
     timeoutMs: number;
   },
-): Promise<RuntimeHostJobSnapshot> {
-  return await new Promise<RuntimeHostJobSnapshot>((resolve, reject) => {
+): Promise<RuntimeHostJobSnapshot<TResult>> {
+  return await new Promise<RuntimeHostJobSnapshot<TResult>>((resolve, reject) => {
     let settled = false;
     let timeoutHandle: NodeJS.Timeout | null = null;
     let unsubscribe: (() => void) | null = null;
@@ -62,7 +65,7 @@ export async function waitForRuntimeHostJob(
       action();
     };
 
-    const handleSnapshot = (snapshot: RuntimeHostJobSnapshot) => {
+    const handleSnapshot = (snapshot: RuntimeHostJobSnapshot<TResult>) => {
       if (snapshot.id !== jobId) {
         return;
       }
@@ -84,7 +87,7 @@ export async function waitForRuntimeHostJob(
       if (!isJobEventPayload(payload)) {
         return;
       }
-      const snapshot = asJobSnapshot(payload);
+      const snapshot = asJobSnapshot<TResult>(payload);
       if (snapshot) {
         handleSnapshot(snapshot);
       }

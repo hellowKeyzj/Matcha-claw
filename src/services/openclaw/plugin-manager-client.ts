@@ -1,4 +1,5 @@
-import { hostApiFetch, waitForRuntimeJobResult, type RuntimeJobSubmission } from '@/lib/host-api';
+import { hostApiFetch, hostCapabilityExecute, waitForRuntimeJobResult, type RuntimeJobSubmission } from '@/lib/host-api';
+import type { RuntimeAddress } from '../../../runtime-host/shared/runtime-address';
 
 export type RuntimePluginCatalogItem = {
   id: string;
@@ -30,6 +31,24 @@ type PluginRuntimePayload = {
   };
 };
 
+const PLUGIN_RUNTIME_CAPABILITY_ID = 'plugin.runtime';
+
+async function pluginRuntimeCapabilityExecute<TResult>(
+  operationId: string,
+  runtimeAddress: RuntimeAddress,
+  input: Record<string, unknown>,
+): Promise<TResult> {
+  return await hostCapabilityExecute<TResult>({
+    id: PLUGIN_RUNTIME_CAPABILITY_ID,
+    operationId,
+    runtimeAddress,
+    input: {
+      ...input,
+      runtimeAddress,
+    },
+  });
+}
+
 export async function getPluginCatalog(): Promise<PluginCatalogPayload> {
   return await hostApiFetch<PluginCatalogPayload>('/api/plugins/catalog');
 }
@@ -38,18 +57,19 @@ export async function getPluginRuntime(): Promise<PluginRuntimePayload> {
   return await hostApiFetch<PluginRuntimePayload>('/api/plugins/runtime');
 }
 
-export async function setEnabledPluginIds(pluginIds: string[]): Promise<PluginRuntimePayload> {
-  const submission = await hostApiFetch<RuntimeJobSubmission<PluginRuntimePayload>>('/api/plugins/runtime/enabled-plugins', {
-    method: 'PUT',
-    body: JSON.stringify({ pluginIds }),
-  });
+export async function setEnabledPluginIds(pluginIds: string[], runtimeAddress: RuntimeAddress): Promise<PluginRuntimePayload> {
+  const submission = await pluginRuntimeCapabilityExecute<RuntimeJobSubmission<PluginRuntimePayload>>(
+    'plugins.setEnabled',
+    runtimeAddress,
+    { pluginIds },
+  );
   return await waitForRuntimeJobResult<PluginRuntimePayload>(submission.job.id);
 }
 
-export async function ensurePluginEnabled(pluginId: string): Promise<PluginRuntimePayload> {
+export async function ensurePluginEnabled(pluginId: string, runtimeAddress: RuntimeAddress): Promise<PluginRuntimePayload> {
   const runtime = await getPluginRuntime();
   if (runtime.execution.enabledPluginIds.includes(pluginId)) {
     return runtime;
   }
-  return await setEnabledPluginIds([...runtime.execution.enabledPluginIds, pluginId]);
+  return await setEnabledPluginIds([...runtime.execution.enabledPluginIds, pluginId], runtimeAddress);
 }

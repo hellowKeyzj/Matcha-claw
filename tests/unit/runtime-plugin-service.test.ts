@@ -2,12 +2,21 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { OpenClawConfigRepository } from '../../runtime-host/application/openclaw/openclaw-config-repository';
+import { OpenClawConfigRepository } from '../../runtime-host/application/adapters/openclaw/infrastructure/openclaw-config-repository';
 import { createTestOpenClawEnvironmentRepository } from './helpers/runtime-system-environment';
-import { ManagedPluginInstaller } from '../../runtime-host/application/plugins/managed-plugin-installer';
+import { OpenClawChannelPluginProjection } from '../../runtime-host/application/adapters/openclaw/projections/openclaw-channel-config-projection';
+import { OpenClawManagedPluginCatalog } from '../../runtime-host/application/adapters/openclaw/projections/openclaw-managed-plugin-catalog';
+import { OpenClawManagedPluginInstaller } from '../../runtime-host/application/adapters/openclaw/projections/openclaw-managed-plugin-installer';
 import { PluginCompanionSkillService } from '../../runtime-host/application/plugins/plugin-companion-skill-service';
 import { RuntimePluginLifecycleRunner } from '../../runtime-host/application/plugins/plugin-lifecycle-registry';
-import { RuntimePluginRepository } from '../../runtime-host/application/plugins/runtime-plugin-service';
+import { RuntimePluginRepository, type RuntimePluginConfigProjectionPort } from '../../runtime-host/application/plugins/runtime-plugin-service';
+import { PluginCompanionSkillWorkflow } from '../../runtime-host/application/workflows/plugin-lifecycle/plugin-companion-skill-workflow';
+import { RuntimePluginLifecycleWorkflow } from '../../runtime-host/application/workflows/plugin-lifecycle/runtime-plugin-lifecycle-workflow';
+import {
+  applyManuallyManagedPluginIdsToOpenClawConfig,
+  readManuallyManagedPluginIdsFromConfig,
+  resolveEffectivePluginIdsForConfig,
+} from '../../runtime-host/application/adapters/openclaw/projections/openclaw-plugin-config-service';
 import { createTestPluginFileSystem } from './helpers/plugin-file-system';
 
 describe('runtime plugin service', () => {
@@ -80,13 +89,41 @@ describe('runtime plugin service', () => {
     const environmentRepository = createTestOpenClawEnvironmentRepository();
     const configRepository = new OpenClawConfigRepository(environmentRepository);
     const pluginFileSystem = createTestPluginFileSystem();
-    const companionSkills = new PluginCompanionSkillService(environmentRepository, configRepository, pluginFileSystem);
-    return new RuntimePluginRepository(
+    const catalog = new OpenClawManagedPluginCatalog();
+    const companionSkillWorkflow = new PluginCompanionSkillWorkflow({
+      workspace: {
+        getCompanionSkillRootCandidates: () => environmentRepository.getCompanionSkillRootCandidates(),
+        getSkillsRootDir: () => join(configRepository.getConfigDir(), 'skills'),
+      },
+      fileSystem: pluginFileSystem,
+      managedPluginCatalog: catalog,
+    });
+    const companionSkills = new PluginCompanionSkillService(companionSkillWorkflow);
+    const configProjection: RuntimePluginConfigProjectionPort = {
+      readManuallyManagedPluginIds: async (config) => await readManuallyManagedPluginIdsFromConfig(configRepository, pluginFileSystem, config),
+      applyManuallyManagedPluginIds: async (config, manualPluginIds) => await applyManuallyManagedPluginIdsToOpenClawConfig(
+        configRepository,
+        pluginFileSystem,
+        config,
+        manualPluginIds,
+      ),
+      resolveEffectivePluginIds: (config, manualPluginIds) => resolveEffectivePluginIdsForConfig(config, manualPluginIds),
+    };
+    const catalogProjection = new OpenClawChannelPluginProjection();
+    const installer = new OpenClawManagedPluginInstaller({
+      getManagedPluginRegistryRootCandidates: () => environmentRepository.getManagedPluginRegistryRootCandidates(),
+      getExtensionsRootDir: () => join(configRepository.getConfigDir(), 'extensions'),
+    }, pluginFileSystem, catalog);
+    const lifecycleRunner = new RuntimePluginLifecycleRunner(companionSkills);
+    const lifecycleWorkflow = new RuntimePluginLifecycleWorkflow({
       configRepository,
-      new ManagedPluginInstaller(environmentRepository, configRepository, companionSkills, pluginFileSystem),
-      new RuntimePluginLifecycleRunner(companionSkills),
-      pluginFileSystem,
-    );
+      configProjection,
+      catalogProjection,
+      installer,
+      managedPluginCatalog: catalog,
+      lifecycleRunner,
+    });
+    return new RuntimePluginRepository(lifecycleWorkflow);
   }
 
   it('已安装的托管插件版本一致时在非 force 模式下不会重复覆盖', async () => {

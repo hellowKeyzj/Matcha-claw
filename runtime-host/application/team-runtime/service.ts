@@ -1,186 +1,58 @@
 import { join } from 'node:path';
-import type { OpenClawWorkspacePort } from '../openclaw/openclaw-workspace-service';
-import { TeamRuntimeApplicationService } from './team-runtime-application-service';
-import type { TeamMailboxKind, TeamTaskStatus } from './types';
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
-}
-
-function assertRequiredString(value: unknown, fieldName: string) {
-  const normalized = typeof value === 'string' ? value.trim() : '';
-  if (!normalized) {
-    throw new Error(`${fieldName} is required`);
-  }
-  return normalized;
-}
-
-function normalizePositiveNumber(value: unknown, fieldName: string) {
-  if (value == null) {
-    return undefined;
-  }
-  const numeric = Number(value);
-  if (!Number.isFinite(numeric) || numeric <= 0) {
-    throw new Error(`${fieldName} must be a positive number`);
-  }
-  return Math.floor(numeric);
-}
-
-function normalizeTaskStatus(value: unknown): TeamTaskStatus {
-  const status = typeof value === 'string' ? value.trim() : '';
-  if (
-    status !== 'todo'
-    && status !== 'claimed'
-    && status !== 'running'
-    && status !== 'blocked'
-    && status !== 'done'
-    && status !== 'failed'
-  ) {
-    throw new Error('status is invalid');
-  }
-  return status;
-}
-
-function normalizeMailboxKind(value: unknown): TeamMailboxKind | undefined {
-  const kind = typeof value === 'string' ? value.trim() : '';
-  if (
-    kind === 'question'
-    || kind === 'proposal'
-    || kind === 'decision'
-    || kind === 'report'
-  ) {
-    return kind;
-  }
-  return undefined;
-}
-
-function normalizeOptionalString(value: unknown): string | undefined {
-  return typeof value === 'string' ? value : undefined;
-}
-
-function normalizeMailboxMessagePayload(value: unknown) {
-  if (!isRecord(value)) {
-    throw new Error('message is required');
-  }
-
-  return {
-    msgId: assertRequiredString(value.msgId, 'message.msgId'),
-    fromAgentId: assertRequiredString(value.fromAgentId, 'message.fromAgentId'),
-    content: assertRequiredString(value.content, 'message.content'),
-    to: normalizeOptionalString(value.to),
-    kind: normalizeMailboxKind(value.kind),
-    relatedTaskId: normalizeOptionalString(value.relatedTaskId),
-    replyToMsgId: normalizeOptionalString(value.replyToMsgId),
-    createdAt: normalizePositiveNumber(value.createdAt, 'message.createdAt'),
-  };
-}
+import type { TeamRuntimeOperationsWorkflow } from '../workflows/team-runtime/team-runtime-operations-workflow';
 
 export class TeamRuntimeService {
-  constructor(private readonly app: TeamRuntimeApplicationService) {}
+  constructor(private readonly operationsWorkflow: TeamRuntimeOperationsWorkflow) {}
 
   async init(payload: unknown) {
-    const body = isRecord(payload) ? payload : {};
-    return await this.app.init({
-      teamId: assertRequiredString(body.teamId, 'teamId'),
-      leadAgentId: assertRequiredString(body.leadAgentId, 'leadAgentId'),
-    });
+    return await this.operationsWorkflow.init(payload);
   }
 
   async snapshot(payload: unknown) {
-    const body = isRecord(payload) ? payload : {};
-    return await this.app.snapshot({
-      teamId: assertRequiredString(body.teamId, 'teamId'),
-      mailboxCursor: typeof body.mailboxCursor === 'string' ? body.mailboxCursor : undefined,
-      mailboxLimit: normalizePositiveNumber(body.mailboxLimit, 'mailboxLimit'),
-    });
+    return await this.operationsWorkflow.snapshot(payload);
   }
 
   async planUpsert(payload: unknown) {
-    const body = isRecord(payload) ? payload : {};
-    const tasks = Array.isArray(body.tasks) ? body.tasks : null;
-    if (!tasks) {
-      throw new Error('tasks must be an array');
-    }
-    return await this.app.planUpsert({
-      teamId: assertRequiredString(body.teamId, 'teamId'),
-      tasks,
-    });
+    return await this.operationsWorkflow.planUpsert(payload);
   }
 
   async claimNext(payload: unknown) {
-    const body = isRecord(payload) ? payload : {};
-    return await this.app.claimNext({
-      teamId: assertRequiredString(body.teamId, 'teamId'),
-      agentId: assertRequiredString(body.agentId, 'agentId'),
-      sessionKey: assertRequiredString(body.sessionKey, 'sessionKey'),
-      leaseMs: normalizePositiveNumber(body.leaseMs, 'leaseMs'),
-    });
+    return await this.operationsWorkflow.claimNext(payload);
   }
 
   async heartbeat(payload: unknown) {
-    const body = isRecord(payload) ? payload : {};
-    return await this.app.heartbeat({
-      teamId: assertRequiredString(body.teamId, 'teamId'),
-      taskId: assertRequiredString(body.taskId, 'taskId'),
-      agentId: assertRequiredString(body.agentId, 'agentId'),
-      sessionKey: assertRequiredString(body.sessionKey, 'sessionKey'),
-      leaseMs: normalizePositiveNumber(body.leaseMs, 'leaseMs'),
-    });
+    return await this.operationsWorkflow.heartbeat(payload);
   }
 
   async taskUpdate(payload: unknown) {
-    const body = isRecord(payload) ? payload : {};
-    return await this.app.taskUpdate({
-      teamId: assertRequiredString(body.teamId, 'teamId'),
-      taskId: assertRequiredString(body.taskId, 'taskId'),
-      status: normalizeTaskStatus(body.status),
-      resultSummary: typeof body.resultSummary === 'string' ? body.resultSummary : undefined,
-      error: typeof body.error === 'string' ? body.error : undefined,
-    });
+    return await this.operationsWorkflow.taskUpdate(payload);
   }
 
   async mailboxPost(payload: unknown) {
-    const body = isRecord(payload) ? payload : {};
-    return await this.app.mailboxPost({
-      teamId: assertRequiredString(body.teamId, 'teamId'),
-      message: normalizeMailboxMessagePayload(body.message),
-    });
+    return await this.operationsWorkflow.mailboxPost(payload);
   }
 
   async mailboxPull(payload: unknown) {
-    const body = isRecord(payload) ? payload : {};
-    return await this.app.mailboxPull({
-      teamId: assertRequiredString(body.teamId, 'teamId'),
-      cursor: typeof body.cursor === 'string' ? body.cursor : undefined,
-      limit: normalizePositiveNumber(body.limit, 'limit'),
-    });
+    return await this.operationsWorkflow.mailboxPull(payload);
   }
 
   async releaseClaim(payload: unknown) {
-    const body = isRecord(payload) ? payload : {};
-    return await this.app.releaseClaim({
-      teamId: assertRequiredString(body.teamId, 'teamId'),
-      taskId: assertRequiredString(body.taskId, 'taskId'),
-      agentId: assertRequiredString(body.agentId, 'agentId'),
-      sessionKey: assertRequiredString(body.sessionKey, 'sessionKey'),
-    });
+    return await this.operationsWorkflow.releaseClaim(payload);
   }
 
   async reset(payload: unknown) {
-    const body = isRecord(payload) ? payload : {};
-    return await this.app.reset({
-      teamId: assertRequiredString(body.teamId, 'teamId'),
-    });
+    return await this.operationsWorkflow.reset(payload);
   }
 
   async listTasks(payload: unknown) {
-    const body = isRecord(payload) ? payload : {};
-    return await this.app.listTasks({
-      teamId: assertRequiredString(body.teamId, 'teamId'),
-    });
+    return await this.operationsWorkflow.listTasks(payload);
   }
 }
 
-export function createTeamRuntimeRootResolver(workspace: Pick<OpenClawWorkspacePort, 'getConfigDir'>) {
-  return (teamId: string) => join(workspace.getConfigDir(), 'team-runtime', teamId);
+export interface TeamRuntimeStorageRootPort {
+  getRuntimeDataRootDir(): string;
+}
+
+export function createTeamRuntimeRootResolver(storageRoot: TeamRuntimeStorageRootPort) {
+  return (teamId: string) => join(storageRoot.getRuntimeDataRootDir(), 'team-runtime', teamId);
 }

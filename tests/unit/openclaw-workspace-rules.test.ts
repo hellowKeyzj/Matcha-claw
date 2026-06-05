@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   resolveMainWorkspaceDir,
   resolveWorkspaceDirForSession,
-} from '../../runtime-host/application/openclaw/openclaw-workspace-rules';
+} from '../../runtime-host/application/adapters/openclaw/infrastructure/openclaw-workspace-rules';
 
 describe('runtime-host openclaw workspace rules', () => {
   it('resolves main sessions to the main workspace', () => {

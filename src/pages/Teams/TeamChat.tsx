@@ -9,9 +9,13 @@ import { useGatewayStore } from '@/stores/gateway';
 import { useTeamsStore } from '@/stores/teams';
 import { useTeamsRunnerStore } from '@/stores/teams-runner';
 import { useTranslation } from 'react-i18next';
-import type { TeamMailboxMessage, TeamTask } from '@/features/teams/api/runtime-client';
+import type { TeamMailboxMessage, TeamTask, TeamTaskStatus } from '@/features/teams/api/runtime-client';
 import { isGatewayOperational } from '@/lib/gateway-status';
 import { subscribeHostEvent } from '@/lib/host-events';
+import { resolveSingleCapabilityRuntimeAddress } from '@/lib/host-api';
+import type { RuntimeAddress } from '../../../runtime-host/shared/runtime-address';
+
+const TEAM_COORDINATION_CAPABILITY_ID = 'team.coordination';
 
 const DEFAULT_LEASE_MS = 60_000;
 const EMPTY_TASKS: TeamTask[] = [];
@@ -23,6 +27,50 @@ function sessionKey(agentId: string, teamId: string): string {
 
 function buildTaskId(): string {
   return `task-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+type TeamTaskBuckets = Record<TeamTaskStatus, TeamTask[]>;
+
+type TeamTaskSummary = {
+  tasksByStatus: TeamTaskBuckets;
+  ownedCountByAgentId: Record<string, number>;
+  runningCountByAgentId: Record<string, number>;
+  visibleActiveAgentCount: number;
+};
+
+function buildTeamTaskSummary(tasks: readonly TeamTask[], teamActiveAgentIds: readonly string[]): TeamTaskSummary {
+  const tasksByStatus: TeamTaskBuckets = {
+    todo: [],
+    claimed: [],
+    running: [],
+    blocked: [],
+    done: [],
+    failed: [],
+  };
+  const ownedCountByAgentId: Record<string, number> = {};
+  const runningCountByAgentId: Record<string, number> = {};
+  const visibleActiveAgentIds = new Set(teamActiveAgentIds);
+
+  for (const task of tasks) {
+    tasksByStatus[task.status].push(task);
+    if (!task.ownerAgentId) {
+      continue;
+    }
+    ownedCountByAgentId[task.ownerAgentId] = (ownedCountByAgentId[task.ownerAgentId] ?? 0) + 1;
+    if (task.status === 'running') {
+      runningCountByAgentId[task.ownerAgentId] = (runningCountByAgentId[task.ownerAgentId] ?? 0) + 1;
+    }
+    if (task.status === 'claimed' || task.status === 'running') {
+      visibleActiveAgentIds.add(task.ownerAgentId);
+    }
+  }
+
+  return {
+    tasksByStatus,
+    ownedCountByAgentId,
+    runningCountByAgentId,
+    visibleActiveAgentCount: visibleActiveAgentIds.size,
+  };
 }
 
 export function TeamChat({ teamId }: { teamId?: string }) {
@@ -61,6 +109,7 @@ export function TeamChat({ teamId }: { teamId?: string }) {
   const [selectedAgentId, setSelectedAgentId] = useState('');
   const [messageText, setMessageText] = useState('');
   const [messageTo, setMessageTo] = useState<'broadcast' | string>('broadcast');
+  const [teamRuntimeAddress, setTeamRuntimeAddress] = useState<RuntimeAddress | null>(null);
   const enabledByTeamId = useTeamsRunnerStore((state) => state.enabledByTeamId);
   const activeAgentIdsByTeamId = useTeamsRunnerStore((state) => state.activeAgentIdsByTeamId);
   const activeTaskByAgentByTeamId = useTeamsRunnerStore((state) => state.activeTaskByAgentByTeamId);
@@ -78,11 +127,34 @@ export function TeamChat({ teamId }: { teamId?: string }) {
   }, [selectedAgentId, team]);
 
   useEffect(() => {
-    if (!team || !resolvedTeamId) {
+    let cancelled = false;
+    if (!isGatewayOperational(gatewayStatus)) {
+      setTeamRuntimeAddress(null);
+      return;
+    }
+    resolveSingleCapabilityRuntimeAddress(TEAM_COORDINATION_CAPABILITY_ID)
+      .then((runtimeAddress) => {
+        if (!cancelled) {
+          setTeamRuntimeAddress(runtimeAddress);
+        }
+      })
+      .catch((error) => {
+        if (!cancelled) {
+          console.error('Failed to resolve team coordination runtime address:', error);
+          setTeamRuntimeAddress(null);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [gatewayStatus]);
+
+  useEffect(() => {
+    if (!team || !resolvedTeamId || !teamRuntimeAddress) {
       return;
     }
     setActiveTeam(team.id);
-    void initRuntime(team.id).then(() => refreshSnapshot(team.id));
+    void initRuntime(team.id, teamRuntimeAddress).then(() => refreshSnapshot(team.id));
 
     // 后端 TeamRuntimeApplicationService 在每次 init / planUpsert / claimNext / heartbeat / taskUpdate /
     // mailboxPost / releaseClaim 后都会通过 team:event 推送事件。订阅事件并按需触发 refreshSnapshot 与
@@ -103,22 +175,7 @@ export function TeamChat({ teamId }: { teamId?: string }) {
     return () => {
       unsubscribe();
     };
-  }, [team, resolvedTeamId, setActiveTeam, initRuntime, refreshSnapshot, pullMailbox]);
-
-  const tasksByStatus = useMemo(() => {
-    const groups: Record<string, typeof tasks> = {
-      todo: [],
-      claimed: [],
-      running: [],
-      blocked: [],
-      done: [],
-      failed: [],
-    };
-    for (const task of tasks) {
-      groups[task.status] = [...(groups[task.status] ?? []), task];
-    }
-    return groups;
-  }, [tasks]);
+  }, [team, resolvedTeamId, teamRuntimeAddress, setActiveTeam, initRuntime, refreshSnapshot, pullMailbox]);
 
   const teamAutoRunnerEnabled = resolvedTeamId ? (enabledByTeamId[resolvedTeamId] ?? true) : true;
   const teamActiveAgentIds = useMemo(
@@ -129,15 +186,10 @@ export function TeamChat({ teamId }: { teamId?: string }) {
     () => (resolvedTeamId ? (activeTaskByAgentByTeamId[resolvedTeamId] ?? {}) : {}),
     [activeTaskByAgentByTeamId, resolvedTeamId],
   );
-  const autoRunnerVisibleActiveCount = useMemo(() => {
-    const ids = new Set(teamActiveAgentIds);
-    for (const task of tasks) {
-      if ((task.status === 'claimed' || task.status === 'running') && task.ownerAgentId) {
-        ids.add(task.ownerAgentId);
-      }
-    }
-    return ids.size;
-  }, [teamActiveAgentIds, tasks]);
+  const taskSummary = useMemo(
+    () => buildTeamTaskSummary(tasks, teamActiveAgentIds),
+    [tasks, teamActiveAgentIds],
+  );
 
   if (!team || !resolvedTeamId) {
     return (
@@ -224,7 +276,7 @@ export function TeamChat({ teamId }: { teamId?: string }) {
       )}
 
       <div className="rounded-md border border-border/60 bg-muted/20 p-3 text-xs text-muted-foreground">
-        {t('chat.autoRunnerStatus', { state: autoRunnerState, count: autoRunnerVisibleActiveCount })}
+        {t('chat.autoRunnerStatus', { state: autoRunnerState, count: taskSummary.visibleActiveAgentCount })}
       </div>
 
       {autoRunnerError && (
@@ -277,14 +329,14 @@ export function TeamChat({ teamId }: { teamId?: string }) {
                 <Card key={status}>
                   <CardHeader className="pb-2">
                     <CardTitle className="text-sm">
-                      {t(`board.columns.${status}`)} ({tasksByStatus[status].length})
+                      {t(`board.columns.${status}`)} ({taskSummary.tasksByStatus[status].length})
                     </CardTitle>
                   </CardHeader>
                   <CardContent className="space-y-2">
-                    {tasksByStatus[status].length === 0 ? (
+                    {taskSummary.tasksByStatus[status].length === 0 ? (
                       <div className="text-xs text-muted-foreground">{t('board.emptyColumn')}</div>
                     ) : (
-                      tasksByStatus[status].map((task) => (
+                      taskSummary.tasksByStatus[status].map((task) => (
                         <div key={task.taskId} className="rounded border p-2">
                           <div className="text-sm font-medium">{task.title}</div>
                           <div className="text-xs text-muted-foreground">{task.taskId}</div>
@@ -476,14 +528,14 @@ export function TeamChat({ teamId }: { teamId?: string }) {
             </div>
             <div className="space-y-2">
               {team.memberIds.map((agentId) => {
-                const ownedTasks = tasks.filter((task) => task.ownerAgentId === agentId);
-                const runningCount = ownedTasks.filter((task) => task.status === 'running').length;
+                const ownedCount = taskSummary.ownedCountByAgentId[agentId] ?? 0;
+                const runningCount = taskSummary.runningCountByAgentId[agentId] ?? 0;
                 const activeTaskId = teamActiveTaskByAgent[agentId];
                 return (
                   <div key={agentId} className="rounded border p-2">
                     <div className="text-sm font-medium">{agentId}</div>
                     <div className="text-xs text-muted-foreground">
-                      {t('agents.ownedTasks')}: {ownedTasks.length} · {t('agents.runningTasks')}: {runningCount}
+                      {t('agents.ownedTasks')}: {ownedCount} · {t('agents.runningTasks')}: {runningCount}
                     </div>
                     {activeTaskId && (
                       <div className="mt-1 text-xs text-emerald-600 dark:text-emerald-400">

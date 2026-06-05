@@ -1,7 +1,15 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { hostApiFetchMock } from './helpers/mock-gateway-client';
+import { hostApiFetchMock, hostCapabilityExecuteMock } from './helpers/mock-gateway-client';
 
 const waitForRuntimeJobResultMock = vi.fn();
+
+const pluginRuntimeAddress = {
+  kind: 'native-runtime' as const,
+  capabilityId: 'plugin.runtime',
+  runtimeAdapterId: 'openclaw',
+  runtimeInstanceId: 'local',
+  agentId: 'default',
+};
 
 vi.mock('@/lib/host-api', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/lib/host-api')>();
@@ -14,6 +22,7 @@ vi.mock('@/lib/host-api', async (importOriginal) => {
 describe('plugin manager client', () => {
   beforeEach(() => {
     hostApiFetchMock.mockReset();
+    hostCapabilityExecuteMock.mockReset();
     waitForRuntimeJobResultMock.mockReset();
   });
 
@@ -33,7 +42,7 @@ describe('plugin manager client', () => {
   });
 
   it('setEnabledPluginIds 走通用插件写接口', async () => {
-    hostApiFetchMock
+    hostCapabilityExecuteMock
       .mockResolvedValueOnce({
         success: true,
         job: {
@@ -51,12 +60,20 @@ describe('plugin manager client', () => {
     });
 
     const { setEnabledPluginIds } = await import('@/services/openclaw/plugin-manager-client');
-    await setEnabledPluginIds(['task-manager']);
+    await setEnabledPluginIds(['task-manager'], pluginRuntimeAddress);
 
-    expect(hostApiFetchMock).toHaveBeenNthCalledWith(1, '/api/plugins/runtime/enabled-plugins', {
-      method: 'PUT',
-      body: JSON.stringify({ pluginIds: ['task-manager'] }),
-    });
+    expect(hostCapabilityExecuteMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: 'plugin.runtime',
+        operationId: 'plugins.setEnabled',
+        runtimeAddress: pluginRuntimeAddress,
+        input: expect.objectContaining({
+          pluginIds: ['task-manager'],
+          runtimeAddress: pluginRuntimeAddress,
+        }),
+      }),
+      undefined,
+    );
     expect(waitForRuntimeJobResultMock).toHaveBeenCalledWith('job-1');
   });
 });

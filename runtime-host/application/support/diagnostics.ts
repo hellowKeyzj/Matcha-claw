@@ -6,6 +6,7 @@ import type {
   RuntimeProcessInfoPort,
 } from '../common/runtime-ports';
 import type { DiagnosticsCollectInput, DiagnosticsJobPort } from './diagnostics-jobs';
+import type { DiagnosticsRuntimeBundleLayoutPort } from './diagnostics-bundle';
 
 export class DiagnosticsService {
   constructor(
@@ -14,6 +15,7 @@ export class DiagnosticsService {
     private readonly commandExecutor: RuntimeCommandExecutorPort,
     private readonly fileSystem: RuntimeFileSystemPort,
     private readonly clock: RuntimeClockPort,
+    private readonly runtimeLayout: DiagnosticsRuntimeBundleLayoutPort,
   ) {}
 
   submitCollect(input: DiagnosticsCollectInput) {
@@ -23,7 +25,8 @@ export class DiagnosticsService {
   async collect(input: DiagnosticsCollectInput) {
     return await collectDiagnosticsBundle({
       userDataDir: input.userDataDir,
-      openclawConfigDir: input.openclawConfigDir,
+      runtimeDataRootDir: input.runtimeDataRootDir,
+      runtimeLayout: this.runtimeLayout,
       appInfo: input.appInfo,
       gateway: {
         status: input.gatewayStatus,

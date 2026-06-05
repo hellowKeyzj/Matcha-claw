@@ -1,6 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { SecurityRuntimeService } from '../../runtime-host/application/security/service';
 import { normalizeSecurityPolicyPayload } from '../../runtime-host/application/security/security-policy-normalizer';
+import { SecurityEmergencyResponseWorkflow } from '../../runtime-host/application/workflows/security-emergency/security-emergency-response-workflow';
+import { SecurityGatewayOperationsWorkflow } from '../../runtime-host/application/workflows/security-operations/security-gateway-operations-workflow';
+import { SecurityOperationsWorkflow } from '../../runtime-host/application/workflows/security-operations/security-operations-workflow';
+import { SecurityPolicySyncWorkflow } from '../../runtime-host/application/workflows/security-policy/security-policy-sync-workflow';
 
 function createOpenclawBridge() {
   return {
@@ -78,10 +82,22 @@ function createSecurityService(
 ) {
   return {
     service: new SecurityRuntimeService({
-      gateway: openclawBridge,
-      policyRepository,
-      jobs,
-      timer,
+      operationsWorkflow: new SecurityOperationsWorkflow({
+        policyRepository,
+        jobs,
+        policySyncWorkflow: new SecurityPolicySyncWorkflow({
+          gateway: openclawBridge,
+          policyRepository,
+          timer,
+        }),
+        emergencyResponseWorkflow: new SecurityEmergencyResponseWorkflow({
+          gateway: openclawBridge,
+          policyRepository,
+        }),
+        gatewayOperationsWorkflow: new SecurityGatewayOperationsWorkflow({
+          gateway: openclawBridge,
+        }),
+      }),
     }),
     openclawBridge,
     jobs,

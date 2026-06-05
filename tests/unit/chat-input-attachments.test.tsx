@@ -24,8 +24,17 @@ type SkillMock = {
 };
 
 const invokeIpcMock = vi.fn();
-const hostApiFetchMock = vi.fn();
+const hostFileStagePathsMock = vi.fn();
+const hostFileStageBufferMock = vi.fn();
 const fetchSkillsMock = vi.fn(async () => {});
+
+const testRuntimeAddress = {
+  kind: 'native-runtime' as const,
+  capabilityId: 'session.prompt',
+  runtimeAdapterId: 'openclaw',
+  runtimeInstanceId: 'local',
+  agentId: 'default',
+};
 
 const skillsStoreState: {
   skills: SkillMock[];
@@ -44,7 +53,8 @@ vi.mock('@/lib/api-client', () => ({
 }));
 
 vi.mock('@/lib/host-api', () => ({
-  hostApiFetch: (...args: unknown[]) => hostApiFetchMock(...args),
+  hostFileStagePaths: (...args: unknown[]) => hostFileStagePathsMock(...args),
+  hostFileStageBuffer: (...args: unknown[]) => hostFileStageBufferMock(...args),
 }));
 
 vi.mock('@/stores/skills', () => ({
@@ -54,7 +64,8 @@ vi.mock('@/stores/skills', () => ({
 describe('chat input attachments', () => {
   beforeEach(() => {
     invokeIpcMock.mockReset();
-    hostApiFetchMock.mockReset();
+    hostFileStagePathsMock.mockReset();
+    hostFileStageBufferMock.mockReset();
     skillsStoreState.skills = [];
     skillsStoreState.snapshotReady = true;
     skillsStoreState.initialLoading = false;
@@ -70,7 +81,7 @@ describe('chat input attachments', () => {
       }
       return null;
     });
-    hostApiFetchMock.mockResolvedValueOnce([
+    hostFileStagePathsMock.mockResolvedValueOnce([
       {
         id: 'staged-image',
         fileName: 'image.png',
@@ -81,7 +92,7 @@ describe('chat input attachments', () => {
       },
     ]);
 
-    render(<ChatInput onSend={vi.fn()} />);
+    render(<ChatInput onSend={vi.fn()} runtimeAddress={testRuntimeAddress} />);
 
     fireEvent.click(screen.getByRole('button', { name: /attach files/i }));
 
@@ -107,7 +118,7 @@ describe('chat input attachments', () => {
       }
       return payload ?? null;
     });
-    hostApiFetchMock.mockResolvedValueOnce([
+    hostFileStagePathsMock.mockResolvedValueOnce([
       {
         id: 'staged-text',
         fileName: 'notes.txt',
@@ -118,7 +129,7 @@ describe('chat input attachments', () => {
       },
     ]);
 
-    render(<ChatInput onSend={vi.fn()} />);
+    render(<ChatInput onSend={vi.fn()} runtimeAddress={testRuntimeAddress} />);
 
     fireEvent.click(screen.getByRole('button', { name: /attach files/i }));
 

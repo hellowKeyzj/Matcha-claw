@@ -1,4 +1,3 @@
-import type { GatewayCapabilitiesSnapshot, GatewayConnectionStatePayload, GatewayControlReadiness } from '../gateway/gateway-runtime-port';
 import type {
   SessionUpdateEvent,
 } from '../../shared/session-adapter-types';
@@ -10,6 +9,7 @@ import { SessionRuntimeStateStore } from './session-runtime-state';
 import { SessionSnapshotService } from './session-snapshot-service';
 import { SessionTimelineRuntime } from './session-timeline-runtime';
 import { SessionOperationCoordinator } from './session-operation-coordinator';
+import type { RuntimeAddress } from '../agent-runtime/contracts/runtime-address';
 
 interface SessionRuntimeServiceDeps {
   sessionCatalog: SessionCatalogPort;
@@ -25,31 +25,12 @@ interface SessionRuntimeServiceDeps {
 export class SessionRuntimeService {
   constructor(private readonly deps: SessionRuntimeServiceDeps) {}
 
-  consumeGatewayConnectionState(payload: GatewayConnectionStatePayload): SessionUpdateEvent[] {
-    if (payload.state === 'connected') {
-      this.deps.stateStore.markTransportConnected(payload.transportEpoch);
-      this.deps.stateStore.expireTransportControlIssues(payload.transportEpoch);
-    }
-    return this.deps.ingressService.consumeGatewayConnectionState(payload);
+  async consumeEndpointConversationEvent(runtimeAddress: RuntimeAddress, payload: unknown): Promise<SessionUpdateEvent[]> {
+    return await this.deps.ingressService.consumeEndpointConversationEvent(runtimeAddress, payload);
   }
 
-  consumeGatewayControlReadiness(payload: GatewayControlReadiness): SessionUpdateEvent[] {
-    if (payload.ready) {
-      this.deps.stateStore.expireTransportControlIssues(this.deps.stateStore.getLatestConnectedTransportEpoch());
-    }
-    return this.deps.ingressService.consumeGatewayControlReadiness(payload);
-  }
-
-  consumeGatewayCapabilities(payload: GatewayCapabilitiesSnapshot | null): SessionUpdateEvent[] {
-    return this.deps.ingressService.consumeGatewayCapabilities(payload);
-  }
-
-  async consumeGatewayConversationEvent(payload: unknown): Promise<SessionUpdateEvent[]> {
-    return await this.deps.ingressService.consumeGatewayConversationEvent(payload);
-  }
-
-  consumeGatewayNotification(payload: Parameters<SessionGatewayIngressService['consumeGatewayNotification']>[0]): SessionUpdateEvent[] {
-    return this.deps.ingressService.consumeGatewayNotification(payload);
+  consumeEndpointNotification(runtimeAddress: RuntimeAddress, payload: Parameters<SessionGatewayIngressService['consumeEndpointNotification']>[1]): SessionUpdateEvent[] {
+    return this.deps.ingressService.consumeEndpointNotification(runtimeAddress, payload);
   }
 
   async createSession(payload: unknown) {
@@ -72,8 +53,8 @@ export class SessionRuntimeService {
     return await this.deps.commandService.updateSessionStatus(payload);
   }
 
-  async listSessions() {
-    return await this.deps.commandService.listSessions();
+  async listSessions(payload: unknown) {
+    return await this.deps.commandService.listSessions(payload);
   }
 
   async refreshSessionCatalog() {
@@ -116,13 +97,14 @@ export class SessionRuntimeService {
     return await this.deps.commandService.abortSession(payload);
   }
 
-  async listPendingApprovals() {
-    return await this.deps.commandService.listPendingApprovals();
+  async listPendingApprovals(payload: unknown) {
+    return await this.deps.commandService.listPendingApprovals(payload);
   }
 
   async resolveApproval(payload: unknown) {
     return await this.deps.commandService.resolveApproval(payload);
   }
+
 
   async promptSession(payload: unknown) {
     return await this.deps.promptService.promptSession(payload);

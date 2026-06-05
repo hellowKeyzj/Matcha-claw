@@ -8,17 +8,22 @@ import { createTestRuntimeHostContainer } from '../unit/helpers/runtime-host-con
 describe('platform runtime execute integration', () => {
   it('在 runtime-host 子进程里组装 context 并通过 bridge 执行', async () => {
     const container = createTestRuntimeHostContainer();
-    const platformStartRun = vi.fn().mockResolvedValue({ runId: 'run-integration-1' });
-    registerRuntimeHostPlatformRoot(container, () => ({
-      isGatewayRunning: vi.fn().mockResolvedValue(true),
-      platformInstallTool: vi.fn(),
-      platformUninstallTool: vi.fn(),
-      platformEnableTool: vi.fn(),
-      platformDisableTool: vi.fn(),
-      platformListToolsCatalog: vi.fn().mockResolvedValue([]),
-      platformStartRun,
-      platformAbortRun: vi.fn(),
-    }));
+    const platformStartRun = vi.fn().mockResolvedValue('run-integration-1');
+    container.registerValue('gateway.runtime', {});
+    container.registerValue('platform.runtimeDriverFactory', {
+      createRuntimeDriver: () => ({
+        initialize: vi.fn(async () => undefined),
+        healthCheck: vi.fn(async () => ({ status: 'running' })),
+        installTool: vi.fn(async () => 'tool-1'),
+        uninstallTool: vi.fn(async () => undefined),
+        enableTool: vi.fn(async () => undefined),
+        disableTool: vi.fn(async () => undefined),
+        listInstalledTools: vi.fn(async () => []),
+        execute: platformStartRun,
+        abort: vi.fn(async () => undefined),
+      }),
+    });
+    registerRuntimeHostPlatformRoot(container);
     const root = resolveRuntimeHostPlatformRoot(container);
 
     const runId = await root.facade.startRun({

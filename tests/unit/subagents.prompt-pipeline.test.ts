@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   gatewayClientRpcMock,
+  hostCapabilityExecuteMock,
   hostSessionDeleteMock,
   hostSessionPromptMock,
   hostSessionWindowFetchMock,
@@ -9,6 +10,7 @@ import {
 import { SUBAGENT_TARGET_FILES } from '@/constants/subagent-files';
 import { useSubagentsStore } from '@/stores/subagents';
 import { buildRenderItemsFromMessages } from './helpers/timeline-fixtures';
+import type { RuntimeAddress } from '../../runtime-host/shared/runtime-address';
 
 function buildDraftOutput(
   files: Array<{ name: string; content: string; reason: string; confidence: number }>,
@@ -28,6 +30,14 @@ function buildDraftOutput(
     ],
   });
 }
+
+const subagentManagementAddress: RuntimeAddress = {
+  kind: 'native-runtime',
+  capabilityId: 'subagent.management',
+  runtimeAdapterId: 'openclaw',
+  runtimeInstanceId: 'local',
+  agentId: 'default',
+};
 
 function buildHistoryWindow(output: string) {
   return {
@@ -74,6 +84,7 @@ function generateDraft(
     agentId,
     prompt,
     includeCurrentFiles,
+    runtimeAddress: subagentManagementAddress,
   });
 }
 
@@ -127,6 +138,12 @@ describe('subagents prompt pipeline', () => {
     expect(hostSessionPromptMock).toHaveBeenCalledTimes(1);
     expect(hostSessionPromptMock).toHaveBeenCalledWith(expect.objectContaining({
       sessionKey: expect.stringContaining('subagent-draft'),
+      runtimeAddress: {
+        ...subagentManagementAddress,
+        capabilityId: 'session.prompt',
+        agentId: 'writer',
+        sessionKey: 'agent:writer:subagent-draft',
+      },
       message: expect.stringContaining('AGENTS.md'),
       idempotencyKey: expect.any(String),
       deliver: false,
@@ -292,27 +309,29 @@ describe('subagents prompt pipeline', () => {
           confidence: 0.88,
         },
       ])));
-    gatewayClientRpcMock.mockImplementation(async (method) => {
-      if (method === 'agent.wait') {
-        return {
-          success: true,
-          result: {
-            runId: 'run-123',
-            status: 'completed',
-          },
-        };
-      }
-      throw new Error(`Unexpected rpc method in test: ${String(method)}`);
+    hostCapabilityExecuteMock.mockResolvedValueOnce({
+      runId: 'run-123',
+      status: 'completed',
     });
 
     await generateDraft('writer', 'generate config');
 
-    expect(gatewayClientRpcMock).toHaveBeenCalledWith(
-      'agent.wait',
+    expect(hostCapabilityExecuteMock).toHaveBeenCalledWith(
       expect.objectContaining({
-        runId: 'run-123',
+        id: 'agent.run',
+        operationId: 'agent.wait',
+        input: expect.objectContaining({
+          runId: 'run-123',
+        }),
       }),
-      expect.any(Number),
+      expect.objectContaining({
+        timeoutMs: expect.any(Number),
+      }),
+    );
+    expect(gatewayClientRpcMock).not.toHaveBeenCalledWith(
+      'agent.wait',
+      expect.anything(),
+      expect.anything(),
     );
     expect(hostSessionWindowFetchMock).toHaveBeenCalledWith(expect.objectContaining({
       sessionKey: expect.stringContaining('subagent-draft'),

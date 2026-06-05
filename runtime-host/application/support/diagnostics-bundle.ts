@@ -2,24 +2,22 @@ import path from 'node:path';
 import type {
   RuntimeClockPort,
   RuntimeCommandExecutorPort,
-  RuntimeFileStat,
   RuntimeFileSystemPort,
   RuntimePlatform,
 } from '../common/runtime-ports';
 
 const DEFAULT_RECENT_WINDOW_MS = 72 * 60 * 60 * 1000;
-const WORKSPACE_FILE_WHITELIST = new Set(['AGENTS.md', 'SOUL.md', 'TOOLS.md', 'IDENTITY.md', 'USER.md']);
 
 export interface DiagnosticsCounts {
   userDataLogs: number;
-  openclawLogs: number;
+  runtimeLogs: number;
   sessionIndexes: number;
   sessionJsonl: number;
   workspaceFiles: number;
   workspaceSubagentFiles: number;
   pluginManifests: number;
   settingsJson: number;
-  openclawJson: number;
+  runtimeConfigJson: number;
 }
 
 export interface DiagnosticsBundleResult {
@@ -54,9 +52,34 @@ interface DiagnosticsLicenseInfo {
   gateSnapshot?: unknown;
 }
 
+export type DiagnosticsRuntimeBundleEntryKind =
+  | 'runtimeLog'
+  | 'sessionIndex'
+  | 'sessionJsonl'
+  | 'workspaceFile'
+  | 'workspaceSubagentFile'
+  | 'pluginManifest'
+  | 'runtimeConfig';
+
+export interface DiagnosticsRuntimeBundleEntry {
+  sourcePath: string;
+  destinationPath: string;
+  kind: DiagnosticsRuntimeBundleEntryKind;
+  redactJson: boolean;
+}
+
+export interface DiagnosticsRuntimeBundleLayoutPort {
+  listEntries(input: {
+    runtimeDataRootDir: string;
+    cutoffMs: number;
+    fileSystem: RuntimeFileSystemPort;
+  }): Promise<DiagnosticsRuntimeBundleEntry[]>;
+}
+
 export interface CollectDiagnosticsBundleInput {
   userDataDir: string;
-  openclawConfigDir: string;
+  runtimeDataRootDir: string;
+  runtimeLayout: DiagnosticsRuntimeBundleLayoutPort;
   appInfo: DiagnosticsAppInfo;
   gateway: DiagnosticsGatewayInfo;
   license?: DiagnosticsLicenseInfo;
@@ -74,14 +97,14 @@ type JsonRecord = Record<string, unknown>;
 function createEmptyCounts(): DiagnosticsCounts {
   return {
     userDataLogs: 0,
-    openclawLogs: 0,
+    runtimeLogs: 0,
     sessionIndexes: 0,
     sessionJsonl: 0,
     workspaceFiles: 0,
     workspaceSubagentFiles: 0,
     pluginManifests: 0,
     settingsJson: 0,
-    openclawJson: 0,
+    runtimeConfigJson: 0,
   };
 }
 
@@ -164,38 +187,6 @@ function addDiagnosticsEntry(
 
 function isRecentFile(stats: RuntimeFileStat, cutoffMs: number): boolean {
   return stats.mtimeMs >= cutoffMs;
-}
-
-async function walkFilesRecursively(
-  fileSystem: RuntimeFileSystemPort,
-  rootDir: string,
-  visit: (filePath: string, fileName: string, fileStats: RuntimeFileStat) => Promise<void>,
-): Promise<void> {
-  let entries: Awaited<ReturnType<RuntimeFileSystemPort['listDirectory']>>;
-  try {
-    entries = await fileSystem.listDirectory(rootDir);
-  } catch {
-    return;
-  }
-
-  for (const entry of entries) {
-    const fullPath = path.join(rootDir, entry.name);
-    if (entry.isDirectory) {
-      await walkFilesRecursively(fileSystem, fullPath, visit);
-      continue;
-    }
-    if (!entry.isFile) {
-      continue;
-    }
-
-    let fileStats: RuntimeFileStat;
-    try {
-      fileStats = await fileSystem.stat(fullPath);
-    } catch {
-      continue;
-    }
-    await visit(fullPath, entry.name, fileStats);
-  }
 }
 
 async function readAndMaskJsonFile(
@@ -305,104 +296,28 @@ export async function collectDiagnosticsBundle(input: CollectDiagnosticsBundleIn
     });
   });
 
-  const openclawLogsDir = path.join(input.openclawConfigDir, 'logs');
-  await walkFilesRecursively(fileSystem, openclawLogsDir, async (filePath, _fileName, fileStats) => {
-    if (!isRecentFile(fileStats, cutoffMs)) {
-      return;
-    }
-    counts.openclawLogs += 1;
-    addDiagnosticsEntry(entryMap, {
-      sourcePath: filePath,
-      destinationPath: path.join('openclaw', path.relative(input.openclawConfigDir, filePath)),
-      redactJson: false,
-    });
+  const runtimeEntries = await input.runtimeLayout.listEntries({
+    runtimeDataRootDir: input.runtimeDataRootDir,
+    cutoffMs,
+    fileSystem,
   });
-
-  const agentsDir = path.join(input.openclawConfigDir, 'agents');
-  let agentEntries: Awaited<ReturnType<RuntimeFileSystemPort['listDirectory']>> = [];
-  try {
-    agentEntries = await fileSystem.listDirectory(agentsDir);
-  } catch {
-    // ignore
-  }
-  for (const agentEntry of agentEntries) {
-    if (!agentEntry.isDirectory) {
-      continue;
-    }
-    const sessionsDir = path.join(agentsDir, agentEntry.name, 'sessions');
-    const sessionsIndexPath = path.join(sessionsDir, 'sessions.json');
-    if (await fileSystem.exists(sessionsIndexPath)) {
+  for (const runtimeEntry of runtimeEntries) {
+    if (runtimeEntry.kind === 'runtimeLog') {
+      counts.runtimeLogs += 1;
+    } else if (runtimeEntry.kind === 'sessionIndex') {
       counts.sessionIndexes += 1;
-      addDiagnosticsEntry(entryMap, {
-        sourcePath: sessionsIndexPath,
-        destinationPath: path.join('openclaw', path.relative(input.openclawConfigDir, sessionsIndexPath)),
-        redactJson: false,
-      });
-    }
-
-    await walkFilesRecursively(fileSystem, sessionsDir, async (filePath, fileName, fileStats) => {
-      if (!fileName.endsWith('.jsonl')) {
-        return;
-      }
-      if (!isRecentFile(fileStats, cutoffMs)) {
-        return;
-      }
+    } else if (runtimeEntry.kind === 'sessionJsonl') {
       counts.sessionJsonl += 1;
-      addDiagnosticsEntry(entryMap, {
-        sourcePath: filePath,
-        destinationPath: path.join('openclaw', path.relative(input.openclawConfigDir, filePath)),
-        redactJson: false,
-      });
-    });
-  }
-
-  const workspaceDir = path.join(input.openclawConfigDir, 'workspace');
-  await walkFilesRecursively(fileSystem, workspaceDir, async (filePath, fileName) => {
-    if (!WORKSPACE_FILE_WHITELIST.has(fileName)) {
-      return;
+    } else if (runtimeEntry.kind === 'workspaceFile') {
+      counts.workspaceFiles += 1;
+    } else if (runtimeEntry.kind === 'workspaceSubagentFile') {
+      counts.workspaceSubagentFiles += 1;
+    } else if (runtimeEntry.kind === 'pluginManifest') {
+      counts.pluginManifests += 1;
+    } else if (runtimeEntry.kind === 'runtimeConfig') {
+      counts.runtimeConfigJson += 1;
     }
-    counts.workspaceFiles += 1;
-    addDiagnosticsEntry(entryMap, {
-      sourcePath: filePath,
-      destinationPath: path.join('openclaw', path.relative(input.openclawConfigDir, filePath)),
-      redactJson: false,
-    });
-  });
-
-  const subagentsWorkspaceDir = path.join(input.openclawConfigDir, 'workspace-subagents');
-  await walkFilesRecursively(fileSystem, subagentsWorkspaceDir, async (filePath, fileName) => {
-    if (!WORKSPACE_FILE_WHITELIST.has(fileName)) {
-      return;
-    }
-    counts.workspaceSubagentFiles += 1;
-    addDiagnosticsEntry(entryMap, {
-      sourcePath: filePath,
-      destinationPath: path.join('openclaw', path.relative(input.openclawConfigDir, filePath)),
-      redactJson: false,
-    });
-  });
-
-  const extensionsDir = path.join(input.openclawConfigDir, 'extensions');
-  let extensionEntries: Awaited<ReturnType<RuntimeFileSystemPort['listDirectory']>> = [];
-  try {
-    extensionEntries = await fileSystem.listDirectory(extensionsDir);
-  } catch {
-    // ignore
-  }
-  for (const extensionEntry of extensionEntries) {
-    if (!extensionEntry.isDirectory) {
-      continue;
-    }
-    const manifestPath = path.join(extensionsDir, extensionEntry.name, 'openclaw.plugin.json');
-    if (!(await fileSystem.exists(manifestPath))) {
-      continue;
-    }
-    counts.pluginManifests += 1;
-    addDiagnosticsEntry(entryMap, {
-      sourcePath: manifestPath,
-      destinationPath: path.join('openclaw', path.relative(input.openclawConfigDir, manifestPath)),
-      redactJson: false,
-    });
+    addDiagnosticsEntry(entryMap, runtimeEntry);
   }
 
   const settingsPath = path.join(input.userDataDir, 'settings.json');
@@ -411,16 +326,6 @@ export async function collectDiagnosticsBundle(input: CollectDiagnosticsBundleIn
     addDiagnosticsEntry(entryMap, {
       sourcePath: settingsPath,
       destinationPath: path.join('userdata', 'settings.json'),
-      redactJson: true,
-    });
-  }
-
-  const openclawConfigPath = path.join(input.openclawConfigDir, 'openclaw.json');
-  if (await fileSystem.exists(openclawConfigPath)) {
-    counts.openclawJson += 1;
-    addDiagnosticsEntry(entryMap, {
-      sourcePath: openclawConfigPath,
-      destinationPath: path.join('openclaw', 'openclaw.json'),
       redactJson: true,
     });
   }
@@ -440,7 +345,7 @@ export async function collectDiagnosticsBundle(input: CollectDiagnosticsBundleIn
       app: input.appInfo,
       runtime: {
         userDataDir: input.userDataDir,
-        openclawConfigDir: input.openclawConfigDir,
+        runtimeDataRootDir: input.runtimeDataRootDir,
         cutoffIso: input.clock.toIsoString(cutoffMs),
       },
       gateway: {

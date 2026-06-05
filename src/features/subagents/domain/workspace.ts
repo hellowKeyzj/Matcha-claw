@@ -1,7 +1,6 @@
 import type { SubagentSummary } from '@/types/subagent';
 
 const MAIN_AGENT_ID = 'main';
-const FALLBACK_ROOT = '~/.openclaw/workspace-subagents';
 
 export function normalizeSubagentNameToSlug(name: string): string {
   const slug = name
@@ -29,12 +28,6 @@ function trimTrailingSeparator(pathname: string, separator: '/' | '\\'): string 
   return pathname.replace(new RegExp(`${escaped}+$`), '');
 }
 
-function appendPathSegment(pathname: string, segment: string): string {
-  const separator = detectSeparator(pathname);
-  const base = trimTrailingSeparator(pathname, separator);
-  return `${base}${separator}${segment}`;
-}
-
 function getParentDir(pathname: string): string {
   const separator = detectSeparator(pathname);
   const normalized = trimTrailingSeparator(pathname, separator);
@@ -53,14 +46,12 @@ function getParentDir(pathname: string): string {
 
 export function resolveSubagentWorkspaceRoot(
   agents: Pick<SubagentSummary, 'id' | 'workspace' | 'isDefault'>[],
-  options?: { fallbackRoot?: string }
-): string {
+): string | undefined {
   const defaultWorkspace = agents.find((agent) => agent.isDefault)?.workspace?.trim();
   const mainWorkspace = agents.find((agent) => agent.id === MAIN_AGENT_ID)?.workspace?.trim();
   const baseWorkspace = defaultWorkspace || mainWorkspace;
   if (!baseWorkspace) {
-    const fallbackRoot = options?.fallbackRoot?.trim();
-    return fallbackRoot || FALLBACK_ROOT;
+    return undefined;
   }
   const separator = detectSeparator(baseWorkspace);
   const parent = getParentDir(baseWorkspace);
@@ -68,22 +59,14 @@ export function resolveSubagentWorkspaceRoot(
   return base ? `${base}${separator}workspace-subagents` : `${separator}workspace-subagents`;
 }
 
-export function buildWorkspaceSubagentsRootFromConfigDir(configDir: string): string {
-  const normalized = configDir.trim();
-  if (!normalized) {
-    return FALLBACK_ROOT;
-  }
-  return appendPathSegment(normalized, 'workspace-subagents');
-}
-
 export function buildSubagentWorkspacePath(input: {
   name: string;
   agents: Pick<SubagentSummary, 'id' | 'workspace' | 'isDefault'>[];
-  fallbackRoot?: string;
-}): string {
-  const root = resolveSubagentWorkspaceRoot(input.agents, {
-    fallbackRoot: input.fallbackRoot,
-  });
+}): string | undefined {
+  const root = resolveSubagentWorkspaceRoot(input.agents);
+  if (!root) {
+    return undefined;
+  }
   const separator = detectSeparator(root);
   const base = trimTrailingSeparator(root, separator);
   const slug = normalizeSubagentNameToSlug(input.name);

@@ -1,5 +1,6 @@
-import { hostApiFetch } from '@/lib/host-api';
+import { hostCapabilityExecute } from '@/lib/host-api';
 import type { ModelCapability } from '@/lib/providers';
+import type { RuntimeAddress } from '../../runtime-host/shared/runtime-address';
 import { MODEL_CAPABILITIES } from '@/lib/provider-model-capabilities';
 
 export type { ModelCapability } from '@/lib/providers';
@@ -17,7 +18,24 @@ export interface ProviderModel {
   quality?: string;
 }
 
+const MODEL_PROVIDER_CAPABILITY_ID = 'model.provider';
 const MODEL_CAPABILITY_SET = new Set<ModelCapability>(MODEL_CAPABILITIES);
+
+async function modelProviderCapabilityExecute<TResult>(
+  operationId: string,
+  runtimeAddress: RuntimeAddress,
+  input: Record<string, unknown> = {},
+): Promise<TResult> {
+  return await hostCapabilityExecute<TResult>({
+    id: MODEL_PROVIDER_CAPABILITY_ID,
+    operationId,
+    runtimeAddress,
+    input: {
+      ...input,
+      runtimeAddress,
+    },
+  });
+}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
@@ -92,20 +110,22 @@ export function normalizeProviderModels(value: unknown): ProviderModel[] {
   return out;
 }
 
-export async function fetchProviderModels(): Promise<ProviderModel[]> {
-  return normalizeProviderModels(await hostApiFetch<unknown>('/api/provider-models'));
+export async function fetchProviderModels(runtimeAddress: RuntimeAddress): Promise<ProviderModel[]> {
+  return normalizeProviderModels(await modelProviderCapabilityExecute<unknown>(
+    'providerModels.list',
+    runtimeAddress,
+  ));
 }
 
 export async function persistProviderModels(
   credentialId: string,
   models: readonly Omit<ProviderModel, 'credentialId'>[],
+  runtimeAddress: RuntimeAddress,
 ): Promise<{ success: boolean; credentialId: string; models: ProviderModel[]; error?: string }> {
-  const result = await hostApiFetch<{ success?: boolean; credentialId?: string; models?: unknown; error?: string }>(
-    `/api/provider-models/${encodeURIComponent(credentialId)}`,
-    {
-      method: 'PUT',
-      body: JSON.stringify({ models }),
-    },
+  const result = await modelProviderCapabilityExecute<{ success?: boolean; credentialId?: string; models?: unknown; error?: string }>(
+    'providerModels.replace',
+    runtimeAddress,
+    { credentialId, models },
   );
   return {
     success: result?.success === true,

@@ -1,7 +1,9 @@
 import { describe, expect, it, vi } from 'vitest';
 import { subagentRoutes } from '../../runtime-host/api/routes/subagent-routes';
+import { createSubagentManagementCapabilityOperationRoutes } from '../../runtime-host/application/capabilities/agent/subagent-management-capability';
 import { GatewayCapabilityService } from '../../runtime-host/application/gateway/gateway-capability-service';
 import { SubagentRuntimeService } from '../../runtime-host/application/subagents/service';
+import { SubagentRuntimeWorkflow } from '../../runtime-host/application/workflows/subagent-runtime/subagent-runtime-workflow';
 import { dispatchRuntimeRouteDefinition } from './helpers/runtime-route';
 import type { RuntimeClockPort } from '../../runtime-host/application/common/runtime-ports';
 
@@ -11,6 +13,25 @@ function clock(nowMs: number): RuntimeClockPort {
     nowIso: () => new Date(nowMs).toISOString(),
     toIsoString: (ms) => new Date(ms).toISOString(),
   };
+}
+
+function createSubagentService(
+  deps: {
+    gatewayRpc: (method: string, params?: unknown, timeoutMs?: number) => Promise<unknown>;
+    inspectGatewayMethodReadiness: (methods: string[], timeoutMs?: number) => Promise<unknown>;
+    ensureIdentityFile?: (workspaceDir: string, options?: { createDir?: boolean }) => Promise<{ wroteIdentity: boolean; replacedTemplate: boolean; removedBootstrap: boolean }>;
+    nowMs?: number;
+  },
+): SubagentRuntimeService {
+  const runtimeWorkflow = new SubagentRuntimeWorkflow({
+    gateway: { gatewayRpc: deps.gatewayRpc },
+    capabilities: new GatewayCapabilityService({ gateway: { inspectGatewayMethodReadiness: deps.inspectGatewayMethodReadiness } }),
+    workspace: {
+      ensureIdentityFile: deps.ensureIdentityFile ?? vi.fn(async () => ({ wroteIdentity: false, replacedTemplate: false, removedBootstrap: false })),
+    },
+    clock: clock(deps.nowMs ?? 1000),
+  });
+  return new SubagentRuntimeService({ runtimeWorkflow });
 }
 
 describe('runtime-host subagent routes', () => {
@@ -24,12 +45,7 @@ describe('runtime-host subagent routes', () => {
       methods: ['agents.list'],
       missingMethods: [],
     }));
-    const subagentService = new SubagentRuntimeService({
-      gateway: { gatewayRpc },
-      capabilities: new GatewayCapabilityService({ gateway: { inspectGatewayMethodReadiness } }),
-      workspace: { ensureIdentityFile: vi.fn(async () => ({ wroteIdentity: false, replacedTemplate: false, removedBootstrap: false })) },
-      clock: clock(1000),
-    });
+    const subagentService = createSubagentService({ gatewayRpc, inspectGatewayMethodReadiness });
 
     const response = await dispatchRuntimeRouteDefinition(
       subagentRoutes,
@@ -57,20 +73,11 @@ describe('runtime-host subagent routes', () => {
   it('validates config.set before calling gateway', async () => {
     const gatewayRpc = vi.fn(async () => ({ ok: true }));
     const inspectGatewayMethodReadiness = vi.fn();
-    const subagentService = new SubagentRuntimeService({
-      gateway: { gatewayRpc },
-      capabilities: new GatewayCapabilityService({ gateway: { inspectGatewayMethodReadiness } }),
-      workspace: { ensureIdentityFile: vi.fn(async () => ({ wroteIdentity: false, replacedTemplate: false, removedBootstrap: false })) },
-      clock: clock(1000),
-    });
+    const subagentService = createSubagentService({ gatewayRpc, inspectGatewayMethodReadiness });
 
-    await expect(dispatchRuntimeRouteDefinition(
-      subagentRoutes,
-      'POST',
-      '/api/subagents/config/set',
-      { raw: '{} ' },
-      { subagentService },
-    )).resolves.toEqual({
+    const [configSetRoute] = createSubagentManagementCapabilityOperationRoutes({ subagentService });
+
+    await expect(configSetRoute.handle({ raw: '{} ' })).resolves.toEqual({
       status: 400,
       data: { success: false, error: 'baseHash is required' },
     });
@@ -78,44 +85,40 @@ describe('runtime-host subagent routes', () => {
     expect(inspectGatewayMethodReadiness).not.toHaveBeenCalled();
   });
 
-  it('routes file writes and agent wait through explicit gateway methods', async () => {
+  it('routes file writes through subagent capability methods and does not expose direct agent wait', async () => {
     const gatewayRpc = vi.fn(async () => ({ ok: true }));
     const inspectGatewayMethodReadiness = vi.fn(async (methods: string[]) => ({
       ready: true,
       methods,
       missingMethods: [],
     }));
-    const subagentService = new SubagentRuntimeService({
-      gateway: { gatewayRpc },
-      capabilities: new GatewayCapabilityService({ gateway: { inspectGatewayMethodReadiness } }),
-      workspace: { ensureIdentityFile: vi.fn(async () => ({ wroteIdentity: false, replacedTemplate: false, removedBootstrap: false })) },
-      clock: clock(1000),
-    });
+    const subagentService = createSubagentService({ gatewayRpc, inspectGatewayMethodReadiness });
 
-    await expect(dispatchRuntimeRouteDefinition(
-      subagentRoutes,
-      'POST',
-      '/api/subagents/files/set',
-      { agentId: 'writer', name: 'AGENTS.md', content: 'rules' },
-      { subagentService },
-    )).resolves.toEqual({ status: 200, data: { ok: true } });
+    const fileSetRoute = createSubagentManagementCapabilityOperationRoutes({ subagentService })
+      .find((route) => route.operationId === 'subagents.files.set');
+    if (!fileSetRoute) {
+      throw new Error('Expected subagents.files.set operation route');
+    }
+
+    await expect(fileSetRoute.handle({ agentId: 'writer', name: 'AGENTS.md', content: 'rules' }))
+      .resolves.toEqual({ status: 200, data: { ok: true } });
     await expect(dispatchRuntimeRouteDefinition(
       subagentRoutes,
       'POST',
       '/api/subagents/agent-wait',
       { runId: 'run-1', timeoutMs: 30000 },
       { subagentService },
-    )).resolves.toEqual({ status: 200, data: { ok: true } });
+    )).resolves.toBeNull();
 
     expect(gatewayRpc).toHaveBeenCalledWith(
       'agents.files.set',
       { agentId: 'writer', name: 'AGENTS.md', content: 'rules' },
       60000,
     );
-    expect(gatewayRpc).toHaveBeenCalledWith(
+    expect(gatewayRpc).not.toHaveBeenCalledWith(
       'agent.wait',
-      { runId: 'run-1', timeoutMs: 30000 },
-      40000,
+      expect.anything(),
+      expect.anything(),
     );
   });
 
@@ -126,12 +129,7 @@ describe('runtime-host subagent routes', () => {
       methods: ['config.get'],
       missingMethods: ['config.get'],
     }));
-    const subagentService = new SubagentRuntimeService({
-      gateway: { gatewayRpc },
-      capabilities: new GatewayCapabilityService({ gateway: { inspectGatewayMethodReadiness } }),
-      workspace: { ensureIdentityFile: vi.fn(async () => ({ wroteIdentity: false, replacedTemplate: false, removedBootstrap: false })) },
-      clock: clock(1000),
-    });
+    const subagentService = createSubagentService({ gatewayRpc, inspectGatewayMethodReadiness });
 
     await expect(dispatchRuntimeRouteDefinition(subagentRoutes, 'POST', '/api/subagents/config/get', {}, { subagentService }))
       .resolves.toEqual({
@@ -157,12 +155,7 @@ describe('runtime-host subagent routes', () => {
       methods,
       missingMethods: [],
     }));
-    const subagentService = new SubagentRuntimeService({
-      gateway: { gatewayRpc },
-      capabilities: new GatewayCapabilityService({ gateway: { inspectGatewayMethodReadiness } }),
-      workspace: { ensureIdentityFile: vi.fn(async () => ({ wroteIdentity: false, replacedTemplate: false, removedBootstrap: false })) },
-      clock: clock(2000),
-    });
+    const subagentService = createSubagentService({ gatewayRpc, inspectGatewayMethodReadiness, nowMs: 2000 });
 
     await expect(dispatchRuntimeRouteDefinition(subagentRoutes, 'POST', '/api/subagents/list', {}, { subagentService }))
       .resolves.toEqual({
@@ -218,20 +211,16 @@ describe('runtime-host subagent routes', () => {
       missingMethods: [],
     }));
     const ensureIdentityFile = vi.fn(async () => ({ wroteIdentity: true, replacedTemplate: false, removedBootstrap: false }));
-    const subagentService = new SubagentRuntimeService({
-      gateway: { gatewayRpc },
-      capabilities: new GatewayCapabilityService({ gateway: { inspectGatewayMethodReadiness } }),
-      workspace: { ensureIdentityFile },
-      clock: clock(1000),
-    });
+    const subagentService = createSubagentService({ gatewayRpc, inspectGatewayMethodReadiness, ensureIdentityFile });
 
-    await expect(dispatchRuntimeRouteDefinition(
-      subagentRoutes,
-      'POST',
-      '/api/subagents/create',
-      { name: 'Writer', workspace: 'C:\\Users\\Dev\\.openclaw\\workspace-subagents\\writer' },
-      { subagentService },
-    )).resolves.toEqual({ status: 200, data: { agentId: 'writer' } });
+    const createRoute = createSubagentManagementCapabilityOperationRoutes({ subagentService })
+      .find((route) => route.operationId === 'subagents.create');
+    if (!createRoute) {
+      throw new Error('Expected subagents.create operation route');
+    }
+
+    await expect(createRoute.handle({ name: 'Writer', workspace: 'C:\\Users\\Dev\\.openclaw\\workspace-subagents\\writer' }))
+      .resolves.toEqual({ status: 200, data: { agentId: 'writer' } });
 
     expect(ensureIdentityFile).toHaveBeenCalledWith(
       'C:\\Users\\Dev\\.openclaw\\workspace-subagents\\writer',

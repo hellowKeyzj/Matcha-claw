@@ -1,3 +1,5 @@
+import { RuntimeRouteIndex } from '../api/dispatch/runtime-route-index';
+import { createRuntimeRouteDispatcher } from '../api/dispatch/runtime-route-dispatcher';
 import type {
   RuntimeRouteHandler,
   RuntimeRouteHandlerEntry,
@@ -39,17 +41,48 @@ function routeDefinitionKey<Deps>(
   return `${namespace}.${definition.method} /${matcher.pattern.source}/`;
 }
 
+export interface RuntimeHostRouteRegistrationDescriptor {
+  readonly key: string;
+  readonly owner: string | null;
+}
+
 export class RuntimeHostRouteRegistry {
   private readonly registry = new RuntimeHostRegistry<RuntimeRouteHandlerEntry['key'], {
+    readonly method: string;
     readonly matcher: RuntimeRouteMatcher;
     readonly handler: RuntimeRouteHandler;
   }>();
+  private readonly owners = new Map<string, string | null>();
+  private activeRegistrationOwner: string | null = null;
 
-  private register(key: string, matcher: RuntimeRouteMatcher, handler: RuntimeRouteHandler): void {
+  private register(key: string, method: string, matcher: RuntimeRouteMatcher, handler: RuntimeRouteHandler): void {
     this.registry.register(key, {
+      method,
       matcher,
       handler,
     });
+    this.owners.set(key, this.activeRegistrationOwner);
+  }
+
+  withRegistrationOwner<T>(owner: string, register: () => T): T {
+    const normalizedOwner = owner.trim();
+    if (!normalizedOwner) {
+      throw new Error('Runtime route registration owner is required');
+    }
+    const previousOwner = this.activeRegistrationOwner;
+    this.activeRegistrationOwner = normalizedOwner;
+    try {
+      return register();
+    } finally {
+      this.activeRegistrationOwner = previousOwner;
+    }
+  }
+
+  listRegistrations(): RuntimeHostRouteRegistrationDescriptor[] {
+    return this.registry.list().map((entry) => ({
+      key: entry.key,
+      owner: this.owners.get(entry.key) ?? null,
+    }));
   }
 
   registerDefinitions<Deps>(
@@ -60,6 +93,7 @@ export class RuntimeHostRouteRegistry {
     definitions.forEach((definition) => {
       this.register(
         routeDefinitionKey(namespace, definition),
+        definition.method,
         getRuntimeRouteDefinitionMatcher(definition),
         (request) => invokeRuntimeRouteDefinition(definition, routeContext(request), deps),
       );
@@ -69,6 +103,7 @@ export class RuntimeHostRouteRegistry {
   list(): RuntimeRouteHandlerEntry[] {
     return this.registry.list().map((entry) => ({
       key: entry.key,
+      method: entry.value.method,
       matcher: entry.value.matcher,
       handle: async (request) => {
         try {
@@ -81,5 +116,13 @@ export class RuntimeHostRouteRegistry {
         }
       },
     }));
+  }
+
+  index(): RuntimeRouteIndex {
+    return RuntimeRouteIndex.from(this.list());
+  }
+
+  dispatcher(): (method: string, route: string, payload: unknown) => Promise<RuntimeRouteResponse | null> {
+    return createRuntimeRouteDispatcher(this.index());
   }
 }

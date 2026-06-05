@@ -10,6 +10,7 @@ interface SubagentCardProps {
   editLocked?: boolean;
   deleteLocked?: boolean;
   manageLocked?: boolean;
+  exportLocked?: boolean;
   modelReady?: boolean;
   onEdit: () => void;
   onDelete: () => void;
@@ -24,6 +25,7 @@ export function SubagentCard({
   editLocked = false,
   deleteLocked = false,
   manageLocked = false,
+  exportLocked = false,
   modelReady = true,
   onEdit,
   onDelete,
@@ -63,6 +65,7 @@ export function SubagentCard({
           className="h-8 w-8 shrink-0"
           aria-label={`Export ${agent.id}`}
           title={t('card.actions.export')}
+          disabled={exportLocked}
           onClick={onExport}
         >
           <Download className="h-4 w-4" />

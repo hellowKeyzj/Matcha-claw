@@ -3,16 +3,17 @@ import {
   DEFAULT_PORT,
 } from '../shared/runtime-host-constants';
 import { createHealthPayload } from '../application/runtime-host/runtime-state';
-import { createRuntimeRouteDispatcher } from '../api/dispatch/runtime-route-dispatcher';
 import { createParentTransportClient } from './parent-transport-client';
 import { createRuntimeHostHttpServer } from './runtime-host-server';
 import { RuntimeHostServerRunner } from './runtime-host-runner';
-import { createRuntimeHostRouteHandlers } from './runtime-route-composition';
+import { createRuntimeHostRouteRegistry } from './runtime-route-composition';
 import {
-  composeRuntimeHostApplicationServices,
+  createApplicationServiceRegistry,
   registerRuntimeHostApplicationServices,
 } from './application-services';
+import type { RuntimeHostStatePort } from '../application/runtime-host/runtime-state';
 import { RuntimeHostContainer } from './container';
+import { RUNTIME_DISPATCH_ROUTE_TOKEN } from './runtime-host-tokens';
 import {
   registerRuntimeHostInfrastructure,
   resolveRuntimeHostInfrastructure,
@@ -20,6 +21,7 @@ import {
 import {
   registerRuntimeHostModuleJobs,
   registerRuntimeHostModuleLifecycle,
+  validateRuntimeHostApplicationModuleRegistrationOwners,
 } from './runtime-host-module-registry';
 import {
   registerRuntimeHostSystemInfrastructure,
@@ -27,6 +29,7 @@ import {
   registerRuntimeHostSystemModuleLifecycle,
   registerRuntimeHostSystemServices,
   resolveRuntimeHostSystemModules,
+  validateRuntimeHostSystemModuleRegistrationOwners,
 } from './runtime-host-runtime-module-registry';
 
 export interface RuntimeHostProcess {
@@ -103,38 +106,27 @@ export function createRuntimeHostProcess(): RuntimeHostProcess {
   registerRuntimeHostSystemInfrastructure(systemModuleContext);
   registerRuntimeHostSystemServices(systemModuleContext);
   const systemModules = resolveRuntimeHostSystemModules(systemModuleContext);
-  const openclawBridge = systemModules.gatewayBridge.openclawBridge;
   const { pluginRegistry } = systemModules.pluginRuntime;
 
+  container.registerValue('runtimeHost.stateSnapshots', {
+    runtimeState: () => pluginRegistry.snapshotRuntimeState(),
+    runtimeHealth: (state: ReturnType<RuntimeHostStatePort['runtimeState']>) => pluginRegistry.snapshotRuntimeHealth(state),
+  });
+  container.registerValue('runtimeHost.transportStats', {
+    snapshot: () => transportStats,
+  });
+  container.registerValue('runtimeHost.parentShell', parentShell);
+  container.registerValue('runtimeHost.parentGatewayEvents', {
+    emit: parentTransportClient.emitParentGatewayEvent,
+  });
   const applicationContext = {
     container,
-    runtimeState: {
-      runtimeState: () => pluginRegistry.snapshotRuntimeState(),
-      runtimeHealth: (state) => pluginRegistry.snapshotRuntimeHealth(state as ReturnType<typeof pluginRegistry.snapshotRuntimeState>),
-    },
-    transportStats: {
-      snapshot: () => transportStats,
-    },
-    pluginRuntime: {
-      snapshotPluginsRuntimePayload: () => pluginRegistry.snapshotPluginsRuntimePayload(),
-      enqueueRefresh: () => pluginRegistry.enqueueRefresh(),
-      getEnabledPluginIds: () => pluginRegistry.getEnabledPluginIds(),
-      getPluginCatalog: () => pluginRegistry.getPluginCatalog(),
-      getRefreshJob: () => pluginRegistry.getRefreshJob(),
-    },
-    openclawBridge,
-    sessionRuntime: systemModules.sessionRuntime.sessionRuntime,
-    platformRuntime: systemModules.platformRuntime.facade,
-    parentShell,
-    parentGatewayEvents: {
-      emit: parentTransportClient.emitParentGatewayEvent,
-    },
+    facades: createApplicationServiceRegistry(),
   };
   registerRuntimeHostApplicationServices(applicationContext);
-  composeRuntimeHostApplicationServices(applicationContext);
-  container.registerValue('runtime.dispatchRoute', (method: string, route: string, payload: unknown) => (
-    createRuntimeRouteDispatcher(createRuntimeHostRouteHandlers(container))(method, route, payload)
-  ));
+  const routeRegistry = createRuntimeHostRouteRegistry(applicationContext);
+  const dispatchRuntimeRoute = routeRegistry.dispatcher();
+  container.registerValue(RUNTIME_DISPATCH_ROUTE_TOKEN, dispatchRuntimeRoute);
   registerRuntimeHostSystemModuleJobs(systemModuleContext, systemModules);
   registerRuntimeHostModuleJobs(container, {
     jobRegistry,
@@ -143,8 +135,14 @@ export function createRuntimeHostProcess(): RuntimeHostProcess {
   registerRuntimeHostModuleLifecycle(container, {
     lifecycle,
   });
+  validateRuntimeHostSystemModuleRegistrationOwners(systemModuleContext);
+  validateRuntimeHostApplicationModuleRegistrationOwners(container, {
+    jobRegistry,
+    lifecycle,
+    routes: routeRegistry,
+    facades: applicationContext.facades,
+  });
 
-  const dispatchRuntimeRoute = container.resolve<ReturnType<typeof createRuntimeRouteDispatcher>>('runtime.dispatchRoute');
   let runner: RuntimeHostServerRunner;
 
   const server = createRuntimeHostHttpServer({

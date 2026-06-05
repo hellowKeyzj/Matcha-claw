@@ -4,14 +4,13 @@ import type {
   SessionRuntimeStateSnapshot,
   SessionTimelineEntry,
 } from '../../shared/session-adapter-types';
-import { parseSessionKeyAgent } from './session-catalog';
 import {
   resolveSessionLabelDetailsFromTimelineEntries,
 } from './transcript-labels';
 import {
   resolveTimelineLastActivityAt,
 } from './timeline-state';
-import { createOpenClawRuntimeSessionContext } from './runtime-providers/session-runtime-context';
+import type { RuntimeSessionContext } from '../agent-runtime/contracts/runtime-endpoint-types';
 
 function readSessionKeySuffix(sessionKey: string): string {
   const parts = sessionKey.split(':');
@@ -39,9 +38,9 @@ export function createSessionCatalogItem(input: {
   runtimeModel?: string | null;
   resolvedModel?: string | null;
   label?: string | null;
+  context: RuntimeSessionContext;
 }): SessionCatalogItem {
-  const context = createOpenClawRuntimeSessionContext(input.sessionKey);
-  const agentId = parseSessionKeyAgent(input.sessionKey) ?? context.agentId ?? 'main';
+  const agentId = input.context.address.agentId;
   const inputLabel = typeof input.label === 'string' ? input.label.trim() : '';
   const timelineLabel = resolveSessionLabelDetailsFromTimelineEntries(input.timelineEntries);
   const label = inputLabel || timelineLabel.label;
@@ -52,8 +51,9 @@ export function createSessionCatalogItem(input: {
   return {
     key: input.sessionKey,
     agentId,
-    protocolId: context.protocolId,
-    runtimeProviderId: context.runtimeProviderId,
+    protocolId: input.context.protocolId,
+    runtimeEndpointId: input.context.runtimeEndpointId,
+    runtimeAddress: input.context.address,
     kind,
     preferred: kind === 'main',
     ...(label ? { label } : {}),

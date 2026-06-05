@@ -1,6 +1,6 @@
 import { TRANSPORT_VERSION } from '../../shared/runtime-host-constants';
 import { normalizeRoutePath, sendJson, type RuntimeHttpResponsePort } from '../common/http';
-import { parseDispatchEnvelope } from './dispatch-envelope';
+import { DISPATCH_ENVELOPE_MAX_BODY_BYTES, parseDispatchEnvelope } from './dispatch-envelope';
 import type { RuntimeRouteResponse } from './runtime-route-dispatcher-types';
 import type { RuntimeHostLogger } from '../../shared/logger';
 
@@ -28,14 +28,31 @@ interface RuntimeHttpRequestPort {
   on(event: 'error', listener: (error: Error) => void): unknown;
 }
 
+class DispatchPayloadTooLargeError extends Error {}
+
 function readRequestBody(req: RuntimeHttpRequestPort): Promise<string> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
+    let totalBytes = 0;
+    let rejected = false;
     req.on('data', (chunk: unknown) => {
-      chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk)));
+      if (rejected) {
+        return;
+      }
+      const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk));
+      totalBytes += buffer.byteLength;
+      if (totalBytes > DISPATCH_ENVELOPE_MAX_BODY_BYTES) {
+        rejected = true;
+        chunks.length = 0;
+        reject(new DispatchPayloadTooLargeError(`Dispatch envelope exceeds ${DISPATCH_ENVELOPE_MAX_BODY_BYTES} bytes`));
+        return;
+      }
+      chunks.push(buffer);
     });
     req.on('end', () => {
-      resolve(Buffer.concat(chunks).toString('utf8').trim());
+      if (!rejected) {
+        resolve(Buffer.concat(chunks).toString('utf8').trim());
+      }
     });
     req.on('error', reject);
   });
@@ -159,14 +176,20 @@ export function handleDispatchRoute(
       });
     }
   }).catch((error) => {
-    deps.transportStats.dispatchInternalError += 1;
-    sendJson(res, 500, {
+    const isPayloadTooLarge = error instanceof DispatchPayloadTooLargeError;
+    if (isPayloadTooLarge) {
+      deps.transportStats.badRequestRejected += 1;
+    } else {
+      deps.transportStats.dispatchInternalError += 1;
+    }
+    const status = isPayloadTooLarge ? 413 : 500;
+    sendJson(res, status, {
       version: TRANSPORT_VERSION,
       success: false,
-      status: 500,
+      status,
       error: {
-        code: 'INTERNAL_ERROR',
-        message: `Dispatch failure: ${String(error)}`,
+        code: isPayloadTooLarge ? 'PAYLOAD_TOO_LARGE' : 'INTERNAL_ERROR',
+        message: isPayloadTooLarge ? error.message : `Dispatch failure: ${String(error)}`,
       },
     });
   });

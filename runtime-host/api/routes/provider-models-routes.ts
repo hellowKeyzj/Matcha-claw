@@ -1,7 +1,6 @@
 import {
   decodeRouteParam,
   routeResponder,
-  type ApplicationResponse,
   type RuntimeRouteDefinition,
 } from './route-utils';
 
@@ -13,7 +12,6 @@ interface ProviderModelsRouteService {
   readAll(): Promise<unknown>;
   readSelectable(): Promise<unknown>;
   read(credentialId: string): Promise<unknown>;
-  replace(credentialId: string, payload: unknown): Promise<ApplicationResponse>;
 }
 
 export const providerModelsRoutes: readonly RuntimeRouteDefinition<ProviderModelsRouteDeps>[] = [
@@ -31,10 +29,5 @@ export const providerModelsRoutes: readonly RuntimeRouteDefinition<ProviderModel
     method: 'GET',
     pattern: /^\/api\/provider-models\/([^/]+)$/,
     handle: (_context, deps, match) => routeResponder.value(() => deps.providerModelsService.read(decodeRouteParam(match.params[0]))),
-  },
-  {
-    method: 'PUT',
-    pattern: /^\/api\/provider-models\/([^/]+)$/,
-    handle: (context, deps, match) => routeResponder.result(() => deps.providerModelsService.replace(decodeRouteParam(match.params[0]), context.payload)),
   },
 ] as const;

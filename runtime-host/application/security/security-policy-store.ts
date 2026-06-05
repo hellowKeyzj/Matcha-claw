@@ -1,48 +1,22 @@
-import { join } from 'node:path';
-import { normalizeSecurityPolicyPayload } from './security-policy-normalizer';
 import type { SecurityPolicyPayload } from './security-policy-types';
-import type { RuntimeFileSystemPort } from '../common/runtime-ports';
-import type { OpenClawConfigRepositoryPort } from '../openclaw/openclaw-config-repository';
+import type { SecurityPolicyStoragePort, SecurityPolicyStoreWorkflow } from '../workflows/security-policy/security-policy-store-workflow';
+
+export type { SecurityPolicyStoragePort };
 
 export class SecurityPolicyRepository {
   constructor(
-    private readonly configRepository: OpenClawConfigRepositoryPort,
-    private readonly fileSystem: RuntimeFileSystemPort,
+    private readonly storeWorkflow: Pick<SecurityPolicyStoreWorkflow, 'getFilePath' | 'read' | 'write'>,
   ) {}
 
   getFilePath(): string {
-    return join(this.getPolicyDir(), 'security.policy.json');
+    return this.storeWorkflow.getFilePath();
   }
 
   async read(): Promise<SecurityPolicyPayload> {
-    const preferred = await readPolicyFile(this.fileSystem, this.getFilePath());
-    if (preferred) {
-      return preferred;
-    }
-    return normalizeSecurityPolicyPayload({});
+    return await this.storeWorkflow.read();
   }
 
   async write(payload: unknown): Promise<SecurityPolicyPayload> {
-    const normalized = normalizeSecurityPolicyPayload(payload);
-    await this.fileSystem.ensureDirectory(this.getPolicyDir());
-    await this.fileSystem.writeTextFile(this.getFilePath(), `${JSON.stringify(normalized, null, 2)}\n`);
-    return normalized;
-  }
-
-  private getPolicyDir(): string {
-    return join(this.configRepository.getConfigDir(), 'policies');
-  }
-}
-
-async function readPolicyFile(
-  fileSystem: RuntimeFileSystemPort,
-  filePath: string,
-): Promise<SecurityPolicyPayload | null> {
-  try {
-    const raw = await fileSystem.readTextFile(filePath);
-    const parsed = JSON.parse(raw);
-    return normalizeSecurityPolicyPayload(parsed);
-  } catch {
-    return null;
+    return await this.storeWorkflow.write(payload);
   }
 }

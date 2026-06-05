@@ -1,26 +1,32 @@
 import { describe, expect, it, vi } from 'vitest';
-import { taskRoutes } from '../../runtime-host/api/routes/task-routes';
 import { GatewayCapabilityService } from '../../runtime-host/application/gateway/gateway-capability-service';
 import { TaskManagerService } from '../../runtime-host/application/tasks/service';
-import { dispatchRuntimeRouteDefinition } from './helpers/runtime-route';
+import { TaskOperationsWorkflow } from '../../runtime-host/application/workflows/task-runtime/task-operations-workflow';
+import { TaskRuntimeWorkflow } from '../../runtime-host/application/workflows/task-runtime/task-runtime-workflow';
+import { createTaskControlCapabilityOperationRoutes } from '../../runtime-host/application/capabilities/task/task-control-capability';
+import { createToolInvokeCapabilityOperationRoutes } from '../../runtime-host/application/capabilities/tool/tool-invoke-capability';
+import type { CapabilityOperationContext } from '../../runtime-host/application/capabilities/contracts/capability-router';
+import { createOpenClawTestRuntimeAddress } from './helpers/runtime-address-fixtures';
 
 function taskServiceWith(gatewayRpc = vi.fn(async () => ({})), inspectGatewayMethodReadiness = vi.fn(async () => ({
   ready: true,
-  methods: ['TaskList', 'TaskGet', 'TaskCreate', 'TaskUpdate', 'TodoWrite'],
+  methods: ['TaskList', 'TaskGet', 'TaskCreate', 'TaskUpdate', 'TodoWrite', 'TodoGet'],
   missingMethods: [],
 })), getWorkspaceDirForSession = vi.fn(async (sessionKey: string) => (
   sessionKey.startsWith('agent:ui-designer:')
     ? 'C:\\Users\\Dev\\.openclaw\\workspace-subagents\\ui-designer'
     : 'C:\\Users\\Dev\\.openclaw\\workspace'
 )), emitTaskSnapshot = vi.fn()) {
+  const runtimeWorkflow = new TaskRuntimeWorkflow({
+    gateway: { gatewayRpc },
+    capabilities: new GatewayCapabilityService({ gateway: { inspectGatewayMethodReadiness } }),
+    workspace: { getWorkspaceDirForSession },
+    emitTaskSnapshot,
+  });
   return {
-    taskService: new TaskManagerService({
-      gateway: { gatewayRpc },
-      capabilities: new GatewayCapabilityService({ gateway: { inspectGatewayMethodReadiness } }),
-      clock: { now: () => 1 },
-      workspace: { getWorkspaceDirForSession },
-      emitTaskSnapshot,
-    }),
+    taskService: new TaskManagerService(new TaskOperationsWorkflow({
+      runtimeWorkflow,
+    })),
     gatewayRpc,
     inspectGatewayMethodReadiness,
     getWorkspaceDirForSession,
@@ -28,23 +34,49 @@ function taskServiceWith(gatewayRpc = vi.fn(async () => ({})), inspectGatewayMet
   };
 }
 
+function toolInvokeRoute(taskService: TaskManagerService) {
+  return createToolInvokeCapabilityOperationRoutes({ taskService })[0]!;
+}
+
+function taskControlRoutes(taskService: TaskManagerService) {
+  return createTaskControlCapabilityOperationRoutes({ taskService });
+}
+
+function capabilityContext(
+  capabilityId: string,
+  operationId: string,
+  input: Record<string, unknown>,
+): CapabilityOperationContext {
+  const sessionKey = typeof input.params === 'object' && input.params && 'sessionKey' in input.params
+    ? String((input.params as { sessionKey?: unknown }).sessionKey)
+    : 'agent:main:main';
+  const address = createOpenClawTestRuntimeAddress(sessionKey);
+  return {
+    capabilityId,
+    operationId,
+    address: { ...address, capabilityId },
+    input: { ...input, runtimeAddress: { ...address, capabilityId } },
+    domainInput: input,
+  };
+}
+
+function toolInvokeContext(input: Record<string, unknown>): CapabilityOperationContext {
+  return capabilityContext('tool.invoke', 'tools.invoke', input);
+}
+
 describe('runtime-host task routes', () => {
-  it('routes session task list through TaskList gateway method', async () => {
+
+  it('routes session task list through tool.invoke capability operation', async () => {
     const gatewayRpc = vi.fn(async () => ({
       tasks: [{ id: '1', subject: '整理需求' }],
       todos: [],
     }));
     const deps = taskServiceWith(gatewayRpc);
 
-    const response = await dispatchRuntimeRouteDefinition(
-      taskRoutes,
-      'POST',
-      '/api/tasks/list',
-      { sessionKey: 'agent:main:main' },
-      { taskService: deps.taskService },
-    );
-
-    expect(response).toEqual({
+    await expect(toolInvokeRoute(deps.taskService).handle(toolInvokeContext({
+      method: 'TaskList',
+      params: { sessionKey: 'agent:main:main' },
+    }))).resolves.toEqual({
       status: 200,
       data: {
         tasks: [{ id: '1', subject: '整理需求' }],
@@ -64,13 +96,10 @@ describe('runtime-host task routes', () => {
     const deps = taskServiceWith(gatewayRpc);
     const sessionKey = 'agent:ui-designer:session-1';
 
-    await dispatchRuntimeRouteDefinition(
-      taskRoutes,
-      'POST',
-      '/api/tasks/list',
-      { sessionKey },
-      { taskService: deps.taskService },
-    );
+    await toolInvokeRoute(deps.taskService).handle(toolInvokeContext({
+      method: 'TaskList',
+      params: { sessionKey },
+    }));
 
     expect(deps.getWorkspaceDirForSession).toHaveBeenCalledWith(sessionKey);
     expect(gatewayRpc).toHaveBeenCalledWith(
@@ -83,46 +112,60 @@ describe('runtime-host task routes', () => {
     );
   });
 
-  it('validates required sessionKey and taskId before forwarding', async () => {
+  it('validates required sessionKey and taskId before forwarding through capability operation', async () => {
     const deps = taskServiceWith();
+    const route = toolInvokeRoute(deps.taskService);
 
-    await expect(dispatchRuntimeRouteDefinition(taskRoutes, 'POST', '/api/tasks/list', {}, { taskService: deps.taskService }))
+    await expect(route.handle(toolInvokeContext({ method: 'TaskList', params: {} })))
       .resolves.toEqual({ status: 400, data: { success: false, error: 'sessionKey is required' } });
-    await expect(dispatchRuntimeRouteDefinition(taskRoutes, 'POST', '/api/tasks/update', { sessionKey: 'agent:main:main' }, { taskService: deps.taskService }))
+    await expect(route.handle(toolInvokeContext({ method: 'TaskUpdate', params: { sessionKey: 'agent:main:main' } })))
       .resolves.toEqual({ status: 400, data: { success: false, error: 'taskId is required' } });
     expect(deps.gatewayRpc).not.toHaveBeenCalled();
   });
 
-  it('routes create, update, get and TodoWrite to uppercase gateway methods', async () => {
+  it('routes create, update, get and TodoWrite to uppercase gateway methods through capability operation', async () => {
     const gatewayRpc = vi.fn(async () => ({ ok: true }));
     const deps = taskServiceWith(gatewayRpc);
+    const route = toolInvokeRoute(deps.taskService);
 
-    await dispatchRuntimeRouteDefinition(taskRoutes, 'POST', '/api/tasks/create', {
-      sessionKey: 'agent:main:main',
-      subject: '实现接口',
-      description: '接入 TaskCreate',
-    }, { taskService: deps.taskService });
-    await dispatchRuntimeRouteDefinition(taskRoutes, 'POST', '/api/tasks/get', {
-      sessionKey: 'agent:main:main',
-      taskId: '1',
-    }, { taskService: deps.taskService });
-    await dispatchRuntimeRouteDefinition(taskRoutes, 'POST', '/api/tasks/update', {
-      sessionKey: 'agent:main:main',
-      taskId: '1',
-      status: 'deleted',
-      addBlockedBy: ['0'],
-      addBlocks: ['2'],
-    }, { taskService: deps.taskService });
-    await dispatchRuntimeRouteDefinition(taskRoutes, 'POST', '/api/tasks/todos/write', {
-      sessionKey: 'agent:main:main',
-      oldTodos: [],
-      newTodos: [{ content: 'done', status: 'completed' }],
-    }, { taskService: deps.taskService });
-    await dispatchRuntimeRouteDefinition(taskRoutes, 'POST', '/api/tasks/todos/get', {
-      sessionKey: 'agent:main:main',
-    }, { taskService: deps.taskService });
+    await route.handle(toolInvokeContext({
+      method: 'TaskCreate',
+      params: {
+        sessionKey: 'agent:main:main',
+        subject: '实现接口',
+        description: '接入 TaskCreate',
+      },
+    }));
+    await route.handle(toolInvokeContext({
+      method: 'TaskGet',
+      params: {
+        sessionKey: 'agent:main:main',
+        taskId: '1',
+      },
+    }));
+    await route.handle(toolInvokeContext({
+      method: 'TaskUpdate',
+      params: {
+        sessionKey: 'agent:main:main',
+        taskId: '1',
+        status: 'deleted',
+        addBlockedBy: ['0'],
+        addBlocks: ['2'],
+      },
+    }));
+    await route.handle(toolInvokeContext({
+      method: 'TodoWrite',
+      params: {
+        sessionKey: 'agent:main:main',
+        oldTodos: [],
+        newTodos: [{ content: 'done', status: 'completed' }],
+      },
+    }));
+    await route.handle(toolInvokeContext({
+      method: 'TodoGet',
+      params: { sessionKey: 'agent:main:main' },
+    }));
 
-    // 写方法（TaskCreate / TaskUpdate）成功后追加 TaskList 推送 task 权威全量；TodoWrite 直接推送 todo snapshot。
     expect(gatewayRpc.mock.calls.map((call) => call[0])).toEqual([
       'TaskCreate',
       'TaskList',
@@ -184,11 +227,14 @@ describe('runtime-host task routes', () => {
     });
     const deps = taskServiceWith(gatewayRpc);
 
-    await dispatchRuntimeRouteDefinition(taskRoutes, 'POST', '/api/tasks/update', {
-      sessionKey: 'agent:main:main',
-      taskId: '2',
-      status: 'deleted',
-    }, { taskService: deps.taskService });
+    await toolInvokeRoute(deps.taskService).handle(toolInvokeContext({
+      method: 'TaskUpdate',
+      params: {
+        sessionKey: 'agent:main:main',
+        taskId: '2',
+        status: 'deleted',
+      },
+    }));
 
     expect(listCount).toBe(1);
     expect(deps.emitTaskSnapshot).toHaveBeenCalledTimes(1);
@@ -202,30 +248,32 @@ describe('runtime-host task routes', () => {
     const gatewayRpc = vi.fn(async () => ({ tasks: [], todos: [] }));
     const deps = taskServiceWith(gatewayRpc);
 
-    await dispatchRuntimeRouteDefinition(taskRoutes, 'POST', '/api/tasks/list', {
-      sessionKey: 'agent:main:main',
-    }, { taskService: deps.taskService });
+    await toolInvokeRoute(deps.taskService).handle(toolInvokeContext({
+      method: 'TaskList',
+      params: { sessionKey: 'agent:main:main' },
+    }));
 
     expect(deps.emitTaskSnapshot).not.toHaveBeenCalled();
   });
 
-  it('returns background task output and stop results without renderer gateway access', async () => {
+  it('returns background task output and stop results through task.control capability operation', async () => {
     const taskService = {
       output: vi.fn(async () => ({ status: 200, data: { success: true, task: { id: 'job-1' } } })),
       stop: vi.fn(async () => ({ status: 200, data: { success: true, task: { id: 'job-1', status: 'cancelled' } } })),
     } as never;
+    const [outputRoute, stopRoute] = taskControlRoutes(taskService);
 
-    await expect(dispatchRuntimeRouteDefinition(taskRoutes, 'POST', '/api/tasks/output', {
+    await expect(outputRoute.handle(capabilityContext('task.control', 'tasks.output', {
       taskId: 'job-1',
       wait: true,
-    }, { taskService })).resolves.toEqual({
+    }))).resolves.toEqual({
       status: 200,
       data: { success: true, task: { id: 'job-1' } },
     });
 
-    await expect(dispatchRuntimeRouteDefinition(taskRoutes, 'POST', '/api/tasks/stop', {
+    await expect(stopRoute.handle(capabilityContext('task.control', 'tasks.stop', {
       taskId: 'job-1',
-    }, { taskService })).resolves.toEqual({
+    }))).resolves.toEqual({
       status: 200,
       data: { success: true, task: { id: 'job-1', status: 'cancelled' } },
     });
@@ -240,19 +288,19 @@ describe('runtime-host task routes', () => {
     }));
     const deps = taskServiceWith(gatewayRpc, inspectGatewayMethodReadiness);
 
-    await expect(dispatchRuntimeRouteDefinition(taskRoutes, 'POST', '/api/tasks/list', {
-      sessionKey: 'agent:main:main',
-    }, { taskService: deps.taskService }))
-      .resolves.toEqual({
-        status: 503,
-        data: {
-          success: false,
-          code: 'PLUGIN_CAPABILITY_UNAVAILABLE',
-          pluginId: 'task-manager',
-          missingMethods: ['TaskList'],
-          message: 'task-manager plugin is not enabled or did not register required Gateway methods.',
-        },
-      });
+    await expect(toolInvokeRoute(deps.taskService).handle(toolInvokeContext({
+      method: 'TaskList',
+      params: { sessionKey: 'agent:main:main' },
+    }))).resolves.toEqual({
+      status: 503,
+      data: {
+        success: false,
+        code: 'PLUGIN_CAPABILITY_UNAVAILABLE',
+        pluginId: 'task-manager',
+        missingMethods: ['TaskList'],
+        message: 'task-manager plugin is not enabled or did not register required Gateway methods.',
+      },
+    });
     expect(gatewayRpc).not.toHaveBeenCalled();
   });
 });

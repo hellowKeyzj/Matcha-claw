@@ -25,7 +25,7 @@ vi.mock('@/lib/provider-accounts', () => ({
   },
 }));
 
-vi.mock('@/lib/provider-runtime', () => ({
+vi.mock('@/lib/provider-projection', () => ({
   hostProviderCreateAccount: (...args: unknown[]) => hostProviderCreateAccountMock(...args),
   hostProviderDeleteAccount: (...args: unknown[]) => hostProviderDeleteAccountMock(...args),
   hostProviderReadApiKey: (...args: unknown[]) => hostProviderReadApiKeyMock(...args),

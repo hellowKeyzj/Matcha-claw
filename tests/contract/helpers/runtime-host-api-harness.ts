@@ -212,6 +212,10 @@ export async function createRuntimeHostApiHarness(
   const parentApiServer = await startParentApiServer(parentApiPort, parentDispatchToken);
 
   const scriptPath = resolve(process.cwd(), 'runtime-host', 'host-process.cjs');
+  const childLogs: string[] = [];
+  const appendChildLog = (level: string, message: string, error?: unknown): void => {
+    childLogs.push(error === undefined ? `[${level}] ${message}` : `[${level}] ${message} ${String(error)}`);
+  };
   const manager = createRuntimeHostProcessManager({
     scriptPath,
     port: runtimeHostPort,
@@ -224,9 +228,20 @@ export async function createRuntimeHostApiHarness(
       MATCHACLAW_RUNTIME_HOST_ENABLED_PLUGIN_IDS: JSON.stringify(enabledPluginIds),
       MATCHACLAW_RUNTIME_HOST_PLUGIN_CATALOG: JSON.stringify(options.pluginCatalog ?? []),
     }),
+    logger: {
+      info: (message) => appendChildLog('info', message),
+      warn: (message) => appendChildLog('warn', message),
+      error: (message, error) => appendChildLog('error', message, error),
+    },
   });
 
-  await manager.start();
+  try {
+    await manager.start();
+  } catch (error) {
+    await parentApiServer.close();
+    rmSync(rootDir, { recursive: true, force: true });
+    throw new Error(`${error instanceof Error ? error.message : String(error)}\n${childLogs.join('\n')}`);
+  }
 
   const dispatch = async <TData = unknown>(
     method: RuntimeHostRequestMethod,

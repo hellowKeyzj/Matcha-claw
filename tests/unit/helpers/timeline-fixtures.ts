@@ -13,6 +13,7 @@ import { extractMessageText, normalizeOptionalString } from '../../../runtime-ho
 import { buildCanonicalReplayEventsFromTranscriptMessages } from '../../../runtime-host/application/sessions/canonical/canonical-transcript-replay';
 import { buildRenderItemsFromCanonicalState, buildTimelineEntriesFromCanonicalState } from '../../../runtime-host/application/sessions/canonical/canonical-projection';
 import { createEmptyCanonicalSessionState, reduceCanonicalSessionEvents } from '../../../runtime-host/application/sessions/canonical/canonical-reducer';
+import { createOpenClawTestRuntimeContext, openClawTestRuntimeIdentity } from './runtime-address-fixtures';
 import type { SessionTranscriptMessage } from '../../../runtime-host/application/sessions/transcript-types';
 
 export interface MessageTimelineMeta {
@@ -254,10 +255,10 @@ export function materializeTimelineMessages(
 }
 
 function buildCanonicalStateFromMessages(sessionKey: string, messages: RawMessage[]) {
-  const state = createEmptyCanonicalSessionState(sessionKey);
+  const state = createEmptyCanonicalSessionState(sessionKey, createOpenClawTestRuntimeContext(sessionKey));
   reduceCanonicalSessionEvents(
     state,
-    buildCanonicalReplayEventsFromTranscriptMessages(sessionKey, messages.map((message) => toTranscriptMessage(message))),
+    buildCanonicalReplayEventsFromTranscriptMessages(sessionKey, messages.map((message) => toTranscriptMessage(message)), openClawTestRuntimeIdentity),
   );
   return state;
 }

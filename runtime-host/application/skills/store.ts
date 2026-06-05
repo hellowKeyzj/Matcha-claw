@@ -1,6 +1,4 @@
 import type { ClawHubSkillInventory } from './clawhub';
-import type { OpenClawConfigRepositoryPort } from '../openclaw/openclaw-config-repository';
-import type { OpenClawWorkspacePort } from '../openclaw/openclaw-workspace-service';
 import type { RuntimeFileSystemPort } from '../common/runtime-ports';
 import { applicationResponse, badRequest, notFound, ok, serverError } from '../common/application-response';
 import path from 'node:path';
@@ -14,9 +12,19 @@ type InstalledClawHubSkill = {
   version?: string;
 };
 
+export interface SkillsConfigStorePort {
+  read(): Promise<Record<string, unknown>>;
+  updateDirty(mutator: (config: Record<string, unknown>) => Promise<{ result: void; changed: boolean }> | { result: void; changed: boolean }): Promise<void>;
+}
+
+export interface SkillPreviewWorkspacePort {
+  getPreviewRoots(): Promise<string[]>;
+  getDefaultSkillReadmePath(skillKey: string): string;
+}
+
 export class SkillsConfigRepository {
   constructor(
-    private readonly configRepository: OpenClawConfigRepositoryPort,
+    private readonly configRepository: SkillsConfigStorePort,
     private readonly clawHubSkillInventory: Pick<ClawHubSkillInventory, 'listInstalled'>,
   ) {}
 
@@ -41,7 +49,7 @@ export class SkillsConfigRepository {
       return { success: false, error: 'updates is required' };
     }
     try {
-      await this.configRepository.update((config) => {
+      await this.configRepository.updateDirty((config) => {
         if (!isRecord(config.skills)) {
           config.skills = {};
         }
@@ -90,6 +98,7 @@ export class SkillsConfigRepository {
           }
         }
         entries[trimmedSkillKey] = entry;
+        return { result: undefined, changed: true };
       });
       return { success: true };
     } catch (error) {
@@ -103,7 +112,7 @@ export class SkillsConfigRepository {
       return { success: false, error: 'skillKey is required' };
     }
     try {
-      await this.configRepository.update((config) => {
+      await this.configRepository.updateDirty((config) => {
         if (!isRecord(config.skills)) {
           config.skills = {};
         }
@@ -118,6 +127,7 @@ export class SkillsConfigRepository {
           ...current,
           enabled,
         };
+        return { result: undefined, changed: true };
       });
       return { success: true };
     } catch (error) {
@@ -133,7 +143,7 @@ export class SkillsConfigRepository {
       return { success: false, error: 'skillKeys is required' };
     }
     try {
-      await this.configRepository.update((config) => {
+      await this.configRepository.updateDirty((config) => {
         if (!isRecord(config.skills)) {
           config.skills = {};
         }
@@ -150,6 +160,7 @@ export class SkillsConfigRepository {
             enabled,
           };
         }
+        return { result: undefined, changed: true };
       });
       return { success: true };
     } catch (error) {
@@ -196,7 +207,7 @@ function isPathInsideRoot(targetPath: string, rootPath: string): boolean {
 
 export class SkillReadmePreviewRepository {
   constructor(
-    private readonly workspace: Pick<OpenClawWorkspacePort, 'getPreviewRoots' | 'getDefaultSkillReadmePath'>,
+    private readonly workspace: SkillPreviewWorkspacePort,
     private readonly fileSystem: RuntimeFileSystemPort,
   ) {}
 

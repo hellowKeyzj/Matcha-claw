@@ -121,7 +121,14 @@ export function parseFallbackEnabledPluginIds(rawValue: string | undefined): str
   }
 }
 
-export function parseInjectedPluginCatalog(rawValue: string | undefined): RuntimeHostCatalogPlugin[] {
+export interface InjectedPluginCatalogPlatformPolicyPort {
+  normalizePlatform(platform: unknown): RuntimeHostCatalogPlugin['platform'];
+}
+
+export function parseInjectedPluginCatalog(
+  rawValue: string | undefined,
+  platformPolicy: InjectedPluginCatalogPlatformPolicyPort,
+): RuntimeHostCatalogPlugin[] {
   if (!rawValue) {
     return [];
   }
@@ -148,9 +155,9 @@ export function parseInjectedPluginCatalog(rawValue: string | undefined): Runtim
             id: item.id,
             category: item.category,
             description: item.description,
-            controlMode: item.controlMode === 'channel-config' ? 'channel-config' : 'manual',
+            controlMode: item.controlMode === 'channel-config' || item.controlMode === 'managed' ? item.controlMode : 'manual',
           }),
-        platform: item.platform === 'matchaclaw' ? 'matchaclaw' : 'openclaw',
+        platform: platformPolicy.normalizePlatform(item.platform),
       }));
   } catch {
     return [];

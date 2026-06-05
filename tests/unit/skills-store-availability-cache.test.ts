@@ -1,9 +1,20 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { RuntimeAddress } from '../../runtime-host/shared/runtime-address';
 
 const hostApiFetchMock = vi.fn();
+const hostCapabilityExecuteMock = vi.fn();
+
+const skillManagementAddress: RuntimeAddress = {
+  kind: 'native-runtime',
+  capabilityId: 'skill.management',
+  runtimeAdapterId: 'openclaw',
+  runtimeInstanceId: 'local',
+  agentId: 'default',
+};
 
 vi.mock('@/lib/host-api', () => ({
   hostApiFetch: (...args: unknown[]) => hostApiFetchMock(...args),
+  hostCapabilityExecute: (...args: unknown[]) => hostCapabilityExecuteMock(...args),
   waitForRuntimeJobResult: async (jobId: string) => {
     const response = await hostApiFetchMock('/api/runtime-host/jobs/get', {
       method: 'POST',
@@ -116,21 +127,26 @@ describe('skills store availability and search cache', () => {
       if (path === '/api/skills/status') {
         return await deferredStatus.promise;
       }
-      if (path === '/api/skills/status/refresh') {
-        return { skills: [{ skillKey: 'fresh-skill', disabled: false }] };
-      }
       throw new Error(`Unexpected hostApiFetch path: ${path}`);
+    });
+    hostCapabilityExecuteMock.mockResolvedValueOnce({
+      skills: [{ skillKey: 'fresh-skill', disabled: false }],
     });
 
     const { useSkillsStore } = await import('@/stores/skills');
     const staleFetch = useSkillsStore.getState().fetchSkills();
-    const forcedFetch = useSkillsStore.getState().fetchSkills({ force: true, fresh: true });
+    const forcedFetch = useSkillsStore.getState().fetchSkills({ force: true, fresh: true, runtimeAddress: skillManagementAddress });
 
     deferredStatus.resolve({ skills: [{ skillKey: 'stale-skill', disabled: false }] });
     await Promise.all([staleFetch, forcedFetch]);
 
     expect(hostApiFetchMock.mock.calls.filter((call) => call[0] === '/api/skills/status')).toHaveLength(1);
-    expect(hostApiFetchMock.mock.calls.filter((call) => call[0] === '/api/skills/status/refresh')).toHaveLength(1);
+    expect(hostCapabilityExecuteMock).toHaveBeenCalledWith(expect.objectContaining({
+      id: 'skill.management',
+      operationId: 'skills.refreshStatus',
+      runtimeAddress: skillManagementAddress,
+      input: expect.objectContaining({ runtimeAddress: skillManagementAddress }),
+    }));
     expect(useSkillsStore.getState().skills.map((skill) => skill.id)).toEqual(['fresh-skill']);
   });
 
@@ -168,19 +184,6 @@ describe('skills store availability and search cache', () => {
   it('enableSkill 会维护 mutatingBySkillId 生命周期', async () => {
     const deferredJob = createDeferred<{ success: boolean }>();
     hostApiFetchMock.mockImplementation(async (path: string) => {
-      if (path === '/api/skills/state') {
-        return {
-          success: true,
-          job: {
-            id: 'job-demo-skill',
-            type: 'skills.syncGatewayUpdate',
-            status: 'queued',
-            queuedAt: 1,
-            attempts: 0,
-            maxAttempts: 1,
-          },
-        };
-      }
       if (path === '/api/runtime-host/jobs/get') {
         await deferredJob.promise;
         return {
@@ -198,6 +201,17 @@ describe('skills store availability and search cache', () => {
       }
       throw new Error(`Unexpected hostApiFetch path: ${path}`);
     });
+    hostCapabilityExecuteMock.mockResolvedValueOnce({
+      success: true,
+      job: {
+        id: 'job-demo-skill',
+        type: 'skills.syncGatewayUpdate',
+        status: 'queued',
+        queuedAt: 1,
+        attempts: 0,
+        maxAttempts: 1,
+      },
+    });
 
     const { useSkillsStore } = await import('@/stores/skills');
     useSkillsStore.getState().setSkills([
@@ -211,12 +225,23 @@ describe('skills store availability and search cache', () => {
       },
     ]);
 
-    const enablePromise = useSkillsStore.getState().enableSkill('demo-skill');
+    const enablePromise = useSkillsStore.getState().enableSkill('demo-skill', skillManagementAddress);
     expect(useSkillsStore.getState().mutating).toBe(true);
     expect(useSkillsStore.getState().mutatingBySkillId['demo-skill']).toBe(1);
 
     deferredJob.resolve({ success: true });
     await enablePromise;
+
+    expect(hostCapabilityExecuteMock).toHaveBeenCalledWith(expect.objectContaining({
+      id: 'skill.management',
+      operationId: 'skills.updateState',
+      runtimeAddress: skillManagementAddress,
+      input: expect.objectContaining({
+        skillKey: 'demo-skill',
+        enabled: true,
+        runtimeAddress: skillManagementAddress,
+      }),
+    }));
 
     const state = useSkillsStore.getState();
     expect(state.mutating).toBe(false);
@@ -226,14 +251,12 @@ describe('skills store availability and search cache', () => {
 
   it('batchSetSkillsEnabled 只请求一次批量接口并一次更新本地状态', async () => {
     hostApiFetchMock.mockImplementation(async (path: string) => {
-      if (path === '/api/skills/state/batch') {
-        return {
-          success: true,
-          updated: ['skill-a', 'skill-b'],
-          enabled: true,
-        };
-      }
       throw new Error(`Unexpected hostApiFetch path: ${path}`);
+    });
+    hostCapabilityExecuteMock.mockResolvedValueOnce({
+      success: true,
+      updated: ['skill-a', 'skill-b'],
+      enabled: true,
     });
 
     const { useSkillsStore } = await import('@/stores/skills');
@@ -242,13 +265,18 @@ describe('skills store availability and search cache', () => {
       { id: 'skill-b', slug: 'skill-b', name: 'Skill B', description: 'b', enabled: false, icon: '🧩' },
     ]);
 
-    await useSkillsStore.getState().batchSetSkillsEnabled(['skill-a', 'skill-b'], true);
+    await useSkillsStore.getState().batchSetSkillsEnabled(['skill-a', 'skill-b'], true, skillManagementAddress);
 
-    expect(hostApiFetchMock).toHaveBeenCalledWith('/api/skills/state/batch', {
-      method: 'PUT',
-      body: JSON.stringify({ skillKeys: ['skill-a', 'skill-b'], enabled: true }),
-    });
-    expect(hostApiFetchMock.mock.calls.filter((call) => call[0] === '/api/skills/state')).toHaveLength(0);
+    expect(hostCapabilityExecuteMock).toHaveBeenCalledWith(expect.objectContaining({
+      id: 'skill.management',
+      operationId: 'skills.updateBatchState',
+      runtimeAddress: skillManagementAddress,
+      input: expect.objectContaining({
+        skillKeys: ['skill-a', 'skill-b'],
+        enabled: true,
+        runtimeAddress: skillManagementAddress,
+      }),
+    }));
     expect(hostApiFetchMock.mock.calls.filter((call) => call[0] === '/api/runtime-host/jobs/get')).toHaveLength(0);
     expect(useSkillsStore.getState().skills.map((skill) => skill.enabled)).toEqual([true, true]);
     expect(useSkillsStore.getState().mutating).toBe(false);
@@ -316,7 +344,7 @@ describe('skills store availability and search cache', () => {
           description: 'helper',
           disabled: false,
           version: '1.2.3',
-          source: 'openclaw-managed',
+          source: 'managed',
           baseDir: '/tmp/.openclaw/skills/git-helper',
         },
           ],
@@ -330,7 +358,7 @@ describe('skills store availability and search cache', () => {
 
     expect(useSkillsStore.getState().skills[0]).toMatchObject({
       id: 'git-helper',
-      source: 'openclaw-managed',
+      source: 'managed',
       baseDir: '/tmp/.openclaw/skills/git-helper',
     });
   });

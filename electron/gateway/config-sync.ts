@@ -9,6 +9,7 @@ import { createDefaultRuntimeHostHttpClient } from '../main/runtime-host-client'
 import { stripSystemdSupervisorEnv } from './config-sync-env';
 import { waitForRuntimeHostJob, type RuntimeHostJobSnapshot } from '../main/runtime-host-jobs';
 import type { RuntimeHostManager } from '../main/runtime-host-manager';
+import { createRuntimeHostCapabilityPayload } from '../main/runtime-host-capabilities';
 
 function createGatewayConfigRuntimeHostClient() {
   return createDefaultRuntimeHostHttpClient({
@@ -48,46 +49,47 @@ type HostBootstrapSettings = GatewayLaunchSettings & {
   launchAtStartup: boolean;
 };
 
+type GatewayPrelaunchResult = {
+  configuredChannels: string[];
+  launchPlan: GatewayLaunchPlan;
+};
+
 export async function prepareGatewayRuntimeBeforeLaunch(
   runtimeHost: RuntimeHostManager,
   _appSettings?: GatewayLaunchSettings,
-): Promise<void> {
+): Promise<GatewayLaunchPlan> {
   const runtimeHostClient = createGatewayConfigRuntimeHostClient();
   const response = await runtimeHostClient.request<{
     success?: boolean;
-    job?: RuntimeHostJobSnapshot;
-  }>('POST', '/api/runtime-host/prepare-gateway-launch');
+    job?: RuntimeHostJobSnapshot<GatewayPrelaunchResult>;
+  }>(
+    'POST',
+    '/api/capabilities/execute',
+    await createRuntimeHostCapabilityPayload(runtimeHostClient, 'runtimeHost.prepareGatewayLaunch'),
+  );
   const job = response.data?.job;
   if (!job?.id) {
     throw new Error('Runtime Host did not return a gateway prelaunch job');
   }
-  await waitForRuntimeHostJob(runtimeHost, job.id, {
+  const completedJob = await waitForRuntimeHostJob<GatewayPrelaunchResult>(runtimeHost, job.id, {
     timeoutMs: 120_000,
   });
-}
-
-async function loadGatewayLaunchPlan(): Promise<GatewayLaunchPlan> {
-  const runtimeHostClient = createGatewayConfigRuntimeHostClient();
-  const response = await runtimeHostClient.request<{
-    success?: boolean;
-    plan?: Partial<GatewayLaunchPlan>;
-  }>('GET', '/api/runtime-host/gateway-launch-plan');
-  const plan = response.data?.plan;
-  if (!plan || typeof plan !== 'object') {
-    throw new Error('Runtime Host did not return gateway launch plan');
+  const launchPlan = completedJob.result?.launchPlan;
+  if (!launchPlan || typeof launchPlan !== 'object') {
+    throw new Error('Runtime Host prelaunch job did not return a gateway launch plan');
   }
   return {
-    gatewayToken: typeof plan.gatewayToken === 'string' ? plan.gatewayToken : '',
-    providerEnv: plan.providerEnv && typeof plan.providerEnv === 'object' && !Array.isArray(plan.providerEnv)
+    gatewayToken: typeof launchPlan.gatewayToken === 'string' ? launchPlan.gatewayToken : '',
+    providerEnv: launchPlan.providerEnv && typeof launchPlan.providerEnv === 'object' && !Array.isArray(launchPlan.providerEnv)
       ? Object.fromEntries(
-        Object.entries(plan.providerEnv).filter((entry): entry is [string, string] => (
+        Object.entries(launchPlan.providerEnv).filter((entry): entry is [string, string] => (
           typeof entry[0] === 'string' && typeof entry[1] === 'string'
         )),
       )
       : {},
-    loadedProviderKeyCount: typeof plan.loadedProviderKeyCount === 'number' ? plan.loadedProviderKeyCount : 0,
-    skipChannels: plan.skipChannels === true,
-    channelStartupSummary: typeof plan.channelStartupSummary === 'string' ? plan.channelStartupSummary : 'enabled(unknown)',
+    loadedProviderKeyCount: typeof launchPlan.loadedProviderKeyCount === 'number' ? launchPlan.loadedProviderKeyCount : 0,
+    skipChannels: launchPlan.skipChannels === true,
+    channelStartupSummary: typeof launchPlan.channelStartupSummary === 'string' ? launchPlan.channelStartupSummary : 'enabled(unknown)',
   };
 }
 
@@ -123,8 +125,7 @@ export async function prepareGatewayLaunchContext(
   }
 
   const appSettings = await loadHostBootstrapSettings();
-  await prepareGatewayRuntimeBeforeLaunch(runtimeHost, appSettings);
-  const launchPlan = await loadGatewayLaunchPlan();
+  const launchPlan = await prepareGatewayRuntimeBeforeLaunch(runtimeHost, appSettings);
 
   if (!existsSync(entryScript)) {
     throw new Error(`OpenClaw entry script not found at: ${entryScript}`);

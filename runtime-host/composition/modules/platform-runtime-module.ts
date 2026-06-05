@@ -1,8 +1,9 @@
 import { InMemoryAuditSink } from '../../application/platform-runtime/audit-sink';
 import { ContextAssembler } from '../../application/platform-runtime/context-assembler';
 import { LocalEventBus } from '../../application/platform-runtime/local-event-bus';
-import { OpenClawRuntimeDriver, type OpenClawRuntimeBridge } from '../../application/platform-runtime/openclaw-runtime-driver';
 import type { RuntimeHostPlatformFacade } from '../../application/platform-runtime/platform-runtime-port';
+import type { GatewayRuntimePort } from '../../application/gateway/gateway-runtime-port';
+import type { AgentRuntimeDriver } from '../../shared/platform-runtime-contracts';
 import { PolicyEngine } from '../../application/platform-runtime/policy-engine';
 import { RunSessionService } from '../../application/platform-runtime/run-session-service';
 import { RuntimeManagerService } from '../../application/platform-runtime/runtime-manager-service';
@@ -12,7 +13,10 @@ import { ToolRegistryStore } from '../../application/platform-runtime/state/tool
 import { ToolCatalogService } from '../../application/platform-runtime/tool-catalog-service';
 import { PlatformToolExecutor } from '../../application/platform-runtime/tool-executor';
 import { ToolReconciler } from '../../application/platform-runtime/tool-reconciler';
-import type { RuntimeClockPort, RuntimeIdGeneratorPort } from '../../application/common/runtime-ports';
+import { PlatformNativeToolWorkflow } from '../../application/workflows/platform-runtime/platform-native-tool-workflow';
+import { PlatformRunSessionWorkflow } from '../../application/workflows/platform-runtime/platform-run-session-workflow';
+import { PlatformToolStateWorkflow } from '../../application/workflows/platform-runtime/platform-tool-state-workflow';
+import type { RuntimeClockPort } from '../../application/common/runtime-ports';
 import type { RuntimeHostContainer } from '../container';
 
 export interface RuntimeHostPlatformRoot {
@@ -24,20 +28,22 @@ export interface RuntimeHostPlatformRoot {
   readonly toolExecutor: PlatformToolExecutor;
 }
 
+export interface AgentRuntimeDriverFactoryPort {
+  createRuntimeDriver(gateway: GatewayRuntimePort): AgentRuntimeDriver;
+}
+
 export function registerRuntimeHostPlatformRoot(
   container: RuntimeHostContainer,
-  openclawBridge: () => OpenClawRuntimeBridge,
 ): void {
-  container.register('platform.runtimeDriver', (scope) => new OpenClawRuntimeDriver(
-    openclawBridge(),
-    scope.resolve<RuntimeIdGeneratorPort>('runtime.idGenerator'),
-  ));
   container.register('platform.toolRegistry', () => new ToolRegistryStore());
   container.register('platform.gatewayLedger', () => new GatewayPluginStateLedger());
   container.register('platform.localLedger', () => new LocalPluginStateLedger());
   container.register('platform.policyEngine', () => new PolicyEngine());
   container.register('platform.auditSink', () => new InMemoryAuditSink());
   container.register('platform.eventBus', () => new LocalEventBus());
+  container.register('platform.runtimeDriver', (scope) => scope.resolve<AgentRuntimeDriverFactoryPort>('platform.runtimeDriverFactory').createRuntimeDriver(
+    scope.resolve<GatewayRuntimePort>('gateway.runtime'),
+  ));
   container.register('platform.contextAssembler', (scope) => new ContextAssembler(
     scope.resolve('platform.toolRegistry'),
     scope.resolve('platform.policyEngine'),
@@ -50,37 +56,48 @@ export function registerRuntimeHostPlatformRoot(
     scope.resolve('platform.auditSink'),
     scope.resolve<RuntimeClockPort>('runtime.clock'),
   ));
+  container.register('platform.nativeToolWorkflow', (scope) => new PlatformNativeToolWorkflow({
+    runtimeDriver: scope.resolve('platform.runtimeDriver'),
+    toolRegistry: scope.resolve('platform.toolRegistry'),
+    auditSink: scope.resolve('platform.auditSink'),
+    reconciler: scope.resolve('platform.reconciler'),
+    clock: scope.resolve<RuntimeClockPort>('runtime.clock'),
+  }));
   container.register('platform.runtimeManager', (scope) => new RuntimeManagerService(
     scope.resolve('platform.runtimeDriver'),
-    scope.resolve('platform.toolRegistry'),
-    scope.resolve('platform.auditSink'),
-    scope.resolve('platform.reconciler'),
-    scope.resolve<RuntimeClockPort>('runtime.clock'),
+    scope.resolve<PlatformNativeToolWorkflow>('platform.nativeToolWorkflow'),
   ));
+  container.register('platform.runSessionWorkflow', (scope) => new PlatformRunSessionWorkflow({
+    contextAssembler: scope.resolve('platform.contextAssembler'),
+    runtimeDriver: scope.resolve('platform.runtimeDriver'),
+    eventBus: scope.resolve('platform.eventBus'),
+    auditSink: scope.resolve('platform.auditSink'),
+    clock: scope.resolve<RuntimeClockPort>('runtime.clock'),
+  }));
   container.register('platform.runSessionService', (scope) => new RunSessionService(
-    scope.resolve('platform.contextAssembler'),
-    scope.resolve('platform.runtimeDriver'),
-    scope.resolve('platform.eventBus'),
-    scope.resolve('platform.auditSink'),
-    scope.resolve<RuntimeClockPort>('runtime.clock'),
+    scope.resolve<PlatformRunSessionWorkflow>('platform.runSessionWorkflow'),
   ));
   container.register('platform.toolCatalogService', (scope) => new ToolCatalogService(
     scope.resolve('platform.toolRegistry'),
     scope.resolve('platform.auditSink'),
     scope.resolve<RuntimeClockPort>('runtime.clock'),
   ));
-  container.register('platform.facade', (scope) => createRuntimeHostPlatformFacade({
+  container.register('platform.toolStateWorkflow', (scope) => new PlatformToolStateWorkflow({
     runtimeDriver: scope.resolve('platform.runtimeDriver'),
-    toolRegistry: scope.resolve('platform.toolRegistry'),
     gatewayLedger: scope.resolve('platform.gatewayLedger'),
     localLedger: scope.resolve('platform.localLedger'),
+    toolRegistry: scope.resolve('platform.toolRegistry'),
     auditSink: scope.resolve('platform.auditSink'),
-    reconciler: scope.resolve('platform.reconciler'),
+    nativeToolWorkflow: scope.resolve<PlatformNativeToolWorkflow>('platform.nativeToolWorkflow'),
+    toolCatalogService: scope.resolve('platform.toolCatalogService'),
+    clock: scope.resolve<RuntimeClockPort>('runtime.clock'),
+  }));
+  container.register('platform.facade', (scope) => createRuntimeHostPlatformFacade({
+    toolStateWorkflow: scope.resolve('platform.toolStateWorkflow'),
     runtimeManager: scope.resolve('platform.runtimeManager'),
     runSessionService: scope.resolve('platform.runSessionService'),
     toolCatalogService: scope.resolve('platform.toolCatalogService'),
     toolExecutor: scope.resolve('platform.toolExecutor'),
-    clock: scope.resolve<RuntimeClockPort>('runtime.clock'),
   }));
 }
 
@@ -96,17 +113,11 @@ export function resolveRuntimeHostPlatformRoot(container: RuntimeHostContainer):
 }
 
 function createRuntimeHostPlatformFacade(deps: {
-  readonly runtimeDriver: OpenClawRuntimeDriver;
-  readonly toolRegistry: ToolRegistryStore;
-  readonly gatewayLedger: GatewayPluginStateLedger;
-  readonly localLedger: LocalPluginStateLedger;
-  readonly auditSink: InMemoryAuditSink;
-  readonly reconciler: ToolReconciler;
+  readonly toolStateWorkflow: PlatformToolStateWorkflow;
   readonly runtimeManager: RuntimeManagerService;
   readonly runSessionService: RunSessionService;
   readonly toolCatalogService: ToolCatalogService;
   readonly toolExecutor: PlatformToolExecutor;
-  readonly clock: RuntimeClockPort;
 }): RuntimeHostPlatformFacade {
   return {
     async runtimeHealth() {
@@ -114,16 +125,11 @@ function createRuntimeHostPlatformFacade(deps: {
     },
 
     async installNativeTool(source) {
-      const toolId = await deps.runtimeManager.installNativeTool(source);
-      const installed = await deps.runtimeDriver.listInstalledTools();
-      deps.gatewayLedger.setAll(installed);
-      return toolId;
+      return await deps.toolStateWorkflow.installNativeTool(source);
     },
 
     async reconcileNativeTools() {
-      const report = await deps.runtimeManager.reconcileNativeTools();
-      deps.gatewayLedger.setAll(await deps.runtimeDriver.listInstalledTools());
-      return report;
+      return await deps.toolStateWorkflow.reconcileNativeTools();
     },
 
     async startRun(req, eventTx) {
@@ -139,24 +145,11 @@ function createRuntimeHostPlatformFacade(deps: {
     },
 
     async upsertPlatformTools(tools) {
-      await deps.toolCatalogService.upsertPlatformTools(tools);
-      deps.localLedger.setAll(deps.toolRegistry.snapshotPlatform());
+      await deps.toolStateWorkflow.upsertPlatformTools(tools);
     },
 
     async setToolEnabled(toolId, enabled) {
-      if (enabled) {
-        await deps.runtimeDriver.enableTool(toolId);
-      } else {
-        await deps.runtimeDriver.disableTool(toolId);
-      }
-      const upstream = await deps.runtimeDriver.listInstalledTools();
-      deps.gatewayLedger.setAll(upstream);
-      await deps.toolRegistry.upsertNative(upstream);
-      await deps.auditSink.append({
-        type: 'runtime.set_tool_enabled',
-        ts: deps.clock.nowMs(),
-        payload: { toolId, enabled },
-      });
+      await deps.toolStateWorkflow.setToolEnabled(toolId, enabled);
     },
 
     async executePlatformTool(req) {

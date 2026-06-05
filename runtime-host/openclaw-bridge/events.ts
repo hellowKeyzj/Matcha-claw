@@ -9,6 +9,10 @@ export type GatewayConversationEvent =
     event: Record<string, unknown>;
   }
   | {
+    type: 'thinking.delta';
+    event: Record<string, unknown>;
+  }
+  | {
     type: 'tool.lifecycle';
     event: Record<string, unknown>;
   }
@@ -154,6 +158,31 @@ function normalizeGatewayToolLifecycleEvent(payload: unknown): Record<string, un
   };
 }
 
+function normalizeGatewayThinkingEvent(payload: unknown): Record<string, unknown> | null {
+  const input = asRecord(payload);
+  const data = asRecord(input?.data);
+  if (!input || !data || input.stream !== 'thinking') {
+    return null;
+  }
+  const runId = getTrimmedString(input.runId);
+  const sessionKey = getTrimmedString(input.sessionKey);
+  const seq = getFiniteNumber(input.seq);
+  const timestamp = getFiniteNumber(input.ts);
+  const text = getTrimmedString(data.text);
+  const delta = getTrimmedString(data.delta);
+  if (!runId || !sessionKey || seq == null || timestamp == null || !text) {
+    return null;
+  }
+  return {
+    runId,
+    sessionKey,
+    seq,
+    timestamp,
+    text,
+    ...(delta ? { delta } : {}),
+  };
+}
+
 function normalizeGatewayRunActivity(payload: unknown): {
   activity: 'compacting';
   phase: GatewayRuntimeActivityPhase;
@@ -271,6 +300,21 @@ export function dispatchGatewayProtocolEvent(
       break;
     }
     case 'agent': {
+      const thinkingEvent = normalizeGatewayThinkingEvent(payload);
+      if (thinkingEvent) {
+        dispatcher.emitConversationEvent({
+          type: 'thinking.delta',
+          event: thinkingEvent,
+        });
+      }
+      const input = asRecord(payload);
+      if (input?.stream === 'plan') {
+        dispatcher.emitNotification({
+          method: event,
+          params: payload,
+        } satisfies GatewayNotification);
+        break;
+      }
       const toolLifecycleEvent = normalizeGatewayToolLifecycleEvent(payload);
       if (toolLifecycleEvent) {
         dispatcher.emitConversationEvent({

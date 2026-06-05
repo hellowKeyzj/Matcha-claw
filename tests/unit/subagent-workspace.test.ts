@@ -1,7 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
   buildSubagentWorkspacePath,
-  buildWorkspaceSubagentsRootFromConfigDir,
   hasSubagentNameConflict,
   normalizeSubagentNameToSlug,
   resolveSubagentWorkspaceRoot,
@@ -22,17 +21,9 @@ describe('subagent workspace path', () => {
     expect(root).toBe('C:\\Users\\Dev\\.openclaw\\workspace-subagents');
   });
 
-  it('uses fallback root when main workspace is unavailable', () => {
+  it('does not infer root when main/default workspace is unavailable', () => {
     const root = resolveSubagentWorkspaceRoot([{ id: 'main' }]);
-    expect(root).toBe('~/.openclaw/workspace-subagents');
-  });
-
-  it('uses provided fallback root when main workspace is unavailable', () => {
-    const root = resolveSubagentWorkspaceRoot(
-      [{ id: 'main' }],
-      { fallbackRoot: 'C:\\Users\\Dev\\.openclaw\\workspace-subagents' }
-    );
-    expect(root).toBe('C:\\Users\\Dev\\.openclaw\\workspace-subagents');
+    expect(root).toBeUndefined();
   });
 
   it('builds workspace path with slugified name', () => {
@@ -46,19 +37,12 @@ describe('subagent workspace path', () => {
     expect(workspace).toBe('/home/dev/.openclaw/workspace-subagents/writer-bot');
   });
 
-  it('builds fallback path and default slug for empty name', () => {
+  it('does not build a path when workspace root cannot be inferred', () => {
     const workspace = buildSubagentWorkspacePath({
       name: '',
       agents: [{ id: 'main' }],
     });
-    expect(workspace).toBe('~/.openclaw/workspace-subagents/agent');
-  });
-
-  it('builds fallback path from config dir', () => {
-    expect(buildWorkspaceSubagentsRootFromConfigDir('/home/dev/.openclaw'))
-      .toBe('/home/dev/.openclaw/workspace-subagents');
-    expect(buildWorkspaceSubagentsRootFromConfigDir('C:\\Users\\Dev\\.openclaw'))
-      .toBe('C:\\Users\\Dev\\.openclaw\\workspace-subagents');
+    expect(workspace).toBeUndefined();
   });
 
   it('detects duplicate name conflicts by slug', () => {

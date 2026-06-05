@@ -1,10 +1,27 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { IncomingMessage, ServerResponse } from 'http';
 import type { RuntimeHostRouteResult } from '../../electron/main/runtime-host-contract';
+import type { RuntimeAddress } from '../../runtime-host/shared/runtime-address';
 
 const sendJsonMock = vi.fn();
 const parseJsonBodyMock = vi.fn();
 const sendNoContentMock = vi.fn();
+
+const schedulerCronRuntimeAddress: RuntimeAddress = {
+  kind: 'native-runtime',
+  capabilityId: 'scheduler.cron',
+  runtimeAdapterId: 'openclaw',
+  runtimeInstanceId: 'local',
+  agentId: 'default',
+};
+
+const pluginRuntimeAddress: RuntimeAddress = {
+  kind: 'native-runtime',
+  capabilityId: 'plugin.runtime',
+  runtimeAdapterId: 'openclaw',
+  runtimeInstanceId: 'local',
+  agentId: 'default',
+};
 
 vi.mock('../../electron/api/route-utils', () => ({
   parseJsonBody: (...args: unknown[]) => parseJsonBodyMock(...args),
@@ -56,7 +73,15 @@ describe('runtime-host proxy routes', () => {
   });
 
   it('POST /api/* 路由会解析 body 并透传到 runtime-host.request', async () => {
-    parseJsonBodyMock.mockResolvedValueOnce({ id: 'job-1' });
+    const payload = {
+      id: 'scheduler.cron',
+      operationId: 'cron.trigger',
+      runtimeAddress: schedulerCronRuntimeAddress,
+      input: {
+        runtimeAddress: schedulerCronRuntimeAddress,
+      },
+    };
+    parseJsonBodyMock.mockResolvedValueOnce(payload);
     const runtimeHostRequest = vi.fn().mockResolvedValue({
       status: 200,
       data: { success: true },
@@ -66,12 +91,12 @@ describe('runtime-host proxy routes', () => {
     const handled = await handleRuntimeHostProxyRoutes(
       { method: 'POST' } as IncomingMessage,
       {} as ServerResponse,
-      new URL('http://127.0.0.1:3210/api/cron/trigger'),
+      new URL('http://127.0.0.1:3210/api/capabilities/execute'),
       { runtimeHost: { request: runtimeHostRequest } } as never,
     );
 
     expect(handled).toBe(true);
-    expect(runtimeHostRequest).toHaveBeenCalledWith('POST', '/api/cron/trigger', { id: 'job-1' }, undefined);
+    expect(runtimeHostRequest).toHaveBeenCalledWith('POST', '/api/capabilities/execute', payload, undefined);
     expect(sendJsonMock).toHaveBeenCalledWith(expect.anything(), 200, { success: true });
   });
 
@@ -107,76 +132,54 @@ describe('runtime-host proxy routes', () => {
     expect(sendJsonMock).not.toHaveBeenCalled();
   });
 
-  it('POST /api/files/write-text 由主进程文件路由处理，不转发 runtime-host', async () => {
-    const runtimeHostRequest = vi.fn();
+  it('插件运行态写能力会走 runtime-host-proxy 转发', async () => {
+    const runtimeHostRequest = vi.fn().mockResolvedValue({
+      status: 200,
+      data: { success: true },
+    } satisfies RuntimeHostRouteResult);
+    const payload = {
+      id: 'plugin.runtime',
+      operationId: 'plugins.setEnabled',
+      runtimeAddress: pluginRuntimeAddress,
+      input: {
+        runtimeAddress: pluginRuntimeAddress,
+        pluginId: 'plugin-1',
+        enabled: true,
+      },
+    };
+    parseJsonBodyMock.mockResolvedValueOnce(payload);
 
     const { handleRuntimeHostProxyRoutes } = await import('../../electron/api/routes/runtime-host-proxy');
     const handled = await handleRuntimeHostProxyRoutes(
       { method: 'POST' } as IncomingMessage,
       {} as ServerResponse,
-      new URL('http://127.0.0.1:3210/api/files/write-text'),
-      { runtimeHost: { request: runtimeHostRequest } } as never,
-    );
-
-    expect(handled).toBe(false);
-    expect(runtimeHostRequest).not.toHaveBeenCalled();
-    expect(sendJsonMock).not.toHaveBeenCalled();
-  });
-
-  it('插件运行态路由会走 runtime-host-proxy 转发', async () => {
-    const runtimeHostRequest = vi.fn().mockResolvedValue({
-      status: 200,
-      data: { success: true },
-    } satisfies RuntimeHostRouteResult);
-    parseJsonBodyMock.mockResolvedValueOnce({ pluginIds: ['task-manager'] });
-
-    const { handleRuntimeHostProxyRoutes } = await import('../../electron/api/routes/runtime-host-proxy');
-    const handled = await handleRuntimeHostProxyRoutes(
-      { method: 'PUT' } as IncomingMessage,
-      {} as ServerResponse,
-      new URL('http://127.0.0.1:3210/api/plugins/runtime/enabled-plugins'),
+      new URL('http://127.0.0.1:3210/api/capabilities/execute'),
       { runtimeHost: { request: runtimeHostRequest } } as never,
     );
 
     expect(handled).toBe(true);
     expect(runtimeHostRequest).toHaveBeenCalledWith(
-      'PUT',
-      '/api/plugins/runtime/enabled-plugins',
-      { pluginIds: ['task-manager'] },
+      'POST',
+      '/api/capabilities/execute',
+      payload,
       undefined,
     );
     expect(sendJsonMock).toHaveBeenCalledWith(expect.anything(), 200, { success: true });
   });
 
-  it('diagnostics collect 业务入口会走 runtime-host-proxy 转发', async () => {
-    const runtimeHostRequest = vi.fn().mockResolvedValue({
-      status: 202,
-      data: { success: true, job: { id: 'job-1', type: 'diagnostics.collect' } },
-    } satisfies RuntimeHostRouteResult);
-    parseJsonBodyMock.mockResolvedValueOnce(undefined);
-
-    const { handleRuntimeHostProxyRoutes } = await import('../../electron/api/routes/runtime-host-proxy');
-    const handled = await handleRuntimeHostProxyRoutes(
-      { method: 'POST' } as IncomingMessage,
-      {} as ServerResponse,
-      new URL('http://127.0.0.1:3210/api/diagnostics/collect'),
-      { runtimeHost: { request: runtimeHostRequest } } as never,
-    );
-
-    expect(handled).toBe(true);
-    expect(runtimeHostRequest).toHaveBeenCalledWith('POST', '/api/diagnostics/collect', undefined, undefined);
-    expect(sendJsonMock).toHaveBeenCalledWith(
-      expect.anything(),
-      202,
-      { success: true, job: { id: 'job-1', type: 'diagnostics.collect' } },
-    );
-  });
-
   it('透传 renderer 指定的 timeoutMs 到 runtime-host transport', async () => {
-    parseJsonBodyMock.mockResolvedValueOnce({});
+    const payload = {
+      id: 'scheduler.cron',
+      operationId: 'cron.trigger',
+      runtimeAddress: schedulerCronRuntimeAddress,
+      input: {
+        runtimeAddress: schedulerCronRuntimeAddress,
+      },
+    };
+    parseJsonBodyMock.mockResolvedValueOnce(payload);
     const runtimeHostRequest = vi.fn().mockResolvedValue({
       status: 200,
-      data: { success: true, tasks: [] },
+      data: { success: true, task: { id: 'task-1' } },
     } satisfies RuntimeHostRouteResult);
 
     const { handleRuntimeHostProxyRoutes } = await import('../../electron/api/routes/runtime-host-proxy');
@@ -188,15 +191,15 @@ describe('runtime-host proxy routes', () => {
         },
       } as unknown as IncomingMessage,
       {} as ServerResponse,
-      new URL('http://127.0.0.1:3210/api/tasks/list'),
+      new URL('http://127.0.0.1:3210/api/capabilities/execute'),
       { runtimeHost: { request: runtimeHostRequest } } as never,
     );
 
     expect(handled).toBe(true);
     expect(runtimeHostRequest).toHaveBeenCalledWith(
       'POST',
-      '/api/tasks/list',
-      {},
+      '/api/capabilities/execute',
+      payload,
       { timeoutMs: 60000 },
     );
   });

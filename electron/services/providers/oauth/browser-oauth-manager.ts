@@ -1,17 +1,23 @@
 import { EventEmitter } from 'events';
 import { shell } from 'electron';
 import { logger } from '../../../utils/logger';
+import { createCapabilityPayload } from '../../../main/runtime-host-capabilities';
 import { createDefaultRuntimeHostHttpClient } from '../../../main/runtime-host-client';
 import { loginGeminiCliOAuth, type GeminiCliOAuthCredentials } from './gemini-cli-oauth';
 import { loginOpenAICodexOAuth, type OpenAICodexOAuthCredentials } from './openai-codex-oauth';
 
 export type BrowserOAuthProviderType = 'google' | 'openai';
 
-const GOOGLE_RUNTIME_PROVIDER_ID = 'google-gemini-cli';
-const OPENAI_RUNTIME_PROVIDER_ID = 'openai-codex';
+const GOOGLE_OAUTH_PROVIDER_TOKEN_KEY = 'google-gemini-cli';
+const OPENAI_OAUTH_PROVIDER_TOKEN_KEY = 'openai-codex';
+const MODEL_PROVIDER_CAPABILITY_ID = 'model.provider';
 const runtimeHostClient = createDefaultRuntimeHostHttpClient({
   timeoutMs: 8000,
 });
+
+async function modelProviderCapabilityPayload(operationId: string, input: Record<string, unknown>) {
+  return await createCapabilityPayload(runtimeHostClient, MODEL_PROVIDER_CAPABILITY_ID, operationId, input);
+}
 
 class BrowserOAuthManager extends EventEmitter {
   private activeProvider: BrowserOAuthProviderType | null = null;
@@ -148,7 +154,7 @@ class BrowserOAuthManager extends EventEmitter {
     logger.info(`[BrowserOAuth] Successfully completed OAuth for ${providerType}`);
 
     const isGoogle = providerType === 'google';
-    const runtimeProviderId = isGoogle ? GOOGLE_RUNTIME_PROVIDER_ID : OPENAI_RUNTIME_PROVIDER_ID;
+    const oauthProviderTokenKey = isGoogle ? GOOGLE_OAUTH_PROVIDER_TOKEN_KEY : OPENAI_OAUTH_PROVIDER_TOKEN_KEY;
     const oauthTokenEmail = typeof token.email === 'string' ? token.email : undefined;
     const oauthTokenSubject = typeof token.projectId === 'string'
       ? token.projectId
@@ -156,14 +162,14 @@ class BrowserOAuthManager extends EventEmitter {
 
     const response = await runtimeHostClient.request<{ account?: { id?: unknown } }>(
       'POST',
-      '/api/provider-accounts/oauth/complete-browser',
-      {
+      '/api/capabilities/execute',
+      await modelProviderCapabilityPayload('providers.oauthCompleteBrowser', {
         providerType,
         accountId,
         ...(accountLabel ? { accountLabel } : {}),
-        runtimeProviderId,
+        oauthProviderTokenKey,
         token,
-      },
+      }),
     );
     const completedAccountId = typeof response.data?.account?.id === 'string'
       ? response.data.account.id

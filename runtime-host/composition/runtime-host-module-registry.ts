@@ -1,40 +1,71 @@
 import type { RuntimeJobRegistry } from '../core/jobs';
 import type { RuntimeHostLifecycle } from '../core/lifecycle';
-import type {
-  RuntimeHostApplicationServices,
-  RuntimeHostApplicationServicesContext,
-} from './application-services';
+import type { ApplicationServiceRegistry } from './application-service-registry';
 import type { RuntimeHostContainer } from './container';
 import type { RuntimeHostRouteRegistry } from './route-registry';
+import type { RuntimeHostRegistrationOwnerDescriptor } from '../core/registry';
 import { GatewayCapabilityService } from '../application/gateway/gateway-capability-service';
-import { RuntimeHostModuleRegistry, type RuntimeHostNamedModule } from '../core/registry';
+import {
+  AGENT_RUNTIME_APPLICATION_TOKEN,
+  CAPABILITY_ROUTING_SERVICE_TOKEN,
+  CHANNEL_SERVICE_TOKEN,
+  CLAWHUB_SERVICE_TOKEN,
+  CRON_SERVICE_TOKEN,
+  FILE_SERVICE_TOKEN,
+  GATEWAY_SERVICE_TOKEN,
+  LICENSE_SERVICE_TOKEN,
+  OPENCLAW_SERVICE_TOKEN,
+  PLATFORM_SERVICE_TOKEN,
+  PLUGIN_RUNTIME_SERVICE_TOKEN,
+  PROVIDER_ACCOUNTS_SERVICE_TOKEN,
+  PROVIDER_MODELS_SERVICE_TOKEN,
+  RUNTIME_HOST_SERVICE_TOKEN,
+  SECURITY_SERVICE_TOKEN,
+  SESSION_RUNTIME_TOKEN,
+  SETTINGS_SERVICE_TOKEN,
+  SKILLS_SERVICE_TOKEN,
+  SUBAGENT_SERVICE_TOKEN,
+  TOOLCHAIN_UV_SERVICE_TOKEN,
+  WORKBENCH_SERVICE_TOKEN,
+} from './runtime-host-tokens';
+import type { GatewayConnectionPort } from '../application/gateway/gateway-runtime-port';
+import {
+  RuntimeHostModuleRegistry,
+  type RuntimeHostModuleRegistrationDiagnostic,
+  type RuntimeHostNamedModule,
+} from '../core/registry';
 import {
   registerOpenClawApplicationServices,
   registerOpenClawApplicationLifecycle,
   registerOpenClawApplicationJobs,
-  resolveOpenClawApplicationServices,
 } from './modules/openclaw-application-module';
 import {
   registerOperationsApplicationServices,
   registerOperationsLifecycle,
   registerOperationsJobs,
-  resolveOperationsApplicationServices,
 } from './modules/operations-application-module';
 import {
   registerRuntimeApplicationServices,
   registerRuntimeApplicationLifecycle,
   registerRuntimeApplicationJobs,
-  resolveRuntimeApplicationServices,
 } from './modules/runtime-application-module';
 import { registerOpenClawRoutes } from './modules/openclaw-route-module';
 import { registerOperationsRoutes } from './modules/operations-route-module';
 import { registerRuntimeRoutes } from './modules/runtime-route-module';
 import { registerSessionRoutes } from './modules/session-route-module';
 
+export interface RuntimeHostServiceRegistrationContext {
+  readonly container: RuntimeHostContainer;
+  readonly facades: ApplicationServiceRegistry;
+}
+
+export interface RuntimeHostRouteRegistrationContext {
+  readonly facades: ApplicationServiceRegistry;
+}
+
 export interface RuntimeHostApplicationModule extends RuntimeHostNamedModule {
   readonly name: string;
-  readonly registerServices: (context: RuntimeHostApplicationServicesContext) => void;
-  readonly resolveServices?: (container: RuntimeHostContainer) => object;
+  readonly registerServices: (context: RuntimeHostServiceRegistrationContext) => void;
   readonly registerJobs?: (
     container: RuntimeHostContainer,
     deps: {
@@ -49,62 +80,278 @@ export interface RuntimeHostApplicationModule extends RuntimeHostNamedModule {
   ) => void;
   readonly registerRoutes?: (
     routes: RuntimeHostRouteRegistry,
-    services: RuntimeHostApplicationServices,
+    context: RuntimeHostRouteRegistrationContext,
   ) => void;
+  readonly connect?: (context: RuntimeHostServiceRegistrationContext) => void;
 }
 
 const openClawModule: RuntimeHostApplicationModule = {
   name: 'openclaw',
-  registerServices: (context) => registerOpenClawApplicationServices(context.container, context),
-  resolveServices: resolveOpenClawApplicationServices,
+  manifest: {
+    id: 'openclaw',
+    registerProviders: true,
+    registerJobs: true,
+    registerLifecycle: true,
+    registerRoutes: true,
+    imports: [
+      'channels.activationStrategy',
+      'channels.configRepository',
+      'channels.loginRuntime',
+      'channels.pairingRuntime',
+      'clawhub.cliRunner',
+      'clawhub.registryClient',
+      'clawhub.runtime',
+      'clawhub.skillInventory',
+      'gateway.capabilities',
+      'gateway.control',
+      'gateway.runtime',
+      'logger',
+      'openclaw.authProfileService',
+      'openclaw.authRepository',
+      'openclaw.configRepository',
+      'openclaw.environmentRepository',
+      'openclaw.infrastructure',
+      'openclaw.oauthPluginRegistrationService',
+      'openclaw.providerSnapshotService',
+      'openclaw.subagentTemplateService',
+      'openclaw.workspaceService',
+      'plugins.fileSystem',
+      'plugins.repository',
+      'plugins.runtime',
+      'providers.agentIdentityProjection',
+      'providers.agentModelsProjection',
+      'providers.capabilityRoutingProjection',
+      'providers.capabilityRoutingStorage',
+      'providers.customMediaProjection',
+      'providers.modelsProjection',
+      'providers.modelsStorage',
+      'providers.projectionKeyResolver',
+      'providers.accountsProjectionPort',
+      'providers.projectionPolicy',
+      'providers.storeRepository',
+      'runtime.clock',
+      'runtime.commandExecutor',
+      'runtime.fileSystem',
+      'runtime.httpClient',
+      'runtime.idGenerator',
+      'runtime.systemEnvironment',
+      'runtime.tasks',
+      'runtime.timer',
+      'runtimeHost.parentGatewayEvents',
+      'runtimeHost.parentShell',
+      'settings.repository',
+      'skills.configRepository',
+      'skills.readmePreviewRepository',
+      'skills.workspace',
+    ],
+    exports: [
+      'settings.service',
+      'providers.accountsService',
+      'providers.capabilityRoutingService',
+      'providers.modelsService',
+      'channels.service',
+      'openclaw.service',
+      'skills.service',
+      'subagents.service',
+      'clawhub.service',
+      'runtimeHost.runtimeConfig',
+      'runtimeHost.workspaceBootstrap',
+    ],
+  },
+  registerServices: (context) => registerOpenClawApplicationServices(context.container, context.facades),
   registerJobs: registerOpenClawApplicationJobs,
   registerLifecycle: registerOpenClawApplicationLifecycle,
-  registerRoutes: registerOpenClawRoutes,
+  registerRoutes: (routes, context) => registerOpenClawRoutes(routes, {
+    settingsService: context.facades.resolve(SETTINGS_SERVICE_TOKEN),
+    providerAccountsService: context.facades.resolve(PROVIDER_ACCOUNTS_SERVICE_TOKEN),
+    capabilityRoutingService: context.facades.resolve(CAPABILITY_ROUTING_SERVICE_TOKEN),
+    providerModelsService: context.facades.resolve(PROVIDER_MODELS_SERVICE_TOKEN),
+    channelService: context.facades.resolve(CHANNEL_SERVICE_TOKEN),
+    openClawService: context.facades.resolve(OPENCLAW_SERVICE_TOKEN),
+    skillsService: context.facades.resolve(SKILLS_SERVICE_TOKEN),
+    subagentService: context.facades.resolve(SUBAGENT_SERVICE_TOKEN),
+    clawHubService: context.facades.resolve(CLAWHUB_SERVICE_TOKEN),
+  }),
 };
 
 const applicationFoundationModule: RuntimeHostApplicationModule = {
   name: 'application-foundation',
+  manifest: {
+    id: 'application-foundation',
+    registerProviders: true,
+    imports: ['gateway.runtime'],
+    exports: ['gateway.capabilities'],
+  },
   registerServices: (context) => {
-    context.container.register('gateway.capabilities', () => new GatewayCapabilityService({
-      gateway: context.openclawBridge,
+    context.container.register('gateway.capabilities', (scope) => new GatewayCapabilityService({
+      gateway: scope.resolve<Pick<GatewayConnectionPort, 'inspectGatewayMethodReadiness'>>('gateway.runtime'),
     }));
   },
 };
 
 const runtimeModule: RuntimeHostApplicationModule = {
   name: 'runtime',
-  registerServices: (context) => registerRuntimeApplicationServices(context.container, context),
-  resolveServices: resolveRuntimeApplicationServices,
+  manifest: {
+    id: 'runtime',
+    registerProviders: true,
+    registerJobs: true,
+    registerLifecycle: true,
+    registerRoutes: true,
+    imports: [
+      'channels.configRepository',
+      'channels.prelaunchPluginProjection',
+      'diagnostics.runtimeLayout',
+      'gateway.runtime',
+      'license.service',
+      'logger',
+      'plugins.catalogProjection',
+      'plugins.repository',
+      'plugins.runtime',
+      'plugins.runtimeJobs',
+      'providers.capabilityRoutingService',
+      'providers.modelsService',
+      'providers.projectionKeyResolver',
+      'providers.projectionSyncService',
+      'providers.storeRepository',
+      'runtime.clock',
+      'runtime.commandExecutor',
+      'runtime.fileSystem',
+      'runtime.idGenerator',
+      'runtime.processInfo',
+      'runtime.systemEnvironment',
+      'runtime.tasks',
+      'runtimeHost.environment',
+      'runtimeHost.parentShell',
+      'runtimeHost.prelaunchMaintenanceCacheStorage',
+      'runtimeHost.prelaunchPluginMaintenanceRuntime',
+      'runtimeHost.runtimeConfig',
+      'runtimeHost.stateSnapshots',
+      'runtimeHost.transportStats',
+      'runtimeHost.workspaceBootstrap',
+      'security.pluginConfigApplier',
+      'settings.repository',
+    ],
+    exports: [
+      'workbench.service',
+      'runtimeHost.service',
+      'plugins.runtimeService',
+      'gateway.service',
+    ],
+  },
+  registerServices: (context) => registerRuntimeApplicationServices(context.container, context.facades),
   registerJobs: registerRuntimeApplicationJobs,
   registerLifecycle: registerRuntimeApplicationLifecycle,
-  registerRoutes: registerRuntimeRoutes,
+  registerRoutes: (routes, context) => registerRuntimeRoutes(routes, {
+    workbenchService: context.facades.resolve(WORKBENCH_SERVICE_TOKEN),
+    runtimeHostService: context.facades.resolve(RUNTIME_HOST_SERVICE_TOKEN),
+    pluginRuntimeService: context.facades.resolve(PLUGIN_RUNTIME_SERVICE_TOKEN),
+    gatewayService: context.facades.resolve(GATEWAY_SERVICE_TOKEN),
+  }),
+};
+
+const licenseModule: RuntimeHostApplicationModule = {
+  name: 'license',
+  manifest: {
+    id: 'license',
+    registerProviders: true,
+    imports: ['runtimeHost.parentGatewayEvents'],
+    exports: ['license.service'],
+  },
+  registerServices: (context) => registerOperationsApplicationServices(context.container, context.facades, { only: 'license' }),
 };
 
 const operationsModule: RuntimeHostApplicationModule = {
   name: 'operations',
-  registerServices: (context) => registerOperationsApplicationServices(context.container, context),
-  resolveServices: resolveOperationsApplicationServices,
+  manifest: {
+    id: 'operations',
+    registerProviders: true,
+    registerJobs: true,
+    registerLifecycle: true,
+    registerRoutes: true,
+    imports: [
+      'channels.deliveryProjection',
+      'file.runtimeDataStore',
+      'gateway.capabilities',
+      'gateway.runtime',
+      'license.service',
+      'openclaw.infrastructure',
+      'operations.runtimeDataRoot',
+      'operations.taskWorkspace',
+      'platform.facade',
+      'runtime.backgroundTasks',
+      'runtime.clock',
+      'runtime.commandExecutor',
+      'runtime.fileSystem',
+      'runtime.idGenerator',
+      'runtime.systemEnvironment',
+      'runtime.tasks',
+      'runtime.timer',
+      'runtimeHost.parentGatewayEvents',
+      'security.pluginConfigProjection',
+      'security.policyStorage',
+      'session.runtime',
+      'teamRuntime.storageRoot',
+      'toolchainUv.runtime',
+      'usage.runtimeData',
+      'usage.transcriptLayout',
+    ],
+    exports: [
+      'agentRuntime.capabilityOperationRoutes',
+      'multiAgentTask.workflow',
+      'cron.service',
+      'file.service',
+      'teamRuntime.service',
+      'toolchainUv.service',
+      'security.service',
+      'task.service',
+      'platform.service',
+      'security.pluginConfigApplier',
+    ],
+  },
+  registerServices: (context) => registerOperationsApplicationServices(context.container, context.facades),
   registerJobs: registerOperationsJobs,
   registerLifecycle: registerOperationsLifecycle,
-  registerRoutes: registerOperationsRoutes,
+  registerRoutes: (routes, context) => registerOperationsRoutes(routes, {
+    cronService: context.facades.resolve(CRON_SERVICE_TOKEN),
+    fileService: context.facades.resolve(FILE_SERVICE_TOKEN),
+    licenseService: context.facades.resolve(LICENSE_SERVICE_TOKEN),
+    toolchainUvService: context.facades.resolve(TOOLCHAIN_UV_SERVICE_TOKEN),
+    securityService: context.facades.resolve(SECURITY_SERVICE_TOKEN),
+    platformService: context.facades.resolve(PLATFORM_SERVICE_TOKEN),
+  }),
 };
 
 const sessionsModule: RuntimeHostApplicationModule = {
   name: 'sessions',
-  registerServices: () => undefined,
-  resolveServices: () => ({}),
-  registerRoutes: registerSessionRoutes,
+  manifest: {
+    id: 'sessions',
+    registerProviders: true,
+    registerRoutes: true,
+    imports: ['agentRuntime.application', 'session.runtime'],
+    exports: ['agentRuntime.routes', 'sessions.routes'],
+  },
+  registerServices: (context) => {
+    context.facades.registerContainerFacade('agentRuntime', AGENT_RUNTIME_APPLICATION_TOKEN, context.container);
+    context.facades.registerContainerFacade('session-runtime', SESSION_RUNTIME_TOKEN, context.container);
+  },
+  registerRoutes: (routes, context) => registerSessionRoutes(routes, {
+    agentRuntimeService: context.facades.resolve(AGENT_RUNTIME_APPLICATION_TOKEN),
+    sessionRuntimeService: context.facades.resolve(SESSION_RUNTIME_TOKEN),
+  }),
 };
 
 export const RUNTIME_HOST_APPLICATION_MODULES: readonly RuntimeHostApplicationModule[] = [
   applicationFoundationModule,
   openClawModule,
+  licenseModule,
   runtimeModule,
   operationsModule,
   sessionsModule,
 ] as const;
 
 const RUNTIME_HOST_ROUTE_MODULES: readonly RuntimeHostApplicationModule[] = [
+  applicationFoundationModule,
+  licenseModule,
   runtimeModule,
   operationsModule,
   openClawModule,
@@ -114,11 +361,90 @@ const RUNTIME_HOST_ROUTE_MODULES: readonly RuntimeHostApplicationModule[] = [
 function createRuntimeHostApplicationModuleRegistry(
   modules: readonly RuntimeHostApplicationModule[],
 ): RuntimeHostModuleRegistry<RuntimeHostApplicationModule> {
-  const registry = new RuntimeHostModuleRegistry<RuntimeHostApplicationModule>();
-  for (const module of modules) {
-    registry.register(module);
-  }
-  return registry;
+  return new RuntimeHostModuleRegistry<RuntimeHostApplicationModule>(modules, {
+    stages: [
+      { name: 'services', handler: 'registerServices' },
+      { name: 'jobs', handler: 'registerJobs' },
+      { name: 'lifecycle', handler: 'registerLifecycle' },
+      { name: 'routes', handler: 'registerRoutes' },
+      { name: 'connect', handler: 'connect' },
+    ],
+    externalExports: [
+      'channels.activationStrategy',
+      'channels.configRepository',
+      'channels.deliveryProjection',
+      'channels.prelaunchPluginProjection',
+      'diagnostics.runtimeLayout',
+      'gateway.runtime',
+      'logger',
+      'channels.loginRuntime',
+      'channels.pairingRuntime',
+      'clawhub.cliRunner',
+      'clawhub.registryClient',
+      'clawhub.runtime',
+      'clawhub.skillInventory',
+      'file.runtimeDataStore',
+      'gateway.control',
+      'openclaw.authProfileService',
+      'openclaw.authRepository',
+      'openclaw.configRepository',
+      'openclaw.environmentRepository',
+      'openclaw.infrastructure',
+      'openclaw.oauthPluginRegistrationService',
+      'openclaw.providerSnapshotService',
+      'openclaw.subagentTemplateService',
+      'openclaw.workspaceService',
+      'operations.runtimeDataRoot',
+      'operations.taskWorkspace',
+      'platform.facade',
+      'plugins.catalogProjection',
+      'plugins.fileSystem',
+      'plugins.repository',
+      'plugins.runtime',
+      'plugins.runtimeJobs',
+      'providers.agentIdentityProjection',
+      'providers.agentModelsProjection',
+      'providers.capabilityRoutingProjection',
+      'providers.capabilityRoutingStorage',
+      'providers.customMediaProjection',
+      'providers.modelsProjection',
+      'providers.modelsStorage',
+      'providers.projectionKeyResolver',
+      'providers.accountsProjectionPort',
+      'providers.projectionPolicy',
+      'providers.projectionSyncService',
+      'providers.storeRepository',
+      'runtime.backgroundTasks',
+      'runtime.clock',
+      'runtime.commandExecutor',
+      'runtime.fileSystem',
+      'runtime.httpClient',
+      'runtime.idGenerator',
+      'runtime.processInfo',
+      'runtime.systemEnvironment',
+      'runtime.tasks',
+      'runtime.timer',
+      'runtimeHost.environment',
+      'runtimeHost.parentGatewayEvents',
+      'runtimeHost.parentShell',
+      'runtimeHost.prelaunchMaintenanceCacheStorage',
+      'runtimeHost.prelaunchPluginMaintenanceRuntime',
+      'runtimeHost.stateSnapshots',
+      'runtimeHost.transportStats',
+      'session.runtime',
+      'settings.repository',
+      'security.pluginConfigProjection',
+      'security.policyStorage',
+      'skills.configRepository',
+      'skills.readmePreviewRepository',
+      'skills.workspace',
+      'teamRuntime.storageRoot',
+      'toolchainUv.runtime',
+      'usage.runtimeData',
+      'usage.transcriptLayout',
+      'agentRuntime.application',
+    ],
+  });
 }
 
 const RUNTIME_HOST_APPLICATION_MODULE_REGISTRY = createRuntimeHostApplicationModuleRegistry(
@@ -128,25 +454,84 @@ const RUNTIME_HOST_ROUTE_MODULE_REGISTRY = createRuntimeHostApplicationModuleReg
   RUNTIME_HOST_ROUTE_MODULES,
 );
 
+function listRuntimeHostApplicationRegistrationOwners(
+  container: RuntimeHostContainer,
+  deps: {
+    readonly jobRegistry?: RuntimeJobRegistry;
+    readonly lifecycle?: RuntimeHostLifecycle;
+    readonly routes?: RuntimeHostRouteRegistry;
+  } = {},
+): RuntimeHostRegistrationOwnerDescriptor[] {
+  return [
+    ...container.listRegistrations(),
+    ...(deps.jobRegistry?.listRegistrations().map((registration) => ({
+      key: registration.type,
+      owner: registration.owner,
+    })) ?? []),
+    ...(deps.lifecycle?.listRegistrations().map((registration) => ({
+      key: registration.name,
+      owner: registration.owner,
+    })) ?? []),
+    ...(deps.routes?.listRegistrations() ?? []),
+  ];
+}
+
+export function listRuntimeHostApplicationModuleRegistrationDiagnostics(
+  container: RuntimeHostContainer,
+  deps: {
+    readonly jobRegistry?: RuntimeJobRegistry;
+    readonly lifecycle?: RuntimeHostLifecycle;
+    readonly routes?: RuntimeHostRouteRegistry;
+  } = {},
+): RuntimeHostModuleRegistrationDiagnostic[] {
+  return RUNTIME_HOST_APPLICATION_MODULE_REGISTRY.listRegistrationDiagnostics(
+    listRuntimeHostApplicationRegistrationOwners(container, deps),
+  );
+}
+
+export function validateRuntimeHostApplicationModuleRegistrationOwners(
+  container: RuntimeHostContainer,
+  deps: {
+    readonly jobRegistry?: RuntimeJobRegistry;
+    readonly lifecycle?: RuntimeHostLifecycle;
+    readonly routes?: RuntimeHostRouteRegistry;
+    readonly facades?: ApplicationServiceRegistry;
+  } = {},
+): void {
+  RUNTIME_HOST_APPLICATION_MODULE_REGISTRY.validateRegistrationOwners(
+    listRuntimeHostApplicationRegistrationOwners(container, deps),
+  );
+  RUNTIME_HOST_APPLICATION_MODULE_REGISTRY.validateResolveImports([
+    ...container.listResolveEdges(),
+    ...(deps.facades?.listResolveEdges() ?? []),
+  ]);
+  RUNTIME_HOST_ROUTE_MODULE_REGISTRY.validateResolveImports([
+    ...(deps.facades?.listResolveEdges() ?? []),
+  ]);
+}
+
 export function registerRuntimeHostModuleServices(
-  context: RuntimeHostApplicationServicesContext,
+  context: RuntimeHostServiceRegistrationContext,
 ): void {
   RUNTIME_HOST_APPLICATION_MODULE_REGISTRY.run('services', (module) => {
-    module.registerServices(context);
+    context.container.withRegistrationOwner(module.name, () => {
+      context.container.withResolutionOwner(module.name, () => {
+        module.registerServices(context);
+      });
+    });
   });
 }
 
-export function resolveRuntimeHostModuleServices(
-  context: RuntimeHostApplicationServicesContext,
-): RuntimeHostApplicationServices {
-  const services: Record<string, unknown> = {
-    sessionRuntime: context.sessionRuntime,
-  };
-  RUNTIME_HOST_APPLICATION_MODULE_REGISTRY.run('service-resolution', (module) => {
-    Object.assign(services, module.resolveServices?.(context.container));
+export function connectRuntimeHostModuleServices(
+  context: RuntimeHostServiceRegistrationContext,
+): void {
+  RUNTIME_HOST_APPLICATION_MODULE_REGISTRY.run('connect', (module) => {
+    context.container.withResolutionOwner(module.name, () => {
+      context.facades.withResolutionOwner(module.name, () => {
+        module.connect?.(context);
+      });
+    });
   });
-  context.container.registerValue('application.services', services);
-  return services as unknown as RuntimeHostApplicationServices;
 }
 
 export function registerRuntimeHostModuleJobs(
@@ -156,7 +541,11 @@ export function registerRuntimeHostModuleJobs(
   },
 ): void {
   RUNTIME_HOST_APPLICATION_MODULE_REGISTRY.run('jobs', (module) => {
-    module.registerJobs?.(container, deps);
+    deps.jobRegistry.withRegistrationOwner(module.name, () => {
+      container.withResolutionOwner(module.name, () => {
+        module.registerJobs?.(container, deps);
+      });
+    });
   });
 }
 
@@ -167,15 +556,29 @@ export function registerRuntimeHostModuleLifecycle(
   },
 ): void {
   RUNTIME_HOST_APPLICATION_MODULE_REGISTRY.run('lifecycle', (module) => {
-    module.registerLifecycle?.(container, deps);
+    deps.lifecycle.withRegistrationOwner(module.name, () => {
+      container.withResolutionOwner(module.name, () => {
+        module.registerLifecycle?.(container, deps);
+      });
+    });
   });
 }
 
 export function registerRuntimeHostModuleRoutes(
   routes: RuntimeHostRouteRegistry,
-  services: RuntimeHostApplicationServices,
+  deps: {
+    readonly container: RuntimeHostContainer;
+    readonly facades: ApplicationServiceRegistry;
+  },
 ): void {
+  const routeContext: RuntimeHostRouteRegistrationContext = { facades: deps.facades };
   RUNTIME_HOST_ROUTE_MODULE_REGISTRY.run('routes', (module) => {
-    module.registerRoutes?.(routes, services);
+    routes.withRegistrationOwner(module.name, () => {
+      deps.container.withResolutionOwner(module.name, () => {
+        deps.facades.withResolutionOwner(module.name, () => {
+          module.registerRoutes?.(routes, routeContext);
+        });
+      });
+    });
   });
 }

@@ -11,11 +11,13 @@ function createConfigRepository(configDir: string, openclawDir: string) {
     write: async (config: Record<string, unknown>) => {
       writeFileSync(join(configDir, 'openclaw.json'), JSON.stringify(config, null, 2), 'utf8');
     },
-    update: async <T>(mutate: (config: Record<string, unknown>) => Promise<T> | T) => {
+    updateDirty: async <T>(mutate: (config: Record<string, unknown>) => Promise<{ result: T; changed: boolean }> | { result: T; changed: boolean }) => {
       const config = JSON.parse(readFileSync(join(configDir, 'openclaw.json'), 'utf8')) as Record<string, unknown>;
-      const result = await mutate(config);
-      writeFileSync(join(configDir, 'openclaw.json'), JSON.stringify(config, null, 2), 'utf8');
-      return result;
+      const update = await mutate(config);
+      if (update.changed) {
+        writeFileSync(join(configDir, 'openclaw.json'), JSON.stringify(config, null, 2), 'utf8');
+      }
+      return update.result;
     },
     getConfigDir: () => configDir,
     getConfigFilePath: () => join(configDir, 'openclaw.json'),
@@ -24,8 +26,12 @@ function createConfigRepository(configDir: string, openclawDir: string) {
 }
 
 async function createPluginConfigService(configDir: string, openclawDir: string) {
-  const { OpenClawPluginConfigService } = await import('../../runtime-host/application/openclaw/openclaw-plugin-config-service');
-  return new OpenClawPluginConfigService(createConfigRepository(configDir, openclawDir), createTestPluginFileSystem());
+  const { OpenClawPluginConfigService } = await import('../../runtime-host/application/adapters/openclaw/projections/openclaw-plugin-config-service');
+  const { OpenClawPluginConfigWorkflow } = await import('../../runtime-host/application/adapters/openclaw/workflows/openclaw-plugin/openclaw-plugin-config-workflow');
+  return new OpenClawPluginConfigService(new OpenClawPluginConfigWorkflow({
+    configRepository: createConfigRepository(configDir, openclawDir),
+    pluginFileSystem: createTestPluginFileSystem(),
+  }));
 }
 
 describe('openclaw plugin config service', () => {
@@ -419,7 +425,7 @@ describe('openclaw plugin config service', () => {
       },
     }, null, 2));
 
-    const { syncBrowserModeToOpenClaw } = await import('../../runtime-host/application/openclaw/openclaw-runtime-config-sync');
+    const { syncBrowserModeToOpenClaw } = await import('../../runtime-host/application/adapters/openclaw/projections/openclaw-runtime-config-sync');
 
     await syncBrowserModeToOpenClaw(
       createConfigRepository(configDir, openclawDir),
@@ -474,7 +480,7 @@ describe('openclaw plugin config service', () => {
       },
     }, null, 2));
 
-    const { syncBrowserModeToOpenClaw } = await import('../../runtime-host/application/openclaw/openclaw-runtime-config-sync');
+    const { syncBrowserModeToOpenClaw } = await import('../../runtime-host/application/adapters/openclaw/projections/openclaw-runtime-config-sync');
 
     await syncBrowserModeToOpenClaw(
       createConfigRepository(configDir, openclawDir),
@@ -546,7 +552,7 @@ describe('openclaw plugin config service', () => {
       },
     }, null, 2));
 
-    const { syncBrowserModeToOpenClaw } = await import('../../runtime-host/application/openclaw/openclaw-runtime-config-sync');
+    const { syncBrowserModeToOpenClaw } = await import('../../runtime-host/application/adapters/openclaw/projections/openclaw-runtime-config-sync');
 
     await syncBrowserModeToOpenClaw(
       createConfigRepository(configDir, openclawDir),

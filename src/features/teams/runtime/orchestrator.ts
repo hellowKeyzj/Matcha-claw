@@ -1,4 +1,4 @@
-import { hostApiFetch } from '@/lib/host-api';
+import { hostCapabilityExecute, runtimeAddressForAgentCapability } from '@/lib/host-api';
 import { waitAgentRunWithProgress } from '@/services/openclaw/agent-runtime';
 import {
   fetchChatTimeline,
@@ -12,6 +12,7 @@ import type { TeamMeta } from '@/stores/teams';
 import { useTeamsStore } from '@/stores/teams';
 import { useTeamsRunnerStore } from '@/stores/teams-runner';
 import { findLatestAssistantTextFromItems } from '@/stores/chat/timeline-message';
+import type { RuntimeAddress } from '../../../../runtime-host/shared/runtime-address';
 import type { SessionRenderItem } from '../../../../runtime-host/shared/session-adapter-types';
 
 const ORCHESTRATOR_TICK_ACTIVE_MS = 2_500;
@@ -70,20 +71,27 @@ function sleep(ms: number): Promise<void> {
   });
 }
 
-async function callGatewayRpc<T>(
-  method: string,
-  params: unknown,
-  timeoutMs: number,
+async function waitAgentRunSlice<T>(
+  runtimeAddress: RuntimeAddress,
+  runId: string,
+  waitSliceMs: number,
+  rpcTimeoutBufferMs: number,
 ): Promise<T> {
-  return await hostApiFetch<T>('/api/gateway/agent-wait', {
-    method: 'POST',
-    body: JSON.stringify({ method, params }),
-    timeoutMs,
-  });
-}
-
-async function gatewayRpc<T>(method: string, params?: unknown, timeoutMs?: number): Promise<T> {
-  return callGatewayRpc<T>(method, params, timeoutMs ?? 30_000);
+  const address = {
+    ...runtimeAddress,
+    capabilityId: 'agent.run',
+  };
+  return await hostCapabilityExecute<T>({
+    id: 'agent.run',
+    operationId: 'agent.wait',
+    runtimeAddress: address,
+    input: {
+      runtimeAddress: address,
+      runId,
+      waitSliceMs,
+      rpcTimeoutBufferMs,
+    },
+  }, { timeoutMs: waitSliceMs + rpcTimeoutBufferMs });
 }
 
 function readAssistantProgress(items?: SessionRenderItem[]): AssistantProgress {
@@ -105,16 +113,20 @@ function readAssistantProgress(items?: SessionRenderItem[]): AssistantProgress {
   };
 }
 
-async function fetchAssistantProgress(sessionKey: string): Promise<AssistantProgress> {
+async function fetchAssistantProgress(agentId: string, sessionKey: string, baseRuntimeAddress: RuntimeAddress): Promise<AssistantProgress> {
+  const runtimeAddress = resolveTeamRuntimeAddress(baseRuntimeAddress, agentId, sessionKey);
   const items = await fetchChatTimeline({
     sessionKey,
+    runtimeAddress,
     limit: HISTORY_LIMIT,
   });
   return readAssistantProgress(items);
 }
 
 async function waitForNextAssistantSummary(
+  agentId: string,
   sessionKey: string,
+  baseRuntimeAddress: RuntimeAddress,
   baseline: AssistantProgress,
 ): Promise<string> {
   const startedAt = Date.now();
@@ -122,7 +134,7 @@ async function waitForNextAssistantSummary(
 
   while (Date.now() - startedAt < RESULT_WAIT_TIMEOUT_MS) {
     try {
-      const current = await fetchAssistantProgress(sessionKey);
+      const current = await fetchAssistantProgress(agentId, sessionKey, baseRuntimeAddress);
       if (current.assistantCount > baseline.assistantCount) {
         return current.latestSummary || '自动执行完成';
       }
@@ -163,6 +175,15 @@ function sessionKey(agentId: string, teamId: string): string {
   return `agent:${agentId}:team:${teamId}:exec`;
 }
 
+function resolveTeamRuntimeAddress(baseRuntimeAddress: RuntimeAddress, agentId: string, execSessionKey: string): RuntimeAddress {
+  return runtimeAddressForAgentCapability({
+    runtimeAddress: baseRuntimeAddress,
+    capabilityId: 'session.prompt',
+    agentId,
+    sessionKey: execSessionKey,
+  });
+}
+
 function selectLatestDecisionMessage(mailbox: TeamMailboxMessage[], taskId: string): TeamMailboxMessage | null {
   const list = mailbox
     .filter((message) => message.kind === 'decision' && message.relatedTaskId === taskId)
@@ -185,6 +206,7 @@ export class TeamsBackgroundOrchestrator {
   private planningHandledByMessageId = new Set<string>();
   private tickRunning = false;
   private visibilityHandlerBound = false;
+  private teamRuntimeAddress: RuntimeAddress | null = null;
 
   private handleVisibilityChange = () => {
     if (!useTeamsRunnerStore.getState().daemonRunning) {
@@ -200,7 +222,8 @@ export class TeamsBackgroundOrchestrator {
     return document.visibilityState === 'visible';
   }
 
-  start(): void {
+  start(teamRuntimeAddress: RuntimeAddress): void {
+    this.teamRuntimeAddress = teamRuntimeAddress;
     if (this.timer) {
       return;
     }
@@ -223,6 +246,7 @@ export class TeamsBackgroundOrchestrator {
     }
     this.busyAgentKeys.clear();
     this.lastRefreshAtByTeamId.clear();
+    this.teamRuntimeAddress = null;
     useTeamsRunnerStore.getState().resetRuntimeState();
     useTeamsRunnerStore.getState().setDaemonRunning(false);
   }
@@ -497,6 +521,14 @@ export class TeamsBackgroundOrchestrator {
     }
     runtimeStore.markAgentTask(team.id, agentId, claimedTask.taskId);
 
+    const baseRuntimeAddress = useTeamsStore.getState().runMetaByTeamId[team.id]?.runtimeAddress;
+    if (!baseRuntimeAddress) {
+      runtimeStore.markAgentTask(team.id, agentId);
+      runtimeStore.markAgentActive(team.id, agentId, false);
+      this.busyAgentKeys.delete(busyKey);
+      throw new Error(`Team runtimeAddress is required: ${team.id}`);
+    }
+
     let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
     const heartbeat = async () => {
       try {
@@ -507,15 +539,17 @@ export class TeamsBackgroundOrchestrator {
     };
 
     try {
-      const baseline = await fetchAssistantProgress(execSessionKey);
+      const baseline = await fetchAssistantProgress(agentId, execSessionKey, baseRuntimeAddress);
       await useTeamsStore.getState().updateTaskStatus(team.id, claimedTask.taskId, 'running');
 
       heartbeatTimer = setInterval(() => {
         void heartbeat();
       }, HEARTBEAT_TICK_MS);
 
+      const runtimeAddress = resolveTeamRuntimeAddress(baseRuntimeAddress, agentId, execSessionKey);
       const sendResult = await sendChatMessage({
         sessionKey: execSessionKey,
+        runtimeAddress,
         message: buildRunnerPrompt(claimedTask),
         deliver: false,
         idempotencyKey: generateId(),
@@ -523,25 +557,27 @@ export class TeamsBackgroundOrchestrator {
 
       const runId = typeof sendResult?.runId === 'string' ? sendResult.runId.trim() : '';
       if (runId) {
-        await waitAgentRunWithProgress(gatewayRpc, {
+        await waitAgentRunWithProgress(null, {
           runId,
           sessionKey: execSessionKey,
+          runtimeAddress,
           waitSliceMs: AGENT_WAIT_SLICE_MS,
           idleTimeoutMs: RESULT_WAIT_TIMEOUT_MS,
           rpcTimeoutBufferMs: AGENT_WAIT_RPC_TIMEOUT_BUFFER_MS,
           logPrefix: 'teams.daemon',
+          waitSlice: (input) => waitAgentRunSlice(input.runtimeAddress, input.runId, input.waitSliceMs, input.rpcTimeoutBufferMs),
         });
       }
 
       let resultSummary = '';
       if (runId) {
-        const finalProgress = await fetchAssistantProgress(execSessionKey);
+        const finalProgress = await fetchAssistantProgress(agentId, execSessionKey, baseRuntimeAddress);
         if (finalProgress.assistantCount <= baseline.assistantCount) {
           throw new Error('任务执行结束但未产生新的助手回复，已转入阻塞等待决策。');
         }
         resultSummary = finalProgress.latestSummary || '自动执行完成';
       } else {
-        resultSummary = await waitForNextAssistantSummary(execSessionKey, baseline);
+        resultSummary = await waitForNextAssistantSummary(agentId, execSessionKey, baseRuntimeAddress, baseline);
       }
 
       await useTeamsStore.getState().updateTaskStatus(team.id, claimedTask.taskId, 'done', { resultSummary });
@@ -585,8 +621,14 @@ export class TeamsBackgroundOrchestrator {
 
     let runMeta = teamsStore.runMetaByTeamId[team.id];
     if (!runMeta) {
+      const teamRuntimeAddress = this.teamRuntimeAddress;
+      if (!teamRuntimeAddress) {
+        runnerStore.clearTeamRuntimeState(team.id);
+        runnerStore.setTeamError(team.id, `Team runtimeAddress is required: ${team.id}`);
+        return;
+      }
       try {
-        await teamsStore.initRuntime(team.id);
+        await teamsStore.initRuntime(team.id, teamRuntimeAddress);
       } catch (error) {
         runnerStore.clearTeamRuntimeState(team.id);
         runnerStore.setTeamError(team.id, toErrorMessage(error));

@@ -23,6 +23,7 @@ export type RuntimeRouteMatcher =
 
 export interface RuntimeRouteHandlerEntry {
   key: RuntimeRouteHandlerKey;
+  method: string;
   matcher: RuntimeRouteMatcher;
   handle: RuntimeRouteHandler;
 }

@@ -1,4 +1,5 @@
 import { parseRouteUrl } from '../common/http';
+import { RuntimeRouteIndex } from './runtime-route-index';
 import type {
   RuntimeRouteRequest,
   RuntimeRouteHandlerEntry,
@@ -13,17 +14,8 @@ export type {
   RuntimeRouteResponse,
 } from './runtime-route-dispatcher-types';
 
-function routeMatches(entry: RuntimeRouteHandlerEntry, routePath: string): boolean {
-  if (entry.matcher.type === 'exact') {
-    return routePath === entry.matcher.path;
-  }
-  if (entry.matcher.type === 'prefix') {
-    return routePath.startsWith(entry.matcher.prefix);
-  }
-  return entry.matcher.pattern.test(routePath);
-}
-
-export function createRuntimeRouteDispatcher(handlers: RuntimeRouteHandlerEntry[]) {
+export function createRuntimeRouteDispatcher(handlersOrIndex: RuntimeRouteHandlerEntry[] | RuntimeRouteIndex) {
+  const routeIndex = Array.isArray(handlersOrIndex) ? RuntimeRouteIndex.from(handlersOrIndex) : handlersOrIndex;
   return async (method: string, route: string, payload: unknown): Promise<RuntimeRouteResponse | null> => {
     const routeUrl = parseRouteUrl(route);
     const request: RuntimeRouteRequest = {
@@ -33,11 +25,15 @@ export function createRuntimeRouteDispatcher(handlers: RuntimeRouteHandlerEntry[
       routePath: routeUrl.pathname,
       routeUrl,
     };
-    for (const handler of handlers) {
-      if (!routeMatches(handler, request.routePath)) {
-        continue;
+    const exactHandler = routeIndex.exact(method, request.routePath);
+    if (exactHandler) {
+      const result = await exactHandler.handle(request);
+      if (result) {
+        return result;
       }
-      const result = await handler.handle(request);
+    }
+    for (const entry of routeIndex.fallbackCandidates(method, request.routePath)) {
+      const result = await entry.handle(request);
       if (result) {
         return result;
       }

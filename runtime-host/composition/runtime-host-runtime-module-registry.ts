@@ -1,7 +1,12 @@
 import type { GatewayChatPort, GatewayRpcPort } from '../application/gateway/gateway-runtime-port';
 import type { RuntimeJobRegistry } from '../core/jobs';
 import type { RuntimeHostLifecycle } from '../core/lifecycle';
-import { RuntimeHostModuleRegistry, type RuntimeHostNamedModule } from '../core/registry';
+import {
+  RuntimeHostModuleRegistry,
+  type RuntimeHostModuleRegistrationDiagnostic,
+  type RuntimeHostNamedModule,
+  type RuntimeHostRegistrationOwnerDescriptor,
+} from '../core/registry';
 import type { RuntimeHostPlatformRoot } from './modules/platform-runtime-module';
 import {
   registerRuntimeHostPlatformRoot,
@@ -14,6 +19,11 @@ import {
   registerPluginRuntimeLifecycle,
   resolvePluginRuntimeModule,
 } from './modules/plugin-runtime-module';
+import type { AgentRuntimeModule } from './modules/agent-runtime-module';
+import {
+  registerAgentRuntimeModule,
+  resolveAgentRuntimeModule,
+} from './modules/agent-runtime-module';
 import type { SessionRuntimeModule } from './modules/session-runtime-module';
 import {
   registerSessionRuntimeModule,
@@ -32,11 +42,15 @@ import type { RuntimeHostContainer } from './container';
 import type { RuntimeHostInfrastructure } from './modules/runtime-infrastructure-module';
 import { registerRuntimeHostInfrastructureLifecycle } from './modules/runtime-infrastructure-module';
 import { registerOpenClawInfrastructure } from './modules/openclaw-infrastructure-module';
-import type { RuntimeRouteResponse } from '../api/dispatch/runtime-route-dispatcher';
+import { registerAcpConnectorModule } from './modules/acp-connector-module';
 import {
   ParentShellGatewayControl,
   type GatewayControlPort,
 } from '../application/runtime-host/parent-shell-port';
+import {
+  RUNTIME_DISPATCH_ROUTE_TOKEN,
+  type RuntimeDispatchRoutePort,
+} from './runtime-host-tokens';
 
 export interface RuntimeHostSystemModuleContext {
   readonly container: RuntimeHostContainer;
@@ -48,6 +62,7 @@ export interface RuntimeHostSystemModules {
   readonly gatewayBridge: GatewayBridgeModule;
   readonly platformRuntime: RuntimeHostPlatformRoot;
   readonly pluginRuntime: PluginRuntimeModule;
+  readonly agentRuntime: AgentRuntimeModule;
   readonly sessionRuntime: SessionRuntimeModule;
 }
 
@@ -58,7 +73,6 @@ interface RuntimeHostSystemModule extends RuntimeHostNamedModule {
     context: RuntimeHostSystemModuleContext,
     modules: Partial<RuntimeHostSystemModules>,
   ) => void;
-  readonly resolveServices?: (context: RuntimeHostSystemModuleContext, modules: Partial<RuntimeHostSystemModules>) => object;
   readonly connect?: (context: RuntimeHostSystemModuleContext, modules: RuntimeHostSystemModules) => void;
   readonly registerJobs?: (
     context: RuntimeHostSystemModuleContext,
@@ -78,6 +92,11 @@ interface RuntimeHostSystemModule extends RuntimeHostNamedModule {
 
 const infrastructureModule: RuntimeHostSystemModule = {
   name: 'infrastructure',
+  manifest: {
+    id: 'infrastructure',
+    registerLifecycle: true,
+    exports: ['runtime.infrastructure'],
+  },
   registerLifecycle: (context) => {
     registerRuntimeHostInfrastructureLifecycle(context.infrastructure);
   },
@@ -85,13 +104,60 @@ const infrastructureModule: RuntimeHostSystemModule = {
 
 const openclawInfrastructureModule: RuntimeHostSystemModule = {
   name: 'openclaw-infrastructure',
+  manifest: {
+    id: 'openclaw-infrastructure',
+    registerProviders: true,
+    imports: ['runtime.infrastructure'],
+    exports: [
+      'gateway.runtimeData',
+      'gateway.runtimeEndpointId',
+      'gateway.runtimeFactory',
+      'gateway.settings',
+      'platform.runtimeDriverFactory',
+      'channels.activationStrategy',
+      'channels.deliveryProjection',
+      'openclaw.infrastructure',
+      'openclaw.providerSnapshotService',
+      'sessionConfigDirectory',
+      'sessionExternalArtefactResolver',
+      'sessionDefaultModelResolver',
+      'plugins.catalogProjection',
+      'plugins.companionSkillWorkspace',
+      'plugins.configProjection',
+      'plugins.configStore',
+      'plugins.fileSystem',
+      'plugins.injectedCatalogPlatformPolicy',
+      'plugins.managedCatalog',
+      'plugins.managedInstaller',
+      'runtime.adapterRegistrationFactories',
+    ],
+  },
   registerInfrastructure: (context) => {
     registerOpenClawInfrastructure(context.container);
   },
 };
 
+const acpConnectorModule: RuntimeHostSystemModule = {
+  name: 'acp-connector',
+  manifest: {
+    id: 'acp-connector',
+    registerProviders: true,
+    exports: ['runtime.connectorRegistrationFactories'],
+  },
+  registerInfrastructure: (context) => {
+    registerAcpConnectorModule(context.container);
+  },
+};
+
 const gatewayBridgeModule: RuntimeHostSystemModule = {
   name: 'gateway-bridge',
+  manifest: {
+    id: 'gateway-bridge',
+    registerProviders: true,
+    registerLifecycle: true,
+    imports: ['runtime.infrastructure', 'agentRuntime.registry', 'gateway.runtimeData', 'gateway.runtimeFactory', 'gateway.settings'],
+    exports: ['gateway.control', 'gateway.endpointControlState', 'gateway.runtime'],
+  },
   registerInfrastructure: (context) => {
     context.container.register('gateway.control', (): GatewayControlPort => new ParentShellGatewayControl({
       request: context.parentTransport.requestParentShellAction,
@@ -101,22 +167,15 @@ const gatewayBridgeModule: RuntimeHostSystemModule = {
     const { container, infrastructure, parentTransport } = context;
     registerGatewayBridgeModule(container, {
       parentTransport,
-      dispatchRoute: (method, route, payload) => container.resolve<(
-        method: string,
-        route: string,
-        payload: unknown,
-      ) => Promise<RuntimeRouteResponse | null>>('runtime.dispatchRoute')(method, route, payload),
+      dispatchRoute: (method, route, payload) => container.resolve<RuntimeDispatchRoutePort>(
+        RUNTIME_DISPATCH_ROUTE_TOKEN,
+      )(method, route, payload),
       systemEnvironment: infrastructure.systemEnvironment,
       clock: infrastructure.clock,
       scheduler: infrastructure.scheduler,
       tcpProbe: infrastructure.tcpProbe,
       logger: infrastructure.logger,
     });
-  },
-  resolveServices: (context) => {
-    return {
-      gatewayBridge: resolveGatewayBridgeModule(context.container),
-    };
   },
   registerLifecycle: (_context, modules, deps) => {
     registerGatewayBridgeLifecycle(modules.gatewayBridge, deps);
@@ -125,21 +184,39 @@ const gatewayBridgeModule: RuntimeHostSystemModule = {
 
 const platformRuntimeModule: RuntimeHostSystemModule = {
   name: 'platform-runtime',
+  manifest: {
+    id: 'platform-runtime',
+    registerProviders: true,
+    imports: ['gateway.runtime', 'platform.runtimeDriverFactory'],
+    exports: ['platform.runtimeDriver', 'platform.facade'],
+  },
   registerServices: (context) => {
-    registerRuntimeHostPlatformRoot(
-      context.container,
-      () => context.container.resolve('gateway.openclawBridge'),
-    );
-  },
-  resolveServices: (context) => {
-    return {
-      platformRuntime: resolveRuntimeHostPlatformRoot(context.container),
-    };
-  },
+    registerRuntimeHostPlatformRoot(context.container);
+  }
 };
 
 const pluginRuntimeModule: RuntimeHostSystemModule = {
   name: 'plugin-runtime',
+  manifest: {
+    id: 'plugin-runtime',
+    registerProviders: true,
+    registerJobs: true,
+    registerLifecycle: true,
+    imports: [
+      'runtime.infrastructure',
+      'gateway.control',
+      'openclaw.infrastructure',
+      'plugins.catalogProjection',
+      'plugins.companionSkillWorkspace',
+      'plugins.configProjection',
+      'plugins.configStore',
+      'plugins.fileSystem',
+      'plugins.injectedCatalogPlatformPolicy',
+      'plugins.managedCatalog',
+      'plugins.managedInstaller',
+    ],
+    exports: ['plugins.companionSkillService', 'plugins.registry', 'plugins.runtime'],
+  },
   registerServices: (context) => {
     const { infrastructure } = context;
     registerPluginRuntimeModule(context.container, {
@@ -147,12 +224,8 @@ const pluginRuntimeModule: RuntimeHostSystemModule = {
       logger: infrastructure.logger,
       enabledPluginIdsEnv: infrastructure.systemEnvironment.getEnv('MATCHACLAW_RUNTIME_HOST_ENABLED_PLUGIN_IDS'),
       pluginCatalogEnv: infrastructure.systemEnvironment.getEnv('MATCHACLAW_RUNTIME_HOST_PLUGIN_CATALOG'),
+      injectedPluginPlatformPolicy: context.container.resolve('plugins.injectedCatalogPlatformPolicy'),
     });
-  },
-  resolveServices: (context) => {
-    return {
-      pluginRuntime: resolvePluginRuntimeModule(context.container),
-    };
   },
   registerJobs: (context, modules, deps) => {
     registerPluginRuntimeJobs(modules.pluginRuntime, {
@@ -165,21 +238,54 @@ const pluginRuntimeModule: RuntimeHostSystemModule = {
   },
 };
 
+const agentRuntimeModule: RuntimeHostSystemModule = {
+  name: 'agent-runtime',
+  manifest: {
+    id: 'agent-runtime',
+    registerProviders: true,
+    imports: [
+      'runtime.adapterRegistrationFactories',
+      'runtime.connectorRegistrationFactories',
+    ],
+    exports: [
+      'agentRuntime.registry',
+      'agentRuntime.capabilityRouter',
+      'agentRuntime.application',
+    ],
+  },
+  registerServices: (context) => {
+    registerAgentRuntimeModule(
+      context.container,
+      () => context.container.resolve('gateway.runtime') as GatewayChatPort & Pick<GatewayRpcPort, 'gatewayRpc'>,
+    );
+  },
+};
+
 const sessionRuntimeModule: RuntimeHostSystemModule = {
   name: 'session-runtime',
+  manifest: {
+    id: 'session-runtime',
+    registerProviders: true,
+    connect: true,
+    connectImports: ['gateway-bridge'],
+    registerJobs: true,
+    registerLifecycle: true,
+    imports: [
+      'agentRuntime.registry',
+      'gateway.runtimeEndpointId',
+      'sessionConfigDirectory',
+      'sessionExternalArtefactResolver',
+      'sessionDefaultModelResolver',
+    ],
+    exports: ['agentRuntime.capabilityOperationRoutes', 'session.runtime'],
+  },
   registerServices: (context) => {
     registerSessionRuntimeModule(
       context.container,
-      () => context.container.resolve('gateway.openclawBridge') as GatewayChatPort & Pick<GatewayRpcPort, 'gatewayRpc'>,
       {
         emit: context.parentTransport.emitParentGatewayEvent,
       },
     );
-  },
-  resolveServices: (context) => {
-    return {
-      sessionRuntime: resolveSessionRuntimeModule(context.container),
-    };
   },
   connect: (_context, modules) => {
     modules.gatewayBridge.setSessionRuntime(modules.sessionRuntime.sessionRuntime);
@@ -195,44 +301,92 @@ const sessionRuntimeModule: RuntimeHostSystemModule = {
 const RUNTIME_HOST_SYSTEM_MODULES: readonly RuntimeHostSystemModule[] = [
   infrastructureModule,
   openclawInfrastructureModule,
+  acpConnectorModule,
   gatewayBridgeModule,
   platformRuntimeModule,
   pluginRuntimeModule,
+  agentRuntimeModule,
   sessionRuntimeModule,
 ] as const;
 
-function createRuntimeHostSystemModuleRegistry(): RuntimeHostModuleRegistry<RuntimeHostSystemModule> {
-  const registry = new RuntimeHostModuleRegistry<RuntimeHostSystemModule>();
-  for (const module of RUNTIME_HOST_SYSTEM_MODULES) {
-    registry.register(module);
-  }
-  return registry;
+const RUNTIME_HOST_SYSTEM_MODULE_REGISTRY = new RuntimeHostModuleRegistry<RuntimeHostSystemModule>(
+  RUNTIME_HOST_SYSTEM_MODULES,
+  {
+    stages: [
+      { name: 'infrastructure', handler: 'registerInfrastructure' },
+      { name: 'services', handler: 'registerServices' },
+      { name: 'connect', handler: 'connect' },
+      { name: 'jobs', handler: 'registerJobs' },
+      { name: 'lifecycle', handler: 'registerLifecycle' },
+    ],
+  },
+);
+
+function listRuntimeHostSystemRegistrationOwners(
+  context: RuntimeHostSystemModuleContext,
+): RuntimeHostRegistrationOwnerDescriptor[] {
+  return [
+    ...context.container.listRegistrations(),
+    ...context.infrastructure.jobRegistry.listRegistrations().map((registration) => ({
+      key: registration.type,
+      owner: registration.owner,
+    })),
+    ...context.infrastructure.lifecycle.listRegistrations().map((registration) => ({
+      key: registration.name,
+      owner: registration.owner,
+    })),
+  ];
 }
 
-const RUNTIME_HOST_SYSTEM_MODULE_REGISTRY = createRuntimeHostSystemModuleRegistry();
+export function listRuntimeHostSystemModuleRegistrationDiagnostics(
+  context: RuntimeHostSystemModuleContext,
+): RuntimeHostModuleRegistrationDiagnostic[] {
+  return RUNTIME_HOST_SYSTEM_MODULE_REGISTRY.listRegistrationDiagnostics(
+    listRuntimeHostSystemRegistrationOwners(context),
+  );
+}
+
+export function validateRuntimeHostSystemModuleRegistrationOwners(
+  context: RuntimeHostSystemModuleContext,
+): void {
+  RUNTIME_HOST_SYSTEM_MODULE_REGISTRY.validateRegistrationOwners(
+    listRuntimeHostSystemRegistrationOwners(context),
+  );
+  RUNTIME_HOST_SYSTEM_MODULE_REGISTRY.validateResolveImports(context.container.listResolveEdges());
+}
 
 export function registerRuntimeHostSystemInfrastructure(context: RuntimeHostSystemModuleContext): void {
   RUNTIME_HOST_SYSTEM_MODULE_REGISTRY.run('infrastructure', (module) => {
-    module.registerInfrastructure?.(context);
+    context.container.withRegistrationOwner(module.name, () => {
+      module.registerInfrastructure?.(context);
+    });
   });
 }
 
 export function registerRuntimeHostSystemServices(context: RuntimeHostSystemModuleContext): void {
   RUNTIME_HOST_SYSTEM_MODULE_REGISTRY.run('services', (module) => {
-    module.registerServices?.(context, {});
+    context.container.withRegistrationOwner(module.name, () => {
+      context.container.withResolutionOwner(module.name, () => {
+        module.registerServices?.(context, {});
+      });
+    });
   });
 }
 
 export function resolveRuntimeHostSystemModules(context: RuntimeHostSystemModuleContext): RuntimeHostSystemModules {
-  const modules: Partial<RuntimeHostSystemModules> = {};
-  RUNTIME_HOST_SYSTEM_MODULE_REGISTRY.run('service-resolution', (module) => {
-    Object.assign(modules, module.resolveServices?.(context, modules));
-  });
-  const createdModules = modules as RuntimeHostSystemModules;
+  const modules: RuntimeHostSystemModules = {
+    gatewayBridge: context.container.withResolutionOwner('gateway-bridge', () => resolveGatewayBridgeModule(context.container)),
+    platformRuntime: context.container.withResolutionOwner('platform-runtime', () => resolveRuntimeHostPlatformRoot(context.container)),
+    pluginRuntime: context.container.withResolutionOwner('plugin-runtime', () => resolvePluginRuntimeModule(context.container)),
+    agentRuntime: context.container.withResolutionOwner('agent-runtime', () => resolveAgentRuntimeModule(context.container)),
+    sessionRuntime: context.container.withResolutionOwner('session-runtime', () => resolveSessionRuntimeModule(context.container)),
+  };
   RUNTIME_HOST_SYSTEM_MODULE_REGISTRY.run('connect', (module) => {
-    module.connect?.(context, createdModules);
+    context.container.withResolutionOwner(module.name, () => {
+      module.connect?.(context, modules);
+    });
   });
-  return createdModules;
+  return modules;
 }
 
 export function registerRuntimeHostSystemModuleJobs(
@@ -240,8 +394,12 @@ export function registerRuntimeHostSystemModuleJobs(
   modules: RuntimeHostSystemModules,
 ): void {
   RUNTIME_HOST_SYSTEM_MODULE_REGISTRY.run('jobs', (module) => {
-    module.registerJobs?.(context, modules, {
-      jobRegistry: context.infrastructure.jobRegistry,
+    context.infrastructure.jobRegistry.withRegistrationOwner(module.name, () => {
+      context.container.withResolutionOwner(module.name, () => {
+        module.registerJobs?.(context, modules, {
+          jobRegistry: context.infrastructure.jobRegistry,
+        });
+      });
     });
   });
 }
@@ -251,8 +409,12 @@ export function registerRuntimeHostSystemModuleLifecycle(
   modules: RuntimeHostSystemModules,
 ): void {
   RUNTIME_HOST_SYSTEM_MODULE_REGISTRY.run('lifecycle', (module) => {
-    module.registerLifecycle?.(context, modules, {
-      lifecycle: context.infrastructure.lifecycle,
+    context.infrastructure.lifecycle.withRegistrationOwner(module.name, () => {
+      context.container.withResolutionOwner(module.name, () => {
+        module.registerLifecycle?.(context, modules, {
+          lifecycle: context.infrastructure.lifecycle,
+        });
+      });
     });
   });
 }

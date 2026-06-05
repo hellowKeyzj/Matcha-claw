@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { RuntimeHostService } from '../../runtime-host/application/runtime-host/service';
+import { DiagnosticsCollectionWorkflow } from '../../runtime-host/application/workflows/diagnostics/diagnostics-collection-workflow';
+import { RuntimeHostOperationsWorkflow } from '../../runtime-host/application/workflows/runtime-host/runtime-host-operations-workflow';
 
 function createService() {
   const submitGatewayPrelaunch = vi.fn(() => ({
@@ -16,11 +18,9 @@ function createService() {
       type: 'diagnostics.collect',
     },
   }));
-  const service = new RuntimeHostService({
+  const diagnosticsCollectionWorkflow = new DiagnosticsCollectionWorkflow({
     environment: {
-      getPlatform: () => process.platform,
-      getArch: () => process.arch,
-      getOpenClawConfigDir: () => 'openclaw',
+      getRuntimeDataRootDir: () => 'openclaw',
     },
     processInfo: {
       nodeVersion: process.versions.node,
@@ -33,25 +33,6 @@ function createService() {
       arch: process.arch,
       electronVersion: process.versions.electron,
     },
-    runtimeState: {
-      health: vi.fn(() => ({ success: true })),
-      transportStats: vi.fn(() => ({ success: true })),
-      runtimeState: vi.fn(() => ({ lifecycle: 'running', plugins: [] })),
-    },
-    bootstrap: {
-      submitGatewayPrelaunch,
-      submitProviderAuthBootstrap: vi.fn(() => ({
-        success: true,
-        job: {
-          id: 'job-provider-auth-1',
-          type: 'runtimeHost.providerAuthBootstrap',
-        },
-      })),
-      buildProviderEnvMap: vi.fn(() => ({
-        keyableProviderTypes: [],
-        envVarByProviderType: {},
-      })),
-    },
     diagnostics: {
       submitCollect: submitDiagnosticsCollection,
     },
@@ -63,10 +44,6 @@ function createService() {
           reason: 'test',
         },
       })),
-    },
-    jobs: {
-      list: vi.fn(() => ({ success: true, jobs: [] })),
-      get: vi.fn(() => ({ success: true, job: null })),
     },
     parentShell: {
       request: vi.fn(async () => ({
@@ -89,6 +66,55 @@ function createService() {
         },
       })),
     },
+  });
+  const operationsWorkflow = new RuntimeHostOperationsWorkflow({
+    bootstrap: {
+      submitGatewayPrelaunch,
+      submitProviderAuthBootstrap: vi.fn(() => ({
+        success: true,
+        job: {
+          id: 'job-provider-auth-1',
+          type: 'runtimeHost.providerAuthBootstrap',
+        },
+      })),
+      buildProviderEnvMap: vi.fn(() => ({
+        keyableProviderTypes: [],
+        envVarByProviderType: {},
+      })),
+      getHostBootstrapSettings: vi.fn(async () => ({
+        proxyEnabled: false,
+        proxyServer: '',
+        proxyBypassRules: '',
+        browserMode: 'off',
+        sessionIdleMinutes: 30,
+      })),
+      buildGatewayLaunchPlan: vi.fn(async () => ({
+        launchId: 'launch-1',
+        gatewayToken: 'token-1',
+        providerEnv: {},
+        settings: {
+          proxyEnabled: false,
+          proxyServer: '',
+          proxyBypassRules: '',
+          browserMode: 'off',
+          sessionIdleMinutes: 30,
+        },
+      })),
+      onGatewayLifecycle: vi.fn(() => null),
+    },
+    diagnosticsCollectionWorkflow,
+    jobs: {
+      list: vi.fn(() => ({ success: true, queue: { pending: 0, running: 0 }, registeredTypes: [], jobs: [] })),
+      get: vi.fn(() => ({ success: true, job: null })),
+    },
+  });
+  const service = new RuntimeHostService({
+    runtimeState: {
+      health: vi.fn(() => ({ success: true })),
+      transportStats: vi.fn(() => ({ success: true })),
+      runtimeState: vi.fn(() => ({ lifecycle: 'running', plugins: [] })),
+    },
+    operationsWorkflow,
   });
   return {
     service,
@@ -131,7 +157,7 @@ describe('runtime host service', () => {
 
     const response = await service.collectDiagnostics({
       userDataDir: 'userdata',
-      openclawConfigDir: 'openclaw',
+      runtimeDataRootDir: 'runtime-data',
       appInfo: {
         name: 'MatchaClaw',
         version: '0.0.0',

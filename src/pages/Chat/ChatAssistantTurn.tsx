@@ -17,6 +17,7 @@ import {
 import { extractArtifactRefsFromAssistantText } from './artifact-paths';
 import { hostFileStat } from '@/lib/host-api';
 import { DIRECTORY_MIME_TYPE } from '@/components/file-preview/types';
+import type { RuntimeAddress } from '../../../runtime-host/shared/runtime-address';
 import {
   containsTodoToolDebugSignal,
   logRendererTodoToolDebug,
@@ -27,6 +28,7 @@ interface ChatAssistantTurnProps {
   item: ChatAssistantTurnItem;
   showThinking: boolean;
   userAvatarImageUrl?: string | null;
+  runtimeAddress?: RuntimeAddress;
   onOpenAttachedArtifact?: (file: AttachedFileMeta) => void;
 }
 
@@ -105,6 +107,7 @@ export const ChatAssistantTurn = memo(function ChatAssistantTurn({
   item,
   showThinking,
   userAvatarImageUrl,
+  runtimeAddress,
   onOpenAttachedArtifact,
 }: ChatAssistantTurnProps) {
   const [collapseVersion, requestCollapse] = useReducer((value: number) => value + 1, 0);
@@ -158,6 +161,9 @@ export const ChatAssistantTurn = memo(function ChatAssistantTurn({
   ), [attachedByPath, plainText]);
 
   useEffect(() => {
+    if (!runtimeAddress) {
+      return;
+    }
     if (derivedAttachedFiles.length === 0) {
       return;
     }
@@ -171,7 +177,7 @@ export const ChatAssistantTurn = memo(function ChatAssistantTurn({
     let cancelled = false;
     void Promise.all(pendingPaths.map(async (filePath) => {
       try {
-        const stat = await hostFileStat({ path: filePath });
+        const stat = await hostFileStat({ path: filePath, runtimeAddress });
         const expectDir = derivedAttachedFiles.find((file) => file.filePath === filePath)?.mimeType === DIRECTORY_MIME_TYPE;
         return {
           filePath,
@@ -196,7 +202,7 @@ export const ChatAssistantTurn = memo(function ChatAssistantTurn({
     return () => {
       cancelled = true;
     };
-  }, [derivedAttachedFiles, validatedDerivedPaths]);
+  }, [derivedAttachedFiles, runtimeAddress, validatedDerivedPaths]);
 
   const visibleDerivedAttachedFiles = useMemo(() => (
     derivedAttachedFiles.filter((file) => !file.filePath || validatedDerivedPaths[file.filePath] === true)

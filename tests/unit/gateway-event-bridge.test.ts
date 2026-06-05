@@ -12,6 +12,20 @@ vi.mock('../../runtime-host/openclaw-bridge', () => ({
   createGatewayClient: createGatewayClientMock,
 }));
 
+function connected(transportEpoch: number): GatewayConnectionStatePayload {
+  return {
+    state: 'connected',
+    portReachable: true,
+    gatewayReady: false,
+    transportEpoch,
+    diagnostics: {
+      consecutiveHeartbeatMisses: 0,
+      consecutiveRpcFailures: 0,
+    },
+    updatedAt: transportEpoch,
+  };
+}
+
 describe('runtime host gateway event bridge', () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -20,15 +34,20 @@ describe('runtime host gateway event bridge', () => {
   it('queues gateway notifications until the session runtime is available', async () => {
     createGatewayClientMock.mockReturnValue(gatewayClient);
     const emitParentGatewayEvent = vi.fn(async () => undefined);
+    const endpointControlState = {
+      updateRuntimeEndpointControlState: vi.fn(() => ({
+        connection: null,
+        readiness: null,
+        capabilities: null,
+        updatedAt: null,
+      })),
+    };
     const runtime = {
-      consumeGatewayConversationEvent: vi.fn(async () => []),
-      consumeGatewayNotification: vi.fn(() => [{ type: 'approval' }]),
-      consumeGatewayConnectionState: vi.fn(() => []),
-      consumeGatewayControlReadiness: vi.fn(() => []),
-      consumeGatewayCapabilities: vi.fn(() => []),
+      consumeEndpointConversationEvent: vi.fn(async () => []),
+      consumeEndpointNotification: vi.fn(() => [{ type: 'approval' }]),
     };
     let currentRuntime: typeof runtime | null = null;
-    const { createRuntimeHostGatewayClient } = await import('../../runtime-host/composition/gateway-event-bridge');
+    const { createRuntimeHostGatewayClient } = await import('../../runtime-host/application/adapters/openclaw/gateway/openclaw-gateway-event-bridge');
 
     createRuntimeHostGatewayClient({
       parentTransport: {
@@ -37,6 +56,14 @@ describe('runtime host gateway event bridge', () => {
       },
       dispatchRoute: vi.fn(async () => ({ status: 200, data: {} })),
       getSessionRuntime: () => currentRuntime,
+      endpointControlState,
+      runtimeHostCapabilityAddress: {
+        kind: 'native-runtime',
+        capabilityId: 'runtime.host',
+        runtimeAdapterId: 'test-runtime',
+        runtimeInstanceId: 'local',
+        agentId: 'default',
+      },
       runtimeHostDataDir: process.cwd(),
       gatewayPort: 12345,
       readGatewayToken: vi.fn(async () => 'token'),
@@ -51,15 +78,204 @@ describe('runtime host gateway event bridge', () => {
 
     const options = createGatewayClientMock.mock.calls[0]?.[0];
     options.onGatewayNotification({ method: 'exec.approval.requested', params: { id: 'approval-1' } });
-    expect(runtime.consumeGatewayNotification).not.toHaveBeenCalled();
+    options.onGatewayNotification({ method: 'exec.approval.requested', params: { id: 'approval-2' } });
+    expect(runtime.consumeEndpointNotification).not.toHaveBeenCalled();
 
     currentRuntime = runtime;
     options.onGatewayConversationEvent({ type: 'usage', event: { sessionKey: 'agent:main:main' } });
     await Promise.resolve();
     await Promise.resolve();
 
-    expect(runtime.consumeGatewayNotification).toHaveBeenCalledWith({ method: 'exec.approval.requested', params: { id: 'approval-1' } });
+    expect(runtime.consumeEndpointNotification.mock.calls.map((call) => call[0])).toEqual([
+      {
+        kind: 'native-runtime',
+        capabilityId: 'session.prompt',
+        runtimeAdapterId: 'test-runtime',
+        runtimeInstanceId: 'local',
+        agentId: 'default',
+      },
+      {
+        kind: 'native-runtime',
+        capabilityId: 'session.prompt',
+        runtimeAdapterId: 'test-runtime',
+        runtimeInstanceId: 'local',
+        agentId: 'default',
+      },
+    ]);
+    expect(runtime.consumeEndpointNotification.mock.calls.map((call) => call[1])).toEqual([
+      { method: 'exec.approval.requested', params: { id: 'approval-1' } },
+      { method: 'exec.approval.requested', params: { id: 'approval-2' } },
+    ]);
+    expect(runtime.consumeEndpointConversationEvent).toHaveBeenCalledWith({
+      kind: 'native-runtime',
+      capabilityId: 'session.prompt',
+      runtimeAdapterId: 'test-runtime',
+      runtimeInstanceId: 'local',
+      agentId: 'main',
+      sessionKey: 'agent:main:main',
+    }, { type: 'usage', event: { sessionKey: 'agent:main:main' } });
     expect(emitParentGatewayEvent).toHaveBeenCalledWith('session:update', { type: 'approval' });
+  });
+
+  it('routes raw OpenClaw chat events through endpoint ingress with the session RuntimeAddress', async () => {
+    createGatewayClientMock.mockReturnValue(gatewayClient);
+    const emitParentGatewayEvent = vi.fn(async () => undefined);
+    const endpointControlState = {
+      updateRuntimeEndpointControlState: vi.fn(() => ({
+        connection: null,
+        readiness: null,
+        capabilities: null,
+        updatedAt: null,
+      })),
+    };
+    const runtime = {
+      consumeEndpointConversationEvent: vi.fn(async () => [{
+        sessionUpdate: 'session_item',
+        sessionKey: 'agent:main:main',
+        item: { kind: 'assistant-turn', text: '你好，主人' },
+      }]),
+      consumeEndpointNotification: vi.fn(() => []),
+    };
+    const { createRuntimeHostGatewayClient } = await import('../../runtime-host/application/adapters/openclaw/gateway/openclaw-gateway-event-bridge');
+
+    createRuntimeHostGatewayClient({
+      parentTransport: {
+        requestParentShellAction: vi.fn(async () => ({ success: true, status: 200, data: {} })),
+        emitParentGatewayEvent,
+      },
+      dispatchRoute: vi.fn(async () => ({ status: 200, data: {} })),
+      getSessionRuntime: () => runtime,
+      endpointControlState,
+      runtimeHostCapabilityAddress: {
+        kind: 'native-runtime',
+        capabilityId: 'runtime.host',
+        runtimeAdapterId: 'test-runtime',
+        runtimeInstanceId: 'local',
+        agentId: 'default',
+      },
+      runtimeHostDataDir: process.cwd(),
+      gatewayPort: 12345,
+      readGatewayToken: vi.fn(async () => 'token'),
+      platform: process.platform,
+      clock: { nowMs: () => 1 },
+      idGenerator: { randomUUID: () => 'id-1' },
+      identityRepository: {} as never,
+      deviceCrypto: {} as never,
+      scheduler: {} as never,
+      tcpProbe: {} as never,
+    });
+
+    const options = createGatewayClientMock.mock.calls[0]?.[0];
+    const event = {
+      type: 'chat.message' as const,
+      event: {
+        state: 'final',
+        sessionKey: 'agent:main:main',
+        runId: 'run-final',
+        seq: 1,
+        message: { role: 'assistant', content: [{ type: 'text', text: '你好，主人' }] },
+      },
+    };
+    options.onGatewayConversationEvent(event);
+
+    await vi.waitFor(() => {
+      expect(runtime.consumeEndpointConversationEvent).toHaveBeenCalledWith({
+        kind: 'native-runtime',
+        capabilityId: 'session.prompt',
+        runtimeAdapterId: 'test-runtime',
+        runtimeInstanceId: 'local',
+        agentId: 'main',
+        sessionKey: 'agent:main:main',
+      }, event);
+    });
+    expect(emitParentGatewayEvent).toHaveBeenCalledWith('session:update', {
+      sessionUpdate: 'session_item',
+      sessionKey: 'agent:main:main',
+      item: { kind: 'assistant-turn', text: '你好，主人' },
+    });
+  });
+
+  it('serializes gateway conversation events per session without blocking other sessions', async () => {
+    createGatewayClientMock.mockReturnValue(gatewayClient);
+    const emitParentGatewayEvent = vi.fn(async () => undefined);
+    const endpointControlState = {
+      updateRuntimeEndpointControlState: vi.fn(() => ({
+        connection: null,
+        readiness: null,
+        capabilities: null,
+        updatedAt: null,
+      })),
+    };
+    const processed: string[] = [];
+    let releaseFirstMain: () => void = () => undefined;
+    const runtime = {
+      consumeEndpointConversationEvent: vi.fn(async (_runtimeAddress, payload: { event?: { sessionKey?: string; seq?: number } }) => {
+        const sessionKey = payload.event?.sessionKey ?? 'unknown';
+        const seq = payload.event?.seq ?? 0;
+        processed.push(`start:${sessionKey}:${seq}`);
+        if (sessionKey === 'agent:main:main' && seq === 1) {
+          await new Promise<void>((resolve) => { releaseFirstMain = resolve; });
+        }
+        processed.push(`end:${sessionKey}:${seq}`);
+        return [{ sessionKey, seq }];
+      }),
+      consumeEndpointNotification: vi.fn(() => []),
+    };
+    const { createRuntimeHostGatewayClient } = await import('../../runtime-host/application/adapters/openclaw/gateway/openclaw-gateway-event-bridge');
+
+    createRuntimeHostGatewayClient({
+      parentTransport: {
+        requestParentShellAction: vi.fn(async () => ({ success: true, status: 200, data: {} })),
+        emitParentGatewayEvent,
+      },
+      dispatchRoute: vi.fn(async () => ({ status: 200, data: {} })),
+      getSessionRuntime: () => runtime,
+      endpointControlState,
+      runtimeHostCapabilityAddress: {
+        kind: 'native-runtime',
+        capabilityId: 'runtime.host',
+        runtimeAdapterId: 'test-runtime',
+        runtimeInstanceId: 'local',
+        agentId: 'default',
+      },
+      runtimeHostDataDir: process.cwd(),
+      gatewayPort: 12345,
+      readGatewayToken: vi.fn(async () => 'token'),
+      platform: process.platform,
+      clock: { nowMs: () => 1 },
+      idGenerator: { randomUUID: () => 'id-1' },
+      identityRepository: {} as never,
+      deviceCrypto: {} as never,
+      scheduler: {} as never,
+      tcpProbe: {} as never,
+    });
+
+    const options = createGatewayClientMock.mock.calls[0]?.[0];
+    options.onGatewayConversationEvent({ type: 'usage', event: { sessionKey: 'agent:main:main', seq: 1 } });
+    options.onGatewayConversationEvent({ type: 'usage', event: { sessionKey: 'agent:main:main', seq: 2 } });
+    options.onGatewayConversationEvent({ type: 'usage', event: { sessionKey: 'agent:test:main', seq: 1 } });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(processed).toEqual([
+      'start:agent:main:main:1',
+      'start:agent:test:main:1',
+      'end:agent:test:main:1',
+    ]);
+
+    releaseFirstMain();
+    await vi.waitFor(() => {
+      expect(emitParentGatewayEvent).toHaveBeenCalledWith('session:update', { sessionKey: 'agent:main:main', seq: 2 });
+    });
+
+    expect(processed).toEqual([
+      'start:agent:main:main:1',
+      'start:agent:test:main:1',
+      'end:agent:test:main:1',
+      'end:agent:main:main:1',
+      'start:agent:main:main:2',
+      'end:agent:main:main:2',
+    ]);
   });
 
   it('ignores stale readiness results from superseded transport epochs', async () => {
@@ -75,14 +291,19 @@ describe('runtime host gateway event bridge', () => {
         capabilities: { methods: ['status'], updatedAt: 2 },
       });
     createGatewayClientMock.mockReturnValue(gatewayClient);
-    const runtime = {
-      consumeGatewayConversationEvent: vi.fn(async () => []),
-      consumeGatewayNotification: vi.fn(() => []),
-      consumeGatewayConnectionState: vi.fn(() => []),
-      consumeGatewayControlReadiness: vi.fn(() => []),
-      consumeGatewayCapabilities: vi.fn(() => []),
+    const endpointControlState = {
+      updateRuntimeEndpointControlState: vi.fn(() => ({
+        connection: null,
+        readiness: null,
+        capabilities: null,
+        updatedAt: null,
+      })),
     };
-    const { createRuntimeHostGatewayClient } = await import('../../runtime-host/composition/gateway-event-bridge');
+    const runtime = {
+      consumeEndpointConversationEvent: vi.fn(async () => []),
+      consumeEndpointNotification: vi.fn(() => []),
+    };
+    const { createRuntimeHostGatewayClient } = await import('../../runtime-host/application/adapters/openclaw/gateway/openclaw-gateway-event-bridge');
 
     createRuntimeHostGatewayClient({
       parentTransport: {
@@ -91,6 +312,14 @@ describe('runtime host gateway event bridge', () => {
       },
       dispatchRoute: vi.fn(async () => ({ status: 200, data: {} })),
       getSessionRuntime: () => runtime,
+      endpointControlState,
+      runtimeHostCapabilityAddress: {
+        kind: 'native-runtime',
+        capabilityId: 'runtime.host',
+        runtimeAdapterId: 'test-runtime',
+        runtimeInstanceId: 'local',
+        agentId: 'default',
+      },
       runtimeHostDataDir: process.cwd(),
       gatewayPort: 12345,
       readGatewayToken: vi.fn(async () => 'token'),
@@ -104,17 +333,6 @@ describe('runtime host gateway event bridge', () => {
     });
 
     const onGatewayConnectionState = createGatewayClientMock.mock.calls[0]?.[0].onGatewayConnectionState;
-    const connected = (transportEpoch: number): GatewayConnectionStatePayload => ({
-      state: 'connected',
-      portReachable: true,
-      gatewayReady: false,
-      transportEpoch,
-      diagnostics: {
-        consecutiveHeartbeatMisses: 0,
-        consecutiveRpcFailures: 0,
-      },
-      updatedAt: transportEpoch,
-    });
 
     onGatewayConnectionState(connected(1));
     onGatewayConnectionState(connected(2));
@@ -129,11 +347,17 @@ describe('runtime host gateway event bridge', () => {
     await Promise.resolve();
     await Promise.resolve();
 
-    expect(runtime.consumeGatewayControlReadiness).toHaveBeenCalledTimes(1);
-    expect(runtime.consumeGatewayControlReadiness).toHaveBeenCalledWith(expect.objectContaining({ capabilities: { methods: ['status'], updatedAt: 2 } }));
+    const readinessUpdates = endpointControlState.updateRuntimeEndpointControlState.mock.calls
+      .map((call) => call[0])
+      .filter((input) => input.readiness);
+    expect(readinessUpdates).toHaveLength(1);
+    expect(readinessUpdates[0]).toMatchObject({
+      readiness: expect.objectContaining({ capabilities: { methods: ['status'], updatedAt: 2 } }),
+      capabilities: { methods: ['status'], updatedAt: 2 },
+    });
   });
 
-  it('reuses readiness capabilities on connect instead of issuing a second capabilities probe', async () => {
+  it('stores readiness capabilities on the runtime endpoint instead of emitting session updates', async () => {
     const capabilities = {
       methods: ['status', 'config.get', 'agents.list', 'skills.status', 'system-presence'],
       updatedAt: 123,
@@ -148,14 +372,19 @@ describe('runtime host gateway event bridge', () => {
     });
     createGatewayClientMock.mockReturnValue(gatewayClient);
     const emitParentGatewayEvent = vi.fn(async () => undefined);
-    const runtime = {
-      consumeGatewayConversationEvent: vi.fn(async () => []),
-      consumeGatewayNotification: vi.fn(() => []),
-      consumeGatewayConnectionState: vi.fn(() => []),
-      consumeGatewayControlReadiness: vi.fn(() => [{ type: 'readiness' }]),
-      consumeGatewayCapabilities: vi.fn(() => [{ type: 'capabilities' }]),
+    const endpointControlState = {
+      updateRuntimeEndpointControlState: vi.fn(() => ({
+        connection: null,
+        readiness: null,
+        capabilities: null,
+        updatedAt: null,
+      })),
     };
-    const { createRuntimeHostGatewayClient } = await import('../../runtime-host/composition/gateway-event-bridge');
+    const runtime = {
+      consumeEndpointConversationEvent: vi.fn(async () => []),
+      consumeEndpointNotification: vi.fn(() => []),
+    };
+    const { createRuntimeHostGatewayClient } = await import('../../runtime-host/application/adapters/openclaw/gateway/openclaw-gateway-event-bridge');
 
     createRuntimeHostGatewayClient({
       parentTransport: {
@@ -164,6 +393,14 @@ describe('runtime host gateway event bridge', () => {
       },
       dispatchRoute: vi.fn(async () => ({ status: 200, data: {} })),
       getSessionRuntime: () => runtime,
+      endpointControlState,
+      runtimeHostCapabilityAddress: {
+        kind: 'native-runtime',
+        capabilityId: 'runtime.host',
+        runtimeAdapterId: 'test-runtime',
+        runtimeInstanceId: 'local',
+        agentId: 'default',
+      },
       runtimeHostDataDir: process.cwd(),
       gatewayPort: 12345,
       readGatewayToken: vi.fn(async () => 'token'),
@@ -177,26 +414,36 @@ describe('runtime host gateway event bridge', () => {
     });
 
     const onGatewayConnectionState = createGatewayClientMock.mock.calls[0]?.[0].onGatewayConnectionState;
-    const payload: GatewayConnectionStatePayload = {
-      state: 'connected',
-      portReachable: true,
-      gatewayReady: false,
-      transportEpoch: 1,
-      diagnostics: {
-        consecutiveHeartbeatMisses: 0,
-        consecutiveRpcFailures: 0,
-      },
-      updatedAt: 1,
-    };
+    const payload = connected(1);
     onGatewayConnectionState(payload);
     await Promise.resolve();
     await Promise.resolve();
 
     expect(gatewayClient.inspectGatewayControlReadiness).toHaveBeenCalledTimes(1);
     expect(gatewayClient.readGatewayCapabilities).not.toHaveBeenCalled();
-    expect(runtime.consumeGatewayControlReadiness).toHaveBeenCalledWith(expect.objectContaining({ capabilities }));
-    expect(runtime.consumeGatewayCapabilities).toHaveBeenCalledWith(capabilities);
-    expect(emitParentGatewayEvent).toHaveBeenCalledWith('session:update', { type: 'readiness' });
-    expect(emitParentGatewayEvent).toHaveBeenCalledWith('session:update', { type: 'capabilities' });
+    expect(endpointControlState.updateRuntimeEndpointControlState).toHaveBeenCalledWith({
+      address: {
+        kind: 'native-runtime',
+        capabilityId: 'runtime.host',
+        runtimeAdapterId: 'test-runtime',
+        runtimeInstanceId: 'local',
+        agentId: 'default',
+      },
+      connection: payload,
+      updatedAt: payload.updatedAt,
+    });
+    expect(endpointControlState.updateRuntimeEndpointControlState).toHaveBeenCalledWith({
+      address: {
+        kind: 'native-runtime',
+        capabilityId: 'runtime.host',
+        runtimeAdapterId: 'test-runtime',
+        runtimeInstanceId: 'local',
+        agentId: 'default',
+      },
+      readiness: expect.objectContaining({ capabilities }),
+      capabilities,
+      updatedAt: 1,
+    });
+    expect(emitParentGatewayEvent.mock.calls.some((call) => call[0] === 'session:update')).toBe(false);
   });
 });

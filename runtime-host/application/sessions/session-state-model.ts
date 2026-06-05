@@ -12,7 +12,7 @@ import { createEmptyCanonicalSessionState } from './canonical/canonical-reducer'
 import type {
   SessionRuntimeTimelineState,
 } from './session-runtime-types';
-import type { RuntimeSessionContext } from './runtime-providers/runtime-provider-types';
+import type { RuntimeSessionContext } from '../agent-runtime/contracts/runtime-endpoint-types';
 
 export function createEmptySessionRuntimeState(): SessionRuntimeStateSnapshot {
   return {

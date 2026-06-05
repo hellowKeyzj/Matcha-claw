@@ -1,4 +1,4 @@
-import type { TeamRuntimeStoragePort } from './team-runtime-application-service';
+import type { TeamRuntimeStoragePort } from './types';
 import * as mailboxStore from './mailbox-store';
 import * as runtimeStore from './runtime-store';
 import * as taskStore from './task-store';
@@ -28,8 +28,8 @@ export class TeamRuntimeStorageRepository implements TeamRuntimeStoragePort {
     return await runtimeStore.appendTeamEvent({ ...input, context: this.context });
   }
 
-  async buildSnapshot(input: Omit<Parameters<typeof runtimeStore.buildTeamSnapshot>[0], 'context'>) {
-    return await runtimeStore.buildTeamSnapshot({ ...input, context: this.context });
+  async readRecentEvents(runtimeRoot: string, limit?: number) {
+    return await runtimeStore.readRecentEvents(this.context, runtimeRoot, limit);
   }
 
   async upsertPlanTasks(input: Omit<Parameters<typeof taskStore.upsertPlanTasks>[0], 'context'>) {

@@ -11,6 +11,7 @@ import {
   hostSettingsPutValue,
   hostSettingsReset,
 } from '@/lib/settings-runtime';
+import type { RuntimeAddress } from '../../runtime-host/shared/runtime-address';
 
 type Theme = 'light' | 'dark' | 'system';
 type UpdateChannel = 'stable' | 'beta' | 'dev';
@@ -46,23 +47,20 @@ interface SettingsState {
 
   // Actions
   init: () => Promise<void>;
-  setTheme: (theme: Theme) => void;
-  setLanguage: (language: string) => void;
-  setUserAvatarDataUrl: (dataUrl: string | null) => void;
-  clearUserAvatar: () => void;
-  setStartMinimized: (value: boolean) => void;
-  setLaunchAtStartup: (value: boolean) => void;
-  setTelemetryEnabled: (value: boolean) => void;
-  setGatewayAutoStart: (value: boolean) => void;
-  setGatewayPort: (port: number) => void;
-  setProxyEnabled: (value: boolean) => void;
-  setProxyServer: (value: string) => void;
-  setProxyBypassRules: (value: string) => void;
-  setUpdateChannel: (channel: UpdateChannel) => void;
-  setAutoCheckUpdate: (value: boolean) => void;
-  setDevModeUnlocked: (value: boolean) => void;
-  markSetupComplete: () => void;
-  resetSettings: () => Promise<void>;
+  setTheme: (theme: Theme, runtimeAddress: RuntimeAddress) => Promise<void>;
+  setLanguage: (language: string, runtimeAddress: RuntimeAddress) => Promise<void>;
+  setUserAvatarDataUrl: (dataUrl: string | null, runtimeAddress: RuntimeAddress) => Promise<void>;
+  clearUserAvatar: (runtimeAddress: RuntimeAddress) => Promise<void>;
+  setStartMinimized: (value: boolean, runtimeAddress: RuntimeAddress) => Promise<void>;
+  setLaunchAtStartup: (value: boolean, runtimeAddress: RuntimeAddress) => Promise<void>;
+  setTelemetryEnabled: (value: boolean, runtimeAddress: RuntimeAddress) => Promise<void>;
+  setGatewayAutoStart: (value: boolean, runtimeAddress: RuntimeAddress) => Promise<void>;
+  setGatewayPort: (port: number, runtimeAddress: RuntimeAddress) => Promise<void>;
+  setUpdateChannel: (channel: UpdateChannel, runtimeAddress: RuntimeAddress) => Promise<void>;
+  setAutoCheckUpdate: (value: boolean, runtimeAddress: RuntimeAddress) => Promise<void>;
+  setDevModeUnlocked: (value: boolean, runtimeAddress: RuntimeAddress) => Promise<void>;
+  markSetupComplete: (runtimeAddress: RuntimeAddress) => Promise<void>;
+  resetSettings: (runtimeAddress: RuntimeAddress) => Promise<void>;
 }
 
 const defaultSettings = {
@@ -98,10 +96,8 @@ export const useSettingsStore = create<SettingsState>()(
           const resolvedLanguage = settings.language
             ? resolveSupportedLanguage(settings.language)
             : undefined;
-          let shouldSyncSetupComplete = false;
           set((state) => {
             const mergedSetupComplete = Boolean(state.setupComplete || settings.setupComplete);
-            shouldSyncSetupComplete = mergedSetupComplete && !settings.setupComplete;
             return {
               ...state,
               ...settings,
@@ -110,9 +106,6 @@ export const useSettingsStore = create<SettingsState>()(
               initialized: true,
             };
           });
-          if (shouldSyncSetupComplete) {
-            void hostSettingsPutValue('setupComplete', true).catch(() => {});
-          }
           if (resolvedLanguage) {
             i18n.changeLanguage(resolvedLanguage);
           }
@@ -123,81 +116,74 @@ export const useSettingsStore = create<SettingsState>()(
         }
       },
 
-      setTheme: (theme) => {
+      setTheme: async (theme, runtimeAddress) => {
+        await hostSettingsPutValue('theme', theme, runtimeAddress);
         set({ theme });
-        void hostSettingsPutValue('theme', theme).catch(() => {});
       },
-      setLanguage: (language) => {
+      setLanguage: async (language, runtimeAddress) => {
         const resolvedLanguage = resolveSupportedLanguage(language);
+        await hostSettingsPutValue('language', resolvedLanguage, runtimeAddress);
         i18n.changeLanguage(resolvedLanguage);
         set({ language: resolvedLanguage });
-        void hostSettingsPutValue('language', resolvedLanguage).catch(() => {});
       },
-      setUserAvatarDataUrl: (userAvatarDataUrl) => {
+      setUserAvatarDataUrl: async (userAvatarDataUrl, runtimeAddress) => {
+        await hostSettingsPutValue('userAvatarDataUrl', userAvatarDataUrl, runtimeAddress);
         set({ userAvatarDataUrl });
-        void hostSettingsPutValue('userAvatarDataUrl', userAvatarDataUrl).catch(() => {});
       },
-      clearUserAvatar: () => {
+      clearUserAvatar: async (runtimeAddress) => {
+        await hostSettingsPutValue('userAvatarDataUrl', null, runtimeAddress);
         set({ userAvatarDataUrl: null });
-        void hostSettingsPutValue('userAvatarDataUrl', null).catch(() => {});
       },
-      setStartMinimized: (startMinimized) => {
+      setStartMinimized: async (startMinimized, runtimeAddress) => {
+        await hostSettingsPutValue('startMinimized', startMinimized, runtimeAddress);
         set({ startMinimized });
-        void hostSettingsPutValue('startMinimized', startMinimized).catch(() => {});
       },
-      setLaunchAtStartup: (launchAtStartup) => {
+      setLaunchAtStartup: async (launchAtStartup, runtimeAddress) => {
+        await hostSettingsPutValue('launchAtStartup', launchAtStartup, runtimeAddress);
         set({ launchAtStartup });
-        void hostSettingsPutValue('launchAtStartup', launchAtStartup).catch(() => {});
       },
-      setTelemetryEnabled: (telemetryEnabled) => {
+      setTelemetryEnabled: async (telemetryEnabled, runtimeAddress) => {
+        await hostSettingsPutValue('telemetryEnabled', telemetryEnabled, runtimeAddress);
         set({ telemetryEnabled });
-        void hostSettingsPutValue('telemetryEnabled', telemetryEnabled).catch(() => {});
       },
-      setGatewayAutoStart: (gatewayAutoStart) => {
+      setGatewayAutoStart: async (gatewayAutoStart, runtimeAddress) => {
+        await hostSettingsPutValue('gatewayAutoStart', gatewayAutoStart, runtimeAddress);
         set({ gatewayAutoStart });
-        void hostSettingsPutValue('gatewayAutoStart', gatewayAutoStart).catch(() => {});
       },
-      setGatewayPort: (gatewayPort) => {
+      setGatewayPort: async (gatewayPort, runtimeAddress) => {
+        await hostSettingsPutValue('gatewayPort', gatewayPort, runtimeAddress);
         set({ gatewayPort });
-        void hostSettingsPutValue('gatewayPort', gatewayPort).catch(() => {});
       },
-      setProxyEnabled: (proxyEnabled) => set({ proxyEnabled }),
-      setProxyServer: (proxyServer) => set({ proxyServer }),
-      setProxyBypassRules: (proxyBypassRules) => set({ proxyBypassRules }),
-      setUpdateChannel: (updateChannel) => {
+      setUpdateChannel: async (updateChannel, runtimeAddress) => {
+        await hostSettingsPutValue('updateChannel', updateChannel, runtimeAddress);
         set({ updateChannel });
-        void hostSettingsPutValue('updateChannel', updateChannel).catch(() => {});
       },
-      setAutoCheckUpdate: (autoCheckUpdate) => {
+      setAutoCheckUpdate: async (autoCheckUpdate, runtimeAddress) => {
+        await hostSettingsPutValue('autoCheckUpdate', autoCheckUpdate, runtimeAddress);
         set({ autoCheckUpdate });
-        void hostSettingsPutValue('autoCheckUpdate', autoCheckUpdate).catch(() => {});
       },
-      setDevModeUnlocked: (devModeUnlocked) => {
+      setDevModeUnlocked: async (devModeUnlocked, runtimeAddress) => {
+        await hostSettingsPutValue('devModeUnlocked', devModeUnlocked, runtimeAddress);
         set({ devModeUnlocked });
-        void hostSettingsPutValue('devModeUnlocked', devModeUnlocked).catch(() => {});
       },
-      markSetupComplete: () => {
+      markSetupComplete: async (runtimeAddress) => {
+        await hostSettingsPutValue('setupComplete', true, runtimeAddress);
         set({ setupComplete: true });
-        void hostSettingsPutValue('setupComplete', true).catch(() => {});
       },
-      resetSettings: async () => {
-        try {
-          const settings = await hostSettingsReset<Partial<SettingsSnapshot>>();
-          const resolvedLanguage = settings.language
-            ? resolveSupportedLanguage(settings.language)
-            : undefined;
-          if (resolvedLanguage) {
-            i18n.changeLanguage(resolvedLanguage);
-          }
-          set({
-            ...defaultSettings,
-            ...settings,
-            ...(resolvedLanguage ? { language: resolvedLanguage } : {}),
-            initialized: true,
-          });
-        } catch {
-          set({ ...defaultSettings, initialized: true });
+      resetSettings: async (runtimeAddress) => {
+        const settings = await hostSettingsReset<Partial<SettingsSnapshot>>(runtimeAddress);
+        const resolvedLanguage = settings.language
+          ? resolveSupportedLanguage(settings.language)
+          : undefined;
+        if (resolvedLanguage) {
+          i18n.changeLanguage(resolvedLanguage);
         }
+        set({
+          ...defaultSettings,
+          ...settings,
+          ...(resolvedLanguage ? { language: resolvedLanguage } : {}),
+          initialized: true,
+        });
       },
     }),
     {

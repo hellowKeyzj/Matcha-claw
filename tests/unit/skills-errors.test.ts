@@ -1,9 +1,21 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import type { RuntimeAddress } from '../../runtime-host/shared/runtime-address';
 
 const hostApiFetchMock = vi.fn();
+const hostCapabilityExecuteMock = vi.fn();
+
+const skillManagementAddress: RuntimeAddress = {
+  kind: 'native-runtime',
+  capabilityId: 'skill.management',
+  runtimeAdapterId: 'openclaw',
+  runtimeInstanceId: 'local',
+  agentId: 'default',
+};
 
 vi.mock('@/lib/host-api', () => ({
   hostApiFetch: (...args: unknown[]) => hostApiFetchMock(...args),
+  hostCapabilityExecute: (...args: unknown[]) => hostCapabilityExecuteMock(...args),
+  waitForRuntimeJobResult: vi.fn(),
 }));
 
 describe('skills store error mapping', () => {
@@ -59,16 +71,16 @@ describe('skills store error mapping', () => {
   });
 
   it('maps installSkill timeout result into installTimeoutError', async () => {
-    hostApiFetchMock.mockResolvedValueOnce({ success: false, error: 'request timeout' });
+    hostCapabilityExecuteMock.mockResolvedValueOnce({ success: false, error: 'request timeout' });
 
     const { useSkillsStore } = await import('@/stores/skills');
-    await expect(useSkillsStore.getState().installSkill('demo-skill')).rejects.toThrow('installTimeoutError');
+    await expect(useSkillsStore.getState().installSkill('demo-skill', skillManagementAddress)).rejects.toThrow('installTimeoutError');
   });
 
   it('preserves specific installSkill error messages when no mapped error code exists', async () => {
-    hostApiFetchMock.mockResolvedValueOnce({ success: false, error: 'custom install failure' });
+    hostCapabilityExecuteMock.mockResolvedValueOnce({ success: false, error: 'custom install failure' });
 
     const { useSkillsStore } = await import('@/stores/skills');
-    await expect(useSkillsStore.getState().installSkill('demo-skill')).rejects.toThrow('custom install failure');
+    await expect(useSkillsStore.getState().installSkill('demo-skill', skillManagementAddress)).rejects.toThrow('custom install failure');
   });
 });

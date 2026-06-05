@@ -1,10 +1,11 @@
 import {
-  hostApiFetch,
   hostSessionDelete,
   hostSessionList,
   hostSessionNew,
+  hostSessionResume,
+  hostSessionSwitch,
   hostSessionWindowFetch,
-  waitForRuntimeJobResult,
+  resolveHydratedSessionSnapshot,
 } from '@/lib/host-api';
 import {
   createErrorResourceStatusState,
@@ -12,11 +13,9 @@ import {
   createReadyResourceStatusState,
 } from '@/lib/resource-state';
 import {
-  getCanonicalPrefixFromSessions,
   isTrulyEmptyNonMainSession,
   parseSessionUpdatedAtMs,
   readSessionsFromState,
-  resolveCanonicalPrefixForAgent,
   resolvePreferredSessionKeyForAgent,
   shouldKeepMissingCurrentSession,
   shouldRetainLocalSessionRecord,
@@ -39,9 +38,17 @@ import {
   resolveSessionRecord,
 } from './store-state-helpers';
 import { useTaskSnapshotStore } from './task-snapshot-store';
+import {
+  buildRuntimeScopeKey,
+  buildSessionRecordKey,
+  resolveSessionOperationTarget,
+  sameRuntimeEndpointScope,
+} from './session-identity';
 import type { StoreHistoryCache } from './history-cache';
+import type { RuntimeAddress } from '../../../runtime-host/shared/runtime-address';
 import type {
   ChatSession,
+  ChatSessionRuntimeEndpointTarget,
   ChatStoreState,
 } from './types';
 import { isRunActive } from './types';
@@ -82,13 +89,12 @@ interface CreateStoreSessionActionsInput {
   get: ChatStoreGetFn;
   beginMutating: () => void;
   finishMutating: () => void;
-  defaultCanonicalPrefix: string;
   defaultSessionKey: string;
   historyRuntime: StoreHistoryCache;
 }
 
 interface RenameStoreSessionInput extends CreateStoreSessionActionsInput {
-  renameSession: (payload: { sessionKey: string; label: string }) => Promise<{ success: boolean; error?: string }>;
+  renameSession: (payload: { sessionKey: string; runtimeAddress: RuntimeAddress; label: string }) => Promise<{ success: boolean; error?: string }>;
 }
 
 function clearSessionHistoryFingerprints(
@@ -120,34 +126,156 @@ function normalizeCatalogString(value: string | undefined): string | null {
   return trimmed.length > 0 ? trimmed : null;
 }
 
+function resolveOperationTarget(state: ChatStoreState, recordKey: string) {
+  return resolveSessionOperationTarget(state, recordKey);
+}
+
+const SESSION_CATALOG_LIST_CONCURRENCY = 4;
+
+interface SessionCatalogLoadResult {
+  target: ChatSessionRuntimeEndpointTarget;
+  sessions: ChatSession[];
+  ready: boolean;
+  error: string | null;
+}
+
+function readSessionRuntimeTargets(state: ChatStoreState): ChatSessionRuntimeEndpointTarget[] {
+  return state.sessionRuntimeCatalog.status === 'ready'
+    ? state.sessionRuntimeCatalog.endpoints
+    : [];
+}
+
+async function mapWithConcurrency<T, R>(
+  items: readonly T[],
+  concurrency: number,
+  worker: (item: T) => Promise<R>,
+): Promise<R[]> {
+  const results: R[] = new Array(items.length);
+  let nextIndex = 0;
+  const workerCount = Math.min(Math.max(1, concurrency), items.length);
+  await Promise.all(Array.from({ length: workerCount }, async () => {
+    while (nextIndex < items.length) {
+      const index = nextIndex;
+      nextIndex += 1;
+      results[index] = await worker(items[index]!);
+    }
+  }));
+  return results;
+}
+
+function normalizeCatalogSession(session: ChatSession): ChatSession | null {
+  if (!session.key || !session.agentId || !session.runtimeAddress) {
+    return null;
+  }
+  const recordKey = buildSessionRecordKey(session.runtimeAddress, session.key);
+  return {
+    ...session,
+    key: recordKey,
+    backendSessionKey: session.key,
+  };
+}
+
+async function loadEndpointSessionCatalog(target: ChatSessionRuntimeEndpointTarget): Promise<SessionCatalogLoadResult> {
+  try {
+    const data = await hostSessionList({ runtimeAddress: target.defaultSessionPromptAddress });
+    const rawSessions = Array.isArray(data.sessions) ? data.sessions : [];
+    return {
+      target,
+      sessions: rawSessions.map((session) => normalizeCatalogSession({
+        key: session.key || '',
+        backendSessionKey: session.key || '',
+        agentId: typeof session.agentId === 'string' ? session.agentId : '',
+        protocolId: typeof session.protocolId === 'string' ? session.protocolId : undefined,
+        runtimeEndpointId: typeof session.runtimeEndpointId === 'string' ? session.runtimeEndpointId : undefined,
+        runtimeAddress: session.runtimeAddress,
+        kind: session.kind === 'main' || session.kind === 'subsession' || session.kind === 'session' || session.kind === 'named'
+          ? session.kind
+          : undefined,
+        preferred: session.preferred === true,
+        label: typeof session.label === 'string' ? session.label : undefined,
+        titleSource: session.titleSource === 'user' || session.titleSource === 'assistant' || session.titleSource === 'none'
+          ? session.titleSource
+          : undefined,
+        displayName: typeof session.displayName === 'string' ? session.displayName : undefined,
+        model: normalizeCatalogString(session.model) ?? undefined,
+        updatedAt: parseSessionUpdatedAtMs(session.updatedAt),
+      })).filter((session): session is ChatSession => session != null),
+      ready: data.ready !== false,
+      error: typeof data.error === 'string' ? data.error : null,
+    };
+  } catch (error) {
+    return {
+      target,
+      sessions: [],
+      ready: false,
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
+function findRuntimeTargetForAddress(
+  targets: readonly ChatSessionRuntimeEndpointTarget[],
+  runtimeAddress: RuntimeAddress,
+): ChatSessionRuntimeEndpointTarget | null {
+  return targets.find((target) => sameRuntimeEndpointScope(target.defaultSessionPromptAddress, runtimeAddress)) ?? null;
+}
+
+function resolveAddressForAgent(target: ChatSessionRuntimeEndpointTarget, agentId: string): RuntimeAddress {
+  const matched = target.sessionPromptAddresses.find((address) => address.agentId === agentId);
+  if (matched) {
+    return matched;
+  }
+  if (!target.acceptsDynamicAgents) {
+    throw new Error(`Runtime endpoint does not support agent: ${agentId}`);
+  }
+  return {
+    ...target.defaultSessionPromptAddress,
+    agentId,
+  };
+}
+
+function resolveNewSessionRuntimeAddress(state: ChatStoreState, agentId?: string): RuntimeAddress {
+  const targets = readSessionRuntimeTargets(state);
+  if (targets.length === 0) {
+    throw new Error('Session runtime is not ready');
+  }
+  const currentMeta = getSessionMeta(state, state.currentSessionKey);
+  const currentRuntimeAddress = currentMeta.runtimeAddress;
+  const targetEndpoint = currentRuntimeAddress
+    ? findRuntimeTargetForAddress(targets, currentRuntimeAddress)
+    : null;
+  const defaultRuntimeAddress = state.sessionRuntimeCatalog.defaultRuntimeAddress;
+  const defaultEndpoint = defaultRuntimeAddress
+    ? findRuntimeTargetForAddress(targets, defaultRuntimeAddress)
+    : null;
+  const target = targetEndpoint ?? defaultEndpoint ?? targets[0]!;
+  const targetAgentId = agentId?.trim()
+    || currentMeta.agentId
+    || currentRuntimeAddress?.agentId
+    || target.defaultSessionPromptAddress.agentId;
+  return resolveAddressForAgent(target, targetAgentId);
+}
+
 async function requestSessionLifecycleSnapshot(
-  path: '/api/session/switch' | '/api/session/resume',
-  sessionKey: string,
+  action: 'switch' | 'resume',
+  target: { sessionKey: string; runtimeAddress: RuntimeAddress },
 ): Promise<SessionLoadResult> {
-  const result = await hostApiFetch<SessionLoadResult & {
-    hydrationJob?: { id: string };
-  }>(path, {
-    method: 'POST',
-    body: JSON.stringify({ sessionKey, limit: 200 }),
-  });
-  if (result.hydrationJob) {
-    await waitForRuntimeJobResult(result.hydrationJob.id);
-    const window = await hostSessionWindowFetch({
-      sessionKey,
+  const result = action === 'switch'
+    ? await hostSessionSwitch({ sessionKey: target.sessionKey, runtimeAddress: target.runtimeAddress, limit: 200 })
+    : await hostSessionResume({ sessionKey: target.sessionKey, runtimeAddress: target.runtimeAddress });
+  const snapshot = await resolveHydratedSessionSnapshot({
+    initial: result,
+    refetch: async () => await hostSessionWindowFetch({
+      sessionKey: target.sessionKey,
+      runtimeAddress: target.runtimeAddress,
       mode: 'latest',
       limit: 200,
-    });
-    if (window.snapshot) {
-      return { snapshot: window.snapshot };
-    }
-  }
-  const data = result.snapshot
-    ? result as SessionLoadResult
-    : null;
-  if (!data) {
+    }),
+  });
+  if (!snapshot) {
     throw new Error('session lifecycle request did not return a snapshot');
   }
-  return data;
+  return { snapshot };
 }
 
 function applyBackendSessionSnapshot(
@@ -214,123 +342,130 @@ async function executeLoadSessionsNow(input: CreateStoreSessionActionsInput): Pr
   set({
     sessionCatalogStatus: createLoadingResourceStatusState(previousResource),
   });
-  try {
-    const data = await hostSessionList();
-    if (data) {
-      if (data.ready === false) {
-        set((state) => ({
-          sessionCatalogStatus: createLoadingResourceStatusState(state.sessionCatalogStatus),
-        }));
-        scheduleSessionCatalogRetry(() => executeLoadSessions(input));
-        return;
-      }
-      clearSessionCatalogRetry();
-      const rawSessions = Array.isArray(data.sessions) ? data.sessions : [];
-      const sessions: ChatSession[] = rawSessions.map((session) => ({
-        key: session.key || '',
-        agentId: typeof session.agentId === 'string' ? session.agentId : undefined,
-        protocolId: typeof session.protocolId === 'string' ? session.protocolId : undefined,
-        runtimeProviderId: typeof session.runtimeProviderId === 'string' ? session.runtimeProviderId : undefined,
-        kind: session.kind === 'main' || session.kind === 'subsession' || session.kind === 'session' || session.kind === 'named'
-          ? session.kind
-          : undefined,
-        preferred: session.preferred === true,
-        label: typeof session.label === 'string' ? session.label : undefined,
-        titleSource: session.titleSource === 'user' || session.titleSource === 'assistant' || session.titleSource === 'none'
-          ? session.titleSource
-          : undefined,
-        displayName: typeof session.displayName === 'string' ? session.displayName : undefined,
-        model: normalizeCatalogString(session.model) ?? undefined,
-        updatedAt: parseSessionUpdatedAtMs(session.updatedAt),
-      })).filter((session: ChatSession) => session.key);
-
-      const stateSnapshot = get();
-      const { currentSessionKey } = stateSnapshot;
-      let nextSessionKey = currentSessionKey || defaultSessionKey;
-      const hasSessionInBackend = (sessionKey: string): boolean => sessions.some((session) => session.key === sessionKey);
-      let shouldKeepMissingCurrent = false;
-      if (!hasSessionInBackend(nextSessionKey)) {
-        shouldKeepMissingCurrent = shouldKeepMissingCurrentSession(
-          nextSessionKey,
-          stateSnapshot,
-          sessions.length,
-        );
-        if (!shouldKeepMissingCurrent && sessions.length > 0) {
-          nextSessionKey = sessions[0].key;
-        }
-      }
-      const currentExistsInBackend = hasSessionInBackend(nextSessionKey);
-      const backendSessions = sessions;
-
-      const shouldMarkCurrentAsReadyEmpty = (
-        !currentExistsInBackend
-        && shouldKeepMissingCurrent
-        && sessions.length === 0
-        && nextSessionKey.length > 0
-      );
-      const loadedAt = Date.now();
-      set((state) => {
-        const backendSessionKeys = new Set(backendSessions.map((session) => session.key));
-        let loadedSessions = Object.fromEntries(
-          Object.entries(state.loadedSessions).filter(([sessionKey]) => (
-            backendSessionKeys.has(sessionKey)
-            || shouldRetainLocalSessionRecord(sessionKey, {
-              currentSessionKey: nextSessionKey,
-              loadedSessions: state.loadedSessions,
-              pendingApprovalsBySession: state.pendingApprovalsBySession,
-            })
-          )),
-        );
-
-        for (const session of backendSessions) {
-          loadedSessions = ensureSessionRecordMap(loadedSessions, session.key);
-          const currentMeta = getSessionMeta({ loadedSessions }, session.key);
-          const explicitLabel = normalizeCatalogString(session.label);
-          loadedSessions = patchSessionMeta({ loadedSessions }, session.key, {
-            agentId: normalizeCatalogString(session.agentId) ?? currentMeta.agentId,
-            protocolId: normalizeCatalogString(session.protocolId) ?? currentMeta.protocolId,
-            runtimeProviderId: normalizeCatalogString(session.runtimeProviderId) ?? currentMeta.runtimeProviderId,
-            kind: session.kind ?? currentMeta.kind,
-            preferred: session.preferred ?? currentMeta.preferred,
-            label: explicitLabel && explicitLabel !== session.key ? explicitLabel : currentMeta.label,
-            titleSource: session.titleSource ?? currentMeta.titleSource,
-            displayName: normalizeCatalogString(session.displayName) ?? currentMeta.displayName ?? null,
-            thinkingLevel: normalizeCatalogString(session.thinkingLevel) ?? currentMeta.thinkingLevel,
-            model: normalizeCatalogString(session.model) ?? currentMeta.model ?? null,
-            lastActivityAt: typeof session.updatedAt === 'number' && Number.isFinite(session.updatedAt)
-              ? session.updatedAt
-              : currentMeta.lastActivityAt,
-          });
-        }
-
-        if (shouldMarkCurrentAsReadyEmpty) {
-          loadedSessions = ensureSessionRecordMap(loadedSessions, nextSessionKey);
-          loadedSessions = patchSessionMeta({ loadedSessions }, nextSessionKey, { historyStatus: 'ready' });
-        }
-
-        const retainedSessionKeys = new Set(Object.keys(loadedSessions));
-        return {
-          sessionCatalogStatus: createReadyResourceStatusState(loadedAt),
-          currentSessionKey: nextSessionKey,
-          loadedSessions,
-          pendingApprovalsBySession: Object.fromEntries(
-            Object.entries(state.pendingApprovalsBySession).filter(([sessionKey]) => retainedSessionKeys.has(sessionKey)),
-          ),
-        };
-      });
-      return;
-    }
+  const targets = readSessionRuntimeTargets(stateBeforeLoad);
+  if (targets.length === 0) {
     set({
-      sessionCatalogStatus: createReadyResourceStatusState(),
+      sessionCatalogStatus: createErrorResourceStatusState(previousResource, 'Session runtime is not ready'),
     });
-  } catch (error) {
-    clearSessionCatalogRetry();
-    const stateSnapshot = get();
-    const message = error instanceof Error ? error.message : 'Failed to load sessions';
-    set({
-      sessionCatalogStatus: createErrorResourceStatusState(stateSnapshot.sessionCatalogStatus, message),
-    });
+    return;
   }
+
+  const results = await mapWithConcurrency(
+    targets,
+    SESSION_CATALOG_LIST_CONCURRENCY,
+    loadEndpointSessionCatalog,
+  );
+  const readyResults = results.filter((result) => result.ready);
+  const mergedSessions = new Map<string, ChatSession>();
+  for (const result of results) {
+    for (const session of result.sessions) {
+      mergedSessions.set(session.key, session);
+    }
+  }
+  const sessions = Array.from(mergedSessions.values());
+  const errors = results.flatMap((result) => result.error ? [result.error] : []);
+
+  if (readyResults.length === 0 && sessions.length === 0) {
+    clearSessionCatalogRetry();
+    const message = errors[0] ?? 'Failed to load sessions';
+    set((state) => ({
+      sessionCatalogStatus: createErrorResourceStatusState(state.sessionCatalogStatus, message),
+      error: message,
+    }));
+    return;
+  }
+
+  if (results.some((result) => !result.ready)) {
+    scheduleSessionCatalogRetry(() => executeLoadSessions(input));
+  } else {
+    clearSessionCatalogRetry();
+  }
+
+  const stateSnapshot = get();
+  const { currentSessionKey } = stateSnapshot;
+  let nextSessionKey = currentSessionKey || defaultSessionKey;
+  const hasSessionInBackend = (sessionKey: string): boolean => mergedSessions.has(sessionKey);
+  let shouldKeepMissingCurrent = false;
+  if (!hasSessionInBackend(nextSessionKey)) {
+    shouldKeepMissingCurrent = shouldKeepMissingCurrentSession(
+      nextSessionKey,
+      stateSnapshot,
+      sessions.length,
+    );
+    if (!shouldKeepMissingCurrent && sessions.length > 0) {
+      nextSessionKey = sessions[0]!.key;
+    }
+  }
+  const currentExistsInBackend = hasSessionInBackend(nextSessionKey);
+  const shouldMarkCurrentAsReadyEmpty = (
+    !currentExistsInBackend
+    && shouldKeepMissingCurrent
+    && sessions.length === 0
+    && nextSessionKey.length > 0
+  );
+  const loadedAt = Date.now();
+  const successfulRuntimeScopes = new Set(
+    readyResults.map((result) => buildRuntimeScopeKey(result.target.defaultSessionPromptAddress)),
+  );
+  set((state) => {
+    const backendSessionKeys = new Set(sessions.map((session) => session.key));
+    let loadedSessions = Object.fromEntries(
+      Object.entries(state.loadedSessions).filter(([sessionKey, record]) => {
+        const runtimeScope = record.meta.runtimeScopeKey;
+        if (backendSessionKeys.has(sessionKey)) {
+          return true;
+        }
+        if (runtimeScope && !successfulRuntimeScopes.has(runtimeScope)) {
+          return true;
+        }
+        return shouldRetainLocalSessionRecord(sessionKey, {
+          currentSessionKey: nextSessionKey,
+          loadedSessions: state.loadedSessions,
+          pendingApprovalsBySession: state.pendingApprovalsBySession,
+        });
+      }),
+    );
+
+    for (const session of sessions) {
+      loadedSessions = ensureSessionRecordMap(loadedSessions, session.key);
+      const currentMeta = getSessionMeta({ loadedSessions }, session.key);
+      const explicitLabel = normalizeCatalogString(session.label);
+      loadedSessions = patchSessionMeta({ loadedSessions }, session.key, {
+        backendSessionKey: session.backendSessionKey,
+        runtimeScopeKey: buildRuntimeScopeKey(session.runtimeAddress),
+        agentId: normalizeCatalogString(session.agentId) ?? currentMeta.agentId,
+        protocolId: normalizeCatalogString(session.protocolId) ?? currentMeta.protocolId,
+        runtimeEndpointId: normalizeCatalogString(session.runtimeEndpointId) ?? currentMeta.runtimeEndpointId,
+        runtimeAddress: session.runtimeAddress,
+        kind: session.kind ?? currentMeta.kind,
+        preferred: session.preferred ?? currentMeta.preferred,
+        label: explicitLabel && explicitLabel !== session.backendSessionKey ? explicitLabel : currentMeta.label,
+        titleSource: session.titleSource ?? currentMeta.titleSource,
+        displayName: normalizeCatalogString(session.displayName) ?? currentMeta.displayName ?? null,
+        thinkingLevel: normalizeCatalogString(session.thinkingLevel) ?? currentMeta.thinkingLevel,
+        model: normalizeCatalogString(session.model) ?? currentMeta.model ?? null,
+        lastActivityAt: typeof session.updatedAt === 'number' && Number.isFinite(session.updatedAt)
+          ? session.updatedAt
+          : currentMeta.lastActivityAt,
+      });
+    }
+
+    if (shouldMarkCurrentAsReadyEmpty) {
+      loadedSessions = ensureSessionRecordMap(loadedSessions, nextSessionKey);
+      loadedSessions = patchSessionMeta({ loadedSessions }, nextSessionKey, { historyStatus: 'ready' });
+    }
+
+    const retainedSessionKeys = new Set(Object.keys(loadedSessions));
+    return {
+      sessionCatalogStatus: createReadyResourceStatusState(loadedAt),
+      currentSessionKey: nextSessionKey,
+      loadedSessions,
+      pendingApprovalsBySession: Object.fromEntries(
+        Object.entries(state.pendingApprovalsBySession).filter(([sessionKey]) => retainedSessionKeys.has(sessionKey)),
+      ),
+      error: errors[0] ?? state.error,
+    };
+  });
 }
 
 export function executeOpenAgentConversation(input: CreateStoreSessionActionsInput, agentId: string): void {
@@ -358,7 +493,7 @@ export function executeSwitchSession(input: CreateStoreSessionActionsInput, key:
   if (key === currentState.currentSessionKey) {
     void (async () => {
       try {
-        const result = await requestSessionLifecycleSnapshot('/api/session/resume', key);
+        const result = await requestSessionLifecycleSnapshot('resume', resolveOperationTarget(get(), key));
         if (get().currentSessionKey !== key) {
           return;
         }
@@ -414,7 +549,7 @@ export function executeSwitchSession(input: CreateStoreSessionActionsInput, key:
 
   void (async () => {
     try {
-      const result = await requestSessionLifecycleSnapshot('/api/session/switch', key);
+      const result = await requestSessionLifecycleSnapshot('switch', resolveOperationTarget(get(), key));
       if (get().currentSessionKey !== key) {
         return;
       }
@@ -483,9 +618,7 @@ export async function executeDeleteSession(input: CreateStoreSessionActionsInput
   beginMutating();
   try {
     try {
-      await hostSessionDelete({
-        sessionKey: key,
-      });
+      await hostSessionDelete(resolveOperationTarget(get(), key));
     } catch {
       void 0;
     }
@@ -545,8 +678,10 @@ export async function executeRenameSession(
 
   input.beginMutating();
   try {
+    const target = resolveOperationTarget(input.get(), key);
     const result = await input.renameSession({
-      sessionKey: key,
+      sessionKey: target.sessionKey,
+      runtimeAddress: target.runtimeAddress,
       label: normalizedLabel,
     });
     if (result.success === false) {
@@ -569,7 +704,6 @@ export async function executeNewSession(input: CreateStoreSessionActionsInput, a
     get,
     beginMutating,
     finishMutating,
-    defaultCanonicalPrefix,
     historyRuntime,
   } = input;
   beginMutating();
@@ -582,14 +716,9 @@ export async function executeNewSession(input: CreateStoreSessionActionsInput, a
     if (leavingEmpty) {
       clearSessionHistoryFingerprints(historyRuntime, currentSessionKey);
     }
-    const prefix = resolveCanonicalPrefixForAgent(agentId)
-      ?? getCanonicalPrefixFromSessions(readSessionsFromState(get()), currentSessionKey)
-      ?? defaultCanonicalPrefix;
-    const created = await hostSessionNew({
-      agentId,
-      canonicalPrefix: prefix,
-    });
-    const newKey = created.sessionKey;
+    const runtimeAddress = resolveNewSessionRuntimeAddress(state, agentId);
+    const created = await hostSessionNew({ runtimeAddress });
+    const newKey = buildSessionRecordKey(created.snapshot.catalog.runtimeAddress, created.sessionKey);
     useTaskSnapshotStore.getState().reportSessionSnapshot(created.snapshot, 'replay');
     set((stateValue) => {
       const baseLoadedSessions = leavingEmpty

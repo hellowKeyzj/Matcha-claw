@@ -18,6 +18,7 @@ import { invokeIpc } from '@/lib/api-client';
 import { FilePreviewBody, type FilePreviewMode } from '@/components/file-preview/FilePreviewBody';
 import { WorkspaceBrowserBody } from '@/components/file-preview/WorkspaceBrowserBody';
 import type { ArtifactPreviewTarget } from '@/components/file-preview/types';
+import type { RuntimeAddress } from '../../../../runtime-host/shared/runtime-address';
 import type { DerivedPlanStatus } from '@/stores/chat/task-snapshot-store';
 import type { TaskInboxTask } from '../useChatSidePanelController';
 
@@ -70,6 +71,7 @@ interface ChatSidePanelProps {
   onArtifactSectionChange: (section: 'changes' | 'preview' | 'workspace') => void;
   onArtifactViewModeChange: (mode: FilePreviewMode) => void;
   onArtifactRevealInFileManager: (filePath: string) => void;
+  runtimeAddress?: RuntimeAddress;
 }
 
 const ARTIFACT_GROUP_RAIL_MIN_WIDTH = 240;
@@ -141,6 +143,7 @@ export const ChatSidePanel = memo(function ChatSidePanel({
   onArtifactSectionChange,
   onArtifactViewModeChange,
   onArtifactRevealInFileManager,
+  runtimeAddress,
 }: ChatSidePanelProps) {
   const { t } = useTranslation('chat');
   const gatewayStatus = useGatewayStore((state) => state.status);
@@ -344,6 +347,7 @@ export const ChatSidePanel = memo(function ChatSidePanel({
         <FilePreviewBody
           file={artifactFocusedFile}
           mode={artifactViewMode}
+          runtimeAddress={runtimeAddress}
           className="h-full"
           headerAccessory={(
             <>
@@ -733,6 +737,7 @@ export const ChatSidePanel = memo(function ChatSidePanel({
                 rootPath={artifactWorkspaceRoot}
                 selectedFilePath={artifactFocusedFile?.filePath ?? null}
                 selectedFile={artifactFocusedFile}
+                runtimeAddress={runtimeAddress}
                 availableWidth={width}
                 previewMode={artifactViewMode}
                 onSelectFile={(file) => onArtifactFocusFile(file, { preserveSection: 'workspace' })}

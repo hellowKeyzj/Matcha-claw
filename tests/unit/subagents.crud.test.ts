@@ -4,6 +4,13 @@ import { gatewayClientRpcMock, resetGatewayClientMocks } from './helpers/mock-ga
 import { useSubagentsStore } from '@/stores/subagents';
 
 const AVATAR_STORAGE_KEY = 'matchaclaw-subagent-avatar-presentations';
+const subagentManagementAddress = {
+  kind: 'native-runtime' as const,
+  capabilityId: 'subagent.management',
+  runtimeAdapterId: 'openclaw',
+  runtimeInstanceId: 'local',
+  agentId: 'default',
+};
 
 describe('subagents crud', () => {
   beforeEach(() => {
@@ -56,12 +63,13 @@ describe('subagents crud', () => {
       name: 'writer',
       workspace: '/tmp/writer',
       model: 'gpt-4.1-mini',
+      runtimeAddress: subagentManagementAddress,
     });
     expect(createResult).toEqual({ agentId: 'writer-v2' });
 
     expect(rpc).toHaveBeenCalledWith(
       'agents.create',
-      { name: 'writer', workspace: '/home/dev/.openclaw/workspace-subagents/writer' },
+      { name: 'writer', workspace: '/tmp/writer' },
       undefined,
     );
     expect(rpc).toHaveBeenCalledWith(
@@ -73,57 +81,23 @@ describe('subagents crud', () => {
     expect(window.localStorage.getItem(AVATAR_STORAGE_KEY)).toBeNull();
   });
 
-  it('create 在缺少主工作区时，优先用 openclaw:getConfigDir 生成 fallback 工作区', async () => {
-    const invoke = vi.mocked(window.electron.ipcRenderer.invoke);
+  it('create 在缺少显式 workspace 且无法从已有 agent 推导时失败', async () => {
     const rpc = gatewayClientRpcMock;
     useSubagentsStore.setState({
       agents: [{ id: 'main', isDefault: true }],
     });
-    invoke.mockImplementation(async (channel, payload) => {
-      if (channel === 'hostapi:fetch' && (payload as { path?: string } | undefined)?.path === '/api/openclaw/config-dir') {
-        return {
-          ok: true,
-          data: {
-            status: 200,
-            ok: true,
-            json: 'C:\\Users\\Dev\\.openclaw',
-          },
-        };
-      }
-      throw new Error(`Unexpected invoke call: ${String(channel)}`);
-    });
-    rpc.mockImplementation(async (method, params) => {
-      if (method === 'agents.create') {
-        return { success: true, result: { agentId: 'writer' } };
-      }
-      if (method === 'agents.list') {
-        return {
-          success: true,
-          result: {
-            agents: [{ id: 'writer' }],
-          },
-        };
-      }
-      if (method === 'agents.update') {
-        return { success: true, result: {} };
-      }
-      throw new Error(`Unexpected rpc method in test: ${String(method)}`);
-    });
 
-    await useSubagentsStore.getState().createAgent({
+    await expect(useSubagentsStore.getState().createAgent({
       name: 'writer',
       workspace: '',
       model: 'gpt-4.1-mini',
-    });
+      runtimeAddress: subagentManagementAddress,
+    })).rejects.toThrow('Subagent workspace is required');
 
-    expect(invoke).toHaveBeenCalledWith(
+    expect(rpc).not.toHaveBeenCalled();
+    expect(vi.mocked(window.electron.ipcRenderer.invoke)).not.toHaveBeenCalledWith(
       'hostapi:fetch',
-      expect.objectContaining({ path: '/api/openclaw/config-dir', method: 'GET' }),
-    );
-    expect(rpc).toHaveBeenCalledWith(
-      'agents.create',
-      { name: 'writer', workspace: 'C:\\Users\\Dev\\.openclaw\\workspace-subagents\\writer' },
-      undefined,
+      expect.objectContaining({ path: '/api/openclaw/config-dir' }),
     );
   });
 
@@ -153,11 +127,12 @@ describe('subagents crud', () => {
       model: 'gpt-4.1-mini',
       avatarSeed: 'picker:writer:page:0:option:3',
       avatarStyle: 'bottts',
+      runtimeAddress: subagentManagementAddress,
     });
 
     expect(rpc).toHaveBeenCalledWith(
       'agents.create',
-      { name: 'writer', workspace: '/home/dev/.openclaw/workspace-subagents/writer' },
+      { name: 'writer', workspace: '/tmp/writer' },
       undefined,
     );
     expect(JSON.parse(window.localStorage.getItem(AVATAR_STORAGE_KEY) || '{}')).toEqual({
@@ -201,6 +176,7 @@ describe('subagents crud', () => {
       name: 'test4',
       workspace: '/tmp/test4',
       model: 'gpt-4.1-mini',
+      runtimeAddress: subagentManagementAddress,
     })).resolves.toEqual({ agentId: 'test4' });
 
     expect(updateCallCount).toBe(2);
@@ -237,6 +213,7 @@ describe('subagents crud', () => {
       name: 'writer',
       workspace: '/tmp/writer',
       model: 'gpt-4.1-mini',
+      runtimeAddress: subagentManagementAddress,
     })).resolves.toEqual({
       agentId: 'writer',
       warning: '智能体 "writer" 已创建，但模型配置写入失败：RPC timeout: agents.update。请在编辑中重新确认',
@@ -279,6 +256,7 @@ describe('subagents crud', () => {
         model: 'gpt-4.1-mini',
         avatarSeed: 'picker:writer:page:0:option:1',
         avatarStyle: 'botttsNeutral',
+        runtimeAddress: subagentManagementAddress,
       })).resolves.toEqual({
         agentId: 'writer',
         warning: '智能体 "writer" 已创建，但头像展示配置写入失败：localStorage quota exceeded。请在编辑中重新确认',
@@ -307,6 +285,7 @@ describe('subagents crud', () => {
       name: 'test-missing-id',
       workspace: '/tmp/test-missing-id',
       model: 'gpt-4.1-mini',
+      runtimeAddress: subagentManagementAddress,
     })).rejects.toThrow('agents.create returned missing agentId');
 
     expect(rpc).not.toHaveBeenCalledWith('agents.update', expect.anything());
@@ -322,6 +301,7 @@ describe('subagents crud', () => {
       name: 'writer-v2',
       workspace: '/tmp/writer-v2',
       model: 'gpt-4.1-mini',
+      runtimeAddress: subagentManagementAddress,
     });
 
     expect(rpc).toHaveBeenCalledWith(
@@ -362,6 +342,7 @@ describe('subagents crud', () => {
       model: 'gpt-4.1-mini',
       avatarSeed: 'picker:writer:page:1:option:2',
       avatarStyle: 'bottts',
+      runtimeAddress: subagentManagementAddress,
     });
 
     expect(rpc).not.toHaveBeenCalledWith('config.get', {}, undefined);
@@ -434,6 +415,7 @@ describe('subagents crud', () => {
       name: 'writer-v2',
       workspace: '/tmp/writer-v2',
       model: undefined,
+      runtimeAddress: subagentManagementAddress,
     });
 
     expect(rpc).toHaveBeenCalledWith('config.get', {}, undefined);
@@ -510,6 +492,7 @@ describe('subagents crud', () => {
       workspace: '/tmp/writer-v2',
       model: 'gpt-4.1-mini',
       skills: ['web-search', 'feishu-doc'],
+      runtimeAddress: subagentManagementAddress,
     });
 
     expect(rpc).toHaveBeenCalledWith('config.get', {}, undefined);
@@ -545,6 +528,7 @@ describe('subagents crud', () => {
       name: 'writer-v2',
       workspace: '/tmp/writer-v2',
       model: 'gpt-4.1-mini',
+      runtimeAddress: subagentManagementAddress,
     });
 
     expect(rpc).not.toHaveBeenCalled();
@@ -555,7 +539,7 @@ describe('subagents crud', () => {
     const rpc = gatewayClientRpcMock;
     rpc.mockResolvedValueOnce({ success: true, result: {} });
 
-    await useSubagentsStore.getState().deleteAgent('writer');
+    await useSubagentsStore.getState().deleteAgent('writer', subagentManagementAddress);
 
     expect(rpc).toHaveBeenCalledWith(
       'agents.delete',

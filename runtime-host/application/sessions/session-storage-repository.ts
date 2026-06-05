@@ -1,6 +1,5 @@
-import { basename, dirname, isAbsolute, join, relative, win32 } from 'node:path';
-import type { RuntimeFileSystemPort } from '../common/runtime-ports';
-import type { OpenClawWorkspacePort } from '../openclaw/openclaw-workspace-service';
+import type { RuntimeAddress } from '../agent-runtime/contracts/runtime-address';
+import type { SessionStorageRepositoryWorkflow } from '../workflows/session-storage/session-storage-repository-workflow';
 
 export interface SessionStorageDescriptor {
   sessionKey: string;
@@ -9,6 +8,7 @@ export interface SessionStorageDescriptor {
   sessionsJsonPath: string | null;
   sessionsJson: Record<string, unknown> | null;
   sessionStoreEntry: Record<string, unknown> | null;
+  runtimeAddress: RuntimeAddress;
   transcriptPath: string | null;
 }
 
@@ -18,9 +18,32 @@ export interface SessionTranscriptFingerprint {
   mtimeMs: number;
 }
 
+export interface SessionConfigDirectoryPort {
+  getConfigDir(): string;
+}
+
+export interface SessionExternalArtefactResolverPort {
+  resolveExternalArtefactPaths(input: {
+    pointerPath: string;
+    pointerContent: string;
+    transcriptDir: string;
+  }): readonly string[];
+}
+
 export interface SessionStorageRepositoryDeps {
-  workspace: Pick<OpenClawWorkspacePort, 'getConfigDir'>;
-  fileSystem: RuntimeFileSystemPort;
+  repositoryWorkflow: Pick<SessionStorageRepositoryWorkflow,
+    | 'listStorageDescriptors'
+    | 'findStorageDescriptor'
+    | 'getTranscriptFingerprint'
+    | 'readTranscriptContent'
+    | 'readTranscriptDescriptorContent'
+    | 'readTranscriptLines'
+    | 'readTranscriptDescriptorLines'
+    | 'upsertSessionRuntimeAddress'
+    | 'updateSessionStatus'
+    | 'renameSession'
+    | 'deleteSession'
+  >;
 }
 
 export interface SessionStoragePort {
@@ -29,274 +52,16 @@ export interface SessionStoragePort {
   getTranscriptFingerprint(pathname: string): Promise<SessionTranscriptFingerprint | null>;
   readTranscriptContent(sessionKey: string): Promise<string | null>;
   readTranscriptDescriptorContent(descriptor: SessionStorageDescriptor): Promise<string | null>;
+  readTranscriptLines(sessionKey: string): AsyncIterable<string>;
+  readTranscriptDescriptorLines(descriptor: SessionStorageDescriptor): AsyncIterable<string>;
   deleteSession(sessionKey: string): Promise<boolean>;
   renameSession(sessionKey: string, label: string): Promise<boolean>;
   updateSessionStatus(sessionKey: string, status: 'active' | 'completed' | 'archived' | 'deleted'): Promise<boolean>;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+  upsertSessionRuntimeAddress(sessionKey: string, runtimeAddress: RuntimeAddress): Promise<boolean>;
 }
 
 function normalizeString(value: unknown): string {
   return typeof value === 'string' ? value.trim() : '';
-}
-
-function isAbsolutePath(path: string): boolean {
-  return isAbsolute(path) || win32.isAbsolute(path);
-}
-
-function resolveIndexedTranscriptPath(
-  entry: Record<string, unknown>,
-  sessionsDir: string,
-): string | null {
-  const indexedPath = entry.sessionFile ?? entry.file ?? entry.fileName ?? entry.path;
-  if (typeof indexedPath === 'string' && indexedPath.trim()) {
-    const normalizedPath = indexedPath.trim();
-    if (isAbsolutePath(normalizedPath)) {
-      return normalizedPath;
-    }
-    const normalizedFileName = normalizedPath.endsWith('.jsonl') ? normalizedPath : `${normalizedPath}.jsonl`;
-    return join(sessionsDir, normalizedFileName);
-  }
-
-  const sessionId = entry.id ?? entry.sessionId;
-  if (typeof sessionId === 'string' && sessionId.trim()) {
-    const normalizedFileName = sessionId.endsWith('.jsonl') ? sessionId : `${sessionId}.jsonl`;
-    return join(sessionsDir, normalizedFileName);
-  }
-
-  return null;
-}
-
-function parseJsonRecord(raw: string): Record<string, unknown> | null {
-  try {
-    const parsed = JSON.parse(raw) as unknown;
-    return isRecord(parsed) ? parsed : null;
-  } catch {
-    return null;
-  }
-}
-
-async function readJsonRecordFromFileSystem(
-  fileSystem: RuntimeFileSystemPort,
-  pathname: string,
-): Promise<Record<string, unknown> | null> {
-  try {
-    return parseJsonRecord(await fileSystem.readTextFile(pathname));
-  } catch {
-    return null;
-  }
-}
-
-function listAgentStorageDescriptors(input: {
-  agentId: string;
-  sessionsDir: string;
-  sessionsJsonPath: string;
-  sessionsJson: Record<string, unknown>;
-}): SessionStorageDescriptor[] {
-  const descriptors: SessionStorageDescriptor[] = [];
-
-  if (Array.isArray(input.sessionsJson.sessions)) {
-    for (const candidate of input.sessionsJson.sessions) {
-      if (!isRecord(candidate)) {
-        continue;
-      }
-      const sessionKey = normalizeString(candidate.key ?? candidate.sessionKey);
-      if (!sessionKey) {
-        continue;
-      }
-      descriptors.push({
-        sessionKey,
-        agentId: input.agentId,
-        sessionsDir: input.sessionsDir,
-        sessionsJsonPath: input.sessionsJsonPath,
-        sessionsJson: input.sessionsJson,
-        sessionStoreEntry: candidate,
-        transcriptPath: resolveIndexedTranscriptPath(candidate, input.sessionsDir),
-      });
-    }
-    return descriptors;
-  }
-
-  for (const [sessionKey, value] of Object.entries(input.sessionsJson)) {
-    const normalizedSessionKey = normalizeString(sessionKey);
-    if (!normalizedSessionKey) {
-      continue;
-    }
-    if (typeof value === 'string' && value.trim()) {
-      const normalizedFileName = value.endsWith('.jsonl') ? value : `${value}.jsonl`;
-      descriptors.push({
-        sessionKey,
-        agentId: input.agentId,
-        sessionsDir: input.sessionsDir,
-        sessionsJsonPath: input.sessionsJsonPath,
-        sessionsJson: input.sessionsJson,
-        sessionStoreEntry: null,
-        transcriptPath: join(input.sessionsDir, normalizedFileName),
-      });
-      continue;
-    }
-    if (!isRecord(value)) {
-      continue;
-    }
-    descriptors.push({
-      sessionKey,
-      agentId: input.agentId,
-      sessionsDir: input.sessionsDir,
-      sessionsJsonPath: input.sessionsJsonPath,
-      sessionsJson: input.sessionsJson,
-      sessionStoreEntry: value,
-      transcriptPath: resolveIndexedTranscriptPath(value, input.sessionsDir),
-    });
-  }
-
-  return descriptors;
-}
-
-function normalizeTranscriptFileName(fileName: string): string | null {
-  const normalized = normalizeString(fileName);
-  if (!normalized.endsWith('.jsonl') || normalized.endsWith('.deleted.jsonl')) {
-    return null;
-  }
-  return normalized;
-}
-
-function buildFallbackSessionKey(agentId: string, transcriptFileName: string): string {
-  const suffix = transcriptFileName.slice(0, -'.jsonl'.length);
-  return `agent:${agentId}:${suffix}`;
-}
-
-function listTranscriptStorageDescriptors(input: {
-  agentId: string;
-  sessionsDir: string;
-  sessionsJsonPath: string | null;
-  sessionsJson: Record<string, unknown> | null;
-  entryNames: readonly string[];
-  indexedDescriptors?: readonly SessionStorageDescriptor[];
-}): SessionStorageDescriptor[] {
-  const indexedTranscriptPaths = new Set(
-    (input.indexedDescriptors ?? [])
-      .map((descriptor) => normalizeString(descriptor.transcriptPath))
-      .filter((path): path is string => path.length > 0),
-  );
-  const descriptors: SessionStorageDescriptor[] = [];
-
-  for (const entryName of input.entryNames) {
-    const transcriptFileName = normalizeTranscriptFileName(entryName);
-    if (!transcriptFileName) {
-      continue;
-    }
-    const transcriptPath = join(input.sessionsDir, transcriptFileName);
-    if (indexedTranscriptPaths.has(transcriptPath)) {
-      continue;
-    }
-    descriptors.push({
-      sessionKey: buildFallbackSessionKey(input.agentId, transcriptFileName),
-      agentId: input.agentId,
-      sessionsDir: input.sessionsDir,
-      sessionsJsonPath: input.sessionsJsonPath,
-      sessionsJson: input.sessionsJson,
-      sessionStoreEntry: null,
-      transcriptPath,
-    });
-  }
-
-  return descriptors;
-}
-
-function updateStorageIndexStatus(
-  sessionsJson: Record<string, unknown>,
-  sessionKey: string,
-  status: 'active' | 'completed' | 'archived' | 'deleted',
-): Record<string, unknown> {
-  if (Array.isArray(sessionsJson.sessions)) {
-    return {
-      ...sessionsJson,
-      sessions: sessionsJson.sessions.map((candidate) => {
-        if (!isRecord(candidate)) {
-          return candidate;
-        }
-        const candidateKey = normalizeString(candidate.key ?? candidate.sessionKey);
-        return candidateKey === sessionKey ? { ...candidate, status } : candidate;
-      }),
-    };
-  }
-  const current = sessionsJson[sessionKey];
-  if (isRecord(current)) {
-    return {
-      ...sessionsJson,
-      [sessionKey]: { ...current, status },
-    };
-  }
-  if (typeof current === 'string') {
-    return {
-      ...sessionsJson,
-      [sessionKey]: { file: current, status },
-    };
-  }
-  return {
-    ...sessionsJson,
-    [sessionKey]: { key: sessionKey, status },
-  };
-}
-
-function removeSessionFromStorageIndex(
-  sessionsJson: Record<string, unknown>,
-  sessionKey: string,
-): Record<string, unknown> {
-  if (Array.isArray(sessionsJson.sessions)) {
-    return {
-      ...sessionsJson,
-      sessions: sessionsJson.sessions.filter((candidate) => {
-        if (!isRecord(candidate)) {
-          return true;
-        }
-        const candidateKey = normalizeString(candidate.key ?? candidate.sessionKey);
-        return candidateKey !== sessionKey;
-      }),
-    };
-  }
-  const next = { ...sessionsJson };
-  delete next[sessionKey];
-  return next;
-}
-
-function updateStorageIndexLabel(
-  sessionsJson: Record<string, unknown>,
-  sessionKey: string,
-  label: string,
-): Record<string, unknown> {
-  if (Array.isArray(sessionsJson.sessions)) {
-    let found = false;
-    const sessions = sessionsJson.sessions.map((candidate) => {
-      if (!isRecord(candidate)) {
-        return candidate;
-      }
-      const candidateKey = normalizeString(candidate.key ?? candidate.sessionKey);
-      if (candidateKey !== sessionKey) {
-        return candidate;
-      }
-      found = true;
-      return { ...candidate, label };
-    });
-    return found ? { ...sessionsJson, sessions } : sessionsJson;
-  }
-
-  const current = sessionsJson[sessionKey];
-  if (isRecord(current)) {
-    return {
-      ...sessionsJson,
-      [sessionKey]: { ...current, label },
-    };
-  }
-  if (typeof current === 'string' && current.trim()) {
-    return {
-      ...sessionsJson,
-      [sessionKey]: { file: current, label },
-    };
-  }
-  return sessionsJson;
 }
 
 export function readSessionStoreLabel(entry: Record<string, unknown> | null): string | null {
@@ -304,317 +69,53 @@ export function readSessionStoreLabel(entry: Record<string, unknown> | null): st
   return label || null;
 }
 
-function isPathInside(parentDir: string, childPath: string): boolean {
-  const rel = relative(parentDir, childPath);
-  return rel === '' || (!rel.startsWith('..') && !isAbsolutePath(rel));
-}
-
-function readTranscriptBaseId(transcriptPath: string): string | null {
-  const fileName = basename(transcriptPath);
-  return fileName.endsWith('.jsonl') ? fileName.slice(0, -'.jsonl'.length) : null;
-}
-
-function isSessionArtefactName(fileName: string, baseId: string): boolean {
-  return fileName === `${baseId}.jsonl`
-    || fileName === `${baseId}.deleted.jsonl`
-    || fileName === `${baseId}.trajectory.jsonl`
-    || fileName === `${baseId}.trajectory-path.json`
-    || fileName.startsWith(`${baseId}.jsonl.reset.`);
-}
-
-function readTrajectoryRuntimeFile(pointerContent: string): string | null {
-  try {
-    const parsed = JSON.parse(pointerContent) as unknown;
-    if (!isRecord(parsed)) {
-      return null;
-    }
-    if (parsed.traceSchema !== 'openclaw-trajectory-pointer') {
-      return null;
-    }
-    const runtimeFile = normalizeString(parsed.runtimeFile);
-    if (!runtimeFile || !runtimeFile.endsWith('.jsonl') || !isAbsolutePath(runtimeFile)) {
-      return null;
-    }
-    return runtimeFile;
-  } catch {
-    return null;
-  }
-}
-
 export class SessionStorageRepository implements SessionStoragePort {
-  // 按 agentId 缓存上次扫描得到的 descriptors。下次扫描时若 sessions.json 与 sessions 目录的
-  // (size, mtimeMs) 都没变化，则直接复用 descriptors，跳过 readJsonRecordFromFileSystem +
-  // listDirectory(sessionsDir) 的目录列举与 JSON 解析开销。
-  private readonly agentDescriptorsCache = new Map<string, {
-    readonly sessionsJsonFingerprint: { size: number; mtimeMs: number } | null;
-    readonly sessionsDirFingerprint: { mtimeMs: number } | null;
-    readonly descriptors: SessionStorageDescriptor[];
-  }>();
-
   constructor(private readonly deps: SessionStorageRepositoryDeps) {}
 
   async listStorageDescriptors(): Promise<SessionStorageDescriptor[]> {
-    const agentsDir = join(this.deps.workspace.getConfigDir(), 'agents');
-    let agentEntries: Array<{ isDirectory: boolean; name: string }>;
-    try {
-      agentEntries = await this.deps.fileSystem.listDirectory(agentsDir);
-    } catch {
-      return [];
-    }
-
-    const descriptors: SessionStorageDescriptor[] = [];
-    const presentAgentIds = new Set<string>();
-    for (const agentDirEntry of agentEntries) {
-      if (!agentDirEntry.isDirectory) {
-        continue;
-      }
-      const agentId = agentDirEntry.name;
-      presentAgentIds.add(agentId);
-      const sessionsDir = join(agentsDir, agentId, 'sessions');
-      const sessionsJsonPath = join(sessionsDir, 'sessions.json');
-
-      const sessionsJsonFingerprint = await this.statFingerprint(sessionsJsonPath);
-      const sessionsDirFingerprint = await this.statDirFingerprint(sessionsDir);
-
-      const cached = this.agentDescriptorsCache.get(agentId);
-      if (
-        cached
-        && this.fingerprintEqual(cached.sessionsJsonFingerprint, sessionsJsonFingerprint)
-        && this.fingerprintEqual(cached.sessionsDirFingerprint, sessionsDirFingerprint)
-      ) {
-        descriptors.push(...cached.descriptors);
-        continue;
-      }
-
-      const sessionsJson = await readJsonRecordFromFileSystem(this.deps.fileSystem, sessionsJsonPath);
-      const indexedDescriptors = sessionsJson ? listAgentStorageDescriptors({
-        agentId,
-        sessionsDir,
-        sessionsJsonPath,
-        sessionsJson,
-      }) : [];
-
-      let entryNames: string[] = [];
-      try {
-        entryNames = (await this.deps.fileSystem.listDirectory(sessionsDir))
-          .filter((entry) => entry.isFile)
-          .map((entry) => entry.name);
-      } catch {
-        entryNames = [];
-      }
-      const transcriptDescriptors = listTranscriptStorageDescriptors({
-        agentId,
-        sessionsDir,
-        sessionsJsonPath: sessionsJson ? sessionsJsonPath : null,
-        sessionsJson,
-        entryNames,
-        indexedDescriptors,
-      });
-
-      const agentDescriptors: SessionStorageDescriptor[] = [
-        ...indexedDescriptors,
-        ...transcriptDescriptors,
-      ];
-      this.agentDescriptorsCache.set(agentId, {
-        sessionsJsonFingerprint,
-        sessionsDirFingerprint,
-        descriptors: agentDescriptors,
-      });
-      descriptors.push(...agentDescriptors);
-    }
-
-    // agent 目录被删除时同步清掉缓存条目，避免长跑内存增长。
-    for (const cachedAgentId of [...this.agentDescriptorsCache.keys()]) {
-      if (!presentAgentIds.has(cachedAgentId)) {
-        this.agentDescriptorsCache.delete(cachedAgentId);
-      }
-    }
-
-    return descriptors;
-  }
-
-  private async statFingerprint(pathname: string): Promise<{ size: number; mtimeMs: number } | null> {
-    try {
-      const fileStat = await this.deps.fileSystem.stat(pathname);
-      if (!fileStat.isFile) {
-        return null;
-      }
-      return { size: fileStat.size, mtimeMs: fileStat.mtimeMs };
-    } catch {
-      return null;
-    }
-  }
-
-  private async statDirFingerprint(pathname: string): Promise<{ mtimeMs: number } | null> {
-    try {
-      const fileStat = await this.deps.fileSystem.stat(pathname);
-      if (!fileStat.isDirectory) {
-        return null;
-      }
-      return { mtimeMs: fileStat.mtimeMs };
-    } catch {
-      return null;
-    }
-  }
-
-  private fingerprintEqual(
-    left: { size?: number; mtimeMs: number } | null,
-    right: { size?: number; mtimeMs: number } | null,
-  ): boolean {
-    if (left === null && right === null) {
-      return true;
-    }
-    if (left === null || right === null) {
-      return false;
-    }
-    return left.mtimeMs === right.mtimeMs && left.size === right.size;
-  }
-
-  private invalidateAgentDescriptorsCache(agentId: string): void {
-    this.agentDescriptorsCache.delete(agentId);
+    return await this.deps.repositoryWorkflow.listStorageDescriptors();
   }
 
   async findStorageDescriptor(sessionKey: string): Promise<SessionStorageDescriptor | null> {
-    if (!normalizeString(sessionKey)) {
-      return null;
-    }
-    for (const descriptor of await this.listStorageDescriptors()) {
-      if (descriptor.sessionKey === sessionKey) {
-        return descriptor;
-      }
-    }
-    return null;
+    return await this.deps.repositoryWorkflow.findStorageDescriptor(sessionKey);
   }
 
   async getTranscriptFingerprint(pathname: string): Promise<SessionTranscriptFingerprint | null> {
-    try {
-      const fileStat = await this.deps.fileSystem.stat(pathname);
-      if (!fileStat.isFile) {
-        return null;
-      }
-      return {
-        path: pathname,
-        size: fileStat.size,
-        mtimeMs: fileStat.mtimeMs,
-      };
-    } catch {
-      return null;
-    }
+    return await this.deps.repositoryWorkflow.getTranscriptFingerprint(pathname);
   }
 
   async readTranscriptContent(sessionKey: string): Promise<string | null> {
-    const descriptor = await this.findStorageDescriptor(sessionKey);
-    return descriptor ? await this.readTranscriptDescriptorContent(descriptor) : null;
+    return await this.deps.repositoryWorkflow.readTranscriptContent(sessionKey);
   }
 
   async readTranscriptDescriptorContent(descriptor: SessionStorageDescriptor): Promise<string | null> {
-    if (!descriptor?.transcriptPath || !(await this.deps.fileSystem.exists(descriptor.transcriptPath))) {
-      return null;
-    }
+    return await this.deps.repositoryWorkflow.readTranscriptDescriptorContent(descriptor);
+  }
 
-    try {
-      return await this.deps.fileSystem.readTextFile(descriptor.transcriptPath);
-    } catch {
-      return null;
-    }
+  async *readTranscriptLines(sessionKey: string): AsyncIterable<string> {
+    yield* this.deps.repositoryWorkflow.readTranscriptLines(sessionKey);
+  }
+
+  async *readTranscriptDescriptorLines(descriptor: SessionStorageDescriptor): AsyncIterable<string> {
+    yield* this.deps.repositoryWorkflow.readTranscriptDescriptorLines(descriptor);
+  }
+
+  async upsertSessionRuntimeAddress(sessionKey: string, runtimeAddress: RuntimeAddress): Promise<boolean> {
+    return await this.deps.repositoryWorkflow.upsertSessionRuntimeAddress(sessionKey, runtimeAddress);
   }
 
   async updateSessionStatus(
     sessionKey: string,
     status: 'active' | 'completed' | 'archived' | 'deleted',
   ): Promise<boolean> {
-    const descriptor = await this.findStorageDescriptor(sessionKey);
-    if (!descriptor?.sessionsJson || !descriptor.sessionsJsonPath) {
-      return false;
-    }
-    await this.deps.fileSystem.writeTextFile(
-      descriptor.sessionsJsonPath,
-      JSON.stringify(updateStorageIndexStatus(descriptor.sessionsJson, sessionKey, status), null, 2),
-    );
-    this.invalidateAgentDescriptorsCache(descriptor.agentId);
-    return true;
+    return await this.deps.repositoryWorkflow.updateSessionStatus(sessionKey, status);
   }
 
   async renameSession(sessionKey: string, label: string): Promise<boolean> {
-    const normalizedLabel = normalizeString(label);
-    if (!normalizedLabel) {
-      return false;
-    }
-    const descriptor = await this.findStorageDescriptor(sessionKey);
-    if (!descriptor?.sessionsJson || !descriptor.sessionsJsonPath) {
-      return false;
-    }
-    const nextSessionsJson = updateStorageIndexLabel(descriptor.sessionsJson, sessionKey, normalizedLabel);
-    if (nextSessionsJson === descriptor.sessionsJson) {
-      return false;
-    }
-    await this.deps.fileSystem.writeTextFile(
-      descriptor.sessionsJsonPath,
-      JSON.stringify(nextSessionsJson, null, 2),
-    );
-    this.invalidateAgentDescriptorsCache(descriptor.agentId);
-    return true;
+    return await this.deps.repositoryWorkflow.renameSession(sessionKey, label);
   }
 
   async deleteSession(sessionKey: string): Promise<boolean> {
-    const descriptor = await this.findStorageDescriptor(sessionKey);
-    if (!descriptor?.sessionsJson || !descriptor.sessionsJsonPath) {
-      return false;
-    }
-    if (descriptor.transcriptPath) {
-      await this.removeSessionArtefacts(descriptor);
-    }
-    await this.deps.fileSystem.writeTextFile(
-      descriptor.sessionsJsonPath,
-      JSON.stringify(removeSessionFromStorageIndex(descriptor.sessionsJson, sessionKey), null, 2),
-    );
-    this.invalidateAgentDescriptorsCache(descriptor.agentId);
-    return true;
+    return await this.deps.repositoryWorkflow.deleteSession(sessionKey);
   }
-
-  private async removeSessionArtefacts(descriptor: SessionStorageDescriptor): Promise<void> {
-    if (!descriptor.transcriptPath) {
-      return;
-    }
-    const baseId = readTranscriptBaseId(descriptor.transcriptPath);
-    if (!baseId) {
-      return;
-    }
-    const transcriptDir = dirname(descriptor.transcriptPath);
-    if (!isPathInside(descriptor.sessionsDir, transcriptDir)) {
-      return;
-    }
-
-    let entries: RuntimeDirectoryEntry[] = [];
-    try {
-      entries = await this.deps.fileSystem.listDirectory(transcriptDir);
-    } catch {
-      return;
-    }
-
-    const localTargets = entries
-      .filter((entry) => entry.isFile && isSessionArtefactName(entry.name, baseId))
-      .map((entry) => join(transcriptDir, entry.name));
-
-    const pointerPath = join(transcriptDir, `${baseId}.trajectory-path.json`);
-    if (localTargets.includes(pointerPath)) {
-      await this.removeExternalTrajectory(pointerPath, transcriptDir);
-    }
-
-    await Promise.all(localTargets.map((target) => this.deps.fileSystem.removeFile(target)));
-  }
-
-  private async removeExternalTrajectory(pointerPath: string, transcriptDir: string): Promise<void> {
-    let runtimeFile: string | null = null;
-    try {
-      runtimeFile = readTrajectoryRuntimeFile(await this.deps.fileSystem.readTextFile(pointerPath));
-    } catch {
-      return;
-    }
-    if (!runtimeFile || isPathInside(transcriptDir, runtimeFile)) {
-      return;
-    }
-    await this.deps.fileSystem.removeFile(runtimeFile);
-  }
-
 }

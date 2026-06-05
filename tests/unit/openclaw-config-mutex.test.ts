@@ -2,15 +2,23 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { OpenClawConfigRepository } from '../../runtime-host/application/openclaw/openclaw-config-repository';
+import { OpenClawConfigRepository } from '../../runtime-host/application/adapters/openclaw/infrastructure/openclaw-config-repository';
 import { createTestOpenClawEnvironmentRepository } from './helpers/runtime-system-environment';
-import { ChannelConfigRepository } from '../../runtime-host/application/channels/channel-runtime';
-import { withOpenClawConfigLock } from '../../runtime-host/application/openclaw/openclaw-config-mutex';
+import { ChannelConfigRepository, type ChannelPluginConfigProjectionPort } from '../../runtime-host/application/channels/channel-runtime';
+import { ChannelConfigWorkflow } from '../../runtime-host/application/workflows/channel-runtime/channel-config-workflow';
+import { OpenClawChannelConfigProjection } from '../../runtime-host/application/adapters/openclaw/projections/openclaw-channel-config-projection';
+import {
+  applyManuallyManagedPluginIdsToOpenClawConfig,
+  readManuallyManagedPluginIdsFromConfig,
+} from '../../runtime-host/application/adapters/openclaw/projections/openclaw-plugin-config-service';
+import { withOpenClawConfigLock } from '../../runtime-host/application/adapters/openclaw/infrastructure/openclaw-config-mutex';
 import { SkillsConfigRepository } from '../../runtime-host/application/skills/store';
 import { ClawHubSkillInventory } from '../../runtime-host/application/skills/clawhub';
-import { ManagedPluginInstaller } from '../../runtime-host/application/plugins/managed-plugin-installer';
+import { OpenClawManagedPluginCatalog } from '../../runtime-host/application/adapters/openclaw/projections/openclaw-managed-plugin-catalog';
+import { OpenClawManagedPluginInstaller } from '../../runtime-host/application/adapters/openclaw/projections/openclaw-managed-plugin-installer';
 import { PluginCompanionSkillService } from '../../runtime-host/application/plugins/plugin-companion-skill-service';
-import { syncGatewayTokenToConfig } from '../../runtime-host/application/openclaw/openclaw-runtime-config-sync';
+import { PluginCompanionSkillWorkflow } from '../../runtime-host/application/workflows/plugin-lifecycle/plugin-companion-skill-workflow';
+import { syncGatewayTokenToConfig } from '../../runtime-host/application/adapters/openclaw/projections/openclaw-runtime-config-sync';
 import { createTestPluginFileSystem } from './helpers/plugin-file-system';
 import { createTestRuntimeFileSystem } from './helpers/runtime-file-system';
 
@@ -69,10 +77,53 @@ describe('openclaw-config-mutex', () => {
 
     await writeFile(join(tempDir, 'openclaw.json'), '{ invalid json', 'utf8');
 
-    await expect(configRepository.update((config) => {
+    await expect(configRepository.updateDirty((config) => {
       config.gateway = { mode: 'local' };
+      return { result: undefined, changed: true };
     })).rejects.toThrow('Invalid OpenClaw config JSON');
     await expect(readFile(join(tempDir, 'openclaw.json'), 'utf8')).resolves.toBe('{ invalid json');
+  });
+
+  it('updateDirty 由 mutator dirty bit 决定是否写盘', async () => {
+    const configRepository = new OpenClawConfigRepository(createTestOpenClawEnvironmentRepository());
+    const writeSpy = vi.spyOn(configRepository, 'write');
+
+    await expect(configRepository.updateDirty((config) => {
+      config.channels = {
+        telegram: {
+          defaultAccount: 'default',
+          accounts: {
+            default: { token: 'old-token' },
+          },
+        },
+      };
+      return { result: 'unchanged', changed: false };
+    })).resolves.toBe('unchanged');
+
+    expect(writeSpy).not.toHaveBeenCalled();
+  });
+
+  it('patchSection 只在 mutator 标记 section dirty 时写回', async () => {
+    const configRepository = new OpenClawConfigRepository(createTestOpenClawEnvironmentRepository());
+    const writeSpy = vi.spyOn(configRepository, 'write');
+
+    await expect(configRepository.patchSection('channels', (channels) => ({
+      result: 'same',
+      value: channels,
+      changed: false,
+    }))).resolves.toBe('same');
+    expect(writeSpy).not.toHaveBeenCalled();
+
+    await expect(configRepository.patchSection('gateway', () => ({
+      result: 'changed',
+      value: { mode: 'local' },
+      changed: true,
+    }))).resolves.toBe('changed');
+    expect(writeSpy).toHaveBeenCalledTimes(1);
+
+    const finalConfig = JSON.parse(await readFile(join(tempDir, 'openclaw.json'), 'utf8')) as Record<string, any>;
+    expect(finalConfig.channels.telegram.accounts.default.token).toBe('old-token');
+    expect(finalConfig.gateway).toEqual({ mode: 'local' });
   });
 
   it('启动同步只 patch 自己拥有的路径，保留其它 openclaw.json 内容', async () => {
@@ -154,12 +205,46 @@ describe('openclaw-config-mutex', () => {
 
     const pluginFileSystem = createTestPluginFileSystem();
     const runtimeFileSystem = createTestRuntimeFileSystem();
-    const companionSkills = new PluginCompanionSkillService(environmentRepository, configRepository, pluginFileSystem);
-    const pluginInstaller = new ManagedPluginInstaller(environmentRepository, configRepository, companionSkills, pluginFileSystem);
-    const channelSavePromise = new ChannelConfigRepository(configRepository, pluginInstaller, pluginFileSystem, {
-      nowMs: () => 1_700_000_000_000,
-      nowIso: () => '2023-11-14T22:13:20.000Z',
-    }).saveChannelConfig({
+    const catalog = new OpenClawManagedPluginCatalog();
+    const companionSkillWorkflow = new PluginCompanionSkillWorkflow({
+      workspace: {
+        getCompanionSkillRootCandidates: () => environmentRepository.getCompanionSkillRootCandidates(),
+        getSkillsRootDir: () => join(configRepository.getConfigDir(), 'skills'),
+      },
+      fileSystem: pluginFileSystem,
+      managedPluginCatalog: catalog,
+    });
+    const companionSkills = new PluginCompanionSkillService(companionSkillWorkflow);
+    const pluginInstaller = new OpenClawManagedPluginInstaller({
+      getManagedPluginRegistryRootCandidates: () => environmentRepository.getManagedPluginRegistryRootCandidates(),
+      getExtensionsRootDir: () => join(configRepository.getConfigDir(), 'extensions'),
+    }, pluginFileSystem, catalog);
+    const pluginProjection: ChannelPluginConfigProjectionPort = {
+      reconcileChannelDerivedPluginState: async (config) => await applyManuallyManagedPluginIdsToOpenClawConfig(
+        configRepository,
+        pluginFileSystem,
+        config,
+        await readManuallyManagedPluginIdsFromConfig(configRepository, pluginFileSystem, config),
+      ),
+    };
+    const pluginProvisioner = {
+      ensureChannelPluginInstalled: async (pluginId: string, options?: { force?: boolean }) => {
+        const definition = catalog.findChannelDefinition(pluginId);
+        if (definition) {
+          await pluginInstaller.ensureDefinitionInstalled(definition, options);
+        }
+      },
+    };
+    const channelSavePromise = new ChannelConfigRepository(new ChannelConfigWorkflow({
+      configRepository,
+      configProjection: new OpenClawChannelConfigProjection(),
+      pluginProjection,
+      pluginProvisioner,
+      clock: {
+        nowMs: () => 1_700_000_000_000,
+        nowIso: () => '2023-11-14T22:13:20.000Z',
+      },
+    })).saveChannelConfig({
       channelType: 'telegram',
       accountId: 'default',
       config: { token: 'new-token' },
@@ -170,7 +255,10 @@ describe('openclaw-config-mutex', () => {
 
     const skillSavePromise = new SkillsConfigRepository(
       configRepository,
-      new ClawHubSkillInventory(configRepository, runtimeFileSystem),
+      new ClawHubSkillInventory({
+        getSkillsRootDir: () => join(configRepository.getConfigDir(), 'skills'),
+        getLockFilePath: () => join(configRepository.getConfigDir(), '.clawhub', 'lock.json'),
+      }, runtimeFileSystem),
     ).updateConfig('tavily-search', { apiKey: 'skill-key' });
 
     await new Promise((resolve) => setTimeout(resolve, 30));

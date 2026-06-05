@@ -12,6 +12,27 @@ import {
 import type { RawMessage } from './helpers/timeline-fixtures';
 import { buildRenderItemsFromMessages } from './helpers/timeline-fixtures';
 import { createViewportWindowState } from '@/stores/chat/viewport-state';
+import type { RuntimeAddress } from '../../runtime-host/shared/runtime-address';
+import type { ChatSession } from '@/stores/chat';
+
+function createRuntimeAddress(sessionKey: string): RuntimeAddress {
+  return {
+    kind: 'native-runtime',
+    capabilityId: 'session.prompt',
+    runtimeAdapterId: 'openclaw',
+    runtimeInstanceId: 'local',
+    agentId: sessionKey.split(':')[1] || 'main',
+    sessionKey,
+  };
+}
+
+function createChatSession(input: Partial<ChatSession> & Pick<ChatSession, 'key' | 'agentId'>): ChatSession {
+  return {
+    backendSessionKey: input.key,
+    runtimeAddress: createRuntimeAddress(input.key),
+    ...input,
+  };
+}
 
 function createSessionRecord(input?: {
   sessionKey?: string;
@@ -28,6 +49,9 @@ function createSessionRecord(input?: {
   return {
     meta: {
       agentId: sessionKey.split(':')[1] ?? null,
+      protocolId: null,
+      runtimeEndpointId: 'local',
+      runtimeAddress: createRuntimeAddress(sessionKey),
       kind: sessionKey.endsWith(':main') ? 'main' : 'session',
       preferred: sessionKey.endsWith(':main'),
       label: input?.label ?? (messages.length > 0 && typeof messages[messages.length - 1]?.content === 'string'
@@ -61,7 +85,7 @@ function createSessionRecord(input?: {
 describe('chat session helpers', () => {
   it('resolves thinking level from sessions list', () => {
     expect(resolveSessionThinkingLevelFromList(
-      [{ key: 'agent:main:main', thinkingLevel: ' high ' }],
+      [createChatSession({ key: 'agent:main:main', agentId: 'main', thinkingLevel: ' high ' })],
       'agent:main:main',
     )).toBe('high');
     expect(resolveSessionThinkingLevelFromList([], 'agent:main:main')).toBeNull();
@@ -115,16 +139,16 @@ describe('chat session helpers', () => {
 
   it('chooses preferred agent session key from authoritative catalog preference then recency', () => {
     const sessions = [
-      { key: 'agent:foo:session-1700000000000', agentId: 'foo' },
-      { key: 'agent:foo:main', agentId: 'foo', preferred: true },
-      { key: 'agent:bar:main', agentId: 'bar', preferred: true },
+      createChatSession({ key: 'agent:foo:session-1700000000000', agentId: 'foo' }),
+      createChatSession({ key: 'agent:foo:main', agentId: 'foo', preferred: true }),
+      createChatSession({ key: 'agent:bar:main', agentId: 'bar', preferred: true }),
     ];
     const preferredWithCanonical = resolvePreferredSessionKeyForAgent('foo', sessions, {});
     expect(preferredWithCanonical).toBe('agent:foo:main');
 
     const sessionsNoCanonical = [
-      { key: 'agent:foo:session-1700000000000', agentId: 'foo', updatedAt: 1_700_000_000_000 },
-      { key: 'agent:foo:session-1700000000100', agentId: 'foo', updatedAt: 1_700_000_000_100 },
+      createChatSession({ key: 'agent:foo:session-1700000000000', agentId: 'foo', updatedAt: 1_700_000_000_000 }),
+      createChatSession({ key: 'agent:foo:session-1700000000100', agentId: 'foo', updatedAt: 1_700_000_000_100 }),
     ];
     const preferredByRecency = resolvePreferredSessionKeyForAgent('foo', sessionsNoCanonical, {});
     expect(preferredByRecency).toBe('agent:foo:session-1700000000100');
@@ -192,13 +216,13 @@ describe('chat session helpers', () => {
     expect(retainEmptyBackground).toBe(false);
   });
 
-  it('builds task bridge state from current session runtime flags', () => {
+  it('builds task bridge state from explicit session metadata', () => {
     expect(normalizeTaskSessionKey(' ', 'agent:main:main')).toBe('agent:main:main');
     const bridge = buildTaskBridgeState(
       {
         currentSessionKey: 'agent:foo:main',
         loadedSessions: {
-          'agent:foo:main': createSessionRecord(),
+          'agent:foo:main': createSessionRecord({ sessionKey: 'agent:foo:main' }),
         },
       } as never,
       'agent:main:main',
@@ -208,6 +232,23 @@ describe('chat session helpers', () => {
       owner: 'foo',
       canSendRecoveryPrompt: true,
     });
+
+    const fallback = buildTaskBridgeState(
+      {
+        currentSessionKey: 'agent:bar:main',
+        loadedSessions: {
+          'agent:bar:main': {
+            ...createSessionRecord({ sessionKey: 'agent:bar:main' }),
+            meta: {
+              ...createSessionRecord({ sessionKey: 'agent:bar:main' }).meta,
+              agentId: null,
+            },
+          },
+        },
+      } as never,
+      'agent:main:main',
+    );
+    expect(fallback.owner).toBe('bar');
   });
 });
 

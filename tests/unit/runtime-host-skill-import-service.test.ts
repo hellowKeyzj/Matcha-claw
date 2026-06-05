@@ -3,8 +3,13 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { SkillsService } from '../../runtime-host/application/skills/service';
+import { LocalSkillImportWorkflow } from '../../runtime-host/application/workflows/skill-install/local-skill-import-workflow';
+import { SkillBundleTransferWorkflow } from '../../runtime-host/application/workflows/skill-install/skill-bundle-transfer-workflow';
+import { PreinstalledSkillsWorkflow } from '../../runtime-host/application/workflows/skill-install/preinstalled-skills-workflow';
+import { SkillsOperationsWorkflow } from '../../runtime-host/application/workflows/skill-runtime/skills-operations-workflow';
+import { SkillRuntimeWorkflow } from '../../runtime-host/application/workflows/skill-runtime/skill-runtime-workflow';
 import { createTestRuntimeFileSystem } from './helpers/runtime-file-system';
-import { createTestOpenClawEnvironmentRepository, createTestRuntimeSystemEnvironment } from './helpers/runtime-system-environment';
+import { createTestRuntimeSystemEnvironment } from './helpers/runtime-system-environment';
 
 const tempDirs: string[] = [];
 let skillsRoot = '';
@@ -18,49 +23,95 @@ async function createTempDir(prefix: string): Promise<string> {
 
 function createSkillsService(): SkillsService {
   commandExecutorMock = vi.fn(async () => ({ stdout: '', stderr: '' }));
-  return new SkillsService({
-    repository: {
-      getAllConfigs: async () => ({}),
-      updateConfig: async () => ({ success: true }),
-      setEnabled: async () => ({ success: true }),
-      setManyEnabled: async () => ({ success: true }),
-      listEffective: async () => [],
-    },
-    readmePreviews: {
-      read: async () => ({ status: 404, data: { success: false, error: 'not found' } }),
-    },
+  const fileSystem = createTestRuntimeFileSystem();
+  const systemEnvironment = createTestRuntimeSystemEnvironment();
+  const clock = {
+    nowMs: () => 1234,
+    nowIso: () => '2026-05-01T00:00:00.000Z',
+    toIsoString: (ms: number) => new Date(ms).toISOString(),
+  };
+  const logger = {
+    debug: vi.fn(),
+    info: vi.fn(),
+    warn: vi.fn(),
+    error: vi.fn(),
+  };
+  const jobs = {
+    submitRefreshStatus: vi.fn() as never,
+    submitGatewayUpdate: vi.fn() as never,
+    submitImportLocal: vi.fn() as never,
+    submitEnsurePreinstalled: vi.fn() as never,
+  };
+  const repository = {
+    getAllConfigs: async () => ({}),
+    updateConfig: async () => ({ success: true }),
+    setEnabled: async () => ({ success: true }),
+    setManyEnabled: async () => ({ success: true }),
+    listEffective: async () => [],
+  };
+  const skillRuntimeWorkflow = new SkillRuntimeWorkflow({
     gateway: {
       isGatewayRunning: async () => false,
       readGatewayConnectionState: async () => ({ state: 'disconnected', gatewayReady: false }),
       gatewayRpc: async () => ({}),
+    } as never,
+    jobs,
+    clock,
+    repository,
+    fileSystem,
+    workspace: {
+      getSkillsDir: () => skillsRoot,
+      getBuiltinVisibleSkillsManifestCandidates: () => [],
+      getBuiltinSkillRootCandidates: () => [],
     },
-    jobs: {
-      submitRefreshStatus: vi.fn() as never,
-      submitGatewayUpdate: vi.fn() as never,
-      submitImportLocal: vi.fn() as never,
-      submitEnsurePreinstalled: vi.fn() as never,
+    logger,
+  });
+  const skillBundleTransferWorkflow = new SkillBundleTransferWorkflow({
+    repository,
+    jobs,
+    clock,
+    fileSystem,
+    skillsRoot: () => skillsRoot,
+  });
+  const preinstalledSkillsWorkflow = new PreinstalledSkillsWorkflow({
+    repository,
+    jobs,
+    clock,
+    fileSystem,
+    workspace: {
+      getSkillsDir: () => skillsRoot,
+      getPreinstalledManifestCandidates: () => [],
+      getPreinstalledSourceRootCandidates: () => [],
     },
-    clock: {
-      nowMs: () => 1234,
-      nowIso: () => '2026-05-01T00:00:00.000Z',
-      toIsoString: (ms) => new Date(ms).toISOString(),
-    },
-    fileSystem: createTestRuntimeFileSystem(),
+    logger,
+  });
+  const localSkillImportWorkflow = new LocalSkillImportWorkflow({
+    fileSystem,
     commandExecutor: {
       execFile: commandExecutorMock,
     },
-    systemEnvironment: createTestRuntimeSystemEnvironment(),
-    workspace: {
-      getSkillsDir: () => skillsRoot,
-    },
-    environment: createTestOpenClawEnvironmentRepository(),
-    logger: {
-      debug: vi.fn(),
-      info: vi.fn(),
-      warn: vi.fn(),
-      error: vi.fn(),
-    },
+    systemEnvironment,
+    clock,
+    skillsRoot: () => skillsRoot,
+    logger,
   });
+  const service = new SkillsService({
+    operationsWorkflow: new SkillsOperationsWorkflow({
+      repository,
+      readmePreviews: {
+        read: async () => ({ status: 404, data: { success: false, error: 'not found' } }),
+      },
+      jobs,
+      skillRuntimeWorkflow,
+      skillBundleTransferWorkflow,
+      localSkillImportWorkflow,
+      logger,
+    }),
+    skillRuntimeWorkflow,
+    skillBundleTransferWorkflow,
+    preinstalledSkillsWorkflow,
+  });
+  return service;
 }
 
 beforeEach(async () => {

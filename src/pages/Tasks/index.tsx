@@ -29,7 +29,7 @@ import { cn } from '@/lib/utils';
 import { Cron } from '@/pages/Cron';
 import { listTaskSnapshot, type Task } from '@/services/openclaw/task-manager-client';
 import { useChatStore } from '@/stores/chat';
-import { readSessionsFromState, parseAgentIdFromSessionKey } from '@/stores/chat/session-helpers';
+import { readSessionsFromState } from '@/stores/chat/session-helpers';
 import { useTeamsStore } from '@/stores/teams';
 
 function statusVariant(status: string): 'default' | 'secondary' | 'destructive' | 'success' {
@@ -125,6 +125,10 @@ function taskViewKey(task: ScopedTask): string {
   return `${task.scopeKey ?? task.sourceSessionKey ?? task.sourceTeamKey ?? 'task'}:${task.id}`;
 }
 
+function resolveTaskSession(sessions: ReturnType<typeof readSessionsFromState>, sessionKey: string) {
+  return sessions.find((session) => session.key === sessionKey) ?? null;
+}
+
 function isIncompleteTask(task: Task): boolean {
   return task.status !== 'completed';
 }
@@ -150,6 +154,10 @@ export function TasksPage() {
   const gatewayStatus = useGatewayStore((state) => state.status);
   const gatewayInitialized = useGatewayStore((state) => state.isInitialized);
   const currentSessionKey = useChatStore((state) => state.currentSessionKey);
+  const currentAgentId = useChatStore((state) => {
+    const meta = state.loadedSessions[state.currentSessionKey]?.meta;
+    return meta?.agentId ?? meta?.runtimeAddress?.agentId ?? 'main';
+  });
   const sessions = useChatStore((state) => readSessionsFromState(state));
   const sessionsLoadedOnce = useChatStore((state) => state.sessionCatalogStatus.hasLoadedOnce);
   const loadSessions = useChatStore((state) => state.loadSessions);
@@ -167,7 +175,7 @@ export function TasksPage() {
 
   const [scopeFilter, setScopeFilter] = useState<TaskCenterScopeFilter>(() => ({
     type: 'agent',
-    agentId: parseAgentIdFromSessionKey(currentSessionKey) ?? 'main',
+    agentId: currentAgentId,
   }));
   const [scopedTasks, setScopedTasks] = useState<ScopedTask[]>([]);
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
@@ -179,10 +187,10 @@ export function TasksPage() {
   const [visibleTaskCount, setVisibleTaskCount] = useState(INITIAL_TASK_LIST_BATCH);
   const agentIds = useMemo(() => {
     return uniqueSorted([
-      parseAgentIdFromSessionKey(currentSessionKey) ?? 'main',
-      ...sessions.map((session) => session.agentId ?? parseAgentIdFromSessionKey(session.key) ?? ''),
+      currentAgentId,
+      ...sessions.map((session) => session.agentId ?? ''),
     ]);
-  }, [currentSessionKey, sessions]);
+  }, [currentAgentId, sessions]);
   const tasks = scopedTasks;
   const [taskHeavyContentReady, setTaskHeavyContentReady] = useState(() => tasks.length > 0 || initialized);
   const [taskToDelete, setTaskToDelete] = useState<{ id: string } | null>(null);
@@ -203,12 +211,25 @@ export function TasksPage() {
   );
 
   useEffect(() => {
+    const currentSession = resolveTaskSession(sessions, currentSessionKey);
     if (!initialized) {
-      void init(currentSessionKey);
+      void init(currentSession ? {
+        recordKey: currentSession.key,
+        backendSessionKey: currentSession.backendSessionKey,
+        runtimeAddress: currentSession.runtimeAddress,
+      } : undefined);
       return;
     }
-    void refreshTasks({ sessionKey: currentSessionKey, silent: true });
-  }, [currentSessionKey, init, initialized, refreshTasks]);
+    if (!currentSession) {
+      return;
+    }
+    void refreshTasks({
+      sessionKey: currentSession.key,
+      backendSessionKey: currentSession.backendSessionKey,
+      runtimeAddress: currentSession.runtimeAddress,
+      silent: true,
+    });
+  }, [currentSessionKey, init, initialized, refreshTasks, sessions]);
 
   const loadScopedTasks = useCallback(async () => {
     const requestSeq = scopedTasksRequestSeqRef.current + 1;
@@ -220,8 +241,13 @@ export function TasksPage() {
       setScopedTasks([]);
       return;
     }
+    const activeSession = resolveTaskSession(activeSessions, activeSessionKey);
+    if (!activeSession) {
+      setScopedTasks([]);
+      return;
+    }
     if (scopeFilter.type === 'team') {
-      const snapshot = await listTaskSnapshot({ sessionKey: activeSessionKey, teamKey: scopeFilter.teamId });
+      const snapshot = await listTaskSnapshot({ sessionKey: activeSession.backendSessionKey, runtimeAddress: activeSession.runtimeAddress, teamKey: scopeFilter.teamId });
       if (scopedTasksRequestSeqRef.current !== requestSeq) {
         return;
       }
@@ -233,14 +259,16 @@ export function TasksPage() {
       })));
       return;
     }
-    const sessionKeys = activeSessions
-      .filter((session) => (session.agentId ?? parseAgentIdFromSessionKey(session.key)) === scopeFilter.agentId)
-      .map((session) => session.key);
-    const uniqueSessionKeys = uniqueSorted(sessionKeys);
-    const snapshots = await Promise.all(uniqueSessionKeys.map(async (sessionKey) => ({
-      sessionKey,
-      snapshot: await listTaskSnapshot({ sessionKey }),
-    })));
+    const scopedSessions = activeSessions.filter((session) => session.agentId === scopeFilter.agentId);
+    const uniqueSessionKeys = uniqueSorted(scopedSessions.map((session) => session.key));
+    const sessionByKey = new Map(scopedSessions.map((session) => [session.key, session]));
+    const snapshots = await Promise.all(uniqueSessionKeys.map(async (sessionKey) => {
+      const session = sessionByKey.get(sessionKey)!;
+      return {
+        sessionKey,
+        snapshot: await listTaskSnapshot({ sessionKey: session.backendSessionKey, runtimeAddress: session.runtimeAddress }),
+      };
+    }));
     if (scopedTasksRequestSeqRef.current !== requestSeq) {
       return;
     }
@@ -606,9 +634,18 @@ export function TasksPage() {
       return;
     }
     const selected = selectedTask;
+    const selectedSessionKey = selected?.sourceSessionKey;
+    const selectedSession = selectedSessionKey
+      ? resolveTaskSession(sessions, selectedSessionKey)
+      : resolveTaskSession(sessions, currentSessionKey);
+    if (!selectedSession) {
+      return;
+    }
     await deleteTaskById({
       taskId: deletingTaskId,
-      ...(selected?.sourceSessionKey ? { sessionKey: selected.sourceSessionKey } : {}),
+      sessionKey: selectedSession.key,
+      backendSessionKey: selectedSession.backendSessionKey,
+      runtimeAddress: selectedSession.runtimeAddress,
       ...(selected?.sourceTeamKey ? { teamKey: selected.sourceTeamKey } : {}),
     });
     const next = useTaskCenterStore.getState();

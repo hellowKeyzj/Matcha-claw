@@ -1,5 +1,9 @@
 import { normalizeSendWithMediaInput } from '../chat/send-media';
 import {
+  validateRuntimeAddress,
+  type RuntimeAddress,
+} from '../agent-runtime/contracts/runtime-address';
+import {
   isRecord,
   normalizeString,
 } from './session-value-normalization';
@@ -12,29 +16,47 @@ import {
 import type {
   SessionAbortRuntimePayload,
   SessionLoadPayload,
+  SessionResolveApprovalPayload,
   SessionNewPayload,
   SessionPatchPayload,
   SessionPromptPayload,
   SessionRenamePayload,
+  SessionStatusPayload,
   SessionWindowPayload,
 } from './session-runtime-types';
 
+function readRuntimeAddress(value: unknown): {
+  runtimeAddress: RuntimeAddress | null;
+  runtimeAddressError: string | null;
+} {
+  if (value === undefined) {
+    return {
+      runtimeAddress: null,
+      runtimeAddressError: 'RuntimeAddress is required',
+    };
+  }
+  const error = validateRuntimeAddress(value);
+  if (error) {
+    return {
+      runtimeAddress: null,
+      runtimeAddressError: error,
+    };
+  }
+  return {
+    runtimeAddress: value as RuntimeAddress,
+    runtimeAddressError: null,
+  };
+}
+
 export function readCreateSessionRequest(payload: unknown): {
   explicitSessionKey: string;
-  agentId: string;
-  canonicalPrefix: string;
-  runtimeProviderId: string;
-  protocolId: string;
+  runtimeAddress: RuntimeAddress | null;
+  runtimeAddressError: string | null;
 } {
   const body = isRecord(payload) ? payload as SessionNewPayload : {};
-  const explicitSessionKey = normalizeString(body.sessionKey);
-  const agentId = normalizeString(body.agentId) || 'main';
   return {
-    explicitSessionKey,
-    agentId,
-    canonicalPrefix: normalizeString(body.canonicalPrefix) || `agent:${agentId}`,
-    runtimeProviderId: normalizeString(body.runtimeProviderId),
-    protocolId: normalizeString(body.protocolId),
+    explicitSessionKey: normalizeString(body.sessionKey),
+    ...readRuntimeAddress(body.runtimeAddress),
   };
 }
 
@@ -43,41 +65,123 @@ export function readRequiredSessionKey(payload: unknown): string {
   return normalizeString(body.sessionKey);
 }
 
+export function readRuntimeAddressRequest(payload: unknown): {
+  sessionKey: string;
+  runtimeAddress: RuntimeAddress | null;
+  runtimeAddressError: string | null;
+} {
+  const body = isRecord(payload) ? payload as SessionLoadPayload : {};
+  return {
+    sessionKey: normalizeString(body.sessionKey),
+    ...readRuntimeAddress(body.runtimeAddress),
+  };
+}
+
+export function readSessionListRequest(payload: unknown): {
+  runtimeAddress: RuntimeAddress | null;
+  runtimeAddressError: string | null;
+} {
+  const body = isRecord(payload) ? payload as SessionLoadPayload : {};
+  return readRuntimeAddress(body.runtimeAddress);
+}
+
 export function readSessionLoadRequest(payload: unknown): {
   sessionKey: string;
   limit: number;
+  runtimeAddress: RuntimeAddress | null;
+  runtimeAddressError: string | null;
 } {
   const body = isRecord(payload) ? payload as SessionLoadPayload : {};
   return {
     sessionKey: normalizeString(body.sessionKey),
     limit: normalizeWindowLimit(body.limit),
+    ...readRuntimeAddress(body.runtimeAddress),
   };
 }
 
-export function readAbortSessionKey(payload: unknown, fallbackSessionKey: string | null): string {
+export function readAbortSessionRequest(payload: unknown): {
+  sessionKey: string;
+  approvalIds: string[];
+  runtimeAddress: RuntimeAddress | null;
+  runtimeAddressError: string | null;
+} {
   const body = isRecord(payload) ? payload as SessionAbortRuntimePayload : {};
-  return normalizeString(body.sessionKey) || fallbackSessionKey || '';
+  const rawApprovalIds = Array.isArray(body.approvalIds) ? body.approvalIds : [];
+  return {
+    sessionKey: normalizeString(body.sessionKey),
+    approvalIds: rawApprovalIds.flatMap((rawApprovalId) => {
+      const approvalId = typeof rawApprovalId === 'string' ? rawApprovalId.trim() : '';
+      return approvalId ? [approvalId] : [];
+    }),
+    ...readRuntimeAddress(body.runtimeAddress),
+  };
+}
+
+export function readResolveApprovalRequest(payload: unknown): {
+  id: string;
+  decision: '' | 'allow-once' | 'allow-always' | 'deny';
+  sessionKey: string;
+  runtimeAddress: RuntimeAddress | null;
+  runtimeAddressError: string | null;
+} {
+  const body = isRecord(payload) ? payload as SessionResolveApprovalPayload : {};
+  const rawDecision = normalizeString(body.decision);
+  const decision = rawDecision === 'allow-once' || rawDecision === 'allow-always' || rawDecision === 'deny'
+    ? rawDecision
+    : '';
+  return {
+    id: normalizeString(body.id),
+    decision,
+    sessionKey: normalizeString(body.sessionKey),
+    ...readRuntimeAddress(body.runtimeAddress),
+  };
 }
 
 export function readPatchSessionRequest(payload: unknown): {
   sessionKey: string;
+  runtimeAddress: RuntimeAddress | null;
+  runtimeAddressError: string | null;
   runtimeModelRef: string;
 } {
   const body = isRecord(payload) ? payload as SessionPatchPayload : {};
   return {
     sessionKey: normalizeString(body.sessionKey),
+    ...readRuntimeAddress(body.runtimeAddress),
     runtimeModelRef: normalizeString(body.runtimeModelRef),
   };
 }
 
 export function readRenameSessionRequest(payload: unknown): {
   sessionKey: string;
+  runtimeAddress: RuntimeAddress | null;
+  runtimeAddressError: string | null;
   label: string;
 } {
   const body = isRecord(payload) ? payload as SessionRenamePayload : {};
   return {
     sessionKey: normalizeString(body.sessionKey),
+    ...readRuntimeAddress(body.runtimeAddress),
     label: normalizeString(body.label),
+  };
+}
+
+export function readSessionStatusRequest(payload: unknown): {
+  sessionKey: string;
+  runtimeAddress: RuntimeAddress | null;
+  runtimeAddressError: string | null;
+  status: 'active' | 'completed' | 'archived' | 'deleted' | null;
+} {
+  const body = isRecord(payload) ? payload as SessionStatusPayload : {};
+  const status = body.status === 'active'
+    || body.status === 'completed'
+    || body.status === 'archived'
+    || body.status === 'deleted'
+    ? body.status
+    : null;
+  return {
+    sessionKey: normalizeString(body.sessionKey),
+    ...readRuntimeAddress(body.runtimeAddress),
+    status,
   };
 }
 
@@ -87,6 +191,8 @@ export function readSessionWindowRequest(payload: unknown): {
   limit: number;
   offset: number | null;
   includeCanonical: boolean;
+  runtimeAddress: RuntimeAddress | null;
+  runtimeAddressError: string | null;
 } {
   const body = isRecord(payload) ? payload as SessionWindowPayload : {};
   return {
@@ -95,6 +201,7 @@ export function readSessionWindowRequest(payload: unknown): {
     limit: normalizeWindowLimit(body.limit),
     offset: normalizeWindowOffset(body.offset),
     includeCanonical: normalizeIncludeCanonical(body.includeCanonical),
+    ...readRuntimeAddress(body.runtimeAddress),
   };
 }
 
@@ -104,7 +211,8 @@ export function readPromptSessionRequest(payload: unknown): {
   sessionKey: string;
   message: string;
   requestedRunId: string;
-  runtimeProviderId: string;
+  runtimeAddress: RuntimeAddress | null;
+  runtimeAddressError: string | null;
 } {
   const directBody = isRecord(payload) ? payload as SessionPromptPayload : {};
   const mediaBody = normalizeSendWithMediaInput(payload);
@@ -121,6 +229,6 @@ export function readPromptSessionRequest(payload: unknown): {
       ?? directBody.idempotencyKey
       ?? mediaBody?.idempotencyKey,
     ),
-    runtimeProviderId: normalizeString(directBody.runtimeProviderId),
+    ...readRuntimeAddress(directBody.runtimeAddress),
   };
 }

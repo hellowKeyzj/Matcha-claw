@@ -14,6 +14,7 @@ import {
   hostSessionPatchMock,
   resetGatewayClientMocks,
 } from './helpers/mock-gateway-client';
+import { createOpenClawTestRuntimeAddress } from './helpers/runtime-address-fixtures';
 
 vi.mock('sonner', () => ({
   toast: {
@@ -26,6 +27,9 @@ class ResizeObserverStub {
   unobserve() {}
   disconnect() {}
 }
+
+const TEST_SESSION_KEY = 'agent:test:main';
+const TEST_RUNTIME_ADDRESS = createOpenClawTestRuntimeAddress(TEST_SESSION_KEY, 'test');
 
 function renderChat() {
   return render(
@@ -42,7 +46,8 @@ describe('chat model picker', () => {
     resetGatewayClientMocks();
     (globalThis as unknown as { ResizeObserver: typeof ResizeObserver }).ResizeObserver = ResizeObserverStub as unknown as typeof ResizeObserver;
 
-    const sessionKey = 'agent:test:main';
+    const sessionKey = TEST_SESSION_KEY;
+    const runtimeAddress = TEST_RUNTIME_ADDRESS;
     const messages = buildRenderItemsFromMessages(sessionKey, [
       {
         id: 'user-1',
@@ -58,7 +63,7 @@ describe('chat model picker', () => {
       },
     ]);
 
-    hostSessionPatchMock.mockImplementation(async (payload: { sessionKey: string; runtimeModelRef: string }) => ({
+    hostSessionPatchMock.mockImplementation(async (payload: { sessionKey: string; runtimeAddress: typeof runtimeAddress; runtimeModelRef: string }) => ({
       success: true,
       snapshot: {
         sessionKey: payload.sessionKey,
@@ -164,7 +169,14 @@ describe('chat model picker', () => {
 
     useChatStore.setState({
       currentSessionKey: sessionKey,
-      currentSession: createEmptySessionRecord(),
+      currentSession: {
+        ...createEmptySessionRecord(),
+        meta: {
+          ...createEmptySessionRecord().meta,
+          model: 'openai/gpt-5.4',
+          runtimeAddress: TEST_RUNTIME_ADDRESS,
+        },
+      },
       pendingApprovalsBySession: {},
       foregroundHistorySessionKey: null,
       sessionsLoading: false,
@@ -208,6 +220,7 @@ describe('chat model picker', () => {
             historyStatus: 'ready',
             lastActivityAt: Date.now(),
             model: 'openai/gpt-5.4',
+            runtimeAddress: TEST_RUNTIME_ADDRESS,
           },
         },
       },
@@ -229,6 +242,7 @@ describe('chat model picker', () => {
     await waitFor(() => {
       expect(hostSessionPatchMock).toHaveBeenCalledWith({
         sessionKey: 'agent:test:main',
+        runtimeAddress: TEST_RUNTIME_ADDRESS,
         runtimeModelRef: 'anthropic/claude-opus-4-6',
       });
     });
@@ -315,6 +329,7 @@ describe('chat model picker', () => {
     await waitFor(() => {
       expect(hostSessionPatchMock).toHaveBeenCalledWith({
         sessionKey: 'agent:test:main',
+        runtimeAddress: TEST_RUNTIME_ADDRESS,
         runtimeModelRef: 'openai/gpt-5.4',
       });
     });
@@ -372,6 +387,7 @@ describe('chat model picker', () => {
     await waitFor(() => {
       expect(hostSessionPatchMock).toHaveBeenCalledWith({
         sessionKey: 'agent:test:main',
+        runtimeAddress: TEST_RUNTIME_ADDRESS,
         runtimeModelRef: 'openai/gpt-5.4',
       });
     });

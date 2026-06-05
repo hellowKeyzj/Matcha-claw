@@ -6,9 +6,18 @@ import type { RawMessage } from './helpers/timeline-fixtures';
 import { getSessionItems } from '@/stores/chat/store-state-helpers';
 import { createViewportWindowState } from '@/stores/chat/viewport-state';
 import type { SessionRenderItem } from '../../runtime-host/shared/session-adapter-types';
+import type { RuntimeAddress } from '../../runtime-host/shared/runtime-address';
 import { buildRenderItemsFromMessages } from './helpers/timeline-fixtures';
 
 const sendChatTransportMock = vi.fn();
+
+const testRuntimeAddress: RuntimeAddress = {
+  kind: 'native-runtime',
+  capabilityId: 'session.prompt',
+  runtimeAdapterId: 'openclaw',
+  runtimeInstanceId: 'local',
+  agentId: 'default',
+};
 
 vi.mock('@/stores/chat/send-transport', () => ({
   CHAT_SEND_RPC_TIMEOUT_MS: 120000,
@@ -32,6 +41,7 @@ function createSessionRecord(input?: {
       lastActivityAt: null,
       historyStatus: 'ready' as const,
       thinkingLevel: null,
+      runtimeAddress: testRuntimeAddress,
     },
     runtime: {
       activeRunId: null,

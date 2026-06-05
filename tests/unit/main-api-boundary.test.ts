@@ -18,12 +18,13 @@ describe('main api boundary', () => {
     expect(isMainOwnedRoute('/api/app/browser-relay-info')).toBe(true);
     expect(isMainOwnedRoute('/api/runtime-host/restart')).toBe(true);
     expect(isMainOwnedRoute('/api/files/save-image')).toBe(true);
-    expect(isMainOwnedRoute('/api/files/write-text')).toBe(true);
+    expect(isMainOwnedRoute('/api/files/write-text')).toBe(false);
+    expect(isRuntimeHostBusinessRoute('/api/files/write-text')).toBe(true);
     expect(isMainOwnedRoute('/api/files/read-text')).toBe(false);
     expect(isMainOwnedRoute('/api/plugins/runtime')).toBe(false);
-    expect(isMainOwnedRoute('/api/plugins/runtime/enabled-plugins')).toBe(false);
+    expect(isRuntimeHostBusinessRoute('/api/plugins/runtime')).toBe(true);
     expect(isRuntimeHostBusinessRoute('/api/security/audit')).toBe(true);
-    expect(isRuntimeHostBusinessRoute('/api/chat/send-with-media')).toBe(true);
+    expect(isRuntimeHostBusinessRoute('/api/capabilities/execute')).toBe(true);
     expect(isRuntimeHostBusinessRoute('/api/platform/tools')).toBe(true);
     expect(isRuntimeHostBusinessRoute('/api/plugins/catalog')).toBe(true);
     expect(isRuntimeHostBusinessRoute('/api/gateway/status')).toBe(false);

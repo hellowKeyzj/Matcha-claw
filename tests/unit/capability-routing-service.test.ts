@@ -1,10 +1,34 @@
 import { describe, expect, it, vi } from 'vitest';
 import { CapabilityRoutingApplicationService } from '../../runtime-host/application/providers/capability-routing-service';
+import { ProviderCapabilityRoutingWorkflow } from '../../runtime-host/application/workflows/provider-capability-routing/provider-capability-routing-workflow';
+import { getOpenClawProviderKeyForType } from '../../runtime-host/application/adapters/openclaw/projections/openclaw-provider-projection-rules';
+import type { ProviderProjectionKeyResolverPort } from '../../runtime-host/application/providers/provider-store-model';
+
+const projectionKeys: ProviderProjectionKeyResolverPort = {
+  resolveProviderKey: ({ vendorId, accountId }) => getOpenClawProviderKeyForType(vendorId, accountId),
+};
+
+function createService(
+  store: ConstructorParameters<typeof ProviderCapabilityRoutingWorkflow>[0]['store'],
+  credentials: ConstructorParameters<typeof ProviderCapabilityRoutingWorkflow>[0]['credentials'],
+  models: ConstructorParameters<typeof ProviderCapabilityRoutingWorkflow>[0]['models'],
+  writer: ConstructorParameters<typeof ProviderCapabilityRoutingWorkflow>[0]['writer'],
+): CapabilityRoutingApplicationService {
+  return new CapabilityRoutingApplicationService({
+    routingWorkflow: new ProviderCapabilityRoutingWorkflow({
+      store,
+      credentials,
+      models,
+      writer,
+      projectionKeys,
+    }),
+  });
+}
 
 describe('CapabilityRoutingApplicationService', () => {
   it('imports existing OpenClaw routing refs into credential-scoped routing', async () => {
     const writeStore = vi.fn(async () => {});
-    const service = new CapabilityRoutingApplicationService(
+    const service = createService(
       {
         read: async () => ({ schemaVersion: 1, routing: {} }),
         write: writeStore,
@@ -72,7 +96,7 @@ describe('CapabilityRoutingApplicationService', () => {
       read: vi.fn(async () => ({})),
       replace: vi.fn(async () => {}),
     };
-    const service = new CapabilityRoutingApplicationService(
+    const service = createService(
       {
         read: async () => ({ schemaVersion: 1, routing: {} }),
         write: async () => {},
@@ -95,6 +119,7 @@ describe('CapabilityRoutingApplicationService', () => {
         write: async () => {},
       },
       writer as any,
+      projectionKeys,
     );
 
     const result = await service.write({
@@ -129,7 +154,7 @@ describe('CapabilityRoutingApplicationService', () => {
       read: vi.fn(async () => ({})),
       replace: vi.fn(async () => {}),
     };
-    const service = new CapabilityRoutingApplicationService(
+    const service = createService(
       {
         read: async () => ({ schemaVersion: 1, routing: {} }),
         write: async () => {},
@@ -154,6 +179,7 @@ describe('CapabilityRoutingApplicationService', () => {
         write: async () => {},
       },
       writer as any,
+      projectionKeys,
     );
 
     const result = await service.write({
@@ -185,7 +211,7 @@ describe('CapabilityRoutingApplicationService', () => {
       })),
       replace: vi.fn(async () => {}),
     };
-    const service = new CapabilityRoutingApplicationService(
+    const service = createService(
       {
         read: async () => ({
           schemaVersion: 1,
@@ -224,6 +250,7 @@ describe('CapabilityRoutingApplicationService', () => {
         write: async () => {},
       },
       writer as any,
+      projectionKeys,
     );
 
     await expect(service.read()).resolves.toEqual({
@@ -249,7 +276,7 @@ describe('CapabilityRoutingApplicationService', () => {
       read: vi.fn(async () => ({})),
       replace: vi.fn(async () => {}),
     };
-    const service = new CapabilityRoutingApplicationService(
+    const service = createService(
       {
         read: async () => ({
           schemaVersion: 1,
@@ -293,6 +320,7 @@ describe('CapabilityRoutingApplicationService', () => {
         write: async () => {},
       },
       writer as any,
+      projectionKeys,
     );
 
     await service.pruneUnavailableModelRoutes([

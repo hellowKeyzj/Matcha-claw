@@ -12,14 +12,14 @@ const {
   fileExistsMock,
 } = vi.hoisted(() => ({
   readOpenClawJsonMock: vi.fn(),
-  readAuthProfilesMock: vi.fn(async () => ({ version: 1, profiles: {} })),
+  readAuthProfilesMock: vi.fn(async (_agentId: string = 'main') => ({ version: 1, profiles: {} })),
   discoverAgentIdsMock: vi.fn(async () => ['main']),
   writeAuthProfilesMock: vi.fn(async () => {}),
   writeOpenClawJsonMock: vi.fn(),
   fileExistsMock: vi.fn(async () => false),
 }));
 
-vi.mock('../../runtime-host/application/openclaw/openclaw-config-mutex', () => ({
+vi.mock('../../runtime-host/application/adapters/openclaw/infrastructure/openclaw-config-mutex', () => ({
   withOpenClawConfigLock: async (handler: () => Promise<unknown>) => await handler(),
 }));
 
@@ -29,7 +29,7 @@ vi.mock('../../runtime-host/application/providers/provider-registry', () => ({
   getProviderConfig: vi.fn(() => undefined),
 }));
 
-vi.mock('../../runtime-host/application/providers/provider-runtime-rules', () => ({
+vi.mock('../../runtime-host/application/adapters/openclaw/projections/openclaw-provider-projection-rules', () => ({
   OPENCLAW_PROVIDER_KEY_MINIMAX: 'minimax-portal',
   OPENCLAW_PROVIDER_KEY_MOONSHOT: 'moonshot',
   OPENCLAW_PROVIDER_KEY_MOONSHOT_GLOBAL: 'moonshot-global',
@@ -38,17 +38,20 @@ vi.mock('../../runtime-host/application/providers/provider-runtime-rules', () =>
   )),
 }));
 
-import { OpenClawProviderConfigService } from '../../runtime-host/application/openclaw/openclaw-provider-config-service';
-import { OpenClawProviderSnapshotService } from '../../runtime-host/application/openclaw/openclaw-provider-snapshot';
-import { sanitizeOpenClawConfig } from '../../runtime-host/application/openclaw/openclaw-config-sanitizer';
-import { OpenClawAgentModelRepository } from '../../runtime-host/application/openclaw/openclaw-agent-model-repository';
+import { OpenClawProviderConfigService } from '../../runtime-host/application/adapters/openclaw/projections/openclaw-provider-config-service';
+import { OpenClawProviderConfigWorkflow } from '../../runtime-host/application/adapters/openclaw/workflows/openclaw-provider/openclaw-provider-config-workflow';
+import { OpenClawProviderSnapshotService } from '../../runtime-host/application/adapters/openclaw/projections/openclaw-provider-snapshot';
+import { sanitizeOpenClawConfig } from '../../runtime-host/application/adapters/openclaw/projections/openclaw-config-sanitizer';
+import { OpenClawAgentModelRepository } from '../../runtime-host/application/adapters/openclaw/infrastructure/openclaw-agent-model-repository';
+import { OpenClawAgentModelStoreWorkflow } from '../../runtime-host/application/adapters/openclaw/workflows/openclaw-auth/openclaw-agent-model-store-workflow';
+import type { AuthProfilesStore } from '../../runtime-host/application/adapters/openclaw/infrastructure/openclaw-auth-store';
 import { createTestOpenClawEnvironmentRepository } from './helpers/runtime-system-environment';
 import { createTestRuntimeFileSystem } from './helpers/runtime-file-system';
 import {
   syncBrowserConfigToOpenClaw,
   syncGatewayTokenToConfig,
   syncSessionIdleMinutesToOpenClaw,
-} from '../../runtime-host/application/openclaw/openclaw-runtime-config-sync';
+} from '../../runtime-host/application/adapters/openclaw/projections/openclaw-runtime-config-sync';
 import { createTestRuntimeLogger } from './helpers/runtime-logger';
 
 const testLogger = createTestRuntimeLogger('openclaw-provider-sanitize-test');
@@ -57,14 +60,26 @@ function createMockConfigRepository() {
   return {
     read: async () => await readOpenClawJsonMock(),
     write: async (config: Record<string, unknown>) => await writeOpenClawJsonMock(config),
-    update: async <T>(mutate: (config: Record<string, unknown>) => Promise<T> | T) => {
+    updateDirty: async <T>(mutate: (config: Record<string, unknown>) => Promise<{ result: T; changed: boolean }> | { result: T; changed: boolean }) => {
       const config = await readOpenClawJsonMock();
-      const previousSerialized = JSON.stringify(config);
-      const result = await mutate(config);
-      if (JSON.stringify(config) !== previousSerialized) {
+      const update = await mutate(config);
+      if (update.changed) {
         await writeOpenClawJsonMock(config);
       }
-      return result;
+      return update.result;
+    },
+    patchSection: async <T>(sectionKey: string, mutate: (value: unknown, config: Record<string, unknown>) => Promise<{ result: T; value: unknown; changed: boolean }> | { result: T; value: unknown; changed: boolean }) => {
+      const config = await readOpenClawJsonMock();
+      const update = await mutate(config[sectionKey], config);
+      if (update.changed) {
+        if (update.value === undefined) {
+          delete config[sectionKey];
+        } else {
+          config[sectionKey] = update.value;
+        }
+        await writeOpenClawJsonMock(config);
+      }
+      return update.result;
     },
     getConfigDir: () => '/mock',
     getConfigFilePath: () => '/mock/openclaw.json',
@@ -77,32 +92,34 @@ const mockFileSystem = createTestRuntimeFileSystem();
 const mockAuthRepository = {
   discoverAgentIds: async () => await discoverAgentIdsMock(),
   readAuthProfiles: async (agentId = 'main') => await readAuthProfilesMock(agentId),
-  writeAuthProfiles: async (store: Record<string, unknown>, agentId = 'main') => await writeAuthProfilesMock(store, agentId),
+  writeAuthProfiles: async (store: AuthProfilesStore, agentId = 'main') => await (writeAuthProfilesMock as unknown as (store: AuthProfilesStore, agentId: string) => Promise<void>)(store, agentId),
 };
 const mockOAuthPlugins = {
   discoverBundledPlugins: async () => {
-    const { OpenClawOAuthPluginRegistrationService } = await import('../../runtime-host/application/openclaw/openclaw-oauth-plugin-registration');
+    const { OpenClawOAuthPluginRegistrationService } = await import('../../runtime-host/application/adapters/openclaw/projections/openclaw-oauth-plugin-registration');
     return await new OpenClawOAuthPluginRegistrationService(mockConfigRepository, mockFileSystem, testLogger).discoverBundledPlugins();
   },
-  ensureOAuthPluginEnabled: async (config: Record<string, unknown>, provider: string) => {
-    const { OpenClawOAuthPluginRegistrationService } = await import('../../runtime-host/application/openclaw/openclaw-oauth-plugin-registration');
-    return await new OpenClawOAuthPluginRegistrationService(mockConfigRepository, mockFileSystem, testLogger).ensureOAuthPluginEnabled(config, provider);
+  resolveOAuthPluginRegistration: async (provider: string) => {
+    const { OpenClawOAuthPluginRegistrationService } = await import('../../runtime-host/application/adapters/openclaw/projections/openclaw-oauth-plugin-registration');
+    return await new OpenClawOAuthPluginRegistrationService(mockConfigRepository, mockFileSystem, testLogger).resolveOAuthPluginRegistration(provider);
   },
-  removeOAuthPluginRegistrations: async (config: Record<string, unknown>, provider: string) => {
-    const { OpenClawOAuthPluginRegistrationService } = await import('../../runtime-host/application/openclaw/openclaw-oauth-plugin-registration');
-    return await new OpenClawOAuthPluginRegistrationService(mockConfigRepository, mockFileSystem, testLogger).removeOAuthPluginRegistrations(config, provider);
+  ensureOAuthPluginEnabled: async (config: Record<string, unknown>, provider: string) => {
+    const { OpenClawOAuthPluginRegistrationService } = await import('../../runtime-host/application/adapters/openclaw/projections/openclaw-oauth-plugin-registration');
+    return await new OpenClawOAuthPluginRegistrationService(mockConfigRepository, mockFileSystem, testLogger).ensureOAuthPluginEnabled(config, provider);
   },
 };
 
 function createProviderConfigService() {
-  const environmentRepository = createTestOpenClawEnvironmentRepository();
-  return new OpenClawProviderConfigService(
-    mockConfigRepository,
-    mockAuthRepository,
-    mockOAuthPlugins,
-    new OpenClawAgentModelRepository(mockConfigRepository, mockFileSystem),
-    testLogger,
-  );
+  return new OpenClawProviderConfigService(new OpenClawProviderConfigWorkflow({
+    configRepository: mockConfigRepository,
+    authRepository: mockAuthRepository,
+    oauthPlugins: mockOAuthPlugins,
+    agentModels: new OpenClawAgentModelRepository(new OpenClawAgentModelStoreWorkflow({
+      configRepository: mockConfigRepository,
+      fileSystem: mockFileSystem,
+    })),
+    logger: testLogger,
+  }));
 }
 
 function createProviderSnapshotService() {
@@ -803,7 +820,7 @@ describe('provider discovery from auth profiles', () => {
       },
     });
     discoverAgentIdsMock.mockResolvedValue(['main', 'work']);
-    readAuthProfilesMock.mockImplementation(async (agentId: string) => {
+    readAuthProfilesMock.mockImplementation(async (agentId?: string) => {
       if (agentId === 'work') {
         return {
           version: 1,
@@ -838,7 +855,7 @@ describe('provider discovery from auth profiles', () => {
       },
     });
     discoverAgentIdsMock.mockResolvedValue(['main', 'work']);
-    readAuthProfilesMock.mockImplementation(async (agentId: string) => {
+    readAuthProfilesMock.mockImplementation(async (agentId?: string) => {
       if (agentId === 'work') {
         return {
           version: 1,

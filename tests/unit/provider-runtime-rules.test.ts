@@ -1,12 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import {
-  GOOGLE_BROWSER_OAUTH_RUNTIME_PROVIDER,
-  OPENAI_BROWSER_OAUTH_RUNTIME_PROVIDER,
+  GOOGLE_BROWSER_OAUTH_TOKEN_KEY,
+  OPENAI_BROWSER_OAUTH_TOKEN_KEY,
   getLegacyOpenClawProviderKeys,
   getOpenClawProviderKey,
-} from '../../runtime-host/application/providers/provider-runtime-rules';
+} from '../../runtime-host/application/adapters/openclaw/projections/openclaw-provider-projection-rules';
 
-describe('provider-runtime-rules', () => {
+describe('openclaw-provider-projection-rules', () => {
   it('custom/ollama 已是 runtime key 时保持幂等', () => {
     expect(getOpenClawProviderKey('ollama', 'ollama')).toBe('ollama');
     expect(getOpenClawProviderKey('custom', 'custom-abc12345')).toBe('custom-abc12345');
@@ -32,8 +32,8 @@ describe('provider-runtime-rules', () => {
     expect(getOpenClawProviderKey('moonshot-global', 'moonshot-global-work')).toBe('moonshot-global');
   });
 
-  it('Browser OAuth 只定义 runtime provider key，不再携带默认模型', () => {
-    expect(OPENAI_BROWSER_OAUTH_RUNTIME_PROVIDER).toBe('openai-codex');
-    expect(GOOGLE_BROWSER_OAUTH_RUNTIME_PROVIDER).toBe('google-gemini-cli');
+  it('Browser OAuth 只定义 token key，不再携带默认模型', () => {
+    expect(OPENAI_BROWSER_OAUTH_TOKEN_KEY).toBe('openai-codex');
+    expect(GOOGLE_BROWSER_OAUTH_TOKEN_KEY).toBe('google-gemini-cli');
   });
 });

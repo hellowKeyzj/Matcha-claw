@@ -24,7 +24,7 @@ import { useLayoutStore } from '@/stores/layout';
 import { useSettingsStore } from '@/stores/settings';
 import { useChatStore, type ApprovalItem } from '@/stores/chat';
 import { selectSidebarNewSessionAction, selectSidebarPendingBlockersState } from '@/stores/chat/selectors';
-import { resolveSessionListLabel } from '@/stores/chat/session-helpers';
+import { readSessionsFromState, resolveSessionListLabel } from '@/stores/chat/session-helpers';
 import { getSessionItemCount } from '@/stores/chat/store-state-helpers';
 import { useGatewayStore } from '@/stores/gateway';
 import { useTeamsStore } from '@/stores/teams';
@@ -274,7 +274,8 @@ const SidebarPendingBlockers = memo(function SidebarPendingBlockers() {
         next[sessionKey] = label;
         continue;
       }
-      next[sessionKey] = inferUntitledSessionLabel(sessionByKey.get(sessionKey) ?? { key: sessionKey }, t);
+      const session = sessionByKey.get(sessionKey);
+      next[sessionKey] = session ? inferUntitledSessionLabel(session, t) : t('sidebar.untitledSession');
     }
     return next;
   }, [deferredChatSessions, deferredloadedSessions, t]);
@@ -502,10 +503,25 @@ export function Sidebar({
     }
 
     if (path === '/tasks') {
-      if (!taskCenterInitialized) {
-        void initTaskCenter(currentSessionKey);
+      const chatState = useChatStore.getState();
+      const currentSession = readSessionsFromState(chatState).find((session) => session.key === currentSessionKey);
+      if (!currentSession) {
+        return;
       }
-      void refreshTaskCenter({ sessionKey: currentSessionKey, silent: true });
+      const taskSession = {
+        recordKey: currentSession.key,
+        backendSessionKey: currentSession.backendSessionKey,
+        runtimeAddress: currentSession.runtimeAddress,
+      };
+      if (!taskCenterInitialized) {
+        void initTaskCenter(taskSession);
+      }
+      void refreshTaskCenter({
+        sessionKey: taskSession.recordKey,
+        backendSessionKey: taskSession.backendSessionKey,
+        runtimeAddress: taskSession.runtimeAddress,
+        silent: true,
+      });
       return;
     }
 

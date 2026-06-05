@@ -1,39 +1,40 @@
 import { join } from 'node:path';
 import type { RuntimeHostLogger } from '../../shared/logger';
-import {
-  BUILTIN_CHANNEL_IDS,
-  EXTERNAL_CHANNEL_PLUGIN_BINDINGS,
-  getExternalChannelPluginId,
-} from '../channels/channel-plugin-bindings';
 import type { ChannelConfigRepository } from '../channels/channel-runtime';
 import type { RuntimeFileSystemPort } from '../common/runtime-ports';
-import type { OpenClawConfigRepositoryPort } from '../openclaw/openclaw-config-repository';
-import type { OpenClawEnvironmentRepository } from '../openclaw/openclaw-environment-repository';
 import type { RuntimePluginRepositoryPort } from '../plugins/runtime-plugin-service';
 import {
   buildPrelaunchMaintenanceCacheKey,
   type PrelaunchMaintenanceCacheRepository,
 } from './prelaunch-maintenance-cache';
 
+export interface PrelaunchPluginMaintenanceRuntimePort {
+  getRuntimeDataRootDir(): string;
+  getRuntimeDistributionDir(): string;
+  getWorkingDir(): string;
+}
+
+export interface PrelaunchChannelPluginProjectionPort {
+  getConfiguredPluginIds(configuredChannels: readonly string[]): string[];
+  listKnownPluginIds(): string[];
+  listStaleBuiltinExtensionIds(): string[];
+  listBuiltinChannelIds(): string[];
+}
+
 async function buildChannelMaintenanceCacheKey(
-  configRepository: OpenClawConfigRepositoryPort,
-  environment: OpenClawEnvironmentRepository,
+  runtime: PrelaunchPluginMaintenanceRuntimePort,
   runtimePlugins: RuntimePluginRepositoryPort,
+  channelPluginProjection: PrelaunchChannelPluginProjectionPort,
   configuredChannels: readonly string[],
 ): Promise<string> {
-  const configuredPluginIds = configuredChannels
-    .map((channelType) => getExternalChannelPluginId(channelType))
-    .filter((pluginId): pluginId is string => typeof pluginId === 'string' && pluginId.trim().length > 0)
-    .sort((left, right) => left.localeCompare(right, 'en'));
-  const knownChannelPluginIds = EXTERNAL_CHANNEL_PLUGIN_BINDINGS
-    .flatMap((binding) => [binding.pluginId, ...(binding.legacyPluginIds ?? [])])
-    .sort((left, right) => left.localeCompare(right, 'en'));
+  const configuredPluginIds = channelPluginProjection.getConfiguredPluginIds(configuredChannels);
+  const knownChannelPluginIds = channelPluginProjection.listKnownPluginIds();
 
   return buildPrelaunchMaintenanceCacheKey({
     task: 'configured-channel-plugin-maintenance',
-    openclawDir: configRepository.getOpenClawDirPath(),
-    configDir: configRepository.getConfigDir(),
-    cwd: environment.getWorkingDir(),
+    runtimeDistributionDir: runtime.getRuntimeDistributionDir(),
+    configDir: runtime.getRuntimeDataRootDir(),
+    cwd: runtime.getWorkingDir(),
     configuredChannels: [...configuredChannels].sort((left, right) => left.localeCompare(right, 'en')),
     configuredPluginIds,
     sources: await runtimePlugins.getManagedPluginSourceSignatures(configuredPluginIds),
@@ -42,34 +43,31 @@ async function buildChannelMaintenanceCacheKey(
 }
 
 async function buildManagedPluginMaintenanceCacheKey(
-  configRepository: OpenClawConfigRepositoryPort,
-    environment: OpenClawEnvironmentRepository,
-    runtimePlugins: RuntimePluginRepositoryPort,
-    cacheRepository: Pick<PrelaunchMaintenanceCacheRepository, 'directoryChildrenSignature'>,
+  runtime: PrelaunchPluginMaintenanceRuntimePort,
+  runtimePlugins: RuntimePluginRepositoryPort,
+  cacheRepository: Pick<PrelaunchMaintenanceCacheRepository, 'directoryChildrenSignature'>,
   enabledPluginIds: readonly string[],
 ): Promise<string> {
   const normalizedEnabledPluginIds = [...enabledPluginIds].sort((left, right) => left.localeCompare(right, 'en'));
   return buildPrelaunchMaintenanceCacheKey({
     task: 'configured-managed-plugin-maintenance',
-    openclawDir: configRepository.getOpenClawDirPath(),
-    configDir: configRepository.getConfigDir(),
-    cwd: environment.getWorkingDir(),
+    runtimeDistributionDir: runtime.getRuntimeDistributionDir(),
+    configDir: runtime.getRuntimeDataRootDir(),
+    cwd: runtime.getWorkingDir(),
     enabledPluginIds: normalizedEnabledPluginIds,
     sources: await runtimePlugins.getManagedPluginSourceSignatures(normalizedEnabledPluginIds),
     targets: await runtimePlugins.getManagedPluginTargetSignatures(normalizedEnabledPluginIds),
-    skillsDir: await cacheRepository.directoryChildrenSignature(join(configRepository.getConfigDir(), 'skills')),
+    skillsDir: await cacheRepository.directoryChildrenSignature(join(runtime.getRuntimeDataRootDir(), 'skills')),
   });
 }
-
-const STALE_BUILTIN_EXTENSION_IDS = ['telegram'] as const;
 
 export class PrelaunchPluginMaintenanceService {
   constructor(
     private readonly deps: {
       runtimePlugins: RuntimePluginRepositoryPort;
       channels: Pick<ChannelConfigRepository, 'listConfiguredChannels' | 'reconcileConfiguredChannelPlugins'>;
-      configRepository: OpenClawConfigRepositoryPort;
-      environment: OpenClawEnvironmentRepository;
+      channelPluginProjection: PrelaunchChannelPluginProjectionPort;
+      runtime: PrelaunchPluginMaintenanceRuntimePort;
       cacheRepository: Pick<PrelaunchMaintenanceCacheRepository, 'directoryChildrenSignature' | 'runTask'>;
       fileSystem: Pick<RuntimeFileSystemPort, 'exists' | 'removeDirectory'>;
       logger: RuntimeHostLogger;
@@ -78,18 +76,18 @@ export class PrelaunchPluginMaintenanceService {
 
   async cleanupStaleBuiltinExtensionsForGatewayLaunch(): Promise<string[]> {
     const removed: string[] = [];
-    const configDir = this.deps.configRepository.getConfigDir();
+    const configDir = this.deps.runtime.getRuntimeDataRootDir();
     const result = await this.deps.cacheRepository.runTask(
       'stale-builtin-extension-cleanup',
       () => buildPrelaunchMaintenanceCacheKey({
         task: 'stale-builtin-extension-cleanup',
         configDir,
-        staleBuiltinExtensionIds: STALE_BUILTIN_EXTENSION_IDS,
-        builtinChannelIds: [...BUILTIN_CHANNEL_IDS].sort((left, right) => left.localeCompare(right, 'en')),
+        staleBuiltinExtensionIds: this.deps.channelPluginProjection.listStaleBuiltinExtensionIds(),
+        builtinChannelIds: this.deps.channelPluginProjection.listBuiltinChannelIds(),
         targets: this.deps.cacheRepository.directoryChildrenSignature(join(configDir, 'extensions')),
       }),
       async () => {
-        for (const extensionId of STALE_BUILTIN_EXTENSION_IDS) {
+        for (const extensionId of this.deps.channelPluginProjection.listStaleBuiltinExtensionIds()) {
           const extensionDir = join(configDir, 'extensions', extensionId);
           if (!(await this.deps.fileSystem.exists(extensionDir))) {
             continue;
@@ -109,7 +107,12 @@ export class PrelaunchPluginMaintenanceService {
     const configuredChannels = await this.deps.channels.listConfiguredChannels();
     const result = await this.deps.cacheRepository.runTask(
       'configured-channel-plugin-maintenance',
-      () => buildChannelMaintenanceCacheKey(this.deps.configRepository, this.deps.environment, this.deps.runtimePlugins, configuredChannels),
+      () => buildChannelMaintenanceCacheKey(
+        this.deps.runtime,
+        this.deps.runtimePlugins,
+        this.deps.channelPluginProjection,
+        configuredChannels,
+      ),
       async () => {
         await this.deps.channels.reconcileConfiguredChannelPlugins(configuredChannels, { forceInstall: true });
       },
@@ -125,8 +128,7 @@ export class PrelaunchPluginMaintenanceService {
     const result = await this.deps.cacheRepository.runTask(
       'configured-managed-plugin-maintenance',
       () => buildManagedPluginMaintenanceCacheKey(
-        this.deps.configRepository,
-        this.deps.environment,
+        this.deps.runtime,
         this.deps.runtimePlugins,
         this.deps.cacheRepository,
         enabledPluginIds,

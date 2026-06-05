@@ -1,9 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { acpRuntimeProviderProfiles } from '../../runtime-host/application/sessions/runtime-providers/acp/acp-profiles';
+import { acpEndpointTemplates } from '../../runtime-host/application/agent-runtime/protocol-connectors/acp/acp-profiles';
 
-describe('ACP runtime provider profiles', () => {
-  it('declares Claude Code and Hermes as ACP profiles', () => {
-    expect(acpRuntimeProviderProfiles).toMatchObject([
+describe('ACP runtime endpoint profiles', () => {
+  it('declares Claude Code and Hermes as ACP endpoint templates', () => {
+    expect(acpEndpointTemplates).toMatchObject([
       {
         id: 'claude-code',
         protocolId: 'acp',

@@ -1,5 +1,6 @@
 import { hostSessionAbort } from '@/lib/host-api';
 import type { StoreSessionRunCache } from './session-run-cache';
+import { resolveSessionOperationTarget } from './session-identity';
 import { patchSessionSnapshot } from './store-state-helpers';
 import { clearErrorRecoveryTimer, clearHistoryPoll } from './timers';
 import type {
@@ -48,8 +49,10 @@ export async function executeStoreAbortRun(params: ExecuteStoreAbortRunParams): 
         [sessionKey]: [],
       },
     }));
+    const target = resolveSessionOperationTarget(get(), sessionKey);
     const abortRuntime = await hostSessionAbort({
-      sessionKey,
+      sessionKey: target.sessionKey,
+      runtimeAddress: target.runtimeAddress,
       approvalIds: pendingApprovals.map((approval) => approval.id),
     });
     set((state) => ({

@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { SessionRuntimeStoreRepository } from '../../runtime-host/application/sessions/session-runtime-store-repository';
+import { SessionRuntimeStorePersistenceWorkflow } from '../../runtime-host/application/workflows/session-runtime-store/session-runtime-store-persistence-workflow';
 import { createTestRuntimeFileSystem } from './helpers/runtime-file-system';
 
 describe('session runtime store repository', () => {
@@ -19,8 +20,10 @@ describe('session runtime store repository', () => {
     const configDir = mkdtempSync(join(tmpdir(), 'matchaclaw-session-runtime-store-'));
     tempDirs.push(configDir);
     const repository = new SessionRuntimeStoreRepository({
-      workspace: { getConfigDir: () => configDir },
-      fileSystem: createTestRuntimeFileSystem(),
+      persistenceWorkflow: new SessionRuntimeStorePersistenceWorkflow({
+        workspace: { getConfigDir: () => configDir },
+        fileSystem: createTestRuntimeFileSystem(),
+      }),
     });
 
     expect(await repository.load()).toEqual({

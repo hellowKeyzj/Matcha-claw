@@ -17,7 +17,7 @@ vi.mock('@/lib/provider-accounts', () => ({
   },
 }));
 
-vi.mock('@/lib/provider-runtime', () => ({
+vi.mock('@/lib/provider-projection', () => ({
   hostProviderCreateAccount: vi.fn(),
   hostProviderDeleteAccount: vi.fn(),
   hostProviderReadApiKey: vi.fn(),
@@ -29,6 +29,14 @@ vi.mock('@/lib/telemetry', () => ({
   trackUiEvent: vi.fn(),
   startUiTiming: vi.fn(() => () => 1),
 }));
+
+const TEST_RUNTIME_ADDRESS = {
+  kind: 'native-runtime',
+  capabilityId: 'model.provider',
+  runtimeAdapterId: 'openclaw',
+  runtimeInstanceId: 'local',
+  agentId: 'default',
+} as const;
 
 describe('useProviderStore validateAccountApiKey', () => {
   beforeEach(() => {
@@ -65,7 +73,7 @@ describe('useProviderStore validateAccountApiKey', () => {
       error: null,
     });
 
-    await useProviderStore.getState().validateAccountApiKey('custom-1', '  sk-lm-test \n', {
+    await useProviderStore.getState().validateAccountApiKey('custom-1', '  sk-lm-test \n', TEST_RUNTIME_ADDRESS, {
       baseUrl: 'https://example.com',
     });
 
@@ -76,6 +84,6 @@ describe('useProviderStore validateAccountApiKey', () => {
       options: {
         baseUrl: 'https://example.com',
       },
-    });
+    }, TEST_RUNTIME_ADDRESS);
   });
 });

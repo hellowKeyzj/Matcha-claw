@@ -24,7 +24,7 @@ export function buildBrowserOAuthAccount(input: {
   providerType: BrowserOAuthProviderType;
   accountId: string;
   accountLabel?: string | null;
-  runtimeProviderId: string;
+  oauthProviderTokenKey: string;
   oauthTokenEmail?: string;
   existingAccount?: ProviderCredentialLike | null;
   clock: RuntimeClockPort;
@@ -42,7 +42,7 @@ export function buildBrowserOAuthAccount(input: {
     metadata: {
       ...input.existingAccount?.metadata,
       ...(input.oauthTokenEmail ? { email: input.oauthTokenEmail } : {}),
-      resourceUrl: input.runtimeProviderId,
+      resourceUrl: input.oauthProviderTokenKey,
     },
     createdAt: input.existingAccount?.createdAt || nowIso,
     updatedAt: nowIso,

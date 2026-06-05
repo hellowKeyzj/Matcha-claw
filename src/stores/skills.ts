@@ -3,9 +3,10 @@
  * Manages skill/plugin state
  */
 import { create } from 'zustand';
-import { hostApiFetch, waitForRuntimeJobResult, type RuntimeJobSubmission } from '@/lib/host-api';
+import { hostApiFetch, hostCapabilityExecute, waitForRuntimeJobResult, type RuntimeJobSubmission } from '@/lib/host-api';
 import { AppError, normalizeAppError } from '@/lib/error-model';
 import type { Skill, MarketplaceSkill, SkillMissingRequirements } from '../types/skill';
+import type { RuntimeAddress } from '../../runtime-host/shared/runtime-address';
 
 type GatewaySkillMissing = {
   bins?: string[];
@@ -50,6 +51,7 @@ type MarketplaceSearchResult = {
   error?: string;
 };
 
+const SKILL_MANAGEMENT_CAPABILITY_ID = 'skill.management';
 const MARKETPLACE_SEARCH_CACHE_TTL_MS = 2500;
 const SKILLS_FETCH_MIN_INTERVAL_MS = 30000;
 const SKILLS_SNAPSHOT_NOT_READY_RETRY_MS = 1200;
@@ -117,6 +119,29 @@ function mapErrorCodeToSkillErrorKey(
   return null;
 }
 
+function requireSkillManagementRuntimeAddress(runtimeAddress: RuntimeAddress | undefined): RuntimeAddress {
+  if (!runtimeAddress) {
+    throw new Error('skill.management runtimeAddress is required');
+  }
+  return runtimeAddress;
+}
+
+async function skillManagementCapabilityExecute<TResult>(
+  operationId: string,
+  runtimeAddress: RuntimeAddress,
+  input: Record<string, unknown>,
+): Promise<TResult> {
+  return await hostCapabilityExecute<TResult>({
+    id: SKILL_MANAGEMENT_CAPABILITY_ID,
+    operationId,
+    runtimeAddress,
+    input: {
+      ...input,
+      runtimeAddress,
+    },
+  });
+}
+
 function hasMutatingSkills(mutatingBySkillId: Record<string, number>): boolean {
   return Object.keys(mutatingBySkillId).length > 0;
 }
@@ -162,13 +187,13 @@ interface SkillsState {
   error: string | null;
 
   // Actions
-  fetchSkills: (options?: { force?: boolean; silent?: boolean; fresh?: boolean }) => Promise<void>;
+  fetchSkills: (options?: { force?: boolean; silent?: boolean; fresh?: boolean; runtimeAddress?: RuntimeAddress }) => Promise<void>;
   searchSkills: (query: string) => Promise<void>;
-  installSkill: (slug: string, version?: string) => Promise<void>;
-  uninstallSkill: (slug: string) => Promise<void>;
-  enableSkill: (skillId: string) => Promise<void>;
-  disableSkill: (skillId: string) => Promise<void>;
-  batchSetSkillsEnabled: (skillIds: string[], enabled: boolean) => Promise<void>;
+  installSkill: (slug: string, runtimeAddress: RuntimeAddress, version?: string) => Promise<void>;
+  uninstallSkill: (slug: string, runtimeAddress: RuntimeAddress) => Promise<void>;
+  enableSkill: (skillId: string, runtimeAddress: RuntimeAddress) => Promise<void>;
+  disableSkill: (skillId: string, runtimeAddress: RuntimeAddress) => Promise<void>;
+  batchSetSkillsEnabled: (skillIds: string[], enabled: boolean, runtimeAddress: RuntimeAddress) => Promise<void>;
   setSkills: (skills: Skill[]) => void;
   updateSkill: (skillId: string, updates: Partial<Skill>) => void;
 }
@@ -190,13 +215,14 @@ export const useSkillsStore = create<SkillsState>((set, get) => ({
     const force = options?.force === true;
     const silent = options?.silent === true;
     const fresh = options?.fresh === true;
+    const runtimeAddress = options?.runtimeAddress;
     const now = Date.now();
     const hasSnapshot = get().snapshotReady;
 
     if (inflightSkillsFetch) {
       await inflightSkillsFetch;
       if (force || fresh) {
-        await get().fetchSkills({ force: true, silent, fresh });
+        await get().fetchSkills({ force: true, silent, fresh, runtimeAddress });
       }
       return;
     }
@@ -227,7 +253,11 @@ export const useSkillsStore = create<SkillsState>((set, get) => ({
     inflightSkillsFetch = (async () => {
       try {
         const gatewayPromise = fresh
-          ? hostApiFetch<GatewaySkillsStatusResult>('/api/skills/status/refresh', { method: 'POST' })
+          ? skillManagementCapabilityExecute<GatewaySkillsStatusResult>(
+            'skills.refreshStatus',
+            requireSkillManagementRuntimeAddress(runtimeAddress),
+            {},
+          )
           : hostApiFetch<GatewaySkillsStatusResult>('/api/skills/status');
         const gatewayData = await gatewayPromise;
 
@@ -242,7 +272,7 @@ export const useSkillsStore = create<SkillsState>((set, get) => ({
             refreshing: true,
             error: gatewayData.error ?? null,
           }));
-          scheduleSkillsSnapshotRetry(() => get().fetchSkills({ force: true, silent: true }));
+          scheduleSkillsSnapshotRetry(() => get().fetchSkills({ force: true, silent: true, runtimeAddress }));
           return;
         }
 
@@ -346,7 +376,7 @@ export const useSkillsStore = create<SkillsState>((set, get) => ({
     }
   },
 
-  installSkill: async (slug: string, version?: string) => {
+  installSkill: async (slug: string, runtimeAddress: RuntimeAddress, version?: string) => {
     if (get().installing[slug]) {
       return;
     }
@@ -359,10 +389,11 @@ export const useSkillsStore = create<SkillsState>((set, get) => ({
       };
     });
     try {
-      const result = await hostApiFetch<RuntimeJobSubmission<{ success: boolean }> | { success: false; error?: string }>('/api/clawhub/install', {
-        method: 'POST',
-        body: JSON.stringify({ slug, version }),
-      });
+      const result = await skillManagementCapabilityExecute<RuntimeJobSubmission<{ success: boolean }> | { success: false; error?: string }>(
+        'clawhub.install',
+        runtimeAddress,
+        { slug, version },
+      );
       if (!result.success) {
         const appError = normalizeAppError(new Error(result.error || 'Install failed'), {
           module: 'skills',
@@ -373,7 +404,7 @@ export const useSkillsStore = create<SkillsState>((set, get) => ({
       }
       await waitForRuntimeJobResult<{ success: boolean }>(result.job.id);
       // Refresh skills after install
-      await get().fetchSkills({ force: true, fresh: true });
+      await get().fetchSkills({ force: true, fresh: true, runtimeAddress });
     } catch (error) {
       console.error('Install error:', error);
       throw error;
@@ -391,7 +422,7 @@ export const useSkillsStore = create<SkillsState>((set, get) => ({
     }
   },
 
-  uninstallSkill: async (slug: string) => {
+  uninstallSkill: async (slug: string, runtimeAddress: RuntimeAddress) => {
     set((state) => {
       const nextMutating = incrementMutatingSkill(state.mutatingBySkillId, slug);
       return {
@@ -401,16 +432,17 @@ export const useSkillsStore = create<SkillsState>((set, get) => ({
       };
     });
     try {
-      const result = await hostApiFetch<RuntimeJobSubmission<{ success: boolean }>>('/api/clawhub/uninstall', {
-        method: 'POST',
-        body: JSON.stringify({ slug }),
-      });
+      const result = await skillManagementCapabilityExecute<RuntimeJobSubmission<{ success: boolean }>>(
+        'clawhub.uninstall',
+        runtimeAddress,
+        { slug },
+      );
       if (!result.success) {
         throw new Error('Uninstall failed');
       }
       await waitForRuntimeJobResult<{ success: boolean }>(result.job.id);
       // Refresh skills after uninstall
-      await get().fetchSkills({ force: true, fresh: true });
+      await get().fetchSkills({ force: true, fresh: true, runtimeAddress });
     } catch (error) {
       console.error('Uninstall error:', error);
       throw error;
@@ -428,7 +460,7 @@ export const useSkillsStore = create<SkillsState>((set, get) => ({
     }
   },
 
-  enableSkill: async (skillId) => {
+  enableSkill: async (skillId, runtimeAddress) => {
     const { updateSkill } = get();
     set((state) => {
       const nextMutating = incrementMutatingSkill(state.mutatingBySkillId, skillId);
@@ -439,10 +471,11 @@ export const useSkillsStore = create<SkillsState>((set, get) => ({
     });
 
     try {
-      const result = await hostApiFetch<RuntimeJobSubmission<{ success: boolean; error?: string }>>('/api/skills/state', {
-        method: 'PUT',
-        body: JSON.stringify({ skillKey: skillId, enabled: true }),
-      });
+      const result = await skillManagementCapabilityExecute<RuntimeJobSubmission<{ success: boolean; error?: string }>>(
+        'skills.updateState',
+        runtimeAddress,
+        { skillKey: skillId, enabled: true },
+      );
       await waitForRuntimeJobResult<{ success: boolean; error?: string }>(result.job.id);
       updateSkill(skillId, { enabled: true });
     } catch (error) {
@@ -459,7 +492,7 @@ export const useSkillsStore = create<SkillsState>((set, get) => ({
     }
   },
 
-  disableSkill: async (skillId) => {
+  disableSkill: async (skillId, runtimeAddress) => {
     const { updateSkill, skills } = get();
 
     const skill = skills.find((s) => s.id === skillId);
@@ -475,10 +508,11 @@ export const useSkillsStore = create<SkillsState>((set, get) => ({
     });
 
     try {
-      const result = await hostApiFetch<RuntimeJobSubmission<{ success: boolean; error?: string }>>('/api/skills/state', {
-        method: 'PUT',
-        body: JSON.stringify({ skillKey: skillId, enabled: false }),
-      });
+      const result = await skillManagementCapabilityExecute<RuntimeJobSubmission<{ success: boolean; error?: string }>>(
+        'skills.updateState',
+        runtimeAddress,
+        { skillKey: skillId, enabled: false },
+      );
       await waitForRuntimeJobResult<{ success: boolean; error?: string }>(result.job.id);
       updateSkill(skillId, { enabled: false });
     } catch (error) {
@@ -495,7 +529,7 @@ export const useSkillsStore = create<SkillsState>((set, get) => ({
     }
   },
 
-  batchSetSkillsEnabled: async (skillIds, enabled) => {
+  batchSetSkillsEnabled: async (skillIds, enabled, runtimeAddress) => {
     const uniqueSkillIds = [...new Set(skillIds.map((skillId) => skillId.trim()).filter(Boolean))];
     if (uniqueSkillIds.length === 0) {
       return;
@@ -520,10 +554,11 @@ export const useSkillsStore = create<SkillsState>((set, get) => ({
     });
 
     try {
-      const result = await hostApiFetch<{ success: boolean; updated?: string[]; error?: string }>('/api/skills/state/batch', {
-        method: 'PUT',
-        body: JSON.stringify({ skillKeys: uniqueSkillIds, enabled }),
-      });
+      const result = await skillManagementCapabilityExecute<{ success: boolean; updated?: string[]; error?: string }>(
+        'skills.updateBatchState',
+        runtimeAddress,
+        { skillKeys: uniqueSkillIds, enabled },
+      );
       if (result.success !== true) {
         throw new Error(result.error || 'Failed to update skills');
       }

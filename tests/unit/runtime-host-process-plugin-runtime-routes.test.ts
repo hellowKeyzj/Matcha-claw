@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from 'vitest';
+import { createPluginRuntimeCapabilityOperationRoutes } from '../../runtime-host/application/capabilities/plugin/plugin-runtime-capability';
 import { pluginRuntimeRoutes } from '../../runtime-host/api/routes/plugin-runtime-routes';
 import { PluginRuntimeService } from '../../runtime-host/application/plugins/plugin-runtime-service';
+import { PluginRuntimeOperationsWorkflow } from '../../runtime-host/application/workflows/plugin-runtime/plugin-runtime-operations-workflow';
 import { dispatchRuntimeRouteDefinition } from './helpers/runtime-route';
 
 function createDeps() {
@@ -35,20 +37,27 @@ describe('runtime-host process plugin runtime routes', () => {
   it('GET /api/plugins/catalog 只触发后台刷新并立即返回当前快照', async () => {
     const deps = createDeps();
     const pluginRuntimeService = new PluginRuntimeService({
-      runtime: deps,
-      jobs: {
-        submitSetEnabledPlugins: vi.fn(() => ({
-          success: true,
-          job: {
-            id: 'job-2',
-            type: 'plugins.setEnabled',
-            status: 'queued',
-            queuedAt: 2,
-            attempts: 0,
-            maxAttempts: 1,
-          },
-        })),
-      },
+      operationsWorkflow: new PluginRuntimeOperationsWorkflow({
+        runtime: deps,
+        jobs: {
+          submitSetEnabledPlugins: vi.fn(() => ({
+            success: true,
+            job: {
+              id: 'job-2',
+              type: 'plugins.setEnabled',
+              status: 'queued',
+              queuedAt: 2,
+              attempts: 0,
+              maxAttempts: 1,
+            },
+          })),
+          submitRefreshCatalog: vi.fn(),
+          getRefreshCatalogJob: vi.fn(() => null),
+        },
+        catalogProjection: {
+          isChannelDerivedPluginId: () => false,
+        },
+      }),
     });
 
     const result = await dispatchRuntimeRouteDefinition(pluginRuntimeRoutes, 
@@ -87,7 +96,7 @@ describe('runtime-host process plugin runtime routes', () => {
     });
   });
 
-  it('PUT /api/plugins/runtime/enabled-plugins 只提交启用变更任务', async () => {
+  it('plugin runtime capability 只提交启用变更任务', async () => {
     const deps = createDeps();
     const submitSetEnabledPlugins = vi.fn(() => ({
       success: true,
@@ -101,18 +110,21 @@ describe('runtime-host process plugin runtime routes', () => {
       },
     }));
     const pluginRuntimeService = new PluginRuntimeService({
-      runtime: deps,
-      jobs: {
-        submitSetEnabledPlugins,
-      },
+      operationsWorkflow: new PluginRuntimeOperationsWorkflow({
+        runtime: deps,
+        jobs: {
+          submitSetEnabledPlugins,
+          submitRefreshCatalog: vi.fn(),
+          getRefreshCatalogJob: vi.fn(() => null),
+        },
+        catalogProjection: {
+          isChannelDerivedPluginId: () => false,
+        },
+      }),
     });
 
-    const result = await dispatchRuntimeRouteDefinition(pluginRuntimeRoutes, 
-      'PUT',
-      '/api/plugins/runtime/enabled-plugins',
-      { pluginIds: ['memory-lancedb-pro'] },
-      { pluginRuntimeService },
-    );
+    const [setEnabledRoute] = createPluginRuntimeCapabilityOperationRoutes({ pluginRuntimeService });
+    const result = setEnabledRoute.handle({ pluginIds: ['memory-lancedb-pro'] });
 
     expect(submitSetEnabledPlugins).toHaveBeenCalledWith({ pluginIds: ['memory-lancedb-pro'] });
     expect(result).toEqual({

@@ -1,4 +1,5 @@
 import { create } from 'zustand';
+import { buildSessionRecordKey } from './session-identity';
 import type {
   SessionAssistantTurnItem,
   SessionRenderToolCard,
@@ -41,9 +42,10 @@ interface TaskSnapshotStoreState {
       source?: TaskSnapshotEvent['source'];
       enableEdit?: boolean;
       uri?: string;
+      recordKey?: string;
     },
   ) => void;
-  reportTaskCenterSnapshot: (event: TaskSnapshotEvent) => void;
+  reportTaskCenterSnapshot: (event: TaskSnapshotEvent & { recordKey?: string }) => void;
   reportSessionUpdate: (event: SessionUpdateEvent) => void;
   reportSessionSnapshot: (snapshot: SessionStateSnapshot, source?: TaskSnapshotEvent['source']) => void;
   getTodoList: (sessionKey: string) => TodoItem[];
@@ -106,17 +108,18 @@ function taskScopeKeyForSession(sessionKey: string): string {
   return normalizeString(sessionKey);
 }
 
-function fallbackTaskScopeForSession(sessionKey: string): TaskScopeSnapshot | undefined {
-  const normalizedSessionKey = normalizeString(sessionKey);
-  if (!normalizedSessionKey) {
+function fallbackTaskScopeForSession(recordKey: string, backendSessionKey = recordKey): TaskScopeSnapshot | undefined {
+  const normalizedRecordKey = normalizeString(recordKey);
+  if (!normalizedRecordKey) {
     return undefined;
   }
-  const agentId = /^agent:([^:]+):/.exec(normalizedSessionKey)?.[1];
+  const normalizedBackendSessionKey = normalizeString(backendSessionKey) || normalizedRecordKey;
+  const agentId = /^agent:([^:]+):/.exec(normalizedBackendSessionKey)?.[1];
   return {
     type: 'session',
-    key: normalizedSessionKey,
-    label: agentId ? `${agentId} · ${normalizedSessionKey.split(':').slice(2).join(':') || 'main'}` : normalizedSessionKey,
-    sessionKey: normalizedSessionKey,
+    key: normalizedRecordKey,
+    label: agentId ? `${agentId} · ${normalizedBackendSessionKey.split(':').slice(2).join(':') || 'main'}` : normalizedBackendSessionKey,
+    sessionKey: normalizedBackendSessionKey,
     ...(agentId ? { agentId } : {}),
   };
 }
@@ -441,10 +444,18 @@ export const useTaskSnapshotStore = create<TaskSnapshotStoreState>((set, get) =>
   },
 
   reportTaskCenterData: (sessionKey, tasks, options) => {
-    const normalizedSessionKey = normalizeString(sessionKey);
-    if (!normalizedSessionKey) return;
-    const normalizedScope = normalizeScope(options?.scope) ?? fallbackTaskScopeForSession(normalizedSessionKey);
-    const snapshotKey = normalizedScope?.key || taskScopeKeyForSession(normalizedSessionKey);
+    const backendSessionKey = normalizeString(sessionKey);
+    if (!backendSessionKey) return;
+    const recordKey = normalizeString(options?.recordKey) || backendSessionKey;
+    const rawScope = normalizeScope(options?.scope);
+    const normalizedScope = rawScope
+      ? {
+          ...rawScope,
+          key: rawScope.type === 'session' ? recordKey : rawScope.key,
+          ...(rawScope.type === 'session' ? { sessionKey: rawScope.sessionKey ?? backendSessionKey } : {}),
+        }
+      : fallbackTaskScopeForSession(recordKey, backendSessionKey);
+    const snapshotKey = normalizedScope?.key || taskScopeKeyForSession(recordKey);
     if (!snapshotKey) return;
     const normalizedTasks = sortTasks(
       tasks
@@ -483,37 +494,40 @@ export const useTaskSnapshotStore = create<TaskSnapshotStoreState>((set, get) =>
   },
 
   reportTaskCenterSnapshot: (event) => {
-    const sessionKey = normalizeString(event.sessionKey);
-    if (!sessionKey) return;
+    const backendSessionKey = normalizeString(event.sessionKey);
+    if (!backendSessionKey) return;
+    const recordKey = normalizeString(event.recordKey) || backendSessionKey;
     if (event.source === 'todo') {
-      get().reportTodos(sessionKey, event.todos ?? []);
+      get().reportTodos(recordKey, event.todos ?? []);
       return;
     }
-    get().reportTaskCenterData(sessionKey, event.tasks, {
+    get().reportTaskCenterData(backendSessionKey, event.tasks, {
       scope: event.scope,
       source: event.source,
       enableEdit: event.enableEdit,
       uri: event.uri,
+      recordKey,
     });
     if (event.todos) {
-      get().reportTodos(sessionKey, event.todos);
+      get().reportTodos(recordKey, event.todos);
     }
   },
 
   reportSessionUpdate: (event) => {
-    const sessionKey = normalizeString(event.sessionKey) || event.snapshot.sessionKey;
-    if (!sessionKey) return;
+    const backendSessionKey = normalizeString(event.sessionKey) || event.snapshot.sessionKey;
+    if (!backendSessionKey) return;
+    const recordKey = buildSessionRecordKey(event.snapshot.catalog.runtimeAddress, backendSessionKey);
     if (event.sessionUpdate === 'session_info_update') {
       if (event.phase === 'started') {
-        get().notifyChatStarted(sessionKey);
+        get().notifyChatStarted(recordKey);
       }
       if (event.phase === 'final' || event.phase === 'error' || event.phase === 'aborted') {
-        get().notifyChatStopped(sessionKey);
+        get().notifyChatStopped(recordKey);
       }
     }
     if (event.sessionUpdate === 'plan') {
       if (event.taskSnapshot.source === 'todo' || event.taskSnapshot.todos) {
-        get().reportTodos(sessionKey, event.taskSnapshot.todos ?? []);
+        get().reportTodos(recordKey, event.taskSnapshot.todos ?? []);
       }
       return;
     }
@@ -522,12 +536,13 @@ export const useTaskSnapshotStore = create<TaskSnapshotStoreState>((set, get) =>
 
   reportSessionSnapshot: (snapshot, source = 'replay') => {
     void source;
+    const recordKey = buildSessionRecordKey(snapshot.catalog.runtimeAddress, snapshot.sessionKey);
     if (snapshot.taskSnapshot?.source === 'todo' || snapshot.taskSnapshot?.todos) {
-      get().reportTodos(snapshot.sessionKey, snapshot.taskSnapshot.todos ?? []);
+      get().reportTodos(recordKey, snapshot.taskSnapshot.todos ?? []);
     }
     for (const event of extractSnapshotEventsFromItems(snapshot)) {
       if (event.source === 'todo' || event.todos) {
-        get().reportTodos(snapshot.sessionKey, event.todos ?? []);
+        get().reportTodos(recordKey, event.todos ?? []);
       }
     }
   },
@@ -554,8 +569,7 @@ export const useTaskSnapshotStore = create<TaskSnapshotStoreState>((set, get) =>
 
   getSessionTaskScopeKey: (sessionKey) => {
     const normalizedSessionKey = normalizeString(sessionKey);
-    const defaultSessionKey = 'agent:main:main';
-    return taskScopeKeyForSession(normalizedSessionKey || defaultSessionKey);
+    return normalizedSessionKey ? taskScopeKeyForSession(normalizedSessionKey) : '';
   },
 
   getStatusMap: (scopeKey) => get().snapshots[scopeKey]?.statusMap ?? EMPTY_STATUS_MAP,

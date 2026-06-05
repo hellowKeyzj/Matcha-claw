@@ -6,7 +6,8 @@ import { Button } from '@/components/ui/button';
 import { AgentAvatar } from '@/components/common/AgentAvatar';
 import { invokeIpc } from '@/lib/api-client';
 import { buildTemplateAvatarSeed } from '@/lib/agent-avatar';
-import { hostFileReadText, hostFileWriteText, hostOpenClawGetWorkspaceDir } from '@/lib/host-api';
+import { hostFileReadText, hostFileWriteText, resolveSingleCapabilityRuntimeAddress } from '@/lib/host-api';
+import type { RuntimeAddress } from '../../../runtime-host/shared/runtime-address';
 import { useDelayedFlag } from '@/lib/use-delayed-flag';
 import { normalizeSubagentNameToSlug } from '@/features/subagents/domain/workspace';
 import {
@@ -31,6 +32,9 @@ const SUBAGENTS_HEAVY_CONTENT_IDLE_TIMEOUT_MS = 320;
 const INITIAL_TEMPLATE_CARD_BATCH = 9;
 const TEMPLATE_CARD_BATCH_SIZE = 18;
 const TEMPLATE_CARD_SCROLL_THRESHOLD_PX = 180;
+const MODEL_PROVIDER_CAPABILITY_ID = 'model.provider';
+const SUBAGENT_MANAGEMENT_CAPABILITY_ID = 'subagent.management';
+
 const AGENT_CONFIG_FILE_FILTERS = [
   { name: 'MatchaClaw Agent Config', extensions: ['matchaclaw-agent.json', 'json'] },
   { name: 'JSON', extensions: ['json'] },
@@ -162,6 +166,7 @@ export function SubAgents() {
   const [templateDialogLoading, setTemplateDialogLoading] = useState(false);
   const [templateDialogSubmitting, setTemplateDialogSubmitting] = useState(false);
   const [activeTemplate, setActiveTemplate] = useState<SubagentTemplateDetail | null>(null);
+  const [subagentsRuntimeAddress, setSubagentsRuntimeAddress] = useState<RuntimeAddress | null>(null);
   const [subagentsHeavyContentReady, setSubagentsHeavyContentReady] = useState(
     () => import.meta.env.MODE === 'test' || agents.length > 0 || agentsResource.hasLoadedOnce,
   );
@@ -205,8 +210,47 @@ export function SubAgents() {
   );
 
   useEffect(() => {
-    void loadAvailableModels();
-  }, [loadAvailableModels]);
+    if (!gatewayOperational) {
+      return;
+    }
+    let active = true;
+    void resolveSingleCapabilityRuntimeAddress(MODEL_PROVIDER_CAPABILITY_ID)
+      .then((runtimeAddress) => {
+        if (active) {
+          void loadAvailableModels(runtimeAddress);
+        }
+      })
+      .catch(() => {
+        if (active) {
+          useSubagentsStore.setState({ availableModels: [], modelsLoading: false });
+        }
+      });
+    return () => {
+      active = false;
+    };
+  }, [gatewayOperational, loadAvailableModels]);
+
+  useEffect(() => {
+    if (!gatewayOperational) {
+      setSubagentsRuntimeAddress(null);
+      return;
+    }
+    let active = true;
+    void resolveSingleCapabilityRuntimeAddress(SUBAGENT_MANAGEMENT_CAPABILITY_ID)
+      .then((runtimeAddress) => {
+        if (active) {
+          setSubagentsRuntimeAddress(runtimeAddress);
+        }
+      })
+      .catch(() => {
+        if (active) {
+          setSubagentsRuntimeAddress(null);
+        }
+      });
+    return () => {
+      active = false;
+    };
+  }, [gatewayOperational]);
 
   useEffect(() => {
     if (!gatewayOperational) {
@@ -538,8 +582,12 @@ export function SubAgents() {
       setManagedAgentId(null);
       return;
     }
+    if (!subagentsRuntimeAddress) {
+      setManagedAgentId(null);
+      return;
+    }
     try {
-      await cancelDraft(agentId);
+      await cancelDraft(agentId, subagentsRuntimeAddress);
     } catch {
       // Error state is already set by store.
     } finally {
@@ -548,8 +596,11 @@ export function SubAgents() {
   };
 
   const handleExportAgentConfig = useCallback(async (agent: SubagentSummary) => {
+    if (!subagentsRuntimeAddress) {
+      return;
+    }
     try {
-      const packageData = await exportAgentConfig(agent.id);
+      const packageData = await exportAgentConfig(agent.id, subagentsRuntimeAddress);
       const fileNameBase = normalizeSubagentNameToSlug(packageData.agent.name) || agent.id;
       const result = await invokeIpc<{ canceled?: boolean; filePath?: string }>('dialog:save', {
         title: t('transfer.exportDialogTitle'),
@@ -562,6 +613,7 @@ export function SubAgents() {
       const writeResult = await hostFileWriteText({
         path: result.filePath,
         content: `${JSON.stringify(packageData, null, 2)}\n`,
+        runtimeAddress: subagentsRuntimeAddress,
       });
       if (!writeResult.ok) {
         throw new Error(writeResult.error || 'Failed to write file');
@@ -570,9 +622,12 @@ export function SubAgents() {
     } catch (error) {
       toast.error(t('transfer.exportFailed', { message: error instanceof Error ? error.message : String(error) }));
     }
-  }, [exportAgentConfig, t]);
+  }, [exportAgentConfig, subagentsRuntimeAddress, t]);
 
   const handleImportAgentConfig = useCallback(async () => {
+    if (!subagentsRuntimeAddress) {
+      return;
+    }
     try {
       const result = await invokeIpc<{ canceled?: boolean; filePaths?: string[] }>('dialog:open', {
         title: t('transfer.importDialogTitle'),
@@ -583,11 +638,11 @@ export function SubAgents() {
       if (result?.canceled || !filePath) {
         return;
       }
-      const readResult = await hostFileReadText({ path: filePath });
+      const readResult = await hostFileReadText({ path: filePath, runtimeAddress: subagentsRuntimeAddress });
       if (!readResult.ok || typeof readResult.content !== 'string') {
         throw new Error(readResult.error || 'Failed to read file');
       }
-      const importResult = await importAgentConfig(JSON.parse(readResult.content) as unknown);
+      const importResult = await importAgentConfig(JSON.parse(readResult.content) as unknown, subagentsRuntimeAddress);
       void loadPersistedFilesForAgent(importResult.agentId);
       setManagedAgentId(importResult.agentId);
       if (importResult.warning) {
@@ -598,7 +653,7 @@ export function SubAgents() {
     } catch (error) {
       toast.error(t('transfer.importFailed', { message: error instanceof Error ? error.message : String(error) }));
     }
-  }, [importAgentConfig, loadPersistedFilesForAgent, setManagedAgentId, t]);
+  }, [importAgentConfig, loadPersistedFilesForAgent, setManagedAgentId, subagentsRuntimeAddress, t]);
 
   return (
     <section className="space-y-4">
@@ -614,11 +669,11 @@ export function SubAgents() {
               {mutating ? t('status.mutating') : t('status.refreshing')}
             </span>
           )}
-          <Button variant="outline" className="gap-2" onClick={handleImportAgentConfig}>
+          <Button variant="outline" className="gap-2" disabled={!subagentsRuntimeAddress} onClick={handleImportAgentConfig}>
             <Upload className="h-4 w-4" />
             {t('transfer.import')}
           </Button>
-          <Button onClick={openCreateDialog}>{t('newSubagent')}</Button>
+          <Button onClick={openCreateDialog} disabled={!subagentsRuntimeAddress}>{t('newSubagent')}</Button>
         </div>
       </header>
 
@@ -777,9 +832,10 @@ export function SubAgents() {
               key={agent.id}
               agent={agent}
               modelLabel={agent.model?.trim() ? (modelDisplayLabelById.get(agent.model.trim()) ?? agent.model.trim()) : undefined}
-              editLocked={false}
-              deleteLocked={Boolean(agent.isDefault)}
+              editLocked={!subagentsRuntimeAddress}
+              deleteLocked={Boolean(agent.isDefault) || !subagentsRuntimeAddress}
               manageLocked={false}
+              exportLocked={!subagentsRuntimeAddress}
               modelReady={Boolean(agent.model?.trim())}
               onEdit={() => openEditDialog(agent.id)}
               onDelete={() => {
@@ -812,8 +868,11 @@ export function SubAgents() {
             return;
           }
           setDeleting(true);
+          if (!subagentsRuntimeAddress) {
+            return;
+          }
           try {
-            await deleteAgent(deletingAgentId);
+            await deleteAgent(deletingAgentId, subagentsRuntimeAddress);
             setDeletingAgentId(null);
           } finally {
             setDeleting(false);
@@ -827,6 +886,7 @@ export function SubAgents() {
         draftPrompt={draftPrompt}
         generatingDraft={generatingDraft}
         applyingDraft={applyingDraft}
+        canGenerateDraft={Boolean(subagentsRuntimeAddress)}
         includeCurrentFiles={includeCurrentFiles}
         hasAnyDraft={hasAnyDraft}
         hasApprovedDraft={hasApprovedDraft}
@@ -849,7 +909,7 @@ export function SubAgents() {
           setDraftIncludeCurrentFilesForAgent(managedAgentId, nextIncludeCurrentFiles);
         }}
         onGenerateDraft={async () => {
-          if (!managedAgentId || !draftPrompt.trim()) {
+          if (!managedAgentId || !draftPrompt.trim() || !subagentsRuntimeAddress) {
             return;
           }
           try {
@@ -857,6 +917,7 @@ export function SubAgents() {
               agentId: managedAgentId,
               prompt: draftPrompt.trim(),
               includeCurrentFiles,
+              runtimeAddress: subagentsRuntimeAddress,
             });
           } catch {
             // Error state is already set by store.
@@ -864,11 +925,11 @@ export function SubAgents() {
         }}
         onGenerateDiffPreview={generatePreviewDiffByFile}
         onApplyDraft={async () => {
-          if (!managedAgentId) {
+          if (!managedAgentId || !subagentsRuntimeAddress) {
             return;
           }
           try {
-            await applyDraft(managedAgentId);
+            await applyDraft(managedAgentId, subagentsRuntimeAddress);
           } catch {
             // Error state is already set by store.
           }
@@ -889,6 +950,9 @@ export function SubAgents() {
         initialValues={editingAgent}
         onSubmit={async (values) => {
           if (dialogMode === 'create') {
+            if (!subagentsRuntimeAddress) {
+              return;
+            }
             try {
               const createResult = await createAgent({
                 name: values.name,
@@ -896,6 +960,7 @@ export function SubAgents() {
                 model: values.model,
                 avatarSeed: values.avatarSeed,
                 avatarStyle: values.avatarStyle,
+                runtimeAddress: subagentsRuntimeAddress,
               });
               const resolvedAgentId = createResult.agentId || normalizeSubagentNameToSlug(values.name);
               setManagedAgentId(resolvedAgentId);
@@ -910,31 +975,22 @@ export function SubAgents() {
             }
             return;
           }
-          if (!editingAgentId) {
+          if (!editingAgentId || !subagentsRuntimeAddress) {
             return;
           }
           const isDefaultAgent = Boolean(editingAgent?.isDefault);
           const resolvedName = isDefaultAgent
             ? (editingAgent?.name ?? values.name)
             : values.name;
-          let resolvedWorkspace = isDefaultAgent
+          const resolvedWorkspace = isDefaultAgent
             ? (editingAgent?.workspace ?? values.workspace)
             : values.workspace;
-          if (isDefaultAgent && !resolvedWorkspace.trim()) {
-            try {
-              const workspaceDir = (await hostOpenClawGetWorkspaceDir()).trim();
-              if (workspaceDir) {
-                resolvedWorkspace = workspaceDir;
-              }
-            } catch {
-              // best-effort fallback only
-            }
-          }
           await updateAgent({
             agentId: editingAgentId,
             name: resolvedName,
             workspace: resolvedWorkspace,
             model: values.model || undefined,
+            runtimeAddress: subagentsRuntimeAddress,
           });
           setDialogOpen(false);
         }}
@@ -949,7 +1005,7 @@ export function SubAgents() {
         modelsLoading={modelsLoading}
         submitting={templateDialogSubmitting}
         onSubmit={async (modelId) => {
-          if (!activeTemplate) {
+          if (!activeTemplate || !subagentsRuntimeAddress) {
             return;
           }
           setTemplateDialogSubmitting(true);
@@ -961,6 +1017,7 @@ export function SubAgents() {
               template: activeTemplate,
               model: modelId,
               localizedName: localizedTemplateName,
+              runtimeAddress: subagentsRuntimeAddress,
             });
             setManagedAgentId(createResult.agentId);
             void loadPersistedFilesForAgent(createResult.agentId);

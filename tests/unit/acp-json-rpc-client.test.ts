@@ -1,8 +1,8 @@
 import { EventEmitter } from 'node:events';
 import { Writable } from 'node:stream';
 import { describe, expect, it, vi } from 'vitest';
-import { encodeAcpJsonRpcMessage } from '../../runtime-host/application/sessions/runtime-providers/acp/acp-framing';
-import { AcpJsonRpcClient } from '../../runtime-host/application/sessions/runtime-providers/acp/acp-json-rpc-client';
+import { encodeAcpJsonRpcMessage } from '../../runtime-host/application/agent-runtime/protocol-connectors/acp/acp-framing';
+import { AcpJsonRpcClient } from '../../runtime-host/application/agent-runtime/protocol-connectors/acp/acp-json-rpc-client';
 
 const spawnMock = vi.hoisted(() => vi.fn());
 
@@ -34,7 +34,7 @@ function createClient() {
   const child = new MockChild();
   spawnMock.mockReturnValueOnce(child);
   const client = new AcpJsonRpcClient({
-    runtimeProviderId: 'claude-code',
+    endpointId: 'claude-code',
     launcher: { command: 'acp-server', args: ['--stdio'] },
   });
   return { child, client };
@@ -81,7 +81,7 @@ describe('ACP JSON-RPC client', () => {
     const secondChild = new MockChild();
     spawnMock.mockReturnValueOnce(firstChild).mockReturnValueOnce(secondChild);
     const client = new AcpJsonRpcClient({
-      runtimeProviderId: 'hermes',
+      endpointId: 'hermes',
       launcher: { command: 'hermes', args: ['acp'] },
     });
 

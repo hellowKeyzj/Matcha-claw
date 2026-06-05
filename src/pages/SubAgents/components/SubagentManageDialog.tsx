@@ -13,6 +13,7 @@ interface SubagentManageDialogProps {
   draftPrompt: string;
   generatingDraft: boolean;
   applyingDraft: boolean;
+  canGenerateDraft: boolean;
   includeCurrentFiles: boolean;
   hasAnyDraft: boolean;
   hasApprovedDraft: boolean;
@@ -36,6 +37,7 @@ export function SubagentManageDialog({
   draftPrompt,
   generatingDraft,
   applyingDraft,
+  canGenerateDraft,
   includeCurrentFiles,
   hasAnyDraft,
   hasApprovedDraft,
@@ -86,7 +88,7 @@ export function SubagentManageDialog({
           <Button
             variant="outline"
             size="sm"
-            disabled={!draftPrompt.trim() || generatingDraft || applyingDraft}
+            disabled={!canGenerateDraft || !draftPrompt.trim() || generatingDraft || applyingDraft}
             onClick={onGenerateDraft}
           >
             {generatingDraft ? t('manage.generatingDraft') : t('manage.generateDraft')}

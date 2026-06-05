@@ -21,6 +21,29 @@ const readyResource = {
   lastLoadedAt: 1,
 };
 
+const sessionRuntimeAddress = {
+  kind: 'native-runtime' as const,
+  capabilityId: 'session.prompt',
+  runtimeAdapterId: 'openclaw',
+  runtimeInstanceId: 'local',
+  agentId: 'main',
+};
+
+function markSessionRuntimeReady() {
+  useChatStore.setState({
+    activeSessionRuntime: {
+      status: 'ready',
+      error: null,
+      endpointId: 'openclaw-local',
+      protocolId: 'openclaw-v4',
+      runtimeAdapterId: 'openclaw',
+      runtimeInstanceId: 'local',
+      agentId: 'main',
+      sessionPromptAddress: sessionRuntimeAddress,
+    },
+  } as never);
+}
+
 function buildSessionRecord(overrides?: Partial<ReturnType<typeof createEmptySessionRecord>> & {
   sessionKey?: string;
   messages?: Array<{ id?: string; role: 'user' | 'assistant' | 'system'; content: unknown; timestamp?: number }>;
@@ -77,6 +100,9 @@ describe('useChatInit', () => {
         sessionCatalogStatus: readyResource,
       } as never);
     });
+    const bootstrapSessionRuntime = vi.fn().mockImplementation(async () => {
+      markSessionRuntimeReady();
+    });
     const loadHistory = vi.fn().mockResolvedValue(undefined);
 
     const { unmount } = renderHook(() => useChatInit({
@@ -86,6 +112,7 @@ describe('useChatInit', () => {
       navigate: vi.fn(),
       switchSession: vi.fn(),
       openAgentConversation: vi.fn(),
+      bootstrapSessionRuntime,
       loadAgents,
       loadSessions,
       loadHistory,
@@ -96,8 +123,10 @@ describe('useChatInit', () => {
       await Promise.resolve();
     });
 
+    expect(bootstrapSessionRuntime).toHaveBeenCalledTimes(1);
     expect(loadAgents).toHaveBeenCalledTimes(1);
     expect(loadSessions).toHaveBeenCalledTimes(1);
+    expect(bootstrapSessionRuntime.mock.invocationCallOrder[0]).toBeLessThan(loadSessions.mock.invocationCallOrder[0]);
 
     await act(async () => {
       resolveAgentsLoad?.();
@@ -156,6 +185,9 @@ describe('useChatInit', () => {
         navigate: vi.fn(),
         switchSession: vi.fn(),
         openAgentConversation: vi.fn(),
+        bootstrapSessionRuntime: vi.fn().mockImplementation(async () => {
+          markSessionRuntimeReady();
+        }),
         loadAgents,
         loadSessions,
         loadHistory: vi.fn().mockResolvedValue(undefined),
@@ -182,6 +214,45 @@ describe('useChatInit', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it('bootstrap 未得到 ready runtime 时，不加载会话目录或历史', async () => {
+    const loadAgents = vi.fn().mockResolvedValue(undefined);
+    const loadSessions = vi.fn().mockResolvedValue(undefined);
+    const loadHistory = vi.fn().mockResolvedValue(undefined);
+
+    renderHook(() => useChatInit({
+      isActive: true,
+      isGatewayRunning: true,
+      locationSearch: '',
+      navigate: vi.fn(),
+      switchSession: vi.fn(),
+      openAgentConversation: vi.fn(),
+      bootstrapSessionRuntime: vi.fn().mockImplementation(async () => {
+        useChatStore.setState({
+          activeSessionRuntime: {
+            status: 'error',
+            error: 'No session runtime endpoint is available',
+            endpointId: null,
+            protocolId: null,
+            agentId: null,
+            sessionPromptAddress: null,
+          },
+        } as never);
+      }),
+      loadAgents,
+      loadSessions,
+      loadHistory,
+      cleanupEmptySession: vi.fn(),
+    }));
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(loadAgents).not.toHaveBeenCalled();
+    expect(loadSessions).not.toHaveBeenCalled();
+    expect(loadHistory).not.toHaveBeenCalled();
   });
 
   it('当前会话已有 viewport 快照时，初始化走 quiet refresh，不回退到阻塞加载', async () => {
@@ -214,6 +285,9 @@ describe('useChatInit', () => {
       navigate: vi.fn(),
       switchSession: vi.fn(),
       openAgentConversation: vi.fn(),
+      bootstrapSessionRuntime: vi.fn().mockImplementation(async () => {
+        markSessionRuntimeReady();
+      }),
       loadAgents: vi.fn().mockResolvedValue(undefined),
       loadSessions: vi.fn().mockResolvedValue(undefined),
       loadHistory,

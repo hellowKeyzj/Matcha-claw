@@ -2,12 +2,25 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   gatewayClientRpcMock,
   hostApiFetchMock,
+  hostCapabilityExecuteMock,
   resetGatewayClientMocks,
 } from './helpers/mock-gateway-client';
 
 import { useSubagentsStore } from '@/stores/subagents';
+import type { RuntimeAddress } from '../../runtime-host/shared/runtime-address';
 
 const AVATAR_STORAGE_KEY = 'matchaclaw-subagent-avatar-presentations';
+const subagentManagementAddress: RuntimeAddress = {
+  kind: 'native-runtime',
+  capabilityId: 'subagent.management',
+  runtimeAdapterId: 'openclaw',
+  runtimeInstanceId: 'local',
+  agentId: 'default',
+};
+const skillManagementAddress: RuntimeAddress = {
+  ...subagentManagementAddress,
+  capabilityId: 'skill.management',
+};
 
 describe('subagents store', () => {
   beforeEach(() => {
@@ -83,12 +96,7 @@ describe('subagents store', () => {
     const configGetTask = new Promise((resolve) => {
       resolveConfigGet = resolve;
     });
-    hostApiFetchMock.mockImplementation(async (path) => {
-      if (path === '/api/provider-models/selectable') {
-        return { models: [] };
-      }
-      return {};
-    });
+    hostCapabilityExecuteMock.mockImplementation(async () => ({ models: [] }));
     rpc.mockImplementation(async (method) => {
       if (method === 'agents.list') {
         return {
@@ -106,7 +114,7 @@ describe('subagents store', () => {
     });
 
     const loadAgentsTask = useSubagentsStore.getState().loadAgents();
-    const loadModelsTask = useSubagentsStore.getState().loadAvailableModels();
+    const loadModelsTask = useSubagentsStore.getState().loadAvailableModels(subagentManagementAddress);
     resolveConfigGet?.({
       success: true,
       result: {
@@ -125,7 +133,11 @@ describe('subagents store', () => {
     );
     expect(configGetCalls).toHaveLength(1);
     expect(rpc).not.toHaveBeenCalledWith('models.list', {}, undefined);
-    expect(hostApiFetchMock).toHaveBeenCalledWith('/api/provider-models/selectable', undefined);
+    expect(hostCapabilityExecuteMock).toHaveBeenCalledWith(expect.objectContaining({
+      id: 'model.provider',
+      operationId: 'providerModels.listSelectable',
+      runtimeAddress: subagentManagementAddress,
+    }), undefined);
     expect(hostApiFetchMock).not.toHaveBeenCalledWith('/api/provider-models', undefined);
     expect(hostApiFetchMock).not.toHaveBeenCalledWith('/api/provider-accounts', undefined);
   });
@@ -316,23 +328,26 @@ describe('subagents store', () => {
         },
       ],
     });
-    hostApiFetchMock.mockImplementation(async (path, init) => {
-      if (path === '/api/skills/bundles/export') {
-        expect(JSON.parse(String(init?.body))).toEqual({
+    hostCapabilityExecuteMock.mockImplementation(async (payload) => {
+      expect(payload).toEqual(expect.objectContaining({
+        id: 'skill.management',
+        operationId: 'skills.exportBundles',
+        runtimeAddress: skillManagementAddress,
+        input: expect.objectContaining({
           skillKeys: ['web-search', 'feishu-doc'],
-        });
-        return [
-          {
-            skillKey: 'web-search',
-            files: [{ path: 'SKILL.md', content: 'web skill' }],
-          },
-          {
-            skillKey: 'feishu-doc',
-            files: [{ path: 'SKILL.md', content: 'feishu skill' }],
-          },
-        ];
-      }
-      throw new Error(`Unexpected host api path in test: ${path}`);
+          runtimeAddress: skillManagementAddress,
+        }),
+      }));
+      return [
+        {
+          skillKey: 'web-search',
+          files: [{ path: 'SKILL.md', content: 'web skill' }],
+        },
+        {
+          skillKey: 'feishu-doc',
+          files: [{ path: 'SKILL.md', content: 'feishu skill' }],
+        },
+      ];
     });
     rpc.mockImplementation(async (method, params) => {
       if (method === 'agents.files.get') {
@@ -349,7 +364,7 @@ describe('subagents store', () => {
       throw new Error(`Unexpected rpc method in test: ${String(method)}`);
     });
 
-    const exported = await useSubagentsStore.getState().exportAgentConfig('writer');
+    const exported = await useSubagentsStore.getState().exportAgentConfig('writer', subagentManagementAddress);
 
     expect(exported).toEqual({
       schema: 'matchaclaw.agent-config',
@@ -386,19 +401,22 @@ describe('subagents store', () => {
         { id: 'main', name: 'Main', workspace: '/home/dev/.openclaw/workspace', isDefault: true },
       ],
     });
-    hostApiFetchMock.mockImplementation(async (path, init) => {
-      if (path === '/api/skills/bundles/import') {
-        expect(JSON.parse(String(init?.body))).toEqual({
+    hostCapabilityExecuteMock.mockImplementation(async (payload) => {
+      expect(payload).toEqual(expect.objectContaining({
+        id: 'skill.management',
+        operationId: 'skills.importBundles',
+        runtimeAddress: skillManagementAddress,
+        input: expect.objectContaining({
+          runtimeAddress: skillManagementAddress,
           skillBundles: [
             {
               skillKey: 'web-search',
               files: [{ path: 'SKILL.md', content: 'web skill' }],
             },
           ],
-        });
-        return { ok: true, installed: ['web-search'] };
-      }
-      throw new Error(`Unexpected host api path in test: ${path}`);
+        }),
+      }));
+      return { ok: true, installed: ['web-search'] };
     });
     rpc.mockImplementation(async (method, params) => {
       if (method === 'agents.create') {
@@ -461,7 +479,7 @@ describe('subagents store', () => {
           'SOUL.md': 'soul content',
         },
       },
-    });
+    }, subagentManagementAddress);
 
     expect(result).toEqual({ agentId: 'writer' });
     expect(rpc).toHaveBeenCalledWith(
@@ -479,34 +497,29 @@ describe('subagents store', () => {
   });
 
   it('loadAvailableModels 从模型清单读取可选模型', async () => {
-    hostApiFetchMock.mockImplementation(async (path) => {
-      if (path === '/api/provider-models/selectable') {
-        return {
-          models: [
-            {
-              credentialId: 'custom-dd749b2e-4807-4e78-bb50-7f7e3ae81d7a',
-              providerKey: 'custom-dd749b2e',
-              runtimeModelRef: 'custom-dd749b2e/gpt-5.4',
-              label: '自定义',
-              modelId: 'gpt-5.4',
-              capabilities: ['chat'],
-              contextWindow: 200000,
-            },
-            {
-              credentialId: 'ark',
-              providerKey: 'ark',
-              runtimeModelRef: 'ark/ark-code-latest',
-              label: 'Ark Code',
-              modelId: 'ark-code-latest',
-              capabilities: ['chat'],
-            },
-          ],
-        };
-      }
-      return {};
-    });
+    hostCapabilityExecuteMock.mockImplementation(async () => ({
+      models: [
+        {
+          credentialId: 'custom-dd749b2e-4807-4e78-bb50-7f7e3ae81d7a',
+          providerKey: 'custom-dd749b2e',
+          runtimeModelRef: 'custom-dd749b2e/gpt-5.4',
+          label: '自定义',
+          modelId: 'gpt-5.4',
+          capabilities: ['chat'],
+          contextWindow: 200000,
+        },
+        {
+          credentialId: 'ark',
+          providerKey: 'ark',
+          runtimeModelRef: 'ark/ark-code-latest',
+          label: 'Ark Code',
+          modelId: 'ark-code-latest',
+          capabilities: ['chat'],
+        },
+      ],
+    }));
 
-    await useSubagentsStore.getState().loadAvailableModels();
+    await useSubagentsStore.getState().loadAvailableModels(subagentManagementAddress);
 
     expect(useSubagentsStore.getState().availableModels).toEqual(expect.arrayContaining([
       expect.objectContaining({
@@ -534,49 +547,38 @@ describe('subagents store', () => {
   });
 
   it('loadAvailableModels 不从 provider store snapshot 推断模型', async () => {
-    hostApiFetchMock.mockImplementation(async (path) => {
-      if (path === '/api/provider-models/selectable') {
-        return { models: [] };
-      }
-      return {};
-    });
+    hostCapabilityExecuteMock.mockImplementation(async () => ({ models: [] }));
 
-    await useSubagentsStore.getState().loadAvailableModels();
+    await useSubagentsStore.getState().loadAvailableModels(subagentManagementAddress);
 
     expect(useSubagentsStore.getState().availableModels).toEqual([]);
-    expect(hostApiFetchMock).toHaveBeenCalledWith('/api/provider-models/selectable', undefined);
+    expect(hostCapabilityExecuteMock).toHaveBeenCalledWith(expect.objectContaining({
+      id: 'model.provider',
+      operationId: 'providerModels.listSelectable',
+      runtimeAddress: subagentManagementAddress,
+    }), undefined);
   });
 
   it('loadAvailableModels 不再从 browser oauth 凭证推断模型', async () => {
-    hostApiFetchMock.mockImplementation(async (path) => {
-      if (path === '/api/provider-models/selectable') {
-        return { models: [] };
-      }
-      return {};
-    });
+    hostCapabilityExecuteMock.mockImplementation(async () => ({ models: [] }));
 
-    await useSubagentsStore.getState().loadAvailableModels();
+    await useSubagentsStore.getState().loadAvailableModels(subagentManagementAddress);
 
     expect(useSubagentsStore.getState().availableModels).toEqual([]);
   });
 
   it('模型清单为空时，loadAvailableModels 返回空列表', async () => {
-    hostApiFetchMock.mockImplementation(async (path) => {
-      if (path === '/api/provider-models/selectable') {
-        return { models: [] };
-      }
-      return {};
-    });
+    hostCapabilityExecuteMock.mockImplementation(async () => ({ models: [] }));
 
-    await useSubagentsStore.getState().loadAvailableModels();
+    await useSubagentsStore.getState().loadAvailableModels(subagentManagementAddress);
 
     expect(useSubagentsStore.getState().availableModels).toEqual([]);
   });
 
   it('loadAvailableModels 在模型清单读取失败时安全降级为空', async () => {
-    hostApiFetchMock.mockRejectedValueOnce(new Error('provider models failed'));
+    hostCapabilityExecuteMock.mockRejectedValueOnce(new Error('provider models failed'));
 
-    await useSubagentsStore.getState().loadAvailableModels();
+    await useSubagentsStore.getState().loadAvailableModels(subagentManagementAddress);
 
     expect(useSubagentsStore.getState().availableModels).toEqual([]);
   });
@@ -1081,7 +1083,7 @@ describe('subagents store', () => {
       throw new Error(`Unexpected rpc method in test: ${String(method)}`);
     });
 
-    await useSubagentsStore.getState().deleteAgent('ghost-delete-003');
+    await useSubagentsStore.getState().deleteAgent('ghost-delete-003', subagentManagementAddress);
     expect(useSubagentsStore.getState().agents.map((agent) => agent.id)).toEqual(['main']);
 
     await useSubagentsStore.getState().loadAgents();
@@ -1122,7 +1124,7 @@ describe('subagents store', () => {
       throw new Error(`Unexpected rpc method in test: ${String(method)}`);
     });
 
-    await useSubagentsStore.getState().deleteAgent('ghost-delete-001');
+    await useSubagentsStore.getState().deleteAgent('ghost-delete-001', subagentManagementAddress);
 
     const agents = useSubagentsStore.getState().agents;
     expect(agents.map((item) => item.id)).toEqual(['main']);

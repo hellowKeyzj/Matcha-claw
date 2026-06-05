@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { SessionOperationCoordinator } from '../../runtime-host/application/sessions/session-operation-coordinator';
+import { SessionOperationResultWorkflow } from '../../runtime-host/application/workflows/session-operation/session-operation-result-workflow';
 import type { SessionStateSnapshot } from '../../runtime-host/shared/session-adapter-types';
 
 function createSnapshot(updatedAt: number): SessionStateSnapshot {
@@ -44,7 +45,7 @@ function createSnapshot(updatedAt: number): SessionStateSnapshot {
 
 describe('SessionOperationCoordinator', () => {
   it('records the atomic completion snapshot for the latest session operation', async () => {
-    const coordinator = new SessionOperationCoordinator();
+    const coordinator = new SessionOperationCoordinator(new SessionOperationResultWorkflow());
     const snapshot = createSnapshot(2);
 
     await coordinator.run('agent:main:main', 'prompt', async () => ({
@@ -61,7 +62,7 @@ describe('SessionOperationCoordinator', () => {
   });
 
   it('records raw snapshot results from background session operations', async () => {
-    const coordinator = new SessionOperationCoordinator();
+    const coordinator = new SessionOperationCoordinator(new SessionOperationResultWorkflow());
     const snapshot = createSnapshot(3);
 
     await coordinator.run('agent:main:main', 'reconcile', async () => snapshot);

@@ -1,4 +1,5 @@
-import { hostApiFetch } from '@/lib/host-api';
+import { hostCapabilityExecute } from '@/lib/host-api';
+import type { RuntimeAddress } from '../../runtime-host/shared/runtime-address';
 
 export type CapabilityKey =
   | 'chat'
@@ -20,6 +21,24 @@ export interface ModelRoute {
 }
 
 export type CapabilityRouting = Partial<Record<CapabilityKey, ModelRoute>>;
+
+const MODEL_PROVIDER_CAPABILITY_ID = 'model.provider';
+
+async function modelProviderCapabilityExecute<TResult>(
+  operationId: string,
+  runtimeAddress: RuntimeAddress,
+  input: Record<string, unknown> = {},
+): Promise<TResult> {
+  return await hostCapabilityExecute<TResult>({
+    id: MODEL_PROVIDER_CAPABILITY_ID,
+    operationId,
+    runtimeAddress,
+    input: {
+      ...input,
+      runtimeAddress,
+    },
+  });
+}
 
 export const CAPABILITY_KEYS: readonly Exclude<CapabilityKey, 'tts'>[] = [
   'chat',
@@ -86,19 +105,21 @@ export function parseModelRouteRefString(raw: string): ModelRouteRef | null {
   return { credentialId, modelId };
 }
 
-export async function fetchCapabilityRouting(): Promise<CapabilityRouting> {
-  return normalizeCapabilityRouting(await hostApiFetch<unknown>('/api/capability-routing'));
+export async function fetchCapabilityRouting(runtimeAddress: RuntimeAddress): Promise<CapabilityRouting> {
+  return normalizeCapabilityRouting(await modelProviderCapabilityExecute<unknown>(
+    'capabilityRouting.read',
+    runtimeAddress,
+  ));
 }
 
 export async function persistCapabilityRouting(
   routing: CapabilityRouting,
+  runtimeAddress: RuntimeAddress,
 ): Promise<{ success: boolean; routing: CapabilityRouting; error?: string }> {
-  const result = await hostApiFetch<{ success?: boolean; routing?: unknown; error?: string }>(
-    '/api/capability-routing',
-    {
-      method: 'PUT',
-      body: JSON.stringify(routing),
-    },
+  const result = await modelProviderCapabilityExecute<{ success?: boolean; routing?: unknown; error?: string }>(
+    'capabilityRouting.write',
+    runtimeAddress,
+    routing,
   );
   return {
     success: result?.success === true,

@@ -1,5 +1,6 @@
 import type { GatewayRpcInvoker } from '@/services/openclaw/types';
 import { fetchLatestAssistantSnapshot } from '@/services/runtime/session-runtime';
+import type { RuntimeAddress } from '../../../runtime-host/shared/runtime-address';
 
 interface AgentRunResult {
   runId?: unknown;
@@ -31,14 +32,28 @@ export interface WaitAgentRunInput {
 export interface WaitAgentRunWithProgressInput {
   runId: string;
   sessionKey: string;
+  runtimeAddress: RuntimeAddress;
   waitSliceMs: number;
   idleTimeoutMs: number;
   rpcTimeoutBufferMs: number;
   logPrefix?: string;
+  waitSlice?: (input: {
+    runtimeAddress: RuntimeAddress;
+    runId: string;
+    waitSliceMs: number;
+    rpcTimeoutBufferMs: number;
+  }) => Promise<AgentWaitResult>;
 }
 
 const AGENT_WAIT_SUCCESS_STATUSES = new Set(['', 'ok', 'completed', 'done', 'success']);
 const AGENT_WAIT_ERROR_STATUSES = new Set(['error', 'failed', 'aborted']);
+
+function readGatewayRpc(rpc: GatewayRpcInvoker | null): GatewayRpcInvoker {
+  if (!rpc) {
+    throw new Error('agent.wait gateway rpc is required when waitSlice is not provided');
+  }
+  return rpc;
+}
 
 function buildSnapshotFingerprint(input: { text: string; toolNames: string[] }): string {
   const normalizedTools = input.toolNames.map((item) => item.trim()).filter((item) => item.length > 0);
@@ -132,7 +147,7 @@ export async function waitAgentRun(
 }
 
 export async function waitAgentRunWithProgress(
-  rpc: GatewayRpcInvoker,
+  rpc: GatewayRpcInvoker | null,
   input: WaitAgentRunWithProgressInput,
 ): Promise<AgentWaitResult> {
   const {
@@ -150,7 +165,7 @@ export async function waitAgentRunWithProgress(
   let fingerprint = '';
 
   try {
-    const initial = await fetchLatestAssistantSnapshot({ sessionKey, limit: 20 });
+    const initial = await fetchLatestAssistantSnapshot({ sessionKey, runtimeAddress: input.runtimeAddress, limit: 20 });
     fingerprint = buildSnapshotFingerprint(initial);
     if (fingerprint) {
       lastProgressAt = Date.now();
@@ -173,7 +188,14 @@ export async function waitAgentRunWithProgress(
 
     let result: AgentWaitResult;
     try {
-      result = await rpc<AgentWaitResult>('agent.wait', { runId, timeoutMs: waitSliceMs }, rpcTimeoutMs);
+      result = input.waitSlice
+        ? await input.waitSlice({
+          runtimeAddress: input.runtimeAddress,
+          runId,
+          waitSliceMs,
+          rpcTimeoutBufferMs,
+        })
+        : await readGatewayRpc(rpc)<AgentWaitResult>('agent.wait', { runId, timeoutMs: waitSliceMs }, rpcTimeoutMs);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       if (message.includes('RPC timeout: agent.wait')) {
@@ -188,7 +210,7 @@ export async function waitAgentRunWithProgress(
       }
 
       try {
-        const snapshot = await fetchLatestAssistantSnapshot({ sessionKey, limit: 20 });
+        const snapshot = await fetchLatestAssistantSnapshot({ sessionKey, runtimeAddress: input.runtimeAddress, limit: 20 });
         const nextFingerprint = buildSnapshotFingerprint(snapshot);
         if (nextFingerprint !== fingerprint) {
           fingerprint = nextFingerprint;
@@ -214,7 +236,7 @@ export async function waitAgentRunWithProgress(
     }
 
     try {
-      const snapshot = await fetchLatestAssistantSnapshot({ sessionKey, limit: 20 });
+      const snapshot = await fetchLatestAssistantSnapshot({ sessionKey, runtimeAddress: input.runtimeAddress, limit: 20 });
       const nextFingerprint = buildSnapshotFingerprint(snapshot);
       if (nextFingerprint !== fingerprint) {
         fingerprint = nextFingerprint;

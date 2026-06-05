@@ -30,6 +30,7 @@ import type { ProviderModel } from '@/lib/provider-model-catalog';
 import { useProviderStore } from '@/stores/providers';
 import { cn } from '@/lib/utils';
 import { useTranslation } from 'react-i18next';
+import type { RuntimeAddress } from '../../../runtime-host/shared/runtime-address';
 
 interface CapabilityRowState {
   primary: string;
@@ -97,10 +98,11 @@ function CapabilityRow(props: {
   initial: ModelRoute | undefined;
   modelOptions: readonly ModelOption[];
   saving: boolean;
+  disabled: boolean;
   onSave: (route: ModelRoute | undefined) => Promise<void>;
 }): ReactNode {
   const { t } = useTranslation('settings');
-  const { capability, title, initial, modelOptions, saving, onSave } = props;
+  const { capability, title, initial, modelOptions, saving, disabled, onSave } = props;
   const availableRefs = useMemo(() => new Set(modelOptions.map((option) => option.value)), [modelOptions]);
   const baseline = useMemo(() => routeToRowState(initial, availableRefs), [initial, availableRefs]);
   const baselineKey = `${baseline.primary}|${baseline.fallbacks.join('\n')}|${baseline.timeoutMs}`;
@@ -113,6 +115,7 @@ function CapabilityRow(props: {
       hasInitial={Boolean(initial?.fallbacks.length || initial?.timeoutMs)}
       modelOptions={modelOptions}
       saving={saving}
+      disabled={disabled}
       onSave={onSave}
       t={t}
     />
@@ -126,12 +129,13 @@ interface CapabilityRowEditorProps {
   hasInitial: boolean;
   modelOptions: readonly ModelOption[];
   saving: boolean;
+  disabled: boolean;
   onSave: (route: ModelRoute | undefined) => Promise<void>;
   t: ReturnType<typeof useTranslation>[0];
 }
 
 function CapabilityRowEditor(props: CapabilityRowEditorProps): ReactNode {
-  const { capability, title, baseline, hasInitial, modelOptions, saving, onSave, t } = props;
+  const { capability, title, baseline, hasInitial, modelOptions, saving, disabled, onSave, t } = props;
   const [row, setRow] = useState<CapabilityRowState>(baseline);
   const [advancedOpen, setAdvancedOpen] = useState<boolean>(hasInitial);
   const [fallbackCandidate, setFallbackCandidate] = useState('');
@@ -231,7 +235,7 @@ function CapabilityRowEditor(props: CapabilityRowEditorProps): ReactNode {
                 fallbacks: prev.fallbacks.filter((fallback) => fallback !== primary),
               }));
             }}
-            disabled={saving || modelOptions.length === 0}
+            disabled={saving || disabled || modelOptions.length === 0}
             className="h-9 rounded-md bg-background text-sm"
           >
             <option value="">{t('capabilityRouting.noModelOption')}</option>
@@ -251,7 +255,7 @@ function CapabilityRowEditor(props: CapabilityRowEditorProps): ReactNode {
               variant="ghost"
               size="sm"
               onClick={handleClear}
-              disabled={saving}
+              disabled={saving || disabled}
               className="h-8 px-2.5"
             >
               {t('capabilityRouting.clear')}
@@ -272,7 +276,7 @@ function CapabilityRowEditor(props: CapabilityRowEditorProps): ReactNode {
           <Button
             size="icon"
             onClick={handleSave}
-            disabled={saving || !dirty}
+            disabled={saving || disabled || !dirty}
             className="h-8 w-8"
             aria-label={t('capabilityRouting.save')}
             title={t('capabilityRouting.save')}
@@ -293,7 +297,7 @@ function CapabilityRowEditor(props: CapabilityRowEditorProps): ReactNode {
                 id={`capability-${capability}-fallback-add`}
                 value={fallbackCandidate}
                 onChange={(event) => setFallbackCandidate(event.target.value)}
-                disabled={saving || availableFallbackOptions.length === 0}
+                disabled={saving || disabled || availableFallbackOptions.length === 0}
                 className="h-9 min-w-64 flex-1 rounded-md bg-background text-sm"
               >
                 <option value="">{t('capabilityRouting.fallbackSelectPlaceholder')}</option>
@@ -308,7 +312,7 @@ function CapabilityRowEditor(props: CapabilityRowEditorProps): ReactNode {
                 variant="outline"
                 size="sm"
                 onClick={handleAddFallback}
-                disabled={saving || !fallbackCandidate}
+                disabled={saving || disabled || !fallbackCandidate}
                 className="h-9"
               >
                 <Plus className="mr-2 h-4 w-4" />
@@ -326,7 +330,7 @@ function CapabilityRowEditor(props: CapabilityRowEditorProps): ReactNode {
                       size="icon"
                       className="h-8 w-8"
                       onClick={() => handleMoveFallback(index, -1)}
-                      disabled={saving || index === 0}
+                      disabled={saving || disabled || index === 0}
                       aria-label={t('capabilityRouting.moveFallbackUp')}
                       title={t('capabilityRouting.moveFallbackUp')}
                     >
@@ -338,7 +342,7 @@ function CapabilityRowEditor(props: CapabilityRowEditorProps): ReactNode {
                       size="icon"
                       className="h-8 w-8"
                       onClick={() => handleMoveFallback(index, 1)}
-                      disabled={saving || index === row.fallbacks.length - 1}
+                      disabled={saving || disabled || index === row.fallbacks.length - 1}
                       aria-label={t('capabilityRouting.moveFallbackDown')}
                       title={t('capabilityRouting.moveFallbackDown')}
                     >
@@ -350,7 +354,7 @@ function CapabilityRowEditor(props: CapabilityRowEditorProps): ReactNode {
                       size="icon"
                       className="h-8 w-8 text-muted-foreground hover:text-destructive"
                       onClick={() => handleRemoveFallback(index)}
-                      disabled={saving}
+                      disabled={saving || disabled}
                       aria-label={t('capabilityRouting.removeFallback')}
                       title={t('capabilityRouting.removeFallback')}
                     >
@@ -371,7 +375,7 @@ function CapabilityRowEditor(props: CapabilityRowEditorProps): ReactNode {
               onChange={(event) => setRow((prev) => ({ ...prev, timeoutMs: event.target.value }))}
               placeholder="180000"
               spellCheck={false}
-              disabled={saving}
+              disabled={saving || disabled}
               className="h-9 rounded-md bg-background text-sm"
             />
           </div>
@@ -383,7 +387,7 @@ function CapabilityRowEditor(props: CapabilityRowEditorProps): ReactNode {
   );
 }
 
-export function MediaCapabilitiesPanel() {
+export function MediaCapabilitiesPanel({ runtimeAddress }: { runtimeAddress: RuntimeAddress | null }) {
   const { t } = useTranslation('settings');
   const [open, setOpen] = useState(false);
   const routing = useCapabilityRoutingStore((state) => state.routing);
@@ -403,9 +407,12 @@ export function MediaCapabilitiesPanel() {
   ), [credentials]);
 
   useEffect(() => {
-    void refresh();
-    void refreshModelCatalog();
-  }, [refresh, refreshModelCatalog]);
+    if (!runtimeAddress) {
+      return;
+    }
+    void refresh(runtimeAddress);
+    void refreshModelCatalog(runtimeAddress);
+  }, [refresh, refreshModelCatalog, runtimeAddress]);
 
   const initialLoading = (loading && !ready) || (modelCatalogLoading && !modelCatalogReady);
 
@@ -426,8 +433,11 @@ export function MediaCapabilitiesPanel() {
             variant="outline"
             size="sm"
             onClick={() => {
-              void refresh();
-              void refreshModelCatalog();
+              if (!runtimeAddress) {
+                return;
+              }
+              void refresh(runtimeAddress);
+              void refreshModelCatalog(runtimeAddress);
             }}
             disabled={loading || modelCatalogLoading}
           >
@@ -456,7 +466,8 @@ export function MediaCapabilitiesPanel() {
                 initial={routing[capability]}
                 modelOptions={buildModelOptions(models, capability, credentialLabels)}
                 saving={saving}
-                onSave={(route) => setRoute(capability, route)}
+                disabled={!runtimeAddress}
+                onSave={(route) => runtimeAddress ? setRoute(capability, route, runtimeAddress) : Promise.resolve()}
               />
             ))}
             <CapabilityRow
@@ -465,7 +476,8 @@ export function MediaCapabilitiesPanel() {
               initial={routing.tts}
               modelOptions={buildModelOptions(models, 'tts', credentialLabels)}
               saving={saving}
-              onSave={(route) => setRoute('tts', route)}
+              disabled={!runtimeAddress}
+              onSave={(route) => runtimeAddress ? setRoute('tts', route, runtimeAddress) : Promise.resolve()}
             />
           </div>
         )}

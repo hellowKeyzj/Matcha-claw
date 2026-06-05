@@ -9,12 +9,10 @@ import {
   DEFAULT_AGENT_AVATAR_STYLE,
   type AgentAvatarStyle,
 } from '@/lib/agent-avatar';
-import { hostOpenClawGetConfigDir, hostOpenClawGetWorkspaceDir } from '@/lib/host-api';
 import { Textarea } from '@/components/ui/textarea';
 import { cn } from '@/lib/utils';
 import {
   buildSubagentWorkspacePath,
-  buildWorkspaceSubagentsRootFromConfigDir,
   hasSubagentNameConflict,
 } from '@/features/subagents/domain/workspace';
 import type { ModelCatalogEntry, SubagentSummary } from '@/types/subagent';
@@ -70,7 +68,6 @@ export function SubagentFormDialog({
   const { t } = useTranslation('subagents');
   const [values, setValues] = useState<SubagentFormValues>(EMPTY_VALUES);
   const [submitting, setSubmitting] = useState(false);
-  const [fallbackWorkspaceRoot, setFallbackWorkspaceRoot] = useState<string | undefined>(undefined);
   const [avatarPickerPage, setAvatarPickerPage] = useState(0);
   const basicInfoLocked = mode === 'edit' && lockBasicInfo;
   const resolvedModelOptions = useMemo(() => {
@@ -83,13 +80,11 @@ export function SubagentFormDialog({
     return Array.from(byId.values());
   }, [modelOptions]);
   const buildWorkspaceValue = useCallback(
-    (name: string) =>
-      buildSubagentWorkspacePath({
-        name,
-        agents: existingAgents,
-        fallbackRoot: fallbackWorkspaceRoot,
-      }),
-    [existingAgents, fallbackWorkspaceRoot],
+    (name: string) => buildSubagentWorkspacePath({
+      name,
+      agents: existingAgents,
+    }) ?? '',
+    [existingAgents],
   );
 
   useEffect(() => {
@@ -153,34 +148,6 @@ export function SubagentFormDialog({
     if (!open || mode !== 'create') {
       return;
     }
-    let cancelled = false;
-    const loadFallbackWorkspaceRoot = async () => {
-      try {
-        const configDir = (await hostOpenClawGetConfigDir()).trim();
-        if (cancelled) {
-          return;
-        }
-        if (!configDir) {
-          setFallbackWorkspaceRoot(undefined);
-          return;
-        }
-        setFallbackWorkspaceRoot(buildWorkspaceSubagentsRootFromConfigDir(configDir));
-      } catch {
-        if (!cancelled) {
-          setFallbackWorkspaceRoot(undefined);
-        }
-      }
-    };
-    void loadFallbackWorkspaceRoot();
-    return () => {
-      cancelled = true;
-    };
-  }, [mode, open]);
-
-  useEffect(() => {
-    if (!open || mode !== 'create') {
-      return;
-    }
     setValues((prev) => {
       const nextWorkspace = buildWorkspaceValue(prev.name);
       if (nextWorkspace === prev.workspace) {
@@ -192,39 +159,6 @@ export function SubagentFormDialog({
       };
     });
   }, [buildWorkspaceValue, mode, open]);
-
-  useEffect(() => {
-    if (!open || mode !== 'edit' || !basicInfoLocked) {
-      return;
-    }
-    if (values.workspace.trim()) {
-      return;
-    }
-    let cancelled = false;
-    const loadMainWorkspace = async () => {
-      try {
-        const workspaceDir = (await hostOpenClawGetWorkspaceDir()).trim();
-        if (!workspaceDir || cancelled) {
-          return;
-        }
-        setValues((prev) => {
-          if (prev.workspace.trim()) {
-            return prev;
-          }
-          return {
-            ...prev,
-            workspace: workspaceDir,
-          };
-        });
-      } catch {
-        // best-effort fallback only
-      }
-    };
-    void loadMainWorkspace();
-    return () => {
-      cancelled = true;
-    };
-  }, [basicInfoLocked, mode, open, values.workspace]);
 
   useEffect(() => {
     if (!open || mode !== 'create' || values.model || modelOptions.length !== 1) {

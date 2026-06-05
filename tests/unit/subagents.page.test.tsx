@@ -7,6 +7,7 @@ import { useGatewayStore } from '@/stores/gateway';
 import { useSubagentsStore } from '@/stores/subagents';
 import i18n from '@/i18n';
 import { __resetSubagentTemplateCatalogCacheForTest } from '@/services/openclaw/subagent-template-catalog';
+import type { RuntimeAddress } from '../../runtime-host/shared/runtime-address';
 
 vi.mock('sonner', () => ({
   toast: {
@@ -21,6 +22,56 @@ function LocationProbe() {
   return <div data-testid="router-location">{`${location.pathname}${location.search}`}</div>;
 }
 
+const subagentManagementAddress: RuntimeAddress = {
+  kind: 'native-runtime',
+  capabilityId: 'subagent.management',
+  runtimeAdapterId: 'openclaw',
+  runtimeInstanceId: 'local',
+  agentId: 'default',
+};
+const modelProviderAddress: RuntimeAddress = {
+  ...subagentManagementAddress,
+  capabilityId: 'model.provider',
+};
+
+function buildCapabilitiesListEnvelope() {
+  return {
+    ok: true,
+    data: {
+      status: 200,
+      ok: true,
+      json: {
+        capabilities: [
+          {
+            id: 'subagent.management',
+            kind: 'subagent.management',
+            address: subagentManagementAddress,
+            runtimeAdapterId: 'openclaw',
+            runtimeInstanceId: 'local',
+            targetAgentIds: ['default'],
+            supportLevel: 'native',
+            availability: 'available',
+            operations: [],
+            policyScope: 'subagent.management',
+          },
+          {
+            id: 'model.provider',
+            kind: 'model.provider',
+            address: modelProviderAddress,
+            runtimeAdapterId: 'openclaw',
+            runtimeInstanceId: 'local',
+            targetAgentIds: ['default'],
+            supportLevel: 'native',
+            availability: 'available',
+            operations: [],
+            policyScope: 'model.provider',
+          },
+        ],
+      },
+    },
+  };
+}
+
 function renderSubagentsPage(initialEntries: string[] = ['/subagents']) {
   return render(
     <MemoryRouter initialEntries={initialEntries}>
@@ -28,6 +79,18 @@ function renderSubagentsPage(initialEntries: string[] = ['/subagents']) {
       <SubAgents />
     </MemoryRouter>,
   );
+}
+
+async function openCreateDialog(): Promise<void> {
+  const button = await screen.findByRole('button', { name: 'New Subagent' });
+  await waitFor(() => expect(button).toBeEnabled());
+  fireEvent.click(button);
+}
+
+async function openEditDialog(agentId: string): Promise<void> {
+  const button = await screen.findByRole('button', { name: `Edit ${agentId}` });
+  await waitFor(() => expect(button).toBeEnabled());
+  fireEvent.click(button);
 }
 
 describe('subagents page', () => {
@@ -96,6 +159,9 @@ describe('subagents page', () => {
           },
         };
       }
+      if (channel === 'hostapi:fetch' && path === '/api/capabilities/list') {
+        return buildCapabilitiesListEnvelope();
+      }
       return undefined;
     });
     createAgent.mockClear();
@@ -116,12 +182,12 @@ describe('subagents page', () => {
     i18n.changeLanguage('en');
     useGatewayStore.setState({
       status: {
-        processState: 'stopped',
+        processState: 'running',
         port: 18789,
-        gatewayReady: false,
-        healthSummary: 'unresponsive',
-        transportState: 'disconnected',
-        portReachable: false,
+        gatewayReady: true,
+        healthSummary: 'healthy',
+        transportState: 'connected',
+        portReachable: true,
         diagnostics: {
           consecutiveHeartbeatMisses: 0,
           consecutiveRpcFailures: 0,
@@ -224,20 +290,50 @@ describe('subagents page', () => {
     expect(screen.getByTestId('agent-avatar-agent-alpha')).toBeInTheDocument();
   });
 
-  it('挂载时先加载模型选项，等待网关 ready 后再加载 agents', () => {
+  it('挂载时等待网关 ready 后再加载模型和 agents', () => {
+    useGatewayStore.setState({
+      status: {
+        processState: 'stopped',
+        port: 18789,
+        gatewayReady: false,
+        healthSummary: 'unresponsive',
+        transportState: 'disconnected',
+        portReachable: false,
+        diagnostics: {
+          consecutiveHeartbeatMisses: 0,
+          consecutiveRpcFailures: 0,
+        },
+        updatedAt: 1,
+      },
+    });
     useSubagentsStore.setState({
       agents: [],
       availableModels: [],
     });
     renderSubagentsPage();
     expect(loadAgents).not.toHaveBeenCalled();
-    expect(loadAvailableModels).toHaveBeenCalledTimes(1);
+    expect(loadAvailableModels).not.toHaveBeenCalled();
   });
 
   it('网关恢复到 running 后会自动重载数据', async () => {
+    useGatewayStore.setState({
+      status: {
+        processState: 'stopped',
+        port: 18789,
+        gatewayReady: false,
+        healthSummary: 'unresponsive',
+        transportState: 'disconnected',
+        portReachable: false,
+        diagnostics: {
+          consecutiveHeartbeatMisses: 0,
+          consecutiveRpcFailures: 0,
+        },
+        updatedAt: 1,
+      },
+    });
     renderSubagentsPage();
     expect(loadAgents).not.toHaveBeenCalled();
-    expect(loadAvailableModels).toHaveBeenCalledTimes(1);
+    expect(loadAvailableModels).not.toHaveBeenCalled();
 
     act(() => {
       useGatewayStore.setState({
@@ -276,10 +372,10 @@ describe('subagents page', () => {
     expect(screen.getByTestId('router-location')).toHaveTextContent('/providers');
   });
 
-  it('opens create dialog when clicking add button', () => {
+  it('opens create dialog when clicking add button', async () => {
     renderSubagentsPage();
 
-    fireEvent.click(screen.getByRole('button', { name: 'New Subagent' }));
+    await openCreateDialog();
 
     expect(screen.getByRole('dialog', { name: 'Create Subagent' })).toBeInTheDocument();
   });
@@ -287,7 +383,7 @@ describe('subagents page', () => {
   it('submits create form and calls createAgent', async () => {
     renderSubagentsPage();
 
-    fireEvent.click(screen.getByRole('button', { name: 'New Subagent' }));
+    await openCreateDialog();
     fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'writer' } });
     expect(screen.getByLabelText('Workspace')).toHaveValue(
       '/home/dev/.openclaw/workspace-subagents/writer'
@@ -310,7 +406,7 @@ describe('subagents page', () => {
     createAgent.mockRejectedValueOnce(new Error('RPC timeout: agents.create'));
     renderSubagentsPage();
 
-    fireEvent.click(screen.getByRole('button', { name: 'New Subagent' }));
+    await openCreateDialog();
     fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'writer' } });
     fireEvent.click(screen.getByRole('button', { name: 'Create' }));
 
@@ -328,10 +424,10 @@ describe('subagents page', () => {
     expect(screen.queryByText('Managing: writer')).toBeNull();
   });
 
-  it('create dialog no longer renders emoji input', () => {
+  it('create dialog no longer renders emoji input', async () => {
     renderSubagentsPage();
 
-    fireEvent.click(screen.getByRole('button', { name: 'New Subagent' }));
+    await openCreateDialog();
 
     expect(screen.queryByLabelText('Emoji')).toBeNull();
     expect(screen.getByText('Avatar')).toBeInTheDocument();
@@ -344,7 +440,7 @@ describe('subagents page', () => {
   it('supports selecting an avatar option and avatar style when creating subagent', async () => {
     renderSubagentsPage();
 
-    fireEvent.click(screen.getByRole('button', { name: 'New Subagent' }));
+    await openCreateDialog();
     fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'writer' } });
     fireEvent.click(screen.getByRole('button', { name: 'avatar-style-bottts' }));
     const avatarButtons = screen.getAllByRole('button', { name: /pick-avatar-/ });
@@ -365,7 +461,7 @@ describe('subagents page', () => {
   it('prefills manage prompt from create dialog initial prompt', async () => {
     renderSubagentsPage();
 
-    fireEvent.click(screen.getByRole('button', { name: 'New Subagent' }));
+    await openCreateDialog();
     fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'writer' } });
     fireEvent.change(screen.getByLabelText('System Prompt'), {
       target: { value: 'act as a finance analyst' },
@@ -393,7 +489,7 @@ describe('subagents page', () => {
     });
     renderSubagentsPage();
 
-    fireEvent.click(screen.getByRole('button', { name: 'New Subagent' }));
+    await openCreateDialog();
     fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'writer' } });
     fireEvent.click(screen.getByRole('button', { name: 'Create' }));
 
@@ -423,10 +519,32 @@ describe('subagents page', () => {
   });
 
   it('submits prompt to generate subagent draft', async () => {
+    useGatewayStore.setState({
+      status: {
+        processState: 'running',
+        port: 18789,
+        gatewayReady: true,
+        healthSummary: 'healthy',
+        transportState: 'connected',
+        portReachable: true,
+        diagnostics: {
+          consecutiveHeartbeatMisses: 0,
+          consecutiveRpcFailures: 0,
+        },
+        updatedAt: 2,
+      },
+    });
+    const invoke = vi.mocked(window.electron.ipcRenderer.invoke);
     renderSubagentsPage();
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith('hostapi:fetch', expect.objectContaining({ path: '/api/capabilities/list' }));
+    });
 
     fireEvent.click(screen.getByRole('button', { name: 'Manage agent-alpha' }));
     fireEvent.change(screen.getByLabelText('Prompt'), { target: { value: 'draft policy docs' } });
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: 'Generate Draft' })).toBeEnabled();
+    });
     fireEvent.click(screen.getByRole('button', { name: 'Generate Draft' }));
 
     await waitFor(() => {
@@ -434,16 +552,39 @@ describe('subagents page', () => {
         agentId: 'agent-alpha',
         prompt: 'draft policy docs',
         includeCurrentFiles: false,
+        runtimeAddress: subagentManagementAddress,
       });
     });
   });
 
   it('passes current-file baseline option when draft switch is enabled', async () => {
+    useGatewayStore.setState({
+      status: {
+        processState: 'running',
+        port: 18789,
+        gatewayReady: true,
+        healthSummary: 'healthy',
+        transportState: 'connected',
+        portReachable: true,
+        diagnostics: {
+          consecutiveHeartbeatMisses: 0,
+          consecutiveRpcFailures: 0,
+        },
+        updatedAt: 2,
+      },
+    });
+    const invoke = vi.mocked(window.electron.ipcRenderer.invoke);
     renderSubagentsPage();
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith('hostapi:fetch', expect.objectContaining({ path: '/api/capabilities/list' }));
+    });
 
     fireEvent.click(screen.getByRole('button', { name: 'Manage agent-alpha' }));
     fireEvent.change(screen.getByLabelText('Prompt'), { target: { value: 'draft policy docs' } });
     fireEvent.click(screen.getByRole('switch', { name: /Use current files/i }));
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: 'Generate Draft' })).toBeEnabled();
+    });
     fireEvent.click(screen.getByRole('button', { name: 'Generate Draft' }));
 
     await waitFor(() => {
@@ -451,6 +592,7 @@ describe('subagents page', () => {
         agentId: 'agent-alpha',
         prompt: 'draft policy docs',
         includeCurrentFiles: true,
+        runtimeAddress: subagentManagementAddress,
       });
     });
   });
@@ -483,7 +625,7 @@ describe('subagents page', () => {
   it('calls edit/delete actions for non-main agent', async () => {
     renderSubagentsPage();
 
-    fireEvent.click(screen.getByRole('button', { name: 'Edit agent-alpha' }));
+    await openEditDialog('agent-alpha');
     fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'Alpha v2' } });
     fireEvent.change(screen.getByLabelText('Model'), { target: { value: 'claude-3-7-sonnet' } });
     fireEvent.click(screen.getByRole('button', { name: 'Save' }));
@@ -498,9 +640,10 @@ describe('subagents page', () => {
         name: 'Alpha v2',
         workspace: '/home/dev/.openclaw/workspace-subagents/alpha',
         model: 'claude-3-7-sonnet',
+        runtimeAddress: subagentManagementAddress,
       });
     });
-    expect(deleteAgent).toHaveBeenCalledWith('agent-alpha');
+    expect(deleteAgent).toHaveBeenCalledWith('agent-alpha', subagentManagementAddress);
   });
 
   it('exports selected agent config to a picked json path', async () => {
@@ -510,7 +653,10 @@ describe('subagents page', () => {
       if (channel === 'dialog:save') {
         return { canceled: false, filePath: '/tmp/alpha.matchaclaw-agent.json' };
       }
-      if (channel === 'hostapi:fetch' && path === '/api/files/write-text') {
+      if (channel === 'hostapi:fetch' && path === '/api/capabilities/list') {
+        return buildCapabilitiesListEnvelope();
+      }
+      if (channel === 'hostapi:fetch' && path === '/api/capabilities/execute') {
         return {
           ok: true,
           data: {
@@ -535,25 +681,58 @@ describe('subagents page', () => {
       }
       return undefined;
     });
+    useGatewayStore.setState({
+      status: {
+        processState: 'running',
+        port: 18789,
+        gatewayReady: true,
+        healthSummary: 'healthy',
+        transportState: 'connected',
+        portReachable: true,
+        diagnostics: {
+          consecutiveHeartbeatMisses: 0,
+          consecutiveRpcFailures: 0,
+        },
+        updatedAt: 2,
+      },
+    });
     renderSubagentsPage();
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: 'Export agent-alpha' })).toBeEnabled();
+    });
 
     fireEvent.click(screen.getByRole('button', { name: 'Export agent-alpha' }));
 
     await waitFor(() => {
-      expect(exportAgentConfig).toHaveBeenCalledWith('agent-alpha');
+      expect(exportAgentConfig).toHaveBeenCalledWith('agent-alpha', subagentManagementAddress);
     });
     expect(invoke).toHaveBeenCalledWith('dialog:save', expect.objectContaining({
       defaultPath: expect.stringContaining('alpha.matchaclaw-agent.json'),
     }));
     const writeCall = invoke.mock.calls.find(([channel, payload]) => (
       channel === 'hostapi:fetch'
-      && (payload as { path?: string } | undefined)?.path === '/api/files/write-text'
+      && (payload as { path?: string } | undefined)?.path === '/api/capabilities/execute'
     ));
     expect(writeCall).toBeTruthy();
     const writePayload = writeCall?.[1] as { body?: string };
-    const writeBody = JSON.parse(writePayload.body || '{}') as { path?: string; content?: string };
-    expect(writeBody.path).toBe('/tmp/alpha.matchaclaw-agent.json');
-    expect(JSON.parse(writeBody.content || '{}')).toEqual(expect.objectContaining({
+    const writeBody = JSON.parse(writePayload.body || '{}') as {
+      id?: string;
+      operationId?: string;
+      runtimeAddress?: RuntimeAddress;
+      input?: { path?: string; content?: string; runtimeAddress?: RuntimeAddress };
+    };
+    expect(writeBody.id).toBe('workspace.file');
+    expect(writeBody.operationId).toBe('files.writeText');
+    expect(writeBody.runtimeAddress).toEqual({
+      ...subagentManagementAddress,
+      capabilityId: 'workspace.file',
+    });
+    expect(writeBody.input?.runtimeAddress).toEqual({
+      ...subagentManagementAddress,
+      capabilityId: 'workspace.file',
+    });
+    expect(writeBody.input?.path).toBe('/tmp/alpha.matchaclaw-agent.json');
+    expect(JSON.parse(writeBody.input?.content || '{}')).toEqual(expect.objectContaining({
       schema: 'matchaclaw.agent-config',
       version: 1,
     }));
@@ -592,6 +771,9 @@ describe('subagents page', () => {
           },
         };
       }
+      if (channel === 'hostapi:fetch' && path === '/api/capabilities/list') {
+        return buildCapabilitiesListEnvelope();
+      }
       if (channel === 'hostapi:fetch' && path === '/api/openclaw/subagent-templates') {
         return {
           ok: true,
@@ -607,7 +789,25 @@ describe('subagents page', () => {
       }
       return undefined;
     });
+    useGatewayStore.setState({
+      status: {
+        processState: 'running',
+        port: 18789,
+        gatewayReady: true,
+        healthSummary: 'healthy',
+        transportState: 'connected',
+        portReachable: true,
+        diagnostics: {
+          consecutiveHeartbeatMisses: 0,
+          consecutiveRpcFailures: 0,
+        },
+        updatedAt: 2,
+      },
+    });
     renderSubagentsPage();
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: 'Import Agent' })).toBeEnabled();
+    });
 
     fireEvent.click(screen.getByRole('button', { name: 'Import Agent' }));
 
@@ -615,7 +815,7 @@ describe('subagents page', () => {
       expect(importAgentConfig).toHaveBeenCalledWith(expect.objectContaining({
         schema: 'matchaclaw.agent-config',
         version: 1,
-      }));
+      }), subagentManagementAddress);
     });
     expect(loadPersistedFilesForAgent).toHaveBeenCalledWith('imported-agent');
     await waitFor(() => {
@@ -623,16 +823,16 @@ describe('subagents page', () => {
     });
   });
 
-  it('edit dialog no longer renders skill configuration section', () => {
+  it('edit dialog no longer renders skill configuration section', async () => {
     renderSubagentsPage();
 
-    fireEvent.click(screen.getByRole('button', { name: 'Edit agent-alpha' }));
+    await openEditDialog('agent-alpha');
     expect(screen.queryByText('Skill Configuration')).toBeNull();
     expect(screen.queryByText('Web Search')).toBeNull();
     expect(screen.queryByText('Feishu Doc')).toBeNull();
   });
 
-  it('编辑时不应把已删除模型补回下拉选项，并在单模型场景自动回填', () => {
+  it('编辑时不应把已删除模型补回下拉选项，并在单模型场景自动回填', async () => {
     useSubagentsStore.setState({
       agents: [
         {
@@ -667,7 +867,7 @@ describe('subagents page', () => {
     });
 
     renderSubagentsPage();
-    fireEvent.click(screen.getByRole('button', { name: 'Edit agent-alpha' }));
+    await openEditDialog('agent-alpha');
 
     const modelSelect = screen.getByLabelText('Model');
     expect(screen.queryByRole('option', { name: 'legacy/removed-model' })).toBeNull();
@@ -675,7 +875,7 @@ describe('subagents page', () => {
     expect(screen.getByRole('button', { name: 'Save' })).toBeEnabled();
   });
 
-  it('编辑子 Agent 时模型下拉优先显示 provider 自定义名称', () => {
+  it('编辑子 Agent 时模型下拉优先显示 provider 自定义名称', async () => {
     useSubagentsStore.setState({
       availableModels: [
         {
@@ -691,7 +891,7 @@ describe('subagents page', () => {
     });
 
     renderSubagentsPage();
-    fireEvent.click(screen.getByRole('button', { name: 'Edit agent-alpha' }));
+    await openEditDialog('agent-alpha');
 
     expect(
       screen.getByRole('option', { name: '自定义 / gpt-4o-mini' })
@@ -756,6 +956,9 @@ describe('subagents page', () => {
     const invoke = vi.mocked(window.electron.ipcRenderer.invoke);
     invoke.mockImplementation(async (channel, payload) => {
       const path = (payload as { path?: string } | undefined)?.path;
+      if (channel === 'hostapi:fetch' && path === '/api/capabilities/list') {
+        return buildCapabilitiesListEnvelope();
+      }
       if (channel === 'hostapi:fetch' && path === '/api/openclaw/subagent-templates') {
         return {
           ok: true,
@@ -822,8 +1025,11 @@ describe('subagents page', () => {
 
     renderSubagentsPage();
 
-    fireEvent.click(await screen.findByRole('button', { name: 'Expand Template Library' }));
-    fireEvent.click(await screen.findByRole('button', { name: 'Load Template' }));
+    const expandTemplatesButton = await screen.findByRole('button', { name: 'Expand Template Library' });
+    fireEvent.click(expandTemplatesButton);
+    const loadTemplateButton = await screen.findByRole('button', { name: 'Load Template' });
+    await waitFor(() => expect(loadTemplateButton).toBeEnabled());
+    fireEvent.click(loadTemplateButton);
 
     await waitFor(() => {
       expect(screen.getByRole('dialog', { name: 'Load Template: Brand Guardian' })).toBeInTheDocument();
@@ -841,20 +1047,20 @@ describe('subagents page', () => {
     expect(screen.queryByRole('button', { name: 'Set default agent-alpha' })).toBeNull();
   });
 
-  it('blocks create when name conflicts with existing slug', () => {
+  it('blocks create when name conflicts with existing slug', async () => {
     renderSubagentsPage();
 
-    fireEvent.click(screen.getByRole('button', { name: 'New Subagent' }));
+    await openCreateDialog();
     fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'agent alpha' } });
 
     expect(screen.getByText('Agent name is duplicated.')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Create' })).toBeDisabled();
   });
 
-  it('keeps main editable/manageable but still blocks deletion', () => {
+  it('keeps main manageable but blocks direct edit/delete for protected default agent', () => {
     renderSubagentsPage();
 
-    expect(screen.getByRole('button', { name: 'Edit main' })).toBeEnabled();
+    expect(screen.getByRole('button', { name: 'Edit main' })).toBeDisabled();
     expect(screen.getByRole('button', { name: 'Delete main' })).toBeDisabled();
     expect(screen.getByRole('button', { name: 'Manage main' })).toBeEnabled();
     expect(screen.getByRole('button', { name: 'Chat main' })).toBeEnabled();
@@ -919,6 +1125,22 @@ describe('subagents page', () => {
   });
 
   it('closes manage dialog via top-right close button and triggers cancel action', async () => {
+    useGatewayStore.setState({
+      status: {
+        processState: 'running',
+        port: 18789,
+        gatewayReady: true,
+        healthSummary: 'healthy',
+        transportState: 'connected',
+        portReachable: true,
+        diagnostics: {
+          consecutiveHeartbeatMisses: 0,
+          consecutiveRpcFailures: 0,
+        },
+        updatedAt: 2,
+      },
+    });
+    const invoke = vi.mocked(window.electron.ipcRenderer.invoke);
     useSubagentsStore.setState({
       managedAgentId: 'agent-alpha',
       draftByFile: {
@@ -934,10 +1156,13 @@ describe('subagents page', () => {
     });
 
     renderSubagentsPage();
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith('hostapi:fetch', expect.objectContaining({ path: '/api/capabilities/list' }));
+    });
 
     fireEvent.click(screen.getByRole('button', { name: 'Close' }));
     await waitFor(() => {
-      expect(cancelDraft).toHaveBeenCalledWith('agent-alpha');
+      expect(cancelDraft).toHaveBeenCalledWith('agent-alpha', subagentManagementAddress);
     });
     expect(screen.queryByRole('dialog', { name: 'Managing: agent-alpha' })).toBeNull();
   });
@@ -951,9 +1176,24 @@ describe('subagents page', () => {
   });
 
   it('loads a template and creates subagent with template defaults', async () => {
+    useSubagentsStore.setState({
+      availableModels: [
+        {
+          id: 'gpt-4.1-mini',
+          provider: 'openai',
+          providerLabel: 'OpenAI',
+          modelLabel: 'gpt-4.1-mini',
+          displayLabel: 'OpenAI / gpt-4.1-mini',
+        },
+      ],
+      modelsLoading: false,
+    });
     const invoke = vi.mocked(window.electron.ipcRenderer.invoke);
     invoke.mockImplementation(async (channel, payload) => {
       const path = (payload as { path?: string } | undefined)?.path;
+      if (channel === 'hostapi:fetch' && path === '/api/capabilities/list') {
+        return buildCapabilitiesListEnvelope();
+      }
       if (channel === 'hostapi:fetch' && path === '/api/openclaw/subagent-templates') {
         return {
           ok: true,
@@ -1009,10 +1249,9 @@ describe('subagents page', () => {
     });
 
     fireEvent.click(screen.getByRole('button', { name: 'Expand Template Library' }));
-    await waitFor(() => {
-      expect(screen.getByRole('button', { name: 'Load Template' })).toBeInTheDocument();
-    });
-    fireEvent.click(screen.getByRole('button', { name: 'Load Template' }));
+    const loadTemplateButton = await screen.findByRole('button', { name: 'Load Template' });
+    await waitFor(() => expect(loadTemplateButton).toBeEnabled());
+    fireEvent.click(loadTemplateButton);
 
     await waitFor(() => {
       expect(screen.getByRole('dialog', { name: 'Load Template: Brand Guardian' })).toBeInTheDocument();
@@ -1024,6 +1263,7 @@ describe('subagents page', () => {
       expect(createAgentFromTemplate).toHaveBeenCalledWith(
         expect.objectContaining({
           model: 'gpt-4.1-mini',
+          runtimeAddress: subagentManagementAddress,
           template: expect.objectContaining({
             id: 'brand-guardian',
             name: 'Brand Guardian',

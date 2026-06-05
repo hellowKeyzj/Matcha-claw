@@ -45,6 +45,7 @@ interface UseChatInitInput {
   navigate: NavigateFunction;
   switchSession: (sessionKey: string) => void;
   openAgentConversation: (agentId: string) => void;
+  bootstrapSessionRuntime: () => Promise<void>;
   loadAgents: () => Promise<void>;
   loadSessions: () => Promise<void>;
   loadHistory: (request: ChatHistoryLoadRequest) => Promise<void>;
@@ -59,6 +60,7 @@ export function useChatInit(input: UseChatInitInput): void {
     navigate,
     switchSession,
     openAgentConversation,
+    bootstrapSessionRuntime,
     loadAgents,
     loadSessions,
     loadHistory,
@@ -110,9 +112,6 @@ export function useChatInit(input: UseChatInitInput): void {
     if (sessionParam) {
       switchSession(sessionParam);
       navigate('/', { replace: true });
-    } else if (agentParam) {
-      openAgentConversation(agentParam);
-      navigate('/', { replace: true });
     }
 
     (async () => {
@@ -130,6 +129,14 @@ export function useChatInit(input: UseChatInitInput): void {
         || !subagentsState.agentsResource.lastLoadedAt
         || (Date.now() - subagentsState.agentsResource.lastLoadedAt) > SUBAGENTS_SNAPSHOT_TTL_MS
       );
+      await bootstrapSessionRuntime();
+      if (useChatStore.getState().sessionRuntimeCatalog.status !== 'ready') {
+        return;
+      }
+      if (agentParam) {
+        openAgentConversation(agentParam);
+        navigate('/', { replace: true });
+      }
       const agentsLoadTask = shouldLoadAgents ? loadAgents() : Promise.resolve();
       const sessionsLoadTask = loadSessions();
       await Promise.all([agentsLoadTask, sessionsLoadTask]);
@@ -189,6 +196,7 @@ export function useChatInit(input: UseChatInitInput): void {
       cleanupEmptySession();
     };
   }, [
+    bootstrapSessionRuntime,
     cleanupEmptySession,
     isActive,
     isGatewayRunning,

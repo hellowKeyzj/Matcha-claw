@@ -1,116 +1,86 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
   createRuntimeHostRouteHandlers,
+  createRuntimeHostRouteRegistry,
 } from '../../runtime-host/composition/runtime-route-composition';
 import {
-  composeRuntimeHostApplicationServices,
+  createApplicationServiceRegistry,
   registerRuntimeHostApplicationServices,
 } from '../../runtime-host/composition/application-services';
 import { RuntimeHostContainer } from '../../runtime-host/composition/container';
-import { registerOpenClawInfrastructure } from '../../runtime-host/composition/modules/openclaw-infrastructure-module';
 import {
   registerRuntimeHostInfrastructure,
   resolveRuntimeHostInfrastructure,
 } from '../../runtime-host/composition/modules/runtime-infrastructure-module';
+import { createParentTransportClient } from '../../runtime-host/composition/parent-transport-client';
 import {
-  registerPluginRuntimeModule,
-  resolvePluginRuntimeModule,
-} from '../../runtime-host/composition/modules/plugin-runtime-module';
+  registerRuntimeHostSystemInfrastructure,
+  registerRuntimeHostSystemServices,
+  resolveRuntimeHostSystemModules,
+} from '../../runtime-host/composition/runtime-host-runtime-module-registry';
+import {
+  validateRuntimeHostApplicationModuleRegistrationOwners,
+} from '../../runtime-host/composition/runtime-host-module-registry';
 
-function createContainer() {
+function createApplicationContext() {
   const container = new RuntimeHostContainer();
   registerRuntimeHostInfrastructure(container);
   const infrastructure = resolveRuntimeHostInfrastructure(container);
-  registerOpenClawInfrastructure(container);
-  registerPluginRuntimeModule(container, {
-    lifecycle: infrastructure.lifecycle,
-    logger: infrastructure.logger,
-    enabledPluginIdsEnv: undefined,
-    pluginCatalogEnv: undefined,
+  const parentTransport = createParentTransportClient({
+    parentApiBaseUrl: 'http://127.0.0.1:1',
+    parentDispatchToken: 'test-token',
+    httpClient: infrastructure.httpClient,
+    scheduler: infrastructure.scheduler,
   });
-  resolvePluginRuntimeModule(container);
-  container.registerValue('gateway.control', {
-    restartGateway: vi.fn(async () => ({
-      success: true,
-      status: 200,
-      data: { success: true },
-    })),
-  });
-  const applicationContext = {
+  const systemModuleContext = {
     container,
-    runtimeState: {
-      runtimeState: vi.fn(() => ({
-        lifecycle: 'running',
-        plugins: [],
-      })),
-      runtimeHealth: vi.fn(() => ({
-        ok: true,
-      })),
-    },
-    transportStats: {
-      snapshot: vi.fn(() => ({
-        totalDispatchRequests: 0,
-        runtimeRouteHandled: 0,
-        unhandledRouteCount: 0,
-        badRequestRejected: 0,
-        dispatchInternalError: 0,
-      })),
-    },
-    pluginRuntime: {
-      snapshotPluginsRuntimePayload: vi.fn(() => ({
-        success: true,
-      })),
-      enqueueRefresh: vi.fn(),
-      getRefreshJob: vi.fn(() => null),
-      getEnabledPluginIds: vi.fn(() => ['security-core']),
-      getPluginCatalog: vi.fn(() => []),
-    },
-    openclawBridge: {
-      gatewayRpc: vi.fn(async () => ({ success: true })),
-      chatSend: vi.fn(async () => ({ success: true })),
-      isGatewayRunning: vi.fn(async () => true),
-      securityPolicySync: vi.fn(async () => ({ success: true })),
-      securityAuditQueryFromUrl: vi.fn(async () => ({ success: true, items: [] })),
-      securityQuickAuditRun: vi.fn(async () => ({ success: true })),
-      securityEmergencyRun: vi.fn(async () => ({ success: true })),
-      securityIntegrityCheck: vi.fn(async () => ({ success: true })),
-      securityIntegrityRebaseline: vi.fn(async () => ({ success: true })),
-      securitySkillsScan: vi.fn(async () => ({ success: true })),
-      securityAdvisoriesCheck: vi.fn(async () => ({ success: true })),
-      securityRemediationPreview: vi.fn(async () => ({ success: true })),
-      securityRemediationApply: vi.fn(async () => ({ success: true })),
-      securityRemediationRollback: vi.fn(async () => ({ success: true })),
-      listCronJobs: vi.fn(async () => ({ jobs: [] })),
-      addCronJob: vi.fn(async () => ({ success: true })),
-      updateCronJob: vi.fn(async () => ({ success: true })),
-      removeCronJob: vi.fn(async () => ({ success: true })),
-      runCronJob: vi.fn(async () => ({ success: true })),
-      channelsStatus: vi.fn(async () => ({ success: true })),
-      channelsConnect: vi.fn(async () => ({ success: true })),
-      channelsDisconnect: vi.fn(async () => ({ success: true })),
-      channelsRequestQr: vi.fn(async () => ({ success: true })),
-    },
-    platformRuntime: {},
-    parentShell: {
-      request: vi.fn(async () => ({
+    infrastructure,
+    parentTransport: {
+      ...parentTransport,
+      emitParentGatewayEvent: vi.fn(async () => ({ success: true })),
+      requestParentShellAction: vi.fn(async () => ({
         success: true,
         status: 200,
         data: { success: true },
       })),
-      mapResponse: vi.fn((upstream: unknown) => ({
+      mapParentTransportResponse: vi.fn((upstream: unknown) => ({
         status: 200,
         data: upstream,
       })),
     },
-  } as never;
+  };
+
+  registerRuntimeHostSystemInfrastructure(systemModuleContext);
+  registerRuntimeHostSystemServices(systemModuleContext);
+  const systemModules = resolveRuntimeHostSystemModules(systemModuleContext);
+  container.registerValue('runtimeHost.stateSnapshots', {
+    runtimeState: () => systemModules.pluginRuntime.pluginRegistry.snapshotRuntimeState(),
+    runtimeHealth: () => systemModules.pluginRuntime.pluginRegistry.snapshotRuntimeHealth({
+      lifecycle: 'running',
+      uptimeMs: 0,
+    }),
+  });
+  container.registerValue('runtimeHost.transportStats', {
+    snapshot: () => infrastructure.transportStats,
+  });
+  container.registerValue('runtimeHost.parentShell', {
+    request: systemModuleContext.parentTransport.requestParentShellAction,
+    mapResponse: systemModuleContext.parentTransport.mapParentTransportResponse,
+  });
+  container.registerValue('runtimeHost.parentGatewayEvents', {
+    emit: systemModuleContext.parentTransport.emitParentGatewayEvent,
+  });
+  const applicationContext = {
+    container,
+    facades: createApplicationServiceRegistry(),
+  };
   registerRuntimeHostApplicationServices(applicationContext);
-  composeRuntimeHostApplicationServices(applicationContext);
-  return container;
+  return applicationContext;
 }
 
 describe('runtime-host route composition', () => {
   it('runtime 路由由领域模块注册到 composition root', () => {
-    const registry = createRuntimeHostRouteHandlers(createContainer());
+    const registry = createRuntimeHostRouteHandlers(createApplicationContext());
     const keys = registry.map((entry) => entry.key);
 
     expect(keys[0]).toBe('workbench.GET /api/workbench/bootstrap');
@@ -118,25 +88,38 @@ describe('runtime-host route composition', () => {
     expect(registry.every((entry) => typeof entry.handle === 'function')).toBe(true);
   });
 
+  it('route facade resolve 参与 module import/export 校验', () => {
+    const context = createApplicationContext();
+    const routeRegistry = createRuntimeHostRouteRegistry(context);
+
+    expect(() => validateRuntimeHostApplicationModuleRegistrationOwners(context.container, {
+      routes: routeRegistry,
+      facades: context.facades,
+    })).not.toThrow();
+    expect(context.facades.listResolveEdges()).toEqual(expect.arrayContaining([
+      { fromOwner: 'sessions', toOwner: 'agentRuntime', key: 'agentRuntime.application' },
+    ]));
+  });
+
   it('runtime 路由覆盖所有 runtime-host API 能力', () => {
-    const registry = createRuntimeHostRouteHandlers(createContainer());
+    const registry = createRuntimeHostRouteHandlers(createApplicationContext());
     const namespaces = new Set(registry.map((entry) => entry.key.split('.')[0]));
     expect(namespaces).toEqual(new Set([
       'workbench',
       'runtime_host',
+      'runtimeTopology',
       'plugin_runtime',
       'gateway',
       'cron_usage',
       'files',
       'license',
-      'team_runtime',
       'toolchain_uv',
       'security',
-      'tasks',
       'platform',
       'settings',
       'provider',
       'capabilityRouting',
+      'capabilities',
       'providerModels',
       'channel',
       'openclaw',
@@ -147,10 +130,13 @@ describe('runtime-host route composition', () => {
     ]));
     expect(registry.map((entry) => entry.key)).toEqual(expect.arrayContaining([
       'gateway.POST /api/gateway/ready',
-      'tasks.POST /api/tasks/list',
       'subagents.POST /api/subagents/config/get',
       'runtime_host.POST /api/runtime-host/jobs/get',
       'files.POST /api/files/read-text',
+      'session.POST /api/sessions/prompt',
+      'session.POST /api/sessions/window',
+      'capabilities.POST /api/capabilities/execute',
+      'runtimeTopology.GET /api/runtime-endpoints/list',
     ]));
   });
 });

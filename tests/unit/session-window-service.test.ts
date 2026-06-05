@@ -3,13 +3,14 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { createTestSessionRuntimeService } from './helpers/session-runtime-fixture';
+import { createOpenClawTestRuntimeAddress, createTestSessionRuntimeService } from './helpers/session-runtime-fixture';
 
 async function resolveHydrationResponse(
   service: ReturnType<typeof createTestSessionRuntimeService>,
   response: Awaited<ReturnType<ReturnType<typeof createTestSessionRuntimeService>['getSessionWindow']>>,
   payload: {
     sessionKey: string;
+    runtimeAddress?: ReturnType<typeof createOpenClawTestRuntimeAddress>;
     snapshot: Parameters<ReturnType<typeof createTestSessionRuntimeService>['executeSessionHydration']>[0]['snapshot'];
   },
 ) {
@@ -18,7 +19,10 @@ async function resolveHydrationResponse(
   }
   return {
     status: 200,
-    data: await service.executeSessionHydration(payload),
+    data: await service.executeSessionHydration({
+      ...payload,
+      runtimeAddress: payload.runtimeAddress ?? createOpenClawTestRuntimeAddress(payload.sessionKey),
+    }),
   };
 }
 
@@ -32,8 +36,13 @@ async function hydrateSessionWindow(
     includeCanonical?: boolean;
   },
 ) {
-  return resolveHydrationResponse(service, await service.getSessionWindow(payload), {
+  const runtimeAddress = createOpenClawTestRuntimeAddress(payload.sessionKey);
+  return resolveHydrationResponse(service, await service.getSessionWindow({
+    ...payload,
+    runtimeAddress,
+  }), {
     sessionKey: payload.sessionKey,
+    runtimeAddress,
     snapshot: {
       kind: 'window',
       mode: payload.mode ?? 'latest',
@@ -313,6 +322,7 @@ describe('session runtime service window', () => {
 
     const second = await service.getSessionWindow({
       sessionKey: 'agent:main:session-a',
+      runtimeAddress: createOpenClawTestRuntimeAddress('agent:main:session-a'),
       mode: 'latest',
       limit: 2,
     });
@@ -351,6 +361,7 @@ describe('session runtime service window', () => {
     });
     const response = await service.getSessionWindow({
       sessionKey: 'agent:main:session-a',
+      runtimeAddress: createOpenClawTestRuntimeAddress('agent:main:session-a'),
       mode: 'older',
       limit: 2,
     });
@@ -395,10 +406,13 @@ describe('session runtime service window', () => {
     });
     expect(older.status).toBe(200);
 
+    const runtimeAddress = createOpenClawTestRuntimeAddress('agent:main:session-a');
     const resumed = await resolveHydrationResponse(service, await service.resumeSession({
       sessionKey: 'agent:main:session-a',
+      runtimeAddress,
     }), {
       sessionKey: 'agent:main:session-a',
+      runtimeAddress,
       snapshot: { kind: 'state' },
     });
     expect(resumed.status).toBe(200);
@@ -413,8 +427,10 @@ describe('session runtime service window', () => {
 
     const switched = await resolveHydrationResponse(service, await service.switchSession({
       sessionKey: 'agent:main:session-a',
+      runtimeAddress,
     }), {
       sessionKey: 'agent:main:session-a',
+      runtimeAddress,
       snapshot: { kind: 'window', mode: 'latest', limit: 80, offset: null },
     });
     expect(switched.status).toBe(200);

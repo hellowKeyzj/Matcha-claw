@@ -1,13 +1,5 @@
-import type { RuntimeFileSystemPort } from '../common/runtime-ports';
-import type { OpenClawEnvironmentRepository } from '../openclaw/openclaw-environment-repository';
-import type { ModelCapability, ProviderModel } from './provider-types';
-import { MODEL_CAPABILITIES } from './provider-model-capabilities';
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
-}
-
-const MODEL_CAPABILITY_SET = new Set<ModelCapability>(MODEL_CAPABILITIES);
+import type { ProviderModelsStorePersistenceWorkflow } from '../workflows/provider-models-store/provider-models-store-persistence-workflow';
+import type { ProviderModel } from './provider-types';
 
 export interface ProviderModelsStoreRecord {
   schemaVersion: 1;
@@ -19,131 +11,23 @@ export interface ProviderModelsStorePort {
   write(store: ProviderModelsStoreRecord): Promise<void>;
 }
 
-function normalizePositiveInteger(value: unknown): number | undefined {
-  if (typeof value !== 'number' || !Number.isFinite(value)) return undefined;
-  const normalized = Math.floor(value);
-  return normalized > 0 ? normalized : undefined;
+export interface ProviderModelsStoragePort {
+  getProviderModelsStoreFilePath(): string;
+  ensureParentDir(filePath: string): Promise<void>;
 }
 
-function normalizeOptionalString(value: unknown): string | undefined {
-  if (typeof value !== 'string') return undefined;
-  const trimmed = value.trim();
-  return trimmed ? trimmed : undefined;
-}
-
-function normalizeCapabilities(value: unknown): ModelCapability[] {
-  if (!Array.isArray(value)) return [];
-  const out: ModelCapability[] = [];
-  const seen = new Set<ModelCapability>();
-  for (const raw of value) {
-    if (!MODEL_CAPABILITY_SET.has(raw as ModelCapability) || seen.has(raw as ModelCapability)) continue;
-    seen.add(raw as ModelCapability);
-    out.push(raw as ModelCapability);
-  }
-  return out;
-}
-
-function normalizeProviderModel(value: unknown): ProviderModel | null {
-  if (!isRecord(value)) return null;
-  const credentialId = typeof value.credentialId === 'string' ? value.credentialId.trim() : '';
-  const modelId = typeof value.modelId === 'string' ? value.modelId.trim() : '';
-  if (!credentialId || !modelId) return null;
-  const capabilities = normalizeCapabilities(value.capabilities);
-  if (capabilities.length === 0) return null;
-  const contextWindow = normalizePositiveInteger(value.contextWindow);
-  const maxTokens = normalizePositiveInteger(value.maxTokens);
-  const timeoutMs = normalizePositiveInteger(value.timeoutMs);
-  const aspectRatio = normalizeOptionalString(value.aspectRatio);
-  const resolution = normalizeOptionalString(value.resolution);
-  const quality = normalizeOptionalString(value.quality);
-  return {
-    credentialId,
-    modelId,
-    capabilities,
-    ...(contextWindow !== undefined ? { contextWindow } : {}),
-    ...(maxTokens !== undefined ? { maxTokens } : {}),
-    ...(timeoutMs !== undefined ? { timeoutMs } : {}),
-    ...(aspectRatio !== undefined ? { aspectRatio } : {}),
-    ...(resolution !== undefined ? { resolution } : {}),
-    ...(quality !== undefined ? { quality } : {}),
-  };
-}
-
-function createEmptyStore(): ProviderModelsStoreRecord {
-  return { schemaVersion: 1, models: [] };
-}
-
-function cloneStore(store: ProviderModelsStoreRecord): ProviderModelsStoreRecord {
-  return {
-    schemaVersion: 1,
-    models: store.models.map((model) => ({
-      ...model,
-      capabilities: [...model.capabilities],
-    })),
-  };
-}
-
-function normalizeStore(value: unknown): ProviderModelsStoreRecord {
-  if (!isRecord(value) || !Array.isArray(value.models)) return createEmptyStore();
-  const models: ProviderModel[] = [];
-  const seen = new Set<string>();
-  for (const raw of value.models) {
-    const model = normalizeProviderModel(raw);
-    if (!model) continue;
-    const key = `${model.credentialId}\n${model.modelId}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
-    models.push(model);
-  }
-  return { schemaVersion: 1, models };
+export interface ProviderModelsStoreRepositoryDeps {
+  readonly persistenceWorkflow: Pick<ProviderModelsStorePersistenceWorkflow, 'read' | 'write'>;
 }
 
 export class ProviderModelsStoreRepository implements ProviderModelsStorePort {
-  private cachedStore: ProviderModelsStoreRecord | null = null;
-  private cachedStat: { size: number; mtimeMs: number } | null = null;
-
-  constructor(
-    private readonly environment: OpenClawEnvironmentRepository,
-    private readonly fileSystem: RuntimeFileSystemPort,
-  ) {}
+  constructor(private readonly deps: ProviderModelsStoreRepositoryDeps) {}
 
   async read(): Promise<ProviderModelsStoreRecord> {
-    const filePath = this.environment.getProviderModelsStoreFilePath();
-    let stat: { size: number; mtimeMs: number } | null = null;
-    try {
-      const fileStat = await this.fileSystem.stat(filePath);
-      stat = { size: fileStat.size, mtimeMs: fileStat.mtimeMs };
-    } catch {
-      // fall through to read path
-    }
-
-    if (
-      stat
-      && this.cachedStore
-      && this.cachedStat
-      && this.cachedStat.size === stat.size
-      && this.cachedStat.mtimeMs === stat.mtimeMs
-    ) {
-      return cloneStore(this.cachedStore);
-    }
-
-    try {
-      const normalized = normalizeStore(JSON.parse(await this.fileSystem.readTextFile(filePath)));
-      this.cachedStore = cloneStore(normalized);
-      this.cachedStat = stat;
-      return normalized;
-    } catch {
-      this.cachedStore = null;
-      this.cachedStat = null;
-      return createEmptyStore();
-    }
+    return await this.deps.persistenceWorkflow.read();
   }
 
   async write(store: ProviderModelsStoreRecord): Promise<void> {
-    const filePath = this.environment.getProviderModelsStoreFilePath();
-    await this.environment.ensureParentDir(filePath);
-    await this.fileSystem.writeTextFile(filePath, `${JSON.stringify(cloneStore(store), null, 2)}\n`);
-    this.cachedStore = null;
-    this.cachedStat = null;
+    await this.deps.persistenceWorkflow.write(store);
   }
 }

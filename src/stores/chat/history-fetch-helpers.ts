@@ -1,9 +1,9 @@
-import { hostSessionLoad, hostSessionWindowFetch, waitForRuntimeJobResult } from '@/lib/host-api';
+import { hostSessionLoad, hostSessionWindowFetch, resolveHydratedSessionSnapshot } from '@/lib/host-api';
 import type {
-  SessionLoadResult,
   SessionStateSnapshot,
 } from '../../../runtime-host/shared/session-adapter-types';
 import { resolveSessionThinkingLevelFromList } from './session-helpers';
+import type { RuntimeAddress } from '../../../runtime-host/shared/runtime-address';
 import type { ChatSession } from './types';
 
 export interface HistoryWindowResult {
@@ -18,7 +18,9 @@ export interface HistoryWindowResult {
 }
 
 interface FetchHistoryWindowInput {
-  requestedSessionKey: string;
+  recordKey: string;
+  backendSessionKey: string;
+  runtimeAddress: RuntimeAddress;
   sessions: ChatSession[];
   limit: number;
   timeoutMs?: number;
@@ -28,7 +30,9 @@ export async function fetchHistoryWindow(
   input: FetchHistoryWindowInput,
 ): Promise<HistoryWindowResult> {
   const {
-    requestedSessionKey,
+    recordKey,
+    backendSessionKey,
+    runtimeAddress,
     sessions,
     limit,
     timeoutMs,
@@ -37,36 +41,33 @@ export async function fetchHistoryWindow(
   void limit;
 
   const initial = await hostSessionLoad({
-    sessionKey: requestedSessionKey,
+    sessionKey: backendSessionKey,
+    runtimeAddress,
     limit,
   }, {
     timeoutMs,
   });
-  const data = initial.hydrationJob
-    ? await waitForRuntimeJobResult(initial.hydrationJob.id, {
-        timeoutMs,
-      }).then(async () => {
-        const window = await hostSessionWindowFetch({
-          sessionKey: requestedSessionKey,
-          mode: 'latest',
-          limit,
-        });
-        return window.snapshot ? { snapshot: window.snapshot } : null;
-      })
-    : initial.snapshot
-      ? initial as SessionLoadResult
-      : null;
-  if (!data) {
+  const snapshot = await resolveHydratedSessionSnapshot({
+    initial,
+    timeoutMs,
+    refetch: async () => await hostSessionWindowFetch({
+      sessionKey: backendSessionKey,
+      runtimeAddress,
+      mode: 'latest',
+      limit,
+    }),
+  });
+  if (!snapshot) {
     throw new Error('session load did not return a snapshot');
   }
   return {
-    snapshot: data.snapshot,
-    thinkingLevel: resolveSessionThinkingLevelFromList(sessions, requestedSessionKey),
-    totalItemCount: data.snapshot.window.totalItemCount,
-    windowStartOffset: data.snapshot.window.windowStartOffset,
-    windowEndOffset: data.snapshot.window.windowEndOffset,
-    hasMore: data.snapshot.window.hasMore,
-    hasNewer: data.snapshot.window.hasNewer,
-    isAtLatest: data.snapshot.window.isAtLatest,
+    snapshot,
+    thinkingLevel: resolveSessionThinkingLevelFromList(sessions, recordKey),
+    totalItemCount: snapshot.window.totalItemCount,
+    windowStartOffset: snapshot.window.windowStartOffset,
+    windowEndOffset: snapshot.window.windowEndOffset,
+    hasMore: snapshot.window.hasMore,
+    hasNewer: snapshot.window.hasNewer,
+    isAtLatest: snapshot.window.isAtLatest,
   };
 }

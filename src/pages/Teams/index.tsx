@@ -10,6 +10,10 @@ import { useSubagentsStore } from '@/stores/subagents';
 import { useTeamsStore } from '@/stores/teams';
 import { useTranslation } from 'react-i18next';
 import { isGatewayOperational, isGatewayRecovering } from '@/lib/gateway-status';
+import { resolveSingleCapabilityRuntimeAddress } from '@/lib/host-api';
+import type { RuntimeAddress } from '../../../runtime-host/shared/runtime-address';
+
+const TEAM_COORDINATION_CAPABILITY_ID = 'team.coordination';
 
 export function TeamsPage() {
   const { t } = useTranslation('teams');
@@ -32,7 +36,31 @@ export function TeamsPage() {
   const [teamName, setTeamName] = useState('');
   const [leadAgentId, setLeadAgentId] = useState('');
   const [memberIds, setMemberIds] = useState<string[]>([]);
+  const [teamRuntimeAddress, setTeamRuntimeAddress] = useState<RuntimeAddress | null>(null);
   const hasRequestedAgentsForCurrentGatewayRunRef = useRef(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    if (!gatewayOperational) {
+      setTeamRuntimeAddress(null);
+      return;
+    }
+    resolveSingleCapabilityRuntimeAddress(TEAM_COORDINATION_CAPABILITY_ID)
+      .then((runtimeAddress) => {
+        if (!cancelled) {
+          setTeamRuntimeAddress(runtimeAddress);
+        }
+      })
+      .catch((error) => {
+        if (!cancelled) {
+          console.error('Failed to resolve team coordination runtime address:', error);
+          setTeamRuntimeAddress(null);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [gatewayOperational]);
 
   useEffect(() => {
     if (!gatewayOperational) {
@@ -89,7 +117,7 @@ export function TeamsPage() {
   };
 
   const handleCreate = async () => {
-    if (!effectiveLeadAgentId) {
+    if (!effectiveLeadAgentId || !teamRuntimeAddress) {
       return;
     }
     const name = teamName.trim() || t('defaultValues.teamName', 'New Team');
@@ -102,7 +130,7 @@ export function TeamsPage() {
       memberIds: members,
     });
     setActiveTeam(teamId);
-    await initRuntime(teamId);
+    await initRuntime(teamId, teamRuntimeAddress);
     navigate(`/teams/${teamId}`);
   };
 
@@ -173,7 +201,7 @@ export function TeamsPage() {
           <div className="flex justify-end">
             <Button
               onClick={() => void handleCreate()}
-              disabled={!effectiveLeadAgentId || effectiveMemberIds.length === 0}
+              disabled={!effectiveLeadAgentId || effectiveMemberIds.length === 0 || !teamRuntimeAddress}
             >
               {t('create.createButton')}
             </Button>
@@ -205,10 +233,14 @@ export function TeamsPage() {
                     <div className="flex items-center gap-2">
                       <Button
                         size="sm"
+                        disabled={!teamRuntimeAddress}
                         onClick={async () => {
                           setActiveTeam(team.id);
+                          if (!teamRuntimeAddress) {
+                            return;
+                          }
                           if (!loadingByTeamId[team.id]) {
-                            await initRuntime(team.id);
+                            await initRuntime(team.id, teamRuntimeAddress);
                           }
                           navigate(`/teams/${team.id}`);
                         }}

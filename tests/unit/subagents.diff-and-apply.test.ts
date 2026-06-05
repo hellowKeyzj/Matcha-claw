@@ -112,6 +112,14 @@ describe('subagents diff and apply', () => {
 
     expect(hostSessionDeleteMock).toHaveBeenCalledWith({
       sessionKey: 'agent:writer:subagent-draft-123',
+      runtimeAddress: {
+        kind: 'native-runtime',
+        capabilityId: 'session.prompt',
+        runtimeAdapterId: 'openclaw',
+        runtimeInstanceId: 'local',
+        agentId: 'writer',
+        sessionKey: 'agent:writer:subagent-draft-123',
+      },
     });
     const state = useSubagentsStore.getState();
     expect(state.draftByFile).toEqual({});

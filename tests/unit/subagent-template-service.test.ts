@@ -3,6 +3,7 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createTestOpenClawEnvironmentRepository } from './helpers/runtime-system-environment';
+import { OpenClawSubagentTemplateWorkflow } from '../../runtime-host/application/adapters/openclaw/workflows/openclaw-workspace/openclaw-subagent-template-workflow';
 import { createTestRuntimeFileSystem } from './helpers/runtime-file-system';
 
 describe('subagent template service', () => {
@@ -58,13 +59,13 @@ describe('subagent template service', () => {
 
     process.resourcesPath = packagedResourcesDir;
 
-    const { SubagentTemplateService } = await import('../../runtime-host/application/openclaw/templates');
-    const service = new SubagentTemplateService(
-      createTestOpenClawEnvironmentRepository({
+    const { SubagentTemplateService } = await import('../../runtime-host/application/adapters/openclaw/infrastructure/openclaw-subagent-template-service');
+    const service = new SubagentTemplateService(new OpenClawSubagentTemplateWorkflow({
+      sources: createTestOpenClawEnvironmentRepository({
         resourcesPath: packagedResourcesDir,
       }),
       fileSystem,
-    );
+    }));
     const catalog = await service.listCatalog();
 
     expect(catalog.sourceDir).toBe(packagedTemplateRoot);
@@ -77,13 +78,13 @@ describe('subagent template service', () => {
 
     delete (process as NodeJS.Process & { resourcesPath?: string }).resourcesPath;
 
-    const { SubagentTemplateService } = await import('../../runtime-host/application/openclaw/templates');
-    const service = new SubagentTemplateService(
-      createTestOpenClawEnvironmentRepository({
+    const { SubagentTemplateService } = await import('../../runtime-host/application/adapters/openclaw/infrastructure/openclaw-subagent-template-service');
+    const service = new SubagentTemplateService(new OpenClawSubagentTemplateWorkflow({
+      sources: createTestOpenClawEnvironmentRepository({
         resourcesPath: null,
       }),
       fileSystem,
-    );
+    }));
     const catalog = await service.listCatalog();
 
     expect(catalog.sourceDir).toBe(workspaceTemplateRoot);

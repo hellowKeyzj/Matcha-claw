@@ -4,8 +4,7 @@ import type {
   SessionRunPhase,
 } from '../../../shared/session-adapter-types';
 import { createEmptySessionRuntimeState } from '../session-state-model';
-import { createOpenClawRuntimeSessionContext } from '../runtime-providers/session-runtime-context';
-import type { RuntimeSessionContext } from '../runtime-providers/runtime-provider-types';
+import type { RuntimeSessionContext } from '../../agent-runtime/contracts/runtime-endpoint-types';
 import type {
   CanonicalApprovalEvent,
   CanonicalLifecycleEvent,
@@ -279,6 +278,13 @@ function rebuildApprovalIndex(state: CanonicalSessionState): void {
   state.approvalIndexById = new Map(state.approvals.map((approval, index) => [approval.id, index]));
 }
 
+function approvalRuntimeAddress(state: CanonicalSessionState): RuntimeSessionContext['address'] {
+  return {
+    ...state.context.address,
+    capabilityId: 'session.approval',
+  };
+}
+
 function applyApproval(state: CanonicalSessionState, event: CanonicalApprovalEvent): void {
   const index = state.approvalIndexById.get(event.approvalId) ?? -1;
   if (event.status === 'resolved') {
@@ -291,6 +297,7 @@ function applyApproval(state: CanonicalSessionState, event: CanonicalApprovalEve
   const approval = {
     id: event.approvalId,
     sessionKey: event.sessionId,
+    runtimeAddress: approvalRuntimeAddress(state),
     ...(event.runId ? { runId: event.runId } : {}),
     title: event.title,
     ...(event.command ? { command: event.command } : {}),
@@ -346,12 +353,13 @@ function applyToolRuntime(state: CanonicalSessionState, event: CanonicalToolCall
 
 export function createEmptyCanonicalSessionState(
   sessionId: string,
-  context: RuntimeSessionContext = createOpenClawRuntimeSessionContext(sessionId),
+  context: RuntimeSessionContext,
 ): CanonicalSessionState {
   return {
     sessionId,
     protocolId: context.protocolId,
-    runtimeProviderId: context.runtimeProviderId,
+    runtimeEndpointId: context.runtimeEndpointId,
+    context,
     eventIds: [],
     eventIdSet: new Set<string>(),
     messageIndexByKey: new Map<string, number>(),
@@ -383,7 +391,7 @@ export function createEmptyCanonicalSessionState(
 }
 
 export function reduceCanonicalSessionEvent(state: CanonicalSessionState, event: CanonicalSessionEvent): boolean {
-  if (state.protocolId !== event.protocolId || state.runtimeProviderId !== event.runtimeProviderId) {
+  if (state.protocolId !== event.protocolId || state.runtimeEndpointId !== event.runtimeEndpointId) {
     return false;
   }
   if (state.eventIdSet.has(event.eventId)) {

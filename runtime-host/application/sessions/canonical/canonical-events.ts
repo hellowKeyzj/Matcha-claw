@@ -10,17 +10,17 @@ import type {
   SessionTaskCompletionEvent,
   TaskSnapshotEvent,
 } from '../../../shared/session-adapter-types';
-import type { RuntimeProtocolId, RuntimeProviderId } from '../runtime-providers/runtime-provider-types';
+import type { RuntimeProtocolId, RuntimeEndpointId } from '../../agent-runtime/contracts/runtime-endpoint-types';
 
-export type { RuntimeProtocolId, RuntimeProviderId } from '../runtime-providers/runtime-provider-types';
+export type { RuntimeProtocolId, RuntimeEndpointId } from '../../agent-runtime/contracts/runtime-endpoint-types';
 export type CanonicalEventSource = 'live' | 'replay' | 'imported' | 'snapshot' | 'control';
 export type CanonicalMessageStatus = 'streaming' | 'final' | 'error' | 'aborted';
 export type CanonicalLifecyclePhase = 'started' | 'final' | 'error' | 'aborted';
 export type CanonicalReplayBoundaryPhase = 'start' | 'end' | 'failed';
 
 export interface CanonicalOrigin {
-  providerEventType?: string;
-  providerIds?: {
+  runtimeEventType?: string;
+  runtimeIds?: {
     sessionKey?: string;
     sessionId?: string;
     turnId?: string;
@@ -41,7 +41,7 @@ export interface CanonicalEventBase {
   eventId: string;
   type: string;
   protocolId: RuntimeProtocolId;
-  runtimeProviderId: RuntimeProviderId;
+  runtimeEndpointId: RuntimeEndpointId;
   source: CanonicalEventSource;
   sessionId: string;
   runId?: string;

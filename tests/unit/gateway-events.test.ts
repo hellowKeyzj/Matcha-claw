@@ -18,6 +18,17 @@ vi.mock('@/lib/host-events', () => ({
   subscribeHostEvent: (...args: unknown[]) => subscribeHostEventMock(...args),
 }));
 
+function createTestRuntimeAddress(sessionKey = 'agent:main:main') {
+  return {
+    kind: 'native-runtime' as const,
+    capabilityId: 'session.prompt',
+    runtimeAdapterId: 'openclaw',
+    runtimeInstanceId: 'local',
+    agentId: 'main',
+    sessionKey,
+  };
+}
+
 function createRunningGatewayStatus(updatedAt = 1) {
   return {
     processState: 'running' as const,
@@ -90,6 +101,7 @@ function createSessionInfoUpdate(payload: {
         kind: 'main' as const,
         preferred: true,
         displayName: sessionKey,
+        runtimeAddress: createTestRuntimeAddress(sessionKey),
       },
       items: [],
       approvals: payload.approvals ?? [],
@@ -240,6 +252,7 @@ function createSessionItemUpdate(payload: {
         kind: 'main' as const,
         preferred: true,
         displayName: sessionKey,
+        runtimeAddress: createTestRuntimeAddress(sessionKey),
       },
       items: [item],
       approvals: [],
@@ -292,6 +305,7 @@ function createSessionPlanUpdate(payload: {
         kind: 'main' as const,
         preferred: true,
         displayName: sessionKey,
+        runtimeAddress: createTestRuntimeAddress(sessionKey),
       },
       items,
       approvals: [],

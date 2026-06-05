@@ -13,7 +13,7 @@ import { useSettingsStore } from './stores/settings';
 import { useGatewayStore } from './stores/gateway';
 import { useProviderStore } from './stores/providers';
 import { useUpdateStore } from './stores/update';
-import { hostApiFetch } from './lib/host-api';
+import { hostApiFetch, resolveSingleCapabilityRuntimeAddress } from './lib/host-api';
 import { useDelayedFlag } from './lib/use-delayed-flag';
 import { TeamsRuntimeDaemon } from './components/runtime/TeamsRuntimeDaemon';
 import { UpdateNotifier } from './components/update/UpdateNotifier';
@@ -119,6 +119,8 @@ interface LicenseGateSnapshot {
   nextRevalidateAtMs: number | null;
 }
 
+const MODEL_PROVIDER_CAPABILITY_ID = 'model.provider';
+
 function App() {
   const navigate = useNavigate();
   const location = useLocation();
@@ -169,7 +171,21 @@ function App() {
   // Initialize provider snapshot on mount so provider display state
   // survives app restarts without requiring settings page entry.
   useEffect(() => {
-    void initProviders();
+    let cancelled = false;
+    resolveSingleCapabilityRuntimeAddress(MODEL_PROVIDER_CAPABILITY_ID)
+      .then((runtimeAddress) => {
+        if (!cancelled) {
+          void initProviders(runtimeAddress);
+        }
+      })
+      .catch((error) => {
+        if (!cancelled) {
+          console.error('Failed to resolve model provider runtime address:', error);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
   }, [initProviders]);
 
   useEffect(() => {

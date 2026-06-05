@@ -2,7 +2,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { access, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { OpenClawWorkspaceService } from '../../runtime-host/application/openclaw/openclaw-workspace-service';
+import { OpenClawWorkspaceService } from '../../runtime-host/application/adapters/openclaw/infrastructure/openclaw-workspace-service';
+import { OpenClawWorkspaceMaintenanceWorkflow } from '../../runtime-host/application/adapters/openclaw/workflows/openclaw-workspace/openclaw-workspace-maintenance-workflow';
+import { OpenClawWorkspaceQueryWorkflow } from '../../runtime-host/application/adapters/openclaw/workflows/openclaw-workspace/openclaw-workspace-query-workflow';
 import { createTestRuntimeFileSystem } from './helpers/runtime-file-system';
 
 describe('runtime-host workspace template migration', () => {
@@ -38,29 +40,37 @@ describe('runtime-host workspace template migration', () => {
   });
 
   function createService(): OpenClawWorkspaceService {
-    return new OpenClawWorkspaceService(
-      {
-        getConfigDir: () => tempRoot,
-        read: async () => ({
-          agents: {
-            defaults: {
-              workspace: workspaceDir,
-            },
+    const config = {
+      getConfigDir: () => tempRoot,
+      read: async () => ({
+        agents: {
+          defaults: {
+            workspace: workspaceDir,
           },
-        }),
-      },
-      {
-        getResourcesPath: () => resourcesDir,
-        getWorkingDir: () => tempRoot,
-        getOpenClawDirPath: () => openclawDir,
-      },
-      createTestRuntimeFileSystem(),
-      {
-        debug: vi.fn(),
-        info: vi.fn(),
-        warn: vi.fn(),
-        error: vi.fn(),
-      },
+        },
+      }),
+    };
+    const environment = {
+      getResourcesPath: () => resourcesDir,
+      getWorkingDir: () => tempRoot,
+      getOpenClawDirPath: () => openclawDir,
+    };
+    const fileSystem = createTestRuntimeFileSystem();
+    const logger = {
+      debug: vi.fn(),
+      info: vi.fn(),
+      warn: vi.fn(),
+      error: vi.fn(),
+    };
+    const queryWorkflow = new OpenClawWorkspaceQueryWorkflow({ config });
+    return new OpenClawWorkspaceService(
+      queryWorkflow,
+      new OpenClawWorkspaceMaintenanceWorkflow({
+        workspaceQuery: queryWorkflow,
+        environment,
+        fileSystem,
+        logger,
+      }),
     );
   }
 
@@ -126,32 +136,40 @@ describe('runtime-host workspace template migration', () => {
 
   it('ensures identity files for every configured task workspace', async () => {
     const subagentWorkspaceDir = join(tempRoot, 'workspace-subagents', 'writer');
-    const service = new OpenClawWorkspaceService(
-      {
-        getConfigDir: () => tempRoot,
-        read: async () => ({
-          agents: {
-            defaults: {
-              workspace: workspaceDir,
-            },
-            list: [
-              { id: 'writer', workspace: subagentWorkspaceDir },
-            ],
+    const config = {
+      getConfigDir: () => tempRoot,
+      read: async () => ({
+        agents: {
+          defaults: {
+            workspace: workspaceDir,
           },
-        }),
-      },
-      {
-        getResourcesPath: () => resourcesDir,
-        getWorkingDir: () => tempRoot,
-        getOpenClawDirPath: () => openclawDir,
-      },
-      createTestRuntimeFileSystem(),
-      {
-        debug: vi.fn(),
-        info: vi.fn(),
-        warn: vi.fn(),
-        error: vi.fn(),
-      },
+          list: [
+            { id: 'writer', workspace: subagentWorkspaceDir },
+          ],
+        },
+      }),
+    };
+    const environment = {
+      getResourcesPath: () => resourcesDir,
+      getWorkingDir: () => tempRoot,
+      getOpenClawDirPath: () => openclawDir,
+    };
+    const fileSystem = createTestRuntimeFileSystem();
+    const logger = {
+      debug: vi.fn(),
+      info: vi.fn(),
+      warn: vi.fn(),
+      error: vi.fn(),
+    };
+    const queryWorkflow = new OpenClawWorkspaceQueryWorkflow({ config });
+    const service = new OpenClawWorkspaceService(
+      queryWorkflow,
+      new OpenClawWorkspaceMaintenanceWorkflow({
+        workspaceQuery: queryWorkflow,
+        environment,
+        fileSystem,
+        logger,
+      }),
     );
 
     const result = await service.ensureDefaultIdentity();

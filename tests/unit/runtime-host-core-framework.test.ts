@@ -3,6 +3,11 @@ import { RuntimeHostContainer } from '../../runtime-host/composition/container';
 import { RuntimeJobQueue, RuntimeJobRegistry } from '../../runtime-host/core/jobs';
 import { RuntimeHostLifecycle } from '../../runtime-host/core/lifecycle';
 import { RuntimeHostModuleRegistry, RuntimeHostRegistry } from '../../runtime-host/core/registry';
+import { RuntimeHostRouteRegistry } from '../../runtime-host/composition/route-registry';
+import {
+  listRuntimeHostApplicationModuleRegistrationDiagnostics,
+  validateRuntimeHostApplicationModuleRegistrationOwners,
+} from '../../runtime-host/composition/runtime-host-module-registry';
 import { createTestRuntimeScheduler } from './helpers/runtime-scheduler';
 
 const logger = {
@@ -442,6 +447,21 @@ describe('runtime-host core framework', () => {
     vi.useRealTimers();
   });
 
+  it('job queue eviction 会清掉 pending 队列里的 stale id', async () => {
+    const registry = new RuntimeJobRegistry();
+    registry.register('queued.cleanup', vi.fn(async () => undefined));
+    const queue = new RuntimeJobQueue(registry, logger, scheduler, clock, {
+      concurrency: 1,
+      retentionSucceededMs: 60_000,
+    });
+    const job = queue.enqueue('queued.cleanup', null, { queue: 'low' });
+    (queue as unknown as { evictJob: (jobId: string) => void }).evictJob(job.id);
+
+    expect(queue.get(job.id)).toBeNull();
+    expect(queue.snapshotQueue().pendingCount).toBe(0);
+    expect(queue.snapshotQueue().queues.low.pendingCount).toBe(0);
+  });
+
   it('job queue finish 时清掉 payload 引用以释放大对象', async () => {
     const largePayload = { blob: new Array(1024).fill('x').join('') };
     const registry = new RuntimeJobRegistry();
@@ -537,29 +557,360 @@ describe('runtime-host core framework', () => {
     expect(registry.list()).toHaveLength(1);
   });
 
+  it('container 记录 factory resolve 的跨 owner 依赖边', () => {
+    const container = new RuntimeHostContainer();
+
+    container.withRegistrationOwner('infrastructure', () => {
+      container.registerValue('runtime.clock', { nowMs: () => 1 });
+    });
+    container.withRegistrationOwner('sessions', () => {
+      container.register('session.service', (scope) => ({
+        clock: scope.resolve('runtime.clock'),
+      }));
+      container.register('session.facade', (scope) => scope.resolve('session.service'));
+    });
+
+    container.resolve('session.facade');
+
+    expect(container.listResolveEdges()).toEqual([
+      {
+        fromOwner: 'sessions',
+        toOwner: 'infrastructure',
+        key: 'runtime.clock',
+      },
+    ]);
+  });
+
+  it('container 记录同一 contribution token 的多个 contributor owner', () => {
+    const container = new RuntimeHostContainer();
+
+    container.withRegistrationOwner('sessions', () => {
+      container.contribute('agentRuntime.capabilityOperationRoutes', () => ['session.prompt']);
+    });
+    container.withRegistrationOwner('operations', () => {
+      container.contribute('agentRuntime.capabilityOperationRoutes', () => ['tool.invoke']);
+    });
+
+    expect(container.listRegistrations()).toEqual([
+      {
+        key: 'agentRuntime.capabilityOperationRoutes',
+        owner: 'sessions',
+        kind: 'contribution',
+        resolved: false,
+      },
+      {
+        key: 'agentRuntime.capabilityOperationRoutes',
+        owner: 'operations',
+        kind: 'contribution',
+        resolved: false,
+      },
+    ]);
+  });
+
+  it('container 执行 contribution factory 时使用 contributor owner 记录依赖边', () => {
+    const container = new RuntimeHostContainer();
+
+    container.withRegistrationOwner('sessions', () => {
+      container.registerValue('sessionCommandService', { ok: true });
+      container.contribute('agentRuntime.capabilityOperationRoutes', (scope) => [scope.resolve('sessionCommandService')]);
+    });
+    container.withRegistrationOwner('agent-runtime', () => {
+      container.register('agentRuntime.capabilityRouter', (scope) => scope.resolveContributions('agentRuntime.capabilityOperationRoutes'));
+    });
+
+    container.resolve('agentRuntime.capabilityRouter');
+
+    expect(container.listResolveEdges()).toEqual([
+      {
+        fromOwner: 'agent-runtime',
+        toOwner: 'sessions',
+        key: 'agentRuntime.capabilityOperationRoutes',
+      },
+    ]);
+  });
+
   it('module registry 以模块名注册并拒绝重复模块', () => {
     const registry = new RuntimeHostModuleRegistry([
-      { name: 'runtime' },
+      { name: 'runtime', manifest: { id: 'runtime' } },
     ]);
 
-    expect(() => registry.register({ name: 'runtime' })).toThrow(
+    expect(() => registry.register({ name: 'runtime', manifest: { id: 'runtime' } })).toThrow(
       'Runtime host registry entry already registered: runtime',
     );
-    expect(registry.list()).toEqual([{ name: 'runtime' }]);
+    expect(registry.list()).toEqual([{ name: 'runtime', manifest: { id: 'runtime' } }]);
   });
 
   it('module registry 拒绝空模块名，避免组合根出现匿名模块', () => {
     const registry = new RuntimeHostModuleRegistry();
 
-    expect(() => registry.register({ name: '   ' })).toThrow(
+    expect(() => registry.register({ name: '   ', manifest: { id: '   ' } })).toThrow(
       'Runtime host module name is required',
     );
   });
 
+  it('module registry 要求所有模块显式声明 manifest', () => {
+    expect(() => new RuntimeHostModuleRegistry([
+      { name: 'runtime', manifest: undefined as never },
+    ])).toThrow('Runtime host module manifest is required: runtime');
+  });
+
+  it('module registry 校验 manifest id、重复 export 和缺失 import', () => {
+    expect(() => new RuntimeHostModuleRegistry([
+      { name: 'runtime', manifest: { id: 'sessions' } },
+    ])).toThrow('Runtime host module manifest id mismatch: runtime != sessions');
+
+    expect(() => new RuntimeHostModuleRegistry([
+      { name: 'runtime', manifest: { id: 'runtime', exports: ['gateway.runtime'] } },
+      { name: 'gateway', manifest: { id: 'gateway', exports: ['gateway.runtime'] } },
+    ])).toThrow('Runtime host module export already registered: gateway.runtime by runtime and gateway');
+
+    expect(() => new RuntimeHostModuleRegistry([
+      { name: 'sessions', manifest: { id: 'sessions', imports: ['gateway.runtime'] } },
+    ])).toThrow('Runtime host module import not exported: sessions imports gateway.runtime');
+  });
+
+  it('module registry 允许 manifest import 使用 external export', () => {
+    const registry = new RuntimeHostModuleRegistry([
+      { name: 'sessions', manifest: { id: 'sessions', imports: ['gateway.runtime'], exports: ['session.runtime'] } },
+    ], {
+      externalExports: ['gateway.runtime'],
+    });
+
+    expect(registry.listImports()).toEqual([{ moduleName: 'sessions', token: 'gateway.runtime' }]);
+    expect(registry.listExports()).toEqual([{ moduleName: 'sessions', token: 'session.runtime' }]);
+  });
+
+  it('module registry 拒绝 import/export 模块环', () => {
+    expect(() => new RuntimeHostModuleRegistry([
+      { name: 'gateway', manifest: { id: 'gateway', imports: ['agentRuntime.registry'], exports: ['gateway.runtime'] } },
+      { name: 'agent-runtime', manifest: { id: 'agent-runtime', imports: ['gateway.runtime'], exports: ['agentRuntime.registry'] } },
+    ])).toThrow('Runtime host module import cycle: gateway -> agent-runtime -> gateway');
+  });
+
+  it('module registry 拒绝 connect import 缺失和 connect 顺序环', () => {
+    expect(() => new RuntimeHostModuleRegistry([
+      { name: 'session-runtime', manifest: { id: 'session-runtime', connect: true, connectImports: ['gateway-bridge'] } },
+    ])).toThrow('Runtime host module connect import not registered: session-runtime imports gateway-bridge');
+
+    expect(() => new RuntimeHostModuleRegistry([
+      { name: 'gateway-bridge', manifest: { id: 'gateway-bridge', connect: true, connectImports: ['session-runtime'] } },
+      { name: 'session-runtime', manifest: { id: 'session-runtime', connect: true, connectImports: ['gateway-bridge'] } },
+    ])).toThrow('Runtime host module connect cycle: gateway-bridge -> session-runtime -> gateway-bridge');
+  });
+
+  it('module registry 拒绝未声明 import 的跨 owner resolve', () => {
+    const registry = new RuntimeHostModuleRegistry([
+      { name: 'gateway', manifest: { id: 'gateway', exports: ['gateway.runtime'] } },
+      { name: 'storage', manifest: { id: 'storage', exports: ['session.storage'] } },
+      { name: 'sessions', manifest: { id: 'sessions', imports: ['session.storage'], exports: ['session.runtime'] } },
+    ]);
+
+    expect(() => registry.validateResolveImports([
+      { fromOwner: 'sessions', toOwner: 'gateway', key: 'gateway.runtime' },
+    ])).toThrow('Runtime host module import not declared: sessions resolves gateway.runtime');
+  });
+
+  it('module registry 拒绝跨 owner resolve 未导出的内部 token', () => {
+    const registry = new RuntimeHostModuleRegistry([
+      { name: 'gateway', manifest: { id: 'gateway', exports: ['gateway.runtime'] } },
+      { name: 'sessions', manifest: { id: 'sessions', imports: ['gateway.client'], exports: ['session.runtime'] } },
+    ], {
+      externalExports: ['gateway.client'],
+    });
+
+    expect(() => registry.validateResolveImports([
+      { fromOwner: 'sessions', toOwner: 'gateway', key: 'gateway.client' },
+    ])).toThrow('Runtime host module dependency not exported: sessions resolves gateway.client owned by gateway');
+  });
+
+  it('module registry 允许已声明 import 的跨 owner resolve', () => {
+    const registry = new RuntimeHostModuleRegistry([
+      { name: 'gateway', manifest: { id: 'gateway', exports: ['gateway.runtime'] } },
+      { name: 'sessions', manifest: { id: 'sessions', imports: ['gateway.runtime'], exports: ['session.runtime'] } },
+    ]);
+
+    expect(() => registry.validateResolveImports([
+      { fromOwner: 'sessions', toOwner: 'gateway', key: 'gateway.runtime' },
+    ])).not.toThrow();
+  });
+
+  it('module registry 拒绝未声明 import 的 external export resolve', () => {
+    const registry = new RuntimeHostModuleRegistry([
+      { name: 'sessions', manifest: { id: 'sessions', exports: ['session.runtime'] } },
+    ], {
+      externalExports: ['gateway.runtime'],
+    });
+
+    expect(() => registry.validateResolveImports([
+      { fromOwner: 'sessions', toOwner: null, key: 'gateway.runtime' },
+    ])).toThrow('Runtime host module import not declared: sessions resolves gateway.runtime');
+  });
+
+  it('module registry 允许已声明 import 的 external export resolve', () => {
+    const registry = new RuntimeHostModuleRegistry([
+      { name: 'sessions', manifest: { id: 'sessions', imports: ['gateway.runtime'], exports: ['session.runtime'] } },
+    ], {
+      externalExports: ['gateway.runtime'],
+    });
+
+    expect(() => registry.validateResolveImports([
+      { fromOwner: 'sessions', toOwner: null, key: 'gateway.runtime' },
+    ])).not.toThrow();
+  });
+
+  it('module registry 用显式 manifest 阶段字段约束可执行阶段', () => {
+    interface TestModule {
+      readonly name: string;
+      readonly manifest: {
+        readonly id: string;
+        readonly registerProviders?: boolean;
+        readonly registerJobs?: boolean;
+        readonly connect?: boolean;
+      };
+      readonly registerServices?: () => void;
+      readonly registerJobs?: () => void;
+      readonly connect?: () => void;
+    }
+    const services = vi.fn();
+    const jobs = vi.fn();
+    const connect = vi.fn();
+    const registry = new RuntimeHostModuleRegistry<TestModule>([
+      { name: 'runtime', manifest: { id: 'runtime', registerProviders: true }, registerServices: services },
+      { name: 'jobs', manifest: { id: 'jobs', registerJobs: true }, registerJobs: jobs },
+      { name: 'connector', manifest: { id: 'connector', connect: true }, connect },
+    ], {
+      stages: [
+        { name: 'services', handler: 'registerServices' },
+        { name: 'jobs', handler: 'registerJobs' },
+        { name: 'connect', handler: 'connect' },
+      ],
+    });
+
+    registry.run('services', (module) => module.registerServices?.());
+    registry.run('connect', (module) => module.connect?.());
+
+    expect(services).toHaveBeenCalledTimes(1);
+    expect(connect).toHaveBeenCalledTimes(1);
+    expect(jobs).not.toHaveBeenCalled();
+  });
+
+  it('module registry 拒绝显式阶段字段和 handler 不一致的模块', () => {
+    interface TestModule {
+      readonly name: string;
+      readonly manifest: {
+        readonly id: string;
+        readonly registerProviders?: boolean;
+      };
+      readonly registerServices?: () => void;
+    }
+
+    expect(() => new RuntimeHostModuleRegistry<TestModule>([
+      { name: 'runtime', manifest: { id: 'runtime', registerProviders: true } },
+    ], {
+      stages: [{ name: 'services', handler: 'registerServices' }],
+    })).toThrow('Runtime host module stage handler missing: runtime.services');
+
+    expect(() => new RuntimeHostModuleRegistry<TestModule>([
+      { name: 'runtime', manifest: { id: 'runtime' }, registerServices: vi.fn() },
+    ], {
+      stages: [{ name: 'services', handler: 'registerServices' }],
+    })).toThrow('Runtime host module stage not declared: runtime.services');
+  });
+
+  it('route registry dispatcher uses exact path index before prefix and pattern buckets', async () => {
+    const routes = new RuntimeHostRouteRegistry();
+    const exact = vi.fn(() => ({ status: 200, data: { route: 'exact' } }));
+    const prefix = vi.fn(() => ({ status: 200, data: { route: 'prefix' } }));
+    const pattern = vi.fn(() => ({ status: 200, data: { route: 'pattern' } }));
+
+    routes.registerDefinitions('sessions', [
+      { method: 'POST', path: '/api/sessions/prompt', handle: exact },
+      { method: 'POST', prefix: '/api/sessions/', handle: prefix },
+      { method: 'POST', pattern: /^\/api\/sessions\//, handle: pattern },
+    ], {});
+
+    await expect(routes.dispatcher()('POST', '/api/sessions/prompt?ignored=1', {})).resolves.toEqual({
+      status: 200,
+      data: { route: 'exact' },
+    });
+    expect(exact).toHaveBeenCalledTimes(1);
+    expect(prefix).not.toHaveBeenCalled();
+    expect(pattern).not.toHaveBeenCalled();
+  });
+
+  it('application module diagnostics 合并 route/job/lifecycle 注册 owner', () => {
+    const container = new RuntimeHostContainer();
+    const jobRegistry = new RuntimeJobRegistry();
+    const lifecycle = new RuntimeHostLifecycle(logger);
+    const routes = new RuntimeHostRouteRegistry();
+
+    container.withRegistrationOwner('openclaw', () => {
+      container.registerValue('settings.service', { ok: true });
+    });
+    jobRegistry.withRegistrationOwner('runtime', () => {
+      jobRegistry.register('diagnostics.collect', () => undefined);
+    });
+    lifecycle.withRegistrationOwner('operations', () => {
+      lifecycle.registerBackgroundService({ name: 'cron.jobs-refresh', start: () => undefined });
+    });
+    routes.withRegistrationOwner('sessions', () => {
+      routes.registerDefinitions('sessions', [
+        {
+          method: 'POST',
+          path: '/api/capabilities/execute',
+          handle: () => ({ status: 200, data: { success: true } }),
+        },
+      ], {});
+    });
+
+    expect(listRuntimeHostApplicationModuleRegistrationDiagnostics(container, {
+      jobRegistry,
+      lifecycle,
+      routes,
+    })).toEqual(expect.arrayContaining([
+      { key: 'settings.service', owner: 'openclaw', exported: true },
+      { key: 'diagnostics.collect', owner: 'runtime', exported: false },
+      { key: 'cron.jobs-refresh', owner: 'operations', exported: false },
+      { key: 'sessions.POST /api/capabilities/execute', owner: 'sessions', exported: false },
+    ]));
+  });
+
+  it('module registry 允许模块注册未导出的内部 token', () => {
+    const container = new RuntimeHostContainer();
+
+    container.withRegistrationOwner('openclaw', () => {
+      container.registerValue('openclaw.internalOnly', { ok: true });
+    });
+
+    expect(() => validateRuntimeHostApplicationModuleRegistrationOwners(container)).not.toThrow();
+  });
+
+  it('application module owner 校验覆盖 job/lifecycle registry 注册项', () => {
+    const container = new RuntimeHostContainer();
+    const jobRegistry = new RuntimeJobRegistry();
+    const lifecycle = new RuntimeHostLifecycle(logger);
+
+    jobRegistry.withRegistrationOwner('runtime', () => {
+      jobRegistry.register('settings.service', () => undefined);
+    });
+    expect(() => validateRuntimeHostApplicationModuleRegistrationOwners(container, {
+      jobRegistry,
+    })).toThrow('Runtime host module export owner mismatch: settings.service exported by openclaw but registered by runtime');
+
+    lifecycle.withRegistrationOwner('runtime', () => {
+      lifecycle.registerBackgroundService({ name: 'cron.service', start: () => undefined });
+    });
+    expect(() => validateRuntimeHostApplicationModuleRegistrationOwners(container, {
+      lifecycle,
+    })).toThrow('Runtime host module export owner mismatch: cron.service exported by operations but registered by runtime');
+  });
+
   it('module registry 执行阶段失败时带出模块名和阶段名', () => {
     const registry = new RuntimeHostModuleRegistry([
-      { name: 'openclaw' },
-    ]);
+      { name: 'openclaw', manifest: { id: 'openclaw', registerJobs: true }, registerJobs: () => undefined },
+    ], {
+      stages: [{ name: 'jobs', handler: 'registerJobs' }],
+    });
 
     expect(() => registry.run('jobs', () => {
       throw new Error('boom');

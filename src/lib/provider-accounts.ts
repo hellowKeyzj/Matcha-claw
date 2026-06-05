@@ -1,4 +1,4 @@
-import { hostApiFetch } from '@/lib/host-api';
+import { hostCapabilityExecute } from '@/lib/host-api';
 import type {
   ModelCapability,
   ProviderCredential,
@@ -6,6 +6,25 @@ import type {
   ProviderVendorInfo,
   ProviderWithKeyInfo,
 } from '@/lib/providers';
+import type { RuntimeAddress } from '../../runtime-host/shared/runtime-address';
+
+const MODEL_PROVIDER_CAPABILITY_ID = 'model.provider';
+
+async function modelProviderCapabilityExecute<TResult>(
+  operationId: string,
+  runtimeAddress: RuntimeAddress,
+  input: Record<string, unknown> = {},
+): Promise<TResult> {
+  return await hostCapabilityExecute<TResult>({
+    id: MODEL_PROVIDER_CAPABILITY_ID,
+    operationId,
+    runtimeAddress,
+    input: {
+      ...input,
+      runtimeAddress,
+    },
+  });
+}
 
 export interface ProviderSnapshot {
   credentials: ProviderCredential[];
@@ -64,8 +83,11 @@ export function normalizeProviderSnapshot(value: unknown): ProviderSnapshot {
   };
 }
 
-export async function fetchProviderSnapshot(): Promise<ProviderSnapshot> {
-  const snapshot = await hostApiFetch<ProviderSnapshot | undefined>('/api/provider-accounts');
+export async function fetchProviderSnapshot(runtimeAddress: RuntimeAddress): Promise<ProviderSnapshot> {
+  const snapshot = await modelProviderCapabilityExecute<ProviderSnapshot | undefined>(
+    'providers.listAccounts',
+    runtimeAddress,
+  );
   return normalizeProviderSnapshot(snapshot);
 }
 

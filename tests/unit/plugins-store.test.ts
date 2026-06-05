@@ -1,10 +1,20 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const hostApiFetchMock = vi.fn();
+const hostCapabilityExecuteMock = vi.fn();
 const waitForRuntimeJobResultMock = vi.fn();
+
+const pluginRuntimeAddress = {
+  kind: 'native-runtime' as const,
+  capabilityId: 'plugin.runtime',
+  runtimeAdapterId: 'openclaw',
+  runtimeInstanceId: 'local',
+  agentId: 'default',
+};
 
 vi.mock('@/lib/host-api', () => ({
   hostApiFetch: (...args: unknown[]) => hostApiFetchMock(...args),
+  hostCapabilityExecute: (...args: unknown[]) => hostCapabilityExecuteMock(...args),
   waitForRuntimeJobResult: (...args: unknown[]) => waitForRuntimeJobResultMock(...args),
 }));
 
@@ -55,6 +65,7 @@ describe('plugins store', () => {
   beforeEach(() => {
     vi.resetModules();
     hostApiFetchMock.mockReset();
+    hostCapabilityExecuteMock.mockReset();
     waitForRuntimeJobResultMock.mockReset();
   });
 
@@ -141,7 +152,10 @@ describe('plugins store', () => {
       if (path === '/api/plugins/catalog') {
         return buildCatalogPayload();
       }
-      if (path === '/api/plugins/runtime/enabled-plugins') {
+      throw new Error(`unexpected path: ${path}`);
+    });
+    hostCapabilityExecuteMock.mockImplementation(async (payload: { operationId?: string }) => {
+      if (payload.operationId === 'plugins.setEnabled') {
         return {
           success: true,
           job: {
@@ -154,22 +168,27 @@ describe('plugins store', () => {
           },
         };
       }
-      throw new Error(`unexpected path: ${path}`);
+      throw new Error(`unexpected operation: ${payload.operationId}`);
     });
     waitForRuntimeJobResultMock.mockResolvedValue(buildRuntimePayload({ enabledPluginIds: [] }));
 
     const { usePluginsStore } = await import('@/stores/plugins-store');
     await usePluginsStore.getState().refreshSnapshot({ reason: 'initial', force: true });
-    await usePluginsStore.getState().togglePluginEnabled('plugin-a', false);
+    await usePluginsStore.getState().togglePluginEnabled('plugin-a', false, pluginRuntimeAddress);
 
     const state = usePluginsStore.getState();
     expect(state.mutating).toBe(false);
     expect(state.mutatingPluginId).toBeNull();
     expect(state.runtime?.execution.enabledPluginIds).toEqual(['plugin-a']);
-    expect(hostApiFetchMock).toHaveBeenCalledWith('/api/plugins/runtime/enabled-plugins', {
-      method: 'PUT',
-      body: JSON.stringify({ pluginIds: [] }),
-    });
+    expect(hostCapabilityExecuteMock).toHaveBeenCalledWith(expect.objectContaining({
+      id: 'plugin.runtime',
+      operationId: 'plugins.setEnabled',
+      runtimeAddress: pluginRuntimeAddress,
+      input: expect.objectContaining({
+        pluginIds: [],
+        runtimeAddress: pluginRuntimeAddress,
+      }),
+    }));
     expect(waitForRuntimeJobResultMock).toHaveBeenCalledWith('job-1');
   });
 

@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { FileService } from '../../runtime-host/application/files/file-service';
+import { WorkspaceFileRuntimeWorkflow } from '../../runtime-host/application/workflows/workspace-file/workspace-file-runtime-workflow';
 import { createTestRuntimeFileSystem } from './helpers/runtime-file-system';
 import { createTestRuntimeSystemEnvironment } from './helpers/runtime-system-environment';
 
@@ -14,14 +15,15 @@ describe('file routes', () => {
   beforeEach(async () => {
     tempHome = await mkdtemp(join(process.env.TEMP || process.cwd(), 'matcha-claw-home-'));
     configDir = await mkdtemp(join(process.env.TEMP || process.cwd(), 'matcha-claw-config-'));
-    fileService = new FileService({
+    const runtimeWorkflow = new WorkspaceFileRuntimeWorkflow({
       fileSystem: createTestRuntimeFileSystem(),
       idGenerator: { randomId: () => 'file-id', randomHex: () => 'file-id' },
       systemEnvironment: createTestRuntimeSystemEnvironment({ homeDir: tempHome }),
-      environment: {
-        getOpenClawConfigDir: () => configDir,
-      } as never,
+      runtimeDataStore: {
+        getRuntimeDataRootDir: () => configDir,
+      },
     });
+    fileService = new FileService({ runtimeWorkflow });
   });
 
   afterEach(async () => {

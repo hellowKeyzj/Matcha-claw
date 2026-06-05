@@ -77,7 +77,8 @@ function areChatSessionsEqual(left: ChatSession | undefined, right: ChatSession)
     left.key === right.key
     && (left.agentId ?? null) === (right.agentId ?? null)
     && (left.protocolId ?? null) === (right.protocolId ?? null)
-    && (left.runtimeProviderId ?? null) === (right.runtimeProviderId ?? null)
+    && (left.runtimeEndpointId ?? null) === (right.runtimeEndpointId ?? null)
+    && JSON.stringify(left.runtimeAddress ?? null) === JSON.stringify(right.runtimeAddress ?? null)
     && (left.kind ?? null) === (right.kind ?? null)
     && (left.preferred ?? false) === (right.preferred ?? false)
     && (left.label ?? null) === (right.label ?? null)
@@ -110,11 +111,17 @@ export function readSessionsFromState(
       continue;
     }
     const meta = getSessionMeta(state, sessionKey);
+    if (!meta.runtimeAddress) {
+      continue;
+    }
+    const agentId = meta.agentId ?? meta.runtimeAddress.agentId;
     const nextSession = {
       key: sessionKey,
-      agentId: meta.agentId ?? undefined,
+      backendSessionKey: meta.backendSessionKey,
+      agentId,
       protocolId: meta.protocolId ?? undefined,
-      runtimeProviderId: meta.runtimeProviderId ?? undefined,
+      runtimeEndpointId: meta.runtimeEndpointId ?? undefined,
+      runtimeAddress: meta.runtimeAddress,
       kind: meta.kind ?? undefined,
       preferred: meta.preferred,
       label: normalizeSessionLabel(meta.label) ?? undefined,
@@ -207,11 +214,6 @@ export function resolveCanonicalPrefixForAgent(agentId?: string): string | null 
   return `agent:${normalized}`;
 }
 
-export function parseAgentIdFromSessionKey(sessionKey: string): string | null {
-  const matched = sessionKey.match(/^agent:([^:]+):/i);
-  return matched?.[1] ?? null;
-}
-
 export function parseSessionCreatedAtMs(sessionKey: string): number | null {
   const matched = sessionKey.match(/(?:^|:)session-(\d{11,})(?=$|:)/);
   if (!matched) {
@@ -236,9 +238,10 @@ export function buildTaskBridgeState(
 ): TaskChatBridgeState {
   const sessionKey = normalizeTaskSessionKey(state.currentSessionKey, defaultSessionKey);
   const runtime = getSessionRuntime(state, sessionKey);
+  const meta = getSessionMeta(state, sessionKey);
   return {
     sessionKey,
-    owner: parseAgentIdFromSessionKey(sessionKey) || 'main',
+    owner: meta.agentId ?? meta.runtimeAddress?.agentId ?? 'main',
     canSendRecoveryPrompt: !isRunActive(runtime) && !runtime.activeRunId,
   };
 }
@@ -254,7 +257,7 @@ export function resolveSessionActivityMs(
   if (typeof session.updatedAt === 'number' && Number.isFinite(session.updatedAt)) {
     return session.updatedAt;
   }
-  return parseSessionCreatedAtMs(session.key) ?? 0;
+  return parseSessionCreatedAtMs(session.backendSessionKey) ?? 0;
 }
 
 export function resolvePreferredSessionKeyForAgent(
@@ -262,9 +265,7 @@ export function resolvePreferredSessionKeyForAgent(
   sessions: ChatSession[],
   loadedSessions: ChatStoreState['loadedSessions'],
 ): string | null {
-  const owned = sessions.filter((session) => (
-    (session.agentId ?? parseAgentIdFromSessionKey(session.key)) === agentId
-  ));
+  const owned = sessions.filter((session) => session.agentId === agentId);
   if (owned.length === 0) {
     return null;
   }

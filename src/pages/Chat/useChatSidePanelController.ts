@@ -113,7 +113,7 @@ export function useChatSidePanelController(
     if (!snapshot) {
       return [];
     }
-    const sourceSessionKey = snapshot.scope?.sessionKey ?? session.key;
+    const sourceSessionKey = session.key;
     return snapshot.tasks.map((task) => ({
       ...task,
       createdAt: task.createdAt ?? 0,
@@ -149,13 +149,18 @@ export function useChatSidePanelController(
         const chatState = useChatStore.getState();
         const activeSessions = readSessionsFromState(chatState);
         const sessionKeys = uniqueSorted(activeSessions.map((session) => session.key));
-        const snapshots = await Promise.all(sessionKeys.map(async (sessionKey) => ({
-          sessionKey,
-          snapshot: await listTaskSnapshot({ sessionKey }),
-        })));
+        const sessionByKey = new Map(activeSessions.map((session) => [session.key, session]));
+        const snapshots = await Promise.all(sessionKeys.map(async (sessionKey) => {
+          const session = sessionByKey.get(sessionKey)!;
+          return {
+            sessionKey,
+            snapshot: await listTaskSnapshot({ sessionKey: session.backendSessionKey, runtimeAddress: session.runtimeAddress }),
+          };
+        }));
         for (const { sessionKey, snapshot } of snapshots) {
           useTaskSnapshotStore.getState().reportTaskCenterSnapshot({
             sessionKey: getSnapshotSessionKey(sessionKey, snapshot),
+            recordKey: sessionKey,
             ...(snapshot.scope ? { scope: snapshot.scope } : {}),
             tasks: snapshot.tasks,
             todos: snapshot.todos,

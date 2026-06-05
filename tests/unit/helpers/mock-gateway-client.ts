@@ -1,5 +1,6 @@
 import { vi } from 'vitest';
 import * as hostApiModule from '@/lib/host-api';
+import type { RuntimeAddress } from '../../../runtime-host/application/agent-runtime/contracts/runtime-address';
 
 type GatewayRpcEnvelope<TResult = unknown> = {
   success: boolean;
@@ -13,6 +14,32 @@ type RpcCall = {
   timeoutMs?: number;
 };
 
+function capabilityAddress(capabilityId: string): RuntimeAddress {
+  return {
+    kind: 'native-runtime',
+    capabilityId,
+    runtimeAdapterId: 'openclaw',
+    runtimeInstanceId: 'local',
+    agentId: 'default',
+  };
+}
+
+function capabilityDescriptor(capabilityId: string): Record<string, unknown> {
+  const address = capabilityAddress(capabilityId);
+  return {
+    id: capabilityId,
+    kind: capabilityId,
+    address,
+    runtimeAdapterId: address.runtimeAdapterId,
+    runtimeInstanceId: address.runtimeInstanceId,
+    targetAgentIds: [address.agentId],
+    supportLevel: 'native',
+    availability: 'available',
+    operations: [],
+    policyScope: capabilityId,
+  };
+}
+
 function isGatewayRpcEnvelope(value: unknown): value is GatewayRpcEnvelope {
   return Boolean(
     value
@@ -23,6 +50,7 @@ function isGatewayRpcEnvelope(value: unknown): value is GatewayRpcEnvelope {
 
 export const gatewayClientRpcMock = vi.fn();
 export const hostApiFetchMock = vi.fn();
+export const hostCapabilityExecuteMock = vi.fn();
 export const hostSessionPromptMock = vi.fn();
 export const hostSessionWindowFetchMock = vi.fn();
 export const hostSessionDeleteMock = vi.fn();
@@ -32,14 +60,22 @@ export const hostSessionPatchMock = vi.fn();
 const subagentRuntimeRoutes: Record<string, string> = {
   '/api/subagents/list': 'agents.list',
   '/api/subagents/config/get': 'config.get',
-  '/api/subagents/config/set': 'config.set',
-  '/api/subagents/create': 'agents.create',
-  '/api/subagents/update': 'agents.update',
-  '/api/subagents/delete': 'agents.delete',
   '/api/subagents/files/get': 'agents.files.get',
-  '/api/subagents/files/set': 'agents.files.set',
   '/api/subagents/files/list': 'agents.files.list',
-  '/api/subagents/agent-wait': 'agent.wait',
+};
+
+const subagentCapabilityOperations: Record<string, string> = {
+  'subagents.config.set': 'config.set',
+  'subagents.create': 'agents.create',
+  'subagents.update': 'agents.update',
+  'subagents.delete': 'agents.delete',
+  'subagents.files.set': 'agents.files.set',
+};
+
+const settingsCapabilityRoutes: Record<string, string> = {
+  'settings.patch': '/api/settings',
+  'settings.reset': '/api/settings/reset',
+  'settings.setValue': '/api/settings/:key',
 };
 
 function parseJsonBody(init?: RequestInit & { timeoutMs?: number }): unknown {
@@ -59,23 +95,42 @@ function buildSubagentRpcCall(path: string, init?: RequestInit & { timeoutMs?: n
     return undefined;
   }
   const body = parseJsonBody(init);
-  if (method === 'agent.wait') {
-    const payload = body && typeof body === 'object' && !Array.isArray(body)
-      ? body as Record<string, unknown>
-      : {};
-    const timeoutMs = typeof payload.timeoutMs === 'number'
-      ? Math.max(1000, Math.floor(payload.timeoutMs)) + 10000
-      : init?.timeoutMs;
-    return {
-      method,
-      params: body,
-      timeoutMs,
-    };
-  }
   return {
     method,
     params: body,
     timeoutMs: init?.timeoutMs,
+  };
+}
+
+function readCapabilityInput(input: unknown): Record<string, unknown> {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) {
+    return {};
+  }
+  const { runtimeAddress: _runtimeAddress, ...domainInput } = input as Record<string, unknown>;
+  return domainInput;
+}
+
+function resolveSettingsCapabilityPath(operationId: string, input: unknown): string {
+  if (operationId !== 'settings.setValue') {
+    return settingsCapabilityRoutes[operationId] ?? '/api/settings';
+  }
+  const key = readCapabilityInput(input).key;
+  return `/api/settings/${encodeURIComponent(typeof key === 'string' ? key : '')}`;
+}
+
+function buildSettingsCapabilityInit(operationId: string, input: unknown): RequestInit | undefined {
+  if (operationId === 'settings.reset') {
+    return { method: 'POST' };
+  }
+  if (operationId === 'settings.setValue') {
+    return {
+      method: 'PUT',
+      body: JSON.stringify({ value: readCapabilityInput(input).value }),
+    };
+  }
+  return {
+    method: 'PUT',
+    body: JSON.stringify(readCapabilityInput(input)),
   };
 }
 
@@ -106,7 +161,49 @@ vi.spyOn(hostApiModule, 'hostApiFetch').mockImplementation(async <TResult = unkn
       subagentRpcCall.timeoutMs,
     );
   }
+  if (path === '/api/capabilities/list') {
+    return {
+      capabilities: [
+        capabilityDescriptor('plugin.runtime'),
+        capabilityDescriptor('skill.management'),
+        capabilityDescriptor('subagent.management'),
+      ],
+    } as TResult;
+  }
   return await hostApiFetchMock(path, init) as TResult;
+});
+
+vi.spyOn(hostApiModule, 'resolveSingleCapabilityRuntimeAddress').mockImplementation(async (
+  capabilityId: string,
+) => capabilityAddress(capabilityId));
+
+vi.spyOn(hostApiModule, 'hostCapabilityExecute').mockImplementation(async <TResult = unknown>(
+  payload: {
+    id: string;
+    operationId: string;
+    runtimeAddress: RuntimeAddress;
+    input?: unknown;
+  },
+  options?: { timeoutMs?: number },
+) => {
+  const subagentMethod = payload.id === 'subagent.management'
+    ? subagentCapabilityOperations[payload.operationId]
+    : undefined;
+  if (subagentMethod) {
+    return await invokeMockedGatewayRpc<TResult>(
+      subagentMethod,
+      readCapabilityInput(payload.input),
+      options?.timeoutMs,
+    );
+  }
+  if (payload.id === 'settings.runtime' && settingsCapabilityRoutes[payload.operationId]) {
+    hostCapabilityExecuteMock(payload, options);
+    return await hostApiFetchMock(
+      resolveSettingsCapabilityPath(payload.operationId, payload.input),
+      buildSettingsCapabilityInit(payload.operationId, payload.input),
+    ) as TResult;
+  }
+  return await hostCapabilityExecuteMock(payload, options) as TResult;
 });
 
 vi.spyOn(hostApiModule, 'hostSessionPrompt').mockImplementation(async (
@@ -134,14 +231,17 @@ vi.spyOn(hostApiModule, 'hostSessionWindowFetch').mockImplementation(async (
 ) => await hostSessionWindowFetchMock(payload));
 
 vi.spyOn(hostApiModule, 'hostSessionDelete').mockImplementation(async (
-  payload: { sessionKey: string },
+  payload: { sessionKey: string; runtimeAddress: RuntimeAddress },
 ) => await hostSessionDeleteMock(payload));
 
-vi.spyOn(hostApiModule, 'hostSessionList').mockImplementation(async () => await hostSessionListMock());
+vi.spyOn(hostApiModule, 'hostSessionList').mockImplementation(async (
+  payload: { runtimeAddress: RuntimeAddress },
+) => await hostSessionListMock(payload));
 
 vi.spyOn(hostApiModule, 'hostSessionPatch').mockImplementation(async (
   payload: {
     sessionKey: string;
+    runtimeAddress: RuntimeAddress;
     runtimeModelRef: string;
   },
 ) => await hostSessionPatchMock(payload));
@@ -149,6 +249,7 @@ vi.spyOn(hostApiModule, 'hostSessionPatch').mockImplementation(async (
 export function resetGatewayClientMocks(): void {
   gatewayClientRpcMock.mockReset();
   hostApiFetchMock.mockReset();
+  hostCapabilityExecuteMock.mockReset();
   hostSessionPromptMock.mockReset();
   hostSessionWindowFetchMock.mockReset();
   hostSessionDeleteMock.mockReset();

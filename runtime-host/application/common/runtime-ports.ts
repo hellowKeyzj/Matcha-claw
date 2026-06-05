@@ -87,6 +87,7 @@ export interface RuntimeFileSystemPort {
   ensureDirectory(pathname: string): Promise<void>;
   listDirectory(pathname: string): Promise<RuntimeDirectoryEntry[]>;
   readTextFile(pathname: string): Promise<string>;
+  readTextFileLines(pathname: string): AsyncIterable<string>;
   readBinaryFile(pathname: string): Promise<Uint8Array>;
   writeTextFile(pathname: string, content: string): Promise<void>;
   writeBinaryFile(pathname: string, content: Uint8Array): Promise<void>;

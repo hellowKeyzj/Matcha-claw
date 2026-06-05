@@ -3,15 +3,35 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { describe, expect, it, vi } from 'vitest';
 import { skillsRoutes } from '../../runtime-host/api/routes/skills-routes';
+import { createSkillManagementCapabilityOperationRoutes } from '../../runtime-host/application/capabilities/skill/skill-management-capability';
 import { SkillsService } from '../../runtime-host/application/skills/service';
+import { LocalSkillImportWorkflow } from '../../runtime-host/application/workflows/skill-install/local-skill-import-workflow';
+import { SkillBundleTransferWorkflow } from '../../runtime-host/application/workflows/skill-install/skill-bundle-transfer-workflow';
+import { PreinstalledSkillsWorkflow } from '../../runtime-host/application/workflows/skill-install/preinstalled-skills-workflow';
+import { SkillsOperationsWorkflow } from '../../runtime-host/application/workflows/skill-runtime/skills-operations-workflow';
+import { SkillRuntimeWorkflow } from '../../runtime-host/application/workflows/skill-runtime/skill-runtime-workflow';
 import { dispatchRuntimeRouteDefinition } from './helpers/runtime-route';
 import { createTestRuntimeFileSystem } from './helpers/runtime-file-system';
-import { createTestOpenClawEnvironmentRepository, createTestRuntimeSystemEnvironment } from './helpers/runtime-system-environment';
+import { createTestRuntimeSystemEnvironment } from './helpers/runtime-system-environment';
 
 const clock = {
   nowMs: () => 2345,
   nowIso: () => '1970-01-01T00:00:02.345Z',
 };
+
+async function executeSkillsRefreshStatus(skillsService: SkillsService) {
+  const route = createSkillManagementCapabilityOperationRoutes({
+    skillsService: skillsService as never,
+    clawHubService: {
+      install: vi.fn(),
+      uninstall: vi.fn(),
+    } as never,
+  }).find((item) => item.operationId === 'skills.refreshStatus');
+  if (!route) {
+    throw new Error('skills.refreshStatus route not registered');
+  }
+  return await route.handle({});
+}
 
 function createSkillsService(input: {
   getAllSkillConfigs?: () => Promise<Record<string, unknown>>;
@@ -78,47 +98,114 @@ function createSkillsService(input: {
       },
     })),
   };
-  return new SkillsService({
-    repository: {
-      getAllConfigs: input.getAllSkillConfigs ?? (async () => ({})),
-      updateConfig: input.updateSkillConfig ?? (async () => ({ success: true })),
-      setEnabled: input.setSkillEnabled ?? (async () => ({ success: true })),
-      setManyEnabled: input.setManySkillsEnabled ?? (async () => ({ success: true })),
-      listEffective: input.listEffectiveSkills ?? (async () => []),
-    },
-    readmePreviews: {
-      read: input.readmePreview ?? (async () => ({
-        status: 404,
-        data: { success: false, error: 'Skill preview not found' },
-      })),
-    },
+  const workingDir = input.workingDir ?? join(input.skillsDir ?? 'C:\\openclaw\\skills', '..', 'workspace');
+  const openClawDir = input.openClawDir ?? join(input.skillsDir ?? 'C:\\openclaw\\skills', '..', 'openclaw-package');
+  const fileSystem = createTestRuntimeFileSystem();
+  const commandExecutor = { execFile: vi.fn(async () => ({ stdout: '', stderr: '' })) };
+  const systemEnvironment = createTestRuntimeSystemEnvironment();
+  const logger = {
+    debug: vi.fn(),
+    info: vi.fn(),
+    warn: vi.fn(),
+    error: vi.fn(),
+  };
+  const repository = {
+    getAllConfigs: input.getAllSkillConfigs ?? (async () => ({})),
+    updateConfig: input.updateSkillConfig ?? (async () => ({ success: true })),
+    setEnabled: input.setSkillEnabled ?? (async () => ({ success: true })),
+    setManyEnabled: input.setManySkillsEnabled ?? (async () => ({ success: true })),
+    listEffective: input.listEffectiveSkills ?? (async () => []),
+  };
+  const skillRuntimeWorkflow = new SkillRuntimeWorkflow({
     gateway: {
       readGatewayConnectionState: async () => ({ state: 'connected', gatewayReady: true }),
       ...input.gateway,
-    },
+    } as never,
     jobs,
     clock,
-    fileSystem: createTestRuntimeFileSystem(),
-    commandExecutor: {
-      execFile: vi.fn(async () => ({ stdout: '', stderr: '' })),
-    },
-    systemEnvironment: createTestRuntimeSystemEnvironment(),
+    repository,
+    fileSystem,
     workspace: {
       getSkillsDir: () => input.skillsDir ?? 'C:\\openclaw\\skills',
+      getBuiltinVisibleSkillsManifestCandidates: () => [
+        join(workingDir, 'resources', 'skills', 'builtin-visible-skills.json'),
+      ],
+      getBuiltinSkillRootCandidates: () => [
+        join(openClawDir, 'skills'),
+        join(workingDir, 'build', 'openclaw', 'skills'),
+      ],
     },
-    environment: createTestOpenClawEnvironmentRepository({
-      workingDir: input.workingDir ?? join(input.skillsDir ?? 'C:\\openclaw\\skills', '..', 'workspace'),
-      getEnv: (name) => (name === 'MATCHACLAW_OPENCLAW_DIR'
-        ? input.openClawDir ?? join(input.skillsDir ?? 'C:\\openclaw\\skills', '..', 'openclaw-package')
-        : ''),
-    }),
-    logger: {
-      debug: vi.fn(),
-      info: vi.fn(),
-      warn: vi.fn(),
-      error: vi.fn(),
-    },
+    logger,
   });
+  const skillBundleTransferWorkflow = new SkillBundleTransferWorkflow({
+    repository,
+    jobs,
+    clock,
+    fileSystem,
+    skillsRoot: () => input.skillsDir ?? 'C:\\openclaw\\skills',
+  });
+  const preinstalledSkillsWorkflow = new PreinstalledSkillsWorkflow({
+    repository,
+    jobs,
+    clock,
+    fileSystem,
+    workspace: {
+      getSkillsDir: () => input.skillsDir ?? 'C:\\openclaw\\skills',
+      getPreinstalledManifestCandidates: () => [
+        join(workingDir, 'resources', 'skills', 'preinstalled-manifest.json'),
+      ],
+      getPreinstalledSourceRootCandidates: () => [
+        join(workingDir, 'build', 'preinstalled-skills'),
+      ],
+    },
+    logger,
+  });
+  const localSkillImportWorkflow = new LocalSkillImportWorkflow({
+    fileSystem,
+    commandExecutor,
+    systemEnvironment,
+    clock,
+    skillsRoot: () => input.skillsDir ?? 'C:\\openclaw\\skills',
+    logger,
+  });
+  const service = new SkillsService({
+    operationsWorkflow: new SkillsOperationsWorkflow({
+      repository,
+      readmePreviews: {
+        read: input.readmePreview ?? (async () => ({
+          status: 404,
+          data: { success: false, error: 'Skill preview not found' },
+        })),
+      },
+      jobs,
+      skillRuntimeWorkflow,
+      skillBundleTransferWorkflow,
+      localSkillImportWorkflow,
+      logger,
+    }),
+    skillRuntimeWorkflow,
+    skillBundleTransferWorkflow,
+    preinstalledSkillsWorkflow,
+  });
+  return service;
+}
+
+async function dispatchSkillManagementCapability(
+  skillsService: SkillsService,
+  operationId: string,
+  payload: Record<string, unknown>,
+) {
+  const route = createSkillManagementCapabilityOperationRoutes({
+    skillsService,
+    clawHubService: {
+      install: vi.fn(),
+      uninstall: vi.fn(),
+    } as never,
+  }).find((candidate) => candidate.operationId === operationId);
+  if (!route) {
+    throw new Error(`Missing skill management operation: ${operationId}`);
+  }
+  return await route.handle(payload);
 }
 
 async function writeSkillManifest(root: string, slug: string, input: { name?: string; description?: string } = {}) {
@@ -172,7 +259,7 @@ describe('skills route state sync', () => {
       },
     });
     expect(gatewayRpc).not.toHaveBeenCalled();
-    expect((skillsService as any).deps.jobs.submitRefreshStatus).not.toHaveBeenCalled();
+    expect((skillsService as any).deps.operationsWorkflow.deps.jobs.submitRefreshStatus).not.toHaveBeenCalled();
   });
 
   it('GET /api/skills/status 在 Gateway ready 后只提交后台刷新任务', async () => {
@@ -204,10 +291,10 @@ describe('skills route state sync', () => {
       error: null,
     });
     expect(gatewayRpc).not.toHaveBeenCalled();
-    expect((skillsService as any).deps.jobs.submitRefreshStatus).toHaveBeenCalledTimes(1);
+    expect((skillsService as any).deps.operationsWorkflow.deps.jobs.submitRefreshStatus).toHaveBeenCalledTimes(1);
   });
 
-  it('POST /api/skills/status/refresh 在 Gateway ready 后直接返回最新快照', async () => {
+  it('skill.management refreshStatus capability 在 Gateway ready 后直接返回最新快照', async () => {
     const tempRoot = await mkdtemp(join(tmpdir(), 'matchaclaw-skills-refresh-'));
     try {
       const skillsDir = join(tempRoot, 'skills');
@@ -228,12 +315,7 @@ describe('skills route state sync', () => {
         },
       });
 
-      const response = await dispatchRuntimeRouteDefinition(skillsRoutes,
-        'POST',
-        '/api/skills/status/refresh',
-        undefined,
-        { skillsService },
-      );
+      const response = await executeSkillsRefreshStatus(skillsService);
 
       expect(response.data).toMatchObject({
         success: true,
@@ -294,7 +376,7 @@ describe('skills route state sync', () => {
     }
   });
 
-  it('GET /api/skills/status/refresh 返回完整已安装清单，禁用项不因 Gateway 快照缺失而消失', async () => {
+  it('skill.management refreshStatus capability 返回完整已安装清单，禁用项不因 Gateway 快照缺失而消失', async () => {
     const tempRoot = await mkdtemp(join(tmpdir(), 'matchaclaw-skills-inventory-'));
     try {
       const skillsDir = join(tempRoot, 'skills');
@@ -335,13 +417,7 @@ describe('skills route state sync', () => {
         },
       });
 
-      const response = await dispatchRuntimeRouteDefinition(
-        skillsRoutes,
-        'POST',
-        '/api/skills/status/refresh',
-        {},
-        { skillsService },
-      );
+      const response = await executeSkillsRefreshStatus(skillsService);
 
       expect(response.status).toBe(200);
       expect((response.data as any).skills).toEqual(expect.arrayContaining([
@@ -367,7 +443,7 @@ describe('skills route state sync', () => {
     }
   });
 
-  it('GET /api/skills/status/refresh 保留已安装但当前不可用的技能，只过滤未安装配置项', async () => {
+  it('skill.management refreshStatus capability 保留已安装但当前不可用的技能，只过滤未安装配置项', async () => {
     const tempRoot = await mkdtemp(join(tmpdir(), 'matchaclaw-skills-missing-filter-'));
     try {
       const skillsDir = join(tempRoot, 'skills');
@@ -423,13 +499,7 @@ describe('skills route state sync', () => {
         },
       });
 
-      const response = await dispatchRuntimeRouteDefinition(
-        skillsRoutes,
-        'POST',
-        '/api/skills/status/refresh',
-        {},
-        { skillsService },
-      );
+      const response = await executeSkillsRefreshStatus(skillsService);
 
       const returnedSkillKeys = ((response.data as any).skills as Array<{ skillKey: string }>).map((skill) => skill.skillKey);
       expect(returnedSkillKeys).toContain('pdf');
@@ -450,7 +520,7 @@ describe('skills route state sync', () => {
     }
   });
 
-  it('GET /api/skills/status/refresh 启用后 eligible=false 的已安装技能不会从列表消失', async () => {
+  it('skill.management refreshStatus capability 启用后 eligible=false 的已安装技能不会从列表消失', async () => {
     const tempRoot = await mkdtemp(join(tmpdir(), 'matchaclaw-skills-enabled-ineligible-'));
     try {
       const skillsDir = join(tempRoot, 'skills');
@@ -495,13 +565,7 @@ describe('skills route state sync', () => {
         },
       });
 
-      const response = await dispatchRuntimeRouteDefinition(
-        skillsRoutes,
-        'POST',
-        '/api/skills/status/refresh',
-        {},
-        { skillsService },
-      );
+      const response = await executeSkillsRefreshStatus(skillsService);
 
       const returnedSkillKeys = ((response.data as any).skills as Array<{ skillKey: string }>).map((skill) => skill.skillKey);
       expect(returnedSkillKeys).toContain('image-gen');
@@ -511,7 +575,7 @@ describe('skills route state sync', () => {
     }
   });
 
-  it('GET /api/skills/status/refresh 保留本地 manifest 展示信息，不被 Gateway 空字段覆盖', async () => {
+  it('skill.management refreshStatus capability 保留本地 manifest 展示信息，不被 Gateway 空字段覆盖', async () => {
     const tempRoot = await mkdtemp(join(tmpdir(), 'matchaclaw-skills-display-'));
     try {
       const skillsDir = join(tempRoot, 'skills');
@@ -540,13 +604,7 @@ describe('skills route state sync', () => {
         },
       });
 
-      const response = await dispatchRuntimeRouteDefinition(
-        skillsRoutes,
-        'POST',
-        '/api/skills/status/refresh',
-        {},
-        { skillsService },
-      );
+      const response = await executeSkillsRefreshStatus(skillsService);
 
       expect((response.data as any).skills).toEqual(expect.arrayContaining([
         expect.objectContaining({
@@ -562,7 +620,7 @@ describe('skills route state sync', () => {
     }
   });
 
-  it('GET /api/skills/status/refresh 支持没有 frontmatter 的 Markdown 技能简介', async () => {
+  it('skill.management refreshStatus capability 支持没有 frontmatter 的 Markdown 技能简介', async () => {
     const tempRoot = await mkdtemp(join(tmpdir(), 'matchaclaw-skills-markdown-display-'));
     try {
       const skillsDir = join(tempRoot, 'skills');
@@ -594,13 +652,7 @@ describe('skills route state sync', () => {
         },
       });
 
-      const response = await dispatchRuntimeRouteDefinition(
-        skillsRoutes,
-        'POST',
-        '/api/skills/status/refresh',
-        {},
-        { skillsService },
-      );
+      const response = await executeSkillsRefreshStatus(skillsService);
 
       expect((response.data as any).skills).toEqual(expect.arrayContaining([
         expect.objectContaining({
@@ -614,7 +666,7 @@ describe('skills route state sync', () => {
     }
   });
 
-  it('GET /api/skills/status/refresh 只显示 manifest 配置的 OpenClaw 内置 skill', async () => {
+  it('skill.management refreshStatus capability 只显示 manifest 配置的 OpenClaw 内置 skill', async () => {
     const tempRoot = await mkdtemp(join(tmpdir(), 'matchaclaw-skills-bundled-roots-'));
     try {
       const runtimeOpenClawDir = join(tempRoot, 'runtime-openclaw');
@@ -664,13 +716,7 @@ describe('skills route state sync', () => {
         },
       });
 
-      const response = await dispatchRuntimeRouteDefinition(
-        skillsRoutes,
-        'POST',
-        '/api/skills/status/refresh',
-        {},
-        { skillsService },
-      );
+      const response = await executeSkillsRefreshStatus(skillsService);
 
       const returnedSkillKeys = ((response.data as any).skills as Array<{ skillKey: string }>).map((skill) => skill.skillKey);
       expect(returnedSkillKeys).toEqual(['canvas', 'healthcheck', 'user-skill']);
@@ -729,7 +775,7 @@ describe('skills route state sync', () => {
     expect(gatewayRpc).not.toHaveBeenCalled();
   });
 
-  it('PUT /api/skills/state 会先本地写 enabled，再提交 skills.update 后台同步任务', async () => {
+  it('skills.updateState capability 会先本地写 enabled，再提交 skills.update 后台同步任务', async () => {
     const gatewayRpc = vi.fn(async () => ({}));
     const setSkillEnabled = vi.fn(async () => ({ success: true }));
     const skillsService = createSkillsService({
@@ -740,17 +786,10 @@ describe('skills route state sync', () => {
       },
     });
 
-    const result = await dispatchRuntimeRouteDefinition(skillsRoutes, 
-      'PUT',
-      '/api/skills/state',
-      {
-        skillKey: 'multi-search-engine',
-        enabled: true,
-      },
-      {
-        skillsService,
-      },
-    );
+    const result = await dispatchSkillManagementCapability(skillsService, 'skills.updateState', {
+      skillKey: 'multi-search-engine',
+      enabled: true,
+    });
 
     expect(result).toEqual({
       status: 202,
@@ -761,7 +800,7 @@ describe('skills route state sync', () => {
     });
     expect(setSkillEnabled).toHaveBeenCalledWith('multi-search-engine', true);
     expect(gatewayRpc).not.toHaveBeenCalled();
-    expect((skillsService as any).deps.jobs.submitGatewayUpdate).toHaveBeenCalledWith({
+    expect((skillsService as any).deps.operationsWorkflow.deps.jobs.submitGatewayUpdate).toHaveBeenCalledWith({
       skillKey: 'multi-search-engine',
       updates: {
       enabled: true,
@@ -769,27 +808,21 @@ describe('skills route state sync', () => {
     });
   });
 
-  it('PUT /api/skills/state 在 Gateway 未运行时仍只提交同一个后台同步任务', async () => {
+  it('skills.updateState capability 在 Gateway 未运行时仍只提交同一个后台同步任务', async () => {
     const gatewayRpc = vi.fn(async () => ({}));
     const setSkillEnabled = vi.fn(async () => ({ success: true }));
 
-    const result = await dispatchRuntimeRouteDefinition(skillsRoutes, 
-      'PUT',
-      '/api/skills/state',
-      {
-        skillKey: 'web-extract',
-        enabled: false,
+    const skillsService = createSkillsService({
+      setSkillEnabled,
+      gateway: {
+        isGatewayRunning: async () => false,
+        gatewayRpc,
       },
-      {
-        skillsService: createSkillsService({
-          setSkillEnabled,
-          gateway: {
-          isGatewayRunning: async () => false,
-          gatewayRpc,
-          },
-        }),
-      },
-    );
+    });
+    const result = await dispatchSkillManagementCapability(skillsService, 'skills.updateState', {
+      skillKey: 'web-extract',
+      enabled: false,
+    });
 
     expect(result).toEqual({
       status: 202,
@@ -802,7 +835,7 @@ describe('skills route state sync', () => {
     expect(gatewayRpc).not.toHaveBeenCalled();
   });
 
-  it('PUT /api/skills/state/batch 会一次本地写入，不再通过 Gateway 逐项写配置', async () => {
+  it('skills.updateState capability/batch 会一次本地写入，不再通过 Gateway 逐项写配置', async () => {
     const gatewayRpc = vi.fn(async () => ({}));
     const setManySkillsEnabled = vi.fn(async () => ({ success: true }));
     const skillsService = createSkillsService({
@@ -813,17 +846,10 @@ describe('skills route state sync', () => {
       },
     });
 
-    const result = await dispatchRuntimeRouteDefinition(skillsRoutes,
-      'PUT',
-      '/api/skills/state/batch',
-      {
-        skillKeys: ['multi-search-engine', 'web-extract', 'multi-search-engine'],
-        enabled: false,
-      },
-      {
-        skillsService,
-      },
-    );
+    const result = await dispatchSkillManagementCapability(skillsService, 'skills.updateBatchState', {
+      skillKeys: ['multi-search-engine', 'web-extract', 'multi-search-engine'],
+      enabled: false,
+    });
 
     expect(result).toEqual({
       status: 200,
@@ -837,10 +863,10 @@ describe('skills route state sync', () => {
     expect(setManySkillsEnabled).toHaveBeenCalledWith(['multi-search-engine', 'web-extract'], false);
     expect(gatewayRpc).toHaveBeenCalledTimes(1);
     expect(gatewayRpc).toHaveBeenCalledWith('skills.status');
-    expect((skillsService as any).deps.jobs.submitGatewayUpdate).not.toHaveBeenCalled();
+    expect((skillsService as any).deps.operationsWorkflow.deps.jobs.submitGatewayUpdate).not.toHaveBeenCalled();
   });
 
-  it('PUT /api/skills/config 会先本地写配置，再提交 skills.update 后台同步任务', async () => {
+  it('skills.updateConfig capability 会先本地写配置，再提交 skills.update 后台同步任务', async () => {
     const gatewayRpc = vi.fn(async () => ({}));
     const updateSkillConfig = vi.fn(async () => ({ success: true }));
     const skillsService = createSkillsService({
@@ -851,20 +877,13 @@ describe('skills route state sync', () => {
       },
     });
 
-    const result = await dispatchRuntimeRouteDefinition(skillsRoutes, 
-      'PUT',
-      '/api/skills/config',
-      {
-        skillKey: 'tavily-search',
-        apiKey: 'tv-key',
-        env: {
-          TAVILY_SEARCH_DEPTH: 'advanced',
-        },
+    const result = await dispatchSkillManagementCapability(skillsService, 'skills.updateConfig', {
+      skillKey: 'tavily-search',
+      apiKey: 'tv-key',
+      env: {
+        TAVILY_SEARCH_DEPTH: 'advanced',
       },
-      {
-        skillsService,
-      },
-    );
+    });
 
     expect(result).toEqual({
       status: 202,
@@ -880,7 +899,7 @@ describe('skills route state sync', () => {
       },
     });
     expect(gatewayRpc).not.toHaveBeenCalled();
-    expect((skillsService as any).deps.jobs.submitGatewayUpdate).toHaveBeenCalledWith({
+    expect((skillsService as any).deps.operationsWorkflow.deps.jobs.submitGatewayUpdate).toHaveBeenCalledWith({
       skillKey: 'tavily-search',
       updates: {
       apiKey: 'tv-key',
@@ -891,27 +910,21 @@ describe('skills route state sync', () => {
     });
   });
 
-  it('PUT /api/skills/config 在 Gateway 未运行时会本地写配置', async () => {
+  it('skills.updateConfig capability 在 Gateway 未运行时会本地写配置', async () => {
     const gatewayRpc = vi.fn(async () => ({}));
     const updateSkillConfig = vi.fn(async () => ({ success: true }));
 
-    const result = await dispatchRuntimeRouteDefinition(skillsRoutes, 
-      'PUT',
-      '/api/skills/config',
-      {
-        skillKey: 'tavily-search',
-        apiKey: 'tv-key',
+    const skillsService = createSkillsService({
+      updateSkillConfig,
+      gateway: {
+        isGatewayRunning: async () => false,
+        gatewayRpc,
       },
-      {
-        skillsService: createSkillsService({
-          updateSkillConfig,
-          gateway: {
-          isGatewayRunning: async () => false,
-          gatewayRpc,
-          },
-        }),
-      },
-    );
+    });
+    const result = await dispatchSkillManagementCapability(skillsService, 'skills.updateConfig', {
+      skillKey: 'tavily-search',
+      apiKey: 'tv-key',
+    });
 
     expect(result).toEqual({
       status: 202,
@@ -983,7 +996,7 @@ describe('skills route state sync', () => {
     });
   });
 
-  it('POST /api/skills/bundles/export 打包 managed skill 文本文件', async () => {
+  it('skills.exportBundles capability 打包 managed skill 文本文件', async () => {
     const tempDir = await mkdtemp(join(tmpdir(), 'matchaclaw-skills-export-'));
     try {
       const skillsDir = join(tempDir, 'skills');
@@ -992,20 +1005,16 @@ describe('skills route state sync', () => {
       await writeFile(join(skillDir, 'SKILL.md'), '---\nname: Web Search\ndescription: Search web\n---\n', 'utf8');
       await writeFile(join(skillDir, 'scripts', 'run.py'), 'print("hi")\n', 'utf8');
 
-      const result = await dispatchRuntimeRouteDefinition(skillsRoutes,
-        'POST',
-        '/api/skills/bundles/export',
-        { skillKeys: ['web-search', 'missing-skill'] },
-        {
-          skillsService: createSkillsService({
-            skillsDir,
-            gateway: {
-              isGatewayRunning: async () => false,
-              gatewayRpc: vi.fn(async () => ({})),
-            },
-          }),
+      const skillsService = createSkillsService({
+        skillsDir,
+        gateway: {
+          isGatewayRunning: async () => false,
+          gatewayRpc: vi.fn(async () => ({})),
         },
-      );
+      });
+      const result = await dispatchSkillManagementCapability(skillsService, 'skills.exportBundles', {
+        skillKeys: ['web-search', 'missing-skill'],
+      });
 
       expect(result).toEqual({
         status: 200,
@@ -1024,7 +1033,7 @@ describe('skills route state sync', () => {
     }
   });
 
-  it('POST /api/skills/bundles/import 安装技能包并启用技能', async () => {
+  it('skills.importBundles capability 安装技能包并启用技能', async () => {
     const tempDir = await mkdtemp(join(tmpdir(), 'matchaclaw-skills-import-'));
     try {
       const skillsDir = join(tempDir, 'skills');
@@ -1038,22 +1047,17 @@ describe('skills route state sync', () => {
         },
       });
 
-      const result = await dispatchRuntimeRouteDefinition(skillsRoutes,
-        'POST',
-        '/api/skills/bundles/import',
-        {
-          skillBundles: [
-            {
-              skillKey: 'web-search',
-              files: [
-                { path: 'SKILL.md', content: '---\nname: Web Search\ndescription: Search web\n---\n' },
-                { path: 'scripts/run.py', content: 'print("hi")\n' },
-              ],
-            },
-          ],
-        },
-        { skillsService },
-      );
+      const result = await dispatchSkillManagementCapability(skillsService, 'skills.importBundles', {
+        skillBundles: [
+          {
+            skillKey: 'web-search',
+            files: [
+              { path: 'SKILL.md', content: '---\nname: Web Search\ndescription: Search web\n---\n' },
+              { path: 'scripts/run.py', content: 'print("hi")\n' },
+            ],
+          },
+        ],
+      });
 
       expect(result).toEqual({
         status: 200,
@@ -1064,7 +1068,7 @@ describe('skills route state sync', () => {
       });
       await expect(readFile(join(skillsDir, 'web-search', 'scripts', 'run.py'), 'utf8')).resolves.toBe('print("hi")\n');
       expect(setSkillEnabled).toHaveBeenCalledWith('web-search', true);
-      expect((skillsService as any).deps.jobs.submitGatewayUpdate).toHaveBeenCalledWith({
+      expect((skillsService as any).deps.operationsWorkflow.deps.jobs.submitGatewayUpdate).toHaveBeenCalledWith({
         skillKey: 'web-search',
         updates: { enabled: true },
       });
@@ -1073,7 +1077,7 @@ describe('skills route state sync', () => {
     }
   });
 
-  it('POST /api/skills/bundles/import 遇到已存在技能时跳过并保持静默成功', async () => {
+  it('skills.importBundles capability 遇到已存在技能时跳过并保持静默成功', async () => {
     const tempDir = await mkdtemp(join(tmpdir(), 'matchaclaw-skills-import-existing-'));
     try {
       const skillsDir = join(tempDir, 'skills');
@@ -1089,21 +1093,16 @@ describe('skills route state sync', () => {
         },
       });
 
-      const result = await dispatchRuntimeRouteDefinition(skillsRoutes,
-        'POST',
-        '/api/skills/bundles/import',
-        {
-          skillBundles: [
-            {
-              skillKey: 'web-search',
-              files: [
-                { path: 'SKILL.md', content: '---\nname: Incoming\ndescription: Incoming skill\n---\n' },
-              ],
-            },
-          ],
-        },
-        { skillsService },
-      );
+      const result = await dispatchSkillManagementCapability(skillsService, 'skills.importBundles', {
+        skillBundles: [
+          {
+            skillKey: 'web-search',
+            files: [
+              { path: 'SKILL.md', content: '---\nname: Incoming\ndescription: Incoming skill\n---\n' },
+            ],
+          },
+        ],
+      });
 
       expect(result).toEqual({
         status: 200,

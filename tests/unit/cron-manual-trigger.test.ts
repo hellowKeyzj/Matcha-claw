@@ -1,10 +1,10 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
   buildManualRunPatches,
+  ScheduledAgentTriggerWorkflow,
   shouldUseManualRunProfileSwitch,
-  triggerCronJobWithSplitProfiles,
   type GatewayCronJobForTrigger,
-} from '../../runtime-host/application/cron/manual-trigger';
+} from '../../runtime-host/application/workflows/scheduled-agent/scheduled-agent-trigger-workflow';
 
 function buildJob(overrides?: Partial<GatewayCronJobForTrigger>): GatewayCronJobForTrigger {
   return {
@@ -86,9 +86,8 @@ describe('cron 手动触发配置切换', () => {
       }),
     };
 
-    const result = await triggerCronJobWithSplitProfiles({
+    const result = await new ScheduledAgentTriggerWorkflow({
       gateway,
-      id: 'job-1',
       clock: {
         nowMs: () => 1000,
         nowIso: () => '1970-01-01T00:00:01.000Z',
@@ -96,7 +95,7 @@ describe('cron 手动触发配置切换', () => {
       timer: {
         sleep: vi.fn(async () => undefined),
       },
-    });
+    }).execute({ id: 'job-1' });
 
     expect(result).toEqual({ ran: true });
     expect(gateway.updateCronJob).toHaveBeenNthCalledWith(1, 'job-1', expect.objectContaining({

@@ -102,6 +102,14 @@ describe('task snapshot store', () => {
     expect(useTaskSnapshotStore.getState().getPersistentTaskDataList('agent:main:main').map((t) => t.id)).toEqual(['1']);
   });
 
+  it('does not map an empty session task scope to the default main session', async () => {
+    const { useTaskSnapshotStore } = await import('@/stores/chat/task-snapshot-store');
+    const store = useTaskSnapshotStore.getState();
+
+    expect(store.getSessionTaskScopeKey('')).toBe('');
+    expect(store.getSessionTaskScopeKey('   ')).toBe('');
+  });
+
   it('returns stable derived task references for React selectors', async () => {
     const { useTaskSnapshotStore } = await import('@/stores/chat/task-snapshot-store');
     const store = useTaskSnapshotStore.getState();

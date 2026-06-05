@@ -1,26 +1,33 @@
 import { describe, expect, it } from 'vitest';
-import { OpenClawCustomMediaPluginConfigService } from '../../runtime-host/application/openclaw/openclaw-custom-media-plugin-config-service';
+import { OpenClawCustomMediaPluginConfigService } from '../../runtime-host/application/adapters/openclaw/projections/openclaw-custom-media-plugin-config-service';
+import { OpenClawCustomMediaPluginConfigWorkflow } from '../../runtime-host/application/adapters/openclaw/workflows/openclaw-provider/openclaw-custom-media-plugin-config-workflow';
 
 function createService(initialConfig: Record<string, unknown>) {
   let config = structuredClone(initialConfig);
-  const service = new OpenClawCustomMediaPluginConfigService({
+  let writeCount = 0;
+  const service = new OpenClawCustomMediaPluginConfigService(new OpenClawCustomMediaPluginConfigWorkflow({
     read: async () => structuredClone(config),
     write: async (next) => {
+      writeCount += 1;
       config = structuredClone(next);
     },
-    update: async (mutate) => {
+    updateDirty: async (mutate) => {
       const next = structuredClone(config);
-      const result = await mutate(next);
-      config = structuredClone(next);
-      return result;
+      const update = await mutate(next);
+      if (update.changed) {
+        writeCount += 1;
+        config = structuredClone(next);
+      }
+      return update.result;
     },
     getConfigDir: () => '',
     getConfigFilePath: () => '',
     getOpenClawDirPath: () => '',
-  });
+  }));
   return {
     service,
     readConfig: () => config,
+    writeCount: () => writeCount,
   };
 }
 
@@ -100,6 +107,41 @@ describe('OpenClawCustomMediaPluginConfigService', () => {
     });
 
     expect((readConfig().plugins as any).entries['matchaclaw-media'].config.providers['custom-592a8424']).not.toHaveProperty('apiKey');
+  });
+
+  it('does not rewrite openclaw config when custom media providers are unchanged', async () => {
+    const providerMap = {
+      'custom-592a8424': {
+        label: 'pic2api',
+        baseUrl: 'http://pic2api.com/v1beta',
+        apiProtocol: 'google',
+        models: [{ modelId: 'gemini-2.5-flash-image', capabilities: ['imageGenerate'], timeoutMs: 90_000 }],
+      },
+    };
+    const { service, writeCount } = createService({
+      plugins: {
+        allow: ['matchaclaw-media'],
+        entries: {
+          'matchaclaw-media': {
+            enabled: true,
+            config: {
+              providers: {
+                'custom-592a8424': {
+                  label: 'pic2api',
+                  baseUrl: 'http://pic2api.com/v1beta',
+                  apiProtocol: 'google',
+                  models: [{ id: 'gemini-2.5-flash-image', capabilities: ['imageGenerate'], timeoutMs: 90_000 }],
+                },
+              },
+            },
+          },
+        },
+      },
+    });
+
+    await service.replaceAll(providerMap);
+
+    expect(writeCount()).toBe(0);
   });
 
   it('reads model-level timeoutMs from custom media plugin config', async () => {

@@ -8,16 +8,21 @@ import { createTestRuntimeHostContainer } from '../unit/helpers/runtime-host-con
 describe('platform tool callback integration', () => {
   it('通过子进程 facade 执行注册的平台工具', async () => {
     const container = createTestRuntimeHostContainer();
-    registerRuntimeHostPlatformRoot(container, () => ({
-      isGatewayRunning: vi.fn().mockResolvedValue(true),
-      platformInstallTool: vi.fn(),
-      platformUninstallTool: vi.fn(),
-      platformEnableTool: vi.fn(),
-      platformDisableTool: vi.fn(),
-      platformListToolsCatalog: vi.fn().mockResolvedValue([]),
-      platformStartRun: vi.fn(),
-      platformAbortRun: vi.fn(),
-    }));
+    container.registerValue('gateway.runtime', {});
+    container.registerValue('platform.runtimeDriverFactory', {
+      createRuntimeDriver: () => ({
+        initialize: vi.fn(async () => undefined),
+        healthCheck: vi.fn(async () => ({ status: 'running' })),
+        installTool: vi.fn(async () => 'tool.echo'),
+        uninstallTool: vi.fn(async () => undefined),
+        enableTool: vi.fn(async () => undefined),
+        disableTool: vi.fn(async () => undefined),
+        listInstalledTools: vi.fn(async () => []),
+        execute: vi.fn(async () => 'run-1'),
+        abort: vi.fn(async () => undefined),
+      }),
+    });
+    registerRuntimeHostPlatformRoot(container);
     const root = resolveRuntimeHostPlatformRoot(container);
 
     root.toolExecutor.register('tool.echo', async (req) => ({

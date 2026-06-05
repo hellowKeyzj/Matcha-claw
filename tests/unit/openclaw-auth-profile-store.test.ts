@@ -2,7 +2,8 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
   OpenClawAuthProfileService,
-} from '../../runtime-host/application/openclaw/openclaw-auth-profile-store';
+} from '../../runtime-host/application/adapters/openclaw/infrastructure/openclaw-auth-profile-store';
+import { OpenClawAuthProfileWorkflow } from '../../runtime-host/application/adapters/openclaw/workflows/openclaw-auth/openclaw-auth-profile-workflow';
 import { createTestRuntimeLogger } from './helpers/runtime-logger';
 
 type AuthStoreShape = {
@@ -17,14 +18,17 @@ function cloneStore(store: AuthStoreShape): AuthStoreShape {
 }
 
 function createAuthProfileService(stores: Map<string, AuthStoreShape>, writeAuthProfilesMock: ReturnType<typeof vi.fn>) {
-  return new OpenClawAuthProfileService({
-    discoverAgentIds: async () => ['main'],
-    readAuthProfiles: async (agentId = 'main') => cloneStore(stores.get(agentId) ?? { version: 1, profiles: {} }),
-    writeAuthProfiles: async (store: AuthStoreShape, agentId = 'main') => {
-      writeAuthProfilesMock(store, agentId);
-      stores.set(agentId, cloneStore(store));
+  return new OpenClawAuthProfileService(new OpenClawAuthProfileWorkflow({
+    repository: {
+      discoverAgentIds: async () => ['main'],
+      readAuthProfiles: async (agentId = 'main') => cloneStore(stores.get(agentId) ?? { version: 1, profiles: {} }),
+      writeAuthProfiles: async (store: AuthStoreShape, agentId = 'main') => {
+        writeAuthProfilesMock(store, agentId);
+        stores.set(agentId, cloneStore(store));
+      },
     },
-  }, createTestRuntimeLogger('openclaw-auth-profile-store-test'));
+    logger: createTestRuntimeLogger('openclaw-auth-profile-store-test'),
+  }));
 }
 
 describe('removeProviderKeyFromOpenClaw', () => {

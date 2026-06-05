@@ -50,19 +50,31 @@ import { useTranslation } from 'react-i18next';
 import { SUPPORTED_LANGUAGES } from '@/i18n';
 import {
   hostApiFetch,
+  hostDiagnosticsCollect,
   hostOpenClawGetCliCommand,
+  resolveSingleCapabilityRuntimeAddress,
   waitForRuntimeJobResult,
-  type RuntimeJobSubmission,
 } from '@/lib/host-api';
 import { subscribeHostEvent } from '@/lib/host-events';
 import {
   hostSettingsPutPatch,
 } from '@/lib/settings-runtime';
 import {
+  hostLicenseClear,
+  hostLicenseRevalidate,
+  hostLicenseValidate,
+} from '@/lib/license-runtime';
+import {
   DEFAULT_SETTINGS_SECTION,
   parseSettingsSectionFromSearch,
   type SettingsSectionKey,
 } from '@/lib/sections';
+import { isGatewayOperational } from '@/lib/gateway-status';
+import type { RuntimeAddress } from '../../../runtime-host/shared/runtime-address';
+
+const SETTINGS_RUNTIME_CAPABILITY_ID = 'settings.runtime';
+const LICENSE_RUNTIME_CAPABILITY_ID = 'license.runtime';
+const RUNTIME_HOST_CAPABILITY_ID = 'runtime.host';
 type ControlUiInfo = {
   url: string;
   token: string;
@@ -233,15 +245,13 @@ export function Settings() {
   const proxyEnabled = useSettingsStore((state) => state.proxyEnabled);
   const proxyServer = useSettingsStore((state) => state.proxyServer);
   const proxyBypassRules = useSettingsStore((state) => state.proxyBypassRules);
-  const setProxyEnabled = useSettingsStore((state) => state.setProxyEnabled);
-  const setProxyServer = useSettingsStore((state) => state.setProxyServer);
-  const setProxyBypassRules = useSettingsStore((state) => state.setProxyBypassRules);
   const autoCheckUpdate = useSettingsStore((state) => state.autoCheckUpdate);
   const setAutoCheckUpdate = useSettingsStore((state) => state.setAutoCheckUpdate);
   const devModeUnlocked = useSettingsStore((state) => state.devModeUnlocked);
   const setDevModeUnlocked = useSettingsStore((state) => state.setDevModeUnlocked);
 
   const gatewayStatus = useGatewayStore((state) => state.status);
+  const gatewayOperational = isGatewayOperational(gatewayStatus);
   const restartGateway = useGatewayStore((state) => state.restart);
   const [controlUiInfo, setControlUiInfo] = useState<ControlUiInfo | null>(null);
   const [openclawCliCommand, setOpenclawCliCommand] = useState('');
@@ -290,6 +300,41 @@ export function Settings() {
     lastValidation: null,
     renewalAlert: null,
   });
+  const [settingsRuntimeAddress, setSettingsRuntimeAddress] = useState<RuntimeAddress | null>(null);
+  const [licenseRuntimeAddress, setLicenseRuntimeAddress] = useState<RuntimeAddress | null>(null);
+  const [runtimeHostAddress, setRuntimeHostAddress] = useState<RuntimeAddress | null>(null);
+
+  useEffect(() => {
+    if (!gatewayOperational) {
+      setSettingsRuntimeAddress(null);
+      setLicenseRuntimeAddress(null);
+      setRuntimeHostAddress(null);
+      return;
+    }
+    let active = true;
+    void Promise.all([
+      resolveSingleCapabilityRuntimeAddress(SETTINGS_RUNTIME_CAPABILITY_ID),
+      resolveSingleCapabilityRuntimeAddress(LICENSE_RUNTIME_CAPABILITY_ID),
+      resolveSingleCapabilityRuntimeAddress(RUNTIME_HOST_CAPABILITY_ID),
+    ])
+      .then(([settingsAddress, licenseAddress, hostAddress]) => {
+        if (active) {
+          setSettingsRuntimeAddress(settingsAddress);
+          setLicenseRuntimeAddress(licenseAddress);
+          setRuntimeHostAddress(hostAddress);
+        }
+      })
+      .catch(() => {
+        if (active) {
+          setSettingsRuntimeAddress(null);
+          setLicenseRuntimeAddress(null);
+          setRuntimeHostAddress(null);
+        }
+      });
+    return () => {
+      active = false;
+    };
+  }, [gatewayOperational]);
 
   const handleShowLogs = async () => {
     try {
@@ -376,12 +421,13 @@ export function Settings() {
   }, [resolveLicenseMessage, t]);
 
   const runValidateLicense = useCallback(async () => {
+    if (!licenseRuntimeAddress) {
+      toast.error(t('license.messages.unknown'));
+      return;
+    }
     setLicenseBusy(true);
     try {
-      const result = await hostApiFetch<LicenseValidationResponse>('/api/license/validate', {
-        method: 'POST',
-        body: JSON.stringify({ key: licenseKeyInput }),
-      });
+      const result = await hostLicenseValidate<LicenseValidationResponse>(licenseKeyInput, licenseRuntimeAddress);
       applyLicenseResult(result);
       await refreshLicenseGateSnapshot();
     } catch (error) {
@@ -391,7 +437,7 @@ export function Settings() {
     } finally {
       setLicenseBusy(false);
     }
-  }, [applyLicenseResult, licenseKeyInput, refreshLicenseGateSnapshot, resolveLicenseMessage]);
+  }, [applyLicenseResult, licenseKeyInput, licenseRuntimeAddress, refreshLicenseGateSnapshot, resolveLicenseMessage, t]);
 
   const handleValidateLicense = useCallback(() => {
     if (!licenseKeyInput.trim()) {
@@ -404,11 +450,13 @@ export function Settings() {
   }, [licenseKeyInput, resolveLicenseMessage, runValidateLicense]);
 
   const handleForceRevalidate = useCallback(async () => {
+    if (!licenseRuntimeAddress) {
+      toast.error(t('license.messages.unknown'));
+      return;
+    }
     setLicenseBusy(true);
     try {
-      const result = await hostApiFetch<LicenseValidationResponse>('/api/license/revalidate', {
-        method: 'POST',
-      });
+      const result = await hostLicenseRevalidate<LicenseValidationResponse>(licenseRuntimeAddress);
       applyLicenseResult(result);
       await refreshLicenseGateSnapshot();
     } catch (error) {
@@ -418,12 +466,16 @@ export function Settings() {
     } finally {
       setLicenseBusy(false);
     }
-  }, [applyLicenseResult, refreshLicenseGateSnapshot, resolveLicenseMessage]);
+  }, [applyLicenseResult, licenseRuntimeAddress, refreshLicenseGateSnapshot, resolveLicenseMessage, t]);
 
   const handleClearStoredLicense = useCallback(async () => {
+    if (!licenseRuntimeAddress) {
+      toast.error(t('license.toast.clearFailed', { error: t('license.messages.unknown') }));
+      return;
+    }
     setLicenseBusy(true);
     try {
-      await hostApiFetch('/api/license/clear', { method: 'POST' });
+      await hostLicenseClear(licenseRuntimeAddress);
       setLicenseKeyInput('');
       setLicenseValidationCode(null);
       setLicenseValidationMessage('');
@@ -435,14 +487,16 @@ export function Settings() {
     } finally {
       setLicenseBusy(false);
     }
-  }, [refreshLicenseGateSnapshot, t]);
+  }, [licenseRuntimeAddress, refreshLicenseGateSnapshot, t]);
 
   const handleCollectDiagnosticsBundle = useCallback(async () => {
+    if (!runtimeHostAddress) {
+      toast.error(t('diagnostics.toast.failed', { error: t('common:status.error') }));
+      return;
+    }
     setCollectingDiagnostics(true);
     try {
-      const submission = await hostApiFetch<RuntimeJobSubmission<DiagnosticsBundleResponse>>('/api/diagnostics/collect', {
-        method: 'POST',
-      });
+      const submission = await hostDiagnosticsCollect(runtimeHostAddress);
       const result = await waitForRuntimeJobResult<DiagnosticsBundleResponse>(submission.job.id, {
         timeoutMs: 180000,
       });
@@ -458,7 +512,7 @@ export function Settings() {
     } finally {
       setCollectingDiagnostics(false);
     }
-  }, [t]);
+  }, [runtimeHostAddress, t]);
 
   const handleOpenDiagnosticsBundleFolder = useCallback(async () => {
     if (!lastDiagnosticsZipPath) {
@@ -523,20 +577,32 @@ export function Settings() {
 
     try {
       const sourceDataUrl = await readFileAsDataUrl(selectedFile);
+      if (!settingsRuntimeAddress) {
+        toast.error(t('common:status.error'));
+        return;
+      }
       const squareAvatarDataUrl = await cropImageToSquareDataUrl(sourceDataUrl, 128);
-      setUserAvatarDataUrl(squareAvatarDataUrl);
+      await setUserAvatarDataUrl(squareAvatarDataUrl, settingsRuntimeAddress);
       toast.success(t('appearance.avatarUpdated'));
     } catch (error) {
       toast.error(t('appearance.avatarUpdateFailed', { error: String(error) }));
     }
   };
 
-  const handleClearAvatar = () => {
-    clearUserAvatar();
-    if (userAvatarInputRef.current) {
-      userAvatarInputRef.current.value = '';
+  const handleClearAvatar = async () => {
+    if (!settingsRuntimeAddress) {
+      toast.error(t('common:status.error'));
+      return;
     }
-    toast.success(t('appearance.avatarCleared'));
+    try {
+      await clearUserAvatar(settingsRuntimeAddress);
+      if (userAvatarInputRef.current) {
+        userAvatarInputRef.current.value = '';
+      }
+      toast.success(t('appearance.avatarCleared'));
+    } catch (error) {
+      toast.error(t('appearance.avatarUpdateFailed', { error: String(error) }));
+    }
   };
 
   // Open developer console
@@ -731,6 +797,10 @@ export function Settings() {
   }, []);
 
   const handleSaveProxySettings = async () => {
+    if (!settingsRuntimeAddress) {
+      toast.error(t('gateway.proxySaveFailed'));
+      return;
+    }
     setSavingProxy(true);
     try {
       const normalizedProxyServer = proxyServerDraft.trim();
@@ -739,11 +809,13 @@ export function Settings() {
         proxyEnabled: proxyEnabledDraft,
         proxyServer: normalizedProxyServer,
         proxyBypassRules: normalizedBypassRules,
-      });
+      }, settingsRuntimeAddress);
 
-      setProxyServer(normalizedProxyServer);
-      setProxyBypassRules(normalizedBypassRules);
-      setProxyEnabled(proxyEnabledDraft);
+      useSettingsStore.setState({
+        proxyEnabled: proxyEnabledDraft,
+        proxyServer: normalizedProxyServer,
+        proxyBypassRules: normalizedBypassRules,
+      });
 
       toast.success(t('gateway.proxySaved'));
       trackUiEvent('settings.proxy_saved', { enabled: proxyEnabledDraft });
@@ -758,11 +830,15 @@ export function Settings() {
     if (savingBrowserMode || nextMode === browserMode) {
       return;
     }
+    if (!settingsRuntimeAddress) {
+      toast.error(t('gateway.browser.modeSaveFailed'));
+      return;
+    }
     setSavingBrowserMode(true);
     try {
       await hostSettingsPutPatch({
         browserMode: nextMode,
-      });
+      }, settingsRuntimeAddress);
       useSettingsStore.setState({ browserMode: nextMode });
       toast.success(t('gateway.browser.modeSaved'));
     } catch (error) {
@@ -770,7 +846,7 @@ export function Settings() {
     } finally {
       setSavingBrowserMode(false);
     }
-  }, [browserMode, savingBrowserMode, t]);
+  }, [browserMode, savingBrowserMode, settingsRuntimeAddress, t]);
 
   const filteredTelemetryEntries = useMemo(() => {
     let entries = telemetryEntries;
@@ -1142,7 +1218,13 @@ export function Settings() {
               <Button
                 variant={theme === 'light' ? 'default' : 'outline'}
                 size="sm"
-                onClick={() => setTheme('light')}
+                onClick={() => {
+                  if (settingsRuntimeAddress) {
+                    void setTheme('light', settingsRuntimeAddress).catch((error) => {
+                      toast.error(`${t('common:status.error')}: ${toUserMessage(error)}`);
+                    });
+                  }
+                }}
               >
                 <Sun className="h-4 w-4 mr-2" />
                 {t('appearance.light')}
@@ -1150,7 +1232,13 @@ export function Settings() {
               <Button
                 variant={theme === 'dark' ? 'default' : 'outline'}
                 size="sm"
-                onClick={() => setTheme('dark')}
+                onClick={() => {
+                  if (settingsRuntimeAddress) {
+                    void setTheme('dark', settingsRuntimeAddress).catch((error) => {
+                      toast.error(`${t('common:status.error')}: ${toUserMessage(error)}`);
+                    });
+                  }
+                }}
               >
                 <Moon className="h-4 w-4 mr-2" />
                 {t('appearance.dark')}
@@ -1158,7 +1246,7 @@ export function Settings() {
               <Button
                 variant={theme === 'system' ? 'default' : 'outline'}
                 size="sm"
-                onClick={() => setTheme('system')}
+                onClick={() => { if (settingsRuntimeAddress) void setTheme('system', settingsRuntimeAddress).catch(() => {}); }}
               >
                 <Monitor className="h-4 w-4 mr-2" />
                 {t('appearance.system')}
@@ -1173,7 +1261,7 @@ export function Settings() {
                   key={lang.code}
                   variant={language === lang.code ? 'default' : 'outline'}
                   size="sm"
-                  onClick={() => setLanguage(lang.code)}
+                  onClick={() => { if (settingsRuntimeAddress) void setLanguage(lang.code, settingsRuntimeAddress).catch(() => {}); }}
                 >
                   {lang.label}
                 </Button>
@@ -1237,7 +1325,7 @@ export function Settings() {
                   </div>
                   <Switch
                     checked={launchAtStartup}
-                    onCheckedChange={setLaunchAtStartup}
+                    onCheckedChange={(value) => { if (settingsRuntimeAddress) void setLaunchAtStartup(value, settingsRuntimeAddress).catch(() => {}); }}
                   />
                 </div>
               </div>
@@ -1468,7 +1556,7 @@ export function Settings() {
             </div>
             <Switch
               checked={gatewayAutoStart}
-              onCheckedChange={setGatewayAutoStart}
+              onCheckedChange={(value) => { if (settingsRuntimeAddress) void setGatewayAutoStart(value, settingsRuntimeAddress).catch(() => {}); }}
             />
           </div>
 
@@ -1578,7 +1666,7 @@ export function Settings() {
             </div>
             <Switch
               checked={autoCheckUpdate}
-              onCheckedChange={setAutoCheckUpdate}
+              onCheckedChange={(value) => { if (settingsRuntimeAddress) void setAutoCheckUpdate(value, settingsRuntimeAddress).catch(() => {}); }}
             />
           </div>
 
@@ -1656,7 +1744,7 @@ export function Settings() {
             </div>
             <Switch
               checked={devModeUnlocked}
-              onCheckedChange={setDevModeUnlocked}
+              onCheckedChange={(value) => { if (settingsRuntimeAddress) void setDevModeUnlocked(value, settingsRuntimeAddress).catch(() => {}); }}
             />
           </div>
         </CardContent>

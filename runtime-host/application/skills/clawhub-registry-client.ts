@@ -1,4 +1,3 @@
-import type { OpenClawEnvironmentRepository } from '../openclaw/openclaw-environment-repository';
 import type { RuntimeFileSystemPort, RuntimeHttpClientPort } from '../common/runtime-ports';
 
 const CLAWHUB_PRIMARY_REGISTRY = 'https://cn.clawhub-mirror.com';
@@ -119,15 +118,20 @@ export function mapClawHubSearchResults(payload: Record<string, any>, options?: 
   return mapped.map(({ score: _score, ...item }) => item);
 }
 
+export interface ClawHubRegistryRuntimePort {
+  getClawHubRegistryBases(): readonly string[];
+  getRuntimeHostSettingsFilePath(): string;
+}
+
 export class ClawHubRegistryClient {
   constructor(
-    private readonly environment: OpenClawEnvironmentRepository,
+    private readonly runtime: ClawHubRegistryRuntimePort,
     private readonly httpClient: RuntimeHttpClientPort,
     private readonly fileSystem: RuntimeFileSystemPort,
   ) {}
 
   resolveRegistryBases(): string[] {
-    const configured = this.environment.getClawHubRegistryBases().map(normalizeRegistryBase);
+    const configured = this.runtime.getClawHubRegistryBases().map(normalizeRegistryBase);
     return configured.length > 0 ? configured : resolveClawHubRegistryBases();
   }
 
@@ -158,7 +162,7 @@ export class ClawHubRegistryClient {
   }
 
   private async getAllSettings(): Promise<Record<string, unknown>> {
-    const filePath = this.environment.getRuntimeHostSettingsFilePath();
+    const filePath = this.runtime.getRuntimeHostSettingsFilePath();
     try {
       const raw = await this.fileSystem.readTextFile(filePath);
       const parsed = JSON.parse(raw);

@@ -4,11 +4,16 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { SessionMetadataRepository } from '../../runtime-host/application/sessions/session-metadata-repository';
 import { SessionStorageRepository } from '../../runtime-host/application/sessions/session-storage-repository';
+import { SessionStorageIndexWorkflow, type SessionStorageRuntimeAddressResolverPort } from '../../runtime-host/application/workflows/session-storage/session-storage-index-workflow';
+import { SessionStorageRepositoryWorkflow } from '../../runtime-host/application/workflows/session-storage/session-storage-repository-workflow';
+import { SessionStorageTranscriptWorkflow } from '../../runtime-host/application/workflows/session-storage/session-storage-transcript-workflow';
 import {
   createTestSessionCatalogService,
   createTestSessionRuntimeService,
 } from './helpers/session-runtime-fixture';
 import { createTestRuntimeFileSystem } from './helpers/runtime-file-system';
+import { validateRuntimeAddress, type RuntimeAddress } from '../../runtime-host/application/agent-runtime/contracts/runtime-address';
+import { createOpenClawTestRuntimeAddress } from './helpers/runtime-address-fixtures';
 
 function buildTranscriptLine(input: {
   timestamp: string;
@@ -24,6 +29,34 @@ function buildTranscriptLine(input: {
       content: input.content,
     },
   });
+}
+
+function openClawRuntimeAddress(sessionKey: string): RuntimeAddress {
+  return createOpenClawTestRuntimeAddress(sessionKey, 'alpha');
+}
+
+function createTestSessionStorageRuntimeAddressResolver(): SessionStorageRuntimeAddressResolverPort {
+  return {
+    resolveStorageRuntimeAddress: ({ agentId, sessionKey, sessionStoreEntry }) => {
+      const stored = sessionStoreEntry?.runtimeAddress;
+      if (validateRuntimeAddress(stored) === null) {
+        return stored as RuntimeAddress;
+      }
+      return createOpenClawTestRuntimeAddress(sessionKey, agentId);
+    },
+  };
+}
+
+function claudeCodeRuntimeAddress(sessionKey: string): RuntimeAddress {
+  return {
+    kind: 'protocol-connector',
+    capabilityId: 'session.prompt',
+    protocolId: 'acp',
+    connectorId: 'acp',
+    endpointId: 'claude-code',
+    agentId: 'default',
+    sessionKey,
+  };
 }
 
 describe('session adapter service catalog', () => {
@@ -43,7 +76,7 @@ describe('session adapter service catalog', () => {
     mkdirSync(sessionsDir, { recursive: true });
     writeFileSync(join(sessionsDir, 'sessions.json'), JSON.stringify({
       sessions: [
-        { key: 'agent:alpha:main', id: 'main', label: 'indexed catalog title' },
+        { key: 'agent:alpha:main', id: 'main', label: 'indexed catalog title', runtimeAddress: openClawRuntimeAddress('agent:alpha:main') },
       ],
     }, null, 2));
     writeFileSync(join(sessionsDir, 'main.jsonl'), [
@@ -60,7 +93,7 @@ describe('session adapter service catalog', () => {
     });
 
     await service.refreshCache();
-    await expect(service.listSessions()).resolves.toEqual({
+    await expect(service.listSessions({ runtimeAddress: openClawRuntimeAddress('agent:alpha:main') })).resolves.toEqual({
       ready: true,
       refreshing: false,
       updatedAt: expect.any(Number),
@@ -73,7 +106,8 @@ describe('session adapter service catalog', () => {
           label: 'indexed catalog title',
           preferred: true,
           protocolId: 'openclaw-v4',
-          runtimeProviderId: 'openclaw',
+          runtimeEndpointId: 'openclaw-local',
+          runtimeAddress: openClawRuntimeAddress('agent:alpha:main'),
           status: 'completed',
           titleSource: 'user',
           displayName: 'indexed catalog title',
@@ -81,6 +115,91 @@ describe('session adapter service catalog', () => {
         },
       ],
     });
+  });
+
+  it('keeps same-key sessions isolated across runtime agents in the catalog', async () => {
+    const configDir = mkdtempSync(join(tmpdir(), 'matchaclaw-session-catalog-'));
+    tempDirs.push(configDir);
+
+    for (const agentId of ['alpha', 'beta']) {
+      const sessionsDir = join(configDir, 'agents', agentId, 'sessions');
+      mkdirSync(sessionsDir, { recursive: true });
+      writeFileSync(join(sessionsDir, 'sessions.json'), JSON.stringify({
+        sessions: [
+          { key: 'main', id: 'main', label: `${agentId} main`, runtimeAddress: createOpenClawTestRuntimeAddress('main', agentId) },
+        ],
+      }, null, 2));
+      writeFileSync(join(sessionsDir, 'main.jsonl'), [
+        buildTranscriptLine({
+          timestamp: '2026-04-10T10:00:00.000Z',
+          role: 'user',
+          content: `${agentId} transcript`,
+          id: `message-${agentId}`,
+        }),
+      ].join('\n'));
+    }
+
+    const service = createTestSessionCatalogService({
+      workspace: { getConfigDir: () => configDir },
+    });
+
+    await service.refreshCache();
+    const response = await service.listSessions({ runtimeAddress: createOpenClawTestRuntimeAddress('main', 'alpha') });
+
+    expect(response.sessions).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        agentId: 'alpha',
+        key: 'main',
+        displayName: 'alpha main',
+        runtimeAddress: createOpenClawTestRuntimeAddress('main', 'alpha'),
+      }),
+      expect.objectContaining({
+        agentId: 'beta',
+        key: 'main',
+        displayName: 'beta main',
+        runtimeAddress: createOpenClawTestRuntimeAddress('main', 'beta'),
+      }),
+    ]));
+    expect(response.sessions.filter((session) => session.key === 'main')).toHaveLength(2);
+  });
+
+  it('projects OpenClaw agent-scoped historical sessions into runtime-addressed catalog items', async () => {
+    const configDir = mkdtempSync(join(tmpdir(), 'matchaclaw-session-catalog-'));
+    tempDirs.push(configDir);
+
+    const sessionsDir = join(configDir, 'agents', 'alpha', 'sessions');
+    mkdirSync(sessionsDir, { recursive: true });
+    writeFileSync(join(sessionsDir, 'sessions.json'), JSON.stringify({
+      sessions: [
+        { key: 'agent:alpha:main', id: 'main', label: 'legacy title' },
+      ],
+    }, null, 2));
+    writeFileSync(join(sessionsDir, 'main.jsonl'), [
+      buildTranscriptLine({
+        timestamp: '2026-04-10T10:00:00.000Z',
+        role: 'user',
+        content: 'legacy transcript',
+        id: 'message-1',
+      }),
+    ].join('\n'));
+
+    const service = createTestSessionCatalogService({
+      workspace: { getConfigDir: () => configDir },
+    });
+
+    await service.refreshCache();
+    const response = await service.listSessions({ runtimeAddress: openClawRuntimeAddress('agent:alpha:main') });
+
+    expect(response.sessions).toEqual([
+      expect.objectContaining({
+        agentId: 'alpha',
+        key: 'agent:alpha:main',
+        runtimeAddress: openClawRuntimeAddress('agent:alpha:main'),
+        protocolId: 'openclaw-v4',
+        runtimeEndpointId: 'openclaw-local',
+        label: 'legacy title',
+      }),
+    ]);
   });
 
   it('uses the shared session metadata repository for catalog model resolution', async () => {
@@ -91,7 +210,7 @@ describe('session adapter service catalog', () => {
     mkdirSync(sessionsDir, { recursive: true });
     writeFileSync(join(sessionsDir, 'sessions.json'), JSON.stringify({
       sessions: [
-        { key: 'agent:alpha:main', id: 'main' },
+        { key: 'agent:alpha:main', id: 'main', runtimeAddress: openClawRuntimeAddress('agent:alpha:main') },
       ],
     }, null, 2));
     writeFileSync(join(sessionsDir, 'main.jsonl'), [
@@ -111,14 +230,11 @@ describe('session adapter service catalog', () => {
 
     const service = createTestSessionCatalogService({
       workspace: { getConfigDir: () => configDir },
-      metadataRepository: new TestSessionMetadataRepository({
-        workspace: { getConfigDir: () => configDir },
-        fileSystem: createTestRuntimeFileSystem(),
-      }),
+      metadataRepository: new TestSessionMetadataRepository(),
     });
 
     await service.refreshCache();
-    const response = await service.listSessions();
+    const response = await service.listSessions({ runtimeAddress: openClawRuntimeAddress('agent:alpha:main') });
 
     expect(response.sessions[0]).toMatchObject({
       key: 'agent:alpha:main',
@@ -135,8 +251,8 @@ describe('session adapter service catalog', () => {
     mkdirSync(sessionsDir, { recursive: true });
     writeFileSync(join(sessionsDir, 'sessions.json'), JSON.stringify({
       sessions: [
-        { key: 'agent:alpha:main', id: 'main', label: 'cached title' },
-        { key: 'agent:alpha:session-1', id: 'session-1' },
+        { key: 'agent:alpha:main', id: 'main', label: 'cached title', runtimeAddress: openClawRuntimeAddress('agent:alpha:main') },
+        { key: 'agent:alpha:session-1', id: 'session-1', runtimeAddress: openClawRuntimeAddress('agent:alpha:session-1') },
       ],
     }, null, 2));
     writeFileSync(transcriptPath, [
@@ -165,9 +281,24 @@ describe('session adapter service catalog', () => {
       }
     }
 
+    const fileSystem = createTestRuntimeFileSystem();
     const storageRepository = new CountingSessionStorageRepository({
-      workspace: { getConfigDir: () => configDir },
-      fileSystem: createTestRuntimeFileSystem(),
+      repositoryWorkflow: new SessionStorageRepositoryWorkflow({
+        indexWorkflow: new SessionStorageIndexWorkflow({
+          workspace: { getConfigDir: () => configDir },
+          fileSystem,
+          runtimeAddressResolver: createTestSessionStorageRuntimeAddressResolver(),
+        }),
+        transcriptWorkflow: new SessionStorageTranscriptWorkflow({
+          fileSystem,
+        }),
+        mutationWorkflow: {
+          upsertRuntimeAddress: async () => undefined,
+          updateStatus: async () => undefined,
+          rename: async () => undefined,
+          delete: async () => undefined,
+        },
+      }),
     });
     const service = createTestSessionCatalogService({
       workspace: { getConfigDir: () => configDir },
@@ -175,7 +306,7 @@ describe('session adapter service catalog', () => {
     });
 
     await service.refreshCache();
-    const response = await service.listSessions();
+    const response = await service.listSessions({ runtimeAddress: openClawRuntimeAddress('agent:alpha:main') });
     expect(response.sessions).toEqual(expect.arrayContaining([
       expect.objectContaining({
         key: 'agent:alpha:session-1',
@@ -202,10 +333,10 @@ describe('session adapter service catalog', () => {
     mkdirSync(sessionsDir, { recursive: true });
     writeFileSync(join(sessionsDir, 'sessions.json'), JSON.stringify({
       sessions: [
-        { key: 'agent:alpha:session-empty', id: 'session-empty' },
-        { key: 'agent:alpha:session-control', id: 'session-control' },
-        { key: 'agent:alpha:session-visible', id: 'session-visible' },
-        { key: 'agent:alpha:session-manual', id: 'session-manual', label: 'manual empty title' },
+        { key: 'agent:alpha:session-empty', id: 'session-empty', runtimeAddress: openClawRuntimeAddress('agent:alpha:session-empty') },
+        { key: 'agent:alpha:session-control', id: 'session-control', runtimeAddress: openClawRuntimeAddress('agent:alpha:session-control') },
+        { key: 'agent:alpha:session-visible', id: 'session-visible', runtimeAddress: openClawRuntimeAddress('agent:alpha:session-visible') },
+        { key: 'agent:alpha:session-manual', id: 'session-manual', label: 'manual empty title', runtimeAddress: openClawRuntimeAddress('agent:alpha:session-manual') },
       ],
     }, null, 2));
     writeFileSync(join(sessionsDir, 'session-empty.jsonl'), '');
@@ -232,7 +363,7 @@ describe('session adapter service catalog', () => {
     });
 
     await service.refreshCache();
-    const response = await service.listSessions();
+    const response = await service.listSessions({ runtimeAddress: openClawRuntimeAddress('agent:alpha:main') });
 
     expect(response.sessions.map((session) => session.key)).toEqual(expect.arrayContaining([
       'agent:alpha:session-visible',
@@ -262,6 +393,7 @@ describe('session adapter service catalog', () => {
       sessionsJsonPath: null,
       sessionsJson: null,
       sessionStoreEntry: null,
+      runtimeAddress: openClawRuntimeAddress(`agent:alpha:session-${index}`),
       transcriptPath: `/tmp/session-${index}.jsonl`,
     }));
     const service = createTestSessionCatalogService({
@@ -281,6 +413,8 @@ describe('session adapter service catalog', () => {
         },
         readTranscriptContent: async () => null,
         readTranscriptDescriptorContent: async () => null,
+        readTranscriptLines: async function* () {},
+        readTranscriptDescriptorLines: async function* () {},
         deleteSession: async () => false,
         renameSession: async () => false,
         updateSessionStatus: async () => false,
@@ -306,6 +440,109 @@ describe('session adapter service catalog', () => {
     expect(maxActive).toBe(8);
   });
 
+  it('lists all agents sharing the requested runtime endpoint', async () => {
+    const configDir = mkdtempSync(join(tmpdir(), 'matchaclaw-session-catalog-'));
+    tempDirs.push(configDir);
+
+    const alphaSessionsDir = join(configDir, 'agents', 'alpha', 'sessions');
+    const betaSessionsDir = join(configDir, 'agents', 'beta', 'sessions');
+    mkdirSync(alphaSessionsDir, { recursive: true });
+    mkdirSync(betaSessionsDir, { recursive: true });
+    writeFileSync(join(alphaSessionsDir, 'sessions.json'), JSON.stringify({
+      sessions: [
+        { key: 'agent:alpha:session-1', id: 'session-1', label: 'alpha history', runtimeAddress: createOpenClawTestRuntimeAddress('agent:alpha:session-1', 'alpha') },
+      ],
+    }, null, 2));
+    writeFileSync(join(betaSessionsDir, 'sessions.json'), JSON.stringify({
+      sessions: [
+        { key: 'agent:beta:session-1', id: 'session-1', label: 'beta history', runtimeAddress: createOpenClawTestRuntimeAddress('agent:beta:session-1', 'beta') },
+      ],
+    }, null, 2));
+    writeFileSync(join(alphaSessionsDir, 'session-1.jsonl'), [
+      buildTranscriptLine({
+        timestamp: '2026-04-10T10:00:00.000Z',
+        role: 'user',
+        content: 'alpha transcript',
+        id: 'alpha-message-1',
+      }),
+    ].join('\n'));
+    writeFileSync(join(betaSessionsDir, 'session-1.jsonl'), [
+      buildTranscriptLine({
+        timestamp: '2026-04-10T10:01:00.000Z',
+        role: 'user',
+        content: 'beta transcript',
+        id: 'beta-message-1',
+      }),
+    ].join('\n'));
+
+    const service = createTestSessionCatalogService({
+      workspace: { getConfigDir: () => configDir },
+    });
+
+    await service.refreshCache();
+    const response = await service.listSessions({ runtimeAddress: createOpenClawTestRuntimeAddress('agent:main:main', 'main') });
+
+    expect(response.sessions.map((session) => session.key)).toEqual(expect.arrayContaining([
+      'agent:alpha:session-1',
+      'agent:beta:session-1',
+    ]));
+  });
+
+  it('uses RuntimeAddress agent identity instead of parsing OpenClaw-style session keys', async () => {
+    const service = createTestSessionCatalogService({
+      workspace: { getConfigDir: () => '' },
+      storageRepository: {
+        listStorageDescriptors: async () => [],
+        findStorageDescriptor: async () => null,
+        getTranscriptFingerprint: async () => null,
+        readTranscriptContent: async () => null,
+        readTranscriptDescriptorContent: async () => null,
+        readTranscriptLines: async function* () {},
+        readTranscriptDescriptorLines: async function* () {},
+        deleteSession: async () => false,
+        renameSession: async () => false,
+        updateSessionStatus: async () => false,
+        upsertSessionRuntimeAddress: async () => true,
+      },
+      metadataRepository: {
+        resolveSessionModel: async () => null,
+        readSessionMetadata: async () => null,
+        writeSessionMetadata: async () => undefined,
+      },
+    });
+
+    const response = await service.listSessions({
+      runtimeAddress: createOpenClawTestRuntimeAddress('agent:legacy-name:main', 'address-agent'),
+      runtimeOverlays: [{
+        sessionKey: 'agent:legacy-name:main',
+        protocolId: 'openclaw-v4',
+        runtimeEndpointId: 'openclaw-local',
+        runtimeAddress: createOpenClawTestRuntimeAddress('agent:legacy-name:main', 'address-agent'),
+        timelineEntries: [],
+        runtime: {
+          status: 'idle',
+          updatedAt: 1,
+          phase: 'idle',
+          lastError: null,
+          transportIssue: null,
+          approvals: [],
+          usage: [],
+          artifacts: [],
+          capabilities: null,
+          control: null,
+        },
+      }],
+    });
+
+    expect(response.sessions[0]).toMatchObject({
+      key: 'agent:legacy-name:main',
+      agentId: 'address-agent',
+      runtimeAddress: {
+        agentId: 'address-agent',
+      },
+    });
+  });
+
   it('listSessions reads the cached catalog snapshot without rescanning transcripts', async () => {
     const configDir = mkdtempSync(join(tmpdir(), 'matchaclaw-session-catalog-'));
     tempDirs.push(configDir);
@@ -314,7 +551,7 @@ describe('session adapter service catalog', () => {
     mkdirSync(sessionsDir, { recursive: true });
     writeFileSync(join(sessionsDir, 'sessions.json'), JSON.stringify({
       sessions: [
-        { key: 'agent:alpha:main', id: 'main', label: 'cached snapshot' },
+        { key: 'agent:alpha:main', id: 'main', label: 'cached snapshot', runtimeAddress: openClawRuntimeAddress('agent:alpha:main') },
       ],
     }, null, 2));
     writeFileSync(join(sessionsDir, 'main.jsonl'), [
@@ -335,9 +572,24 @@ describe('session adapter service catalog', () => {
       }
     }
 
+    const fileSystem = createTestRuntimeFileSystem();
     const storageRepository = new CountingSessionStorageRepository({
-      workspace: { getConfigDir: () => configDir },
-      fileSystem: createTestRuntimeFileSystem(),
+      repositoryWorkflow: new SessionStorageRepositoryWorkflow({
+        indexWorkflow: new SessionStorageIndexWorkflow({
+          workspace: { getConfigDir: () => configDir },
+          fileSystem,
+          runtimeAddressResolver: createTestSessionStorageRuntimeAddressResolver(),
+        }),
+        transcriptWorkflow: new SessionStorageTranscriptWorkflow({
+          fileSystem,
+        }),
+        mutationWorkflow: {
+          upsertRuntimeAddress: async () => undefined,
+          updateStatus: async () => undefined,
+          rename: async () => undefined,
+          delete: async () => undefined,
+        },
+      }),
     });
     const service = createTestSessionCatalogService({
       workspace: { getConfigDir: () => configDir },
@@ -346,14 +598,14 @@ describe('session adapter service catalog', () => {
 
     await service.refreshCache();
     expect(storageRepository.readCount).toBe(0);
-    await expect(service.listSessions()).resolves.toMatchObject({
+    await expect(service.listSessions({ runtimeAddress: openClawRuntimeAddress('agent:alpha:main') })).resolves.toMatchObject({
       sessions: [
         {
           label: 'cached snapshot',
         },
       ],
     });
-    await service.listSessions();
+    await service.listSessions({ runtimeAddress: openClawRuntimeAddress('agent:alpha:main') });
     expect(storageRepository.readCount).toBe(0);
   });
 
@@ -385,7 +637,7 @@ describe('session adapter service catalog', () => {
       },
     });
 
-    const response = await service.listSessions();
+    const response = await service.listSessions({ runtimeAddress: openClawRuntimeAddress('agent:alpha:main') });
 
     expect(submitRefreshCatalog).not.toHaveBeenCalled();
     expect(getRefreshCatalogJob).toHaveBeenCalledTimes(1);
@@ -417,9 +669,9 @@ describe('session adapter service catalog', () => {
     mkdirSync(sessionsDir, { recursive: true });
     writeFileSync(join(sessionsDir, 'sessions.json'), JSON.stringify({
       sessions: [
-        { key: 'agent:alpha:session-1', id: 'session-1', label: 'indexed session one', updatedAt: Date.parse('2026-04-10T10:10:00.000Z') },
-        { key: 'agent:alpha:session-2', id: 'session-2', label: 'indexed session two', updatedAt: Date.parse('2026-04-11T08:00:00.000Z') },
-        { key: 'agent:alpha:session-missing', id: 'session-missing', label: 'missing transcript' },
+        { key: 'agent:alpha:session-1', id: 'session-1', label: 'indexed session one', updatedAt: Date.parse('2026-04-10T10:10:00.000Z'), runtimeAddress: openClawRuntimeAddress('agent:alpha:session-1') },
+        { key: 'agent:alpha:session-2', id: 'session-2', label: 'indexed session two', updatedAt: Date.parse('2026-04-11T08:00:00.000Z'), runtimeAddress: openClawRuntimeAddress('agent:alpha:session-2') },
+        { key: 'agent:alpha:session-missing', id: 'session-missing', label: 'missing transcript', runtimeAddress: openClawRuntimeAddress('agent:alpha:session-missing') },
       ],
     }, null, 2));
 
@@ -456,7 +708,7 @@ describe('session adapter service catalog', () => {
     });
 
     await service.refreshSessionCatalog();
-    const response = await service.listSessions();
+    const response = await service.listSessions({ runtimeAddress: openClawRuntimeAddress('agent:alpha:main') });
 
     expect(response.status).toBe(200);
     expect(response.data).toMatchObject({
@@ -499,6 +751,7 @@ describe('session adapter service catalog', () => {
         sessionFile: join(sessionsDir, 'session-1.jsonl'),
         label: 'claude code indexed session',
         updatedAt: Date.parse('2026-04-14T10:00:00.000Z'),
+        runtimeAddress: claudeCodeRuntimeAddress('claude-code:session-1'),
       },
     }, null, 2));
     writeFileSync(join(sessionsDir, 'session-1.jsonl'), [
@@ -519,11 +772,11 @@ describe('session adapter service catalog', () => {
     });
 
     await service.refreshSessionCatalog();
-    const response = await service.listSessions();
+    const response = await service.listSessions({ runtimeAddress: claudeCodeRuntimeAddress('claude-code:session-1') });
 
     expect(response.status).toBe(200);
     expect(response.data.sessions[0]).toMatchObject({
-      agentId: 'claude-code',
+      agentId: 'default',
       key: 'claude-code:session-1',
       label: 'claude code indexed session',
       displayName: 'claude code indexed session',
@@ -545,6 +798,7 @@ describe('session adapter service catalog', () => {
         updatedAt: Date.parse('2026-04-12T10:00:00.000Z'),
         modelProvider: 'openai',
         model: 'gpt-5.4',
+        runtimeAddress: openClawRuntimeAddress('agent:alpha:main'),
       },
       'agent:alpha:session-2': {
         sessionId: 'session-2',
@@ -553,6 +807,7 @@ describe('session adapter service catalog', () => {
         updatedAt: Date.parse('2026-04-13T10:00:00.000Z'),
         providerOverride: 'anthropic',
         modelOverride: 'claude-opus-4-6',
+        runtimeAddress: openClawRuntimeAddress('agent:alpha:session-2'),
       },
     }, null, 2));
 
@@ -583,7 +838,7 @@ describe('session adapter service catalog', () => {
     });
 
     await service.refreshSessionCatalog();
-    const response = await service.listSessions();
+    const response = await service.listSessions({ runtimeAddress: openClawRuntimeAddress('agent:alpha:main') });
 
     expect(response.status).toBe(200);
     expect(response.data).toMatchObject({
@@ -625,6 +880,7 @@ describe('session adapter service catalog', () => {
         sessionId: 'session-1',
         sessionFile: join(sessionsDir, 'session-1.jsonl'),
         label: 'indexed title',
+        runtimeAddress: claudeCodeRuntimeAddress('claude-code:session-1'),
       },
     }, null, 2));
     writeFileSync(join(sessionsDir, 'session-1.jsonl'), [
@@ -646,6 +902,7 @@ describe('session adapter service catalog', () => {
 
     await expect(service.renameSession({
       sessionKey: 'claude-code:session-1',
+      runtimeAddress: claudeCodeRuntimeAddress('claude-code:session-1'),
       label: 'manual provider title',
     })).resolves.toEqual({
       status: 200,
@@ -656,7 +913,7 @@ describe('session adapter service catalog', () => {
       },
     });
 
-    const response = await service.listSessions();
+    const response = await service.listSessions({ runtimeAddress: claudeCodeRuntimeAddress('claude-code:session-1') });
 
     expect(response.status).toBe(200);
     expect(response.data.sessions[0]).toMatchObject({
@@ -674,7 +931,7 @@ describe('session adapter service catalog', () => {
     mkdirSync(sessionsDir, { recursive: true });
     writeFileSync(join(sessionsDir, 'sessions.json'), JSON.stringify({
       sessions: [
-        { key: 'agent:alpha:session-1', id: 'session-1', label: 'indexed title' },
+        { key: 'agent:alpha:session-1', id: 'session-1', label: 'indexed title', runtimeAddress: openClawRuntimeAddress('agent:alpha:session-1') },
       ],
     }, null, 2));
     writeFileSync(join(sessionsDir, 'session-1.jsonl'), [
@@ -696,6 +953,7 @@ describe('session adapter service catalog', () => {
 
     await expect(service.renameSession({
       sessionKey: 'agent:alpha:session-1',
+      runtimeAddress: openClawRuntimeAddress('agent:alpha:session-1'),
       label: 'manual title',
     })).resolves.toEqual({
       status: 200,
@@ -706,7 +964,7 @@ describe('session adapter service catalog', () => {
       },
     });
 
-    const response = await service.listSessions();
+    const response = await service.listSessions({ runtimeAddress: openClawRuntimeAddress('agent:alpha:main') });
 
     expect(response.status).toBe(200);
     expect(response.data.sessions[0]).toMatchObject({
@@ -738,7 +996,7 @@ describe('session adapter service catalog', () => {
     mkdirSync(sessionsDir, { recursive: true });
     writeFileSync(join(sessionsDir, 'sessions.json'), JSON.stringify({
       sessions: [
-        { key: 'agent:alpha:main', id: 'main', label: 'alpha main title' },
+        { key: 'agent:alpha:main', id: 'main', label: 'alpha main title', runtimeAddress: openClawRuntimeAddress('agent:alpha:main') },
       ],
     }, null, 2));
     writeFileSync(join(sessionsDir, 'main.jsonl'), [
@@ -759,7 +1017,7 @@ describe('session adapter service catalog', () => {
     });
 
     await service.refreshSessionCatalog();
-    const response = await service.listSessions();
+    const response = await service.listSessions({ runtimeAddress: openClawRuntimeAddress('agent:alpha:main') });
 
     expect(response.status).toBe(200);
     expect(response.data.sessions[0]).toMatchObject({
@@ -768,7 +1026,7 @@ describe('session adapter service catalog', () => {
     });
   });
 
-  it('falls back to raw jsonl discovery when an agent has transcripts but no sessions.json', async () => {
+  it('projects raw OpenClaw jsonl discovery into runtime-addressed catalog items', async () => {
     const configDir = mkdtempSync(join(tmpdir(), 'matchaclaw-session-catalog-'));
     tempDirs.push(configDir);
 
@@ -792,22 +1050,16 @@ describe('session adapter service catalog', () => {
     });
 
     await service.refreshSessionCatalog();
-    const response = await service.listSessions();
+    const response = await service.listSessions({ runtimeAddress: openClawRuntimeAddress('agent:alpha:main') });
 
     expect(response.status).toBe(200);
-    expect(response.data).toMatchObject({
-      sessions: [
-        {
-          agentId: 'orphan-agent',
-          key: 'agent:orphan-agent:session-1778000000000',
-          kind: 'session',
-          label: 'orphan transcript title',
-          titleSource: 'user',
-          preferred: false,
-          displayName: 'orphan transcript title',
-          updatedAt: expect.any(Number),
-        },
-      ],
-    });
+    expect(response.data.sessions).toEqual([
+      expect.objectContaining({
+        agentId: 'orphan-agent',
+        key: 'agent:orphan-agent:session-1778000000000',
+        label: 'orphan transcript title',
+        runtimeAddress: createOpenClawTestRuntimeAddress('agent:orphan-agent:session-1778000000000', 'orphan-agent'),
+      }),
+    ]);
   });
 });

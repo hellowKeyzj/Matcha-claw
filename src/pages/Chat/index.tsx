@@ -22,6 +22,7 @@ import {
   patchSessionSnapshot,
 } from '@/stores/chat/store-state-helpers';
 import { hasVisibleRuntimeError } from '@/stores/chat/runtime-error-view';
+import { resolveSessionOperationTarget } from '@/stores/chat/session-identity';
 import {
   TRANSIENT_RUNTIME_ERROR_BANNER_DELAY_MS,
   shouldShowRuntimeErrorBannerImmediately,
@@ -44,7 +45,7 @@ import {
   type ChatAssistantCatalogAgent,
   type ChatRenderItem,
 } from './chat-render-item-model';
-import { hostApiFetch, hostSessionPatch } from '@/lib/host-api';
+import { hostApiFetch, hostSessionPatch, resolveSingleCapabilityRuntimeAddress } from '@/lib/host-api';
 import { invokeIpc } from '@/lib/api-client';
 import { toast } from 'sonner';
 import { collectChatArtifactGroups } from './artifacts';
@@ -56,6 +57,7 @@ import {
   resolveArtifactWorkbenchSelection,
 } from './artifact-workbench';
 import { supportsInlineDiff, type GeneratedFile } from '@/lib/generated-files';
+import type { RuntimeAddress } from '../../../runtime-host/shared/runtime-address';
 import type { ArtifactPreviewTarget } from '@/components/file-preview/types';
 import {
   buildArtifactPreviewTargetFromAttachedFile,
@@ -89,6 +91,8 @@ const EMPTY_APPROVAL_ITEMS: ApprovalItem[] = [];
 const ACTIVE_RUN_DISCONNECTED_ERROR = 'The active run disconnected before a terminal event was received.';
 const GATEWAY_CONNECT_FAILED_PREFIX = 'Gateway connect failed: ';
 const GATEWAY_RPC_TIMEOUT_PREFIX = 'Gateway RPC timeout: ';
+const MODEL_PROVIDER_CAPABILITY_ID = 'model.provider';
+const SUBAGENT_MANAGEMENT_CAPABILITY_ID = 'subagent.management';
 
 function parseRpcFailedMessage(message: string): { method: string; reason: string } | null {
   const matched = /^Gateway RPC failed \((.+?)\):\s*(.+)$/.exec(message.trim());
@@ -231,15 +235,11 @@ function selectChatPageState(state: ChatStoreState) {
     resolveApproval: state.resolveApproval,
     switchSession: state.switchSession,
     openAgentConversation: state.openAgentConversation,
+    bootstrapSessionRuntime: state.bootstrapSessionRuntime,
     loadHistory: state.loadHistory,
     loadSessions: state.loadSessions,
     cleanupEmptySession: state.cleanupEmptySession,
   };
-}
-
-function parseAgentIdFromSessionKey(sessionKey: string): string {
-  const matched = sessionKey.match(/^agent:([^:]+):/i);
-  return matched?.[1] ?? 'main';
 }
 
 function resolveEffectiveChatModelId(
@@ -293,11 +293,12 @@ export function Chat({ isActive = true }: ChatProps) {
     resolveApproval,
     switchSession,
     openAgentConversation,
+    bootstrapSessionRuntime,
     loadHistory,
     loadSessions,
     cleanupEmptySession,
   } = useChatStore(useShallow(selectChatPageState));
-  const currentAgentId = parseAgentIdFromSessionKey(currentSessionKey);
+  const currentAgentId = currentSession.meta.agentId ?? currentSession.meta.runtimeAddress?.agentId ?? 'main';
   const agents = useSubagentsStore((state) => (
     Array.isArray(state.agentsResource.data) ? state.agentsResource.data : EMPTY_AGENTS
   ));
@@ -318,6 +319,8 @@ export function Chat({ isActive = true }: ChatProps) {
   const [artifactFocusedFileOverride, setArtifactFocusedFileOverride] = useState<ArtifactPreviewTarget | null>(null);
   const [artifactViewMode, setArtifactViewMode] = useState<'preview' | 'diff'>('diff');
   const [visibleRuntimeError, setVisibleRuntimeError] = useState<string | null>(null);
+  const [modelProviderAddress, setModelProviderAddress] = useState<RuntimeAddress | null>(null);
+  const [subagentManagementAddress, setSubagentManagementAddress] = useState<RuntimeAddress | null>(null);
   const skillPreviewRequestSeqRef = useRef(0);
   const previousRenderedItemsRef = useRef<ChatRenderItem[] | null>(null);
   const artifactAutoOpenedSessionKeyRef = useRef<string | null>(null);
@@ -334,11 +337,59 @@ export function Chat({ isActive = true }: ChatProps) {
     navigate,
     switchSession,
     openAgentConversation,
+    bootstrapSessionRuntime,
     loadAgents,
     loadSessions,
     loadHistory,
     cleanupEmptySession,
   });
+
+
+  useEffect(() => {
+    let cancelled = false;
+    if (!isGatewayRunning) {
+      setModelProviderAddress(null);
+      return;
+    }
+    resolveSingleCapabilityRuntimeAddress(MODEL_PROVIDER_CAPABILITY_ID)
+      .then((runtimeAddress) => {
+        if (!cancelled) {
+          setModelProviderAddress(runtimeAddress);
+        }
+      })
+      .catch((error) => {
+        if (!cancelled) {
+          console.error('Failed to resolve model provider runtime address:', error);
+          setModelProviderAddress(null);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [isGatewayRunning]);
+
+  useEffect(() => {
+    let cancelled = false;
+    if (!isGatewayRunning) {
+      setSubagentManagementAddress(null);
+      return;
+    }
+    resolveSingleCapabilityRuntimeAddress(SUBAGENT_MANAGEMENT_CAPABILITY_ID)
+      .then((runtimeAddress) => {
+        if (!cancelled) {
+          setSubagentManagementAddress(runtimeAddress);
+        }
+      })
+      .catch((error) => {
+        if (!cancelled) {
+          console.error('Failed to resolve subagent management runtime address:', error);
+          setSubagentManagementAddress(null);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [isGatewayRunning]);
 
   const {
     sidePanelOpen,
@@ -360,6 +411,22 @@ export function Chat({ isActive = true }: ChatProps) {
     toggleArtifactWorkbenchFullscreen,
   } = useChatSidePanelController(sideEffectsActive, chatLayoutRef);
 
+  const updateAgentSkillConfig = useCallback(async (input: {
+    agentId: string;
+    name: string;
+    workspace: string;
+    model?: string;
+    skills?: string[] | null;
+  }) => {
+    if (!subagentManagementAddress) {
+      return;
+    }
+    await useSubagentsStore.getState().updateAgent({
+      ...input,
+      runtimeAddress: subagentManagementAddress,
+    });
+  }, [subagentManagementAddress]);
+
   const {
     selectedSkillIds,
     availableSkillOptions,
@@ -376,7 +443,7 @@ export function Chat({ isActive = true }: ChatProps) {
     skillsSnapshotReady,
     skillsInitialLoading,
     fetchSkills,
-    updateAgent: useSubagentsStore.getState().updateAgent,
+    updateAgent: updateAgentSkillConfig,
   });
 
   useEffect(() => {
@@ -386,8 +453,11 @@ export function Chat({ isActive = true }: ChatProps) {
   }, [currentAgentId, resetSkillConfigSession]);
 
   useEffect(() => {
-    void loadAvailableModels();
-  }, [loadAvailableModels]);
+    if (!modelProviderAddress) {
+      return;
+    }
+    void loadAvailableModels(modelProviderAddress);
+  }, [loadAvailableModels, modelProviderAddress]);
 
   useEffect(() => {
     if (sidePanelOpen && activeSidePanelTab === 'skills') {
@@ -714,8 +784,10 @@ export function Chat({ isActive = true }: ChatProps) {
       }),
     }));
     try {
+      const target = resolveSessionOperationTarget(useChatStore.getState(), currentSessionKey);
       const result = await hostSessionPatch({
-        sessionKey: currentSessionKey,
+        sessionKey: target.sessionKey,
+        runtimeAddress: target.runtimeAddress,
         runtimeModelRef: normalizedNextModelId,
       });
       if (result.snapshot) {
@@ -839,6 +911,7 @@ export function Chat({ isActive = true }: ChatProps) {
       sending={isRunActive(currentSession.runtime)}
       approvalWaiting={approvalStatus === 'awaiting_approval'}
       allowedSkillIds={allowedSkillIds}
+      runtimeAddress={currentSession.meta.runtimeAddress}
     />
   );
 
@@ -910,6 +983,7 @@ export function Chat({ isActive = true }: ChatProps) {
             onOpenArtifactGroup={handleOpenArtifactGroup}
             onArtifactSectionChange={setArtifactActiveSection}
             onArtifactViewModeChange={setArtifactViewMode}
+            runtimeAddress={currentSession.meta.runtimeAddress ?? undefined}
             onArtifactRevealInFileManager={(filePath) => {
               void invokeIpc('shell:showItemInFolder', filePath).then((result) => {
                 if (result && typeof result === 'object' && 'success' in result && (result as { success?: boolean }).success === false) {
@@ -946,6 +1020,7 @@ export function Chat({ isActive = true }: ChatProps) {
             errorMessage={localizedRuntimeError}
             showThinking={showThinking}
             userAvatarDataUrl={userAvatarDataUrl}
+            runtimeAddress={currentSession.meta.runtimeAddress ?? undefined}
             artifactGroups={artifactGroups}
             onOpenArtifactFile={handleOpenArtifactFile}
             onOpenAttachedArtifact={(file) => {

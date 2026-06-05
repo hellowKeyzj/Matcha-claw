@@ -1,13 +1,17 @@
-import type { RuntimeCommandExecutorPort, RuntimeFileSystemPort, RuntimeProcessInfoPort } from '../common/runtime-ports';
-import type { OpenClawConfigRepositoryPort } from '../openclaw/openclaw-config-repository';
-import type { OpenClawEnvironmentRepository } from '../openclaw/openclaw-environment-repository';
+import type { RuntimeCommandExecutorPort, RuntimeFileSystemPort, RuntimeProcessEnvironment, RuntimeProcessInfoPort } from '../common/runtime-ports';
 import type { ClawHubRegistryClient } from './clawhub-registry-client';
 
+export interface ClawHubCliRuntimePort {
+  getCliEntryCandidates(): readonly string[];
+  getProcessEnv(): RuntimeProcessEnvironment;
+  getWorkDir(): string;
+}
+
 async function resolveCliEntry(
-  environment: OpenClawEnvironmentRepository,
+  runtime: ClawHubCliRuntimePort,
   fileSystem: RuntimeFileSystemPort,
 ) {
-  const candidates = environment.getClawHubCliEntryCandidates();
+  const candidates = runtime.getCliEntryCandidates();
   for (const candidate of candidates) {
     if (await fileSystem.exists(candidate)) {
       return candidate;
@@ -22,8 +26,7 @@ type CliCommandResult =
 
 export class ClawHubCliRunner {
   constructor(
-    private readonly configRepository: OpenClawConfigRepositoryPort,
-    private readonly environment: OpenClawEnvironmentRepository,
+    private readonly runtime: ClawHubCliRuntimePort,
     private readonly registryClient: Pick<ClawHubRegistryClient, 'resolveRegistryBases'>,
     private readonly commandExecutor: RuntimeCommandExecutorPort,
     private readonly processInfo: RuntimeProcessInfoPort,
@@ -47,15 +50,15 @@ export class ClawHubCliRunner {
   }
 
   private async runCommand(args: string[], registryBase: string): Promise<CliCommandResult> {
-    const entry = await resolveCliEntry(this.environment, this.fileSystem);
+    const entry = await resolveCliEntry(this.runtime, this.fileSystem);
     if (!entry) {
       return {
         ok: false,
-        error: `ClawHub CLI entry not found. Checked: ${this.environment.getClawHubCliEntryCandidates().join(' | ')}`,
+        error: `ClawHub CLI entry not found. Checked: ${this.runtime.getCliEntryCandidates().join(' | ')}`,
       };
     }
 
-    const workDir = this.configRepository.getConfigDir();
+    const workDir = this.runtime.getWorkDir();
     try {
       const result = await this.commandExecutor.execFile(this.processInfo.execPath, [entry, ...args], {
         cwd: workDir,
@@ -63,7 +66,7 @@ export class ClawHubCliRunner {
         shell: false,
         encoding: 'utf8',
         env: {
-          ...this.environment.getProcessEnv(),
+          ...this.runtime.getProcessEnv(),
           ELECTRON_RUN_AS_NODE: '1',
           CI: 'true',
           FORCE_COLOR: '0',

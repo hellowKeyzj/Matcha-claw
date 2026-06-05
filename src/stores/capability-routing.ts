@@ -6,6 +6,7 @@ import {
   type CapabilityRouting,
   type ModelRoute,
 } from '@/lib/capability-routing';
+import type { RuntimeAddress } from '../../runtime-host/shared/runtime-address';
 
 interface CapabilityRoutingState {
   routing: CapabilityRouting;
@@ -13,16 +14,17 @@ interface CapabilityRoutingState {
   loading: boolean;
   saving: boolean;
   error: string | null;
-  refresh: () => Promise<void>;
-  setRoute: (capability: CapabilityKey, route: ModelRoute | undefined) => Promise<void>;
+  refresh: (runtimeAddress: RuntimeAddress) => Promise<void>;
+  setRoute: (capability: CapabilityKey, route: ModelRoute | undefined, runtimeAddress: RuntimeAddress) => Promise<void>;
 }
 
 async function applyRoutingMutation(
   current: CapabilityRouting,
+  runtimeAddress: RuntimeAddress,
   mutate: (draft: CapabilityRouting) => CapabilityRouting,
 ): Promise<{ next: CapabilityRouting; error?: string }> {
   const next = mutate({ ...current });
-  const result = await persistCapabilityRouting(next);
+  const result = await persistCapabilityRouting(next, runtimeAddress);
   if (!result.success) {
     return { next: current, error: result.error || 'Failed to persist capability routing' };
   }
@@ -36,20 +38,20 @@ export const useCapabilityRoutingStore = create<CapabilityRoutingState>((set, ge
   saving: false,
   error: null,
 
-  refresh: async () => {
+  refresh: async (runtimeAddress) => {
     set({ loading: true, error: null });
     try {
-      const routing = await fetchCapabilityRouting();
+      const routing = await fetchCapabilityRouting(runtimeAddress);
       set({ routing, ready: true, loading: false });
     } catch (error) {
       set({ loading: false, error: String(error) });
     }
   },
 
-  setRoute: async (capability, route) => {
+  setRoute: async (capability, route, runtimeAddress) => {
     set({ saving: true, error: null });
     try {
-      const { next, error } = await applyRoutingMutation(get().routing, (draft) => {
+      const { next, error } = await applyRoutingMutation(get().routing, runtimeAddress, (draft) => {
         if (route) {
           draft[capability] = route;
         } else {

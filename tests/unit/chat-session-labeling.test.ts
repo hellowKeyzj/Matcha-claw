@@ -13,12 +13,36 @@ import { resolveSessionLabelDetailsFromTimelineEntries } from '../../runtime-hos
 
 const hostApiFetchMock = vi.fn();
 const hostSessionLoadMock = vi.fn();
+const hostRuntimeEndpointsListMock = vi.fn();
 
 vi.mock('@/lib/host-api', () => ({
   hostApiFetch: (...args: unknown[]) => hostApiFetchMock(...args),
-  hostSessionList: () => hostApiFetchMock('/api/sessions/list'),
+  hostRuntimeEndpointsList: (...args: unknown[]) => hostRuntimeEndpointsListMock(...args),
+  hostSessionList: (...args: unknown[]) => hostApiFetchMock(...args),
   hostSessionLoad: (...args: unknown[]) => hostSessionLoadMock(...args),
 }));
+
+const alphaRuntimeAddress = {
+  kind: 'native-runtime' as const,
+  capabilityId: 'session.prompt',
+  runtimeAdapterId: 'openclaw',
+  runtimeInstanceId: 'local',
+  agentId: 'alpha',
+  sessionKey: 'agent:alpha:session-1',
+};
+
+function buildActiveSessionRuntime(runtimeAddress = alphaRuntimeAddress) {
+  return {
+    status: 'ready' as const,
+    error: null,
+    endpointId: 'local',
+    protocolId: 'openclaw-v4',
+    runtimeAdapterId: 'openclaw',
+    runtimeInstanceId: 'local',
+    agentId: runtimeAddress.agentId,
+    sessionPromptAddress: runtimeAddress,
+  };
+}
 
 function buildSessionRecord(overrides?: Partial<ReturnType<typeof createEmptySessionRecord>>) {
   const base = createEmptySessionRecord();
@@ -50,8 +74,16 @@ function resetChatStoreState() {
     mutating: false,
     error: null,
     currentSessionKey: 'agent:alpha:session-1',
+    activeSessionRuntime: buildActiveSessionRuntime(),
     loadedSessions: {
-      'agent:alpha:session-1': buildSessionRecord(),
+      'agent:alpha:session-1': buildSessionRecord({
+        meta: {
+          agentId: 'alpha',
+          protocolId: 'openclaw-v4',
+          runtimeEndpointId: 'openclaw-local',
+          runtimeAddress: alphaRuntimeAddress,
+        },
+      }),
     },
     showThinking: true,
   } as never);
@@ -118,8 +150,77 @@ describe('chat session labeling', () => {
     vi.clearAllMocks();
     hostApiFetchMock.mockReset();
     hostSessionLoadMock.mockReset();
+    hostRuntimeEndpointsListMock.mockReset();
     hostSessionLoadMock.mockRejectedValue(new Error('host session unavailable'));
+    hostRuntimeEndpointsListMock.mockResolvedValue({ endpoints: [] });
     resetChatStoreState();
+  });
+
+  it('bootstrap 多个 session.prompt 候选后，loadSessions 使用明确 active runtime 地址', async () => {
+    const mainRuntimeAddress = {
+      ...alphaRuntimeAddress,
+      agentId: 'main',
+    };
+    useChatStore.setState((state) => ({
+      activeSessionRuntime: {
+        status: 'idle',
+        error: null,
+        endpointId: null,
+        protocolId: null,
+        agentId: null,
+        sessionPromptAddress: null,
+      },
+      loadedSessions: {
+        ...state.loadedSessions,
+        'agent:alpha:session-1': buildSessionRecord({
+          meta: {
+            agentId: null,
+            protocolId: null,
+            runtimeEndpointId: null,
+            runtimeAddress: null,
+          },
+        }),
+      },
+    }) as never);
+    hostRuntimeEndpointsListMock.mockResolvedValueOnce({
+      endpoints: [
+        {
+          id: 'zeta-endpoint',
+          protocolId: 'openclaw-v4',
+          displayName: 'Zeta',
+          agentIds: ['zeta'],
+          acceptsDynamicAgents: true,
+          capabilities: {},
+          capabilityAddresses: [{ ...alphaRuntimeAddress, agentId: 'zeta' }],
+          controlState: { connection: null, readiness: null, capabilities: null, updatedAt: null },
+        },
+        {
+          id: 'main-endpoint',
+          protocolId: 'openclaw-v4',
+          displayName: 'Main',
+          agentIds: ['main'],
+          acceptsDynamicAgents: true,
+          capabilities: {},
+          capabilityAddresses: [mainRuntimeAddress],
+          controlState: { connection: null, readiness: null, capabilities: null, updatedAt: null },
+        },
+      ],
+    });
+    hostApiFetchMock.mockResolvedValueOnce({ ready: true, sessions: [] });
+
+    await useChatStore.getState().bootstrapSessionRuntime();
+    await useChatStore.getState().loadSessions();
+
+    expect(hostRuntimeEndpointsListMock).toHaveBeenCalledTimes(1);
+    expect(hostApiFetchMock).toHaveBeenCalledWith({
+      runtimeAddress: mainRuntimeAddress,
+    });
+    const state = useChatStore.getState();
+    expect(state.activeSessionRuntime.sessionPromptAddress).toEqual(mainRuntimeAddress);
+    expect(state.loadedSessions['agent:alpha:session-1']?.meta.runtimeAddress).toEqual({
+      ...mainRuntimeAddress,
+      sessionKey: 'agent:alpha:session-1',
+    });
   });
 
   it('当会话没有用户消息时，允许使用 assistant 有效内容作为会话标题兜底', async () => {
@@ -255,6 +356,9 @@ describe('chat session labeling', () => {
           runtime: {
             lastUserMessageAt: sentAtMs,
           },
+          meta: {
+            runtimeAddress: alphaRuntimeAddress,
+          },
         }),
       },
     } as never);
@@ -276,16 +380,20 @@ describe('chat session labeling', () => {
     expect(userItems[0]?.key).toContain('gateway-user-1');
   });
 
-  it('loadSessions 直接信任 /api/sessions/list 的显式标题，不再补抓正文生成标题', async () => {
+  it('loadSessions 直接信任 session.management sessions.list 的显式标题，不再补抓正文生成标题', async () => {
     hostApiFetchMock.mockResolvedValueOnce({
       sessions: [
         {
           key: 'agent:alpha:session-1',
+          agentId: 'alpha',
+          runtimeAddress: alphaRuntimeAddress,
           label: 'Alpha 会话标题',
           updatedAt: 1_800_000_111_000,
         },
         {
           key: 'agent:alpha:session-2',
+          agentId: 'alpha',
+          runtimeAddress: { ...alphaRuntimeAddress, sessionKey: 'agent:alpha:session-2' },
           displayName: 'Alpha Session 2',
           updatedAt: '2026-04-10T14:20:00.000Z',
         },
@@ -295,7 +403,7 @@ describe('chat session labeling', () => {
     await useChatStore.getState().loadSessions();
 
     expect(hostApiFetchMock).toHaveBeenCalledTimes(1);
-    expect(hostApiFetchMock).toHaveBeenCalledWith('/api/sessions/list');
+    expect(hostApiFetchMock).toHaveBeenCalledWith({ runtimeAddress: alphaRuntimeAddress });
     const state = useChatStore.getState();
     expect(state.sessionCatalogStatus.status).toBe('ready');
     expect(state.loadedSessions['agent:alpha:session-1']?.meta.label).toBe('Alpha 会话标题');
@@ -309,6 +417,8 @@ describe('chat session labeling', () => {
       sessions: [
         {
           key: 'agent:alpha:session-2',
+          agentId: 'alpha',
+          runtimeAddress: { ...alphaRuntimeAddress, sessionKey: 'agent:alpha:session-2' },
           displayName: 'MatchaClaw Runtime Host',
           updatedAt: '2026-04-10T14:20:00.000Z',
         },
@@ -327,6 +437,7 @@ describe('chat session labeling', () => {
         ...useChatStore.getState().loadedSessions,
         'agent:alpha:session-2': buildSessionRecord({
           meta: {
+            runtimeAddress: { ...alphaRuntimeAddress, sessionKey: 'agent:alpha:session-2' },
             label: '本地已加载标题',
             lastActivityAt: 1_800_000_100_000,
           },
@@ -338,6 +449,8 @@ describe('chat session labeling', () => {
       sessions: [
         {
           key: 'agent:alpha:session-2',
+          agentId: 'alpha',
+          runtimeAddress: { ...alphaRuntimeAddress, sessionKey: 'agent:alpha:session-2' },
           displayName: 'MatchaClaw Runtime Host',
           updatedAt: '2026-04-10T14:20:00.000Z',
         },
@@ -347,12 +460,12 @@ describe('chat session labeling', () => {
     await useChatStore.getState().loadSessions();
 
     const state = useChatStore.getState();
-    expect(hostApiFetchMock).toHaveBeenCalledWith('/api/sessions/list');
+    expect(hostApiFetchMock).toHaveBeenCalledWith({ runtimeAddress: alphaRuntimeAddress });
     expect(state.loadedSessions['agent:alpha:session-2']?.meta.label).toBe('本地已加载标题');
     expect(state.loadedSessions['agent:alpha:session-2']?.meta.lastActivityAt).toBe(Date.parse('2026-04-10T14:20:00.000Z'));
   });
 
-  it('loadSessions 即使改写 currentSessionKey，也只按 /api/sessions/list 收口当前会话', async () => {
+  it('loadSessions 即使改写 currentSessionKey，也只按 session.management sessions.list 收口当前会话', async () => {
     resetChatStoreState();
     useChatStore.setState({
       currentSessionKey: 'agent:missing:session-x',
@@ -371,7 +484,7 @@ describe('chat session labeling', () => {
     await useChatStore.getState().loadSessions();
 
     expect(hostApiFetchMock).toHaveBeenCalledTimes(1);
-    expect(hostApiFetchMock).toHaveBeenCalledWith('/api/sessions/list');
+    expect(hostApiFetchMock).toHaveBeenCalledWith({ runtimeAddress: alphaRuntimeAddress });
     const state = useChatStore.getState();
     expect(state.sessionCatalogStatus.status).toBe('ready');
     expect(state.currentSessionKey).toBe('agent:alpha:session-1');
@@ -414,6 +527,8 @@ describe('chat session labeling', () => {
           sessions: [
             {
               key: 'agent:alpha:session-ready',
+              agentId: 'alpha',
+              runtimeAddress: { ...alphaRuntimeAddress, sessionKey: 'agent:alpha:session-ready' },
               label: '刷新后的会话',
               updatedAt: 1_800_000_444_000,
             },
@@ -446,19 +561,30 @@ describe('chat session labeling', () => {
     resetChatStoreState();
     useChatStore.setState({
       currentSessionKey: 'agent:feedback:main',
+      loadedSessions: {
+        'agent:feedback:main': buildSessionRecord({
+          meta: {
+            agentId: 'feedback',
+            protocolId: 'openclaw-v4',
+            runtimeEndpointId: 'openclaw-local',
+            runtimeAddress: { ...alphaRuntimeAddress, agentId: 'feedback', sessionKey: 'agent:feedback:main' },
+          },
+        }),
+      },
       sessionCatalogStatus: {
         status: 'idle',
         error: null,
         hasLoadedOnce: false,
         lastLoadedAt: null,
       },
-      loadedSessions: {},
     } as never);
 
     hostApiFetchMock.mockResolvedValueOnce({
       sessions: [
         {
           key: 'agent:main:main',
+          agentId: 'feedback',
+          runtimeAddress: { ...alphaRuntimeAddress, agentId: 'feedback', sessionKey: 'agent:main:main' },
           label: 'Main 会话',
           updatedAt: 1_800_000_333_000,
         },
@@ -572,6 +698,7 @@ describe('chat session labeling', () => {
       loadedSessions: {
         'agent:alpha:session-1': buildSessionRecord({
           meta: {
+            runtimeAddress: alphaRuntimeAddress,
             thinkingLevel: 'high',
           },
         }),
@@ -589,6 +716,7 @@ describe('chat session labeling', () => {
 
     expect(hostSessionLoadMock).toHaveBeenCalledWith({
       sessionKey: 'agent:alpha:session-1',
+      runtimeAddress: alphaRuntimeAddress,
       limit: 200,
     }, { timeoutMs: undefined });
     const state = useChatStore.getState();

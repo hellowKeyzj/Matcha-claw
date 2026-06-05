@@ -38,6 +38,7 @@ interface FilePreviewBodyProps {
   showHeader?: boolean;
   headerAccessory?: ReactNode;
   headerTrailingAccessory?: ReactNode;
+  runtimeAddress?: ArtifactPreviewTarget['runtimeAddress'];
 }
 
 type TextPreviewState =
@@ -139,6 +140,7 @@ export function FilePreviewBody({
   showHeader = true,
   headerAccessory,
   headerTrailingAccessory,
+  runtimeAddress,
 }: FilePreviewBodyProps) {
   const { t } = useTranslation(['chat', 'common']);
   const [textState, setTextState] = useState<TextPreviewState>({ status: 'idle' });
@@ -146,6 +148,7 @@ export function FilePreviewBody({
   const [pathCopied, setPathCopied] = useState(false);
   const previewInstanceKey = `${file.filePath || file.fileName}:${mode}`;
   const shouldUseInlineSnapshot = file.sourceTool !== 'write' && !!file.content;
+  const fileRuntimeAddress = runtimeAddress ?? file.runtimeAddress;
   const canDirectOpen = !!file.filePath;
   const fileTooLargeForPreview = typeof file.fileSize === 'number' && file.fileSize > INLINE_BINARY_PREVIEW_MAX_BYTES;
   const shouldConfirmDirectOpen = shouldOfferDirectOpenFallback(file.ext, file.fileSize);
@@ -223,7 +226,13 @@ export function FilePreviewBody({
 
     void (async () => {
       try {
-        const result: ReadTextFileResult = await hostFileReadText({ path: file.filePath });
+        if (!fileRuntimeAddress) {
+          throw new Error('RuntimeAddress is required');
+        }
+        const result: ReadTextFileResult = await hostFileReadText({
+          path: file.filePath,
+          runtimeAddress: fileRuntimeAddress,
+        });
         if (cancelled) {
           return;
         }
@@ -254,7 +263,7 @@ export function FilePreviewBody({
     return () => {
       cancelled = true;
     };
-  }, [file.filePath, shouldLoadTextPreview]);
+  }, [file.filePath, fileRuntimeAddress, shouldLoadTextPreview]);
 
   const shouldLoadBinaryPreview = useMemo(() => (
     mode === 'preview' && file.contentType === 'image'
@@ -272,7 +281,13 @@ export function FilePreviewBody({
 
     void (async () => {
       try {
-        const result = await hostFileReadBinary({ path: file.filePath });
+        if (!fileRuntimeAddress) {
+          throw new Error('RuntimeAddress is required');
+        }
+        const result = await hostFileReadBinary({
+          path: file.filePath,
+          runtimeAddress: fileRuntimeAddress,
+        });
         if (cancelled) {
           return;
         }
@@ -309,7 +324,7 @@ export function FilePreviewBody({
         URL.revokeObjectURL(objectUrl);
       }
     };
-  }, [file.filePath, file.mimeType, shouldLoadBinaryPreview]);
+  }, [file.filePath, file.mimeType, fileRuntimeAddress, shouldLoadBinaryPreview]);
 
   const content = (() => {
     if (file.isDirectory) {
@@ -373,7 +388,7 @@ export function FilePreviewBody({
     }
 
     if (file.contentType === 'pdf') {
-      return <PdfViewer key={previewInstanceKey} filePath={file.filePath} fileName={file.fileName} className="h-full" />;
+      return <PdfViewer key={previewInstanceKey} filePath={file.filePath} fileName={file.fileName} runtimeAddress={fileRuntimeAddress} className="h-full" />;
     }
 
     if (file.contentType === 'image') {
@@ -410,7 +425,7 @@ export function FilePreviewBody({
     }
 
     if (file.contentType === 'sheet' && (file.ext === '.xls' || file.ext === '.xlsx')) {
-      return <SheetViewer key={previewInstanceKey} filePath={file.filePath} className="h-full" />;
+      return <SheetViewer key={previewInstanceKey} filePath={file.filePath} runtimeAddress={fileRuntimeAddress} className="h-full" />;
     }
 
     if (file.contentType === 'sheet' && file.ext === '.csv') {

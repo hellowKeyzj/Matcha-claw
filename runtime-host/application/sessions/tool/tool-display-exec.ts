@@ -273,10 +273,6 @@ function summarizeKnownExec(words: string[]): string {
     return `执行 ${bin} · ${script}`;
   }
 
-  if (bin === 'openclaw') {
-    const sub = firstPositional(words, 1);
-    return sub ? `执行 openclaw ${sub}` : '执行 openclaw';
-  }
 
   const arg = firstPositional(words, 1);
   if (!arg || arg.length > 48) {
@@ -353,7 +349,6 @@ const KNOWN_SUMMARY_PREFIXES = [
   '执行构建',
   '启动应用',
   '运行检查',
-  '执行 openclaw',
   '执行 Node 脚本',
   '执行 python',
   '执行 ruby',

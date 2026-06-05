@@ -122,12 +122,8 @@ const SESSION_BUCKET_SPECS: SessionBucketSpec[] = [
   },
 ];
 
-export function parseAgentIdFromSessionKey(key: string): string | null {
-  const matched = key.match(/^agent:([^:]+):/i);
-  return matched?.[1] ?? null;
-}
-
-export function readSessionSuffix(sessionKey: string): string {
+export function readSessionSuffix(session: Pick<ChatSession, 'key' | 'backendSessionKey'> | string): string {
+  const sessionKey = typeof session === 'string' ? session : session.backendSessionKey;
   const suffix = sessionKey.split(':').slice(2).join(':');
   return suffix || sessionKey;
 }
@@ -144,14 +140,7 @@ function normalizeSessionTitle(text: string): string {
 }
 
 function resolvePreferredSessionKey(sessions: ChatSession[]): string | null {
-  const preferred = sessions.find((session) => session.preferred);
-  if (preferred) {
-    return preferred.key;
-  }
-  if (sessions.length > 0) {
-    return sessions[0].key;
-  }
-  return null;
+  return sessions.find((session) => session.preferred || session.kind === 'main')?.key ?? null;
 }
 
 function resolveSessionActivityMs(
@@ -165,7 +154,7 @@ function resolveSessionActivityMs(
   if (typeof session.updatedAt === 'number' && Number.isFinite(session.updatedAt)) {
     return session.updatedAt;
   }
-  return parseSessionCreatedAtMs(session.key) ?? 0;
+  return parseSessionCreatedAtMs(session.backendSessionKey) ?? 0;
 }
 
 function compareSessionSortEntries(left: SessionSortEntry, right: SessionSortEntry): number {
@@ -222,14 +211,7 @@ function buildIncrementalSessionActivityIndex(input: {
     const session = entry.session;
     const key = session.key;
     seen.add(key);
-    const agentId = session.agentId ?? parseAgentIdFromSessionKey(key);
-    if (!agentId) {
-      if (entriesByKey.has(key)) {
-        entriesByKey.delete(key);
-        removeSortedSessionKey(sortedKeys, key);
-      }
-      continue;
-    }
+    const agentId = session.agentId;
     const activityMs = resolveSessionActivityMs(entry);
     const previousEntry = entriesByKey.get(key);
     if (!previousEntry) {
@@ -336,7 +318,7 @@ function formatSessionMeta(session: ChatSession, activityMs: number, locale: str
       minute: '2-digit',
     });
   }
-  const suffix = readSessionSuffix(session.key);
+  const suffix = readSessionSuffix(session);
   return suffix.length > 36 ? `${suffix.slice(0, 36)}...` : suffix;
 }
 
@@ -363,7 +345,7 @@ interface UseAgentSessionsPaneViewModelInput {
   sessionsLoading: boolean;
   sessionsLoadedOnce: boolean;
   sessionsError: string | null;
-  currentSessionKey: string;
+  currentAgentId: string;
   locale: string;
   t: (key: string, options?: Record<string, unknown>) => string;
 }
@@ -410,12 +392,8 @@ export function useAgentSessionsPaneViewModel(
   }, [agentNodes]);
 
   const activeAgentId = useMemo(() => {
-    const current = parseAgentIdFromSessionKey(input.currentSessionKey);
-    if (current) {
-      return current;
-    }
-    return agentNodes[0]?.agentId ?? 'main';
-  }, [agentNodes, input.currentSessionKey]);
+    return input.currentAgentId || agentNodes[0]?.agentId || '';
+  }, [agentNodes, input.currentAgentId]);
 
   const globalSessionNodes = useMemo<SessionListNode[]>(() => {
     const nodes: SessionListNode[] = [];
@@ -480,8 +458,8 @@ export function useAgentSessionsPaneViewModel(
       map.set(session.key, {
         title: sessionTitle,
         meta: sessionMeta,
-        agentId: sessionOwner?.agentId ?? session.agentId ?? 'main',
-        agentName: sessionOwner?.agentName ?? session.agentId ?? 'main',
+        agentId: sessionOwner?.agentId ?? session.agentId,
+        agentName: sessionOwner?.agentName ?? session.agentId,
         avatarSeed: sessionOwner?.avatarSeed,
         avatarStyle: sessionOwner?.avatarStyle,
         deleteLabel: input.t('sidebar.deleteSessionAria', { title: sessionTitle }),

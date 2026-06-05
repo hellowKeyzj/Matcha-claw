@@ -1,6 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { clawHubRoutes } from '../../runtime-host/api/routes/clawhub-routes';
-import { dispatchRuntimeRouteDefinition } from './helpers/runtime-route';
+import { createSkillManagementCapabilityOperationRoutes } from '../../runtime-host/application/capabilities/skill/skill-management-capability';
 
 const openReadmeMock = vi.fn();
 const openPathMock = vi.fn();
@@ -22,14 +21,18 @@ describe('clawhub routes', () => {
     vi.clearAllMocks();
   });
 
-  it('open-readme 路由会透传 baseDir 到 service', async () => {
+  it('clawhub.openReadme capability 会透传 baseDir 到 service', async () => {
     openReadmeMock.mockResolvedValueOnce({ success: true });
 
-    const response = await dispatchRuntimeRouteDefinition(clawHubRoutes, 'POST', '/api/clawhub/open-readme', {
+    const [route] = createSkillManagementCapabilityOperationRoutes({
+      skillsService: {} as never,
+      clawHubService: createClawHubService(),
+    }).filter((item) => item.operationId === 'clawhub.openReadme');
+    const response = await route.handle({
       skillKey: 'skill.alpha',
       slug: 'skill-alpha',
       baseDir: '/tmp/skills/skill-alpha',
-    }, { clawHubService: createClawHubService() });
+    });
 
     expect(response).toMatchObject({
       status: 200,
@@ -38,14 +41,18 @@ describe('clawhub routes', () => {
     expect(openReadmeMock).toHaveBeenCalledWith('skill.alpha', 'skill-alpha', '/tmp/skills/skill-alpha');
   });
 
-  it('open-path 路由会透传 baseDir 到 service', async () => {
+  it('clawhub.openPath capability 会透传 baseDir 到 service', async () => {
     openPathMock.mockResolvedValueOnce({ success: true });
 
-    const response = await dispatchRuntimeRouteDefinition(clawHubRoutes, 'POST', '/api/clawhub/open-path', {
+    const [route] = createSkillManagementCapabilityOperationRoutes({
+      skillsService: {} as never,
+      clawHubService: createClawHubService(),
+    }).filter((item) => item.operationId === 'clawhub.openPath');
+    const response = await route.handle({
       skillKey: 'skill.beta',
       slug: 'skill-beta',
       baseDir: '/tmp/skills/skill-beta',
-    }, { clawHubService: createClawHubService() });
+    });
 
     expect(response).toMatchObject({
       status: 200,
@@ -54,7 +61,7 @@ describe('clawhub routes', () => {
     expect(openPathMock).toHaveBeenCalledWith('skill.beta', 'skill-beta', '/tmp/skills/skill-beta');
   });
 
-  it('install 路由提交后台任务', async () => {
+  it('clawhub.install capability 提交后台任务', async () => {
     const service = createClawHubService();
     service.install.mockReturnValueOnce({
       success: true,
@@ -64,9 +71,11 @@ describe('clawhub routes', () => {
       },
     });
 
-    const response = await dispatchRuntimeRouteDefinition(clawHubRoutes, 'POST', '/api/clawhub/install', {
-      slug: 'skill-alpha',
-    }, { clawHubService: service });
+    const [installRoute] = createSkillManagementCapabilityOperationRoutes({
+      skillsService: {} as never,
+      clawHubService: service,
+    }).filter((route) => route.operationId === 'clawhub.install');
+    const response = await installRoute.handle({ slug: 'skill-alpha' });
 
     expect(service.install).toHaveBeenCalledWith({ slug: 'skill-alpha' });
     expect(response).toEqual({

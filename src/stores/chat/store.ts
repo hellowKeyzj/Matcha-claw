@@ -6,7 +6,7 @@
 import { create } from 'zustand';
 import type { GatewayStatus } from '@/types/gateway';
 import { createIdleResourceStatusState } from '@/lib/resource-state';
-import { hostSessionApprovals, hostSessionRename, hostSessionResolveApproval } from '@/lib/host-api';
+import { hostRuntimeEndpointsList, hostSessionApprovals, hostSessionRename, hostSessionResolveApproval } from '@/lib/host-api';
 import { useGatewayStore } from '../gateway';
 import { executeStoreAbortRun } from './abort-handlers';
 import {
@@ -33,16 +33,92 @@ import {
 import { buildTaskBridgeState, normalizeTaskSessionKey } from './session-helpers';
 import { createChatStoreKernel } from './store-kernel';
 import {
-  DEFAULT_CANONICAL_PREFIX,
   DEFAULT_SESSION_KEY,
+  type ChatSessionRuntimeEndpointTarget,
   type ChatStoreState,
 } from './types';
-import { createEmptySessionRecord, getSessionRuntime } from './store-state-helpers';
+import { getSessionMeta, getSessionRuntime, patchSessionMeta } from './store-state-helpers';
+import { buildRuntimeScopeKey, buildSessionRecordKey, findSessionRecordKey, resolveSessionOperationTarget, sameRuntimeEndpointScope } from './session-identity';
+import type { RuntimeAddress } from '../../../runtime-host/shared/runtime-address';
+import type { RuntimeEndpointSummary } from '../../../runtime-host/shared/runtime-topology';
 import { finishChatRunTelemetry } from './telemetry';
 import { buildRuntimeErrorDismissMarker } from './runtime-error-view';
 
 function isStaleApprovalResolveError(message: string): boolean {
   return /not found|expired|already resolved|unknown approval|invalid approval/i.test(message);
+}
+
+function runtimeEndpointIdFromAddress(runtimeAddress: RuntimeAddress): string {
+  return runtimeAddress.kind === 'native-runtime'
+    ? runtimeAddress.runtimeInstanceId
+    : runtimeAddress.endpointId;
+}
+
+function protocolIdFromAddress(runtimeAddress: RuntimeAddress): string | null {
+  return runtimeAddress.kind === 'protocol-connector'
+    ? runtimeAddress.protocolId
+    : null;
+}
+
+const SESSION_PROMPT_CAPABILITY_ID = 'session.prompt';
+
+function readSessionPromptAddresses(endpoint: RuntimeEndpointSummary): RuntimeAddress[] {
+  return endpoint.capabilityAddresses.filter((address) => address.capabilityId === SESSION_PROMPT_CAPABILITY_ID);
+}
+
+function isReadySessionEndpoint(endpoint: RuntimeEndpointSummary): boolean {
+  return readSessionPromptAddresses(endpoint).length > 0
+    && endpoint.controlState.readiness?.ready !== false;
+}
+
+function compareRuntimeEndpointTarget(left: ChatSessionRuntimeEndpointTarget, right: ChatSessionRuntimeEndpointTarget): number {
+  return left.endpointId.localeCompare(right.endpointId)
+    || left.defaultSessionPromptAddress.agentId.localeCompare(right.defaultSessionPromptAddress.agentId)
+    || JSON.stringify(left.defaultSessionPromptAddress).localeCompare(JSON.stringify(right.defaultSessionPromptAddress));
+}
+
+function buildSessionRuntimeEndpointTargets(endpoints: RuntimeEndpointSummary[]): ChatSessionRuntimeEndpointTarget[] {
+  return endpoints
+    .filter(isReadySessionEndpoint)
+    .map((endpoint) => {
+      const sessionPromptAddresses = readSessionPromptAddresses(endpoint)
+        .sort((left, right) => left.agentId.localeCompare(right.agentId) || JSON.stringify(left).localeCompare(JSON.stringify(right)));
+      const defaultSessionPromptAddress = sessionPromptAddresses.find((address) => address.agentId === 'main' || address.agentId === 'default')
+        ?? sessionPromptAddresses[0]!;
+      return {
+        endpointId: endpoint.id,
+        protocolId: endpoint.protocolId ?? protocolIdFromAddress(defaultSessionPromptAddress) ?? '',
+        runtimeAdapterId: endpoint.runtimeAdapterId,
+        runtimeInstanceId: endpoint.runtimeInstanceId,
+        connectorId: endpoint.connectorId,
+        displayName: endpoint.displayName,
+        agentIds: [...endpoint.agentIds],
+        acceptsDynamicAgents: endpoint.acceptsDynamicAgents,
+        sessionPromptAddresses,
+        defaultSessionPromptAddress,
+      };
+    })
+    .sort(compareRuntimeEndpointTarget);
+}
+
+function matchesCurrentSessionRuntime(
+  target: ChatSessionRuntimeEndpointTarget,
+  state: ChatStoreState,
+): boolean {
+  const meta = getSessionMeta(state, state.currentSessionKey);
+  return Boolean(meta.runtimeAddress && sameRuntimeEndpointScope(target.defaultSessionPromptAddress, meta.runtimeAddress));
+}
+
+function selectDefaultRuntimeAddress(
+  targets: ChatSessionRuntimeEndpointTarget[],
+  state: ChatStoreState,
+): RuntimeAddress | null {
+  if (targets.length === 0) {
+    return null;
+  }
+  return targets.find((target) => matchesCurrentSessionRuntime(target, state))?.defaultSessionPromptAddress
+    ?? targets.find((target) => target.defaultSessionPromptAddress.agentId === 'main' || target.defaultSessionPromptAddress.agentId === 'default')?.defaultSessionPromptAddress
+    ?? targets[0]!.defaultSessionPromptAddress;
 }
 
 export const useChatStore = create<ChatStoreState>((set, get) => {
@@ -53,16 +129,19 @@ export const useChatStore = create<ChatStoreState>((set, get) => {
     get,
     beginMutating,
     finishMutating,
-    defaultCanonicalPrefix: DEFAULT_CANONICAL_PREFIX,
     defaultSessionKey: DEFAULT_SESSION_KEY,
     historyRuntime,
   } as const;
 
   return {
     currentSessionKey: DEFAULT_SESSION_KEY,
-    loadedSessions: {
-      [DEFAULT_SESSION_KEY]: createEmptySessionRecord(),
+    sessionRuntimeCatalog: {
+      status: 'idle',
+      error: null,
+      endpoints: [],
+      defaultRuntimeAddress: null,
     },
+    loadedSessions: {},
     pendingApprovalsBySession: {},
     dismissedRuntimeErrorBySession: {},
     foregroundHistorySessionKey: null,
@@ -70,6 +149,78 @@ export const useChatStore = create<ChatStoreState>((set, get) => {
     mutating: false,
     error: null,
     showThinking: true,
+    bootstrapSessionRuntime: async () => {
+      set((state) => ({
+        sessionRuntimeCatalog: {
+          ...state.sessionRuntimeCatalog,
+          status: 'loading',
+          error: null,
+        },
+      }));
+      try {
+        const { endpoints } = await hostRuntimeEndpointsList();
+        const targets = buildSessionRuntimeEndpointTargets(endpoints);
+        const defaultRuntimeAddress = selectDefaultRuntimeAddress(targets, get());
+        if (!defaultRuntimeAddress) {
+          throw new Error('No session runtime endpoint is available');
+        }
+        set((state) => {
+          const currentMeta = getSessionMeta(state, state.currentSessionKey);
+          if (currentMeta.runtimeAddress) {
+            return {
+              sessionRuntimeCatalog: {
+                status: 'ready',
+                error: null,
+                endpoints: targets,
+                defaultRuntimeAddress,
+              },
+            };
+          }
+          const runtimeAddress = {
+            ...defaultRuntimeAddress,
+            sessionKey: defaultRuntimeAddress.sessionKey ?? DEFAULT_SESSION_KEY,
+          };
+          const recordKey = buildSessionRecordKey(runtimeAddress, DEFAULT_SESSION_KEY);
+          return {
+            sessionRuntimeCatalog: {
+              status: 'ready',
+              error: null,
+              endpoints: targets,
+              defaultRuntimeAddress,
+            },
+            currentSessionKey: recordKey,
+            loadedSessions: patchSessionMeta(
+              { loadedSessions: state.loadedSessions },
+              recordKey,
+              {
+                backendSessionKey: DEFAULT_SESSION_KEY,
+                runtimeScopeKey: buildRuntimeScopeKey(runtimeAddress),
+                agentId: runtimeAddress.agentId,
+                protocolId: protocolIdFromAddress(runtimeAddress),
+                runtimeEndpointId: runtimeEndpointIdFromAddress(runtimeAddress),
+                runtimeAddress,
+                kind: 'main',
+                preferred: true,
+                displayName: 'Main',
+              },
+            ),
+          };
+        });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        set((state) => ({
+          sessionRuntimeCatalog: {
+            ...state.sessionRuntimeCatalog,
+            status: 'error',
+            error: message,
+            endpoints: [],
+            defaultRuntimeAddress: null,
+          },
+          sessionCatalogStatus: createIdleResourceStatusState(),
+          error: message,
+        }));
+      }
+    },
     loadSessions: () => executeLoadSessions(sessionInput),
     openAgentConversation: (agentId) => {
       executeOpenAgentConversation(sessionInput, agentId);
@@ -138,15 +289,29 @@ export const useChatStore = create<ChatStoreState>((set, get) => {
     },
     syncPendingApprovals: async (sessionKeyHint) => {
       try {
-        const payload = await hostSessionApprovals();
-        const grouped = groupApprovalsBySession(payload.approvals.map((approval) => ({
-          ...approval,
-          allowedDecisions: [...approval.allowedDecisions],
-        })));
+        const targetSessionKey = normalizeTaskSessionKey(sessionKeyHint, get().currentSessionKey);
+        const target = resolveSessionOperationTarget(get(), targetSessionKey);
+        const payload = await hostSessionApprovals({ runtimeAddress: target.runtimeAddress });
+        const stateAfterFetch = get();
+        const endpointSessionKeys = Object.entries(stateAfterFetch.loadedSessions)
+          .filter(([, record]) => record.meta.runtimeAddress && sameRuntimeEndpointScope(record.meta.runtimeAddress, target.runtimeAddress))
+          .map(([recordKey]) => recordKey);
+        const grouped = groupApprovalsBySession(payload.approvals.flatMap((approval) => {
+          const recordKey = findSessionRecordKey(stateAfterFetch, approval.sessionKey, approval.runtimeAddress);
+          if (!recordKey) {
+            return [];
+          }
+          return [{
+            ...approval,
+            sessionKey: recordKey,
+            backendSessionKey: approval.sessionKey,
+            allowedDecisions: [...approval.allowedDecisions],
+          }];
+        }));
         set((state) => buildSyncPendingApprovalsPatch({
           state,
           grouped,
-          sessionKeyHint,
+          sessionKeys: endpointSessionKeys,
         }));
       } catch {
         // ignore
@@ -157,11 +322,22 @@ export const useChatStore = create<ChatStoreState>((set, get) => {
       if (!approvalId) return;
       beginMutating();
       try {
-        await hostSessionResolveApproval({ id: approvalId, decision });
+        const approval = Object.values(get().pendingApprovalsBySession)
+          .flat()
+          .find((item) => item.id === approvalId);
+        if (!approval) {
+          throw new Error('approval not found');
+        }
+        await hostSessionResolveApproval({
+          id: approvalId,
+          sessionKey: approval.backendSessionKey,
+          runtimeAddress: approval.runtimeAddress,
+          decision,
+        });
         set((state) => buildApprovalResolvedPatch({
           state,
           id: approvalId,
-          resolvedSessionKey: get().currentSessionKey,
+          resolvedSessionKey: approval.sessionKey,
           decision,
         }) ?? state);
       } catch (error) {
@@ -170,7 +346,6 @@ export const useChatStore = create<ChatStoreState>((set, get) => {
           set((state) => buildApprovalResolvedPatch({
             state,
             id: approvalId,
-            resolvedSessionKey: get().currentSessionKey,
             decision: 'deny',
           }) ?? state);
         }
@@ -179,6 +354,25 @@ export const useChatStore = create<ChatStoreState>((set, get) => {
       } finally {
         finishMutating();
       }
+    },
+    setSessionRuntimeAddress: (sessionKey, runtimeAddress) => {
+      const normalizedSessionKey = sessionKey.trim();
+      if (!normalizedSessionKey) {
+        return;
+      }
+      set((state) => ({
+        loadedSessions: patchSessionMeta(state, normalizedSessionKey, {
+          backendSessionKey: runtimeAddress.sessionKey ?? normalizedSessionKey,
+          runtimeScopeKey: buildRuntimeScopeKey(runtimeAddress),
+          agentId: runtimeAddress.agentId,
+          protocolId: protocolIdFromAddress(runtimeAddress),
+          runtimeEndpointId: runtimeEndpointIdFromAddress(runtimeAddress),
+          runtimeAddress: {
+            ...runtimeAddress,
+            sessionKey: runtimeAddress.sessionKey ?? normalizedSessionKey,
+          },
+        }),
+      }));
     },
     getTaskBridgeState: () => buildTaskBridgeState(get(), DEFAULT_SESSION_KEY),
     openTaskSession: (sessionKey) => {

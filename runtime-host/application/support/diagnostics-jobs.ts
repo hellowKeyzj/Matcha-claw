@@ -5,7 +5,7 @@ export const COLLECT_DIAGNOSTICS_JOB = 'diagnostics.collect';
 
 export interface DiagnosticsCollectInput {
   userDataDir: string;
-  openclawConfigDir: string;
+  runtimeDataRootDir: string;
   appInfo: {
     name: string;
     version: string;

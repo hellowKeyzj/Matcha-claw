@@ -1,7 +1,6 @@
 import { join } from 'node:path';
-import { listTasks } from './task-store';
-import { mailboxPull } from './mailbox-store';
 import { atomicWriteJson, readJsonFile, type TeamRuntimeStorageContext } from './storage-context';
+import type { RuntimeAddress } from '../../shared/runtime-address';
 import type { TeamEventRecord, TeamRunRecord } from './types';
 
 function runPath(runtimeRoot: string): string {
@@ -35,6 +34,7 @@ export async function initTeamRun(input: {
   runtimeRoot: string;
   teamId: string;
   leadAgentId: string;
+  runtimeAddress: RuntimeAddress;
   nowMs?: number;
 }): Promise<TeamRunRecord> {
   await ensureRuntimeLayout(input.context, input.runtimeRoot);
@@ -46,6 +46,7 @@ export async function initTeamRun(input: {
   const created: TeamRunRecord = {
     teamId: input.teamId,
     leadAgentId: input.leadAgentId,
+    runtimeAddress: input.runtimeAddress,
     status: 'active',
     revision: 1,
     createdAt: now,
@@ -120,36 +121,6 @@ export async function readRecentEvents(
     }
   }
   return rows.sort((a, b) => a.createdAt - b.createdAt);
-}
-
-export async function buildTeamSnapshot(input: {
-  context: TeamRuntimeStorageContext;
-  runtimeRoot: string;
-  mailboxCursor?: string;
-  mailboxLimit?: number;
-}): Promise<{
-  run: TeamRunRecord | null;
-  tasks: Awaited<ReturnType<typeof listTasks>>;
-  mailbox: Awaited<ReturnType<typeof mailboxPull>>;
-  events: TeamEventRecord[];
-}> {
-  const [run, tasks, mailbox, events] = await Promise.all([
-    readTeamRun(input.context, input.runtimeRoot),
-    listTasks(input.context, input.runtimeRoot),
-    mailboxPull({
-      context: input.context,
-      runtimeRoot: input.runtimeRoot,
-      cursor: input.mailboxCursor,
-      limit: input.mailboxLimit ?? 100,
-    }),
-    readRecentEvents(input.context, input.runtimeRoot, 200),
-  ]);
-  return {
-    run,
-    tasks,
-    mailbox,
-    events,
-  };
 }
 
 export async function clearTeamRuntime(

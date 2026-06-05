@@ -1,7 +1,7 @@
 /**
  * Channel snapshot projection.
  *
- * 单一事实源：openclaw.json（已配置渠道列表）。
+ * 单一事实源：ChannelConfigPort 提供的已配置渠道列表。
  * gateway `channels.status` 的缓存只用于富化每个已配置渠道的 status / accounts；
  * 缓存里残留但已不在配置中的渠道会被过滤掉，避免出现“删完还在”的视觉错位。
  */

@@ -1,42 +1,51 @@
-import { routeResponder, type ApplicationResponse, type RuntimeRouteDefinition } from './route-utils';
+import { routeResponder, type RuntimeRouteDefinition } from './route-utils';
 
 interface SessionRouteService {
-  listSessions: () => Promise<ApplicationResponse>;
-  getSessionWindow: (payload: unknown) => Promise<ApplicationResponse>;
-  createSession: (payload: unknown) => Promise<ApplicationResponse>;
-  loadSession: (payload: unknown) => Promise<ApplicationResponse>;
-  promptSession: (payload: unknown) => Promise<ApplicationResponse>;
-  patchSession: (payload: unknown) => Promise<ApplicationResponse>;
-  renameSession: (payload: unknown) => Promise<ApplicationResponse>;
-  deleteSession: (payload: unknown) => Promise<ApplicationResponse>;
-  archiveSession: (payload: unknown) => Promise<ApplicationResponse>;
-  unarchiveSession: (payload: unknown) => Promise<ApplicationResponse>;
-  updateSessionStatus: (payload: unknown) => Promise<ApplicationResponse>;
-  switchSession: (payload: unknown) => Promise<ApplicationResponse>;
-  resumeSession: (payload: unknown) => Promise<ApplicationResponse>;
-  getSessionStateSnapshot: (payload: unknown) => Promise<ApplicationResponse>;
-  abortSession: (payload: unknown) => Promise<ApplicationResponse>;
-  listPendingApprovals: () => Promise<ApplicationResponse>;
-  resolveApproval: (payload: unknown) => Promise<ApplicationResponse>;
+  createSession: (payload: unknown) => Promise<unknown>;
+  deleteSession: (payload: unknown) => Promise<unknown>;
+  archiveSession: (payload: unknown) => Promise<unknown>;
+  unarchiveSession: (payload: unknown) => Promise<unknown>;
+  updateSessionStatus: (payload: unknown) => Promise<unknown>;
+  listSessions: (payload: unknown) => Promise<unknown>;
+  loadSession: (payload: unknown) => Promise<unknown>;
+  resumeSession: (payload: unknown) => Promise<unknown>;
+  patchSession: (payload: unknown) => Promise<unknown>;
+  renameSession: (payload: unknown) => Promise<unknown>;
+  switchSession: (payload: unknown) => Promise<unknown>;
+  getSessionStateSnapshot: (payload: unknown) => Promise<unknown>;
+  getSessionWindow: (payload: unknown) => Promise<unknown>;
+  abortSession: (payload: unknown) => Promise<unknown>;
+  listPendingApprovals: (payload: unknown) => Promise<unknown>;
+  resolveApproval: (payload: unknown) => Promise<unknown>;
+  promptSession: (payload: unknown) => Promise<unknown>;
+}
+
+type SessionRouteOperation = (service: SessionRouteService, payload: unknown) => Promise<unknown>;
+
+function sessionRoute(path: string, operation: SessionRouteOperation): RuntimeRouteDefinition<SessionRouteService> {
+  return {
+    method: 'POST',
+    path,
+    handle: (context, service) => routeResponder.result(() => operation(service, context.payload), (message) => ({ success: false, error: message })),
+  };
 }
 
 export const sessionRoutes: readonly RuntimeRouteDefinition<SessionRouteService>[] = [
-  { method: 'GET', path: '/api/sessions/list', handle: (_context, service) => routeResponder.result(() => service.listSessions()) },
-  { method: 'POST', path: '/api/sessions/window', handle: (context, service) => routeResponder.result(() => service.getSessionWindow(context.payload)) },
-  { method: 'POST', path: '/api/session/new', handle: (context, service) => routeResponder.result(() => service.createSession(context.payload)) },
-  { method: 'POST', path: '/api/session/load', handle: (context, service) => routeResponder.result(() => service.loadSession(context.payload)) },
-  { method: 'POST', path: '/api/session/prompt', handle: (context, service) => routeResponder.result(() => service.promptSession(context.payload)) },
-  { method: 'POST', path: '/api/session/patch', handle: (context, service) => routeResponder.result(() => service.patchSession(context.payload)) },
-  { method: 'POST', path: '/api/sessions/rename', handle: (context, service) => routeResponder.result(() => service.renameSession(context.payload)) },
-  { method: 'POST', path: '/api/sessions/delete', handle: (context, service) => routeResponder.result(() => service.deleteSession(context.payload)) },
-  { method: 'POST', path: '/api/sessions/archive', handle: (context, service) => routeResponder.result(() => service.archiveSession(context.payload)) },
-  { method: 'POST', path: '/api/sessions/unarchive', handle: (context, service) => routeResponder.result(() => service.unarchiveSession(context.payload)) },
-  { method: 'POST', path: '/api/sessions/status', handle: (context, service) => routeResponder.result(() => service.updateSessionStatus(context.payload)) },
-  { method: 'POST', path: '/api/session/switch', handle: (context, service) => routeResponder.result(() => service.switchSession(context.payload)) },
-  { method: 'POST', path: '/api/session/resume', handle: (context, service) => routeResponder.result(() => service.resumeSession(context.payload)) },
-  { method: 'POST', path: '/api/session/state', handle: (context, service) => routeResponder.result(() => service.getSessionStateSnapshot(context.payload)) },
-  { method: 'POST', path: '/api/session/abort', handle: (context, service) => routeResponder.result(() => service.abortSession(context.payload)) },
-  { method: 'GET', path: '/api/session/approvals', handle: (_context, service) => routeResponder.result(() => service.listPendingApprovals()) },
-  { method: 'POST', path: '/api/session/approval/resolve', handle: (context, service) => routeResponder.result(() => service.resolveApproval(context.payload)) },
+  sessionRoute('/api/sessions/list', (service, payload) => service.listSessions(payload)),
+  sessionRoute('/api/sessions/create', (service, payload) => service.createSession(payload)),
+  sessionRoute('/api/sessions/load', (service, payload) => service.loadSession(payload)),
+  sessionRoute('/api/sessions/window', (service, payload) => service.getSessionWindow(payload)),
+  sessionRoute('/api/sessions/prompt', (service, payload) => service.promptSession(payload)),
+  sessionRoute('/api/sessions/patch', (service, payload) => service.patchSession(payload)),
+  sessionRoute('/api/sessions/rename', (service, payload) => service.renameSession(payload)),
+  sessionRoute('/api/sessions/delete', (service, payload) => service.deleteSession(payload)),
+  sessionRoute('/api/sessions/archive', (service, payload) => service.archiveSession(payload)),
+  sessionRoute('/api/sessions/unarchive', (service, payload) => service.unarchiveSession(payload)),
+  sessionRoute('/api/sessions/status', (service, payload) => service.updateSessionStatus(payload)),
+  sessionRoute('/api/sessions/switch', (service, payload) => service.switchSession(payload)),
+  sessionRoute('/api/sessions/resume', (service, payload) => service.resumeSession(payload)),
+  sessionRoute('/api/sessions/state', (service, payload) => service.getSessionStateSnapshot(payload)),
+  sessionRoute('/api/sessions/abort', (service, payload) => service.abortSession(payload)),
+  sessionRoute('/api/sessions/approvals', (service, payload) => service.listPendingApprovals(payload)),
+  sessionRoute('/api/sessions/approval/resolve', (service, payload) => service.resolveApproval(payload)),
 ] as const;
-

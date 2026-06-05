@@ -1,5 +1,6 @@
 import { BrowserWindow } from 'electron';
 import * as XLSX from 'xlsx';
+import type { RuntimeAddress } from '../../../runtime-host/application/agent-runtime/contracts/runtime-address';
 import type {
   SessionRenderExecutionGraphItem,
   SessionRenderItem,
@@ -120,6 +121,52 @@ const MOCK_TEXT_FILES = new Map<string, string>([
   [MOCK_GENERATED_FILE, 'export const value = 2;\n'],
   [MOCK_SKILL_FILE, '# open-baidu\n\nThis is a mocked skill preview.\n'],
 ]);
+function runtimeAddressForSession(sessionKey: string): RuntimeAddress {
+  return {
+    kind: 'native-runtime',
+    capabilityId: 'session.prompt',
+    runtimeAdapterId: 'openclaw',
+    runtimeInstanceId: 'local',
+    agentId: sessionKey.split(':')[1] || 'main',
+    sessionKey,
+  };
+}
+
+function requireRuntimeAddressPayload(payload: Record<string, unknown>): HostApiProxyEnvelope | null {
+  const runtimeAddress = payload.runtimeAddress;
+  if (!runtimeAddress || typeof runtimeAddress !== 'object' || Array.isArray(runtimeAddress)) {
+    return toSuccessEnvelope({ success: false, error: 'RuntimeAddress is required' }, 400, false);
+  }
+  return null;
+}
+
+function requireCapabilityExecutePayload(
+  payload: Record<string, unknown>,
+  capabilityId: string,
+  operationId: string,
+): { input: Record<string, unknown>; runtimeAddress: Record<string, unknown> } | HostApiProxyEnvelope {
+  if (payload.id !== capabilityId || payload.operationId !== operationId) {
+    return toSuccessEnvelope({ success: false, error: 'Capability operation not supported' }, 400, false);
+  }
+  const invalidRuntimeAddress = requireRuntimeAddressPayload(payload);
+  if (invalidRuntimeAddress) {
+    return invalidRuntimeAddress;
+  }
+  const input = payload.input;
+  if (!input || typeof input !== 'object' || Array.isArray(input)) {
+    return toSuccessEnvelope({ success: false, error: 'Capability input is required' }, 400, false);
+  }
+  const inputRecord = input as Record<string, unknown>;
+  const invalidInputRuntimeAddress = requireRuntimeAddressPayload(inputRecord);
+  if (invalidInputRuntimeAddress) {
+    return invalidInputRuntimeAddress;
+  }
+  return {
+    input: inputRecord,
+    runtimeAddress: payload.runtimeAddress as Record<string, unknown>,
+  };
+}
+
 const MOCK_FILE_STATS = new Map<string, { isDir: boolean; size: number; mtimeMs: number }>([
   [ARTIFACT_WORKSPACE_ROOT, { isDir: true, size: 0, mtimeMs: 1 }],
   [MOCK_GENERATED_FILE, { isDir: false, size: 24, mtimeMs: 1 }],
@@ -353,9 +400,13 @@ function emitAborted(runId: string, sessionKey: string): void {
 
 function makeCatalog(sessionKey: string) {
   const session = state.sessions.find((item) => item.key === sessionKey);
+  const runtimeAddress = runtimeAddressForSession(sessionKey);
   return {
     key: sessionKey,
-    agentId: 'main',
+    agentId: runtimeAddress.agentId,
+    protocolId: 'openclaw-v4',
+    runtimeEndpointId: 'openclaw-local',
+    runtimeAddress,
     kind: 'main' as const,
     preferred: sessionKey === state.mainSessionKey,
     label: session?.label || 'Main',
@@ -644,6 +695,7 @@ function buildSnapshotForSession(sessionKey: string): SessionStateSnapshot {
       .map((approval) => ({
         id: approval.id,
         sessionKey: approval.sessionKey,
+        runtimeAddress: runtimeAddressForSession(approval.sessionKey),
         runId: approval.runId,
         title: approval.title,
         command: approval.command,
@@ -857,170 +909,233 @@ export function handleE2EHostApiFetch(request: HostApiFetchRequest): HostApiProx
     return toSuccessEnvelope('/tmp/openclaw-config');
   }
 
-  if (path === '/api/chat/send-with-media' && method === 'POST') {
+  if (path === '/api/capabilities/execute' && method === 'POST') {
     const payload = parseJsonBody(request.body);
-    const sessionKey = typeof payload.sessionKey === 'string' ? payload.sessionKey : state.mainSessionKey;
-    const message = typeof payload.message === 'string' ? payload.message : 'Process attachment';
-    const result = createRun(sessionKey, message, 'default');
-    return toSuccessEnvelope({
-      success: true,
-      result,
-    });
-  }
 
-  if (path === '/api/sessions/list' && method === 'GET') {
-    return toSuccessEnvelope({
-      sessions: state.sessions.map((session) => makeCatalog(session.key)),
-    });
-  }
-
-  if (path === '/api/sessions/window' && method === 'POST') {
-    const payload = parseJsonBody(request.body);
-    const sessionKey = typeof payload.sessionKey === 'string' ? payload.sessionKey : state.mainSessionKey;
-    return toSuccessEnvelope({
-      snapshot: buildSnapshotForSession(sessionKey),
-    });
-  }
-
-  if (path === '/api/session/new' && method === 'POST') {
-    const payload = parseJsonBody(request.body);
-    const agentId = typeof payload.agentId === 'string' && payload.agentId.trim()
-      ? payload.agentId.trim()
-      : 'main';
-    const canonicalPrefix = typeof payload.canonicalPrefix === 'string' && payload.canonicalPrefix.trim()
-      ? payload.canonicalPrefix.trim()
-      : `agent:${agentId}`;
-    const sessionKey = `${canonicalPrefix}:session-${Date.now()}-${++state.counter}`;
-    ensureSession(sessionKey, sessionKey);
-    return toSuccessEnvelope({
-      success: true,
-      sessionKey,
-      snapshot: buildSnapshotForSession(sessionKey),
-    });
-  }
-
-  if (path === '/api/session/load' && method === 'POST') {
-    const payload = parseJsonBody(request.body);
-    const sessionKey = typeof payload.sessionKey === 'string' ? payload.sessionKey : state.mainSessionKey;
-    return toSuccessEnvelope({
-      snapshot: buildSnapshotForSession(sessionKey),
-    });
-  }
-
-  if ((path === '/api/session/switch' || path === '/api/session/resume') && method === 'POST') {
-    const payload = parseJsonBody(request.body);
-    const sessionKey = typeof payload.sessionKey === 'string' ? payload.sessionKey : state.mainSessionKey;
-    return toSuccessEnvelope({
-      snapshot: buildSnapshotForSession(sessionKey),
-    });
-  }
-
-  if (path === '/api/session/state' && method === 'POST') {
-    const payload = parseJsonBody(request.body);
-    const sessionKey = typeof payload.sessionKey === 'string' ? payload.sessionKey : state.mainSessionKey;
-    return toSuccessEnvelope({
-      snapshot: buildSnapshotForSession(sessionKey),
-    });
-  }
-
-  if (path === '/api/session/abort' && method === 'POST') {
-    const payload = parseJsonBody(request.body);
-    const sessionKey = typeof payload.sessionKey === 'string' ? payload.sessionKey : state.mainSessionKey;
-    const run = findLatestRunningRunBySession(sessionKey);
-    if (run) {
-      emitAborted(run.runId, sessionKey);
+    if (payload.id === 'session.management' && payload.operationId === 'sessions.list') {
+      const requestPayload = requireCapabilityExecutePayload(payload, 'session.management', 'sessions.list');
+      if ('ok' in requestPayload) {
+        return requestPayload;
+      }
+      const runtimeAddress = requestPayload.runtimeAddress;
+      const agentId = typeof runtimeAddress.agentId === 'string' ? runtimeAddress.agentId : '';
+      return toSuccessEnvelope({
+        sessions: state.sessions
+          .map((session) => makeCatalog(session.key))
+          .filter((session) => session.runtimeAddress.agentId === agentId),
+      });
     }
-    return toSuccessEnvelope({
-      success: true,
-      snapshot: buildSnapshotForSession(sessionKey),
-    });
-  }
 
-  if (path === '/api/session/approvals' && method === 'GET') {
-    return toSuccessEnvelope({
-      success: true,
-      approvals: state.approvals.map((approval) => ({
-        id: approval.id,
-        sessionKey: approval.sessionKey,
-        runId: approval.runId,
-        title: approval.title,
-        command: approval.command,
-        allowedDecisions: approval.allowedDecisions,
-        createdAtMs: approval.createdAt,
-      })),
-    });
-  }
-
-  if (path === '/api/session/approval/resolve' && method === 'POST') {
-    const payload = parseJsonBody(request.body);
-    const approvalId = typeof payload.id === 'string' ? payload.id : '';
-    const approval = state.approvals.find((item) => item.id === approvalId);
-    if (!approval) {
-      return toSuccessEnvelope({ success: false, error: 'approval_not_found' }, 404, false);
+    if (payload.id === 'runtime.host' && payload.operationId === 'diagnostics.collect') {
+      const requestPayload = requireCapabilityExecutePayload(payload, 'runtime.host', 'diagnostics.collect');
+      if ('ok' in requestPayload) {
+        return requestPayload;
+      }
+      return toSuccessEnvelope({
+        success: true,
+        job: {
+          id: `job-diagnostics-${Date.now()}`,
+          type: 'diagnostics.collect',
+          status: 'succeeded',
+          queuedAt: Date.now(),
+          attempts: 1,
+          maxAttempts: 1,
+          result: {
+            zipPath: 'C:\\mock\\diagnostics.zip',
+            generatedAt: new Date().toISOString(),
+            fileCount: 3,
+          },
+        },
+      }, 202);
     }
-    state.approvals = state.approvals.filter((item) => item.id !== approvalId);
-    emitHostEvent('gateway:notification', {
-      method: 'exec.approval.resolved',
-      params: {
-        approvalId,
-        id: approvalId,
-        sessionKey: approval.sessionKey,
-        runId: approval.runId,
-      },
-    });
-    setTimeout(() => emitFinal(approval.runId, approval.sessionKey, 'Approved result'), 40);
-    return toSuccessEnvelope({ success: true });
-  }
 
-  if (path === '/api/session/prompt' && method === 'POST') {
-    const payload = parseJsonBody(request.body);
-    const sessionKey = typeof payload.sessionKey === 'string' ? payload.sessionKey : state.mainSessionKey;
-    const message = typeof payload.message === 'string' ? payload.message : '';
-    const mode: MockRun['mode'] = message.includes('[approval]')
-      ? 'approval'
-      : (message.includes('[long]') ? 'long' : 'default');
-    const result = createRun(sessionKey, message || '(empty)', mode);
-    return toSuccessEnvelope({
-      success: true,
-      sessionKey,
-      runId: result.runId,
-      item: null,
-      snapshot: buildSnapshotForSession(sessionKey),
-    });
-  }
+    if (payload.id === 'session.management' && payload.operationId === 'sessions.window') {
+      const requestPayload = requireCapabilityExecutePayload(payload, 'session.management', 'sessions.window');
+      if ('ok' in requestPayload) {
+        return requestPayload;
+      }
+      const sessionKey = typeof requestPayload.input.sessionKey === 'string' ? requestPayload.input.sessionKey : state.mainSessionKey;
+      return toSuccessEnvelope({
+        snapshot: buildSnapshotForSession(sessionKey),
+      });
+    }
 
-  if (path === '/api/files/stage-paths' && method === 'POST') {
-    const payload = parseJsonBody(request.body);
-    const filePaths = Array.isArray(payload.filePaths) ? payload.filePaths : [];
-    const staged = filePaths.map((rawFilePath, index) => {
-      const filePath = typeof rawFilePath === 'string' ? rawFilePath : `C:\\mock\\file-${index}.txt`;
-      const nameParts = filePath.split(/[\\/]/);
-      const fileName = nameParts[nameParts.length - 1] || `file-${index}.txt`;
-      return {
-        id: `staged-path-${index}-${Date.now()}`,
+    if (payload.id === 'session.prompt' && payload.operationId === 'sessions.create') {
+      const requestPayload = requireCapabilityExecutePayload(payload, 'session.prompt', 'sessions.create');
+      if ('ok' in requestPayload) {
+        return requestPayload;
+      }
+      const runtimeAddress = requestPayload.runtimeAddress;
+      const agentId = typeof runtimeAddress.agentId === 'string' && runtimeAddress.agentId.trim()
+        ? runtimeAddress.agentId.trim()
+        : 'main';
+      const sessionKey = `agent:${agentId}:session-${Date.now()}-${++state.counter}`;
+      ensureSession(sessionKey, sessionKey);
+      return toSuccessEnvelope({
+        success: true,
+        sessionKey,
+        snapshot: buildSnapshotForSession(sessionKey),
+      });
+    }
+
+    if (payload.id === 'session.prompt' && payload.operationId === 'sessions.load') {
+      const requestPayload = requireCapabilityExecutePayload(payload, 'session.prompt', 'sessions.load');
+      if ('ok' in requestPayload) {
+        return requestPayload;
+      }
+      const sessionKey = typeof requestPayload.input.sessionKey === 'string' ? requestPayload.input.sessionKey : state.mainSessionKey;
+      return toSuccessEnvelope({
+        snapshot: buildSnapshotForSession(sessionKey),
+      });
+    }
+
+    if (payload.id === 'session.management' && (payload.operationId === 'sessions.switch' || payload.operationId === 'sessions.resume' || payload.operationId === 'sessions.state')) {
+      const requestPayload = requireCapabilityExecutePayload(payload, 'session.management', payload.operationId);
+      if ('ok' in requestPayload) {
+        return requestPayload;
+      }
+      const sessionKey = typeof requestPayload.input.sessionKey === 'string' ? requestPayload.input.sessionKey : state.mainSessionKey;
+      return toSuccessEnvelope({
+        snapshot: buildSnapshotForSession(sessionKey),
+      });
+    }
+
+    if (payload.id === 'session.prompt' && payload.operationId === 'sessions.abort') {
+      const requestPayload = requireCapabilityExecutePayload(payload, 'session.prompt', 'sessions.abort');
+      if ('ok' in requestPayload) {
+        return requestPayload;
+      }
+      const sessionKey = typeof requestPayload.input.sessionKey === 'string' ? requestPayload.input.sessionKey : state.mainSessionKey;
+      const run = findLatestRunningRunBySession(sessionKey);
+      if (run) {
+        emitAborted(run.runId, sessionKey);
+      }
+      return toSuccessEnvelope({
+        success: true,
+        snapshot: buildSnapshotForSession(sessionKey),
+      });
+    }
+
+    if (payload.id === 'session.approval' && payload.operationId === 'approvals.list') {
+      const requestPayload = requireCapabilityExecutePayload(payload, 'session.approval', 'approvals.list');
+      if ('ok' in requestPayload) {
+        return requestPayload;
+      }
+      return toSuccessEnvelope({
+        success: true,
+        approvals: state.approvals.map((approval) => ({
+          id: approval.id,
+          sessionKey: approval.sessionKey,
+          runtimeAddress: { ...runtimeAddressForSession(approval.sessionKey), capabilityId: 'session.approval' },
+          runId: approval.runId,
+          title: approval.title,
+          command: approval.command,
+          allowedDecisions: approval.allowedDecisions,
+          createdAtMs: approval.createdAt,
+        })),
+      });
+    }
+
+    if (payload.id === 'session.approval' && payload.operationId === 'approvals.resolve') {
+      const requestPayload = requireCapabilityExecutePayload(payload, 'session.approval', 'approvals.resolve');
+      if ('ok' in requestPayload) {
+        return requestPayload;
+      }
+      const approvalId = typeof requestPayload.input.id === 'string' ? requestPayload.input.id : '';
+      const approval = state.approvals.find((item) => item.id === approvalId);
+      if (!approval) {
+        return toSuccessEnvelope({ success: false, error: 'approval_not_found' }, 404, false);
+      }
+      state.approvals = state.approvals.filter((item) => item.id !== approvalId);
+      emitHostEvent('gateway:notification', {
+        method: 'exec.approval.resolved',
+        params: {
+          approvalId,
+          id: approvalId,
+          sessionKey: approval.sessionKey,
+          runId: approval.runId,
+        },
+      });
+      setTimeout(() => emitFinal(approval.runId, approval.sessionKey, 'Approved result'), 40);
+      return toSuccessEnvelope({ success: true });
+    }
+
+    if (payload.id === 'session.prompt' && payload.operationId === 'sessions.sendWithMedia') {
+      const requestPayload = requireCapabilityExecutePayload(payload, 'session.prompt', 'sessions.sendWithMedia');
+      if ('ok' in requestPayload) {
+        return requestPayload;
+      }
+      const sessionKey = typeof requestPayload.input.sessionKey === 'string' ? requestPayload.input.sessionKey : state.mainSessionKey;
+      const message = typeof requestPayload.input.message === 'string' ? requestPayload.input.message : 'Process attachment';
+      const result = createRun(sessionKey, message, 'default');
+      return toSuccessEnvelope({
+        success: true,
+        result,
+      });
+    }
+
+    if (payload.id === 'workspace.file' && payload.operationId === 'files.stagePaths') {
+      const requestPayload = requireCapabilityExecutePayload(payload, 'workspace.file', 'files.stagePaths');
+      if ('ok' in requestPayload) {
+        return requestPayload;
+      }
+      const filePaths = Array.isArray(requestPayload.input.filePaths) ? requestPayload.input.filePaths : [];
+      const staged = filePaths.map((rawFilePath, index) => {
+        const filePath = typeof rawFilePath === 'string' ? rawFilePath : `C:\\mock\\file-${index}.txt`;
+        const nameParts = filePath.split(/[\\/]/);
+        const fileName = nameParts[nameParts.length - 1] || `file-${index}.txt`;
+        return {
+          id: `staged-path-${index}-${Date.now()}`,
+          fileName,
+          mimeType: 'text/plain',
+          fileSize: 12,
+          stagedPath: filePath,
+          preview: null,
+        };
+      });
+      return toSuccessEnvelope(staged);
+    }
+
+    if (payload.id === 'workspace.file' && payload.operationId === 'files.stageBuffer') {
+      const requestPayload = requireCapabilityExecutePayload(payload, 'workspace.file', 'files.stageBuffer');
+      if ('ok' in requestPayload) {
+        return requestPayload;
+      }
+      const fileName = typeof requestPayload.input.fileName === 'string' ? requestPayload.input.fileName : 'buffer-file.txt';
+      const mimeType = typeof requestPayload.input.mimeType === 'string' ? requestPayload.input.mimeType : 'application/octet-stream';
+      return toSuccessEnvelope({
+        id: `staged-buffer-${Date.now()}`,
         fileName,
-        mimeType: 'text/plain',
-        fileSize: 12,
-        stagedPath: filePath,
+        mimeType,
+        fileSize: 16,
+        stagedPath: `C:\\mock\\${fileName}`,
         preview: null,
-      };
-    });
-    return toSuccessEnvelope(staged);
+      });
+    }
+
+    if (payload.id === 'session.prompt' && payload.operationId === 'sessions.prompt') {
+      const requestPayload = requireCapabilityExecutePayload(payload, 'session.prompt', 'sessions.prompt');
+      if ('ok' in requestPayload) {
+        return requestPayload;
+      }
+      const sessionKey = typeof requestPayload.input.sessionKey === 'string' ? requestPayload.input.sessionKey : state.mainSessionKey;
+      const message = typeof requestPayload.input.message === 'string' ? requestPayload.input.message : '';
+      const mode: MockRun['mode'] = message.includes('[approval]')
+        ? 'approval'
+        : (message.includes('[long]') ? 'long' : 'default');
+      const result = createRun(sessionKey, message || '(empty)', mode);
+      return toSuccessEnvelope({
+        success: true,
+        sessionKey,
+        runId: result.runId,
+        item: null,
+        snapshot: buildSnapshotForSession(sessionKey),
+      });
+    }
+
+    return toSuccessEnvelope({ success: false, error: 'Capability execution not supported' }, 400, false);
   }
 
-  if (path === '/api/files/stage-buffer' && method === 'POST') {
-    const payload = parseJsonBody(request.body);
-    const fileName = typeof payload.fileName === 'string' ? payload.fileName : 'buffer-file.txt';
-    const mimeType = typeof payload.mimeType === 'string' ? payload.mimeType : 'application/octet-stream';
-    return toSuccessEnvelope({
-      id: `staged-buffer-${Date.now()}`,
-      fileName,
-      mimeType,
-      fileSize: 16,
-      stagedPath: `C:\\mock\\${fileName}`,
-      preview: null,
-    });
-  }
 
   if (path === '/api/files/stat' && method === 'POST') {
     const payload = parseJsonBody(request.body);

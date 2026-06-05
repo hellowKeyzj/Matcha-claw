@@ -6,6 +6,8 @@ import {
   extractSessionIdFromTranscriptFileName,
   TokenUsageHistoryRepository,
 } from '../../runtime-host/application/usage/token-usage-history';
+import { TokenUsageHistoryWorkflow } from '../../runtime-host/application/workflows/usage/token-usage-history-workflow';
+import { OpenClawRuntimeDataLayout } from '../../runtime-host/application/adapters/openclaw/infrastructure/openclaw-runtime-data-layout';
 import { createTestRuntimeFileSystem } from './helpers/runtime-file-system';
 
 describe('token usage history scan', () => {
@@ -56,17 +58,13 @@ describe('token usage history scan', () => {
       'utf8',
     );
 
-    const repository = new TokenUsageHistoryRepository({
-      configRepository: {
-        getConfigDir: () => configDir,
-        read: async () => ({}),
-        write: async () => {},
-        update: async (mutate) => await mutate({}),
-        getConfigFilePath: () => join(configDir, 'openclaw.json'),
-        getOpenClawDirPath: () => '',
+    const repository = new TokenUsageHistoryRepository(new TokenUsageHistoryWorkflow({
+      runtimeData: {
+        getRuntimeDataRootDir: () => configDir,
       },
       fileSystem: createTestRuntimeFileSystem(),
-    });
+      transcriptLayout: new OpenClawRuntimeDataLayout(),
+    }));
     const entries = await repository.scanRecent();
 
     expect(entries).toEqual(expect.arrayContaining([
@@ -106,17 +104,13 @@ describe('token usage history scan', () => {
       'utf8',
     );
 
-    const repository = new TokenUsageHistoryRepository({
-      configRepository: {
-        getConfigDir: () => configDir,
-        read: async () => ({}),
-        write: async () => {},
-        update: async (mutate) => await mutate({}),
-        getConfigFilePath: () => join(configDir, 'openclaw.json'),
-        getOpenClawDirPath: () => '',
+    const repository = new TokenUsageHistoryRepository(new TokenUsageHistoryWorkflow({
+      runtimeData: {
+        getRuntimeDataRootDir: () => configDir,
       },
       fileSystem: createTestRuntimeFileSystem(),
-    });
+      transcriptLayout: new OpenClawRuntimeDataLayout(),
+    }));
 
     expect(repository.recent()).toEqual([]);
     await repository.refreshCache();

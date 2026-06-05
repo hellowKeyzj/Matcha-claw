@@ -4,9 +4,11 @@ import {
 } from './session-storage-repository';
 import { SessionRuntimeStateStore } from './session-runtime-state';
 import type { CanonicalSessionEvent } from './canonical/canonical-events';
-import { reduceCanonicalSessionEvents } from './canonical/canonical-reducer';
-import { buildProjectedCanonicalSessionState, buildRenderItemIndexByKey } from './canonical/canonical-projection';
-import { cloneCanonicalSessionState } from './canonical/canonical-state';
+import { reduceCanonicalSessionEvent, reduceCanonicalSessionEvents } from './canonical/canonical-reducer';
+import {
+  buildIncrementalProjectedCanonicalSessionState,
+  buildProjectedCanonicalSessionState,
+} from './canonical/canonical-projection';
 import {
   cloneSessionRuntimeState,
 } from './session-state-model';
@@ -22,7 +24,7 @@ import type {
 import { SessionTranscriptTimelineLoader } from './session-transcript-timeline-loader';
 import { SessionExecutionGraphRuntime } from './session-execution-graph-runtime';
 import type { RuntimeClockPort } from '../common/runtime-ports';
-import type { RuntimeSessionContext } from './runtime-providers/runtime-provider-types';
+import type { RuntimeSessionContext } from '../agent-runtime/contracts/runtime-endpoint-types';
 
 export interface SessionTimelineRuntimeDeps {
   stateStore: SessionRuntimeStateStore;
@@ -39,8 +41,8 @@ export class SessionTimelineRuntime {
     return await this.deps.sessionStorage.findStorageDescriptor(sessionKey);
   }
 
-  private getSessionState(sessionKey: string): SessionRuntimeTimelineState {
-    return this.deps.stateStore.getSessionState(sessionKey);
+  private getSessionState(sessionKey: string, context?: RuntimeSessionContext): SessionRuntimeTimelineState {
+    return this.deps.stateStore.getSessionState(sessionKey, context);
   }
 
   private touchSessionStateMeta(
@@ -58,40 +60,38 @@ export class SessionTimelineRuntime {
     };
   }
 
-  private cloneCommittedSessionState(state: SessionRuntimeTimelineState): SessionRuntimeTimelineState {
-    return {
-      sessionKey: state.sessionKey,
-      runEpoch: state.runEpoch,
-      canonical: cloneCanonicalSessionState(state.canonical),
-      timelineEntries: state.timelineEntries,
-      executionGraphItems: state.executionGraphItems,
-      renderItems: state.renderItems,
-      renderItemIndexByKey: new Map(state.renderItemIndexByKey),
-      renderItemKeyIndex: {
-        messageItemKeyByCanonicalKey: new Map(state.renderItemKeyIndex.messageItemKeyByCanonicalKey),
-        toolItemKeyByCanonicalKey: new Map(state.renderItemKeyIndex.toolItemKeyByCanonicalKey),
-      },
-      taskSnapshot: state.taskSnapshot,
-      hydrated: state.hydrated,
-      runtime: cloneSessionRuntimeState(state.runtime),
-      window: cloneSessionWindowState(state.window),
-      activeTransportEpoch: state.activeTransportEpoch,
-    };
+  private async reduceCanonicalSessionEventsAsync(
+    state: SessionRuntimeTimelineState,
+    events: AsyncIterable<CanonicalSessionEvent>,
+  ): Promise<CanonicalSessionEvent[]> {
+    const committedEvents: CanonicalSessionEvent[] = [];
+    for await (const event of events) {
+      if (reduceCanonicalSessionEvent(state.canonical, event)) {
+        committedEvents.push(event);
+      }
+    }
+    return committedEvents;
   }
 
   private async ensureSessionHydrated(
     sessionKey: string,
     state: SessionRuntimeTimelineState,
-  ): Promise<void> {
+  ): Promise<{ projected: boolean }> {
     if (state.hydrated) {
-      return;
+      return { projected: false };
     }
 
+    let projected = false;
     if (state.renderItems.length === 0 && state.canonical.messages.length === 0) {
-      const replayEvents = await this.deps.transcriptLoader.readCanonicalReplayEvents(sessionKey);
-      const committedEvents = reduceCanonicalSessionEvents(state.canonical, replayEvents);
+      const replayEvents = await this.deps.transcriptLoader.readCanonicalReplayEvents(state.canonical.context);
+      const committedEvents = Symbol.asyncIterator in Object(replayEvents)
+        ? await this.reduceCanonicalSessionEventsAsync(state, replayEvents as AsyncIterable<CanonicalSessionEvent>)
+        : reduceCanonicalSessionEvents(state.canonical, replayEvents as Iterable<CanonicalSessionEvent>);
       if (committedEvents.length > 0) {
+        this.deps.stateStore.syncTransportIssueIndex(sessionKey, state);
+        this.deps.stateStore.syncApprovalAddressIndex(sessionKey, state);
         this.projectCanonicalState(sessionKey, state);
+        projected = true;
       }
     }
 
@@ -100,16 +100,22 @@ export class SessionTimelineRuntime {
     state.window = state.window.isAtLatest && state.window.windowStartOffset === 0
       ? createLatestWindowState(state.renderItems.length)
       : clampWindowState(state.window, state.renderItems.length);
-    this.deps.executionGraphRuntime.refreshParents(sessionKey);
+    if (!projected) {
+      this.deps.executionGraphRuntime.refreshParents(sessionKey, state.canonical.context.address);
+    }
+    return { projected };
   }
 
   async hydrateSession(
     sessionKey: string,
+    context?: RuntimeSessionContext,
   ): Promise<SessionRuntimeTimelineState> {
     await this.deps.stateStore.ready();
-    const state = this.getSessionState(sessionKey);
-    await this.ensureSessionHydrated(sessionKey, state);
-    this.deps.executionGraphRuntime.refreshRenderItems(state);
+    const state = this.deps.stateStore.getSessionState(sessionKey, context);
+    const hydration = await this.ensureSessionHydrated(sessionKey, state);
+    if (!hydration.projected) {
+      this.deps.executionGraphRuntime.refreshRenderItems(state);
+    }
     state.window = state.window.isAtLatest && state.window.windowStartOffset === 0
       ? createLatestWindowState(state.renderItems.length)
       : clampWindowState(state.window, state.renderItems.length);
@@ -149,42 +155,54 @@ export class SessionTimelineRuntime {
     state.taskSnapshot = state.canonical.taskSnapshot;
     state.runtime = cloneSessionRuntimeState(state.canonical.runtime);
     state.window = createLatestWindowState(state.renderItems.length);
-    this.deps.stateStore.updateExecutionGraphDependencyIndex(sessionKey, state.executionGraphItems);
-    this.deps.executionGraphRuntime.refreshParents(sessionKey);
+    this.deps.stateStore.updateExecutionGraphDependencyIndex(sessionKey, state.canonical.context, state.executionGraphItems);
+    this.deps.executionGraphRuntime.refreshParents(sessionKey, state.canonical.context.address);
   }
 
-  private projectCanonicalRuntimeState(state: SessionRuntimeTimelineState): void {
-    state.runtime = cloneSessionRuntimeState(state.canonical.runtime);
+  private projectIncrementalCanonicalState(
+    sessionKey: string,
+    state: SessionRuntimeTimelineState,
+    committedEvents: readonly CanonicalSessionEvent[],
+  ): void {
+    const projection = buildIncrementalProjectedCanonicalSessionState({
+      state: state.canonical,
+      committedEvents,
+      timelineEntries: state.timelineEntries,
+      executionGraphItems: state.executionGraphItems,
+    });
+    state.timelineEntries = projection.timelineEntries;
+    state.executionGraphItems = projection.executionGraphItems;
+    state.renderItems = projection.renderItems;
+    state.renderItemIndexByKey = projection.renderItemIndexByKey;
+    state.renderItemKeyIndex = projection.renderItemKeyIndex;
     state.taskSnapshot = state.canonical.taskSnapshot;
-    state.renderItemIndexByKey = buildRenderItemIndexByKey(state.renderItems);
-  }
-
-  private shouldProjectRenderState(events: readonly CanonicalSessionEvent[]): boolean {
-    return events.some((event) => event.type !== 'control' && event.type !== 'runtime_activity');
+    state.runtime = cloneSessionRuntimeState(state.canonical.runtime);
+    state.window = createLatestWindowState(state.renderItems.length);
+    this.deps.stateStore.updateExecutionGraphDependencyIndex(sessionKey, state.canonical.context, state.executionGraphItems);
   }
 
   appendCanonicalEvents(
     sessionKey: string,
     events: readonly CanonicalSessionEvent[],
+    context?: RuntimeSessionContext,
   ): CommittedSessionTransition {
-    const state = this.getSessionState(sessionKey);
+    const state = this.getSessionState(sessionKey, context);
     const committedEvents = reduceCanonicalSessionEvents(state.canonical, events);
     if (committedEvents.length === 0) {
       return {
-        state: this.cloneCommittedSessionState(state),
+        state,
         runtime: cloneSessionRuntimeState(state.runtime),
         mergedEntries: state.timelineEntries,
       };
     }
-    if (this.shouldProjectRenderState(committedEvents)) {
-      this.projectCanonicalState(sessionKey, state);
-    } else {
-      this.projectCanonicalRuntimeState(state);
-    }
+    this.deps.stateStore.syncTransportIssueIndex(sessionKey, state);
+    this.deps.stateStore.syncApprovalAddressIndex(sessionKey, state);
+    this.projectIncrementalCanonicalState(sessionKey, state, committedEvents);
+    this.deps.executionGraphRuntime.refreshParents(sessionKey, state.canonical.context.address);
     this.touchSessionStateMeta(state, { advanceRunEpoch: committedEvents.some((event) => event.type === 'lifecycle') });
     this.deps.stateStore.persistStore();
     return {
-      state: this.cloneCommittedSessionState(state),
+      state,
       runtime: cloneSessionRuntimeState(state.runtime),
       mergedEntries: state.timelineEntries,
     };

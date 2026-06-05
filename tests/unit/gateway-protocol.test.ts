@@ -184,6 +184,64 @@ describe('dispatchProtocolEvent', () => {
     );
   });
 
+  it('agent thinking stream 会作为源事实进入 conversation 通道', () => {
+    const emitNotification = vi.fn();
+    const emitConversationEvent = vi.fn();
+    const emitChannelStatus = vi.fn();
+    dispatchGatewayProtocolEvent(
+      { emitNotification, emitConversationEvent, emitChannelStatus },
+      'agent',
+      {
+        runId: 'run-thinking-1',
+        sessionKey: 'agent:main:main',
+        stream: 'thinking',
+        seq: 5,
+        ts: 1_700_000_000_010,
+        data: {
+          text: 'reviewing options',
+          delta: 'reviewing options',
+        },
+      },
+    );
+
+    expect(emitConversationEvent).toHaveBeenCalledWith({
+      type: 'thinking.delta',
+      event: {
+        runId: 'run-thinking-1',
+        sessionKey: 'agent:main:main',
+        seq: 5,
+        timestamp: 1_700_000_000_010,
+        text: 'reviewing options',
+        delta: 'reviewing options',
+      },
+    });
+    expect(emitNotification).toHaveBeenCalledWith(expect.objectContaining({ method: 'agent' }));
+  });
+
+  it('agent native plan stream 当前只透传 notification，不进入 conversation 通道', () => {
+    const emitNotification = vi.fn();
+    const emitConversationEvent = vi.fn();
+    const emitChannelStatus = vi.fn();
+    dispatchGatewayProtocolEvent(
+      { emitNotification, emitConversationEvent, emitChannelStatus },
+      'agent',
+      {
+        runId: 'run-plan-1',
+        sessionKey: 'agent:main:main',
+        stream: 'plan',
+        seq: 6,
+        ts: 1_700_000_000_020,
+        data: {
+          phase: 'update',
+          title: 'Assistant proposed a plan',
+        },
+      },
+    );
+
+    expect(emitConversationEvent).not.toHaveBeenCalled();
+    expect(emitNotification).toHaveBeenCalledWith(expect.objectContaining({ method: 'agent' }));
+  });
+
   it('session.message 事件会作为 transcript message 事实进入 conversation 通道', () => {
     const emitNotification = vi.fn();
     const emitConversationEvent = vi.fn();

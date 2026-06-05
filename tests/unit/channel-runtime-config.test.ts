@@ -3,11 +3,19 @@ import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { ChannelConfigRepository } from '../../runtime-host/application/channels/channel-runtime';
-import { OpenClawConfigRepository } from '../../runtime-host/application/openclaw/openclaw-config-repository';
+import { ChannelConfigRepository, type ChannelPluginConfigProjectionPort, type ChannelPluginProvisionerPort } from '../../runtime-host/application/channels/channel-runtime';
+import { ChannelConfigWorkflow } from '../../runtime-host/application/workflows/channel-runtime/channel-config-workflow';
+import { OpenClawConfigRepository } from '../../runtime-host/application/adapters/openclaw/infrastructure/openclaw-config-repository';
+import { OpenClawChannelConfigProjection } from '../../runtime-host/application/adapters/openclaw/projections/openclaw-channel-config-projection';
+import {
+  applyManuallyManagedPluginIdsToOpenClawConfig,
+  readManuallyManagedPluginIdsFromConfig,
+} from '../../runtime-host/application/adapters/openclaw/projections/openclaw-plugin-config-service';
 import { createTestOpenClawEnvironmentRepository } from './helpers/runtime-system-environment';
-import { ManagedPluginInstaller } from '../../runtime-host/application/plugins/managed-plugin-installer';
+import { OpenClawManagedPluginCatalog } from '../../runtime-host/application/adapters/openclaw/projections/openclaw-managed-plugin-catalog';
+import { OpenClawManagedPluginInstaller } from '../../runtime-host/application/adapters/openclaw/projections/openclaw-managed-plugin-installer';
 import { PluginCompanionSkillService } from '../../runtime-host/application/plugins/plugin-companion-skill-service';
+import { PluginCompanionSkillWorkflow } from '../../runtime-host/application/workflows/plugin-lifecycle/plugin-companion-skill-workflow';
 import { createTestPluginFileSystem } from './helpers/plugin-file-system';
 
 const require = createRequire(import.meta.url);
@@ -27,16 +35,47 @@ describe('channel-runtime config save', () => {
     const environmentRepository = createTestOpenClawEnvironmentRepository();
     const configRepository = new OpenClawConfigRepository(environmentRepository);
     const pluginFileSystem = createTestPluginFileSystem();
-    const companionSkills = new PluginCompanionSkillService(environmentRepository, configRepository, pluginFileSystem);
-    repository = new ChannelConfigRepository(
+    const catalog = new OpenClawManagedPluginCatalog();
+    const companionSkillWorkflow = new PluginCompanionSkillWorkflow({
+      workspace: {
+        getCompanionSkillRootCandidates: () => environmentRepository.getCompanionSkillRootCandidates(),
+        getSkillsRootDir: () => join(configRepository.getConfigDir(), 'skills'),
+      },
+      fileSystem: pluginFileSystem,
+      managedPluginCatalog: catalog,
+    });
+    const companionSkills = new PluginCompanionSkillService(companionSkillWorkflow);
+    const pluginProjection: ChannelPluginConfigProjectionPort = {
+      reconcileChannelDerivedPluginState: async (config) => await applyManuallyManagedPluginIdsToOpenClawConfig(
+        configRepository,
+        pluginFileSystem,
+        config,
+        await readManuallyManagedPluginIdsFromConfig(configRepository, pluginFileSystem, config),
+      ),
+    };
+    const pluginInstaller = new OpenClawManagedPluginInstaller({
+      getManagedPluginRegistryRootCandidates: () => environmentRepository.getManagedPluginRegistryRootCandidates(),
+      getExtensionsRootDir: () => join(configRepository.getConfigDir(), 'extensions'),
+    }, pluginFileSystem, catalog);
+    const pluginProvisioner: ChannelPluginProvisionerPort = {
+      ensureChannelPluginInstalled: async (pluginId, options) => {
+        const definition = catalog.findChannelDefinition(pluginId);
+        if (!definition) {
+          return;
+        }
+        await pluginInstaller.ensureDefinitionInstalled(definition, options);
+      },
+    };
+    repository = new ChannelConfigRepository(new ChannelConfigWorkflow({
       configRepository,
-      new ManagedPluginInstaller(environmentRepository, configRepository, companionSkills, pluginFileSystem),
-      pluginFileSystem,
-      {
+      configProjection: new OpenClawChannelConfigProjection(),
+      pluginProjection,
+      pluginProvisioner,
+      clock: {
         nowMs: () => 1_700_000_000_000,
         nowIso: () => '2023-11-14T22:13:20.000Z',
       },
-    );
+    }));
     await writeFile(
       join(tempDir, 'openclaw.json'),
       `${JSON.stringify({

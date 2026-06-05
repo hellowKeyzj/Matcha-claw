@@ -7,15 +7,22 @@ import {
 } from '@/stores/chat/event-routing';
 
 describe('chat runtime event routing helpers', () => {
-  it('ignores events for another session or another active run', () => {
+  it('ignores events for a different backend session', () => {
     expect(shouldIgnoreRuntimeEvent({
       eventSessionKey: 'agent:other:main',
-      targetSessionKey: 'agent:main:main',
+      targetBackendSessionKey: 'agent:main:main',
     })).toBe(true);
 
     expect(shouldIgnoreRuntimeEvent({
       eventSessionKey: 'agent:main:main',
-      targetSessionKey: 'agent:main:main',
+      targetBackendSessionKey: 'agent:main:main',
+    })).toBe(false);
+  });
+
+  it('does not compare backend event keys against renderer record keys', () => {
+    expect(shouldIgnoreRuntimeEvent({
+      eventSessionKey: 'agent:main:session-1',
+      targetBackendSessionKey: 'agent:main:session-1',
     })).toBe(false);
   });
 

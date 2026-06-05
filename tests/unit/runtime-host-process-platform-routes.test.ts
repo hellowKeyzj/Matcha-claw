@@ -1,6 +1,9 @@
 import { describe, expect, it, vi } from 'vitest';
 import { platformRoutes } from '../../runtime-host/api/routes/platform-routes';
 import { PlatformService } from '../../runtime-host/application/platform-runtime/service';
+import { PlatformRuntimeOperationsWorkflow } from '../../runtime-host/application/workflows/platform-runtime/platform-runtime-operations-workflow';
+import { PlatformToolRuntimeWorkflow } from '../../runtime-host/application/workflows/platform-runtime/platform-tool-runtime-workflow';
+import { createPlatformRuntimeCapabilityOperationRoutes } from '../../runtime-host/application/capabilities/platform/platform-runtime-capability';
 import { dispatchRuntimeRouteDefinition } from './helpers/runtime-route';
 
 function createDeps() {
@@ -13,7 +16,6 @@ function createDeps() {
       listEffectiveTools: vi.fn(async () => [{ id: 'tool.echo', source: 'platform', enabled: true }]),
       upsertPlatformTools: vi.fn(async () => undefined),
       setToolEnabled: vi.fn(async () => undefined),
-      executePlatformTool: vi.fn(async () => ({ ok: true, output: 'hello' })),
   };
   const longTasks = {
     submit: vi.fn((type: string, payload: unknown) => ({
@@ -35,9 +37,29 @@ function createDeps() {
     longTasks,
     jobs,
     routeDeps: {
-      platformService: new PlatformService({ platformRuntime, jobs }),
+      platformService: new PlatformService({
+        operationsWorkflow: new PlatformRuntimeOperationsWorkflow({
+          platformRuntime,
+          jobs,
+          toolRuntimeWorkflow: new PlatformToolRuntimeWorkflow({ platformRuntime }),
+        }),
+      }),
     },
   };
+}
+
+async function dispatchPlatformRuntimeCapability(
+  platformService: PlatformService,
+  toolchainUvService: { install(): unknown },
+  operationId: string,
+  payload: Record<string, unknown> = {},
+) {
+  const route = createPlatformRuntimeCapabilityOperationRoutes({ platformService, toolchainUvService })
+    .find((candidate) => candidate.operationId === operationId);
+  if (!route) {
+    throw new Error(`Missing platform runtime operation: ${operationId}`);
+  }
+  return await route.handle(payload);
 }
 
 describe('runtime-host process platform routes', () => {
@@ -64,15 +86,13 @@ describe('runtime-host process platform routes', () => {
     });
   });
 
-  it('平台工具刷新提交后台任务，不在请求里执行 reconcile', async () => {
+  it('平台工具刷新 capability 提交后台任务，不在请求里执行 reconcile', async () => {
     const deps = createDeps();
 
-    const result = await dispatchRuntimeRouteDefinition(platformRoutes, 
-      'POST',
-      '/api/platform/tools/reconcile',
-      new URL('http://127.0.0.1/api/platform/tools/reconcile'),
-      undefined,
-      deps.routeDeps,
+    const result = await dispatchPlatformRuntimeCapability(
+      deps.routeDeps.platformService,
+      { install: vi.fn(() => deps.longTasks.submit('toolchain.uvInstall', null)) },
+      'platform.reconcileTools',
     );
 
     expect(deps.platformRuntime.reconcileNativeTools).not.toHaveBeenCalled();
@@ -91,24 +111,17 @@ describe('runtime-host process platform routes', () => {
     });
   });
 
-  it('平台工具执行走子进程 facade', async () => {
+  it('不再暴露平台工具 direct mutation 路由', async () => {
     const deps = createDeps();
 
-    const result = await dispatchRuntimeRouteDefinition(platformRoutes, 
+    const result = await dispatchRuntimeRouteDefinition(platformRoutes,
       'POST',
-      '/api/platform/tools/execute',
-      new URL('http://127.0.0.1/api/platform/tools/execute'),
-      { req: { toolId: 'tool.echo', args: { value: 'hello' } } },
+      '/api/platform/tools/reconcile',
+      new URL('http://127.0.0.1/api/platform/tools/reconcile'),
+      {},
       deps.routeDeps,
     );
 
-    expect(deps.platformRuntime.executePlatformTool).toHaveBeenCalledWith({
-      toolId: 'tool.echo',
-      args: { value: 'hello' },
-    });
-    expect(result).toEqual({
-      status: 200,
-      data: { ok: true, output: 'hello' },
-    });
+    expect(result).toBeNull();
   });
 });

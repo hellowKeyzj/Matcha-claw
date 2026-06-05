@@ -29,6 +29,11 @@ export interface RuntimeJobDefinition {
   readonly handler: RuntimeJobHandler;
 }
 
+export interface RuntimeJobRegistrationDescriptor {
+  readonly type: string;
+  readonly owner: string | null;
+}
+
 interface RuntimeJobRecord extends RuntimeJobSnapshot {
   status: RuntimeJobStatus;
   queue: RuntimeJobQueueName;
@@ -48,6 +53,11 @@ interface RuntimeJobRecord extends RuntimeJobSnapshot {
 
 interface RuntimeJobYieldState {
   sliceStartedAt: number;
+}
+
+interface PendingRuntimeJobIdQueue {
+  ids: string[];
+  head: number;
 }
 
 export interface RuntimeJobEventSink {
@@ -76,12 +86,36 @@ function waitForNextTurn(): Promise<void> {
 
 export class RuntimeJobRegistry {
   private readonly handlers = new Map<string, RuntimeJobHandler>();
+  private readonly owners = new Map<string, string | null>();
+  private activeRegistrationOwner: string | null = null;
 
   register(type: string, handler: RuntimeJobHandler): void {
     if (this.handlers.has(type)) {
       throw new Error(`Runtime job handler already registered: ${type}`);
     }
     this.handlers.set(type, handler);
+    this.owners.set(type, this.activeRegistrationOwner);
+  }
+
+  withRegistrationOwner<T>(owner: string, register: () => T): T {
+    const normalizedOwner = owner.trim();
+    if (!normalizedOwner) {
+      throw new Error('Runtime job registration owner is required');
+    }
+    const previousOwner = this.activeRegistrationOwner;
+    this.activeRegistrationOwner = normalizedOwner;
+    try {
+      return register();
+    } finally {
+      this.activeRegistrationOwner = previousOwner;
+    }
+  }
+
+  listRegistrations(): RuntimeJobRegistrationDescriptor[] {
+    return Array.from(this.handlers.keys()).map((type) => ({
+      type,
+      owner: this.owners.get(type) ?? null,
+    }));
   }
 
   get(type: string): RuntimeJobHandler {
@@ -114,10 +148,10 @@ export class RuntimeJobQueue {
   private nextId = 1;
   private activeCount = 0;
   private stopped = false;
-  private readonly pendingJobIds: Record<RuntimeJobQueueName, string[]> = {
-    critical: [],
-    default: [],
-    low: [],
+  private readonly pendingJobIds: Record<RuntimeJobQueueName, PendingRuntimeJobIdQueue> = {
+    critical: { ids: [], head: 0 },
+    default: { ids: [], head: 0 },
+    low: { ids: [], head: 0 },
   };
   private readonly jobs = new Map<string, RuntimeJobRecord>();
   private readonly jobIdsByType = new Map<string, Set<string>>();
@@ -202,7 +236,7 @@ export class RuntimeJobQueue {
       this.activeDedupeKeys.set(options.dedupeKey, job.id);
     }
 
-    this.pendingJobIds[job.queue].push(job.id);
+    this.enqueuePendingJobId(job.queue, job.id);
     this.drain();
     return this.snapshot(job);
   }
@@ -261,13 +295,13 @@ export class RuntimeJobQueue {
       totalCount: this.jobs.size,
       queues: {
         critical: {
-          pendingCount: this.pendingJobIds.critical.length,
+          pendingCount: this.countPendingQueueJobs(this.pendingJobIds.critical),
         },
         default: {
-          pendingCount: this.pendingJobIds.default.length,
+          pendingCount: this.countPendingQueueJobs(this.pendingJobIds.default),
         },
         low: {
-          pendingCount: this.pendingJobIds.low.length,
+          pendingCount: this.countPendingQueueJobs(this.pendingJobIds.low),
         },
       },
     };
@@ -295,7 +329,7 @@ export class RuntimeJobQueue {
     this.evictionTasks.clear();
 
     for (const queue of RUNTIME_JOB_QUEUE_ORDER) {
-      for (const jobId of this.pendingJobIds[queue].splice(0)) {
+      for (const jobId of this.drainPendingQueue(this.pendingJobIds[queue])) {
         const job = this.jobs.get(jobId);
         if (job && job.status === 'queued') {
           this.finish(job, 'failed', 'Runtime job queue stopped');
@@ -349,7 +383,7 @@ export class RuntimeJobQueue {
           if (this.stopped || job.status !== 'queued') {
             return;
           }
-          this.pendingJobIds[job.queue].push(job.id);
+          this.enqueuePendingJobId(job.queue, job.id);
           this.drain();
         });
         this.retryTasks.set(job.id, retryTask);
@@ -469,11 +503,25 @@ export class RuntimeJobQueue {
     }
   }
 
+  private removePendingJobId(jobId: string): void {
+    for (const queue of RUNTIME_JOB_QUEUE_ORDER) {
+      const pendingQueue = this.pendingJobIds[queue];
+      for (let index = pendingQueue.head; index < pendingQueue.ids.length; index += 1) {
+        if (pendingQueue.ids[index] === jobId) {
+          pendingQueue.ids.splice(index, 1);
+          index -= 1;
+        }
+      }
+      this.compactPendingQueue(pendingQueue);
+    }
+  }
+
   private evictJob(jobId: string): void {
     const job = this.jobs.get(jobId);
     if (!job) {
       return;
     }
+    this.removePendingJobId(jobId);
     this.jobs.delete(jobId);
     const typeBucket = this.jobIdsByType.get(job.type);
     if (typeBucket) {
@@ -539,17 +587,43 @@ export class RuntimeJobQueue {
     }
   }
 
+  private enqueuePendingJobId(queue: RuntimeJobQueueName, jobId: string): void {
+    this.pendingJobIds[queue].ids.push(jobId);
+  }
+
+  private drainPendingQueue(queue: PendingRuntimeJobIdQueue): string[] {
+    const pendingIds = queue.ids.slice(queue.head);
+    queue.ids.length = 0;
+    queue.head = 0;
+    return pendingIds;
+  }
+
+  private compactPendingQueue(queue: PendingRuntimeJobIdQueue): void {
+    if (queue.head <= 32 || queue.head * 2 < queue.ids.length) {
+      return;
+    }
+    queue.ids.splice(0, queue.head);
+    queue.head = 0;
+  }
+
+  private countPendingQueueJobs(queue: PendingRuntimeJobIdQueue): number {
+    return queue.ids.length - queue.head;
+  }
+
   private countPendingJobs(): number {
     return RUNTIME_JOB_QUEUE_ORDER.reduce(
-      (total, queue) => total + this.pendingJobIds[queue].length,
+      (total, queue) => total + this.countPendingQueueJobs(this.pendingJobIds[queue]),
       0,
     );
   }
 
   private shiftNextPendingJobId(): string | undefined {
-    for (const queue of RUNTIME_JOB_QUEUE_ORDER) {
-      const jobId = this.pendingJobIds[queue].shift();
+    for (const queueName of RUNTIME_JOB_QUEUE_ORDER) {
+      const queue = this.pendingJobIds[queueName];
+      const jobId = queue.ids[queue.head];
       if (jobId) {
+        queue.head += 1;
+        this.compactPendingQueue(queue);
         return jobId;
       }
     }

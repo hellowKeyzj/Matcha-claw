@@ -1,13 +1,57 @@
 import { describe, expect, it, vi } from 'vitest';
 import { cronRoutes } from '../../runtime-host/api/routes/cron-routes';
+import { createCronSchedulerCapabilityOperationRoutes } from '../../runtime-host/application/capabilities/scheduler/cron-scheduler-capability';
 import { CronService } from '../../runtime-host/application/cron/service';
+import { CronJobMutationWorkflow } from '../../runtime-host/application/workflows/cron/cron-job-mutation-workflow';
+import { CronOperationsWorkflow } from '../../runtime-host/application/workflows/cron/cron-operations-workflow';
+import { ScheduledAgentTriggerWorkflow } from '../../runtime-host/application/workflows/scheduled-agent/scheduled-agent-trigger-workflow';
 import { createImmediateRuntimeTimer } from './helpers/runtime-scheduler';
 import { dispatchRuntimeRouteDefinition } from './helpers/runtime-route';
 
 const clock = {
   nowMs: () => 3456,
   nowIso: () => '1970-01-01T00:00:03.456Z',
+  toIsoString: (ms: number) => new Date(ms).toISOString(),
 };
+
+type CronGatewayMock = ConstructorParameters<typeof ScheduledAgentTriggerWorkflow>[0]['gateway'];
+
+function createScheduledAgentTriggerWorkflow(gateway: CronGatewayMock): ScheduledAgentTriggerWorkflow {
+  return new ScheduledAgentTriggerWorkflow({
+    gateway,
+    clock,
+    timer: createImmediateRuntimeTimer(),
+  });
+}
+
+function createCronService(input: {
+  gateway: CronGatewayMock;
+  jobs: ReturnType<typeof createCronJobsMock>;
+  usageHistory?: { isReady: ReturnType<typeof vi.fn>; refreshCache: ReturnType<typeof vi.fn>; recent: ReturnType<typeof vi.fn> };
+  requestUsageHistoryRefresh?: () => void;
+}): CronService {
+  const jobMutationWorkflow = new CronJobMutationWorkflow({
+    gateway: input.gateway,
+    clock,
+    jobs: input.jobs,
+    scheduledAgentTriggerWorkflow: createScheduledAgentTriggerWorkflow(input.gateway),
+  });
+  const operationsWorkflow = new CronOperationsWorkflow({
+    gateway: input.gateway,
+    usageHistory: (input.usageHistory ?? {
+      isReady: vi.fn(() => true),
+      refreshCache: vi.fn(),
+      recent: vi.fn(() => []),
+    }) as any,
+    jobs: input.jobs,
+    jobMutationWorkflow,
+    requestUsageHistoryRefresh: input.requestUsageHistoryRefresh,
+  });
+  return new CronService({
+    sessionHistory: { read: vi.fn() },
+    operationsWorkflow,
+  });
+}
 
 function createCronJobsMock() {
   const job = (type: string, id = type) => ({
@@ -38,11 +82,6 @@ describe('runtime-host cron routes', () => {
       usageRecent: vi.fn(async () => ({ usage: [] })),
       listJobs: vi.fn(),
       sessionHistory: vi.fn(),
-      createJob: vi.fn(),
-      updateJob: vi.fn(),
-      deleteJob: vi.fn(),
-      toggleJob: vi.fn(),
-      trigger: vi.fn(),
     };
     const routeUrl = new URL('http://127.0.0.1/api/runtime-host/usage/recent?limit=3');
 
@@ -68,24 +107,22 @@ describe('runtime-host cron routes', () => {
       refreshCache: vi.fn(),
       recent: vi.fn(() => [{ totalTokens: 3 }]),
     };
-    const service = new CronService({
-      gateway: {
-        listCronJobs: vi.fn(),
-        addCronJob: vi.fn(),
-        updateCronJob: vi.fn(),
-        removeCronJob: vi.fn(),
-        runCronJob: vi.fn(),
-        readGatewayConnectionState: vi.fn(async () => ({
-          state: 'connected',
-          gatewayReady: true,
-          portReachable: true,
-        })),
-      },
-      sessionHistory: { read: vi.fn() },
-      usageHistory: usageHistory as any,
-      timer: createImmediateRuntimeTimer(),
-      clock,
+    const gateway = {
+      listCronJobs: vi.fn(),
+      addCronJob: vi.fn(),
+      updateCronJob: vi.fn(),
+      removeCronJob: vi.fn(),
+      runCronJob: vi.fn(),
+      readGatewayConnectionState: vi.fn(async () => ({
+        state: 'connected',
+        gatewayReady: true,
+        portReachable: true,
+      })),
+    };
+    const service = createCronService({
+      gateway,
       jobs: createCronJobsMock(),
+      usageHistory,
       requestUsageHistoryRefresh,
     });
 
@@ -121,31 +158,50 @@ describe('runtime-host cron routes', () => {
     expect(cronService.listJobs).toHaveBeenCalledTimes(1);
   });
 
+  it('cron scheduler capability 提交 trigger 后台任务，不在请求链路执行 gateway', async () => {
+    const jobs = createCronJobsMock();
+    const gateway = {
+      listCronJobs: vi.fn(),
+      addCronJob: vi.fn(),
+      updateCronJob: vi.fn(),
+      removeCronJob: vi.fn(),
+      runCronJob: vi.fn(),
+      readGatewayConnectionState: vi.fn(async () => ({
+        state: 'connected',
+        gatewayReady: true,
+        portReachable: true,
+      })),
+    };
+    const service = createCronService({ gateway, jobs });
+    const triggerRoute = createCronSchedulerCapabilityOperationRoutes({ cronService: service })
+      .find((route) => route.operationId === 'cron.trigger');
+
+    expect(await triggerRoute?.handle({ id: 'job-1' })).toMatchObject({
+      status: 202,
+      data: {
+        success: true,
+        job: { id: 'runtime-job-1', type: 'cron.trigger' },
+      },
+    });
+    expect(jobs.submitTrigger).toHaveBeenCalledWith({ id: 'job-1' });
+    expect(gateway.runCronJob).not.toHaveBeenCalled();
+  });
+
   it('cron jobs 在 Gateway 未 ready 时不提交刷新任务', async () => {
     const jobs = createCronJobsMock();
-    const service = new CronService({
-      gateway: {
-        listCronJobs: vi.fn(),
-        addCronJob: vi.fn(),
-        updateCronJob: vi.fn(),
-        removeCronJob: vi.fn(),
-        runCronJob: vi.fn(),
-        readGatewayConnectionState: vi.fn(async () => ({
-          state: 'disconnected',
-          gatewayReady: false,
-          portReachable: false,
-        })),
-      },
-      sessionHistory: { read: vi.fn() },
-      usageHistory: {
-        isReady: vi.fn(() => true),
-        refreshCache: vi.fn(),
-        recent: vi.fn(() => []),
-      } as any,
-      timer: createImmediateRuntimeTimer(),
-      clock,
-      jobs,
-    });
+    const gateway = {
+      listCronJobs: vi.fn(),
+      addCronJob: vi.fn(),
+      updateCronJob: vi.fn(),
+      removeCronJob: vi.fn(),
+      runCronJob: vi.fn(),
+      readGatewayConnectionState: vi.fn(async () => ({
+        state: 'disconnected',
+        gatewayReady: false,
+        portReachable: false,
+      })),
+    };
+    const service = createCronService({ gateway, jobs });
 
     await expect(service.listJobs()).resolves.toEqual({
       success: true,
@@ -162,29 +218,19 @@ describe('runtime-host cron routes', () => {
     const listCronJobs = vi.fn(async () => {
       throw new Error('connect ECONNREFUSED 127.0.0.1:18789');
     });
-    const service = new CronService({
-      gateway: {
-        listCronJobs,
-        addCronJob: vi.fn(),
-        updateCronJob: vi.fn(),
-        removeCronJob: vi.fn(),
-        runCronJob: vi.fn(),
-        readGatewayConnectionState: vi.fn(async () => ({
-          state: 'disconnected',
-          gatewayReady: false,
-          portReachable: false,
-        })),
-      },
-      sessionHistory: { read: vi.fn() },
-      usageHistory: {
-        isReady: vi.fn(() => true),
-        refreshCache: vi.fn(),
-        recent: vi.fn(() => []),
-      } as any,
-      timer: createImmediateRuntimeTimer(),
-      clock,
-      jobs: createCronJobsMock(),
-    });
+    const gateway = {
+      listCronJobs,
+      addCronJob: vi.fn(),
+      updateCronJob: vi.fn(),
+      removeCronJob: vi.fn(),
+      runCronJob: vi.fn(),
+      readGatewayConnectionState: vi.fn(async () => ({
+        state: 'disconnected',
+        gatewayReady: false,
+        portReachable: false,
+      })),
+    };
+    const service = createCronService({ gateway, jobs: createCronJobsMock() });
 
     await expect(service.refreshJobsSnapshot()).resolves.toEqual({
       success: true,

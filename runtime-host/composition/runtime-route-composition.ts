@@ -1,20 +1,25 @@
 import type {
   RuntimeRouteHandlerEntry,
 } from '../api/dispatch/runtime-route-dispatcher-types';
-import {
-  resolveRuntimeHostApplicationServices,
-} from './application-services';
-import type { RuntimeHostContainer } from './container';
+import type { RuntimeHostApplicationServicesContext } from './application-services';
 import { registerRuntimeHostModuleRoutes } from './runtime-host-module-registry';
 import { RuntimeHostRouteRegistry } from './route-registry';
 
-export function createRuntimeHostRouteHandlers(
-  container: RuntimeHostContainer,
-): RuntimeRouteHandlerEntry[] {
-  const services = resolveRuntimeHostApplicationServices(container);
+export function createRuntimeHostRouteRegistry(
+  context: RuntimeHostApplicationServicesContext,
+): RuntimeHostRouteRegistry {
   const routes = new RuntimeHostRouteRegistry();
 
-  registerRuntimeHostModuleRoutes(routes, services);
+  registerRuntimeHostModuleRoutes(routes, {
+    container: context.container,
+    facades: context.facades,
+  });
 
-  return routes.list();
+  return routes;
+}
+
+export function createRuntimeHostRouteHandlers(
+  context: RuntimeHostApplicationServicesContext,
+): RuntimeRouteHandlerEntry[] {
+  return createRuntimeHostRouteRegistry(context).list();
 }

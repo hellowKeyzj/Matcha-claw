@@ -1,6 +1,7 @@
 import { EventEmitter } from 'events';
 import { shell } from 'electron';
 import { logger } from '../../../utils/logger';
+import { createCapabilityPayload } from '../../../main/runtime-host-capabilities';
 import { createDefaultRuntimeHostHttpClient } from '../../../main/runtime-host-client';
 import {
   loginMiniMaxPortalOAuth,
@@ -13,9 +14,14 @@ import {
 export type OAuthProviderType = 'minimax-portal' | 'minimax-portal-cn' | 'qwen-portal';
 export type { MiniMaxRegion };
 
+const MODEL_PROVIDER_CAPABILITY_ID = 'model.provider';
 const runtimeHostClient = createDefaultRuntimeHostHttpClient({
   timeoutMs: 8000,
 });
+
+async function modelProviderCapabilityPayload(operationId: string, input: Record<string, unknown>) {
+  return await createCapabilityPayload(runtimeHostClient, MODEL_PROVIDER_CAPABILITY_ID, operationId, input);
+}
 
 class DeviceOAuthManager extends EventEmitter {
   private activeProvider: OAuthProviderType | null = null;
@@ -160,13 +166,13 @@ class DeviceOAuthManager extends EventEmitter {
     logger.info(`[DeviceOAuth] Successfully completed OAuth for ${providerType}`);
     await runtimeHostClient.request(
       'POST',
-      '/api/provider-accounts/oauth/complete-device',
-      {
+      '/api/capabilities/execute',
+      await modelProviderCapabilityPayload('providers.oauthCompleteDevice', {
         providerType,
         accountId,
         ...(accountLabel ? { accountLabel } : {}),
         token,
-      },
+      }),
     );
 
     this.emit('oauth:success', { provider: providerType, accountId });

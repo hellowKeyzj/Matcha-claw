@@ -69,7 +69,7 @@ function parseTranscriptLine(line: string): SessionTranscriptMessage | null {
   };
 }
 
-export function* iterateTranscriptMessages(content: string): Generator<SessionTranscriptMessage> {
+function* iterateTranscriptContentLines(content: string): Generator<string> {
   let start = 0;
   for (let index = 0; index <= content.length; index += 1) {
     if (index < content.length && content.charCodeAt(index) !== 10) {
@@ -77,12 +77,60 @@ export function* iterateTranscriptMessages(content: string): Generator<SessionTr
     }
     const end = index > start && content.charCodeAt(index - 1) === 13 ? index - 1 : index;
     if (end > start) {
-      const message = parseTranscriptLine(content.slice(start, end));
+      yield content.slice(start, end);
+    }
+    start = index + 1;
+  }
+}
+
+export function* iterateTranscriptMessages(content: string | Iterable<string>): Generator<SessionTranscriptMessage> {
+  const lines = typeof content === 'string' ? iterateTranscriptContentLines(content) : content;
+  for (const line of lines) {
+    if (!line) {
+      continue;
+    }
+    const message = parseTranscriptLine(line);
+    if (message) {
+      yield message;
+    }
+  }
+}
+
+export async function* iterateTranscriptMessagesAsync(content: string | Iterable<string> | AsyncIterable<string>): AsyncGenerator<SessionTranscriptMessage> {
+  if (typeof content === 'string' || Symbol.iterator in Object(content)) {
+    yield* iterateTranscriptMessages(content as string | Iterable<string>);
+    return;
+  }
+  for await (const line of content) {
+    if (!line) {
+      continue;
+    }
+    const message = parseTranscriptLine(line);
+    if (message) {
+      yield message;
+    }
+  }
+}
+
+export async function* iterateTranscriptMessagesFromChunksAsync(chunks: AsyncIterable<string>): AsyncGenerator<SessionTranscriptMessage> {
+  let pending = '';
+  for await (const chunk of chunks) {
+    pending += chunk;
+    let newlineIndex = pending.indexOf('\n');
+    while (newlineIndex >= 0) {
+      const line = pending.slice(0, newlineIndex > 0 && pending.charCodeAt(newlineIndex - 1) === 13 ? newlineIndex - 1 : newlineIndex);
+      pending = pending.slice(newlineIndex + 1);
+      const message = line ? parseTranscriptLine(line) : null;
       if (message) {
         yield message;
       }
+      newlineIndex = pending.indexOf('\n');
     }
-    start = index + 1;
+  }
+  const line = pending.endsWith('\r') ? pending.slice(0, -1) : pending;
+  const message = line ? parseTranscriptLine(line) : null;
+  if (message) {
+    yield message;
   }
 }
 

@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
+import { createOpenClawTestRuntimeAddress } from './helpers/runtime-address-fixtures';
 import { render, screen } from '@testing-library/react';
 import { ApprovalActionsPanel } from '@/pages/Chat/components/ChatStates';
 import { ChatApprovalDock, ChatErrorBanner } from '@/pages/Chat/components/ChatRuntimeDock';
@@ -71,6 +72,7 @@ describe('chat floating overlays layout', () => {
         approvals={[{
           id: 'approval-1',
           sessionKey: 'agent:main:main',
+          runtimeAddress: createOpenClawTestRuntimeAddress('agent:main:main'),
           title: 'gateway',
           command: 'Remove-Item demo.txt',
           allowedDecisions: ['allow-once', 'deny'],

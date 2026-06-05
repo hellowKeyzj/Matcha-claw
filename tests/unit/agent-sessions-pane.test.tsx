@@ -10,6 +10,7 @@ import { createEmptySessionRecord } from '@/stores/chat/store-state-helpers';
 import { buildRenderItemsFromMessages } from './helpers/timeline-fixtures';
 import type { RawMessage } from './helpers/timeline-fixtures';
 import { createViewportWindowState } from '@/stores/chat/viewport-state';
+import { createOpenClawTestRuntimeAddress } from './helpers/runtime-address-fixtures';
 
 const readyResource = {
   status: 'ready' as const,
@@ -38,7 +39,11 @@ function createSessionRecord(input?: {
   return {
     meta: {
       ...base.meta,
+      backendSessionKey: sessionKey,
       agentId: sessionKey.split(':')[1] ?? null,
+      protocolId: null,
+      runtimeEndpointId: 'local',
+      runtimeAddress: createOpenClawTestRuntimeAddress(sessionKey),
       kind: sessionKey.endsWith(':main') ? 'main' : 'session',
       preferred: sessionKey.endsWith(':main'),
       label: input?.label ?? null,
@@ -270,6 +275,44 @@ describe('agent sessions pane', () => {
     fireEvent.click(sessionButton);
 
     expect(switchSession).toHaveBeenCalledWith('agent:test:session-2');
+  });
+
+  it('缺少 catalog agentId 时，会话列表从 session key 派生所属 agent', () => {
+    const now = Date.now();
+    useChatStore.setState({
+      currentSessionKey: 'agent:test:main',
+      sessionCatalogStatus: buildReadySessionCatalogStatus([
+        { key: 'agent:test:main', displayName: 'agent:test:main' },
+        { key: 'agent:test:session-2', displayName: 'agent:test:session-2' },
+      ]),
+      loadedSessions: {
+        'agent:test:main': createSessionRecord({ sessionKey: 'agent:test:main', historyStatus: 'ready' }),
+        'agent:test:session-2': {
+          ...createSessionRecord({
+            sessionKey: 'agent:test:session-2',
+            historyStatus: 'ready',
+            label: '缺少 agentId 的会话',
+            lastActivityAt: now,
+          }),
+          meta: {
+            ...createSessionRecord({ sessionKey: 'agent:test:session-2' }).meta,
+            agentId: null,
+            historyStatus: 'ready',
+            label: '缺少 agentId 的会话',
+            lastActivityAt: now,
+          },
+        },
+      },
+      switchSession: vi.fn(),
+      newSession: vi.fn(),
+      deleteSession: vi.fn().mockResolvedValue(undefined),
+      loadSessions: vi.fn().mockResolvedValue(undefined),
+    } as never);
+
+    renderPane();
+
+    expect(screen.getByText('缺少 agentId 的会话')).toBeInTheDocument();
+    expect(screen.getByTestId('session-avatar-agent:test:session-2')).toBeInTheDocument();
   });
 
   it('点击无历史会话的 agent 行，应走 agent 打开动作而不是切到伪 main 会话', () => {
@@ -609,6 +652,53 @@ describe('agent sessions pane', () => {
     renderPane();
 
     expect(screen.queryByText('agent:test:session-1710000000000')).not.toBeInTheDocument();
+  });
+
+  it('没有 main 入口时不应把第一条真实历史会话当 preferred 入口过滤掉', () => {
+    useChatStore.setState({
+      currentSessionKey: 'agent:test:session-1710000000000',
+      sessionCatalogStatus: buildReadySessionCatalogStatus([
+        { key: 'agent:test:session-1710000000000', displayName: '真实历史会话' },
+      ]),
+      loadedSessions: {
+        'agent:test:session-1710000000000': createSessionRecord({
+          sessionKey: 'agent:test:session-1710000000000',
+          historyStatus: 'ready',
+          label: '真实历史会话',
+          lastActivityAt: Date.now(),
+        }),
+      },
+      switchSession: vi.fn(),
+      newSession: vi.fn(),
+      deleteSession: vi.fn().mockResolvedValue(undefined),
+      loadSessions: vi.fn().mockResolvedValue(undefined),
+    } as never);
+
+    renderPane();
+
+    expect(screen.getByText('真实历史会话')).toBeInTheDocument();
+  });
+
+  it('没有当前 agent 和 agent 列表时，新建按钮不应伪造成 main agent', () => {
+    const newSession = vi.fn();
+    useSubagentsStore.setState({
+      agents: [],
+      agentsResource: readyResource,
+    } as never);
+    useChatStore.setState({
+      currentSessionKey: '',
+      loadedSessions: {},
+      sessionCatalogStatus: buildReadySessionCatalogStatus([]),
+      switchSession: vi.fn(),
+      newSession,
+      deleteSession: vi.fn().mockResolvedValue(undefined),
+      loadSessions: vi.fn().mockResolvedValue(undefined),
+    } as never);
+
+    renderPane();
+
+    fireEvent.click(screen.getByRole('button', { name: 'New session' }));
+    expect(newSession).not.toHaveBeenCalled();
   });
 
   it('会话资源加载中时，不应阻塞 agent 列表渲染', () => {

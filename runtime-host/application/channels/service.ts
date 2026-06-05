@@ -3,28 +3,19 @@ import {
   badRequest,
   ok,
 } from '../common/application-response';
-import type { RuntimeClockPort } from '../common/runtime-ports';
-import type { GatewayChannelPort } from '../gateway/gateway-runtime-port';
-import { isGatewayReadyForSnapshot } from '../gateway/gateway-readiness';
-import type { ParentShellPort } from '../runtime-host/parent-shell-port';
-import { channelUsesLoginSession } from './channel-activation-strategy';
+import type { ChannelActivationWorkflow } from '../workflows/channel-runtime/channel-activation-workflow';
+import type { ChannelConfigMutationWorkflow } from '../workflows/channel-runtime/channel-config-mutation-workflow';
+import type { ChannelRuntimeWorkflow } from '../workflows/channel-runtime/channel-runtime-workflow';
 import type { ChannelJobPort } from './channel-jobs';
 import type { ChannelPairingService } from './channel-pairing-service';
 import type { ChannelConfigPort } from './channel-runtime';
-import type { ChannelLoginSessionService } from './channel-login-session-service';
-import {
-  projectChannelsSnapshot,
-  type ProjectedChannelsSnapshot,
-} from './channel-snapshot-projection';
-
 export interface ChannelServiceDeps {
-  readonly gateway: GatewayChannelPort;
   readonly channelConfig: ChannelConfigPort;
-  readonly parentShell: ParentShellPort;
-  readonly loginSessions: Pick<ChannelLoginSessionService, 'start' | 'cancel'>;
+  readonly activationWorkflow: Pick<ChannelActivationWorkflow, 'activate' | 'cancelSession'>;
+  readonly configMutationWorkflow: Pick<ChannelConfigMutationWorkflow, 'executeActivateDirect' | 'executeDeleteConfigDirect'>;
+  readonly runtimeWorkflow: Pick<ChannelRuntimeWorkflow, 'snapshot' | 'refreshSnapshot' | 'probeSnapshot' | 'connect' | 'disconnect' | 'requestQr'>;
   readonly pairing: Pick<ChannelPairingService, 'listRequests' | 'approveRequest'>;
   readonly jobs: ChannelJobPort;
-  readonly clock: RuntimeClockPort;
 }
 
 function isRecord(value: unknown): value is Record<string, any> {
@@ -32,92 +23,26 @@ function isRecord(value: unknown): value is Record<string, any> {
 }
 
 export class ChannelService {
-  private gatewayChannelsCache: unknown = null;
-  private gatewayChannelsCacheReady = false;
-  private gatewayChannelsCacheError: string | null = null;
-  private gatewayChannelsCacheUpdatedAt: number | null = null;
-
   constructor(private readonly deps: ChannelServiceDeps) {}
 
-  private async restartGateway(): Promise<void> {
-    const restartResponse = await this.deps.parentShell.request('gateway_restart');
-    if (!restartResponse.success) {
-      throw new Error(restartResponse.error?.message ?? 'gateway restart failed');
-    }
-  }
-
   async activateDirect(payload: unknown): Promise<{ success: true }> {
-    await this.deps.channelConfig.saveChannelConfig(payload);
-    await this.restartGateway();
-    return { success: true };
+    return await this.deps.configMutationWorkflow.executeActivateDirect(payload);
   }
 
   async deleteConfigDirect(channelType: string): Promise<{ success: true }> {
-    await this.deps.channelConfig.deleteChannelConfig(channelType);
-    await this.restartGateway();
-    return { success: true };
+    return await this.deps.configMutationWorkflow.executeDeleteConfigDirect(channelType);
   }
 
   async snapshot() {
-    if (await isGatewayReadyForSnapshot(this.deps.gateway)) {
-      try {
-        const refresh = await this.fetchAndCache(false);
-        return {
-          ...refresh,
-          ready: true,
-          refreshing: false,
-          error: null,
-        };
-      } catch {
-        const configuredChannels = await this.deps.channelConfig.listConfiguredChannels();
-        return {
-          success: true,
-          snapshot: projectChannelsSnapshot(configuredChannels, this.gatewayChannelsCache),
-          ready: true,
-          refreshing: false,
-          updatedAt: this.gatewayChannelsCacheUpdatedAt,
-          error: this.gatewayChannelsCacheError,
-        };
-      }
-    }
-
-    const configuredChannels = await this.deps.channelConfig.listConfiguredChannels();
-    const projected = projectChannelsSnapshot(configuredChannels, this.gatewayChannelsCache);
-
-    return {
-      success: true,
-      snapshot: projected satisfies ProjectedChannelsSnapshot,
-      ready: this.gatewayChannelsCacheReady,
-      refreshing: false,
-      updatedAt: this.gatewayChannelsCacheUpdatedAt,
-      error: this.gatewayChannelsCacheError,
-    };
+    return await this.deps.runtimeWorkflow.snapshot();
   }
 
   async refreshSnapshot() {
-    return await this.fetchAndCache(false);
+    return await this.deps.runtimeWorkflow.refreshSnapshot();
   }
 
   async probeSnapshot() {
-    return await this.fetchAndCache(true);
-  }
-
-  private async fetchAndCache(probe: boolean) {
-    try {
-      this.gatewayChannelsCache = await this.deps.gateway.channelsStatus(probe);
-      this.gatewayChannelsCacheReady = true;
-      this.gatewayChannelsCacheError = null;
-      this.gatewayChannelsCacheUpdatedAt = this.deps.clock.nowMs();
-      const configuredChannels = await this.deps.channelConfig.listConfiguredChannels();
-      return {
-        success: true,
-        snapshot: projectChannelsSnapshot(configuredChannels, this.gatewayChannelsCache),
-        updatedAt: this.gatewayChannelsCacheUpdatedAt,
-      };
-    } catch (error) {
-      this.gatewayChannelsCacheError = error instanceof Error ? error.message : String(error);
-      throw error;
-    }
+    return await this.deps.runtimeWorkflow.probeSnapshot();
   }
 
   async validateConfig(payload: unknown) {
@@ -145,18 +70,7 @@ export class ChannelService {
     if (!channelType) {
       return badRequest('channelType is required');
     }
-
-    if (!channelUsesLoginSession(channelType)) {
-      return accepted(this.deps.jobs.submitActivateDirectChannel(payload));
-    }
-
-    await this.deps.channelConfig.prepareChannelPlugin(channelType);
-    const result = await this.deps.loginSessions.start({
-      channelType,
-      ...(typeof body.accountId === 'string' ? { accountId: body.accountId } : {}),
-      ...(isRecord(body.config) ? { config: body.config } : {}),
-    });
-    return ok({ success: true, ...result });
+    return await this.deps.activationWorkflow.activate(channelType, payload);
   }
 
   async cancelSession(payload: unknown) {
@@ -165,34 +79,27 @@ export class ChannelService {
     if (!channelType) {
       return badRequest('channelType is required');
     }
-    if (!channelUsesLoginSession(channelType)) {
-      return badRequest(`channel ${channelType} does not use login session`);
-    }
-
-    await this.deps.loginSessions.cancel(channelType);
-    return ok({ success: true });
+    return await this.deps.activationWorkflow.cancelSession(channelType);
   }
 
   async connect(payload: unknown) {
     const body = isRecord(payload) ? payload : {};
-    const channelId = typeof body.channelId === 'string' ? body.channelId : '';
-    if (!channelId) {
-      return badRequest('channelId is required');
+    const channelType = typeof body.channelType === 'string' ? body.channelType : '';
+    const accountId = typeof body.accountId === 'string' && body.accountId.trim() ? body.accountId : undefined;
+    if (!channelType) {
+      return badRequest('channelType is required');
     }
-    await this.deps.gateway.channelsConnect(channelId);
-    await this.refreshSnapshot();
-    return ok({ success: true });
+    return ok(await this.deps.runtimeWorkflow.connect(channelType, accountId));
   }
 
   async disconnect(payload: unknown) {
     const body = isRecord(payload) ? payload : {};
-    const channelId = typeof body.channelId === 'string' ? body.channelId : '';
-    if (!channelId) {
-      return badRequest('channelId is required');
+    const channelType = typeof body.channelType === 'string' ? body.channelType : '';
+    const accountId = typeof body.accountId === 'string' && body.accountId.trim() ? body.accountId : undefined;
+    if (!channelType) {
+      return badRequest('channelType is required');
     }
-    await this.deps.gateway.channelsDisconnect(channelId);
-    await this.refreshSnapshot();
-    return ok({ success: true });
+    return ok(await this.deps.runtimeWorkflow.disconnect(channelType, accountId));
   }
 
   async requestQr(payload: unknown) {
@@ -201,14 +108,7 @@ export class ChannelService {
     if (!channelType) {
       return badRequest('channelType is required');
     }
-    const result = await this.deps.gateway.channelsRequestQr(channelType);
-    await this.refreshSnapshot();
-    const qrResult = isRecord(result) ? result : {};
-    return ok({
-      success: true,
-      qrCode: typeof qrResult.qrCode === 'string' ? qrResult.qrCode : '',
-      sessionId: typeof qrResult.sessionId === 'string' ? qrResult.sessionId : '',
-    });
+    return ok(await this.deps.runtimeWorkflow.requestQr(channelType));
   }
 
   async getConfigValues(channelType: string, accountId?: string) {

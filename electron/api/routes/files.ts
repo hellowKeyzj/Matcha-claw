@@ -1,6 +1,6 @@
 import type { IncomingMessage, ServerResponse } from 'http';
 import { dialog } from 'electron';
-import { dirname, join, resolve } from 'node:path';
+import { join } from 'node:path';
 import { homedir } from 'node:os';
 import type { FileApiContext } from '../context';
 import { parseJsonBody, sendJson } from '../route-utils';
@@ -11,32 +11,6 @@ export async function handleFileRoutes(
   url: URL,
   _ctx: FileApiContext,
 ): Promise<boolean> {
-  if (url.pathname === '/api/files/write-text' && req.method === 'POST') {
-    try {
-      const body = await parseJsonBody<{
-        path?: string;
-        content?: string;
-      }>(req);
-      const targetPath = typeof body.path === 'string' ? body.path.trim() : '';
-      if (!targetPath) {
-        sendJson(res, 400, { ok: false, error: 'path is required' });
-        return true;
-      }
-      if (typeof body.content !== 'string') {
-        sendJson(res, 400, { ok: false, error: 'content is required' });
-        return true;
-      }
-      const fsP = await import('node:fs/promises');
-      const resolvedPath = resolve(targetPath);
-      await fsP.mkdir(dirname(resolvedPath), { recursive: true });
-      await fsP.writeFile(resolvedPath, body.content, 'utf8');
-      sendJson(res, 200, { ok: true, path: resolvedPath });
-    } catch (error) {
-      sendJson(res, 500, { ok: false, error: String(error) });
-    }
-    return true;
-  }
-
   if (url.pathname === '/api/files/save-image' && req.method === 'POST') {
     try {
       const body = await parseJsonBody<{

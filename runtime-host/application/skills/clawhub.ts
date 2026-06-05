@@ -1,25 +1,32 @@
 import { join, resolve } from 'node:path';
 import type { ParentShellPort } from '../runtime-host/parent-shell-port';
 import type { RuntimeCommandExecutorPort, RuntimeFileSystemPort, RuntimePlatform } from '../common/runtime-ports';
-import type { OpenClawConfigRepositoryPort } from '../openclaw/openclaw-config-repository';
-import type { OpenClawEnvironmentRepository } from '../openclaw/openclaw-environment-repository';
 import {
   mapClawHubSearchResults,
   type ClawHubRegistryClient,
 } from './clawhub-registry-client';
-import type { ClawHubCliRunner } from './clawhub-cli';
 import type { ClawHubJobPort } from './clawhub-jobs';
+import type { ClawHubSkillInstallWorkflow } from '../workflows/skill-install/clawhub-skill-install-workflow';
 
 function isRecord(value: unknown): value is Record<string, any> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 }
 
+export interface ClawHubRuntimePort {
+  getPlatform(): RuntimePlatform;
+}
+
+export interface ClawHubSkillInventoryStoragePort {
+  getSkillsRootDir(): string;
+  getLockFilePath(): string;
+}
+
 interface ClawHubServiceDeps {
   parentShell: ParentShellPort;
   registryClient: ClawHubRegistryClient;
-  cliRunner: ClawHubCliRunner;
+  skillInstallWorkflow: Pick<ClawHubSkillInstallWorkflow, 'executeInstall' | 'executeUninstall'>;
   skillInventory: ClawHubSkillInventory;
-  environment: Pick<OpenClawEnvironmentRepository, 'getPlatform'>;
+  runtime: ClawHubRuntimePort;
   commandExecutor: RuntimeCommandExecutorPort;
   fileSystem: RuntimeFileSystemPort;
   jobs: ClawHubJobPort;
@@ -117,16 +124,16 @@ async function openPathWithDefaultApp(
 
 export class ClawHubSkillInventory {
   constructor(
-    private readonly configRepository: OpenClawConfigRepositoryPort,
+    private readonly storage: ClawHubSkillInventoryStoragePort,
     private readonly fileSystem: RuntimeFileSystemPort,
   ) {}
 
   get skillsRoot(): string {
-    return join(this.configRepository.getConfigDir(), 'skills');
+    return this.storage.getSkillsRootDir();
   }
 
   get lockFilePath(): string {
-    return join(this.configRepository.getConfigDir(), '.clawhub', 'lock.json');
+    return this.storage.getLockFilePath();
   }
 
   async listInstalled() {
@@ -157,7 +164,7 @@ export class ClawHubSkillInventory {
       skills.push({
         slug,
         version,
-        source: 'openclaw-managed',
+        source: 'managed',
         baseDir: skillDir,
       });
     }
@@ -170,10 +177,6 @@ export class ClawHubService {
 
   private get skillsRoot(): string {
     return this.deps.skillInventory.skillsRoot;
-  }
-
-  private get lockFilePath(): string {
-    return this.deps.skillInventory.lockFilePath;
   }
 
   async search(params: Record<string, unknown>) {
@@ -209,19 +212,7 @@ export class ClawHubService {
   }
 
   async executeInstall(params: Record<string, unknown>) {
-    const slug = assertRequiredString(params.slug, 'slug');
-    const args = ['install', slug];
-    if (typeof params.version === 'string' && params.version.trim()) {
-      args.push('--version', params.version.trim());
-    }
-    if (params.force === true) {
-      args.push('--force');
-    }
-    const result = await this.deps.cliRunner.runWithRegistryFallback(args);
-    if (!result.ok) {
-      throw new Error(result.error || 'clawhub install failed');
-    }
-    return { success: true };
+    return await this.deps.skillInstallWorkflow.executeInstall(params);
   }
 
   uninstall(params: Record<string, unknown>) {
@@ -230,24 +221,7 @@ export class ClawHubService {
   }
 
   async executeUninstall(params: Record<string, unknown>) {
-    const slug = assertRequiredString(params.slug, 'slug');
-    const skillDir = join(this.skillsRoot, slug);
-    await this.deps.fileSystem.removeDirectory(skillDir);
-
-    const lockFile = this.lockFilePath;
-    if (await this.deps.fileSystem.exists(lockFile)) {
-      try {
-        const raw = await this.deps.fileSystem.readTextFile(lockFile);
-        const parsed = JSON.parse(raw);
-        if (isRecord(parsed) && isRecord(parsed.skills) && Object.prototype.hasOwnProperty.call(parsed.skills, slug)) {
-          delete parsed.skills[slug];
-          await this.deps.fileSystem.writeTextFile(lockFile, `${JSON.stringify(parsed, null, 2)}\n`);
-        }
-      } catch {
-        // ignore
-      }
-    }
-    return { success: true };
+    return await this.deps.skillInstallWorkflow.executeUninstall(params);
   }
 
   private async resolveSkillDir(skillKeyOrSlug: string, fallbackSlug?: string, preferredBaseDir?: string) {
@@ -304,7 +278,7 @@ export class ClawHubService {
 
     const opened = await this.openPathViaMainProcess(targetPath) || await openPathWithDefaultApp(
       targetPath,
-      this.deps.environment.getPlatform(),
+      this.deps.runtime.getPlatform(),
       this.deps.commandExecutor,
     );
     if (!opened) {
@@ -320,7 +294,7 @@ export class ClawHubService {
     }
     const opened = await this.openPathViaMainProcess(skillDir) || await openPathWithDefaultApp(
       skillDir,
-      this.deps.environment.getPlatform(),
+      this.deps.runtime.getPlatform(),
       this.deps.commandExecutor,
     );
     if (!opened) {

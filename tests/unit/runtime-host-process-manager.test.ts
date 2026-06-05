@@ -7,6 +7,7 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { WebSocketServer } from 'ws';
 import { createRuntimeHostProcessManager } from '../../electron/main/runtime-host-process-manager';
 import { buildLicenseKey } from '../../runtime-host/application/license/service';
+import { OPENCLAW_RUNTIME_ENDPOINT_ID, OPENCLAW_RUNTIME_INSTANCE_ID } from '../../runtime-host/application/adapters/openclaw/runtime/openclaw-runtime-identity';
 
 const scriptPath = join(process.cwd(), 'runtime-host', 'host-process.cjs');
 
@@ -36,6 +37,36 @@ async function removeTempDir(path: string): Promise<void> {
 function writeRuntimeHostSettings(filePath: string, settings: Record<string, unknown>): void {
   mkdirSync(join(filePath, '..'), { recursive: true });
   writeFileSync(filePath, `${JSON.stringify(settings, null, 2)}\n`, 'utf8');
+}
+
+function createOpenClawRuntimeAddress(sessionKey: string, agentId: string) {
+  return {
+    kind: 'native-runtime' as const,
+    capabilityId: 'session.prompt',
+    runtimeAdapterId: OPENCLAW_RUNTIME_ENDPOINT_ID,
+    runtimeInstanceId: OPENCLAW_RUNTIME_INSTANCE_ID,
+    agentId,
+    sessionKey,
+  };
+}
+
+function createOpenClawCapabilityPayload(capabilityId: string, operationId: string, input: Record<string, unknown>) {
+  const runtimeAddress = {
+    kind: 'native-runtime' as const,
+    capabilityId,
+    runtimeAdapterId: OPENCLAW_RUNTIME_ENDPOINT_ID,
+    runtimeInstanceId: OPENCLAW_RUNTIME_INSTANCE_ID,
+    agentId: 'default',
+  };
+  return {
+    id: capabilityId,
+    operationId,
+    runtimeAddress,
+    input: {
+      ...input,
+      runtimeAddress,
+    },
+  };
 }
 
 async function waitForRuntimeHostJob(port: number, jobId: string | undefined): Promise<void> {
@@ -927,7 +958,7 @@ describe('runtime-host process manager', () => {
     }
   });
 
-  it('toolchain uv/install 路由在子进程本地入队且不走 parent dispatch', async () => {
+  it('toolchain uv install capability 在子进程本地入队且不走 parent dispatch', async () => {
     const port = createPort(18);
     const parentApiPort = createPort(45);
     const token = 'test-runtime-host-dispatch-token-toolchain-install-local';
@@ -953,7 +984,8 @@ describe('runtime-host process manager', () => {
         body: JSON.stringify({
           version: 1,
           method: 'POST',
-          route: '/api/toolchain/uv/install',
+          route: '/api/capabilities/execute',
+          payload: createOpenClawCapabilityPayload('platform.runtime', 'toolchain.installUv', {}),
         }),
       });
       const payload = await response.json() as {
@@ -1022,16 +1054,16 @@ describe('runtime-host process manager', () => {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           version: 1,
-          method: 'PUT',
-          route: '/api/skills/config',
-          payload: {
+          method: 'POST',
+          route: '/api/capabilities/execute',
+          payload: createOpenClawCapabilityPayload('skill.management', 'skills.updateConfig', {
             skillKey: 'skill.alpha',
             apiKey: 'new-key',
             env: {
               REGION: 'us',
               EMPTY: '   ',
             },
-          },
+          }),
         }),
       });
       const updatePayload = await updateResponse.json() as {
@@ -1064,7 +1096,7 @@ describe('runtime-host process manager', () => {
     }
   });
 
-  it('team-runtime 路由在子进程本地执行任务编排，不走 parent dispatch', async () => {
+  it('team coordination capability 在子进程本地执行任务编排，不走 parent dispatch', async () => {
     const port = createPort(92);
     const parentApiPort = createPort(93);
     const token = 'test-runtime-host-dispatch-token-team-runtime-local';
@@ -1085,33 +1117,44 @@ describe('runtime-host process manager', () => {
     try {
       await manager.start();
 
-      const initResponse = await fetch(`http://127.0.0.1:${port}/dispatch`, {
+      const teamCapabilityPayload = (operationId: string, input: Record<string, unknown>) => {
+        const runtimeAddress = {
+          kind: 'native-runtime' as const,
+          capabilityId: 'team.coordination',
+          runtimeAdapterId: OPENCLAW_RUNTIME_ENDPOINT_ID,
+          runtimeInstanceId: OPENCLAW_RUNTIME_INSTANCE_ID,
+          agentId: 'default',
+        };
+        return {
+          id: 'team.coordination',
+          operationId,
+          runtimeAddress,
+          input: {
+            ...input,
+            runtimeAddress,
+          },
+        };
+      };
+      const dispatchTeamCapability = async (operationId: string, input: Record<string, unknown>) => await fetch(`http://127.0.0.1:${port}/dispatch`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           version: 1,
           method: 'POST',
-          route: '/api/team-runtime/init',
-          payload: { teamId: 'team-alpha', leadAgentId: 'lead-1' },
+          route: '/api/capabilities/execute',
+          payload: teamCapabilityPayload(operationId, input),
         }),
       });
+
+      const initResponse = await dispatchTeamCapability('team.init', { teamId: 'team-alpha', leadAgentId: 'lead-1' });
       expect(initResponse.status).toBe(200);
 
-      const upsertResponse = await fetch(`http://127.0.0.1:${port}/dispatch`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          version: 1,
-          method: 'POST',
-          route: '/api/team-runtime/plan-upsert',
-          payload: {
-            teamId: 'team-alpha',
-            tasks: [
-              { taskId: 'task-1', instruction: 'do task 1' },
-              { taskId: 'task-2', instruction: 'do task 2', dependsOn: ['task-1'] },
-            ],
-          },
-        }),
+      const upsertResponse = await dispatchTeamCapability('team.planUpsert', {
+        teamId: 'team-alpha',
+        tasks: [
+          { taskId: 'task-1', instruction: 'do task 1' },
+          { taskId: 'task-2', instruction: 'do task 2', dependsOn: ['task-1'] },
+        ],
       });
       const upsertPayload = await upsertResponse.json() as {
         success: boolean;
@@ -1121,19 +1164,10 @@ describe('runtime-host process manager', () => {
       expect(upsertResponse.status).toBe(200);
       expect(upsertPayload.data?.tasks?.length).toBe(2);
 
-      const claimResponse = await fetch(`http://127.0.0.1:${port}/dispatch`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          version: 1,
-          method: 'POST',
-          route: '/api/team-runtime/claim-next',
-          payload: {
-            teamId: 'team-alpha',
-            agentId: 'agent-a',
-            sessionKey: 'session-a',
-          },
-        }),
+      const claimResponse = await dispatchTeamCapability('team.claimNext', {
+        teamId: 'team-alpha',
+        agentId: 'agent-a',
+        sessionKey: 'session-a',
       });
       const claimPayload = await claimResponse.json() as {
         success: boolean;
@@ -1146,19 +1180,10 @@ describe('runtime-host process manager', () => {
         status: 'claimed',
       });
 
-      const updateResponse = await fetch(`http://127.0.0.1:${port}/dispatch`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          version: 1,
-          method: 'POST',
-          route: '/api/team-runtime/task-update',
-          payload: {
-            teamId: 'team-alpha',
-            taskId: 'task-1',
-            status: 'running',
-          },
-        }),
+      const updateResponse = await dispatchTeamCapability('team.taskUpdate', {
+        teamId: 'team-alpha',
+        taskId: 'task-1',
+        status: 'running',
       });
       const updateToRunningPayload = await updateResponse.json() as {
         success: boolean;
@@ -1171,19 +1196,10 @@ describe('runtime-host process manager', () => {
         status: 'running',
       });
 
-      const doneResponse = await fetch(`http://127.0.0.1:${port}/dispatch`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          version: 1,
-          method: 'POST',
-          route: '/api/team-runtime/task-update',
-          payload: {
-            teamId: 'team-alpha',
-            taskId: 'task-1',
-            status: 'done',
-          },
-        }),
+      const doneResponse = await dispatchTeamCapability('team.taskUpdate', {
+        teamId: 'team-alpha',
+        taskId: 'task-1',
+        status: 'done',
       });
       const updatePayload = await doneResponse.json() as {
         success: boolean;
@@ -1196,35 +1212,17 @@ describe('runtime-host process manager', () => {
         status: 'done',
       });
 
-      const mailboxPostResponse = await fetch(`http://127.0.0.1:${port}/dispatch`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          version: 1,
-          method: 'POST',
-          route: '/api/team-runtime/mailbox-post',
-          payload: {
-            teamId: 'team-alpha',
-            message: {
-              msgId: 'msg-1',
-              fromAgentId: 'agent-a',
-              content: 'hello team',
-            },
-          },
-        }),
+      const mailboxPostResponse = await dispatchTeamCapability('team.mailboxPost', {
+        teamId: 'team-alpha',
+        message: {
+          msgId: 'msg-1',
+          fromAgentId: 'agent-a',
+          content: 'hello team',
+        },
       });
       expect(mailboxPostResponse.status).toBe(200);
 
-      const snapshotResponse = await fetch(`http://127.0.0.1:${port}/dispatch`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          version: 1,
-          method: 'POST',
-          route: '/api/team-runtime/snapshot',
-          payload: { teamId: 'team-alpha', mailboxLimit: 20 },
-        }),
-      });
+      const snapshotResponse = await dispatchTeamCapability('team.snapshot', { teamId: 'team-alpha', mailboxLimit: 20 });
       const snapshotPayload = await snapshotResponse.json() as {
         success: boolean;
         status: number;
@@ -1439,8 +1437,22 @@ describe('runtime-host process manager', () => {
         body: JSON.stringify({
           version: 1,
           method: 'POST',
-          route: '/api/sessions/delete',
-          payload: { sessionKey: 'agent:foo:session-a' },
+          route: '/api/capabilities/execute',
+          payload: {
+            id: 'session.management',
+            operationId: 'sessions.delete',
+            runtimeAddress: {
+              ...createOpenClawRuntimeAddress('agent:foo:session-a', 'foo'),
+              capabilityId: 'session.management',
+            },
+            input: {
+              sessionKey: 'agent:foo:session-a',
+              runtimeAddress: {
+                ...createOpenClawRuntimeAddress('agent:foo:session-a', 'foo'),
+                capabilityId: 'session.management',
+              },
+            },
+          },
         }),
       });
       const payload = await response.json() as {
@@ -1514,12 +1526,12 @@ describe('runtime-host process manager', () => {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           version: 1,
-          method: 'PUT',
-          route: '/api/settings',
-          payload: {
+          method: 'POST',
+          route: '/api/capabilities/execute',
+          payload: createOpenClawCapabilityPayload('settings.runtime', 'settings.patch', {
             theme: 'dark',
             language: 'zh',
-          },
+          }),
         }),
       });
       const updatePayload = await updateResponse.json() as {
@@ -1593,8 +1605,8 @@ describe('runtime-host process manager', () => {
         body: JSON.stringify({
           version: 1,
           method: 'POST',
-          route: '/api/provider-accounts',
-          payload: {
+          route: '/api/capabilities/execute',
+          payload: createOpenClawCapabilityPayload('model.provider', 'providers.createAccount', {
             account: {
               id: 'openai-main',
               vendorId: 'openai',
@@ -1605,7 +1617,7 @@ describe('runtime-host process manager', () => {
               updatedAt: '2026-01-01T00:00:00.000Z',
             },
             apiKey: 'sk-test-openai-main',
-          },
+          }),
         }),
       });
       const createPayload = await createResponse.json() as {
@@ -1674,7 +1686,7 @@ describe('runtime-host process manager', () => {
     }
   });
 
-  it('provider oauth 路由在子进程本地命中并通过 shell-actions 调用主进程壳能力', async () => {
+  it('provider oauth capability 在子进程本地命中并通过 shell-actions 调用主进程壳能力', async () => {
     const port = createPort(171);
     const parentApiPort = createPort(172);
     const token = 'test-runtime-host-dispatch-token-provider-oauth-shell-action';
@@ -1722,12 +1734,12 @@ describe('runtime-host process manager', () => {
         body: JSON.stringify({
           version: 1,
           method: 'POST',
-          route: '/api/provider-accounts/oauth/start',
-          payload: {
+          route: '/api/capabilities/execute',
+          payload: createOpenClawCapabilityPayload('model.provider', 'providers.oauthStart', {
             provider: 'openai',
             accountId: 'openai-main',
             label: 'OpenAI Main',
-          },
+          }),
         }),
       });
       const startPayload = await startResponse.json() as {
@@ -1748,8 +1760,8 @@ describe('runtime-host process manager', () => {
         body: JSON.stringify({
           version: 1,
           method: 'POST',
-          route: '/api/provider-accounts/oauth/submit',
-          payload: { code: 'oauth-demo-code' },
+          route: '/api/capabilities/execute',
+          payload: createOpenClawCapabilityPayload('model.provider', 'providers.oauthSubmit', { code: 'oauth-demo-code' }),
         }),
       });
       expect(submitResponse.status).toBe(200);
@@ -1760,7 +1772,8 @@ describe('runtime-host process manager', () => {
         body: JSON.stringify({
           version: 1,
           method: 'POST',
-          route: '/api/provider-accounts/oauth/cancel',
+          route: '/api/capabilities/execute',
+          payload: createOpenClawCapabilityPayload('model.provider', 'providers.oauthCancel', {}),
         }),
       });
       expect(cancelResponse.status).toBe(200);
@@ -1809,12 +1822,12 @@ describe('runtime-host process manager', () => {
         body: JSON.stringify({
           version: 1,
           method: 'POST',
-          route: '/api/provider-accounts/oauth/start',
-          payload: {
+          route: '/api/capabilities/execute',
+          payload: createOpenClawCapabilityPayload('model.provider', 'providers.oauthStart', {
             provider: 'openai',
             accountId: 'openai-main',
             label: 'OpenAI Main',
-          },
+          }),
         }),
       });
       const payload = await response.json() as {
@@ -1862,12 +1875,12 @@ describe('runtime-host process manager', () => {
         body: JSON.stringify({
           version: 1,
           method: 'POST',
-          route: '/api/channels/activate',
-          payload: {
+          route: '/api/capabilities/execute',
+          payload: createOpenClawCapabilityPayload('integration.channel', 'channels.activate', {
             channelType: 'openclaw-weixin',
             accountId: 'wx-main',
             config: { baseUrl: 'http://127.0.0.1:1', routeTag: 'prod' },
-          },
+          }),
         }),
       });
       const weixinStartPayload = await weixinStart.json() as {
@@ -1892,8 +1905,10 @@ describe('runtime-host process manager', () => {
         body: JSON.stringify({
           version: 1,
           method: 'POST',
-          route: '/api/channels/session/cancel',
-          payload: { channelType: 'openclaw-weixin' },
+          route: '/api/capabilities/execute',
+          payload: createOpenClawCapabilityPayload('integration.channel', 'channels.cancelSession', {
+            channelType: 'openclaw-weixin',
+          }),
         }),
       });
       expect(weixinCancel.status).toBe(200);
@@ -1978,8 +1993,10 @@ describe('runtime-host process manager', () => {
         body: JSON.stringify({
           version: 1,
           method: 'POST',
-          route: '/api/license/validate',
-          payload: { key: buildLicenseKey('ABCD1234EFGH') },
+          route: '/api/capabilities/execute',
+          payload: createOpenClawCapabilityPayload('license.runtime', 'license.validate', {
+            key: buildLicenseKey('ABCD1234EFGH'),
+          }),
         }),
       });
       expect(validateResponse.status).toBe(200);
@@ -1995,7 +2012,8 @@ describe('runtime-host process manager', () => {
         body: JSON.stringify({
           version: 1,
           method: 'POST',
-          route: '/api/license/revalidate',
+          route: '/api/capabilities/execute',
+          payload: createOpenClawCapabilityPayload('license.runtime', 'license.revalidate', {}),
         }),
       });
       expect(revalidateResponse.status).toBe(200);
@@ -2006,7 +2024,8 @@ describe('runtime-host process manager', () => {
         body: JSON.stringify({
           version: 1,
           method: 'POST',
-          route: '/api/license/clear',
+          route: '/api/capabilities/execute',
+          payload: createOpenClawCapabilityPayload('license.runtime', 'license.clear', {}),
         }),
       });
       expect(clearResponse.status).toBe(200);
@@ -2071,15 +2090,15 @@ describe('runtime-host process manager', () => {
         body: JSON.stringify({
           version: 1,
           method: 'POST',
-          route: '/api/channels/activate',
-          payload: {
+          route: '/api/capabilities/execute',
+          payload: createOpenClawCapabilityPayload('integration.channel', 'channels.activate', {
             channelType: 'discord',
             config: {
               token: 'discord-token',
               guildId: 'guild-1',
               channelId: 'channel-1',
             },
-          },
+          }),
         }),
       });
       const savePayload = await saveResponse.json() as {
@@ -2116,8 +2135,10 @@ describe('runtime-host process manager', () => {
         body: JSON.stringify({
           version: 1,
           method: 'POST',
-          route: '/api/channels/request-qr',
-          payload: { channelType: 'whatsapp' },
+          route: '/api/capabilities/execute',
+          payload: createOpenClawCapabilityPayload('integration.channel', 'channels.requestQr', {
+            channelType: 'whatsapp',
+          }),
         }),
       });
       const qrPayload = await qrResponse.json() as {
@@ -2344,16 +2365,16 @@ describe('runtime-host process manager', () => {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           version: 1,
-          method: 'PUT',
-          route: '/api/security',
-          payload: {
+          method: 'POST',
+          route: '/api/capabilities/execute',
+          payload: createOpenClawCapabilityPayload('security.runtime', 'security.writePolicy', {
             preset: 'strict',
             securityPolicyVersion: 11,
             runtime: {
               allowDomains: ['api.openai.com', '  ', 'api.openai.com'],
               blockDestructive: true,
             },
-          },
+          }),
         }),
       });
       const updatePayload = await updateResponse.json() as {
@@ -2602,8 +2623,8 @@ describe('runtime-host process manager', () => {
         body: JSON.stringify({
           version: 1,
           method: 'POST',
-          route: '/api/security/emergency-response',
-          payload: {},
+          route: '/api/capabilities/execute',
+          payload: createOpenClawCapabilityPayload('security.runtime', 'security.emergencyResponse', {}),
         }),
       });
       const payload = await response.json() as {
@@ -2719,12 +2740,17 @@ describe('runtime-host process manager', () => {
         body: JSON.stringify({
           version: 1,
           method: 'POST',
-          route: '/api/chat/send-with-media',
+          route: '/api/capabilities/execute',
           payload: {
-            sessionKey: 'agent:main:session-1',
-            message: 'hello',
-            idempotencyKey: 'idem-1',
-            deliver: true,
+            id: 'session.prompt',
+            operationId: 'sessions.sendWithMedia',
+            runtimeAddress: createOpenClawRuntimeAddress('agent:main:session-1', 'main'),
+            input: {
+              sessionKey: 'agent:main:session-1',
+              message: 'hello',
+              idempotencyKey: 'idem-1',
+              deliver: true,
+            },
           },
         }),
       });
@@ -2791,6 +2817,7 @@ describe('runtime-host process manager', () => {
               {
                 id: 'job-1',
                 name: 'Daily Report',
+                agentId: 'cron-agent',
                 enabled: true,
                 createdAtMs: 1700000000000,
                 updatedAtMs: 1700003600000,
@@ -2944,14 +2971,29 @@ describe('runtime-host process manager', () => {
 
     try {
       await manager.start();
+      const runtimeAddress = {
+        kind: 'native-runtime' as const,
+        capabilityId: 'scheduler.cron',
+        runtimeAdapterId: OPENCLAW_RUNTIME_ENDPOINT_ID,
+        runtimeInstanceId: OPENCLAW_RUNTIME_INSTANCE_ID,
+        agentId: 'default',
+      };
       const response = await fetch(`http://127.0.0.1:${port}/dispatch`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           version: 1,
           method: 'POST',
-          route: '/api/cron/trigger',
-          payload: { id: 'job-trigger-1' },
+          route: '/api/capabilities/execute',
+          payload: {
+            id: 'scheduler.cron',
+            operationId: 'cron.trigger',
+            runtimeAddress,
+            input: {
+              id: 'job-trigger-1',
+              runtimeAddress,
+            },
+          },
         }),
       });
       const payload = await response.json() as {
@@ -3229,13 +3271,13 @@ describe('runtime-host process manager', () => {
         body: JSON.stringify({
           version: 1,
           method: 'POST',
-          route: '/api/runtime-host/prepare-gateway-launch',
-          payload: {
+          route: '/api/capabilities/execute',
+          payload: createOpenClawCapabilityPayload('runtime.host', 'runtimeHost.prepareGatewayLaunch', {
             gatewayToken: 'test-gateway-token',
             proxyEnabled: false,
             proxyServer: '',
             proxyBypassRules: '',
-          },
+          }),
         }),
       });
       expect(prepareResponse.status).toBe(202);
@@ -3471,9 +3513,9 @@ describe('runtime-host process manager', () => {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           version: 1,
-          method: 'PUT',
-          route: '/api/plugins/runtime/enabled-plugins',
-          payload: { pluginIds: ['task-manager'] },
+          method: 'POST',
+          route: '/api/capabilities/execute',
+          payload: createOpenClawCapabilityPayload('plugin.runtime', 'plugins.setEnabled', { pluginIds: ['task-manager'] }),
         }),
       });
       expect(setEnabledPluginsResponse.status).toBe(202);
@@ -3615,9 +3657,9 @@ describe('runtime-host process manager', () => {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           version: 1,
-          method: 'PUT',
-          route: '/api/plugins/runtime/enabled-plugins',
-          payload: { pluginIds: ['task-manager'] },
+          method: 'POST',
+          route: '/api/capabilities/execute',
+          payload: createOpenClawCapabilityPayload('plugin.runtime', 'plugins.setEnabled', { pluginIds: ['task-manager'] }),
         }),
       });
       const payload = await response.json() as {
@@ -3669,9 +3711,9 @@ describe('runtime-host process manager', () => {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           version: 1,
-          method: 'PUT',
-          route: '/api/plugins/runtime/enabled-plugins',
-          payload: { pluginIds: [1, 2, 3] },
+          method: 'POST',
+          route: '/api/capabilities/execute',
+          payload: createOpenClawCapabilityPayload('plugin.runtime', 'plugins.setEnabled', { pluginIds: [1, 2, 3] }),
         }),
       });
       const payload = await response.json() as {

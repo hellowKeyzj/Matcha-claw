@@ -2,7 +2,8 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { ChannelLoginSessionService } from '../../runtime-host/application/channels/channel-login-session-service';
+import { OpenClawChannelLoginSessionService } from '../../runtime-host/application/adapters/openclaw/projections/openclaw-channel-login-session-service';
+import { OpenClawWeixinAccountStoreWorkflow } from '../../runtime-host/application/adapters/openclaw/workflows/openclaw-channel/openclaw-weixin-account-store-workflow';
 import { createTestRuntimeFileSystem } from './helpers/runtime-file-system';
 import { createTestRuntimeLogger } from './helpers/runtime-logger';
 import { createTestOpenClawEnvironmentRepository } from './helpers/runtime-system-environment';
@@ -22,7 +23,7 @@ async function waitForCondition(
   throw new Error('waitForCondition timeout');
 }
 
-describe('ChannelLoginSessionService Weixin login', () => {
+describe('OpenClawChannelLoginSessionService Weixin login', () => {
   let tempDir = '';
   let previousConfigDir: string | undefined;
   let originalFetch: typeof globalThis.fetch;
@@ -86,9 +87,16 @@ describe('ChannelLoginSessionService Weixin login', () => {
       throw new Error(`unexpected fetch ${textUrl}`);
     }) as typeof globalThis.fetch;
 
-    const service = new ChannelLoginSessionService({
-      fileSystem: createTestRuntimeFileSystem(),
-      environment: createTestOpenClawEnvironmentRepository(),
+    const fileSystem = createTestRuntimeFileSystem();
+    const runtime = {
+      getEnv: (name: string) => createTestOpenClawEnvironmentRepository().getEnv(name),
+      getRuntimeDataRootDir: () => createTestOpenClawEnvironmentRepository().getOpenClawConfigDir(),
+      resolveRuntimeModulePath: (specifier: string) => createTestOpenClawEnvironmentRepository().getOpenClawDirPath() + `/node_modules/${specifier}`,
+    };
+    const service = new OpenClawChannelLoginSessionService({
+      fileSystem,
+      runtime,
+      weixinAccounts: new OpenClawWeixinAccountStoreWorkflow({ fileSystem, runtime }),
       idGenerator: { randomId: () => 'requested-account' },
       timer: { sleep: async () => {} },
       logger: createTestRuntimeLogger(),

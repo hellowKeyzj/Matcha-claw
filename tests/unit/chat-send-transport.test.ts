@@ -1,6 +1,14 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const hostSessionPromptMock = vi.fn();
+const runtimeAddress = {
+  kind: 'native-runtime' as const,
+  capabilityId: 'session.prompt',
+  runtimeAdapterId: 'openclaw',
+  runtimeInstanceId: 'local',
+  agentId: 'default',
+  sessionKey: 'agent:main:main',
+};
 
 vi.mock('@/lib/host-api', () => ({
   hostSessionPrompt: (...args: unknown[]) => hostSessionPromptMock(...args),
@@ -61,12 +69,14 @@ describe('chat send transport', () => {
     const { sendChatTransport } = await import('@/stores/chat/send-transport');
     const result = await sendChatTransport({
       sessionKey: 'agent:main:main',
+      runtimeAddress,
       message: 'hello',
       idempotencyKey: 'user-local-1',
     });
 
     expect(hostSessionPromptMock).toHaveBeenCalledWith({
       sessionKey: 'agent:main:main',
+      runtimeAddress,
       message: 'hello',
       idempotencyKey: 'user-local-1',
       deliver: false,
@@ -91,6 +101,7 @@ describe('chat send transport', () => {
     const { sendChatTransport } = await import('@/stores/chat/send-transport');
     await sendChatTransport({
       sessionKey: 'agent:main:main',
+      runtimeAddress,
       message: 'hello',
       idempotencyKey: 'user-local-2',
       attachments: [{
@@ -104,6 +115,7 @@ describe('chat send transport', () => {
 
     expect(hostSessionPromptMock).toHaveBeenCalledWith({
       sessionKey: 'agent:main:main',
+      runtimeAddress,
       message: 'hello',
       idempotencyKey: 'user-local-2',
       deliver: false,
@@ -126,6 +138,7 @@ describe('chat send transport', () => {
     const { sendChatTransport } = await import('@/stores/chat/send-transport');
     const result = await sendChatTransport({
       sessionKey: 'agent:main:main',
+      runtimeAddress,
       message: 'hello',
       idempotencyKey: 'user-local-3',
     });

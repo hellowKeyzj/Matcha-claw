@@ -19,17 +19,16 @@ export function groupApprovalsBySession(items: ApprovalItem[]): Record<string, A
 interface BuildSyncPendingApprovalsPatchInput {
   state: ChatStoreState;
   grouped: Record<string, ApprovalItem[]>;
-  sessionKeyHint?: string;
+  sessionKeys: string[];
 }
 
 export function buildSyncPendingApprovalsPatch(
   input: BuildSyncPendingApprovalsPatchInput,
 ): Partial<ChatStoreState> {
-  const { state, grouped, sessionKeyHint } = input;
-  const normalizedHint = typeof sessionKeyHint === 'string' ? sessionKeyHint.trim() : '';
-  const nextApprovals = normalizedHint
-    ? { ...state.pendingApprovalsBySession, [normalizedHint]: grouped[normalizedHint] ?? [] }
-    : grouped;
+  const nextApprovals = { ...input.state.pendingApprovalsBySession };
+  for (const sessionKey of input.sessionKeys) {
+    nextApprovals[sessionKey] = input.grouped[sessionKey] ?? [];
+  }
   return {
     pendingApprovalsBySession: nextApprovals,
   };

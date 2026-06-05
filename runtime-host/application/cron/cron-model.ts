@@ -1,7 +1,3 @@
-import {
-  EXTERNAL_CHANNEL_PLUGIN_BINDINGS,
-  isBuiltinChannelId,
-} from '../channels/channel-plugin-bindings';
 import type { RuntimeClockPort } from '../common/runtime-ports';
 
 export type CronDeliveryMode = 'none' | 'announce';
@@ -12,53 +8,61 @@ export type GatewayCronDelivery = {
   accountId?: string;
 };
 
-const WECHAT_CHANNEL_ALIAS = new Set(['wechat', 'openclaw-weixin']);
+export interface CronDeliveryChannelProjectionPort {
+  normalizeDeliveryChannel(channel: string): string;
+  requiresDeliveryTarget(channel: string): boolean;
+  getDeliveryTargetLabel(channel: string): string;
+}
+
+export const DEFAULT_CRON_DELIVERY_CHANNEL_PROJECTION: CronDeliveryChannelProjectionPort = {
+  normalizeDeliveryChannel: (channel) => channel,
+  requiresDeliveryTarget: () => false,
+  getDeliveryTargetLabel: () => 'Channel',
+};
 
 export function isRecord(value: unknown): value is Record<string, any> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 }
 
-function normalizeDeliveryChannel(channel: unknown): string | undefined {
+function normalizeDeliveryChannel(
+  channel: unknown,
+  projection: CronDeliveryChannelProjectionPort = DEFAULT_CRON_DELIVERY_CHANNEL_PROJECTION,
+): string | undefined {
   if (typeof channel !== 'string') {
     return undefined;
   }
-  const normalized = channel.trim();
-  if (!normalized) {
-    return undefined;
-  }
-  return WECHAT_CHANNEL_ALIAS.has(normalized) ? 'openclaw-weixin' : normalized;
+  const normalized = projection.normalizeDeliveryChannel(channel.trim());
+  return normalized || undefined;
 }
 
-function isWeChatDeliveryChannel(channel?: string): boolean {
-  if (!channel) {
-    return false;
-  }
-  return WECHAT_CHANNEL_ALIAS.has(channel.trim());
-}
-
-export function getCronDeliveryValidationError(delivery: GatewayCronDelivery): string | undefined {
-  if (delivery.mode !== 'announce' || !delivery.channel) {
+export function getCronDeliveryValidationError(
+  delivery: GatewayCronDelivery,
+  projection: CronDeliveryChannelProjectionPort = DEFAULT_CRON_DELIVERY_CHANNEL_PROJECTION,
+): string | undefined {
+  if (delivery.mode !== 'announce' || !delivery.channel || !projection.requiresDeliveryTarget(delivery.channel)) {
     return undefined;
   }
-  if (!isWeChatDeliveryChannel(delivery.channel)) {
-    return undefined;
-  }
+  const label = projection.getDeliveryTargetLabel(delivery.channel);
   if (!delivery.to) {
-    return 'WeChat scheduled delivery requires delivery.to (recipient target).';
+    return `${label} scheduled delivery requires delivery.to (recipient target).`;
   }
   if (!delivery.accountId) {
-    return 'WeChat scheduled delivery requires delivery.accountId (sending account).';
+    return `${label} scheduled delivery requires delivery.accountId (sending account).`;
   }
   return undefined;
 }
 
-export function mergeCronDelivery(base: GatewayCronDelivery, patch: Record<string, unknown>): GatewayCronDelivery {
+export function mergeCronDelivery(
+  base: GatewayCronDelivery,
+  patch: Record<string, unknown>,
+  projection: CronDeliveryChannelProjectionPort = DEFAULT_CRON_DELIVERY_CHANNEL_PROJECTION,
+): GatewayCronDelivery {
   const mode = typeof patch.mode === 'string'
     ? (patch.mode.trim() === 'announce' ? 'announce' : 'none')
     : base.mode;
   const channel = 'channel' in patch
-    ? normalizeDeliveryChannel(patch.channel)
-    : normalizeDeliveryChannel(base.channel);
+    ? normalizeDeliveryChannel(patch.channel, projection)
+    : normalizeDeliveryChannel(base.channel, projection);
   if (mode !== 'announce' || !channel) {
     return { mode: 'none' };
   }
@@ -76,14 +80,17 @@ export function mergeCronDelivery(base: GatewayCronDelivery, patch: Record<strin
   };
 }
 
-export function normalizeCronDelivery(rawDelivery: unknown): GatewayCronDelivery {
+export function normalizeCronDelivery(
+  rawDelivery: unknown,
+  projection: CronDeliveryChannelProjectionPort = DEFAULT_CRON_DELIVERY_CHANNEL_PROJECTION,
+): GatewayCronDelivery {
   if (!isRecord(rawDelivery)) {
     return { mode: 'none' };
   }
   const mode = typeof rawDelivery.mode === 'string' && rawDelivery.mode.trim() === 'announce'
     ? 'announce'
     : 'none';
-  const channel = normalizeDeliveryChannel(rawDelivery.channel);
+  const channel = normalizeDeliveryChannel(rawDelivery.channel, projection);
   if (mode !== 'announce' || !channel) {
     return { mode: 'none' };
   }
@@ -97,7 +104,10 @@ export function normalizeCronDelivery(rawDelivery: unknown): GatewayCronDelivery
   };
 }
 
-export function normalizeCronDeliveryPatch(rawPatch: unknown): Record<string, unknown> | undefined {
+export function normalizeCronDeliveryPatch(
+  rawPatch: unknown,
+  projection: CronDeliveryChannelProjectionPort = DEFAULT_CRON_DELIVERY_CHANNEL_PROJECTION,
+): Record<string, unknown> | undefined {
   if (!isRecord(rawPatch)) {
     return undefined;
   }
@@ -108,7 +118,7 @@ export function normalizeCronDeliveryPatch(rawPatch: unknown): Record<string, un
       : 'none';
   }
   if ('channel' in rawPatch) {
-    patch.channel = normalizeDeliveryChannel(rawPatch.channel);
+    patch.channel = normalizeDeliveryChannel(rawPatch.channel, projection);
   }
   if ('to' in rawPatch) {
     patch.to = typeof rawPatch.to === 'string' ? rawPatch.to.trim() : '';
@@ -119,35 +129,49 @@ export function normalizeCronDeliveryPatch(rawPatch: unknown): Record<string, un
   return patch;
 }
 
-export function normalizeCronAgentId(value: unknown): string {
+export function normalizeCronAgentId(value: unknown): string | null {
   if (typeof value !== 'string') {
-    return 'main';
+    return null;
   }
   const normalized = value.trim();
-  return normalized || 'main';
+  return normalized || null;
 }
 
-export function asCronCreateInput(value: unknown) {
+export function asCronCreateInput(
+  value: unknown,
+  projection: CronDeliveryChannelProjectionPort = DEFAULT_CRON_DELIVERY_CHANNEL_PROJECTION,
+) {
   if (!isRecord(value)) return null;
   if (typeof value.name !== 'string' || typeof value.message !== 'string' || typeof value.schedule !== 'string') {
     return null;
   }
+  const agentId = normalizeCronAgentId(value.agentId);
+  if (!agentId) {
+    return null;
+  }
   return {
     name: value.name,
-    agentId: normalizeCronAgentId(value.agentId),
+    agentId,
     message: value.message,
     schedule: value.schedule,
-    delivery: normalizeCronDelivery(value.delivery),
+    delivery: normalizeCronDelivery(value.delivery, projection),
     ...(typeof value.enabled === 'boolean' ? { enabled: value.enabled } : {}),
   };
 }
 
-export function normalizeCronJob(job: Record<string, any>, clock: Pick<RuntimeClockPort, 'toIsoString'>) {
+export function normalizeCronJob(
+  job: Record<string, any>,
+  clock: Pick<RuntimeClockPort, 'toIsoString'>,
+  projection: CronDeliveryChannelProjectionPort = DEFAULT_CRON_DELIVERY_CHANNEL_PROJECTION,
+) {
   const payload = isRecord(job.payload) ? job.payload : {};
-  const delivery = normalizeCronDelivery(job.delivery);
+  const delivery = normalizeCronDelivery(job.delivery, projection);
   const state = isRecord(job.state) ? job.state : {};
   const schedule = isRecord(job.schedule) ? job.schedule : {};
   const agentId = normalizeCronAgentId(job.agentId);
+  if (!agentId) {
+    return null;
+  }
   const message = payload.message || payload.text || '';
   const channelType = delivery.channel;
   const target = channelType
@@ -191,42 +215,3 @@ export function parseGatewayCronJobs(value: unknown) {
   return jobs.filter((entry) => isRecord(entry) && typeof entry.id === 'string') as Array<Record<string, any>>;
 }
 
-function channelSectionHasEnabledAccount(sectionRaw: unknown): boolean {
-  if (!isRecord(sectionRaw) || sectionRaw.enabled === false) {
-    return false;
-  }
-  const accounts = isRecord(sectionRaw.accounts) ? sectionRaw.accounts : null;
-  if (!accounts) {
-    return false;
-  }
-  return Object.values(accounts).some((item) => !isRecord(item) || item.enabled !== false);
-}
-
-export function listConfiguredBuiltinChannelIdsFromConfig(config: Record<string, unknown>): string[] {
-  const channels = isRecord(config.channels) ? config.channels : {};
-  const configured: string[] = [];
-
-  for (const [channelType, sectionRaw] of Object.entries(channels)) {
-    if (!isBuiltinChannelId(channelType)) {
-      continue;
-    }
-    if (channelSectionHasEnabledAccount(sectionRaw)) {
-      configured.push(channelType);
-    }
-  }
-
-  return configured.sort((left, right) => left.localeCompare(right, 'en'));
-}
-
-export function listConfiguredExternalChannelPluginIdsFromConfig(config: Record<string, unknown>): string[] {
-  const channels = isRecord(config.channels) ? config.channels : {};
-  const configured: string[] = [];
-
-  for (const binding of EXTERNAL_CHANNEL_PLUGIN_BINDINGS) {
-    if (channelSectionHasEnabledAccount(channels[binding.channelType])) {
-      configured.push(binding.pluginId);
-    }
-  }
-
-  return configured.sort((left, right) => left.localeCompare(right, 'en'));
-}

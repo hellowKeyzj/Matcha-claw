@@ -1,3 +1,4 @@
+import type { RuntimeAddress } from './runtime-address';
 import type { GatewayTransportIssue } from './gateway-error';
 
 export type SessionMessageRole =
@@ -37,6 +38,7 @@ export interface SessionTaskCompletionEvent {
   kind: 'task_completion';
   source: 'subagent' | 'cron' | 'unknown';
   childSessionKey: string;
+  childRuntimeAddress?: RuntimeAddress;
   sequenceId?: number;
   laneKey?: string;
   turnKey?: string;
@@ -305,6 +307,7 @@ export interface SessionRenderExecutionGraphItem extends SessionTimelineEntryBas
   completionItemKey: string;
   anchorItemKey?: string;
   childSessionKey: string;
+  childRuntimeAddress?: RuntimeAddress;
   childSessionId?: string;
   childAgentId?: string;
   agentLabel: string;
@@ -381,6 +384,7 @@ export type SessionApprovalDecision = 'allow-once' | 'allow-always' | 'deny';
 export interface SessionApprovalRequestItem {
   id: string;
   sessionKey: string;
+  runtimeAddress: RuntimeAddress;
   runId?: string;
   title: string;
   command?: string;
@@ -427,7 +431,8 @@ export interface SessionCatalogItem {
   key: string;
   agentId: string;
   protocolId: string;
-  runtimeProviderId: string;
+  runtimeEndpointId: string;
+  runtimeAddress: RuntimeAddress;
   kind: SessionCatalogKind;
   preferred: boolean;
   status?: 'active' | 'completed' | 'archived' | 'deleted';

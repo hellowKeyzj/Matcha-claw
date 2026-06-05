@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { AcpFrameParser, encodeAcpJsonRpcMessage } from '../../runtime-host/application/sessions/runtime-providers/acp/acp-framing';
+import { AcpFrameParser, encodeAcpJsonRpcMessage } from '../../runtime-host/application/agent-runtime/protocol-connectors/acp/acp-framing';
 
 describe('ACP stdio framing', () => {
   it('parses chunked content-length JSON-RPC frames', () => {

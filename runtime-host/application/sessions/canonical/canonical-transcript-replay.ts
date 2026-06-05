@@ -5,9 +5,8 @@ import {
 } from '../../../shared/chat-message-normalization';
 import type { SessionRenderAttachedFile } from '../../../shared/session-adapter-types';
 import { extractImagesAsAttachedFiles } from '../assistant-segment-media';
-import type { CanonicalSessionEvent } from './canonical-events';
+import type { CanonicalSessionEvent, RuntimeEndpointId, RuntimeProtocolId } from './canonical-events';
 import type { SessionTranscriptMessage } from '../transcript-types';
-import { OPENCLAW_RUNTIME_PROTOCOL_ID, OPENCLAW_RUNTIME_PROVIDER_ID } from '../runtime-providers/runtime-provider-types';
 import { extractTaskSnapshotFromTranscriptMessage } from '../transcript-task-snapshot-replay';
 import { readMessageContent, resolveTranscriptDisplayText } from '../transcript-content-extractors';
 import { isRecord, normalizeString } from '../session-value-normalization';
@@ -22,13 +21,19 @@ import {
 } from '../state-only-tools';
 import { extractToolResultOutputText } from '../tool/tool-card-content';
 
+export interface CanonicalReplayRuntimeIdentity {
+  protocolId: RuntimeProtocolId;
+  runtimeEndpointId: RuntimeEndpointId;
+}
+
 function eventId(parts: ReadonlyArray<string | number | undefined>): string {
   return parts.filter((part) => part !== undefined && String(part).trim()).join(':');
 }
 
 function replayBase(input: {
   eventId: string;
-  providerEventType: string;
+  identity: CanonicalReplayRuntimeIdentity;
+  runtimeEventType: string;
   sessionId: string;
   runId?: string;
   timestamp?: number;
@@ -36,11 +41,11 @@ function replayBase(input: {
   agentId?: string;
   toolCallId?: string;
   seq?: number;
-}): Pick<CanonicalSessionEvent, 'eventId' | 'protocolId' | 'runtimeProviderId' | 'source' | 'sessionId' | 'runId' | 'timestamp' | 'laneKey' | 'agentId' | 'seq' | 'origin'> {
+}): Pick<CanonicalSessionEvent, 'eventId' | 'protocolId' | 'runtimeEndpointId' | 'source' | 'sessionId' | 'runId' | 'timestamp' | 'laneKey' | 'agentId' | 'seq' | 'origin'> {
   return {
     eventId: input.eventId,
-    protocolId: OPENCLAW_RUNTIME_PROTOCOL_ID,
-    runtimeProviderId: OPENCLAW_RUNTIME_PROVIDER_ID,
+    protocolId: input.identity.protocolId,
+    runtimeEndpointId: input.identity.runtimeEndpointId,
     source: 'replay',
     sessionId: input.sessionId,
     ...(input.runId ? { runId: input.runId } : {}),
@@ -49,8 +54,8 @@ function replayBase(input: {
     ...(input.agentId ? { agentId: input.agentId } : {}),
     ...(input.seq != null ? { seq: input.seq } : {}),
     origin: {
-      providerEventType: input.providerEventType,
-      providerIds: {
+      runtimeEventType: input.runtimeEventType,
+      runtimeIds: {
         sessionKey: input.sessionId,
         ...(input.runId ? { runId: input.runId } : {}),
         ...(input.laneKey ? { laneKey: input.laneKey } : {}),
@@ -101,6 +106,7 @@ function readTaskCompletionEvents(
   sessionId: string,
   message: SessionTranscriptMessage,
   index: number,
+  identity: CanonicalReplayRuntimeIdentity,
 ): CanonicalSessionEvent[] {
   if (!message.taskCompletionEvents?.length) {
     return [];
@@ -111,7 +117,8 @@ function readTaskCompletionEvents(
   return message.taskCompletionEvents.map((event, eventIndex): CanonicalSessionEvent => ({
     ...replayBase({
       eventId: eventId(['replay', sessionId, 'team', index, eventIndex, event.childSessionKey]),
-      providerEventType: 'transcript.task_completion',
+      identity,
+      runtimeEventType: 'transcript.task_completion',
       sessionId,
       ...(runId ? { runId } : {}),
       ...(message.timestamp != null ? { timestamp: message.timestamp } : {}),
@@ -158,6 +165,7 @@ function readToolEventsFromMessage(
   sessionId: string,
   message: SessionTranscriptMessage,
   index: number,
+  identity: CanonicalReplayRuntimeIdentity,
 ): CanonicalSessionEvent[] {
   const content = readMessageContent(message);
   if (message.role !== 'assistant' || !Array.isArray(content)) {
@@ -179,7 +187,8 @@ function readToolEventsFromMessage(
       return [{
         ...replayBase({
           eventId: eventId(['replay', sessionId, 'tool-call', index, blockIndex, toolCallId]),
-          providerEventType: 'transcript.tool_call',
+          identity,
+          runtimeEventType: 'transcript.tool_call',
           sessionId,
           ...(runId ? { runId } : {}),
           ...(message.timestamp != null ? { timestamp: message.timestamp } : {}),
@@ -209,6 +218,7 @@ function readToolEventsFromMessage(
       output,
       ...(outputText ? { outputText } : {}),
       isError: block.isError === true || block.is_error === true,
+      identity,
     })];
   });
 }
@@ -222,13 +232,15 @@ function buildToolResultEvent(input: {
   output: unknown;
   outputText?: string;
   isError: boolean;
+  identity: CanonicalReplayRuntimeIdentity;
 }): CanonicalSessionEvent {
   const agentId = normalizeString(input.message.agentId);
   const runId = messageRunId(input.message);
   return {
     ...replayBase({
       eventId: eventId(['replay', input.sessionId, 'tool-result', input.index, input.toolCallId]),
-      providerEventType: 'transcript.message_tool_result',
+      identity: input.identity,
+      runtimeEventType: 'transcript.message_tool_result',
       sessionId: input.sessionId,
       ...(runId ? { runId } : {}),
       ...(input.message.timestamp != null ? { timestamp: input.message.timestamp } : {}),
@@ -250,6 +262,7 @@ function buildStandaloneToolResultEvent(
   sessionId: string,
   message: SessionTranscriptMessage,
   index: number,
+  identity: CanonicalReplayRuntimeIdentity,
 ): CanonicalSessionEvent | null {
   const toolCallId = normalizeString(message.toolCallId);
   if (!toolCallId) {
@@ -266,6 +279,30 @@ function buildStandaloneToolResultEvent(
     output,
     ...(outputText ? { outputText } : {}),
     isError: message.isError === true,
+    identity,
+  });
+}
+
+function hasToolEventContent(message: SessionTranscriptMessage): boolean {
+  const content = readMessageContent(message);
+  if (message.role !== 'assistant' || !Array.isArray(content)) {
+    return false;
+  }
+  return content.some((block) => {
+    if (!isRecord(block)) {
+      return false;
+    }
+    const toolCallId = resolveToolRecordCallId(block);
+    const name = resolveToolRecordName(block);
+    if (!toolCallId || !name || isStateOnlyToolName(name)) {
+      return false;
+    }
+    const type = normalizeString(block.type);
+    return isToolCallContentType(block.type)
+      || type === 'tool_result'
+      || type === 'toolResult'
+      || type === 'function_call_output'
+      || type === 'functionCallOutput';
   });
 }
 
@@ -278,140 +315,170 @@ function canReplayMessageSnapshot(message: SessionTranscriptMessage): boolean {
     return false;
   }
   const text = resolveTranscriptDisplayText(message);
-  const hasToolEvents = readToolEventsFromMessage('', message, 0).length > 0;
   return role === 'system'
     || text.length > 0
     || cloneAttachedFiles(message).length > 0
     || hasContentMedia(message)
     || hasThinkingContent(message)
-    || hasToolEvents
+    || hasToolEventContent(message)
     || hasRenderableTaskCompletion(message);
 }
 
 export function canProjectTranscriptMessage(sessionId: string, message: SessionTranscriptMessage): boolean {
-  if (message.role === 'toolresult' || message.role === 'tool_result') {
-    return buildStandaloneToolResultEvent(sessionId, message, 0) !== null
-      || extractTaskSnapshotFromTranscriptMessage(sessionId, message) !== null
-      || hasRenderableTaskCompletion(message);
+  if (message.role !== 'toolresult' && message.role !== 'tool_result') {
+    return canReplayMessageSnapshot(message)
+      || extractTaskSnapshotFromTranscriptMessage(sessionId, message) !== null;
   }
-  return canReplayMessageSnapshot(message)
-    || extractTaskSnapshotFromTranscriptMessage(sessionId, message) !== null;
+  const toolCallId = normalizeString(message.toolCallId);
+  return toolCallId.length > 0
+    || extractTaskSnapshotFromTranscriptMessage(sessionId, message) !== null
+    || hasRenderableTaskCompletion(message);
+}
+
+function buildReplayBoundaryEvent(
+  sessionId: string,
+  phase: 'start' | 'end',
+  identity: CanonicalReplayRuntimeIdentity,
+): CanonicalSessionEvent {
+  return {
+    ...replayBase({
+      eventId: eventId(['replay', sessionId, phase]),
+      identity,
+      runtimeEventType: 'transcript.replay_boundary',
+      sessionId,
+    }),
+    type: 'replay_boundary',
+    phase,
+  };
+}
+
+function* iterateCanonicalReplayEventsFromTranscriptMessage(
+  sessionId: string,
+  message: SessionTranscriptMessage,
+  index: number,
+  identity: CanonicalReplayRuntimeIdentity,
+): Generator<CanonicalSessionEvent> {
+  if (!canProjectTranscriptMessage(sessionId, message)) {
+    return;
+  }
+  if (message.role === 'toolresult' || message.role === 'tool_result') {
+    const toolResult = buildStandaloneToolResultEvent(sessionId, message, index, identity);
+    if (toolResult) {
+      yield toolResult;
+    }
+    const taskSnapshot = extractTaskSnapshotFromTranscriptMessage(sessionId, message);
+    if (taskSnapshot) {
+      yield {
+        ...replayBase({
+          eventId: eventId(['replay', sessionId, 'plan', index]),
+          identity,
+          runtimeEventType: 'transcript.plan',
+          sessionId,
+          ...(message.timestamp != null ? { timestamp: message.timestamp } : {}),
+          seq: index,
+        }),
+        type: 'plan',
+        taskSnapshot,
+      };
+    }
+    for (const event of readTaskCompletionEvents(sessionId, message, index, identity)) {
+      yield event;
+    }
+    return;
+  }
+
+  const role = message.role;
+  const text = resolveTranscriptDisplayText(message);
+  const toolEvents = readToolEventsFromMessage(sessionId, message, index, identity);
+  const runId = messageRunId(message);
+  const agentId = normalizeString(message.agentId);
+  const canonicalMessageId = messageId(message, sessionId, index);
+  if (canReplayMessageSnapshot(message)) {
+    yield {
+      ...replayBase({
+        eventId: eventId(['replay', sessionId, 'message', index, canonicalMessageId]),
+        identity,
+        runtimeEventType: 'transcript.message',
+        sessionId,
+        ...(runId ? { runId } : {}),
+        ...(message.timestamp != null ? { timestamp: message.timestamp } : {}),
+        laneKey: messageLaneKey(message),
+        ...(agentId ? { agentId } : {}),
+        seq: index,
+      }),
+      type: 'message_snapshot',
+      role,
+      messageId: canonicalMessageId,
+      ...(message.originMessageId ? { originMessageId: message.originMessageId } : {}),
+      ...(message.clientId ? { clientId: message.clientId } : {}),
+      content: structuredClone(messageContent(message)),
+      text,
+      status: messageStatus(message),
+      attachedFiles: cloneAttachedFiles(message),
+    };
+    for (const event of toolEvents) {
+      yield event;
+    }
+  }
+  const taskSnapshot = extractTaskSnapshotFromTranscriptMessage(sessionId, message);
+  if (taskSnapshot) {
+    yield {
+      ...replayBase({
+        eventId: eventId(['replay', sessionId, 'plan', index]),
+        identity,
+        runtimeEventType: 'transcript.plan',
+        sessionId,
+        ...(runId ? { runId } : {}),
+        ...(message.timestamp != null ? { timestamp: message.timestamp } : {}),
+        seq: index,
+      }),
+      type: 'plan',
+      taskSnapshot,
+    };
+  }
+  for (const event of readTaskCompletionEvents(sessionId, message, index, identity)) {
+    yield event;
+  }
 }
 
 export function* iterateCanonicalReplayEventsFromTranscriptMessages(
   sessionId: string,
   messages: Iterable<SessionTranscriptMessage>,
+  identity: CanonicalReplayRuntimeIdentity,
 ): Generator<CanonicalSessionEvent> {
-  yield {
-    ...replayBase({
-      eventId: eventId(['replay', sessionId, 'start']),
-      providerEventType: 'transcript.replay_boundary',
-      sessionId,
-    }),
-    type: 'replay_boundary',
-    phase: 'start',
-  };
-
+  yield buildReplayBoundaryEvent(sessionId, 'start', identity);
   let index = 0;
   for (const message of messages) {
     try {
-      if (!canProjectTranscriptMessage(sessionId, message)) {
-        continue;
-      }
-      if (message.role === 'toolresult' || message.role === 'tool_result') {
-        const toolResult = buildStandaloneToolResultEvent(sessionId, message, index);
-        if (toolResult) {
-          yield toolResult;
-        }
-        const taskSnapshot = extractTaskSnapshotFromTranscriptMessage(sessionId, message);
-        if (taskSnapshot) {
-          yield {
-            ...replayBase({
-              eventId: eventId(['replay', sessionId, 'plan', index]),
-              providerEventType: 'transcript.plan',
-              sessionId,
-              ...(message.timestamp != null ? { timestamp: message.timestamp } : {}),
-              seq: index,
-            }),
-            type: 'plan',
-            taskSnapshot,
-          };
-        }
-        for (const event of readTaskCompletionEvents(sessionId, message, index)) {
-          yield event;
-        }
-        continue;
-      }
-
-      const role = message.role;
-      const text = resolveTranscriptDisplayText(message);
-      const toolEvents = readToolEventsFromMessage(sessionId, message, index);
-      const runId = messageRunId(message);
-      const agentId = normalizeString(message.agentId);
-      const canonicalMessageId = messageId(message, sessionId, index);
-      if (canReplayMessageSnapshot(message)) {
-        yield {
-          ...replayBase({
-            eventId: eventId(['replay', sessionId, 'message', index, canonicalMessageId]),
-            providerEventType: 'transcript.message',
-            sessionId,
-            ...(runId ? { runId } : {}),
-            ...(message.timestamp != null ? { timestamp: message.timestamp } : {}),
-            laneKey: messageLaneKey(message),
-            ...(agentId ? { agentId } : {}),
-            seq: index,
-          }),
-          type: 'message_snapshot',
-          role,
-          messageId: canonicalMessageId,
-          ...(message.originMessageId ? { originMessageId: message.originMessageId } : {}),
-          ...(message.clientId ? { clientId: message.clientId } : {}),
-          content: structuredClone(messageContent(message)),
-          text,
-          status: messageStatus(message),
-          attachedFiles: cloneAttachedFiles(message),
-        };
-        for (const event of toolEvents) {
-          yield event;
-        }
-      }
-      const taskSnapshot = extractTaskSnapshotFromTranscriptMessage(sessionId, message);
-      if (taskSnapshot) {
-        yield {
-          ...replayBase({
-            eventId: eventId(['replay', sessionId, 'plan', index]),
-            providerEventType: 'transcript.plan',
-            sessionId,
-            ...(runId ? { runId } : {}),
-            ...(message.timestamp != null ? { timestamp: message.timestamp } : {}),
-            seq: index,
-          }),
-          type: 'plan',
-          taskSnapshot,
-        };
-      }
-      for (const event of readTaskCompletionEvents(sessionId, message, index)) {
-        yield event;
-      }
+      yield* iterateCanonicalReplayEventsFromTranscriptMessage(sessionId, message, index, identity);
     } finally {
       index += 1;
     }
   }
+  yield buildReplayBoundaryEvent(sessionId, 'end', identity);
+}
 
-  yield {
-    ...replayBase({
-      eventId: eventId(['replay', sessionId, 'end']),
-      providerEventType: 'transcript.replay_boundary',
-      sessionId,
-    }),
-    type: 'replay_boundary',
-    phase: 'end',
-  };
+export async function* iterateCanonicalReplayEventsFromTranscriptMessagesAsync(
+  sessionId: string,
+  messages: AsyncIterable<SessionTranscriptMessage>,
+  identity: CanonicalReplayRuntimeIdentity,
+): AsyncGenerator<CanonicalSessionEvent> {
+  yield buildReplayBoundaryEvent(sessionId, 'start', identity);
+  let index = 0;
+  for await (const message of messages) {
+    try {
+      yield* iterateCanonicalReplayEventsFromTranscriptMessage(sessionId, message, index, identity);
+    } finally {
+      index += 1;
+    }
+  }
+  yield buildReplayBoundaryEvent(sessionId, 'end', identity);
 }
 
 export function buildCanonicalReplayEventsFromTranscriptMessages(
   sessionId: string,
   messages: Iterable<SessionTranscriptMessage>,
+  identity: CanonicalReplayRuntimeIdentity,
 ): CanonicalSessionEvent[] {
-  return Array.from(iterateCanonicalReplayEventsFromTranscriptMessages(sessionId, messages));
+  return Array.from(iterateCanonicalReplayEventsFromTranscriptMessages(sessionId, messages, identity));
 }

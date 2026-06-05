@@ -19,7 +19,6 @@ export const MAIN_OWNED_EXACT_ROUTES = Object.freeze([
   '/api/gateway/restart',
   '/api/gateway/control-ui',
   '/api/files/save-image',
-  '/api/files/write-text',
   '/api/diagnostics/memory',
   '/api/diagnostics/gateway-snapshot',
   '/api/logs',

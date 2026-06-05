@@ -51,13 +51,14 @@ import {
   hostProviderCancelOAuth,
   hostProviderStartOAuth,
   hostProviderSubmitOAuthCode,
-} from '@/lib/provider-runtime';
+} from '@/lib/provider-projection';
 import { invokeIpc } from '@/lib/api-client';
 import { subscribeHostEvent } from '@/lib/host-events';
 import { isGatewayOperational } from '@/lib/gateway-status';
 import { useDelayedFlag } from '@/lib/use-delayed-flag';
 import { useGatewayStore } from '@/stores/gateway';
 import { cn } from '@/lib/utils';
+import type { RuntimeAddress } from '../../../runtime-host/shared/runtime-address';
 
 function getProtocolBaseUrlPlaceholder(apiProtocol: ProviderCredential['apiProtocol']): string {
   if (apiProtocol === 'anthropic-messages') {
@@ -110,7 +111,7 @@ function modelsForCredential(models: readonly ProviderModel[], credentialId: str
   return models.filter((model) => model.credentialId === credentialId);
 }
 
-export function ProvidersSettings() {
+export function ProvidersSettings({ runtimeAddress }: { runtimeAddress: RuntimeAddress | null }) {
   const { t } = useTranslation('settings');
   const gatewayStatus = useGatewayStore((state) => state.status);
   const {
@@ -151,23 +152,30 @@ export function ProvidersSettings() {
   const showRefreshingHint = useDelayedFlag(refreshing && snapshotReady, 180);
 
   useEffect(() => {
+    if (!runtimeAddress) {
+      return;
+    }
     void refreshProviderSnapshot({
       trigger: 'background',
       reason: 'providers_settings_mount',
+      runtimeAddress,
     });
-    void refreshModelCatalog();
-  }, [refreshModelCatalog, refreshProviderSnapshot]);
+    void refreshModelCatalog(runtimeAddress);
+  }, [refreshModelCatalog, refreshProviderSnapshot, runtimeAddress]);
 
   useEffect(() => {
+    if (!runtimeAddress) {
+      return;
+    }
     const handleFocus = () => {
-      void refreshProviderSnapshot({ trigger: 'background', reason: 'window_focus' });
+      void refreshProviderSnapshot({ trigger: 'background', reason: 'window_focus', runtimeAddress });
     };
     const handleOnline = () => {
-      void refreshProviderSnapshot({ trigger: 'background', reason: 'network_online' });
+      void refreshProviderSnapshot({ trigger: 'background', reason: 'network_online', runtimeAddress });
     };
     const handleVisibilityChange = () => {
       if (document.visibilityState === 'visible') {
-        void refreshProviderSnapshot({ trigger: 'background', reason: 'visibility_visible' });
+        void refreshProviderSnapshot({ trigger: 'background', reason: 'visibility_visible', runtimeAddress });
       }
     };
 
@@ -179,26 +187,27 @@ export function ProvidersSettings() {
       window.removeEventListener('online', handleOnline);
       document.removeEventListener('visibilitychange', handleVisibilityChange);
     };
-  }, [refreshProviderSnapshot]);
+  }, [refreshProviderSnapshot, runtimeAddress]);
 
   useEffect(() => {
-    if (!wasGatewayRunningRef.current && gatewayOperational) {
-      void refreshProviderSnapshot({ trigger: 'background', reason: 'gateway_reconnected' });
+    if (!wasGatewayRunningRef.current && gatewayOperational && runtimeAddress) {
+      void refreshProviderSnapshot({ trigger: 'background', reason: 'gateway_reconnected', runtimeAddress });
     }
     wasGatewayRunningRef.current = gatewayOperational;
-  }, [gatewayOperational, refreshProviderSnapshot]);
+  }, [gatewayOperational, refreshProviderSnapshot, runtimeAddress]);
 
   const handleManualRefresh = useCallback(() => {
-    if (manualRefreshPending) return;
+    if (manualRefreshPending || !runtimeAddress) return;
     setManualRefreshPending(true);
     void Promise.all([
       refreshProviderSnapshot({
         trigger: 'manual',
         reason: 'user_manual_refresh',
+        runtimeAddress,
       }),
-      refreshModelCatalog(),
+      refreshModelCatalog(runtimeAddress),
     ]).finally(() => setManualRefreshPending(false));
-  }, [manualRefreshPending, refreshModelCatalog, refreshProviderSnapshot]);
+  }, [manualRefreshPending, refreshModelCatalog, refreshProviderSnapshot, runtimeAddress]);
 
   const handleAddProvider = async (
     type: ProviderType,
@@ -213,6 +222,9 @@ export function ProvidersSettings() {
       mediaApiProtocol?: ProviderCredential['mediaApiProtocol'];
     },
   ) => {
+    if (!runtimeAddress) {
+      return;
+    }
     const vendor = vendors.find((item) => item.id === type);
     const id = buildProviderCredentialId(type, null, vendors);
     const effectiveApiKey = resolveProviderApiKeyForSave(type, apiKey);
@@ -232,7 +244,7 @@ export function ProvidersSettings() {
         enabled: true,
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString(),
-      }, effectiveApiKey);
+      }, runtimeAddress, effectiveApiKey);
       setShowAddDialog(false);
       toast.success(t('aiProviders.toast.added'));
     } catch (addError) {
@@ -270,6 +282,7 @@ export function ProvidersSettings() {
                 setOpen(true);
                 setShowAddDialog(true);
               }}
+              disabled={!runtimeAddress}
             >
               <Plus className="h-4 w-4 mr-2" />
               {t('aiProviders.add')}
@@ -308,7 +321,10 @@ export function ProvidersSettings() {
               variant="outline"
               size="sm"
               onClick={() => {
-                void refreshProviderSnapshot({ trigger: 'manual', reason: 'user_retry_refresh' });
+                if (!runtimeAddress) {
+                  return;
+                }
+                void refreshProviderSnapshot({ trigger: 'manual', reason: 'user_retry_refresh', runtimeAddress });
               }}
             >
               <RefreshCw className="h-4 w-4 mr-2" />
@@ -324,7 +340,7 @@ export function ProvidersSettings() {
             <p className="text-muted-foreground text-center mb-4">
               {t('aiProviders.empty.desc')}
             </p>
-            <Button onClick={() => setShowAddDialog(true)}>
+            <Button onClick={() => setShowAddDialog(true)} disabled={!runtimeAddress}>
               <Plus className="h-4 w-4 mr-2" />
               {t('aiProviders.empty.cta')}
             </Button>
@@ -347,19 +363,35 @@ export function ProvidersSettings() {
               onEdit={() => setEditingProvider(item.account.id)}
               onCancelEdit={() => setEditingProvider(null)}
               onDelete={async () => {
+                if (!runtimeAddress) {
+                  return;
+                }
                 try {
-                  await removeAccount(item.account.id);
+                  await removeAccount(item.account.id, runtimeAddress);
                   toast.success(t('aiProviders.toast.deleted'));
                 } catch (deleteError) {
                   toast.error(`${t('aiProviders.toast.failedDelete')}: ${deleteError}`);
                 }
               }}
               onSaveEdits={async (payload) => {
-                await updateAccount(item.account.id, payload.updates ?? {}, payload.newApiKey);
+                if (!runtimeAddress) {
+                  return;
+                }
+                await updateAccount(item.account.id, payload.updates ?? {}, runtimeAddress, payload.newApiKey);
                 setEditingProvider(null);
               }}
-              onValidateKey={(key, options) => validateAccountApiKey(item.account.id, key, options)}
-              onReplaceModels={(next) => replaceCredentialModels(item.account.id, next)}
+              onValidateKey={(key, options) => {
+                if (!runtimeAddress) {
+                  return Promise.resolve({ valid: false, error: 'RuntimeAddress is required' });
+                }
+                return validateAccountApiKey(item.account.id, key, runtimeAddress, options);
+              }}
+              onReplaceModels={(next) => {
+                if (!runtimeAddress) {
+                  return Promise.resolve();
+                }
+                return replaceCredentialModels(item.account.id, next, runtimeAddress);
+              }}
             />
           ))}
         </div>
@@ -371,8 +403,14 @@ export function ProvidersSettings() {
           existingVendorIds={existingVendorIds}
           vendors={vendors}
           onClose={() => setShowAddDialog(false)}
+          runtimeAddress={runtimeAddress}
           onAdd={handleAddProvider}
-          onValidateKey={(type, key, options) => validateAccountApiKey(type, key, options)}
+          onValidateKey={(type, key, options) => {
+            if (!runtimeAddress) {
+              return Promise.resolve({ valid: false, error: 'RuntimeAddress is required' });
+            }
+            return validateAccountApiKey(type, key, runtimeAddress, options);
+          }}
         />
       ) : null}
     </Card>
@@ -781,6 +819,7 @@ function ProviderCard({
 interface AddProviderDialogProps {
   existingVendorIds: Set<string>;
   vendors: ProviderVendorInfo[];
+  runtimeAddress: RuntimeAddress | null;
   onClose: () => void;
   onAdd: (
     type: ProviderType,
@@ -809,6 +848,7 @@ interface AddProviderDialogProps {
 function AddProviderDialog({
   existingVendorIds,
   vendors,
+  runtimeAddress,
   onClose,
   onAdd,
   onValidateKey,
@@ -897,10 +937,13 @@ function AddProviderDialog({
       setManualCodeInput('');
       setValidationError(null);
       try {
-        await useProviderStore.getState().refreshProviderSnapshot({
-          trigger: 'reconcile',
-          reason: 'oauth_success_reconcile',
-        });
+        if (runtimeAddress) {
+          await useProviderStore.getState().refreshProviderSnapshot({
+            trigger: 'reconcile',
+            reason: 'oauth_success_reconcile',
+            runtimeAddress,
+          });
+        }
       } catch (refreshError) {
         console.error('Failed to refresh providers after OAuth:', refreshError);
       }
@@ -938,7 +981,7 @@ function AddProviderDialog({
   });
 
   const handleStartOAuth = async () => {
-    if (!selectedType) return;
+    if (!selectedType || !runtimeAddress) return;
     const hasMinimax = existingVendorIds.has('minimax-portal') || existingVendorIds.has('minimax-portal-cn');
     if ((selectedType === 'minimax-portal' || selectedType === 'minimax-portal-cn') && hasMinimax) {
       toast.error(t('aiProviders.toast.minimaxConflict'));
@@ -960,7 +1003,7 @@ function AddProviderDialog({
         return;
       }
       setPendingOAuth({ accountId, label });
-      await hostProviderStartOAuth({ provider: selectedType, accountId, label });
+      await hostProviderStartOAuth({ provider: selectedType, accountId, label }, runtimeAddress);
     } catch (oauthStartError) {
       setOauthError(String(oauthStartError));
       setOauthFlowing(false);
@@ -969,19 +1012,20 @@ function AddProviderDialog({
   };
 
   const handleCancelOAuth = async () => {
+    if (!runtimeAddress) return;
     setOauthFlowing(false);
     setOauthData(null);
     setManualCodeInput('');
     setOauthError(null);
     setPendingOAuth(null);
-    await hostProviderCancelOAuth();
+    await hostProviderCancelOAuth(runtimeAddress);
   };
 
   const handleSubmitManualOAuthCode = async () => {
     const value = manualCodeInput.trim();
-    if (!value) return;
+    if (!value || !runtimeAddress) return;
     try {
-      await hostProviderSubmitOAuthCode(value);
+      await hostProviderSubmitOAuthCode(value, runtimeAddress);
       setOauthError(null);
     } catch (submitError) {
       setOauthError(String(submitError));
@@ -989,7 +1033,7 @@ function AddProviderDialog({
   };
 
   const handleAdd = async () => {
-    if (!selectedType) return;
+    if (!selectedType || !runtimeAddress) return;
     const hasMinimax = existingVendorIds.has('minimax-portal') || existingVendorIds.has('minimax-portal-cn');
     if ((selectedType === 'minimax-portal' || selectedType === 'minimax-portal-cn') && hasMinimax) {
       toast.error(t('aiProviders.toast.minimaxConflict'));
@@ -1305,7 +1349,7 @@ function AddProviderDialog({
 
           <div className="flex justify-end gap-2">
             <Button variant="outline" onClick={onClose}>{t('aiProviders.dialog.cancel')}</Button>
-            <Button onClick={handleAdd} className={cn(useOAuthFlow && 'hidden')} disabled={!selectedType || saving}>
+            <Button onClick={handleAdd} className={cn(useOAuthFlow && 'hidden')} disabled={!selectedType || saving || !runtimeAddress}>
               {saving ? <Loader2 className="h-4 w-4 animate-spin mr-2" /> : null}
               {t('aiProviders.dialog.add')}
             </Button>

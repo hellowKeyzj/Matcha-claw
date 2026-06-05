@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { toast } from 'sonner';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -32,7 +32,11 @@ import {
   type SecuritySectionKey,
 } from '@/stores/security-support-store';
 import { isGatewayOperational, isGatewayPreparing } from '@/lib/gateway-status';
+import { resolveSingleCapabilityRuntimeAddress } from '@/lib/host-api';
 import { useTranslation } from 'react-i18next';
+import type { RuntimeAddress } from '../../../runtime-host/shared/runtime-address';
+
+const SECURITY_RUNTIME_CAPABILITY_ID = 'security.runtime';
 
 type Preset = 'strict' | 'balanced' | 'relaxed';
 type Action = 'block' | 'redact' | 'confirm' | 'warn' | 'log';
@@ -181,6 +185,29 @@ export function SecurityPage() {
   const setRuleCatalogPlatform = useSecuritySupportStore((state) => state.setRuleCatalogPlatform);
   const setActiveSection = useSecuritySupportStore((state) => state.setActiveSection);
   const showPolicyRefreshingHint = useDelayedFlag(refreshing, 180);
+  const [securityRuntimeAddress, setSecurityRuntimeAddress] = useState<RuntimeAddress | null>(null);
+
+  useEffect(() => {
+    if (!gatewayOperational) {
+      setSecurityRuntimeAddress(null);
+      return;
+    }
+    let active = true;
+    void resolveSingleCapabilityRuntimeAddress(SECURITY_RUNTIME_CAPABILITY_ID)
+      .then((runtimeAddress) => {
+        if (active) {
+          setSecurityRuntimeAddress(runtimeAddress);
+        }
+      })
+      .catch(() => {
+        if (active) {
+          setSecurityRuntimeAddress(null);
+        }
+      });
+    return () => {
+      active = false;
+    };
+  }, [gatewayOperational]);
 
   const getActionLabel = useCallback((action: Action) => t(`matrix.action.${action}`), [t]);
   const getSeverityLabel = useCallback((severity: Severity) => t(`matrix.severity.${severity}`), [t]);
@@ -194,13 +221,17 @@ export function SecurityPage() {
   }, [loadPolicy]);
 
   const handleSavePolicy = useCallback(async () => {
+    if (!securityRuntimeAddress) {
+      toast.error(gatewayPreparing ? t('actionCenter.gatewayPreparing') : t('actionCenter.gatewayNotRunning'));
+      return;
+    }
     try {
-      await savePolicy();
+      await savePolicy(securityRuntimeAddress);
       toast.success(t('messages.saved'));
     } catch {
       toast.error(t('messages.saveFailed'));
     }
-  }, [savePolicy, t]);
+  }, [gatewayPreparing, savePolicy, securityRuntimeAddress, t]);
 
   useEffect(() => {
     void loadRecentAudits({ gatewayProcessState, page: 1, pageSize: 8 });
@@ -216,14 +247,14 @@ export function SecurityPage() {
     void loadRuleCatalog();
   }, [loadRuleCatalog]);
 
-  const runSecurityOp = useCallback(async (name: string, runner: () => Promise<unknown>) => {
-    if (!gatewayOperational) {
+  const runSecurityOp = useCallback(async (name: string, runner: (runtimeAddress: RuntimeAddress) => Promise<unknown>) => {
+    if (!gatewayOperational || !securityRuntimeAddress) {
       toast.error(gatewayPreparing ? t('actionCenter.gatewayPreparing') : t('actionCenter.gatewayNotRunning'));
       return;
     }
     setSecurityOpBusy(name);
     try {
-      const result = await runner();
+      const result = await runner(securityRuntimeAddress);
       setSecurityOpResult(JSON.stringify(result, null, 2));
       toast.success(t('actionCenter.runSuccess', { name }));
     } catch (e) {
@@ -233,7 +264,7 @@ export function SecurityPage() {
     } finally {
       setSecurityOpBusy(null);
     }
-  }, [gatewayOperational, gatewayPreparing, setSecurityOpBusy, setSecurityOpResult, t]);
+  }, [gatewayOperational, gatewayPreparing, securityRuntimeAddress, setSecurityOpBusy, setSecurityOpResult, t]);
 
   const runtime = policy.runtime;
   const isDirty = useMemo(
@@ -405,7 +436,7 @@ export function SecurityPage() {
               {t('page.unsaved')}
             </Badge>
           )}
-          <Button onClick={() => void handleSavePolicy()} disabled={saving || !isDirty}>
+          <Button onClick={() => void handleSavePolicy()} disabled={saving || !isDirty || !securityRuntimeAddress}>
             {saving ? t('actions.saving') : t('actions.save')}
           </Button>
         </div>
@@ -823,38 +854,38 @@ export function SecurityPage() {
             <Button
               title={t('actionCenter.quickAuditTitle')}
               variant="outline"
-              disabled={securityOpBusy !== null}
-              onClick={() => void runSecurityOp(t('actionCenter.quickAudit'), async () => await hostSecurityRunQuickAudit())}
+              disabled={securityOpBusy !== null || !securityRuntimeAddress}
+              onClick={() => void runSecurityOp(t('actionCenter.quickAudit'), async (runtimeAddress) => await hostSecurityRunQuickAudit(runtimeAddress))}
             >
               {t('actionCenter.quickAudit')}
             </Button>
             <Button
               title={t('actionCenter.emergencyTitle')}
               variant="destructive"
-              disabled={securityOpBusy !== null}
-              onClick={() => void runSecurityOp(t('actionCenter.emergency'), async () => await hostSecurityRunEmergencyResponse())}
+              disabled={securityOpBusy !== null || !securityRuntimeAddress}
+              onClick={() => void runSecurityOp(t('actionCenter.emergency'), async (runtimeAddress) => await hostSecurityRunEmergencyResponse(runtimeAddress))}
             >
               {t('actionCenter.emergency')}
             </Button>
-            <Button variant="outline" disabled={securityOpBusy !== null} onClick={() => void runSecurityOp(t('actionCenter.integrity'), async () => await hostSecurityCheckIntegrity())}>{t('actionCenter.integrity')}</Button>
-            <Button variant="outline" disabled={securityOpBusy !== null} onClick={() => void runSecurityOp(t('actionCenter.rebaseline'), async () => await hostSecurityRebaselineIntegrity())}>{t('actionCenter.rebaseline')}</Button>
-            <Button variant="outline" disabled={securityOpBusy !== null} onClick={() => void runSecurityOp(t('actionCenter.skillScan'), async () => await hostSecurityScanSkills())}>{t('actionCenter.skillScan')}</Button>
-            <Button variant="outline" disabled={securityOpBusy !== null} onClick={() => void runSecurityOp(t('actionCenter.advisories'), async () => await hostSecurityCheckAdvisories())}>{t('actionCenter.advisories')}</Button>
+            <Button variant="outline" disabled={securityOpBusy !== null || !securityRuntimeAddress} onClick={() => void runSecurityOp(t('actionCenter.integrity'), async (runtimeAddress) => await hostSecurityCheckIntegrity(runtimeAddress))}>{t('actionCenter.integrity')}</Button>
+            <Button variant="outline" disabled={securityOpBusy !== null || !securityRuntimeAddress} onClick={() => void runSecurityOp(t('actionCenter.rebaseline'), async (runtimeAddress) => await hostSecurityRebaselineIntegrity(runtimeAddress))}>{t('actionCenter.rebaseline')}</Button>
+            <Button variant="outline" disabled={securityOpBusy !== null || !securityRuntimeAddress} onClick={() => void runSecurityOp(t('actionCenter.skillScan'), async (runtimeAddress) => await hostSecurityScanSkills(runtimeAddress))}>{t('actionCenter.skillScan')}</Button>
+            <Button variant="outline" disabled={securityOpBusy !== null || !securityRuntimeAddress} onClick={() => void runSecurityOp(t('actionCenter.advisories'), async (runtimeAddress) => await hostSecurityCheckAdvisories(runtimeAddress))}>{t('actionCenter.advisories')}</Button>
           </div>
 
           <div className="flex flex-wrap gap-2">
-            <Button variant="outline" disabled={securityOpBusy !== null} onClick={() => void runSecurityOp(t('actionCenter.remediationPreview'), async () => {
-              const payload = await hostSecurityPreviewRemediation<{ actions?: RemediationActionItem[] }>();
+            <Button variant="outline" disabled={securityOpBusy !== null || !securityRuntimeAddress} onClick={() => void runSecurityOp(t('actionCenter.remediationPreview'), async (runtimeAddress) => {
+              const payload = await hostSecurityPreviewRemediation<{ actions?: RemediationActionItem[] }>(runtimeAddress);
               const actions = Array.isArray(payload.actions) ? payload.actions : [];
               setRemediationActions(actions);
               return payload;
             })}>{t('actionCenter.remediationPreview')}</Button>
-            <Button disabled={securityOpBusy !== null || selectedRemediationActions.length === 0} onClick={() => void runSecurityOp(t('actionCenter.remediationApply'), async () => {
-              const payload = await hostSecurityApplyRemediation<{ snapshotId?: string }>(selectedRemediationActions);
+            <Button disabled={securityOpBusy !== null || !securityRuntimeAddress || selectedRemediationActions.length === 0} onClick={() => void runSecurityOp(t('actionCenter.remediationApply'), async (runtimeAddress) => {
+              const payload = await hostSecurityApplyRemediation<{ snapshotId?: string }>(runtimeAddress, selectedRemediationActions);
               if (payload.snapshotId) setLastRemediationSnapshotId(payload.snapshotId);
               return payload;
             })}>{t('actionCenter.remediationApply')}</Button>
-            <Button variant="outline" disabled={securityOpBusy !== null} onClick={() => void runSecurityOp(t('actionCenter.remediationRollback'), async () => await hostSecurityRollbackRemediation(lastRemediationSnapshotId))}>{t('actionCenter.remediationRollback')}</Button>
+            <Button variant="outline" disabled={securityOpBusy !== null || !securityRuntimeAddress} onClick={() => void runSecurityOp(t('actionCenter.remediationRollback'), async (runtimeAddress) => await hostSecurityRollbackRemediation(runtimeAddress, lastRemediationSnapshotId))}>{t('actionCenter.remediationRollback')}</Button>
           </div>
 
           {remediationActions.length > 0 && (

@@ -40,7 +40,7 @@ describe('provider-oauth-account-service', () => {
     const account = buildBrowserOAuthAccount({
       providerType: 'openai',
       accountId: 'openai-main',
-      runtimeProviderId: 'openai-codex',
+      oauthProviderTokenKey: 'openai-codex',
       oauthTokenEmail: 'dev@example.com',
       clock,
     });

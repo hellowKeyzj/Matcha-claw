@@ -1,6 +1,5 @@
 import type { SessionApprovalDecision, SessionApprovalRequestItem } from '../../../shared/session-adapter-types';
-import type { CanonicalApprovalEvent } from './canonical-events';
-import { OPENCLAW_RUNTIME_PROTOCOL_ID, OPENCLAW_RUNTIME_PROVIDER_ID } from '../runtime-providers/runtime-provider-types';
+import type { CanonicalApprovalEvent, RuntimeEndpointId, RuntimeProtocolId } from './canonical-events';
 
 export interface CanonicalApprovalNotification {
   method: string;
@@ -8,6 +7,12 @@ export interface CanonicalApprovalNotification {
 }
 
 type ApprovalDecision = SessionApprovalDecision;
+
+export interface CanonicalApprovalRuntimeIdentity {
+  protocolId: RuntimeProtocolId;
+  runtimeEndpointId: RuntimeEndpointId;
+  eventIdPrefix: string;
+}
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   return value && typeof value === 'object' && !Array.isArray(value)
@@ -163,24 +168,25 @@ function normalizePendingApproval(value: unknown, nowMs: number): SessionApprova
 
 function buildEventBase(input: {
   eventId: string;
+  identity: CanonicalApprovalRuntimeIdentity;
   sessionKey: string;
   runId?: string;
   timestamp: number;
   raw?: unknown;
-}): Pick<CanonicalApprovalEvent, 'eventId' | 'type' | 'protocolId' | 'runtimeProviderId' | 'source' | 'sessionId' | 'runId' | 'timestamp' | 'laneKey' | 'origin'> {
+}): Pick<CanonicalApprovalEvent, 'eventId' | 'type' | 'protocolId' | 'runtimeEndpointId' | 'source' | 'sessionId' | 'runId' | 'timestamp' | 'laneKey' | 'origin'> {
   return {
     eventId: input.eventId,
     type: 'approval',
-    protocolId: OPENCLAW_RUNTIME_PROTOCOL_ID,
-    runtimeProviderId: OPENCLAW_RUNTIME_PROVIDER_ID,
+    protocolId: input.identity.protocolId,
+    runtimeEndpointId: input.identity.runtimeEndpointId,
     source: 'live',
     sessionId: input.sessionKey,
     ...(input.runId ? { runId: input.runId } : {}),
     timestamp: input.timestamp,
     laneKey: 'main',
     origin: {
-      providerEventType: 'approval.notification',
-      providerIds: {
+      runtimeEventType: 'approval.notification',
+      runtimeIds: {
         sessionKey: input.sessionKey,
         ...(input.runId ? { runId: input.runId } : {}),
       },
@@ -192,6 +198,7 @@ function buildEventBase(input: {
 export function buildCanonicalApprovalEventsFromGatewayNotification(
   notification: CanonicalApprovalNotification,
   nowMs: number,
+  identity: CanonicalApprovalRuntimeIdentity,
 ): CanonicalApprovalEvent[] {
   if (notification.method === 'exec.approval.requested' || notification.method === 'plugin.approval.requested') {
     const approval = normalizePendingApproval(notification.params, nowMs);
@@ -200,7 +207,8 @@ export function buildCanonicalApprovalEventsFromGatewayNotification(
     }
     return [{
       ...buildEventBase({
-        eventId: `openclaw-v4:approval:pending:${approval.sessionKey}:${approval.id}`,
+        identity,
+        eventId: `${identity.eventIdPrefix}:approval:pending:${approval.sessionKey}:${approval.id}`,
         sessionKey: approval.sessionKey,
         runId: approval.runId,
         timestamp: approval.createdAtMs,
@@ -234,7 +242,8 @@ export function buildCanonicalApprovalEventsFromGatewayNotification(
     const decision = readDecision(record?.decision ?? data?.decision ?? request?.decision);
     return [{
       ...buildEventBase({
-        eventId: `openclaw-v4:approval:resolved:${sessionKey}:${approvalId}`,
+        identity,
+        eventId: `${identity.eventIdPrefix}:approval:resolved:${sessionKey}:${approvalId}`,
         sessionKey,
         runId,
         timestamp: nowMs,

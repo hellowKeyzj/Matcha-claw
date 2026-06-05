@@ -1,11 +1,16 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Task, TaskListSnapshot } from '@/services/openclaw/task-manager-client';
+import { createOpenClawTestRuntimeAddress } from './helpers/runtime-address-fixtures';
 
-const listTaskSnapshotMock = vi.fn<(payload: string | { sessionKey: string; teamKey?: string }) => Promise<TaskListSnapshot>>();
+const runtimeAddress = createOpenClawTestRuntimeAddress('agent:main:main');
+const firstRuntimeAddress = createOpenClawTestRuntimeAddress('agent:main:first');
+const secondRuntimeAddress = createOpenClawTestRuntimeAddress('agent:main:second');
+
+const listTaskSnapshotMock = vi.fn<(payload: { sessionKey: string; runtimeAddress: typeof runtimeAddress; teamKey?: string }) => Promise<TaskListSnapshot>>();
 const updateTaskMock = vi.fn();
 
 vi.mock('@/services/openclaw/task-manager-client', () => ({
-  listTaskSnapshot: (...args: [string | { sessionKey: string; teamKey?: string }]) => listTaskSnapshotMock(...args),
+  listTaskSnapshot: (...args: [{ sessionKey: string; runtimeAddress: typeof runtimeAddress; teamKey?: string }]) => listTaskSnapshotMock(...args),
   updateTask: (...args: unknown[]) => updateTaskMock(...args),
 }));
 
@@ -50,7 +55,7 @@ describe('task center store', () => {
     ]));
     const { useTaskCenterStore } = await import('@/stores/task-center-store');
 
-    await useTaskCenterStore.getState().init('agent:main:main');
+    await useTaskCenterStore.getState().init({ sessionKey: 'agent:main:main', runtimeAddress });
 
     const state = useTaskCenterStore.getState();
     const { useTaskSnapshotStore } = await import('@/stores/chat/task-snapshot-store');
@@ -59,7 +64,7 @@ describe('task center store', () => {
     expect(state.refreshing).toBe(false);
     expect(state.initialized).toBe(true);
     expect(useTaskSnapshotStore.getState().getTaskDataList('agent:main:main').map((item) => item.id)).toEqual(['1', '2']);
-    expect(listTaskSnapshotMock).toHaveBeenCalledWith({ sessionKey: 'agent:main:main' });
+    expect(listTaskSnapshotMock).toHaveBeenCalledWith({ sessionKey: 'agent:main:main', runtimeAddress });
   });
 
   it('init without session clears tasks and marks initialized', async () => {
@@ -75,7 +80,7 @@ describe('task center store', () => {
   it('refreshTasks keeps previous snapshot when request fails', async () => {
     listTaskSnapshotMock.mockResolvedValueOnce(snapshot([task({ id: '1', status: 'pending' })]));
     const { useTaskCenterStore } = await import('@/stores/task-center-store');
-    await useTaskCenterStore.getState().init('agent:main:main');
+    await useTaskCenterStore.getState().init({ sessionKey: 'agent:main:main', runtimeAddress });
 
     listTaskSnapshotMock.mockRejectedValueOnce(new Error('refresh failed'));
     await useTaskCenterStore.getState().refreshTasks();
@@ -96,7 +101,7 @@ describe('task center store', () => {
       { content: '已有待办', status: 'pending' },
     ]);
 
-    await useTaskCenterStore.getState().refreshTasks({ sessionKey: 'agent:main:main' });
+    await useTaskCenterStore.getState().refreshTasks({ sessionKey: 'agent:main:main', runtimeAddress });
 
     expect(useTaskSnapshotStore.getState().getTaskDataList('agent:main:main')).toEqual([]);
     expect(useTaskSnapshotStore.getState().getPersistentTaskDataList('agent:main:main')).toEqual([]);
@@ -105,7 +110,7 @@ describe('task center store', () => {
   it('refreshTasks isolates in-flight requests by session key', async () => {
     let resolveFirst: ((snapshot: TaskListSnapshot) => void) | null = null;
     listTaskSnapshotMock.mockImplementation((payload) => {
-      const sessionKey = typeof payload === 'string' ? payload : payload.sessionKey;
+      const sessionKey = payload.sessionKey;
       if (sessionKey === 'agent:main:first') {
         return new Promise<TaskListSnapshot>((resolve) => {
           resolveFirst = resolve;
@@ -116,12 +121,12 @@ describe('task center store', () => {
     const { useTaskCenterStore } = await import('@/stores/task-center-store');
     const { useTaskSnapshotStore } = await import('@/stores/chat/task-snapshot-store');
 
-    const firstRefresh = useTaskCenterStore.getState().refreshTasks({ sessionKey: 'agent:main:first', silent: true });
-    const secondRefresh = useTaskCenterStore.getState().refreshTasks({ sessionKey: 'agent:main:second', silent: true });
+    const firstRefresh = useTaskCenterStore.getState().refreshTasks({ sessionKey: 'agent:main:first', runtimeAddress: firstRuntimeAddress, silent: true });
+    const secondRefresh = useTaskCenterStore.getState().refreshTasks({ sessionKey: 'agent:main:second', runtimeAddress: secondRuntimeAddress, silent: true });
     await secondRefresh;
 
-    expect(listTaskSnapshotMock).toHaveBeenCalledWith({ sessionKey: 'agent:main:first' });
-    expect(listTaskSnapshotMock).toHaveBeenCalledWith({ sessionKey: 'agent:main:second' });
+    expect(listTaskSnapshotMock).toHaveBeenCalledWith({ sessionKey: 'agent:main:first', runtimeAddress: firstRuntimeAddress });
+    expect(listTaskSnapshotMock).toHaveBeenCalledWith({ sessionKey: 'agent:main:second', runtimeAddress: secondRuntimeAddress });
     expect(useTaskSnapshotStore.getState().getTaskDataList('agent:main:second').map((item) => item.subject)).toEqual(['second task']);
 
     resolveFirst?.(snapshot([task({ id: '1', subject: 'first task' })], 'agent:main:first'));
@@ -144,12 +149,13 @@ describe('task center store', () => {
     ]));
     const { useTaskCenterStore } = await import('@/stores/task-center-store');
     const { useTaskSnapshotStore } = await import('@/stores/chat/task-snapshot-store');
-    await useTaskCenterStore.getState().init('agent:main:main');
+    await useTaskCenterStore.getState().init({ sessionKey: 'agent:main:main', runtimeAddress });
 
     await useTaskCenterStore.getState().deleteTaskById({ taskId: '2' });
 
     expect(updateTaskMock).toHaveBeenCalledWith({
       sessionKey: 'agent:main:main',
+      runtimeAddress,
       taskId: '2',
       status: 'deleted',
     });

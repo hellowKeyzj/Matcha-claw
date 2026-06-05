@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   upsertOpenClawProviderEntry,
-} from '../../runtime-host/application/openclaw/openclaw-provider-entry-builder';
+} from '../../runtime-host/application/adapters/openclaw/projections/openclaw-provider-entry-builder';
 
 describe('openclaw provider entry builder', () => {
   it('updates provider transport fields without owning models[]', () => {

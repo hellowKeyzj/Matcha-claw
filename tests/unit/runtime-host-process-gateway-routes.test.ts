@@ -2,6 +2,8 @@ import { describe, expect, it, vi } from 'vitest';
 import { gatewayRoutes } from '../../runtime-host/api/routes/gateway-routes';
 import { GatewayService } from '../../runtime-host/application/gateway/service';
 import { DEFAULT_GATEWAY_BASE_METHODS } from '../../runtime-host/application/gateway/gateway-runtime-port';
+import { GatewayReadinessWorkflow } from '../../runtime-host/application/workflows/gateway-readiness/gateway-readiness-workflow';
+import { createAgentRunCapabilityOperationRoutes } from '../../runtime-host/application/capabilities/agent/agent-run-capability';
 import { dispatchRuntimeRouteDefinition } from './helpers/runtime-route';
 
 function createDeps() {
@@ -29,7 +31,9 @@ function createDeps() {
   };
   return {
     openclawBridge,
-    gatewayService: new GatewayService({ gateway: openclawBridge }),
+    gatewayService: new GatewayService({
+      readinessWorkflow: new GatewayReadinessWorkflow({ gateway: openclawBridge }),
+    }),
   };
 }
 
@@ -77,19 +81,34 @@ describe('runtime-host process gateway routes', () => {
     });
   });
 
-  it('POST /api/gateway/agent-wait 只允许等待 agent.wait', async () => {
+  it.each([
+    '/api/gateway/agent-wait',
+    '/api/chat/send-with-media',
+  ])('POST %s 不再作为 direct route 暴露', async (path) => {
     const deps = createDeps();
 
     const result = await dispatchRuntimeRouteDefinition(
       gatewayRoutes,
       'POST',
-      '/api/gateway/agent-wait',
-      {
-        method: 'agent.wait',
-        params: { runId: 'run-1', timeoutMs: 30000 },
-      },
+      path,
+      { method: 'agent.wait', params: { runId: 'run-1', timeoutMs: 30000 } },
       deps,
     );
+
+    expect(deps.openclawBridge.gatewayRpc).not.toHaveBeenCalled();
+    expect(deps.openclawBridge.chatSend).not.toHaveBeenCalled();
+    expect(result).toBeNull();
+  });
+
+  it('agent.run capability operation 等待 agent.wait', async () => {
+    const deps = createDeps();
+    const [route] = createAgentRunCapabilityOperationRoutes({ gateway: deps.openclawBridge });
+
+    const result = await route!.handle({
+      runId: 'run-1',
+      waitSliceMs: 30000,
+      rpcTimeoutBufferMs: 10000,
+    });
 
     expect(deps.openclawBridge.gatewayRpc).toHaveBeenCalledWith(
       'agent.wait',
@@ -99,27 +118,6 @@ describe('runtime-host process gateway routes', () => {
     expect(result).toEqual({
       status: 200,
       data: { ok: true },
-    });
-  });
-
-  it('POST /api/gateway/agent-wait 拒绝非 agent.wait 方法', async () => {
-    const deps = createDeps();
-
-    const result = await dispatchRuntimeRouteDefinition(
-      gatewayRoutes,
-      'POST',
-      '/api/gateway/agent-wait',
-      { method: 'chat.history', params: {} },
-      deps,
-    );
-
-    expect(deps.openclawBridge.gatewayRpc).not.toHaveBeenCalled();
-    expect(result).toEqual({
-      status: 400,
-      data: {
-        success: false,
-        error: 'Only agent.wait is allowed',
-      },
     });
   });
 

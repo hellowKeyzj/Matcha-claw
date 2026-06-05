@@ -1,4 +1,5 @@
 import { SessionCommandService } from '../../application/sessions/session-command-service';
+import { SessionCommandOperationsWorkflow } from '../../application/workflows/session-command/session-command-operations-workflow';
 import { SessionGatewayIngressService } from '../../application/sessions/session-gateway-ingress-service';
 import { SessionRuntimeService } from '../../application/sessions/service';
 import {
@@ -16,18 +17,37 @@ import {
 } from '../../application/sessions/session-hydration-jobs';
 import { SessionMetadataRepository } from '../../application/sessions/session-metadata-repository';
 import { SessionRuntimeStoreRepository } from '../../application/sessions/session-runtime-store-repository';
+import { SessionRuntimeStorePersistenceWorkflow } from '../../application/workflows/session-runtime-store/session-runtime-store-persistence-workflow';
 import { SessionRuntimeStateStore } from '../../application/sessions/session-runtime-state';
 import { SessionPromptService } from '../../application/sessions/session-prompt-service';
+import { SessionRunWorkflow } from '../../application/workflows/session-run/session-run-workflow';
+import { SessionGatewayIngressWorkflow } from '../../application/workflows/session-gateway-ingress/session-gateway-ingress-workflow';
+import { SessionHydrationWorkflow } from '../../application/workflows/session-hydration/session-hydration-workflow';
+import { SessionLifecycleWorkflow } from '../../application/workflows/session-lifecycle/session-lifecycle-workflow';
+import { SessionCatalogWorkflow } from '../../application/workflows/session-catalog/session-catalog-workflow';
+import { SessionModelResolutionWorkflow } from '../../application/workflows/session-metadata/session-model-resolution-workflow';
+import { SessionOperationResultWorkflow } from '../../application/workflows/session-operation/session-operation-result-workflow';
+import { SessionStorageIndexWorkflow, type SessionStorageRuntimeAddressResolverPort } from '../../application/workflows/session-storage/session-storage-index-workflow';
+import { SessionStorageMutationWorkflow } from '../../application/workflows/session-storage/session-storage-mutation-workflow';
+import { SessionStorageRepositoryWorkflow } from '../../application/workflows/session-storage/session-storage-repository-workflow';
+import { SessionStorageTranscriptWorkflow } from '../../application/workflows/session-storage/session-storage-transcript-workflow';
+import { SessionApprovalWorkflow } from '../../application/workflows/session-approval/session-approval-workflow';
+import { SessionModelSelectionWorkflow } from '../../application/workflows/session-model-selection/session-model-selection-workflow';
+import { SessionSnapshotWorkflow } from '../../application/workflows/session-snapshot/session-snapshot-workflow';
 import { SessionSnapshotService } from '../../application/sessions/session-snapshot-service';
 import { SessionStorageRepository } from '../../application/sessions/session-storage-repository';
 import { SessionExecutionGraphRuntime } from '../../application/sessions/session-execution-graph-runtime';
 import { SessionTimelineRuntime } from '../../application/sessions/session-timeline-runtime';
 import { SessionOperationCoordinator } from '../../application/sessions/session-operation-coordinator';
 import { SessionTranscriptTimelineLoader } from '../../application/sessions/session-transcript-timeline-loader';
-import type { TaskManagerService } from '../../application/tasks/service';
-import type { OpenClawWorkspacePort } from '../../application/openclaw/openclaw-workspace-service';
+import { createSessionApprovalCapabilityOperationRoutes } from '../../application/capabilities/approval/session-approval-capability';
+import type { CapabilityOperationRoute } from '../../application/capabilities/contracts/capability-router';
+import { createSessionModelSelectionCapabilityOperationRoutes } from '../../application/capabilities/model/session-model-capability';
+import { createSessionManagementCapabilityOperationRoutes } from '../../application/capabilities/session/session-management-capability';
+import { createSessionPromptCapabilityOperationRoutes, SESSION_PROMPT_CAPABILITY_ID } from '../../application/capabilities/session/session-prompt-capability';
+import type { SessionConfigDirectoryPort, SessionExternalArtefactResolverPort } from '../../application/sessions/session-storage-repository';
+import type { SessionDefaultModelResolverPort } from '../../application/sessions/session-metadata-repository';
 import type { RuntimeClockPort, RuntimeFileSystemPort, RuntimeIdGeneratorPort } from '../../application/common/runtime-ports';
-import type { GatewayChatPort, GatewayRpcPort } from '../../application/gateway/gateway-runtime-port';
 import type { RuntimeHostLogger } from '../../shared/logger';
 import type { ParentGatewayForwardEventName } from '../../shared/parent-transport-contracts';
 import {
@@ -44,65 +64,135 @@ import type {
   RuntimeLongTaskLookupPort,
   RuntimeLongTaskSubmissionPort,
 } from '../../application/runtime-host/runtime-task-ports';
-import { RuntimeProviderRegistry } from '../../application/sessions/runtime-providers/runtime-provider-registry';
-import { OpenClawV4ProtocolAdapter } from '../../application/sessions/runtime-providers/openclaw/openclaw-v4-protocol-adapter';
-import { openClawRuntimeProviderProfile } from '../../application/sessions/runtime-providers/openclaw/openclaw-profile';
-import { AcpProtocolAdapter } from '../../application/sessions/runtime-providers/acp/acp-protocol-adapter';
-import { acpRuntimeProviderProfiles } from '../../application/sessions/runtime-providers/acp/acp-profiles';
+import type { AgentRuntimeRegistry } from '../../application/agent-runtime/contracts/agent-runtime-registry';
+import type { RuntimeEndpointProfile } from '../../application/agent-runtime/contracts/runtime-endpoint-types';
+import { validateRuntimeAddress, type RuntimeAddress } from '../../application/agent-runtime/contracts/runtime-address';
+import type { GatewayChatPort } from '../../application/gateway/gateway-runtime-port';
 
 export interface SessionRuntimeModule {
   readonly sessionRuntime: SessionRuntimeService;
   readonly sessionCatalog: SessionCatalogService;
 }
 
+class AgentNamespaceSessionStorageRuntimeAddressResolver implements SessionStorageRuntimeAddressResolverPort {
+  constructor(private readonly registry: AgentRuntimeRegistry) {}
+
+  resolveStorageRuntimeAddress(input: {
+    agentId: string;
+    sessionKey: string;
+    sessionStoreEntry: Record<string, unknown> | null;
+  }): RuntimeAddress | null {
+    const stored = this.readStoredRuntimeAddress(input.sessionStoreEntry);
+    if (stored) {
+      return stored;
+    }
+    const endpoint = this.registry.listEndpoints().find((candidate) => (
+      candidate.capabilities.chat
+      && candidate.storage?.namespace === 'agent'
+      && candidate.keying?.namespace === 'agent'
+      && (candidate.agentIds.includes(input.agentId) || candidate.acceptsDynamicAgents === true)
+    ));
+    return endpoint ? this.buildRuntimeAddress(endpoint, input.agentId, input.sessionKey) : null;
+  }
+
+  private readStoredRuntimeAddress(entry: Record<string, unknown> | null): RuntimeAddress | null {
+    const candidate = entry?.runtimeAddress;
+    return validateRuntimeAddress(candidate) === null ? candidate as RuntimeAddress : null;
+  }
+
+  private buildRuntimeAddress(endpoint: RuntimeEndpointProfile, agentId: string, sessionKey: string): RuntimeAddress {
+    if (endpoint.runtimeAdapterId) {
+      return {
+        kind: 'native-runtime',
+        capabilityId: SESSION_PROMPT_CAPABILITY_ID,
+        runtimeAdapterId: endpoint.runtimeAdapterId,
+        runtimeInstanceId: endpoint.runtimeInstanceId ?? endpoint.id,
+        agentId,
+        sessionKey,
+      };
+    }
+    if (!endpoint.connectorId) {
+      throw new Error(`Runtime endpoint cannot address sessions: ${endpoint.id}`);
+    }
+    return {
+      kind: 'protocol-connector',
+      capabilityId: SESSION_PROMPT_CAPABILITY_ID,
+      protocolId: endpoint.protocolId,
+      connectorId: endpoint.connectorId,
+      endpointId: endpoint.id,
+      agentId,
+      sessionKey,
+    };
+  }
+}
+
 export function registerSessionRuntimeModule(
   container: RuntimeHostContainer,
-  gateway: () => GatewayChatPort & Pick<GatewayRpcPort, 'gatewayRpc'>,
   parentGatewayEvents?: {
     emit: (eventName: ParentGatewayForwardEventName, payload: unknown) => Promise<void>;
   },
 ): void {
+  container.register('sessionStorageRuntimeAddressResolver', (scope) => new AgentNamespaceSessionStorageRuntimeAddressResolver(
+    scope.resolve<AgentRuntimeRegistry>('sessionAgentRuntimeRegistry'),
+  ));
+  container.register('sessionStorageIndexWorkflow', (scope) => new SessionStorageIndexWorkflow({
+    workspace: scope.resolve<SessionConfigDirectoryPort>('sessionConfigDirectory'),
+    fileSystem: scope.resolve<RuntimeFileSystemPort>('runtime.fileSystem'),
+    runtimeAddressResolver: scope.resolve<SessionStorageRuntimeAddressResolverPort>('sessionStorageRuntimeAddressResolver'),
+  }));
+  container.register('sessionStorageMutationWorkflow', (scope) => new SessionStorageMutationWorkflow({
+    fileSystem: scope.resolve<RuntimeFileSystemPort>('runtime.fileSystem'),
+    externalArtefactResolver: scope.resolve<SessionExternalArtefactResolverPort>('sessionExternalArtefactResolver'),
+  }));
+  container.register('sessionStorageTranscriptWorkflow', (scope) => new SessionStorageTranscriptWorkflow({
+    fileSystem: scope.resolve<RuntimeFileSystemPort>('runtime.fileSystem'),
+  }));
+  container.register('sessionStorageRepositoryWorkflow', (scope) => new SessionStorageRepositoryWorkflow({
+    indexWorkflow: scope.resolve<SessionStorageIndexWorkflow>('sessionStorageIndexWorkflow'),
+    mutationWorkflow: scope.resolve<SessionStorageMutationWorkflow>('sessionStorageMutationWorkflow'),
+    transcriptWorkflow: scope.resolve<SessionStorageTranscriptWorkflow>('sessionStorageTranscriptWorkflow'),
+  }));
   container.register('sessionStorageRepository', (scope) => new SessionStorageRepository({
-    workspace: scope.resolve<OpenClawWorkspacePort>('openclaw.workspaceService'),
+    repositoryWorkflow: scope.resolve<SessionStorageRepositoryWorkflow>('sessionStorageRepositoryWorkflow'),
+  }));
+  container.register('sessionRuntimeStorePersistenceWorkflow', (scope) => new SessionRuntimeStorePersistenceWorkflow({
+    workspace: scope.resolve<SessionConfigDirectoryPort>('sessionConfigDirectory'),
     fileSystem: scope.resolve<RuntimeFileSystemPort>('runtime.fileSystem'),
   }));
   container.register('sessionRuntimeStoreRepository', (scope) => new SessionRuntimeStoreRepository({
-    workspace: scope.resolve<OpenClawWorkspacePort>('openclaw.workspaceService'),
-    fileSystem: scope.resolve<RuntimeFileSystemPort>('runtime.fileSystem'),
+    persistenceWorkflow: scope.resolve<SessionRuntimeStorePersistenceWorkflow>('sessionRuntimeStorePersistenceWorkflow'),
+  }));
+  container.register('sessionModelResolutionWorkflow', (scope) => new SessionModelResolutionWorkflow({
+    defaultModelResolver: scope.resolve<SessionDefaultModelResolverPort>('sessionDefaultModelResolver'),
   }));
   container.register('sessionMetadataRepository', (scope) => new SessionMetadataRepository({
-    workspace: scope.resolve<OpenClawWorkspacePort>('openclaw.workspaceService'),
-    fileSystem: scope.resolve<RuntimeFileSystemPort>('runtime.fileSystem'),
+    modelResolutionWorkflow: scope.resolve<SessionModelResolutionWorkflow>('sessionModelResolutionWorkflow'),
   }));
-  container.register('sessionCatalogService', (scope) => new SessionCatalogService({
+  container.register('sessionCatalogWorkflow', (scope) => new SessionCatalogWorkflow({
     storageRepository: scope.resolve('sessionStorageRepository'),
     metadataRepository: scope.resolve('sessionMetadataRepository'),
+    agentRuntimeRegistry: scope.resolve('sessionAgentRuntimeRegistry'),
+  }));
+  container.register('sessionCatalogService', (scope) => new SessionCatalogService({
+    catalogWorkflow: scope.resolve<SessionCatalogWorkflow>('sessionCatalogWorkflow'),
   }));
   container.register('sessionCatalogJobs', (scope): SessionCatalogJobPort => createSessionCatalogJobPort(
     scope.resolve<RuntimeLongTaskSubmissionPort>('runtime.tasks'),
     scope.resolve<RuntimeLongTaskLookupPort>('runtime.taskLookup'),
   ));
-  container.register('sessionOperationCoordinator', () => new SessionOperationCoordinator());
-  container.register('sessionRuntimeProviderRegistry', () => {
-    const registry = new RuntimeProviderRegistry();
-    registry.register({
-      protocol: new OpenClawV4ProtocolAdapter(gateway()),
-      profiles: [openClawRuntimeProviderProfile],
-    });
-    registry.register({
-      protocol: new AcpProtocolAdapter(),
-      profiles: acpRuntimeProviderProfiles,
-    });
-    return registry;
-  });
+  container.register('sessionOperationResultWorkflow', () => new SessionOperationResultWorkflow());
+  container.register('sessionOperationCoordinator', (scope) => new SessionOperationCoordinator(
+    scope.resolve<SessionOperationResultWorkflow>('sessionOperationResultWorkflow'),
+  ));
+  container.register('sessionAgentRuntimeRegistry', (scope): AgentRuntimeRegistry => scope.resolve<AgentRuntimeRegistry>('agentRuntime.registry'));
   container.register('sessionRuntimeStateStore', (scope) => new SessionRuntimeStateStore({
     runtimeStore: scope.resolve('sessionRuntimeStoreRepository'),
-    runtimeProviderRegistry: scope.resolve('sessionRuntimeProviderRegistry'),
+    agentRuntimeRegistry: scope.resolve('sessionAgentRuntimeRegistry'),
     logger: scope.resolve<RuntimeHostLogger>('logger'),
   }));
   container.register('sessionTranscriptTimelineLoader', (scope) => new SessionTranscriptTimelineLoader({
     sessionStorage: scope.resolve('sessionStorageRepository'),
-    runtimeProviderRegistry: scope.resolve('sessionRuntimeProviderRegistry'),
+    agentRuntimeRegistry: scope.resolve('sessionAgentRuntimeRegistry'),
   }));
   container.register('sessionExecutionGraphRuntime', (scope) => new SessionExecutionGraphRuntime({
     stateStore: scope.resolve('sessionRuntimeStateStore'),
@@ -114,18 +204,24 @@ export function registerSessionRuntimeModule(
     executionGraphRuntime: scope.resolve('sessionExecutionGraphRuntime'),
     clock: scope.resolve<RuntimeClockPort>('runtime.clock'),
   }));
-  container.register('sessionSnapshotService', (scope) => new SessionSnapshotService({
+  container.register('sessionSnapshotWorkflow', (scope) => new SessionSnapshotWorkflow({
     stateStore: scope.resolve('sessionRuntimeStateStore'),
     sessionMetadata: scope.resolve('sessionMetadataRepository'),
     sessionStorage: scope.resolve('sessionStorageRepository'),
   }));
-  container.register('sessionGatewayIngressService', (scope) => new SessionGatewayIngressService({
+  container.register('sessionSnapshotService', (scope) => new SessionSnapshotService({
+    snapshotWorkflow: scope.resolve<SessionSnapshotWorkflow>('sessionSnapshotWorkflow'),
+  }));
+  container.register('sessionGatewayIngressWorkflow', (scope) => new SessionGatewayIngressWorkflow({
     stateStore: scope.resolve('sessionRuntimeStateStore'),
     timelineRuntime: scope.resolve('sessionTimelineRuntime'),
     snapshotService: scope.resolve('sessionSnapshotService'),
     clock: scope.resolve<RuntimeClockPort>('runtime.clock'),
     logger: scope.resolve<RuntimeHostLogger>('logger'),
-    runtimeProviderRegistry: scope.resolve('sessionRuntimeProviderRegistry'),
+    agentRuntimeRegistry: scope.resolve('sessionAgentRuntimeRegistry'),
+  }));
+  container.register('sessionGatewayIngressService', (scope) => new SessionGatewayIngressService({
+    ingressWorkflow: scope.resolve<SessionGatewayIngressWorkflow>('sessionGatewayIngressWorkflow'),
     emitSessionUpdate: (event) => {
       void parentGatewayEvents?.emit('session:update', event).catch(() => undefined);
     },
@@ -133,42 +229,67 @@ export function registerSessionRuntimeModule(
   container.register('sessionHydrationJobAdapter', (scope): SessionHydrationJobPort => createSessionHydrationJobPort(
     scope.resolve<RuntimeLongTaskSubmissionPort>('runtime.tasks'),
   ));
-  container.register('sessionCommandService', (scope) => new SessionCommandService({
+  container.register('sessionHydrationWorkflow', (scope) => new SessionHydrationWorkflow({
+    stateStore: scope.resolve('sessionRuntimeStateStore'),
+    timelineRuntime: scope.resolve('sessionTimelineRuntime'),
+    snapshotService: scope.resolve('sessionSnapshotService'),
+    agentRuntimeRegistry: scope.resolve('sessionAgentRuntimeRegistry'),
+    operationCoordinator: scope.resolve('sessionOperationCoordinator'),
+    sessionHydrationJobs: scope.resolve('sessionHydrationJobAdapter'),
+  }));
+  container.register('sessionApprovalWorkflow', (scope) => new SessionApprovalWorkflow({
+    stateStore: scope.resolve('sessionRuntimeStateStore'),
+    timelineRuntime: scope.resolve('sessionTimelineRuntime'),
+    snapshotService: scope.resolve('sessionSnapshotService'),
+    agentRuntimeRegistry: scope.resolve('sessionAgentRuntimeRegistry'),
+    operationCoordinator: scope.resolve('sessionOperationCoordinator'),
+    clock: scope.resolve<RuntimeClockPort>('runtime.clock'),
+  }));
+  container.register('sessionModelSelectionWorkflow', (scope) => new SessionModelSelectionWorkflow({
+    stateStore: scope.resolve('sessionRuntimeStateStore'),
+    timelineRuntime: scope.resolve('sessionTimelineRuntime'),
+    snapshotService: scope.resolve('sessionSnapshotService'),
+    agentRuntimeRegistry: scope.resolve('sessionAgentRuntimeRegistry'),
+    operationCoordinator: scope.resolve('sessionOperationCoordinator'),
+  }));
+  container.register('sessionLifecycleWorkflow', (scope) => new SessionLifecycleWorkflow({
     sessionCatalog: scope.resolve('sessionCatalogService'),
     sessionCatalogJobs: scope.resolve<SessionCatalogJobPort>('sessionCatalogJobs'),
     sessionStorage: scope.resolve('sessionStorageRepository'),
     stateStore: scope.resolve('sessionRuntimeStateStore'),
     timelineRuntime: scope.resolve('sessionTimelineRuntime'),
     snapshotService: scope.resolve('sessionSnapshotService'),
-    runtimeProviderRegistry: scope.resolve('sessionRuntimeProviderRegistry'),
-    operationCoordinator: scope.resolve('sessionOperationCoordinator'),
+    agentRuntimeRegistry: scope.resolve('sessionAgentRuntimeRegistry'),
     clock: scope.resolve<RuntimeClockPort>('runtime.clock'),
     idGenerator: scope.resolve<RuntimeIdGeneratorPort>('runtime.idGenerator'),
-    sessionHydrationJobs: scope.resolve('sessionHydrationJobAdapter'),
-    readTaskSnapshot: async (sessionKey) => {
-      try {
-        return await scope.resolve<TaskManagerService>('task.service').buildTaskSnapshot(sessionKey);
-      } catch {
-        return null;
-      }
-    },
-    emitTaskSnapshot: (event) => {
-      void scope.resolve<TaskManagerService>('task.service').emitSnapshot(event);
-    },
   }));
-  container.register('sessionPromptService', (scope) => new SessionPromptService({
+  container.register('sessionCommandOperationsWorkflow', (scope) => new SessionCommandOperationsWorkflow({
+    stateStore: scope.resolve('sessionRuntimeStateStore'),
+    sessionLifecycleWorkflow: scope.resolve('sessionLifecycleWorkflow'),
+    sessionHydrationWorkflow: scope.resolve('sessionHydrationWorkflow'),
+    sessionApprovalWorkflow: scope.resolve('sessionApprovalWorkflow'),
+    sessionModelSelectionWorkflow: scope.resolve('sessionModelSelectionWorkflow'),
+  }));
+  container.register('sessionCommandService', (scope) => new SessionCommandService({
+    operationsWorkflow: scope.resolve('sessionCommandOperationsWorkflow'),
+  }));
+  container.register('sessionRunWorkflow', (scope) => new SessionRunWorkflow({
     stateStore: scope.resolve('sessionRuntimeStateStore'),
     timelineRuntime: scope.resolve('sessionTimelineRuntime'),
     snapshotService: scope.resolve('sessionSnapshotService'),
     fileSystem: scope.resolve<RuntimeFileSystemPort>('runtime.fileSystem'),
-    idGenerator: scope.resolve<RuntimeIdGeneratorPort>('runtime.idGenerator'),
     clock: scope.resolve<RuntimeClockPort>('runtime.clock'),
-    runtimeProviderRegistry: scope.resolve('sessionRuntimeProviderRegistry'),
+    agentRuntimeRegistry: scope.resolve('sessionAgentRuntimeRegistry'),
     operationCoordinator: scope.resolve('sessionOperationCoordinator'),
     emitSessionUpdate: (event) => {
       void parentGatewayEvents?.emit('session:update', event).catch(() => undefined);
     },
   }));
+  container.register('sessionPromptService', (scope) => new SessionPromptService({
+    idGenerator: scope.resolve<RuntimeIdGeneratorPort>('runtime.idGenerator'),
+    sessionRunWorkflow: scope.resolve('sessionRunWorkflow'),
+  }));
+  registerSessionRuntimeCapabilityOperationRoutes(container);
   container.register('sessionRuntimeService', (scope) => new SessionRuntimeService({
     sessionCatalog: scope.resolve('sessionCatalogService'),
     stateStore: scope.resolve('sessionRuntimeStateStore'),
@@ -179,6 +300,7 @@ export function registerSessionRuntimeModule(
     promptService: scope.resolve('sessionPromptService'),
     operationCoordinator: scope.resolve('sessionOperationCoordinator'),
   }));
+  container.register('session.runtime', (scope): SessionRuntimeService => scope.resolve<SessionRuntimeService>('sessionRuntimeService'));
 }
 
 export function resolveSessionRuntimeModule(container: RuntimeHostContainer): SessionRuntimeModule {
@@ -186,6 +308,26 @@ export function resolveSessionRuntimeModule(container: RuntimeHostContainer): Se
     sessionRuntime: container.resolve('sessionRuntimeService'),
     sessionCatalog: container.resolve('sessionCatalogService'),
   };
+}
+
+function registerSessionRuntimeCapabilityOperationRoutes(container: RuntimeHostContainer): void {
+  container.contribute('agentRuntime.capabilityOperationRoutes', (scope): readonly CapabilityOperationRoute[] => [
+    ...createSessionPromptCapabilityOperationRoutes({
+      commandService: scope.resolve('sessionCommandService'),
+      promptService: scope.resolve('sessionPromptService'),
+      fileSystem: scope.resolve<RuntimeFileSystemPort>('runtime.fileSystem'),
+      gateway: scope.resolve<GatewayChatPort>('gateway.runtime'),
+    }),
+    ...createSessionApprovalCapabilityOperationRoutes({
+      commandService: scope.resolve('sessionCommandService'),
+    }),
+    ...createSessionManagementCapabilityOperationRoutes({
+      commandService: scope.resolve('sessionCommandService'),
+    }),
+    ...createSessionModelSelectionCapabilityOperationRoutes({
+      commandService: scope.resolve('sessionCommandService'),
+    }),
+  ]);
 }
 
 export function registerSessionRuntimeJobs(

@@ -8,11 +8,13 @@ import { classifyFileContentType, extnameOf, getMimeTypeForPath, supportsInlineD
 import { cn } from '@/lib/utils';
 import { FilePreviewBody, type FilePreviewMode } from './FilePreviewBody';
 import type { ArtifactPreviewTarget } from './types';
+import type { RuntimeAddress } from '../../../runtime-host/shared/runtime-address';
 
 interface WorkspaceBrowserBodyProps {
   rootPath: string | null;
   selectedFilePath: string | null;
   selectedFile: ArtifactPreviewTarget | null;
+  runtimeAddress?: RuntimeAddress;
   availableWidth?: number;
   previewMode?: FilePreviewMode;
   onSelectFile: (file: ArtifactPreviewTarget) => void;
@@ -275,6 +277,7 @@ export function WorkspaceBrowserBody({
   rootPath,
   selectedFilePath,
   selectedFile,
+  runtimeAddress,
   availableWidth = Number.POSITIVE_INFINITY,
   previewMode = 'preview',
   onSelectFile,
@@ -348,9 +351,13 @@ export function WorkspaceBrowserBody({
     });
 
     try {
+      if (!runtimeAddress) {
+        return;
+      }
       const result = await hostFileListDir(
         {
           path,
+          runtimeAddress,
         },
         {
           timeoutMs: WORKSPACE_DIR_LIST_TIMEOUT_MS,
@@ -399,9 +406,15 @@ export function WorkspaceBrowserBody({
 
     void (async () => {
       try {
+        if (!runtimeAddress) {
+          setTreeState({ status: 'error', message: 'RuntimeAddress is required' });
+          replaceLoadingPaths(new Set());
+          return;
+        }
         const result = await hostFileListDir(
           {
             path: effectiveRootPath,
+            runtimeAddress,
           },
           {
             timeoutMs: WORKSPACE_DIR_LIST_TIMEOUT_MS,
@@ -439,7 +452,7 @@ export function WorkspaceBrowserBody({
     return () => {
       cancelled = true;
     };
-  }, [effectiveRootPath, reloadToken]);
+  }, [effectiveRootPath, reloadToken, runtimeAddress]);
 
   useEffect(() => {
     if (treeState.status !== 'ready' || !selectedFilePath) {
@@ -586,6 +599,7 @@ export function WorkspaceBrowserBody({
           <FilePreviewBody
             file={selectedFile}
             mode={supportsInlineDiff(selectedFile) ? previewMode : 'preview'}
+            runtimeAddress={runtimeAddress}
             className="h-full"
             headerAccessory={(
               <>

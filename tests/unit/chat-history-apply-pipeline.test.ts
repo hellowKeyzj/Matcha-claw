@@ -9,6 +9,7 @@ import type { HistoryWindowResult } from '@/stores/chat/history-fetch-helpers';
 import type { ChatStoreState } from '@/stores/chat/types';
 import type { RawMessage } from './helpers/timeline-fixtures';
 import { buildRenderItemsFromMessages } from './helpers/timeline-fixtures';
+import { createOpenClawTestRuntimeAddress } from './helpers/runtime-address-fixtures';
 
 function createHistoryRuntimeHarness(): StoreHistoryCache {
   let runId = 0;
@@ -33,6 +34,7 @@ function createSnapshot(
   runtimeOverrides: Partial<HistoryWindowResult['snapshot']['runtime']> = {},
 ) {
   const items = buildRenderItemsFromMessages(sessionKey, messages);
+  const runtimeAddress = createOpenClawTestRuntimeAddress(sessionKey);
   const agentId = sessionKey.split(':')[1] ?? 'main';
   const suffix = sessionKey.split(':').slice(2).join(':');
   const kind = suffix === 'main'
@@ -45,6 +47,7 @@ function createSnapshot(
       agentId,
       kind,
       preferred: kind === 'main',
+      runtimeAddress,
       displayName: sessionKey,
       updatedAt: items[items.length - 1]?.createdAt,
     },
@@ -314,9 +317,11 @@ describe('chat history apply pipeline', () => {
       { role: 'assistant', content: 'done', timestamp: 2, id: 'assistant-1' },
     ];
     const snapshot = createSnapshot(sessionKey, rawMessages);
+    const runtimeAddress = createOpenClawTestRuntimeAddress(sessionKey);
     const approvals = [{
       id: 'approval-1',
       sessionKey,
+      runtimeAddress,
       runId: 'run-1',
       title: 'Run command',
       command: 'pnpm test',
@@ -336,6 +341,7 @@ describe('chat history apply pipeline', () => {
         displayName: snapshot.catalog.displayName,
         lastActivityAt: snapshot.catalog.updatedAt ?? null,
         historyStatus: 'ready' as const,
+        runtimeAddress,
       },
       runtime: snapshot.runtime,
       items: snapshot.items,
@@ -384,8 +390,61 @@ describe('chat history apply pipeline', () => {
     expect(harness.get().pendingApprovalsBySession).toBe(approvalsRef);
   });
 
+  it('updates pending approvals when RuntimeAddress changes for the same approval id', async () => {
+    const sessionKey = 'agent:main:main';
+    const firstRuntimeAddress = createOpenClawTestRuntimeAddress(sessionKey, 'main');
+    const nextRuntimeAddress = createOpenClawTestRuntimeAddress(sessionKey, 'other-agent');
+    const historyRuntime = createHistoryRuntimeHarness();
+    const harness = createStateHarness({
+      currentSessionKey: sessionKey,
+      loadedSessions: {
+        [sessionKey]: createEmptySessionRecord(),
+      },
+      pendingApprovalsBySession: {
+        [sessionKey]: [{
+          id: 'approval-1',
+          sessionKey,
+          runtimeAddress: firstRuntimeAddress,
+          title: 'Run command',
+          allowedDecisions: ['allow-once', 'deny'],
+          createdAtMs: 1,
+        }],
+      },
+      foregroundHistorySessionKey: sessionKey,
+    } as ChatStoreState);
+
+    const applyLoadedMessages = createApplyLoadedMessagesPipeline({
+      set: harness.set,
+      get: harness.get,
+      historyRuntime,
+      requestedSessionKey: sessionKey,
+      scope: 'foreground',
+      abortSignal: new AbortController().signal,
+      shouldAbortHistoryProcessing: () => false,
+    });
+    const snapshot = createSnapshot(sessionKey, []);
+
+    await applyLoadedMessages({
+      ...createHistoryWindow(sessionKey, []),
+      snapshot: {
+        ...snapshot,
+        approvals: [{
+          id: 'approval-1',
+          sessionKey,
+          runtimeAddress: nextRuntimeAddress,
+          title: 'Run command',
+          allowedDecisions: ['allow-once', 'deny'],
+          createdAtMs: 1,
+        }],
+      },
+    });
+
+    expect(harness.get().pendingApprovalsBySession[sessionKey]?.[0]?.runtimeAddress).toEqual(nextRuntimeAddress);
+  });
+
   it('syncs pending approvals from authoritative Runtime Host snapshot', async () => {
     const sessionKey = 'agent:main:main';
+    const runtimeAddress = createOpenClawTestRuntimeAddress(sessionKey);
     const historyRuntime = createHistoryRuntimeHarness();
     const harness = createStateHarness({
       currentSessionKey: sessionKey,
@@ -396,6 +455,7 @@ describe('chat history apply pipeline', () => {
         [sessionKey]: [{
           id: 'stale-approval',
           sessionKey,
+          runtimeAddress,
           title: 'stale',
           allowedDecisions: ['deny'],
           createdAtMs: 1,
@@ -422,6 +482,7 @@ describe('chat history apply pipeline', () => {
         approvals: [{
           id: 'approval-1',
           sessionKey,
+          runtimeAddress,
           runId: 'run-1',
           title: 'Run command',
           command: 'pnpm test',
@@ -434,6 +495,7 @@ describe('chat history apply pipeline', () => {
     expect(harness.get().pendingApprovalsBySession[sessionKey]).toEqual([{
       id: 'approval-1',
       sessionKey,
+      runtimeAddress,
       runId: 'run-1',
       title: 'Run command',
       command: 'pnpm test',

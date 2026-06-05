@@ -8,6 +8,7 @@ import {
 } from '@/stores/chat/selectors';
 import { buildRenderItemsFromMessages } from './helpers/timeline-fixtures';
 import { createViewportWindowState } from '@/stores/chat/viewport-state';
+import { createOpenClawTestRuntimeAddress } from './helpers/runtime-address-fixtures';
 
 function createSessionRecord(input?: {
   sessionKey?: string;
@@ -25,7 +26,16 @@ function createSessionRecord(input?: {
     : 'Main';
   return {
     meta: {
+      agentId: sessionKey.split(':')[1] ?? null,
+      protocolId: null,
+      runtimeEndpointId: 'local',
+      runtimeAddress: createOpenClawTestRuntimeAddress(sessionKey),
+      kind: sessionKey.endsWith(':main') ? 'main' : 'session',
+      preferred: sessionKey.endsWith(':main'),
       label,
+      titleSource: label ? 'user' as const : 'none' as const,
+      displayName: null,
+      model: null,
       lastActivityAt: input?.lastActivityAt ?? 1_700_000_000_000,
       historyStatus: input?.historyStatus ?? 'ready',
       thinkingLevel: null,
@@ -109,10 +119,12 @@ describe('chat selectors layering', () => {
 
   it('sidebar and session pane selectors read stable snapshot/runtime surfaces', () => {
     const state = makeState({
+      currentSessionKey: 'agent:foo:main',
       pendingApprovalsBySession: {
         'agent:main:main': [{
           id: 'ap-1',
           sessionKey: 'agent:main:main',
+          runtimeAddress: createOpenClawTestRuntimeAddress('agent:main:main'),
           title: 'gateway',
           allowedDecisions: ['allow-once', 'deny'],
           createdAtMs: 1,
@@ -139,7 +151,8 @@ describe('chat selectors layering', () => {
     expect(pane.sessionsLoading).toBe(false);
     expect(pane.sessionsLoadedOnce).toBe(true);
     expect(pane.sessionsError).toBeNull();
-    expect(pane.currentSessionKey).toBe('agent:main:main');
+    expect(pane.currentSessionKey).toBe('agent:foo:main');
+    expect(pane.currentAgentId).toBe('foo');
   });
 
   it('session pane selector keeps stable session entry references when only assistant transcript changes', () => {

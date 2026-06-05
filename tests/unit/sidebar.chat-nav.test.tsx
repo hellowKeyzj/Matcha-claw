@@ -15,6 +15,7 @@ import { createEmptySessionRecord } from '@/stores/chat/store-state-helpers';
 import { buildRenderItemsFromMessages } from './helpers/timeline-fixtures';
 import type { RawMessage } from './helpers/timeline-fixtures';
 import { createViewportWindowState } from '@/stores/chat/viewport-state';
+import { createOpenClawTestRuntimeAddress } from './helpers/runtime-address-fixtures';
 
 vi.mock('@/features/teams/feature-flag', () => ({
   TEAMS_FEATURE_ENABLED: true,
@@ -352,6 +353,7 @@ describe('sidebar chat nav', () => {
           {
             id: 'approval-chat-1',
             sessionKey: 'agent:analytics:main',
+            runtimeAddress: createOpenClawTestRuntimeAddress('agent:analytics:main'),
             runId: 'run-chat-1',
             title: 'gateway',
             command: 'Remove-Item demo.txt',
@@ -389,6 +391,7 @@ describe('sidebar chat nav', () => {
           {
             id: 'approval-chat-1',
             sessionKey: 'agent:main:main',
+            runtimeAddress: createOpenClawTestRuntimeAddress('agent:main:main'),
             runId: 'run-chat-1',
             title: 'gateway',
             command: 'Remove-Item demo.txt',

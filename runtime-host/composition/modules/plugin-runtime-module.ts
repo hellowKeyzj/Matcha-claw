@@ -9,12 +9,14 @@ import {
   RuntimePluginRegistry,
   parseFallbackEnabledPluginIds,
   parseInjectedPluginCatalog,
+  type InjectedPluginCatalogPlatformPolicyPort,
 } from '../../application/plugins/runtime-plugin-registry';
-import { ManagedPluginInstaller } from '../../application/plugins/managed-plugin-installer';
-import { PluginCompanionSkillService } from '../../application/plugins/plugin-companion-skill-service';
+import { PluginCompanionSkillService, type PluginCompanionSkillWorkspacePort } from '../../application/plugins/plugin-companion-skill-service';
 import { RuntimePluginLifecycleRunner } from '../../application/plugins/plugin-lifecycle-registry';
-import { RuntimePluginRepository } from '../../application/plugins/runtime-plugin-service';
-import { NodePluginFileSystem } from '../plugin-file-system-adapter';
+import { PluginCompanionSkillWorkflow } from '../../application/workflows/plugin-lifecycle/plugin-companion-skill-workflow';
+import { RuntimePluginLifecycleWorkflow } from '../../application/workflows/plugin-lifecycle/runtime-plugin-lifecycle-workflow';
+import type { ManagedPluginCatalogPort, ManagedPluginInstallerPort } from '../../application/plugins/managed-plugin-catalog';
+import { RuntimePluginRepository, type PluginRuntimePort, type RuntimePluginCatalogProjectionPort, type RuntimePluginConfigProjectionPort } from '../../application/plugins/runtime-plugin-service';
 import {
   registerRuntimeJobDefinitions,
   type RuntimeJobDefinition,
@@ -30,8 +32,7 @@ import type {
   RuntimeLongTaskSubmissionPort,
 } from '../../application/runtime-host/runtime-task-ports';
 import type { GatewayControlPort } from '../../application/runtime-host/parent-shell-port';
-import type { OpenClawConfigRepositoryPort } from '../../application/openclaw/openclaw-config-repository';
-import type { OpenClawEnvironmentRepository } from '../../application/openclaw/openclaw-environment-repository';
+import type { RuntimePluginConfigStorePort } from '../../application/plugins/runtime-plugin-service';
 import type { RuntimeHostContainer } from '../container';
 
 export interface PluginRuntimeModule {
@@ -43,27 +44,29 @@ export function registerPluginRuntimeModule(container: RuntimeHostContainer, dep
   readonly logger: RuntimeHostLogger;
   readonly enabledPluginIdsEnv: string | undefined;
   readonly pluginCatalogEnv: string | undefined;
+  readonly injectedPluginPlatformPolicy: InjectedPluginCatalogPlatformPolicyPort;
 }): void {
-  container.register('plugins.fileSystem', () => new NodePluginFileSystem());
+  container.register('plugins.companionSkillWorkflow', (scope) => new PluginCompanionSkillWorkflow({
+    workspace: scope.resolve<PluginCompanionSkillWorkspacePort>('plugins.companionSkillWorkspace'),
+    fileSystem: scope.resolve('plugins.fileSystem'),
+    managedPluginCatalog: scope.resolve<ManagedPluginCatalogPort>('plugins.managedCatalog'),
+  }));
   container.register('plugins.companionSkillService', (scope) => new PluginCompanionSkillService(
-    scope.resolve('openclaw.environmentRepository'),
-    scope.resolve<OpenClawConfigRepositoryPort>('openclaw.configRepository'),
-    scope.resolve('plugins.fileSystem'),
-  ));
-  container.register('plugins.managedInstaller', (scope) => new ManagedPluginInstaller(
-    scope.resolve('openclaw.environmentRepository'),
-    scope.resolve<OpenClawConfigRepositoryPort>('openclaw.configRepository'),
-    scope.resolve('plugins.companionSkillService'),
-    scope.resolve('plugins.fileSystem'),
+    scope.resolve<PluginCompanionSkillWorkflow>('plugins.companionSkillWorkflow'),
   ));
   container.register('plugins.lifecycleRunner', (scope) => new RuntimePluginLifecycleRunner(
     scope.resolve('plugins.companionSkillService'),
   ));
+  container.register('plugins.lifecycleWorkflow', (scope) => new RuntimePluginLifecycleWorkflow({
+    configRepository: scope.resolve<RuntimePluginConfigStorePort>('plugins.configStore'),
+    configProjection: scope.resolve<RuntimePluginConfigProjectionPort>('plugins.configProjection'),
+    catalogProjection: scope.resolve<RuntimePluginCatalogProjectionPort>('plugins.catalogProjection'),
+    installer: scope.resolve<ManagedPluginInstallerPort>('plugins.managedInstaller'),
+    managedPluginCatalog: scope.resolve<ManagedPluginCatalogPort>('plugins.managedCatalog'),
+    lifecycleRunner: scope.resolve('plugins.lifecycleRunner'),
+  }));
   container.register('plugins.repository', (scope) => new RuntimePluginRepository(
-    scope.resolve<OpenClawConfigRepositoryPort>('openclaw.configRepository'),
-    scope.resolve('plugins.managedInstaller'),
-    scope.resolve('plugins.lifecycleRunner'),
-    scope.resolve('plugins.fileSystem'),
+    scope.resolve<RuntimePluginLifecycleWorkflow>('plugins.lifecycleWorkflow'),
   ));
   container.register('plugins.runtimeJobs', (scope): PluginRuntimeJobPort => createPluginRuntimeJobPort(
     scope.resolve<RuntimeLongTaskSubmissionPort>('runtime.tasks'),
@@ -72,12 +75,22 @@ export function registerPluginRuntimeModule(container: RuntimeHostContainer, dep
   container.register('plugins.registry', (scope) => {
     return new RuntimePluginRegistry({
       fallbackEnabledPluginIds: parseFallbackEnabledPluginIds(deps.enabledPluginIdsEnv),
-      injectedPluginCatalog: parseInjectedPluginCatalog(deps.pluginCatalogEnv),
+      injectedPluginCatalog: parseInjectedPluginCatalog(deps.pluginCatalogEnv, deps.injectedPluginPlatformPolicy),
       getLifecycleState: () => deps.lifecycle.getState(),
       logger: deps.logger,
       jobs: scope.resolve<PluginRuntimeJobPort>('plugins.runtimeJobs'),
       repository: scope.resolve('plugins.repository'),
     });
+  });
+  container.register('plugins.runtime', (scope): PluginRuntimePort => {
+    const registry = scope.resolve<RuntimePluginRegistry>('plugins.registry');
+    return {
+      snapshotPluginsRuntimePayload: () => registry.snapshotPluginsRuntimePayload(),
+      enqueueRefresh: () => registry.enqueueRefresh(),
+      getEnabledPluginIds: () => registry.getEnabledPluginIds(),
+      getPluginCatalog: () => registry.getPluginCatalog(),
+      getRefreshJob: () => registry.getRefreshJob(),
+    };
   });
 }
 

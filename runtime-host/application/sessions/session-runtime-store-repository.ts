@@ -1,6 +1,4 @@
-import { dirname, join } from 'node:path';
-import type { RuntimeFileSystemPort } from '../common/runtime-ports';
-import type { OpenClawWorkspacePort } from '../openclaw/openclaw-workspace-service';
+import type { SessionRuntimeStorePersistenceWorkflow } from '../workflows/session-runtime-store/session-runtime-store-persistence-workflow';
 
 export interface PersistedSessionRuntimeStore {
   version: 3;
@@ -8,8 +6,7 @@ export interface PersistedSessionRuntimeStore {
 }
 
 export interface SessionRuntimeStoreRepositoryDeps {
-  workspace: Pick<OpenClawWorkspacePort, 'getConfigDir'>;
-  fileSystem: RuntimeFileSystemPort;
+  persistenceWorkflow: Pick<SessionRuntimeStorePersistenceWorkflow, 'load' | 'save'>;
 }
 
 export interface SessionRuntimeStorePort {
@@ -17,46 +14,14 @@ export interface SessionRuntimeStorePort {
   save(store: PersistedSessionRuntimeStore): Promise<void>;
 }
 
-function normalizeActiveSessionKey(value: unknown): string | null {
-  return typeof value === 'string' && value.trim()
-    ? value.trim()
-    : null;
-}
-
 export class SessionRuntimeStoreRepository implements SessionRuntimeStorePort {
-  private readonly storeFilePath: string;
-
-  constructor(private readonly deps: SessionRuntimeStoreRepositoryDeps) {
-    this.storeFilePath = join(this.deps.workspace.getConfigDir(), 'matchaclaw-session-runtime-store.json');
-  }
+  constructor(private readonly deps: SessionRuntimeStoreRepositoryDeps) {}
 
   async load(): Promise<PersistedSessionRuntimeStore> {
-    try {
-      const parsed = JSON.parse(await this.deps.fileSystem.readTextFile(this.storeFilePath)) as unknown;
-      if (!parsed || typeof parsed !== 'object') {
-        return {
-          version: 3,
-          activeSessionKey: null,
-        };
-      }
-      return {
-        version: 3,
-        activeSessionKey: normalizeActiveSessionKey((parsed as Record<string, unknown>).activeSessionKey),
-      };
-    } catch {
-      return {
-        version: 3,
-        activeSessionKey: null,
-      };
-    }
+    return await this.deps.persistenceWorkflow.load();
   }
 
   async save(store: PersistedSessionRuntimeStore): Promise<void> {
-    const payload: PersistedSessionRuntimeStore = {
-      version: 3,
-      activeSessionKey: normalizeActiveSessionKey(store.activeSessionKey),
-    };
-    await this.deps.fileSystem.ensureDirectory(dirname(this.storeFilePath));
-    await this.deps.fileSystem.writeTextFile(this.storeFilePath, JSON.stringify(payload, null, 2));
+    await this.deps.persistenceWorkflow.save(store);
   }
 }

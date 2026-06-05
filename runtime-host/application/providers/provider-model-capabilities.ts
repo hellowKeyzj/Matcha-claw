@@ -93,6 +93,6 @@ export function findDisallowedModelCapabilities(
   return uniqueCapabilities(capabilities.filter((capability) => !allowed.has(capability)));
 }
 
-export function modelCapabilitiesToOpenClawInput(capabilities: readonly ModelCapability[]): string[] {
+export function modelCapabilitiesToRuntimeInput(capabilities: readonly ModelCapability[]): string[] {
   return capabilities.includes('imageUnderstand') ? ['text', 'image'] : ['text'];
 }

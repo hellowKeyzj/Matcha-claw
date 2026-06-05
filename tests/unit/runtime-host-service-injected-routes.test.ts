@@ -49,10 +49,7 @@ describe('runtime-host service-injected routes', () => {
   it('routes settings requests through the injected settings service', async () => {
     const settingsService = {
       getAll: vi.fn(async () => ({ theme: 'dark' })),
-      patch: vi.fn(),
-      reset: vi.fn(),
       getValue: vi.fn(),
-      setValue: vi.fn(),
     };
 
     const response = await dispatchRuntimeRouteDefinition(settingsRoutes, 
@@ -126,8 +123,6 @@ describe('runtime-host service-injected routes', () => {
       rpc: vi.fn(),
       status: vi.fn(async () => ({ status: 200, data: { connected: true } })),
       ready: vi.fn(),
-      sendMedia: vi.fn(),
-      agentWait: vi.fn(),
     };
     await expect(dispatchRuntimeRouteDefinition(gatewayRoutes, 'GET', '/api/gateway/status', undefined, { gatewayService }))
       .resolves.toEqual({ status: 200, data: { connected: true } });
@@ -135,9 +130,6 @@ describe('runtime-host service-injected routes', () => {
     const licenseService = {
       gate: vi.fn(async () => ({ status: 200, data: { allowed: true } })),
       storedKey: vi.fn(),
-      validate: vi.fn(),
-      revalidate: vi.fn(),
-      clear: vi.fn(),
     };
     await expect(dispatchRuntimeRouteDefinition(licenseRoutes, 'GET', '/api/license/gate', undefined, { licenseService }))
       .resolves.toEqual({ status: 200, data: { allowed: true } });
@@ -156,14 +148,8 @@ describe('runtime-host service-injected routes', () => {
     const subagentService = {
       listAgents: vi.fn(async () => ({ status: 200, data: { agents: [] } })),
       getConfig: vi.fn(),
-      setConfig: vi.fn(),
-      createAgent: vi.fn(),
-      updateAgent: vi.fn(),
-      deleteAgent: vi.fn(),
       getAgentFile: vi.fn(),
-      setAgentFile: vi.fn(),
       listAgentFiles: vi.fn(),
-      waitAgent: vi.fn(),
     };
     await expect(dispatchRuntimeRouteDefinition(subagentRoutes, 'POST', '/api/subagents/list', {}, { subagentService }))
       .resolves.toEqual({ status: 200, data: { agents: [] } });

@@ -1,8 +1,7 @@
-import { accepted, routeResponder, type RuntimeRouteDefinition } from './route-utils';
+import { routeResponder, type RuntimeRouteDefinition } from './route-utils';
 
 export interface ToolchainUvRouteService {
   checkInstalled(): Promise<boolean>;
-  install(): unknown;
 }
 
 export interface ToolchainUvRouteDeps {
@@ -14,11 +13,6 @@ export const toolchainUvRoutes: readonly RuntimeRouteDefinition<ToolchainUvRoute
     method: 'GET',
     path: '/api/toolchain/uv/check',
     handle: (_context, deps) => routeResponder.value(() => deps.toolchainUvService.checkInstalled()),
-  },
-  {
-    method: 'POST',
-    path: '/api/toolchain/uv/install',
-    handle: (_context, deps) => accepted(deps.toolchainUvService.install()),
   },
 ] as const;
 

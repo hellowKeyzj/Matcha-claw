@@ -1,15 +1,14 @@
 import { accepted, badRequest, ok, type ApplicationResponse } from '../common/application-response';
 import type { ProviderAccountJobPort } from './provider-account-jobs';
 import type { ParentShellPort } from '../runtime-host/parent-shell-port';
-import type { RuntimeClockPort, RuntimeHttpClientPort } from '../common/runtime-ports';
+import type { RuntimeHttpClientPort } from '../common/runtime-ports';
 import type { ProviderOAuthCompletionPort } from './oauth-runtime';
-import type { ProviderAccountsRuntimePort } from './provider-accounts-runtime-port';
+import type { ProviderAccountsProjectionPort } from './provider-accounts-projection-port';
+import type { ProviderProjectionKeyResolverPort } from './provider-store-model';
 import type { ProviderStorePort, ProviderStoreRecord } from './provider-store-repository';
-import type { ProviderModelsApplicationService } from './provider-models-service';
-import type { CapabilityRoutingApplicationService } from './capability-routing-service';
+import type { ProviderAccountMutationWorkflow } from '../workflows/provider-account/provider-account-mutation-workflow';
 import {
   accountToStatusLocal,
-  normalizeProviderAccountLocal,
   sortProviderAccountsLocal,
   validateProviderApiKeyLocal,
 } from './account-runtime';
@@ -17,7 +16,7 @@ import { PROVIDER_VENDOR_DEFINITIONS } from './provider-registry';
 import { resolveProviderModelCapabilities } from './provider-model-capabilities';
 import {
   isRecord,
-  normalizeProviderStoreForRuntime,
+  normalizeProviderStoreForProjection,
 } from './provider-store-model';
 
 type ProviderStore = ProviderStoreRecord;
@@ -26,26 +25,18 @@ export interface ProviderAccountsServiceDeps {
   readonly store: ProviderStorePort;
   readonly parentShell: ParentShellPort;
   readonly oauthCompletion: ProviderOAuthCompletionPort;
-  readonly runtime: ProviderAccountsRuntimePort;
-  readonly providerModels: ProviderModelsApplicationService;
-  readonly capabilityRouting: CapabilityRoutingApplicationService;
+  readonly projection: ProviderAccountsProjectionPort;
+  readonly mutations: Pick<ProviderAccountMutationWorkflow, 'executeCreate' | 'executeUpdate' | 'executeDelete'>;
   readonly httpClient: RuntimeHttpClientPort;
-  readonly clock: RuntimeClockPort;
   readonly jobs: ProviderAccountJobPort;
+  readonly projectionKeys: ProviderProjectionKeyResolverPort;
 }
 
 export class ProviderAccountsService {
-  private readonly runtime: ProviderAccountsRuntimePort;
+  private readonly projection: ProviderAccountsProjectionPort;
 
   constructor(private readonly deps: ProviderAccountsServiceDeps) {
-    this.runtime = deps.runtime;
-  }
-
-  private async syncStoreToOpenClaw(store: ProviderStore): Promise<void> {
-    const result = await this.runtime.syncStoreToRuntime(store);
-    if (result.storeModified) {
-      await this.deps.store.write(store);
-    }
+    this.projection = deps.projection;
   }
 
   private async resolveAccountApiKey(
@@ -53,12 +44,12 @@ export class ProviderAccountsService {
     accountId: string,
     account: Record<string, any> | null,
   ): Promise<string | undefined> {
-    return await this.runtime.resolveAccountApiKey({ store, accountId, account });
+    return await this.projection.resolveAccountApiKey({ store, accountId, account });
   }
 
   async list() {
     const store = await this.deps.store.read();
-    const { accounts: normalizedAccounts, storeModified } = normalizeProviderStoreForRuntime(store);
+    const { accounts: normalizedAccounts, storeModified } = normalizeProviderStoreForProjection(store, this.deps.projectionKeys);
     if (storeModified) {
       await this.deps.store.write(store);
     }
@@ -86,24 +77,7 @@ export class ProviderAccountsService {
   }
 
   async executeCreate(payload: unknown): Promise<{ success: true; account: Record<string, unknown> }> {
-    const body = isRecord(payload) ? payload : {};
-    const account = normalizeProviderAccountLocal(body.account, null, this.deps.clock);
-    if (!account) {
-      throw new Error('account 参数无效');
-    }
-    const store = await this.deps.store.read();
-    store.accounts[account.id] = account;
-    const apiKey = typeof body.apiKey === 'string' ? body.apiKey.trim() : '';
-    if (apiKey) {
-      store.apiKeys[account.id] = apiKey;
-    }
-    await this.deps.store.write(store);
-    await this.syncStoreToOpenClaw(store);
-    await this.deps.providerModels.syncOpenClaw();
-    return {
-      success: true,
-      account: store.accounts[account.id],
-    };
+    return await this.deps.mutations.executeCreate(payload);
   }
 
   async validate(payload: unknown) {
@@ -143,9 +117,9 @@ export class ProviderAccountsService {
       ? body.providerType
       : null;
     const accountId = typeof body.accountId === 'string' ? body.accountId.trim() : '';
-    const runtimeProviderId = typeof body.runtimeProviderId === 'string' ? body.runtimeProviderId.trim() : '';
+    const oauthProviderTokenKey = typeof body.oauthProviderTokenKey === 'string' ? body.oauthProviderTokenKey.trim() : '';
     const token = isRecord(body.token) ? body.token : null;
-    if (!providerType || !accountId || !runtimeProviderId || !token) {
+    if (!providerType || !accountId || !oauthProviderTokenKey || !token) {
       return badRequest('provider-accounts/oauth/complete-browser 参数无效');
     }
     if (typeof token.access !== 'string' || typeof token.refresh !== 'string' || typeof token.expires !== 'number') {
@@ -155,7 +129,7 @@ export class ProviderAccountsService {
       providerType,
       accountId,
       ...(typeof body.accountLabel === 'string' ? { accountLabel: body.accountLabel } : {}),
-      runtimeProviderId,
+      oauthProviderTokenKey,
       token: {
         access: token.access,
         refresh: token.refresh,
@@ -224,37 +198,7 @@ export class ProviderAccountsService {
   }
 
   async executeUpdate(accountId: string, payload: unknown): Promise<{ success: true; account: Record<string, unknown> }> {
-    const store = await this.deps.store.read();
-    const existing = isRecord(store.accounts[accountId]) ? store.accounts[accountId] : null;
-    if (!existing) {
-      throw new Error('Provider account not found');
-    }
-    const body = isRecord(payload) ? payload : {};
-    const updates = isRecord(body.updates) ? body.updates : null;
-    if (!updates) {
-      throw new Error('updates 参数无效');
-    }
-    const next = normalizeProviderAccountLocal({
-      ...existing,
-      ...updates,
-      id: accountId,
-    }, existing, this.deps.clock);
-    if (!next) {
-      throw new Error('provider account 参数无效');
-    }
-    store.accounts[accountId] = next;
-    if (Object.prototype.hasOwnProperty.call(body, 'apiKey')) {
-      const apiKey = typeof body.apiKey === 'string' ? body.apiKey.trim() : '';
-      if (apiKey) {
-        store.apiKeys[accountId] = apiKey;
-      } else {
-        delete store.apiKeys[accountId];
-      }
-    }
-    await this.deps.store.write(store);
-    await this.syncStoreToOpenClaw(store);
-    await this.deps.providerModels.syncOpenClaw();
-    return { success: true, account: next };
+    return await this.deps.mutations.executeUpdate(accountId, payload);
   }
 
   delete(accountId: string, apiKeyOnly: boolean): ApplicationResponse {
@@ -262,34 +206,6 @@ export class ProviderAccountsService {
   }
 
   async executeDelete(accountId: string, apiKeyOnly: boolean): Promise<{ success: true }> {
-    const store = await this.deps.store.read();
-    const existingAccount = isRecord(store.accounts[accountId]) ? store.accounts[accountId] : null;
-    const cleanupProviderKeys = this.runtime.resolveCleanupProviderKeys({
-      accountId,
-      account: existingAccount,
-    });
-
-    if (apiKeyOnly) {
-      delete store.apiKeys[accountId];
-      for (const providerKey of cleanupProviderKeys) {
-        await this.runtime.removeProviderKey(providerKey);
-      }
-      await this.deps.store.write(store);
-      await this.syncStoreToOpenClaw(store);
-      return { success: true };
-    }
-    delete store.accounts[accountId];
-    delete store.apiKeys[accountId];
-    await this.deps.providerModels.removeCredentialModels(accountId);
-    await this.deps.capabilityRouting.removeCredentialRoutes(accountId);
-    const isCustomMediaCredential = existingAccount?.vendorId === 'custom' && existingAccount.providerKind === 'media';
-    if (!isCustomMediaCredential) {
-      for (const providerKey of cleanupProviderKeys) {
-        await this.runtime.removeProviderConfig(providerKey);
-      }
-    }
-    await this.deps.store.write(store);
-    await this.syncStoreToOpenClaw(store);
-    return { success: true };
+    return await this.deps.mutations.executeDelete(accountId, apiKeyOnly);
   }
 }

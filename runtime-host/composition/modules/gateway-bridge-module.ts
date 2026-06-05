@@ -1,13 +1,9 @@
-import {
-  createOpenClawBridge,
-  type OpenClawGatewayClient,
-  type OpenClawBridge,
-} from '../../openclaw-bridge';
+import type { OpenClawGatewayClient } from '../../openclaw-bridge';
+import type { GatewayRuntimePort } from '../../application/gateway/gateway-runtime-port';
 import {
   registerRuntimeLifecycleDefinitions,
   type RuntimeHostLifecycle,
 } from '../../core/lifecycle';
-import type { OpenClawEnvironmentRepository } from '../../application/openclaw/openclaw-environment-repository';
 import type {
   RuntimeSchedulerPort,
   RuntimeSystemEnvironmentPort,
@@ -23,17 +19,19 @@ import type {
 } from '../../openclaw-bridge/client-auth-ports';
 import { buildInitialDiagnostics, createGatewayTransportIssue } from '../../openclaw-bridge/client-state';
 import type { SessionRuntimeService } from '../../application/sessions/service';
-import type { SettingsRepository } from '../../application/settings/store';
+import type { AgentRuntimeRegistry } from '../../application/agent-runtime/contracts/agent-runtime-registry';
+import { RUNTIME_HOST_CAPABILITY_ID } from '../../application/capabilities/runtime/runtime-host-capability';
 import {
   createRuntimeHostGatewayClient,
-} from '../gateway-event-bridge';
+  type RuntimeEndpointControlStatePort,
+} from '../../application/adapters/openclaw/gateway/openclaw-gateway-event-bridge';
 import type { ParentTransportClient } from '../parent-transport-client';
 import type { RuntimeHostContainer } from '../container';
 import type { RuntimeRouteResponse } from '../../api/dispatch/runtime-route-dispatcher';
 import type { RuntimeHostLogger } from '../../shared/logger';
+import type { RuntimeAddress } from '../../application/agent-runtime/contracts/runtime-address';
 
 export interface GatewayBridgeModule {
-  readonly openclawBridge: OpenClawBridge;
   readonly close: () => void;
   readonly setSessionRuntime: (sessionRuntime: SessionRuntimeService) => void;
 }
@@ -50,6 +48,26 @@ export interface GatewayBridgeModuleDeps {
 
 interface RuntimeHostGatewayClient extends OpenClawGatewayClient {
   close: () => void;
+}
+
+function resolveRuntimeHostCapabilityAddress(registry: AgentRuntimeRegistry): RuntimeAddress {
+  const descriptors = registry.listCapabilities().filter((capability) => capability.id === RUNTIME_HOST_CAPABILITY_ID);
+  if (descriptors.length !== 1) {
+    throw new Error(`Expected exactly one runtime.host capability: ${String(descriptors.length)}`);
+  }
+  return descriptors[0].address;
+}
+
+export interface GatewayBridgeRuntimeDataPort {
+  getRuntimeHostDataDir(): string;
+}
+
+export interface GatewayBridgeSettingsPort {
+  readGatewayToken(): Promise<string>;
+}
+
+export interface GatewayRuntimeFactoryPort {
+  createGatewayRuntime(client: OpenClawGatewayClient): GatewayRuntimePort;
 }
 
 function createUnavailableGatewayClient(reason: string, clock: RuntimeClockPort): RuntimeHostGatewayClient {
@@ -115,6 +133,8 @@ function createGatewayClientForEnvironment(deps: {
   readonly parentTransport: ParentTransportClient;
   readonly dispatchRoute: (method: string, route: string, payload: unknown) => Promise<RuntimeRouteResponse | null>;
   readonly getSessionRuntime: () => SessionRuntimeService | null;
+  readonly endpointControlState: RuntimeEndpointControlStatePort;
+  readonly runtimeHostCapabilityAddress: RuntimeAddress;
   readonly runtimeHostDataDir: string;
   readonly rawGatewayPort: string;
   readonly readGatewayToken: () => Promise<string>;
@@ -133,6 +153,8 @@ function createGatewayClientForEnvironment(deps: {
       parentTransport: deps.parentTransport,
       dispatchRoute: deps.dispatchRoute,
       getSessionRuntime: deps.getSessionRuntime,
+      endpointControlState: deps.endpointControlState,
+      runtimeHostCapabilityAddress: deps.runtimeHostCapabilityAddress,
       runtimeHostDataDir: deps.runtimeHostDataDir,
       gatewayPort,
       readGatewayToken: deps.readGatewayToken,
@@ -156,19 +178,23 @@ export function registerGatewayBridgeModule(
   deps: GatewayBridgeModuleDeps,
 ): void {
   let sessionRuntimeService: SessionRuntimeService | null = null;
+  container.register('gateway.endpointControlState', (scope): RuntimeEndpointControlStatePort => ({
+    updateRuntimeEndpointControlState: ({ address, ...input }) => scope
+      .resolve<AgentRuntimeRegistry>('agentRuntime.registry')
+      .updateRuntimeEndpointControlState({ address, ...input }),
+  }));
   container.register('gateway.bridgeClient', (scope) => {
-    const environmentRepository = scope.resolve<Pick<OpenClawEnvironmentRepository, 'getRuntimeHostDataDir'>>('openclaw.environmentRepository');
-    const settingsRepository = scope.resolve<Pick<SettingsRepository, 'getAll'>>('settings.repository');
+    const runtimeData = scope.resolve<GatewayBridgeRuntimeDataPort>('gateway.runtimeData');
+    const settings = scope.resolve<GatewayBridgeSettingsPort>('gateway.settings');
     return createGatewayClientForEnvironment({
       parentTransport: deps.parentTransport,
       dispatchRoute: deps.dispatchRoute,
       getSessionRuntime: () => sessionRuntimeService,
-      runtimeHostDataDir: environmentRepository.getRuntimeHostDataDir(),
+      endpointControlState: scope.resolve('gateway.endpointControlState'),
+      runtimeHostCapabilityAddress: resolveRuntimeHostCapabilityAddress(scope.resolve<AgentRuntimeRegistry>('agentRuntime.registry')),
+      runtimeHostDataDir: runtimeData.getRuntimeHostDataDir(),
       rawGatewayPort: deps.systemEnvironment.getEnv('MATCHACLAW_RUNTIME_HOST_GATEWAY_PORT'),
-      readGatewayToken: async () => {
-        const settings = await settingsRepository.getAll();
-        return typeof settings.gatewayToken === 'string' ? settings.gatewayToken : '';
-      },
+      readGatewayToken: () => settings.readGatewayToken(),
       platform: deps.systemEnvironment.platform,
       clock: deps.clock,
       idGenerator: scope.resolve<RuntimeIdGeneratorPort>('runtime.idGenerator'),
@@ -179,13 +205,13 @@ export function registerGatewayBridgeModule(
       logger: deps.logger,
     });
   });
-  container.register('gateway.openclawBridge', (scope) => createOpenClawBridge(
-    scope.resolve<RuntimeHostGatewayClient>('gateway.bridgeClient'),
-  ));
+  container.register('gateway.runtime', (scope): GatewayRuntimePort => {
+    const factory = scope.resolve<GatewayRuntimeFactoryPort>('gateway.runtimeFactory');
+    return factory.createGatewayRuntime(scope.resolve<RuntimeHostGatewayClient>('gateway.bridgeClient'));
+  });
   container.register('gateway.bridge', (scope): GatewayBridgeModule => {
     const gatewayClient = scope.resolve<RuntimeHostGatewayClient>('gateway.bridgeClient');
     return {
-      openclawBridge: scope.resolve<OpenClawBridge>('gateway.openclawBridge'),
       close: () => {
         gatewayClient.close();
       },

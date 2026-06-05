@@ -14,6 +14,12 @@ export interface RuntimeHostCleanupTask {
   readonly run: () => Promise<void> | void;
 }
 
+export interface RuntimeHostLifecycleRegistrationDescriptor {
+  readonly kind: 'background-service' | 'cleanup-task';
+  readonly name: string;
+  readonly owner: string | null;
+}
+
 export interface RuntimeHostLifecycleDefinitions {
   readonly backgroundServices?: readonly RuntimeHostBackgroundService[];
   readonly cleanupTasks?: readonly RuntimeHostCleanupTask[];
@@ -35,9 +41,12 @@ export class RuntimeHostLifecycle {
   private state: RuntimeHostLifecycleState = 'starting';
   private readonly backgroundServices: RuntimeHostBackgroundService[] = [];
   private readonly backgroundServiceNames = new Set<string>();
+  private readonly backgroundServiceOwners = new Map<string, string | null>();
   private readonly startedBackgroundServiceNames = new Set<string>();
   private readonly cleanupTasks: RuntimeHostCleanupTask[] = [];
   private readonly cleanupTaskNames = new Set<string>();
+  private readonly cleanupTaskOwners = new Map<string, string | null>();
+  private activeRegistrationOwner: string | null = null;
 
   constructor(private readonly logger: RuntimeHostLogger) {}
 
@@ -65,6 +74,7 @@ export class RuntimeHostLifecycle {
       throw new Error(`Runtime host background service already registered: ${service.name}`);
     }
     this.backgroundServiceNames.add(service.name);
+    this.backgroundServiceOwners.set(service.name, this.activeRegistrationOwner);
     this.backgroundServices.push(service);
   }
 
@@ -73,7 +83,37 @@ export class RuntimeHostLifecycle {
       throw new Error(`Runtime host cleanup task already registered: ${task.name}`);
     }
     this.cleanupTaskNames.add(task.name);
+    this.cleanupTaskOwners.set(task.name, this.activeRegistrationOwner);
     this.cleanupTasks.push(task);
+  }
+
+  withRegistrationOwner<T>(owner: string, register: () => T): T {
+    const normalizedOwner = owner.trim();
+    if (!normalizedOwner) {
+      throw new Error('Runtime lifecycle registration owner is required');
+    }
+    const previousOwner = this.activeRegistrationOwner;
+    this.activeRegistrationOwner = normalizedOwner;
+    try {
+      return register();
+    } finally {
+      this.activeRegistrationOwner = previousOwner;
+    }
+  }
+
+  listRegistrations(): RuntimeHostLifecycleRegistrationDescriptor[] {
+    return [
+      ...this.backgroundServices.map((service) => ({
+        kind: 'background-service' as const,
+        name: service.name,
+        owner: this.backgroundServiceOwners.get(service.name) ?? null,
+      })),
+      ...this.cleanupTasks.map((task) => ({
+        kind: 'cleanup-task' as const,
+        name: task.name,
+        owner: this.cleanupTaskOwners.get(task.name) ?? null,
+      })),
+    ];
   }
 
   startBackgroundServices(): void {

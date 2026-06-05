@@ -1,5 +1,3 @@
-import { getOpenClawProviderKeyForType } from './provider-runtime-rules';
-
 export type ProviderStoreLike = {
   accounts: Record<string, Record<string, unknown>>;
   apiKeys: Record<string, string>;
@@ -12,6 +10,10 @@ export type NormalizedProviderCredential = {
   vendorId: string;
   account: Record<string, unknown>;
 };
+
+export interface ProviderProjectionKeyResolverPort {
+  resolveProviderKey(input: { vendorId: string; accountId: string }): string;
+}
 
 export function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
@@ -55,7 +57,10 @@ function compareAccountsForRuntimeKey(left: NormalizedProviderCredential, right:
   return left.accountId.localeCompare(right.accountId);
 }
 
-export function normalizeProviderStoreForRuntime(store: ProviderStoreLike): {
+export function normalizeProviderStoreForProjection(
+  store: ProviderStoreLike,
+  projectionKeys: ProviderProjectionKeyResolverPort,
+): {
   accounts: NormalizedProviderCredential[];
   storeModified: boolean;
 } {
@@ -90,7 +95,7 @@ export function normalizeProviderStoreForRuntime(store: ProviderStoreLike): {
         storeModified = true;
       }
     }
-    const providerKey = getOpenClawProviderKeyForType(vendorId, accountId);
+    const providerKey = projectionKeys.resolveProviderKey({ vendorId, accountId });
     normalizedAccounts.push({
       accountId,
       providerKey,

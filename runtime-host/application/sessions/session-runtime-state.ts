@@ -1,4 +1,6 @@
+import { buildRuntimeAddressKey, type RuntimeAddress } from '../agent-runtime/contracts/runtime-address';
 import type {
+  SessionApprovalRequestItem,
   SessionExecutionGraphItem,
   SessionRuntimeStateSnapshot,
   SessionTimelineEntry,
@@ -14,13 +16,14 @@ import type {
 import {
   normalizeString,
 } from './session-value-normalization';
-import type { RuntimeProviderRegistry } from './runtime-providers/runtime-provider-registry';
-import type { RuntimeSessionContext } from './runtime-providers/runtime-provider-types';
+import type { AgentRuntimeRegistry } from '../agent-runtime/contracts/agent-runtime-registry';
+import type { RuntimeSessionContext } from '../agent-runtime/contracts/runtime-endpoint-types';
 
 export interface SessionRuntimeOverlay {
   sessionKey: string;
   protocolId: string;
-  runtimeProviderId: string;
+  runtimeEndpointId: string;
+  runtimeAddress: RuntimeAddress;
   timelineEntries: SessionTimelineEntry[];
   runtime: SessionRuntimeStateSnapshot;
   runtimeModel: string | null;
@@ -28,8 +31,14 @@ export interface SessionRuntimeOverlay {
 
 export interface SessionRuntimeStateStoreDeps {
   runtimeStore: SessionRuntimeStorePort;
-  runtimeProviderRegistry: RuntimeProviderRegistry;
+  agentRuntimeRegistry: AgentRuntimeRegistry;
   logger?: Pick<RuntimeHostLogger, 'warn'>;
+}
+
+export interface SessionApprovalIndexEntry {
+  sessionKey: string;
+  stateKey: string;
+  approval: SessionApprovalRequestItem;
 }
 
 function clearRuntimeIssueIfMatches(
@@ -54,7 +63,10 @@ function clearRuntimeIssueIfMatches(
 
 export class SessionRuntimeStateStore {
   private readonly sessionStates = new Map<string, SessionRuntimeTimelineState>();
-  private readonly parentSessionsByChildSessionKey = new Map<string, Set<string>>();
+  private readonly parentSessionsByChildStateKey = new Map<string, Set<string>>();
+  private readonly sessionKeysWithTransportIssue = new Set<string>();
+  private readonly approvalsByAddressKey = new Map<string, SessionApprovalIndexEntry[]>();
+  private readonly approvalsById = new Map<string, SessionApprovalIndexEntry>();
   private readonly resolvedSessionModels = new Map<string, string>();
   private readonly persistedStoreReady: Promise<void>;
   private activeSessionKey: string | null = null;
@@ -96,81 +108,206 @@ export class SessionRuntimeStateStore {
   }
 
   getSessionState(sessionKey: string, context?: RuntimeSessionContext): SessionRuntimeTimelineState {
-    const existing = this.sessionStates.get(sessionKey);
+    const stateKey = context ? this.buildStateKey(sessionKey, context) : null;
+    const existing = stateKey ? this.sessionStates.get(stateKey) : this.findUniqueSessionState(sessionKey);
     if (existing) {
       return existing;
     }
-    const resolvedContext = context ?? this.deps.runtimeProviderRegistry.resolveSessionContext(sessionKey);
+    const resolvedContext = context ?? this.deps.agentRuntimeRegistry.resolveSessionContext(sessionKey);
+    const resolvedStateKey = this.buildStateKey(sessionKey, resolvedContext);
     const created = createEmptyTimelineState({ sessionKey }, resolvedContext);
-    this.sessionStates.set(sessionKey, created);
+    this.sessionStates.set(resolvedStateKey, created);
     return created;
   }
 
-  findSessionState(sessionKey: string): SessionRuntimeTimelineState | null {
-    return this.sessionStates.get(sessionKey) ?? null;
-  }
-
-  hasSessionState(sessionKey: string): boolean {
-    return this.sessionStates.has(sessionKey);
-  }
-
-  deleteSessionState(sessionKey: string): void {
-    this.sessionStates.delete(sessionKey);
-    this.parentSessionsByChildSessionKey.delete(sessionKey);
-    for (const parents of this.parentSessionsByChildSessionKey.values()) {
-      parents.delete(sessionKey);
+  findSessionState(sessionKey: string, context?: RuntimeSessionContext): SessionRuntimeTimelineState | null {
+    if (context) {
+      return this.sessionStates.get(this.buildStateKey(sessionKey, context)) ?? null;
     }
-    this.resolvedSessionModels.delete(sessionKey);
+    return this.findUniqueSessionState(sessionKey);
+  }
+
+  findSessionStateByAddress(sessionKey: string, runtimeAddress: RuntimeAddress): SessionRuntimeTimelineState | null {
+    return this.sessionStates.get(this.buildAddressStateKey(sessionKey, runtimeAddress)) ?? null;
+  }
+
+  hasSessionState(sessionKey: string, context?: RuntimeSessionContext): boolean {
+    return this.findSessionState(sessionKey, context) !== null;
+  }
+
+  deleteSessionState(sessionKey: string, context?: RuntimeSessionContext): void {
+    const stateKeys = context
+      ? [this.buildStateKey(sessionKey, context)]
+      : this.findStateKeys(sessionKey);
+    for (const stateKey of stateKeys) {
+      this.sessionStates.delete(stateKey);
+      this.parentSessionsByChildStateKey.delete(stateKey);
+      this.sessionKeysWithTransportIssue.delete(stateKey);
+      this.removeSessionFromApprovalIndexes(stateKey);
+      for (const parents of this.parentSessionsByChildStateKey.values()) {
+        parents.delete(stateKey);
+      }
+      this.resolvedSessionModels.delete(stateKey);
+    }
     this.clearActiveSessionKey(sessionKey);
   }
 
   listSessionStates(): Array<[string, SessionRuntimeTimelineState]> {
-    return Array.from(this.sessionStates.entries());
+    return Array.from(this.sessionStates.values()).map((state) => [state.sessionKey, state]);
   }
 
   listRuntimeOverlays(): SessionRuntimeOverlay[] {
-    return this.listSessionStates().map(([sessionKey, state]) => ({
-      sessionKey,
+    return Array.from(this.sessionStates.values()).map((state) => ({
+      sessionKey: state.sessionKey,
       protocolId: state.canonical.protocolId,
-      runtimeProviderId: state.canonical.runtimeProviderId,
+      runtimeEndpointId: state.canonical.runtimeEndpointId,
+      runtimeAddress: state.canonical.context.address,
       timelineEntries: state.timelineEntries,
       runtime: state.runtime,
-      runtimeModel: this.getResolvedSessionModel(sessionKey),
+      runtimeModel: this.getResolvedSessionModel(state.sessionKey, state.canonical.context),
     }));
   }
 
-  setResolvedSessionModel(sessionKey: string, model: string): void {
-    this.resolvedSessionModels.set(sessionKey, model);
+  setResolvedSessionModel(sessionKey: string, model: string, context?: RuntimeSessionContext): void {
+    const stateKey = context ? this.buildStateKey(sessionKey, context) : this.resolveExistingStateKey(sessionKey);
+    this.resolvedSessionModels.set(stateKey, model);
   }
 
-  getResolvedSessionModel(sessionKey: string): string | null {
-    return this.resolvedSessionModels.get(sessionKey) ?? null;
+  getResolvedSessionModel(sessionKey: string, context?: RuntimeSessionContext): string | null {
+    const stateKey = context ? this.buildStateKey(sessionKey, context) : this.resolveExistingStateKeyOrNull(sessionKey);
+    return stateKey ? this.resolvedSessionModels.get(stateKey) ?? null : null;
   }
 
 
   updateExecutionGraphDependencyIndex(
     sessionKey: string,
+    parentContext: RuntimeSessionContext,
     graphs: SessionExecutionGraphItem[],
   ): void {
-    for (const parents of this.parentSessionsByChildSessionKey.values()) {
-      parents.delete(sessionKey);
+    const parentStateKey = this.buildStateKey(sessionKey, parentContext);
+    for (const parents of this.parentSessionsByChildStateKey.values()) {
+      parents.delete(parentStateKey);
     }
     for (const graph of graphs) {
       const childSessionKey = normalizeString(graph.childSessionKey);
-      if (!childSessionKey) {
+      if (!childSessionKey || !graph.childRuntimeAddress) {
         continue;
       }
-      let parents = this.parentSessionsByChildSessionKey.get(childSessionKey);
+      const childStateKey = this.buildAddressStateKey(childSessionKey, graph.childRuntimeAddress);
+      let parents = this.parentSessionsByChildStateKey.get(childStateKey);
       if (!parents) {
         parents = new Set<string>();
-        this.parentSessionsByChildSessionKey.set(childSessionKey, parents);
+        this.parentSessionsByChildStateKey.set(childStateKey, parents);
       }
-      parents.add(sessionKey);
+      parents.add(parentStateKey);
     }
   }
 
-  listParentSessionKeys(childSessionKey: string): string[] {
-    return Array.from(this.parentSessionsByChildSessionKey.get(childSessionKey) ?? []);
+  listParentSessionStates(childSessionKey: string, runtimeAddress: RuntimeAddress): SessionRuntimeTimelineState[] {
+    const parentStateKeys = this.parentSessionsByChildStateKey.get(this.buildAddressStateKey(childSessionKey, runtimeAddress)) ?? [];
+    const states: SessionRuntimeTimelineState[] = [];
+    for (const stateKey of parentStateKeys) {
+      const state = this.sessionStates.get(stateKey);
+      if (state) {
+        states.push(state);
+      }
+    }
+    return states;
+  }
+
+  syncTransportIssueIndex(sessionKey: string, state: SessionRuntimeTimelineState): void {
+    const stateKey = this.buildStateKey(sessionKey, state.canonical.context);
+    if (state.canonical.control.issue && state.canonical.control.issueTransportEpoch != null) {
+      this.sessionKeysWithTransportIssue.add(stateKey);
+      return;
+    }
+    this.sessionKeysWithTransportIssue.delete(stateKey);
+  }
+
+  private removeSessionFromApprovalIndexes(stateKey: string): void {
+    for (const [addressKey, entries] of this.approvalsByAddressKey.entries()) {
+      const retained = entries.filter((entry) => entry.stateKey !== stateKey);
+      if (retained.length === 0) {
+        this.approvalsByAddressKey.delete(addressKey);
+        continue;
+      }
+      this.approvalsByAddressKey.set(addressKey, retained);
+    }
+    for (const [approvalId, entry] of this.approvalsById.entries()) {
+      if (entry.stateKey === stateKey) {
+        this.approvalsById.delete(approvalId);
+      }
+    }
+  }
+
+  syncApprovalAddressIndex(sessionKey: string, state: SessionRuntimeTimelineState): void {
+    const stateKey = this.buildStateKey(sessionKey, state.canonical.context);
+    this.removeSessionFromApprovalIndexes(stateKey);
+    for (const approval of state.canonical.approvals) {
+      const entry = { sessionKey, stateKey, approval };
+      const addressKey = buildRuntimeAddressKey(approval.runtimeAddress);
+      const entries = this.approvalsByAddressKey.get(addressKey) ?? [];
+      entries.push(entry);
+      this.approvalsByAddressKey.set(addressKey, entries);
+      this.approvalsById.set(approval.id, entry);
+    }
+  }
+
+  listApprovals(runtimeAddress: RuntimeAddress): SessionApprovalIndexEntry[] {
+    return [...this.approvalsByAddressKey.get(buildRuntimeAddressKey(runtimeAddress)) ?? []];
+  }
+
+  findApproval(approvalId: string): SessionApprovalIndexEntry | null {
+    return this.approvalsById.get(approvalId) ?? null;
+  }
+
+  listApprovalSessionStates(runtimeAddress: RuntimeAddress): Array<[string, SessionRuntimeTimelineState]> {
+    const states: Array<[string, SessionRuntimeTimelineState]> = [];
+    for (const entry of this.listApprovals(runtimeAddress)) {
+      const state = this.sessionStates.get(entry.stateKey);
+      if (state) {
+        states.push([entry.sessionKey, state]);
+      }
+    }
+    return states;
+  }
+
+  private findStateKeys(sessionKey: string): string[] {
+    return Array.from(this.sessionStates.entries())
+      .filter(([, state]) => state.sessionKey === sessionKey)
+      .map(([stateKey]) => stateKey);
+  }
+
+  private findUniqueSessionState(sessionKey: string): SessionRuntimeTimelineState | null {
+    const matches = this.findStateKeys(sessionKey).map((stateKey) => this.sessionStates.get(stateKey)!);
+    if (matches.length > 1) {
+      throw new Error(`Session state requires explicit runtime address metadata: ${sessionKey}`);
+    }
+    return matches[0] ?? null;
+  }
+
+  private resolveExistingStateKey(sessionKey: string): string {
+    const stateKey = this.resolveExistingStateKeyOrNull(sessionKey);
+    if (!stateKey) {
+      throw new Error(`Unknown session state: ${sessionKey}`);
+    }
+    return stateKey;
+  }
+
+  private resolveExistingStateKeyOrNull(sessionKey: string): string | null {
+    const matches = this.findStateKeys(sessionKey);
+    if (matches.length > 1) {
+      throw new Error(`Session state requires explicit runtime address metadata: ${sessionKey}`);
+    }
+    return matches[0] ?? null;
+  }
+
+  private buildStateKey(sessionKey: string, context: RuntimeSessionContext): string {
+    return this.buildAddressStateKey(sessionKey, context.address);
+  }
+
+  private buildAddressStateKey(sessionKey: string, runtimeAddress: RuntimeAddress): string {
+    return `${buildRuntimeAddressKey(runtimeAddress)}::${sessionKey}`;
   }
 
   getLatestConnectedTransportEpoch(): number {
@@ -193,9 +330,15 @@ export class SessionRuntimeStateStore {
       return [];
     }
     const expiredSessionKeys: string[] = [];
-    for (const [sessionKey, state] of this.sessionStates.entries()) {
+    for (const stateKey of Array.from(this.sessionKeysWithTransportIssue)) {
+      const state = this.sessionStates.get(stateKey);
+      if (!state) {
+        this.sessionKeysWithTransportIssue.delete(stateKey);
+        continue;
+      }
       const issueEpoch = state.canonical.control.issueTransportEpoch;
       if (issueEpoch == null || issueEpoch > transportEpoch || !state.canonical.control.issue) {
+        this.syncTransportIssueIndex(state.sessionKey, state);
         continue;
       }
       const expiredIssue = state.canonical.control.issue;
@@ -206,7 +349,8 @@ export class SessionRuntimeStateStore {
       };
       state.canonical.runtime = clearRuntimeIssueIfMatches(state.canonical.runtime, expiredIssue);
       state.runtime = clearRuntimeIssueIfMatches(state.runtime, expiredIssue);
-      expiredSessionKeys.push(sessionKey);
+      this.sessionKeysWithTransportIssue.delete(stateKey);
+      expiredSessionKeys.push(state.sessionKey);
     }
     if (expiredSessionKeys.length > 0) {
       this.persistStore();

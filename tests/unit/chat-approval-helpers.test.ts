@@ -5,10 +5,12 @@ import {
   groupApprovalsBySession,
 } from '@/stores/chat/approval-handlers';
 import type { ApprovalItem } from '@/stores/chat/types';
+import { createOpenClawTestRuntimeAddress } from './helpers/runtime-address-fixtures';
 
 function approval(input: Partial<ApprovalItem> & Pick<ApprovalItem, 'id' | 'sessionKey' | 'createdAtMs'>): ApprovalItem {
   return {
     title: input.title ?? 'approval',
+    runtimeAddress: input.runtimeAddress ?? createOpenClawTestRuntimeAddress(input.sessionKey),
     allowedDecisions: input.allowedDecisions ?? ['allow-once', 'deny'],
     ...input,
   };
@@ -36,9 +38,11 @@ describe('chat approval handlers', () => {
       grouped: {
         'agent:main:main': [approval({ id: 'approval-a', sessionKey: 'agent:main:main', createdAtMs: 1 })],
       },
+      sessionKeys: ['agent:old:main', 'agent:main:main'],
     });
 
     expect(patch.pendingApprovalsBySession).toEqual({
+      'agent:old:main': [],
       'agent:main:main': [expect.objectContaining({ id: 'approval-a' })],
     });
   });
@@ -52,7 +56,7 @@ describe('chat approval handlers', () => {
         },
       } as never,
       grouped: {},
-      sessionKeyHint: 'agent:main:main',
+      sessionKeys: ['agent:main:main'],
     });
 
     expect(patch.pendingApprovalsBySession).toEqual({

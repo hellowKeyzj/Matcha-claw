@@ -17,6 +17,7 @@ import {
   patchSessionSnapshot,
 } from './store-state-helpers';
 import { useTaskSnapshotStore } from './task-snapshot-store';
+import { buildSessionRecordKey, findSessionRecordKey } from './session-identity';
 import {
   logRendererTodoToolDebug,
   summarizeAssistantTurnForTodoToolDebug,
@@ -47,6 +48,21 @@ function normalizeIdentifier(value: unknown): string {
   return typeof value === 'string' ? value.trim() : '';
 }
 
+function resolveSessionUpdateRecordKey(
+  state: Pick<ChatStoreState, 'loadedSessions'>,
+  backendSessionKey: string,
+  runtimeAddress: SessionStateSnapshot['catalog']['runtimeAddress'],
+): string {
+  if (Object.prototype.hasOwnProperty.call(state.loadedSessions, backendSessionKey)) {
+    return backendSessionKey;
+  }
+  const existingRecordKey = findSessionRecordKey(state, backendSessionKey, runtimeAddress);
+  if (existingRecordKey) {
+    return existingRecordKey;
+  }
+  return buildSessionRecordKey(runtimeAddress, backendSessionKey);
+}
+
 function patchSessionSnapshotWithTodoToolDebug(
   state: Pick<ChatStoreState, 'loadedSessions'>,
   sessionKey: string,
@@ -73,6 +89,7 @@ function patchSessionSnapshotWithTodoToolDebug(
 function applySessionLifecycleEvent(
   input: CreateStoreRuntimeEventActionsInput & {
     targetSessionKey: string;
+    targetBackendSessionKey: string;
     currentSessionKey: string;
     event: Extract<SessionUpdateEvent, { sessionUpdate: 'session_info_update' }>;
   },
@@ -81,6 +98,7 @@ function applySessionLifecycleEvent(
     set,
     get,
     targetSessionKey,
+    targetBackendSessionKey,
     currentSessionKey,
     event,
   } = input;
@@ -98,8 +116,8 @@ function applySessionLifecycleEvent(
       || event.phase === 'aborted'
     )
     && (
-      eventSessionKey !== currentSessionKey
-      || !Object.prototype.hasOwnProperty.call(stateBeforeHandle.loadedSessions, eventSessionKey)
+      targetSessionKey !== currentSessionKey
+      || !Object.prototype.hasOwnProperty.call(stateBeforeHandle.loadedSessions, targetSessionKey)
     )
   ) {
     void stateBeforeHandle.loadSessions();
@@ -109,7 +127,7 @@ function applySessionLifecycleEvent(
     (event.phase === 'error' || event.phase === 'aborted')
     && (
       !eventSessionKey
-      || eventSessionKey === currentSessionKey
+      || targetSessionKey === currentSessionKey
       || (eventRunId && getSessionRuntime(stateBeforeHandle, currentSessionKey).activeRunId === eventRunId)
     )
   ) {
@@ -123,7 +141,7 @@ function applySessionLifecycleEvent(
 
   if (shouldIgnoreRuntimeEvent({
     eventSessionKey,
-    targetSessionKey,
+    targetBackendSessionKey,
   })) {
     return;
   }
@@ -221,10 +239,15 @@ export function handleStoreSessionUpdateEvent(
   if (eventSessionKey && snapshotSessionKey && eventSessionKey !== snapshotSessionKey) {
     return;
   }
-  const targetSessionKey = eventSessionKey || snapshotSessionKey;
-  if (!targetSessionKey) {
+  const backendSessionKey = eventSessionKey || snapshotSessionKey;
+  if (!backendSessionKey) {
     return;
   }
+  const targetSessionKey = resolveSessionUpdateRecordKey(
+    stateBeforeHandle,
+    backendSessionKey,
+    sessionUpdate.snapshot.catalog.runtimeAddress,
+  );
   const eventRunId = normalizeIdentifier(sessionUpdate.runId);
 
   logRendererTodoToolDebug('renderer.session-update.received', {
@@ -244,6 +267,7 @@ export function handleStoreSessionUpdateEvent(
       set,
       get,
       targetSessionKey,
+      targetBackendSessionKey: backendSessionKey,
       currentSessionKey,
       event: sessionUpdate,
     });
@@ -253,8 +277,8 @@ export function handleStoreSessionUpdateEvent(
   if (sessionUpdate.sessionUpdate === 'plan') {
     useTaskSnapshotStore.getState().reportSessionUpdate(sessionUpdate);
     if (shouldIgnoreRuntimeEvent({
-      eventSessionKey,
-      targetSessionKey,
+      eventSessionKey: null,
+      targetBackendSessionKey: backendSessionKey,
     })) {
       return;
     }
@@ -280,7 +304,7 @@ export function handleStoreSessionUpdateEvent(
 
   if (shouldIgnoreRuntimeEvent({
     eventSessionKey,
-    targetSessionKey,
+    targetBackendSessionKey: backendSessionKey,
   })) {
     return;
   }

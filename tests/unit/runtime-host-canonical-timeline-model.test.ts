@@ -1,23 +1,49 @@
 import { describe, expect, it } from 'vitest';
-import { buildRenderItemsFromCanonicalState, buildTimelineEntriesFromCanonicalState } from '../../runtime-host/application/sessions/canonical/canonical-projection';
+import { buildProjectedCanonicalSessionState, buildRenderItemsFromCanonicalState, buildTimelineEntriesFromCanonicalState } from '../../runtime-host/application/sessions/canonical/canonical-projection';
 import { createEmptyCanonicalSessionState, reduceCanonicalSessionEvents } from '../../runtime-host/application/sessions/canonical/canonical-reducer';
 import { SessionSnapshotService } from '../../runtime-host/application/sessions/session-snapshot-service';
-import { createEmptySessionRuntimeState } from '../../runtime-host/application/sessions/session-state-model';
+import { SessionSnapshotWorkflow } from '../../runtime-host/application/workflows/session-snapshot/session-snapshot-workflow';
+import { createEmptySessionRuntimeState, createEmptyTimelineState } from '../../runtime-host/application/sessions/session-state-model';
+import { SessionTimelineRuntime } from '../../runtime-host/application/sessions/session-timeline-runtime';
+import { SessionExecutionGraphRuntime } from '../../runtime-host/application/sessions/session-execution-graph-runtime';
 import type { CanonicalSessionEvent } from '../../runtime-host/application/sessions/canonical/canonical-events';
 import type {
   SessionRuntimeTimelineState,
 } from '../../runtime-host/application/sessions/session-runtime-types';
-import { OPENCLAW_RUNTIME_PROTOCOL_ID, OPENCLAW_RUNTIME_PROVIDER_ID } from '../../runtime-host/application/sessions/runtime-providers/runtime-provider-types';
+import { OPENCLAW_RUNTIME_PROTOCOL_ID, OPENCLAW_RUNTIME_ENDPOINT_ID } from '../../runtime-host/application/adapters/openclaw/runtime/openclaw-runtime-identity';
+import { createOpenClawTestRuntimeAddress, createOpenClawTestRuntimeContext } from './helpers/runtime-address-fixtures';
 
 function buildRuntimeState(): ReturnType<typeof createEmptySessionRuntimeState> {
   return createEmptySessionRuntimeState();
 }
 
-function base(eventId: string): Pick<CanonicalSessionEvent, 'eventId' | 'protocolId' | 'runtimeProviderId' | 'source' | 'sessionId' | 'runId' | 'seq' | 'timestamp' | 'laneKey' | 'origin'> {
+function createTimelineRuntime(state: SessionRuntimeTimelineState) {
+  const stateStore = {
+    ready: async () => undefined,
+    getSessionState: () => state,
+    persistStore: () => undefined,
+    updateExecutionGraphDependencyIndex: () => undefined,
+    syncTransportIssueIndex: () => undefined,
+    syncApprovalAddressIndex: () => undefined,
+    listParentSessionStates: () => [],
+  };
+  const executionGraphRuntime = new SessionExecutionGraphRuntime({
+    stateStore: stateStore as never,
+  });
+  return new SessionTimelineRuntime({
+    stateStore: stateStore as never,
+    sessionStorage: {} as never,
+    transcriptLoader: {} as never,
+    executionGraphRuntime,
+    clock: { nowMs: () => 1_700_000_000_500 },
+  });
+}
+
+function base(eventId: string): Pick<CanonicalSessionEvent, 'eventId' | 'protocolId' | 'runtimeEndpointId' | 'source' | 'sessionId' | 'runId' | 'seq' | 'timestamp' | 'laneKey' | 'origin'> {
   return {
     eventId,
     protocolId: OPENCLAW_RUNTIME_PROTOCOL_ID,
-    runtimeProviderId: OPENCLAW_RUNTIME_PROVIDER_ID,
+    runtimeEndpointId: OPENCLAW_RUNTIME_ENDPOINT_ID,
     source: 'live',
     sessionId: 'agent:main:main',
     runId: 'run-1',
@@ -25,8 +51,8 @@ function base(eventId: string): Pick<CanonicalSessionEvent, 'eventId' | 'protoco
     timestamp: 1_700_000_000_000,
     laneKey: 'main',
     origin: {
-      providerEventType: 'test',
-      providerIds: {
+      runtimeEventType: 'test',
+      runtimeIds: {
         sessionKey: 'agent:main:main',
         runId: 'run-1',
       },
@@ -36,7 +62,7 @@ function base(eventId: string): Pick<CanonicalSessionEvent, 'eventId' | 'protoco
 
 describe('Runtime Host canonical ACP projection', () => {
   it('keeps tool lifecycle associated with the owning assistant turn and stable segment keys', () => {
-    const state = createEmptyCanonicalSessionState('agent:main:main');
+    const state = createEmptyCanonicalSessionState('agent:main:main', createOpenClawTestRuntimeContext('agent:main:main'));
     reduceCanonicalSessionEvents(state, [{
       ...base('message-1'),
       type: 'message_snapshot',
@@ -91,7 +117,7 @@ describe('Runtime Host canonical ACP projection', () => {
   });
 
   it('projects state-only tool lifecycle as Runtime Host side state instead of visible tool cards', () => {
-    const state = createEmptyCanonicalSessionState('agent:main:main');
+    const state = createEmptyCanonicalSessionState('agent:main:main', createOpenClawTestRuntimeContext('agent:main:main'));
     reduceCanonicalSessionEvents(state, [{
       ...base('plan-1'),
       type: 'plan',
@@ -113,8 +139,55 @@ describe('Runtime Host canonical ACP projection', () => {
     });
   });
 
+  it('projects thought snapshots into an assistant turn even before assistant message text arrives', () => {
+    const state = createEmptyCanonicalSessionState('agent:main:main', createOpenClawTestRuntimeContext('agent:main:main'));
+    reduceCanonicalSessionEvents(state, [{
+      ...base('thought-1'),
+      seq: 1,
+      type: 'thought_snapshot',
+      text: '先检查入口',
+      status: 'streaming',
+    }]);
+
+    const items = buildRenderItemsFromCanonicalState({ state, executionGraphItems: [] });
+    expect(items).toMatchObject([{
+      kind: 'assistant-turn',
+      runId: 'run-1',
+      status: 'final',
+      thinking: '先检查入口',
+      segments: [{ kind: 'thinking', text: '先检查入口' }],
+      text: '',
+    }]);
+  });
+
+  it('settles thought-only assistant turns when the run is no longer active', () => {
+    const state = createEmptyCanonicalSessionState('agent:main:main', createOpenClawTestRuntimeContext('agent:main:main'));
+    reduceCanonicalSessionEvents(state, [{
+      ...base('thought-1'),
+      seq: 1,
+      type: 'thought_snapshot',
+      text: '先检查入口',
+      status: 'streaming',
+    }, {
+      ...base('lifecycle-final-1'),
+      seq: 2,
+      type: 'lifecycle',
+      phase: 'final',
+      runPhase: 'done',
+      error: null,
+    }]);
+
+    const items = buildRenderItemsFromCanonicalState({ state, executionGraphItems: [] });
+    expect(items).toMatchObject([{
+      kind: 'assistant-turn',
+      runId: 'run-1',
+      status: 'final',
+      thinking: '先检查入口',
+    }]);
+  });
+
   it('keeps same-run assistant messages distinct and ordered around tool output', () => {
-    const state = createEmptyCanonicalSessionState('agent:main:main');
+    const state = createEmptyCanonicalSessionState('agent:main:main', createOpenClawTestRuntimeContext('agent:main:main'));
     reduceCanonicalSessionEvents(state, [{
       ...base('message-before-tool'),
       seq: 1,
@@ -173,7 +246,7 @@ describe('Runtime Host canonical ACP projection', () => {
   });
 
   it('uses seq as the local message identity fallback without conflating messages by runId', () => {
-    const state = createEmptyCanonicalSessionState('agent:main:main');
+    const state = createEmptyCanonicalSessionState('agent:main:main', createOpenClawTestRuntimeContext('agent:main:main'));
     reduceCanonicalSessionEvents(state, [{
       ...base('assistant-1'),
       seq: 1,
@@ -202,7 +275,7 @@ describe('Runtime Host canonical ACP projection', () => {
   });
 
   it('does not emit duplicate render items when duplicate assistant timeline keys exist', () => {
-    const state = createEmptyCanonicalSessionState('agent:main:main');
+    const state = createEmptyCanonicalSessionState('agent:main:main', createOpenClawTestRuntimeContext('agent:main:main'));
     reduceCanonicalSessionEvents(state, [{
       ...base('message-1'),
       type: 'message_snapshot',
@@ -230,7 +303,7 @@ describe('Runtime Host canonical ACP projection', () => {
   });
 
   it('ignores duplicate canonical events by eventId through the indexed event set', () => {
-    const state = createEmptyCanonicalSessionState('agent:main:main');
+    const state = createEmptyCanonicalSessionState('agent:main:main', createOpenClawTestRuntimeContext('agent:main:main'));
     const event: CanonicalSessionEvent = {
       ...base('message-1'),
       type: 'message_snapshot',
@@ -251,18 +324,18 @@ describe('Runtime Host canonical ACP projection', () => {
   });
 
   it('projects canonical control transport events into runtime issue state', () => {
-    const state = createEmptyCanonicalSessionState('agent:main:main');
+    const state = createEmptyCanonicalSessionState('agent:main:main', createOpenClawTestRuntimeContext('agent:main:main'));
     reduceCanonicalSessionEvents(state, [{
       eventId: 'control-issue-1',
       type: 'control',
       protocolId: OPENCLAW_RUNTIME_PROTOCOL_ID,
-      runtimeProviderId: OPENCLAW_RUNTIME_PROVIDER_ID,
+      runtimeEndpointId: OPENCLAW_RUNTIME_ENDPOINT_ID,
       source: 'control',
       sessionId: 'agent:main:main',
       timestamp: 1,
       origin: {
-        providerEventType: 'gateway.transport.issue',
-        providerIds: { sessionKey: 'agent:main:main' },
+        runtimeEventType: 'gateway.transport.issue',
+        runtimeIds: { sessionKey: 'agent:main:main' },
       },
       controlType: 'transport_issue',
       issue: {
@@ -283,13 +356,13 @@ describe('Runtime Host canonical ACP projection', () => {
       eventId: 'control-connected-1',
       type: 'control',
       protocolId: OPENCLAW_RUNTIME_PROTOCOL_ID,
-      runtimeProviderId: OPENCLAW_RUNTIME_PROVIDER_ID,
+      runtimeEndpointId: OPENCLAW_RUNTIME_ENDPOINT_ID,
       source: 'control',
       sessionId: 'agent:main:main',
       timestamp: 2,
       origin: {
-        providerEventType: 'gateway.transport.connected',
-        providerIds: { sessionKey: 'agent:main:main' },
+        runtimeEventType: 'gateway.transport.connected',
+        runtimeIds: { sessionKey: 'agent:main:main' },
       },
       controlType: 'transport_connected',
       transportEpoch: 1,
@@ -299,13 +372,13 @@ describe('Runtime Host canonical ACP projection', () => {
       eventId: 'control-capabilities-1',
       type: 'control',
       protocolId: OPENCLAW_RUNTIME_PROTOCOL_ID,
-      runtimeProviderId: OPENCLAW_RUNTIME_PROVIDER_ID,
+      runtimeEndpointId: OPENCLAW_RUNTIME_ENDPOINT_ID,
       source: 'control',
       sessionId: 'agent:main:main',
       timestamp: 3,
       origin: {
-        providerEventType: 'gateway.capabilities.updated',
-        providerIds: { sessionKey: 'agent:main:main' },
+        runtimeEventType: 'gateway.capabilities.updated',
+        runtimeIds: { sessionKey: 'agent:main:main' },
       },
       controlType: 'capabilities_updated',
       capabilities: {
@@ -325,12 +398,180 @@ describe('Runtime Host canonical ACP projection', () => {
     });
   });
 
+  it('updates only affected timeline entries when appending render events', () => {
+    const sessionKey = 'agent:main:main';
+    const state = createEmptyTimelineState({ sessionKey }, createOpenClawTestRuntimeContext(sessionKey));
+    const timelineRuntime = createTimelineRuntime(state);
+
+    timelineRuntime.appendCanonicalEvents(sessionKey, [{
+      ...base('user-1'),
+      runId: 'run-user',
+      type: 'message_snapshot',
+      role: 'user',
+      content: 'hello',
+      text: 'hello',
+      status: 'final',
+    }, {
+      ...base('assistant-1'),
+      seq: 2,
+      type: 'message_snapshot',
+      role: 'assistant',
+      messageId: 'assistant-1',
+      content: 'working',
+      text: 'working',
+      status: 'streaming',
+    }]);
+    const userEntry = state.timelineEntries[0];
+    const assistantEntry = state.timelineEntries[1];
+
+    timelineRuntime.appendCanonicalEvents(sessionKey, [{
+      ...base('assistant-1-final'),
+      seq: 3,
+      type: 'message_snapshot',
+      role: 'assistant',
+      messageId: 'assistant-1',
+      content: 'done',
+      text: 'done',
+      status: 'final',
+    }]);
+
+    expect(state.timelineEntries).toHaveLength(2);
+    expect(state.timelineEntries[0]).toBe(userEntry);
+    expect(state.timelineEntries[1]).not.toBe(assistantEntry);
+    expect(state.timelineEntries[1]).toMatchObject({ text: 'done', status: 'final' });
+  });
+
+  it('reprojects lifecycle events through the canonical render path', () => {
+    const sessionKey = 'agent:main:main';
+    const state = createEmptyTimelineState({ sessionKey }, createOpenClawTestRuntimeContext(sessionKey));
+    const timelineRuntime = createTimelineRuntime(state);
+
+    timelineRuntime.appendCanonicalEvents(sessionKey, [{
+      ...base('message-1'),
+      type: 'message_snapshot',
+      role: 'assistant',
+      content: 'ready',
+      text: 'ready',
+      status: 'final',
+    }]);
+    const renderItems = state.renderItems;
+    const timelineEntries = state.timelineEntries;
+    const renderItemIndexByKey = state.renderItemIndexByKey;
+
+    timelineRuntime.appendCanonicalEvents(sessionKey, [{
+      ...base('lifecycle-1'),
+      eventId: 'lifecycle-1',
+      type: 'lifecycle',
+      phase: 'completed',
+      runPhase: 'idle',
+    }]);
+
+    expect(state.renderItems).not.toBe(renderItems);
+    expect(state.timelineEntries).not.toBe(timelineEntries);
+    expect(state.renderItemIndexByKey).not.toBe(renderItemIndexByKey);
+    expect(state.runtime.runPhase).toBe('idle');
+    expect(state.runEpoch).toBe(1);
+  });
+
+  it('reprojects control and runtime activity events through the canonical render path', () => {
+    const sessionKey = 'agent:main:main';
+    const state = createEmptyTimelineState({ sessionKey }, createOpenClawTestRuntimeContext(sessionKey));
+    const timelineRuntime = createTimelineRuntime(state);
+
+    timelineRuntime.appendCanonicalEvents(sessionKey, [{
+      ...base('message-1'),
+      type: 'message_snapshot',
+      role: 'assistant',
+      content: 'ready',
+      text: 'ready',
+      status: 'final',
+    }]);
+    const renderItems = state.renderItems;
+    const timelineEntries = state.timelineEntries;
+    const renderItemIndexByKey = state.renderItemIndexByKey;
+
+    timelineRuntime.appendCanonicalEvents(sessionKey, [{
+      ...base('runtime-activity-1'),
+      type: 'runtime_activity',
+      activity: 'compacting',
+      phase: 'started',
+    }, {
+      ...base('control-issue-1'),
+      eventId: 'control-issue-1',
+      type: 'control',
+      source: 'control',
+      controlType: 'transport_issue',
+      issue: {
+        source: 'runtime',
+        message: 'Gateway unavailable',
+        code: 'UNAVAILABLE',
+        retryable: true,
+        at: 1_700_000_000_000,
+      },
+    }]);
+
+    expect(state.renderItems).not.toBe(renderItems);
+    expect(state.timelineEntries).not.toBe(timelineEntries);
+    expect(state.renderItemIndexByKey).not.toBe(renderItemIndexByKey);
+    expect(state.runtime.runtimeActivity).toBe('compacting');
+    expect(state.runtime.lastIssue).toMatchObject({ code: 'UNAVAILABLE' });
+    expect(state.runEpoch).toBe(0);
+  });
+
+  it('keeps incremental projection aligned with full projection when a message snapshot absorbs a prior tool-only entry', () => {
+    const sessionKey = 'agent:main:main';
+    const state = createEmptyTimelineState({ sessionKey }, createOpenClawTestRuntimeContext(sessionKey));
+    const timelineRuntime = createTimelineRuntime(state);
+
+    timelineRuntime.appendCanonicalEvents(sessionKey, [{
+      ...base('tool-call-1'),
+      type: 'tool_call',
+      toolCallId: 'tool-read-1',
+      name: 'Read',
+      input: { file_path: 'package.json' },
+    }, {
+      ...base('tool-result-1'),
+      seq: 2,
+      type: 'tool_result',
+      toolCallId: 'tool-read-1',
+      name: 'Read',
+      output: 'package content',
+      outputText: 'package content',
+      isError: false,
+    }]);
+
+    timelineRuntime.appendCanonicalEvents(sessionKey, [{
+      ...base('message-1'),
+      seq: 3,
+      type: 'message_snapshot',
+      role: 'assistant',
+      messageId: 'assistant-tool-message',
+      content: [
+        { type: 'tool_call', toolCallId: 'tool-read-1', name: 'Read', input: { file_path: 'package.json' } },
+        { type: 'text', text: '已读取。' },
+      ],
+      text: '已读取。',
+      status: 'final',
+    }]);
+
+    const fullProjection = buildProjectedCanonicalSessionState(state.canonical);
+
+    expect(state.timelineEntries).toEqual(fullProjection.timelineEntries);
+    expect(state.renderItems).toEqual(fullProjection.renderItems);
+    expect(state.renderItems.filter((item) => item.kind === 'assistant-turn')).toHaveLength(1);
+    expect(state.renderItems[0]).toMatchObject({
+      kind: 'assistant-turn',
+      text: '已读取。',
+      tools: [{ toolCallId: 'tool-read-1', status: 'completed' }],
+    });
+  });
+
   it('exposes pending approvals through the Runtime Host session snapshot', () => {
     const runtime = buildRuntimeState();
     const state: SessionRuntimeTimelineState = {
       sessionKey: 'agent:main:main',
       runEpoch: 0,
-      canonical: createEmptyCanonicalSessionState('agent:main:main'),
+      canonical: createEmptyCanonicalSessionState('agent:main:main', createOpenClawTestRuntimeContext('agent:main:main')),
       timelineEntries: [],
       executionGraphItems: [],
       renderItems: [],
@@ -352,9 +593,11 @@ describe('Runtime Host canonical ACP projection', () => {
       },
       activeTransportEpoch: null,
     };
+    const runtimeAddress = createOpenClawTestRuntimeAddress('agent:main:main');
     state.canonical.approvals = [{
       id: 'approval-1',
       sessionKey: 'agent:main:main',
+      runtimeAddress,
       runId: 'run-1',
       title: 'Run command',
       command: 'pnpm test',
@@ -362,11 +605,13 @@ describe('Runtime Host canonical ACP projection', () => {
       createdAtMs: 1_700_000_000_000,
     }];
     const service = new SessionSnapshotService({
-      stateStore: {
-        getResolvedSessionModel: () => null,
-      } as never,
-      sessionMetadata: {} as never,
-      sessionStorage: {} as never,
+      snapshotWorkflow: new SessionSnapshotWorkflow({
+        stateStore: {
+          getResolvedSessionModel: () => null,
+        } as never,
+        sessionMetadata: {} as never,
+        sessionStorage: {} as never,
+      }),
     });
 
     const snapshot = service.buildSnapshot('agent:main:main', state);
@@ -374,6 +619,7 @@ describe('Runtime Host canonical ACP projection', () => {
     expect(snapshot.approvals).toEqual([{
       id: 'approval-1',
       sessionKey: 'agent:main:main',
+      runtimeAddress,
       runId: 'run-1',
       title: 'Run command',
       command: 'pnpm test',

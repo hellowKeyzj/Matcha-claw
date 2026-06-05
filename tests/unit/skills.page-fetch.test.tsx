@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { MemoryRouter } from 'react-router-dom';
 import { Skills } from '@/pages/Skills';
 import { toast } from 'sonner';
+import type { RuntimeAddress } from '../../runtime-host/shared/runtime-address';
 
 const fetchSkillsMock = vi.fn(async () => {});
 const enableSkillMock = vi.fn(async () => {});
@@ -11,6 +12,14 @@ const batchSetSkillsEnabledMock = vi.fn(async () => {});
 const installSkillMock = vi.fn(async () => {});
 const uninstallSkillMock = vi.fn(async () => {});
 const invokeIpcMock = vi.fn();
+
+const skillManagementAddress: RuntimeAddress = {
+  kind: 'native-runtime',
+  capabilityId: 'skill.management',
+  runtimeAdapterId: 'openclaw',
+  runtimeInstanceId: 'local',
+  agentId: 'default',
+};
 
 const gatewayState = {
   status: {
@@ -36,13 +45,13 @@ const skillsState: {
   mutating: boolean;
   error: string | null;
   fetchSkills: typeof fetchSkillsMock;
-  enableSkill: (skillId: string) => Promise<void>;
-  disableSkill: (skillId: string) => Promise<void>;
-  batchSetSkillsEnabled: (skillIds: string[], enabled: boolean) => Promise<void>;
+  enableSkill: (skillId: string, runtimeAddress: RuntimeAddress) => Promise<void>;
+  disableSkill: (skillId: string, runtimeAddress: RuntimeAddress) => Promise<void>;
+  batchSetSkillsEnabled: (skillIds: string[], enabled: boolean, runtimeAddress: RuntimeAddress) => Promise<void>;
   searchResults: unknown[];
   searchSkills: (query: string) => Promise<void>;
-  installSkill: (slug: string, version?: string) => Promise<void>;
-  uninstallSkill: (slug: string) => Promise<void>;
+  installSkill: (slug: string, runtimeAddress: RuntimeAddress, version?: string) => Promise<void>;
+  uninstallSkill: (slug: string, runtimeAddress: RuntimeAddress) => Promise<void>;
   searching: boolean;
   searchError: string | null;
   installing: Record<string, boolean>;
@@ -118,7 +127,7 @@ describe('skills page fetch behavior', () => {
     vi.mocked(toast.error).mockClear();
     vi.mocked(toast.success).mockClear();
     vi.mocked(toast.warning).mockClear();
-    invokeIpcMock.mockImplementation(async (channel: string, payload?: { path?: string }) => {
+    invokeIpcMock.mockImplementation(async (channel: string, payload?: { path?: string; body?: string }) => {
       if (channel === 'hostapi:fetch' && payload?.path === '/api/openclaw/skills-dir') {
         return {
           ok: true,
@@ -129,7 +138,43 @@ describe('skills page fetch behavior', () => {
           },
         };
       }
-      if (channel === 'hostapi:fetch' && payload?.path === '/api/skills/import-local') {
+      if (channel === 'hostapi:fetch' && payload?.path === '/api/capabilities/list') {
+        return {
+          ok: true,
+          data: {
+            status: 200,
+            ok: true,
+            json: {
+              capabilities: [
+                {
+                  id: 'skill.management',
+                  kind: 'skill.management',
+                  address: skillManagementAddress,
+                  runtimeAdapterId: 'openclaw',
+                  runtimeInstanceId: 'local',
+                  targetAgentIds: ['default'],
+                  supportLevel: 'native',
+                  availability: 'available',
+                  operations: [],
+                  policyScope: 'skill.management',
+                },
+              ],
+            },
+          },
+        };
+      }
+      if (channel === 'hostapi:fetch' && payload?.path === '/api/capabilities/execute') {
+        const body = JSON.parse(String(payload.body)) as { operationId?: string };
+        if (body.operationId === 'clawhub.openReadme') {
+          return {
+            ok: true,
+            data: {
+              status: 200,
+              ok: true,
+              json: { success: true },
+            },
+          };
+        }
         return {
           ok: true,
           data: {
@@ -195,6 +240,7 @@ describe('skills page fetch behavior', () => {
     skillsState.searching = false;
     skillsState.searchError = null;
     skillsState.installing = {};
+    vi.mocked(toast.success).mockClear();
     gatewayState.status.processState = 'running';
     gatewayState.status.gatewayReady = true;
     gatewayState.status.transportState = 'connected';
@@ -242,9 +288,12 @@ describe('skills page fetch behavior', () => {
       </MemoryRouter>,
     );
 
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: 'refresh' })).toBeEnabled();
+    });
     fireEvent.click(screen.getByRole('button', { name: 'refresh' }));
 
-    expect(fetchSkillsMock).toHaveBeenCalledWith({ force: true, fresh: true });
+    expect(fetchSkillsMock).toHaveBeenCalledWith({ force: true, fresh: true, runtimeAddress: skillManagementAddress });
   });
 
   it('技能页会一次性渲染完整技能列表，不使用内部裁切滚动区', async () => {
@@ -329,6 +378,72 @@ describe('skills page fetch behavior', () => {
     expect(screen.getByText('memory-lancedb-pro-skill')).toHaveClass('font-mono');
   });
 
+  it('技能详情打开手册通过 skill.management capability 执行', async () => {
+    skillsState.skills = [
+      {
+        id: 'memory-lancedb-pro-skill',
+        slug: 'memory-lancedb-pro-skill',
+        name: 'memory-lancedb-pro',
+        description: 'This skill should be used when working with memory-lancedb-pro.',
+        enabled: true,
+        installed: true,
+        isBundled: false,
+        eligible: true,
+        baseDir: 'C:/Users/test/.openclaw/skills/memory-lancedb-pro-skill',
+      },
+    ];
+    skillsState.snapshotReady = true;
+
+    render(
+      <MemoryRouter>
+        <Skills />
+      </MemoryRouter>,
+    );
+
+    await waitFor(() => {
+      expect(invokeIpcMock).toHaveBeenCalledWith('hostapi:fetch', expect.objectContaining({ path: '/api/capabilities/list' }));
+    });
+    fireEvent.click(await screen.findByText('memory-lancedb-pro'));
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: 'detail.openManual' })).toBeEnabled();
+    });
+    fireEvent.click(await screen.findByRole('button', { name: 'detail.openManual' }));
+
+    await waitFor(() => {
+      expect(invokeIpcMock).toHaveBeenCalledWith(
+        'hostapi:fetch',
+        expect.objectContaining({
+          path: '/api/capabilities/execute',
+          method: 'POST',
+          body: JSON.stringify({
+            id: 'skill.management',
+            operationId: 'clawhub.openReadme',
+            runtimeAddress: {
+              kind: 'native-runtime',
+              capabilityId: 'skill.management',
+              runtimeAdapterId: 'openclaw',
+              runtimeInstanceId: 'local',
+              agentId: 'default',
+            },
+            input: {
+              skillKey: 'memory-lancedb-pro-skill',
+              slug: 'memory-lancedb-pro-skill',
+              baseDir: 'C:/Users/test/.openclaw/skills/memory-lancedb-pro-skill',
+              runtimeAddress: {
+                kind: 'native-runtime',
+                capabilityId: 'skill.management',
+                runtimeAdapterId: 'openclaw',
+                runtimeInstanceId: 'local',
+                agentId: 'default',
+              },
+            },
+          }),
+        }),
+      );
+    });
+    expect(toast.success).toHaveBeenCalledWith('toast.openedEditor');
+  });
+
   it('市场页移除旧手动安装提示卡，并提供上传技能入口', async () => {
     skillsState.snapshotReady = true;
 
@@ -404,6 +519,9 @@ describe('skills page fetch behavior', () => {
 
     fireEvent.mouseDown(screen.getByRole('tab', { name: 'tabs.marketplace' }));
     await screen.findByPlaceholderText('searchMarketplace');
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: 'marketplace.uploadSkill' })).toBeEnabled();
+    });
 
     fireEvent.click(screen.getByRole('button', { name: 'marketplace.uploadSkill' }));
     expect(screen.getByText('marketplace.uploadDialog.title')).toBeInTheDocument();
@@ -435,6 +553,9 @@ describe('skills page fetch behavior', () => {
 
     fireEvent.mouseDown(screen.getByRole('tab', { name: 'tabs.marketplace' }));
     await screen.findByPlaceholderText('searchMarketplace');
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: 'marketplace.uploadSkill' })).toBeEnabled();
+    });
 
     fireEvent.click(screen.getByRole('button', { name: 'marketplace.uploadSkill' }));
     const dropTarget = screen.getByText('marketplace.uploadDialog.empty').closest('[role="button"]');
@@ -462,6 +583,9 @@ describe('skills page fetch behavior', () => {
 
     fireEvent.mouseDown(screen.getByRole('tab', { name: 'tabs.marketplace' }));
     await screen.findByPlaceholderText('searchMarketplace');
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: 'marketplace.uploadSkill' })).toBeEnabled();
+    });
 
     fireEvent.click(screen.getByRole('button', { name: 'marketplace.uploadSkill' }));
     expect(screen.queryByText('marketplace.uploadDialog.autoEnable')).not.toBeInTheDocument();
@@ -472,7 +596,7 @@ describe('skills page fetch behavior', () => {
     fireEvent.click(screen.getByRole('button', { name: 'marketplace.uploadDialog.confirm' }));
 
     await waitFor(() => {
-      expect(enableSkillMock).toHaveBeenCalledWith('uploaded-skill');
+      expect(enableSkillMock).toHaveBeenCalledWith('uploaded-skill', skillManagementAddress);
     });
     expect(invokeIpcMock).toHaveBeenCalledWith(
       'hostapi:fetch',
@@ -482,7 +606,7 @@ describe('skills page fetch behavior', () => {
 
   it('上传技能格式不符合要求时显示具体错误且不会启用', async () => {
     skillsState.snapshotReady = true;
-    invokeIpcMock.mockImplementation(async (channel: string, payload?: { path?: string }) => {
+    invokeIpcMock.mockImplementation(async (channel: string, payload?: { path?: string; body?: string }) => {
       if (channel === 'hostapi:fetch' && payload?.path === '/api/openclaw/skills-dir') {
         return {
           ok: true,
@@ -493,7 +617,32 @@ describe('skills page fetch behavior', () => {
           },
         };
       }
-      if (channel === 'hostapi:fetch' && payload?.path === '/api/skills/import-local') {
+      if (channel === 'hostapi:fetch' && payload?.path === '/api/capabilities/list') {
+        return {
+          ok: true,
+          data: {
+            status: 200,
+            ok: true,
+            json: {
+              capabilities: [
+                {
+                  id: 'skill.management',
+                  kind: 'skill.management',
+                  address: skillManagementAddress,
+                  runtimeAdapterId: 'openclaw',
+                  runtimeInstanceId: 'local',
+                  targetAgentIds: ['default'],
+                  supportLevel: 'native',
+                  availability: 'available',
+                  operations: [],
+                  policyScope: 'skill.management',
+                },
+              ],
+            },
+          },
+        };
+      }
+      if (channel === 'hostapi:fetch' && payload?.path === '/api/capabilities/execute') {
         return {
           ok: true,
           data: {
@@ -553,6 +702,9 @@ describe('skills page fetch behavior', () => {
 
     fireEvent.mouseDown(screen.getByRole('tab', { name: 'tabs.marketplace' }));
     await screen.findByPlaceholderText('searchMarketplace');
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: 'marketplace.uploadSkill' })).toBeEnabled();
+    });
 
     fireEvent.click(screen.getByRole('button', { name: 'marketplace.uploadSkill' }));
     fireEvent.click(screen.getByText('marketplace.uploadDialog.empty'));
@@ -566,7 +718,7 @@ describe('skills page fetch behavior', () => {
       );
     });
     expect(enableSkillMock).not.toHaveBeenCalled();
-    expect(fetchSkillsMock).not.toHaveBeenCalledWith({ force: true, fresh: true });
+    expect(fetchSkillsMock).not.toHaveBeenCalledWith({ force: true, fresh: true, runtimeAddress: skillManagementAddress });
     expect(toast.success).not.toHaveBeenCalled();
   });
 
@@ -584,10 +736,13 @@ describe('skills page fetch behavior', () => {
       </MemoryRouter>,
     );
 
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: 'actions.enableVisible' })).toBeEnabled();
+    });
     fireEvent.click(screen.getByRole('button', { name: 'actions.enableVisible' }));
 
     await waitFor(() => {
-      expect(batchSetSkillsEnabledMock).toHaveBeenCalledWith(['skill-a', 'skill-b'], true);
+      expect(batchSetSkillsEnabledMock).toHaveBeenCalledWith(['skill-a', 'skill-b'], true, skillManagementAddress);
     });
     expect(batchSetSkillsEnabledMock).toHaveBeenCalledTimes(1);
     expect(enableSkillMock).not.toHaveBeenCalled();

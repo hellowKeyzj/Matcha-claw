@@ -40,6 +40,7 @@ import { useGatewayStore } from '@/stores/gateway';
 import { useSubagentsStore } from '@/stores/subagents';
 import { isGatewayOperational, isGatewayPreparing } from '@/lib/gateway-status';
 import { hostChannelsFetchSnapshot } from '@/lib/channel-runtime';
+import { resolveSingleCapabilityRuntimeAddress } from '@/lib/host-api';
 import { useDelayedFlag } from '@/lib/use-delayed-flag';
 import { formatRelativeTime, cn } from '@/lib/utils';
 import { toast } from 'sonner';
@@ -47,7 +48,9 @@ import type { CronJob, CronJobCreateInput, ScheduleType } from '@/types/cron';
 import { CHANNEL_ICONS, CHANNEL_NAMES, type ChannelType } from '@/types/channel';
 import { useTranslation } from 'react-i18next';
 import type { TFunction } from 'i18next';
-import { parseAgentIdFromSessionKey } from '@/stores/chat/session-helpers';
+import type { RuntimeAddress } from '../../../runtime-host/shared/runtime-address';
+
+const SCHEDULER_CRON_CAPABILITY_ID = 'scheduler.cron';
 
 // Common cron schedule presets
 const schedulePresets: { key: string; value: string; type: ScheduleType }[] = [
@@ -881,22 +884,47 @@ export function Cron({ embedded = false }: CronProps) {
   } = useCronStore();
   const gatewayStatus = useGatewayStore((state) => state.status);
   const gatewayInitialized = useGatewayStore((state) => state.isInitialized);
-  const currentChatSessionKey = useChatStore((state) => state.currentSessionKey);
+  const defaultAgentId = useChatStore((state) => {
+    const meta = state.loadedSessions[state.currentSessionKey]?.meta;
+    return meta?.agentId ?? meta?.runtimeAddress?.agentId ?? 'main';
+  });
   const agentsResource = useSubagentsStore((state) => state.agentsResource);
   const loadAgents = useSubagentsStore((state) => state.loadAgents);
   const [showDialog, setShowDialog] = useState(false);
   const [editingJob, setEditingJob] = useState<CronJob | undefined>();
   const [jobToDelete, setJobToDelete] = useState<{ id: string } | null>(null);
+  const [cronRuntimeAddress, setCronRuntimeAddress] = useState<RuntimeAddress | null>(null);
 
   const isGatewayRunning = isGatewayOperational(gatewayStatus);
   const gatewayPreparing = isGatewayPreparing(gatewayStatus, gatewayInitialized);
   const availableAgents = Array.isArray(agentsResource.data)
     ? agentsResource.data.map((agent) => ({ id: agent.id, name: agent.name || agent.id }))
     : [];
-  const defaultAgentId = parseAgentIdFromSessionKey(currentChatSessionKey) || 'main';
   const manualRefreshBusy = refreshing || mutating;
   const showInitialLoading = !snapshotReady && initialLoading;
   const showRefreshingHint = useDelayedFlag(refreshing && snapshotReady, 180);
+
+  useEffect(() => {
+    if (!isGatewayRunning) {
+      setCronRuntimeAddress(null);
+      return;
+    }
+    let active = true;
+    void resolveSingleCapabilityRuntimeAddress(SCHEDULER_CRON_CAPABILITY_ID)
+      .then((runtimeAddress) => {
+        if (active) {
+          setCronRuntimeAddress(runtimeAddress);
+        }
+      })
+      .catch(() => {
+        if (active) {
+          setCronRuntimeAddress(null);
+        }
+      });
+    return () => {
+      active = false;
+    };
+  }, [isGatewayRunning]);
 
   // Fetch jobs on mount
   useEffect(() => {
@@ -920,21 +948,29 @@ export function Cron({ embedded = false }: CronProps) {
   const failedJobs = jobs.filter((j) => j.lastRun && !j.lastRun.success);
 
   const handleSave = useCallback(async (input: CronJobCreateInput) => {
-    if (editingJob) {
-      await updateJob(editingJob.id, input);
-    } else {
-      await createJob(input);
+    if (!cronRuntimeAddress) {
+      toast.error(gatewayPreparing ? t('gatewayPreparing') : t('gatewayWarning'));
+      return;
     }
-  }, [editingJob, createJob, updateJob]);
+    if (editingJob) {
+      await updateJob(editingJob.id, input, cronRuntimeAddress);
+    } else {
+      await createJob(input, cronRuntimeAddress);
+    }
+  }, [cronRuntimeAddress, editingJob, gatewayPreparing, createJob, updateJob, t]);
 
   const handleToggle = useCallback(async (id: string, enabled: boolean) => {
+    if (!cronRuntimeAddress) {
+      toast.error(gatewayPreparing ? t('gatewayPreparing') : t('gatewayWarning'));
+      return;
+    }
     try {
-      await toggleJob(id, enabled);
+      await toggleJob(id, enabled, cronRuntimeAddress);
       toast.success(enabled ? t('toast.enabled') : t('toast.paused'));
     } catch {
       toast.error(t('toast.failedUpdate'));
     }
-  }, [toggleJob, t]);
+  }, [cronRuntimeAddress, gatewayPreparing, toggleJob, t]);
 
   return (
     <div className="space-y-6">
@@ -963,7 +999,7 @@ export function Cron({ embedded = false }: CronProps) {
               setEditingJob(undefined);
               setShowDialog(true);
             }}
-            disabled={!isGatewayRunning || mutating}
+            disabled={!isGatewayRunning || mutating || !cronRuntimeAddress}
           >
             <Plus className="h-4 w-4 mr-2" />
             {t('newTask')}
@@ -1050,7 +1086,7 @@ export function Cron({ embedded = false }: CronProps) {
                 setEditingJob(undefined);
                 setShowDialog(true);
               }}
-              disabled={!isGatewayRunning}
+              disabled={!isGatewayRunning || !cronRuntimeAddress}
             >
               <Plus className="h-4 w-4 mr-2" />
               {t('empty.create')}
@@ -1070,7 +1106,7 @@ export function Cron({ embedded = false }: CronProps) {
                 setShowDialog(true);
               }}
               onDelete={() => setJobToDelete({ id: job.id })}
-              onTrigger={() => triggerJob(job.id)}
+              onTrigger={() => cronRuntimeAddress ? triggerJob(job.id, cronRuntimeAddress) : Promise.resolve({ ran: false, reason: 'runtime-address-unavailable' })}
             />
           ))}
         </div>
@@ -1098,8 +1134,8 @@ export function Cron({ embedded = false }: CronProps) {
         cancelLabel={t('common:actions.cancel', 'Cancel')}
         variant="destructive"
         onConfirm={async () => {
-          if (jobToDelete) {
-            await deleteJob(jobToDelete.id);
+          if (jobToDelete && cronRuntimeAddress) {
+            await deleteJob(jobToDelete.id, cronRuntimeAddress);
             setJobToDelete(null);
             toast.success(t('toast.deleted'));
           }

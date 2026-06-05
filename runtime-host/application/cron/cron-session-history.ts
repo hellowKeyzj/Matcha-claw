@@ -1,7 +1,6 @@
 import { join } from 'node:path';
 import { badRequest, ok } from '../common/application-response';
 import type { RuntimeClockPort, RuntimeFileSystemPort } from '../common/runtime-ports';
-import type { OpenClawWorkspacePort } from '../openclaw/openclaw-workspace-service';
 import { isRecord } from './cron-model';
 
 function parseCronSessionKey(sessionKey: string) {
@@ -13,7 +12,10 @@ function parseCronSessionKey(sessionKey: string) {
   if (parts.length < cronIndex + 2 || parts[cronIndex] !== 'cron') {
     return null;
   }
-  const agentId = parts[0] === 'agent' ? parts[1] || 'main' : parts[0] || 'main';
+  const agentId = parts[0] === 'agent' ? parts[1]?.trim() : parts[0]?.trim();
+  if (!agentId) {
+    return null;
+  }
   const jobId = parts[cronIndex + 1];
   if (!jobId) {
     return null;
@@ -79,8 +81,12 @@ function buildCronRunMessage(entry: Record<string, any>, index: number) {
   };
 }
 
+export interface CronRuntimeDataPort {
+  getRuntimeDataRootDir(): string;
+}
+
 export interface CronRunHistoryRepositoryDeps {
-  workspace: Pick<OpenClawWorkspacePort, 'getConfigDir'>;
+  runtimeData: CronRuntimeDataPort;
   fileSystem: RuntimeFileSystemPort;
 }
 
@@ -92,7 +98,7 @@ export class CronRunHistoryRepository implements CronRunHistoryPort {
   constructor(private readonly deps: CronRunHistoryRepositoryDeps) {}
 
   async readJobRuns(jobId: string): Promise<Array<Record<string, any>>> {
-    const logPath = join(this.deps.workspace.getConfigDir(), 'cron', 'runs', `${jobId}.jsonl`);
+    const logPath = join(this.deps.runtimeData.getRuntimeDataRootDir(), 'cron', 'runs', `${jobId}.jsonl`);
     const raw = await this.deps.fileSystem.readTextFile(logPath).catch(() => '');
     if (!raw.trim()) {
       return [];

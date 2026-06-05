@@ -15,40 +15,111 @@ const {
 }));
 
 import { ProviderAccountsService } from '../../runtime-host/application/providers/accounts';
-import { getOpenClawProviderKeyForType } from '../../runtime-host/application/providers/provider-runtime-rules';
-import { ProviderRuntimeSyncService } from '../../runtime-host/application/providers/store-sync';
+import { ProviderAccountMutationWorkflow } from '../../runtime-host/application/workflows/provider-account/provider-account-mutation-workflow';
+import {
+  getLegacyOpenClawProviderKeys,
+  getOAuthApiKeyEnv,
+  getOAuthProviderApi,
+  getOAuthProviderDefaultBaseUrl,
+  getOAuthProviderTokenKey,
+  getOpenClawProviderKeyForType,
+  normalizeOAuthBaseUrl,
+  usesOAuthAuthHeader,
+} from '../../runtime-host/application/adapters/openclaw/projections/openclaw-provider-projection-rules';
+import { ProviderProjectionSyncService, type ProviderProjectionKeyResolverPort, type ProviderProjectionPolicyPort } from '../../runtime-host/application/providers/store-sync';
+import { ProviderProjectionSyncWorkflow } from '../../runtime-host/application/workflows/provider-projection-sync/provider-projection-sync-workflow';
+
+const projectionKeys: ProviderProjectionKeyResolverPort = {
+  resolveProviderKey: ({ vendorId, accountId }) => getOpenClawProviderKeyForType(vendorId, accountId),
+};
+
+const projectionPolicy: ProviderProjectionPolicyPort = {
+  getReplaceProviderKeys: ({ vendorId, accountId }) => getLegacyOpenClawProviderKeys(vendorId, accountId),
+  getOAuthProviderApi,
+  getOAuthProviderTokenKey,
+  getOAuthProviderDefaultBaseUrl,
+  normalizeOAuthBaseUrl,
+  getOAuthApiKeyEnv,
+  usesOAuthAuthHeader,
+};
 
 function createServiceWithStore(store: {
   accounts: Record<string, any>;
   apiKeys: Record<string, string>;
 }) {
   const writeProviderStore = vi.fn(async () => {});
-  const syncOpenClawModelsMock = vi.fn(async () => {});
+  const syncRuntimeModelProjectionMock = vi.fn(async () => {});
   const removeCredentialModelsMock = vi.fn(async () => {});
-  const runtimeSync = new ProviderRuntimeSyncService(
-    {
+  const runtimeSync = new ProviderProjectionSyncService(new ProviderProjectionSyncWorkflow({
+    authProfiles: {
       saveProviderKey: saveProviderKeyMock,
       removeProviderKey: removeProviderKeyMock,
     },
-    {
+    providerConfig: {
       syncProviderConfig: syncProviderConfigMock,
+      removeProvider: removeProviderMock,
     },
-    {
+    projectionState: {
+      getActiveProviders: async () => new Set<string>(),
+    },
+    authRepository: {
       discoverAgentIds: async () => ['main'],
     },
-    {
+    agentModels: {
       upsertProviderInAgentModels: upsertProviderInAgentModelsMock,
     },
-  );
-  const resolveRuntimeProviderKey = (accountId: string, account: Record<string, any> | null) => {
+    projectionKeys,
+    projectionPolicy,
+  }));
+  const resolveRuntimeConfigProviderKey = (accountId: string, account: Record<string, any> | null) => {
     const providerType = typeof account?.vendorId === 'string' ? account.vendorId.trim() : '';
     return providerType ? getOpenClawProviderKeyForType(providerType, accountId) : accountId;
   };
-  const service = new ProviderAccountsService({
-    store: {
-      read: async () => store,
-      write: writeProviderStore,
+  const storePort = {
+    read: async () => store,
+    write: writeProviderStore,
+  };
+  const projectionPort = {
+    syncStoreToProjection: async (runtimeStore) => await runtimeSync.syncProviderStore(runtimeStore),
+    resolveAccountApiKey: async ({ store: runtimeStore, accountId, account }) => {
+      const runtimeConfigProviderKey = resolveRuntimeConfigProviderKey(accountId, account as Record<string, any> | null);
+      const localApiKey = runtimeStore.apiKeys[accountId];
+      if (typeof localApiKey === 'string' && localApiKey.trim()) return localApiKey.trim();
+      if (runtimeConfigProviderKey !== accountId) {
+        const aliasedApiKey = runtimeStore.apiKeys[runtimeConfigProviderKey];
+        return typeof aliasedApiKey === 'string' && aliasedApiKey.trim() ? aliasedApiKey.trim() : undefined;
+      }
+      return undefined;
     },
+    resolveCleanupProviderKeys: ({ accountId, account }) => (
+      Array.from(new Set([resolveRuntimeConfigProviderKey(accountId, account as Record<string, any> | null), accountId]))
+    ),
+    removeProviderKey: async (providerKey) => {
+      await removeProviderKeyMock(providerKey);
+    },
+    removeProviderConfig: async (providerKey) => {
+      await removeProviderMock(providerKey);
+    },
+  };
+  const providerModels = {
+    removeCredentialModels: removeCredentialModelsMock,
+    syncRuntimeProjection: syncRuntimeModelProjectionMock,
+  };
+  const capabilityRouting = {
+    removeCredentialRoutes: vi.fn(),
+  };
+  const mutationWorkflow = new ProviderAccountMutationWorkflow({
+    store: storePort,
+    projection: projectionPort,
+    providerModels,
+    capabilityRouting,
+    clock: {
+      nowMs: () => 1_700_000_000_000,
+      nowIso: () => '2023-11-14T22:13:20.000Z',
+    },
+  });
+  const service = new ProviderAccountsService({
+    store: storePort,
     parentShell: {
       request: async () => ({ version: 1, success: true, status: 200, data: {} }),
       mapResponse: () => ({ status: 200, data: {} }),
@@ -60,46 +131,16 @@ function createServiceWithStore(store: {
     httpClient: {
       request: vi.fn(),
     },
-    clock: {
-      nowMs: () => 1_700_000_000_000,
-      nowIso: () => '2023-11-14T22:13:20.000Z',
-    },
-    runtime: {
-      syncStoreToRuntime: async (runtimeStore) => await runtimeSync.syncProviderStore(runtimeStore),
-      resolveAccountApiKey: async ({ store: runtimeStore, accountId, account }) => {
-        const runtimeProviderKey = resolveRuntimeProviderKey(accountId, account as Record<string, any> | null);
-        const localApiKey = runtimeStore.apiKeys[accountId];
-        if (typeof localApiKey === 'string' && localApiKey.trim()) return localApiKey.trim();
-        if (runtimeProviderKey !== accountId) {
-          const aliasedApiKey = runtimeStore.apiKeys[runtimeProviderKey];
-          return typeof aliasedApiKey === 'string' && aliasedApiKey.trim() ? aliasedApiKey.trim() : undefined;
-        }
-        return undefined;
-      },
-      resolveCleanupProviderKeys: ({ accountId, account }) => (
-        Array.from(new Set([resolveRuntimeProviderKey(accountId, account as Record<string, any> | null), accountId]))
-      ),
-      removeProviderKey: async (providerKey) => {
-        await removeProviderKeyMock(providerKey);
-      },
-      removeProviderConfig: async (providerKey) => {
-        await removeProviderMock(providerKey);
-      },
-    },
-    providerModels: {
-      removeCredentialModels: removeCredentialModelsMock,
-      syncOpenClaw: syncOpenClawModelsMock,
-    } as any,
-    capabilityRouting: {
-      removeCredentialRoutes: vi.fn(),
-    } as any,
+    projection: projectionPort,
+    mutations: mutationWorkflow,
     jobs: {
       submitCreate: vi.fn(() => ({ success: true, job: { id: 'job-create', type: 'providers.createAccount', status: 'queued', queuedAt: 1, attempts: 0, maxAttempts: 1 } })),
       submitUpdate: vi.fn(() => ({ success: true, job: { id: 'job-update', type: 'providers.updateAccount', status: 'queued', queuedAt: 1, attempts: 0, maxAttempts: 1 } })),
       submitDelete: vi.fn(() => ({ success: true, job: { id: 'job-delete', type: 'providers.deleteAccount', status: 'queued', queuedAt: 1, attempts: 0, maxAttempts: 1 } })),
     },
+    projectionKeys,
   });
-  return { service, writeProviderStore, syncOpenClawModelsMock, removeCredentialModelsMock };
+  return { service, writeProviderStore, syncRuntimeModelProjectionMock, removeCredentialModelsMock };
 }
 
 describe('ProviderAccountsService list', () => {
@@ -225,7 +266,7 @@ describe('ProviderAccountsService mutations', () => {
       updatedAt: '2026-04-10T00:00:00.000Z',
     };
 
-    const { service, writeProviderStore, syncOpenClawModelsMock } = createServiceWithStore(store);
+    const { service, writeProviderStore, syncRuntimeModelProjectionMock } = createServiceWithStore(store);
     const result = await service.executeCreate({ account, apiKey: 'sk-custom' });
 
     expect(result.success).toBe(true);
@@ -250,7 +291,7 @@ describe('ProviderAccountsService mutations', () => {
       }),
     });
     expect(syncProviderConfigMock.mock.calls[0][1]).not.toHaveProperty('models');
-    expect(syncOpenClawModelsMock).toHaveBeenCalledTimes(1);
+    expect(syncRuntimeModelProjectionMock).toHaveBeenCalledTimes(1);
   });
 
   it('新增 custom 媒体凭证以自定义 providerKey 同步中转接口契约', async () => {
@@ -271,7 +312,7 @@ describe('ProviderAccountsService mutations', () => {
       updatedAt: '2026-04-10T00:00:00.000Z',
     };
 
-    const { service, syncOpenClawModelsMock } = createServiceWithStore(store);
+    const { service, syncRuntimeModelProjectionMock } = createServiceWithStore(store);
     const result = await service.executeCreate({ account, apiKey: 'sk-openai-media' });
 
     expect(result.success).toBe(true);
@@ -279,7 +320,7 @@ describe('ProviderAccountsService mutations', () => {
     expect(removeProviderKeyMock).not.toHaveBeenCalledWith('custom-media-openai');
     expect(upsertProviderInAgentModelsMock).not.toHaveBeenCalled();
     expect(syncProviderConfigMock).not.toHaveBeenCalled();
-    expect(syncOpenClawModelsMock).toHaveBeenCalledTimes(1);
+    expect(syncRuntimeModelProjectionMock).toHaveBeenCalledTimes(1);
   });
 
   it('删除 custom 凭证时清理 runtime key 与原账号 key', async () => {
