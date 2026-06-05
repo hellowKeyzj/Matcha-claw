@@ -32,6 +32,7 @@ function createSnapshot(
   sessionKey: string,
   messages: RawMessage[],
   runtimeOverrides: Partial<HistoryWindowResult['snapshot']['runtime']> = {},
+  catalogOverrides: Partial<HistoryWindowResult['snapshot']['catalog']> = {},
 ) {
   const items = buildRenderItemsFromMessages(sessionKey, messages);
   const runtimeAddress = createOpenClawTestRuntimeAddress(sessionKey);
@@ -50,6 +51,7 @@ function createSnapshot(
       runtimeAddress,
       displayName: sessionKey,
       updatedAt: items[items.length - 1]?.createdAt,
+      ...catalogOverrides,
     },
     items,
     approvals: [],
@@ -148,6 +150,52 @@ describe('chat history apply pipeline', () => {
       expect.objectContaining({ text: 'done' }),
     ]);
     expect(harness.get().loadedSessions[sessionKey]?.runtime.runPhase).toBe('done');
+  });
+
+  it('preserves a manually renamed session label when applying a transcript-derived snapshot label', async () => {
+    const sessionKey = 'agent:main:main';
+    const historyRuntime = createHistoryRuntimeHarness();
+    const harness = createStateHarness({
+      currentSessionKey: sessionKey,
+      loadedSessions: {
+        [sessionKey]: {
+          ...createEmptySessionRecord(),
+          meta: {
+            ...createEmptySessionRecord().meta,
+            label: 'Custom name',
+            titleSource: 'user',
+            manualLabel: true,
+          },
+        },
+      },
+      pendingApprovalsBySession: {},
+      foregroundHistorySessionKey: sessionKey,
+    } as ChatStoreState);
+
+    const applyLoadedMessages = createApplyLoadedMessagesPipeline({
+      set: harness.set,
+      get: harness.get,
+      historyRuntime,
+      requestedSessionKey: sessionKey,
+      scope: 'foreground',
+      abortSignal: new AbortController().signal,
+      shouldAbortHistoryProcessing: () => false,
+    });
+
+    await applyLoadedMessages(createHistoryWindow(
+      sessionKey,
+      [{ role: 'user', content: 'transcript title', timestamp: 1, id: 'user-1' }],
+      {
+        snapshot: createSnapshot(
+          sessionKey,
+          [{ role: 'user', content: 'transcript title', timestamp: 1, id: 'user-1' }],
+          {},
+          { label: 'transcript title', titleSource: 'user' },
+        ),
+      },
+    ));
+
+    expect(harness.get().loadedSessions[sessionKey]?.meta.label).toBe('Custom name');
   });
 
   it('background apply only updates the target session snapshot', async () => {

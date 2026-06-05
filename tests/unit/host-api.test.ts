@@ -30,6 +30,22 @@ function proxyEnvelope(json: unknown, status = 200) {
   };
 }
 
+function capabilitiesEnvelope(addresses: unknown[]) {
+  return proxyEnvelope({
+    capabilities: addresses.map((address) => ({
+      id: 'workspace.file',
+      availability: 'available',
+      address,
+    })),
+  });
+}
+
+function mockWorkspaceCapabilityExecute(json: unknown, status = 200) {
+  invokeIpcMock
+    .mockResolvedValueOnce(capabilitiesEnvelope([capabilityAddress('workspace.file')]))
+    .mockResolvedValueOnce(proxyEnvelope(json, status));
+}
+
 vi.mock('@/lib/api-client', () => ({
   invokeIpc: (...args: unknown[]) => invokeIpcMock(...args),
 }));
@@ -132,14 +148,21 @@ describe('host-api', () => {
   });
 
   it('hostFileStagePaths uses workspace capability execute', async () => {
-    invokeIpcMock.mockResolvedValueOnce({
-      ok: true,
-      data: {
-        status: 200,
+    const workspaceAddress = capabilityAddress('workspace.file');
+    const otherWorkspaceAddress = {
+      ...workspaceAddress,
+      agentId: 'other-agent',
+    };
+    invokeIpcMock
+      .mockResolvedValueOnce(capabilitiesEnvelope([otherWorkspaceAddress, workspaceAddress]))
+      .mockResolvedValueOnce({
         ok: true,
-        json: [{ id: 'file-1', fileName: 'demo.txt', mimeType: 'text/plain', fileSize: 4, stagedPath: '/tmp/demo.txt', preview: null }],
-      },
-    });
+        data: {
+          status: 200,
+          ok: true,
+          json: [{ id: 'file-1', fileName: 'demo.txt', mimeType: 'text/plain', fileSize: 4, stagedPath: '/tmp/demo.txt', preview: null }],
+        },
+      });
 
     const { hostFileStagePaths } = await import('@/lib/host-api');
     const result = await hostFileStagePaths({
@@ -156,16 +179,10 @@ describe('host-api', () => {
         body: JSON.stringify({
           id: 'workspace.file',
           operationId: 'files.stagePaths',
-          runtimeAddress: capabilityAddress('workspace.file'),
+          runtimeAddress: workspaceAddress,
           input: {
             filePaths: ['/tmp/demo.txt'],
-            runtimeAddress: {
-              kind: 'native-runtime',
-              capabilityId: 'workspace.file',
-              runtimeAdapterId: 'openclaw',
-              runtimeInstanceId: 'local',
-              agentId: 'default',
-            },
+            runtimeAddress: workspaceAddress,
           },
         }),
       }),
@@ -173,14 +190,7 @@ describe('host-api', () => {
   });
 
   it('hostFileStageBuffer uses workspace capability execute', async () => {
-    invokeIpcMock.mockResolvedValueOnce({
-      ok: true,
-      data: {
-        status: 200,
-        ok: true,
-        json: { id: 'file-1', fileName: 'demo.txt', mimeType: 'text/plain', fileSize: 4, stagedPath: '/tmp/demo.txt', preview: null },
-      },
-    });
+    mockWorkspaceCapabilityExecute({ id: 'file-1', fileName: 'demo.txt', mimeType: 'text/plain', fileSize: 4, stagedPath: '/tmp/demo.txt', preview: null });
 
     const { hostFileStageBuffer } = await import('@/lib/host-api');
     const result = await hostFileStageBuffer({
@@ -227,17 +237,11 @@ describe('host-api', () => {
   });
 
   it('hostFileReadText uses workspace file capability execute', async () => {
-    invokeIpcMock.mockResolvedValueOnce({
-      ok: true,
-      data: {
-        status: 200,
-        ok: true,
-        json: { ok: true, content: '# Hello' },
-      },
-    });
+    const workspaceAddress = capabilityAddress('workspace.file');
+    mockWorkspaceCapabilityExecute({ ok: true, content: '# Hello' });
 
     const { hostFileReadText } = await import('@/lib/host-api');
-    const result = await hostFileReadText({ path: '/tmp/demo.md' });
+    const result = await hostFileReadText({ path: '/tmp/demo.md', runtimeAddress: testRuntimeAddress });
 
     expect(result).toEqual({ ok: true, content: '# Hello' });
     expect(invokeIpcMock).toHaveBeenCalledWith(
@@ -248,10 +252,10 @@ describe('host-api', () => {
         body: JSON.stringify({
           id: 'workspace.file',
           operationId: 'files.readText',
-          runtimeAddress: { capabilityId: 'workspace.file' },
+          runtimeAddress: workspaceAddress,
           input: {
             path: '/tmp/demo.md',
-            runtimeAddress: { capabilityId: 'workspace.file' },
+            runtimeAddress: workspaceAddress,
           },
         }),
       }),
@@ -259,17 +263,11 @@ describe('host-api', () => {
   });
 
   it('hostFileReadBinary uses workspace file capability execute', async () => {
-    invokeIpcMock.mockResolvedValueOnce({
-      ok: true,
-      data: {
-        status: 200,
-        ok: true,
-        json: { ok: true, data: 'UEsDBA==' },
-      },
-    });
+    const workspaceAddress = capabilityAddress('workspace.file');
+    mockWorkspaceCapabilityExecute({ ok: true, data: 'UEsDBA==' });
 
     const { hostFileReadBinary } = await import('@/lib/host-api');
-    const result = await hostFileReadBinary({ path: '/tmp/demo.pdf' });
+    const result = await hostFileReadBinary({ path: '/tmp/demo.pdf', runtimeAddress: testRuntimeAddress });
 
     expect(result).toEqual({ ok: true, data: 'UEsDBA==' });
     expect(invokeIpcMock).toHaveBeenCalledWith(
@@ -280,10 +278,10 @@ describe('host-api', () => {
         body: JSON.stringify({
           id: 'workspace.file',
           operationId: 'files.readBinary',
-          runtimeAddress: { capabilityId: 'workspace.file' },
+          runtimeAddress: workspaceAddress,
           input: {
             path: '/tmp/demo.pdf',
-            runtimeAddress: { capabilityId: 'workspace.file' },
+            runtimeAddress: workspaceAddress,
           },
         }),
       }),
@@ -291,17 +289,11 @@ describe('host-api', () => {
   });
 
   it('hostFileListDir uses workspace file capability execute', async () => {
-    invokeIpcMock.mockResolvedValueOnce({
-      ok: true,
-      data: {
-        status: 200,
-        ok: true,
-        json: { ok: true, entries: [{ name: 'src', path: '/tmp/workspace/src', isDir: true, size: 0, mtimeMs: 0, hasChildren: true }] },
-      },
-    });
+    const workspaceAddress = capabilityAddress('workspace.file');
+    mockWorkspaceCapabilityExecute({ ok: true, entries: [{ name: 'src', path: '/tmp/workspace/src', isDir: true, size: 0, mtimeMs: 0, hasChildren: true }] });
 
     const { hostFileListDir } = await import('@/lib/host-api');
-    const result = await hostFileListDir({ path: '/tmp/workspace' });
+    const result = await hostFileListDir({ path: '/tmp/workspace', runtimeAddress: testRuntimeAddress });
 
     expect(result).toEqual({
       ok: true,
@@ -316,10 +308,10 @@ describe('host-api', () => {
         body: JSON.stringify({
           id: 'workspace.file',
           operationId: 'files.listDir',
-          runtimeAddress: { capabilityId: 'workspace.file' },
+          runtimeAddress: workspaceAddress,
           input: {
             path: '/tmp/workspace',
-            runtimeAddress: { capabilityId: 'workspace.file' },
+            runtimeAddress: workspaceAddress,
           },
         }),
       }),

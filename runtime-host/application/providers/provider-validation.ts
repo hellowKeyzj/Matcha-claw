@@ -7,7 +7,6 @@ type ValidationProfile =
   | 'openai-responses'
   | 'google-query-key'
   | 'anthropic-header'
-  | 'openrouter'
   | 'none';
 
 type ValidationResult = { valid: boolean; error?: string; status?: number };
@@ -86,10 +85,6 @@ function getValidationProfile(
   providerType: string,
   options?: ValidationOptions,
 ): ValidationProfile {
-  if (providerType === 'openrouter') {
-    return 'openrouter';
-  }
-
   const providerApi = options?.apiProtocol || getProviderConfig(providerType)?.api;
 
   if (providerApi === 'anthropic-messages') {
@@ -333,17 +328,6 @@ async function validateAnthropicHeaderKey(
   return modelsResult;
 }
 
-async function validateOpenRouterKey(
-  httpClient: RuntimeHttpClientPort,
-  apiKey: string,
-): Promise<ValidationResult> {
-  return await performProviderValidationRequest(
-    httpClient,
-    'https://openrouter.ai/api/v1/auth/key',
-    { Authorization: `Bearer ${apiKey}` },
-  );
-}
-
 export async function validateApiKeyWithProvider(
   providerType: string,
   apiKey: string,
@@ -390,8 +374,6 @@ export async function validateApiKeyWithProvider(
         return await validateGoogleQueryKey(options.httpClient, trimmedKey, resolvedBaseUrl);
       case 'anthropic-header':
         return await validateAnthropicHeaderKey(options.httpClient, providerType, trimmedKey, resolvedBaseUrl);
-      case 'openrouter':
-        return await validateOpenRouterKey(options.httpClient, trimmedKey);
       default:
         return { valid: true };
     }

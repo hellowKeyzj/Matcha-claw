@@ -78,14 +78,14 @@ describe('runtime-host manager provider oauth action', () => {
     vi.clearAllMocks();
   });
 
-  it('按 provider 类型分流 browser/device OAuth', async () => {
+  it('OpenAI 走 browser OAuth，设备 OAuth provider 走 device OAuth', async () => {
     const { createRuntimeHostManager } = await import('../../electron/main/runtime-host-manager');
     const manager = createRuntimeHostManager({
       gatewayManager: { getStatus: () => ({ processState: 'running', port: 18789 }), debouncedRestart: vi.fn() } as never,
     });
 
     await manager.executeShellAction('provider_oauth_start', {
-      provider: 'google',
+      provider: 'openai',
       accountId: 'acc-browser',
       label: 'Browser',
     });
@@ -96,7 +96,7 @@ describe('runtime-host manager provider oauth action', () => {
       label: 'Device',
     });
 
-    expect(hoisted.browserStartFlow).toHaveBeenCalledWith('google', {
+    expect(hoisted.browserStartFlow).toHaveBeenCalledWith('openai', {
       accountId: 'acc-browser',
       label: 'Browser',
     });

@@ -4,6 +4,7 @@ import { DIRECTORY_MIME_TYPE } from '@/components/file-preview/types';
 function previewMimeFromPath(filePath: string): string | null {
   const lower = filePath.toLowerCase();
   if (lower.endsWith('.md') || lower.endsWith('.markdown') || lower.endsWith('.mdx')) return 'text/markdown';
+  if (lower.endsWith('.html') || lower.endsWith('.htm')) return 'text/html';
   if (lower.endsWith('.pdf')) return 'application/pdf';
   if (lower.endsWith('.xls')) return 'application/vnd.ms-excel';
   if (lower.endsWith('.xlsx')) return 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
@@ -56,7 +57,7 @@ export function extractArtifactRefsFromAssistantText(text: string): AttachedFile
     refs.push(buildAttachedPathRef(normalizedPath, mimeType));
   };
 
-  const exts = 'pdf|xlsx?|csv|md|mdx|png|jpe?g|gif|webp|ts|tsx|js|jsx|json|txt|log|PDF|XLSX?|CSV|MD|MDX|PNG|JPE?G|GIF|WEBP|TSX?|JSX?|JSON|TXT|LOG';
+  const exts = 'html?|pdf|xlsx?|csv|md|mdx|png|jpe?g|gif|webp|ts|tsx|js|jsx|json|txt|log|HTML?|PDF|XLSX?|CSV|MD|MDX|PNG|JPE?G|GIF|WEBP|TSX?|JSX?|JSON|TXT|LOG';
   const taggedRegex = new RegExp(`(?:^|[\\s(\\[{>])(?:MEDIA|media):((?:\\/|~\\/)[^\\s\\n"'()\\[\\],<>]*?\\.(?:${exts}))`, 'g');
   const unixRegex = new RegExp(`(?<![\\w./:])((?:\\/|~\\/)[^\\s\\n"'()\`\\[\\],<>]*?\\.(?:${exts}))`, 'g');
   const windowsRegex = new RegExp(`(?<![\\w/])([A-Za-z]:\\\\[^\\s\\n"'()\`\\[\\],<>]*?\\.(?:${exts}))`, 'g');
@@ -108,6 +109,7 @@ export function shouldKeepAssistantAttachmentVisible(file: AttachedFileMeta): bo
     || mime === 'application/vnd.ms-excel'
     || mime === 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
     || mime === 'text/markdown'
+    || mime === 'text/html'
     || mime === 'text/csv'
     || mime.startsWith('image/');
 }

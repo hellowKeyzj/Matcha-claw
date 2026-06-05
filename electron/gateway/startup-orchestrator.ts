@@ -1,6 +1,9 @@
 import { logger } from '../utils/logger';
 import { LifecycleSupersededError } from './lifecycle-controller';
-import { getGatewayStartupRecoveryAction } from './startup-recovery';
+import {
+  getGatewayStartupRecoveryAction,
+  waitForGatewayControlReadyWithStartupRetry,
+} from './startup-recovery';
 
 export interface ExistingGatewayInfo {
   port: number;
@@ -26,6 +29,22 @@ type StartupHooks = {
   onDoctorRepairSuccess: () => void;
   delay: (ms: number) => Promise<void>;
 };
+
+async function waitForControlReadyWithRetry(
+  hooks: StartupHooks,
+  port: number,
+  externalToken?: string,
+): Promise<void> {
+  await waitForGatewayControlReadyWithStartupRetry({
+    waitForControlReady: hooks.waitForControlReady,
+    port,
+    externalToken,
+    delay: hooks.delay,
+    beforeAttempt: () => hooks.assertLifecycle('start/control-ready-retry'),
+    logWarn: (message) => logger.warn(message),
+    logInfo: (message) => logger.info(message),
+  });
+}
 
 export async function runGatewayStartupSequence(hooks: StartupHooks): Promise<void> {
   let configRepairAttempted = false;
@@ -57,7 +76,7 @@ export async function runGatewayStartupSequence(hooks: StartupHooks): Promise<vo
       if (existing) {
         logger.debug(`Found existing Gateway on port ${existing.port}`);
         await measureStage('wait-control-ready-existing', async () => {
-          await hooks.waitForControlReady(existing.port, existing.externalToken);
+          await waitForControlReadyWithRetry(hooks, existing.port, existing.externalToken);
         });
         hooks.assertLifecycle('start/wait-control-ready-existing');
         hooks.onConnectedToExistingGateway();
@@ -88,7 +107,7 @@ export async function runGatewayStartupSequence(hooks: StartupHooks): Promise<vo
       hooks.onManagedGatewayPortReady();
 
       await measureStage('wait-control-ready', async () => {
-        await hooks.waitForControlReady(hooks.port);
+        await waitForControlReadyWithRetry(hooks, hooks.port);
       });
       hooks.assertLifecycle('start/wait-control-ready');
 

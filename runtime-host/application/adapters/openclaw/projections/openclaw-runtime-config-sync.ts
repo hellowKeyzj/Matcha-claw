@@ -46,6 +46,48 @@ function applyDefaultBrowserSsrfPolicy(browser: Record<string, unknown>): boolea
   return false;
 }
 
+function applyDefaultWebFetchSsrfPolicy(config: Record<string, unknown>): boolean {
+  const tools = (
+    config.tools && typeof config.tools === 'object'
+      ? { ...(config.tools as Record<string, unknown>) }
+      : {}
+  ) as Record<string, unknown>;
+  const web = (
+    tools.web && typeof tools.web === 'object'
+      ? { ...(tools.web as Record<string, unknown>) }
+      : {}
+  ) as Record<string, unknown>;
+  const fetch = (
+    web.fetch && typeof web.fetch === 'object'
+      ? { ...(web.fetch as Record<string, unknown>) }
+      : {}
+  ) as Record<string, unknown>;
+  const ssrfPolicy = (
+    fetch.ssrfPolicy && typeof fetch.ssrfPolicy === 'object'
+      ? { ...(fetch.ssrfPolicy as Record<string, unknown>) }
+      : {}
+  ) as Record<string, unknown>;
+
+  let changed = false;
+  if (ssrfPolicy.allowRfc2544BenchmarkRange === undefined) {
+    ssrfPolicy.allowRfc2544BenchmarkRange = true;
+    changed = true;
+  }
+  if (ssrfPolicy.allowIpv6UniqueLocalRange === undefined) {
+    ssrfPolicy.allowIpv6UniqueLocalRange = true;
+    changed = true;
+  }
+  if (!changed) {
+    return false;
+  }
+
+  fetch.ssrfPolicy = ssrfPolicy;
+  web.fetch = fetch;
+  tools.web = web;
+  config.tools = tools;
+  return true;
+}
+
 function markRestartCommand(config: Record<string, unknown>): void {
   const commands = (
     config.commands && typeof config.commands === 'object'
@@ -179,6 +221,9 @@ export async function syncBrowserConfigToOpenClaw(
     if (applyDefaultBrowserSsrfPolicy(browser)) {
       changed = true;
     }
+    if (applyDefaultWebFetchSsrfPolicy(config)) {
+      changed = true;
+    }
 
     if (changed) {
       markRestartCommand(config);
@@ -214,6 +259,7 @@ export async function syncBrowserModeToOpenClaw(
       delete browser.defaultProfile;
     }
     applyDefaultBrowserSsrfPolicy(browser);
+    applyDefaultWebFetchSsrfPolicy(config);
     syncOfficialBrowserDenylist(config, browserMode !== 'native');
 
     const currentEnabledPluginIds = await readManuallyEnabledPluginIdsFromOpenClawConfig(configRepository, pluginFileSystem, config);

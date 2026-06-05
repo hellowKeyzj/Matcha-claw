@@ -228,7 +228,7 @@ export function createRuntimeHostManager(
   const mainProcessCapabilities: RuntimeHostMainProcessCapabilities = {
     providerOAuth: {
       startOAuthFlow: async (input) => {
-        if (input.provider === 'google' || input.provider === 'openai') {
+        if (input.provider === 'openai') {
           await browserOAuthManager.startFlow(input.provider as BrowserOAuthProviderType, {
             accountId: input.accountId,
             label: input.label,

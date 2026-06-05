@@ -1,6 +1,15 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+
+const hostApiFetchMock = vi.fn();
+
+vi.mock('@/lib/host-api', () => ({
+  hostApiFetch: (...args: unknown[]) => hostApiFetchMock(...args),
+}));
+
 import {
+  hasPendingItemPreviewLoads,
   hydrateAttachedFilesFromItems,
+  loadMissingItemPreviews,
   reconcileHydratedAttachmentItems,
 } from '@/stores/chat/attachment-helpers';
 import {
@@ -11,6 +20,34 @@ import type { SessionRenderItem } from '../../runtime-host/shared/session-adapte
 import { buildRenderItemsFromMessages } from './helpers/timeline-fixtures';
 
 describe('chat attachment helpers', () => {
+  it('marks image previews unavailable when thumbnail loading returns no image data', async () => {
+    hostApiFetchMock.mockResolvedValue({});
+    const items = buildRenderItemsFromMessages('agent:test:main', [{
+      role: 'assistant',
+      id: 'assistant-1',
+      content: 'generated image',
+      _attachedFiles: [{
+        fileName: 'artifact.png',
+        mimeType: 'image/png',
+        fileSize: 0,
+        preview: null,
+        filePath: 'E:\\code\\Matcha-claw\\artifact.png',
+        source: 'tool-result',
+      }],
+    }]) as SessionRenderItem[];
+
+    const updated = await loadMissingItemPreviews(items);
+
+    expect(updated?.[0]).toMatchObject({
+      kind: 'assistant-turn',
+      attachedFiles: [{
+        preview: null,
+        previewStatus: 'unavailable',
+      }],
+    });
+    expect(hasPendingItemPreviewLoads(updated ?? [])).toBe(false);
+  });
+
   it('does not synthesize assistant attachments from raw absolute paths in assistant text', () => {
     const items = buildRenderItemsFromMessages('agent:test:main', [{
       role: 'assistant',

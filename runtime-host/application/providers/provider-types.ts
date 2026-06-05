@@ -40,8 +40,7 @@ export type ProviderProtocol =
   | 'openai-completions'
   | 'openai-responses'
   | 'google-generative-ai'
-  | 'anthropic-messages'
-  | 'openrouter';
+  | 'anthropic-messages';
 
 export type ProviderCredentialKind = 'chat' | 'media';
 

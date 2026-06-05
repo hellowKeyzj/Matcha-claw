@@ -21,7 +21,7 @@ function getStoredApiKey(store: ProviderStoreLike, key: string): string | undefi
 function resolveRuntimeConfigProviderKey(projectionKeys: ProviderProjectionKeyResolverPort, accountId: string, account: Record<string, unknown> | null): string {
   const vendorId = typeof account?.vendorId === 'string' ? account.vendorId.trim() : '';
   return vendorId
-    ? projectionKeys.resolveProviderKey({ vendorId, accountId })
+    ? projectionKeys.resolveProviderKey({ vendorId, accountId, account: account ?? undefined })
     : accountId;
 }
 

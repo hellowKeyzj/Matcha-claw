@@ -1,9 +1,11 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   getGatewayStartupRecoveryAction,
   hasInvalidConfigFailureSignal,
+  isGatewayStillStartingError,
   isInvalidConfigSignal,
   shouldAttemptConfigAutoRepair,
+  waitForGatewayControlReadyWithStartupRetry,
 } from '@electron/gateway/startup-recovery';
 
 describe('gateway startup recovery heuristics', () => {
@@ -59,5 +61,27 @@ describe('gateway startup recovery heuristics', () => {
       maxAttempts: 3,
     });
     expect(action).toBe('retry');
+  });
+
+  it('识别 OpenClaw 启动中拒绝控制面连接的错误', () => {
+    expect(isGatewayStillStartingError(new Error('gateway starting; retry shortly'))).toBe(true);
+    expect(isGatewayStillStartingError(new Error('Gateway control ready check failed'))).toBe(false);
+  });
+
+  it('控制面仍在启动时会原地重试到成功', async () => {
+    const waitForControlReady = vi.fn()
+      .mockRejectedValueOnce(new Error('gateway starting; retry shortly'))
+      .mockResolvedValueOnce(undefined);
+    const delay = vi.fn().mockResolvedValue(undefined);
+
+    await waitForGatewayControlReadyWithStartupRetry({
+      waitForControlReady,
+      port: 18789,
+      delay,
+      retryDelaysMs: [5],
+    });
+
+    expect(waitForControlReady).toHaveBeenCalledTimes(2);
+    expect(delay).toHaveBeenCalledWith(5);
   });
 });

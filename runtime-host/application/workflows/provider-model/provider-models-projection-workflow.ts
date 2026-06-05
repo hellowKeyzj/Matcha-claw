@@ -27,6 +27,10 @@ import type {
   ProviderModelsProjectionPort,
 } from '../../providers/provider-models-service';
 import type { CapabilityRoutingApplicationService } from '../../providers/capability-routing-service';
+import {
+  isAnthropicMessagesApi,
+  withAnthropicMessagesModelMaxTokens,
+} from '../../adapters/openclaw/projections/openclaw-anthropic-messages-max-tokens';
 
 const RUNTIME_ZERO_MODEL_COST = {
   input: 0,
@@ -316,13 +320,18 @@ export class ProviderModelsProjectionWorkflow {
           api: entry.api,
           ...(entry.headers ? { headers: entry.headers } : {}),
           ...(entry.authHeader !== undefined ? { authHeader: entry.authHeader } : {}),
-          models: entry.models.map((model) => ({
-            id: model.modelId,
-            input: model.input,
-            contextWindow: model.contextWindow,
-            maxTokens: model.maxTokens,
-            cost: model.cost,
-          })),
+          models: entry.models.map((model) => {
+            const out: Record<string, unknown> = {
+              id: model.modelId,
+              input: model.input,
+              contextWindow: model.contextWindow,
+              maxTokens: model.maxTokens,
+              cost: model.cost,
+            };
+            return isAnthropicMessagesApi(entry.api)
+              ? withAnthropicMessagesModelMaxTokens(out, provider, entry)
+              : out;
+          }),
         },
       });
     }

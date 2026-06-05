@@ -187,6 +187,13 @@ function baseArch(rawArch) {
   return dash > 0 ? rawArch.slice(0, dash) : rawArch;
 }
 
+function matchesTargetArch(pkgArch, targetArch) {
+  if (targetArch === 'universal') {
+    return pkgArch === 'x64' || pkgArch === 'arm64' || pkgArch === 'universal';
+  }
+  return pkgArch === targetArch || pkgArch === 'universal';
+}
+
 function cleanupNativePlatformPackages(nodeModulesDir, platform, arch) {
   let removed = 0;
 
@@ -204,7 +211,7 @@ function cleanupNativePlatformPackages(nodeModulesDir, platform, arch) {
 
       const isMatch =
         pkgPlatform === platform &&
-        (pkgArch === arch || pkgArch === 'universal');
+        matchesTargetArch(pkgArch, arch);
 
       if (!isMatch) {
         try {
@@ -229,7 +236,7 @@ function cleanupNativePlatformPackages(nodeModulesDir, platform, arch) {
 
       const isMatch =
         pkgPlatform === platform &&
-        (pkgArch === arch || pkgArch === 'universal');
+        matchesTargetArch(pkgArch, arch);
 
       if (!isMatch) {
         try {
@@ -936,6 +943,7 @@ exports.__test__ = {
   PLATFORM_NATIVE_SCOPES,
   UNSCOPED_NATIVE_PACKAGES,
   baseArch,
+  matchesTargetArch,
   cleanupNativePlatformPackages,
   cleanupLanceDbPlatformPackages,
   cleanupOnnxRuntimeNodeBinaries,

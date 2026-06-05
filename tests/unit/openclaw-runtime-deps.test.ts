@@ -9,6 +9,8 @@ describe('openclaw runtime dependency bundle list', () => {
     expect(EXTRA_OPENCLAW_RUNTIME_PACKAGES).toEqual(expect.arrayContaining([
       'acpx',
       'playwright-core',
+      '@whiskeysockets/baileys',
+      'qrcode',
     ]));
   });
 
@@ -21,6 +23,8 @@ describe('openclaw runtime dependency bundle list', () => {
       'acpx',
       '@agentclientprotocol/sdk',
       'playwright-core',
+      '@whiskeysockets/baileys',
+      'qrcode',
     ]);
   });
 });

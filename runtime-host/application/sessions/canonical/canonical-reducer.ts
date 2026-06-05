@@ -21,6 +21,7 @@ import type {
   CanonicalThoughtState,
   CanonicalToolState,
 } from './canonical-state';
+import { isStateOnlyToolContentBlock, isToolCallContentType } from '../state-only-tools';
 
 function eventTime(event: CanonicalSessionEvent): number | undefined {
   return typeof event.timestamp === 'number' && Number.isFinite(event.timestamp)
@@ -226,6 +227,19 @@ function applyLifecycle(state: CanonicalSessionState, event: CanonicalLifecycleE
   };
 }
 
+function messageHasToolCall(content: unknown): boolean {
+  if (!Array.isArray(content)) {
+    return false;
+  }
+  return content.some((block) => {
+    if (!block || typeof block !== 'object' || Array.isArray(block)) {
+      return false;
+    }
+    const record = block as Record<string, unknown>;
+    return isToolCallContentType(record.type) && !isStateOnlyToolContentBlock(record);
+  });
+}
+
 function applyMessageRuntime(state: CanonicalSessionState, event: CanonicalMessageSnapshotEvent): void {
   if (event.source === 'replay') {
     return;
@@ -255,6 +269,19 @@ function applyMessageRuntime(state: CanonicalSessionState, event: CanonicalMessa
     return;
   }
   if (event.status === 'final') {
+    if (messageHasToolCall(event.content)) {
+      state.runtime = {
+        ...state.runtime,
+        activeRunId: event.runId ?? state.runtime.activeRunId,
+        runPhase: 'waiting_tool',
+        pendingTurnKey: event.runId ?? event.messageId ?? state.runtime.pendingTurnKey,
+        pendingTurnLaneKey: laneKeyOf(event),
+        lastError: null,
+        lastIssue: null,
+        runtimeActivity: null,
+      };
+      return;
+    }
     state.runtime = {
       ...state.runtime,
       ...terminalRuntimePatch('done', null, null),
@@ -494,7 +521,7 @@ export function reduceCanonicalSessionEvent(state: CanonicalSessionState, event:
     default:
       break;
   }
-  if (state.updatedAt == null) {
+  if (state.updatedAt == null && event.source !== 'replay') {
     state.updatedAt = Date.now();
   }
   state.runtime = {

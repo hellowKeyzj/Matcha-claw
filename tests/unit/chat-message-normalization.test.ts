@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   isAssistantControlPrefixMessage,
   isInternalRuntimeDisplayMessage,
+  sanitizeAssistantDisplayText,
   sanitizeCanonicalUserText,
   shouldPreserveCanonicalTranscriptMessage,
 } from '../../runtime-host/shared/chat-message-normalization';
@@ -181,6 +182,20 @@ describe('chat message normalization', () => {
 
     expect(isInternalRuntimeDisplayMessage(message)).toBe(false);
     expect(shouldPreserveCanonicalTranscriptMessage(message)).toBe(true);
+  });
+
+  it('strips standalone assistant control and artifact marker lines from visible assistant text', () => {
+    expect(sanitizeAssistantDisplayText([
+      'Real reply',
+      'NO_REPLY',
+      '',
+      String.raw`MEDIA:C:\Users\me\.openclaw\workspace\out.svg`,
+      'More detail',
+      'HEARTBEAT_OK',
+    ].join('\n'))).toBe([
+      'Real reply',
+      'More detail',
+    ].join('\n'));
   });
 
   it('detects only uppercase silent reply streaming prefixes for assistant messages', () => {

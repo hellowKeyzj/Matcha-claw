@@ -101,4 +101,36 @@ describe('runtime-host gateway ready service', () => {
       },
     });
   });
+
+  it('auto-approves only OpenClaw Control UI browser pairing requests', async () => {
+    const gateway = {
+      gatewayRpc: vi.fn(async (method: string) => {
+        if (method === 'device.pair.list') {
+          return {
+            pending: [
+              { requestId: 'control-1', clientId: 'openclaw-control-ui' },
+              { requestId: 'other-1', clientId: 'external-device' },
+              { requestId: '', clientId: 'openclaw-control-ui' },
+            ],
+          };
+        }
+        return { ok: true };
+      }),
+      inspectGatewayControlReadiness: vi.fn(),
+      readGatewayConnectionState: vi.fn(),
+      chatSend: vi.fn(),
+    };
+    const service = new GatewayService({ readinessWorkflow: new GatewayReadinessWorkflow({ gateway }) });
+
+    await expect(service.approvePendingControlUiPairingRequests()).resolves.toEqual({
+      status: 200,
+      data: {
+        success: true,
+        approvedRequestIds: ['control-1'],
+      },
+    });
+    expect(gateway.gatewayRpc).toHaveBeenCalledWith('device.pair.list', {}, 10000);
+    expect(gateway.gatewayRpc).toHaveBeenCalledWith('device.pair.approve', { requestId: 'control-1' }, 15000);
+    expect(gateway.gatewayRpc).not.toHaveBeenCalledWith('device.pair.approve', { requestId: 'other-1' }, 15000);
+  });
 });

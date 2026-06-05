@@ -61,6 +61,26 @@ function base(eventId: string): Pick<CanonicalSessionEvent, 'eventId' | 'protoco
 }
 
 describe('Runtime Host canonical ACP projection', () => {
+  it('does not treat timestamp-less replay boundaries as session activity', () => {
+    const state = createEmptyCanonicalSessionState('agent:main:main', createOpenClawTestRuntimeContext('agent:main:main'));
+    reduceCanonicalSessionEvents(state, [{
+      ...base('replay-start'),
+      source: 'replay',
+      type: 'replay_boundary',
+      timestamp: undefined,
+      phase: 'start',
+    }, {
+      ...base('replay-end'),
+      source: 'replay',
+      type: 'replay_boundary',
+      timestamp: undefined,
+      phase: 'end',
+    }]);
+
+    expect(state.updatedAt).toBeNull();
+    expect(state.runtime.updatedAt).toBeNull();
+  });
+
   it('keeps tool lifecycle associated with the owning assistant turn and stable segment keys', () => {
     const state = createEmptyCanonicalSessionState('agent:main:main', createOpenClawTestRuntimeContext('agent:main:main'));
     reduceCanonicalSessionEvents(state, [{
@@ -184,6 +204,32 @@ describe('Runtime Host canonical ACP projection', () => {
       status: 'final',
       thinking: '先检查入口',
     }]);
+  });
+
+  it('keeps final assistant tool-use turns active until tool results arrive', () => {
+    const state = createEmptyCanonicalSessionState('agent:main:main', createOpenClawTestRuntimeContext('agent:main:main'));
+    reduceCanonicalSessionEvents(state, [{
+      ...base('message-with-tool-call'),
+      seq: 1,
+      type: 'message_snapshot',
+      role: 'assistant',
+      messageId: 'assistant-tool-turn',
+      content: [
+        { type: 'thinking', thinking: '先检查入口' },
+        { type: 'text', text: '我先读文件。' },
+        { type: 'tool_call', toolCallId: 'tool-read-1', name: 'Read', input: { file_path: 'package.json' } },
+      ],
+      text: '我先读文件。',
+      status: 'final',
+    }]);
+
+    expect(state.runtime).toMatchObject({
+      activeRunId: 'run-1',
+      runPhase: 'waiting_tool',
+      pendingTurnKey: 'run-1',
+      pendingTurnLaneKey: 'main',
+      lastError: null,
+    });
   });
 
   it('keeps same-run assistant messages distinct and ordered around tool output', () => {

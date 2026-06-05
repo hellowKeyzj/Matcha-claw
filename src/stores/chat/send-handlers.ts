@@ -20,6 +20,7 @@ import {
   patchSessionMeta,
   hasTimeoutSignal,
   isRecoverableChatSendTimeout,
+  getSessionItems,
 } from './store-state-helpers';
 import { resolveSessionOperationTarget } from './session-identity';
 import type { ChatSendAttachment, ChatStoreState } from './types';
@@ -33,6 +34,19 @@ export type ChatStoreSetFn = (
 export type ChatStoreGetFn = () => ChatStoreState;
 
 export const NO_RESPONSE_RECEIVED_ERROR = 'No response received from the model. The provider may be unavailable or the API key may have insufficient quota. Please check your provider settings.';
+
+function hasAssistantProgress(items: ReturnType<typeof getSessionItems>): boolean {
+  return items.some((item) => item.kind === 'assistant-turn' && (
+    item.status === 'streaming'
+    || item.status === 'waiting_tool'
+    || item.segments.length > 0
+    || item.tools.length > 0
+    || item.thinking != null
+    || item.text.trim().length > 0
+    || item.images.length > 0
+    || item.attachedFiles.length > 0
+  ));
+}
 
 interface ApplyStoreSendStartParams {
   set: ChatStoreSetFn;
@@ -96,6 +110,14 @@ export function startStoreSendWatchers(params: StartStoreSendWatchersParams): vo
       return;
     }
     if (hasActiveStreamingRun(runtime) || isWaitingTool(runtime)) {
+      setSendSafetyTimer(setTimeout(checkStuck, SAFETY_RETRY_INTERVAL_MS));
+      return;
+    }
+    if (hasAssistantProgress(getSessionItems(state, sessionKey))) {
+      setLastChatEventAt(Date.now());
+      if (state.error === NO_RESPONSE_RECEIVED_ERROR) {
+        set({ error: null });
+      }
       setSendSafetyTimer(setTimeout(checkStuck, SAFETY_RETRY_INTERVAL_MS));
       return;
     }
@@ -198,6 +220,9 @@ export async function executeStoreSend(params: ExecuteStoreSendParams): Promise<
   }
 
   const stateBeforeSend = get();
+  if (stateBeforeSend.mutating === true) {
+    return;
+  }
   const { currentSessionKey } = stateBeforeSend;
   const runtimeBeforeSend = getSessionRuntime(stateBeforeSend, currentSessionKey);
   let target;

@@ -3,12 +3,10 @@ import { shell } from 'electron';
 import { logger } from '../../../utils/logger';
 import { createCapabilityPayload } from '../../../main/runtime-host-capabilities';
 import { createDefaultRuntimeHostHttpClient } from '../../../main/runtime-host-client';
-import { loginGeminiCliOAuth, type GeminiCliOAuthCredentials } from './gemini-cli-oauth';
 import { loginOpenAICodexOAuth, type OpenAICodexOAuthCredentials } from './openai-codex-oauth';
 
-export type BrowserOAuthProviderType = 'google' | 'openai';
+export type BrowserOAuthProviderType = 'openai';
 
-const GOOGLE_OAUTH_PROVIDER_TOKEN_KEY = 'google-gemini-cli';
 const OPENAI_OAUTH_PROVIDER_TOKEN_KEY = 'openai-codex';
 const MODEL_PROVIDER_CAPABILITY_ID = 'model.provider';
 const runtimeHostClient = createDefaultRuntimeHostHttpClient({
@@ -41,63 +39,36 @@ class BrowserOAuthManager extends EventEmitter {
     this.activeLabel = options?.label || null;
     this.emit('oauth:start', { provider, accountId: this.activeAccountId });
 
-    if (provider === 'openai') {
-      void this.executeFlow(provider);
-      return true;
-    }
-
-    await this.executeFlow(provider);
+    void this.executeFlow(provider);
     return true;
   }
 
   private async executeFlow(provider: BrowserOAuthProviderType): Promise<void> {
     try {
-      const token = provider === 'google'
-        ? await loginGeminiCliOAuth({
-          isRemote: false,
-          openUrl: async (url) => {
-            await shell.openExternal(url);
-          },
-          log: (message) => logger.info(`[BrowserOAuth] ${message}`),
-          note: async (message, title) => {
-            logger.info(`[BrowserOAuth] ${title || 'OAuth note'}: ${message}`);
-          },
-          prompt: async () => {
-            throw new Error('Manual browser OAuth fallback is not implemented in MatchaClaw yet.');
-          },
-          progress: {
-            update: (message) => logger.info(`[BrowserOAuth] ${message}`),
-            stop: (message) => {
-              if (message) {
-                logger.info(`[BrowserOAuth] ${message}`);
-              }
-            },
-          },
-        })
-        : await loginOpenAICodexOAuth({
-          openUrl: async (url) => {
-            await shell.openExternal(url);
-          },
-          onProgress: (message) => logger.info(`[BrowserOAuth] ${message}`),
-          onManualCodeRequired: ({ authorizationUrl, reason }) => {
-            const message = reason === 'port_in_use'
-              ? 'OpenAI OAuth callback port 1455 is in use. Complete sign-in, then paste the final callback URL or code.'
-              : 'OpenAI OAuth callback timed out. Paste the final callback URL or code to continue.';
-            const payload = {
-              provider,
-              mode: 'manual' as const,
-              authorizationUrl,
-              message,
-            };
-            this.emit('oauth:code', payload);
-          },
-          onManualCodeInput: async () => {
-            return await new Promise<string>((resolve, reject) => {
-              this.pendingManualCodeResolve = resolve;
-              this.pendingManualCodeReject = reject;
-            });
-          },
-        });
+      const token = await loginOpenAICodexOAuth({
+        openUrl: async (url) => {
+          await shell.openExternal(url);
+        },
+        onProgress: (message) => logger.info(`[BrowserOAuth] ${message}`),
+        onManualCodeRequired: ({ authorizationUrl, reason }) => {
+          const message = reason === 'port_in_use'
+            ? 'OpenAI OAuth callback port 1455 is in use. Complete sign-in, then paste the final callback URL or code.'
+            : 'OpenAI OAuth callback timed out. Paste the final callback URL or code to continue.';
+          const payload = {
+            provider,
+            mode: 'manual' as const,
+            authorizationUrl,
+            message,
+          };
+          this.emit('oauth:code', payload);
+        },
+        onManualCodeInput: async () => {
+          return await new Promise<string>((resolve, reject) => {
+            this.pendingManualCodeResolve = resolve;
+            this.pendingManualCodeReject = reject;
+          });
+        },
+      });
 
       await this.onSuccess(provider, token);
     } catch (error) {
@@ -141,7 +112,7 @@ class BrowserOAuthManager extends EventEmitter {
 
   private async onSuccess(
     providerType: BrowserOAuthProviderType,
-    token: GeminiCliOAuthCredentials | OpenAICodexOAuthCredentials,
+    token: OpenAICodexOAuthCredentials,
   ) {
     const accountId = this.activeAccountId || providerType;
     const accountLabel = this.activeLabel;
@@ -153,12 +124,9 @@ class BrowserOAuthManager extends EventEmitter {
     this.pendingManualCodeReject = null;
     logger.info(`[BrowserOAuth] Successfully completed OAuth for ${providerType}`);
 
-    const isGoogle = providerType === 'google';
-    const oauthProviderTokenKey = isGoogle ? GOOGLE_OAUTH_PROVIDER_TOKEN_KEY : OPENAI_OAUTH_PROVIDER_TOKEN_KEY;
+    const oauthProviderTokenKey = OPENAI_OAUTH_PROVIDER_TOKEN_KEY;
     const oauthTokenEmail = typeof token.email === 'string' ? token.email : undefined;
-    const oauthTokenSubject = typeof token.projectId === 'string'
-      ? token.projectId
-      : (typeof token.accountId === 'string' ? token.accountId : undefined);
+    const oauthTokenSubject = typeof token.accountId === 'string' ? token.accountId : undefined;
 
     const response = await runtimeHostClient.request<{ account?: { id?: unknown } }>(
       'POST',

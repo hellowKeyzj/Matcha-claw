@@ -18,6 +18,7 @@ import { cn } from '@/lib/utils';
 import { MonacoDiffViewer } from './MonacoDiffViewer';
 import { MonacoViewer } from './MonacoViewer';
 import { MarkdownPreview } from './MarkdownPreview';
+import { HtmlPreview } from './HtmlPreview';
 import { PdfViewer } from './PdfViewer';
 import { SheetViewer } from './SheetViewer';
 import type { ArtifactPreviewTarget } from './types';
@@ -206,7 +207,7 @@ export function FilePreviewBody({
   }, [file.filePath, t]);
 
   const shouldLoadTextPreview = useMemo(() => {
-    if (file.contentType === 'code' || file.contentType === 'text' || file.contentType === 'markdown') {
+    if (file.contentType === 'code' || file.contentType === 'text' || file.contentType === 'markdown' || file.contentType === 'html') {
       return mode === 'preview' && !shouldUseInlineSnapshot;
     }
     if (file.contentType === 'sheet' && file.ext === '.csv') {
@@ -440,6 +441,11 @@ export function FilePreviewBody({
     if (file.contentType === 'markdown') {
       const markdownText = textState.status === 'ready' ? textState.content : (file.content ?? '');
       return <MarkdownPreview key={previewInstanceKey} filePath={file.filePath} markdown={markdownText} />;
+    }
+
+    if (file.contentType === 'html') {
+      const htmlText = textState.status === 'ready' ? textState.content : (file.content ?? '');
+      return <HtmlPreview key={previewInstanceKey} fileName={file.fileName} source={htmlText} />;
     }
 
     if (file.contentType === 'code') {

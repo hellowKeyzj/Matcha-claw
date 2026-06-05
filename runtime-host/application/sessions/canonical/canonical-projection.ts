@@ -18,6 +18,7 @@ import { buildAssistantTurnEntry, buildAssistantTurnEntryKey } from '../assistan
 import { buildRenderItemsFromTimeline } from '../session-render-model';
 import { resolveToolCardRenderState } from '../tool/tool-card-render-state';
 import { extractToolResultOutputText } from '../tool/tool-card-content';
+import { sanitizeAssistantDisplayText } from '../../../shared/chat-message-normalization';
 import { extractToolResultMediaAttachments } from '../tool-result-media';
 import {
   isToolCallContentType,
@@ -378,12 +379,15 @@ function buildSegmentsFromCanonicalMessage(message: CanonicalMessageState, tools
         });
         continue;
       }
-      if (type === 'text' && typeof row.text === 'string' && row.text.trim()) {
-        segments.push({
-          kind: 'message',
-          key: `message:${segmentKey}`,
-          text: row.text.trim(),
-        });
+      if (type === 'text' && typeof row.text === 'string') {
+        const text = sanitizeAssistantDisplayText(row.text);
+        if (text) {
+          segments.push({
+            kind: 'message',
+            key: `message:${segmentKey}`,
+            text,
+          });
+        }
         continue;
       }
       if (type === 'image') {
@@ -407,12 +411,12 @@ function buildSegmentsFromCanonicalMessage(message: CanonicalMessageState, tools
         text: text.trim(),
       });
     }
-    const text = message.text || readTextFromContent(message.content);
-    if (text.trim()) {
+    const text = sanitizeAssistantDisplayText(message.text || readTextFromContent(message.content));
+    if (text) {
       segments.push({
         kind: 'message',
         key: `message:${turnKey}:${laneKey}:${segments.length}`,
-        text: text.trim(),
+        text,
       });
     }
   }
@@ -593,7 +597,7 @@ export function buildAssistantEntry(sessionId: string, message: CanonicalMessage
       ...(message.clientId ? { clientId: message.clientId } : {}),
     },
     status: message.status === 'streaming' ? 'streaming' : message.status,
-    text: message.text,
+    text: sanitizeAssistantDisplayText(message.text),
     ...(message.createdAt != null ? { createdAt: message.createdAt } : {}),
     ...(message.seq != null ? { sequenceId: message.seq } : {}),
     segments: buildSegmentsFromCanonicalMessage(message, tools, thoughts),

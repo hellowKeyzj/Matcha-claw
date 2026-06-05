@@ -18,6 +18,7 @@ import { cn } from '@/lib/utils';
 import { useTranslation } from 'react-i18next';
 import { CHAT_LAYOUT_TOKENS } from './chat-layout-tokens';
 import { ChatImageLightbox } from './components/ChatImageLightbox';
+import { collectDroppedFiles } from '@/lib/collect-dropped-files';
 
 // ── Types ────────────────────────────────────────────────────────
 
@@ -508,52 +509,34 @@ export const ChatInput = memo(function ChatInput({
 
   // ── File staging via native dialog ─────────────────────────────
 
-  const pickFiles = useCallback(async () => {
-    let tempIds: string[] = [];
+  const stagePathFiles = useCallback(async (filePaths: string[]) => {
+    if (filePaths.length === 0) {
+      return;
+    }
+    const tempIds: string[] = [];
+    const stagingAttachments = filePaths.map((filePath) => {
+      const tempId = crypto.randomUUID();
+      tempIds.push(tempId);
+      const fileName = filePath.split(/[\\/]/).pop() || 'file';
+      return buildStagingAttachment(tempId, fileName, '', 0);
+    });
+    setAttachments((prev) => [...prev, ...stagingAttachments]);
+
     try {
-      const result = await invokeIpc('dialog:open', {
-        properties: ['openFile', 'multiSelections'],
-      }) as { canceled: boolean; filePaths?: string[] };
-      if (result.canceled || !result.filePaths?.length) return;
-
-      // Add placeholder entries immediately
-      const stagingAttachments = result.filePaths.map((filePath) => {
-        const tempId = crypto.randomUUID();
-        tempIds.push(tempId);
-        // Handle both Unix (/) and Windows (\) path separators
-        const fileName = filePath.split(/[\\/]/).pop() || 'file';
-        return buildStagingAttachment(tempId, fileName, '', 0);
-      });
-      setAttachments((prev) => [...prev, ...stagingAttachments]);
-
       if (!runtimeAddress) {
         throw new Error('RuntimeAddress is required');
       }
-      const staged = await hostFileStagePaths({
-        filePaths: result.filePaths,
-        runtimeAddress,
-      });
-
-      // Update each placeholder with real data
+      const staged = await hostFileStagePaths({ filePaths, runtimeAddress });
       const updatesByTempId = new Map<string, FileAttachment>();
       for (let i = 0; i < tempIds.length; i++) {
         const tempId = tempIds[i];
         const data = staged[i];
-        if (data) {
-          updatesByTempId.set(tempId, { ...data, status: 'ready' });
-        } else {
-          const fallback = stagingAttachments[i];
-          updatesByTempId.set(tempId, {
-            ...fallback,
-            status: 'error',
-            error: 'Staging failed',
-          });
-        }
+        updatesByTempId.set(tempId, data
+          ? { ...data, status: 'ready' }
+          : { ...stagingAttachments[i], status: 'error', error: 'Staging failed' });
       }
       setAttachments((prev) => prev.map((attachment) => updatesByTempId.get(attachment.id) ?? attachment));
     } catch (err) {
-      // Mark any stuck 'staging' attachments as 'error' so the user can remove them
-      // and the send button isn't permanently blocked
       const failedIds = new Set(tempIds);
       setAttachments((prev) => prev.map((attachment) => (
         failedIds.has(attachment.id)
@@ -562,6 +545,18 @@ export const ChatInput = memo(function ChatInput({
       )));
     }
   }, [runtimeAddress]);
+
+  const pickFiles = useCallback(async () => {
+    try {
+      const result = await invokeIpc('dialog:open', {
+        properties: ['openFile', 'multiSelections'],
+      }) as { canceled: boolean; filePaths?: string[] };
+      if (result.canceled || !result.filePaths?.length) return;
+      await stagePathFiles(result.filePaths);
+    } catch (err) {
+      console.error('[pickFiles] Failed to open file dialog:', err);
+    }
+  }, [stagePathFiles]);
 
   // ── Stage browser File objects (paste / drag-drop) ─────────────
 
@@ -806,11 +801,18 @@ export const ChatInput = memo(function ChatInput({
       e.preventDefault();
       e.stopPropagation();
       setDragOver(false);
-      if (e.dataTransfer?.files?.length) {
-        stageBufferFiles(Array.from(e.dataTransfer.files));
+      if (!e.dataTransfer) {
+        return;
+      }
+      const { pathFiles, bufferFiles } = collectDroppedFiles(e.dataTransfer);
+      if (pathFiles.length > 0) {
+        void stagePathFiles(pathFiles);
+      }
+      if (bufferFiles.length > 0) {
+        stageBufferFiles(bufferFiles);
       }
     },
-    [stageBufferFiles],
+    [stageBufferFiles, stagePathFiles],
   );
 
   const placeholderText = resolveInputPlaceholder(disabled, approvalWaiting, t);

@@ -287,7 +287,7 @@ describe('openclaw plugin config service', () => {
     expect(nextConfig.plugins.entries['openclaw-lark']).toMatchObject({ enabled: true });
   });
 
-  it('启用 openclaw-lark 时即使原配置没有 entries.feishu 也会显式禁用 built-in feishu', async () => {
+  it('启用 openclaw-lark 时不会写入会阻塞 openclaw-lark 的 legacy feishu entry', async () => {
     writeFileSync(join(configDir, 'openclaw.json'), JSON.stringify({
       channels: {
         feishu: {
@@ -319,7 +319,7 @@ describe('openclaw plugin config service', () => {
       };
     };
 
-    expect(nextConfig.plugins.entries.feishu).toMatchObject({ enabled: false });
+    expect(nextConfig.plugins.entries.feishu).toBeUndefined();
     expect(nextConfig.plugins.entries['openclaw-lark']).toMatchObject({ enabled: true });
   });
 

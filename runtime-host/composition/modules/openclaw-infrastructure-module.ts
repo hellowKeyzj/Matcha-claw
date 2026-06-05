@@ -95,7 +95,7 @@ import {
   getOAuthProviderApi,
   getOAuthProviderDefaultBaseUrl,
   getOAuthProviderTokenKey,
-  getOpenClawProviderKeyForType,
+  resolveOpenClawProviderKeyForAccount,
   normalizeOAuthBaseUrl,
   usesOAuthAuthHeader,
 } from '../../application/adapters/openclaw/projections/openclaw-provider-projection-rules';
@@ -384,7 +384,11 @@ function createRuntimeAdapterRegistrationFactory(): RuntimeAdapterRegistrationFa
 
 function createOpenClawProviderProjectionKeyResolver(): ProviderProjectionKeyResolverPort {
   return {
-    resolveProviderKey: ({ vendorId, accountId }) => getOpenClawProviderKeyForType(vendorId, accountId),
+    resolveProviderKey: ({ vendorId, accountId, account }) => resolveOpenClawProviderKeyForAccount({
+      vendorId,
+      id: accountId,
+      authMode: account?.authMode,
+    }),
   };
 }
 

@@ -63,9 +63,7 @@ export const PROVIDER_DEFINITIONS: ProviderDefinition[] = [
     requiresApiKey: true,
     category: 'official',
     envVar: 'GEMINI_API_KEY',
-    isOAuth: true,
-    supportsApiKey: true,
-    supportedAuthModes: ['api_key', 'oauth_browser'],
+    supportedAuthModes: ['api_key'],
     defaultAuthMode: 'api_key',
     supportsMultipleAccounts: true,
     providerConfig: {

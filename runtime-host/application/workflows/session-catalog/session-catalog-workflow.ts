@@ -14,7 +14,7 @@ import {
   readSessionStoreLabel,
 } from '../../sessions/session-storage-repository';
 import type { SessionMetadataPort } from '../../sessions/session-metadata-repository';
-import { iterateTranscriptMessages } from '../../sessions/transcript-parser';
+import { iterateTranscriptMessagesAsync } from '../../sessions/transcript-parser';
 import { canProjectTranscriptMessage } from '../../sessions/canonical/canonical-transcript-replay';
 import {
   resolveSessionLabelDetailsFromTimelineEntries,
@@ -125,7 +125,6 @@ export class SessionCatalogWorkflow {
       const item = await buildSessionCatalogItem({
         sessionKey: descriptor.sessionKey,
         storageDescriptor: descriptor,
-        transcriptUpdatedAt: fingerprint.mtimeMs,
         runtimeModel: null,
         metadataRepository: this.deps.metadataRepository,
         storageRepository: this.deps.storageRepository,
@@ -232,38 +231,43 @@ function readSessionStoreUpdatedAt(entry: Record<string, unknown> | null): numbe
 
 interface SessionTranscriptCatalogDetails extends SessionResolvedLabel {
   hasRenderableContent: boolean;
+  lastActivityAt: number | null;
 }
 
 async function resolveTranscriptCatalogDetails(input: {
   storageRepository: SessionStoragePort;
   storageDescriptor: SessionStorageDescriptor;
 }): Promise<SessionTranscriptCatalogDetails> {
-  const content = await input.storageRepository.readTranscriptDescriptorContent(input.storageDescriptor);
   let userLabel: string | null = null;
   let assistantLabel: string | null = null;
   let hasRenderableContent = false;
-  for (const message of content ? iterateTranscriptMessages(content) : []) {
+  let lastActivityAt: number | null = null;
+  for await (const message of iterateTranscriptMessagesAsync(input.storageRepository.readTranscriptDescriptorLines(input.storageDescriptor))) {
     const details = resolveSessionLabelDetailsFromTranscriptMessages([message]);
     if (details.titleSource === 'user') {
       userLabel = details.label;
     } else if (details.titleSource === 'assistant') {
       assistantLabel = details.label;
     }
-    hasRenderableContent ||= canProjectTranscriptMessage(input.storageDescriptor.sessionKey, message);
+    if (canProjectTranscriptMessage(input.storageDescriptor.sessionKey, message)) {
+      hasRenderableContent = true;
+      if (typeof message.timestamp === 'number' && Number.isFinite(message.timestamp)) {
+        lastActivityAt = message.timestamp;
+      }
+    }
   }
   if (userLabel) {
-    return { label: userLabel, titleSource: 'user', hasRenderableContent };
+    return { label: userLabel, titleSource: 'user', hasRenderableContent, lastActivityAt };
   }
   if (assistantLabel) {
-    return { label: assistantLabel, titleSource: 'assistant', hasRenderableContent };
+    return { label: assistantLabel, titleSource: 'assistant', hasRenderableContent, lastActivityAt };
   }
-  return { label: null, titleSource: 'none', hasRenderableContent };
+  return { label: null, titleSource: 'none', hasRenderableContent, lastActivityAt };
 }
 
 async function buildSessionCatalogItem(input: {
   sessionKey: string;
   storageDescriptor: SessionStorageDescriptor;
-  transcriptUpdatedAt?: number | null;
   runtimeModel?: string | null;
   metadataRepository: SessionMetadataPort;
   storageRepository: SessionStoragePort;
@@ -275,18 +279,16 @@ async function buildSessionCatalogItem(input: {
   const runtimeAddress = input.storageDescriptor.runtimeAddress;
   const agentId = runtimeAddress.agentId;
   const storeLabel = readSessionStoreLabel(input.storageDescriptor.sessionStoreEntry);
-  const transcriptDetails = storeLabel
-    ? { label: null, titleSource: 'none' as const, hasRenderableContent: true }
-    : await resolveTranscriptCatalogDetails({
-        storageRepository: input.storageRepository,
-        storageDescriptor: input.storageDescriptor,
-      });
+  const transcriptDetails = await resolveTranscriptCatalogDetails({
+    storageRepository: input.storageRepository,
+    storageDescriptor: input.storageDescriptor,
+  });
   if (!storeLabel && !transcriptDetails.hasRenderableContent) {
     return null;
   }
   const label = storeLabel ?? transcriptDetails.label;
   const titleSource = storeLabel ? 'user' : transcriptDetails.titleSource;
-  const updatedAt = readSessionStoreUpdatedAt(input.storageDescriptor.sessionStoreEntry) ?? input.transcriptUpdatedAt ?? null;
+  const updatedAt = transcriptDetails.lastActivityAt ?? readSessionStoreUpdatedAt(input.storageDescriptor.sessionStoreEntry);
   const kind = resolveSessionCatalogKind(input.sessionKey);
   const resolvedModel = await input.metadataRepository.resolveSessionModel({
     sessionKey: input.sessionKey,

@@ -62,6 +62,7 @@ function normalizeAttachedFiles(files: ReadonlyArray<SessionRenderAttachedFile>)
     ...(file.source ? { source: file.source } : {}),
     ...(file.filePath ? { filePath: file.filePath } : {}),
     ...(file.gatewayUrl ? { gatewayUrl: file.gatewayUrl } : {}),
+    ...(file.previewStatus ? { previewStatus: file.previewStatus } : {}),
   }));
 }
 
@@ -223,7 +224,7 @@ export function hasPendingItemPreviewLoads(items: SessionRenderItem[]): boolean 
         return false;
       }
       return file.mimeType.startsWith('image/')
-        ? !file.preview
+        ? !file.preview && file.previewStatus !== 'unavailable'
         : file.fileSize === 0;
     });
   });
@@ -250,7 +251,7 @@ export async function loadMissingItemPreviews(
         continue;
       }
       const needsLoad = file.mimeType.startsWith('image/')
-        ? !file.preview
+        ? !file.preview && file.previewStatus !== 'unavailable'
         : file.fileSize === 0;
       if (!needsLoad) {
         continue;
@@ -289,14 +290,24 @@ export async function loadMissingItemPreviews(
         }
         const thumb = thumbnails[refKey];
         if (!thumb || (!thumb.preview && !thumb.fileSize)) {
-          return file;
+          if (!file.mimeType.startsWith('image/')) {
+            return file;
+          }
+          const nextFile = {
+            ...file,
+            previewStatus: 'unavailable' as const,
+          } satisfies AttachedFileMeta;
+          itemChanged = true;
+          imageCache.set(refKey, { ...nextFile });
+          return nextFile;
         }
         const nextFile = {
           ...file,
           preview: thumb.preview ?? file.preview ?? null,
           fileSize: thumb.fileSize || file.fileSize,
+          previewStatus: undefined,
         } satisfies AttachedFileMeta;
-        if (nextFile.preview !== file.preview || nextFile.fileSize !== file.fileSize) {
+        if (nextFile.preview !== file.preview || nextFile.fileSize !== file.fileSize || nextFile.previewStatus !== file.previewStatus) {
           itemChanged = true;
           imageCache.set(refKey, { ...nextFile });
         }

@@ -36,7 +36,9 @@ function createSessionRecord(input?: {
       titleSource: label ? 'user' as const : 'none' as const,
       displayName: null,
       model: null,
-      lastActivityAt: input?.lastActivityAt ?? 1_700_000_000_000,
+      lastActivityAt: input && Object.prototype.hasOwnProperty.call(input, 'lastActivityAt')
+        ? (input.lastActivityAt ?? null)
+        : 1_700_000_000_000,
       historyStatus: input?.historyStatus ?? 'ready',
       thinkingLevel: null,
     },
@@ -153,6 +155,20 @@ describe('chat selectors layering', () => {
     expect(pane.sessionsError).toBeNull();
     expect(pane.currentSessionKey).toBe('agent:foo:main');
     expect(pane.currentAgentId).toBe('foo');
+  });
+
+  it('session pane selector hides empty runtime placeholder sessions', () => {
+    const state = makeState({
+      loadedSessions: {
+        'agent:main:main': createSessionRecord({
+          label: null,
+          lastActivityAt: null,
+          items: [],
+        }),
+      },
+    });
+
+    expect(selectAgentSessionsPaneState(state).sessionEntries).toHaveLength(0);
   });
 
   it('session pane selector keeps stable session entry references when only assistant transcript changes', () => {

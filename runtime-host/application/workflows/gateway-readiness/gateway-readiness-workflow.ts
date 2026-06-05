@@ -3,11 +3,19 @@ import {
   DEFAULT_GATEWAY_BASE_METHODS,
   normalizeGatewayMethods,
   type GatewayConnectionPort,
+  type GatewayRpcPort,
 } from '../../gateway/gateway-runtime-port';
 
+const CONTROL_UI_BROWSER_CLIENT_ID = 'openclaw-control-ui';
+
 export interface GatewayReadinessWorkflowDeps {
-  readonly gateway: Pick<GatewayConnectionPort, 'inspectGatewayControlReadiness' | 'readGatewayConnectionState'>;
+  readonly gateway: Pick<GatewayConnectionPort, 'inspectGatewayControlReadiness' | 'readGatewayConnectionState'> & Pick<GatewayRpcPort, 'gatewayRpc'>;
 }
+
+type PendingDevicePairingRequest = {
+  requestId?: unknown;
+  clientId?: unknown;
+};
 
 export class GatewayReadinessWorkflow {
   constructor(private readonly deps: GatewayReadinessWorkflowDeps) {}
@@ -40,6 +48,27 @@ export class GatewayReadinessWorkflow {
       ...(readiness.details !== undefined ? { details: readiness.details } : {}),
       ...(readiness.retryAfterMs !== undefined ? { retryAfterMs: readiness.retryAfterMs } : {}),
     });
+  }
+
+  async approvePendingControlUiPairingRequests() {
+    const list = await this.deps.gateway.gatewayRpc('device.pair.list', {}, 10_000);
+    const pending = isRecord(list) && Array.isArray(list.pending)
+      ? list.pending
+      : [];
+    const approvedRequestIds: string[] = [];
+
+    for (const request of pending) {
+      const pairingRequest = isRecord(request) ? request as PendingDevicePairingRequest : null;
+      const requestId = typeof pairingRequest?.requestId === 'string' ? pairingRequest.requestId.trim() : '';
+      const clientId = typeof pairingRequest?.clientId === 'string' ? pairingRequest.clientId.trim() : '';
+      if (!requestId || clientId !== CONTROL_UI_BROWSER_CLIENT_ID) {
+        continue;
+      }
+      await this.deps.gateway.gatewayRpc('device.pair.approve', { requestId }, 15_000);
+      approvedRequestIds.push(requestId);
+    }
+
+    return ok({ success: true, approvedRequestIds });
   }
 }
 

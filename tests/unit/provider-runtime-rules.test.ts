@@ -1,9 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import {
-  GOOGLE_BROWSER_OAUTH_TOKEN_KEY,
   OPENAI_BROWSER_OAUTH_TOKEN_KEY,
+  OPENAI_CODEX_RUNTIME_PROVIDER_KEY,
   getLegacyOpenClawProviderKeys,
   getOpenClawProviderKey,
+  resolveOpenClawProviderKeyForAccount,
 } from '../../runtime-host/application/adapters/openclaw/projections/openclaw-provider-projection-rules';
 
 describe('openclaw-provider-projection-rules', () => {
@@ -32,8 +33,20 @@ describe('openclaw-provider-projection-rules', () => {
     expect(getOpenClawProviderKey('moonshot-global', 'moonshot-global-work')).toBe('moonshot-global');
   });
 
-  it('Browser OAuth 只定义 token key，不再携带默认模型', () => {
+  it('Browser OAuth 只支持 OpenAI token key，不再携带默认模型', () => {
     expect(OPENAI_BROWSER_OAUTH_TOKEN_KEY).toBe('openai-codex');
-    expect(GOOGLE_BROWSER_OAUTH_TOKEN_KEY).toBe('google-gemini-cli');
+  });
+
+  it('OpenAI browser OAuth 使用 openai-codex runtime provider key', () => {
+    expect(resolveOpenClawProviderKeyForAccount({
+      vendorId: 'openai',
+      id: 'openai-main',
+      authMode: 'oauth_browser',
+    })).toBe(OPENAI_CODEX_RUNTIME_PROVIDER_KEY);
+    expect(resolveOpenClawProviderKeyForAccount({
+      vendorId: 'openai',
+      id: 'openai-main',
+      authMode: 'api_key',
+    })).toBe('openai');
   });
 });

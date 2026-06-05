@@ -8,8 +8,9 @@ import {
   getSessionMeta,
   getSessionRuntime,
   getSessionItems,
+  getSessionItemCount,
 } from './store-state-helpers';
-import type { ChatSessionHistoryStatus } from './types';
+import type { ChatSessionHistoryStatus, ChatSessionRecord } from './types';
 
 const EMPTY_AGENT_PANE_SESSION_ENTRIES: AgentSessionsPaneSessionEntry[] = [];
 
@@ -37,6 +38,15 @@ function resolveCurrentAgentId(state: ChatStoreState): string {
   return meta.agentId ?? meta.runtimeAddress?.agentId ?? '';
 }
 
+function hasSessionPaneActivity(record: ChatSessionRecord): boolean {
+  return record.meta.label != null
+    || getSessionItemCount(record) > 0
+    || typeof record.meta.lastActivityAt === 'number'
+    || record.runtime.activeRunId != null
+    || record.runtime.activeTurnItemKey != null
+    || record.runtime.lastUserMessageAt != null;
+}
+
 function buildAgentPaneSessionEntries(state: ChatStoreState): AgentSessionsPaneSessionEntry[] {
   const sessions = readSessionsFromState(state);
   if (sessions.length === 0) {
@@ -45,14 +55,16 @@ function buildAgentPaneSessionEntries(state: ChatStoreState): AgentSessionsPaneS
     return cachedAgentPaneSessionEntries;
   }
 
-  const nextEntries: AgentSessionsPaneSessionEntry[] = new Array(sessions.length);
+  const nextEntries: AgentSessionsPaneSessionEntry[] = [];
   const nextEntryByKey = new Map<string, AgentSessionsPaneSessionEntry>();
-  let changed = cachedAgentPaneSessionEntries.length !== sessions.length;
 
-  for (let index = 0; index < sessions.length; index += 1) {
-    const session = sessions[index];
-    const meta = state.loadedSessions[session.key]?.meta;
+  for (const session of sessions) {
+    const record = state.loadedSessions[session.key];
+    const meta = record?.meta;
     const title = normalizeAgentPaneSessionLabel(resolveSessionListLabel(state, session.key, session.label ?? null));
+    if (!record || !hasSessionPaneActivity(record)) {
+      continue;
+    }
     const lastActivityAt = typeof meta?.lastActivityAt === 'number' ? meta.lastActivityAt : null;
     const historyStatus = meta?.historyStatus ?? 'idle';
     const previousEntry = cachedAgentPaneSessionEntryByKey.get(session.key);
@@ -68,11 +80,13 @@ function buildAgentPaneSessionEntries(state: ChatStoreState): AgentSessionsPaneS
           lastActivityAt,
           historyStatus,
         };
-    nextEntries[index] = nextEntry;
+    nextEntries.push(nextEntry);
     nextEntryByKey.set(session.key, nextEntry);
-    if (cachedAgentPaneSessionEntries[index] !== nextEntry) {
-      changed = true;
-    }
+  }
+
+  let changed = cachedAgentPaneSessionEntries.length !== nextEntries.length;
+  if (!changed) {
+    changed = nextEntries.some((entry, index) => cachedAgentPaneSessionEntries[index] !== entry);
   }
 
   if (!changed) {

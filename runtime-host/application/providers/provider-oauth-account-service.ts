@@ -17,7 +17,7 @@ export type ProviderCredentialLike = {
   updatedAt: string;
 };
 
-type BrowserOAuthProviderType = 'google' | 'openai';
+type BrowserOAuthProviderType = 'openai';
 type DeviceOAuthProviderType = 'minimax-portal' | 'minimax-portal-cn' | 'qwen-portal';
 
 export function buildBrowserOAuthAccount(input: {
@@ -29,7 +29,7 @@ export function buildBrowserOAuthAccount(input: {
   existingAccount?: ProviderCredentialLike | null;
   clock: RuntimeClockPort;
 }): ProviderCredentialLike {
-  const defaultLabel = input.providerType === 'google' ? 'Google Gemini' : 'OpenAI Codex';
+  const defaultLabel = 'OpenAI Codex';
   const nowIso = input.clock.nowIso();
   return {
     id: input.accountId,

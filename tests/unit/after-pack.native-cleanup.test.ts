@@ -54,6 +54,29 @@ describe('after-pack native cleanup', () => {
     expect(existsSync(join(nodeModulesDir, 'sqlite-vec-darwin-arm64'))).toBe(false);
   });
 
+  it('macOS universal 构建会保留同平台 x64 和 arm64 原生包', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'matchaclaw-after-pack-'));
+    tempDirs.push(root);
+    const nodeModulesDir = join(root, 'node_modules');
+    await mkdir(join(nodeModulesDir, '@snazzah', 'davey-darwin-x64'), { recursive: true });
+    await mkdir(join(nodeModulesDir, '@snazzah', 'davey-darwin-arm64'), { recursive: true });
+    await mkdir(join(nodeModulesDir, '@snazzah', 'davey-linux-x64-gnu'), { recursive: true });
+    await mkdir(join(nodeModulesDir, 'sqlite-vec-darwin-x64'), { recursive: true });
+    await mkdir(join(nodeModulesDir, 'sqlite-vec-darwin-arm64'), { recursive: true });
+    await mkdir(join(nodeModulesDir, 'sqlite-vec-windows-x64'), { recursive: true });
+
+    const { cleanupNativePlatformPackages } = await loadAfterPackTestApi();
+    const removed = cleanupNativePlatformPackages(nodeModulesDir, 'darwin', 'universal');
+
+    expect(removed).toBe(2);
+    expect(existsSync(join(nodeModulesDir, '@snazzah', 'davey-darwin-x64'))).toBe(true);
+    expect(existsSync(join(nodeModulesDir, '@snazzah', 'davey-darwin-arm64'))).toBe(true);
+    expect(existsSync(join(nodeModulesDir, 'sqlite-vec-darwin-x64'))).toBe(true);
+    expect(existsSync(join(nodeModulesDir, 'sqlite-vec-darwin-arm64'))).toBe(true);
+    expect(existsSync(join(nodeModulesDir, '@snazzah', 'davey-linux-x64-gnu'))).toBe(false);
+    expect(existsSync(join(nodeModulesDir, 'sqlite-vec-windows-x64'))).toBe(false);
+  });
+
   it('支持 linuxmusl 平台别名映射为 linux', async () => {
     const root = await mkdtemp(join(tmpdir(), 'matchaclaw-after-pack-'));
     tempDirs.push(root);

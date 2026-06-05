@@ -1,3 +1,10 @@
+import {
+  isAnthropicMessagesApi,
+  normalizePositiveMaxTokens,
+  resolveAnthropicMessagesDefaultMaxTokens,
+  withAnthropicMessagesModelMaxTokens,
+} from './openclaw-anthropic-messages-max-tokens';
+
 export interface RuntimeConfigProviderOverride {
   baseUrl?: string;
   api?: string;
@@ -21,6 +28,34 @@ function removeLegacyMoonshotProviderEntry(
   _providers: Record<string, unknown>,
 ): boolean {
   return false;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+function resolvePinnedAgentRuntime(provider: string): Record<string, string> | undefined {
+  return provider === 'openai' || provider === 'openai-codex' ? { id: 'pi' } : undefined;
+}
+
+function normalizeProviderModels(
+  provider: string,
+  options: ProviderEntryBuildOptions,
+  existingProvider: Record<string, unknown>,
+): unknown[] {
+  const existingModels = Array.isArray(existingProvider.models) ? existingProvider.models : [];
+  if (!isAnthropicMessagesApi(options.api)) {
+    return existingModels;
+  }
+  return existingModels.map((model) => (
+    model && typeof model === 'object' && !Array.isArray(model)
+      ? withAnthropicMessagesModelMaxTokens(model as Record<string, unknown>, provider, {
+        ...existingProvider,
+        baseUrl: options.baseUrl,
+        api: options.api,
+      })
+      : model
+  ));
 }
 
 export function upsertOpenClawProviderEntry(
@@ -50,8 +85,14 @@ export function upsertOpenClawProviderEntry(
     ...existingProvider,
     baseUrl: options.baseUrl,
     api: options.api,
-    models: Array.isArray(existingProvider.models) ? existingProvider.models : [],
+    models: normalizeProviderModels(provider, options, existingProvider),
   };
+  if (isAnthropicMessagesApi(options.api)) {
+    nextProvider.maxTokens = normalizePositiveMaxTokens(nextProvider.maxTokens)
+      ?? resolveAnthropicMessagesDefaultMaxTokens(provider, nextProvider);
+  } else {
+    delete nextProvider.maxTokens;
+  }
   if (options.apiKeyEnv) nextProvider.apiKey = options.apiKeyEnv;
   if (options.headers !== undefined) {
     if (Object.keys(options.headers).length > 0) {
@@ -64,6 +105,12 @@ export function upsertOpenClawProviderEntry(
     nextProvider.authHeader = options.authHeader;
   } else {
     delete nextProvider.authHeader;
+  }
+  if (!isRecord(nextProvider.agentRuntime)) {
+    const pinnedAgentRuntime = resolvePinnedAgentRuntime(provider);
+    if (pinnedAgentRuntime) {
+      nextProvider.agentRuntime = pinnedAgentRuntime;
+    }
   }
 
   for (const [key, value] of Object.entries(nextProvider)) {

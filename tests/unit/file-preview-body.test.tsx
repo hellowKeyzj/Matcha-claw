@@ -12,6 +12,12 @@ const revealArtifactPathInFileManagerMock = vi.fn();
 const createObjectUrlMock = vi.fn(() => 'blob:mock-image-url');
 const revokeObjectUrlMock = vi.fn();
 const NativeUrl = URL;
+const runtimeAddress = {
+  kind: 'native-runtime' as const,
+  runtimeInstanceId: 'runtime-main',
+  capabilityId: 'file.read',
+  agentId: 'main',
+};
 
 vi.mock('react-i18next', () => ({
   useTranslation: () => ({
@@ -54,6 +60,10 @@ vi.mock('@/components/file-preview/MarkdownPreview', () => ({
   MarkdownPreview: ({ markdown }: { markdown: string }) => <div data-testid="markdown-preview">{markdown}</div>,
 }));
 
+vi.mock('@/components/file-preview/HtmlPreview', () => ({
+  HtmlPreview: ({ source }: { source: string }) => <iframe data-testid="html-preview-frame" srcDoc={source} sandbox="allow-scripts allow-forms" />,
+}));
+
 vi.mock('@/components/file-preview/PdfViewer', () => ({
   PdfViewer: () => <div data-testid="pdf-viewer" />,
 }));
@@ -92,14 +102,46 @@ describe('file preview body', () => {
       content: '',
       lineStats: { added: 0, removed: 0 },
       toolId: 'workspace:/workspace/demo.ts',
+      runtimeAddress,
     };
 
     render(<FilePreviewBody file={file} mode="preview" />);
 
     await waitFor(() => {
-      expect(hostFileReadTextMock).toHaveBeenCalledWith({ path: '/workspace/demo.ts' });
+      expect(hostFileReadTextMock).toHaveBeenCalledWith({ path: '/workspace/demo.ts', runtimeAddress });
     });
     expect(await screen.findByTestId('monaco-viewer')).toHaveTextContent('export const answer = 42;');
+  });
+
+  it('renders html files in a sandboxed iframe', async () => {
+    hostFileReadTextMock.mockResolvedValue({
+      ok: true,
+      content: '<!doctype html><h1>Rendered Preview</h1>',
+    });
+
+    const file: GeneratedFile = {
+      filePath: '/workspace/demo.html',
+      fileName: 'demo.html',
+      ext: '.html',
+      mimeType: 'text/html',
+      contentType: 'html',
+      sourceTool: 'write',
+      action: 'created',
+      baseline: '',
+      content: '',
+      lineStats: { added: 0, removed: 0 },
+      toolId: 'workspace:/workspace/demo.html',
+      runtimeAddress,
+    };
+
+    render(<FilePreviewBody file={file} mode="preview" />);
+
+    await waitFor(() => {
+      expect(hostFileReadTextMock).toHaveBeenCalledWith({ path: '/workspace/demo.html', runtimeAddress });
+    });
+    const frame = await screen.findByTestId('html-preview-frame');
+    expect(frame).toHaveAttribute('srcdoc', '<!doctype html><h1>Rendered Preview</h1>');
+    expect(frame).toHaveAttribute('sandbox', 'allow-scripts allow-forms');
   });
 
   it('renders image previews from binary file reads', async () => {
@@ -121,12 +163,13 @@ describe('file preview body', () => {
       content: '',
       lineStats: { added: 0, removed: 0 },
       toolId: 'workspace:/workspace/demo.png',
+      runtimeAddress,
     };
 
     render(<FilePreviewBody file={file} mode="preview" />);
 
     await waitFor(() => {
-      expect(hostFileReadBinaryMock).toHaveBeenCalledWith({ path: '/workspace/demo.png' });
+      expect(hostFileReadBinaryMock).toHaveBeenCalledWith({ path: '/workspace/demo.png', runtimeAddress });
     });
     const image = await screen.findByRole('img', { name: 'demo.png' });
     expect(createObjectUrlMock).toHaveBeenCalledTimes(1);

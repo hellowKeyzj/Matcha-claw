@@ -457,6 +457,7 @@ export function createEmptySessionMeta(): ChatSessionMetaState {
     preferred: false,
     label: null,
     titleSource: 'none',
+    manualLabel: false,
     displayName: null,
     model: null,
     lastActivityAt: null,
@@ -493,6 +494,7 @@ function areSessionMetaEquivalent(left: ChatSessionMetaState, right: ChatSession
     && left.preferred === right.preferred
     && left.label === right.label
     && left.titleSource === right.titleSource
+    && (left.manualLabel === true) === (right.manualLabel === true)
     && left.displayName === right.displayName
     && left.model === right.model
     && left.lastActivityAt === right.lastActivityAt
@@ -782,6 +784,9 @@ export function patchSessionSnapshot(
   const current = getSessionRecord(state, sessionKey);
   const catalog = snapshot.catalog;
   const nextItems = reconcileSessionItems(current.items, snapshot.items);
+  const hasManualLabel = current.meta.manualLabel === true;
+  const nextLabel = hasManualLabel ? current.meta.label : catalog.label ?? null;
+  const nextTitleSource = hasManualLabel ? current.meta.titleSource : catalog.titleSource ?? 'none';
   const nextMeta = {
     ...current.meta,
     backendSessionKey: snapshot.sessionKey,
@@ -792,11 +797,12 @@ export function patchSessionSnapshot(
     runtimeAddress: catalog.runtimeAddress,
     kind: catalog.kind,
     preferred: catalog.preferred,
-    label: catalog.label ?? null,
-    titleSource: catalog.titleSource ?? 'none',
+    label: nextLabel,
+    titleSource: nextTitleSource,
+    manualLabel: hasManualLabel,
     displayName: catalog.displayName ?? current.meta.displayName,
     model: catalog.model ?? current.meta.model ?? null,
-    lastActivityAt: typeof catalog.updatedAt === 'number' ? catalog.updatedAt : current.meta.lastActivityAt,
+    lastActivityAt: typeof catalog.updatedAt === 'number' ? toMs(catalog.updatedAt) : current.meta.lastActivityAt,
   };
   const nextRuntime = {
     ...current.runtime,

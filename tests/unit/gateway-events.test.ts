@@ -622,6 +622,50 @@ describe('gateway store event wiring', () => {
     expect(chatState.pendingApprovalsBySession['agent:main:main'] ?? []).toEqual([]);
   });
 
+  it('session_info_update unknown phase keeps active run state', async () => {
+    hostApiFetchMock.mockResolvedValueOnce(createRunningGatewayStatus());
+    const handlers = new Map<string, (payload: unknown) => void>();
+    subscribeHostEventMock.mockImplementation((eventName: string, handler: (payload: unknown) => void) => {
+      handlers.set(eventName, handler);
+      return () => {};
+    });
+
+    const { useChatStore } = await import('@/stores/chat');
+    useChatStore.setState({
+      currentSessionKey: 'agent:main:main',
+      sessionCatalogStatus: {
+        status: 'ready',
+        error: null,
+        hasLoadedOnce: true,
+        lastLoadedAt: 1,
+      },
+      loadedSessions: {
+        'agent:main:main': createSessionRecord({
+          runtime: {
+            activeRunId: 'run-active',
+            runPhase: 'waiting_tool',
+          },
+        }),
+      },
+      loadHistory: vi.fn().mockResolvedValue(undefined),
+    } as never);
+
+    const { useGatewayStore } = await import('@/stores/gateway');
+    await useGatewayStore.getState().init();
+
+    handlers.get('session:update')?.(createSessionInfoUpdate({
+      phase: 'unknown',
+      runId: 'run-active',
+      sessionKey: 'agent:main:main',
+    }));
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const runtime = useChatStore.getState().loadedSessions['agent:main:main']?.runtime;
+    expect(runtime?.activeRunId).toBe('run-active');
+    expect(runtime?.runPhase).toBe('waiting_tool');
+  });
+
   it('run.phase completed 事件应清理 chat.send 超时残留错误', async () => {
     hostApiFetchMock.mockResolvedValueOnce(createRunningGatewayStatus());
     const handlers = new Map<string, (payload: unknown) => void>();

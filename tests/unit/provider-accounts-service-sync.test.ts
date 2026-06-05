@@ -22,7 +22,7 @@ import {
   getOAuthProviderApi,
   getOAuthProviderDefaultBaseUrl,
   getOAuthProviderTokenKey,
-  getOpenClawProviderKeyForType,
+  resolveOpenClawProviderKeyForAccount,
   normalizeOAuthBaseUrl,
   usesOAuthAuthHeader,
 } from '../../runtime-host/application/adapters/openclaw/projections/openclaw-provider-projection-rules';
@@ -30,7 +30,11 @@ import { ProviderProjectionSyncService, type ProviderProjectionKeyResolverPort, 
 import { ProviderProjectionSyncWorkflow } from '../../runtime-host/application/workflows/provider-projection-sync/provider-projection-sync-workflow';
 
 const projectionKeys: ProviderProjectionKeyResolverPort = {
-  resolveProviderKey: ({ vendorId, accountId }) => getOpenClawProviderKeyForType(vendorId, accountId),
+  resolveProviderKey: ({ vendorId, accountId, account }) => resolveOpenClawProviderKeyForAccount({
+    vendorId,
+    id: accountId,
+    authMode: account?.authMode,
+  }),
 };
 
 const projectionPolicy: ProviderProjectionPolicyPort = {
@@ -73,7 +77,7 @@ function createServiceWithStore(store: {
   }));
   const resolveRuntimeConfigProviderKey = (accountId: string, account: Record<string, any> | null) => {
     const providerType = typeof account?.vendorId === 'string' ? account.vendorId.trim() : '';
-    return providerType ? getOpenClawProviderKeyForType(providerType, accountId) : accountId;
+    return providerType ? projectionKeys.resolveProviderKey({ vendorId: providerType, accountId, account: account ?? undefined }) : accountId;
   };
   const storePort = {
     read: async () => store,
@@ -292,6 +296,35 @@ describe('ProviderAccountsService mutations', () => {
     });
     expect(syncProviderConfigMock.mock.calls[0][1]).not.toHaveProperty('models');
     expect(syncRuntimeModelProjectionMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('OpenAI browser OAuth 凭证同步到 openai-codex runtime provider', async () => {
+    const store = {
+      accounts: {},
+      apiKeys: {},
+    };
+    const account = {
+      id: 'openai-oauth',
+      vendorId: 'openai',
+      label: 'OpenAI Codex',
+      authMode: 'oauth_browser',
+      enabled: true,
+      createdAt: '2026-04-10T00:00:00.000Z',
+      updatedAt: '2026-04-10T00:00:00.000Z',
+    };
+
+    const { service } = createServiceWithStore(store);
+    const result = await service.executeCreate({ account });
+
+    expect(result.success).toBe(true);
+    expect(syncProviderConfigMock).toHaveBeenCalledWith(
+      'openai-codex',
+      expect.objectContaining({
+        baseUrl: 'https://api.openai.com/v1',
+        api: 'openai-codex-responses',
+      }),
+    );
+    expect(saveProviderKeyMock).not.toHaveBeenCalled();
   });
 
   it('新增 custom 媒体凭证以自定义 providerKey 同步中转接口契约', async () => {

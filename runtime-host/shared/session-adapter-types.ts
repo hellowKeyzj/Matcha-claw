@@ -135,6 +135,7 @@ export interface SessionRenderAttachedFile {
   mimeType: string;
   fileSize: number;
   preview: string | null;
+  previewStatus?: 'unavailable';
   filePath?: string;
   gatewayUrl?: string;
   source?: 'user-upload' | 'tool-result' | 'message-ref';

@@ -1,6 +1,8 @@
 export const EXTRA_OPENCLAW_RUNTIME_PACKAGES = [
   'acpx',
   'playwright-core',
+  '@whiskeysockets/baileys',
+  'qrcode',
 ];
 
 export function mergeOpenClawRuntimePackages(...groups) {

@@ -1,5 +1,5 @@
-export const GOOGLE_BROWSER_OAUTH_TOKEN_KEY = 'google-gemini-cli';
 export const OPENAI_BROWSER_OAUTH_TOKEN_KEY = 'openai-codex';
+export const OPENAI_CODEX_RUNTIME_PROVIDER_KEY = 'openai-codex';
 export const OPENCLAW_PROVIDER_KEY_MINIMAX = 'minimax-portal';
 export const OPENCLAW_PROVIDER_KEY_QWEN = 'qwen-portal';
 export const OPENCLAW_PROVIDER_KEY_MOONSHOT = 'moonshot';
@@ -35,9 +35,6 @@ export function getBrowserOAuthTokenKey(
   if (authMode !== 'oauth_browser') {
     return undefined;
   }
-  if (providerType === 'google') {
-    return GOOGLE_BROWSER_OAUTH_TOKEN_KEY;
-  }
   if (providerType === 'openai') {
     return OPENAI_BROWSER_OAUTH_TOKEN_KEY;
   }
@@ -61,6 +58,17 @@ export function getOpenClawProviderKey(providerType: string, providerId: string)
 
 export function getOpenClawProviderKeyForType(type: string, providerId: string): string {
   return getOpenClawProviderKey(type, providerId);
+}
+
+export function resolveOpenClawProviderKeyForAccount(account: {
+  vendorId: string;
+  id: string;
+  authMode?: unknown;
+}): string {
+  if (account.vendorId === 'openai' && account.authMode === 'oauth_browser') {
+    return OPENAI_CODEX_RUNTIME_PROVIDER_KEY;
+  }
+  return getOpenClawProviderKey(account.vendorId, account.id);
 }
 
 export function getLegacyOpenClawProviderKeys(providerType: string, providerId: string): string[] {

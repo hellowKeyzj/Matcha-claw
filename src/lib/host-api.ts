@@ -153,31 +153,59 @@ export type HostSessionWindowResult = Partial<SessionWindowResult> & {
   hydrationJob?: RuntimeJobSnapshot<SessionWindowResult>;
 };
 
-function runtimeAddressForCapability(address: RuntimeAddress, capabilityId: string): RuntimeAddress {
-  return {
-    ...address,
-    capabilityId,
-  };
+function sameRuntimeEndpointAddress(left: RuntimeAddress, right: RuntimeAddress): boolean {
+  if (left.kind !== right.kind) {
+    return false;
+  }
+  if (left.kind === 'native-runtime' && right.kind === 'native-runtime') {
+    return left.runtimeAdapterId === right.runtimeAdapterId
+      && left.runtimeInstanceId === right.runtimeInstanceId;
+  }
+  if (left.kind === 'protocol-connector' && right.kind === 'protocol-connector') {
+    return left.protocolId === right.protocolId
+      && left.connectorId === right.connectorId
+      && left.endpointId === right.endpointId;
+  }
+  return false;
 }
 
-export async function resolveSingleCapabilityRuntimeAddress(capabilityId: string): Promise<RuntimeAddress> {
+function capabilityAddressCacheKey(capabilityId: string, address?: RuntimeAddress): string {
+  if (!address) {
+    return capabilityId;
+  }
+  const endpointKey = address.kind === 'native-runtime'
+    ? `native-runtime:${address.runtimeAdapterId}:${address.runtimeInstanceId}`
+    : `protocol-connector:${address.protocolId}:${address.connectorId}:${address.endpointId}`;
+  return `${capabilityId}:${endpointKey}:${address.agentId}`;
+}
+
+async function resolveCapabilityRuntimeAddress(capabilityId: string, sourceAddress?: RuntimeAddress): Promise<RuntimeAddress> {
+  const cacheKey = capabilityAddressCacheKey(capabilityId, sourceAddress);
   const now = Date.now();
-  const cached = capabilityAddressCache.get(capabilityId);
+  const cached = capabilityAddressCache.get(cacheKey);
   if (cached && cached.expiresAt > now) {
     return cached.address;
   }
   const { capabilities } = await hostCapabilitiesList();
   const available = capabilities.filter((capability) => capability.id === capabilityId && capability.availability === 'available');
-  if (available.length !== 1) {
-    capabilityAddressCache.delete(capabilityId);
+  const matched = sourceAddress
+    ? available.find((capability) => sameRuntimeEndpointAddress(capability.address, sourceAddress) && capability.address.agentId === sourceAddress.agentId)
+      ?? available.find((capability) => sameRuntimeEndpointAddress(capability.address, sourceAddress))
+    : null;
+  const address = matched?.address ?? (available.length === 1 ? available[0]!.address : null);
+  if (!address) {
+    capabilityAddressCache.delete(cacheKey);
     throw new Error(`Expected exactly one RuntimeAddress for capability: ${capabilityId}`);
   }
-  const address = available[0].address;
-  capabilityAddressCache.set(capabilityId, {
+  capabilityAddressCache.set(cacheKey, {
     address,
     expiresAt: now + CAPABILITY_ADDRESS_CACHE_TTL_MS,
   });
   return address;
+}
+
+export async function resolveSingleCapabilityRuntimeAddress(capabilityId: string): Promise<RuntimeAddress> {
+  return resolveCapabilityRuntimeAddress(capabilityId);
 }
 
 export function runtimeAddressForAgentCapability(input: {
@@ -367,12 +395,15 @@ export async function hostUvInstallAll(runtimeAddress: RuntimeAddress): Promise<
 }
 
 async function workspaceFileCapabilityExecute<TResult>(operationId: string, input: Record<string, unknown> & { runtimeAddress: RuntimeAddress }, options?: { timeoutMs?: number }): Promise<TResult> {
-  const runtimeAddress = runtimeAddressForCapability(input.runtimeAddress, WORKSPACE_FILE_CAPABILITY_ID);
+  const runtimeAddress = await resolveCapabilityRuntimeAddress(WORKSPACE_FILE_CAPABILITY_ID, input.runtimeAddress);
   return hostCapabilityExecute<TResult>(buildCapabilityExecutePayload({
     id: WORKSPACE_FILE_CAPABILITY_ID,
     operationId,
     runtimeAddress,
-    body: input,
+    body: {
+      ...input,
+      runtimeAddress,
+    },
   }), options);
 }
 

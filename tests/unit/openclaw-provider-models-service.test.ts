@@ -1,4 +1,8 @@
 import { describe, expect, it } from 'vitest';
+import {
+  ANTHROPIC_MESSAGES_DEFAULT_MAX_TOKENS,
+  MINIMAX_M27_MAX_TOKENS,
+} from '../../runtime-host/application/adapters/openclaw/projections/openclaw-anthropic-messages-max-tokens';
 import { OpenClawProviderModelsService } from '../../runtime-host/application/adapters/openclaw/projections/openclaw-provider-models-service';
 import { OpenClawProviderModelsProjectionWorkflow } from '../../runtime-host/application/adapters/openclaw/workflows/openclaw-provider/openclaw-provider-models-projection-workflow';
 
@@ -62,6 +66,35 @@ describe('OpenClawProviderModelsService', () => {
         },
       ],
     });
+  });
+
+  it('adds maxTokens defaults for anthropic-messages provider models', async () => {
+    const { service, readConfig } = createService({});
+
+    await service.replaceAll({
+      'minimax-portal': {
+        baseUrl: 'https://api.minimax.io/anthropic',
+        api: 'anthropic-messages',
+        models: [
+          { modelId: 'MiniMax-M2.7' },
+        ],
+      },
+      'custom-anthropic': {
+        baseUrl: 'https://api.example.com/anthropic',
+        api: 'anthropic-messages',
+        models: [
+          { modelId: 'claude-proxy' },
+          { modelId: 'claude-proxy-capped', maxTokens: 12288 },
+        ],
+      },
+    });
+
+    const providers = (readConfig().models as any).providers;
+    expect(providers['minimax-portal'].maxTokens).toBe(MINIMAX_M27_MAX_TOKENS);
+    expect(providers['minimax-portal'].models[0].maxTokens).toBe(MINIMAX_M27_MAX_TOKENS);
+    expect(providers['custom-anthropic'].maxTokens).toBe(ANTHROPIC_MESSAGES_DEFAULT_MAX_TOKENS);
+    expect(providers['custom-anthropic'].models[0].maxTokens).toBe(ANTHROPIC_MESSAGES_DEFAULT_MAX_TOKENS);
+    expect(providers['custom-anthropic'].models[1].maxTokens).toBe(12288);
   });
 
   it('keeps provider node schema-valid when the last model is removed', async () => {

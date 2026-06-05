@@ -8,6 +8,12 @@
  */
 
 import type { OpenClawConfigRepositoryPort } from '../../infrastructure/openclaw-config-repository';
+import {
+  isAnthropicMessagesApi,
+  normalizePositiveMaxTokens,
+  resolveAnthropicMessagesDefaultMaxTokens,
+  withAnthropicMessagesModelMaxTokens,
+} from '../../projections/openclaw-anthropic-messages-max-tokens';
 import { pruneUnknownModelRefsInAgentsConfig } from '../../projections/openclaw-provider-model-pruning';
 
 export interface ProviderModelEntry {
@@ -165,6 +171,12 @@ function applyModelsToProviderNode(
   }
   provider.baseUrl = baseUrl;
   provider.api = api;
+  if (isAnthropicMessagesApi(api)) {
+    provider.maxTokens = normalizePositiveMaxTokens(provider.maxTokens)
+      ?? resolveAnthropicMessagesDefaultMaxTokens(providerKey, { ...provider, baseUrl, api });
+  } else {
+    delete provider.maxTokens;
+  }
   if (entry.apiKeyEnv) provider.apiKey = entry.apiKeyEnv;
   const headers = normalizeHeaders(entry.headers);
   if (headers) {
@@ -186,7 +198,10 @@ function applyModelsToProviderNode(
     if (entry.input) out.input = entry.input;
     if (entry.contextWindow !== undefined) out.contextWindow = entry.contextWindow;
     if (entry.maxTokens !== undefined) out.maxTokens = entry.maxTokens;
-    out.cost = normalizeCost(entry.cost) ?? zeroCost();
-    return out;
+    const model = isAnthropicMessagesApi(api)
+      ? withAnthropicMessagesModelMaxTokens(out, providerKey, { ...provider, baseUrl, api })
+      : out;
+    model.cost = normalizeCost(entry.cost) ?? zeroCost();
+    return model;
   });
 }

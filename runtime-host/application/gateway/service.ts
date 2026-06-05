@@ -1,7 +1,7 @@
 import type { GatewayReadinessWorkflow } from '../workflows/gateway-readiness/gateway-readiness-workflow';
 
 export interface GatewayServiceDeps {
-  readonly readinessWorkflow: Pick<GatewayReadinessWorkflow, 'status' | 'ready'>;
+  readonly readinessWorkflow: Pick<GatewayReadinessWorkflow, 'status' | 'ready' | 'approvePendingControlUiPairingRequests'>;
 }
 
 export class GatewayService {
@@ -13,5 +13,9 @@ export class GatewayService {
 
   async ready(payload: unknown) {
     return await this.deps.readinessWorkflow.ready(payload);
+  }
+
+  async approvePendingControlUiPairingRequests() {
+    return await this.deps.readinessWorkflow.approvePendingControlUiPairingRequests();
   }
 }

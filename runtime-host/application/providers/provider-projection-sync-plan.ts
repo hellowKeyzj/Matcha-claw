@@ -8,8 +8,8 @@ import {
 type ProviderProjectionProtocol =
   | 'openai-completions'
   | 'openai-responses'
+  | 'openai-codex-responses'
   | 'anthropic-messages'
-  | 'openrouter'
   | 'google-generative-ai';
 
 export type RuntimeConfigProviderOverride = {
@@ -48,9 +48,6 @@ function normalizeProviderProtocol(protocol: unknown): ProviderProjectionProtoco
   }
   if (protocol === 'anthropic-messages') {
     return 'anthropic-messages';
-  }
-  if (protocol === 'openrouter') {
-    return 'openrouter';
   }
   return 'openai-completions';
 }
@@ -122,6 +119,13 @@ export function resolveRuntimeConfigProviderOverride(
       api: protocol,
       ...(replaceProviderKeys.length > 0 ? { replaceProviderKeys } : {}),
       headers: normalizeProviderHeaders(account.headers),
+    };
+  }
+
+  if (account.authMode === 'oauth_browser' && vendorId === 'openai') {
+    return {
+      baseUrl: 'https://api.openai.com/v1',
+      api: 'openai-codex-responses',
     };
   }
 

@@ -6,19 +6,17 @@ import type { AgentSessionsPaneSessionEntry } from '@/stores/chat/selectors';
 import { parseSessionCreatedAtMs } from '@/stores/chat/session-helpers';
 
 const SESSION_TITLE_MAX_LENGTH = 48;
-const DAY_MS = 24 * 60 * 60 * 1000;
 
 export type SessionBucketId =
-  | 'within_3_days'
+  | 'today'
   | 'within_7_days'
   | 'within_30_days'
-  | 'older_than_30_days';
+  | 'older';
 
 interface SessionBucketSpec {
   id: SessionBucketId;
   labelKey: string;
-  minAgeMs?: number;
-  maxAgeMs?: number;
+  maxAgeDays?: number;
   defaultCollapsed: boolean;
 }
 
@@ -95,29 +93,26 @@ export interface AgentSessionsPaneViewModel {
 
 const SESSION_BUCKET_SPECS: SessionBucketSpec[] = [
   {
-    id: 'within_3_days',
-    labelKey: 'sidebar.sessionBucketWithin3Days',
-    maxAgeMs: 3 * DAY_MS,
+    id: 'today',
+    labelKey: 'sidebar.sessionBucketToday',
+    maxAgeDays: 1,
     defaultCollapsed: false,
   },
   {
     id: 'within_7_days',
     labelKey: 'sidebar.sessionBucketWithin7Days',
-    minAgeMs: 3 * DAY_MS,
-    maxAgeMs: 7 * DAY_MS,
-    defaultCollapsed: true,
+    maxAgeDays: 7,
+    defaultCollapsed: false,
   },
   {
     id: 'within_30_days',
     labelKey: 'sidebar.sessionBucketWithin30Days',
-    minAgeMs: 7 * DAY_MS,
-    maxAgeMs: 30 * DAY_MS,
+    maxAgeDays: 30,
     defaultCollapsed: true,
   },
   {
-    id: 'older_than_30_days',
-    labelKey: 'sidebar.sessionBucketOlderThan30Days',
-    minAgeMs: 30 * DAY_MS,
+    id: 'older',
+    labelKey: 'sidebar.sessionBucketOlder',
     defaultCollapsed: true,
   },
 ];
@@ -266,14 +261,18 @@ function buildSessionAggregation(index: SessionActivityIndex): SessionAggregatio
   };
 }
 
-function matchesBucket(ageMs: number, spec: SessionBucketSpec): boolean {
-  if (typeof spec.minAgeMs === 'number' && ageMs < spec.minAgeMs) {
-    return false;
-  }
-  if (typeof spec.maxAgeMs === 'number' && ageMs >= spec.maxAgeMs) {
-    return false;
-  }
-  return true;
+function startOfLocalDay(value: Date): number {
+  return new Date(value.getFullYear(), value.getMonth(), value.getDate()).getTime();
+}
+
+function resolveActivityAgeDays(activityMs: number, now: Date): number {
+  const todayStartMs = startOfLocalDay(now);
+  const activityDayStartMs = startOfLocalDay(new Date(activityMs));
+  return Math.max(0, Math.floor((todayStartMs - activityDayStartMs) / (24 * 60 * 60 * 1000)));
+}
+
+function matchesBucket(ageDays: number, spec: SessionBucketSpec): boolean {
+  return spec.maxAgeDays == null || ageDays < spec.maxAgeDays;
 }
 
 function buildSessionBuckets(
@@ -292,12 +291,12 @@ function buildSessionBuckets(
     ]),
   );
 
-  const now = Date.now();
+  const now = new Date();
   for (const entry of entries) {
     const activityMs = resolveSessionActivityMs(entry);
-    const ageMs = Math.max(0, now - activityMs);
-    const matched = SESSION_BUCKET_SPECS.find((spec) => matchesBucket(ageMs, spec));
-    const bucket = matched ? bucketsById.get(matched.id) : bucketsById.get('older_than_30_days');
+    const ageDays = resolveActivityAgeDays(activityMs, now);
+    const matched = SESSION_BUCKET_SPECS.find((spec) => matchesBucket(ageDays, spec));
+    const bucket = matched ? bucketsById.get(matched.id) : bucketsById.get('older');
     if (bucket) {
       bucket.sessions.push(entry);
     }

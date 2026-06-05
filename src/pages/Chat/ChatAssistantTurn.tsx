@@ -37,6 +37,13 @@ type MarkdownFenceState = {
   length: number;
 } | null;
 
+type AssistantToolSegment = Extract<ChatAssistantTurnItem['segments'][number], { kind: 'tool' }>;
+type AssistantBubbleCanvasToolSegment = AssistantToolSegment & {
+  tool: AssistantToolSegment['tool'] & {
+    result: Extract<AssistantToolSegment['tool']['result'], { kind: 'canvas' }>;
+  };
+};
+
 function readFenceMarker(line: string): { marker: '`' | '~'; length: number; closingOnly: boolean } | null {
   const match = /^(?: {0,3})(`{3,}|~{3,})(.*)$/.exec(line);
   if (!match) {
@@ -101,6 +108,13 @@ function buildMessageSegmentRenderTextByKey(item: ChatAssistantTurnItem): Map<st
     fenceState = advanceMarkdownFenceState(segment.text, fenceState);
   }
   return renderTextByKey;
+}
+
+function isAssistantBubbleCanvasTool(segment: ChatAssistantTurnItem['segments'][number]): segment is AssistantBubbleCanvasToolSegment {
+  return segment.kind === 'tool'
+    && segment.tool.result.kind === 'canvas'
+    && segment.tool.result.surface === 'assistant-bubble'
+    && segment.tool.result.preview.surface === 'assistant_message';
 }
 
 export const ChatAssistantTurn = memo(function ChatAssistantTurn({
@@ -233,26 +247,26 @@ export const ChatAssistantTurn = memo(function ChatAssistantTurn({
             );
           }
           if (segment.kind === 'tool') {
-            const embeddedToolResults = (
-              segment.tool.result.kind === 'canvas'
-              && segment.tool.result.surface === 'assistant-bubble'
-              && segment.tool.result.preview.surface === 'assistant_message'
-            )
-              ? [{
-                  key: segment.tool.toolCallId || segment.tool.id || segment.key,
-                  ...(segment.tool.toolCallId ? { toolCallId: segment.tool.toolCallId } : {}),
-                  toolName: segment.tool.name,
-                  preview: segment.tool.result.preview,
-                  ...(segment.tool.result.rawText ? { rawText: segment.tool.result.rawText } : {}),
-                }]
-              : [];
+            if (isAssistantBubbleCanvasTool(segment)) {
+              const embeddedToolResults = [{
+                key: segment.tool.toolCallId || segment.tool.id || segment.key,
+                ...(segment.tool.toolCallId ? { toolCallId: segment.tool.toolCallId } : {}),
+                toolName: segment.tool.name,
+                preview: segment.tool.result.preview,
+                ...(segment.tool.result.rawText ? { rawText: segment.tool.result.rawText } : {}),
+              }];
+              return (
+                <div key={segment.key} className="flex flex-col items-start gap-0 pt-0">
+                  <AssistantEmbeddedToolResults
+                    embeddedToolResults={embeddedToolResults}
+                    collapseVersion={collapseVersion}
+                  />
+                </div>
+              );
+            }
             return (
               <div key={segment.key} className="flex flex-col items-start gap-0 pt-0">
                 <ToolCardList tools={[segment.tool]} collapseVersion={collapseVersion} />
-                <AssistantEmbeddedToolResults
-                  embeddedToolResults={embeddedToolResults}
-                  collapseVersion={collapseVersion}
-                />
               </div>
             );
           }

@@ -3,6 +3,7 @@ import { PORTS } from '../../utils/config';
 import { buildOpenClawControlUiUrl } from '../../utils/openclaw-control-ui';
 import { loadHostBootstrapSettings } from '../../gateway/config-sync';
 import { buildPublicGatewayStatus } from '../../gateway/public-status';
+import { logger } from '../../utils/logger';
 import type { GatewayApiContext } from '../context';
 import { sendJson } from '../route-utils';
 
@@ -30,6 +31,32 @@ async function readPlatformHealth(ctx: GatewayApiContext): Promise<{
   } catch {
     return null;
   }
+}
+
+let activeControlUiAutoApproveTimer: NodeJS.Timeout | null = null;
+
+function scheduleControlUiDeviceAutoApproval(ctx: GatewayApiContext): void {
+  if (activeControlUiAutoApproveTimer) {
+    clearTimeout(activeControlUiAutoApproveTimer);
+  }
+
+  const startedAt = Date.now();
+  const tick = async () => {
+    try {
+      await ctx.runtimeHost.request('POST', '/api/gateway/control-ui/auto-approve', {}, { timeoutMs: 20_000 });
+    } catch (error) {
+      logger.debug(`[control-ui] Auto-approve pairing check failed: ${String(error)}`);
+    }
+    if (Date.now() - startedAt >= 90_000) {
+      activeControlUiAutoApproveTimer = null;
+      return;
+    }
+    activeControlUiAutoApproveTimer = setTimeout(() => {
+      void tick();
+    }, 800);
+  };
+
+  void tick();
 }
 
 export async function handleGatewayRoutes(
@@ -98,6 +125,7 @@ export async function handleGatewayRoutes(
       const { gatewayToken: token } = await loadHostBootstrapSettings();
       const port = status.port || PORTS.OPENCLAW_GATEWAY;
       const urlValue = buildOpenClawControlUiUrl(port, token);
+      scheduleControlUiDeviceAutoApproval(ctx);
       sendJson(res, 200, { success: true, url: urlValue, token, port });
     } catch (error) {
       sendJson(res, 500, { success: false, error: String(error) });

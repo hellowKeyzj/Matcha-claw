@@ -203,12 +203,25 @@ export function stripAssistantReplyDirectivePrefix(text: string): string {
     .trim();
 }
 
+function stripInternalAssistantArtifactLines(text: string): string {
+  if (!text) {
+    return text;
+  }
+  return text
+    .replace(/(^|\n)[ \t]*(?:HEARTBEAT_OK|NO_REPLY)[ \t]*(?=\n|$)/gi, '$1')
+    .replace(/(^|\n)[ \t]*MEDIA:(?:\/|~\/|[A-Za-z]:\\)[^\n]+(?=\n|$)/gi, '$1')
+    .replace(/[ \t]+\n/g, '\n')
+    .replace(/\n{2,}/g, '\n')
+    .trim();
+}
+
 export function sanitizeAssistantDisplayText(content: unknown): string {
   const text = typeof content === 'string' ? content : extractMessageText(content);
-  return stripLeadingDisplayEnvelopeArtifacts(stripAssistantReplyDirectivePrefix(text))
-    .replace(/\s*\[media attached:[^\]]*\]/gi, '')
-    .replace(/\r\n?/g, '\n')
-    .trim();
+  return stripInternalAssistantArtifactLines(
+    stripLeadingDisplayEnvelopeArtifacts(stripAssistantReplyDirectivePrefix(text))
+      .replace(/\s*\[media attached:[^\]]*\]/gi, '')
+      .replace(/\r\n?/g, '\n'),
+  );
 }
 
 export function normalizeAssistantFinalText(content: unknown): string {

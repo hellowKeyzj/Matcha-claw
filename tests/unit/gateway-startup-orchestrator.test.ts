@@ -65,6 +65,25 @@ describe('runGatewayStartupSequence', () => {
     expect(hooks.onConnectedToExistingGateway).toHaveBeenCalledTimes(1);
   });
 
+  it('managed gateway control ready 仍在启动时原地重试，不重新 startProcess', async () => {
+    let readyAttempts = 0;
+    const hooks = createMockHooks({
+      waitForControlReady: vi.fn().mockImplementation(async () => {
+        readyAttempts += 1;
+        if (readyAttempts === 1) {
+          throw new Error('gateway starting; retry shortly');
+        }
+      }),
+    });
+
+    await runGatewayStartupSequence(hooks);
+
+    expect(hooks.waitForControlReady).toHaveBeenCalledTimes(2);
+    expect(hooks.startProcess).toHaveBeenCalledTimes(1);
+    expect(hooks.delay).toHaveBeenCalledWith(500);
+    expect(hooks.onConnectedToManagedGateway).toHaveBeenCalledTimes(1);
+  });
+
   it('LifecycleSupersededError 不会被吞掉重试', async () => {
     const hooks = createMockHooks({
       startProcess: vi.fn().mockRejectedValue(

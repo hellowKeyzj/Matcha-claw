@@ -209,11 +209,8 @@ export async function applyEnabledPluginIdsToOpenClawConfig(
   const nextEntries = cloneNormalizedPluginEntries(config);
   const ownedPluginIds = await listOwnedPluginIds(configRepository, pluginFileSystem, normalizedPluginIds, nextEntries);
 
-  if (enabledSet.has('openclaw-lark') && nextEntries.feishu?.enabled !== false) {
-    nextEntries.feishu = {
-      ...(nextEntries.feishu ?? {}),
-      enabled: false,
-    };
+  if (enabledSet.has('openclaw-lark') && nextEntries.feishu) {
+    delete nextEntries.feishu;
   }
 
   for (const pluginId of normalizedPluginIds) {

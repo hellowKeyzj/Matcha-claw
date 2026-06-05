@@ -12,7 +12,7 @@ export type NormalizedProviderCredential = {
 };
 
 export interface ProviderProjectionKeyResolverPort {
-  resolveProviderKey(input: { vendorId: string; accountId: string }): string;
+  resolveProviderKey(input: { vendorId: string; accountId: string; account?: Record<string, unknown> }): string;
 }
 
 export function isRecord(value: unknown): value is Record<string, unknown> {
@@ -95,7 +95,7 @@ export function normalizeProviderStoreForProjection(
         storeModified = true;
       }
     }
-    const providerKey = projectionKeys.resolveProviderKey({ vendorId, accountId });
+    const providerKey = projectionKeys.resolveProviderKey({ vendorId, accountId, account: rawAccount });
     normalizedAccounts.push({
       accountId,
       providerKey,

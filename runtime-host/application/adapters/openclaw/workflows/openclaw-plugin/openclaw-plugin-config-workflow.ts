@@ -1,4 +1,4 @@
-import { normalizePluginIds } from '../../../bootstrap/runtime-config';
+import { normalizePluginIds } from '../../../../../bootstrap/runtime-config';
 import type { PluginFileSystemPort } from '../../../../plugin-engine/plugin-file-system';
 import type { OpenClawConfigRepositoryPort } from '../../infrastructure/openclaw-config-repository';
 import { isChannelDerivedPluginId } from '../../projections/openclaw-channel-plugin-bindings';

@@ -253,8 +253,55 @@ function enforceToolDefaults(config: Record<string, unknown>, deps: OpenClawConf
   return true;
 }
 
+const OPENCLAW_PROVIDER_PINNED_AGENT_RUNTIME: Record<string, string> = {
+  openai: 'pi',
+  'openai-codex': 'pi',
+};
+
 const MIN_BOOTSTRAP_MAX_CHARS = 32_000;
 const MIN_BOOTSTRAP_TOTAL_MAX_CHARS = 100_000;
+
+function enforceOpenAiAgentRuntimePins(config: Record<string, unknown>, deps: OpenClawConfigSanitizerRulesDeps): boolean {
+  const models = (config.models && typeof config.models === 'object' && !Array.isArray(config.models)
+    ? config.models
+    : null) as Record<string, unknown> | null;
+  const providers = (models?.providers && typeof models.providers === 'object' && !Array.isArray(models.providers)
+    ? models.providers
+    : null) as Record<string, unknown> | null;
+  if (!models || !providers) {
+    return false;
+  }
+
+  let modified = false;
+  for (const [providerKey, runtimeId] of Object.entries(OPENCLAW_PROVIDER_PINNED_AGENT_RUNTIME)) {
+    const provider = providers[providerKey];
+    if (!provider || typeof provider !== 'object' || Array.isArray(provider)) {
+      continue;
+    }
+    const providerRecord = provider as Record<string, unknown>;
+    const agentRuntime = providerRecord.agentRuntime;
+    if (
+      agentRuntime
+      && typeof agentRuntime === 'object'
+      && !Array.isArray(agentRuntime)
+      && typeof (agentRuntime as Record<string, unknown>).id === 'string'
+      && ((agentRuntime as Record<string, unknown>).id as string).trim()
+    ) {
+      continue;
+    }
+    providerRecord.agentRuntime = { id: runtimeId };
+    providers[providerKey] = providerRecord;
+    modified = true;
+  }
+
+  if (!modified) {
+    return false;
+  }
+  models.providers = providers;
+  config.models = models;
+  deps.info('[sanitize] Pinned OpenAI provider entries to the embedded pi runtime');
+  return true;
+}
 
 function enforceBootstrapCharLimits(config: Record<string, unknown>, deps: OpenClawConfigSanitizerRulesDeps): boolean {
   const agents = (config.agents && typeof config.agents === 'object' && !Array.isArray(config.agents)
@@ -491,13 +538,10 @@ async function sanitizePlugins(config: Record<string, unknown>, deps: OpenClawCo
       deps.info('[sanitize] Removed bare "feishu" from plugins.allow because openclaw-lark is configured');
     }
   }
-  if (hasNewFeishu && (!entries.feishu || entries.feishu.enabled !== false)) {
-    entries.feishu = {
-      ...(entries.feishu ?? {}),
-      enabled: false,
-    };
+  if (hasNewFeishu && entries.feishu) {
+    delete entries.feishu;
     modified = true;
-    deps.info('[sanitize] Disabled plugins.entries.feishu because openclaw-lark is configured');
+    deps.info('[sanitize] Removed plugins.entries.feishu because openclaw-lark is configured');
   }
 
   const providers = ((config.models as Record<string, unknown> | undefined)?.providers as Record<string, unknown> | undefined) || {};
@@ -592,6 +636,7 @@ export async function applyOpenClawConfigSanitizerRules(
   modified = ensureCommandsRestart(config, deps) || modified;
   modified = removeStaleMoonshotKimiApiKey(config, deps) || modified;
   modified = enforceToolDefaults(config, deps) || modified;
+  modified = enforceOpenAiAgentRuntimePins(config, deps) || modified;
   modified = enforceBootstrapCharLimits(config, deps) || modified;
   modified = await sanitizePluginsLoadPaths(config, deps) || modified;
   modified = sanitizeStrictSchemaChannels(config, deps) || modified;

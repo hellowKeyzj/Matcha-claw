@@ -4,6 +4,7 @@ export type FileContentType =
   | 'code'
   | 'text'
   | 'markdown'
+  | 'html'
   | 'image'
   | 'pdf'
   | 'sheet'
@@ -351,6 +352,9 @@ export function classifyFileContentType(ext: string, mimeType: string): FileCont
   if (MARKDOWN_EXTENSIONS.has(normalizedExt)) {
     return 'markdown';
   }
+  if (normalizedExt === '.html' || normalizedExt === '.htm' || normalizedMime === 'text/html') {
+    return 'html';
+  }
   if (CODE_EXTENSIONS.has(normalizedExt)) {
     return 'code';
   }
@@ -383,7 +387,8 @@ export function supportsInlineDiff(
   }
   return file.contentType === 'code'
     || file.contentType === 'text'
-    || file.contentType === 'markdown';
+    || file.contentType === 'markdown'
+    || file.contentType === 'html';
 }
 
 export function supportsInlineDocumentPreview(ext: string): boolean {
@@ -391,6 +396,7 @@ export function supportsInlineDocumentPreview(ext: string): boolean {
   return contentType === 'code'
     || contentType === 'text'
     || contentType === 'markdown'
+    || contentType === 'html'
     || contentType === 'image'
     || contentType === 'pdf'
     || contentType === 'sheet';

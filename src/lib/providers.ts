@@ -72,6 +72,7 @@ export interface ProviderTypeInfo {
   showBaseUrl?: boolean;
   isOAuth?: boolean;
   supportsApiKey?: boolean;
+  hideOAuthUi?: boolean;
   apiKeyUrl?: string;
   docsUrl?: string;
   docsUrlZh?: string;
@@ -172,8 +173,6 @@ export const PROVIDER_TYPE_INFO: ProviderTypeInfo[] = [
     placeholder: 'AIza...',
     model: 'Gemini',
     requiresApiKey: true,
-    isOAuth: true,
-    supportsApiKey: true,
     apiKeyUrl: 'https://aistudio.google.com/app/apikey',
   },
   { id: 'openrouter', name: 'OpenRouter', icon: '🌐', placeholder: 'sk-or-v1-...', model: 'Multi-Model', requiresApiKey: true, docsUrl: 'https://openrouter.ai/models' },

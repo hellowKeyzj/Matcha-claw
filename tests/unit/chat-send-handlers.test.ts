@@ -191,6 +191,40 @@ describe('chat send handlers', () => {
     });
   });
 
+  it('does not send while a previous send mutation is still in flight', async () => {
+    const sessionKey = 'agent:main:session-1';
+    let state = {
+      currentSessionKey: sessionKey,
+      loadedSessions: {
+        [sessionKey]: createSessionRecord({ sessionKey }),
+      },
+      pendingApprovalsBySession: {},
+      error: null,
+      mutating: true,
+      syncPendingApprovals: vi.fn().mockResolvedValue(undefined),
+    } as unknown as ChatStoreState;
+
+    const set = (
+      partial: Partial<ChatStoreState> | ((current: ChatStoreState) => Partial<ChatStoreState> | ChatStoreState),
+    ) => {
+      const patch = typeof partial === 'function' ? partial(state) : partial;
+      state = { ...state, ...patch } as ChatStoreState;
+    };
+    const beginMutating = vi.fn();
+
+    await executeStoreSend({
+      set,
+      get: () => state,
+      sessionRunCache: createStoreSessionRunCache(),
+      beginMutating,
+      finishMutating: vi.fn(),
+      text: '你好',
+    });
+
+    expect(sendChatTransportMock).not.toHaveBeenCalled();
+    expect(beginMutating).not.toHaveBeenCalled();
+  });
+
   it('does not poll history while a run is active', async () => {
     vi.useFakeTimers();
     try {
@@ -236,6 +270,73 @@ describe('chat send handlers', () => {
 
       expect(state.loadHistory).not.toHaveBeenCalled();
       expect(state.syncPendingApprovals).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not show the safety timeout error when history has assistant tool progress', async () => {
+    vi.useFakeTimers();
+    try {
+      const sessionKey = 'agent:main:session-1';
+      const onSafetyTimeout = vi.fn();
+      let state = {
+        currentSessionKey: sessionKey,
+        loadedSessions: {
+          [sessionKey]: {
+            ...createSessionRecord({ sessionKey }),
+            items: [{
+              key: 'assistant-tool-1',
+              kind: 'assistant-turn' as const,
+              sessionKey,
+              role: 'assistant' as const,
+              identitySource: 'runtime' as const,
+              identityMode: 'turn' as const,
+              identityConfidence: 'high' as const,
+              status: 'waiting_tool' as const,
+              segments: [{ kind: 'tool' as const, toolCallId: 'tool-1' }],
+              thinking: 'Searching...',
+              tools: [{ name: 'web_search', status: 'running' as const, updatedAt: 1 }],
+              text: '',
+              images: [],
+              attachedFiles: [],
+            }],
+            runtime: {
+              activeRunId: 'run-1',
+              runPhase: 'submitted' as const,
+              activeTurnItemKey: null,
+              pendingTurnKey: 'turn-1',
+              pendingTurnLaneKey: 'main',
+              runtimeActivity: null,
+              lastUserMessageAt: 1,
+              lastError: null,
+              lastIssue: null,
+              updatedAt: 1,
+            },
+          },
+        },
+        error: NO_RESPONSE_RECEIVED_ERROR,
+        loadHistory: vi.fn().mockResolvedValue(undefined),
+        syncPendingApprovals: vi.fn().mockResolvedValue(undefined),
+      } as unknown as ChatStoreState;
+      const set = (
+        partial: Partial<ChatStoreState> | ((current: ChatStoreState) => Partial<ChatStoreState> | ChatStoreState),
+      ) => {
+        const patch = typeof partial === 'function' ? partial(state) : partial;
+        state = { ...state, ...patch } as ChatStoreState;
+      };
+
+      startStoreSendWatchers({
+        set,
+        get: () => state,
+        sessionKey,
+        onSafetyTimeout,
+      });
+
+      await vi.advanceTimersByTimeAsync(130_000);
+
+      expect(onSafetyTimeout).not.toHaveBeenCalled();
+      expect(state.error).toBeNull();
     } finally {
       vi.useRealTimers();
     }

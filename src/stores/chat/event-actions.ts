@@ -24,7 +24,7 @@ import {
   summarizeItemsForTodoToolDebug,
   summarizeSnapshotForTodoToolDebug,
 } from './todo-tool-debug';
-import type { ChatStoreState } from './types';
+import { isRunActive, type ChatStoreState } from './types';
 import type {
   SessionItemChunkUpdateEvent,
   SessionItemUpdateEvent,
@@ -61,6 +61,18 @@ function resolveSessionUpdateRecordKey(
     return existingRecordKey;
   }
   return buildSessionRecordKey(runtimeAddress, backendSessionKey);
+}
+
+function shouldPreserveRuntimeOnInfoUpdate(input: {
+  event: Extract<SessionUpdateEvent, { sessionUpdate: 'session_info_update' }>;
+  current: ChatStoreState['loadedSessions'][string] | undefined;
+}): boolean {
+  const runtime = input.current?.runtime;
+  if (input.event.phase !== 'unknown' || !runtime || !isRunActive(runtime)) {
+    return false;
+  }
+  const eventRunId = normalizeIdentifier(input.event.runId);
+  return !eventRunId || eventRunId === runtime.activeRunId;
 }
 
 function patchSessionSnapshotWithTodoToolDebug(
@@ -163,15 +175,33 @@ function applySessionLifecycleEvent(
     return;
   }
 
-  set((state) => ({
-    loadedSessions: patchSessionSnapshotWithTodoToolDebug(
-      state,
-      targetSessionKey,
-      event.snapshot,
-      'session_info_update',
-    ),
-    pendingApprovalsBySession: patchPendingApprovalsFromSnapshot(state, targetSessionKey, event.snapshot),
-  }));
+  set((state) => {
+    const currentRecord = state.loadedSessions[targetSessionKey];
+    const snapshot = shouldPreserveRuntimeOnInfoUpdate({ event, current: currentRecord })
+      ? {
+          ...event.snapshot,
+          runtime: {
+            ...event.snapshot.runtime,
+            activeRunId: currentRecord!.runtime.activeRunId,
+            runPhase: currentRecord!.runtime.runPhase,
+            activeTurnItemKey: currentRecord!.runtime.activeTurnItemKey,
+            pendingTurnKey: currentRecord!.runtime.pendingTurnKey,
+            pendingTurnLaneKey: currentRecord!.runtime.pendingTurnLaneKey,
+            lastUserMessageAt: currentRecord!.runtime.lastUserMessageAt,
+            runtimeActivity: currentRecord!.runtime.runtimeActivity,
+          },
+        }
+      : event.snapshot;
+    return {
+      loadedSessions: patchSessionSnapshotWithTodoToolDebug(
+        state,
+        targetSessionKey,
+        snapshot,
+        'session_info_update',
+      ),
+      pendingApprovalsBySession: patchPendingApprovalsFromSnapshot(state, targetSessionKey, snapshot),
+    };
+  });
 
   if (event.phase === 'final') {
     finishChatRunTelemetry(targetSessionKey, 'completed', { stage: 'session_update_final' });

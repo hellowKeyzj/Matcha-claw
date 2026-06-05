@@ -205,9 +205,9 @@ describe('validateApiKeyWithProvider', () => {
     );
   });
 
-  it('openrouter 使用专用 auth/key 端点校验', async () => {
+  it('openrouter 使用 openai-compatible 协议校验', async () => {
     fetchMock.mockResolvedValueOnce(
-      new Response(JSON.stringify({ data: { label: 'MatchaClaw' } }), {
+      new Response(JSON.stringify({ data: [] }), {
         status: 200,
         headers: { 'Content-Type': 'application/json' },
       }),
@@ -220,11 +220,13 @@ describe('validateApiKeyWithProvider', () => {
 
     expect(result).toMatchObject({ valid: true });
     expect(fetchMock).toHaveBeenCalledWith(
-      'https://openrouter.ai/api/v1/auth/key',
+      'https://openrouter.ai/api/v1/models?limit=1',
       expect.objectContaining({
-        headers: {
+        headers: expect.objectContaining({
           Authorization: 'Bearer sk-or-v1-test',
-        },
+          'HTTP-Referer': 'https://matchaclaw-x.com',
+          'X-OpenRouter-Title': 'MatchaClaw',
+        }),
       }),
     );
   });

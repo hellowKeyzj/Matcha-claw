@@ -65,6 +65,7 @@ describe('provider metadata', () => {
     const qwen = PROVIDER_TYPE_INFO.find((provider) => provider.id === 'qwen-portal');
 
     expect(openai?.apiKeyUrl).toBe('https://platform.openai.com/api-keys');
+    expect(openai?.hideOAuthUi).toBeUndefined();
     expect(google?.apiKeyUrl).toBe('https://aistudio.google.com/app/apikey');
     expect(minimax?.supportsApiKey).toBe(true);
     expect(minimaxCn?.supportsApiKey).toBe(true);

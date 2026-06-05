@@ -341,6 +341,104 @@ describe('agent sessions pane', () => {
     expect(switchSession).not.toHaveBeenCalled();
   });
 
+  it('按今天、7 天、30 天和更早分桶，并默认展开近期分桶', () => {
+    const now = Date.now();
+    const sessions = [
+      { key: 'agent:main:main', displayName: 'agent:main:main' },
+      { key: 'agent:main:session-today', displayName: 'Today conversation' },
+      { key: 'agent:main:session-week', displayName: 'Week conversation' },
+      { key: 'agent:main:session-month', displayName: 'Month conversation' },
+      { key: 'agent:main:session-older', displayName: 'Older conversation' },
+    ];
+    useChatStore.setState({
+      currentSessionKey: 'agent:main:main',
+      sessionCatalogStatus: buildReadySessionCatalogStatus(sessions),
+      loadedSessions: {
+        'agent:main:main': createSessionRecord({ sessionKey: 'agent:main:main', historyStatus: 'ready' }),
+        'agent:main:session-today': createSessionRecord({
+          sessionKey: 'agent:main:session-today',
+          historyStatus: 'ready',
+          label: 'Today conversation',
+          lastActivityAt: now - 60 * 60 * 1000,
+        }),
+        'agent:main:session-week': createSessionRecord({
+          sessionKey: 'agent:main:session-week',
+          historyStatus: 'ready',
+          label: 'Week conversation',
+          lastActivityAt: now - 2 * 24 * 60 * 60 * 1000,
+        }),
+        'agent:main:session-month': createSessionRecord({
+          sessionKey: 'agent:main:session-month',
+          historyStatus: 'ready',
+          label: 'Month conversation',
+          lastActivityAt: now - 10 * 24 * 60 * 60 * 1000,
+        }),
+        'agent:main:session-older': createSessionRecord({
+          sessionKey: 'agent:main:session-older',
+          historyStatus: 'ready',
+          label: 'Older conversation',
+          lastActivityAt: now - 40 * 24 * 60 * 60 * 1000,
+        }),
+      },
+      switchSession: vi.fn(),
+      newSession: vi.fn(),
+      deleteSession: vi.fn().mockResolvedValue(undefined),
+      loadSessions: vi.fn().mockResolvedValue(undefined),
+    } as never);
+
+    renderPane();
+
+    expect(screen.getAllByText('Today').length).toBeGreaterThan(0);
+    expect(screen.getByText('Last 7 Days')).toBeTruthy();
+    expect(screen.getByText('Last 30 Days')).toBeTruthy();
+    expect(screen.getByText('Older')).toBeTruthy();
+    expect(screen.getByText('Today conversation')).toBeTruthy();
+    expect(screen.getByText('Week conversation')).toBeTruthy();
+    expect(screen.queryByText('Month conversation')).toBeNull();
+    expect(screen.queryByText('Older conversation')).toBeNull();
+
+    fireEvent.click(screen.getByText('Last 30 Days').closest('button')!);
+    fireEvent.click(screen.getByText('Older').closest('button')!);
+
+    expect(screen.getByText('Month conversation')).toBeTruthy();
+    expect(screen.getByText('Older conversation')).toBeTruthy();
+  });
+
+  it('昨天但不足 24 小时的会话不归入今天', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-06-05T01:00:00+08:00'));
+    try {
+      useChatStore.setState({
+        currentSessionKey: 'agent:main:main',
+        sessionCatalogStatus: buildReadySessionCatalogStatus([
+          { key: 'agent:main:main', displayName: 'agent:main:main' },
+          { key: 'agent:main:session-yesterday', displayName: 'Yesterday conversation' },
+        ]),
+        loadedSessions: {
+          'agent:main:main': createSessionRecord({ sessionKey: 'agent:main:main', historyStatus: 'ready' }),
+          'agent:main:session-yesterday': createSessionRecord({
+            sessionKey: 'agent:main:session-yesterday',
+            historyStatus: 'ready',
+            label: 'Yesterday conversation',
+            lastActivityAt: new Date('2026-06-04T23:00:00+08:00').getTime(),
+          }),
+        },
+        switchSession: vi.fn(),
+        newSession: vi.fn(),
+        deleteSession: vi.fn().mockResolvedValue(undefined),
+        loadSessions: vi.fn().mockResolvedValue(undefined),
+      } as never);
+
+      renderPane();
+
+      expect(screen.queryByText('Today')).toBeNull();
+      expect(screen.getByText('Last 7 Days')).toBeTruthy();
+      expect(screen.getByText('Yesterday conversation')).toBeTruthy();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('可删除会话并触发 deleteSession', async () => {
     const deleteSession = vi.fn().mockResolvedValue(undefined);
     const now = Date.now();
@@ -780,37 +878,41 @@ describe('agent sessions pane', () => {
   });
 
   it('新建空会话应使用 session key 时间戳参与分桶，而不是被误归到很久以前', () => {
-    const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(1_710_000_600_000);
-    useChatStore.setState({
-      currentSessionKey: 'agent:test:session-1710000000000',
-      sessionCatalogStatus: buildReadySessionCatalogStatus([
-        { key: 'agent:test:main', displayName: 'agent:test:main' },
-        { key: 'agent:test:session-1700000000000', displayName: 'agent:test:session-1700000000000' },
-        { key: 'agent:test:session-1710000000000', displayName: 'agent:test:session-1710000000000' },
-      ]),
-      loadedSessions: {
-        'agent:test:main': createSessionRecord({ sessionKey: 'agent:test:main', historyStatus: 'ready' }),
-        'agent:test:session-1700000000000': createSessionRecord({
-          sessionKey: 'agent:test:session-1700000000000',
-          historyStatus: 'ready',
-          label: '旧空会话',
-        }),
-        'agent:test:session-1710000000000': createSessionRecord({
-          sessionKey: 'agent:test:session-1710000000000',
-          historyStatus: 'ready',
-          label: '新空会话',
-        }),
-      },
-      switchSession: vi.fn(),
-      newSession: vi.fn(),
-      deleteSession: vi.fn().mockResolvedValue(undefined),
-      loadSessions: vi.fn().mockResolvedValue(undefined),
-    } as never);
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(1_710_000_600_000));
+    try {
+      useChatStore.setState({
+        currentSessionKey: 'agent:test:session-1710000000000',
+        sessionCatalogStatus: buildReadySessionCatalogStatus([
+          { key: 'agent:test:main', displayName: 'agent:test:main' },
+          { key: 'agent:test:session-1700000000000', displayName: 'agent:test:session-1700000000000' },
+          { key: 'agent:test:session-1710000000000', displayName: 'agent:test:session-1710000000000' },
+        ]),
+        loadedSessions: {
+          'agent:test:main': createSessionRecord({ sessionKey: 'agent:test:main', historyStatus: 'ready' }),
+          'agent:test:session-1700000000000': createSessionRecord({
+            sessionKey: 'agent:test:session-1700000000000',
+            historyStatus: 'ready',
+            label: '旧空会话',
+          }),
+          'agent:test:session-1710000000000': createSessionRecord({
+            sessionKey: 'agent:test:session-1710000000000',
+            historyStatus: 'ready',
+            label: '新空会话',
+          }),
+        },
+        switchSession: vi.fn(),
+        newSession: vi.fn(),
+        deleteSession: vi.fn().mockResolvedValue(undefined),
+        loadSessions: vi.fn().mockResolvedValue(undefined),
+      } as never);
 
-    renderPane();
+      renderPane();
 
-    expect(screen.getByText('新空会话')).toBeInTheDocument();
-    expect(screen.queryByText('旧空会话')).not.toBeInTheDocument();
-    nowSpy.mockRestore();
+      expect(screen.getByText('新空会话')).toBeTruthy();
+      expect(screen.queryByText('旧空会话')).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

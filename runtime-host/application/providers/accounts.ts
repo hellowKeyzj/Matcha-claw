@@ -113,7 +113,7 @@ export class ProviderAccountsService {
 
   async completeBrowser(payload: unknown): Promise<ApplicationResponse> {
     const body = isRecord(payload) ? payload : {};
-    const providerType = body.providerType === 'google' || body.providerType === 'openai'
+    const providerType = body.providerType === 'openai'
       ? body.providerType
       : null;
     const accountId = typeof body.accountId === 'string' ? body.accountId.trim() : '';

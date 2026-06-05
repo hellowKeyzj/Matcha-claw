@@ -44,6 +44,7 @@ import {
   resolveSessionOperationTarget,
   sameRuntimeEndpointScope,
 } from './session-identity';
+import { pickStartupSessionFallback } from './session-selection';
 import type { StoreHistoryCache } from './history-cache';
 import type { RuntimeAddress } from '../../../runtime-host/shared/runtime-address';
 import type {
@@ -393,7 +394,7 @@ async function executeLoadSessionsNow(input: CreateStoreSessionActionsInput): Pr
       sessions.length,
     );
     if (!shouldKeepMissingCurrent && sessions.length > 0) {
-      nextSessionKey = sessions[0]!.key;
+      nextSessionKey = pickStartupSessionFallback(nextSessionKey, sessions) ?? nextSessionKey;
     }
   }
   const currentExistsInBackend = hasSessionInBackend(nextSessionKey);
@@ -691,6 +692,7 @@ export async function executeRenameSession(
       loadedSessions: patchSessionMeta(state, key, {
         label: normalizedLabel,
         titleSource: 'user',
+        manualLabel: true,
       }),
     }));
   } finally {

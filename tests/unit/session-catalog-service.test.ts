@@ -242,7 +242,7 @@ describe('session adapter service catalog', () => {
     });
   });
 
-  it('catalog refresh reads transcript content only when catalog label is missing', async () => {
+  it('catalog refresh reads transcript lines for activity time while preserving indexed labels', async () => {
     const configDir = mkdtempSync(join(tmpdir(), 'matchaclaw-session-catalog-'));
     tempDirs.push(configDir);
 
@@ -251,7 +251,13 @@ describe('session adapter service catalog', () => {
     mkdirSync(sessionsDir, { recursive: true });
     writeFileSync(join(sessionsDir, 'sessions.json'), JSON.stringify({
       sessions: [
-        { key: 'agent:alpha:main', id: 'main', label: 'cached title', runtimeAddress: openClawRuntimeAddress('agent:alpha:main') },
+        {
+          key: 'agent:alpha:main',
+          id: 'main',
+          label: 'cached title',
+          updatedAt: Date.parse('2026-06-05T10:00:00.000Z'),
+          runtimeAddress: openClawRuntimeAddress('agent:alpha:main'),
+        },
         { key: 'agent:alpha:session-1', id: 'session-1', runtimeAddress: openClawRuntimeAddress('agent:alpha:session-1') },
       ],
     }, null, 2));
@@ -273,11 +279,11 @@ describe('session adapter service catalog', () => {
     ].join('\n'));
 
     class CountingSessionStorageRepository extends SessionStorageRepository {
-      readCount = 0;
+      readLineCount = 0;
 
-      override async readTranscriptDescriptorContent(descriptor: Parameters<SessionStorageRepository['readTranscriptDescriptorContent']>[0]) {
-        this.readCount += 1;
-        return await super.readTranscriptDescriptorContent(descriptor);
+      override async *readTranscriptDescriptorLines(descriptor: Parameters<SessionStorageRepository['readTranscriptDescriptorLines']>[0]) {
+        this.readLineCount += 1;
+        yield* super.readTranscriptDescriptorLines(descriptor);
       }
     }
 
@@ -313,16 +319,72 @@ describe('session adapter service catalog', () => {
         label: 'catalog transcript title',
         titleSource: 'user',
         displayName: 'catalog transcript title',
-        updatedAt: expect.any(Number),
+        updatedAt: Date.parse('2026-04-10T10:05:00.000Z'),
       }),
       expect.objectContaining({
         key: 'agent:alpha:main',
         label: 'cached title',
         displayName: 'cached title',
-        updatedAt: expect.any(Number),
+        updatedAt: Date.parse('2026-04-10T10:00:00.000Z'),
       }),
     ]));
-    expect(storageRepository.readCount).toBe(1);
+    expect(storageRepository.readLineCount).toBe(2);
+  });
+
+  it('uses transcript message timestamps instead of transcript file mtime for catalog activity', async () => {
+    const descriptors = [{
+      sessionKey: 'agent:alpha:session-old-message',
+      agentId: 'alpha',
+      sessionsDir: '',
+      sessionsJsonPath: null,
+      sessionsJson: null,
+      sessionStoreEntry: null,
+      runtimeAddress: openClawRuntimeAddress('agent:alpha:session-old-message'),
+      transcriptPath: '/tmp/session-old-message.jsonl',
+    }];
+    const service = createTestSessionCatalogService({
+      workspace: { getConfigDir: () => '' },
+      storageRepository: {
+        listStorageDescriptors: async () => descriptors,
+        findStorageDescriptor: async () => null,
+        getTranscriptFingerprint: async (pathname) => ({
+          path: pathname,
+          size: 1,
+          mtimeMs: Date.parse('2026-06-05T10:00:00.000Z'),
+        }),
+        readTranscriptContent: async () => null,
+        readTranscriptDescriptorContent: async () => null,
+        readTranscriptLines: async function* () {},
+        readTranscriptDescriptorLines: async function* () {
+          yield buildTranscriptLine({
+            timestamp: '2026-04-10T10:00:00.000Z',
+            role: 'user',
+            content: 'old real message time',
+            id: 'message-old',
+          });
+        },
+        deleteSession: async () => false,
+        renameSession: async () => false,
+        updateSessionStatus: async () => false,
+        upsertSessionRuntimeAddress: async () => true,
+      },
+      metadataRepository: {
+        resolveSessionModel: async () => null,
+        readSessionMetadata: async () => null,
+        writeSessionMetadata: async () => undefined,
+      },
+    });
+
+    await service.refreshCache();
+    const response = await service.listSessions({ runtimeAddress: openClawRuntimeAddress('agent:alpha:main') });
+
+    expect(response.sessions).toEqual([
+      expect.objectContaining({
+        key: 'agent:alpha:session-old-message',
+        label: 'old real message time',
+        updatedAt: Date.parse('2026-04-10T10:00:00.000Z'),
+      }),
+    ]);
   });
 
   it('filters transcript-backed sessions that have no renderable content', async () => {
@@ -564,11 +626,11 @@ describe('session adapter service catalog', () => {
     ].join('\n'));
 
     class CountingSessionStorageRepository extends SessionStorageRepository {
-      readCount = 0;
+      readLineCount = 0;
 
-      override async readTranscriptDescriptorContent(descriptor: Parameters<SessionStorageRepository['readTranscriptDescriptorContent']>[0]) {
-        this.readCount += 1;
-        return await super.readTranscriptDescriptorContent(descriptor);
+      override async *readTranscriptDescriptorLines(descriptor: Parameters<SessionStorageRepository['readTranscriptDescriptorLines']>[0]) {
+        this.readLineCount += 1;
+        yield* super.readTranscriptDescriptorLines(descriptor);
       }
     }
 
@@ -597,7 +659,7 @@ describe('session adapter service catalog', () => {
     });
 
     await service.refreshCache();
-    expect(storageRepository.readCount).toBe(0);
+    expect(storageRepository.readLineCount).toBe(1);
     await expect(service.listSessions({ runtimeAddress: openClawRuntimeAddress('agent:alpha:main') })).resolves.toMatchObject({
       sessions: [
         {
@@ -606,7 +668,7 @@ describe('session adapter service catalog', () => {
       ],
     });
     await service.listSessions({ runtimeAddress: openClawRuntimeAddress('agent:alpha:main') });
-    expect(storageRepository.readCount).toBe(0);
+    expect(storageRepository.readLineCount).toBe(1);
   });
 
   it('runtime listSessions builds the lightweight catalog when the cache is cold', async () => {

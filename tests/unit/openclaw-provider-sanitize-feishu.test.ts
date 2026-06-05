@@ -197,7 +197,7 @@ describe('sanitizeOpenClawConfig feishu plugin migration', () => {
     readOpenClawJsonMock.mockResolvedValue(createSanitizeNeutralConfig());
   });
 
-  it('会把 feishu-openclaw-plugin 迁移为 openclaw-lark 并禁用冲突的 entries.feishu', async () => {
+  it('会把 feishu-openclaw-plugin 迁移为 openclaw-lark 并移除冲突的 entries.feishu', async () => {
     readOpenClawJsonMock.mockResolvedValue({
       ...createSanitizeNeutralConfig(),
       plugins: {
@@ -217,7 +217,7 @@ describe('sanitizeOpenClawConfig feishu plugin migration', () => {
     expect(nextConfig.plugins.allow).not.toContain('feishu');
     expect(nextConfig.plugins.allow).not.toContain('feishu-openclaw-plugin');
     expect(nextConfig.plugins.entries['openclaw-lark']).toMatchObject({ enabled: true, foo: 'bar' });
-    expect(nextConfig.plugins.entries.feishu.enabled).toBe(false);
+    expect(nextConfig.plugins.entries.feishu).toBeUndefined();
   });
 
   it('仅存在 entries.feishu 且未配置 openclaw-lark 时不会强制迁移到新插件 ID', async () => {
@@ -239,7 +239,7 @@ describe('sanitizeOpenClawConfig feishu plugin migration', () => {
     expect(nextConfig.plugins.entries['openclaw-lark']).toBeUndefined();
   });
 
-  it('已配置 openclaw-lark 但缺少 entries.feishu 时也会补写 built-in feishu 禁用项', async () => {
+  it('已配置 openclaw-lark 且缺少 entries.feishu 时不写入 legacy feishu entry', async () => {
     readOpenClawJsonMock.mockResolvedValue({
       ...createSanitizeNeutralConfig(),
       plugins: {
@@ -252,10 +252,7 @@ describe('sanitizeOpenClawConfig feishu plugin migration', () => {
 
     await sanitizeMockConfig();
 
-    expect(writeOpenClawJsonMock).toHaveBeenCalledTimes(1);
-    const nextConfig = writeOpenClawJsonMock.mock.calls[0][0] as Record<string, any>;
-    expect(nextConfig.plugins.entries['openclaw-lark']).toMatchObject({ enabled: true });
-    expect(nextConfig.plugins.entries.feishu).toMatchObject({ enabled: false });
+    expect(writeOpenClawJsonMock).not.toHaveBeenCalled();
   });
 
   it('会把 wecom-openclaw-plugin 迁移为 wecom', async () => {
@@ -484,7 +481,11 @@ describe('sanitizeOpenClawConfig feishu plugin migration', () => {
 
       await sanitizeMockConfig();
 
-      expect(writeOpenClawJsonMock).not.toHaveBeenCalled();
+      expect(writeOpenClawJsonMock).toHaveBeenCalledTimes(1);
+      const nextConfig = writeOpenClawJsonMock.mock.calls[0][0] as Record<string, any>;
+      expect(nextConfig.plugins.allow).toEqual(['custom-plugin']);
+      expect(nextConfig.plugins.allow).not.toContain('openai');
+      expect(nextConfig.models.providers.openai.agentRuntime).toEqual({ id: 'pi' });
     } finally {
       delete process.env.MATCHACLAW_OPENCLAW_DIR;
       await rm(tempOpenClawDir, { recursive: true, force: true });
@@ -519,7 +520,7 @@ describe('sanitizeOpenClawConfig feishu plugin migration', () => {
     }
   });
 
-  it('已配置 openclaw-lark 时不会因 enabledByDefault 再把 bare feishu 补回 allowlist', async () => {
+  it('已配置 openclaw-lark 时不会因 enabledByDefault 再把 bare feishu 或 legacy entry 补回配置', async () => {
     const tempOpenClawDir = await mkdtemp(join(tmpdir(), 'matchaclaw-openclaw-'));
     process.env.MATCHACLAW_OPENCLAW_DIR = tempOpenClawDir;
     try {
@@ -539,14 +540,7 @@ describe('sanitizeOpenClawConfig feishu plugin migration', () => {
 
       await sanitizeMockConfig();
 
-      expect(writeOpenClawJsonMock).toHaveBeenCalledTimes(1);
-      const nextConfig = writeOpenClawJsonMock.mock.calls[0][0] as Record<string, any>;
-      expect(nextConfig.plugins.allow).toEqual(
-        expect.arrayContaining(['custom-plugin', 'openclaw-lark']),
-      );
-      expect(nextConfig.plugins.allow).not.toContain('browser');
-      expect(nextConfig.plugins.allow).not.toContain('feishu');
-      expect(nextConfig.plugins.entries.feishu).toMatchObject({ enabled: false });
+      expect(writeOpenClawJsonMock).not.toHaveBeenCalled();
     } finally {
       delete process.env.MATCHACLAW_OPENCLAW_DIR;
       await rm(tempOpenClawDir, { recursive: true, force: true });
@@ -674,6 +668,40 @@ describe('sanitizeOpenClawConfig feishu plugin migration', () => {
 
     expect(writeOpenClawJsonMock).not.toHaveBeenCalled();
   });
+
+  it('会在 sanitize 阶段为历史 OpenAI provider 补齐 embedded runtime pin', async () => {
+    readOpenClawJsonMock.mockResolvedValue({
+      ...createSanitizeNeutralConfig(),
+      models: {
+        providers: {
+          openai: {
+            baseUrl: 'https://api.openai.com/v1',
+            api: 'openai-responses',
+            models: [{ id: 'gpt-5.5', name: 'gpt-5.5' }],
+          },
+          'openai-codex': {
+            baseUrl: 'https://api.openai.com/v1',
+            api: 'openai-codex-responses',
+            models: [{ id: 'gpt-5.5', name: 'gpt-5.5' }],
+          },
+          custom: {
+            baseUrl: 'https://api.example.test/v1',
+            api: 'openai-responses',
+            agentRuntime: { id: 'custom-runtime' },
+          },
+        },
+      },
+    });
+
+    await sanitizeMockConfig();
+
+    expect(writeOpenClawJsonMock).toHaveBeenCalledTimes(1);
+    const nextConfig = writeOpenClawJsonMock.mock.calls[0][0] as Record<string, any>;
+    const providers = nextConfig.models.providers;
+    expect(providers.openai.agentRuntime).toEqual({ id: 'pi' });
+    expect(providers['openai-codex'].agentRuntime).toEqual({ id: 'pi' });
+    expect(providers.custom.agentRuntime).toEqual({ id: 'custom-runtime' });
+  });
 });
 
 describe('syncSessionIdleMinutesToOpenClaw', () => {
@@ -751,15 +779,29 @@ describe('syncBrowserConfigToOpenClaw', () => {
         dangerouslyAllowPrivateNetwork: true,
       },
     });
+    expect(nextConfig.tools.web.fetch.ssrfPolicy).toEqual({
+      allowRfc2544BenchmarkRange: true,
+      allowIpv6UniqueLocalRange: true,
+    });
   });
 
-  it('用户已显式配置 dangerouslyAllowPrivateNetwork 时不覆盖原值', async () => {
+  it('用户已显式配置 SSRF policy opt-out 时不覆盖原值', async () => {
     readOpenClawJsonMock.mockResolvedValue({
       browser: {
         enabled: true,
         defaultProfile: 'openclaw',
         ssrfPolicy: {
           dangerouslyAllowPrivateNetwork: false,
+        },
+      },
+      tools: {
+        web: {
+          fetch: {
+            ssrfPolicy: {
+              allowRfc2544BenchmarkRange: false,
+              allowIpv6UniqueLocalRange: false,
+            },
+          },
         },
       },
     });

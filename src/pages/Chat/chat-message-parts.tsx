@@ -182,7 +182,7 @@ export function UserMessageMedia({
               if (file.filePath) {
                 return <FileCard key={`local-${index}`} file={file} />;
               }
-              return <MissingImagePreview key={`local-${index}`} />;
+              return <MissingImagePreview key={`local-${index}`} unavailable={file.previewStatus === 'unavailable'} />;
             }
             return (
               <ImageThumbnail
@@ -245,7 +245,7 @@ export function AssistantMessageMedia({
               if (file.filePath) {
                 return <FileCard key={`local-${index}`} file={file} onOpen={onOpenFile} />;
               }
-              return <MissingImagePreview key={`local-${index}`} />;
+              return <MissingImagePreview key={`local-${index}`} unavailable={file.previewStatus === 'unavailable'} />;
             }
             return (
               <ImagePreviewCard
@@ -707,10 +707,10 @@ function FileCard({
   );
 }
 
-function MissingImagePreview() {
+function MissingImagePreview({ unavailable = false }: { unavailable?: boolean }) {
   return (
     <div
-      data-testid="chat-missing-image-preview"
+      data-testid={unavailable ? 'chat-image-preview-unavailable' : 'chat-missing-image-preview'}
       className="w-36 h-36 rounded-xl border overflow-hidden bg-muted flex items-center justify-center text-muted-foreground"
     >
       <File className="h-8 w-8" />

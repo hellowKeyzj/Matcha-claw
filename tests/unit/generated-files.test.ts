@@ -137,9 +137,11 @@ describe('generated files', () => {
     expect(extnameOf('/workspace/Dockerfile')).toBe('.dockerfile');
     expect(getMimeTypeForPath('/workspace/report.pdf')).toBe('application/pdf');
     expect(classifyFileContentType('.xlsx', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')).toBe('sheet');
+    expect(classifyFileContentType('.html', 'text/html')).toBe('html');
     expect(classifyFileContentType('.pdf', 'application/pdf')).toBe('pdf');
     expect(classifyFileContentType('.png', 'image/png')).toBe('image');
     expect(supportsInlineDocumentPreview('.pdf')).toBe(true);
+    expect(supportsInlineDocumentPreview('.html')).toBe(true);
     expect(supportsInlineDocumentPreview('.xlsx')).toBe(true);
     expect(supportsInlineDiff({ contentType: 'sheet', ext: '.csv', baseline: 'a\n', content: 'b\n' })).toBe(true);
     expect(supportsInlineDiff({ contentType: 'sheet', ext: '.xlsx', baseline: 'a\n', content: 'b\n' })).toBe(false);

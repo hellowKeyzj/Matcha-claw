@@ -883,6 +883,7 @@ function AddProviderDialog({
   const providerDocsUrl = getProviderDocsUrl(typeInfo, i18n.language);
   const isOAuth = typeInfo?.isOAuth ?? false;
   const supportsApiKey = typeInfo?.supportsApiKey ?? false;
+  const oauthUiHidden = typeInfo?.hideOAuthUi ?? false;
   const vendorMap = new Map(vendors.map((vendor) => [vendor.id, vendor]));
   const selectedVendor = selectedType ? vendorMap.get(selectedType) : undefined;
   const selectedMediaContract = getCustomMediaContract(mediaApiProtocol);
@@ -892,7 +893,7 @@ function AddProviderDialog({
     : (selectedVendor?.supportedAuthModes.includes('oauth_device')
       ? 'oauth_device'
       : (selectedType === 'google' ? 'oauth_browser' : null));
-  const useOAuthFlow = isOAuth && (!supportsApiKey || authMode === 'oauth');
+  const useOAuthFlow = isOAuth && !oauthUiHidden && (!supportsApiKey || authMode === 'oauth');
   const normalizedApiKey = normalizeProviderApiKeyInput(apiKey);
 
   useEffect(() => {
@@ -902,8 +903,12 @@ function AddProviderDialog({
 
   useEffect(() => {
     if (!selectedVendor || !isOAuth || !supportsApiKey) return;
+    if (oauthUiHidden) {
+      setAuthMode('apikey');
+      return;
+    }
     setAuthMode(selectedVendor.defaultAuthMode === 'api_key' ? 'apikey' : 'oauth');
-  }, [selectedVendor, isOAuth, supportsApiKey]);
+  }, [selectedVendor, isOAuth, supportsApiKey, oauthUiHidden]);
 
   const latestRef = useRef({ selectedType, typeInfo, onClose, t });
   const [pendingOAuth, setPendingOAuth] = useState<{ accountId: string; label: string } | null>(null);
@@ -1221,7 +1226,7 @@ function AddProviderDialog({
                 </div>
               ) : null}
 
-              {isOAuth && supportsApiKey ? (
+              {isOAuth && supportsApiKey && !oauthUiHidden ? (
                 <div className="flex overflow-hidden rounded-lg border text-sm">
                   <button
                     onClick={() => setAuthMode('oauth')}

@@ -76,7 +76,8 @@ describe('main gateway routes', () => {
     expect(sendJsonMock).not.toHaveBeenCalled();
   });
 
-  it('/api/gateway/control-ui 返回使用 hash token 的 URL', async () => {
+  it('/api/gateway/control-ui 返回使用 hash token 的 URL，并触发 Control UI 配对自动批准', async () => {
+    vi.useFakeTimers();
     const ctx = createContext();
     const { handleGatewayRoutes } = await import('../../electron/api/routes/gateway');
 
@@ -87,7 +88,18 @@ describe('main gateway routes', () => {
       ctx as never,
     );
 
+    await Promise.resolve();
+    await Promise.resolve();
+    vi.clearAllTimers();
+    vi.useRealTimers();
+
     expect(handled).toBe(true);
+    expect(ctx.runtimeHost.request).toHaveBeenCalledWith(
+      'POST',
+      '/api/gateway/control-ui/auto-approve',
+      {},
+      { timeoutMs: 20000 },
+    );
     expect(sendJsonMock).toHaveBeenCalledWith(
       expect.anything(),
       200,

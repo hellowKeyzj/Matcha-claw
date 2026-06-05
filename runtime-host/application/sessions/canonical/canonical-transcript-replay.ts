@@ -5,6 +5,7 @@ import {
 } from '../../../shared/chat-message-normalization';
 import type { SessionRenderAttachedFile } from '../../../shared/session-adapter-types';
 import { extractImagesAsAttachedFiles } from '../assistant-segment-media';
+import { extractToolResultMediaAttachments } from '../tool-result-media';
 import type { CanonicalSessionEvent, RuntimeEndpointId, RuntimeProtocolId } from './canonical-events';
 import type { SessionTranscriptMessage } from '../transcript-types';
 import { extractTaskSnapshotFromTranscriptMessage } from '../transcript-task-snapshot-replay';
@@ -131,10 +132,30 @@ function readTaskCompletionEvents(
   }));
 }
 
+function attachmentKey(file: SessionRenderAttachedFile): string {
+  return [file.filePath ?? '', file.gatewayUrl ?? '', file.fileName, file.mimeType].join('\n');
+}
+
 function cloneAttachedFiles(message: SessionTranscriptMessage): SessionRenderAttachedFile[] {
-  return Array.isArray(message._attachedFiles)
+  const files = Array.isArray(message._attachedFiles)
     ? message._attachedFiles.flatMap((file) => (isRecord(file) ? [structuredClone(file) as SessionRenderAttachedFile] : []))
     : [];
+  const mediaFiles = extractToolResultMediaAttachments({
+    outputText: typeof message.content === 'string' ? message.content : typeof message.text === 'string' ? message.text : undefined,
+  });
+  if (mediaFiles.length === 0) {
+    return files;
+  }
+  const seen = new Set(files.map(attachmentKey));
+  for (const file of mediaFiles) {
+    const key = attachmentKey(file);
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    files.push(file);
+  }
+  return files;
 }
 
 function hasContentMedia(message: SessionTranscriptMessage): boolean {
