@@ -1,7 +1,11 @@
 import { hostApiFetch } from '@/lib/host-api';
 import { throwIfHistoryLoadAborted } from './history-abort';
-import { reconcileSessionItems } from './store-state-helpers';
-import type { AttachedFileMeta, ChatSendAttachment } from './types';
+import {
+  getSessionItems,
+  patchSessionRecord,
+  reconcileSessionItems,
+} from './store-state-helpers';
+import type { AttachedFileMeta, ChatSendAttachment, ChatStoreState } from './types';
 import type {
   SessionAssistantTurnItem,
   SessionRenderAttachedFile,
@@ -95,11 +99,45 @@ function isAttachmentBearingItem(item: SessionRenderItem): item is SessionRender
   return item.kind === 'user-message' || item.kind === 'assistant-turn';
 }
 
-function mergeItemAttachedFiles(item: SessionRenderUserMessageItem | SessionAssistantTurnItem): AttachedFileMeta[] {
-  const merged = normalizeAttachedFiles(item.attachedFiles);
-  if (item.kind !== 'user-message') {
-    return merged;
+function areAttachedFilesEquivalent(
+  left: ReadonlyArray<SessionRenderAttachedFile>,
+  right: ReadonlyArray<SessionRenderAttachedFile>,
+): boolean {
+  if (left === right) {
+    return true;
   }
+  if (left.length !== right.length) {
+    return false;
+  }
+  for (let index = 0; index < left.length; index += 1) {
+    const a = left[index]!;
+    const b = right[index]!;
+    if (
+      a.fileName !== b.fileName
+      || a.mimeType !== b.mimeType
+      || a.fileSize !== b.fileSize
+      || a.preview !== b.preview
+      || a.previewStatus !== b.previewStatus
+      || a.filePath !== b.filePath
+      || a.gatewayUrl !== b.gatewayUrl
+      || a.source !== b.source
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function deriveAssistantAttachedFiles(
+  segments: SessionAssistantTurnItem['segments'],
+): AttachedFileMeta[] {
+  return segments.flatMap((segment) => (
+    segment.kind === 'media' ? normalizeAttachedFiles(segment.attachedFiles) : []
+  ));
+}
+
+function mergeUserAttachedFiles(item: SessionRenderUserMessageItem): AttachedFileMeta[] {
+  const merged = normalizeAttachedFiles(item.attachedFiles);
   const existingPaths = new Set(merged.map((file) => file.filePath).filter(Boolean));
   for (const ref of extractMediaRefs(item.text)) {
     if (existingPaths.has(ref.filePath)) {
@@ -111,45 +149,108 @@ function mergeItemAttachedFiles(item: SessionRenderUserMessageItem | SessionAssi
   return merged;
 }
 
-function hydrateAttachmentItemFromCache(
-  item: SessionRenderUserMessageItem | SessionAssistantTurnItem,
-): SessionRenderUserMessageItem | SessionAssistantTurnItem {
-  const attachedFiles = mergeItemAttachedFiles(item);
-  let changed = attachedFiles.length !== item.attachedFiles.length;
-  const nextFiles = attachedFiles.map((file) => {
-    const refKey = getAttachmentRefKey(file);
-    if (!refKey) {
-      return file;
-    }
-    const cached = imageCache.get(refKey);
-    if (!cached) {
-      return file;
-    }
-    const nextFile = {
-      ...file,
-      preview: file.preview ?? cached.preview ?? null,
-      fileSize: file.fileSize > 0 ? file.fileSize : (cached.fileSize ?? 0),
-      fileName: file.fileName || cached.fileName,
-      mimeType: file.mimeType || cached.mimeType,
-      source: file.source ?? cached.source,
-    } satisfies AttachedFileMeta;
-    if (
-      nextFile.preview !== file.preview
-      || nextFile.fileSize !== file.fileSize
-      || nextFile.fileName !== file.fileName
-      || nextFile.mimeType !== file.mimeType
-    ) {
+function readItemAttachedFiles(item: SessionRenderUserMessageItem | SessionAssistantTurnItem): AttachedFileMeta[] {
+  return item.kind === 'assistant-turn'
+    ? deriveAssistantAttachedFiles(item.segments)
+    : mergeUserAttachedFiles(item);
+}
+
+function hydrateFileFromCache(file: AttachedFileMeta): AttachedFileMeta {
+  const refKey = getAttachmentRefKey(file);
+  if (!refKey) {
+    return file;
+  }
+  const cached = imageCache.get(refKey);
+  if (!cached) {
+    return file;
+  }
+  return {
+    ...file,
+    preview: file.preview ?? cached.preview ?? null,
+    fileSize: file.fileSize > 0 ? file.fileSize : (cached.fileSize ?? 0),
+    fileName: file.fileName || cached.fileName,
+    mimeType: file.mimeType || cached.mimeType,
+    source: file.source ?? cached.source,
+  } satisfies AttachedFileMeta;
+}
+
+function applyFileUpdate(
+  files: ReadonlyArray<SessionRenderAttachedFile>,
+  update: (file: AttachedFileMeta) => AttachedFileMeta,
+): { files: AttachedFileMeta[]; changed: boolean } {
+  const normalized = normalizeAttachedFiles(files);
+  let changed = !areAttachedFilesEquivalent(files, normalized);
+  const nextFiles = normalized.map((file) => {
+    const nextFile = update(file);
+    if (nextFile !== file && !areAttachedFilesEquivalent([file], [nextFile])) {
       changed = true;
     }
     return nextFile;
   });
+  return { files: nextFiles, changed };
+}
+
+function normalizeUserAttachmentItem(
+  item: SessionRenderUserMessageItem,
+  update: (file: AttachedFileMeta) => AttachedFileMeta,
+): SessionRenderUserMessageItem {
+  const attachedFiles = mergeUserAttachedFiles(item);
+  const { files, changed } = applyFileUpdate(attachedFiles, update);
+  if (!changed && areAttachedFilesEquivalent(item.attachedFiles, files)) {
+    return item;
+  }
+  return {
+    ...item,
+    attachedFiles: files,
+  };
+}
+
+function normalizeAssistantAttachmentItem(
+  item: SessionAssistantTurnItem,
+  update: (file: AttachedFileMeta) => AttachedFileMeta,
+): SessionAssistantTurnItem {
+  let changed = false;
+  const nextSegments = item.segments.map((segment) => {
+    if (segment.kind !== 'media') {
+      return segment;
+    }
+    const nextFiles = applyFileUpdate(segment.attachedFiles, update);
+    if (!nextFiles.changed) {
+      return segment;
+    }
+    changed = true;
+    return {
+      ...segment,
+      attachedFiles: nextFiles.files,
+    };
+  });
+  const attachedFiles = deriveAssistantAttachedFiles(nextSegments);
+  if (!areAttachedFilesEquivalent(item.attachedFiles, attachedFiles)) {
+    changed = true;
+  }
   if (!changed) {
     return item;
   }
   return {
     ...item,
-    attachedFiles: nextFiles,
+    segments: nextSegments,
+    attachedFiles,
   };
+}
+
+function normalizeAttachmentItem(
+  item: SessionRenderUserMessageItem | SessionAssistantTurnItem,
+  update: (file: AttachedFileMeta) => AttachedFileMeta,
+): SessionRenderUserMessageItem | SessionAssistantTurnItem {
+  return item.kind === 'assistant-turn'
+    ? normalizeAssistantAttachmentItem(item, update)
+    : normalizeUserAttachmentItem(item, update);
+}
+
+function hydrateAttachmentItemFromCache(
+  item: SessionRenderUserMessageItem | SessionAssistantTurnItem,
+): SessionRenderUserMessageItem | SessionAssistantTurnItem {
+  return normalizeAttachmentItem(item, hydrateFileFromCache);
 }
 
 export function hydrateAttachedFilesFromItems(items: SessionRenderItem[]): SessionRenderItem[] {
@@ -167,20 +268,45 @@ export function hydrateAttachedFilesFromItems(items: SessionRenderItem[]): Sessi
   return changed ? nextItems : items;
 }
 
+function mergeHydratedFileByRef(
+  file: AttachedFileMeta,
+  hydratedByRef: ReadonlyMap<string, AttachedFileMeta>,
+): AttachedFileMeta {
+  const refKey = getAttachmentRefKey(file);
+  if (!refKey) {
+    return file;
+  }
+  const hydrated = hydratedByRef.get(refKey);
+  if (!hydrated) {
+    return file;
+  }
+  const preview = file.preview ?? hydrated.preview ?? null;
+  return {
+    ...file,
+    preview,
+    fileSize: file.fileSize > 0 ? file.fileSize : hydrated.fileSize,
+    fileName: file.fileName || hydrated.fileName,
+    mimeType: file.mimeType || hydrated.mimeType,
+    source: file.source ?? hydrated.source,
+    ...(preview ? {} : hydrated.previewStatus ? { previewStatus: hydrated.previewStatus } : file.previewStatus ? { previewStatus: file.previewStatus } : {}),
+  } satisfies AttachedFileMeta;
+}
+
 function mergeHydratedAttachmentItem(
   currentItem: SessionRenderUserMessageItem | SessionAssistantTurnItem,
   hydratedItem: SessionRenderUserMessageItem | SessionAssistantTurnItem,
 ): SessionRenderUserMessageItem | SessionAssistantTurnItem {
-  if (currentItem.attachedFiles === hydratedItem.attachedFiles) {
+  const hydratedByRef = new Map<string, AttachedFileMeta>();
+  for (const file of readItemAttachedFiles(hydratedItem)) {
+    const refKey = getAttachmentRefKey(file);
+    if (refKey) {
+      hydratedByRef.set(refKey, file);
+    }
+  }
+  if (hydratedByRef.size === 0) {
     return currentItem;
   }
-  if (currentItem.attachedFiles.length === 0 && hydratedItem.attachedFiles.length === 0) {
-    return currentItem;
-  }
-  return {
-    ...currentItem,
-    attachedFiles: hydratedItem.attachedFiles,
-  };
+  return normalizeAttachmentItem(currentItem, (file) => mergeHydratedFileByRef(file, hydratedByRef));
 }
 
 export function reconcileHydratedAttachmentItems(
@@ -214,20 +340,36 @@ export function reconcileHydratedAttachmentItems(
   return changed ? reconcileSessionItems(currentItems, nextItems) : currentItems;
 }
 
+export function buildHydratedAttachmentItemsPatch(
+  state: ChatStoreState,
+  sessionKey: string,
+  hydratedItems: SessionRenderItem[],
+): Partial<ChatStoreState> | ChatStoreState {
+  const currentItems = getSessionItems(state, sessionKey);
+  const nextItems = reconcileHydratedAttachmentItems(currentItems, hydratedItems);
+  if (currentItems === nextItems) {
+    return state;
+  }
+  return {
+    loadedSessions: patchSessionRecord(state, sessionKey, {
+      items: nextItems,
+    }),
+  };
+}
+
+function fileNeedsPreviewLoad(file: AttachedFileMeta): boolean {
+  if (!getAttachmentRefKey(file)) {
+    return false;
+  }
+  return file.mimeType.startsWith('image/')
+    ? !file.preview && file.previewStatus !== 'unavailable'
+    : file.fileSize === 0;
+}
+
 export function hasPendingItemPreviewLoads(items: SessionRenderItem[]): boolean {
-  return items.some((item) => {
-    if (!isAttachmentBearingItem(item)) {
-      return false;
-    }
-    return mergeItemAttachedFiles(item).some((file) => {
-      if (!getAttachmentRefKey(file)) {
-        return false;
-      }
-      return file.mimeType.startsWith('image/')
-        ? !file.preview && file.previewStatus !== 'unavailable'
-        : file.fileSize === 0;
-    });
-  });
+  return items.some((item) => (
+    isAttachmentBearingItem(item) && readItemAttachedFiles(item).some(fileNeedsPreviewLoad)
+  ));
 }
 
 export async function loadMissingItemPreviews(
@@ -245,15 +387,9 @@ export async function loadMissingItemPreviews(
     if (!isAttachmentBearingItem(item)) {
       continue;
     }
-    for (const file of mergeItemAttachedFiles(item)) {
+    for (const file of readItemAttachedFiles(item)) {
       const refKey = getAttachmentRefKey(file);
-      if (!refKey || seenRefs.has(refKey)) {
-        continue;
-      }
-      const needsLoad = file.mimeType.startsWith('image/')
-        ? !file.preview && file.previewStatus !== 'unavailable'
-        : file.fileSize === 0;
-      if (!needsLoad) {
+      if (!refKey || seenRefs.has(refKey) || !fileNeedsPreviewLoad(file)) {
         continue;
       }
       seenRefs.add(refKey);
@@ -281,11 +417,9 @@ export async function loadMissingItemPreviews(
       if (!isAttachmentBearingItem(item)) {
         return item;
       }
-      const attachedFiles = mergeItemAttachedFiles(item);
-      let itemChanged = attachedFiles.length !== item.attachedFiles.length;
-      const nextFiles = attachedFiles.map((file) => {
+      const nextItem = normalizeAttachmentItem(item, (file) => {
         const refKey = getAttachmentRefKey(file);
-        if (!refKey) {
+        if (!refKey || !seenRefs.has(refKey)) {
           return file;
         }
         const thumb = thumbnails[refKey];
@@ -297,7 +431,6 @@ export async function loadMissingItemPreviews(
             ...file,
             previewStatus: 'unavailable' as const,
           } satisfies AttachedFileMeta;
-          itemChanged = true;
           imageCache.set(refKey, { ...nextFile });
           return nextFile;
         }
@@ -307,20 +440,13 @@ export async function loadMissingItemPreviews(
           fileSize: thumb.fileSize || file.fileSize,
           previewStatus: undefined,
         } satisfies AttachedFileMeta;
-        if (nextFile.preview !== file.preview || nextFile.fileSize !== file.fileSize || nextFile.previewStatus !== file.previewStatus) {
-          itemChanged = true;
-          imageCache.set(refKey, { ...nextFile });
-        }
+        imageCache.set(refKey, { ...nextFile });
         return nextFile;
       });
-      if (!itemChanged) {
-        return item;
+      if (nextItem !== item) {
+        changed = true;
       }
-      changed = true;
-      return {
-        ...item,
-        attachedFiles: nextFiles,
-      };
+      return nextItem;
     });
 
     if (changed) {

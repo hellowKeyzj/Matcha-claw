@@ -40,6 +40,15 @@ describe('chat attachment helpers', () => {
 
     expect(updated?.[0]).toMatchObject({
       kind: 'assistant-turn',
+      segments: [{
+        kind: 'message',
+      }, {
+        kind: 'media',
+        attachedFiles: [{
+          preview: null,
+          previewStatus: 'unavailable',
+        }],
+      }],
       attachedFiles: [{
         preview: null,
         previewStatus: 'unavailable',
@@ -240,6 +249,17 @@ describe('chat attachment helpers', () => {
     expect(reconciled[0]).toMatchObject({
       kind: 'assistant-turn',
       text: 'new assistant text',
+      segments: [{
+        kind: 'message',
+        text: 'new assistant text',
+      }, {
+        kind: 'media',
+        attachedFiles: [{
+          fileName: 'artifact.png',
+          fileSize: 123,
+          preview: 'data:image/png;base64,abc',
+        }],
+      }],
       attachedFiles: [{
         fileName: 'artifact.png',
         fileSize: 123,

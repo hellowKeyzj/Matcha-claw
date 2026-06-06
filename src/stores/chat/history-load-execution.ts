@@ -1,10 +1,10 @@
 import { hostSessionWindowFetch, resolveHydratedSessionSnapshot } from '@/lib/host-api';
 import { normalizeAppError } from '@/lib/error-model';
 import {
+  buildHydratedAttachmentItemsPatch,
   hasPendingItemPreviewLoads,
   hydrateAttachedFilesFromItems,
   loadMissingItemPreviews,
-  reconcileHydratedAttachmentItems,
 } from './attachment-helpers';
 import {
   CHAT_HISTORY_FULL_LIMIT,
@@ -21,7 +21,6 @@ import {
   getSessionItems,
   getSessionViewportState,
   patchSessionMeta,
-  patchSessionRecord,
   patchPendingApprovalsFromSnapshot,
   patchSessionSnapshot,
   patchSessionViewportState,
@@ -33,7 +32,6 @@ import { isHistoryLoadAbortError, throwIfHistoryLoadAborted } from './history-ab
 import type { StoreHistoryCache } from './history-cache';
 import type { ChatHistoryLoadRequest, ChatStoreState } from './types';
 import type {
-  SessionRenderItem,
   SessionWindowResult,
 } from '../../../runtime-host/shared/session-adapter-types';
 import type { GatewayStatus } from '@/types/gateway';
@@ -418,22 +416,6 @@ function shouldSuppressStartupForegroundError(input: {
   );
 }
 
-function buildHistoryPreviewHydrationPatch(
-  state: ChatStoreState,
-  requestedSessionKey: string,
-  hydratedItems: SessionRenderItem[],
-): Partial<ChatStoreState> | ChatStoreState {
-  const currentItems = getSessionItems(state, requestedSessionKey);
-  const nextItems = reconcileHydratedAttachmentItems(currentItems, hydratedItems);
-  if (currentItems === nextItems) {
-    return state;
-  }
-  return {
-    loadedSessions: patchSessionRecord(state, requestedSessionKey, {
-      items: nextItems,
-    }),
-  };
-}
 
 export function createApplyLoadedMessagesPipeline(
   input: CreateApplyLoadedMessagesInput,
@@ -509,7 +491,7 @@ export function createApplyLoadedMessagesPipeline(
         if (!updatedItems || abortSignal.aborted || shouldAbortHistoryProcessing()) {
           return;
         }
-        set((state) => buildHistoryPreviewHydrationPatch(
+        set((state) => buildHydratedAttachmentItemsPatch(
           state,
           requestedSessionKey,
           updatedItems,

@@ -12,6 +12,12 @@ import {
   shouldIgnoreRuntimeEvent,
 } from './event-routing';
 import {
+  buildHydratedAttachmentItemsPatch,
+  hasPendingItemPreviewLoads,
+  hydrateAttachedFilesFromItems,
+  loadMissingItemPreviews,
+} from './attachment-helpers';
+import {
   getSessionRuntime,
   patchPendingApprovalsFromSnapshot,
   patchSessionSnapshot,
@@ -98,6 +104,54 @@ function patchSessionSnapshotWithTodoToolDebug(
   return nextLoadedSessions;
 }
 
+function scheduleMissingPreviewLoads(input: CreateStoreRuntimeEventActionsInput & {
+  targetSessionKey: string;
+  items: SessionStateSnapshot['items'];
+}): void {
+  const hydratedItems = hydrateAttachedFilesFromItems(input.items);
+  if (!hasPendingItemPreviewLoads(hydratedItems)) {
+    return;
+  }
+  void loadMissingItemPreviews(hydratedItems).then((updatedItems) => {
+    if (!updatedItems) {
+      return;
+    }
+    input.set((state) => buildHydratedAttachmentItemsPatch(
+      state,
+      input.targetSessionKey,
+      updatedItems,
+    ));
+  });
+}
+
+function applySessionSnapshotPatch(
+  input: CreateStoreRuntimeEventActionsInput & {
+    targetSessionKey: string;
+    snapshot: SessionStateSnapshot;
+    source: string;
+  },
+): void {
+  const hydratedItems = hydrateAttachedFilesFromItems(input.snapshot.items);
+  const snapshot = hydratedItems === input.snapshot.items
+    ? input.snapshot
+    : { ...input.snapshot, items: hydratedItems };
+  input.set((state) => ({
+    loadedSessions: patchSessionSnapshotWithTodoToolDebug(
+      state,
+      input.targetSessionKey,
+      snapshot,
+      input.source,
+    ),
+    pendingApprovalsBySession: patchPendingApprovalsFromSnapshot(state, input.targetSessionKey, snapshot),
+  }));
+  scheduleMissingPreviewLoads({
+    set: input.set,
+    get: input.get,
+    targetSessionKey: input.targetSessionKey,
+    items: hydratedItems,
+  });
+}
+
 function applySessionLifecycleEvent(
   input: CreateStoreRuntimeEventActionsInput & {
     targetSessionKey: string;
@@ -175,32 +229,28 @@ function applySessionLifecycleEvent(
     return;
   }
 
-  set((state) => {
-    const currentRecord = state.loadedSessions[targetSessionKey];
-    const snapshot = shouldPreserveRuntimeOnInfoUpdate({ event, current: currentRecord })
-      ? {
-          ...event.snapshot,
-          runtime: {
-            ...event.snapshot.runtime,
-            activeRunId: currentRecord!.runtime.activeRunId,
-            runPhase: currentRecord!.runtime.runPhase,
-            activeTurnItemKey: currentRecord!.runtime.activeTurnItemKey,
-            pendingTurnKey: currentRecord!.runtime.pendingTurnKey,
-            pendingTurnLaneKey: currentRecord!.runtime.pendingTurnLaneKey,
-            lastUserMessageAt: currentRecord!.runtime.lastUserMessageAt,
-            runtimeActivity: currentRecord!.runtime.runtimeActivity,
-          },
-        }
-      : event.snapshot;
-    return {
-      loadedSessions: patchSessionSnapshotWithTodoToolDebug(
-        state,
-        targetSessionKey,
-        snapshot,
-        'session_info_update',
-      ),
-      pendingApprovalsBySession: patchPendingApprovalsFromSnapshot(state, targetSessionKey, snapshot),
-    };
+  const currentRecord = get().loadedSessions[targetSessionKey];
+  const snapshot = shouldPreserveRuntimeOnInfoUpdate({ event, current: currentRecord })
+    ? {
+        ...event.snapshot,
+        runtime: {
+          ...event.snapshot.runtime,
+          activeRunId: currentRecord!.runtime.activeRunId,
+          runPhase: currentRecord!.runtime.runPhase,
+          activeTurnItemKey: currentRecord!.runtime.activeTurnItemKey,
+          pendingTurnKey: currentRecord!.runtime.pendingTurnKey,
+          pendingTurnLaneKey: currentRecord!.runtime.pendingTurnLaneKey,
+          lastUserMessageAt: currentRecord!.runtime.lastUserMessageAt,
+          runtimeActivity: currentRecord!.runtime.runtimeActivity,
+        },
+      }
+    : event.snapshot;
+  applySessionSnapshotPatch({
+    set,
+    get,
+    targetSessionKey,
+    snapshot,
+    source: 'session_info_update',
   });
 
   if (event.phase === 'final') {
@@ -217,7 +267,6 @@ function applySessionMessageEvent(
   },
 ): void {
   const {
-    set,
     targetSessionKey,
     event,
   } = input;
@@ -242,15 +291,12 @@ function applySessionMessageEvent(
     );
   }
 
-  set((state) => ({
-      loadedSessions: patchSessionSnapshotWithTodoToolDebug(
-        state,
-        targetSessionKey,
-        event.snapshot,
-        event.sessionUpdate,
-      ),
-      pendingApprovalsBySession: patchPendingApprovalsFromSnapshot(state, targetSessionKey, event.snapshot),
-  }));
+  applySessionSnapshotPatch({
+    ...input,
+    targetSessionKey,
+    snapshot: event.snapshot,
+    source: event.sessionUpdate,
+  });
 }
 
 export function handleStoreSessionUpdateEvent(
@@ -312,15 +358,13 @@ export function handleStoreSessionUpdateEvent(
     })) {
       return;
     }
-    set((state) => ({
-      loadedSessions: patchSessionSnapshotWithTodoToolDebug(
-        state,
-        targetSessionKey,
-        sessionUpdate.snapshot,
-        'plan',
-      ),
-      pendingApprovalsBySession: patchPendingApprovalsFromSnapshot(state, targetSessionKey, sessionUpdate.snapshot),
-    }));
+    applySessionSnapshotPatch({
+      set,
+      get,
+      targetSessionKey,
+      snapshot: sessionUpdate.snapshot,
+      source: 'plan',
+    });
     return;
   }
 

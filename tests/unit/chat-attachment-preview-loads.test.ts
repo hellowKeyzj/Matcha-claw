@@ -74,6 +74,15 @@ describe('chat attachment preview loads', () => {
     });
     expect(nextItem).toMatchObject({
       kind: 'assistant-turn',
+      segments: [{
+        kind: 'media',
+        attachedFiles: [{
+          fileName: 'artifact.png',
+          preview: 'data:image/png;base64,abc',
+          fileSize: 123,
+          gatewayUrl: '/api/chat/media/outgoing/agent%3Atest%3Amain/attachment-1/full',
+        }],
+      }],
       attachedFiles: [{
         fileName: 'artifact.png',
         preview: 'data:image/png;base64,abc',

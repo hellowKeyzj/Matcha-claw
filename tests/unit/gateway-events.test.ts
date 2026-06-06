@@ -1519,6 +1519,148 @@ describe('gateway store event wiring', () => {
     }));
   });
 
+  it('structured session:update media attachments reuse missing preview hydration', async () => {
+    hostApiFetchMock
+      .mockResolvedValueOnce(createRunningGatewayStatus())
+      .mockResolvedValueOnce({
+        '/api/chat/media/outgoing/agent%3Amain%3Amain/attachment-1/full': {
+          preview: 'data:image/png;base64,abc',
+          fileSize: 123,
+        },
+      });
+    const handlers = new Map<string, (payload: unknown) => void>();
+    subscribeHostEventMock.mockImplementation((eventName: string, handler: (payload: unknown) => void) => {
+      handlers.set(eventName, handler);
+      return () => {};
+    });
+
+    const { useChatStore } = await import('@/stores/chat');
+    useChatStore.setState({
+      currentSessionKey: 'agent:main:main',
+      sessionCatalogStatus: {
+        status: 'ready',
+        error: null,
+        hasLoadedOnce: true,
+        lastLoadedAt: 1,
+      },
+      loadedSessions: {
+        'agent:main:main': createSessionRecord(),
+      },
+    } as never);
+
+    const { useGatewayStore } = await import('@/stores/gateway');
+    await useGatewayStore.getState().init();
+
+    const item: SessionRenderItem = {
+      key: 'session:agent:main:main|assistant-turn:main:assistant-media-1',
+      kind: 'assistant-turn',
+      sessionKey: 'agent:main:main',
+      role: 'assistant',
+      laneKey: 'main',
+      turnKey: 'assistant-media-1',
+      identitySource: 'message',
+      identityMode: 'message',
+      identityConfidence: 'strong',
+      status: 'final',
+      segments: [{
+        kind: 'media',
+        key: 'media:assistant-media-1',
+        images: [],
+        attachedFiles: [{
+          fileName: 'artifact.png',
+          mimeType: 'image/png',
+          fileSize: 0,
+          preview: null,
+          gatewayUrl: '/api/chat/media/outgoing/agent%3Amain%3Amain/attachment-1/full',
+          source: 'tool-result',
+        }],
+      }],
+      thinking: null,
+      tools: [],
+      embeddedToolResults: [],
+      text: '',
+      images: [],
+      attachedFiles: [{
+        fileName: 'artifact.png',
+        mimeType: 'image/png',
+        fileSize: 0,
+        preview: null,
+        gatewayUrl: '/api/chat/media/outgoing/agent%3Amain%3Amain/attachment-1/full',
+        source: 'tool-result',
+      }],
+      pendingState: null,
+      createdAt: 1,
+      updatedAt: 1,
+    };
+
+    handlers.get('session:update')?.({
+      sessionUpdate: 'session_item',
+      runId: 'run-media-1',
+      sessionKey: 'agent:main:main',
+      item,
+      snapshot: {
+        sessionKey: 'agent:main:main',
+        catalog: {
+          key: 'agent:main:main',
+          agentId: 'main',
+          kind: 'main' as const,
+          preferred: true,
+          displayName: 'agent:main:main',
+          runtimeAddress: createTestRuntimeAddress('agent:main:main'),
+        },
+        items: [item],
+        approvals: [],
+        replayComplete: true,
+        runtime: {
+          activeRunId: null,
+          runPhase: 'done' as const,
+          activeTurnItemKey: null,
+          pendingTurnKey: null,
+          pendingTurnLaneKey: null,
+          lastUserMessageAt: null,
+          lastError: null,
+          lastIssue: null,
+          updatedAt: 1,
+        },
+        window: {
+          totalItemCount: 1,
+          windowStartOffset: 0,
+          windowEndOffset: 1,
+          hasMore: false,
+          hasNewer: false,
+          isAtLatest: true,
+        },
+      },
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(hostApiFetchMock).toHaveBeenCalledWith('/api/files/thumbnails', {
+      method: 'POST',
+      body: JSON.stringify({
+        paths: [{
+          gatewayUrl: '/api/chat/media/outgoing/agent%3Amain%3Amain/attachment-1/full',
+          mimeType: 'image/png',
+        }],
+      }),
+    });
+    expect(getSessionItems(useChatStore.getState(), 'agent:main:main')).toMatchObject([{
+      kind: 'assistant-turn',
+      segments: [{
+        kind: 'media',
+        attachedFiles: [{
+          preview: 'data:image/png;base64,abc',
+          fileSize: 123,
+        }],
+      }],
+      attachedFiles: [{
+        preview: 'data:image/png;base64,abc',
+        fileSize: 123,
+      }],
+    }]);
+  });
+
   it('task:snapshot 事件会实时写入 task snapshot store', async () => {
     hostApiFetchMock.mockResolvedValueOnce(createRunningGatewayStatus());
     const handlers = new Map<string, (payload: unknown) => void>();
