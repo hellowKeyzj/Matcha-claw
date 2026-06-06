@@ -21,11 +21,11 @@ import path from 'node:path';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 
-import { REMOVED_BUNDLED_CHANNEL_PLUGIN_IDS } from './openclaw-bundled-channels.mjs';
 import {
   EXTRA_OPENCLAW_RUNTIME_PACKAGES,
   mergeOpenClawRuntimePackages,
 } from './openclaw-runtime-deps.mjs';
+import { applyOpenClawBundlePatches } from './openclaw-bundle-patches.mjs';
 import { patchExtensionOpenClawSelfImports } from './openclaw-self-import-patch.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -582,14 +582,12 @@ function cleanupBundle(outputDir) {
     if (rmSafe(path.join(outputDir, rel))) removedCount++;
   }
 
-  // --- bundled channel plugins we explicitly drop ---
-  // See scripts/openclaw-bundled-channels.mjs for the rationale per plugin.
-  for (const pluginId of REMOVED_BUNDLED_CHANNEL_PLUGIN_IDS) {
-    if (rmSafe(path.join(outputDir, 'dist', 'extensions', pluginId))) removedCount++;
-  }
-
   return removedCount;
 }
+
+printLine();
+printLine('🧩 Applying OpenClaw bundle patches...');
+applyOpenClawBundlePatches(OUTPUT);
 
 printLine();
 printLine('🧹 Cleaning up bundle (removing dev artifacts, docs, source maps, type defs)...');
