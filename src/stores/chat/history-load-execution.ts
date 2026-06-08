@@ -27,7 +27,7 @@ import {
 } from './store-state-helpers';
 import { readSessionsFromState } from './session-helpers';
 import { useTaskSnapshotStore } from './task-snapshot-store';
-import { resolveSessionOperationTarget } from './session-identity';
+import { buildSessionIdentityRecordIndex, resolveSessionOperationTarget } from './session-identity';
 import { isHistoryLoadAbortError, throwIfHistoryLoadAborted } from './history-abort';
 import type { StoreHistoryCache } from './history-cache';
 import type { ChatHistoryLoadRequest, ChatStoreState } from './types';
@@ -204,7 +204,7 @@ async function fetchHistoryWindowWithStartupRetry(input: {
       return await fetchHistoryWindow({
         recordKey: requestedSessionKey,
         backendSessionKey: target.sessionKey,
-        runtimeAddress: target.runtimeAddress,
+        sessionIdentity: target.sessionIdentity,
         sessions: readSessionsFromState(get()),
         limit: CHAT_HISTORY_FULL_LIMIT,
         ...(startupColdLoad ? { timeoutMs: CHAT_HISTORY_STARTUP_REQUEST_TIMEOUT_MS } : {}),
@@ -325,7 +325,7 @@ export async function executeViewportWindowLoad(
     const currentItems = getSessionItems(currentState, sessionKey);
     const initialPayload = await hostSessionWindowFetch({
       sessionKey: target.sessionKey,
-      runtimeAddress: target.runtimeAddress,
+      sessionIdentity: target.sessionIdentity,
       mode: request.mode,
       limit: resolveViewportFetchLimit(currentItems.length),
       ...(request.mode === 'older' ? { offset: beforeViewport.windowStartOffset } : {}),
@@ -344,7 +344,7 @@ export async function executeViewportWindowLoad(
         }
         return await hostSessionWindowFetch({
           sessionKey: target.sessionKey,
-          runtimeAddress: target.runtimeAddress,
+          sessionIdentity: target.sessionIdentity,
           mode: request.mode,
           limit: resolveViewportFetchLimit(currentItems.length),
           ...(request.mode === 'older' ? { offset: beforeViewport.windowStartOffset } : {}),
@@ -383,8 +383,10 @@ export async function executeViewportWindowLoad(
           ...nextViewportRequestState,
         },
       };
+      const loadedSessions = patchSessionSnapshot(state, sessionKey, nextSnapshot);
       return {
-        loadedSessions: patchSessionSnapshot(state, sessionKey, nextSnapshot),
+        loadedSessions,
+        sessionRecordKeyByIdentityKey: buildSessionIdentityRecordIndex(loadedSessions),
         pendingApprovalsBySession: patchPendingApprovalsFromSnapshot(state, sessionKey, nextSnapshot),
       };
     });
@@ -461,17 +463,19 @@ export function createApplyLoadedMessagesPipeline(
             items: hydratedItems,
           };
 
+      const loadedSessions = patchSessionMeta(
+        {
+          loadedSessions: patchSessionSnapshot(state, requestedSessionKey, nextSnapshot),
+        },
+        requestedSessionKey,
+        {
+          historyStatus: 'ready',
+          thinkingLevel: window.thinkingLevel,
+        },
+      );
       return {
-        loadedSessions: patchSessionMeta(
-          {
-            loadedSessions: patchSessionSnapshot(state, requestedSessionKey, nextSnapshot),
-          },
-          requestedSessionKey,
-          {
-            historyStatus: 'ready',
-            thinkingLevel: window.thinkingLevel,
-          },
-        ),
+        loadedSessions,
+        sessionRecordKeyByIdentityKey: buildSessionIdentityRecordIndex(loadedSessions),
         pendingApprovalsBySession: patchPendingApprovalsFromSnapshot(state, requestedSessionKey, nextSnapshot),
       };
     });
@@ -487,7 +491,9 @@ export function createApplyLoadedMessagesPipeline(
     }
 
     if ((didMessageListChange || scope === 'background') && hasPendingItemPreviewLoads(hydratedItems)) {
-      void loadMissingItemPreviews(hydratedItems, abortSignal).then((updatedItems) => {
+      void loadMissingItemPreviews(hydratedItems, {
+        sessionIdentity: snapshot.catalog.sessionIdentity,
+      }, abortSignal).then((updatedItems) => {
         if (!updatedItems || abortSignal.aborted || shouldAbortHistoryProcessing()) {
           return;
         }
@@ -606,20 +612,28 @@ export async function executeHistoryLoad(
       );
       if (scope === 'foreground') {
         if (shouldSuppressStartupForegroundError({ request, error: err })) {
-          set({
-            loadedSessions: patchSessionMeta(get(), requestedSessionKey, {
+          set((state) => {
+            const loadedSessions = patchSessionMeta(state, requestedSessionKey, {
               historyStatus: 'ready',
-            }),
-            error: null,
+            });
+            return {
+              loadedSessions,
+              sessionRecordKeyByIdentityKey: buildSessionIdentityRecordIndex(loadedSessions),
+              error: null,
+            };
           });
           recovered = true;
           return;
         }
-        set({
-          loadedSessions: patchSessionMeta(get(), requestedSessionKey, {
+        set((state) => {
+          const loadedSessions = patchSessionMeta(state, requestedSessionKey, {
             historyStatus: 'error',
-          }),
-          error: err instanceof Error ? err.message : String(err),
+          });
+          return {
+            loadedSessions,
+            sessionRecordKeyByIdentityKey: buildSessionIdentityRecordIndex(loadedSessions),
+            error: err instanceof Error ? err.message : String(err),
+          };
         });
       }
       recovered = true;

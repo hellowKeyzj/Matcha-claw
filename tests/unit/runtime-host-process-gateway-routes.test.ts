@@ -1,7 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { gatewayRoutes } from '../../runtime-host/api/routes/gateway-routes';
 import { GatewayService } from '../../runtime-host/application/gateway/service';
-import { DEFAULT_GATEWAY_BASE_METHODS } from '../../runtime-host/application/gateway/gateway-runtime-port';
 import { GatewayReadinessWorkflow } from '../../runtime-host/application/workflows/gateway-readiness/gateway-readiness-workflow';
 import { createAgentRunCapabilityOperationRoutes } from '../../runtime-host/application/capabilities/agent/agent-run-capability';
 import { dispatchRuntimeRouteDefinition } from './helpers/runtime-route';
@@ -57,7 +56,7 @@ describe('runtime-host process gateway routes', () => {
     expect(result).toBeNull();
   });
 
-  it('POST /api/gateway/ready 会显式探测控制面 ready', async () => {
+  it('POST /api/gateway/ready 不再作为 direct control route 暴露', async () => {
     const deps = createDeps();
 
     const result = await dispatchRuntimeRouteDefinition(
@@ -68,16 +67,10 @@ describe('runtime-host process gateway routes', () => {
       deps,
     );
 
-    expect(deps.openclawBridge.inspectGatewayControlReadiness).toHaveBeenCalledWith(DEFAULT_GATEWAY_BASE_METHODS, 8000);
-    expect(result).toEqual({
-      status: 200,
-      data: {
-        success: true,
-        phase: 'ready',
-        retryable: false,
-        requiredMethods: DEFAULT_GATEWAY_BASE_METHODS,
-        missingMethods: [],
-      },
+    expect(deps.openclawBridge.inspectGatewayControlReadiness).not.toHaveBeenCalled();
+    expect(result).toMatchObject({
+      status: 400,
+      data: { success: false },
     });
   });
 
@@ -105,9 +98,11 @@ describe('runtime-host process gateway routes', () => {
     const [route] = createAgentRunCapabilityOperationRoutes({ gateway: deps.openclawBridge });
 
     const result = await route!.handle({
-      runId: 'run-1',
-      waitSliceMs: 30000,
-      rpcTimeoutBufferMs: 10000,
+      domainInput: {
+        runId: 'run-1',
+        waitSliceMs: 30000,
+        rpcTimeoutBufferMs: 10000,
+      },
     });
 
     expect(deps.openclawBridge.gatewayRpc).toHaveBeenCalledWith(

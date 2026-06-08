@@ -1,8 +1,10 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { createRuntimeHostApiHarness, type RuntimeHostApiHarness } from './helpers/runtime-host-api-harness';
-import { createOpenClawTestRuntimeAddress } from '../unit/helpers/runtime-address-fixtures';
+import type { CapabilityTarget, RuntimeScope, SessionIdentity } from '../../runtime-host/application/agent-runtime/contracts/runtime-address';
+import type { RuntimeEndpointSummary } from '../../runtime-host/shared/runtime-topology';
+import { openClawTestRuntimeEndpoint } from '../unit/helpers/runtime-address-fixtures';
 
 type SessionWindowContractResult = {
   snapshot: {
@@ -63,22 +65,32 @@ function requireSessionWindowResult(result: SessionWindowContractResult): Sessio
   return { ...result, snapshot };
 }
 
-function createOpenClawCapabilityPayload(capabilityId: string, operationId: string, input: Record<string, unknown>) {
-  const runtimeAddress = {
-    kind: 'native-runtime' as const,
-    capabilityId,
-    runtimeAdapterId: 'openclaw',
-    runtimeInstanceId: 'local',
-    agentId: 'default',
+const openClawRuntimeInstanceScope: RuntimeScope = {
+  kind: 'runtime-instance',
+  endpoint: openClawTestRuntimeEndpoint,
+};
+
+function createOpenClawSessionIdentity(sessionKey: string, agentId = 'main'): SessionIdentity {
+  return {
+    endpoint: openClawTestRuntimeEndpoint,
+    agentId,
+    sessionKey,
   };
+}
+
+function createOpenClawCapabilityPayload(
+  capabilityId: string,
+  operationId: string,
+  target: CapabilityTarget | null,
+  input: Record<string, unknown>,
+  scope: RuntimeScope = openClawRuntimeInstanceScope,
+) {
   return {
     id: capabilityId,
     operationId,
-    runtimeAddress,
-    input: {
-      ...input,
-      runtimeAddress,
-    },
+    scope,
+    target,
+    input,
   };
 }
 
@@ -86,13 +98,55 @@ async function dispatchSessionWindow(
   harness: RuntimeHostApiHarness,
   input: {
     sessionKey: string;
-    runtimeAddress: ReturnType<typeof createOpenClawTestRuntimeAddress>;
+    sessionIdentity: SessionIdentity;
     mode: 'latest' | 'older' | 'newer';
     limit: number;
     offset?: number;
   },
 ): Promise<SessionWindowContractResult> {
-  return await harness.dispatchOk<SessionWindowContractResult>('POST', '/api/sessions/window', input);
+  return await harness.dispatchOk<SessionWindowContractResult>(
+    'POST',
+    '/api/capabilities/execute',
+    createOpenClawCapabilityPayload(
+      'session.management',
+      'sessions.window',
+      { kind: 'session', identity: input.sessionIdentity },
+      input,
+      { kind: 'session', identity: input.sessionIdentity },
+    ),
+  );
+}
+
+async function readOpenClawEndpointSummary(harness: RuntimeHostApiHarness): Promise<RuntimeEndpointSummary> {
+  const topology = await harness.dispatchOk<{ endpoints: RuntimeEndpointSummary[] }>('GET', '/api/runtime-endpoints/list');
+  const endpoint = topology.endpoints.find((item) => item.runtimeAdapterId === 'openclaw' && item.runtimeInstanceId === 'local');
+  if (!endpoint) {
+    throw new Error(`OpenClaw endpoint summary not found: ${JSON.stringify(topology)}`);
+  }
+  return endpoint;
+}
+
+async function readRuntimeCapabilityScope(harness: RuntimeHostApiHarness, capabilityId: string): Promise<RuntimeScope> {
+  const endpoint = await readOpenClawEndpointSummary(harness);
+  const capability = endpoint.capabilitySummaries.find((item) => item.id === capabilityId && item.scope.kind === 'runtime-instance');
+  if (!capability) {
+    throw new Error(`Runtime capability summary not found: ${capabilityId}`);
+  }
+  return capability.scope;
+}
+
+async function readTeamRunCapabilityScope(harness: RuntimeHostApiHarness, runId: string): Promise<RuntimeScope> {
+  const teamScope: RuntimeScope = {
+    kind: 'team-run',
+    endpoint: openClawTestRuntimeEndpoint,
+    runId,
+  };
+  const capability = await harness.dispatchOk<{ capability: { scope: RuntimeScope } }>(
+    'POST',
+    '/api/capabilities/describe',
+    { id: 'team.runtime', scope: teamScope },
+  );
+  return capability.capability.scope;
 }
 
 describe('runtime-host API 真实链路 contract', { timeout: 20000 }, () => {
@@ -100,7 +154,7 @@ describe('runtime-host API 真实链路 contract', { timeout: 20000 }, () => {
 
   beforeAll(async () => {
     harness = await createRuntimeHostApiHarness({
-      enabledPluginIds: ['task-manager'],
+      enabledPluginIds: ['task-manager', 'team-runtime'],
       pluginCatalog: [
         {
           id: 'task-manager',
@@ -109,19 +163,48 @@ describe('runtime-host API 真实链路 contract', { timeout: 20000 }, () => {
           kind: 'third-party',
           category: 'workflow',
         },
+        {
+          id: 'team-runtime',
+          name: 'Team Runtime',
+          version: '1.0.0',
+          kind: 'third-party',
+          category: 'workflow',
+        },
       ],
+      gatewayMethods: [
+        'matchaclaw.team.run.create',
+        'matchaclaw.team.run.start',
+        'matchaclaw.team.run.snapshot',
+      ],
+      gatewayHandler: ({ method, params }) => {
+        const body = isRecord(params) ? params : {};
+        const runId = typeof body.runId === 'string' ? body.runId : 'team-api-chain';
+        if (method === 'matchaclaw.team.run.snapshot') {
+          return {
+            run: { runId, status: 'running' },
+            stages: [{ stageId: 'stage-1' }],
+            events: [{ type: 'run:created' }],
+          };
+        }
+        return { runId, status: method.endsWith('.create') ? 'created' : 'running' };
+      },
     });
-  });
+  }, 20000);
 
   afterAll(async () => {
     await harness?.stop();
   });
 
   it('provider accounts 通过 /dispatch 完成增删查与校验', async () => {
+    const modelProviderScope = await readRuntimeCapabilityScope(harness, 'model.provider');
     const created = await harness.dispatchOk<{ success: boolean; job: { id: string } }>(
       'POST',
       '/api/capabilities/execute',
       createOpenClawCapabilityPayload('model.provider', 'providers.createAccount', {
+        kind: 'provider-account',
+        accountId: 'openai-main',
+        vendorId: 'openai',
+      }, {
         account: {
           id: 'openai-main',
           vendorId: 'openai',
@@ -129,7 +212,7 @@ describe('runtime-host API 真实链路 contract', { timeout: 20000 }, () => {
           authMode: 'api_key',
         },
         apiKey: 'sk-test-001',
-      }),
+      }, modelProviderScope),
     );
     expect(created.success).toBe(true);
     const createResult = await harness.waitForJob<{ account?: { id: string }; credential?: { id: string } }>(created.job.id);
@@ -144,17 +227,29 @@ describe('runtime-host API 真实链路 contract', { timeout: 20000 }, () => {
 
     const validated = await harness.dispatchOk<{ valid: boolean }>(
       'POST',
-      '/api/provider-accounts/validate',
-      { vendorId: 'ollama', apiKey: '' },
+      '/api/capabilities/execute',
+      createOpenClawCapabilityPayload('model.provider', 'providers.validate', {
+        kind: 'provider-credential',
+        accountId: 'ollama',
+        vendorId: 'ollama',
+      }, {
+        vendorId: 'ollama',
+        apiKey: '',
+      }, modelProviderScope),
     );
     expect(validated.valid).toBe(true);
   });
 
   it('channels 配置链路通过 /dispatch 生效并可读回', async () => {
+    const channelScope = await readRuntimeCapabilityScope(harness, 'integration.channel');
     const saved = await harness.dispatchOk<{ success: boolean; job: { id: string } }>(
       'POST',
       '/api/capabilities/execute',
       createOpenClawCapabilityPayload('integration.channel', 'channels.activate', {
+        kind: 'channel',
+        channelType: 'wecom',
+        accountId: 'default',
+      }, {
         channelType: 'wecom',
         accountId: 'default',
         enabled: true,
@@ -162,7 +257,7 @@ describe('runtime-host API 真实链路 contract', { timeout: 20000 }, () => {
           botId: 'wecom-bot-1',
           secret: 'wecom-secret-1',
         },
-      }),
+      }, channelScope),
     );
     expect(saved.success).toBe(true);
     await harness.waitForJob(saved.job.id);
@@ -177,12 +272,10 @@ describe('runtime-host API 真实链路 contract', { timeout: 20000 }, () => {
     expect(snapshot.success).toBe(true);
     expect(snapshot.snapshot.channelOrder).toContain('wecom');
 
-    const values = await harness.dispatchOk<{ success: boolean; values: Record<string, string> }>(
-      'GET',
-      '/api/channels/config/wecom?accountId=default',
-    );
-    expect(values.success).toBe(true);
-    expect(values.values.botId).toBe('wecom-bot-1');
+    const openclawConfig = JSON.parse(readFileSync(join(harness.paths.openclawConfigDir, 'openclaw.json'), 'utf8')) as {
+      channels?: { wecom?: { accounts?: { default?: { botId?: string } } } };
+    };
+    expect(openclawConfig.channels?.wecom?.accounts?.default?.botId).toBe('wecom-bot-1');
   });
 
   it('plugins 运行态和目录均由 API 暴露，不依赖内部 import', async () => {
@@ -212,17 +305,21 @@ describe('runtime-host API 真实链路 contract', { timeout: 20000 }, () => {
     expect(typeof beforePolicy.preset).toBe('string');
     expect(typeof beforePolicy.securityPolicyVersion).toBe('number');
 
+    const securityScope = await readRuntimeCapabilityScope(harness, 'security.runtime');
     const updated = await harness.dispatchOk<{
       success: boolean;
       policy?: { preset: string; securityPolicyVersion: number };
       error?: string;
     }>('POST', '/api/capabilities/execute', createOpenClawCapabilityPayload('security.runtime', 'security.writePolicy', {
+      kind: 'security-policy',
+      policyId: 'runtime',
+    }, {
       preset: 'strict',
       securityPolicyVersion: 7,
       runtime: {
         auditDailyCostLimitUsd: 12,
       },
-    }));
+    }, securityScope));
     if (!updated.success) {
       expect(typeof updated.error).toBe('string');
     }
@@ -243,97 +340,59 @@ describe('runtime-host API 真实链路 contract', { timeout: 20000 }, () => {
     expect(catalog.items.length).toBeGreaterThan(0);
   });
 
-  it('team coordination capability 生命周期通过 API 串联（init/plan/claim/update/mailbox）', async () => {
-    const teamId = 'team-api-chain';
-    const teamCapabilityPayload = (operationId: string, input: Record<string, unknown>) => {
-      const runtimeAddress = {
-        kind: 'native-runtime' as const,
-        capabilityId: 'team.coordination',
-        runtimeAdapterId: 'openclaw',
-        runtimeInstanceId: 'local',
-        agentId: 'default',
-      };
-      return {
-        id: 'team.coordination',
-        operationId,
-        runtimeAddress,
-        input: {
-          ...input,
-          runtimeAddress,
-        },
-      };
-    };
-    const init = await harness.dispatchOk<{ run: { teamId: string; status: string } }>(
-      'POST',
-      '/api/capabilities/execute',
-      teamCapabilityPayload('team.init', { teamId, leadAgentId: 'lead-1' }),
-    );
-    expect(init.run.teamId).toBe(teamId);
-    expect(init.run.status).toBe('active');
+  it('team runtime capability 通过 API 创建并读取 TeamRun snapshot', async () => {
+    const runId = 'team-api-chain';
+    const teamScope = await readRuntimeCapabilityScope(harness, 'team.runtime');
+    const teamCapabilityPayload = (
+      operationId: string,
+      target: CapabilityTarget,
+      input: Record<string, unknown>,
+      scope: RuntimeScope = teamScope,
+    ) => createOpenClawCapabilityPayload('team.runtime', operationId, target, input, scope);
 
-    const planned = await harness.dispatchOk<{ tasks: Array<{ taskId: string; status: string }> }>(
+    const created = await harness.dispatchOk<{ runId: string; status: string }>(
       'POST',
       '/api/capabilities/execute',
-      teamCapabilityPayload('team.planUpsert', {
-        teamId,
-        tasks: [
-          { taskId: 'task-1', instruction: 'first task' },
-          { taskId: 'task-2', instruction: 'second task', dependsOn: ['task-1'] },
-        ],
+      teamCapabilityPayload('team.runCreate', {
+        kind: 'team',
+        packagePath: resolve('.tmp/ascendc-operator-dev-optimize-team_1.0.0'),
+      }, {
+        runId,
+        packagePath: resolve('.tmp/ascendc-operator-dev-optimize-team_1.0.0'),
+        idempotencyKey: `${runId}:create`,
       }),
     );
-    expect(planned.tasks).toHaveLength(2);
+    expect(created, JSON.stringify(created)).toMatchObject({ runId, status: 'created' });
 
-    const firstClaim = await harness.dispatchOk<{ task: { taskId: string; status: string } }>(
+    const teamRunScope = await readTeamRunCapabilityScope(harness, runId);
+    const started = await harness.dispatchOk<{ runId: string; status: string }>(
       'POST',
       '/api/capabilities/execute',
-      teamCapabilityPayload('team.claimNext', { teamId, agentId: 'agent-A', sessionKey: 'session-A' }),
+      teamCapabilityPayload('team.runStart', {
+        kind: 'team-run',
+        runId,
+      }, {
+        runId,
+        idempotencyKey: `${runId}:start`,
+      }, teamRunScope),
     );
-    expect(firstClaim.task.taskId).toBe('task-1');
-    expect(firstClaim.task.status).toBe('claimed');
+    expect(started.runId).toBe(runId);
 
-    const running = await harness.dispatchOk<{ task: { taskId: string; status: string } }>(
+    const snapshot = await harness.dispatchOk<{
+      run: { runId: string; status: string } | null;
+      stages: Array<{ stageId: string }>;
+      events: Array<{ type: string }>;
+    }>(
       'POST',
       '/api/capabilities/execute',
-      teamCapabilityPayload('team.taskUpdate', { teamId, taskId: 'task-1', status: 'running' }),
+      teamCapabilityPayload('team.runSnapshot', {
+        kind: 'team-run',
+        runId,
+      }, { runId, eventLimit: 20 }, teamRunScope),
     );
-    expect(running.task.status).toBe('running');
-
-    const done = await harness.dispatchOk<{ task: { taskId: string; status: string } }>(
-      'POST',
-      '/api/capabilities/execute',
-      teamCapabilityPayload('team.taskUpdate', { teamId, taskId: 'task-1', status: 'done', resultSummary: 'ok' }),
-    );
-    expect(done.task.status).toBe('done');
-
-    const secondClaim = await harness.dispatchOk<{ task: { taskId: string } }>(
-      'POST',
-      '/api/capabilities/execute',
-      teamCapabilityPayload('team.claimNext', { teamId, agentId: 'agent-A', sessionKey: 'session-A' }),
-    );
-    expect(secondClaim.task.taskId).toBe('task-2');
-
-    const posted = await harness.dispatchOk<{ created: boolean; message: { msgId: string } }>(
-      'POST',
-      '/api/capabilities/execute',
-      teamCapabilityPayload('team.mailboxPost', {
-        teamId,
-        message: {
-          msgId: 'msg-1',
-          fromAgentId: 'agent-A',
-          content: 'hello runtime mailbox',
-        },
-      }),
-    );
-    expect(posted.created).toBe(true);
-    expect(posted.message.msgId).toBe('msg-1');
-
-    const pulled = await harness.dispatchOk<{ messages: Array<{ msgId: string }> }>(
-      'POST',
-      '/api/capabilities/execute',
-      teamCapabilityPayload('team.mailboxPull', { teamId, limit: 10 }),
-    );
-    expect(pulled.messages.some((item) => item.msgId === 'msg-1')).toBe(true);
+    expect(snapshot.run?.runId).toBe(runId);
+    expect(snapshot.stages.length).toBeGreaterThan(0);
+    expect(snapshot.events.some((event) => event.type === 'run:created')).toBe(true);
   });
 
   it('openclaw workspace 与 usage 历史通过 API 返回', async () => {
@@ -448,17 +507,17 @@ describe('runtime-host API 真实链路 contract', { timeout: 20000 }, () => {
       'utf8',
     );
 
-    const runtimeAddress = createOpenClawTestRuntimeAddress('agent:main:session-window');
+    const sessionIdentity = createOpenClawSessionIdentity('agent:main:session-window');
     const initialLatest = await dispatchSessionWindow(harness, {
       sessionKey: 'agent:main:session-window',
-      runtimeAddress,
+      sessionIdentity,
       mode: 'latest',
       limit: 2,
     });
     const latest = requireSessionWindowResult(initialLatest.hydrationJob
       ? await harness.waitForJob(initialLatest.hydrationJob.id).then(async (result) => readSessionWindowResult(result) ?? await dispatchSessionWindow(harness, {
           sessionKey: 'agent:main:session-window',
-          runtimeAddress,
+          sessionIdentity,
           mode: 'latest',
           limit: 2,
         }))
@@ -476,7 +535,7 @@ describe('runtime-host API 真实链路 contract', { timeout: 20000 }, () => {
 
     const initialOlder = await dispatchSessionWindow(harness, {
       sessionKey: 'agent:main:session-window',
-      runtimeAddress,
+      sessionIdentity,
       mode: 'older',
       limit: 2,
       offset: latest.snapshot.window.windowStartOffset,
@@ -484,7 +543,7 @@ describe('runtime-host API 真实链路 contract', { timeout: 20000 }, () => {
     const older = requireSessionWindowResult(initialOlder.hydrationJob
       ? await harness.waitForJob(initialOlder.hydrationJob.id).then(async (result) => readSessionWindowResult(result) ?? await dispatchSessionWindow(harness, {
           sessionKey: 'agent:main:session-window',
-          runtimeAddress,
+          sessionIdentity,
           mode: 'older',
           limit: 2,
           offset: latest.snapshot.window.windowStartOffset,

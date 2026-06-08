@@ -1,5 +1,5 @@
 import type { GatewayCapabilitiesSnapshot, GatewayConnectionStatePayload, GatewayControlReadiness } from '../application/gateway/gateway-runtime-port';
-import type { RuntimeAddress } from './runtime-address';
+import type { CapabilityTargetKind, RuntimeScope, RuntimeScopeKind } from './runtime-address';
 
 export interface RuntimeProtocolSummary {
   protocolId: string;
@@ -31,6 +31,21 @@ export interface RuntimeEndpointControlStateSummary {
   updatedAt: number | null;
 }
 
+export interface RuntimeEndpointCapabilityOperationSummary {
+  id: string;
+  targetKind: CapabilityTargetKind;
+  targetRequired?: boolean;
+}
+
+export interface RuntimeEndpointCapabilitySummary {
+  id: string;
+  scopeKind: RuntimeScopeKind;
+  scope: RuntimeScope;
+  targetKinds: CapabilityTargetKind[];
+  operations: RuntimeEndpointCapabilityOperationSummary[];
+  availability: 'available' | 'unavailable';
+}
+
 export interface RuntimeEndpointSummary {
   id: string;
   protocolId: string;
@@ -48,7 +63,7 @@ export interface RuntimeEndpointSummary {
     replay: boolean;
     modelSelection: boolean;
   };
-  capabilityAddresses: RuntimeAddress[];
+  capabilitySummaries: RuntimeEndpointCapabilitySummary[];
   controlState: RuntimeEndpointControlStateSummary;
 }
 

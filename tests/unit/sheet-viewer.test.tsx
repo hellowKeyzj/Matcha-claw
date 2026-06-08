@@ -3,6 +3,15 @@ import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { SheetViewer } from '@/components/file-preview/SheetViewer';
 
 const hostFileReadBinaryMock = vi.fn();
+const sessionIdentity = {
+  endpoint: {
+    kind: 'native-runtime' as const,
+    runtimeAdapterId: 'openclaw',
+    runtimeInstanceId: 'openclaw:default',
+  },
+  agentId: 'files',
+  sessionKey: 'files:test',
+};
 const xlsxReadMock = vi.fn();
 const xlsxSheetToJsonMock = vi.fn();
 
@@ -58,12 +67,13 @@ describe('sheet viewer', () => {
         ['A'],
       ]);
 
-    render(<SheetViewer filePath="/workspace/demo.xlsx" />);
+    render(<SheetViewer filePath="/workspace/demo.xlsx" sessionIdentity={sessionIdentity} />);
 
     await waitFor(() => {
       expect(hostFileReadBinaryMock).toHaveBeenCalledWith({
         path: '/workspace/demo.xlsx',
         maxBytes: 50 * 1024 * 1024,
+        sessionIdentity,
       });
     });
 
@@ -85,7 +95,7 @@ describe('sheet viewer', () => {
       error: 'tooLarge',
     });
 
-    render(<SheetViewer filePath="/workspace/demo.xlsx" />);
+    render(<SheetViewer filePath="/workspace/demo.xlsx" sessionIdentity={sessionIdentity} />);
 
     expect(await screen.findByText('artifacts.previewTooLarge')).toBeInTheDocument();
   });

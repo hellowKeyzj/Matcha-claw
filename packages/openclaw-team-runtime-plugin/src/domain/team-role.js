@@ -1,0 +1,14 @@
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.TEAM_MANAGED_AGENT_KIND = exports.TEAM_MANAGED_AGENT_SANDBOX = exports.TEAM_MANAGED_AGENT_TOOLS_PROFILE = exports.TEAM_LEADER_SUBAGENT_TOOLS = exports.TEAM_ROLE_RUNTIME_TOOLS = exports.TEAM_ROLE_MANAGED_DENIED_TOOLS = exports.TEAM_MANAGED_AGENT_CONFIG_SOURCE = exports.TEAM_MANAGED_AGENT_CONFIG_VERSION = exports.TEAM_MANAGED_AGENT_CONFIG_KIND = exports.TEAM_LEADER_ROLE_ID = exports.TEAM_AGENT_ID_PREFIX = void 0;
+exports.TEAM_AGENT_ID_PREFIX = 'matchaclaw-team:';
+exports.TEAM_LEADER_ROLE_ID = 'leader';
+exports.TEAM_MANAGED_AGENT_CONFIG_KIND = 'matchaclaw-team-managed-openclaw-agents';
+exports.TEAM_MANAGED_AGENT_CONFIG_VERSION = 1;
+exports.TEAM_MANAGED_AGENT_CONFIG_SOURCE = 'matchaclaw.team-runtime';
+exports.TEAM_ROLE_MANAGED_DENIED_TOOLS = ['sessions_spawn', 'sessions_yield', 'subagents'];
+exports.TEAM_ROLE_RUNTIME_TOOLS = ['team_submit_artifact', 'team_send_message', 'team_request_approval', 'team_update_task'];
+exports.TEAM_LEADER_SUBAGENT_TOOLS = ['sessions_spawn', 'sessions_yield', 'subagents'];
+exports.TEAM_MANAGED_AGENT_TOOLS_PROFILE = 'coding';
+exports.TEAM_MANAGED_AGENT_SANDBOX = { mode: 'all', scope: 'agent', workspaceAccess: 'rw' };
+exports.TEAM_MANAGED_AGENT_KIND = 'team-role-agent';

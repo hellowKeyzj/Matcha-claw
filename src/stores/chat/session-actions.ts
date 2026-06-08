@@ -32,6 +32,7 @@ import {
   getSessionMeta,
   getSessionViewportState,
   patchSessionMeta,
+  patchSessionRecord,
   patchSessionSnapshot,
   patchSessionViewportState,
   removeSessionRecord,
@@ -40,13 +41,15 @@ import {
 import { useTaskSnapshotStore } from './task-snapshot-store';
 import {
   buildRuntimeScopeKey,
+  buildSessionIdentityRecordIndex,
   buildSessionRecordKey,
+  findAgentScope,
   resolveSessionOperationTarget,
   sameRuntimeEndpointScope,
 } from './session-identity';
 import { pickStartupSessionFallback } from './session-selection';
 import type { StoreHistoryCache } from './history-cache';
-import type { RuntimeAddress } from '../../../runtime-host/shared/runtime-address';
+import type { AgentScope, SessionIdentity } from '../../../runtime-host/shared/runtime-address';
 import type {
   ChatSession,
   ChatSessionRuntimeEndpointTarget,
@@ -95,7 +98,7 @@ interface CreateStoreSessionActionsInput {
 }
 
 interface RenameStoreSessionInput extends CreateStoreSessionActionsInput {
-  renameSession: (payload: { sessionKey: string; runtimeAddress: RuntimeAddress; label: string }) => Promise<{ success: boolean; error?: string }>;
+  renameSession: (payload: { sessionKey: string; sessionIdentity: SessionIdentity; label: string }) => Promise<{ success: boolean; error?: string }>;
 }
 
 function clearSessionHistoryFingerprints(
@@ -165,12 +168,14 @@ async function mapWithConcurrency<T, R>(
 }
 
 function normalizeCatalogSession(session: ChatSession): ChatSession | null {
-  if (!session.key || !session.agentId || !session.runtimeAddress) {
+  if (!session.key || !session.agentId || !session.sessionIdentity) {
     return null;
   }
-  const recordKey = buildSessionRecordKey(session.runtimeAddress, session.key);
+  const identity = { ...session.sessionIdentity, sessionKey: session.key };
+  const recordKey = buildSessionRecordKey(identity);
   return {
     ...session,
+    sessionIdentity: identity,
     key: recordKey,
     backendSessionKey: session.key,
   };
@@ -178,7 +183,7 @@ function normalizeCatalogSession(session: ChatSession): ChatSession | null {
 
 async function loadEndpointSessionCatalog(target: ChatSessionRuntimeEndpointTarget): Promise<SessionCatalogLoadResult> {
   try {
-    const data = await hostSessionList({ runtimeAddress: target.defaultSessionPromptAddress });
+    const data = await hostSessionList({ endpoint: target.defaultSessionPromptScope.endpoint });
     const rawSessions = Array.isArray(data.sessions) ? data.sessions : [];
     return {
       target,
@@ -188,7 +193,7 @@ async function loadEndpointSessionCatalog(target: ChatSessionRuntimeEndpointTarg
         agentId: typeof session.agentId === 'string' ? session.agentId : '',
         protocolId: typeof session.protocolId === 'string' ? session.protocolId : undefined,
         runtimeEndpointId: typeof session.runtimeEndpointId === 'string' ? session.runtimeEndpointId : undefined,
-        runtimeAddress: session.runtimeAddress,
+        sessionIdentity: session.sessionIdentity,
         kind: session.kind === 'main' || session.kind === 'subsession' || session.kind === 'session' || session.kind === 'named'
           ? session.kind
           : undefined,
@@ -199,6 +204,7 @@ async function loadEndpointSessionCatalog(target: ChatSessionRuntimeEndpointTarg
           : undefined,
         displayName: typeof session.displayName === 'string' ? session.displayName : undefined,
         model: normalizeCatalogString(session.model) ?? undefined,
+        contextTokens: session.contextTokens,
         updatedAt: parseSessionUpdatedAtMs(session.updatedAt),
       })).filter((session): session is ChatSession => session != null),
       ready: data.ready !== false,
@@ -214,15 +220,15 @@ async function loadEndpointSessionCatalog(target: ChatSessionRuntimeEndpointTarg
   }
 }
 
-function findRuntimeTargetForAddress(
+function findRuntimeTargetForEndpoint(
   targets: readonly ChatSessionRuntimeEndpointTarget[],
-  runtimeAddress: RuntimeAddress,
+  identity: SessionIdentity,
 ): ChatSessionRuntimeEndpointTarget | null {
-  return targets.find((target) => sameRuntimeEndpointScope(target.defaultSessionPromptAddress, runtimeAddress)) ?? null;
+  return targets.find((target) => sameRuntimeEndpointScope(target.endpoint, identity.endpoint)) ?? null;
 }
 
-function resolveAddressForAgent(target: ChatSessionRuntimeEndpointTarget, agentId: string): RuntimeAddress {
-  const matched = target.sessionPromptAddresses.find((address) => address.agentId === agentId);
+function resolveScopeForAgent(target: ChatSessionRuntimeEndpointTarget, agentId: string): AgentScope {
+  const matched = findAgentScope(target.sessionPromptScopes, agentId);
   if (matched) {
     return matched;
   }
@@ -230,45 +236,44 @@ function resolveAddressForAgent(target: ChatSessionRuntimeEndpointTarget, agentI
     throw new Error(`Runtime endpoint does not support agent: ${agentId}`);
   }
   return {
-    ...target.defaultSessionPromptAddress,
+    ...target.defaultSessionPromptScope,
     agentId,
   };
 }
 
-function resolveNewSessionRuntimeAddress(state: ChatStoreState, agentId?: string): RuntimeAddress {
+function resolveNewSessionAgentScope(state: ChatStoreState, agentId?: string): AgentScope {
   const targets = readSessionRuntimeTargets(state);
   if (targets.length === 0) {
     throw new Error('Session runtime is not ready');
   }
   const currentMeta = getSessionMeta(state, state.currentSessionKey);
-  const currentRuntimeAddress = currentMeta.runtimeAddress;
-  const targetEndpoint = currentRuntimeAddress
-    ? findRuntimeTargetForAddress(targets, currentRuntimeAddress)
+  const targetEndpoint = currentMeta.sessionIdentity
+    ? findRuntimeTargetForEndpoint(targets, currentMeta.sessionIdentity)
     : null;
-  const defaultRuntimeAddress = state.sessionRuntimeCatalog.defaultRuntimeAddress;
-  const defaultEndpoint = defaultRuntimeAddress
-    ? findRuntimeTargetForAddress(targets, defaultRuntimeAddress)
+  const defaultScope = state.sessionRuntimeCatalog.defaultSessionPromptScope;
+  const defaultEndpoint = defaultScope
+    ? targets.find((target) => target.sessionPromptScopes.some((scope) => scope === defaultScope || (scope.agentId === defaultScope.agentId && sameRuntimeEndpointScope(scope.endpoint, defaultScope.endpoint)))) ?? null
     : null;
   const target = targetEndpoint ?? defaultEndpoint ?? targets[0]!;
   const targetAgentId = agentId?.trim()
     || currentMeta.agentId
-    || currentRuntimeAddress?.agentId
-    || target.defaultSessionPromptAddress.agentId;
-  return resolveAddressForAgent(target, targetAgentId);
+    || currentMeta.sessionIdentity?.agentId
+    || target.defaultSessionPromptScope.agentId;
+  return resolveScopeForAgent(target, targetAgentId);
 }
 
 async function requestSessionLifecycleSnapshot(
   action: 'switch' | 'resume',
-  target: { sessionKey: string; runtimeAddress: RuntimeAddress },
+  target: { sessionKey: string; sessionIdentity: SessionIdentity },
 ): Promise<SessionLoadResult> {
   const result = action === 'switch'
-    ? await hostSessionSwitch({ sessionKey: target.sessionKey, runtimeAddress: target.runtimeAddress, limit: 200 })
-    : await hostSessionResume({ sessionKey: target.sessionKey, runtimeAddress: target.runtimeAddress });
+    ? await hostSessionSwitch({ sessionKey: target.sessionKey, sessionIdentity: target.sessionIdentity, limit: 200 })
+    : await hostSessionResume({ sessionKey: target.sessionKey, sessionIdentity: target.sessionIdentity });
   const snapshot = await resolveHydratedSessionSnapshot({
     initial: result,
     refetch: async () => await hostSessionWindowFetch({
       sessionKey: target.sessionKey,
-      runtimeAddress: target.runtimeAddress,
+      sessionIdentity: target.sessionIdentity,
       mode: 'latest',
       limit: 200,
     }),
@@ -299,6 +304,7 @@ function applyBackendSessionSnapshot(
     );
     return {
       loadedSessions,
+      sessionRecordKeyByIdentityKey: buildSessionIdentityRecordIndex(loadedSessions),
     };
   });
 }
@@ -406,7 +412,7 @@ async function executeLoadSessionsNow(input: CreateStoreSessionActionsInput): Pr
   );
   const loadedAt = Date.now();
   const successfulRuntimeScopes = new Set(
-    readyResults.map((result) => buildRuntimeScopeKey(result.target.defaultSessionPromptAddress)),
+    readyResults.map((result) => buildRuntimeScopeKey(result.target.defaultSessionPromptScope.endpoint)),
   );
   set((state) => {
     const backendSessionKeys = new Set(sessions.map((session) => session.key));
@@ -433,11 +439,11 @@ async function executeLoadSessionsNow(input: CreateStoreSessionActionsInput): Pr
       const explicitLabel = normalizeCatalogString(session.label);
       loadedSessions = patchSessionMeta({ loadedSessions }, session.key, {
         backendSessionKey: session.backendSessionKey,
-        runtimeScopeKey: buildRuntimeScopeKey(session.runtimeAddress),
+        runtimeScopeKey: buildRuntimeScopeKey(session.sessionIdentity.endpoint),
         agentId: normalizeCatalogString(session.agentId) ?? currentMeta.agentId,
         protocolId: normalizeCatalogString(session.protocolId) ?? currentMeta.protocolId,
         runtimeEndpointId: normalizeCatalogString(session.runtimeEndpointId) ?? currentMeta.runtimeEndpointId,
-        runtimeAddress: session.runtimeAddress,
+        sessionIdentity: session.sessionIdentity,
         kind: session.kind ?? currentMeta.kind,
         preferred: session.preferred ?? currentMeta.preferred,
         label: explicitLabel && explicitLabel !== session.backendSessionKey ? explicitLabel : currentMeta.label,
@@ -448,6 +454,9 @@ async function executeLoadSessionsNow(input: CreateStoreSessionActionsInput): Pr
         lastActivityAt: typeof session.updatedAt === 'number' && Number.isFinite(session.updatedAt)
           ? session.updatedAt
           : currentMeta.lastActivityAt,
+      });
+      loadedSessions = patchSessionRecord({ loadedSessions }, session.key, {
+        contextTokens: session.contextTokens,
       });
     }
 
@@ -461,6 +470,7 @@ async function executeLoadSessionsNow(input: CreateStoreSessionActionsInput): Pr
       sessionCatalogStatus: createReadyResourceStatusState(loadedAt),
       currentSessionKey: nextSessionKey,
       loadedSessions,
+      sessionRecordKeyByIdentityKey: buildSessionIdentityRecordIndex(loadedSessions),
       pendingApprovalsBySession: Object.fromEntries(
         Object.entries(state.pendingApprovalsBySession).filter(([sessionKey]) => retainedSessionKeys.has(sessionKey)),
       ),
@@ -539,6 +549,7 @@ export function executeSwitchSession(input: CreateStoreSessionActionsInput, key:
     currentSessionKey: key,
     error: null,
     loadedSessions: nextloadedSessions,
+    sessionRecordKeyByIdentityKey: buildSessionIdentityRecordIndex(nextloadedSessions),
     ...(leavingEmpty ? {
       pendingApprovalsBySession: Object.fromEntries(
         Object.entries(stateValue.pendingApprovalsBySession).filter(([sessionKey]) => sessionKey !== currentSessionKey),
@@ -632,15 +643,19 @@ export async function executeDeleteSession(input: CreateStoreSessionActionsInput
       clearHistoryPoll();
       clearErrorRecoveryTimer();
       const next = remainingSessions[0];
-      set((state) => ({
-        loadedSessions: removeSessionRecord(state, key),
-        sessionCatalogStatus: state.sessionCatalogStatus,
-        pendingApprovalsBySession: Object.fromEntries(
-          Object.entries(state.pendingApprovalsBySession).filter(([sessionKey]) => sessionKey !== key),
-        ),
-        error: null,
-        currentSessionKey: next?.key ?? defaultSessionKey,
-      }));
+      set((state) => {
+        const loadedSessions = removeSessionRecord(state, key);
+        return {
+          loadedSessions,
+          sessionRecordKeyByIdentityKey: buildSessionIdentityRecordIndex(loadedSessions),
+          sessionCatalogStatus: state.sessionCatalogStatus,
+          pendingApprovalsBySession: Object.fromEntries(
+            Object.entries(state.pendingApprovalsBySession).filter(([sessionKey]) => sessionKey !== key),
+          ),
+          error: null,
+          currentSessionKey: next?.key ?? defaultSessionKey,
+        };
+      });
       if (next) {
         void get().loadHistory({
           sessionKey: next.key,
@@ -652,13 +667,17 @@ export async function executeDeleteSession(input: CreateStoreSessionActionsInput
       return;
     }
 
-    set((state) => ({
-      loadedSessions: removeSessionRecord(state, key),
-      sessionCatalogStatus: state.sessionCatalogStatus,
-      pendingApprovalsBySession: Object.fromEntries(
-        Object.entries(state.pendingApprovalsBySession).filter(([sessionKey]) => sessionKey !== key),
-      ),
-    }));
+    set((state) => {
+      const loadedSessions = removeSessionRecord(state, key);
+      return {
+        loadedSessions,
+        sessionRecordKeyByIdentityKey: buildSessionIdentityRecordIndex(loadedSessions),
+        sessionCatalogStatus: state.sessionCatalogStatus,
+        pendingApprovalsBySession: Object.fromEntries(
+          Object.entries(state.pendingApprovalsBySession).filter(([sessionKey]) => sessionKey !== key),
+        ),
+      };
+    });
   } finally {
     finishMutating();
   }
@@ -682,19 +701,23 @@ export async function executeRenameSession(
     const target = resolveOperationTarget(input.get(), key);
     const result = await input.renameSession({
       sessionKey: target.sessionKey,
-      runtimeAddress: target.runtimeAddress,
+      sessionIdentity: target.sessionIdentity,
       label: normalizedLabel,
     });
     if (result.success === false) {
       throw new Error(result.error || 'Failed to rename session');
     }
-    input.set((state) => ({
-      loadedSessions: patchSessionMeta(state, key, {
+    input.set((state) => {
+      const loadedSessions = patchSessionMeta(state, key, {
         label: normalizedLabel,
         titleSource: 'user',
         manualLabel: true,
-      }),
-    }));
+      });
+      return {
+        loadedSessions,
+        sessionRecordKeyByIdentityKey: buildSessionIdentityRecordIndex(loadedSessions),
+      };
+    });
   } finally {
     input.finishMutating();
   }
@@ -718,9 +741,12 @@ export async function executeNewSession(input: CreateStoreSessionActionsInput, a
     if (leavingEmpty) {
       clearSessionHistoryFingerprints(historyRuntime, currentSessionKey);
     }
-    const runtimeAddress = resolveNewSessionRuntimeAddress(state, agentId);
-    const created = await hostSessionNew({ runtimeAddress });
-    const newKey = buildSessionRecordKey(created.snapshot.catalog.runtimeAddress, created.sessionKey);
+    const agentScope = resolveNewSessionAgentScope(state, agentId);
+    const created = await hostSessionNew({
+      endpoint: agentScope.endpoint,
+      agentId: agentScope.agentId,
+    });
+    const newKey = buildSessionRecordKey(created.snapshot.catalog.sessionIdentity);
     useTaskSnapshotStore.getState().reportSessionSnapshot(created.snapshot, 'replay');
     set((stateValue) => {
       const baseLoadedSessions = leavingEmpty
@@ -741,6 +767,7 @@ export async function executeNewSession(input: CreateStoreSessionActionsInput, a
       );
       return {
         loadedSessions,
+        sessionRecordKeyByIdentityKey: buildSessionIdentityRecordIndex(loadedSessions),
         sessionCatalogStatus: stateValue.sessionCatalogStatus,
         currentSessionKey: newKey,
         pendingApprovalsBySession: leavingEmpty
@@ -771,6 +798,7 @@ export function executeCleanupEmptySession(input: CreateStoreSessionActionsInput
     const loadedSessions = removeSessionRecord(stateValue, currentSessionKey);
     return {
       loadedSessions,
+      sessionRecordKeyByIdentityKey: buildSessionIdentityRecordIndex(loadedSessions),
       sessionCatalogStatus: stateValue.sessionCatalogStatus,
       pendingApprovalsBySession: Object.fromEntries(
         Object.entries(stateValue.pendingApprovalsBySession).filter(([sessionKey]) => sessionKey !== currentSessionKey),

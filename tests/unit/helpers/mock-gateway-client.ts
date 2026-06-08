@@ -1,6 +1,6 @@
 import { vi } from 'vitest';
 import * as hostApiModule from '@/lib/host-api';
-import type { RuntimeAddress } from '../../../runtime-host/application/agent-runtime/contracts/runtime-address';
+import type { RuntimeEndpointRef, RuntimeScope, SessionIdentity } from '../../../runtime-host/application/agent-runtime/contracts/runtime-address';
 
 type GatewayRpcEnvelope<TResult = unknown> = {
   success: boolean;
@@ -14,25 +14,29 @@ type RpcCall = {
   timeoutMs?: number;
 };
 
-function capabilityAddress(capabilityId: string): RuntimeAddress {
-  return {
-    kind: 'native-runtime',
-    capabilityId,
-    runtimeAdapterId: 'openclaw',
-    runtimeInstanceId: 'local',
-    agentId: 'default',
-  };
+const runtimeEndpoint: RuntimeEndpointRef = {
+  kind: 'native-runtime',
+  runtimeAdapterId: 'openclaw',
+  runtimeInstanceId: 'local',
+};
+
+function capabilityScope(capabilityId: string): RuntimeScope {
+  return capabilityId === 'subagent.management'
+    ? { kind: 'agent', endpoint: runtimeEndpoint, agentId: 'default' }
+    : { kind: 'runtime-instance', endpoint: runtimeEndpoint };
 }
 
 function capabilityDescriptor(capabilityId: string): Record<string, unknown> {
-  const address = capabilityAddress(capabilityId);
+  const scope = capabilityScope(capabilityId);
   return {
     id: capabilityId,
     kind: capabilityId,
-    address,
-    runtimeAdapterId: address.runtimeAdapterId,
-    runtimeInstanceId: address.runtimeInstanceId,
-    targetAgentIds: [address.agentId],
+    scopeKind: scope.kind,
+    scope,
+    targetKinds: ['none'],
+    runtimeAdapterId: runtimeEndpoint.runtimeAdapterId,
+    runtimeInstanceId: runtimeEndpoint.runtimeInstanceId,
+    targetAgentIds: ['default'],
     supportLevel: 'native',
     availability: 'available',
     operations: [],
@@ -50,26 +54,24 @@ function isGatewayRpcEnvelope(value: unknown): value is GatewayRpcEnvelope {
 
 export const gatewayClientRpcMock = vi.fn();
 export const hostApiFetchMock = vi.fn();
-export const hostCapabilityExecuteMock = vi.fn();
+export const capabilityExecuteMock = vi.fn();
 export const hostSessionPromptMock = vi.fn();
 export const hostSessionWindowFetchMock = vi.fn();
 export const hostSessionDeleteMock = vi.fn();
 export const hostSessionListMock = vi.fn();
 export const hostSessionPatchMock = vi.fn();
-
-const subagentRuntimeRoutes: Record<string, string> = {
-  '/api/subagents/list': 'agents.list',
-  '/api/subagents/config/get': 'config.get',
-  '/api/subagents/files/get': 'agents.files.get',
-  '/api/subagents/files/list': 'agents.files.list',
-};
+export const hostRuntimeEndpointsListMock = vi.fn();
 
 const subagentCapabilityOperations: Record<string, string> = {
+  'subagents.list': 'agents.list',
+  'subagents.config.get': 'config.get',
   'subagents.config.set': 'config.set',
   'subagents.create': 'agents.create',
   'subagents.update': 'agents.update',
   'subagents.delete': 'agents.delete',
+  'subagents.files.get': 'agents.files.get',
   'subagents.files.set': 'agents.files.set',
+  'subagents.files.list': 'agents.files.list',
 };
 
 const settingsCapabilityRoutes: Record<string, string> = {
@@ -89,25 +91,11 @@ function parseJsonBody(init?: RequestInit & { timeoutMs?: number }): unknown {
   }
 }
 
-function buildSubagentRpcCall(path: string, init?: RequestInit & { timeoutMs?: number }): RpcCall | undefined {
-  const method = subagentRuntimeRoutes[path];
-  if (!method) {
-    return undefined;
-  }
-  const body = parseJsonBody(init);
-  return {
-    method,
-    params: body,
-    timeoutMs: init?.timeoutMs,
-  };
-}
-
 function readCapabilityInput(input: unknown): Record<string, unknown> {
   if (!input || typeof input !== 'object' || Array.isArray(input)) {
     return {};
   }
-  const { runtimeAddress: _runtimeAddress, ...domainInput } = input as Record<string, unknown>;
-  return domainInput;
+  return input as Record<string, unknown>;
 }
 
 function resolveSettingsCapabilityPath(operationId: string, input: unknown): string {
@@ -153,14 +141,6 @@ vi.spyOn(hostApiModule, 'hostApiFetch').mockImplementation(async <TResult = unkn
   path: string,
   init?: RequestInit & { timeoutMs?: number },
 ) => {
-  const subagentRpcCall = buildSubagentRpcCall(path, init);
-  if (subagentRpcCall) {
-    return await invokeMockedGatewayRpc<TResult>(
-      subagentRpcCall.method,
-      subagentRpcCall.params,
-      subagentRpcCall.timeoutMs,
-    );
-  }
   if (path === '/api/capabilities/list') {
     return {
       capabilities: [
@@ -170,26 +150,65 @@ vi.spyOn(hostApiModule, 'hostApiFetch').mockImplementation(async <TResult = unkn
       ],
     } as TResult;
   }
+  if (path === '/api/capabilities/execute') {
+    const payload = init?.body && typeof init.body === 'string' ? JSON.parse(init.body) : {};
+    return await mockedCapabilityExecute<TResult>(payload, { timeoutMs: init?.timeoutMs });
+  }
   return await hostApiFetchMock(path, init) as TResult;
 });
 
-vi.spyOn(hostApiModule, 'resolveSingleCapabilityRuntimeAddress').mockImplementation(async (
+vi.spyOn(hostApiModule, 'resolveSingleCapabilityScope').mockImplementation(async (
   capabilityId: string,
-) => capabilityAddress(capabilityId));
+) => capabilityScope(capabilityId));
 
-vi.spyOn(hostApiModule, 'hostCapabilityExecute').mockImplementation(async <TResult = unknown>(
+vi.spyOn(hostApiModule, 'hostRuntimeEndpointsList').mockImplementation(async () => {
+  const response = await hostRuntimeEndpointsListMock();
+  if (response) {
+    return response;
+  }
+  return {
+    endpoints: [{
+      id: 'openclaw-local',
+      protocolId: 'openclaw-v4',
+      runtimeAdapterId: 'openclaw',
+      runtimeInstanceId: 'local',
+      displayName: 'OpenClaw Local',
+      agentIds: ['default'],
+      acceptsDynamicAgents: true,
+      capabilities: {
+        chat: true,
+        streaming: true,
+        tools: true,
+        approvals: true,
+        replay: true,
+        modelSelection: true,
+      },
+      capabilitySummaries: [capabilityDescriptor('session.prompt')],
+      controlState: {
+        connection: null,
+        readiness: null,
+        capabilities: null,
+        updatedAt: null,
+      },
+    }],
+  };
+});
+
+async function mockedCapabilityExecute<TResult = unknown>(
   payload: {
     id: string;
     operationId: string;
-    runtimeAddress: RuntimeAddress;
+    scope: RuntimeScope;
+    target?: unknown;
     input?: unknown;
   },
   options?: { timeoutMs?: number },
-) => {
+): Promise<TResult> {
   const subagentMethod = payload.id === 'subagent.management'
     ? subagentCapabilityOperations[payload.operationId]
     : undefined;
   if (subagentMethod) {
+    capabilityExecuteMock(payload, options);
     return await invokeMockedGatewayRpc<TResult>(
       subagentMethod,
       readCapabilityInput(payload.input),
@@ -197,14 +216,14 @@ vi.spyOn(hostApiModule, 'hostCapabilityExecute').mockImplementation(async <TResu
     );
   }
   if (payload.id === 'settings.runtime' && settingsCapabilityRoutes[payload.operationId]) {
-    hostCapabilityExecuteMock(payload, options);
+    capabilityExecuteMock(payload, options);
     return await hostApiFetchMock(
       resolveSettingsCapabilityPath(payload.operationId, payload.input),
       buildSettingsCapabilityInit(payload.operationId, payload.input),
     ) as TResult;
   }
-  return await hostCapabilityExecuteMock(payload, options) as TResult;
-});
+  return await capabilityExecuteMock(payload, options) as TResult;
+}
 
 vi.spyOn(hostApiModule, 'hostSessionPrompt').mockImplementation(async (
   payload: {
@@ -231,17 +250,17 @@ vi.spyOn(hostApiModule, 'hostSessionWindowFetch').mockImplementation(async (
 ) => await hostSessionWindowFetchMock(payload));
 
 vi.spyOn(hostApiModule, 'hostSessionDelete').mockImplementation(async (
-  payload: { sessionKey: string; runtimeAddress: RuntimeAddress },
+  payload: { sessionKey: string; sessionIdentity: SessionIdentity },
 ) => await hostSessionDeleteMock(payload));
 
 vi.spyOn(hostApiModule, 'hostSessionList').mockImplementation(async (
-  payload: { runtimeAddress: RuntimeAddress },
+  payload: { endpoint: RuntimeEndpointRef },
 ) => await hostSessionListMock(payload));
 
 vi.spyOn(hostApiModule, 'hostSessionPatch').mockImplementation(async (
   payload: {
     sessionKey: string;
-    runtimeAddress: RuntimeAddress;
+    sessionIdentity: SessionIdentity;
     runtimeModelRef: string;
   },
 ) => await hostSessionPatchMock(payload));
@@ -249,10 +268,11 @@ vi.spyOn(hostApiModule, 'hostSessionPatch').mockImplementation(async (
 export function resetGatewayClientMocks(): void {
   gatewayClientRpcMock.mockReset();
   hostApiFetchMock.mockReset();
-  hostCapabilityExecuteMock.mockReset();
+  capabilityExecuteMock.mockReset();
   hostSessionPromptMock.mockReset();
   hostSessionWindowFetchMock.mockReset();
   hostSessionDeleteMock.mockReset();
   hostSessionListMock.mockReset();
   hostSessionPatchMock.mockReset();
+  hostRuntimeEndpointsListMock.mockReset();
 }

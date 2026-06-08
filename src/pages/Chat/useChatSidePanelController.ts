@@ -154,7 +154,7 @@ export function useChatSidePanelController(
           const session = sessionByKey.get(sessionKey)!;
           return {
             sessionKey,
-            snapshot: await listTaskSnapshot({ sessionKey: session.backendSessionKey, runtimeAddress: session.runtimeAddress }),
+            snapshot: await listTaskSnapshot({ sessionKey: session.backendSessionKey, sessionIdentity: session.sessionIdentity }),
           };
         }));
         for (const { sessionKey, snapshot } of snapshots) {

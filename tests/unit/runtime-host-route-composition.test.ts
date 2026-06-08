@@ -128,10 +128,12 @@ describe('runtime-host route composition', () => {
       'clawhub',
       'session',
     ]));
-    expect(registry.map((entry) => entry.key)).toEqual(expect.arrayContaining([
+    const routeKeys = registry.map((entry) => entry.key);
+    expect(routeKeys).not.toContain('runtime_host.POST /api/runtime-host/jobs/get');
+    expect(routeKeys).toEqual(expect.arrayContaining([
       'gateway.POST /api/gateway/ready',
-      'subagents.POST /api/subagents/config/get',
-      'runtime_host.POST /api/runtime-host/jobs/get',
+      'subagents.POST /api/subagents/list',
+      'runtime_host.GET /api/runtime-host/jobs',
       'files.POST /api/files/read-text',
       'session.POST /api/sessions/prompt',
       'session.POST /api/sessions/window',

@@ -105,7 +105,7 @@ describe('useProviderStore mutation states', () => {
 
   function mockProviderJob(jobId: string, result: unknown = { success: true }): void {
     hostApiFetchMock.mockImplementation(async (path: string) => {
-      if (path === '/api/runtime-host/jobs/get') {
+      if (path === '/api/capabilities/execute') {
         return {
           success: true,
           job: {
@@ -182,7 +182,7 @@ describe('useProviderStore mutation states', () => {
     });
     hostProviderDeleteAccountMock.mockReturnValue(deleteTask);
     hostApiFetchMock.mockImplementation(async (path: string) => {
-      if (path === '/api/runtime-host/jobs/get') {
+      if (path === '/api/capabilities/execute') {
         return {
           success: true,
           job: {

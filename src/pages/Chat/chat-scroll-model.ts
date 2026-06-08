@@ -4,11 +4,11 @@
  * 模型语义：
  * - 每个 scope（一个会话）持有一个 follow/detached 的二态 phase。
  * - phase 是“用户跟随最新消息的意图”，是唯一意图源。
- * - 仅以下用户主动事件能写 phase：
- *     a. 滚轮上滑 / 触摸下滑 / 拖滚动条上移   → detached
- *     b. 滚到底部（视口几何到达底部）         → follow
- *     c. 显式 jumpToBottom / 切 scope 强制贴底 → follow
- * - 流式追加、布局重排、程序写 scrollTop 等被动几何变化不写 phase，只读它。
+ * - 仅以下语义事件能写 phase：
+ *     a. 用户明确离开底部（滚轮上滑 / 触摸下滑）→ detached
+ *     b. 视口几何到达底部                         → follow
+ *     c. 显式 jumpToBottom / 切 scope 强制贴底     → follow
+ * - 流式追加、布局重排、程序写 scrollTop 等被动几何变化不能把 follow 反推成 detached。
  *
  * 几何工具是纯函数；reducer 也是纯函数。所有 DOM 副作用都在 controller。
  */

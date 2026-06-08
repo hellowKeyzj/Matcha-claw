@@ -1,0 +1,23 @@
+{
+  "name": "@matchaclaw/team-runtime",
+  "version": "0.1.0",
+  "private": true,
+  "description": "TeamSkill runtime plugin for OpenClaw",
+  "type": "module",
+  "main": "./dist/index.js",
+  "exports": "./dist/index.js",
+  "scripts": {
+    "build": "node ../../scripts/build-local-openclaw-plugins.mjs team-runtime"
+  },
+  "openclaw": {
+    "extensions": [
+      "./dist/index.js"
+    ]
+  },
+  "dependencies": {
+    "yaml": "^2.9.0"
+  },
+  "peerDependencies": {
+    "openclaw": "*"
+  }
+}

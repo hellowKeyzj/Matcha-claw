@@ -1,4 +1,5 @@
 import { buildRuntimeScopeKey } from './session-identity';
+import { buildSessionIdentityKey, type SessionIdentity } from '../../../runtime-host/shared/runtime-address';
 import type {
   ApprovalStatus,
   ApprovalItem,
@@ -17,6 +18,7 @@ import type {
   SessionRenderExecutionGraphItem,
   SessionRenderImage,
   SessionRenderItem,
+  SessionContextTokenSnapshot,
   SessionRenderSystemItem,
   SessionStateSnapshot,
 } from '../../../runtime-host/shared/session-adapter-types';
@@ -41,12 +43,37 @@ export function nowMs(): number {
   return Date.now();
 }
 
-function safeStableStringify(value: unknown): string {
-  try {
-    return JSON.stringify(value) ?? '';
-  } catch {
-    return String(value);
+function sessionIdentitiesEquivalent(left: SessionIdentity | null | undefined, right: SessionIdentity | null | undefined): boolean {
+  if (left === right) {
+    return true;
   }
+  if (!left || !right) {
+    return false;
+  }
+  return buildSessionIdentityKey(left) === buildSessionIdentityKey(right);
+}
+
+function shallowRecordsEquivalent(
+  left: Record<string, unknown> | null | undefined,
+  right: Record<string, unknown> | null | undefined,
+): boolean {
+  if (left === right) {
+    return true;
+  }
+  if (!left || !right) {
+    return false;
+  }
+  const leftKeys = Object.keys(left);
+  const rightKeys = Object.keys(right);
+  if (leftKeys.length !== rightKeys.length) {
+    return false;
+  }
+  for (const key of leftKeys) {
+    if (left[key] !== right[key]) {
+      return false;
+    }
+  }
+  return true;
 }
 
 function hashStringDjb2(input: string): string {
@@ -373,7 +400,7 @@ export function areSessionsEquivalent(left: ChatSession[], right: ChatSession[])
       || (a.agentId ?? null) !== (b.agentId ?? null)
       || (a.protocolId ?? null) !== (b.protocolId ?? null)
       || (a.runtimeEndpointId ?? null) !== (b.runtimeEndpointId ?? null)
-      || safeStableStringify(a.runtimeAddress ?? null) !== safeStableStringify(b.runtimeAddress ?? null)
+      || !sessionIdentitiesEquivalent(a.sessionIdentity, b.sessionIdentity)
       || (a.kind ?? null) !== (b.kind ?? null)
       || (a.preferred ?? false) !== (b.preferred ?? false)
       || (a.label ?? null) !== (b.label ?? null)
@@ -452,7 +479,7 @@ export function createEmptySessionMeta(): ChatSessionMetaState {
     agentId: null,
     protocolId: null,
     runtimeEndpointId: null,
-    runtimeAddress: null,
+    sessionIdentity: null,
     kind: null,
     preferred: false,
     label: null,
@@ -489,7 +516,7 @@ function areSessionMetaEquivalent(left: ChatSessionMetaState, right: ChatSession
     && left.agentId === right.agentId
     && (left.protocolId ?? null) === (right.protocolId ?? null)
     && (left.runtimeEndpointId ?? null) === (right.runtimeEndpointId ?? null)
-    && safeStableStringify(left.runtimeAddress) === safeStableStringify(right.runtimeAddress)
+    && sessionIdentitiesEquivalent(left.sessionIdentity, right.sessionIdentity)
     && left.kind === right.kind
     && left.preferred === right.preferred
     && left.label === right.label
@@ -502,6 +529,22 @@ function areSessionMetaEquivalent(left: ChatSessionMetaState, right: ChatSession
     && left.thinkingLevel === right.thinkingLevel;
 }
 
+function areTransportIssuesEquivalent(
+  left: ChatSessionRuntimeState['lastIssue'],
+  right: ChatSessionRuntimeState['lastIssue'],
+): boolean {
+  return left === right
+    || (!!left
+      && !!right
+      && left.message === right.message
+      && left.source === right.source
+      && left.at === right.at
+      && (left.code ?? null) === (right.code ?? null)
+      && (left.retryable ?? null) === (right.retryable ?? null)
+      && (left.retryAfterMs ?? null) === (right.retryAfterMs ?? null)
+      && left.details === right.details);
+}
+
 function areSessionRuntimeEquivalent(left: ChatSessionRuntimeState, right: ChatSessionRuntimeState): boolean {
   return left.activeRunId === right.activeRunId
     && left.runPhase === right.runPhase
@@ -511,8 +554,17 @@ function areSessionRuntimeEquivalent(left: ChatSessionRuntimeState, right: ChatS
     && left.runtimeActivity === right.runtimeActivity
     && left.lastUserMessageAt === right.lastUserMessageAt
     && left.lastError === right.lastError
-    && safeStableStringify(left.lastIssue) === safeStableStringify(right.lastIssue)
+    && areTransportIssuesEquivalent(left.lastIssue, right.lastIssue)
     && left.updatedAt === right.updatedAt;
+}
+
+function areSessionContextTokensEquivalent(
+  left: SessionContextTokenSnapshot | undefined,
+  right: SessionContextTokenSnapshot | undefined,
+): boolean {
+  return (left?.totalTokens ?? null) === (right?.totalTokens ?? null)
+    && (left?.totalTokensFresh ?? null) === (right?.totalTokensFresh ?? null)
+    && (left?.contextTokens ?? null) === (right?.contextTokens ?? null);
 }
 
 function areSessionViewportEquivalent(left: ChatSessionViewportState, right: ChatSessionViewportState): boolean {
@@ -541,10 +593,10 @@ function areApprovalItemsEquivalent(left: ApprovalComparable, right: ApprovalCom
     && left.createdAtMs === right.createdAtMs
     && left.expiresAtMs === right.expiresAtMs
     && left.decision === right.decision
-    && safeStableStringify(left.runtimeAddress) === safeStableStringify(right.runtimeAddress)
+    && sessionIdentitiesEquivalent(left.sessionIdentity, right.sessionIdentity)
     && left.allowedDecisions.length === right.allowedDecisions.length
     && left.allowedDecisions.every((decision, index) => decision === right.allowedDecisions[index])
-    && safeStableStringify(left.request) === safeStableStringify(right.request);
+    && shallowRecordsEquivalent(left.request, right.request);
 }
 
 function areApprovalListsEquivalent(left: readonly ApprovalComparable[], right: readonly ApprovalComparable[]): boolean {
@@ -635,7 +687,9 @@ export function upsertSessionRecord(
   };
 }
 
-type ChatSessionRecordPatch = Partial<ChatSessionRecord>;
+type ChatSessionRecordPatch = Partial<Omit<ChatSessionRecord, 'contextTokens'>> & {
+  contextTokens?: SessionContextTokenSnapshot | null;
+};
 
 export function patchSessionRecord(
   state: Pick<ChatStoreState, 'loadedSessions'>,
@@ -648,12 +702,16 @@ export function patchSessionRecord(
     runtime: patch.runtime ?? current.runtime,
     items: patch.items ?? current.items,
     window: patch.window ?? current.window,
+    contextTokens: Object.prototype.hasOwnProperty.call(patch, 'contextTokens')
+      ? patch.contextTokens ?? undefined
+      : current.contextTokens,
   };
   if (
     current.meta === nextRecord.meta
     && current.runtime === nextRecord.runtime
     && current.items === nextRecord.items
     && current.window === nextRecord.window
+    && areSessionContextTokensEquivalent(current.contextTokens, nextRecord.contextTokens)
   ) {
     return state.loadedSessions;
   }
@@ -790,11 +848,11 @@ export function patchSessionSnapshot(
   const nextMeta = {
     ...current.meta,
     backendSessionKey: snapshot.sessionKey,
-    runtimeScopeKey: buildRuntimeScopeKey(catalog.runtimeAddress),
+    runtimeScopeKey: buildRuntimeScopeKey(catalog.sessionIdentity.endpoint),
     agentId: catalog.agentId,
     protocolId: catalog.protocolId ?? null,
     runtimeEndpointId: catalog.runtimeEndpointId ?? null,
-    runtimeAddress: catalog.runtimeAddress,
+    sessionIdentity: catalog.sessionIdentity,
     kind: catalog.kind,
     preferred: catalog.preferred,
     label: nextLabel,
@@ -834,11 +892,13 @@ export function patchSessionSnapshot(
     snapshot,
     nextItems,
   });
+  const nextContextTokens = snapshot.contextTokens ?? catalog.contextTokens ?? current.contextTokens;
   return patchSessionRecord(state, sessionKey, {
     meta: areSessionMetaEquivalent(current.meta, nextMeta) ? current.meta : nextMeta,
     items: nextItems,
     runtime: areSessionRuntimeEquivalent(current.runtime, nextRuntime) ? current.runtime : nextRuntime,
     window: areSessionViewportEquivalent(current.window, nextWindow) ? current.window : nextWindow,
+    contextTokens: areSessionContextTokensEquivalent(current.contextTokens, nextContextTokens) ? current.contextTokens : nextContextTokens,
   });
 }
 

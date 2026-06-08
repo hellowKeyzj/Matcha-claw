@@ -7,7 +7,7 @@ import {
   buildRenderItemsFromMessages,
   type RawMessage,
 } from './helpers/timeline-fixtures';
-import { createOpenClawTestRuntimeAddress } from './helpers/runtime-address-fixtures';
+import { createOpenClawTestSessionIdentity } from './helpers/runtime-address-fixtures';
 
 const hostSessionLoadMock = vi.fn();
 const hostSessionWindowFetchMock = vi.fn();
@@ -71,7 +71,7 @@ describe('chat history fetch pipeline helpers', () => {
     const result = await fetchHistoryWindow({
       recordKey: requestedSessionKey,
       backendSessionKey: requestedSessionKey,
-      runtimeAddress: createOpenClawTestRuntimeAddress(requestedSessionKey),
+      sessionIdentity: createOpenClawTestSessionIdentity(requestedSessionKey),
       sessions: [{ key: requestedSessionKey, thinkingLevel: 'medium', updatedAt: 1 }],
       limit: CHAT_HISTORY_FULL_LIMIT,
     });
@@ -145,7 +145,9 @@ describe('chat history fetch pipeline helpers', () => {
     resolveHydratedSessionSnapshotMock.mockResolvedValueOnce(hydratedSnapshot);
 
     const result = await fetchHistoryWindow({
-      requestedSessionKey,
+      recordKey: requestedSessionKey,
+      backendSessionKey: requestedSessionKey,
+      sessionIdentity: createOpenClawTestSessionIdentity(requestedSessionKey),
       sessions: [{ key: requestedSessionKey, updatedAt: 1 }],
       limit: CHAT_HISTORY_FULL_LIMIT,
     });
@@ -197,14 +199,14 @@ describe('chat history fetch pipeline helpers', () => {
     const result = await fetchHistoryWindow({
       recordKey: requestedSessionKey,
       backendSessionKey: requestedSessionKey,
-      runtimeAddress: createOpenClawTestRuntimeAddress(requestedSessionKey),
+      sessionIdentity: createOpenClawTestSessionIdentity(requestedSessionKey),
       sessions: [{ key: requestedSessionKey, updatedAt: 1 }],
       limit: CHAT_HISTORY_FULL_LIMIT,
     });
 
     expect(hostSessionLoadMock).toHaveBeenCalledWith({
       sessionKey: requestedSessionKey,
-      runtimeAddress: createOpenClawTestRuntimeAddress(requestedSessionKey),
+      sessionIdentity: createOpenClawTestSessionIdentity(requestedSessionKey),
       limit: CHAT_HISTORY_FULL_LIMIT,
     }, {
       timeoutMs: undefined,

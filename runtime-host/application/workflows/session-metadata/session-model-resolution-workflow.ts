@@ -1,3 +1,4 @@
+import type { SessionIdentity } from '../../agent-runtime/contracts/runtime-address';
 import type { SessionDefaultModelResolverPort } from '../../sessions/session-metadata-repository';
 import type { SessionStorageDescriptor } from '../../sessions/session-storage-repository';
 
@@ -9,7 +10,7 @@ export class SessionModelResolutionWorkflow {
   constructor(private readonly deps: SessionModelResolutionWorkflowDeps = {}) {}
 
   async resolveSessionModel(input: {
-    sessionKey: string;
+    sessionIdentity: SessionIdentity;
     storageDescriptor: SessionStorageDescriptor | null;
     runtimeModel?: string | null;
   }): Promise<string | null> {
@@ -20,7 +21,7 @@ export class SessionModelResolutionWorkflow {
     if (entryModel) {
       return entryModel;
     }
-    return await this.deps.defaultModelResolver?.resolveDefaultModel(input.sessionKey) ?? null;
+    return await this.deps.defaultModelResolver?.resolveDefaultModel(input.sessionIdentity) ?? null;
   }
 }
 
@@ -30,15 +31,6 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function normalizeString(value: unknown): string {
   return typeof value === 'string' ? value.trim() : '';
-}
-
-function parseSessionKeyAgent(sessionKey: string): string | null {
-  if (!sessionKey.startsWith('agent:')) {
-    return null;
-  }
-  const parts = sessionKey.split(':');
-  const agentId = parts[1]?.trim();
-  return agentId || null;
 }
 
 export function readAgentModelValue(value: unknown): string | null {
@@ -84,22 +76,16 @@ function readSessionStoreResolvedModel(entry: Record<string, unknown> | null): s
 
 export function resolveAgentConfigDefaultModel(
   config: Record<string, unknown> | null,
-  sessionKey: string,
+  sessionIdentity: SessionIdentity,
 ): string | null {
   if (!config) {
     return null;
   }
   const agents = isRecord(config.agents) ? config.agents : null;
-  const agentId = parseSessionKeyAgent(sessionKey);
   const list = Array.isArray(agents?.list) ? agents.list : [];
-  if (agentId) {
-    const matchedAgent = list.find((candidate) => (
-      isRecord(candidate) && normalizeString(candidate.id) === agentId
-    ));
-    const agentModel = readAgentModelValue(matchedAgent);
-    if (agentModel) {
-      return agentModel;
-    }
-  }
-  return readAgentModelValue(agents?.defaults);
+  const matchedAgent = list.find((candidate) => (
+    isRecord(candidate) && normalizeString(candidate.id) === sessionIdentity.agentId
+  ));
+  const agentModel = readAgentModelValue(matchedAgent);
+  return agentModel ?? readAgentModelValue(agents?.defaults);
 }

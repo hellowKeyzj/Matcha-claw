@@ -1,20 +1,20 @@
 import { describe, expect, it } from 'vitest';
 import { readPatchSessionRequest } from '../../runtime-host/application/sessions/session-runtime-requests';
-import { createOpenClawTestRuntimeAddress } from './helpers/runtime-address-fixtures';
+import { createOpenClawTestSessionIdentity } from './helpers/runtime-address-fixtures';
 
 describe('session runtime request parsing', () => {
-  it('reads session model patch from runtimeModelRef and explicit RuntimeAddress', () => {
-    const runtimeAddress = createOpenClawTestRuntimeAddress('agent:main:main');
+  it('reads session model patch from runtimeModelRef and explicit SessionIdentity', () => {
+    const sessionIdentity = createOpenClawTestSessionIdentity('agent:main:main');
 
     expect(readPatchSessionRequest({
       sessionKey: 'agent:main:main',
-      runtimeAddress,
+      sessionIdentity,
       runtimeModelRef: 'anthropic/claude-opus-4-6',
       model: 'openai/gpt-5.4',
     })).toEqual({
       sessionKey: 'agent:main:main',
-      runtimeAddress,
-      runtimeAddressError: null,
+      sessionIdentity,
+      sessionIdentityError: null,
       runtimeModelRef: 'anthropic/claude-opus-4-6',
     });
 
@@ -23,9 +23,22 @@ describe('session runtime request parsing', () => {
       model: 'openai/gpt-5.4',
     })).toEqual({
       sessionKey: 'agent:main:main',
-      runtimeAddress: null,
-      runtimeAddressError: 'RuntimeAddress is required',
+      sessionIdentity: null,
+      sessionIdentityError: 'SessionIdentity is required',
       runtimeModelRef: '',
+    });
+  });
+
+  it('rejects existing-session requests when sessionKey and SessionIdentity disagree', () => {
+    expect(readPatchSessionRequest({
+      sessionKey: 'agent:main:main',
+      sessionIdentity: createOpenClawTestSessionIdentity('agent:main:other'),
+      runtimeModelRef: 'anthropic/claude-sonnet-4-6',
+    })).toEqual({
+      sessionKey: 'agent:main:main',
+      sessionIdentity: null,
+      sessionIdentityError: 'sessionKey must match SessionIdentity.sessionKey',
+      runtimeModelRef: 'anthropic/claude-sonnet-4-6',
     });
   });
 });

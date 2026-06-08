@@ -18,7 +18,6 @@ import {
   type ChannelRuntimeSummarySnapshot,
 } from '@/lib/channel-status';
 import { CHANNEL_NAMES, type Channel, type ChannelType } from '../types/channel';
-import type { RuntimeAddress } from '../../runtime-host/shared/runtime-address';
 
 interface FetchChannelsOptions {
   silent?: boolean;
@@ -35,11 +34,11 @@ interface ChannelsState {
 
   // Actions
   fetchChannels: (options?: FetchChannelsOptions) => Promise<void>;
-  probeChannels: (runtimeAddress: RuntimeAddress) => Promise<void>;
-  deleteChannel: (channelId: string, runtimeAddress: RuntimeAddress) => Promise<void>;
-  connectChannel: (channelId: string, runtimeAddress: RuntimeAddress) => Promise<void>;
-  disconnectChannel: (channelId: string, runtimeAddress: RuntimeAddress) => Promise<void>;
-  requestQrCode: (channelType: ChannelType, runtimeAddress: RuntimeAddress) => Promise<{ qrCode: string; sessionId: string }>;
+  probeChannels: () => Promise<void>;
+  deleteChannel: (channelId: string) => Promise<void>;
+  connectChannel: (channelId: string) => Promise<void>;
+  disconnectChannel: (channelId: string) => Promise<void>;
+  requestQrCode: (channelType: ChannelType) => Promise<{ qrCode: string; sessionId: string }>;
   setChannels: (channels: Channel[]) => void;
   updateChannel: (channelId: string, updates: Partial<Channel>) => void;
   clearError: () => void;
@@ -288,10 +287,10 @@ export const useChannelsStore = create<ChannelsState>((set, get) => ({
     }
   },
 
-  probeChannels: async (runtimeAddress) => {
+  probeChannels: async () => {
     set({ refreshing: true, error: null });
     try {
-      await hostChannelsProbe(runtimeAddress);
+      await hostChannelsProbe();
     } catch (error) {
       set((state) => ({
         ...state,
@@ -303,7 +302,7 @@ export const useChannelsStore = create<ChannelsState>((set, get) => ({
     await get().fetchChannels({ silent: true });
   },
 
-  deleteChannel: async (channelId, runtimeAddress) => {
+  deleteChannel: async (channelId) => {
     set((state) => {
       const next = incrementMutatingChannel(state.mutatingByChannelId, channelId);
       return {
@@ -329,7 +328,7 @@ export const useChannelsStore = create<ChannelsState>((set, get) => ({
     }
 
     try {
-      await hostChannelsDeleteConfig(channelType, runtimeAddress);
+      await hostChannelsDeleteConfig(channelType);
     } catch (error) {
       console.error('Failed to delete channel config:', error);
     }
@@ -347,7 +346,7 @@ export const useChannelsStore = create<ChannelsState>((set, get) => ({
     });
   },
 
-  connectChannel: async (channelId, runtimeAddress) => {
+  connectChannel: async (channelId) => {
     set((state) => {
       const next = incrementMutatingChannel(state.mutatingByChannelId, channelId);
       return {
@@ -370,7 +369,7 @@ export const useChannelsStore = create<ChannelsState>((set, get) => ({
     updateChannel(channelId, { status: 'connecting', error: undefined });
 
     try {
-      await hostChannelsConnect(channel.type, channel.accountId, runtimeAddress);
+      await hostChannelsConnect(channel.type, channel.accountId);
       updateChannel(channelId, { status: 'connected' });
     } catch (error) {
       updateChannel(channelId, { status: 'error', error: String(error) });
@@ -385,7 +384,7 @@ export const useChannelsStore = create<ChannelsState>((set, get) => ({
     }
   },
 
-  disconnectChannel: async (channelId, runtimeAddress) => {
+  disconnectChannel: async (channelId) => {
     set((state) => {
       const next = incrementMutatingChannel(state.mutatingByChannelId, channelId);
       return {
@@ -407,7 +406,7 @@ export const useChannelsStore = create<ChannelsState>((set, get) => ({
     }
 
     try {
-      await hostChannelsDisconnect(channel.type, channel.accountId, runtimeAddress);
+      await hostChannelsDisconnect(channel.type, channel.accountId);
     } catch (error) {
       console.error('Failed to disconnect channel:', error);
     }
@@ -422,8 +421,8 @@ export const useChannelsStore = create<ChannelsState>((set, get) => ({
     });
   },
 
-  requestQrCode: async (channelType, runtimeAddress) => {
-    const result = await hostChannelsRequestQrCode(channelType, runtimeAddress);
+  requestQrCode: async (channelType) => {
+    const result = await hostChannelsRequestQrCode(channelType);
     return {
       qrCode: result.qrCode || '',
       sessionId: result.sessionId || '',

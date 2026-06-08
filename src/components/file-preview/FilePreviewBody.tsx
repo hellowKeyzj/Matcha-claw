@@ -10,6 +10,7 @@ import {
   hostFileReadBinary,
   hostFileReadText,
   type ReadTextFileResult,
+  type WorkspaceFileContext,
 } from '@/lib/host-api';
 import {
   supportsInlineDiff,
@@ -39,7 +40,8 @@ interface FilePreviewBodyProps {
   showHeader?: boolean;
   headerAccessory?: ReactNode;
   headerTrailingAccessory?: ReactNode;
-  runtimeAddress?: ArtifactPreviewTarget['runtimeAddress'];
+  sessionIdentity?: ArtifactPreviewTarget['sessionIdentity'];
+  workspaceContext?: WorkspaceFileContext;
 }
 
 type TextPreviewState =
@@ -141,7 +143,8 @@ export function FilePreviewBody({
   showHeader = true,
   headerAccessory,
   headerTrailingAccessory,
-  runtimeAddress,
+  sessionIdentity,
+  workspaceContext,
 }: FilePreviewBodyProps) {
   const { t } = useTranslation(['chat', 'common']);
   const [textState, setTextState] = useState<TextPreviewState>({ status: 'idle' });
@@ -149,7 +152,11 @@ export function FilePreviewBody({
   const [pathCopied, setPathCopied] = useState(false);
   const previewInstanceKey = `${file.filePath || file.fileName}:${mode}`;
   const shouldUseInlineSnapshot = file.sourceTool !== 'write' && !!file.content;
-  const fileRuntimeAddress = runtimeAddress ?? file.runtimeAddress;
+  const fileSessionIdentity = sessionIdentity ?? file.sessionIdentity;
+  const effectiveWorkspaceContext = useMemo(() => workspaceContext ?? {
+    workspaceId: file.workspaceId,
+    sourceId: file.sourceId,
+  }, [file.sourceId, file.workspaceId, workspaceContext]);
   const canDirectOpen = !!file.filePath;
   const fileTooLargeForPreview = typeof file.fileSize === 'number' && file.fileSize > INLINE_BINARY_PREVIEW_MAX_BYTES;
   const shouldConfirmDirectOpen = shouldOfferDirectOpenFallback(file.ext, file.fileSize);
@@ -227,12 +234,13 @@ export function FilePreviewBody({
 
     void (async () => {
       try {
-        if (!fileRuntimeAddress) {
-          throw new Error('RuntimeAddress is required');
+        if (!fileSessionIdentity) {
+          throw new Error('SessionIdentity is required');
         }
         const result: ReadTextFileResult = await hostFileReadText({
           path: file.filePath,
-          runtimeAddress: fileRuntimeAddress,
+          sessionIdentity: fileSessionIdentity,
+          ...effectiveWorkspaceContext,
         });
         if (cancelled) {
           return;
@@ -264,7 +272,7 @@ export function FilePreviewBody({
     return () => {
       cancelled = true;
     };
-  }, [file.filePath, fileRuntimeAddress, shouldLoadTextPreview]);
+  }, [effectiveWorkspaceContext, file.filePath, fileSessionIdentity, shouldLoadTextPreview]);
 
   const shouldLoadBinaryPreview = useMemo(() => (
     mode === 'preview' && file.contentType === 'image'
@@ -282,12 +290,13 @@ export function FilePreviewBody({
 
     void (async () => {
       try {
-        if (!fileRuntimeAddress) {
-          throw new Error('RuntimeAddress is required');
+        if (!fileSessionIdentity) {
+          throw new Error('SessionIdentity is required');
         }
         const result = await hostFileReadBinary({
           path: file.filePath,
-          runtimeAddress: fileRuntimeAddress,
+          sessionIdentity: fileSessionIdentity,
+          ...effectiveWorkspaceContext,
         });
         if (cancelled) {
           return;
@@ -325,7 +334,7 @@ export function FilePreviewBody({
         URL.revokeObjectURL(objectUrl);
       }
     };
-  }, [file.filePath, file.mimeType, fileRuntimeAddress, shouldLoadBinaryPreview]);
+  }, [effectiveWorkspaceContext, file.filePath, file.mimeType, fileSessionIdentity, shouldLoadBinaryPreview]);
 
   const content = (() => {
     if (file.isDirectory) {
@@ -389,7 +398,7 @@ export function FilePreviewBody({
     }
 
     if (file.contentType === 'pdf') {
-      return <PdfViewer key={previewInstanceKey} filePath={file.filePath} fileName={file.fileName} runtimeAddress={fileRuntimeAddress} className="h-full" />;
+      return <PdfViewer key={previewInstanceKey} filePath={file.filePath} fileName={file.fileName} sessionIdentity={fileSessionIdentity} workspaceContext={effectiveWorkspaceContext} className="h-full" />;
     }
 
     if (file.contentType === 'image') {
@@ -426,7 +435,7 @@ export function FilePreviewBody({
     }
 
     if (file.contentType === 'sheet' && (file.ext === '.xls' || file.ext === '.xlsx')) {
-      return <SheetViewer key={previewInstanceKey} filePath={file.filePath} runtimeAddress={fileRuntimeAddress} className="h-full" />;
+      return <SheetViewer key={previewInstanceKey} filePath={file.filePath} sessionIdentity={fileSessionIdentity} workspaceContext={effectiveWorkspaceContext} className="h-full" />;
     }
 
     if (file.contentType === 'sheet' && file.ext === '.csv') {

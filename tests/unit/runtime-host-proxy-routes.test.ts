@@ -1,26 +1,21 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { IncomingMessage, ServerResponse } from 'http';
 import type { RuntimeHostRouteResult } from '../../electron/main/runtime-host-contract';
-import type { RuntimeAddress } from '../../runtime-host/shared/runtime-address';
+import type { RuntimeEndpointRef, RuntimeScope } from '../../runtime-host/shared/runtime-address';
 
 const sendJsonMock = vi.fn();
 const parseJsonBodyMock = vi.fn();
 const sendNoContentMock = vi.fn();
 
-const schedulerCronRuntimeAddress: RuntimeAddress = {
+const runtimeEndpoint: RuntimeEndpointRef = {
   kind: 'native-runtime',
-  capabilityId: 'scheduler.cron',
   runtimeAdapterId: 'openclaw',
   runtimeInstanceId: 'local',
-  agentId: 'default',
 };
 
-const pluginRuntimeAddress: RuntimeAddress = {
-  kind: 'native-runtime',
-  capabilityId: 'plugin.runtime',
-  runtimeAdapterId: 'openclaw',
-  runtimeInstanceId: 'local',
-  agentId: 'default',
+const runtimeScope: RuntimeScope = {
+  kind: 'runtime-instance',
+  endpoint: runtimeEndpoint,
 };
 
 vi.mock('../../electron/api/route-utils', () => ({
@@ -76,9 +71,10 @@ describe('runtime-host proxy routes', () => {
     const payload = {
       id: 'scheduler.cron',
       operationId: 'cron.trigger',
-      runtimeAddress: schedulerCronRuntimeAddress,
+      scope: runtimeScope,
+      target: { kind: 'cron-job', jobId: 'job-1' },
       input: {
-        runtimeAddress: schedulerCronRuntimeAddress,
+        jobId: 'job-1',
       },
     };
     parseJsonBodyMock.mockResolvedValueOnce(payload);
@@ -140,9 +136,9 @@ describe('runtime-host proxy routes', () => {
     const payload = {
       id: 'plugin.runtime',
       operationId: 'plugins.setEnabled',
-      runtimeAddress: pluginRuntimeAddress,
+      scope: runtimeScope,
+      target: { kind: 'plugin', pluginId: 'plugin-1' },
       input: {
-        runtimeAddress: pluginRuntimeAddress,
         pluginId: 'plugin-1',
         enabled: true,
       },
@@ -171,9 +167,10 @@ describe('runtime-host proxy routes', () => {
     const payload = {
       id: 'scheduler.cron',
       operationId: 'cron.trigger',
-      runtimeAddress: schedulerCronRuntimeAddress,
+      scope: runtimeScope,
+      target: { kind: 'cron-job', jobId: 'job-1' },
       input: {
-        runtimeAddress: schedulerCronRuntimeAddress,
+        jobId: 'job-1',
       },
     };
     parseJsonBodyMock.mockResolvedValueOnce(payload);

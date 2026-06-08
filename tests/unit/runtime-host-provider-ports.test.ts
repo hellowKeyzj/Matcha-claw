@@ -86,42 +86,61 @@ describe('runtime-host manager provider oauth action', () => {
 
     await manager.executeShellAction('provider_oauth_start', {
       provider: 'openai',
+      flowId: 'flow-browser',
       accountId: 'acc-browser',
       label: 'Browser',
     });
     await manager.executeShellAction('provider_oauth_start', {
       provider: 'qwen-portal',
       region: 'cn',
+      flowId: 'flow-device',
       accountId: 'acc-device',
       label: 'Device',
     });
 
     expect(hoisted.browserStartFlow).toHaveBeenCalledWith('openai', {
+      flowId: 'flow-browser',
       accountId: 'acc-browser',
       label: 'Browser',
     });
     expect(hoisted.deviceStartFlow).toHaveBeenCalledWith('qwen-portal', 'cn', {
+      flowId: 'flow-device',
       accountId: 'acc-device',
       label: 'Device',
     });
   });
 
-  it('cancel/manual-code 只走主进程 OAuth manager', async () => {
+  it('cancel/manual-code 只走匹配 flow/account/vendor 的主进程 OAuth manager', async () => {
     const { createRuntimeHostManager } = await import('../../electron/main/runtime-host-manager');
     const manager = createRuntimeHostManager({
       gatewayManager: { getStatus: () => ({ processState: 'running', port: 18789 }), debouncedRestart: vi.fn() } as never,
     });
+    const binding = { flowId: 'flow-browser', accountId: 'acc-browser', vendorId: 'openai' };
 
-    await manager.executeShellAction('provider_oauth_cancel');
+    await manager.executeShellAction('provider_oauth_cancel', binding);
     await expect(
-      manager.executeShellAction('provider_oauth_submit', { code: '123456' }),
+      manager.executeShellAction('provider_oauth_submit', { ...binding, code: '123456' }),
     ).resolves.toEqual({
       status: 200,
       data: { success: true },
     });
 
-    expect(hoisted.deviceStopFlow).toHaveBeenCalledTimes(1);
-    expect(hoisted.browserStopFlow).toHaveBeenCalledTimes(1);
-    expect(hoisted.browserSubmitManualCode).toHaveBeenCalledWith('123456');
+    expect(hoisted.deviceStopFlow).toHaveBeenCalledWith(binding);
+    expect(hoisted.browserStopFlow).toHaveBeenCalledWith(binding);
+    expect(hoisted.browserSubmitManualCode).toHaveBeenCalledWith({ ...binding, code: '123456' });
+  });
+
+  it('rejects cancel/manual-code without OAuth flow binding', async () => {
+    const { createRuntimeHostManager } = await import('../../electron/main/runtime-host-manager');
+    const manager = createRuntimeHostManager({
+      gatewayManager: { getStatus: () => ({ processState: 'running', port: 18789 }), debouncedRestart: vi.fn() } as never,
+    });
+
+    await expect(manager.executeShellAction('provider_oauth_cancel')).resolves.toMatchObject({ status: 400 });
+    await expect(manager.executeShellAction('provider_oauth_submit', { code: '123456' })).resolves.toMatchObject({ status: 400 });
+
+    expect(hoisted.deviceStopFlow).not.toHaveBeenCalled();
+    expect(hoisted.browserStopFlow).not.toHaveBeenCalled();
+    expect(hoisted.browserSubmitManualCode).not.toHaveBeenCalled();
   });
 });

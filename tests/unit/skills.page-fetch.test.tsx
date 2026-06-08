@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { MemoryRouter } from 'react-router-dom';
 import { Skills } from '@/pages/Skills';
 import { toast } from 'sonner';
-import type { RuntimeAddress } from '../../runtime-host/shared/runtime-address';
+import type { RuntimeScope } from '../../runtime-host/shared/runtime-address';
 
 const fetchSkillsMock = vi.fn(async () => {});
 const enableSkillMock = vi.fn(async () => {});
@@ -13,13 +13,19 @@ const installSkillMock = vi.fn(async () => {});
 const uninstallSkillMock = vi.fn(async () => {});
 const invokeIpcMock = vi.fn();
 
-const skillManagementAddress: RuntimeAddress = {
-  kind: 'native-runtime',
-  capabilityId: 'skill.management',
-  runtimeAdapterId: 'openclaw',
-  runtimeInstanceId: 'local',
-  agentId: 'default',
+const skillManagementScope: RuntimeScope = {
+  kind: 'runtime-instance',
+  endpoint: {
+    kind: 'native-runtime',
+    runtimeAdapterId: 'openclaw',
+    runtimeInstanceId: 'local',
+  },
 };
+const memoryLancedbProSkillTarget = {
+  kind: 'skill',
+  skillId: 'memory-lancedb-pro-skill',
+  slug: 'memory-lancedb-pro-skill',
+} as const;
 
 const gatewayState = {
   status: {
@@ -45,13 +51,13 @@ const skillsState: {
   mutating: boolean;
   error: string | null;
   fetchSkills: typeof fetchSkillsMock;
-  enableSkill: (skillId: string, runtimeAddress: RuntimeAddress) => Promise<void>;
-  disableSkill: (skillId: string, runtimeAddress: RuntimeAddress) => Promise<void>;
-  batchSetSkillsEnabled: (skillIds: string[], enabled: boolean, runtimeAddress: RuntimeAddress) => Promise<void>;
+  enableSkill: (skillId: string) => Promise<void>;
+  disableSkill: (skillId: string) => Promise<void>;
+  batchSetSkillsEnabled: (skillIds: string[], enabled: boolean) => Promise<void>;
   searchResults: unknown[];
   searchSkills: (query: string) => Promise<void>;
-  installSkill: (slug: string, runtimeAddress: RuntimeAddress, version?: string) => Promise<void>;
-  uninstallSkill: (slug: string, runtimeAddress: RuntimeAddress) => Promise<void>;
+  installSkill: (slug: string, version?: string) => Promise<void>;
+  uninstallSkill: (slug: string) => Promise<void>;
   searching: boolean;
   searchError: string | null;
   installing: Record<string, boolean>;
@@ -149,14 +155,33 @@ describe('skills page fetch behavior', () => {
                 {
                   id: 'skill.management',
                   kind: 'skill.management',
-                  address: skillManagementAddress,
-                  runtimeAdapterId: 'openclaw',
-                  runtimeInstanceId: 'local',
-                  targetAgentIds: ['default'],
+                  scopeKind: 'runtime-instance',
+                  scope: skillManagementScope,
+                  targetKinds: ['skill'],
                   supportLevel: 'native',
                   availability: 'available',
-                  operations: [],
+                  operations: [
+                    { id: 'clawhub.openReadme', title: 'Open README', targetKind: 'skill' },
+                    { id: 'skills.importLocal', title: 'Import local skill', targetKind: 'skill' },
+                  ],
                   policyScope: 'skill.management',
+                  ownerModuleId: 'openclaw',
+                  routeOwnerId: 'skill',
+                },
+                {
+                  id: 'runtime.host',
+                  kind: 'runtime.host',
+                  scopeKind: 'runtime-instance',
+                  scope: skillManagementScope,
+                  targetKinds: ['runtime-job'],
+                  supportLevel: 'native',
+                  availability: 'available',
+                  operations: [
+                    { id: 'runtimeHost.jobGet', title: 'Get runtime job', targetKind: 'runtime-job' },
+                  ],
+                  policyScope: 'runtime.host',
+                  ownerModuleId: 'openclaw',
+                  routeOwnerId: 'runtime-host',
                 },
               ],
             },
@@ -175,6 +200,34 @@ describe('skills page fetch behavior', () => {
             },
           };
         }
+        if (body.operationId === 'runtimeHost.jobGet') {
+          return {
+            ok: true,
+            data: {
+              status: 200,
+              ok: true,
+              json: {
+                success: true,
+                job: {
+                  id: 'job-skill-import',
+                  type: 'skills.importLocal',
+                  status: 'succeeded',
+                  queuedAt: 1,
+                  startedAt: 2,
+                  finishedAt: 3,
+                  attempts: 1,
+                  maxAttempts: 1,
+                  result: {
+                    success: true,
+                    skillKey: 'uploaded-skill',
+                    installedPath: 'C:/Users/test/.openclaw/skills/uploaded-skill',
+                    sourceKind: 'zip',
+                  },
+                },
+              },
+            },
+          };
+        }
         return {
           ok: true,
           data: {
@@ -189,34 +242,6 @@ describe('skills page fetch behavior', () => {
                 queuedAt: 1,
                 attempts: 0,
                 maxAttempts: 1,
-              },
-            },
-          },
-        };
-      }
-      if (channel === 'hostapi:fetch' && payload?.path === '/api/runtime-host/jobs/get') {
-        return {
-          ok: true,
-          data: {
-            status: 200,
-            ok: true,
-            json: {
-              success: true,
-              job: {
-                id: 'job-skill-import',
-                type: 'skills.importLocal',
-                status: 'succeeded',
-                queuedAt: 1,
-                startedAt: 2,
-                finishedAt: 3,
-                attempts: 1,
-                maxAttempts: 1,
-                result: {
-                  success: true,
-                  skillKey: 'uploaded-skill',
-                  installedPath: 'C:/Users/test/.openclaw/skills/uploaded-skill',
-                  sourceKind: 'zip',
-                },
               },
             },
           },
@@ -293,7 +318,7 @@ describe('skills page fetch behavior', () => {
     });
     fireEvent.click(screen.getByRole('button', { name: 'refresh' }));
 
-    expect(fetchSkillsMock).toHaveBeenCalledWith({ force: true, fresh: true, runtimeAddress: skillManagementAddress });
+    expect(fetchSkillsMock).toHaveBeenCalledWith({ force: true, fresh: true });
   });
 
   it('技能页会一次性渲染完整技能列表，不使用内部裁切滚动区', async () => {
@@ -400,9 +425,6 @@ describe('skills page fetch behavior', () => {
       </MemoryRouter>,
     );
 
-    await waitFor(() => {
-      expect(invokeIpcMock).toHaveBeenCalledWith('hostapi:fetch', expect.objectContaining({ path: '/api/capabilities/list' }));
-    });
     fireEvent.click(await screen.findByText('memory-lancedb-pro'));
     await waitFor(() => {
       expect(screen.getByRole('button', { name: 'detail.openManual' })).toBeEnabled();
@@ -418,24 +440,12 @@ describe('skills page fetch behavior', () => {
           body: JSON.stringify({
             id: 'skill.management',
             operationId: 'clawhub.openReadme',
-            runtimeAddress: {
-              kind: 'native-runtime',
-              capabilityId: 'skill.management',
-              runtimeAdapterId: 'openclaw',
-              runtimeInstanceId: 'local',
-              agentId: 'default',
-            },
+            scope: skillManagementScope,
+            target: memoryLancedbProSkillTarget,
             input: {
               skillKey: 'memory-lancedb-pro-skill',
               slug: 'memory-lancedb-pro-skill',
               baseDir: 'C:/Users/test/.openclaw/skills/memory-lancedb-pro-skill',
-              runtimeAddress: {
-                kind: 'native-runtime',
-                capabilityId: 'skill.management',
-                runtimeAdapterId: 'openclaw',
-                runtimeInstanceId: 'local',
-                agentId: 'default',
-              },
             },
           }),
         }),
@@ -596,11 +606,11 @@ describe('skills page fetch behavior', () => {
     fireEvent.click(screen.getByRole('button', { name: 'marketplace.uploadDialog.confirm' }));
 
     await waitFor(() => {
-      expect(enableSkillMock).toHaveBeenCalledWith('uploaded-skill', skillManagementAddress);
+      expect(enableSkillMock).toHaveBeenCalledWith('uploaded-skill');
     });
     expect(invokeIpcMock).toHaveBeenCalledWith(
       'hostapi:fetch',
-      expect.objectContaining({ path: '/api/runtime-host/jobs/get' }),
+      expect.objectContaining({ path: '/api/capabilities/execute' }),
     );
   });
 
@@ -628,14 +638,33 @@ describe('skills page fetch behavior', () => {
                 {
                   id: 'skill.management',
                   kind: 'skill.management',
-                  address: skillManagementAddress,
-                  runtimeAdapterId: 'openclaw',
-                  runtimeInstanceId: 'local',
-                  targetAgentIds: ['default'],
+                  scopeKind: 'runtime-instance',
+                  scope: skillManagementScope,
+                  targetKinds: ['skill'],
                   supportLevel: 'native',
                   availability: 'available',
-                  operations: [],
+                  operations: [
+                    { id: 'clawhub.openReadme', title: 'Open README', targetKind: 'skill' },
+                    { id: 'skills.importLocal', title: 'Import local skill', targetKind: 'skill' },
+                  ],
                   policyScope: 'skill.management',
+                  ownerModuleId: 'openclaw',
+                  routeOwnerId: 'skill',
+                },
+                {
+                  id: 'runtime.host',
+                  kind: 'runtime.host',
+                  scopeKind: 'runtime-instance',
+                  scope: skillManagementScope,
+                  targetKinds: ['runtime-job'],
+                  supportLevel: 'native',
+                  availability: 'available',
+                  operations: [
+                    { id: 'runtimeHost.jobGet', title: 'Get runtime job', targetKind: 'runtime-job' },
+                  ],
+                  policyScope: 'runtime.host',
+                  ownerModuleId: 'openclaw',
+                  routeOwnerId: 'runtime-host',
                 },
               ],
             },
@@ -643,6 +672,30 @@ describe('skills page fetch behavior', () => {
         };
       }
       if (channel === 'hostapi:fetch' && payload?.path === '/api/capabilities/execute') {
+        const body = JSON.parse(String(payload.body)) as { operationId?: string };
+        if (body.operationId === 'runtimeHost.jobGet') {
+          return {
+            ok: true,
+            data: {
+              status: 200,
+              ok: true,
+              json: {
+                success: true,
+                job: {
+                  id: 'job-skill-import',
+                  type: 'skills.importLocal',
+                  status: 'failed',
+                  queuedAt: 1,
+                  startedAt: 2,
+                  finishedAt: 3,
+                  attempts: 1,
+                  maxAttempts: 1,
+                  error: 'SKILL.md 格式不符合要求，缺少 YAML frontmatter 中的 name 和 description。',
+                },
+              },
+            },
+          };
+        }
         return {
           ok: true,
           data: {
@@ -657,29 +710,6 @@ describe('skills page fetch behavior', () => {
                 queuedAt: 1,
                 attempts: 0,
                 maxAttempts: 1,
-              },
-            },
-          },
-        };
-      }
-      if (channel === 'hostapi:fetch' && payload?.path === '/api/runtime-host/jobs/get') {
-        return {
-          ok: true,
-          data: {
-            status: 200,
-            ok: true,
-            json: {
-              success: true,
-              job: {
-                id: 'job-skill-import',
-                type: 'skills.importLocal',
-                status: 'failed',
-                queuedAt: 1,
-                startedAt: 2,
-                finishedAt: 3,
-                attempts: 1,
-                maxAttempts: 1,
-                error: 'SKILL.md 格式不符合要求，缺少 YAML frontmatter 中的 name 和 description。',
               },
             },
           },
@@ -718,7 +748,7 @@ describe('skills page fetch behavior', () => {
       );
     });
     expect(enableSkillMock).not.toHaveBeenCalled();
-    expect(fetchSkillsMock).not.toHaveBeenCalledWith({ force: true, fresh: true, runtimeAddress: skillManagementAddress });
+    expect(fetchSkillsMock).not.toHaveBeenCalledWith({ force: true, fresh: true });
     expect(toast.success).not.toHaveBeenCalled();
   });
 
@@ -742,7 +772,7 @@ describe('skills page fetch behavior', () => {
     fireEvent.click(screen.getByRole('button', { name: 'actions.enableVisible' }));
 
     await waitFor(() => {
-      expect(batchSetSkillsEnabledMock).toHaveBeenCalledWith(['skill-a', 'skill-b'], true, skillManagementAddress);
+      expect(batchSetSkillsEnabledMock).toHaveBeenCalledWith(['skill-a', 'skill-b'], true);
     });
     expect(batchSetSkillsEnabledMock).toHaveBeenCalledTimes(1);
     expect(enableSkillMock).not.toHaveBeenCalled();

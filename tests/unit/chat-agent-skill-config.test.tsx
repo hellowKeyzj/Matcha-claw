@@ -10,7 +10,76 @@ import { useSkillsStore } from '@/stores/skills';
 import { useSubagentsStore } from '@/stores/subagents';
 import { useTaskCenterStore } from '@/stores/task-center-store';
 import { createEmptySessionRecord } from '@/stores/chat/store-state-helpers';
+import { buildRuntimeScopeKey, buildSessionRecordKey } from '@/stores/chat/session-identity';
 import i18n from '@/i18n';
+
+const skillRuntimeFixtures = vi.hoisted(() => {
+  const testSessionKey = 'agent:test:main';
+  const testSessionIdentity = {
+    endpoint: {
+      kind: 'native-runtime' as const,
+      runtimeAdapterId: 'openclaw',
+      runtimeInstanceId: 'local',
+    },
+    agentId: 'test',
+    sessionKey: testSessionKey,
+  };
+  const testAgentScope = {
+    kind: 'agent' as const,
+    endpoint: testSessionIdentity.endpoint,
+    agentId: 'test',
+  };
+  return { testSessionKey, testSessionIdentity, testAgentScope };
+});
+
+const { testSessionKey, testSessionIdentity, testAgentScope } = skillRuntimeFixtures;
+const testRecordKey = buildSessionRecordKey(testSessionIdentity);
+
+vi.mock('@/lib/host-api', () => ({
+  hostApiFetch: vi.fn().mockResolvedValue({}),
+  hostSessionPatch: vi.fn().mockResolvedValue({ success: true }),
+  hostRuntimeEndpointsList: vi.fn().mockResolvedValue({
+    endpoints: [{
+      id: 'openclaw-local',
+      protocolId: 'openclaw-v4',
+      runtimeAdapterId: 'openclaw',
+      runtimeInstanceId: 'local',
+      displayName: 'OpenClaw Local',
+      agentIds: ['test'],
+      acceptsDynamicAgents: true,
+      capabilities: {
+        chat: true,
+        streaming: true,
+        tools: true,
+        approvals: true,
+        replay: true,
+        modelSelection: true,
+      },
+      capabilitySummaries: [{
+        id: 'session.prompt',
+        scopeKind: 'agent',
+        scope: skillRuntimeFixtures.testAgentScope,
+        targetKinds: ['session'],
+        operations: [],
+        availability: 'available',
+      }],
+      controlState: {
+        connection: null,
+        readiness: null,
+        capabilities: null,
+        updatedAt: null,
+      },
+    }],
+  }),
+  resolveSingleCapabilityScope: vi.fn().mockResolvedValue({
+    kind: 'runtime-instance',
+    endpoint: skillRuntimeFixtures.testSessionIdentity.endpoint,
+  }),
+  hostSessionList: vi.fn().mockResolvedValue({ ready: true, sessions: [] }),
+  hostSessionLoad: vi.fn().mockResolvedValue({ snapshot: null }),
+  hostSessionWindowFetch: vi.fn().mockResolvedValue({ snapshot: null }),
+  resolveHydratedSessionSnapshot: vi.fn(async ({ initial }: { initial: { snapshot?: unknown } }) => initial.snapshot ?? null),
+}));
 
 function createDeferred<T>() {
   let resolve!: (value: T | PromiseLike<T>) => void;
@@ -52,6 +121,16 @@ describe('chat agent skill configuration', () => {
         { id: 'main', name: 'Main', workspace: '/workspace/main', model: 'gpt-main', isDefault: true },
         { id: 'test', name: 'Test Agent', workspace: '/workspace/test', model: 'gpt-4.1-mini', isDefault: false },
       ],
+      agentsResource: {
+        status: 'ready',
+        data: [
+          { id: 'main', name: 'Main', workspace: '/workspace/main', model: 'gpt-main', isDefault: true },
+          { id: 'test', name: 'Test Agent', workspace: '/workspace/test', model: 'gpt-4.1-mini', isDefault: false },
+        ],
+        error: null,
+        hasLoadedOnce: true,
+        lastLoadedAt: 1,
+      },
       loadAgents: vi.fn().mockResolvedValue(undefined),
       updateAgent,
     } as never);
@@ -82,12 +161,37 @@ describe('chat agent skill configuration', () => {
         hasLoadedOnce: true,
         lastLoadedAt: 1,
       },
-      currentSessionKey: 'agent:test:main',
+      sessionRuntimeCatalog: {
+        status: 'ready',
+        error: null,
+        endpoints: [{
+          endpointId: 'openclaw-local',
+          protocolId: 'openclaw-v4',
+          endpoint: testSessionIdentity.endpoint,
+          runtimeAdapterId: 'openclaw',
+          runtimeInstanceId: 'local',
+          displayName: 'OpenClaw Local',
+          agentIds: ['test'],
+          acceptsDynamicAgents: true,
+          sessionPromptScopes: [testAgentScope],
+          defaultSessionPromptScope: testAgentScope,
+        }],
+        defaultSessionPromptScope: testAgentScope,
+      },
+      currentSessionKey: testRecordKey,
       loadedSessions: {
-        'agent:test:main': {
+        [testRecordKey]: {
           ...createEmptySessionRecord(),
           meta: {
             ...createEmptySessionRecord().meta,
+            backendSessionKey: testSessionKey,
+            runtimeScopeKey: buildRuntimeScopeKey(testSessionIdentity.endpoint),
+            agentId: 'test',
+            protocolId: 'openclaw-v4',
+            runtimeEndpointId: 'local',
+            sessionIdentity: testSessionIdentity,
+            kind: 'main',
+            preferred: true,
             historyStatus: 'ready',
           },
         },
@@ -141,6 +245,9 @@ describe('chat agent skill configuration', () => {
     expect(screen.getByRole('switch', { name: 'Feishu Doc' })).toBeInTheDocument();
     expect(screen.queryByRole('switch', { name: 'Disabled Skill' })).toBeNull();
 
+    await waitFor(() => {
+      expect(screen.getByRole('switch', { name: 'Web Search' })).toHaveAttribute('aria-checked', 'true');
+    });
     fireEvent.click(screen.getByRole('switch', { name: 'Web Search' }));
 
     await waitFor(() => {
@@ -161,6 +268,13 @@ describe('chat agent skill configuration', () => {
         { id: 'main', name: 'Main', workspace: '/workspace/main', model: 'gpt-main', isDefault: true },
         { id: 'test', name: 'Test Agent', workspace: '/workspace/test', model: 'gpt-4.1-mini', isDefault: false, skills: [] },
       ],
+      agentsResource: {
+        ...useSubagentsStore.getState().agentsResource,
+        data: [
+          { id: 'main', name: 'Main', workspace: '/workspace/main', model: 'gpt-main', isDefault: true },
+          { id: 'test', name: 'Test Agent', workspace: '/workspace/test', model: 'gpt-4.1-mini', isDefault: false, skills: [] },
+        ],
+      },
     } as never);
 
     updateAgent.mockImplementation(async (input) => {
@@ -171,18 +285,23 @@ describe('chat agent skill configuration', () => {
         await secondUpdate.promise;
       }
 
+      const nextAgents = [
+        { id: 'main', name: 'Main', workspace: '/workspace/main', model: 'gpt-main', isDefault: true },
+        {
+          id: 'test',
+          name: 'Test Agent',
+          workspace: '/workspace/test',
+          model: 'gpt-4.1-mini',
+          isDefault: false,
+          skills: Array.isArray(input.skills) ? input.skills : [],
+        },
+      ];
       useSubagentsStore.setState({
-        agents: [
-          { id: 'main', name: 'Main', workspace: '/workspace/main', model: 'gpt-main', isDefault: true },
-          {
-            id: 'test',
-            name: 'Test Agent',
-            workspace: '/workspace/test',
-            model: 'gpt-4.1-mini',
-            isDefault: false,
-            skills: Array.isArray(input.skills) ? input.skills : [],
-          },
-        ],
+        agents: nextAgents,
+        agentsResource: {
+          ...useSubagentsStore.getState().agentsResource,
+          data: nextAgents,
+        },
       } as never);
     });
 
@@ -197,6 +316,9 @@ describe('chat agent skill configuration', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Open side panel' }));
     fireEvent.mouseDown(screen.getByRole('tab', { name: 'Skill Configuration' }));
 
+    await waitFor(() => {
+      expect(screen.getByRole('switch', { name: 'Web Search' })).toHaveAttribute('aria-checked', 'false');
+    });
     fireEvent.click(screen.getByRole('switch', { name: 'Web Search' }));
     fireEvent.click(screen.getByRole('switch', { name: 'Feishu Doc' }));
     fireEvent.click(screen.getByRole('switch', { name: 'Clawflow' }));

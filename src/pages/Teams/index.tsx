@@ -10,10 +10,6 @@ import { useSubagentsStore } from '@/stores/subagents';
 import { useTeamsStore } from '@/stores/teams';
 import { useTranslation } from 'react-i18next';
 import { isGatewayOperational, isGatewayRecovering } from '@/lib/gateway-status';
-import { resolveSingleCapabilityRuntimeAddress } from '@/lib/host-api';
-import type { RuntimeAddress } from '../../../runtime-host/shared/runtime-address';
-
-const TEAM_COORDINATION_CAPABILITY_ID = 'team.coordination';
 
 export function TeamsPage() {
   const { t } = useTranslation('teams');
@@ -30,37 +26,13 @@ export function TeamsPage() {
   const createTeam = useTeamsStore((state) => state.createTeam);
   const setActiveTeam = useTeamsStore((state) => state.setActiveTeam);
   const deleteTeam = useTeamsStore((state) => state.deleteTeam);
-  const initRuntime = useTeamsStore((state) => state.initRuntime);
-  const loadingByTeamId = useTeamsStore((state) => state.loadingByTeamId);
+  const refreshSnapshot = useTeamsStore((state) => state.refreshSnapshot);
 
   const [teamName, setTeamName] = useState('');
+  const [teamSkillPackagePath, setTeamSkillPackagePath] = useState('');
   const [leadAgentId, setLeadAgentId] = useState('');
   const [memberIds, setMemberIds] = useState<string[]>([]);
-  const [teamRuntimeAddress, setTeamRuntimeAddress] = useState<RuntimeAddress | null>(null);
   const hasRequestedAgentsForCurrentGatewayRunRef = useRef(false);
-
-  useEffect(() => {
-    let cancelled = false;
-    if (!gatewayOperational) {
-      setTeamRuntimeAddress(null);
-      return;
-    }
-    resolveSingleCapabilityRuntimeAddress(TEAM_COORDINATION_CAPABILITY_ID)
-      .then((runtimeAddress) => {
-        if (!cancelled) {
-          setTeamRuntimeAddress(runtimeAddress);
-        }
-      })
-      .catch((error) => {
-        if (!cancelled) {
-          console.error('Failed to resolve team coordination runtime address:', error);
-          setTeamRuntimeAddress(null);
-        }
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [gatewayOperational]);
 
   useEffect(() => {
     if (!gatewayOperational) {
@@ -117,7 +89,8 @@ export function TeamsPage() {
   };
 
   const handleCreate = async () => {
-    if (!effectiveLeadAgentId || !teamRuntimeAddress) {
+    const packagePath = teamSkillPackagePath.trim();
+    if (!effectiveLeadAgentId || !packagePath) {
       return;
     }
     const name = teamName.trim() || t('defaultValues.teamName', 'New Team');
@@ -128,9 +101,9 @@ export function TeamsPage() {
       name,
       leadAgentId: effectiveLeadAgentId,
       memberIds: members,
+      packagePath,
     });
     setActiveTeam(teamId);
-    await initRuntime(teamId, teamRuntimeAddress);
     navigate(`/teams/${teamId}`);
   };
 
@@ -160,6 +133,15 @@ export function TeamsPage() {
               value={teamName}
               onChange={(event) => setTeamName(event.target.value)}
               placeholder={t('create.teamNamePlaceholder')}
+            />
+          </div>
+          <div className="space-y-1">
+            <Label htmlFor="team-skill-package-path">{t('create.packagePath')}</Label>
+            <Input
+              id="team-skill-package-path"
+              value={teamSkillPackagePath}
+              onChange={(event) => setTeamSkillPackagePath(event.target.value)}
+              placeholder={t('create.packagePathPlaceholder')}
             />
           </div>
           <div className="space-y-1">
@@ -201,7 +183,7 @@ export function TeamsPage() {
           <div className="flex justify-end">
             <Button
               onClick={() => void handleCreate()}
-              disabled={!effectiveLeadAgentId || effectiveMemberIds.length === 0 || !teamRuntimeAddress}
+              disabled={!gatewayOperational || !effectiveLeadAgentId || effectiveMemberIds.length === 0 || !teamSkillPackagePath.trim()}
             >
               {t('create.createButton')}
             </Button>
@@ -233,16 +215,11 @@ export function TeamsPage() {
                     <div className="flex items-center gap-2">
                       <Button
                         size="sm"
-                        disabled={!teamRuntimeAddress}
+                        disabled={!gatewayOperational}
                         onClick={async () => {
                           setActiveTeam(team.id);
-                          if (!teamRuntimeAddress) {
-                            return;
-                          }
-                          if (!loadingByTeamId[team.id]) {
-                            await initRuntime(team.id, teamRuntimeAddress);
-                          }
                           navigate(`/teams/${team.id}`);
+                          await refreshSnapshot(team.id);
                         }}
                       >
                         {t('list.open')}

@@ -1,6 +1,5 @@
-import { buildRuntimeAddressKey, type RuntimeAddress } from '../../agent-runtime/contracts/runtime-address';
+import { buildRuntimeEndpointKey, buildSessionIdentityKey, type RuntimeEndpointRef, type SessionIdentity } from '../../agent-runtime/contracts/runtime-address';
 import type { AgentRuntimeRegistry } from '../../agent-runtime/contracts/agent-runtime-registry';
-import type { RuntimeEndpointId, RuntimeProtocolId } from '../../agent-runtime/contracts/runtime-endpoint-types';
 import type {
   SessionCatalogItem,
   SessionCatalogKind,
@@ -22,6 +21,7 @@ import {
   type SessionResolvedLabel,
 } from '../../sessions/transcript-labels';
 import { resolveTimelineLastActivityAt } from '../../sessions/timeline-state';
+import { readSessionContextTokenSnapshot } from '../../sessions/session-context-tokens';
 
 const SESSION_CATALOG_SCAN_CONCURRENCY = 8;
 
@@ -30,7 +30,7 @@ export interface SessionCatalogRuntimeOverlay {
   timelineEntries: SessionTimelineEntry[];
   runtime: SessionRuntimeStateSnapshot;
   runtimeModel?: string | null;
-  runtimeAddress: RuntimeAddress;
+  sessionIdentity: SessionIdentity;
 }
 
 export interface SessionCatalogWorkflowDeps {
@@ -77,20 +77,20 @@ export class SessionCatalogWorkflow {
   }
 
   async listSessions(input: {
-    runtimeAddress: RuntimeAddress;
+    endpoint: RuntimeEndpointRef;
     runtimeOverlays?: readonly SessionCatalogRuntimeOverlay[];
   }): Promise<SessionListResult> {
     const sessionsByKey = new Map(
       this.cachedSessions
-        .filter((session) => isSameRuntimeTarget(session.runtimeAddress, input.runtimeAddress))
-        .map((session) => [buildSessionIdentityKey(session.runtimeAddress, session.key), session]),
+        .filter((session) => isSameRuntimeEndpoint(session.sessionIdentity.endpoint, input.endpoint))
+        .map((session) => [buildSessionIdentityKey(session.sessionIdentity), session]),
     );
 
     for (const overlay of input.runtimeOverlays ?? []) {
-      if (!isSameRuntimeTarget(overlay.runtimeAddress, input.runtimeAddress)) {
+      if (!isSameRuntimeEndpoint(overlay.sessionIdentity.endpoint, input.endpoint)) {
         continue;
       }
-      const identityKey = buildSessionIdentityKey(overlay.runtimeAddress, overlay.sessionKey);
+      const identityKey = buildSessionIdentityKey(overlay.sessionIdentity);
       const cached = sessionsByKey.get(identityKey);
       if (!cached && !shouldExposeRuntimeOnlySession(overlay.runtime)) {
         continue;
@@ -131,7 +131,7 @@ export class SessionCatalogWorkflow {
         agentRuntimeRegistry: this.deps.agentRuntimeRegistry,
       });
       if (item) {
-        sessionsByKey.set(buildSessionIdentityKey(item.runtimeAddress, item.key), item);
+        sessionsByKey.set(buildSessionIdentityKey(item.sessionIdentity), item);
       }
     });
 
@@ -151,21 +151,22 @@ export class SessionCatalogWorkflow {
     overlay: SessionCatalogRuntimeOverlay,
     cached: SessionCatalogItem | undefined,
   ): Promise<SessionCatalogItem> {
-    const agentId = overlay.runtimeAddress.agentId;
-    const storageDescriptor = await this.deps.storageRepository.findStorageDescriptor(overlay.sessionKey);
+    const agentId = overlay.sessionIdentity.agentId;
+    const storageDescriptor = await this.deps.storageRepository.findStorageDescriptor(overlay.sessionIdentity);
     const storeLabel = readSessionStoreLabel(storageDescriptor?.sessionStoreEntry ?? null);
     const timelineLabel = resolveSessionLabelDetailsFromTimelineEntries(overlay.timelineEntries);
     const label = storeLabel ?? timelineLabel.label;
     const titleSource = storeLabel ? 'user' : timelineLabel.titleSource;
     const updatedAt = resolveTimelineLastActivityAt(overlay.timelineEntries, overlay.runtime);
     const kind = resolveSessionCatalogKind(overlay.sessionKey);
-    const identity = resolveSessionIdentity(this.deps.agentRuntimeRegistry, overlay.runtimeAddress);
+    const contextTokens = readSessionContextTokenSnapshot(storageDescriptor?.sessionStoreEntry);
+    const endpoint = this.deps.agentRuntimeRegistry.resolveEndpointForRef(overlay.sessionIdentity.endpoint, overlay.sessionIdentity.agentId);
     return {
       key: overlay.sessionKey,
       agentId,
-      protocolId: identity.protocolId,
-      runtimeEndpointId: identity.runtimeEndpointId,
-      runtimeAddress: overlay.runtimeAddress,
+      protocolId: endpoint.protocolId,
+      runtimeEndpointId: endpoint.id,
+      sessionIdentity: overlay.sessionIdentity,
       kind,
       preferred: kind === 'main',
       ...(cached ?? {}),
@@ -174,6 +175,7 @@ export class SessionCatalogWorkflow {
       ...(titleSource !== 'none' ? { titleSource } : {}),
       displayName: label ?? cached?.displayName ?? overlay.sessionKey,
       ...(overlay.runtimeModel ? { model: overlay.runtimeModel } : {}),
+      ...(contextTokens ? { contextTokens } : {}),
       ...(typeof updatedAt === 'number' ? { updatedAt } : {}),
     };
   }
@@ -276,8 +278,8 @@ async function buildSessionCatalogItem(input: {
   if (!input.storageDescriptor.transcriptPath) {
     return null;
   }
-  const runtimeAddress = input.storageDescriptor.runtimeAddress;
-  const agentId = runtimeAddress.agentId;
+  const sessionIdentity = input.storageDescriptor.sessionIdentity;
+  const agentId = sessionIdentity.agentId;
   const storeLabel = readSessionStoreLabel(input.storageDescriptor.sessionStoreEntry);
   const transcriptDetails = await resolveTranscriptCatalogDetails({
     storageRepository: input.storageRepository,
@@ -291,17 +293,18 @@ async function buildSessionCatalogItem(input: {
   const updatedAt = transcriptDetails.lastActivityAt ?? readSessionStoreUpdatedAt(input.storageDescriptor.sessionStoreEntry);
   const kind = resolveSessionCatalogKind(input.sessionKey);
   const resolvedModel = await input.metadataRepository.resolveSessionModel({
-    sessionKey: input.sessionKey,
+    sessionIdentity,
     storageDescriptor: input.storageDescriptor,
     runtimeModel: input.runtimeModel ?? null,
   });
-  const identity = resolveSessionIdentity(input.agentRuntimeRegistry, runtimeAddress);
+  const contextTokens = readSessionContextTokenSnapshot(input.storageDescriptor.sessionStoreEntry);
+  const endpoint = input.agentRuntimeRegistry.resolveEndpointForRef(sessionIdentity.endpoint, sessionIdentity.agentId);
   return {
     key: input.sessionKey,
     agentId,
-    protocolId: identity.protocolId,
-    runtimeEndpointId: identity.runtimeEndpointId,
-    runtimeAddress,
+    protocolId: endpoint.protocolId,
+    runtimeEndpointId: endpoint.id,
+    sessionIdentity,
     kind,
     preferred: kind === 'main',
     status: readSessionStoreStatus(input.storageDescriptor.sessionStoreEntry),
@@ -309,6 +312,7 @@ async function buildSessionCatalogItem(input: {
     ...(titleSource !== 'none' ? { titleSource } : {}),
     displayName: label ?? input.sessionKey,
     ...(resolvedModel ? { model: resolvedModel } : {}),
+    ...(contextTokens ? { contextTokens } : {}),
     ...(typeof updatedAt === 'number' ? { updatedAt } : {}),
   };
 }
@@ -317,41 +321,8 @@ function shouldExposeRuntimeOnlySession(runtime: SessionRuntimeStateSnapshot): b
   return typeof runtime.updatedAt === 'number';
 }
 
-function resolveSessionIdentity(registry: AgentRuntimeRegistry, address: RuntimeAddress): {
-  protocolId: RuntimeProtocolId;
-  runtimeEndpointId: RuntimeEndpointId;
-} {
-  try {
-    return registry.resolveSessionIdentityForAddress(address);
-  } catch (error) {
-    if (address.kind !== 'protocol-connector') {
-      throw error;
-    }
-    return {
-      protocolId: address.protocolId,
-      runtimeEndpointId: address.endpointId,
-    };
-  }
-}
-
-function isSameRuntimeTarget(left: RuntimeAddress, right: RuntimeAddress): boolean {
-  if (left.kind !== right.kind) {
-    return false;
-  }
-  if (left.kind === 'native-runtime' && right.kind === 'native-runtime') {
-    return left.runtimeAdapterId === right.runtimeAdapterId
-      && left.runtimeInstanceId === right.runtimeInstanceId;
-  }
-  if (left.kind === 'protocol-connector' && right.kind === 'protocol-connector') {
-    return left.protocolId === right.protocolId
-      && left.connectorId === right.connectorId
-      && left.endpointId === right.endpointId;
-  }
-  return false;
-}
-
-function buildSessionIdentityKey(runtimeAddress: RuntimeAddress, sessionKey: string): string {
-  return `${buildRuntimeAddressKey(runtimeAddress)}::${sessionKey}`;
+function isSameRuntimeEndpoint(left: RuntimeEndpointRef, right: RuntimeEndpointRef): boolean {
+  return buildRuntimeEndpointKey(left) === buildRuntimeEndpointKey(right);
 }
 
 async function forEachWithConcurrency<T>(

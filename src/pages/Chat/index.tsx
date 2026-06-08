@@ -7,6 +7,7 @@ import { useLocation, useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { useShallow } from 'zustand/react/shallow';
 import { useChatStore, type ApprovalItem, type ChatStoreState } from '@/stores/chat';
+import { ABORT_STOPPING_TIMEOUT_ERROR } from '@/stores/chat/abort-handlers';
 import { isRunActive } from '@/stores/chat/types';
 import { useGatewayStore } from '@/stores/gateway';
 import { useSkillsStore } from '@/stores/skills';
@@ -45,10 +46,11 @@ import {
   type ChatAssistantCatalogAgent,
   type ChatRenderItem,
 } from './chat-render-item-model';
-import { hostApiFetch, hostSessionPatch, resolveSingleCapabilityRuntimeAddress } from '@/lib/host-api';
+import { hostApiFetch, hostSessionPatch } from '@/lib/host-api';
 import { invokeIpc } from '@/lib/api-client';
 import { toast } from 'sonner';
 import { collectChatArtifactGroups } from './artifacts';
+import { buildChatContextUsageViewModel } from './context-usage';
 import { resolveArtifactWorkspaceRoot } from './artifact-workspace';
 import {
   resolveArtifactGroupFocusFile,
@@ -57,7 +59,6 @@ import {
   resolveArtifactWorkbenchSelection,
 } from './artifact-workbench';
 import { supportsInlineDiff, type GeneratedFile } from '@/lib/generated-files';
-import type { RuntimeAddress } from '../../../runtime-host/shared/runtime-address';
 import type { ArtifactPreviewTarget } from '@/components/file-preview/types';
 import {
   buildArtifactPreviewTargetFromAttachedFile,
@@ -91,8 +92,6 @@ const EMPTY_APPROVAL_ITEMS: ApprovalItem[] = [];
 const ACTIVE_RUN_DISCONNECTED_ERROR = 'The active run disconnected before a terminal event was received.';
 const GATEWAY_CONNECT_FAILED_PREFIX = 'Gateway connect failed: ';
 const GATEWAY_RPC_TIMEOUT_PREFIX = 'Gateway RPC timeout: ';
-const MODEL_PROVIDER_CAPABILITY_ID = 'model.provider';
-const SUBAGENT_MANAGEMENT_CAPABILITY_ID = 'subagent.management';
 
 function parseRpcFailedMessage(message: string): { method: string; reason: string } | null {
   const matched = /^Gateway RPC failed \((.+?)\):\s*(.+)$/.exec(message.trim());
@@ -298,7 +297,7 @@ export function Chat({ isActive = true }: ChatProps) {
     loadSessions,
     cleanupEmptySession,
   } = useChatStore(useShallow(selectChatPageState));
-  const currentAgentId = currentSession.meta.agentId ?? currentSession.meta.runtimeAddress?.agentId ?? 'main';
+  const currentAgentId = currentSession.meta.agentId ?? currentSession.meta.sessionIdentity?.agentId ?? 'main';
   const agents = useSubagentsStore((state) => (
     Array.isArray(state.agentsResource.data) ? state.agentsResource.data : EMPTY_AGENTS
   ));
@@ -319,8 +318,6 @@ export function Chat({ isActive = true }: ChatProps) {
   const [artifactFocusedFileOverride, setArtifactFocusedFileOverride] = useState<ArtifactPreviewTarget | null>(null);
   const [artifactViewMode, setArtifactViewMode] = useState<'preview' | 'diff'>('diff');
   const [visibleRuntimeError, setVisibleRuntimeError] = useState<string | null>(null);
-  const [modelProviderAddress, setModelProviderAddress] = useState<RuntimeAddress | null>(null);
-  const [subagentManagementAddress, setSubagentManagementAddress] = useState<RuntimeAddress | null>(null);
   const skillPreviewRequestSeqRef = useRef(0);
   const previousRenderedItemsRef = useRef<ChatRenderItem[] | null>(null);
   const artifactAutoOpenedSessionKeyRef = useRef<string | null>(null);
@@ -345,51 +342,6 @@ export function Chat({ isActive = true }: ChatProps) {
   });
 
 
-  useEffect(() => {
-    let cancelled = false;
-    if (!isGatewayRunning) {
-      setModelProviderAddress(null);
-      return;
-    }
-    resolveSingleCapabilityRuntimeAddress(MODEL_PROVIDER_CAPABILITY_ID)
-      .then((runtimeAddress) => {
-        if (!cancelled) {
-          setModelProviderAddress(runtimeAddress);
-        }
-      })
-      .catch((error) => {
-        if (!cancelled) {
-          console.error('Failed to resolve model provider runtime address:', error);
-          setModelProviderAddress(null);
-        }
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [isGatewayRunning]);
-
-  useEffect(() => {
-    let cancelled = false;
-    if (!isGatewayRunning) {
-      setSubagentManagementAddress(null);
-      return;
-    }
-    resolveSingleCapabilityRuntimeAddress(SUBAGENT_MANAGEMENT_CAPABILITY_ID)
-      .then((runtimeAddress) => {
-        if (!cancelled) {
-          setSubagentManagementAddress(runtimeAddress);
-        }
-      })
-      .catch((error) => {
-        if (!cancelled) {
-          console.error('Failed to resolve subagent management runtime address:', error);
-          setSubagentManagementAddress(null);
-        }
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [isGatewayRunning]);
 
   const {
     sidePanelOpen,
@@ -418,14 +370,8 @@ export function Chat({ isActive = true }: ChatProps) {
     model?: string;
     skills?: string[] | null;
   }) => {
-    if (!subagentManagementAddress) {
-      return;
-    }
-    await useSubagentsStore.getState().updateAgent({
-      ...input,
-      runtimeAddress: subagentManagementAddress,
-    });
-  }, [subagentManagementAddress]);
+    await useSubagentsStore.getState().updateAgent(input);
+  }, []);
 
   const {
     selectedSkillIds,
@@ -453,11 +399,11 @@ export function Chat({ isActive = true }: ChatProps) {
   }, [currentAgentId, resetSkillConfigSession]);
 
   useEffect(() => {
-    if (!modelProviderAddress) {
+    if (!isGatewayRunning) {
       return;
     }
-    void loadAvailableModels(modelProviderAddress);
-  }, [loadAvailableModels, modelProviderAddress]);
+    void loadAvailableModels();
+  }, [isGatewayRunning, loadAvailableModels]);
 
   useEffect(() => {
     if (sidePanelOpen && activeSidePanelTab === 'skills') {
@@ -520,6 +466,10 @@ export function Chat({ isActive = true }: ChatProps) {
     });
   }, [artifactFiles, artifactFocusedFile, currentAgent?.workspace]);
   const artifactWorkspaceRoot = defaultArtifactWorkspaceRoot;
+  const artifactWorkspaceContext = useMemo(() => ({
+    workspaceId: currentAgentId,
+    sourceId: currentAgent?.workspace?.trim() || artifactWorkspaceRoot || undefined,
+  }), [artifactWorkspaceRoot, currentAgent?.workspace, currentAgentId]);
   const openGeneratedArtifact = useCallback((file: GeneratedFile, options?: OpenGeneratedArtifactOptions) => {
     const canShowChanges = supportsInlineDiff(file);
     const nextTarget = buildArtifactPreviewTargetFromGeneratedFile(file);
@@ -692,6 +642,9 @@ export function Chat({ isActive = true }: ChatProps) {
     if (effectiveRuntimeError === ACTIVE_RUN_DISCONNECTED_ERROR) {
       return t('errors.activeRunDisconnected');
     }
+    if (effectiveRuntimeError === ABORT_STOPPING_TIMEOUT_ERROR) {
+      return t('errors.abortStoppingTimeout');
+    }
     return effectiveRuntimeError;
   }, [currentSession.runtime, dismissedRuntimeError, localizedGatewayIssue, t]);
   useEffect(() => {
@@ -719,6 +672,11 @@ export function Chat({ isActive = true }: ChatProps) {
   const effectiveCurrentModelId = useMemo(() => {
     return resolveEffectiveChatModelId(currentSession.meta.model, currentAgent?.model, fallbackModelId, availableModelIds);
   }, [availableModelIds, currentAgent?.model, currentSession.meta.model, fallbackModelId]);
+  const contextUsage = useMemo(() => buildChatContextUsageViewModel({
+    snapshot: currentSession.contextTokens,
+    currentModelId: effectiveCurrentModelId,
+    availableModels,
+  }), [availableModels, currentSession.contextTokens, effectiveCurrentModelId]);
   const modelPicker = useMemo(() => {
     const currentModelId = effectiveCurrentModelId;
     if (!currentModelId) {
@@ -754,7 +712,7 @@ export function Chat({ isActive = true }: ChatProps) {
     attachments?: Parameters<typeof sendMessage>[1],
   ) => {
     viewportPaneRef.current?.prepareCurrentLatestBottomAlign();
-    await sendMessage(text, attachments);
+    return sendMessage(text, attachments);
   }, [sendMessage]);
   const handleComposerWheel = useCallback((deltaY: number) => {
     viewportPaneRef.current?.scrollByWheelDelta(deltaY);
@@ -787,7 +745,7 @@ export function Chat({ isActive = true }: ChatProps) {
       const target = resolveSessionOperationTarget(useChatStore.getState(), currentSessionKey);
       const result = await hostSessionPatch({
         sessionKey: target.sessionKey,
-        runtimeAddress: target.runtimeAddress,
+        sessionIdentity: target.sessionIdentity,
         runtimeModelRef: normalizedNextModelId,
       });
       if (result.snapshot) {
@@ -907,11 +865,14 @@ export function Chat({ isActive = true }: ChatProps) {
           void handleSelectModel(modelId);
         },
       } : null}
+      contextUsage={contextUsage}
       disabled={false}
       sending={isRunActive(currentSession.runtime)}
+      stopping={currentSession.runtime.runPhase === 'stopping'}
       approvalWaiting={approvalStatus === 'awaiting_approval'}
       allowedSkillIds={allowedSkillIds}
-      runtimeAddress={currentSession.meta.runtimeAddress}
+      sessionIdentity={currentSession.meta.sessionIdentity}
+      workspaceContext={artifactWorkspaceContext}
     />
   );
 
@@ -978,12 +939,13 @@ export function Chat({ isActive = true }: ChatProps) {
             artifactActiveSection={artifactActiveSection}
             artifactViewMode={artifactViewMode}
             artifactWorkspaceRoot={artifactWorkspaceRoot}
+            artifactWorkspaceContext={artifactWorkspaceContext}
             onArtifactFocusFile={handleArtifactFocusTarget}
             onOpenGeneratedArtifactFile={openGeneratedArtifact}
             onOpenArtifactGroup={handleOpenArtifactGroup}
             onArtifactSectionChange={setArtifactActiveSection}
             onArtifactViewModeChange={setArtifactViewMode}
-            runtimeAddress={currentSession.meta.runtimeAddress ?? undefined}
+            sessionIdentity={currentSession.meta.sessionIdentity ?? undefined}
             onArtifactRevealInFileManager={(filePath) => {
               void invokeIpc('shell:showItemInFolder', filePath).then((result) => {
                 if (result && typeof result === 'object' && 'success' in result && (result as { success?: boolean }).success === false) {
@@ -1020,7 +982,8 @@ export function Chat({ isActive = true }: ChatProps) {
             errorMessage={localizedRuntimeError}
             showThinking={showThinking}
             userAvatarDataUrl={userAvatarDataUrl}
-            runtimeAddress={currentSession.meta.runtimeAddress ?? undefined}
+            sessionIdentity={currentSession.meta.sessionIdentity ?? undefined}
+            workspaceContext={artifactWorkspaceContext}
             artifactGroups={artifactGroups}
             onOpenArtifactFile={handleOpenArtifactFile}
             onOpenAttachedArtifact={(file) => {
@@ -1055,8 +1018,8 @@ export function Chat({ isActive = true }: ChatProps) {
           <ChatApprovalDock
             waitingLabel={t('approval.waitingLabel')}
             approvals={currentPendingApprovals}
-            onResolve={(id, decision) => {
-              void resolveApproval(id, decision);
+            onResolve={(approval, decision) => {
+              void resolveApproval(approval, decision);
             }}
           />
         ) : null}

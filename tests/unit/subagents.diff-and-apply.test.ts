@@ -8,6 +8,12 @@ import {
 
 import { useSubagentsStore } from '@/stores/subagents';
 
+const openClawEndpoint = {
+  kind: 'native-runtime' as const,
+  runtimeAdapterId: 'openclaw',
+  runtimeInstanceId: 'local',
+};
+
 describe('subagents diff and apply', () => {
   beforeEach(() => {
     resetGatewayClientMocks();
@@ -112,11 +118,8 @@ describe('subagents diff and apply', () => {
 
     expect(hostSessionDeleteMock).toHaveBeenCalledWith({
       sessionKey: 'agent:writer:subagent-draft-123',
-      runtimeAddress: {
-        kind: 'native-runtime',
-        capabilityId: 'session.prompt',
-        runtimeAdapterId: 'openclaw',
-        runtimeInstanceId: 'local',
+      sessionIdentity: {
+        endpoint: openClawEndpoint,
         agentId: 'writer',
         sessionKey: 'agent:writer:subagent-draft-123',
       },

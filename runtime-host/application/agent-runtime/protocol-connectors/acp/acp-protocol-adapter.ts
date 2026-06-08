@@ -1,5 +1,5 @@
 import type { CanonicalSessionEvent } from '../../../sessions/canonical/canonical-events';
-import { buildRuntimeAddressScopedMessageId } from '../../contracts/runtime-identity-contract';
+import { buildSessionIdentityScopedMessageId } from '../../contracts/runtime-identity-contract';
 import type {
   RuntimeProtocolAdapter,
   RuntimeReplayAdapter,
@@ -69,6 +69,6 @@ export class AcpProtocolAdapter implements RuntimeProtocolAdapter {
   readonly eventAdapter = new AcpCanonicalAdapter();
   readonly replayAdapter = new AcpReplayAdapter(this.eventAdapter);
   readonly identityPolicy = {
-    buildMessageId: (input: Parameters<RuntimeProtocolAdapter['identityPolicy']['buildMessageId']>[0]) => buildRuntimeAddressScopedMessageId(input),
+    buildMessageId: (input: Parameters<RuntimeProtocolAdapter['identityPolicy']['buildMessageId']>[0]) => buildSessionIdentityScopedMessageId(input),
   };
 }

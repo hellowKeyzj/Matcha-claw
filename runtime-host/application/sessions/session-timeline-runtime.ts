@@ -25,6 +25,7 @@ import { SessionTranscriptTimelineLoader } from './session-transcript-timeline-l
 import { SessionExecutionGraphRuntime } from './session-execution-graph-runtime';
 import type { RuntimeClockPort } from '../common/runtime-ports';
 import type { RuntimeSessionContext } from '../agent-runtime/contracts/runtime-endpoint-types';
+import type { SessionIdentity } from '../agent-runtime/contracts/runtime-address';
 
 export interface SessionTimelineRuntimeDeps {
   stateStore: SessionRuntimeStateStore;
@@ -37,8 +38,8 @@ export interface SessionTimelineRuntimeDeps {
 export class SessionTimelineRuntime {
   constructor(private readonly deps: SessionTimelineRuntimeDeps) {}
 
-  async findStorageDescriptor(sessionKey: string): Promise<SessionStorageDescriptor | null> {
-    return await this.deps.sessionStorage.findStorageDescriptor(sessionKey);
+  async findStorageDescriptor(identity: SessionIdentity): Promise<SessionStorageDescriptor | null> {
+    return await this.deps.sessionStorage.findStorageDescriptor(identity);
   }
 
   private getSessionState(sessionKey: string, context?: RuntimeSessionContext): SessionRuntimeTimelineState {
@@ -89,7 +90,7 @@ export class SessionTimelineRuntime {
         : reduceCanonicalSessionEvents(state.canonical, replayEvents as Iterable<CanonicalSessionEvent>);
       if (committedEvents.length > 0) {
         this.deps.stateStore.syncTransportIssueIndex(sessionKey, state);
-        this.deps.stateStore.syncApprovalAddressIndex(sessionKey, state);
+        this.deps.stateStore.syncApprovalIdentityIndex(sessionKey, state);
         this.projectCanonicalState(sessionKey, state);
         projected = true;
       }
@@ -101,7 +102,7 @@ export class SessionTimelineRuntime {
       ? createLatestWindowState(state.renderItems.length)
       : clampWindowState(state.window, state.renderItems.length);
     if (!projected) {
-      this.deps.executionGraphRuntime.refreshParents(sessionKey, state.canonical.context.address);
+      this.deps.executionGraphRuntime.refreshParents(state.canonical.context.identity);
     }
     return { projected };
   }
@@ -156,7 +157,7 @@ export class SessionTimelineRuntime {
     state.runtime = cloneSessionRuntimeState(state.canonical.runtime);
     state.window = createLatestWindowState(state.renderItems.length);
     this.deps.stateStore.updateExecutionGraphDependencyIndex(sessionKey, state.canonical.context, state.executionGraphItems);
-    this.deps.executionGraphRuntime.refreshParents(sessionKey, state.canonical.context.address);
+    this.deps.executionGraphRuntime.refreshParents(state.canonical.context.identity);
   }
 
   private projectIncrementalCanonicalState(
@@ -196,9 +197,9 @@ export class SessionTimelineRuntime {
       };
     }
     this.deps.stateStore.syncTransportIssueIndex(sessionKey, state);
-    this.deps.stateStore.syncApprovalAddressIndex(sessionKey, state);
+    this.deps.stateStore.syncApprovalIdentityIndex(sessionKey, state);
     this.projectIncrementalCanonicalState(sessionKey, state, committedEvents);
-    this.deps.executionGraphRuntime.refreshParents(sessionKey, state.canonical.context.address);
+    this.deps.executionGraphRuntime.refreshParents(state.canonical.context.identity);
     this.touchSessionStateMeta(state, { advanceRunEpoch: committedEvents.some((event) => event.type === 'lifecycle') });
     this.deps.stateStore.persistStore();
     return {

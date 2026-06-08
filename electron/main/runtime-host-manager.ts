@@ -121,15 +121,26 @@ export interface RuntimeHostManagerDeps {
 type RuntimeHostProviderOAuthInput = {
   provider: string;
   region?: 'global' | 'cn';
-  accountId?: string;
+  flowId: string;
+  accountId: string;
   label?: string;
+};
+
+type RuntimeHostOAuthFlowBinding = {
+  flowId: string;
+  accountId: string;
+  vendorId: string;
+};
+
+type RuntimeHostOAuthSubmitInput = RuntimeHostOAuthFlowBinding & {
+  code: string;
 };
 
 type RuntimeHostMainProcessCapabilities = {
   readonly providerOAuth: {
     readonly startOAuthFlow: (input: RuntimeHostProviderOAuthInput) => Promise<void>;
-    readonly cancelOAuthFlow: () => Promise<void>;
-    readonly submitManualOAuthCode: (code: string) => boolean;
+    readonly cancelOAuthFlow: (input: RuntimeHostOAuthFlowBinding) => Promise<void>;
+    readonly submitManualOAuthCode: (input: RuntimeHostOAuthSubmitInput) => boolean;
   };
 };
 
@@ -159,23 +170,37 @@ export function createRuntimeHostManager(
     return value as Record<string, unknown>;
   }
 
-  function asOAuthStartInput(value: unknown): {
-    provider: string;
-    region?: 'global' | 'cn';
-    accountId?: string;
-    label?: string;
-  } | null {
+  function asOAuthStartInput(value: unknown): RuntimeHostProviderOAuthInput | null {
     const record = asRecord(value);
-    if (!record || typeof record.provider !== 'string') {
+    const provider = typeof record?.provider === 'string' ? record.provider.trim() : '';
+    const flowId = typeof record?.flowId === 'string' ? record.flowId.trim() : '';
+    const accountId = typeof record?.accountId === 'string' ? record.accountId.trim() : '';
+    if (!provider || !flowId || !accountId) {
       return null;
     }
-    const region = record.region;
+    const region = record?.region;
     return {
-      provider: record.provider,
+      provider,
+      flowId,
+      accountId,
       ...(region === 'global' || region === 'cn' ? { region } : {}),
-      ...(typeof record.accountId === 'string' ? { accountId: record.accountId } : {}),
-      ...(typeof record.label === 'string' ? { label: record.label } : {}),
+      ...(typeof record?.label === 'string' ? { label: record.label } : {}),
     };
+  }
+
+  function asOAuthFlowBinding(value: unknown): RuntimeHostOAuthFlowBinding | null {
+    const record = asRecord(value);
+    const flowId = typeof record?.flowId === 'string' ? record.flowId.trim() : '';
+    const accountId = typeof record?.accountId === 'string' ? record.accountId.trim() : '';
+    const vendorId = typeof record?.vendorId === 'string' ? record.vendorId.trim() : '';
+    return flowId && accountId && vendorId ? { flowId, accountId, vendorId } : null;
+  }
+
+  function asOAuthSubmitInput(value: unknown): RuntimeHostOAuthSubmitInput | null {
+    const binding = asOAuthFlowBinding(value);
+    const record = asRecord(value);
+    const code = typeof record?.code === 'string' ? record.code.trim() : '';
+    return binding && code ? { ...binding, code } : null;
   }
 
   let lifecycle: RuntimeHostLifecycle = 'idle';
@@ -230,6 +255,7 @@ export function createRuntimeHostManager(
       startOAuthFlow: async (input) => {
         if (input.provider === 'openai') {
           await browserOAuthManager.startFlow(input.provider as BrowserOAuthProviderType, {
+            flowId: input.flowId,
             accountId: input.accountId,
             label: input.label,
           });
@@ -239,16 +265,17 @@ export function createRuntimeHostManager(
           input.provider as OAuthProviderType,
           input.region,
           {
+            flowId: input.flowId,
             accountId: input.accountId,
             label: input.label,
           },
         );
       },
-      cancelOAuthFlow: async () => {
-        await deviceOAuthManager.stopFlow();
-        await browserOAuthManager.stopFlow();
+      cancelOAuthFlow: async (input) => {
+        await deviceOAuthManager.stopFlow(input);
+        await browserOAuthManager.stopFlow(input);
       },
-      submitManualOAuthCode: (code) => browserOAuthManager.submitManualCode(code || ''),
+      submitManualOAuthCode: (input) => browserOAuthManager.submitManualCode(input),
     },
   };
 
@@ -267,14 +294,20 @@ export function createRuntimeHostManager(
       }
 
       if (action === 'provider_oauth_cancel') {
-        await mainProcessCapabilities.providerOAuth.cancelOAuthFlow();
+        const input = asOAuthFlowBinding(payload);
+        if (!input) {
+          return { status: 400, data: { success: false, error: 'provider-accounts/oauth/cancel 参数无效' } };
+        }
+        await mainProcessCapabilities.providerOAuth.cancelOAuthFlow(input);
         return { status: 200, data: { success: true } };
       }
 
       if (action === 'provider_oauth_submit') {
-        const body = asRecord(payload);
-        const code = typeof body?.code === 'string' ? body.code : '';
-        const accepted = mainProcessCapabilities.providerOAuth.submitManualOAuthCode(code);
+        const input = asOAuthSubmitInput(payload);
+        if (!input) {
+          return { status: 400, data: { success: false, error: 'provider-accounts/oauth/submit 参数无效' } };
+        }
+        const accepted = mainProcessCapabilities.providerOAuth.submitManualOAuthCode(input);
         if (!accepted) {
           return { status: 400, data: { success: false, error: 'No active manual OAuth input pending' } };
         }

@@ -10,11 +10,20 @@ import {
   GATEWAY_RPC_QUEUE_LIMIT,
   GatewayRpcSender,
 } from '../../runtime-host/openclaw-bridge/client-rpc-sender';
-import type { RuntimeAddress } from '../../runtime-host/application/agent-runtime/contracts/runtime-address';
+import {
+  createRuntimeSessionContext,
+} from '../../runtime-host/application/agent-runtime/contracts/runtime-session-context';
+import type {
+  CapabilityTarget,
+  RuntimeEndpointRef,
+  RuntimeScope,
+  SessionIdentity,
+} from '../../runtime-host/application/agent-runtime/contracts/runtime-address';
 import type { RuntimeSessionContext } from '../../runtime-host/application/agent-runtime/contracts/runtime-endpoint-types';
 import type { CanonicalSessionEvent } from '../../runtime-host/application/sessions/canonical/canonical-events';
 import type { SessionRuntimeTimelineState } from '../../runtime-host/application/sessions/session-runtime-types';
 import type { RuntimeScheduledTask, RuntimeSchedulerPort } from '../../runtime-host/application/common/runtime-ports';
+import type { RuntimeTopologySnapshot } from '../../runtime-host/shared/runtime-topology';
 
 const createGatewayClientMock = vi.hoisted(() => vi.fn());
 
@@ -32,31 +41,92 @@ function logBenchmark(label: string, startedAt: number, metrics: Record<string, 
   console.log(`[runtime-host-bench] ${label} ${parts}`);
 }
 
-function runtimeAddress(capabilityId: string, sessionKey = 'agent:main:main'): RuntimeAddress {
+const benchEndpoint: RuntimeEndpointRef = {
+  kind: 'native-runtime',
+  runtimeAdapterId: 'bench-runtime',
+  runtimeInstanceId: 'local',
+};
+
+function sessionIdentity(sessionKey: string): SessionIdentity {
   return {
-    kind: 'native-runtime',
-    capabilityId,
-    runtimeAdapterId: 'bench-runtime',
-    runtimeInstanceId: 'local',
+    endpoint: benchEndpoint,
     agentId: 'default',
     sessionKey,
   };
 }
 
 function runtimeContext(sessionKey: string): RuntimeSessionContext {
-  return {
-    sessionKey,
+  return createRuntimeSessionContext({
+    identity: sessionIdentity(sessionKey),
     protocolId: 'bench-protocol',
     runtimeEndpointId: 'bench-endpoint',
-    endpoint: {
-      scopeKey: 'bench-runtime:local:default',
-      capabilityId: 'session.prompt',
+  });
+}
+
+function teamRunScope(runId: string): RuntimeScope {
+  return {
+    kind: 'team-run',
+    endpoint: benchEndpoint,
+    runId,
+  };
+}
+
+function teamRunTarget(runId: string): CapabilityTarget {
+  return {
+    kind: 'team-run',
+    runId,
+  };
+}
+
+function runtimeHostCapabilityPayload(input: Record<string, unknown> = {}) {
+  const runId = typeof input.runId === 'string' ? input.runId : 'team-run-main';
+  return {
+    id: 'team.runtime',
+    operationId: 'team.runTick',
+    scope: teamRunScope(runId),
+    target: teamRunTarget(runId),
+    input: { runId, ...input },
+  };
+}
+
+function runtimeHostTopology(runId = 'team-run-main'): RuntimeTopologySnapshot {
+  const scope = teamRunScope(runId);
+  return {
+    protocols: [{ protocolId: 'bench-protocol' }],
+    adapters: [{ runtimeAdapterId: 'bench-runtime', protocolId: 'bench-protocol', endpointIds: ['bench-endpoint'] }],
+    connectors: [],
+    adapterInstances: [{ runtimeAdapterId: 'bench-runtime', runtimeInstanceId: 'local', endpointId: 'bench-endpoint', agentIds: ['default'] }],
+    endpoints: [{
+      id: 'bench-endpoint',
+      protocolId: 'bench-protocol',
       runtimeAdapterId: 'bench-runtime',
       runtimeInstanceId: 'local',
-      agentId: 'default',
-    },
-    agentId: 'default',
-    address: runtimeAddress('session.prompt', sessionKey),
+      displayName: 'Benchmark Runtime',
+      agentIds: ['default'],
+      acceptsDynamicAgents: false,
+      capabilities: {
+        chat: true,
+        streaming: true,
+        tools: true,
+        approvals: true,
+        replay: true,
+        modelSelection: true,
+      },
+      capabilitySummaries: [{
+        id: 'team.runtime',
+        scopeKind: 'team-run',
+        scope,
+        targetKinds: ['team-run'],
+        operations: [{ id: 'team.runTick', targetKind: 'team-run', targetRequired: true }],
+        availability: 'available',
+      }],
+      controlState: {
+        connection: null,
+        readiness: null,
+        capabilities: null,
+        updatedAt: null,
+      },
+    }],
   };
 }
 
@@ -99,7 +169,8 @@ function createTimelineRuntime(states: Map<string, SessionRuntimeTimelineState>)
     persistStore: () => undefined,
     updateExecutionGraphDependencyIndex: () => undefined,
     syncTransportIssueIndex: () => undefined,
-    syncApprovalAddressIndex: () => undefined,
+    syncApprovalIdentityIndex: () => undefined,
+    listParentSessionStates: () => [],
     listParentSessionKeys: () => [],
     findSessionState: () => null,
   };
@@ -129,10 +200,10 @@ function createDeferred<T>() {
 
 describe('runtime-host architecture benchmarks', () => {
   benchIt('routes exact dispatch in a 1k fallback table without scanning fallback handlers', async () => {
-    const exact = vi.fn(() => ({ status: 200, data: { route: 'target' } }));
-    const fallbackHandlers = Array.from({ length: 1000 }, (_, index) => vi.fn(() => ({
+    const exact = vi.fn(({ payload }) => ({ status: 200, data: { route: 'target', payload } }));
+    const fallbackHandlers = Array.from({ length: 1000 }, (_, index) => vi.fn(({ payload }) => ({
       status: 200,
-      data: { route: `fallback-${index}` },
+      data: { route: `fallback-${index}`, payload },
     })));
     const dispatcher = createRuntimeRouteDispatcher([
       ...fallbackHandlers.map((handle, index) => ({
@@ -146,7 +217,7 @@ describe('runtime-host architecture benchmarks', () => {
 
     const startedAt = performance.now();
     for (let index = 0; index < 10_000; index += 1) {
-      await dispatcher('POST', '/api/target', undefined);
+      await dispatcher('POST', '/api/target', runtimeHostCapabilityPayload({ runId: `team-run-${index % 1000}` }));
     }
     logBenchmark('route_dispatch_exact_10k', startedAt, { iterations: 10_000 });
 
@@ -179,8 +250,11 @@ describe('runtime-host architecture benchmarks', () => {
     });
     const processed: string[] = [];
     const runtime = {
-      consumeEndpointConversationEvent: vi.fn(async (_runtimeAddress, payload: { event?: { sessionKey?: string; seq?: number } }) => {
-        processed.push(`${payload.event?.sessionKey}:${String(payload.event?.seq)}`);
+      consumeEndpointConversationEvent: vi.fn(async (
+        _endpoint: RuntimeEndpointRef,
+        payload: { event?: { sessionKey?: string; seq?: number }; sessionIdentity?: SessionIdentity },
+      ) => {
+        processed.push(`${payload.sessionIdentity?.sessionKey}:${String(payload.event?.seq)}`);
         return [];
       }),
       consumeEndpointNotification: vi.fn(() => []),
@@ -191,10 +265,13 @@ describe('runtime-host architecture benchmarks', () => {
         requestParentShellAction: vi.fn(async () => ({ success: true, status: 200, data: {} })),
         emitParentGatewayEvent: vi.fn(async () => undefined),
       },
-      dispatchRoute: vi.fn(async () => ({ status: 200, data: {} })),
+      dispatchRoute: vi.fn(async (_method, _route, payload) => ({
+        status: 200,
+        data: { success: true, payload, topology: runtimeHostTopology() },
+      })),
       getSessionRuntime: () => runtime,
-      endpointControlState: { updateRuntimeEndpointControlState: vi.fn(() => ({ connection: null, readiness: null, capabilities: null, updatedAt: null })) },
-      runtimeHostCapabilityAddress: runtimeAddress('runtime.host'),
+      endpointControlState: { updateRuntimeEndpointControlState: vi.fn(() => runtimeHostTopology().endpoints[0].controlState) },
+      runtimeHostEndpoint: benchEndpoint,
       runtimeHostDataDir: process.cwd(),
       gatewayPort: 1,
       readGatewayToken: vi.fn(async () => 'token'),

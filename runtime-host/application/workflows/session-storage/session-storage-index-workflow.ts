@@ -1,6 +1,6 @@
 import { isAbsolute, join, win32 } from 'node:path';
 import type { RuntimeFileSystemPort } from '../../common/runtime-ports';
-import type { RuntimeAddress } from '../../agent-runtime/contracts/runtime-address';
+import { buildSessionIdentityKey, type SessionIdentity } from '../../agent-runtime/contracts/runtime-address';
 import type {
   SessionConfigDirectoryPort,
   SessionStorageDescriptor,
@@ -12,18 +12,18 @@ interface AgentDescriptorsCacheEntry {
   readonly descriptors: SessionStorageDescriptor[];
 }
 
-export interface SessionStorageRuntimeAddressResolverPort {
-  resolveStorageRuntimeAddress(input: {
+export interface SessionStorageSessionIdentityResolverPort {
+  resolveStorageSessionIdentity(input: {
     agentId: string;
     sessionKey: string;
     sessionStoreEntry: Record<string, unknown> | null;
-  }): RuntimeAddress | null;
+  }): SessionIdentity | null;
 }
 
 export interface SessionStorageIndexWorkflowDeps {
   readonly workspace: SessionConfigDirectoryPort;
   readonly fileSystem: RuntimeFileSystemPort;
-  readonly runtimeAddressResolver: SessionStorageRuntimeAddressResolverPort;
+  readonly sessionIdentityResolver: SessionStorageSessionIdentityResolverPort;
 }
 
 export class SessionStorageIndexWorkflow {
@@ -58,17 +58,14 @@ export class SessionStorageIndexWorkflow {
     return descriptors;
   }
 
-  async findStorageDescriptor(sessionKey: string): Promise<SessionStorageDescriptor | null> {
-    const normalizedSessionKey = normalizeString(sessionKey);
-    if (!normalizedSessionKey) {
-      return null;
-    }
-    const cached = this.sessionDescriptorIndex.get(normalizedSessionKey);
+  async findStorageDescriptor(identity: SessionIdentity): Promise<SessionStorageDescriptor | null> {
+    const sessionIdentityKey = buildSessionIdentityKey(identity);
+    const cached = this.sessionDescriptorIndex.get(sessionIdentityKey);
     if (cached) {
       return cached;
     }
     await this.listStorageDescriptors();
-    return this.sessionDescriptorIndex.get(normalizedSessionKey) ?? null;
+    return this.sessionDescriptorIndex.get(sessionIdentityKey) ?? null;
   }
 
   invalidateAgentDescriptorsCache(agentId: string): void {
@@ -97,7 +94,7 @@ export class SessionStorageIndexWorkflow {
       sessionsDir,
       sessionsJsonPath,
       sessionsJson,
-      runtimeAddressResolver: this.deps.runtimeAddressResolver,
+      sessionIdentityResolver: this.deps.sessionIdentityResolver,
     }) : [];
     const transcriptDescriptors = listTranscriptStorageDescriptors({
       agentId,
@@ -106,7 +103,7 @@ export class SessionStorageIndexWorkflow {
       sessionsJson,
       entryNames: await this.listSessionEntryNames(sessionsDir),
       indexedDescriptors,
-      runtimeAddressResolver: this.deps.runtimeAddressResolver,
+      sessionIdentityResolver: this.deps.sessionIdentityResolver,
     });
     const descriptors = [
       ...indexedDescriptors,
@@ -166,7 +163,7 @@ export class SessionStorageIndexWorkflow {
   private rebuildSessionDescriptorIndex(descriptors: ReadonlyArray<SessionStorageDescriptor>): void {
     this.sessionDescriptorIndex.clear();
     for (const descriptor of descriptors) {
-      this.sessionDescriptorIndex.set(descriptor.sessionKey, descriptor);
+      this.sessionDescriptorIndex.set(buildSessionIdentityKey(descriptor.sessionIdentity), descriptor);
     }
   }
 }
@@ -227,15 +224,15 @@ async function readJsonRecordFromFileSystem(
 }
 
 function createStorageDescriptor(
-  resolver: SessionStorageRuntimeAddressResolverPort,
-  input: Omit<SessionStorageDescriptor, 'runtimeAddress'>,
+  resolver: SessionStorageSessionIdentityResolverPort,
+  input: Omit<SessionStorageDescriptor, 'sessionIdentity'>,
 ): SessionStorageDescriptor | null {
-  const runtimeAddress = resolver.resolveStorageRuntimeAddress({
+  const sessionIdentity = resolver.resolveStorageSessionIdentity({
     agentId: input.agentId,
     sessionKey: input.sessionKey,
     sessionStoreEntry: input.sessionStoreEntry,
   });
-  return runtimeAddress ? { ...input, runtimeAddress } : null;
+  return sessionIdentity ? { ...input, sessionIdentity } : null;
 }
 
 function listAgentStorageDescriptors(input: {
@@ -243,7 +240,7 @@ function listAgentStorageDescriptors(input: {
   sessionsDir: string;
   sessionsJsonPath: string;
   sessionsJson: Record<string, unknown>;
-  runtimeAddressResolver: SessionStorageRuntimeAddressResolverPort;
+  sessionIdentityResolver: SessionStorageSessionIdentityResolverPort;
 }): SessionStorageDescriptor[] {
   const descriptors: SessionStorageDescriptor[] = [];
 
@@ -256,7 +253,7 @@ function listAgentStorageDescriptors(input: {
       if (!sessionKey) {
         continue;
       }
-      const descriptor = createStorageDescriptor(input.runtimeAddressResolver, {
+      const descriptor = createStorageDescriptor(input.sessionIdentityResolver, {
         sessionKey,
         agentId: input.agentId,
         sessionsDir: input.sessionsDir,
@@ -279,7 +276,7 @@ function listAgentStorageDescriptors(input: {
     }
     if (typeof value === 'string' && value.trim()) {
       const normalizedFileName = value.endsWith('.jsonl') ? value : `${value}.jsonl`;
-      const descriptor = createStorageDescriptor(input.runtimeAddressResolver, {
+      const descriptor = createStorageDescriptor(input.sessionIdentityResolver, {
         sessionKey,
         agentId: input.agentId,
         sessionsDir: input.sessionsDir,
@@ -296,7 +293,7 @@ function listAgentStorageDescriptors(input: {
     if (!isRecord(value)) {
       continue;
     }
-    const descriptor = createStorageDescriptor(input.runtimeAddressResolver, {
+    const descriptor = createStorageDescriptor(input.sessionIdentityResolver, {
       sessionKey,
       agentId: input.agentId,
       sessionsDir: input.sessionsDir,
@@ -333,7 +330,7 @@ function listTranscriptStorageDescriptors(input: {
   sessionsJson: Record<string, unknown> | null;
   entryNames: readonly string[];
   indexedDescriptors?: readonly SessionStorageDescriptor[];
-  runtimeAddressResolver: SessionStorageRuntimeAddressResolverPort;
+  sessionIdentityResolver: SessionStorageSessionIdentityResolverPort;
 }): SessionStorageDescriptor[] {
   const indexedTranscriptPaths = new Set(
     (input.indexedDescriptors ?? [])
@@ -351,7 +348,7 @@ function listTranscriptStorageDescriptors(input: {
     if (indexedTranscriptPaths.has(transcriptPath)) {
       continue;
     }
-    const descriptor = createStorageDescriptor(input.runtimeAddressResolver, {
+    const descriptor = createStorageDescriptor(input.sessionIdentityResolver, {
       sessionKey: buildFallbackSessionKey(input.agentId, transcriptFileName),
       agentId: input.agentId,
       sessionsDir: input.sessionsDir,

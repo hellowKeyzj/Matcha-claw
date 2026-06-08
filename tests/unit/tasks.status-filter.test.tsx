@@ -7,7 +7,9 @@ import { useTaskCenterStore } from '@/stores/task-center-store';
 import { useTaskSnapshotStore } from '@/stores/chat/task-snapshot-store';
 import { useChatStore } from '@/stores/chat';
 import { createReadyResourceStatusState } from '@/lib/resource-state';
-import { createOpenClawTestRuntimeAddress } from './helpers/runtime-address-fixtures';
+import { createEmptySessionRecord } from '@/stores/chat/store-state-helpers';
+import { buildRuntimeScopeKey } from '@/stores/chat/session-identity';
+import { createOpenClawTestSessionIdentity } from './helpers/runtime-address-fixtures';
 import i18n from '@/i18n';
 
 const listTaskSnapshotMock = vi.fn();
@@ -79,7 +81,8 @@ function setupStores() {
 
   useTaskSnapshotStore.getState().reportTaskCenterData('agent:main:main', tasks as never);
 
-  const mainSession = useChatStore.getState().loadedSessions['agent:main:main'];
+  const sessionIdentity = createOpenClawTestSessionIdentity('agent:main:main', 'main');
+  const mainSession = useChatStore.getState().loadedSessions['agent:main:main'] ?? createEmptySessionRecord();
   useChatStore.setState({
     currentSessionKey: 'agent:main:main',
     sessionCatalogStatus: createReadyResourceStatusState(1),
@@ -88,8 +91,10 @@ function setupStores() {
         ...mainSession,
         meta: {
           ...mainSession.meta,
+          backendSessionKey: 'agent:main:main',
+          runtimeScopeKey: buildRuntimeScopeKey(sessionIdentity.endpoint),
           agentId: 'main',
-          runtimeAddress: createOpenClawTestRuntimeAddress('agent:main:main'),
+          sessionIdentity,
         },
       },
     },

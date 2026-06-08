@@ -1,9 +1,9 @@
-import { describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-const hostApiFetchMock = vi.fn();
+const hostFileThumbnailMock = vi.fn();
 
 vi.mock('@/lib/host-api', () => ({
-  hostApiFetch: (...args: unknown[]) => hostApiFetchMock(...args),
+  hostFileThumbnail: (...args: unknown[]) => hostFileThumbnailMock(...args),
 }));
 
 import {
@@ -20,8 +20,18 @@ import type { SessionRenderItem } from '../../runtime-host/shared/session-adapte
 import { buildRenderItemsFromMessages } from './helpers/timeline-fixtures';
 
 describe('chat attachment helpers', () => {
-  it('marks image previews unavailable when thumbnail loading returns no image data', async () => {
-    hostApiFetchMock.mockResolvedValue({});
+  beforeEach(() => {
+    hostFileThumbnailMock.mockReset();
+    localStorage.clear();
+  });
+
+  it('does not persist huge thumbnail data URLs in localStorage', async () => {
+    const sessionIdentity = {
+      endpoint: { kind: 'native-runtime' as const, runtimeAdapterId: 'openclaw', runtimeInstanceId: 'local' },
+      agentId: 'main',
+      sessionKey: 'agent:test:main',
+    };
+    hostFileThumbnailMock.mockResolvedValue({ preview: `data:image/png;base64,${'a'.repeat(512 * 1024 + 1)}`, fileSize: 123 });
     const items = buildRenderItemsFromMessages('agent:test:main', [{
       role: 'assistant',
       id: 'assistant-1',
@@ -36,7 +46,37 @@ describe('chat attachment helpers', () => {
       }],
     }]) as SessionRenderItem[];
 
-    const updated = await loadMissingItemPreviews(items);
+    const updated = await loadMissingItemPreviews(items, { sessionIdentity });
+
+    expect(updated?.[0]).toMatchObject({
+      kind: 'assistant-turn',
+      attachedFiles: [{ preview: expect.stringContaining('data:image/png;base64,') }],
+    });
+    expect(localStorage.getItem('matchaclaw:image-cache')).not.toContain('data:image/png;base64,');
+  });
+
+  it('marks image previews unavailable when thumbnail loading returns no image data', async () => {
+    const sessionIdentity = {
+      endpoint: { kind: 'native-runtime' as const, runtimeAdapterId: 'openclaw', runtimeInstanceId: 'local' },
+      agentId: 'main',
+      sessionKey: 'agent:test:main',
+    };
+    hostFileThumbnailMock.mockResolvedValue({ preview: null, fileSize: 0 });
+    const items = buildRenderItemsFromMessages('agent:test:main', [{
+      role: 'assistant',
+      id: 'assistant-1',
+      content: 'generated image',
+      _attachedFiles: [{
+        fileName: 'artifact-unavailable.png',
+        mimeType: 'image/png',
+        fileSize: 0,
+        preview: null,
+        filePath: 'E:\\code\\Matcha-claw\\artifact-unavailable.png',
+        source: 'tool-result',
+      }],
+    }]) as SessionRenderItem[];
+
+    const updated = await loadMissingItemPreviews(items, { sessionIdentity });
 
     expect(updated?.[0]).toMatchObject({
       kind: 'assistant-turn',

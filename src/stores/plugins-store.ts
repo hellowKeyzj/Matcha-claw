@@ -1,6 +1,11 @@
 import { create } from 'zustand';
-import { hostApiFetch, hostCapabilityExecute, waitForRuntimeJobResult, type RuntimeJobSubmission } from '@/lib/host-api';
-import type { RuntimeAddress } from '../../runtime-host/shared/runtime-address';
+import {
+  hostApiFetch,
+  resolveSingleCapabilityScope,
+  waitForRuntimeJobResult,
+  type RuntimeJobSubmission,
+} from '@/lib/host-api';
+import type { CapabilityTarget } from '../../runtime-host/shared/runtime-address';
 
 export type PluginCatalogItem = {
   id: string;
@@ -116,17 +121,18 @@ function delay(ms: number): Promise<void> {
 
 async function pluginRuntimeCapabilityExecute<TResult>(
   operationId: string,
-  runtimeAddress: RuntimeAddress,
   input: Record<string, unknown>,
+  target: CapabilityTarget,
 ): Promise<TResult> {
-  return await hostCapabilityExecute<TResult>({
-    id: PLUGIN_RUNTIME_CAPABILITY_ID,
-    operationId,
-    runtimeAddress,
-    input: {
-      ...input,
-      runtimeAddress,
-    },
+  return await hostApiFetch<TResult>('/api/capabilities/execute', {
+    method: 'POST',
+    body: JSON.stringify({
+      id: PLUGIN_RUNTIME_CAPABILITY_ID,
+      operationId,
+      scope: await resolveSingleCapabilityScope(PLUGIN_RUNTIME_CAPABILITY_ID),
+      target,
+      input,
+    }),
   });
 }
 
@@ -222,7 +228,7 @@ interface PluginsStoreState {
   refreshCatalog: (options?: PluginFetchOptions) => Promise<void>;
   refreshSnapshot: (options?: PluginRefreshOptions) => Promise<void>;
   restartHost: () => Promise<void>;
-  togglePluginEnabled: (pluginId: string, nextEnabled: boolean, runtimeAddress: RuntimeAddress) => Promise<void>;
+  togglePluginEnabled: (pluginId: string, nextEnabled: boolean) => Promise<void>;
   clearError: () => void;
 }
 
@@ -379,24 +385,19 @@ export const usePluginsStore = create<PluginsStoreState>((set, get) => ({
     }
   },
 
-  togglePluginEnabled: async (pluginId, nextEnabled, runtimeAddress) => {
+  togglePluginEnabled: async (pluginId, nextEnabled) => {
     const runtime = get().runtime;
     if (!runtime) {
       return;
     }
-    const catalog = get().catalog;
-    const enabledPluginIds = runtime.execution.enabledPluginIds ?? [];
-    const catalogPluginIds = new Set(catalog.map((plugin) => plugin.id));
-    const manuallyManagedEnabledPluginIds = enabledPluginIds.filter((enabledPluginId) => catalogPluginIds.has(enabledPluginId));
-    const nextIds = nextEnabled
-      ? Array.from(new Set([...manuallyManagedEnabledPluginIds, pluginId]))
-      : manuallyManagedEnabledPluginIds.filter((id) => id !== pluginId);
+    void nextEnabled;
+    const nextIds = [pluginId];
     set({ mutatingPluginId: pluginId, mutating: true, error: null });
     try {
       const submission = await pluginRuntimeCapabilityExecute<RuntimeJobSubmission<RuntimePayload>>(
         'plugins.setEnabled',
-        runtimeAddress,
-        { pluginIds: nextIds },
+        { pluginIds: nextIds, enabled: nextEnabled },
+        { kind: 'plugin', pluginId },
       );
       const payload = await waitForRuntimeJobResult<RuntimePayload>(submission.job.id);
       set({

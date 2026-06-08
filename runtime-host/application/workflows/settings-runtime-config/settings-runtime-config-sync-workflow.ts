@@ -1,6 +1,5 @@
 import { accepted, ok, type ApplicationResponse } from '../../common/application-response';
 import { normalizeBrowserMode } from '../../../shared/browser-mode';
-import type { RuntimeAddress } from '../../agent-runtime/contracts/runtime-address';
 import type { RuntimePluginRepositoryPort } from '../../plugins/runtime-plugin-service';
 import type { GatewayControlPort } from '../../runtime-host/parent-shell-port';
 import type { SettingsJobPort, SettingsRuntimeConfigSyncPayload } from '../../settings/settings-jobs';
@@ -39,7 +38,7 @@ function hasRuntimeConfigSyncWork(payload: Pick<SettingsRuntimeConfigSyncPayload
 export class SettingsRuntimeConfigSyncWorkflow {
   constructor(private readonly deps: SettingsRuntimeConfigSyncWorkflowDeps) {}
 
-  async reset(settings: Record<string, unknown>, _runtimeAddress: RuntimeAddress): Promise<void> {
+  async reset(settings: Record<string, unknown>): Promise<void> {
     if (!this.deps.runtimeConfig) {
       return;
     }

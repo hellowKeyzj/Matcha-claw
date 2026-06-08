@@ -4,6 +4,7 @@ import { getSessionItems } from '@/stores/chat/store-state-helpers';
 import { createViewportWindowState } from '@/stores/chat/viewport-state';
 import { buildRenderItemsFromMessages } from './helpers/timeline-fixtures';
 import type { SessionApprovalRequestItem, SessionRenderItem } from '../../runtime-host/shared/session-adapter-types';
+import { buildSessionIdentityKey } from '../../runtime-host/shared/runtime-address';
 
 const hostApiFetchMock = vi.fn();
 const hostSessionAbortMock = vi.fn();
@@ -11,6 +12,7 @@ const subscribeHostEventMock = vi.fn();
 
 vi.mock('@/lib/host-api', () => ({
   hostApiFetch: (...args: unknown[]) => hostApiFetchMock(...args),
+  hostFileThumbnail: (...args: unknown[]) => hostApiFetchMock(...args),
   hostSessionAbort: (...args: unknown[]) => hostSessionAbortMock(...args),
 }));
 
@@ -18,14 +20,32 @@ vi.mock('@/lib/host-events', () => ({
   subscribeHostEvent: (...args: unknown[]) => subscribeHostEventMock(...args),
 }));
 
-function createTestRuntimeAddress(sessionKey = 'agent:main:main') {
+function createTestEndpoint() {
   return {
     kind: 'native-runtime' as const,
-    capabilityId: 'session.prompt',
     runtimeAdapterId: 'openclaw',
     runtimeInstanceId: 'local',
+  };
+}
+
+function createTestSessionIdentity(sessionKey = 'agent:main:main') {
+  return {
+    endpoint: createTestEndpoint(),
     agentId: 'main',
     sessionKey,
+  };
+}
+
+function createTestCatalog(sessionKey = 'agent:main:main') {
+  return {
+    key: sessionKey,
+    agentId: 'main',
+    protocolId: 'openclaw-v4',
+    runtimeEndpointId: 'openclaw-local',
+    sessionIdentity: createTestSessionIdentity(sessionKey),
+    kind: 'main' as const,
+    preferred: true,
+    displayName: sessionKey,
   };
 }
 
@@ -95,16 +115,11 @@ function createSessionInfoUpdate(payload: {
     error: payload.error ?? null,
     snapshot: {
       sessionKey,
-      catalog: {
-        key: sessionKey,
-        agentId: 'main',
-        kind: 'main' as const,
-        preferred: true,
-        displayName: sessionKey,
-        runtimeAddress: createTestRuntimeAddress(sessionKey),
-      },
+      catalog: createTestCatalog(sessionKey),
       items: [],
       approvals: payload.approvals ?? [],
+      usage: [],
+      artifacts: [],
       replayComplete: true,
       runtime: {
         activeRunId: payload.phase === 'started' ? (payload.runId ?? null) : null,
@@ -246,16 +261,11 @@ function createSessionItemUpdate(payload: {
     item,
     snapshot: {
       sessionKey,
-      catalog: {
-        key: sessionKey,
-        agentId: 'main',
-        kind: 'main' as const,
-        preferred: true,
-        displayName: sessionKey,
-        runtimeAddress: createTestRuntimeAddress(sessionKey),
-      },
+      catalog: createTestCatalog(sessionKey),
       items: [item],
       approvals: [],
+      usage: [],
+      artifacts: [],
       replayComplete: true,
       runtime: {
         activeRunId: payload.runId ?? null,
@@ -299,16 +309,11 @@ function createSessionPlanUpdate(payload: {
     },
     snapshot: {
       sessionKey,
-      catalog: {
-        key: sessionKey,
-        agentId: 'main',
-        kind: 'main' as const,
-        preferred: true,
-        displayName: sessionKey,
-        runtimeAddress: createTestRuntimeAddress(sessionKey),
-      },
+      catalog: createTestCatalog(sessionKey),
       items,
       approvals: [],
+      usage: [],
+      artifacts: [],
       replayComplete: true,
       runtime: {
         activeRunId: null,
@@ -587,6 +592,7 @@ describe('gateway store event wiring', () => {
       approvals: [{
         id: 'approval-evt-1',
         sessionKey: 'agent:main:main',
+        sessionIdentity: createTestSessionIdentity('agent:main:main'),
         runId: 'run-evt-1',
         title: 'gateway',
         command: 'Remove-Item demo.txt',
@@ -796,6 +802,67 @@ describe('gateway store event wiring', () => {
     const state = useChatStore.getState();
     expect(state.loadedSessions['agent:main:main']?.runtime.runPhase).toBe('error');
     expect(state.loadedSessions['agent:main:main']?.runtime.lastError).toBe('model unavailable');
+  });
+
+  it('session_item_chunk patches only the affected session identity index entry', async () => {
+    hostApiFetchMock.mockResolvedValueOnce(createRunningGatewayStatus());
+    const handlers = new Map<string, (payload: unknown) => void>();
+    subscribeHostEventMock.mockImplementation((eventName: string, handler: (payload: unknown) => void) => {
+      handlers.set(eventName, handler);
+      return () => {};
+    });
+
+    const { useChatStore } = await import('@/stores/chat');
+    const sessionIdentity = createTestSessionIdentity('agent:main:main');
+    const identityKey = buildSessionIdentityKey(sessionIdentity);
+    const initialIndex = { [identityKey]: 'agent:main:main' };
+    const initialRecord = createSessionRecord();
+    useChatStore.setState({
+      currentSessionKey: 'agent:main:main',
+      sessionCatalogStatus: {
+        status: 'ready',
+        error: null,
+        hasLoadedOnce: true,
+        lastLoadedAt: 1,
+      },
+      loadedSessions: {
+        'agent:main:main': {
+          ...initialRecord,
+          meta: {
+            ...initialRecord.meta,
+            backendSessionKey: 'agent:main:main',
+            runtimeScopeKey: null,
+            agentId: 'main',
+            protocolId: 'openclaw-v4',
+            runtimeEndpointId: 'openclaw-local',
+            sessionIdentity,
+            kind: 'main',
+            preferred: true,
+            displayName: 'agent:main:main',
+            model: null,
+          },
+        },
+      },
+      sessionRecordKeyByIdentityKey: initialIndex,
+    } as never);
+
+    const { useGatewayStore } = await import('@/stores/gateway');
+    await useGatewayStore.getState().init();
+
+    handlers.get('session:update')?.(createSessionItemUpdate({
+      sessionUpdate: 'session_item_chunk',
+      runId: 'run-delta-index-1',
+      sessionKey: 'agent:main:main',
+      sequenceId: 1,
+      message: {
+        role: 'assistant',
+        content: 'hello timeline',
+      },
+    }));
+
+    const state = useChatStore.getState();
+    expect(state.sessionRecordKeyByIdentityKey).toBe(initialIndex);
+    expect(state.sessionRecordKeyByIdentityKey[identityKey]).toBe('agent:main:main');
   });
 
   it('structured session:update delta 会直接驱动 chat store 写入 streaming assistant turn', async () => {
@@ -1523,10 +1590,8 @@ describe('gateway store event wiring', () => {
     hostApiFetchMock
       .mockResolvedValueOnce(createRunningGatewayStatus())
       .mockResolvedValueOnce({
-        '/api/chat/media/outgoing/agent%3Amain%3Amain/attachment-1/full': {
-          preview: 'data:image/png;base64,abc',
-          fileSize: 123,
-        },
+        preview: 'data:image/png;base64,abc',
+        fileSize: 123,
       });
     const handlers = new Map<string, (payload: unknown) => void>();
     subscribeHostEventMock.mockImplementation((eventName: string, handler: (payload: unknown) => void) => {
@@ -1600,16 +1665,11 @@ describe('gateway store event wiring', () => {
       item,
       snapshot: {
         sessionKey: 'agent:main:main',
-        catalog: {
-          key: 'agent:main:main',
-          agentId: 'main',
-          kind: 'main' as const,
-          preferred: true,
-          displayName: 'agent:main:main',
-          runtimeAddress: createTestRuntimeAddress('agent:main:main'),
-        },
+        catalog: createTestCatalog('agent:main:main'),
         items: [item],
         approvals: [],
+        usage: [],
+        artifacts: [],
         replayComplete: true,
         runtime: {
           activeRunId: null,
@@ -1636,14 +1696,12 @@ describe('gateway store event wiring', () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
     await new Promise((resolve) => setTimeout(resolve, 0));
 
-    expect(hostApiFetchMock).toHaveBeenCalledWith('/api/files/thumbnails', {
-      method: 'POST',
-      body: JSON.stringify({
-        paths: [{
-          gatewayUrl: '/api/chat/media/outgoing/agent%3Amain%3Amain/attachment-1/full',
-          mimeType: 'image/png',
-        }],
-      }),
+    expect(hostApiFetchMock).toHaveBeenCalledWith({
+      path: '/api/chat/media/outgoing/agent%3Amain%3Amain/attachment-1/full',
+      mimeType: 'image/png',
+      sessionIdentity: createTestSessionIdentity('agent:main:main'),
+      workspaceId: undefined,
+      sourceId: undefined,
     });
     expect(getSessionItems(useChatStore.getState(), 'agent:main:main')).toMatchObject([{
       kind: 'assistant-turn',

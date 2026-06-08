@@ -10,7 +10,8 @@ import { createEmptySessionRecord } from '@/stores/chat/store-state-helpers';
 import { buildRenderItemsFromMessages } from './helpers/timeline-fixtures';
 import type { RawMessage } from './helpers/timeline-fixtures';
 import { createViewportWindowState } from '@/stores/chat/viewport-state';
-import { createOpenClawTestRuntimeAddress } from './helpers/runtime-address-fixtures';
+import { buildRuntimeEndpointKey, buildSessionIdentityKey, type SessionIdentity } from '../../runtime-host/shared/runtime-address';
+import { createOpenClawTestSessionIdentity } from './helpers/runtime-address-fixtures';
 
 const readyResource = {
   status: 'ready' as const,
@@ -25,8 +26,22 @@ function buildReadySessionCatalogStatus(_sessions: Array<{ key: string; displayN
   };
 }
 
+function readAgentIdFromSessionKey(sessionKey: string): string {
+  return sessionKey.split(':')[1] || 'default';
+}
+
+function createSessionIdentity(sessionKey: string, agentId = readAgentIdFromSessionKey(sessionKey)): SessionIdentity {
+  return createOpenClawTestSessionIdentity(sessionKey, agentId);
+}
+
+function recordKeyForSession(sessionKey: string, identity = createSessionIdentity(sessionKey)): string {
+  return buildSessionIdentityKey(identity);
+}
+
 function createSessionRecord(input?: {
   sessionKey?: string;
+  agentId?: string | null;
+  sessionIdentity?: SessionIdentity;
   messages?: RawMessage[];
   label?: string | null;
   displayName?: string | null;
@@ -34,16 +49,18 @@ function createSessionRecord(input?: {
   historyStatus?: 'idle' | 'loading' | 'ready' | 'error';
 }) {
   const sessionKey = input?.sessionKey ?? 'agent:test:session-1';
+  const sessionIdentity = input?.sessionIdentity ?? createSessionIdentity(sessionKey, input?.agentId ?? undefined);
   const messages = input?.messages ?? [];
   const base = createEmptySessionRecord();
   return {
     meta: {
       ...base.meta,
       backendSessionKey: sessionKey,
-      agentId: sessionKey.split(':')[1] ?? null,
+      runtimeScopeKey: buildRuntimeEndpointKey(sessionIdentity.endpoint),
+      agentId: input?.agentId === undefined ? sessionIdentity.agentId : input.agentId,
       protocolId: null,
       runtimeEndpointId: 'local',
-      runtimeAddress: createOpenClawTestRuntimeAddress(sessionKey),
+      sessionIdentity,
       kind: sessionKey.endsWith(':main') ? 'main' : 'session',
       preferred: sessionKey.endsWith(':main'),
       label: input?.label ?? null,
@@ -120,13 +137,13 @@ describe('agent sessions pane', () => {
       { key: 'agent:test:session-2', displayName: 'agent:test:session-2' },
     ];
     useChatStore.setState({
-      currentSessionKey: 'agent:main:main',
+      currentSessionKey: recordKeyForSession('agent:main:main'),
       sessionCatalogStatus: buildReadySessionCatalogStatus(sessions),
       loadedSessions: {
-        'agent:main:main': createSessionRecord({ sessionKey: 'agent:main:main', historyStatus: 'ready' }),
-        'agent:main:session-1': createSessionRecord({ sessionKey: 'agent:main:session-1', historyStatus: 'ready', label: '主Agent会话', lastActivityAt: now - 1 * 24 * 60 * 60 * 1000 }),
-        'agent:test:main': createSessionRecord({ sessionKey: 'agent:test:main', historyStatus: 'ready' }),
-        'agent:test:session-2': createSessionRecord({ sessionKey: 'agent:test:session-2', historyStatus: 'ready', label: '测试Agent会话', lastActivityAt: now - 2 * 24 * 60 * 60 * 1000 }),
+        [recordKeyForSession('agent:main:main')]: createSessionRecord({ sessionKey: 'agent:main:main', historyStatus: 'ready' }),
+        [recordKeyForSession('agent:main:session-1')]: createSessionRecord({ sessionKey: 'agent:main:session-1', historyStatus: 'ready', label: '主Agent会话', lastActivityAt: now - 1 * 24 * 60 * 60 * 1000 }),
+        [recordKeyForSession('agent:test:main')]: createSessionRecord({ sessionKey: 'agent:test:main', historyStatus: 'ready' }),
+        [recordKeyForSession('agent:test:session-2')]: createSessionRecord({ sessionKey: 'agent:test:session-2', historyStatus: 'ready', label: '测试Agent会话', lastActivityAt: now - 2 * 24 * 60 * 60 * 1000 }),
       },
       switchSession: vi.fn(),
       newSession: vi.fn(),
@@ -148,14 +165,14 @@ describe('agent sessions pane', () => {
     const onToggleCollapse = vi.fn();
     const newSession = vi.fn();
     useChatStore.setState({
-      currentSessionKey: 'agent:test:main',
+      currentSessionKey: recordKeyForSession('agent:test:main'),
       sessionCatalogStatus: buildReadySessionCatalogStatus([
         { key: 'agent:main:main', displayName: 'agent:main:main' },
         { key: 'agent:test:main', displayName: 'agent:test:main' },
       ]),
       loadedSessions: {
-        'agent:main:main': createSessionRecord({ sessionKey: 'agent:main:main', historyStatus: 'ready' }),
-        'agent:test:main': createSessionRecord({ sessionKey: 'agent:test:main', historyStatus: 'ready' }),
+        [recordKeyForSession('agent:main:main')]: createSessionRecord({ sessionKey: 'agent:main:main', historyStatus: 'ready' }),
+        [recordKeyForSession('agent:test:main')]: createSessionRecord({ sessionKey: 'agent:test:main', historyStatus: 'ready' }),
       },
       switchSession: vi.fn(),
       newSession,
@@ -187,11 +204,11 @@ describe('agent sessions pane', () => {
       { key: 'agent:test:main', displayName: 'agent:test:main' },
     ];
     useChatStore.setState({
-      currentSessionKey: 'agent:main:main',
+      currentSessionKey: recordKeyForSession('agent:main:main'),
       sessionCatalogStatus: buildReadySessionCatalogStatus(sessions),
       loadedSessions: {
-        'agent:main:main': createSessionRecord({ sessionKey: 'agent:main:main', historyStatus: 'ready' }),
-        'agent:test:main': createSessionRecord({ sessionKey: 'agent:test:main', historyStatus: 'ready' }),
+        [recordKeyForSession('agent:main:main')]: createSessionRecord({ sessionKey: 'agent:main:main', historyStatus: 'ready' }),
+        [recordKeyForSession('agent:test:main')]: createSessionRecord({ sessionKey: 'agent:test:main', historyStatus: 'ready' }),
       },
       switchSession: vi.fn(),
       newSession,
@@ -208,16 +225,16 @@ describe('agent sessions pane', () => {
   it('优先使用 catalog displayName 展示未 hydrate 历史会话标题', () => {
     const now = Date.now();
     useChatStore.setState({
-      currentSessionKey: 'agent:main:main',
+      currentSessionKey: recordKeyForSession('agent:main:main'),
       sessionCatalogStatus: buildReadySessionCatalogStatus([
         { key: 'agent:main:main', displayName: 'agent:main:main' },
         { key: 'agent:test:main', displayName: 'agent:test:main' },
         { key: 'agent:test:session-2', displayName: 'catalog title from transcript' },
       ]),
       loadedSessions: {
-        'agent:main:main': createSessionRecord({ sessionKey: 'agent:main:main', historyStatus: 'ready' }),
-        'agent:test:main': createSessionRecord({ sessionKey: 'agent:test:main', historyStatus: 'ready' }),
-        'agent:test:session-2': createSessionRecord({
+        [recordKeyForSession('agent:main:main')]: createSessionRecord({ sessionKey: 'agent:main:main', historyStatus: 'ready' }),
+        [recordKeyForSession('agent:test:main')]: createSessionRecord({ sessionKey: 'agent:test:main', historyStatus: 'ready' }),
+        [recordKeyForSession('agent:test:session-2')]: createSessionRecord({
           sessionKey: 'agent:test:session-2',
           historyStatus: 'idle',
           displayName: 'catalog title from transcript',
@@ -246,12 +263,12 @@ describe('agent sessions pane', () => {
       { key: 'agent:test:session-2', displayName: 'agent:test:session-2' },
     ];
     useChatStore.setState({
-      currentSessionKey: 'agent:main:main',
+      currentSessionKey: recordKeyForSession('agent:main:main'),
       sessionCatalogStatus: buildReadySessionCatalogStatus(sessions),
       loadedSessions: {
-        'agent:main:main': createSessionRecord({ sessionKey: 'agent:main:main', historyStatus: 'ready' }),
-        'agent:test:main': createSessionRecord({ sessionKey: 'agent:test:main', historyStatus: 'ready' }),
-        'agent:test:session-2': createSessionRecord({
+        [recordKeyForSession('agent:main:main')]: createSessionRecord({ sessionKey: 'agent:main:main', historyStatus: 'ready' }),
+        [recordKeyForSession('agent:test:main')]: createSessionRecord({ sessionKey: 'agent:test:main', historyStatus: 'ready' }),
+        [recordKeyForSession('agent:test:session-2')]: createSessionRecord({
           sessionKey: 'agent:test:session-2',
           historyStatus: 'ready',
           label: '测试Agent会话',
@@ -274,20 +291,20 @@ describe('agent sessions pane', () => {
     }
     fireEvent.click(sessionButton);
 
-    expect(switchSession).toHaveBeenCalledWith('agent:test:session-2');
+    expect(switchSession).toHaveBeenCalledWith(recordKeyForSession('agent:test:session-2'));
   });
 
   it('缺少 catalog agentId 时，会话列表从 session key 派生所属 agent', () => {
     const now = Date.now();
     useChatStore.setState({
-      currentSessionKey: 'agent:test:main',
+      currentSessionKey: recordKeyForSession('agent:test:main'),
       sessionCatalogStatus: buildReadySessionCatalogStatus([
         { key: 'agent:test:main', displayName: 'agent:test:main' },
         { key: 'agent:test:session-2', displayName: 'agent:test:session-2' },
       ]),
       loadedSessions: {
-        'agent:test:main': createSessionRecord({ sessionKey: 'agent:test:main', historyStatus: 'ready' }),
-        'agent:test:session-2': {
+        [recordKeyForSession('agent:test:main')]: createSessionRecord({ sessionKey: 'agent:test:main', historyStatus: 'ready' }),
+        [recordKeyForSession('agent:test:session-2')]: {
           ...createSessionRecord({
             sessionKey: 'agent:test:session-2',
             historyStatus: 'ready',
@@ -312,7 +329,7 @@ describe('agent sessions pane', () => {
     renderPane();
 
     expect(screen.getByText('缺少 agentId 的会话')).toBeInTheDocument();
-    expect(screen.getByTestId('session-avatar-agent:test:session-2')).toBeInTheDocument();
+    expect(screen.getByTestId(`session-avatar-${recordKeyForSession('agent:test:session-2')}`)).toBeInTheDocument();
   });
 
   it('点击无历史会话的 agent 行，应走 agent 打开动作而不是切到伪 main 会话', () => {
@@ -322,10 +339,10 @@ describe('agent sessions pane', () => {
       { key: 'agent:main:main', displayName: 'agent:main:main' },
     ];
     useChatStore.setState({
-      currentSessionKey: 'agent:main:main',
+      currentSessionKey: recordKeyForSession('agent:main:main'),
       sessionCatalogStatus: buildReadySessionCatalogStatus(sessions),
       loadedSessions: {
-        'agent:main:main': createSessionRecord({ sessionKey: 'agent:main:main', historyStatus: 'ready' }),
+        [recordKeyForSession('agent:main:main')]: createSessionRecord({ sessionKey: 'agent:main:main', historyStatus: 'ready' }),
       },
       switchSession,
       newSession: vi.fn(),
@@ -342,66 +359,72 @@ describe('agent sessions pane', () => {
   });
 
   it('按今天、7 天、30 天和更早分桶，并默认展开近期分桶', () => {
-    const now = Date.now();
-    const sessions = [
-      { key: 'agent:main:main', displayName: 'agent:main:main' },
-      { key: 'agent:main:session-today', displayName: 'Today conversation' },
-      { key: 'agent:main:session-week', displayName: 'Week conversation' },
-      { key: 'agent:main:session-month', displayName: 'Month conversation' },
-      { key: 'agent:main:session-older', displayName: 'Older conversation' },
-    ];
-    useChatStore.setState({
-      currentSessionKey: 'agent:main:main',
-      sessionCatalogStatus: buildReadySessionCatalogStatus(sessions),
-      loadedSessions: {
-        'agent:main:main': createSessionRecord({ sessionKey: 'agent:main:main', historyStatus: 'ready' }),
-        'agent:main:session-today': createSessionRecord({
-          sessionKey: 'agent:main:session-today',
-          historyStatus: 'ready',
-          label: 'Today conversation',
-          lastActivityAt: now - 60 * 60 * 1000,
-        }),
-        'agent:main:session-week': createSessionRecord({
-          sessionKey: 'agent:main:session-week',
-          historyStatus: 'ready',
-          label: 'Week conversation',
-          lastActivityAt: now - 2 * 24 * 60 * 60 * 1000,
-        }),
-        'agent:main:session-month': createSessionRecord({
-          sessionKey: 'agent:main:session-month',
-          historyStatus: 'ready',
-          label: 'Month conversation',
-          lastActivityAt: now - 10 * 24 * 60 * 60 * 1000,
-        }),
-        'agent:main:session-older': createSessionRecord({
-          sessionKey: 'agent:main:session-older',
-          historyStatus: 'ready',
-          label: 'Older conversation',
-          lastActivityAt: now - 40 * 24 * 60 * 60 * 1000,
-        }),
-      },
-      switchSession: vi.fn(),
-      newSession: vi.fn(),
-      deleteSession: vi.fn().mockResolvedValue(undefined),
-      loadSessions: vi.fn().mockResolvedValue(undefined),
-    } as never);
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-06-05T12:00:00+08:00'));
+    try {
+      const now = Date.now();
+      const sessions = [
+        { key: 'agent:main:main', displayName: 'agent:main:main' },
+        { key: 'agent:main:session-today', displayName: 'Today conversation' },
+        { key: 'agent:main:session-week', displayName: 'Week conversation' },
+        { key: 'agent:main:session-month', displayName: 'Month conversation' },
+        { key: 'agent:main:session-older', displayName: 'Older conversation' },
+      ];
+      useChatStore.setState({
+        currentSessionKey: recordKeyForSession('agent:main:main'),
+        sessionCatalogStatus: buildReadySessionCatalogStatus(sessions),
+        loadedSessions: {
+          [recordKeyForSession('agent:main:main')]: createSessionRecord({ sessionKey: 'agent:main:main', historyStatus: 'ready' }),
+          [recordKeyForSession('agent:main:session-today')]: createSessionRecord({
+            sessionKey: 'agent:main:session-today',
+            historyStatus: 'ready',
+            label: 'Today conversation',
+            lastActivityAt: now - 60 * 60 * 1000,
+          }),
+          [recordKeyForSession('agent:main:session-week')]: createSessionRecord({
+            sessionKey: 'agent:main:session-week',
+            historyStatus: 'ready',
+            label: 'Week conversation',
+            lastActivityAt: now - 2 * 24 * 60 * 60 * 1000,
+          }),
+          [recordKeyForSession('agent:main:session-month')]: createSessionRecord({
+            sessionKey: 'agent:main:session-month',
+            historyStatus: 'ready',
+            label: 'Month conversation',
+            lastActivityAt: now - 10 * 24 * 60 * 60 * 1000,
+          }),
+          [recordKeyForSession('agent:main:session-older')]: createSessionRecord({
+            sessionKey: 'agent:main:session-older',
+            historyStatus: 'ready',
+            label: 'Older conversation',
+            lastActivityAt: now - 40 * 24 * 60 * 60 * 1000,
+          }),
+        },
+        switchSession: vi.fn(),
+        newSession: vi.fn(),
+        deleteSession: vi.fn().mockResolvedValue(undefined),
+        loadSessions: vi.fn().mockResolvedValue(undefined),
+      } as never);
 
-    renderPane();
+      renderPane();
 
-    expect(screen.getAllByText('Today').length).toBeGreaterThan(0);
-    expect(screen.getByText('Last 7 Days')).toBeTruthy();
-    expect(screen.getByText('Last 30 Days')).toBeTruthy();
-    expect(screen.getByText('Older')).toBeTruthy();
-    expect(screen.getByText('Today conversation')).toBeTruthy();
-    expect(screen.getByText('Week conversation')).toBeTruthy();
-    expect(screen.queryByText('Month conversation')).toBeNull();
-    expect(screen.queryByText('Older conversation')).toBeNull();
+      expect(screen.getAllByText('Today').length).toBeGreaterThan(0);
+      expect(screen.getByText('Last 7 Days')).toBeTruthy();
+      expect(screen.getByText('Last 30 Days')).toBeTruthy();
+      expect(screen.getByText('Older')).toBeTruthy();
+      expect(screen.getByText('Today conversation')).toBeTruthy();
+      expect(screen.getByText('Week conversation')).toBeTruthy();
+      expect(screen.queryByText('Month conversation')).toBeNull();
+      expect(screen.queryByText('Older conversation')).toBeNull();
 
-    fireEvent.click(screen.getByText('Last 30 Days').closest('button')!);
-    fireEvent.click(screen.getByText('Older').closest('button')!);
+      fireEvent.click(screen.getByText('Last 30 Days').closest('button')!);
+      fireEvent.click(screen.getByText('Older').closest('button')!);
 
-    expect(screen.getByText('Month conversation')).toBeTruthy();
-    expect(screen.getByText('Older conversation')).toBeTruthy();
+      expect(screen.getByText('Month conversation')).toBeTruthy();
+      expect(screen.getByText('Older conversation')).toBeTruthy();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('昨天但不足 24 小时的会话不归入今天', () => {
@@ -409,14 +432,14 @@ describe('agent sessions pane', () => {
     vi.setSystemTime(new Date('2026-06-05T01:00:00+08:00'));
     try {
       useChatStore.setState({
-        currentSessionKey: 'agent:main:main',
+        currentSessionKey: recordKeyForSession('agent:main:main'),
         sessionCatalogStatus: buildReadySessionCatalogStatus([
           { key: 'agent:main:main', displayName: 'agent:main:main' },
           { key: 'agent:main:session-yesterday', displayName: 'Yesterday conversation' },
         ]),
         loadedSessions: {
-          'agent:main:main': createSessionRecord({ sessionKey: 'agent:main:main', historyStatus: 'ready' }),
-          'agent:main:session-yesterday': createSessionRecord({
+          [recordKeyForSession('agent:main:main')]: createSessionRecord({ sessionKey: 'agent:main:main', historyStatus: 'ready' }),
+          [recordKeyForSession('agent:main:session-yesterday')]: createSessionRecord({
             sessionKey: 'agent:main:session-yesterday',
             historyStatus: 'ready',
             label: 'Yesterday conversation',
@@ -448,11 +471,11 @@ describe('agent sessions pane', () => {
     ];
 
     useChatStore.setState({
-      currentSessionKey: 'agent:main:main',
+      currentSessionKey: recordKeyForSession('agent:main:main'),
       sessionCatalogStatus: buildReadySessionCatalogStatus(sessions),
       loadedSessions: {
-        'agent:main:main': createSessionRecord({ sessionKey: 'agent:main:main', historyStatus: 'ready' }),
-        'agent:main:session-1': createSessionRecord({
+        [recordKeyForSession('agent:main:main')]: createSessionRecord({ sessionKey: 'agent:main:main', historyStatus: 'ready' }),
+        [recordKeyForSession('agent:main:session-1')]: createSessionRecord({
           sessionKey: 'agent:main:session-1',
           historyStatus: 'ready',
           label: '需要删除的会话',
@@ -472,7 +495,7 @@ describe('agent sessions pane', () => {
     fireEvent.click(screen.getByRole('button', { name: /Confirm Delete/i }));
 
     await waitFor(() => {
-      expect(deleteSession).toHaveBeenCalledWith('agent:main:session-1');
+      expect(deleteSession).toHaveBeenCalledWith(recordKeyForSession('agent:main:session-1'));
     });
   });
 
@@ -480,14 +503,14 @@ describe('agent sessions pane', () => {
     const renameSession = vi.fn().mockResolvedValue(undefined);
     const now = Date.now();
     useChatStore.setState({
-      currentSessionKey: 'agent:main:main',
+      currentSessionKey: recordKeyForSession('agent:main:main'),
       sessionCatalogStatus: buildReadySessionCatalogStatus([
         { key: 'agent:main:main', displayName: 'agent:main:main' },
         { key: 'agent:main:session-1', displayName: 'agent:main:session-1' },
       ]),
       loadedSessions: {
-        'agent:main:main': createSessionRecord({ sessionKey: 'agent:main:main', historyStatus: 'ready' }),
-        'agent:main:session-1': createSessionRecord({
+        [recordKeyForSession('agent:main:main')]: createSessionRecord({ sessionKey: 'agent:main:main', historyStatus: 'ready' }),
+        [recordKeyForSession('agent:main:session-1')]: createSessionRecord({
           sessionKey: 'agent:main:session-1',
           historyStatus: 'ready',
           label: 'Old session title',
@@ -509,7 +532,7 @@ describe('agent sessions pane', () => {
     fireEvent.keyDown(input, { key: 'Enter' });
 
     await waitFor(() => {
-      expect(renameSession).toHaveBeenCalledWith('agent:main:session-1', 'New session title');
+      expect(renameSession).toHaveBeenCalledWith(recordKeyForSession('agent:main:session-1'), 'New session title');
     });
   });
 
@@ -527,7 +550,7 @@ describe('agent sessions pane', () => {
     } as never);
 
     useChatStore.setState({
-      currentSessionKey: 'agent:agent-1:main',
+      currentSessionKey: recordKeyForSession('agent:agent-1:main'),
       sessionCatalogStatus: buildReadySessionCatalogStatus(Array.from({ length: 14 }, (_, index) => ({
         key: index === 0 ? 'agent:agent-1:main' : `agent:agent-1:session-${index}`,
         displayName: `agent:agent-1:session-${index}`,
@@ -536,7 +559,7 @@ describe('agent sessions pane', () => {
         Array.from({ length: 14 }, (_, index) => {
           const key = index === 0 ? 'agent:agent-1:main' : `agent:agent-1:session-${index}`;
           return [
-            key,
+            recordKeyForSession(key),
             createSessionRecord({
               sessionKey: key,
               historyStatus: 'ready',
@@ -577,14 +600,14 @@ describe('agent sessions pane', () => {
     } as never);
 
     useChatStore.setState({
-      currentSessionKey: 'agent:main:main',
+      currentSessionKey: recordKeyForSession('agent:main:main'),
       sessionCatalogStatus: buildReadySessionCatalogStatus([
         { key: 'agent:main:main', displayName: 'agent:main:main' },
         { key: 'agent:test:main', displayName: 'agent:test:main' },
       ]),
       loadedSessions: {
-        'agent:main:main': createSessionRecord({ sessionKey: 'agent:main:main', historyStatus: 'ready' }),
-        'agent:test:main': createSessionRecord({ sessionKey: 'agent:test:main', historyStatus: 'ready' }),
+        [recordKeyForSession('agent:main:main')]: createSessionRecord({ sessionKey: 'agent:main:main', historyStatus: 'ready' }),
+        [recordKeyForSession('agent:test:main')]: createSessionRecord({ sessionKey: 'agent:test:main', historyStatus: 'ready' }),
       },
       switchSession: vi.fn(),
       newSession: vi.fn(),
@@ -611,14 +634,14 @@ describe('agent sessions pane', () => {
     } as never);
 
     useChatStore.setState({
-      currentSessionKey: 'agent:test:main',
+      currentSessionKey: recordKeyForSession('agent:test:main'),
       sessionCatalogStatus: buildReadySessionCatalogStatus([
         { key: 'agent:test:main', displayName: 'agent:test:main' },
         { key: 'agent:test:session-2', displayName: 'agent:test:session-2' },
       ]),
       loadedSessions: {
-        'agent:test:main': createSessionRecord({ sessionKey: 'agent:test:main', historyStatus: 'ready' }),
-        'agent:test:session-2': createSessionRecord({
+        [recordKeyForSession('agent:test:main')]: createSessionRecord({ sessionKey: 'agent:test:main', historyStatus: 'ready' }),
+        [recordKeyForSession('agent:test:session-2')]: createSessionRecord({
           sessionKey: 'agent:test:session-2',
           historyStatus: 'ready',
           label: '测试Agent会话',
@@ -640,14 +663,14 @@ describe('agent sessions pane', () => {
   it('会话标题消费本地 authoritative label，而不是回退旧值', () => {
     const now = Date.now();
     useChatStore.setState({
-      currentSessionKey: 'agent:test:session-2',
+      currentSessionKey: recordKeyForSession('agent:test:session-2'),
       sessionCatalogStatus: buildReadySessionCatalogStatus([
         { key: 'agent:test:main', displayName: 'agent:test:main' },
         { key: 'agent:test:session-2', displayName: 'agent:test:session-2' },
       ]),
       loadedSessions: {
-        'agent:test:main': createSessionRecord({ sessionKey: 'agent:test:main', historyStatus: 'ready' }),
-        'agent:test:session-2': createSessionRecord({
+        [recordKeyForSession('agent:test:main')]: createSessionRecord({ sessionKey: 'agent:test:main', historyStatus: 'ready' }),
+        [recordKeyForSession('agent:test:session-2')]: createSessionRecord({
           sessionKey: 'agent:test:session-2',
           historyStatus: 'ready',
           label: '最新输入标题',
@@ -662,10 +685,10 @@ describe('agent sessions pane', () => {
     useChatStore.setState({
       loadedSessions: {
         ...useChatStore.getState().loadedSessions,
-        'agent:test:session-2': {
-          ...useChatStore.getState().loadedSessions['agent:test:session-2'],
+        [recordKeyForSession('agent:test:session-2')]: {
+          ...useChatStore.getState().loadedSessions[recordKeyForSession('agent:test:session-2')],
           meta: {
-            ...useChatStore.getState().loadedSessions['agent:test:session-2']!.meta,
+            ...useChatStore.getState().loadedSessions[recordKeyForSession('agent:test:session-2')]!.meta,
             label: '最新输入标题',
           },
           items: buildRenderItemsFromMessages('agent:test:session-2', [
@@ -689,14 +712,14 @@ describe('agent sessions pane', () => {
   it('会话标题在窗口正文已加载后，应消费同步后的 authoritative label', () => {
     const now = Date.now();
     useChatStore.setState({
-      currentSessionKey: 'agent:test:session-2',
+      currentSessionKey: recordKeyForSession('agent:test:session-2'),
       sessionCatalogStatus: buildReadySessionCatalogStatus([
         { key: 'agent:test:main', displayName: 'agent:test:main' },
         { key: 'agent:test:session-2', displayName: 'agent:test:session-2' },
       ]),
       loadedSessions: {
-        'agent:test:main': createSessionRecord({ sessionKey: 'agent:test:main', historyStatus: 'ready' }),
-        'agent:test:session-2': createSessionRecord({
+        [recordKeyForSession('agent:test:main')]: createSessionRecord({ sessionKey: 'agent:test:main', historyStatus: 'ready' }),
+        [recordKeyForSession('agent:test:session-2')]: createSessionRecord({
           sessionKey: 'agent:test:session-2',
           historyStatus: 'ready',
           label: '正文里的新标题',
@@ -726,14 +749,14 @@ describe('agent sessions pane', () => {
   it('会话列表不应把裸 session key displayName 当成正式标题 fallback', () => {
     const now = Date.now();
     useChatStore.setState({
-      currentSessionKey: 'agent:test:session-1710000000000',
+      currentSessionKey: recordKeyForSession('agent:test:session-1710000000000'),
       sessionCatalogStatus: buildReadySessionCatalogStatus([
         { key: 'agent:test:main', displayName: 'agent:test:main' },
         { key: 'agent:test:session-1710000000000', displayName: 'agent:test:session-1710000000000' },
       ]),
       loadedSessions: {
-        'agent:test:main': createSessionRecord({ sessionKey: 'agent:test:main', historyStatus: 'ready' }),
-        'agent:test:session-1710000000000': createSessionRecord({
+        [recordKeyForSession('agent:test:main')]: createSessionRecord({ sessionKey: 'agent:test:main', historyStatus: 'ready' }),
+        [recordKeyForSession('agent:test:session-1710000000000')]: createSessionRecord({
           sessionKey: 'agent:test:session-1710000000000',
           historyStatus: 'ready',
           label: null,
@@ -754,12 +777,12 @@ describe('agent sessions pane', () => {
 
   it('没有 main 入口时不应把第一条真实历史会话当 preferred 入口过滤掉', () => {
     useChatStore.setState({
-      currentSessionKey: 'agent:test:session-1710000000000',
+      currentSessionKey: recordKeyForSession('agent:test:session-1710000000000'),
       sessionCatalogStatus: buildReadySessionCatalogStatus([
         { key: 'agent:test:session-1710000000000', displayName: '真实历史会话' },
       ]),
       loadedSessions: {
-        'agent:test:session-1710000000000': createSessionRecord({
+        [recordKeyForSession('agent:test:session-1710000000000')]: createSessionRecord({
           sessionKey: 'agent:test:session-1710000000000',
           historyStatus: 'ready',
           label: '真实历史会话',
@@ -801,7 +824,7 @@ describe('agent sessions pane', () => {
 
   it('会话资源加载中时，不应阻塞 agent 列表渲染', () => {
     useChatStore.setState({
-      currentSessionKey: 'agent:main:main',
+      currentSessionKey: recordKeyForSession('agent:main:main'),
       loadedSessions: {},
       sessionCatalogStatus: {
         status: 'loading',
@@ -824,7 +847,7 @@ describe('agent sessions pane', () => {
 
   it('session 资源失败时，不应阻塞 agent 列表渲染', () => {
     useChatStore.setState({
-      currentSessionKey: 'agent:main:main',
+      currentSessionKey: recordKeyForSession('agent:main:main'),
       loadedSessions: {},
       sessionCatalogStatus: {
         status: 'error',
@@ -848,7 +871,7 @@ describe('agent sessions pane', () => {
   it('只要 loadedSessions 已经有会话集合，session resource loading/error 都不应覆盖正文来源的会话列表', () => {
     const now = Date.now();
     useChatStore.setState({
-      currentSessionKey: 'agent:test:main',
+      currentSessionKey: recordKeyForSession('agent:test:main'),
       sessionCatalogStatus: {
         status: 'loading',
         error: 'sessions failed',
@@ -856,8 +879,8 @@ describe('agent sessions pane', () => {
         lastLoadedAt: null,
       },
       loadedSessions: {
-        'agent:test:main': createSessionRecord({ sessionKey: 'agent:test:main', historyStatus: 'ready' }),
-        'agent:test:session-2': createSessionRecord({
+        [recordKeyForSession('agent:test:main')]: createSessionRecord({ sessionKey: 'agent:test:main', historyStatus: 'ready' }),
+        [recordKeyForSession('agent:test:session-2')]: createSessionRecord({
           sessionKey: 'agent:test:session-2',
           historyStatus: 'ready',
           label: '正文来源会话',
@@ -882,20 +905,20 @@ describe('agent sessions pane', () => {
     vi.setSystemTime(new Date(1_710_000_600_000));
     try {
       useChatStore.setState({
-        currentSessionKey: 'agent:test:session-1710000000000',
+        currentSessionKey: recordKeyForSession('agent:test:session-1710000000000'),
         sessionCatalogStatus: buildReadySessionCatalogStatus([
           { key: 'agent:test:main', displayName: 'agent:test:main' },
           { key: 'agent:test:session-1700000000000', displayName: 'agent:test:session-1700000000000' },
           { key: 'agent:test:session-1710000000000', displayName: 'agent:test:session-1710000000000' },
         ]),
         loadedSessions: {
-          'agent:test:main': createSessionRecord({ sessionKey: 'agent:test:main', historyStatus: 'ready' }),
-          'agent:test:session-1700000000000': createSessionRecord({
+          [recordKeyForSession('agent:test:main')]: createSessionRecord({ sessionKey: 'agent:test:main', historyStatus: 'ready' }),
+          [recordKeyForSession('agent:test:session-1700000000000')]: createSessionRecord({
             sessionKey: 'agent:test:session-1700000000000',
             historyStatus: 'ready',
             label: '旧空会话',
           }),
-          'agent:test:session-1710000000000': createSessionRecord({
+          [recordKeyForSession('agent:test:session-1710000000000')]: createSessionRecord({
             sessionKey: 'agent:test:session-1710000000000',
             historyStatus: 'ready',
             label: '新空会话',

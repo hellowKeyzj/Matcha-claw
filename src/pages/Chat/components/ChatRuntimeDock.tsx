@@ -37,7 +37,7 @@ export function ChatApprovalDock({
 }: {
   waitingLabel: string;
   approvals: ApprovalItem[];
-  onResolve: (id: string, decision: ApprovalDecision) => void;
+  onResolve: (approval: ApprovalItem, decision: ApprovalDecision) => void;
 }) {
   return (
     <div className={CHAT_LAYOUT_TOKENS.runtimeDockRail} data-testid="chat-approval-dock">
@@ -49,7 +49,7 @@ export function ChatApprovalDock({
         {approvals.length > 0 && (
           <ApprovalActionsPanel
             approvals={approvals}
-            onResolve={(id, decision) => onResolve(id, decision)}
+            onResolve={(approval, decision) => onResolve(approval, decision)}
           />
         )}
       </div>

@@ -1,11 +1,13 @@
 import type { RuntimeTopologySnapshot } from '../../shared/runtime-topology';
-import { routeResponder, type RuntimeRouteDefinition } from './route-utils';
+import { badRequest, routeResponder, type RuntimeRouteDefinition } from './route-utils';
 
 interface RuntimeTopologyRouteService {
   snapshotRuntimeTopology: () => RuntimeTopologySnapshot;
   connectRuntimeConnectorEndpoint: (payload: unknown) => Promise<unknown>;
   disconnectRuntimeConnectorEndpoint: (payload: unknown) => Promise<unknown>;
 }
+
+const LEGACY_RUNTIME_CONNECTOR_ROUTE_REJECTION = 'Legacy runtime connector lifecycle route is disabled; use /api/capabilities/execute with a runtime-endpoint target';
 
 export const runtimeTopologyRoutes: readonly RuntimeRouteDefinition<RuntimeTopologyRouteService>[] = [
   {
@@ -32,12 +34,12 @@ export const runtimeTopologyRoutes: readonly RuntimeRouteDefinition<RuntimeTopol
   {
     method: 'POST',
     path: '/api/runtime-connectors/connect',
-    handle: (context, service) => routeResponder.result(() => service.connectRuntimeConnectorEndpoint(context.payload), (message) => ({ success: false, error: message })),
+    handle: () => badRequest(LEGACY_RUNTIME_CONNECTOR_ROUTE_REJECTION),
   },
   {
     method: 'POST',
     path: '/api/runtime-connectors/disconnect',
-    handle: (context, service) => routeResponder.result(() => service.disconnectRuntimeConnectorEndpoint(context.payload), (message) => ({ success: false, error: message })),
+    handle: () => badRequest(LEGACY_RUNTIME_CONNECTOR_ROUTE_REJECTION),
   },
   {
     method: 'GET',

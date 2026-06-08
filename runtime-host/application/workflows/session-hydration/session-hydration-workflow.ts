@@ -2,7 +2,7 @@ import type {
   SessionLoadResult,
   SessionWindowResult,
 } from '../../../shared/session-adapter-types';
-import { validateRuntimeAddress, type RuntimeAddress } from '../../agent-runtime/contracts/runtime-address';
+import { validateSessionIdentity, type SessionIdentity } from '../../agent-runtime/contracts/runtime-address';
 import type { AgentRuntimeRegistry } from '../../agent-runtime/contracts/agent-runtime-registry';
 import type { SessionOperationCoordinator } from '../../sessions/session-operation-coordinator';
 import {
@@ -43,12 +43,12 @@ export class SessionHydrationWorkflow {
 
   load(input: {
     sessionKey: string;
-    runtimeAddress: RuntimeAddress;
+    sessionIdentity: SessionIdentity;
     limit: number;
   }): ApplicationResponseOf<SessionHydratingLoadResult> {
     return this.acceptHydrationJob({
       sessionKey: input.sessionKey,
-      runtimeAddress: input.runtimeAddress,
+      sessionIdentity: input.sessionIdentity,
       snapshot: {
         kind: 'window',
         mode: 'latest',
@@ -60,34 +60,34 @@ export class SessionHydrationWorkflow {
 
   resume(input: {
     sessionKey: string;
-    runtimeAddress: RuntimeAddress;
+    sessionIdentity: SessionIdentity;
   }): ApplicationResponseOf<SessionHydratingLoadResult> {
     return this.acceptHydrationJob({
       sessionKey: input.sessionKey,
-      runtimeAddress: input.runtimeAddress,
+      sessionIdentity: input.sessionIdentity,
       snapshot: { kind: 'state' },
     });
   }
 
   state(input: {
     sessionKey: string;
-    runtimeAddress: RuntimeAddress;
+    sessionIdentity: SessionIdentity;
   }): ApplicationResponseOf<SessionHydratingLoadResult> {
     return this.acceptHydrationJob({
       sessionKey: input.sessionKey,
-      runtimeAddress: input.runtimeAddress,
+      sessionIdentity: input.sessionIdentity,
       snapshot: { kind: 'state' },
     });
   }
 
   async window(input: {
     sessionKey: string;
-    runtimeAddress: RuntimeAddress;
+    sessionIdentity: SessionIdentity;
     mode: SessionWindowMode;
     limit: number;
     offset: number | null;
   }): Promise<ApplicationResponseOf<SessionWindowResult | SessionHydratingWindowResult>> {
-    const context = this.deps.agentRuntimeRegistry.rememberSessionAddress(input.sessionKey, input.runtimeAddress);
+    const context = this.deps.agentRuntimeRegistry.rememberSessionIdentity(input.sessionIdentity);
     const currentState = this.deps.stateStore.findSessionState(input.sessionKey, context);
     if (currentState?.hydrated) {
       const snapshot = await this.deps.snapshotService.buildWindowSnapshotAsync(input.sessionKey, currentState, {
@@ -103,7 +103,7 @@ export class SessionHydrationWorkflow {
 
     return this.acceptHydrationJob({
       sessionKey: input.sessionKey,
-      runtimeAddress: input.runtimeAddress,
+      sessionIdentity: input.sessionIdentity,
       snapshot: {
         kind: 'window',
         mode: input.mode,
@@ -115,7 +115,7 @@ export class SessionHydrationWorkflow {
 
   private acceptHydrationJob(input: {
     sessionKey: string;
-    runtimeAddress: RuntimeAddress;
+    sessionIdentity: SessionIdentity;
     snapshot: SessionHydrationJobPayload['snapshot'];
   }): ApplicationResponseOf<SessionHydratingLoadResult | SessionHydratingWindowResult> {
     return accepted({
@@ -125,34 +125,31 @@ export class SessionHydrationWorkflow {
 
   private submit(input: {
     sessionKey: string;
-    runtimeAddress: RuntimeAddress;
+    sessionIdentity: SessionIdentity;
     snapshot: SessionHydrationJobPayload['snapshot'];
   }): SessionHydrationJobSubmission['job'] {
     return this.deps.sessionHydrationJobs.submitSessionHydration({
       sessionKey: input.sessionKey,
-      runtimeAddress: {
-        ...input.runtimeAddress,
-        sessionKey: input.sessionKey,
-      },
+      sessionIdentity: input.sessionIdentity,
       snapshot: input.snapshot,
     }).job;
   }
 
   async execute(payload: unknown): Promise<SessionLoadResult | SessionWindowResult> {
     const request = this.readHydrationRequest(payload);
-    const context = this.deps.agentRuntimeRegistry.rememberSessionAddress(request.sessionKey, request.runtimeAddress);
+    const context = this.deps.agentRuntimeRegistry.rememberSessionIdentity(request.sessionIdentity);
     return await this.hydrateFromTranscriptSlowPath(request, context);
   }
 
   private async hydrateFromTranscriptSlowPath(
     request: {
       sessionKey: string;
-      runtimeAddress: RuntimeAddress;
+      sessionIdentity: SessionIdentity;
       snapshot: SessionHydrationJobPayload['snapshot'];
     },
-    context: ReturnType<AgentRuntimeRegistry['rememberSessionAddress']>,
+    context: ReturnType<AgentRuntimeRegistry['rememberSessionIdentity']>,
   ): Promise<SessionLoadResult | SessionWindowResult> {
-    return await this.deps.operationCoordinator.run(request.sessionKey, 'reconcile', async () => {
+    return await this.deps.operationCoordinator.run(request.sessionIdentity, 'reconcile', async () => {
       const state = await this.deps.timelineRuntime.hydrateSession(request.sessionKey, context);
       const snapshot = await this.buildHydratedSnapshot(request, state);
       state.window = snapshot.window;
@@ -193,23 +190,27 @@ export class SessionHydrationWorkflow {
 
   private readHydrationRequest(payload: unknown): {
     sessionKey: string;
-    runtimeAddress: RuntimeAddress;
+    sessionIdentity: SessionIdentity;
     snapshot: SessionHydrationJobPayload['snapshot'];
   } {
     const body = payload && typeof payload === 'object' && !Array.isArray(payload)
-      ? payload as { sessionKey?: unknown; runtimeAddress?: unknown; snapshot?: unknown }
+      ? payload as { sessionKey?: unknown; sessionIdentity?: unknown; snapshot?: unknown }
       : {};
     const sessionKey = typeof body.sessionKey === 'string' ? body.sessionKey.trim() : '';
     if (!sessionKey) {
       throw new Error('sessionKey is required');
     }
-    const addressError = validateRuntimeAddress(body.runtimeAddress);
-    if (addressError) {
-      throw new Error(addressError);
+    const identityError = validateSessionIdentity(body.sessionIdentity);
+    if (identityError) {
+      throw new Error(identityError);
+    }
+    const sessionIdentity = body.sessionIdentity as SessionIdentity;
+    if (sessionIdentity.sessionKey !== sessionKey) {
+      throw new Error('sessionKey must match SessionIdentity.sessionKey');
     }
     return {
       sessionKey,
-      runtimeAddress: body.runtimeAddress as RuntimeAddress,
+      sessionIdentity,
       snapshot: this.readHydrationSnapshotRequest(payload),
     };
   }
@@ -240,7 +241,6 @@ export class SessionHydrationWorkflow {
         mode: (snapshot as { mode?: unknown }).mode,
         limit: (snapshot as { limit?: unknown }).limit,
         offset: (snapshot as { offset?: unknown }).offset,
-        runtimeAddress: (payload as { runtimeAddress?: unknown }).runtimeAddress,
       });
       return {
         kind: 'window',

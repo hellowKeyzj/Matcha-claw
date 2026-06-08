@@ -5,12 +5,13 @@ import {
   groupApprovalsBySession,
 } from '@/stores/chat/approval-handlers';
 import type { ApprovalItem } from '@/stores/chat/types';
-import { createOpenClawTestRuntimeAddress } from './helpers/runtime-address-fixtures';
+import { createOpenClawTestSessionIdentity } from './helpers/runtime-address-fixtures';
 
 function approval(input: Partial<ApprovalItem> & Pick<ApprovalItem, 'id' | 'sessionKey' | 'createdAtMs'>): ApprovalItem {
   return {
     title: input.title ?? 'approval',
-    runtimeAddress: input.runtimeAddress ?? createOpenClawTestRuntimeAddress(input.sessionKey),
+    backendSessionKey: input.backendSessionKey ?? input.sessionKey,
+    sessionIdentity: input.sessionIdentity ?? createOpenClawTestSessionIdentity(input.sessionKey),
     allowedDecisions: input.allowedDecisions ?? ['allow-once', 'deny'],
     ...input,
   };

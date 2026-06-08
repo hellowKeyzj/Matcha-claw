@@ -178,6 +178,7 @@ export function registerRuntimeApplicationServices(
   }));
   container.contribute('agentRuntime.capabilityOperationRoutes', (scope): readonly CapabilityOperationRoute[] => createRuntimeHostCapabilityOperationRoutes({
     runtimeHostService: scope.resolve<RuntimeHostService>('runtimeHost.service'),
+    gatewayService: scope.resolve<GatewayService>('gateway.service'),
   }));
   facades.registerContainerFacade('runtime', WORKBENCH_SERVICE_TOKEN, container);
   facades.registerContainerFacade('runtime', RUNTIME_HOST_SERVICE_TOKEN, container);

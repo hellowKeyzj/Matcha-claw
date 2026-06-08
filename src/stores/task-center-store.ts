@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import type { RuntimeAddress } from '../../runtime-host/shared/runtime-address';
+import type { SessionIdentity } from '../../runtime-host/shared/runtime-address';
 import {
   listTaskSnapshot,
   updateTask,
@@ -11,7 +11,7 @@ import { logRendererDebug } from '@/lib/debug-logging';
 interface TaskCenterState {
   sessionKey: string | null;
   backendSessionKey: string | null;
-  runtimeAddress: RuntimeAddress | null;
+  sessionIdentity: SessionIdentity | null;
   selectedScopeKey: string | null;
   selectedScope: TaskScope | null;
   initialLoading: boolean;
@@ -19,9 +19,9 @@ interface TaskCenterState {
   mutating: boolean;
   initialized: boolean;
   error: string | null;
-  init: (session?: { recordKey: string; backendSessionKey: string; runtimeAddress: RuntimeAddress }) => Promise<void>;
-  refreshTasks: (options?: { sessionKey?: string; backendSessionKey?: string; runtimeAddress?: RuntimeAddress; teamKey?: string; silent?: boolean }) => Promise<void>;
-  deleteTaskById: (payload: { taskId: string; sessionKey?: string; backendSessionKey?: string; runtimeAddress?: RuntimeAddress; teamKey?: string }) => Promise<void>;
+  init: (session?: { recordKey: string; backendSessionKey: string; sessionIdentity: SessionIdentity }) => Promise<void>;
+  refreshTasks: (options?: { sessionKey?: string; backendSessionKey?: string; sessionIdentity?: SessionIdentity; teamKey?: string; silent?: boolean }) => Promise<void>;
+  deleteTaskById: (payload: { taskId: string; sessionKey?: string; backendSessionKey?: string; sessionIdentity?: SessionIdentity; teamKey?: string }) => Promise<void>;
   clearError: () => void;
 }
 
@@ -43,7 +43,7 @@ function scopeKeyForOptions(sessionKey: string, teamKey?: string): string {
 export const useTaskCenterStore = create<TaskCenterState>((set, get) => ({
   sessionKey: null,
   backendSessionKey: null,
-  runtimeAddress: null,
+  sessionIdentity: null,
   selectedScopeKey: null,
   selectedScope: null,
   initialLoading: false,
@@ -59,12 +59,12 @@ export const useTaskCenterStore = create<TaskCenterState>((set, get) => ({
     const backendSessionKey = typeof session?.backendSessionKey === 'string' && session.backendSessionKey.trim().length > 0
       ? session.backendSessionKey.trim()
       : get().backendSessionKey ?? resolvedSessionKey;
-    const runtimeAddress = session?.runtimeAddress ?? get().runtimeAddress;
-    if (!resolvedSessionKey || !backendSessionKey || !runtimeAddress) {
+    const sessionIdentity = session?.sessionIdentity ?? get().sessionIdentity;
+    if (!resolvedSessionKey || !backendSessionKey || !sessionIdentity) {
       set({
         sessionKey: null,
         backendSessionKey: null,
-        runtimeAddress: null,
+        sessionIdentity: null,
         selectedScopeKey: null,
         selectedScope: null,
         initialized: true,
@@ -82,13 +82,13 @@ export const useTaskCenterStore = create<TaskCenterState>((set, get) => ({
     set({
       sessionKey: resolvedSessionKey,
       backendSessionKey,
-      runtimeAddress,
+      sessionIdentity,
       selectedScopeKey: scopeKeyForSession(resolvedSessionKey),
       initialLoading: true,
       refreshing: false,
       error: null,
     });
-    const task = get().refreshTasks({ sessionKey: resolvedSessionKey, backendSessionKey, runtimeAddress, silent: true })
+    const task = get().refreshTasks({ sessionKey: resolvedSessionKey, backendSessionKey, sessionIdentity, silent: true })
       .finally(() => {
         if (get().sessionKey === resolvedSessionKey) {
           set({ initialized: true, initialLoading: false });
@@ -109,15 +109,15 @@ export const useTaskCenterStore = create<TaskCenterState>((set, get) => ({
       ? options.sessionKey.trim()
       : get().sessionKey;
     if (!resolvedSessionKey) {
-      set({ sessionKey: null, backendSessionKey: null, runtimeAddress: null, selectedScopeKey: null, selectedScope: null, refreshing: false, error: null });
+      set({ sessionKey: null, backendSessionKey: null, sessionIdentity: null, selectedScopeKey: null, selectedScope: null, refreshing: false, error: null });
       return;
     }
     const backendSessionKey = typeof options?.backendSessionKey === 'string' && options.backendSessionKey.trim().length > 0
       ? options.backendSessionKey.trim()
       : get().backendSessionKey ?? resolvedSessionKey;
-    const runtimeAddress = options?.runtimeAddress ?? get().runtimeAddress;
-    if (!runtimeAddress) {
-      set({ sessionKey: resolvedSessionKey, backendSessionKey, runtimeAddress: null, selectedScopeKey: null, selectedScope: null, refreshing: false, error: 'RuntimeAddress is required' });
+    const sessionIdentity = options?.sessionIdentity ?? get().sessionIdentity;
+    if (!sessionIdentity) {
+      set({ sessionKey: resolvedSessionKey, backendSessionKey, sessionIdentity: null, selectedScopeKey: null, selectedScope: null, refreshing: false, error: 'SessionIdentity is required' });
       return;
     }
     const teamKey = typeof options?.teamKey === 'string' && options.teamKey.trim().length > 0
@@ -130,9 +130,9 @@ export const useTaskCenterStore = create<TaskCenterState>((set, get) => ({
       return;
     }
     if (!options?.silent) {
-      set({ sessionKey: resolvedSessionKey, backendSessionKey, runtimeAddress, selectedScopeKey: requestedScopeKey, refreshing: true, error: null });
-    } else if (get().sessionKey !== resolvedSessionKey || get().backendSessionKey !== backendSessionKey || get().selectedScopeKey !== requestedScopeKey || get().runtimeAddress !== runtimeAddress) {
-      set({ sessionKey: resolvedSessionKey, backendSessionKey, runtimeAddress, selectedScopeKey: requestedScopeKey });
+      set({ sessionKey: resolvedSessionKey, backendSessionKey, sessionIdentity, selectedScopeKey: requestedScopeKey, refreshing: true, error: null });
+    } else if (get().sessionKey !== resolvedSessionKey || get().backendSessionKey !== backendSessionKey || get().selectedScopeKey !== requestedScopeKey || get().sessionIdentity !== sessionIdentity) {
+      set({ sessionKey: resolvedSessionKey, backendSessionKey, sessionIdentity, selectedScopeKey: requestedScopeKey });
     }
     const task = (async () => {
       try {
@@ -144,8 +144,8 @@ export const useTaskCenterStore = create<TaskCenterState>((set, get) => ({
           storeSessionKey: get().sessionKey,
         });
         const snapshot = await listTaskSnapshot(teamKey
-          ? { sessionKey: backendSessionKey, runtimeAddress, teamKey }
-          : { sessionKey: backendSessionKey, runtimeAddress });
+          ? { sessionKey: backendSessionKey, sessionIdentity, teamKey }
+          : { sessionKey: backendSessionKey, sessionIdentity });
         const nextScopeKey = snapshot.scope?.key ?? requestedScopeKey;
         logTaskPipeline('refresh.result', {
           sessionKey: resolvedSessionKey,
@@ -165,7 +165,7 @@ export const useTaskCenterStore = create<TaskCenterState>((set, get) => ({
           set({
             sessionKey: resolvedSessionKey,
             backendSessionKey,
-            runtimeAddress,
+            sessionIdentity,
             selectedScopeKey: nextScopeKey,
             selectedScope: snapshot.scope ?? null,
             refreshing: false,
@@ -193,15 +193,15 @@ export const useTaskCenterStore = create<TaskCenterState>((set, get) => ({
     }
   },
 
-  deleteTaskById: async ({ taskId, sessionKey, backendSessionKey, runtimeAddress, teamKey }) => {
+  deleteTaskById: async ({ taskId, sessionKey, backendSessionKey, sessionIdentity, teamKey }) => {
     const resolvedSessionKey = typeof sessionKey === 'string' && sessionKey.trim().length > 0
       ? sessionKey.trim()
       : get().sessionKey;
     const resolvedBackendSessionKey = typeof backendSessionKey === 'string' && backendSessionKey.trim().length > 0
       ? backendSessionKey.trim()
       : get().backendSessionKey ?? resolvedSessionKey;
-    const resolvedRuntimeAddress = runtimeAddress ?? get().runtimeAddress;
-    if (!taskId || !resolvedSessionKey || !resolvedBackendSessionKey || !resolvedRuntimeAddress) {
+    const resolvedSessionIdentity = sessionIdentity ?? get().sessionIdentity;
+    if (!taskId || !resolvedSessionKey || !resolvedBackendSessionKey || !resolvedSessionIdentity) {
       return;
     }
     const selectedScope = get().selectedScope;
@@ -210,12 +210,12 @@ export const useTaskCenterStore = create<TaskCenterState>((set, get) => ({
     try {
       await updateTask({
         sessionKey: resolvedBackendSessionKey,
-        runtimeAddress: resolvedRuntimeAddress,
+        sessionIdentity: resolvedSessionIdentity,
         taskId,
         status: 'deleted',
         ...(activeTeamKey ? { teamKey: activeTeamKey } : {}),
       });
-      await get().refreshTasks({ sessionKey: resolvedSessionKey, backendSessionKey: resolvedBackendSessionKey, runtimeAddress: resolvedRuntimeAddress, ...(activeTeamKey ? { teamKey: activeTeamKey } : {}), silent: true });
+      await get().refreshTasks({ sessionKey: resolvedSessionKey, backendSessionKey: resolvedBackendSessionKey, sessionIdentity: resolvedSessionIdentity, ...(activeTeamKey ? { teamKey: activeTeamKey } : {}), silent: true });
     } catch (error) {
       set({ error: error instanceof Error ? error.message : String(error) });
     } finally {

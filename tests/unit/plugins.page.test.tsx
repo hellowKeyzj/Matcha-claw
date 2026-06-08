@@ -4,21 +4,22 @@ import { MemoryRouter } from 'react-router-dom';
 import i18n from '@/i18n';
 
 const hostApiFetchMock = vi.fn();
-const hostCapabilityExecuteMock = vi.fn();
+const capabilityExecuteMock = vi.fn();
 const waitForRuntimeJobResultMock = vi.fn();
 const initGatewayEventsMock = vi.fn(async () => {});
 
-function capabilityAddress(capabilityId: string) {
+function capabilityScope() {
   return {
-    kind: 'native-runtime' as const,
-    capabilityId,
-    runtimeAdapterId: 'openclaw',
-    runtimeInstanceId: 'local',
-    agentId: 'default',
+    kind: 'runtime-instance' as const,
+    endpoint: {
+      kind: 'native-runtime' as const,
+      runtimeAdapterId: 'openclaw',
+      runtimeInstanceId: 'local',
+    },
   };
 }
 
-const pluginRuntimeAddress = capabilityAddress('plugin.runtime');
+const pluginRuntimeScope = capabilityScope();
 
 type RuntimeHostState = {
   lifecycle: 'unknown' | 'starting' | 'running' | 'restarting' | 'degraded' | 'error' | 'stopped';
@@ -39,9 +40,14 @@ const gatewayStoreState: {
 };
 
 vi.mock('@/lib/host-api', () => ({
-  hostApiFetch: (...args: unknown[]) => hostApiFetchMock(...args),
-  hostCapabilityExecute: (...args: unknown[]) => hostCapabilityExecuteMock(...args),
-  resolveSingleCapabilityRuntimeAddress: async (capabilityId: string) => capabilityAddress(capabilityId),
+  hostApiFetch: async (path: string, init?: { body?: string; timeoutMs?: number }) => {
+    if (path === '/api/capabilities/execute') {
+      const payload = init?.body ? JSON.parse(init.body) : {};
+      return await capabilityExecuteMock(payload, { timeoutMs: init?.timeoutMs });
+    }
+    return init === undefined ? await hostApiFetchMock(path) : await hostApiFetchMock(path, init);
+  },
+  resolveSingleCapabilityScope: async () => capabilityScope(),
   waitForRuntimeJobResult: (...args: unknown[]) => waitForRuntimeJobResultMock(...args),
 }));
 
@@ -100,14 +106,15 @@ describe('plugins page', () => {
             {
               id: 'plugin.runtime',
               kind: 'plugin.runtime',
-              address: pluginRuntimeAddress,
-              runtimeAdapterId: 'openclaw',
-              runtimeInstanceId: 'local',
-              targetAgentIds: ['default'],
+              scopeKind: 'runtime-instance',
+              scope: pluginRuntimeScope,
+              targetKinds: ['plugin'],
               supportLevel: 'native',
               availability: 'available',
-              operations: [],
+              operations: [{ id: 'plugins.setEnabled', title: 'Set enabled plugins', targetKind: 'plugin' }],
               policyScope: 'plugin.runtime',
+              ownerModuleId: 'openclaw',
+              routeOwnerId: 'plugin',
             },
           ],
         };
@@ -359,14 +366,15 @@ describe('plugins page', () => {
             {
               id: 'plugin.runtime',
               kind: 'plugin.runtime',
-              address: pluginRuntimeAddress,
-              runtimeAdapterId: 'openclaw',
-              runtimeInstanceId: 'local',
-              targetAgentIds: ['default'],
+              scopeKind: 'runtime-instance',
+              scope: pluginRuntimeScope,
+              targetKinds: ['plugin'],
               supportLevel: 'native',
               availability: 'available',
-              operations: [],
+              operations: [{ id: 'plugins.setEnabled', title: 'Set enabled plugins', targetKind: 'plugin' }],
               policyScope: 'plugin.runtime',
+              ownerModuleId: 'openclaw',
+              routeOwnerId: 'plugin',
             },
           ],
         };
@@ -406,7 +414,7 @@ describe('plugins page', () => {
       }
       throw new Error(`unexpected path: ${path}`);
     });
-    hostCapabilityExecuteMock.mockResolvedValue({
+    capabilityExecuteMock.mockResolvedValue({
       success: true,
       job: {
         id: 'job-plugins-set-enabled',
@@ -433,15 +441,18 @@ describe('plugins page', () => {
     fireEvent.click(switches[switches.length - 1]!);
 
     await waitFor(() => {
-      expect(hostCapabilityExecuteMock).toHaveBeenCalledWith(expect.objectContaining({
-        id: 'plugin.runtime',
-        operationId: 'plugins.setEnabled',
-        runtimeAddress: pluginRuntimeAddress,
-        input: expect.objectContaining({
-          pluginIds: ['task-manager', 'memory-lancedb-pro'],
-          runtimeAddress: pluginRuntimeAddress,
+      expect(capabilityExecuteMock).toHaveBeenCalledWith(
+        expect.objectContaining({
+          id: 'plugin.runtime',
+          operationId: 'plugins.setEnabled',
+          scope: pluginRuntimeScope,
+          target: { kind: 'plugin', pluginId: 'memory-lancedb-pro' },
+          input: expect.objectContaining({
+            pluginIds: ['memory-lancedb-pro'],
+          }),
         }),
-      }));
+        { timeoutMs: undefined },
+      );
     });
   });
 });

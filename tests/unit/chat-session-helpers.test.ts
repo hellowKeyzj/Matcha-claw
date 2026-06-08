@@ -12,24 +12,15 @@ import {
 import type { RawMessage } from './helpers/timeline-fixtures';
 import { buildRenderItemsFromMessages } from './helpers/timeline-fixtures';
 import { createViewportWindowState } from '@/stores/chat/viewport-state';
-import type { RuntimeAddress } from '../../runtime-host/shared/runtime-address';
 import type { ChatSession } from '@/stores/chat';
-
-function createRuntimeAddress(sessionKey: string): RuntimeAddress {
-  return {
-    kind: 'native-runtime',
-    capabilityId: 'session.prompt',
-    runtimeAdapterId: 'openclaw',
-    runtimeInstanceId: 'local',
-    agentId: sessionKey.split(':')[1] || 'main',
-    sessionKey,
-  };
-}
+import { areSessionsEquivalent } from '@/stores/chat/store-state-helpers';
+import { buildRuntimeScopeKey } from '@/stores/chat/session-identity';
+import { createOpenClawTestSessionIdentity } from './helpers/runtime-address-fixtures';
 
 function createChatSession(input: Partial<ChatSession> & Pick<ChatSession, 'key' | 'agentId'>): ChatSession {
   return {
     backendSessionKey: input.key,
-    runtimeAddress: createRuntimeAddress(input.key),
+    sessionIdentity: createOpenClawTestSessionIdentity(input.key, input.agentId),
     ...input,
   };
 }
@@ -46,12 +37,16 @@ function createSessionRecord(input?: {
 }) {
   const sessionKey = input?.sessionKey ?? 'agent:test:session-1';
   const messages = input?.messages ?? [];
+  const agentId = sessionKey.split(':')[1] ?? 'main';
+  const sessionIdentity = createOpenClawTestSessionIdentity(sessionKey, agentId);
   return {
     meta: {
-      agentId: sessionKey.split(':')[1] ?? null,
+      backendSessionKey: sessionKey,
+      runtimeScopeKey: buildRuntimeScopeKey(sessionIdentity.endpoint),
+      agentId,
       protocolId: null,
       runtimeEndpointId: 'local',
-      runtimeAddress: createRuntimeAddress(sessionKey),
+      sessionIdentity,
       kind: sessionKey.endsWith(':main') ? 'main' : 'session',
       preferred: sessionKey.endsWith(':main'),
       label: input?.label ?? (messages.length > 0 && typeof messages[messages.length - 1]?.content === 'string'
@@ -83,6 +78,21 @@ function createSessionRecord(input?: {
 }
 
 describe('chat session helpers', () => {
+  it('compares session identity fields without requiring object identity', () => {
+    const left = createChatSession({ key: 'agent:main:main', agentId: 'main' });
+    const right = {
+      ...left,
+      sessionIdentity: createOpenClawTestSessionIdentity('agent:main:main', 'main'),
+    };
+    const changed = {
+      ...left,
+      sessionIdentity: createOpenClawTestSessionIdentity('agent:main:main', 'browser'),
+    };
+
+    expect(areSessionsEquivalent([left], [right])).toBe(true);
+    expect(areSessionsEquivalent([left], [changed])).toBe(false);
+  });
+
   it('resolves thinking level from sessions list', () => {
     expect(resolveSessionThinkingLevelFromList(
       [createChatSession({ key: 'agent:main:main', agentId: 'main', thinkingLevel: ' high ' })],

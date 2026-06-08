@@ -1,7 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { FilePreviewBody } from '@/components/file-preview/FilePreviewBody';
-import type { GeneratedFile } from '@/lib/generated-files';
+import type { ArtifactPreviewTarget } from '@/components/file-preview/types';
+import type { SessionIdentity } from '../../runtime-host/shared/runtime-address';
 
 const hostFileReadTextMock = vi.fn();
 const hostFileReadBinaryMock = vi.fn();
@@ -12,11 +13,14 @@ const revealArtifactPathInFileManagerMock = vi.fn();
 const createObjectUrlMock = vi.fn(() => 'blob:mock-image-url');
 const revokeObjectUrlMock = vi.fn();
 const NativeUrl = URL;
-const runtimeAddress = {
-  kind: 'native-runtime' as const,
-  runtimeInstanceId: 'runtime-main',
-  capabilityId: 'file.read',
+const sessionIdentity: SessionIdentity = {
+  endpoint: {
+    kind: 'native-runtime',
+    runtimeAdapterId: 'openclaw',
+    runtimeInstanceId: 'local',
+  },
   agentId: 'main',
+  sessionKey: 'agent:main:main',
 };
 
 vi.mock('react-i18next', () => ({
@@ -90,7 +94,7 @@ describe('file preview body', () => {
       content: 'export const answer = 42;\n',
     });
 
-    const file: GeneratedFile = {
+    const file: ArtifactPreviewTarget = {
       filePath: '/workspace/demo.ts',
       fileName: 'demo.ts',
       ext: '.ts',
@@ -102,13 +106,13 @@ describe('file preview body', () => {
       content: '',
       lineStats: { added: 0, removed: 0 },
       toolId: 'workspace:/workspace/demo.ts',
-      runtimeAddress,
+      sessionIdentity,
     };
 
     render(<FilePreviewBody file={file} mode="preview" />);
 
     await waitFor(() => {
-      expect(hostFileReadTextMock).toHaveBeenCalledWith({ path: '/workspace/demo.ts', runtimeAddress });
+      expect(hostFileReadTextMock).toHaveBeenCalledWith({ path: '/workspace/demo.ts', sessionIdentity });
     });
     expect(await screen.findByTestId('monaco-viewer')).toHaveTextContent('export const answer = 42;');
   });
@@ -119,7 +123,7 @@ describe('file preview body', () => {
       content: '<!doctype html><h1>Rendered Preview</h1>',
     });
 
-    const file: GeneratedFile = {
+    const file: ArtifactPreviewTarget = {
       filePath: '/workspace/demo.html',
       fileName: 'demo.html',
       ext: '.html',
@@ -131,13 +135,13 @@ describe('file preview body', () => {
       content: '',
       lineStats: { added: 0, removed: 0 },
       toolId: 'workspace:/workspace/demo.html',
-      runtimeAddress,
+      sessionIdentity,
     };
 
     render(<FilePreviewBody file={file} mode="preview" />);
 
     await waitFor(() => {
-      expect(hostFileReadTextMock).toHaveBeenCalledWith({ path: '/workspace/demo.html', runtimeAddress });
+      expect(hostFileReadTextMock).toHaveBeenCalledWith({ path: '/workspace/demo.html', sessionIdentity });
     });
     const frame = await screen.findByTestId('html-preview-frame');
     expect(frame).toHaveAttribute('srcdoc', '<!doctype html><h1>Rendered Preview</h1>');
@@ -151,7 +155,7 @@ describe('file preview body', () => {
       mimeType: 'image/png',
     });
 
-    const file: GeneratedFile = {
+    const file: ArtifactPreviewTarget = {
       filePath: '/workspace/demo.png',
       fileName: 'demo.png',
       ext: '.png',
@@ -163,13 +167,13 @@ describe('file preview body', () => {
       content: '',
       lineStats: { added: 0, removed: 0 },
       toolId: 'workspace:/workspace/demo.png',
-      runtimeAddress,
+      sessionIdentity,
     };
 
     render(<FilePreviewBody file={file} mode="preview" />);
 
     await waitFor(() => {
-      expect(hostFileReadBinaryMock).toHaveBeenCalledWith({ path: '/workspace/demo.png', runtimeAddress });
+      expect(hostFileReadBinaryMock).toHaveBeenCalledWith({ path: '/workspace/demo.png', sessionIdentity });
     });
     const image = await screen.findByRole('img', { name: 'demo.png' });
     expect(createObjectUrlMock).toHaveBeenCalledTimes(1);
@@ -177,7 +181,7 @@ describe('file preview body', () => {
   });
 
   it('offers system open fallback for large preview targets', async () => {
-    const file: GeneratedFile = {
+    const file: ArtifactPreviewTarget = {
       filePath: '/workspace/report.pdf',
       fileName: 'report.pdf',
       ext: '.pdf',
@@ -190,7 +194,7 @@ describe('file preview body', () => {
       lineStats: { added: 0, removed: 0 },
       toolId: 'workspace:/workspace/report.pdf',
       fileSize: 60 * 1024 * 1024,
-    } as GeneratedFile & { fileSize: number };
+    };
 
     render(<FilePreviewBody file={file} mode="preview" />);
 

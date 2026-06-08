@@ -156,7 +156,7 @@ export function TasksPage() {
   const currentSessionKey = useChatStore((state) => state.currentSessionKey);
   const currentAgentId = useChatStore((state) => {
     const meta = state.loadedSessions[state.currentSessionKey]?.meta;
-    return meta?.agentId ?? meta?.runtimeAddress?.agentId ?? 'main';
+    return meta?.agentId ?? meta?.sessionIdentity?.agentId ?? 'main';
   });
   const sessions = useChatStore((state) => readSessionsFromState(state));
   const sessionsLoadedOnce = useChatStore((state) => state.sessionCatalogStatus.hasLoadedOnce);
@@ -216,7 +216,7 @@ export function TasksPage() {
       void init(currentSession ? {
         recordKey: currentSession.key,
         backendSessionKey: currentSession.backendSessionKey,
-        runtimeAddress: currentSession.runtimeAddress,
+        sessionIdentity: currentSession.sessionIdentity,
       } : undefined);
       return;
     }
@@ -226,7 +226,7 @@ export function TasksPage() {
     void refreshTasks({
       sessionKey: currentSession.key,
       backendSessionKey: currentSession.backendSessionKey,
-      runtimeAddress: currentSession.runtimeAddress,
+      sessionIdentity: currentSession.sessionIdentity,
       silent: true,
     });
   }, [currentSessionKey, init, initialized, refreshTasks, sessions]);
@@ -247,7 +247,7 @@ export function TasksPage() {
       return;
     }
     if (scopeFilter.type === 'team') {
-      const snapshot = await listTaskSnapshot({ sessionKey: activeSession.backendSessionKey, runtimeAddress: activeSession.runtimeAddress, teamKey: scopeFilter.teamId });
+      const snapshot = await listTaskSnapshot({ sessionKey: activeSession.backendSessionKey, sessionIdentity: activeSession.sessionIdentity, teamKey: scopeFilter.teamId });
       if (scopedTasksRequestSeqRef.current !== requestSeq) {
         return;
       }
@@ -266,7 +266,7 @@ export function TasksPage() {
       const session = sessionByKey.get(sessionKey)!;
       return {
         sessionKey,
-        snapshot: await listTaskSnapshot({ sessionKey: session.backendSessionKey, runtimeAddress: session.runtimeAddress }),
+        snapshot: await listTaskSnapshot({ sessionKey: session.backendSessionKey, sessionIdentity: session.sessionIdentity }),
       };
     }));
     if (scopedTasksRequestSeqRef.current !== requestSeq) {
@@ -645,7 +645,7 @@ export function TasksPage() {
       taskId: deletingTaskId,
       sessionKey: selectedSession.key,
       backendSessionKey: selectedSession.backendSessionKey,
-      runtimeAddress: selectedSession.runtimeAddress,
+      sessionIdentity: selectedSession.sessionIdentity,
       ...(selected?.sourceTeamKey ? { teamKey: selected.sourceTeamKey } : {}),
     });
     const next = useTaskCenterStore.getState();

@@ -31,6 +31,7 @@ import {
   summarizeSnapshotForTodoToolDebug,
 } from './todo-tool-debug';
 import { isRunActive, type ChatStoreState } from './types';
+import { buildSessionIdentityKey, type SessionIdentity } from '../../../runtime-host/shared/runtime-address';
 import type {
   SessionItemChunkUpdateEvent,
   SessionItemUpdateEvent,
@@ -57,16 +58,20 @@ function normalizeIdentifier(value: unknown): string {
 function resolveSessionUpdateRecordKey(
   state: Pick<ChatStoreState, 'loadedSessions'>,
   backendSessionKey: string,
-  runtimeAddress: SessionStateSnapshot['catalog']['runtimeAddress'],
+  sessionIdentity: SessionStateSnapshot['catalog']['sessionIdentity'],
 ): string {
   if (Object.prototype.hasOwnProperty.call(state.loadedSessions, backendSessionKey)) {
     return backendSessionKey;
   }
-  const existingRecordKey = findSessionRecordKey(state, backendSessionKey, runtimeAddress);
+  const identity = {
+    ...sessionIdentity,
+    sessionKey: sessionIdentity.sessionKey || backendSessionKey,
+  };
+  const existingRecordKey = findSessionRecordKey(state, identity);
   if (existingRecordKey) {
     return existingRecordKey;
   }
-  return buildSessionRecordKey(runtimeAddress, backendSessionKey);
+  return buildSessionRecordKey(identity);
 }
 
 function shouldPreserveRuntimeOnInfoUpdate(input: {
@@ -79,6 +84,31 @@ function shouldPreserveRuntimeOnInfoUpdate(input: {
   }
   const eventRunId = normalizeIdentifier(input.event.runId);
   return !eventRunId || eventRunId === runtime.activeRunId;
+}
+
+function applySessionIdentityRecordIndexPatch(input: {
+  index: ChatStoreState['sessionRecordKeyByIdentityKey'];
+  sessionKey: string;
+  previousIdentity: SessionIdentity | null | undefined;
+  nextIdentity: SessionIdentity | null | undefined;
+}): ChatStoreState['sessionRecordKeyByIdentityKey'] {
+  const previousIdentityKey = input.previousIdentity ? buildSessionIdentityKey(input.previousIdentity) : null;
+  const nextIdentityKey = input.nextIdentity ? buildSessionIdentityKey(input.nextIdentity) : null;
+  if (
+    previousIdentityKey === nextIdentityKey
+    && (!nextIdentityKey || input.index[nextIdentityKey] === input.sessionKey)
+  ) {
+    return input.index;
+  }
+
+  const nextIndex = { ...input.index };
+  if (previousIdentityKey && nextIndex[previousIdentityKey] === input.sessionKey) {
+    delete nextIndex[previousIdentityKey];
+  }
+  if (nextIdentityKey) {
+    nextIndex[nextIdentityKey] = input.sessionKey;
+  }
+  return nextIndex;
 }
 
 function patchSessionSnapshotWithTodoToolDebug(
@@ -106,13 +136,15 @@ function patchSessionSnapshotWithTodoToolDebug(
 
 function scheduleMissingPreviewLoads(input: CreateStoreRuntimeEventActionsInput & {
   targetSessionKey: string;
-  items: SessionStateSnapshot['items'];
+  snapshot: SessionStateSnapshot;
 }): void {
-  const hydratedItems = hydrateAttachedFilesFromItems(input.items);
+  const hydratedItems = hydrateAttachedFilesFromItems(input.snapshot.items);
   if (!hasPendingItemPreviewLoads(hydratedItems)) {
     return;
   }
-  void loadMissingItemPreviews(hydratedItems).then((updatedItems) => {
+  void loadMissingItemPreviews(hydratedItems, {
+    sessionIdentity: input.snapshot.catalog.sessionIdentity,
+  }).then((updatedItems) => {
     if (!updatedItems) {
       return;
     }
@@ -135,20 +167,31 @@ function applySessionSnapshotPatch(
   const snapshot = hydratedItems === input.snapshot.items
     ? input.snapshot
     : { ...input.snapshot, items: hydratedItems };
-  input.set((state) => ({
-    loadedSessions: patchSessionSnapshotWithTodoToolDebug(
+  input.set((state) => {
+    const previousIdentity = state.loadedSessions[input.targetSessionKey]?.meta.sessionIdentity;
+    const loadedSessions = patchSessionSnapshotWithTodoToolDebug(
       state,
       input.targetSessionKey,
       snapshot,
       input.source,
-    ),
-    pendingApprovalsBySession: patchPendingApprovalsFromSnapshot(state, input.targetSessionKey, snapshot),
-  }));
+    );
+    const nextIdentity = loadedSessions[input.targetSessionKey]?.meta.sessionIdentity;
+    return {
+      loadedSessions,
+      sessionRecordKeyByIdentityKey: applySessionIdentityRecordIndexPatch({
+        index: state.sessionRecordKeyByIdentityKey,
+        sessionKey: input.targetSessionKey,
+        previousIdentity,
+        nextIdentity,
+      }),
+      pendingApprovalsBySession: patchPendingApprovalsFromSnapshot(state, input.targetSessionKey, snapshot),
+    };
+  });
   scheduleMissingPreviewLoads({
     set: input.set,
     get: input.get,
     targetSessionKey: input.targetSessionKey,
-    items: hydratedItems,
+    snapshot,
   });
 }
 
@@ -322,7 +365,7 @@ export function handleStoreSessionUpdateEvent(
   const targetSessionKey = resolveSessionUpdateRecordKey(
     stateBeforeHandle,
     backendSessionKey,
-    sessionUpdate.snapshot.catalog.runtimeAddress,
+    sessionUpdate.snapshot.catalog.sessionIdentity,
   );
   const eventRunId = normalizeIdentifier(sessionUpdate.runId);
 

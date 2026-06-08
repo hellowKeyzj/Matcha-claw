@@ -20,7 +20,6 @@ import type { LicenseService } from '../application/license/service';
 import type { PlatformService } from '../application/platform-runtime/service';
 import type { SecurityRuntimeService } from '../application/security/service';
 import type { TaskManagerService } from '../application/tasks/service';
-import type { TeamRuntimeService } from '../application/team-runtime/service';
 import type { ToolchainUvService } from '../application/toolchain/uv-service';
 
 export type RuntimeHostToken<Value> = string & {
@@ -69,7 +68,6 @@ export const LICENSE_SERVICE_TOKEN = runtimeHostToken<LicenseService>('license.s
 export const PLATFORM_SERVICE_TOKEN = runtimeHostToken<PlatformService>('platform.service');
 export const SECURITY_SERVICE_TOKEN = runtimeHostToken<SecurityRuntimeService>('security.service');
 export const TASK_SERVICE_TOKEN = runtimeHostToken<TaskManagerService>('task.service');
-export const TEAM_RUNTIME_SERVICE_TOKEN = runtimeHostToken<TeamRuntimeService>('teamRuntime.service');
 export const TOOLCHAIN_UV_SERVICE_TOKEN = runtimeHostToken<ToolchainUvService>('toolchainUv.service');
 export const AGENT_RUNTIME_APPLICATION_TOKEN = runtimeHostToken<AgentRuntimeApplicationService>('agentRuntime.application');
 export const SESSION_RUNTIME_TOKEN = runtimeHostToken<SessionRuntimeService>('session.runtime');

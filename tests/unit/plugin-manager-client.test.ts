@@ -1,14 +1,15 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { hostApiFetchMock, hostCapabilityExecuteMock } from './helpers/mock-gateway-client';
+import { hostApiFetchMock, capabilityExecuteMock } from './helpers/mock-gateway-client';
 
 const waitForRuntimeJobResultMock = vi.fn();
 
-const pluginRuntimeAddress = {
-  kind: 'native-runtime' as const,
-  capabilityId: 'plugin.runtime',
-  runtimeAdapterId: 'openclaw',
-  runtimeInstanceId: 'local',
-  agentId: 'default',
+const pluginRuntimeScope = {
+  kind: 'runtime-instance' as const,
+  endpoint: {
+    kind: 'native-runtime' as const,
+    runtimeAdapterId: 'openclaw',
+    runtimeInstanceId: 'local',
+  },
 };
 
 vi.mock('@/lib/host-api', async (importOriginal) => {
@@ -22,7 +23,7 @@ vi.mock('@/lib/host-api', async (importOriginal) => {
 describe('plugin manager client', () => {
   beforeEach(() => {
     hostApiFetchMock.mockReset();
-    hostCapabilityExecuteMock.mockReset();
+    capabilityExecuteMock.mockReset();
     waitForRuntimeJobResultMock.mockReset();
   });
 
@@ -42,7 +43,7 @@ describe('plugin manager client', () => {
   });
 
   it('setEnabledPluginIds 走通用插件写接口', async () => {
-    hostCapabilityExecuteMock
+    capabilityExecuteMock
       .mockResolvedValueOnce({
         success: true,
         job: {
@@ -60,19 +61,17 @@ describe('plugin manager client', () => {
     });
 
     const { setEnabledPluginIds } = await import('@/services/openclaw/plugin-manager-client');
-    await setEnabledPluginIds(['task-manager'], pluginRuntimeAddress);
+    await setEnabledPluginIds(['task-manager']);
 
-    expect(hostCapabilityExecuteMock).toHaveBeenCalledWith(
+    expect(capabilityExecuteMock).toHaveBeenCalledWith(
       expect.objectContaining({
         id: 'plugin.runtime',
         operationId: 'plugins.setEnabled',
-        runtimeAddress: pluginRuntimeAddress,
-        input: expect.objectContaining({
-          pluginIds: ['task-manager'],
-          runtimeAddress: pluginRuntimeAddress,
-        }),
+        scope: pluginRuntimeScope,
+        target: { kind: 'plugin', pluginId: 'task-manager' },
+        input: { pluginIds: ['task-manager'], enabled: true },
       }),
-      undefined,
+      { timeoutMs: undefined },
     );
     expect(waitForRuntimeJobResultMock).toHaveBeenCalledWith('job-1');
   });

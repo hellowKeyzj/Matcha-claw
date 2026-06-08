@@ -7,7 +7,16 @@ import {
   unwrapHostApiProxyEnvelope,
 } from './host-api-transport-contract';
 import { subscribeHostEvent } from './host-events';
-import type { RuntimeAddress } from '../../runtime-host/shared/runtime-address';
+import {
+  buildCapabilityScopeKey,
+  agentScope,
+  runtimeInstanceScope,
+  sessionScope,
+  type CapabilityTarget,
+  type RuntimeEndpointRef,
+  type RuntimeScope,
+  type SessionIdentity,
+} from '../../runtime-host/shared/runtime-address';
 import type { CapabilityDescriptor } from '../../runtime-host/shared/capability-descriptor';
 import type { RuntimeAdapterInstanceSummary, RuntimeAdapterSummary, RuntimeConnectorEndpointLifecycleResult, RuntimeConnectorSummary, RuntimeEndpointSummary } from '../../runtime-host/shared/runtime-topology';
 import type {
@@ -28,12 +37,17 @@ const SESSION_PROMPT_TIMEOUT_MS = 10_000;
 const SESSION_PATCH_TIMEOUT_MS = 15_000;
 const WORKSPACE_FILE_CAPABILITY_ID = 'workspace.file';
 const RUNTIME_HOST_CAPABILITY_ID = 'runtime.host';
+const SESSION_MANAGEMENT_CAPABILITY_ID = 'session.management';
+const SESSION_PROMPT_CAPABILITY_ID = 'session.prompt';
+const SESSION_APPROVAL_CAPABILITY_ID = 'session.approval';
+const SESSION_MODEL_SELECTION_CAPABILITY_ID = 'session.modelSelection';
 const RUNTIME_JOB_INITIAL_POLL_MS = 500;
 const RUNTIME_JOB_MAX_POLL_MS = 5_000;
 const RUNTIME_JOB_NOT_FOUND_GRACE_MS = 2_000;
-const CAPABILITY_ADDRESS_CACHE_TTL_MS = 5_000;
+const CAPABILITY_SCOPE_CACHE_TTL_MS = 5_000;
 let cachedHostApiToken: string | null = null;
-const capabilityAddressCache = new Map<string, { address: RuntimeAddress; expiresAt: number }>();
+const capabilityScopeCache = new Map<string, { scope: RuntimeScope; expiresAt: number }>();
+const capabilityScopeInflight = new Map<string, Promise<RuntimeScope>>();
 
 type HostApiRequestInit = RequestInit & {
   timeoutMs?: number;
@@ -115,6 +129,16 @@ export interface StagedFilePayload {
   preview: string | null;
 }
 
+export interface FileThumbnailResult {
+  preview: string | null;
+  fileSize: number;
+}
+
+export interface WorkspaceFileContext {
+  workspaceId?: string;
+  sourceId?: string;
+}
+
 export interface ReadBinaryFileResult {
   ok: boolean;
   path?: string;
@@ -153,73 +177,69 @@ export type HostSessionWindowResult = Partial<SessionWindowResult> & {
   hydrationJob?: RuntimeJobSnapshot<SessionWindowResult>;
 };
 
-function sameRuntimeEndpointAddress(left: RuntimeAddress, right: RuntimeAddress): boolean {
-  if (left.kind !== right.kind) {
-    return false;
-  }
-  if (left.kind === 'native-runtime' && right.kind === 'native-runtime') {
-    return left.runtimeAdapterId === right.runtimeAdapterId
-      && left.runtimeInstanceId === right.runtimeInstanceId;
-  }
-  if (left.kind === 'protocol-connector' && right.kind === 'protocol-connector') {
-    return left.protocolId === right.protocolId
-      && left.connectorId === right.connectorId
-      && left.endpointId === right.endpointId;
-  }
-  return false;
+function capabilityScopeCacheKey(capabilityId: string, scope?: RuntimeScope): string {
+  return scope ? `${capabilityId}:${buildCapabilityScopeKey(scope)}` : capabilityId;
 }
 
-function capabilityAddressCacheKey(capabilityId: string, address?: RuntimeAddress): string {
-  if (!address) {
-    return capabilityId;
-  }
-  const endpointKey = address.kind === 'native-runtime'
-    ? `native-runtime:${address.runtimeAdapterId}:${address.runtimeInstanceId}`
-    : `protocol-connector:${address.protocolId}:${address.connectorId}:${address.endpointId}`;
-  return `${capabilityId}:${endpointKey}:${address.agentId}`;
+function describeCapabilityScope(scope: RuntimeScope): string {
+  return buildCapabilityScopeKey(scope);
 }
 
-async function resolveCapabilityRuntimeAddress(capabilityId: string, sourceAddress?: RuntimeAddress): Promise<RuntimeAddress> {
-  const cacheKey = capabilityAddressCacheKey(capabilityId, sourceAddress);
-  const now = Date.now();
-  const cached = capabilityAddressCache.get(cacheKey);
-  if (cached && cached.expiresAt > now) {
-    return cached.address;
-  }
-  const { capabilities } = await hostCapabilitiesList();
+function resolveCapabilityScopeFromList(
+  capabilityId: string,
+  capabilities: readonly CapabilityDescriptor[],
+  sourceScope?: RuntimeScope,
+): RuntimeScope {
   const available = capabilities.filter((capability) => capability.id === capabilityId && capability.availability === 'available');
-  const matched = sourceAddress
-    ? available.find((capability) => sameRuntimeEndpointAddress(capability.address, sourceAddress) && capability.address.agentId === sourceAddress.agentId)
-      ?? available.find((capability) => sameRuntimeEndpointAddress(capability.address, sourceAddress))
+  const matched = sourceScope
+    ? available.find((capability) => buildCapabilityScopeKey(capability.scope) === buildCapabilityScopeKey(sourceScope))
     : null;
-  const address = matched?.address ?? (available.length === 1 ? available[0]!.address : null);
-  if (!address) {
-    capabilityAddressCache.delete(cacheKey);
-    throw new Error(`Expected exactly one RuntimeAddress for capability: ${capabilityId}`);
+  const scope = matched?.scope ?? (available.length === 1 ? available[0]!.scope : null);
+  if (!scope) {
+    const scopeHint = sourceScope ? ` for source scope ${describeCapabilityScope(sourceScope)}` : '';
+    const availableHint = available.length > 0
+      ? `; available scopes: ${available.map((capability) => describeCapabilityScope(capability.scope)).join(', ')}`
+      : '; available scopes: none';
+    throw new Error(`Expected exactly one RuntimeScope for capability: ${capabilityId}${scopeHint}, got ${available.length}${availableHint}`);
   }
-  capabilityAddressCache.set(cacheKey, {
-    address,
-    expiresAt: now + CAPABILITY_ADDRESS_CACHE_TTL_MS,
-  });
-  return address;
+  return scope;
 }
 
-export async function resolveSingleCapabilityRuntimeAddress(capabilityId: string): Promise<RuntimeAddress> {
-  return resolveCapabilityRuntimeAddress(capabilityId);
+async function resolveCapabilityScope(capabilityId: string, sourceScope?: RuntimeScope): Promise<RuntimeScope> {
+  const cacheKey = capabilityScopeCacheKey(capabilityId, sourceScope);
+  const now = Date.now();
+  const cached = capabilityScopeCache.get(cacheKey);
+  if (cached && cached.expiresAt > now) {
+    return cached.scope;
+  }
+  const inflight = capabilityScopeInflight.get(cacheKey);
+  if (inflight) {
+    return await inflight;
+  }
+  const task = (async () => {
+    const { capabilities } = await hostCapabilitiesList();
+    const scope = resolveCapabilityScopeFromList(capabilityId, capabilities, sourceScope);
+    capabilityScopeCache.set(cacheKey, {
+      scope,
+      expiresAt: Date.now() + CAPABILITY_SCOPE_CACHE_TTL_MS,
+    });
+    return scope;
+  })();
+  capabilityScopeInflight.set(cacheKey, task);
+  try {
+    return await task;
+  } catch (error) {
+    capabilityScopeCache.delete(cacheKey);
+    throw error;
+  } finally {
+    if (capabilityScopeInflight.get(cacheKey) === task) {
+      capabilityScopeInflight.delete(cacheKey);
+    }
+  }
 }
 
-export function runtimeAddressForAgentCapability(input: {
-  runtimeAddress: RuntimeAddress;
-  capabilityId: string;
-  agentId: string;
-  sessionKey?: string;
-}): RuntimeAddress {
-  return {
-    ...input.runtimeAddress,
-    capabilityId: input.capabilityId,
-    agentId: input.agentId,
-    ...(input.sessionKey ? { sessionKey: input.sessionKey } : {}),
-  };
+export async function resolveSingleCapabilityScope(capabilityId: string, sourceScope?: RuntimeScope): Promise<RuntimeScope> {
+  return resolveCapabilityScope(capabilityId, sourceScope);
 }
 
 function headersToRecord(headers?: HeadersInit): Record<string, string> {
@@ -386,24 +406,27 @@ export async function hostUvCheck(): Promise<boolean> {
   return hostApiFetch('/api/toolchain/uv/check');
 }
 
-export async function hostUvInstallAll(runtimeAddress: RuntimeAddress): Promise<RuntimeJobSubmission> {
+export async function hostUvInstallAll(endpoint: RuntimeEndpointRef): Promise<RuntimeJobSubmission> {
   return hostCapabilityExecute(buildCapabilityExecutePayload({
     id: 'platform.runtime',
     operationId: 'toolchain.installUv',
-    runtimeAddress,
+    scope: runtimeInstanceScope(endpoint),
+    target: { kind: 'runtime-job' },
   }));
 }
 
-async function workspaceFileCapabilityExecute<TResult>(operationId: string, input: Record<string, unknown> & { runtimeAddress: RuntimeAddress }, options?: { timeoutMs?: number }): Promise<TResult> {
-  const runtimeAddress = await resolveCapabilityRuntimeAddress(WORKSPACE_FILE_CAPABILITY_ID, input.runtimeAddress);
+async function workspaceFileCapabilityExecute<TResult>(operationId: string, input: { sessionIdentity: SessionIdentity } & WorkspaceFileContext, options?: { timeoutMs?: number }): Promise<TResult> {
+  const path = typeof (input as { path?: unknown }).path === 'string' ? (input as { path?: string }).path! : '';
+  const { workspaceId: _workspaceId, sourceId: _sourceId, ...body } = input;
+  const target = operationId === 'files.stagePaths' || operationId === 'files.stageBuffer'
+    ? { kind: 'workspace-staging' as const, identity: input.sessionIdentity }
+    : { kind: 'workspace-file' as const, path, identity: input.sessionIdentity };
   return hostCapabilityExecute<TResult>(buildCapabilityExecutePayload({
     id: WORKSPACE_FILE_CAPABILITY_ID,
     operationId,
-    runtimeAddress,
-    body: {
-      ...input,
-      runtimeAddress,
-    },
+    scope: { kind: 'workspace', endpoint: input.sessionIdentity.endpoint },
+    target,
+    body: body as unknown as Record<string, unknown>,
   }), options);
 }
 
@@ -411,8 +434,8 @@ export async function hostFileReadText(
   payload: {
     path: string;
     maxBytes?: number;
-    runtimeAddress: RuntimeAddress;
-  },
+    sessionIdentity: SessionIdentity;
+  } & WorkspaceFileContext,
 ): Promise<ReadTextFileResult> {
   return await workspaceFileCapabilityExecute<ReadTextFileResult>('files.readText', payload);
 }
@@ -421,13 +444,13 @@ export async function hostFileWriteText(
   payload: {
     path: string;
     content: string;
-    runtimeAddress: RuntimeAddress;
-  },
+    sessionIdentity: SessionIdentity;
+  } & WorkspaceFileContext,
 ): Promise<WriteTextFileResult> {
   return await workspaceFileCapabilityExecute<WriteTextFileResult>('files.writeText', payload);
 }
 
-export async function hostFileStagePaths(payload: { filePaths: string[]; runtimeAddress: RuntimeAddress }): Promise<StagedFilePayload[]> {
+export async function hostFileStagePaths(payload: { filePaths: string[]; sessionIdentity: SessionIdentity } & WorkspaceFileContext): Promise<StagedFilePayload[]> {
   return await workspaceFileCapabilityExecute<StagedFilePayload[]>('files.stagePaths', payload);
 }
 
@@ -435,17 +458,25 @@ export async function hostFileStageBuffer(payload: {
   base64: string;
   fileName: string;
   mimeType: string;
-  runtimeAddress: RuntimeAddress;
-}): Promise<StagedFilePayload> {
+  sessionIdentity: SessionIdentity;
+} & WorkspaceFileContext): Promise<StagedFilePayload> {
   return await workspaceFileCapabilityExecute<StagedFilePayload>('files.stageBuffer', payload);
+}
+
+export async function hostFileThumbnail(payload: {
+  path: string;
+  mimeType: string;
+  sessionIdentity: SessionIdentity;
+} & WorkspaceFileContext): Promise<FileThumbnailResult> {
+  return await workspaceFileCapabilityExecute<FileThumbnailResult>('files.thumbnail', payload);
 }
 
 export async function hostFileReadBinary(
   payload: {
     path: string;
     maxBytes?: number;
-    runtimeAddress: RuntimeAddress;
-  },
+    sessionIdentity: SessionIdentity;
+  } & WorkspaceFileContext,
 ): Promise<ReadBinaryFileResult> {
   return await workspaceFileCapabilityExecute<ReadBinaryFileResult>('files.readBinary', payload);
 }
@@ -453,8 +484,8 @@ export async function hostFileReadBinary(
 export async function hostFileStat(
   payload: {
     path: string;
-    runtimeAddress: RuntimeAddress;
-  },
+    sessionIdentity: SessionIdentity;
+  } & WorkspaceFileContext,
 ): Promise<FilePreviewStatResult> {
   return await workspaceFileCapabilityExecute<FilePreviewStatResult>('files.stat', payload);
 }
@@ -463,8 +494,8 @@ export async function hostFileListDir(
   payload: {
     path: string;
     includeHidden?: boolean;
-    runtimeAddress: RuntimeAddress;
-  },
+    sessionIdentity: SessionIdentity;
+  } & WorkspaceFileContext,
   options?: {
     timeoutMs?: number;
   },
@@ -474,18 +505,48 @@ export async function hostFileListDir(
   });
 }
 
-function hostSessionPost<TResult>(path: string, payload: Record<string, unknown>, options?: { timeoutMs?: number }): Promise<TResult> {
-  return hostApiFetch<TResult>(path, {
-    method: 'POST',
-    body: JSON.stringify(payload),
-    timeoutMs: options?.timeoutMs,
-  });
+function sessionCapabilityExecute<TResult>(input: {
+  capabilityId: string;
+  operationId: string;
+  payload: Record<string, unknown>;
+  scope: RuntimeScope;
+  target?: CapabilityTarget | null;
+}, options?: { timeoutMs?: number }): Promise<TResult> {
+  return hostCapabilityExecute<TResult>(buildCapabilityExecutePayload({
+    id: input.capabilityId,
+    operationId: input.operationId,
+    scope: input.scope,
+    target: input.target,
+    body: input.payload,
+  }), options);
+}
+
+function sessionIdentityCapabilityExecute<TResult>(input: {
+  capabilityId: string;
+  operationId: string;
+  payload: Record<string, unknown> & { sessionIdentity: SessionIdentity };
+  target?: CapabilityTarget | null;
+}, options?: { timeoutMs?: number }): Promise<TResult> {
+  const identity = input.payload.sessionIdentity;
+  return sessionCapabilityExecute<TResult>({
+    capabilityId: input.capabilityId,
+    operationId: input.operationId,
+    scope: sessionScope(identity),
+    target: input.target ?? { kind: 'session', identity },
+    payload: input.payload,
+  }, options);
 }
 
 export async function hostSessionList(
-  payload: { runtimeAddress: RuntimeAddress },
+  payload: { endpoint: RuntimeEndpointRef },
 ): Promise<SessionListResult> {
-  return hostSessionPost<SessionListResult>('/api/sessions/list', payload);
+  return sessionCapabilityExecute<SessionListResult>({
+    capabilityId: SESSION_MANAGEMENT_CAPABILITY_ID,
+    operationId: 'sessions.list',
+    scope: runtimeInstanceScope(payload.endpoint),
+    target: { kind: 'runtime-endpoint' },
+    payload,
+  });
 }
 
 export async function hostCapabilitiesList(): Promise<{ capabilities: CapabilityDescriptor[] }> {
@@ -532,7 +593,7 @@ export async function hostRuntimeConnectorDisconnect(payload: {
 
 export async function hostCapabilityDescribe(payload: {
   id: string;
-  runtimeAddress: RuntimeAddress;
+  scope: RuntimeScope;
 }): Promise<{ capability: CapabilityDescriptor }> {
   return hostApiFetch('/api/capabilities/describe', {
     method: 'POST',
@@ -543,25 +604,25 @@ export async function hostCapabilityDescribe(payload: {
 function buildCapabilityExecutePayload(input: {
   id: string;
   operationId: string;
-  runtimeAddress: RuntimeAddress;
+  scope: RuntimeScope;
+  target?: CapabilityTarget | null;
   body?: Record<string, unknown>;
 }) {
   return {
     id: input.id,
     operationId: input.operationId,
-    runtimeAddress: input.runtimeAddress,
-    input: {
-      ...(input.body ?? {}),
-      runtimeAddress: input.runtimeAddress,
-    },
+    scope: input.scope,
+    target: input.target ?? null,
+    input: input.body ?? {},
   };
 }
 
-export async function hostCapabilityExecute<TResult = unknown>(
+async function hostCapabilityExecute<TResult = unknown>(
   payload: {
     id: string;
     operationId: string;
-    runtimeAddress: RuntimeAddress;
+    scope: RuntimeScope;
+    target?: CapabilityTarget | null;
     input?: unknown;
   },
   options?: {
@@ -575,13 +636,31 @@ export async function hostCapabilityExecute<TResult = unknown>(
   });
 }
 
-async function runtimeHostCapabilityExecute<TResult>(operationId: string, runtimeAddress: RuntimeAddress, input: Record<string, unknown> = {}): Promise<TResult> {
+function runtimeHostOperationTarget(operationId: string): CapabilityTarget {
+  return operationId === 'runtimeHost.prepareGatewayLaunch'
+    || operationId === 'runtimeHost.gatewayLifecycle'
+    || operationId === 'runtimeHost.gatewayReady'
+    || operationId === 'runtimeHost.gatewayControlUiAutoApprove'
+    ? { kind: 'gateway-control' }
+    : (operationId === 'runtimeHost.jobGet' ? { kind: 'runtime-job' } : { kind: 'runtime-endpoint' });
+}
+
+async function runtimeHostCapabilityExecute<TResult>(operationId: string, endpoint: RuntimeEndpointRef, input: Record<string, unknown> = {}): Promise<TResult> {
   return await hostCapabilityExecute<TResult>(buildCapabilityExecutePayload({
     id: RUNTIME_HOST_CAPABILITY_ID,
     operationId,
-    runtimeAddress,
+    scope: runtimeInstanceScope(endpoint),
+    target: runtimeHostOperationTarget(operationId),
     body: input,
   }));
+}
+
+async function resolveRuntimeHostJobEndpoint(): Promise<RuntimeEndpointRef> {
+  const scope = await resolveSingleCapabilityScope(RUNTIME_HOST_CAPABILITY_ID);
+  if (scope.kind !== 'runtime-instance') {
+    throw new Error(`runtime.host job lookup requires runtime-instance scope, got ${scope.kind}`);
+  }
+  return scope.endpoint;
 }
 
 export async function hostRuntimePrepareGatewayLaunch(payload: {
@@ -589,27 +668,38 @@ export async function hostRuntimePrepareGatewayLaunch(payload: {
   proxyEnabled?: boolean;
   proxyServer?: string;
   proxyBypassRules?: string;
-}, runtimeAddress: RuntimeAddress): Promise<RuntimeJobSubmission> {
-  return await runtimeHostCapabilityExecute<RuntimeJobSubmission>('runtimeHost.prepareGatewayLaunch', runtimeAddress, payload);
+}, endpoint: RuntimeEndpointRef): Promise<RuntimeJobSubmission> {
+  return await runtimeHostCapabilityExecute<RuntimeJobSubmission>('runtimeHost.prepareGatewayLaunch', endpoint, payload);
 }
 
-export async function hostRuntimeSyncProviderAuthBootstrap(runtimeAddress: RuntimeAddress): Promise<RuntimeJobSubmission> {
-  return await runtimeHostCapabilityExecute<RuntimeJobSubmission>('runtimeHost.syncProviderAuthBootstrap', runtimeAddress);
+export async function hostRuntimeSyncProviderAuthBootstrap(endpoint: RuntimeEndpointRef): Promise<RuntimeJobSubmission> {
+  return await runtimeHostCapabilityExecute<RuntimeJobSubmission>('runtimeHost.syncProviderAuthBootstrap', endpoint);
 }
 
-export async function hostRuntimeGatewayLifecycle(payload: Record<string, unknown>, runtimeAddress: RuntimeAddress): Promise<{ success: boolean; job?: RuntimeJobSnapshot }> {
-  return await runtimeHostCapabilityExecute<{ success: boolean; job?: RuntimeJobSnapshot }>('runtimeHost.gatewayLifecycle', runtimeAddress, payload);
+export async function hostRuntimeGatewayLifecycle(payload: Record<string, unknown>, endpoint: RuntimeEndpointRef): Promise<{ success: boolean; job?: RuntimeJobSnapshot }> {
+  return await runtimeHostCapabilityExecute<{ success: boolean; job?: RuntimeJobSnapshot }>('runtimeHost.gatewayLifecycle', endpoint, payload);
 }
 
-export async function hostDiagnosticsCollect(runtimeAddress: RuntimeAddress): Promise<RuntimeJobSubmission> {
-  return await runtimeHostCapabilityExecute<RuntimeJobSubmission>('diagnostics.collect', runtimeAddress);
+export async function hostRuntimeGatewayReady(endpoint: RuntimeEndpointRef, input: Record<string, unknown> = {}): Promise<unknown> {
+  return await runtimeHostCapabilityExecute<unknown>('runtimeHost.gatewayReady', endpoint, input);
 }
 
-export async function hostRuntimeJobGet<TResult = unknown>(jobId: string): Promise<RuntimeJobLookupResult<TResult>> {
-  return hostApiFetch('/api/runtime-host/jobs/get', {
-    method: 'POST',
-    body: JSON.stringify({ jobId }),
-  });
+export async function hostRuntimeGatewayControlUiAutoApprove(endpoint: RuntimeEndpointRef, input: Record<string, unknown> = {}): Promise<unknown> {
+  return await runtimeHostCapabilityExecute<unknown>('runtimeHost.gatewayControlUiAutoApprove', endpoint, input);
+}
+
+export async function hostDiagnosticsCollect(endpoint: RuntimeEndpointRef): Promise<RuntimeJobSubmission> {
+  return await runtimeHostCapabilityExecute<RuntimeJobSubmission>('diagnostics.collect', endpoint);
+}
+
+export async function hostRuntimeJobGet<TResult = unknown>(jobId: string, endpoint: RuntimeEndpointRef): Promise<RuntimeJobLookupResult<TResult>> {
+  return await hostCapabilityExecute<RuntimeJobLookupResult<TResult>>(buildCapabilityExecutePayload({
+    id: RUNTIME_HOST_CAPABILITY_ID,
+    operationId: 'runtimeHost.jobGet',
+    scope: runtimeInstanceScope(endpoint),
+    target: { kind: 'runtime-job', jobId },
+    body: { jobId },
+  }));
 }
 
 export async function waitForRuntimeJobResult<TResult = void>(
@@ -617,6 +707,7 @@ export async function waitForRuntimeJobResult<TResult = void>(
   options: {
     timeoutMs?: number;
     intervalMs?: number;
+    endpoint?: RuntimeEndpointRef;
   } = {},
 ): Promise<TResult> {
   const timeoutMs = options.timeoutMs ?? 120000;
@@ -678,7 +769,7 @@ export async function waitForRuntimeJobResult<TResult = void>(
       if (settled) {
         return;
       }
-      void hostRuntimeJobGet<TResult>(jobId)
+      void (async () => hostRuntimeJobGet<TResult>(jobId, options.endpoint ?? await resolveRuntimeHostJobEndpoint()))()
         .then((response) => {
           if (settled || handleSnapshot(response.job)) {
             return;
@@ -715,8 +806,12 @@ export async function resolveHydratedSessionSnapshot(input: {
   if (!hydrationJobId) {
     return null;
   }
+  const endpoint = input.initial.hydrationJob?.result && typeof input.initial.hydrationJob.result === 'object' && 'sessionIdentity' in input.initial.hydrationJob.result
+    ? (input.initial.hydrationJob.result as { sessionIdentity?: SessionIdentity }).sessionIdentity?.endpoint
+    : undefined;
   await waitForRuntimeJobResult(hydrationJobId, {
     timeoutMs: input.timeoutMs,
+    endpoint,
   });
   const result = await input.refetch();
   return result.snapshot ?? null;
@@ -725,154 +820,219 @@ export async function resolveHydratedSessionSnapshot(input: {
 export async function hostSessionWindowFetch(
   payload: {
     sessionKey: string;
-    runtimeAddress: RuntimeAddress;
+    sessionIdentity: SessionIdentity;
     mode?: 'latest' | 'older' | 'newer';
     limit?: number;
     offset?: number;
     includeCanonical?: boolean;
   },
 ): Promise<HostSessionWindowResult> {
-  return hostSessionPost<HostSessionWindowResult>('/api/sessions/window', payload);
+  return sessionIdentityCapabilityExecute<HostSessionWindowResult>({
+    capabilityId: SESSION_MANAGEMENT_CAPABILITY_ID,
+    operationId: 'sessions.window',
+    payload,
+  });
 }
 
 export async function hostSessionNew(
   payload: {
     sessionKey?: string;
-    runtimeAddress: RuntimeAddress;
+    endpoint: RuntimeEndpointRef;
+    agentId: string;
   },
 ): Promise<SessionNewResult> {
-  return hostSessionPost<SessionNewResult>('/api/sessions/create', payload);
+  return sessionCapabilityExecute<SessionNewResult>({
+    capabilityId: SESSION_PROMPT_CAPABILITY_ID,
+    operationId: 'sessions.create',
+    scope: agentScope(payload.endpoint, payload.agentId),
+    target: { kind: 'agent', agentId: payload.agentId },
+    payload,
+  });
 }
 
 export async function hostSessionDelete(
   payload: {
     sessionKey: string;
-    runtimeAddress: RuntimeAddress;
+    sessionIdentity: SessionIdentity;
   },
 ): Promise<{ success: boolean; error?: string }> {
-  return hostSessionPost<{ success: boolean; error?: string }>('/api/sessions/delete', payload);
+  return sessionIdentityCapabilityExecute<{ success: boolean; error?: string }>({
+    capabilityId: SESSION_MANAGEMENT_CAPABILITY_ID,
+    operationId: 'sessions.delete',
+    payload,
+  });
 }
 
 export async function hostSessionRename(
   payload: {
     sessionKey: string;
-    runtimeAddress: RuntimeAddress;
+    sessionIdentity: SessionIdentity;
     label: string;
   },
 ): Promise<{ success: boolean; sessionKey?: string; label?: string; error?: string }> {
-  return hostSessionPost<{ success: boolean; sessionKey?: string; label?: string; error?: string }>('/api/sessions/rename', payload);
+  return sessionIdentityCapabilityExecute<{ success: boolean; sessionKey?: string; label?: string; error?: string }>({
+    capabilityId: SESSION_MANAGEMENT_CAPABILITY_ID,
+    operationId: 'sessions.rename',
+    payload,
+  });
 }
 
 export async function hostSessionArchive(
   payload: {
     sessionKey: string;
-    runtimeAddress: RuntimeAddress;
+    sessionIdentity: SessionIdentity;
   },
 ): Promise<{ success: boolean; sessionKey?: string; status?: string; error?: string }> {
-  return hostSessionPost<{ success: boolean; sessionKey?: string; status?: string; error?: string }>('/api/sessions/archive', payload);
+  return sessionIdentityCapabilityExecute<{ success: boolean; sessionKey?: string; status?: string; error?: string }>({
+    capabilityId: SESSION_MANAGEMENT_CAPABILITY_ID,
+    operationId: 'sessions.archive',
+    payload,
+  });
 }
 
 export async function hostSessionUnarchive(
   payload: {
     sessionKey: string;
-    runtimeAddress: RuntimeAddress;
+    sessionIdentity: SessionIdentity;
   },
 ): Promise<{ success: boolean; sessionKey?: string; status?: string; error?: string }> {
-  return hostSessionPost<{ success: boolean; sessionKey?: string; status?: string; error?: string }>('/api/sessions/unarchive', payload);
+  return sessionIdentityCapabilityExecute<{ success: boolean; sessionKey?: string; status?: string; error?: string }>({
+    capabilityId: SESSION_MANAGEMENT_CAPABILITY_ID,
+    operationId: 'sessions.unarchive',
+    payload,
+  });
 }
 
 export async function hostSessionUpdateStatus(
   payload: {
     sessionKey: string;
-    runtimeAddress: RuntimeAddress;
+    sessionIdentity: SessionIdentity;
     status: 'active' | 'completed' | 'archived' | 'deleted';
   },
 ): Promise<{ success: boolean; sessionKey?: string; status?: string; error?: string }> {
-  return hostSessionPost<{ success: boolean; sessionKey?: string; status?: string; error?: string }>('/api/sessions/status', payload);
+  return sessionIdentityCapabilityExecute<{ success: boolean; sessionKey?: string; status?: string; error?: string }>({
+    capabilityId: SESSION_MANAGEMENT_CAPABILITY_ID,
+    operationId: 'sessions.updateStatus',
+    payload,
+  });
 }
 
 export async function hostSessionLoad(
   payload: {
     sessionKey: string;
-    runtimeAddress: RuntimeAddress;
+    sessionIdentity: SessionIdentity;
     limit?: number;
   },
   options?: {
     timeoutMs?: number;
   },
 ): Promise<HostSessionLoadResult> {
-  return hostSessionPost<HostSessionLoadResult>('/api/sessions/load', payload, options);
+  return sessionIdentityCapabilityExecute<HostSessionLoadResult>({
+    capabilityId: SESSION_PROMPT_CAPABILITY_ID,
+    operationId: 'sessions.load',
+    payload,
+  }, options);
 }
 
 export async function hostSessionSwitch(
   payload: {
     sessionKey: string;
-    runtimeAddress: RuntimeAddress;
+    sessionIdentity: SessionIdentity;
     limit?: number;
   },
 ): Promise<HostSessionLoadResult> {
-  return hostSessionPost<HostSessionLoadResult>('/api/sessions/switch', payload);
+  return sessionIdentityCapabilityExecute<HostSessionLoadResult>({
+    capabilityId: SESSION_MANAGEMENT_CAPABILITY_ID,
+    operationId: 'sessions.switch',
+    payload,
+  });
 }
 
 export async function hostSessionResume(
   payload: {
     sessionKey: string;
-    runtimeAddress: RuntimeAddress;
+    sessionIdentity: SessionIdentity;
   },
 ): Promise<HostSessionLoadResult> {
-  return hostSessionPost<HostSessionLoadResult>('/api/sessions/resume', payload);
+  return sessionIdentityCapabilityExecute<HostSessionLoadResult>({
+    capabilityId: SESSION_MANAGEMENT_CAPABILITY_ID,
+    operationId: 'sessions.resume',
+    payload,
+  });
 }
 
 export async function hostSessionState(
   payload: {
     sessionKey: string;
-    runtimeAddress: RuntimeAddress;
+    sessionIdentity: SessionIdentity;
   },
 ): Promise<HostSessionLoadResult> {
-  return hostSessionPost<HostSessionLoadResult>('/api/sessions/state', payload);
+  return sessionIdentityCapabilityExecute<HostSessionLoadResult>({
+    capabilityId: SESSION_MANAGEMENT_CAPABILITY_ID,
+    operationId: 'sessions.state',
+    payload,
+  });
 }
 
 export async function hostSessionAbort(
   payload: {
     sessionKey: string;
-    runtimeAddress: RuntimeAddress;
+    sessionIdentity: SessionIdentity;
     approvalIds?: string[];
   },
 ): Promise<SessionLoadResult & { success?: boolean }> {
-  return hostSessionPost<SessionLoadResult & { success?: boolean }>('/api/sessions/abort', payload, { timeoutMs: SESSION_ABORT_TIMEOUT_MS });
+  return sessionIdentityCapabilityExecute<SessionLoadResult & { success?: boolean }>({
+    capabilityId: SESSION_PROMPT_CAPABILITY_ID,
+    operationId: 'sessions.abort',
+    payload,
+  }, { timeoutMs: SESSION_ABORT_TIMEOUT_MS });
 }
 
 export async function hostSessionApprovals(
-  payload: { runtimeAddress: RuntimeAddress },
+  payload: { sessionIdentity: SessionIdentity },
 ): Promise<{ approvals: SessionApprovalRequestItem[] }> {
-  return hostSessionPost<{ approvals: SessionApprovalRequestItem[] }>('/api/sessions/approvals', payload);
+  return sessionIdentityCapabilityExecute<{ approvals: SessionApprovalRequestItem[] }>({
+    capabilityId: SESSION_APPROVAL_CAPABILITY_ID,
+    operationId: 'approvals.list',
+    payload,
+  });
 }
 
 export async function hostSessionResolveApproval(
   payload: {
     id: string;
     sessionKey: string;
-    runtimeAddress: RuntimeAddress;
+    sessionIdentity: SessionIdentity;
     decision: string;
   },
 ): Promise<unknown> {
-  return hostSessionPost<unknown>('/api/sessions/approval/resolve', payload);
+  return sessionIdentityCapabilityExecute<unknown>({
+    capabilityId: SESSION_APPROVAL_CAPABILITY_ID,
+    operationId: 'approvals.resolve',
+    target: { kind: 'approval', identity: payload.sessionIdentity, approvalId: payload.id },
+    payload,
+  });
 }
 
 export async function hostSessionPatch(
   payload: {
     sessionKey: string;
-    runtimeAddress: RuntimeAddress;
+    sessionIdentity: SessionIdentity;
     runtimeModelRef: string;
   },
 ): Promise<SessionLoadResult & { success?: boolean; error?: string }> {
-  return hostSessionPost<SessionLoadResult & { success?: boolean; error?: string }>('/api/sessions/patch', payload, { timeoutMs: SESSION_PATCH_TIMEOUT_MS });
+  return sessionIdentityCapabilityExecute<SessionLoadResult & { success?: boolean; error?: string }>({
+    capabilityId: SESSION_MODEL_SELECTION_CAPABILITY_ID,
+    operationId: 'sessions.patchModel',
+    target: { kind: 'model-selection', identity: payload.sessionIdentity, runtimeModelRef: payload.runtimeModelRef },
+    payload,
+  }, { timeoutMs: SESSION_PATCH_TIMEOUT_MS });
 }
 
 export async function hostSessionPrompt(
   payload: {
     sessionKey: string;
-    runtimeAddress: RuntimeAddress;
+    sessionIdentity: SessionIdentity;
     message: string;
     idempotencyKey?: string;
     deliver?: boolean;
@@ -885,5 +1045,9 @@ export async function hostSessionPrompt(
     }>;
   },
 ): Promise<SessionPromptResult> {
-  return hostSessionPost<SessionPromptResult>('/api/sessions/prompt', payload, { timeoutMs: SESSION_PROMPT_TIMEOUT_MS });
+  return sessionIdentityCapabilityExecute<SessionPromptResult>({
+    capabilityId: SESSION_PROMPT_CAPABILITY_ID,
+    operationId: payload.media?.length ? 'sessions.sendWithMedia' : 'sessions.prompt',
+    payload,
+  }, { timeoutMs: SESSION_PROMPT_TIMEOUT_MS });
 }

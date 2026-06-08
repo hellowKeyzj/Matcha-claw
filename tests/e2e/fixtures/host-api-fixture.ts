@@ -1,6 +1,6 @@
 import { BrowserWindow } from 'electron';
 import * as XLSX from 'xlsx';
-import type { RuntimeAddress } from '../../../runtime-host/application/agent-runtime/contracts/runtime-address';
+import type { CapabilityTarget, RuntimeEndpointRef, RuntimeScope, SessionIdentity } from '../../../runtime-host/application/agent-runtime/contracts/runtime-address';
 import type {
   SessionRenderExecutionGraphItem,
   SessionRenderItem,
@@ -93,6 +93,7 @@ interface E2EChatMockState {
   mainSessionKey: string;
   historySessionKey: string;
   artifactSessionKey: string;
+  activeTeamRunId: string;
   counter: number;
   subagents: MockSubagent[];
 }
@@ -107,6 +108,7 @@ const state: E2EChatMockState = {
   mainSessionKey: 'agent:main:main',
   historySessionKey: '',
   artifactSessionKey: '',
+  activeTeamRunId: 'team-run-main',
   counter: 0,
   subagents: [],
 };
@@ -121,21 +123,62 @@ const MOCK_TEXT_FILES = new Map<string, string>([
   [MOCK_GENERATED_FILE, 'export const value = 2;\n'],
   [MOCK_SKILL_FILE, '# open-baidu\n\nThis is a mocked skill preview.\n'],
 ]);
-function runtimeAddressForSession(sessionKey: string): RuntimeAddress {
+const OPENCLAW_ENDPOINT: RuntimeEndpointRef = {
+  kind: 'native-runtime',
+  runtimeAdapterId: 'openclaw',
+  runtimeInstanceId: 'local',
+};
+
+function agentIdFromSessionKey(sessionKey: string): string {
+  return sessionKey.split(':')[1] || 'main';
+}
+
+function sessionIdentityForSession(sessionKey: string): SessionIdentity {
   return {
-    kind: 'native-runtime',
-    capabilityId: 'session.prompt',
-    runtimeAdapterId: 'openclaw',
-    runtimeInstanceId: 'local',
-    agentId: sessionKey.split(':')[1] || 'main',
+    endpoint: OPENCLAW_ENDPOINT,
+    agentId: agentIdFromSessionKey(sessionKey),
     sessionKey,
   };
 }
 
-function requireRuntimeAddressPayload(payload: Record<string, unknown>): HostApiProxyEnvelope | null {
-  const runtimeAddress = payload.runtimeAddress;
-  if (!runtimeAddress || typeof runtimeAddress !== 'object' || Array.isArray(runtimeAddress)) {
-    return toSuccessEnvelope({ success: false, error: 'RuntimeAddress is required' }, 400, false);
+function runtimeInstanceScope(): RuntimeScope {
+  return {
+    kind: 'runtime-instance',
+    endpoint: OPENCLAW_ENDPOINT,
+  };
+}
+
+function teamRunScope(runId: string, teamId?: string): RuntimeScope {
+  return {
+    kind: 'team-run',
+    endpoint: OPENCLAW_ENDPOINT,
+    ...(teamId ? { teamId } : {}),
+    runId,
+  };
+}
+
+function isRecord(input: unknown): input is Record<string, unknown> {
+  return typeof input === 'object' && input !== null && !Array.isArray(input);
+}
+
+function getSessionKeyFromScope(scope: unknown): string | null {
+  return isRecord(scope)
+    && scope.kind === 'session'
+    && isRecord(scope.identity)
+    && typeof scope.identity.sessionKey === 'string'
+    ? scope.identity.sessionKey
+    : null;
+}
+
+function getAgentIdFromScope(scope: unknown): string | null {
+  if (!isRecord(scope)) {
+    return null;
+  }
+  if (scope.kind === 'runtime-instance') {
+    return 'main';
+  }
+  if (scope.kind === 'session' && isRecord(scope.identity) && typeof scope.identity.agentId === 'string') {
+    return scope.identity.agentId;
   }
   return null;
 }
@@ -144,26 +187,177 @@ function requireCapabilityExecutePayload(
   payload: Record<string, unknown>,
   capabilityId: string,
   operationId: string,
-): { input: Record<string, unknown>; runtimeAddress: Record<string, unknown> } | HostApiProxyEnvelope {
+): { input: Record<string, unknown>; scope: RuntimeScope; target: CapabilityTarget | null } | HostApiProxyEnvelope {
   if (payload.id !== capabilityId || payload.operationId !== operationId) {
     return toSuccessEnvelope({ success: false, error: 'Capability operation not supported' }, 400, false);
   }
-  const invalidRuntimeAddress = requireRuntimeAddressPayload(payload);
-  if (invalidRuntimeAddress) {
-    return invalidRuntimeAddress;
+  if (!isRecord(payload.scope)) {
+    return toSuccessEnvelope({ success: false, error: 'RuntimeScope is required' }, 400, false);
   }
   const input = payload.input;
   if (!input || typeof input !== 'object' || Array.isArray(input)) {
     return toSuccessEnvelope({ success: false, error: 'Capability input is required' }, 400, false);
   }
-  const inputRecord = input as Record<string, unknown>;
-  const invalidInputRuntimeAddress = requireRuntimeAddressPayload(inputRecord);
-  if (invalidInputRuntimeAddress) {
-    return invalidInputRuntimeAddress;
+  const domainInput = input as Record<string, unknown>;
+  const target = isRecord(payload.target) ? payload.target as CapabilityTarget : null;
+  if (target?.kind === 'workspace-file' && typeof target.path === 'string' && domainInput.path !== target.path) {
+    return toSuccessEnvelope({ success: false, error: 'Workspace file target path must match input path' }, 400, false);
+  }
+  if (target?.kind === 'workspace-staging' && isRecord(target.identity) && isRecord(domainInput.sessionIdentity)) {
+    const targetSessionKey = typeof target.identity.sessionKey === 'string' ? target.identity.sessionKey : '';
+    const inputSessionKey = typeof domainInput.sessionIdentity.sessionKey === 'string' ? domainInput.sessionIdentity.sessionKey : '';
+    if (targetSessionKey && inputSessionKey && targetSessionKey !== inputSessionKey) {
+      return toSuccessEnvelope({ success: false, error: 'Workspace staging target identity must match input sessionIdentity' }, 400, false);
+    }
+  }
+  if (target?.kind === 'session' && isRecord(target.identity)) {
+    const targetSessionKey = typeof target.identity.sessionKey === 'string' ? target.identity.sessionKey : '';
+    const inputSessionKey = typeof domainInput.sessionKey === 'string'
+      ? domainInput.sessionKey
+      : (isRecord(domainInput.sessionIdentity) && typeof domainInput.sessionIdentity.sessionKey === 'string' ? domainInput.sessionIdentity.sessionKey : '');
+    if (targetSessionKey && inputSessionKey && targetSessionKey !== inputSessionKey) {
+      return toSuccessEnvelope({ success: false, error: 'Session target identity must match input session' }, 400, false);
+    }
+  }
+  if (target?.kind === 'runtime-job' && typeof target.jobId === 'string' && domainInput.jobId !== target.jobId) {
+    return toSuccessEnvelope({ success: false, error: 'Runtime job target must match input jobId' }, 400, false);
   }
   return {
-    input: inputRecord,
-    runtimeAddress: payload.runtimeAddress as Record<string, unknown>,
+    input: domainInput,
+    scope: payload.scope as RuntimeScope,
+    target,
+  };
+}
+
+function sessionKeyFromIdentityPayload(payload: Record<string, unknown>): string | null {
+  return isRecord(payload.sessionIdentity) && typeof payload.sessionIdentity.sessionKey === 'string'
+    ? payload.sessionIdentity.sessionKey
+    : null;
+}
+
+function buildSessionOperationPayload(payload: Record<string, unknown>, fallbackSessionKey = state.mainSessionKey): { sessionKey: string; sessionIdentity: SessionIdentity } {
+  const sessionKey = typeof payload.sessionKey === 'string'
+    ? payload.sessionKey
+    : (sessionKeyFromIdentityPayload(payload) ?? fallbackSessionKey);
+  return {
+    sessionKey,
+    sessionIdentity: sessionIdentityForSession(sessionKey),
+  };
+}
+
+function buildCapabilitySummary(
+  id: string,
+  scope: RuntimeScope,
+  targetKinds: Array<CapabilityTarget['kind']>,
+  operations: Array<{ id: string; targetKind: CapabilityTarget['kind']; targetRequired?: boolean }>,
+) {
+  return {
+    id,
+    scopeKind: scope.kind,
+    scope,
+    targetKinds,
+    operations,
+    availability: 'available' as const,
+  };
+}
+
+function buildRuntimeEndpointCapabilitySummaries() {
+  const runtimeScope = runtimeInstanceScope();
+  const teamRuntimeScope = teamRunScope(state.activeTeamRunId ?? 'team-run-main');
+  const workspaceScope: RuntimeScope = { kind: 'workspace', endpoint: OPENCLAW_ENDPOINT };
+  return [
+    buildCapabilitySummary('session.prompt', runtimeScope, ['agent', 'session'], [
+      { id: 'sessions.create', targetKind: 'agent' },
+      { id: 'sessions.prompt', targetKind: 'session' },
+      { id: 'sessions.sendWithMedia', targetKind: 'session' },
+      { id: 'sessions.abort', targetKind: 'session' },
+      { id: 'sessions.load', targetKind: 'session' },
+    ]),
+    buildCapabilitySummary('session.management', runtimeScope, ['runtime-endpoint'], [
+      { id: 'sessions.list', targetKind: 'runtime-endpoint' },
+    ]),
+    buildCapabilitySummary('session.management', { kind: 'session', identity: sessionIdentityForSession(state.mainSessionKey) }, ['session'], [
+      { id: 'sessions.window', targetKind: 'session' },
+      { id: 'sessions.switch', targetKind: 'session' },
+      { id: 'sessions.resume', targetKind: 'session' },
+      { id: 'sessions.state', targetKind: 'session' },
+    ]),
+    buildCapabilitySummary('session.approval', runtimeScope, ['session', 'approval'], [
+      { id: 'approvals.list', targetKind: 'session' },
+      { id: 'approvals.resolve', targetKind: 'approval' },
+    ]),
+    buildCapabilitySummary('team.runtime', runtimeScope, ['team', 'team-run', 'team-stage', 'team-dispatch', 'team-approval'], [
+      { id: 'team.runCreate', targetKind: 'team' },
+    ]),
+    buildCapabilitySummary('team.runtime', teamRuntimeScope, ['team-run', 'team-stage', 'team-dispatch', 'team-approval'], [
+      { id: 'team.runStart', targetKind: 'team-run' },
+      { id: 'team.runSnapshot', targetKind: 'team-run' },
+      { id: 'team.dispatchPrepare', targetKind: 'team-stage' },
+      { id: 'team.dispatchExecute', targetKind: 'team-dispatch' },
+      { id: 'team.approvalResolve', targetKind: 'team-approval' },
+    ]),
+    buildCapabilitySummary('workspace.file', workspaceScope, ['workspace-file', 'workspace-staging'], [
+      { id: 'files.readText', targetKind: 'workspace-file' },
+      { id: 'files.readBinary', targetKind: 'workspace-file' },
+      { id: 'files.stat', targetKind: 'workspace-file' },
+      { id: 'files.listDir', targetKind: 'workspace-file' },
+      { id: 'files.thumbnail', targetKind: 'workspace-file' },
+      { id: 'files.stagePaths', targetKind: 'workspace-staging' },
+      { id: 'files.stageBuffer', targetKind: 'workspace-staging' },
+    ]),
+    buildCapabilitySummary('runtime.host', runtimeScope, ['runtime-endpoint', 'runtime-job', 'gateway-control'], [
+      { id: 'runtimeHost.gatewayReady', targetKind: 'gateway-control' },
+      { id: 'runtimeHost.gatewayControlUiAutoApprove', targetKind: 'gateway-control' },
+      { id: 'runtimeHost.jobGet', targetKind: 'runtime-job', targetRequired: true },
+      { id: 'diagnostics.collect', targetKind: 'runtime-endpoint' },
+    ]),
+  ];
+}
+
+function buildRuntimeEndpointSummary() {
+  return {
+    id: 'openclaw-local',
+    protocolId: 'openclaw-v4',
+    runtimeAdapterId: OPENCLAW_ENDPOINT.runtimeAdapterId,
+    runtimeInstanceId: OPENCLAW_ENDPOINT.runtimeInstanceId,
+    displayName: 'OpenClaw Local',
+    agentIds: ['main'],
+    acceptsDynamicAgents: true,
+    capabilities: {
+      chat: true,
+      streaming: true,
+      tools: true,
+      approvals: true,
+      replay: true,
+      modelSelection: false,
+    },
+    capabilitySummaries: buildRuntimeEndpointCapabilitySummaries(),
+    controlState: {
+      connection: {
+        state: 'connected' as const,
+        portReachable: true,
+        gatewayReady: true,
+        healthSummary: 'healthy' as const,
+        transportEpoch: 1,
+        diagnostics: {
+          consecutiveHeartbeatMisses: 0,
+          consecutiveRpcFailures: 0,
+        },
+        updatedAt: Date.now(),
+      },
+      readiness: {
+        ready: true,
+        phase: 'ready' as const,
+        requiredMethods: [],
+        missingMethods: [],
+        retryable: false,
+      },
+      capabilities: {
+        methods: [],
+        updatedAt: Date.now(),
+      },
+      updatedAt: Date.now(),
+    },
   };
 }
 
@@ -400,13 +594,13 @@ function emitAborted(runId: string, sessionKey: string): void {
 
 function makeCatalog(sessionKey: string) {
   const session = state.sessions.find((item) => item.key === sessionKey);
-  const runtimeAddress = runtimeAddressForSession(sessionKey);
+  const sessionIdentity = sessionIdentityForSession(sessionKey);
   return {
     key: sessionKey,
-    agentId: runtimeAddress.agentId,
+    agentId: sessionIdentity.agentId,
     protocolId: 'openclaw-v4',
     runtimeEndpointId: 'openclaw-local',
-    runtimeAddress,
+    sessionIdentity,
     kind: 'main' as const,
     preferred: sessionKey === state.mainSessionKey,
     label: session?.label || 'Main',
@@ -695,13 +889,15 @@ function buildSnapshotForSession(sessionKey: string): SessionStateSnapshot {
       .map((approval) => ({
         id: approval.id,
         sessionKey: approval.sessionKey,
-        runtimeAddress: runtimeAddressForSession(approval.sessionKey),
+        sessionIdentity: sessionIdentityForSession(approval.sessionKey),
         runId: approval.runId,
         title: approval.title,
         command: approval.command,
         allowedDecisions: approval.allowedDecisions,
         createdAtMs: approval.createdAt,
       })),
+    usage: [],
+    artifacts: [],
     replayComplete: true,
     runtime: {
       activeRunId: activeRun?.runId ?? null,
@@ -776,6 +972,7 @@ function seedState(): void {
   state.mainSessionKey = 'agent:main:main';
   state.historySessionKey = `agent:main:session-${now - 3600_000}`;
   state.artifactSessionKey = 'agent:main:artifact';
+  state.activeTeamRunId = 'team-run-main';
   state.counter = 0;
   state.runsById = {};
   state.approvals = [];
@@ -858,36 +1055,8 @@ export function handleE2EHostApiFetch(request: HostApiFetchRequest): HostApiProx
     });
   }
 
-  if (path === '/api/subagents/list' && method === 'POST') {
-    return toSuccessEnvelope({
-      agents: state.subagents,
-      defaultId: 'main',
-      mainKey: 'agent:main',
-      scope: 'e2e',
-      ready: true,
-      refreshing: false,
-      updatedAt: Date.now(),
-      error: null,
-    });
-  }
-
-  if (path === '/api/subagents/config/get' && method === 'POST') {
-    return toSuccessEnvelope({
-      ready: true,
-      config: {
-        defaultModel: 'mock/default',
-        defaultWorkspace: ARTIFACT_WORKSPACE_ROOT,
-        agents: {
-          list: state.subagents.map((agent) => ({
-            id: agent.id,
-            default: agent.isDefault,
-            model: agent.model,
-            workspace: agent.workspace,
-            skills: agent.skills,
-          })),
-        },
-      },
-    });
+  if ((path === '/api/subagents/list' || path === '/api/subagents/config/get') && method === 'POST') {
+    return toSuccessEnvelope({ success: false, error: 'Legacy subagent read route is disabled; use /api/capabilities/execute with an agent target' }, 400, false);
   }
 
   if (path === '/api/provider-models/selectable' && method === 'GET') {
@@ -909,6 +1078,92 @@ export function handleE2EHostApiFetch(request: HostApiFetchRequest): HostApiProx
     return toSuccessEnvelope('/tmp/openclaw-config');
   }
 
+  if (path === '/api/runtime-adapters/list' && method === 'GET') {
+    return toSuccessEnvelope({
+      adapters: [{ runtimeAdapterId: 'openclaw', protocolId: 'openclaw-v4', endpointIds: ['openclaw-local'] }],
+    });
+  }
+
+  if (path === '/api/runtime-adapters/instances/list' && method === 'GET') {
+    return toSuccessEnvelope({
+      instances: [{ runtimeAdapterId: 'openclaw', runtimeInstanceId: 'local', endpointId: 'openclaw-local', agentIds: ['main'] }],
+    });
+  }
+
+  if (path === '/api/runtime-connectors/list' && method === 'GET') {
+    return toSuccessEnvelope({ connectors: [] });
+  }
+
+  if (path === '/api/runtime-endpoints/list' && method === 'GET') {
+    return toSuccessEnvelope({ endpoints: [buildRuntimeEndpointSummary()] });
+  }
+
+  if (path === '/api/capabilities/list' && method === 'GET') {
+    return toSuccessEnvelope({ capabilities: buildRuntimeEndpointCapabilitySummaries() });
+  }
+
+  if (path === '/api/sessions/list' && method === 'POST') {
+    const payload = parseJsonBody(request.body);
+    const agentId = getAgentIdFromScope(payload.scope) ?? 'main';
+    return toSuccessEnvelope({
+      sessions: state.sessions
+        .map((session) => makeCatalog(session.key))
+        .filter((session) => session.agentId === agentId),
+      ready: true,
+      refreshing: false,
+      updatedAt: Date.now(),
+      error: null,
+    });
+  }
+
+  if (path === '/api/sessions/create' && method === 'POST') {
+    return toSuccessEnvelope({ success: false, error: 'Legacy session mutation route is disabled; use /api/capabilities/execute with a session target' }, 400, false);
+  }
+
+  if (path === '/api/sessions/window' && method === 'POST') {
+    return toSuccessEnvelope({ success: false, error: 'Legacy session hydration route is disabled; use /api/capabilities/execute with a session target' }, 400, false);
+  }
+
+  if (path === '/api/sessions/load' && method === 'POST') {
+    return toSuccessEnvelope({ success: false, error: 'Legacy session mutation route is disabled; use /api/capabilities/execute with a session target' }, 400, false);
+  }
+
+  if ((path === '/api/sessions/switch' || path === '/api/sessions/resume') && method === 'POST') {
+    return toSuccessEnvelope({ success: false, error: 'Legacy session mutation route is disabled; use /api/capabilities/execute with a session target' }, 400, false);
+  }
+
+  if (path === '/api/sessions/state' && method === 'POST') {
+    return toSuccessEnvelope({ success: false, error: 'Legacy session hydration route is disabled; use /api/capabilities/execute with a session target' }, 400, false);
+  }
+
+  if (path === '/api/sessions/abort' && method === 'POST') {
+    return toSuccessEnvelope({ success: false, error: 'Legacy session mutation route is disabled; use /api/capabilities/execute with a session target' }, 400, false);
+  }
+
+  if (path === '/api/sessions/approvals' && method === 'POST') {
+    return toSuccessEnvelope({
+      success: true,
+      approvals: state.approvals.map((approval) => ({
+        id: approval.id,
+        sessionKey: approval.sessionKey,
+        sessionIdentity: sessionIdentityForSession(approval.sessionKey),
+        runId: approval.runId,
+        title: approval.title,
+        command: approval.command,
+        allowedDecisions: approval.allowedDecisions,
+        createdAtMs: approval.createdAt,
+      })),
+    });
+  }
+
+  if (path === '/api/sessions/approval/resolve' && method === 'POST') {
+    return toSuccessEnvelope({ success: false, error: 'Legacy session mutation route is disabled; use /api/capabilities/execute with an approval target' }, 400, false);
+  }
+
+  if (path === '/api/sessions/prompt' && method === 'POST') {
+    return toSuccessEnvelope({ success: false, error: 'Legacy session mutation route is disabled; use /api/capabilities/execute with a session target' }, 400, false);
+  }
+
   if (path === '/api/capabilities/execute' && method === 'POST') {
     const payload = parseJsonBody(request.body);
 
@@ -917,12 +1172,87 @@ export function handleE2EHostApiFetch(request: HostApiFetchRequest): HostApiProx
       if ('ok' in requestPayload) {
         return requestPayload;
       }
-      const runtimeAddress = requestPayload.runtimeAddress;
-      const agentId = typeof runtimeAddress.agentId === 'string' ? runtimeAddress.agentId : '';
       return toSuccessEnvelope({
-        sessions: state.sessions
-          .map((session) => makeCatalog(session.key))
-          .filter((session) => session.runtimeAddress.agentId === agentId),
+        sessions: state.sessions.map((session) => makeCatalog(session.key)),
+        ready: true,
+        refreshing: false,
+        updatedAt: Date.now(),
+        error: null,
+      });
+    }
+
+    if (payload.id === 'subagent.management' && payload.operationId === 'subagents.list') {
+      const requestPayload = requireCapabilityExecutePayload(payload, 'subagent.management', 'subagents.list');
+      if ('ok' in requestPayload) {
+        return requestPayload;
+      }
+      return toSuccessEnvelope({
+        agents: state.subagents,
+        defaultId: 'main',
+        mainKey: 'agent:main',
+        scope: 'e2e',
+        ready: true,
+        refreshing: false,
+        updatedAt: Date.now(),
+        error: null,
+      });
+    }
+
+    if (payload.id === 'subagent.management' && payload.operationId === 'subagents.config.get') {
+      const requestPayload = requireCapabilityExecutePayload(payload, 'subagent.management', 'subagents.config.get');
+      if ('ok' in requestPayload) {
+        return requestPayload;
+      }
+      return toSuccessEnvelope({
+        ready: true,
+        config: {
+          defaultModel: 'mock/default',
+          defaultWorkspace: ARTIFACT_WORKSPACE_ROOT,
+          agents: {
+            list: state.subagents.map((agent) => ({
+              id: agent.id,
+              default: agent.isDefault,
+              model: agent.model,
+              workspace: agent.workspace,
+              skills: agent.skills,
+            })),
+          },
+        },
+      });
+    }
+
+    if (payload.id === 'runtime.host' && payload.operationId === 'runtimeHost.gatewayReady') {
+      const requestPayload = requireCapabilityExecutePayload(payload, 'runtime.host', 'runtimeHost.gatewayReady');
+      if ('ok' in requestPayload) {
+        return requestPayload;
+      }
+      return toSuccessEnvelope({ success: true, phase: 'ready', retryable: false, requiredMethods: [], missingMethods: [] });
+    }
+
+    if (payload.id === 'runtime.host' && payload.operationId === 'runtimeHost.gatewayControlUiAutoApprove') {
+      const requestPayload = requireCapabilityExecutePayload(payload, 'runtime.host', 'runtimeHost.gatewayControlUiAutoApprove');
+      if ('ok' in requestPayload) {
+        return requestPayload;
+      }
+      return toSuccessEnvelope({ success: true, approvedRequestIds: [] });
+    }
+
+    if (payload.id === 'runtime.host' && payload.operationId === 'runtimeHost.jobGet') {
+      const requestPayload = requireCapabilityExecutePayload(payload, 'runtime.host', 'runtimeHost.jobGet');
+      if ('ok' in requestPayload) {
+        return requestPayload;
+      }
+      const jobId = typeof requestPayload.input.jobId === 'string' ? requestPayload.input.jobId : '';
+      return toSuccessEnvelope({
+        success: true,
+        job: jobId ? {
+          id: jobId,
+          type: 'mock.runtimeJob',
+          status: 'succeeded',
+          queuedAt: Date.now(),
+          attempts: 1,
+          maxAttempts: 1,
+        } : null,
       });
     }
 
@@ -954,7 +1284,7 @@ export function handleE2EHostApiFetch(request: HostApiFetchRequest): HostApiProx
       if ('ok' in requestPayload) {
         return requestPayload;
       }
-      const sessionKey = typeof requestPayload.input.sessionKey === 'string' ? requestPayload.input.sessionKey : state.mainSessionKey;
+      const sessionKey = typeof requestPayload.input.sessionKey === 'string' ? requestPayload.input.sessionKey : (getSessionKeyFromScope(requestPayload.scope) ?? state.mainSessionKey);
       return toSuccessEnvelope({
         snapshot: buildSnapshotForSession(sessionKey),
       });
@@ -965,9 +1295,9 @@ export function handleE2EHostApiFetch(request: HostApiFetchRequest): HostApiProx
       if ('ok' in requestPayload) {
         return requestPayload;
       }
-      const runtimeAddress = requestPayload.runtimeAddress;
-      const agentId = typeof runtimeAddress.agentId === 'string' && runtimeAddress.agentId.trim()
-        ? runtimeAddress.agentId.trim()
+      const scopedAgentId = getAgentIdFromScope(requestPayload.scope);
+      const agentId = scopedAgentId && scopedAgentId.trim()
+        ? scopedAgentId.trim()
         : 'main';
       const sessionKey = `agent:${agentId}:session-${Date.now()}-${++state.counter}`;
       ensureSession(sessionKey, sessionKey);
@@ -983,7 +1313,7 @@ export function handleE2EHostApiFetch(request: HostApiFetchRequest): HostApiProx
       if ('ok' in requestPayload) {
         return requestPayload;
       }
-      const sessionKey = typeof requestPayload.input.sessionKey === 'string' ? requestPayload.input.sessionKey : state.mainSessionKey;
+      const sessionKey = typeof requestPayload.input.sessionKey === 'string' ? requestPayload.input.sessionKey : (getSessionKeyFromScope(requestPayload.scope) ?? state.mainSessionKey);
       return toSuccessEnvelope({
         snapshot: buildSnapshotForSession(sessionKey),
       });
@@ -994,7 +1324,7 @@ export function handleE2EHostApiFetch(request: HostApiFetchRequest): HostApiProx
       if ('ok' in requestPayload) {
         return requestPayload;
       }
-      const sessionKey = typeof requestPayload.input.sessionKey === 'string' ? requestPayload.input.sessionKey : state.mainSessionKey;
+      const sessionKey = typeof requestPayload.input.sessionKey === 'string' ? requestPayload.input.sessionKey : (getSessionKeyFromScope(requestPayload.scope) ?? state.mainSessionKey);
       return toSuccessEnvelope({
         snapshot: buildSnapshotForSession(sessionKey),
       });
@@ -1005,7 +1335,7 @@ export function handleE2EHostApiFetch(request: HostApiFetchRequest): HostApiProx
       if ('ok' in requestPayload) {
         return requestPayload;
       }
-      const sessionKey = typeof requestPayload.input.sessionKey === 'string' ? requestPayload.input.sessionKey : state.mainSessionKey;
+      const sessionKey = typeof requestPayload.input.sessionKey === 'string' ? requestPayload.input.sessionKey : (getSessionKeyFromScope(requestPayload.scope) ?? state.mainSessionKey);
       const run = findLatestRunningRunBySession(sessionKey);
       if (run) {
         emitAborted(run.runId, sessionKey);
@@ -1026,7 +1356,7 @@ export function handleE2EHostApiFetch(request: HostApiFetchRequest): HostApiProx
         approvals: state.approvals.map((approval) => ({
           id: approval.id,
           sessionKey: approval.sessionKey,
-          runtimeAddress: { ...runtimeAddressForSession(approval.sessionKey), capabilityId: 'session.approval' },
+          sessionIdentity: sessionIdentityForSession(approval.sessionKey),
           runId: approval.runId,
           title: approval.title,
           command: approval.command,
@@ -1065,13 +1395,78 @@ export function handleE2EHostApiFetch(request: HostApiFetchRequest): HostApiProx
       if ('ok' in requestPayload) {
         return requestPayload;
       }
-      const sessionKey = typeof requestPayload.input.sessionKey === 'string' ? requestPayload.input.sessionKey : state.mainSessionKey;
+      const sessionKey = typeof requestPayload.input.sessionKey === 'string' ? requestPayload.input.sessionKey : (getSessionKeyFromScope(requestPayload.scope) ?? state.mainSessionKey);
       const message = typeof requestPayload.input.message === 'string' ? requestPayload.input.message : 'Process attachment';
       const result = createRun(sessionKey, message, 'default');
       return toSuccessEnvelope({
         success: true,
         result,
       });
+    }
+
+    if (payload.id === 'workspace.file' && ['files.readText', 'files.readBinary', 'files.stat', 'files.listDir', 'files.thumbnail'].includes(String(payload.operationId))) {
+      const requestPayload = requireCapabilityExecutePayload(payload, 'workspace.file', String(payload.operationId));
+      if ('ok' in requestPayload) {
+        return requestPayload;
+      }
+      const targetPath = isRecord(requestPayload.target) && requestPayload.target.kind === 'workspace-file' && typeof requestPayload.target.path === 'string'
+        ? requestPayload.target.path
+        : '';
+      const inputPath = typeof requestPayload.input.path === 'string' ? requestPayload.input.path : '';
+      if (!targetPath || targetPath !== inputPath) {
+        return toSuccessEnvelope({ success: false, error: 'Workspace file target path must match input path' }, 400, false);
+      }
+      const filePath = inputPath;
+      if (payload.operationId === 'files.stat') {
+        const stat = MOCK_FILE_STATS.get(filePath);
+        return toSuccessEnvelope(stat ? {
+          ok: true,
+          entry: {
+            name: filePath.split(/[\\/]/).pop() || filePath,
+            path: filePath,
+            isDir: stat.isDir,
+            size: stat.size,
+            mtimeMs: stat.mtimeMs,
+          },
+        } : { ok: false, error: 'notFound' });
+      }
+      if (payload.operationId === 'files.readText') {
+        const content = MOCK_TEXT_FILES.get(filePath);
+        return toSuccessEnvelope(typeof content === 'string' ? {
+          ok: true,
+          path: filePath,
+          content,
+          mimeType: filePath.endsWith('.md') ? 'text/markdown' : 'text/typescript',
+          size: content.length,
+          readOnly: true,
+        } : { ok: false, error: 'notFound' });
+      }
+      if (payload.operationId === 'files.readBinary') {
+        if (filePath === MOCK_REPORT_FILE) {
+          return toSuccessEnvelope({ ok: true, path: filePath, data: buildMockPdfBase64(), mimeType: 'application/pdf', size: 128, readOnly: true });
+        }
+        if (filePath === MOCK_SHEET_FILE) {
+          return toSuccessEnvelope({ ok: true, path: filePath, data: cachedWorkbookBase64 ?? '', mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', size: 256, readOnly: true });
+        }
+        return toSuccessEnvelope({ ok: false, error: 'notFound' });
+      }
+      if (payload.operationId === 'files.listDir') {
+        if (filePath === ARTIFACT_WORKSPACE_ROOT) {
+          return toSuccessEnvelope({
+            ok: true,
+            entries: [
+              { name: 'demo.ts', path: MOCK_GENERATED_FILE, isDir: false, size: 24, mtimeMs: 1, hasChildren: false },
+              { name: 'report.pdf', path: MOCK_REPORT_FILE, isDir: false, size: 128, mtimeMs: 1, hasChildren: false },
+              { name: 'sales.xlsx', path: MOCK_SHEET_FILE, isDir: false, size: 256, mtimeMs: 1, hasChildren: false },
+            ],
+          });
+        }
+        if (filePath === MOCK_SKILL_DIR) {
+          return toSuccessEnvelope({ ok: true, entries: [{ name: 'SKILL.md', path: MOCK_SKILL_FILE, isDir: false, size: 40, mtimeMs: 1, hasChildren: false }] });
+        }
+        return toSuccessEnvelope({ ok: false, error: 'notFound' });
+      }
+      return toSuccessEnvelope({ preview: null, fileSize: MOCK_FILE_STATS.get(filePath)?.size ?? 0 });
     }
 
     if (payload.id === 'workspace.file' && payload.operationId === 'files.stagePaths') {
@@ -1118,7 +1513,7 @@ export function handleE2EHostApiFetch(request: HostApiFetchRequest): HostApiProx
       if ('ok' in requestPayload) {
         return requestPayload;
       }
-      const sessionKey = typeof requestPayload.input.sessionKey === 'string' ? requestPayload.input.sessionKey : state.mainSessionKey;
+      const sessionKey = typeof requestPayload.input.sessionKey === 'string' ? requestPayload.input.sessionKey : (getSessionKeyFromScope(requestPayload.scope) ?? state.mainSessionKey);
       const message = typeof requestPayload.input.message === 'string' ? requestPayload.input.message : '';
       const mode: MockRun['mode'] = message.includes('[approval]')
         ? 'approval'
@@ -1136,119 +1531,8 @@ export function handleE2EHostApiFetch(request: HostApiFetchRequest): HostApiProx
     return toSuccessEnvelope({ success: false, error: 'Capability execution not supported' }, 400, false);
   }
 
-
-  if (path === '/api/files/stat' && method === 'POST') {
-    const payload = parseJsonBody(request.body);
-    const filePath = typeof payload.path === 'string' ? payload.path : '';
-    const stat = MOCK_FILE_STATS.get(filePath);
-    if (!stat) {
-      return toSuccessEnvelope({ ok: false, error: 'notFound' });
-    }
-    return toSuccessEnvelope({
-      ok: true,
-      entry: {
-        name: filePath.split(/[\\/]/).pop() || filePath,
-        path: filePath,
-        isDir: stat.isDir,
-        size: stat.size,
-        mtimeMs: stat.mtimeMs,
-      },
-    });
-  }
-
-  if (path === '/api/files/read-text' && method === 'POST') {
-    const payload = parseJsonBody(request.body);
-    const filePath = typeof payload.path === 'string' ? payload.path : '';
-    const content = MOCK_TEXT_FILES.get(filePath);
-    if (typeof content !== 'string') {
-      return toSuccessEnvelope({ ok: false, error: 'notFound' });
-    }
-    return toSuccessEnvelope({
-      ok: true,
-      path: filePath,
-      content,
-      mimeType: filePath.endsWith('.md') ? 'text/markdown' : 'text/typescript',
-      size: content.length,
-      readOnly: true,
-    });
-  }
-
-  if (path === '/api/files/read-binary' && method === 'POST') {
-    const payload = parseJsonBody(request.body);
-    const filePath = typeof payload.path === 'string' ? payload.path : '';
-    if (filePath === MOCK_REPORT_FILE) {
-      return toSuccessEnvelope({
-        ok: true,
-        path: filePath,
-        data: buildMockPdfBase64(),
-        mimeType: 'application/pdf',
-        size: 128,
-        readOnly: true,
-      });
-    }
-    if (filePath === MOCK_SHEET_FILE) {
-      return toSuccessEnvelope({
-        ok: true,
-        path: filePath,
-        data: cachedWorkbookBase64 ?? '',
-        mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-        size: 256,
-        readOnly: true,
-      });
-    }
-    return toSuccessEnvelope({ ok: false, error: 'notFound' });
-  }
-
-  if (path === '/api/files/list-dir' && method === 'POST') {
-    const payload = parseJsonBody(request.body);
-    const filePath = typeof payload.path === 'string' ? payload.path : '';
-    if (filePath === ARTIFACT_WORKSPACE_ROOT) {
-      return toSuccessEnvelope({
-        ok: true,
-        entries: [
-          {
-            name: 'demo.ts',
-            path: MOCK_GENERATED_FILE,
-            isDir: false,
-            size: 24,
-            mtimeMs: 1,
-            hasChildren: false,
-          },
-          {
-            name: 'report.pdf',
-            path: MOCK_REPORT_FILE,
-            isDir: false,
-            size: 128,
-            mtimeMs: 1,
-            hasChildren: false,
-          },
-          {
-            name: 'sales.xlsx',
-            path: MOCK_SHEET_FILE,
-            isDir: false,
-            size: 256,
-            mtimeMs: 1,
-            hasChildren: false,
-          },
-        ],
-      });
-    }
-    if (filePath === MOCK_SKILL_DIR) {
-      return toSuccessEnvelope({
-        ok: true,
-        entries: [
-          {
-            name: 'SKILL.md',
-            path: MOCK_SKILL_FILE,
-            isDir: false,
-            size: 40,
-            mtimeMs: 1,
-            hasChildren: false,
-          },
-        ],
-      });
-    }
-    return toSuccessEnvelope({ ok: false, error: 'notFound' });
+  if (path.startsWith('/api/files/') && method === 'POST') {
+    return toSuccessEnvelope({ success: false, error: 'Legacy file route is disabled; use /api/capabilities/execute with a workspace-file target' }, 400, false);
   }
 
   return null;

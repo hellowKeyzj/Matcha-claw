@@ -63,7 +63,7 @@ export class ProviderAccountsService {
       )),
     );
     return {
-      credentials: sortedAccounts,
+      credentials: sortedAccounts.map((account) => sanitizeProviderAccount(account)),
       statuses,
       vendors: PROVIDER_VENDOR_DEFINITIONS.map((vendor) => ({
         ...vendor,
@@ -81,32 +81,63 @@ export class ProviderAccountsService {
   }
 
   async validate(payload: unknown) {
+    const body = isRecord(payload) ? payload : {};
+    const accountId = typeof body.accountId === 'string' ? body.accountId.trim() : '';
+    const vendorId = typeof body.vendorId === 'string' ? body.vendorId.trim() : '';
+    if (accountId) {
+      const store = await this.deps.store.read();
+      const account = isRecord(store.accounts[accountId]) ? store.accounts[accountId] : null;
+      if (!account || account.vendorId !== vendorId) {
+        return { valid: false, error: 'Provider account does not match vendor' };
+      }
+    }
     return await validateProviderApiKeyLocal(payload, this.deps.httpClient);
   }
 
   async startOAuth(payload: unknown) {
     const body = isRecord(payload) ? payload : {};
-    if (typeof body.provider !== 'string') {
+    const provider = typeof body.provider === 'string' ? body.provider.trim() : '';
+    const accountId = typeof body.accountId === 'string' ? body.accountId.trim() : '';
+    const flowId = typeof body.flowId === 'string' ? body.flowId.trim() : '';
+    if (!provider || !accountId || !flowId) {
       return badRequest('provider-accounts/oauth/start 参数无效');
     }
     const shellResponse = await this.deps.parentShell.request('provider_oauth_start', {
-      provider: body.provider,
+      provider,
+      accountId,
+      flowId,
       ...((body.region === 'global' || body.region === 'cn') ? { region: body.region } : {}),
-      ...(typeof body.accountId === 'string' ? { accountId: body.accountId } : {}),
       ...(typeof body.label === 'string' ? { label: body.label } : {}),
     });
     return this.deps.parentShell.mapResponse(shellResponse);
   }
 
-  async cancelOAuth() {
-    const shellResponse = await this.deps.parentShell.request('provider_oauth_cancel');
+  async cancelOAuth(payload: unknown) {
+    const body = isRecord(payload) ? payload : {};
+    const flowId = typeof body.flowId === 'string' ? body.flowId.trim() : '';
+    const accountId = typeof body.accountId === 'string' ? body.accountId.trim() : '';
+    const vendorId = typeof body.vendorId === 'string' ? body.vendorId.trim() : '';
+    if (!flowId || !accountId || !vendorId) {
+      return badRequest('provider-accounts/oauth/cancel 参数无效');
+    }
+    const shellResponse = await this.deps.parentShell.request('provider_oauth_cancel', { flowId, accountId, vendorId });
     return this.deps.parentShell.mapResponse(shellResponse);
   }
 
   async submitOAuth(payload: unknown) {
     const body = isRecord(payload) ? payload : {};
+    const flowId = typeof body.flowId === 'string' ? body.flowId.trim() : '';
+    const accountId = typeof body.accountId === 'string' ? body.accountId.trim() : '';
+    const vendorId = typeof body.vendorId === 'string' ? body.vendorId.trim() : '';
+    const code = typeof body.code === 'string' ? body.code.trim() : '';
+    if (!flowId || !accountId || !vendorId || !code) {
+      return badRequest('provider-accounts/oauth/submit 参数无效');
+    }
     const shellResponse = await this.deps.parentShell.request('provider_oauth_submit', {
-      code: typeof body.code === 'string' ? body.code : '',
+      code,
+      flowId,
+      accountId,
+      vendorId,
     });
     return this.deps.parentShell.mapResponse(shellResponse);
   }
@@ -117,9 +148,10 @@ export class ProviderAccountsService {
       ? body.providerType
       : null;
     const accountId = typeof body.accountId === 'string' ? body.accountId.trim() : '';
+    const flowId = typeof body.flowId === 'string' ? body.flowId.trim() : '';
     const oauthProviderTokenKey = typeof body.oauthProviderTokenKey === 'string' ? body.oauthProviderTokenKey.trim() : '';
     const token = isRecord(body.token) ? body.token : null;
-    if (!providerType || !accountId || !oauthProviderTokenKey || !token) {
+    if (!providerType || !accountId || !flowId || !oauthProviderTokenKey || !token) {
       return badRequest('provider-accounts/oauth/complete-browser 参数无效');
     }
     if (typeof token.access !== 'string' || typeof token.refresh !== 'string' || typeof token.expires !== 'number') {
@@ -150,8 +182,9 @@ export class ProviderAccountsService {
       ? body.providerType
       : null;
     const accountId = typeof body.accountId === 'string' ? body.accountId.trim() : '';
+    const flowId = typeof body.flowId === 'string' ? body.flowId.trim() : '';
     const token = isRecord(body.token) ? body.token : null;
-    if (!providerType || !accountId || !token) {
+    if (!providerType || !accountId || !flowId || !token) {
       return badRequest('provider-accounts/oauth/complete-device 参数无效');
     }
     if (
@@ -179,7 +212,9 @@ export class ProviderAccountsService {
 
   async getApiKey(accountId: string) {
     const store = await this.deps.store.read();
-    return { apiKey: typeof store.apiKeys[accountId] === 'string' ? store.apiKeys[accountId] : null };
+    const account = isRecord(store.accounts[accountId]) ? store.accounts[accountId] : null;
+    const apiKey = await this.resolveAccountApiKey(store, accountId, account);
+    return maskApiKeyMetadata(apiKey);
   }
 
   async hasApiKey(accountId: string) {
@@ -190,7 +225,8 @@ export class ProviderAccountsService {
 
   async get(accountId: string) {
     const store = await this.deps.store.read();
-    return store.accounts[accountId] || null;
+    const account = isRecord(store.accounts[accountId]) ? store.accounts[accountId] : null;
+    return account ? sanitizeProviderAccount(account) : null;
   }
 
   update(accountId: string, payload: unknown): ApplicationResponse {
@@ -208,4 +244,50 @@ export class ProviderAccountsService {
   async executeDelete(accountId: string, apiKeyOnly: boolean): Promise<{ success: true }> {
     return await this.deps.mutations.executeDelete(accountId, apiKeyOnly);
   }
+}
+
+function maskApiKeyMetadata(value: unknown): { hasKey: boolean; keyMasked: string | null; last4: string | null } {
+  if (typeof value !== 'string' || !value.trim()) {
+    return { hasKey: false, keyMasked: null, last4: null };
+  }
+  const trimmed = value.trim();
+  const last4 = trimmed.slice(-4);
+  const keyMasked = trimmed.length <= 8
+    ? '*'.repeat(trimmed.length)
+    : `${trimmed.slice(0, 4)}${'*'.repeat(Math.max(trimmed.length - 8, 1))}${last4}`;
+  return { hasKey: true, keyMasked, last4 };
+}
+
+function sanitizeProviderAccount(account: Record<string, unknown>): Record<string, unknown> {
+  return sanitizeProviderRecord(account);
+}
+
+function sanitizeProviderRecord(value: unknown): Record<string, unknown> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return {};
+  }
+  return Object.fromEntries(Object.entries(value as Record<string, unknown>)
+    .filter(([key]) => !isProviderSecretField(key))
+    .map(([key, item]) => [key, sanitizeProviderValue(item)]));
+}
+
+function sanitizeProviderValue(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map((item) => sanitizeProviderValue(item));
+  }
+  if (value && typeof value === 'object') {
+    return sanitizeProviderRecord(value);
+  }
+  return value;
+}
+
+function isProviderSecretField(key: string): boolean {
+  return key === 'headers'
+    || key === 'customHeaders'
+    || /secret/i.test(key)
+    || /token/i.test(key)
+    || /credential/i.test(key)
+    || /password/i.test(key)
+    || /^apiKey$/i.test(key)
+    || /privateKey/i.test(key);
 }

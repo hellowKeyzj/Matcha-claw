@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { summarizeChatStoreMemory } from '@/lib/chat-memory-diagnostics';
 import { useChatStore, type ChatStoreState } from '@/stores/chat';
+import { createEmptySessionRecord } from '@/stores/chat/store-state-helpers';
 import { createViewportWindowState } from '@/stores/chat/viewport-state';
 import { buildRenderItemsFromMessages } from './helpers/timeline-fixtures';
 
@@ -53,7 +54,7 @@ describe('chat memory diagnostics', () => {
           thinkingLevel: null,
         },
         runtime: {
-          ...useChatStore.getInitialState().loadedSessions['agent:main:main']!.runtime,
+          ...createEmptySessionRecord().runtime,
           activeTurnItemKey: 'overlay-1',
         },
       },
@@ -78,7 +79,7 @@ describe('chat memory diagnostics', () => {
           historyStatus: 'idle',
           thinkingLevel: null,
         },
-        runtime: useChatStore.getInitialState().loadedSessions['agent:main:main']!.runtime,
+        runtime: createEmptySessionRecord().runtime,
       },
     });
 

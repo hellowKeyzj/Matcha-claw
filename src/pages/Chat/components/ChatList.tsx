@@ -35,7 +35,8 @@ import type {
   ChatSessionRuntimeState,
   ChatSessionViewportState,
 } from '@/stores/chat';
-import type { RuntimeAddress } from '../../../../runtime-host/shared/runtime-address';
+import type { SessionIdentity } from '../../../../runtime-host/shared/runtime-address';
+import type { WorkspaceFileContext } from '@/lib/host-api';
 import type { GeneratedFile } from '@/lib/generated-files';
 
 export interface ChatListHandle {
@@ -54,7 +55,8 @@ export interface ChatListProps {
   errorMessage: string | null;
   showThinking: boolean;
   userAvatarDataUrl: string | null;
-  runtimeAddress?: RuntimeAddress;
+  sessionIdentity?: SessionIdentity;
+  workspaceContext?: WorkspaceFileContext;
   onLoadOlder: () => void;
   loadOlderLabel: string;
   onJumpToLatest: () => void;
@@ -83,7 +85,8 @@ interface ChatListSurfaceProps {
   scrollChromeStore: ChatScrollChromeStore;
   showThinking: boolean;
   userAvatarImageUrl: string | null;
-  runtimeAddress?: RuntimeAddress;
+  sessionIdentity?: SessionIdentity;
+  workspaceContext?: WorkspaceFileContext;
   onJumpToItemKey: (itemKey?: string) => void;
   artifactFilesByGraphKey: ReadonlyMap<string, GeneratedFile[]>;
   onOpenArtifactFile: (file: GeneratedFile) => void;
@@ -124,7 +127,8 @@ function renderChatItem(input: {
   item: ChatRenderItem;
   showThinking: boolean;
   userAvatarImageUrl: string | null;
-  runtimeAddress?: RuntimeAddress;
+  sessionIdentity?: SessionIdentity;
+  workspaceContext?: WorkspaceFileContext;
   onJumpToItemKey: (itemKey?: string) => void;
   artifactFilesByGraphKey: ReadonlyMap<string, GeneratedFile[]>;
   onOpenArtifactFile: (file: GeneratedFile) => void;
@@ -136,7 +140,8 @@ function renderChatItem(input: {
         item={input.item}
         showThinking={input.showThinking}
         userAvatarImageUrl={input.userAvatarImageUrl}
-        runtimeAddress={input.runtimeAddress}
+        sessionIdentity={input.sessionIdentity}
+        workspaceContext={input.workspaceContext}
         onOpenAttachedArtifact={input.onOpenAttachedArtifact}
       />
     );
@@ -203,7 +208,8 @@ const ChatListContent = memo(function ChatListContent({
   loadOlderLabel,
   showThinking,
   userAvatarImageUrl,
-  runtimeAddress,
+  sessionIdentity,
+  workspaceContext,
   onJumpToItemKey,
   artifactFilesByGraphKey = new Map<string, GeneratedFile[]>(),
   onOpenArtifactFile = () => {},
@@ -260,7 +266,8 @@ const ChatListContent = memo(function ChatListContent({
                     item,
                     showThinking,
                     userAvatarImageUrl,
-                    runtimeAddress,
+                    sessionIdentity,
+                    workspaceContext,
                     onJumpToItemKey,
                     artifactFilesByGraphKey,
                     onOpenArtifactFile,
@@ -338,7 +345,8 @@ export const ChatListSurface = memo(function ChatListSurface({
   scrollChromeStore,
   showThinking,
   userAvatarImageUrl,
-  runtimeAddress,
+  sessionIdentity,
+  workspaceContext,
   onJumpToItemKey,
   artifactFilesByGraphKey = new Map<string, GeneratedFile[]>(),
   onOpenArtifactFile = () => {},
@@ -386,7 +394,8 @@ export const ChatListSurface = memo(function ChatListSurface({
               loadOlderLabel={loadOlderLabel}
               showThinking={showThinking}
               userAvatarImageUrl={userAvatarImageUrl}
-              runtimeAddress={runtimeAddress}
+              sessionIdentity={sessionIdentity}
+              workspaceContext={workspaceContext}
               onJumpToItemKey={onJumpToItemKey}
               artifactFilesByGraphKey={artifactFilesByGraphKey}
               onOpenArtifactFile={onOpenArtifactFile}
@@ -413,7 +422,8 @@ export const ChatList = forwardRef<ChatListHandle, ChatListProps>(function ChatL
     errorMessage,
     showThinking,
     userAvatarDataUrl,
-    runtimeAddress,
+    sessionIdentity,
+    workspaceContext,
     onLoadOlder,
     loadOlderLabel,
     onJumpToLatest,
@@ -441,7 +451,7 @@ export const ChatList = forwardRef<ChatListHandle, ChatListProps>(function ChatL
 
   const lastItem = items.at(-1);
   const lastItemSignal = lastItem
-    ? `${lastItem.key}|${'updatedAt' in lastItem ? (lastItem.updatedAt ?? '') : ''}`
+    ? `${lastItem.key}|${lastItem.renderSignature}`
     : '';
   const contentSignal = `${items.length}|${lastItemSignal}|${viewport.windowEndOffset}|${viewport.totalItemCount}|${viewport.isAtLatest ? '1' : '0'}|${viewport.hasMore ? '1' : '0'}|${viewport.hasNewer ? '1' : '0'}`;
 
@@ -558,7 +568,8 @@ export const ChatList = forwardRef<ChatListHandle, ChatListProps>(function ChatL
       scrollChromeStore={scrollChromeStore}
       showThinking={showThinking}
       userAvatarImageUrl={userAvatarDataUrl}
-      runtimeAddress={runtimeAddress}
+      sessionIdentity={sessionIdentity}
+      workspaceContext={workspaceContext}
       onJumpToItemKey={handleJumpToItemKey}
       artifactFilesByGraphKey={artifactFilesByGraphKey}
       onOpenArtifactFile={onOpenArtifactFile}

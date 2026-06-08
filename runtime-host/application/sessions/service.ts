@@ -9,7 +9,7 @@ import { SessionRuntimeStateStore } from './session-runtime-state';
 import { SessionSnapshotService } from './session-snapshot-service';
 import { SessionTimelineRuntime } from './session-timeline-runtime';
 import { SessionOperationCoordinator } from './session-operation-coordinator';
-import type { RuntimeAddress } from '../agent-runtime/contracts/runtime-address';
+import type { RuntimeEndpointRef } from '../agent-runtime/contracts/runtime-address';
 
 interface SessionRuntimeServiceDeps {
   sessionCatalog: SessionCatalogPort;
@@ -25,12 +25,12 @@ interface SessionRuntimeServiceDeps {
 export class SessionRuntimeService {
   constructor(private readonly deps: SessionRuntimeServiceDeps) {}
 
-  async consumeEndpointConversationEvent(runtimeAddress: RuntimeAddress, payload: unknown): Promise<SessionUpdateEvent[]> {
-    return await this.deps.ingressService.consumeEndpointConversationEvent(runtimeAddress, payload);
+  async consumeEndpointConversationEvent(endpoint: RuntimeEndpointRef, payload: unknown): Promise<SessionUpdateEvent[]> {
+    return await this.deps.ingressService.consumeEndpointConversationEvent(endpoint, payload);
   }
 
-  consumeEndpointNotification(runtimeAddress: RuntimeAddress, payload: Parameters<SessionGatewayIngressService['consumeEndpointNotification']>[1]): SessionUpdateEvent[] {
-    return this.deps.ingressService.consumeEndpointNotification(runtimeAddress, payload);
+  consumeEndpointNotification(endpoint: RuntimeEndpointRef, payload: Parameters<SessionGatewayIngressService['consumeEndpointNotification']>[1]): SessionUpdateEvent[] {
+    return this.deps.ingressService.consumeEndpointNotification(endpoint, payload);
   }
 
   async createSession(payload: unknown) {

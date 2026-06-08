@@ -4,7 +4,7 @@ import {
   iterateCanonicalReplayEventsFromTranscriptMessagesAsync,
 } from '../../../sessions/canonical/canonical-transcript-replay';
 import { OpenClawV4Adapter } from './openclaw-v4-canonical-adapter';
-import { buildRuntimeAddressScopedMessageId } from '../../../agent-runtime/contracts/runtime-identity-contract';
+import { buildSessionIdentityScopedMessageId } from '../../../agent-runtime/contracts/runtime-identity-contract';
 import type {
   RuntimeEventAdapter,
   RuntimeProtocolAdapter,
@@ -43,7 +43,7 @@ export class OpenClawV4ProtocolAdapter implements RuntimeProtocolAdapter {
   readonly eventAdapter: RuntimeEventAdapter = new OpenClawV4RuntimeEventAdapter();
   readonly replayAdapter: RuntimeReplayAdapter = new OpenClawV4RuntimeReplayAdapter();
   readonly identityPolicy = {
-    buildMessageId: (input: Parameters<RuntimeProtocolAdapter['identityPolicy']['buildMessageId']>[0]) => buildRuntimeAddressScopedMessageId(input),
+    buildMessageId: (input: Parameters<RuntimeProtocolAdapter['identityPolicy']['buildMessageId']>[0]) => buildSessionIdentityScopedMessageId(input),
   };
 
 }

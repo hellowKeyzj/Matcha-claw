@@ -3,7 +3,6 @@ import {
   hostSecurityReadPolicy,
   hostSecurityWritePolicy,
 } from '@/lib/security-runtime';
-import type { RuntimeAddress } from '../../runtime-host/shared/runtime-address';
 
 export type Preset = 'strict' | 'balanced' | 'relaxed';
 export type Action = 'block' | 'redact' | 'confirm' | 'warn' | 'log';
@@ -331,7 +330,7 @@ interface SecurityPolicyState {
   updateRuntime: (updater: (current: RuntimePolicy) => RuntimePolicy) => void;
   applyPresetTemplate: (nextPreset: Preset) => void;
   loadPolicy: (options?: { silent?: boolean }) => Promise<void>;
-  savePolicy: (runtimeAddress: RuntimeAddress) => Promise<void>;
+  savePolicy: () => Promise<void>;
 }
 
 export const useSecurityPolicyStore = create<SecurityPolicyState>((set, get) => ({
@@ -394,11 +393,11 @@ export const useSecurityPolicyStore = create<SecurityPolicyState>((set, get) => 
     }
   },
 
-  savePolicy: async (runtimeAddress) => {
+  savePolicy: async () => {
     set({ mutating: true });
     try {
       const payload: SecurityPolicy = get().policy;
-      await hostSecurityWritePolicy(payload, runtimeAddress);
+      await hostSecurityWritePolicy(payload);
       const nextPolicy = cloneSecurityPolicy(payload);
       const savedSnapshot = cloneSecurityPolicy(nextPolicy);
       securityPolicyCache = nextPolicy;

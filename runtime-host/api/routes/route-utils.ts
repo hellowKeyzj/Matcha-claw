@@ -48,10 +48,82 @@ export function isRuntimeRouteResponse(value: unknown): value is RuntimeRouteRes
     && typeof (value as { status?: unknown }).status === 'number';
 }
 
+const DEFAULT_READ_ONLY_BOUNDARY_FORBIDDEN_FIELDS = new Set<string>([
+  'apiKey',
+  'key',
+  'normalizedKey',
+  'secret',
+  'clientSecret',
+  'accessToken',
+  'refreshToken',
+  'token',
+  'gatewayToken',
+  'providerEnv',
+  'headers',
+  'customHeaders',
+  'serviceAccountKey',
+  'output',
+  'stdout',
+  'stderr',
+  'logs',
+  'controlState',
+  'controlUiState',
+  'pendingControlUiPairingRequests',
+  'controlUiPairingRequests',
+  'pairingControl',
+  'controlRequests',
+]);
+
+const DEFAULT_READ_ONLY_BOUNDARY_FORBIDDEN_FIELD_PATTERNS = [
+  /secret/i,
+  /password/i,
+  /^apiKey$/i,
+  /privateKey/i,
+  /serviceAccountKey/i,
+  /(?:^|[A-Z_])(access|refresh|auth|gateway|bot|channel|channelAccess)?Token$/,
+] as const;
+
 export function readRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === 'object' && !Array.isArray(value)
     ? value as Record<string, unknown>
     : {};
+}
+
+function isReadOnlyForbiddenField(key: string, forbiddenFields: ReadonlySet<string>): boolean {
+  return forbiddenFields.has(key)
+    || DEFAULT_READ_ONLY_BOUNDARY_FORBIDDEN_FIELD_PATTERNS.some((pattern) => pattern.test(key));
+}
+
+export function sanitizeReadOnlyRoutePayload(
+  value: unknown,
+  extraForbiddenFields: readonly string[] = [],
+): unknown {
+  if (Array.isArray(value)) {
+    return value.map((item) => sanitizeReadOnlyRoutePayload(item, extraForbiddenFields));
+  }
+  if (!value || typeof value !== 'object') {
+    return value;
+  }
+  const forbiddenFields = new Set([
+    ...DEFAULT_READ_ONLY_BOUNDARY_FORBIDDEN_FIELDS,
+    ...extraForbiddenFields,
+  ]);
+  return Object.fromEntries(Object.entries(value as Record<string, unknown>)
+    .filter(([key]) => !isReadOnlyForbiddenField(key, forbiddenFields))
+    .map(([key, item]) => [key, sanitizeReadOnlyRoutePayload(item, extraForbiddenFields)]));
+}
+
+export function sanitizeReadOnlyRouteResponse<T>(
+  response: T,
+  extraForbiddenFields: readonly string[] = [],
+): T | unknown {
+  if (isRuntimeRouteResponse(response)) {
+    return {
+      ...response,
+      data: sanitizeReadOnlyRoutePayload(response.data, extraForbiddenFields),
+    };
+  }
+  return sanitizeReadOnlyRoutePayload(response, extraForbiddenFields);
 }
 
 export function decodeRouteParam(value: string | undefined): string {

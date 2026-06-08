@@ -7,70 +7,52 @@ import { Label } from '@/components/ui/label';
 import { Select } from '@/components/ui/select';
 import { useGatewayStore } from '@/stores/gateway';
 import { useTeamsStore } from '@/stores/teams';
-import { useTeamsRunnerStore } from '@/stores/teams-runner';
 import { useTranslation } from 'react-i18next';
-import type { TeamMailboxMessage, TeamTask, TeamTaskStatus } from '@/features/teams/api/runtime-client';
 import { isGatewayOperational } from '@/lib/gateway-status';
-import { subscribeHostEvent } from '@/lib/host-events';
-import { resolveSingleCapabilityRuntimeAddress } from '@/lib/host-api';
-import type { RuntimeAddress } from '../../../runtime-host/shared/runtime-address';
+const EMPTY_STAGES: ReturnType<typeof useTeamsStore.getState>['stagesByTeamId'][string] = [];
+const EMPTY_ROLES: ReturnType<typeof useTeamsStore.getState>['rolesByTeamId'][string] = [];
+const EMPTY_APPROVALS: ReturnType<typeof useTeamsStore.getState>['approvalsByTeamId'][string] = [];
+const EMPTY_ARTIFACTS: ReturnType<typeof useTeamsStore.getState>['artifactsByTeamId'][string] = [];
+const EMPTY_MESSAGES: ReturnType<typeof useTeamsStore.getState>['messagesByTeamId'][string] = [];
+const EMPTY_DISPATCHES: ReturnType<typeof useTeamsStore.getState>['dispatchesByTeamId'][string] = [];
+const EMPTY_DISPATCH_EXECUTIONS: ReturnType<typeof useTeamsStore.getState>['dispatchExecutionsByTeamId'][string] = [];
+const EMPTY_GATES: ReturnType<typeof useTeamsStore.getState>['gatesByTeamId'][string] = [];
+const EMPTY_KICKBACKS: ReturnType<typeof useTeamsStore.getState>['kickbacksByTeamId'][string] = [];
+const EMPTY_DECISIONS: ReturnType<typeof useTeamsStore.getState>['decisionsByTeamId'][string] = [];
+const EMPTY_EVENTS: ReturnType<typeof useTeamsStore.getState>['eventsByTeamId'][string] = [];
 
-const TEAM_COORDINATION_CAPABILITY_ID = 'team.coordination';
+type StageStatus = 'pending' | 'running' | 'waiting_for_user' | 'passed' | 'failed' | 'skipped' | 'cancelled';
 
-const DEFAULT_LEASE_MS = 60_000;
-const EMPTY_TASKS: TeamTask[] = [];
-const EMPTY_MESSAGES: TeamMailboxMessage[] = [];
-
-function sessionKey(agentId: string, teamId: string): string {
-  return `agent:${agentId}:team:${teamId}:exec`;
-}
-
-function buildTaskId(): string {
-  return `task-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
-}
-
-type TeamTaskBuckets = Record<TeamTaskStatus, TeamTask[]>;
-
-type TeamTaskSummary = {
-  tasksByStatus: TeamTaskBuckets;
-  ownedCountByAgentId: Record<string, number>;
-  runningCountByAgentId: Record<string, number>;
-  visibleActiveAgentCount: number;
+type StageSummary = {
+  stagesByStatus: Record<StageStatus, typeof EMPTY_STAGES>;
+  roleStageCountByRoleId: Record<string, number>;
 };
 
-function buildTeamTaskSummary(tasks: readonly TeamTask[], teamActiveAgentIds: readonly string[]): TeamTaskSummary {
-  const tasksByStatus: TeamTaskBuckets = {
-    todo: [],
-    claimed: [],
+function buildStageSummary(stages: typeof EMPTY_STAGES): StageSummary {
+  const stagesByStatus: Record<StageStatus, typeof EMPTY_STAGES> = {
+    pending: [],
     running: [],
-    blocked: [],
-    done: [],
+    waiting_for_user: [],
+    passed: [],
     failed: [],
+    skipped: [],
+    cancelled: [],
   };
-  const ownedCountByAgentId: Record<string, number> = {};
-  const runningCountByAgentId: Record<string, number> = {};
-  const visibleActiveAgentIds = new Set(teamActiveAgentIds);
-
-  for (const task of tasks) {
-    tasksByStatus[task.status].push(task);
-    if (!task.ownerAgentId) {
-      continue;
-    }
-    ownedCountByAgentId[task.ownerAgentId] = (ownedCountByAgentId[task.ownerAgentId] ?? 0) + 1;
-    if (task.status === 'running') {
-      runningCountByAgentId[task.ownerAgentId] = (runningCountByAgentId[task.ownerAgentId] ?? 0) + 1;
-    }
-    if (task.status === 'claimed' || task.status === 'running') {
-      visibleActiveAgentIds.add(task.ownerAgentId);
+  const roleStageCountByRoleId: Record<string, number> = {};
+  for (const stage of stages) {
+    stagesByStatus[stage.status].push(stage);
+    if (stage.roleId) {
+      roleStageCountByRoleId[stage.roleId] = (roleStageCountByRoleId[stage.roleId] ?? 0) + 1;
     }
   }
+  return { stagesByStatus, roleStageCountByRoleId };
+}
 
-  return {
-    tasksByStatus,
-    ownedCountByAgentId,
-    runningCountByAgentId,
-    visibleActiveAgentCount: visibleActiveAgentIds.size,
-  };
+function formatTimestamp(value: number): string {
+  if (!Number.isFinite(value) || value <= 0) {
+    return '-';
+  }
+  return new Date(value).toLocaleString();
 }
 
 export function TeamChat({ teamId }: { teamId?: string }) {
@@ -81,115 +63,57 @@ export function TeamChat({ teamId }: { teamId?: string }) {
   const teams = useTeamsStore((state) => state.teams);
   const activeTeamId = useTeamsStore((state) => state.activeTeamId);
   const setActiveTeam = useTeamsStore((state) => state.setActiveTeam);
-  const initRuntime = useTeamsStore((state) => state.initRuntime);
+  const startRun = useTeamsStore((state) => state.startRun);
   const refreshSnapshot = useTeamsStore((state) => state.refreshSnapshot);
-  const planUpsert = useTeamsStore((state) => state.planUpsert);
-  const claimNext = useTeamsStore((state) => state.claimNext);
-  const heartbeat = useTeamsStore((state) => state.heartbeat);
-  const updateTaskStatus = useTeamsStore((state) => state.updateTaskStatus);
-  const releaseClaim = useTeamsStore((state) => state.releaseClaim);
-  const postMailbox = useTeamsStore((state) => state.postMailbox);
-  const pullMailbox = useTeamsStore((state) => state.pullMailbox);
+  const tickRun = useTeamsStore((state) => state.tickRun);
+  const cancelRun = useTeamsStore((state) => state.cancelRun);
+  const resolveApproval = useTeamsStore((state) => state.resolveApproval);
+  const submitDecision = useTeamsStore((state) => state.submitDecision);
 
   const resolvedTeamId = teamId ?? activeTeamId ?? undefined;
   const team = teams.find((row) => row.id === resolvedTeamId);
-  const tasks = useTeamsStore((state) => (
-    resolvedTeamId ? (state.tasksByTeamId[resolvedTeamId] ?? EMPTY_TASKS) : EMPTY_TASKS
-  ));
-  const messages = useTeamsStore((state) => (
-    resolvedTeamId ? (state.mailboxByTeamId[resolvedTeamId] ?? EMPTY_MESSAGES) : EMPTY_MESSAGES
-  ));
-  const runMeta = useTeamsStore((state) => (resolvedTeamId ? state.runMetaByTeamId[resolvedTeamId] : undefined));
+  const run = useTeamsStore((state) => (resolvedTeamId ? state.runByTeamId[resolvedTeamId] : undefined));
+  const stages = useTeamsStore((state) => (resolvedTeamId ? (state.stagesByTeamId[resolvedTeamId] ?? EMPTY_STAGES) : EMPTY_STAGES));
+  const roles = useTeamsStore((state) => (resolvedTeamId ? (state.rolesByTeamId[resolvedTeamId] ?? EMPTY_ROLES) : EMPTY_ROLES));
+  const approvals = useTeamsStore((state) => (resolvedTeamId ? (state.approvalsByTeamId[resolvedTeamId] ?? EMPTY_APPROVALS) : EMPTY_APPROVALS));
+  const artifacts = useTeamsStore((state) => (resolvedTeamId ? (state.artifactsByTeamId[resolvedTeamId] ?? EMPTY_ARTIFACTS) : EMPTY_ARTIFACTS));
+  const messages = useTeamsStore((state) => (resolvedTeamId ? (state.messagesByTeamId[resolvedTeamId] ?? EMPTY_MESSAGES) : EMPTY_MESSAGES));
+  const dispatches = useTeamsStore((state) => (resolvedTeamId ? (state.dispatchesByTeamId[resolvedTeamId] ?? EMPTY_DISPATCHES) : EMPTY_DISPATCHES));
+  const dispatchExecutions = useTeamsStore((state) => (resolvedTeamId ? (state.dispatchExecutionsByTeamId[resolvedTeamId] ?? EMPTY_DISPATCH_EXECUTIONS) : EMPTY_DISPATCH_EXECUTIONS));
+  const gates = useTeamsStore((state) => (resolvedTeamId ? (state.gatesByTeamId[resolvedTeamId] ?? EMPTY_GATES) : EMPTY_GATES));
+  const kickbacks = useTeamsStore((state) => (resolvedTeamId ? (state.kickbacksByTeamId[resolvedTeamId] ?? EMPTY_KICKBACKS) : EMPTY_KICKBACKS));
+  const decisions = useTeamsStore((state) => (resolvedTeamId ? (state.decisionsByTeamId[resolvedTeamId] ?? EMPTY_DECISIONS) : EMPTY_DECISIONS));
+  const events = useTeamsStore((state) => (resolvedTeamId ? (state.eventsByTeamId[resolvedTeamId] ?? EMPTY_EVENTS) : EMPTY_EVENTS));
   const loading = useTeamsStore((state) => (resolvedTeamId ? Boolean(state.loadingByTeamId[resolvedTeamId]) : false));
   const error = useTeamsStore((state) => (resolvedTeamId ? state.errorByTeamId[resolvedTeamId] : undefined));
 
-  const [newTaskTitle, setNewTaskTitle] = useState('');
-  const [newTaskInstruction, setNewTaskInstruction] = useState('');
-  const [newTaskDependsOn, setNewTaskDependsOn] = useState('');
-  const [selectedAgentId, setSelectedAgentId] = useState('');
-  const [messageText, setMessageText] = useState('');
-  const [messageTo, setMessageTo] = useState<'broadcast' | string>('broadcast');
-  const [teamRuntimeAddress, setTeamRuntimeAddress] = useState<RuntimeAddress | null>(null);
-  const enabledByTeamId = useTeamsRunnerStore((state) => state.enabledByTeamId);
-  const activeAgentIdsByTeamId = useTeamsRunnerStore((state) => state.activeAgentIdsByTeamId);
-  const activeTaskByAgentByTeamId = useTeamsRunnerStore((state) => state.activeTaskByAgentByTeamId);
-  const lastErrorByTeamId = useTeamsRunnerStore((state) => state.lastErrorByTeamId);
-  const setTeamEnabled = useTeamsRunnerStore((state) => state.setTeamEnabled);
-
-  const effectiveSelectedAgentId = useMemo(() => {
-    if (!team) {
-      return '';
-    }
-    if (selectedAgentId && team.memberIds.includes(selectedAgentId)) {
-      return selectedAgentId;
-    }
-    return team.memberIds[0] ?? '';
-  }, [selectedAgentId, team]);
+  const [approvalNoteById, setApprovalNoteById] = useState<Record<string, string>>({});
+  const [decisionType, setDecisionType] = useState<'retry' | 'proceed_degraded' | 'abort'>('retry');
+  const [decisionNote, setDecisionNote] = useState('');
+  const [pendingActionId, setPendingActionId] = useState<string | null>(null);
 
   useEffect(() => {
-    let cancelled = false;
-    if (!isGatewayOperational(gatewayStatus)) {
-      setTeamRuntimeAddress(null);
-      return;
-    }
-    resolveSingleCapabilityRuntimeAddress(TEAM_COORDINATION_CAPABILITY_ID)
-      .then((runtimeAddress) => {
-        if (!cancelled) {
-          setTeamRuntimeAddress(runtimeAddress);
-        }
-      })
-      .catch((error) => {
-        if (!cancelled) {
-          console.error('Failed to resolve team coordination runtime address:', error);
-          setTeamRuntimeAddress(null);
-        }
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [gatewayStatus]);
-
-  useEffect(() => {
-    if (!team || !resolvedTeamId || !teamRuntimeAddress) {
+    if (!team || !resolvedTeamId || !isGatewayOperational(gatewayStatus)) {
       return;
     }
     setActiveTeam(team.id);
-    void initRuntime(team.id, teamRuntimeAddress).then(() => refreshSnapshot(team.id));
+    void refreshSnapshot(team.id);
+  }, [gatewayStatus, team, resolvedTeamId, setActiveTeam, refreshSnapshot]);
 
-    // 后端 TeamRuntimeApplicationService 在每次 init / planUpsert / claimNext / heartbeat / taskUpdate /
-    // mailboxPost / releaseClaim 后都会通过 team:event 推送事件。订阅事件并按需触发 refreshSnapshot 与
-    // pullMailbox，替代 3s 轮询的兜底行为。
-    const teamId = team.id;
-    const unsubscribe = subscribeHostEvent<{ teamId?: string; type?: string }>(
-      'team:event',
-      (payload) => {
-        if (!payload || payload.teamId !== teamId) {
-          return;
-        }
-        void refreshSnapshot(teamId);
-        if (payload.type === 'team:mailboxPost') {
-          void pullMailbox(teamId, 50);
-        }
-      },
-    );
-    return () => {
-      unsubscribe();
-    };
-  }, [team, resolvedTeamId, teamRuntimeAddress, setActiveTeam, initRuntime, refreshSnapshot, pullMailbox]);
+  const runUiAction = async (actionId: string, action: () => Promise<void>): Promise<void> => {
+    if (pendingActionId) {
+      return;
+    }
+    setPendingActionId(actionId);
+    try {
+      await action();
+    } finally {
+      setPendingActionId(null);
+    }
+  };
 
-  const teamAutoRunnerEnabled = resolvedTeamId ? (enabledByTeamId[resolvedTeamId] ?? true) : true;
-  const teamActiveAgentIds = useMemo(
-    () => (resolvedTeamId ? (activeAgentIdsByTeamId[resolvedTeamId] ?? []) : []),
-    [activeAgentIdsByTeamId, resolvedTeamId],
-  );
-  const teamActiveTaskByAgent = useMemo(
-    () => (resolvedTeamId ? (activeTaskByAgentByTeamId[resolvedTeamId] ?? {}) : {}),
-    [activeTaskByAgentByTeamId, resolvedTeamId],
-  );
-  const taskSummary = useMemo(
-    () => buildTeamTaskSummary(tasks, teamActiveAgentIds),
-    [tasks, teamActiveAgentIds],
-  );
+  const stageSummary = useMemo(() => buildStageSummary(stages), [stages]);
+  const pendingApprovals = approvals.filter((approval) => approval.status === 'pending');
 
   if (!team || !resolvedTeamId) {
     return (
@@ -204,40 +128,10 @@ export function TeamChat({ teamId }: { teamId?: string }) {
     );
   }
 
-  const leadSession = effectiveSelectedAgentId ? sessionKey(effectiveSelectedAgentId, team.id) : '';
-  const autoRunnerState = teamAutoRunnerEnabled
-    && isGatewayOperational(gatewayStatus)
-    ? t('chat.autoRunnerOn')
-    : t('chat.autoRunnerOff');
-  const autoRunnerError = resolvedTeamId ? lastErrorByTeamId[resolvedTeamId] : undefined;
-
-  const handleAddTask = async () => {
-    const instruction = newTaskInstruction.trim();
-    if (!instruction) {
-      return;
-    }
-    const title = newTaskTitle.trim() || instruction.split(/\r?\n/, 1)[0].trim();
-    const dependsOn = newTaskDependsOn
-      .split(',')
-      .map((item) => item.trim())
-      .filter(Boolean);
-    const nextTask = {
-      taskId: buildTaskId(),
-      title,
-      instruction,
-      dependsOn,
-    };
-    const merged = [...tasks.map((task) => ({
-      taskId: task.taskId,
-      title: task.title,
-      instruction: task.instruction,
-      dependsOn: task.dependsOn,
-    })), nextTask];
-    await planUpsert(team.id, merged);
-    setNewTaskTitle('');
-    setNewTaskInstruction('');
-    setNewTaskDependsOn('');
-  };
+  const canAct = Boolean(run) && !loading && !pendingActionId;
+  const canStart = !loading && !pendingActionId && (!run || run.status === 'created' || run.status === 'paused');
+  const canCancel = canAct && (run?.status === 'provisioning' || run?.status === 'running' || run?.status === 'waiting_for_user' || run?.status === 'paused');
+  const canSubmitDecision = canAct && run?.status === 'waiting_for_user';
 
   return (
     <section className="space-y-4">
@@ -245,23 +139,33 @@ export function TeamChat({ teamId }: { teamId?: string }) {
         <div>
           <h1 className="text-xl font-semibold">{team.name}</h1>
           <p className="text-sm text-muted-foreground">
-            {t('chat.runStatus')}: {runMeta?.status ?? 'initializing'} · rev {runMeta?.revision ?? 0}
+            {t('chat.runStatus')}: {run?.status ?? t('run.notStarted')} · rev {run?.revision ?? 0}
+          </p>
+          <p className="text-xs text-muted-foreground">
+            {t('create.packagePath')}: {team.packagePath}
           </p>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           <Button
-            variant={teamAutoRunnerEnabled ? 'default' : 'outline'}
-            onClick={() => {
-              if (!team) {
-                return;
-              }
-              setTeamEnabled(team.id, !teamAutoRunnerEnabled);
-            }}
+            variant="outline"
+            onClick={() => void runUiAction(`refresh:${team.id}`, () => refreshSnapshot(team.id))}
+            disabled={loading || Boolean(pendingActionId)}
           >
-            {teamAutoRunnerEnabled ? t('chat.autoRunnerStop') : t('chat.autoRunnerStart')}
-          </Button>
-          <Button variant="outline" onClick={() => void refreshSnapshot(team.id)}>
             {t('chat.refresh')}
+          </Button>
+          <Button
+            variant="outline"
+            onClick={() => void runUiAction(`start:${team.id}`, () => startRun(team.id))}
+            disabled={!canStart}
+          >
+            {t('run.start')}
+          </Button>
+          <Button
+            variant="outline"
+            onClick={() => void runUiAction(`cancel:${team.id}`, () => cancelRun(team.id))}
+            disabled={!canCancel}
+          >
+            {t('run.cancel')}
           </Button>
           <Button variant="outline" onClick={() => navigate('/teams')}>
             {t('chat.backToList')}
@@ -275,153 +179,33 @@ export function TeamChat({ teamId }: { teamId?: string }) {
         </div>
       )}
 
-      <div className="rounded-md border border-border/60 bg-muted/20 p-3 text-xs text-muted-foreground">
-        {t('chat.autoRunnerStatus', { state: autoRunnerState, count: taskSummary.visibleActiveAgentCount })}
-      </div>
-
-      {autoRunnerError && (
-        <div className="rounded-md border border-amber-500/40 bg-amber-500/10 p-3 text-sm text-amber-700 dark:text-amber-300">
-          {t('chat.autoRunnerError', { error: autoRunnerError })}
-        </div>
-      )}
-
-      <div className="grid gap-4 xl:grid-cols-[1.6fr_1.2fr_0.9fr]">
+      <div className="grid gap-4 xl:grid-cols-[1.4fr_1fr_1fr]">
         <Card>
           <CardHeader>
-            <CardTitle className="text-base">{t('board.title')}</CardTitle>
+            <CardTitle className="text-base">{t('run.stages')}</CardTitle>
           </CardHeader>
           <CardContent className="space-y-3">
-            <div className="grid gap-2 sm:grid-cols-3">
-              <div>
-                <Label htmlFor="task-title">{t('board.newTaskTitle')}</Label>
-                <Input
-                  id="task-title"
-                  value={newTaskTitle}
-                  onChange={(event) => setNewTaskTitle(event.target.value)}
-                  placeholder={t('board.newTaskTitlePlaceholder')}
-                />
-              </div>
-              <div>
-                <Label htmlFor="task-instruction">{t('board.newTaskInstruction')}</Label>
-                <Input
-                  id="task-instruction"
-                  value={newTaskInstruction}
-                  onChange={(event) => setNewTaskInstruction(event.target.value)}
-                  placeholder={t('board.newTaskInstructionPlaceholder')}
-                />
-              </div>
-              <div>
-                <Label htmlFor="task-deps">{t('board.newTaskDeps')}</Label>
-                <Input
-                  id="task-deps"
-                  value={newTaskDependsOn}
-                  onChange={(event) => setNewTaskDependsOn(event.target.value)}
-                  placeholder={t('board.newTaskDepsPlaceholder')}
-                />
-              </div>
-            </div>
-            <Button onClick={() => void handleAddTask()} disabled={!newTaskInstruction.trim()}>
-              {t('board.addTask')}
-            </Button>
-
             <div className="grid gap-3 lg:grid-cols-2 2xl:grid-cols-3">
-              {(['todo', 'claimed', 'running', 'blocked', 'done', 'failed'] as const).map((status) => (
+              {(['pending', 'running', 'waiting_for_user', 'passed', 'failed', 'skipped'] as const).map((status) => (
                 <Card key={status}>
                   <CardHeader className="pb-2">
                     <CardTitle className="text-sm">
-                      {t(`board.columns.${status}`)} ({taskSummary.tasksByStatus[status].length})
+                      {t(`run.stageStatus.${status}`)} ({stageSummary.stagesByStatus[status].length})
                     </CardTitle>
                   </CardHeader>
                   <CardContent className="space-y-2">
-                    {taskSummary.tasksByStatus[status].length === 0 ? (
-                      <div className="text-xs text-muted-foreground">{t('board.emptyColumn')}</div>
+                    {stageSummary.stagesByStatus[status].length === 0 ? (
+                      <div className="text-xs text-muted-foreground">{t('run.emptyStages')}</div>
                     ) : (
-                      taskSummary.tasksByStatus[status].map((task) => (
-                        <div key={task.taskId} className="rounded border p-2">
-                          <div className="text-sm font-medium">{task.title}</div>
-                          <div className="text-xs text-muted-foreground">{task.taskId}</div>
+                      stageSummary.stagesByStatus[status].map((stage) => (
+                        <div key={stage.stageId} className="rounded border p-2">
+                          <div className="text-sm font-medium">{stage.title}</div>
+                          <div className="text-xs text-muted-foreground">{stage.stageId}</div>
                           <div className="mt-1 text-xs text-muted-foreground">
-                            {task.ownerAgentId ? `${t('board.owner')}: ${task.ownerAgentId}` : t('board.unclaimed')}
+                            {t('run.executor')}: {stage.roleId ?? stage.executor}
                           </div>
-                          <div className="mt-2 flex flex-wrap gap-1">
-                            {status === 'todo' && (
-                              <Button
-                                size="sm"
-                                variant="outline"
-                                onClick={() => {
-                                  if (!effectiveSelectedAgentId) return;
-                                  void claimNext(
-                                    team.id,
-                                    effectiveSelectedAgentId,
-                                    sessionKey(effectiveSelectedAgentId, team.id),
-                                  );
-                                }}
-                              >
-                                {t('board.claimNext')}
-                              </Button>
-                            )}
-                            {(status === 'claimed' || status === 'blocked') && task.ownerAgentId && (
-                              <Button
-                                size="sm"
-                                variant="outline"
-                                onClick={() => void updateTaskStatus(team.id, task.taskId, 'running')}
-                              >
-                                {t('board.markRunning')}
-                              </Button>
-                            )}
-                            {status === 'running' && (
-                              <>
-                                <Button
-                                  size="sm"
-                                  variant="outline"
-                                  onClick={() => void updateTaskStatus(team.id, task.taskId, 'done')}
-                                >
-                                  {t('board.markDone')}
-                                </Button>
-                                <Button
-                                  size="sm"
-                                  variant="outline"
-                                  onClick={() => void updateTaskStatus(team.id, task.taskId, 'blocked')}
-                                >
-                                  {t('board.markBlocked')}
-                                </Button>
-                                <Button
-                                  size="sm"
-                                  variant="outline"
-                                  onClick={() => void updateTaskStatus(team.id, task.taskId, 'failed')}
-                                >
-                                  {t('board.markFailed')}
-                                </Button>
-                              </>
-                            )}
-                            {task.ownerAgentId && task.claimSessionKey && (
-                              <>
-                                <Button
-                                  size="sm"
-                                  variant="outline"
-                                  onClick={() => void heartbeat(
-                                    team.id,
-                                    task.taskId,
-                                    task.ownerAgentId!,
-                                    task.claimSessionKey!,
-                                  )}
-                                >
-                                  {t('board.heartbeat')}
-                                </Button>
-                                <Button
-                                  size="sm"
-                                  variant="outline"
-                                  onClick={() => void releaseClaim(
-                                    team.id,
-                                    task.taskId,
-                                    task.ownerAgentId!,
-                                    task.claimSessionKey!,
-                                  )}
-                                >
-                                  {t('board.release')}
-                                </Button>
-                              </>
-                            )}
+                          <div className="mt-1 text-xs text-muted-foreground">
+                            {t('run.attempt')}: {stage.attempt}/{stage.maxAttempts}
                           </div>
                         </div>
                       ))
@@ -435,130 +219,247 @@ export function TeamChat({ teamId }: { teamId?: string }) {
 
         <Card>
           <CardHeader>
-            <CardTitle className="text-base">{t('mailbox.title')}</CardTitle>
+            <CardTitle className="text-base">{t('run.approvals')}</CardTitle>
           </CardHeader>
           <CardContent className="space-y-3">
-            <div className="space-y-1">
-              <Label htmlFor="mailbox-target">{t('mailbox.target')}</Label>
-              <Select
-                id="mailbox-target"
-                value={messageTo}
-                onChange={(event) => setMessageTo(event.target.value)}
-              >
-                <option value="broadcast">{t('mailbox.broadcast')}</option>
-                {team.memberIds.map((agentId) => (
-                  <option key={agentId} value={agentId}>
-                    {agentId}
-                  </option>
-                ))}
-              </Select>
-            </div>
-            <div className="space-y-1">
-              <Label htmlFor="mailbox-message">{t('mailbox.message')}</Label>
-              <Input
-                id="mailbox-message"
-                value={messageText}
-                onChange={(event) => setMessageText(event.target.value)}
-                placeholder={t('mailbox.messagePlaceholder')}
-              />
-            </div>
-            <div className="flex gap-2">
-              <Button
-                onClick={async () => {
-                  if (!effectiveSelectedAgentId || !messageText.trim()) return;
-                  const normalizedTo = messageTo || 'broadcast';
-                  await postMailbox(team.id, {
-                    msgId: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-                    fromAgentId: effectiveSelectedAgentId,
-                    to: normalizedTo,
-                    kind: 'question',
-                    content: messageText.trim(),
-                    createdAt: Date.now(),
-                  });
-                  setMessageText('');
-                }}
-                disabled={!effectiveSelectedAgentId || !messageText.trim()}
-              >
-                {t('mailbox.send')}
-              </Button>
-              <Button variant="outline" onClick={() => void pullMailbox(team.id, 100)}>
-                {t('mailbox.pull')}
-              </Button>
-            </div>
-            <div className="max-h-[420px] space-y-2 overflow-y-auto rounded border p-2">
-              {messages.length === 0 ? (
-                <div className="text-xs text-muted-foreground">{t('mailbox.empty')}</div>
-              ) : (
-                messages.map((msg) => (
-                  <div key={msg.msgId} className="rounded border p-2 text-sm">
-                    <div className="text-xs text-muted-foreground">
-                      {msg.fromAgentId} {'->'} {msg.to}
-                      {msg.relatedTaskId ? ` · ${msg.relatedTaskId}` : ''}
+            {pendingApprovals.length === 0 ? (
+              <div className="rounded border p-3 text-xs text-muted-foreground">{t('run.emptyApprovals')}</div>
+            ) : (
+              pendingApprovals.map((approval) => (
+                <div key={approval.approvalId} className="rounded border p-3 text-sm">
+                  <div className="font-medium">{approval.requestedAction}</div>
+                  <div className="text-xs text-muted-foreground">{approval.stageId} · {approval.roleId}</div>
+                  <div className="mt-2 whitespace-pre-wrap text-xs text-muted-foreground">{approval.reason}</div>
+                  <div className="mt-2 text-xs text-muted-foreground">{approval.risk}</div>
+                  <div className="mt-3 space-y-2">
+                    <Label htmlFor={`approval-note-${approval.approvalId}`}>{t('run.note')}</Label>
+                    <Input
+                      id={`approval-note-${approval.approvalId}`}
+                      value={approvalNoteById[approval.approvalId] ?? ''}
+                      onChange={(event) => setApprovalNoteById((current) => ({
+                        ...current,
+                        [approval.approvalId]: event.target.value,
+                      }))}
+                      placeholder={t('run.notePlaceholder')}
+                    />
+                    <div className="flex flex-wrap gap-2">
+                      {(['approve', 'deny', 'abort'] as const).map((decision) => (
+                        <Button
+                          key={decision}
+                          size="sm"
+                          variant="outline"
+                          onClick={() => void runUiAction(
+                            `approval:${team.id}:${approval.approvalId}:${decision}`,
+                            () => resolveApproval(
+                              team.id,
+                              approval.approvalId,
+                              decision,
+                              approvalNoteById[approval.approvalId]?.trim() || undefined,
+                            ),
+                          )}
+                          disabled={loading || Boolean(pendingActionId)}
+                        >
+                          {t(`run.approvalDecision.${decision}`)}
+                        </Button>
+                      ))}
                     </div>
-                    <div className="mt-1 whitespace-pre-wrap">{msg.content}</div>
                   </div>
-                ))
-              )}
-            </div>
+                </div>
+              ))
+            )}
+
+            {run?.status === 'waiting_for_user' ? (
+              <div className="rounded border p-3 text-sm">
+                <div className="font-medium">{t('run.waitingDecision')}</div>
+                <div className="mt-2 grid gap-2 sm:grid-cols-[11rem_1fr]">
+                  <Select value={decisionType} onChange={(event) => setDecisionType(event.target.value as typeof decisionType)}>
+                    <option value="retry">{t('run.runDecision.retry')}</option>
+                    <option value="proceed_degraded">{t('run.runDecision.proceed_degraded')}</option>
+                    <option value="abort">{t('run.runDecision.abort')}</option>
+                  </Select>
+                  <Input
+                    value={decisionNote}
+                    onChange={(event) => setDecisionNote(event.target.value)}
+                    placeholder={t('run.notePlaceholder')}
+                  />
+                </div>
+                <Button
+                  className="mt-2"
+                  size="sm"
+                  variant="outline"
+                  onClick={() => void runUiAction(`decision:${team.id}:${decisionType}`, async () => {
+                    await submitDecision(team.id, decisionType, decisionNote.trim() || undefined);
+                    setDecisionNote('');
+                  })}
+                  disabled={!canSubmitDecision}
+                >
+                  {t('run.submitDecision')}
+                </Button>
+              </div>
+            ) : null}
           </CardContent>
         </Card>
 
         <Card>
           <CardHeader>
-            <CardTitle className="text-base">{t('agents.title')}</CardTitle>
+            <CardTitle className="text-base">{t('run.roles')}</CardTitle>
           </CardHeader>
           <CardContent className="space-y-3">
-            <div className="space-y-1">
-              <Label htmlFor="selected-agent">{t('agents.active')}</Label>
-              <Select
-                id="selected-agent"
-                value={effectiveSelectedAgentId}
-                onChange={(event) => setSelectedAgentId(event.target.value)}
-              >
-                <option value="">{t('agents.select')}</option>
-                {team.memberIds.map((agentId) => (
-                  <option key={agentId} value={agentId}>
-                    {agentId}
-                  </option>
-                ))}
-              </Select>
-            </div>
-            <div className="rounded border p-2 text-xs text-muted-foreground">
-              {t('agents.sessionKey')}: {leadSession || '-'}
-            </div>
-            <div className="space-y-2">
-              {team.memberIds.map((agentId) => {
-                const ownedCount = taskSummary.ownedCountByAgentId[agentId] ?? 0;
-                const runningCount = taskSummary.runningCountByAgentId[agentId] ?? 0;
-                const activeTaskId = teamActiveTaskByAgent[agentId];
-                return (
-                  <div key={agentId} className="rounded border p-2">
-                    <div className="text-sm font-medium">{agentId}</div>
-                    <div className="text-xs text-muted-foreground">
-                      {t('agents.ownedTasks')}: {ownedCount} · {t('agents.runningTasks')}: {runningCount}
-                    </div>
-                    {activeTaskId && (
-                      <div className="mt-1 text-xs text-emerald-600 dark:text-emerald-400">
-                        {t('agents.autoRunningTask')}: {activeTaskId}
-                      </div>
-                    )}
-                    <div className="mt-2">
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        onClick={() => void claimNext(team.id, agentId, sessionKey(agentId, team.id))}
-                        disabled={loading}
-                      >
-                        {t('agents.claimForAgent')}
-                      </Button>
-                    </div>
+            {roles.length === 0 ? (
+              <div className="rounded border p-3 text-xs text-muted-foreground">{t('run.emptyRoles')}</div>
+            ) : roles.map((role) => (
+              <div key={role.roleId} className="rounded border p-2">
+                <div className="text-sm font-medium">{role.roleId}</div>
+                <div className="text-xs text-muted-foreground">{role.agentName} · {role.status}</div>
+                <div className="mt-1 text-xs text-muted-foreground">{t('run.roleStages')}: {stageSummary.roleStageCountByRoleId[role.roleId] ?? 0}</div>
+              </div>
+            ))}
+          </CardContent>
+        </Card>
+      </div>
+
+      <div className="grid gap-4 xl:grid-cols-3">
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-base">{t('run.artifacts')}</CardTitle>
+          </CardHeader>
+          <CardContent className="max-h-[360px] space-y-2 overflow-y-auto">
+            {artifacts.length === 0 ? (
+              <div className="rounded border p-3 text-xs text-muted-foreground">{t('run.emptyArtifacts')}</div>
+            ) : artifacts.map((artifact) => (
+              <div key={artifact.artifactId} className="rounded border p-2 text-sm">
+                <div className="font-medium">{artifact.title}</div>
+                <div className="text-xs text-muted-foreground">{artifact.kind} · {artifact.stageId} · {artifact.roleId}</div>
+                {artifact.summary ? <div className="mt-1 text-xs text-muted-foreground">{artifact.summary}</div> : null}
+              </div>
+            ))}
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-base">{t('run.gates')}</CardTitle>
+          </CardHeader>
+          <CardContent className="max-h-[360px] space-y-2 overflow-y-auto">
+            {gates.length === 0 ? (
+              <div className="rounded border p-3 text-xs text-muted-foreground">{t('run.emptyGates')}</div>
+            ) : gates.map((gate) => (
+              <div key={gate.gateId} className="rounded border p-2 text-sm">
+                <div className="font-medium">{gate.gateType}: {gate.verdict}</div>
+                <div className="text-xs text-muted-foreground">{gate.stageId} · {gate.passed ? t('run.gatePassed') : t('run.gateFailed')}</div>
+                {gate.failureItems.length > 0 ? (
+                  <ul className="mt-1 list-disc pl-4 text-xs text-muted-foreground">
+                    {gate.failureItems.map((item) => <li key={`${gate.gateId}:${item.code}`}>{item.code}: {item.message}</li>)}
+                  </ul>
+                ) : null}
+              </div>
+            ))}
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-base">{t('run.kickbacks')}</CardTitle>
+          </CardHeader>
+          <CardContent className="max-h-[360px] space-y-2 overflow-y-auto">
+            {kickbacks.length === 0 ? (
+              <div className="rounded border p-3 text-xs text-muted-foreground">{t('run.emptyKickbacks')}</div>
+            ) : kickbacks.map((kickback) => (
+              <div key={kickback.kickbackId} className="rounded border p-2 text-sm">
+                <div className="font-medium">{kickback.stageId}</div>
+                <ul className="mt-1 list-disc pl-4 text-xs text-muted-foreground">
+                  {kickback.failureItems.map((item) => <li key={`${kickback.kickbackId}:${item.code}`}>{item.code}: {item.message}</li>)}
+                </ul>
+              </div>
+            ))}
+          </CardContent>
+        </Card>
+      </div>
+
+      <div className="grid gap-4 xl:grid-cols-4">
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-base">{t('run.messages')}</CardTitle>
+          </CardHeader>
+          <CardContent className="max-h-[360px] space-y-2 overflow-y-auto">
+            {messages.length === 0 ? (
+              <div className="rounded border p-3 text-xs text-muted-foreground">{t('run.emptyMessages')}</div>
+            ) : messages.map((message) => (
+              <div key={message.messageId} className="rounded border p-2 text-sm">
+                <div className="text-xs text-muted-foreground">{message.fromRoleId} {'->'} {message.toRoleId} · {formatTimestamp(message.createdAt)}</div>
+                <div className="mt-1 font-medium">{message.summary}</div>
+                <div className="mt-1 whitespace-pre-wrap text-xs text-muted-foreground">{message.body}</div>
+              </div>
+            ))}
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-base">{t('run.dispatches')}</CardTitle>
+          </CardHeader>
+          <CardContent className="max-h-[360px] space-y-2 overflow-y-auto">
+            {dispatches.length === 0 && dispatchExecutions.length === 0 ? (
+              <div className="rounded border p-3 text-xs text-muted-foreground">{t('run.emptyDispatches')}</div>
+            ) : (
+              <>
+                {dispatches.map((dispatch) => (
+                  <div key={dispatch.dispatchId} className="rounded border p-2 text-sm">
+                    <div className="font-medium">{dispatch.stageId}</div>
+                    <div className="text-xs text-muted-foreground">{dispatch.roleId} · {dispatch.dispatchId}</div>
                   </div>
-                );
-              })}
+                ))}
+                {dispatchExecutions.map((execution) => (
+                  <div key={execution.executionRecordId} className="rounded border p-2 text-sm">
+                    <div className="font-medium">{execution.status}</div>
+                    <div className="text-xs text-muted-foreground">{execution.roleId} · {execution.childSessionKey ?? execution.executionId}</div>
+                  </div>
+                ))}
+              </>
+            )}
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-base">{t('run.decisions')}</CardTitle>
+          </CardHeader>
+          <CardContent className="max-h-[360px] space-y-2 overflow-y-auto">
+            {decisions.length === 0 ? (
+              <div className="rounded border p-3 text-xs text-muted-foreground">{t('run.emptyDecisions')}</div>
+            ) : decisions.map((decision) => (
+              <div key={decision.decisionId} className="rounded border p-2 text-sm">
+                <div className="font-medium">{t(`run.runDecision.${decision.decision}`)}</div>
+                <div className="text-xs text-muted-foreground">{decision.stageId} · {formatTimestamp(decision.createdAt)}</div>
+                {decision.note ? <div className="mt-1 whitespace-pre-wrap text-xs text-muted-foreground">{decision.note}</div> : null}
+              </div>
+            ))}
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader>
+            <div className="flex items-center justify-between gap-2">
+              <CardTitle className="text-base">{t('run.events')}</CardTitle>
+              <Button
+                size="sm"
+                variant="ghost"
+                onClick={() => void runUiAction(`tick:${team.id}`, () => tickRun(team.id))}
+                disabled={!canAct}
+              >
+                {t('run.tick')}
+              </Button>
             </div>
-            <div className="rounded border p-2 text-xs text-muted-foreground">
-              lease: {DEFAULT_LEASE_MS}ms
-            </div>
+          </CardHeader>
+          <CardContent className="max-h-[360px] space-y-2 overflow-y-auto">
+            {events.length === 0 ? (
+              <div className="rounded border p-3 text-xs text-muted-foreground">{t('run.emptyEvents')}</div>
+            ) : events.map((event) => (
+              <div key={event.eventId} className="rounded border p-2 text-sm">
+                <div className="font-medium">{event.type}</div>
+                <div className="text-xs text-muted-foreground">rev {event.revision} · {formatTimestamp(event.createdAt)}</div>
+              </div>
+            ))}
           </CardContent>
         </Card>
       </div>

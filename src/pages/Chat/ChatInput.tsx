@@ -10,8 +10,8 @@ import { memo, useState, useRef, useEffect, useCallback, useMemo, type ReactNode
 import { Send, Square, X, Paperclip, FileText, Film, Music, FileArchive, File, Loader2, ImageIcon, AlertCircle, Check, ChevronDown } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
-import { hostFileStageBuffer, hostFileStagePaths } from '@/lib/host-api';
-import type { RuntimeAddress } from '../../../runtime-host/shared/runtime-address';
+import { hostFileStageBuffer, hostFileStagePaths, type WorkspaceFileContext } from '@/lib/host-api';
+import type { SessionIdentity } from '../../../runtime-host/shared/runtime-address';
 import { invokeIpc } from '@/lib/api-client';
 import { useSkillsStore } from '@/stores/skills';
 import { cn } from '@/lib/utils';
@@ -19,6 +19,8 @@ import { useTranslation } from 'react-i18next';
 import { CHAT_LAYOUT_TOKENS } from './chat-layout-tokens';
 import { ChatImageLightbox } from './components/ChatImageLightbox';
 import { collectDroppedFiles } from '@/lib/collect-dropped-files';
+import type { ChatSendResult } from '@/stores/chat';
+import type { ChatContextUsageViewModel } from './context-usage';
 
 // ── Types ────────────────────────────────────────────────────────
 
@@ -63,18 +65,22 @@ interface ModelPickerState {
 }
 
 const STAGE_BUFFER_CONCURRENCY = 3;
+const STAGE_BUFFER_MAX_BYTES = 50 * 1024 * 1024;
 
 interface ChatInputProps {
-  onSend: (text: string, attachments?: FileAttachment[]) => void;
+  onSend: (text: string, attachments?: FileAttachment[]) => ChatSendResult | Promise<ChatSendResult>;
   onStop?: () => void;
+  stopping?: boolean;
   onPreviewSkill?: (skill: SelectedSkill) => void;
   modelPicker?: ModelPickerState | null;
+  contextUsage?: ChatContextUsageViewModel | null;
   disabled?: boolean;
   sending?: boolean;
   approvalWaiting?: boolean;
   mentionCandidates?: MentionCandidate[];
   allowedSkillIds?: string[] | null;
-  runtimeAddress: RuntimeAddress | null;
+  sessionIdentity: SessionIdentity | null;
+  workspaceContext?: WorkspaceFileContext;
 }
 
 function resolveInputPlaceholder(
@@ -261,14 +267,17 @@ function isPreviewableImageAttachment(attachment: FileAttachment): boolean {
 export const ChatInput = memo(function ChatInput({
   onSend,
   onStop,
+  stopping = false,
   onPreviewSkill,
   modelPicker = null,
+  contextUsage = null,
   disabled = false,
   sending = false,
   approvalWaiting = false,
   mentionCandidates = [],
   allowedSkillIds = null,
-  runtimeAddress,
+  sessionIdentity,
+  workspaceContext,
 }: ChatInputProps) {
   const { t } = useTranslation('chat');
   const [input, setInput] = useState('');
@@ -302,11 +311,7 @@ export const ChatInput = memo(function ChatInput({
     if (!Array.isArray(allowedSkillIds)) {
       return null;
     }
-    const normalized = allowedSkillIds
-      .filter((id): id is string => typeof id === 'string')
-      .map((id) => id.trim())
-      .filter((id) => id.length > 0);
-    return new Set(normalized);
+    return new Set(allowedSkillIds.filter((id) => typeof id === 'string' && id.trim()).map((id) => id.trim()));
   }, [allowedSkillIds]);
 
   // Auto-resize textarea
@@ -523,10 +528,10 @@ export const ChatInput = memo(function ChatInput({
     setAttachments((prev) => [...prev, ...stagingAttachments]);
 
     try {
-      if (!runtimeAddress) {
-        throw new Error('RuntimeAddress is required');
+      if (!sessionIdentity) {
+        throw new Error('SessionIdentity is required');
       }
-      const staged = await hostFileStagePaths({ filePaths, runtimeAddress });
+      const staged = await hostFileStagePaths({ filePaths, sessionIdentity, ...workspaceContext });
       const updatesByTempId = new Map<string, FileAttachment>();
       for (let i = 0; i < tempIds.length; i++) {
         const tempId = tempIds[i];
@@ -544,7 +549,7 @@ export const ChatInput = memo(function ChatInput({
           : attachment
       )));
     }
-  }, [runtimeAddress]);
+  }, [sessionIdentity, workspaceContext]);
 
   const pickFiles = useCallback(async () => {
     try {
@@ -590,15 +595,19 @@ export const ChatInput = memo(function ChatInput({
       STAGE_BUFFER_CONCURRENCY,
       async ({ file, tempId, fallback }) => {
         try {
+          if (file.size > STAGE_BUFFER_MAX_BYTES) {
+            throw new Error('tooLarge');
+          }
           const base64 = await readFileAsBase64(file);
-          if (!runtimeAddress) {
-            throw new Error('RuntimeAddress is required');
+          if (!sessionIdentity) {
+            throw new Error('SessionIdentity is required');
           }
           const staged = await hostFileStageBuffer({
             base64,
             fileName: file.name,
             mimeType: file.type || 'application/octet-stream',
-            runtimeAddress,
+            sessionIdentity,
+            ...workspaceContext,
           });
           return { tempId, attachment: { ...staged, status: 'ready' as const } };
         } catch (err) {
@@ -619,7 +628,7 @@ export const ChatInput = memo(function ChatInput({
       results.map((result) => [result.tempId, result.attachment] as const),
     );
     setAttachments((prev) => prev.map((attachment) => updatesByTempId.get(attachment.id) ?? attachment));
-  }, [runtimeAddress]);
+  }, [sessionIdentity, workspaceContext]);
 
   // ── Attachment management ──────────────────────────────────────
 
@@ -653,21 +662,23 @@ export const ChatInput = memo(function ChatInput({
     && !disabled
     && !sending
     && !approvalWaiting;
-  const canStop = sending && !disabled && !!onStop;
+  const canStop = sending && !stopping && !disabled && !!onStop;
   const modelPickerDisabled = !modelPicker
     || modelPicker.disabled
     || modelPicker.loading
     || modelPicker.switching
     || modelPicker.options.length === 0;
 
-  const handleSend = useCallback(() => {
+  const handleSend = useCallback(async () => {
     if (!canSend) return;
     const readyAttachments = attachments.filter(a => a.status === 'ready');
-    // Capture values before clearing — clear input immediately for snappy UX,
-    // but keep attachments available for the async send
     const rawText = input.trim();
     const textToSend = buildSkillPrefixedMessage(rawText, selectedSkills);
     const attachmentsToSend = readyAttachments.length > 0 ? readyAttachments : undefined;
+    const result = await onSend(textToSend, attachmentsToSend);
+    if (!result.accepted) {
+      return;
+    }
     setInput('');
     closeMention();
     closeSlash();
@@ -676,7 +687,6 @@ export const ChatInput = memo(function ChatInput({
     if (textareaRef.current) {
       textareaRef.current.style.height = 'auto';
     }
-    onSend(textToSend, attachmentsToSend);
   }, [attachments, canSend, closeMention, closeSlash, input, onSend, selectedSkills]);
 
   const handleStop = useCallback(() => {
@@ -997,8 +1007,42 @@ export const ChatInput = memo(function ChatInput({
               'flex w-full min-w-0 items-end gap-1.5',
               'justify-end',
             )}>
+              {contextUsage && (
+                <div className="group relative shrink-0" role="status" aria-label={t('input.contextUsageTitle', { detail: contextUsage.detail, pct: contextUsage.pct })}>
+                  <div
+                    className={cn(
+                      'flex h-8 w-8 items-center justify-center',
+                      contextUsage.level === 'danger'
+                        ? 'text-destructive'
+                        : contextUsage.level === 'warning'
+                          ? 'text-amber-700 dark:text-amber-300'
+                          : 'text-muted-foreground',
+                    )}
+                  >
+                    <svg className="h-4 w-4 -rotate-90" viewBox="0 0 16 16" aria-hidden="true">
+                      <circle cx="8" cy="8" r="6" fill="none" stroke="currentColor" strokeWidth="2" opacity="0.18" />
+                      <circle
+                        cx="8"
+                        cy="8"
+                        r="6"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="2"
+                        strokeLinecap="round"
+                        pathLength="100"
+                        strokeDasharray={`${contextUsage.pct} 100`}
+                      />
+                    </svg>
+                  </div>
+                  <div className="pointer-events-none absolute bottom-full left-1/2 z-50 mb-2 -translate-x-1/2 whitespace-nowrap rounded-xl border border-border/60 bg-popover px-3 py-2 text-xs font-medium text-popover-foreground opacity-0 shadow-[0_12px_36px_rgba(0,0,0,0.28)] transition-opacity duration-150 group-hover:opacity-100 group-focus-within:opacity-100">
+                    <span>{t('input.contextUsageLabel', { pct: contextUsage.pct })}</span>
+                    <span className="mx-1.5 text-muted-foreground">·</span>
+                    <span className="text-muted-foreground">{contextUsage.detail}</span>
+                  </div>
+                </div>
+              )}
               {modelPicker ? (
-                <div ref={modelPickerRef} className="relative min-w-0 flex-none w-[clamp(0px,calc(100%-5.25rem),148px)] max-sm:w-[clamp(0px,calc(100%-5.25rem),132px)]">
+                <div ref={modelPickerRef} className="relative min-w-0 flex-none w-[clamp(0px,calc(100%-7.5rem),148px)] max-sm:w-[clamp(0px,calc(100%-7.5rem),132px)]">
                   <button
                     type="button"
                     aria-label={t('input.pickModel')}
@@ -1099,7 +1143,9 @@ export const ChatInput = memo(function ChatInput({
                 aria-label={sending ? 'Stop' : 'Send'}
                 title={sending ? 'Stop' : 'Send'}
               >
-                {sending ? (
+                {stopping ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : sending ? (
                   <Square className="h-4 w-4" />
                 ) : (
                   <Send className="h-4 w-4" />

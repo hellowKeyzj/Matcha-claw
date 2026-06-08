@@ -1,7 +1,9 @@
 import { normalizeSendWithMediaInput } from '../chat/send-media';
 import {
-  validateRuntimeAddress,
-  type RuntimeAddress,
+  validateRuntimeEndpointRef,
+  validateSessionIdentity,
+  type RuntimeEndpointRef,
+  type SessionIdentity,
 } from '../agent-runtime/contracts/runtime-address';
 import {
   isRecord,
@@ -25,38 +27,71 @@ import type {
   SessionWindowPayload,
 } from './session-runtime-types';
 
-function readRuntimeAddress(value: unknown): {
-  runtimeAddress: RuntimeAddress | null;
-  runtimeAddressError: string | null;
+function readSessionIdentity(value: unknown, expectedSessionKey?: unknown): {
+  sessionIdentity: SessionIdentity | null;
+  sessionIdentityError: string | null;
 } {
   if (value === undefined) {
     return {
-      runtimeAddress: null,
-      runtimeAddressError: 'RuntimeAddress is required',
+      sessionIdentity: null,
+      sessionIdentityError: 'SessionIdentity is required',
     };
   }
-  const error = validateRuntimeAddress(value);
+  const error = validateSessionIdentity(value);
   if (error) {
     return {
-      runtimeAddress: null,
-      runtimeAddressError: error,
+      sessionIdentity: null,
+      sessionIdentityError: error,
+    };
+  }
+  const sessionIdentity = value as SessionIdentity;
+  const sessionKey = normalizeString(expectedSessionKey);
+  if (sessionKey && sessionIdentity.sessionKey !== sessionKey) {
+    return {
+      sessionIdentity: null,
+      sessionIdentityError: 'sessionKey must match SessionIdentity.sessionKey',
     };
   }
   return {
-    runtimeAddress: value as RuntimeAddress,
-    runtimeAddressError: null,
+    sessionIdentity,
+    sessionIdentityError: null,
+  };
+}
+
+function readRuntimeEndpoint(value: unknown): {
+  endpoint: RuntimeEndpointRef | null;
+  endpointError: string | null;
+} {
+  if (value === undefined) {
+    return {
+      endpoint: null,
+      endpointError: 'RuntimeEndpointRef is required',
+    };
+  }
+  const error = validateRuntimeEndpointRef(value);
+  if (error) {
+    return {
+      endpoint: null,
+      endpointError: error,
+    };
+  }
+  return {
+    endpoint: value as RuntimeEndpointRef,
+    endpointError: null,
   };
 }
 
 export function readCreateSessionRequest(payload: unknown): {
   explicitSessionKey: string;
-  runtimeAddress: RuntimeAddress | null;
-  runtimeAddressError: string | null;
+  endpoint: RuntimeEndpointRef | null;
+  endpointError: string | null;
+  agentId: string;
 } {
   const body = isRecord(payload) ? payload as SessionNewPayload : {};
   return {
     explicitSessionKey: normalizeString(body.sessionKey),
-    ...readRuntimeAddress(body.runtimeAddress),
+    agentId: normalizeString(body.agentId),
+    ...readRuntimeEndpoint(body.endpoint),
   };
 }
 
@@ -65,55 +100,58 @@ export function readRequiredSessionKey(payload: unknown): string {
   return normalizeString(body.sessionKey);
 }
 
-export function readRuntimeAddressRequest(payload: unknown): {
+export function readSessionIdentityRequest(payload: unknown): {
   sessionKey: string;
-  runtimeAddress: RuntimeAddress | null;
-  runtimeAddressError: string | null;
+  sessionIdentity: SessionIdentity | null;
+  sessionIdentityError: string | null;
 } {
   const body = isRecord(payload) ? payload as SessionLoadPayload : {};
+  const sessionKey = normalizeString(body.sessionKey);
   return {
-    sessionKey: normalizeString(body.sessionKey),
-    ...readRuntimeAddress(body.runtimeAddress),
+    sessionKey,
+    ...readSessionIdentity(body.sessionIdentity, sessionKey),
   };
 }
 
 export function readSessionListRequest(payload: unknown): {
-  runtimeAddress: RuntimeAddress | null;
-  runtimeAddressError: string | null;
+  endpoint: RuntimeEndpointRef | null;
+  endpointError: string | null;
 } {
-  const body = isRecord(payload) ? payload as SessionLoadPayload : {};
-  return readRuntimeAddress(body.runtimeAddress);
+  const body = isRecord(payload) ? payload as { endpoint?: unknown } : {};
+  return readRuntimeEndpoint(body.endpoint);
 }
 
 export function readSessionLoadRequest(payload: unknown): {
   sessionKey: string;
   limit: number;
-  runtimeAddress: RuntimeAddress | null;
-  runtimeAddressError: string | null;
+  sessionIdentity: SessionIdentity | null;
+  sessionIdentityError: string | null;
 } {
   const body = isRecord(payload) ? payload as SessionLoadPayload : {};
+  const sessionKey = normalizeString(body.sessionKey);
   return {
-    sessionKey: normalizeString(body.sessionKey),
+    sessionKey,
     limit: normalizeWindowLimit(body.limit),
-    ...readRuntimeAddress(body.runtimeAddress),
+    ...readSessionIdentity(body.sessionIdentity, sessionKey),
   };
 }
 
 export function readAbortSessionRequest(payload: unknown): {
   sessionKey: string;
   approvalIds: string[];
-  runtimeAddress: RuntimeAddress | null;
-  runtimeAddressError: string | null;
+  sessionIdentity: SessionIdentity | null;
+  sessionIdentityError: string | null;
 } {
   const body = isRecord(payload) ? payload as SessionAbortRuntimePayload : {};
   const rawApprovalIds = Array.isArray(body.approvalIds) ? body.approvalIds : [];
+  const sessionKey = normalizeString(body.sessionKey);
   return {
-    sessionKey: normalizeString(body.sessionKey),
+    sessionKey,
     approvalIds: rawApprovalIds.flatMap((rawApprovalId) => {
       const approvalId = typeof rawApprovalId === 'string' ? rawApprovalId.trim() : '';
       return approvalId ? [approvalId] : [];
     }),
-    ...readRuntimeAddress(body.runtimeAddress),
+    ...readSessionIdentity(body.sessionIdentity, sessionKey),
   };
 }
 
@@ -121,54 +159,57 @@ export function readResolveApprovalRequest(payload: unknown): {
   id: string;
   decision: '' | 'allow-once' | 'allow-always' | 'deny';
   sessionKey: string;
-  runtimeAddress: RuntimeAddress | null;
-  runtimeAddressError: string | null;
+  sessionIdentity: SessionIdentity | null;
+  sessionIdentityError: string | null;
 } {
   const body = isRecord(payload) ? payload as SessionResolveApprovalPayload : {};
   const rawDecision = normalizeString(body.decision);
   const decision = rawDecision === 'allow-once' || rawDecision === 'allow-always' || rawDecision === 'deny'
     ? rawDecision
     : '';
+  const sessionKey = normalizeString(body.sessionKey);
   return {
     id: normalizeString(body.id),
     decision,
-    sessionKey: normalizeString(body.sessionKey),
-    ...readRuntimeAddress(body.runtimeAddress),
+    sessionKey,
+    ...readSessionIdentity(body.sessionIdentity, sessionKey),
   };
 }
 
 export function readPatchSessionRequest(payload: unknown): {
   sessionKey: string;
-  runtimeAddress: RuntimeAddress | null;
-  runtimeAddressError: string | null;
+  sessionIdentity: SessionIdentity | null;
+  sessionIdentityError: string | null;
   runtimeModelRef: string;
 } {
   const body = isRecord(payload) ? payload as SessionPatchPayload : {};
+  const sessionKey = normalizeString(body.sessionKey);
   return {
-    sessionKey: normalizeString(body.sessionKey),
-    ...readRuntimeAddress(body.runtimeAddress),
+    sessionKey,
+    ...readSessionIdentity(body.sessionIdentity, sessionKey),
     runtimeModelRef: normalizeString(body.runtimeModelRef),
   };
 }
 
 export function readRenameSessionRequest(payload: unknown): {
   sessionKey: string;
-  runtimeAddress: RuntimeAddress | null;
-  runtimeAddressError: string | null;
+  sessionIdentity: SessionIdentity | null;
+  sessionIdentityError: string | null;
   label: string;
 } {
   const body = isRecord(payload) ? payload as SessionRenamePayload : {};
+  const sessionKey = normalizeString(body.sessionKey);
   return {
-    sessionKey: normalizeString(body.sessionKey),
-    ...readRuntimeAddress(body.runtimeAddress),
+    sessionKey,
+    ...readSessionIdentity(body.sessionIdentity, sessionKey),
     label: normalizeString(body.label),
   };
 }
 
 export function readSessionStatusRequest(payload: unknown): {
   sessionKey: string;
-  runtimeAddress: RuntimeAddress | null;
-  runtimeAddressError: string | null;
+  sessionIdentity: SessionIdentity | null;
+  sessionIdentityError: string | null;
   status: 'active' | 'completed' | 'archived' | 'deleted' | null;
 } {
   const body = isRecord(payload) ? payload as SessionStatusPayload : {};
@@ -178,9 +219,10 @@ export function readSessionStatusRequest(payload: unknown): {
     || body.status === 'deleted'
     ? body.status
     : null;
+  const sessionKey = normalizeString(body.sessionKey);
   return {
-    sessionKey: normalizeString(body.sessionKey),
-    ...readRuntimeAddress(body.runtimeAddress),
+    sessionKey,
+    ...readSessionIdentity(body.sessionIdentity, sessionKey),
     status,
   };
 }
@@ -191,17 +233,18 @@ export function readSessionWindowRequest(payload: unknown): {
   limit: number;
   offset: number | null;
   includeCanonical: boolean;
-  runtimeAddress: RuntimeAddress | null;
-  runtimeAddressError: string | null;
+  sessionIdentity: SessionIdentity | null;
+  sessionIdentityError: string | null;
 } {
   const body = isRecord(payload) ? payload as SessionWindowPayload : {};
+  const sessionKey = normalizeString(body.sessionKey);
   return {
-    sessionKey: normalizeString(body.sessionKey),
+    sessionKey,
     mode: normalizeWindowMode(body.mode),
     limit: normalizeWindowLimit(body.limit),
     offset: normalizeWindowOffset(body.offset),
     includeCanonical: normalizeIncludeCanonical(body.includeCanonical),
-    ...readRuntimeAddress(body.runtimeAddress),
+    ...readSessionIdentity(body.sessionIdentity, sessionKey),
   };
 }
 
@@ -211,24 +254,25 @@ export function readPromptSessionRequest(payload: unknown): {
   sessionKey: string;
   message: string;
   requestedRunId: string;
-  runtimeAddress: RuntimeAddress | null;
-  runtimeAddressError: string | null;
+  sessionIdentity: SessionIdentity | null;
+  sessionIdentityError: string | null;
 } {
   const directBody = isRecord(payload) ? payload as SessionPromptPayload : {};
   const mediaBody = normalizeSendWithMediaInput(payload);
   const message = typeof directBody.message === 'string'
     ? directBody.message
     : (mediaBody?.message ?? '');
+  const sessionKey = normalizeString(directBody.sessionKey ?? mediaBody?.sessionKey);
   return {
     directBody,
     mediaBody,
-    sessionKey: normalizeString(directBody.sessionKey ?? mediaBody?.sessionKey),
+    sessionKey,
     message,
     requestedRunId: normalizeString(
       directBody.runId
       ?? directBody.idempotencyKey
       ?? mediaBody?.idempotencyKey,
     ),
-    ...readRuntimeAddress(directBody.runtimeAddress),
+    ...readSessionIdentity(directBody.sessionIdentity, sessionKey),
   };
 }

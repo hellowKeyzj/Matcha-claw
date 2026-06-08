@@ -1,20 +1,27 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import type { RuntimeAddress } from '../../runtime-host/shared/runtime-address';
 
 const hostApiFetchMock = vi.fn();
 const hostCapabilityExecuteMock = vi.fn();
+const resolveSingleCapabilityScopeMock = vi.fn();
 
-const skillManagementAddress: RuntimeAddress = {
-  kind: 'native-runtime',
-  capabilityId: 'skill.management',
-  runtimeAdapterId: 'openclaw',
-  runtimeInstanceId: 'local',
-  agentId: 'default',
-};
+const skillManagementScope = {
+  kind: 'runtime-instance',
+  endpoint: {
+    kind: 'native-runtime',
+    runtimeAdapterId: 'openclaw',
+    runtimeInstanceId: 'local',
+  },
+} as const;
 
 vi.mock('@/lib/host-api', () => ({
-  hostApiFetch: (...args: unknown[]) => hostApiFetchMock(...args),
-  hostCapabilityExecute: (...args: unknown[]) => hostCapabilityExecuteMock(...args),
+  hostApiFetch: async (path: string, init?: { body?: string; timeoutMs?: number }) => {
+    if (path === '/api/capabilities/execute') {
+      const payload = init?.body ? JSON.parse(init.body) : {};
+      return await hostCapabilityExecuteMock(payload, { timeoutMs: init?.timeoutMs });
+    }
+    return await hostApiFetchMock(path, init);
+  },
+  resolveSingleCapabilityScope: (...args: unknown[]) => resolveSingleCapabilityScopeMock(...args),
   waitForRuntimeJobResult: vi.fn(),
 }));
 
@@ -22,6 +29,7 @@ describe('skills store error mapping', () => {
   beforeEach(() => {
     vi.resetModules();
     vi.clearAllMocks();
+    resolveSingleCapabilityScopeMock.mockResolvedValue(skillManagementScope);
   });
 
   it('maps fetchSkills rate-limit error by AppError code', async () => {
@@ -74,13 +82,19 @@ describe('skills store error mapping', () => {
     hostCapabilityExecuteMock.mockResolvedValueOnce({ success: false, error: 'request timeout' });
 
     const { useSkillsStore } = await import('@/stores/skills');
-    await expect(useSkillsStore.getState().installSkill('demo-skill', skillManagementAddress)).rejects.toThrow('installTimeoutError');
+    await expect(useSkillsStore.getState().installSkill('demo-skill')).rejects.toThrow('installTimeoutError');
+    expect(hostCapabilityExecuteMock).toHaveBeenCalledWith(expect.objectContaining({
+      id: 'skill.management',
+      operationId: 'clawhub.install',
+      scope: skillManagementScope,
+      target: { kind: 'skill', slug: 'demo-skill' },
+    }), { timeoutMs: undefined });
   });
 
   it('preserves specific installSkill error messages when no mapped error code exists', async () => {
     hostCapabilityExecuteMock.mockResolvedValueOnce({ success: false, error: 'custom install failure' });
 
     const { useSkillsStore } = await import('@/stores/skills');
-    await expect(useSkillsStore.getState().installSkill('demo-skill', skillManagementAddress)).rejects.toThrow('custom install failure');
+    await expect(useSkillsStore.getState().installSkill('demo-skill')).rejects.toThrow('custom install failure');
   });
 });

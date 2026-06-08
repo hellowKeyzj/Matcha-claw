@@ -28,7 +28,7 @@ import {
 import { buildCanonicalMessageStateKey, buildCanonicalToolStateKey } from './canonical-reducer';
 import type { CanonicalSessionEvent } from './canonical-events';
 import type { CanonicalMessageState, CanonicalSessionState, CanonicalThoughtState, CanonicalToolState } from './canonical-state';
-import type { RuntimeAddress } from '../../agent-runtime/contracts/runtime-address';
+import type { SessionIdentity } from '../../agent-runtime/contracts/runtime-address';
 
 type MediaBundle = {
   images: SessionRenderImage[];
@@ -662,10 +662,10 @@ function sortTimelineEntries(entries: SessionTimelineEntry[]): SessionTimelineEn
     .map(({ entry }) => entry);
 }
 
-function deriveChildRuntimeAddress(state: CanonicalSessionState, childSessionKey: string, childAgentId?: string): RuntimeAddress {
-  const agentId = childAgentId || state.context.address.agentId;
+function deriveChildSessionIdentity(state: CanonicalSessionState, childSessionKey: string, childAgentId?: string): SessionIdentity {
+  const agentId = childAgentId || state.context.identity.agentId;
   return {
-    ...state.context.address,
+    endpoint: state.context.identity.endpoint,
     agentId,
     sessionKey: childSessionKey,
   };
@@ -681,7 +681,7 @@ function buildExecutionGraphItemsFromProjectionIndex(
     const runId = event.runId || completion.turnKey;
     const graphId = `${state.sessionId}:${completion.childSessionKey}:${event.eventId}`;
     const childAgentId = completion.childAgentId ?? completion.agentId;
-    const childRuntimeAddress = completion.childRuntimeAddress ?? deriveChildRuntimeAddress(state, completion.childSessionKey, childAgentId);
+    const childSessionIdentity = completion.childSessionIdentity ?? deriveChildSessionIdentity(state, completion.childSessionKey, childAgentId);
     return {
       key: `session:${state.sessionId}|graph:${graphId}`,
       kind: 'execution-graph',
@@ -698,7 +698,7 @@ function buildExecutionGraphItemsFromProjectionIndex(
       turnKey: runId || completion.turnKey || `team:${index}`,
       anchorItemKey: runId ? buildAssistantTurnEntryKey(state.sessionId, laneKey, runId) : undefined,
       childSessionKey: completion.childSessionKey,
-      childRuntimeAddress,
+      childSessionIdentity,
       ...(completion.childSessionId ? { childSessionId: completion.childSessionId } : {}),
       ...(childAgentId ? { childAgentId } : {}),
       agentLabel: childAgentId || 'subagent',

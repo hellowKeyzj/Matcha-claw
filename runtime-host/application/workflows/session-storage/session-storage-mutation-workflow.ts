@@ -1,5 +1,5 @@
 import { basename, dirname, isAbsolute, join, relative, win32 } from 'node:path';
-import type { RuntimeAddress } from '../../agent-runtime/contracts/runtime-address';
+import type { SessionIdentity } from '../../agent-runtime/contracts/runtime-address';
 import type { RuntimeDirectoryEntry, RuntimeFileSystemPort } from '../../common/runtime-ports';
 import type { SessionExternalArtefactResolverPort, SessionStorageDescriptor } from '../../sessions/session-storage-repository';
 
@@ -11,12 +11,12 @@ export interface SessionStorageMutationWorkflowDeps {
 export class SessionStorageMutationWorkflow {
   constructor(private readonly deps: SessionStorageMutationWorkflowDeps) {}
 
-  async upsertRuntimeAddress(
+  async upsertSessionIdentity(
     descriptor: SessionStorageDescriptor,
     sessionKey: string,
-    runtimeAddress: RuntimeAddress,
+    sessionIdentity: SessionIdentity,
   ): Promise<void> {
-    await this.writeSessionIndex(descriptor, updateStorageIndexRuntimeAddress(descriptor.sessionsJson, sessionKey, runtimeAddress));
+    await this.writeSessionIndex(descriptor, updateStorageIndexSessionIdentity(descriptor.sessionsJson, sessionKey, sessionIdentity));
   }
 
   async updateStatus(
@@ -199,12 +199,12 @@ function updateStorageIndexLabel(
   return updateStorageIndexEntry(sessionsJson, sessionKey, { label });
 }
 
-function updateStorageIndexRuntimeAddress(
+function updateStorageIndexSessionIdentity(
   sessionsJson: Record<string, unknown> | null,
   sessionKey: string,
-  runtimeAddress: RuntimeAddress,
+  sessionIdentity: SessionIdentity,
 ): Record<string, unknown> | null {
-  return updateStorageIndexEntry(sessionsJson, sessionKey, { runtimeAddress });
+  return updateStorageIndexEntry(sessionsJson, sessionKey, { sessionIdentity });
 }
 
 function isPathInside(parentDir: string, childPath: string): boolean {

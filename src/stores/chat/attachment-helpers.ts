@@ -1,11 +1,12 @@
-import { hostApiFetch } from '@/lib/host-api';
+import { hostFileThumbnail, type WorkspaceFileContext } from '@/lib/host-api';
 import { throwIfHistoryLoadAborted } from './history-abort';
 import {
   getSessionItems,
   patchSessionRecord,
   reconcileSessionItems,
 } from './store-state-helpers';
-import type { AttachedFileMeta, ChatSendAttachment, ChatStoreState } from './types';
+import type { AttachedFileMeta, ChatSendAttachment, ChatStoreState, ChatSessionMetaState } from './types';
+import { buildSessionIdentityRecordIndex } from './session-identity';
 import type {
   SessionAssistantTurnItem,
   SessionRenderAttachedFile,
@@ -15,6 +16,8 @@ import type {
 
 const IMAGE_CACHE_KEY = 'matchaclaw:image-cache';
 const IMAGE_CACHE_MAX = 100;
+const IMAGE_CACHE_MAX_PERSISTED_PREVIEW_CHARS = 512 * 1024;
+const THUMBNAIL_LOAD_CONCURRENCY = 3;
 
 function loadImageCache(): Map<string, AttachedFileMeta> {
   try {
@@ -28,9 +31,19 @@ function loadImageCache(): Map<string, AttachedFileMeta> {
   return new Map();
 }
 
+function persistableImageCacheFile(file: AttachedFileMeta): AttachedFileMeta {
+  if (typeof file.preview !== 'string' || file.preview.length <= IMAGE_CACHE_MAX_PERSISTED_PREVIEW_CHARS) {
+    return file;
+  }
+  return {
+    ...file,
+    preview: null,
+  };
+}
+
 function saveImageCache(cache: Map<string, AttachedFileMeta>): void {
   try {
-    const entries = Array.from(cache.entries());
+    const entries = Array.from(cache.entries()).map(([key, file]) => [key, persistableImageCacheFile(file)] as const);
     const trimmed = entries.length > IMAGE_CACHE_MAX
       ? entries.slice(entries.length - IMAGE_CACHE_MAX)
       : entries;
@@ -41,6 +54,10 @@ function saveImageCache(cache: Map<string, AttachedFileMeta>): void {
 }
 
 const imageCache = loadImageCache();
+
+interface AttachmentPreviewLoadContext extends WorkspaceFileContext {
+  sessionIdentity: NonNullable<ChatSessionMetaState['sessionIdentity']>;
+}
 
 export interface AttachmentImageCacheStats {
   entryCount: number;
@@ -350,10 +367,12 @@ export function buildHydratedAttachmentItemsPatch(
   if (currentItems === nextItems) {
     return state;
   }
+  const loadedSessions = patchSessionRecord(state, sessionKey, {
+    items: nextItems,
+  });
   return {
-    loadedSessions: patchSessionRecord(state, sessionKey, {
-      items: nextItems,
-    }),
+    loadedSessions,
+    sessionRecordKeyByIdentityKey: buildSessionIdentityRecordIndex(loadedSessions),
   };
 }
 
@@ -372,15 +391,50 @@ export function hasPendingItemPreviewLoads(items: SessionRenderItem[]): boolean 
   ));
 }
 
+function resolveAttachmentPreviewPath(file: AttachedFileMeta): string | null {
+  if (typeof file.filePath === 'string' && file.filePath.trim()) {
+    return file.filePath;
+  }
+  if (typeof file.gatewayUrl === 'string' && file.gatewayUrl.trim()) {
+    return file.gatewayUrl;
+  }
+  return null;
+}
+
+async function mapWithConcurrency<T, R>(
+  items: T[],
+  concurrency: number,
+  worker: (item: T, index: number) => Promise<R>,
+): Promise<R[]> {
+  if (items.length === 0) {
+    return [];
+  }
+  const results = new Array<R>(items.length);
+  let nextIndex = 0;
+  const workerCount = Math.min(items.length, Math.max(1, Math.floor(concurrency)));
+  await Promise.all(Array.from({ length: workerCount }, async () => {
+    while (true) {
+      const index = nextIndex;
+      nextIndex += 1;
+      if (index >= items.length) {
+        return;
+      }
+      results[index] = await worker(items[index], index);
+    }
+  }));
+  return results;
+}
+
 export async function loadMissingItemPreviews(
   items: SessionRenderItem[],
+  context: AttachmentPreviewLoadContext,
   abortSignal?: AbortSignal,
 ): Promise<SessionRenderItem[] | null> {
   if (abortSignal) {
     throwIfHistoryLoadAborted(abortSignal);
   }
   const normalizedItems = hydrateAttachedFilesFromItems(items);
-  const needPreview: Array<{ filePath?: string; gatewayUrl?: string; mimeType: string }> = [];
+  const needPreview: Array<{ refKey: string; path: string; mimeType: string }> = [];
   const seenRefs = new Set<string>();
 
   for (const item of normalizedItems) {
@@ -392,10 +446,12 @@ export async function loadMissingItemPreviews(
       if (!refKey || seenRefs.has(refKey) || !fileNeedsPreviewLoad(file)) {
         continue;
       }
+      const path = resolveAttachmentPreviewPath(file);
+      if (!path) {
+        continue;
+      }
       seenRefs.add(refKey);
-      needPreview.push(file.filePath
-        ? { filePath: file.filePath, mimeType: file.mimeType }
-        : { gatewayUrl: file.gatewayUrl, mimeType: file.mimeType });
+      needPreview.push({ refKey, path, mimeType: file.mimeType });
     }
   }
 
@@ -404,13 +460,16 @@ export async function loadMissingItemPreviews(
   }
 
   try {
-    const thumbnails = await hostApiFetch<Record<string, { preview: string | null; fileSize: number }>>(
-      '/api/files/thumbnails',
-      {
-        method: 'POST',
-        body: JSON.stringify({ paths: needPreview }),
-      },
-    );
+    const thumbnails = Object.fromEntries(await mapWithConcurrency(needPreview, THUMBNAIL_LOAD_CONCURRENCY, async (entry) => [
+      entry.refKey,
+      await hostFileThumbnail({
+        path: entry.path,
+        mimeType: entry.mimeType,
+        sessionIdentity: context.sessionIdentity,
+        workspaceId: context.workspaceId,
+        sourceId: context.sourceId,
+      }),
+    ] as const)) as Record<string, { preview: string | null; fileSize: number }>;
 
     let changed = normalizedItems !== items;
     const nextItems = normalizedItems.map((item) => {

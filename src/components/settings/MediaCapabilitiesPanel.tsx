@@ -30,7 +30,6 @@ import type { ProviderModel } from '@/lib/provider-model-catalog';
 import { useProviderStore } from '@/stores/providers';
 import { cn } from '@/lib/utils';
 import { useTranslation } from 'react-i18next';
-import type { RuntimeAddress } from '../../../runtime-host/shared/runtime-address';
 
 interface CapabilityRowState {
   primary: string;
@@ -387,7 +386,7 @@ function CapabilityRowEditor(props: CapabilityRowEditorProps): ReactNode {
   );
 }
 
-export function MediaCapabilitiesPanel({ runtimeAddress }: { runtimeAddress: RuntimeAddress | null }) {
+export function MediaCapabilitiesPanel() {
   const { t } = useTranslation('settings');
   const [open, setOpen] = useState(false);
   const routing = useCapabilityRoutingStore((state) => state.routing);
@@ -407,12 +406,9 @@ export function MediaCapabilitiesPanel({ runtimeAddress }: { runtimeAddress: Run
   ), [credentials]);
 
   useEffect(() => {
-    if (!runtimeAddress) {
-      return;
-    }
-    void refresh(runtimeAddress);
-    void refreshModelCatalog(runtimeAddress);
-  }, [refresh, refreshModelCatalog, runtimeAddress]);
+    void refresh();
+    void refreshModelCatalog();
+  }, [refresh, refreshModelCatalog]);
 
   const initialLoading = (loading && !ready) || (modelCatalogLoading && !modelCatalogReady);
 
@@ -433,11 +429,8 @@ export function MediaCapabilitiesPanel({ runtimeAddress }: { runtimeAddress: Run
             variant="outline"
             size="sm"
             onClick={() => {
-              if (!runtimeAddress) {
-                return;
-              }
-              void refresh(runtimeAddress);
-              void refreshModelCatalog(runtimeAddress);
+              void refresh();
+              void refreshModelCatalog();
             }}
             disabled={loading || modelCatalogLoading}
           >
@@ -466,8 +459,8 @@ export function MediaCapabilitiesPanel({ runtimeAddress }: { runtimeAddress: Run
                 initial={routing[capability]}
                 modelOptions={buildModelOptions(models, capability, credentialLabels)}
                 saving={saving}
-                disabled={!runtimeAddress}
-                onSave={(route) => runtimeAddress ? setRoute(capability, route, runtimeAddress) : Promise.resolve()}
+                disabled={false}
+                onSave={(route) => setRoute(capability, route)}
               />
             ))}
             <CapabilityRow
@@ -476,8 +469,8 @@ export function MediaCapabilitiesPanel({ runtimeAddress }: { runtimeAddress: Run
               initial={routing.tts}
               modelOptions={buildModelOptions(models, 'tts', credentialLabels)}
               saving={saving}
-              disabled={!runtimeAddress}
-              onSave={(route) => runtimeAddress ? setRoute('tts', route, runtimeAddress) : Promise.resolve()}
+              disabled={false}
+              onSave={(route) => setRoute('tts', route)}
             />
           </div>
         )}

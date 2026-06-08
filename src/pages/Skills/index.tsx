@@ -38,13 +38,13 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { useSkillsStore } from '@/stores/skills';
 import { useGatewayStore } from '@/stores/gateway';
 import {
-  hostCapabilityExecute,
+  hostApiFetch,
   hostOpenClawGetSkillsDir,
-  resolveSingleCapabilityRuntimeAddress,
+  resolveSingleCapabilityScope,
   waitForRuntimeJobResult,
   type RuntimeJobSubmission,
 } from '@/lib/host-api';
-import type { RuntimeAddress } from '../../../runtime-host/shared/runtime-address';
+import type { CapabilityTarget } from '../../../runtime-host/shared/runtime-address';
 import { LoadingSpinner } from '@/components/common/LoadingSpinner';
 import { cn } from '@/lib/utils';
 import { invokeIpc } from '@/lib/api-client';
@@ -74,17 +74,18 @@ type SkillsGatewayBannerState = 'none' | 'starting' | 'stopped';
 
 async function skillManagementCapabilityExecute<TResult>(
   operationId: string,
-  runtimeAddress: RuntimeAddress,
   input: Record<string, unknown>,
+  target: CapabilityTarget,
 ): Promise<TResult> {
-  return await hostCapabilityExecute<TResult>({
-    id: SKILL_MANAGEMENT_CAPABILITY_ID,
-    operationId,
-    runtimeAddress,
-    input: {
-      ...input,
-      runtimeAddress,
-    },
+  return await hostApiFetch<TResult>('/api/capabilities/execute', {
+    method: 'POST',
+    body: JSON.stringify({
+      id: SKILL_MANAGEMENT_CAPABILITY_ID,
+      operationId,
+      scope: await resolveSingleCapabilityScope(SKILL_MANAGEMENT_CAPABILITY_ID),
+      target,
+      input,
+    }),
   });
 }
 
@@ -181,13 +182,12 @@ function resolveSkillSourceLabel(skill: Skill, t: (key: string, options?: Record
 // Skill detail dialog component
 interface SkillDetailDialogProps {
   skill: Skill;
-  runtimeAddress: RuntimeAddress | null;
   onClose: () => void;
   onToggle: (enabled: boolean) => void;
   onOpenFolder?: (skill: Skill) => Promise<void> | void;
 }
 
-function SkillDetailDialog({ skill, runtimeAddress, onClose, onToggle, onOpenFolder }: SkillDetailDialogProps) {
+function SkillDetailDialog({ skill, onClose, onToggle, onOpenFolder }: SkillDetailDialogProps) {
   const { t } = useTranslation('skills');
   const fetchSkills = useSkillsStore((state) => state.fetchSkills);
   const [activeTab, setActiveTab] = useState('info');
@@ -229,16 +229,16 @@ function SkillDetailDialog({ skill, runtimeAddress, onClose, onToggle, onOpenFol
   };
 
   const handleOpenEditor = async () => {
-    if (!skill?.id || !runtimeAddress) return;
+    if (!skill?.id) return;
     try {
       const result = await skillManagementCapabilityExecute<{ success: boolean; error?: string }>(
         'clawhub.openReadme',
-        runtimeAddress,
         {
           skillKey: skill.id,
           slug: skill.slug,
           baseDir: skill.baseDir,
         },
+        { kind: 'skill', skillId: skill.id, slug: skill.slug },
       );
       if (result.success) {
         toast.success(t('toast.openedEditor'));
@@ -279,7 +279,7 @@ function SkillDetailDialog({ skill, runtimeAddress, onClose, onToggle, onOpenFol
   };
 
   const handleSaveConfig = async () => {
-    if (isSaving || !runtimeAddress) return;
+    if (isSaving) return;
     setIsSaving(true);
     try {
       // Build env object, filtering out empty keys
@@ -294,19 +294,19 @@ function SkillDetailDialog({ skill, runtimeAddress, onClose, onToggle, onOpenFol
 
       const result = await skillManagementCapabilityExecute<{ success: boolean; error?: string }>(
         'skills.updateConfig',
-        runtimeAddress,
         {
           skillKey: skill.id,
           apiKey: apiKey || '',
           env: envObj,
         },
+        { kind: 'skill', skillId: skill.id, slug: skill.slug },
       );
 
       if (!result.success) {
         throw new Error(result.error || 'Unknown error');
       }
 
-      await fetchSkills({ force: true, fresh: true, runtimeAddress });
+      await fetchSkills({ force: true, fresh: true });
 
       toast.success(t('detail.configSaved'));
     } catch (err) {
@@ -334,7 +334,7 @@ function SkillDetailDialog({ skill, runtimeAddress, onClose, onToggle, onOpenFol
                       <Globe className="h-3 w-3" />
                       ClawHub
                     </Button>
-                    <Button variant="outline" size="sm" className="h-7 text-xs gap-1" onClick={handleOpenEditor} disabled={!runtimeAddress}>
+                    <Button variant="outline" size="sm" className="h-7 text-xs gap-1" onClick={handleOpenEditor} disabled={false}>
                       <FileCode className="h-3 w-3" />
                       {t('detail.openManual')}
                     </Button>
@@ -534,7 +534,7 @@ function SkillDetailDialog({ skill, runtimeAddress, onClose, onToggle, onOpenFol
                 </div>
 
                 <div className="pt-4 flex justify-end">
-                  <Button onClick={handleSaveConfig} className="gap-2" disabled={isSaving || !runtimeAddress}>
+                  <Button onClick={handleSaveConfig} className="gap-2" disabled={isSaving}>
                     <Save className="h-4 w-4" />
                     {isSaving ? t('detail.saving') : t('detail.saveConfig')}
                   </Button>
@@ -1073,29 +1073,6 @@ export function Skills() {
   );
   const gatewayBannerState = getSkillsGatewayBannerState(gatewayStatus, skillsFeatureReady);
   const [showGatewayBanner, setShowGatewayBanner] = useState(false);
-  const [skillsRuntimeAddress, setSkillsRuntimeAddress] = useState<RuntimeAddress | null>(null);
-
-  useEffect(() => {
-    if (!gatewayProcessRunning) {
-      setSkillsRuntimeAddress(null);
-      return;
-    }
-    let active = true;
-    void resolveSingleCapabilityRuntimeAddress(SKILL_MANAGEMENT_CAPABILITY_ID)
-      .then((runtimeAddress) => {
-        if (active) {
-          setSkillsRuntimeAddress(runtimeAddress);
-        }
-      })
-      .catch(() => {
-        if (active) {
-          setSkillsRuntimeAddress(null);
-        }
-      });
-    return () => {
-      active = false;
-    };
-  }, [gatewayProcessRunning, gatewayRuntimeKey]);
 
   useEffect(() => {
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -1254,9 +1231,6 @@ export function Skills() {
   }, [isAllTabActive, visibleInstalledSkills]);
 
   const bulkToggleVisible = useCallback(async (enable: boolean) => {
-    if (!skillsRuntimeAddress) {
-      return;
-    }
     const candidates = filteredSkills.filter((skill) => !skill.isCore && skill.enabled !== enable);
     if (candidates.length === 0) {
       toast.info(enable ? t('toast.noBatchEnableTargets') : t('toast.noBatchDisableTargets'));
@@ -1264,32 +1238,29 @@ export function Skills() {
     }
 
     try {
-      await batchSetSkillsEnabled(candidates.map((skill) => skill.id), enable, skillsRuntimeAddress);
+      await batchSetSkillsEnabled(candidates.map((skill) => skill.id), enable);
       trackUiEvent('skills.batch_toggle', { enable, total: candidates.length, succeeded: candidates.length });
       toast.success(enable ? t('toast.batchEnabled', { count: candidates.length }) : t('toast.batchDisabled', { count: candidates.length }));
     } catch {
       trackUiEvent('skills.batch_toggle', { enable, total: candidates.length, succeeded: 0 });
       toast.warning(t('toast.batchPartial', { success: 0, total: candidates.length }));
     }
-  }, [batchSetSkillsEnabled, filteredSkills, skillsRuntimeAddress, t]);
+  }, [batchSetSkillsEnabled, filteredSkills, t]);
 
   // Handle toggle
   const handleToggle = useCallback(async (skillId: string, enable: boolean) => {
-    if (!skillsRuntimeAddress) {
-      return;
-    }
     try {
       if (enable) {
-        await enableSkill(skillId, skillsRuntimeAddress);
+        await enableSkill(skillId);
         toast.success(t('toast.enabled'));
       } else {
-        await disableSkill(skillId, skillsRuntimeAddress);
+        await disableSkill(skillId);
         toast.success(t('toast.disabled'));
       }
     } catch (err) {
       toast.error(String(err));
     }
-  }, [enableSkill, disableSkill, skillsRuntimeAddress, t]);
+  }, [enableSkill, disableSkill, t]);
 
   const handleOpenSkillDetail = useCallback((skillId: string) => {
     const nextSkill = skillById.get(skillId);
@@ -1393,7 +1364,7 @@ export function Skills() {
   }, [t]);
 
   const handleImportLocalSkill = useCallback(async () => {
-    if (localSkillImporting || !localSkillSourcePath.trim() || !skillsRuntimeAddress) {
+    if (localSkillImporting || !localSkillSourcePath.trim()) {
       return;
     }
 
@@ -1401,8 +1372,8 @@ export function Skills() {
     try {
       const submission = await skillManagementCapabilityExecute<RuntimeJobSubmission<LocalSkillImportResult>>(
         'skills.importLocal',
-        skillsRuntimeAddress,
         { sourcePath: localSkillSourcePath },
+        { kind: 'skill' },
       );
       const result = await waitForRuntimeJobResult<LocalSkillImportResult>(submission.job.id);
       const skillKey = result.skillKey.trim();
@@ -1412,13 +1383,13 @@ export function Skills() {
 
       let enableError: unknown = null;
       try {
-        await enableSkill(skillKey, skillsRuntimeAddress);
+        await enableSkill(skillKey);
       } catch (error) {
         enableError = error;
       }
 
       try {
-        await fetchSkills({ force: true, fresh: true, runtimeAddress: skillsRuntimeAddress });
+        await fetchSkills({ force: true, fresh: true });
       } catch (error) {
         console.error('Failed to refresh skills after local import:', error);
       }
@@ -1436,7 +1407,7 @@ export function Skills() {
     } finally {
       setLocalSkillImporting(false);
     }
-  }, [enableSkill, fetchSkills, localSkillImporting, localSkillSourcePath, resetLocalSkillDialog, skillsRuntimeAddress, t]);
+  }, [enableSkill, fetchSkills, localSkillImporting, localSkillSourcePath, resetLocalSkillDialog, t]);
 
   // Handle marketplace search
   const handleMarketplaceSearch = useCallback((e: React.FormEvent) => {
@@ -1471,12 +1442,9 @@ export function Skills() {
 
   // Handle install
   const handleInstall = useCallback(async (slug: string) => {
-    if (!skillsRuntimeAddress) {
-      return;
-    }
     try {
-      await installSkill(slug, skillsRuntimeAddress);
-      await enableSkill(slug, skillsRuntimeAddress);
+      await installSkill(slug);
+      await enableSkill(slug);
       toast.success(t('toast.installed'));
     } catch (err) {
       const errorCode = normalizeSkillErrorCode(err instanceof Error ? err.message : String(err));
@@ -1486,7 +1454,7 @@ export function Skills() {
         toast.error(t('toast.failedInstall') + ': ' + errorCode);
       }
     }
-  }, [installSkill, enableSkill, skillsRuntimeAddress, t, skillsDirPath]);
+  }, [installSkill, enableSkill, t, skillsDirPath]);
 
   // Initial marketplace load (Discovery)
   useEffect(() => {
@@ -1508,16 +1476,13 @@ export function Skills() {
 
   // Handle uninstall
   const handleUninstall = useCallback(async (slug: string) => {
-    if (!skillsRuntimeAddress) {
-      return;
-    }
     try {
-      await uninstallSkill(slug, skillsRuntimeAddress);
+      await uninstallSkill(slug);
       toast.success(t('toast.uninstalled'));
     } catch (err) {
       toast.error(t('toast.failedUninstall') + ': ' + String(err));
     }
-  }, [uninstallSkill, skillsRuntimeAddress, t]);
+  }, [uninstallSkill, t]);
 
   const handleUninstallSkillQuick = useCallback((slug: string) => {
     void handleUninstall(slug);
@@ -1545,7 +1510,7 @@ export function Skills() {
           </p>
         </div>
         <div className="flex items-center gap-2">
-          <Button variant="outline" onClick={() => { if (skillsRuntimeAddress) void fetchSkills({ force: true, fresh: true, runtimeAddress: skillsRuntimeAddress }); }} disabled={!gatewayProcessRunning || !skillsRuntimeAddress || manualRefreshBusy}>
+          <Button variant="outline" onClick={() => { void fetchSkills({ force: true, fresh: true }); }} disabled={!gatewayProcessRunning || manualRefreshBusy}>
             <RefreshCw className={cn('h-4 w-4 mr-2', refreshing && 'animate-spin')} />
             {t('refresh')}
           </Button>
@@ -1649,7 +1614,7 @@ export function Skills() {
                 variant="outline"
                 size="sm"
                 onClick={() => { void bulkToggleVisible(true); }}
-                disabled={!skillsRuntimeAddress}
+                disabled={false}
               >
                 {t('actions.enableVisible')}
               </Button>
@@ -1657,7 +1622,7 @@ export function Skills() {
                 variant="outline"
                 size="sm"
                 onClick={() => { void bulkToggleVisible(false); }}
-                disabled={!skillsRuntimeAddress}
+                disabled={false}
               >
                 {t('actions.disableVisible')}
               </Button>
@@ -1717,7 +1682,7 @@ export function Skills() {
                 <SkillGridCard
                   key={skill.skillId}
                   {...skill}
-                  mutationLocked={!skillsRuntimeAddress}
+                  mutationLocked={false}
                   onOpenDetail={handleOpenSkillDetail}
                   onToggleSkill={handleToggleSkillQuick}
                   onUninstallSkill={handleUninstallSkillQuick}
@@ -1768,7 +1733,7 @@ export function Skills() {
                 type="button"
                 variant="outline"
                 className="gap-2 md:min-w-[124px]"
-                disabled={!skillsRuntimeAddress}
+                disabled={false}
                 onClick={() => setLocalSkillDialogOpen(true)}
               >
                 <Upload className="h-4 w-4" />
@@ -1799,7 +1764,7 @@ export function Skills() {
                       skill={skill}
                       isInstalling={!!installing[skill.slug]}
                       isInstalled={isInstalled}
-                      mutationLocked={!skillsRuntimeAddress}
+                      mutationLocked={false}
                       onOpenDetail={() => setSelectedMarketplaceSkill(skill)}
                       onInstall={() => handleInstall(skill.slug)}
                       onUninstall={() => handleUninstall(skill.slug)}
@@ -1851,7 +1816,6 @@ export function Skills() {
       {selectedSkill && (
         <SkillDetailDialog
           skill={selectedSkill}
-          runtimeAddress={skillsRuntimeAddress}
           onClose={() => setSelectedSkill(null)}
           onToggle={(enabled) => {
             handleToggle(selectedSkill.id, enabled);
@@ -1866,7 +1830,7 @@ export function Skills() {
           skill={selectedMarketplaceSkill}
           isInstalled={selectedMarketplaceInstalled}
           isInstalling={selectedMarketplaceInstalling}
-          mutationLocked={!skillsRuntimeAddress}
+          mutationLocked={false}
           onInstall={() => { void handleInstall(selectedMarketplaceSkill.slug); }}
           onUninstall={() => { void handleUninstall(selectedMarketplaceSkill.slug); }}
           onClose={() => setSelectedMarketplaceSkill(null)}

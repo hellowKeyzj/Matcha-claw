@@ -1,6 +1,43 @@
 import { describe, expect, it, vi } from 'vitest';
 import { waitForGatewayControlReady } from '../../electron/main/gateway-control-ready-probe';
 
+const runtimeHostEndpoint = {
+  kind: 'native-runtime',
+  runtimeAdapterId: 'openclaw',
+  runtimeInstanceId: 'local',
+};
+
+function createRuntimeHostManagerMock(request: ReturnType<typeof vi.fn>) {
+  return {
+    request: vi.fn(async (method: string, route: string, payload?: unknown, options?: unknown) => {
+      if (route === '/api/runtime-endpoints/list') {
+        return {
+          data: {
+            endpoints: [{
+              id: 'openclaw-local',
+              runtimeAdapterId: 'openclaw',
+              runtimeInstanceId: 'local',
+              capabilitySummaries: [{ id: 'runtime.host', availability: 'available' }],
+            }],
+          },
+        };
+      }
+      if (route === '/api/capabilities/list') {
+        return {
+          data: {
+            capabilities: [{
+              id: 'runtime.host',
+              availability: 'available',
+              scope: { kind: 'runtime-instance', endpoint: runtimeHostEndpoint },
+            }],
+          },
+        };
+      }
+      return await request(method, route, payload, options);
+    }),
+  };
+}
+
 describe('gateway control ready probe', () => {
   it('continues polling retryable OpenClaw V4 starting responses until ready', async () => {
     let now = 0;
@@ -29,12 +66,23 @@ describe('gateway control ready probe', () => {
     });
 
     await expect(waitForGatewayControlReady({
-      runtimeHostManager: { request } as never,
+      runtimeHostManager: createRuntimeHostManagerMock(request) as never,
       nowMs: () => now,
       delay,
     }, 30000)).resolves.toBeUndefined();
 
     expect(request).toHaveBeenCalledTimes(2);
+    expect(request).toHaveBeenCalledWith(
+      'POST',
+      '/api/capabilities/execute',
+      expect.objectContaining({
+        id: 'runtime.host',
+        operationId: 'runtimeHost.gatewayReady',
+        scope: { kind: 'runtime-instance', endpoint: runtimeHostEndpoint },
+        target: { kind: 'gateway-control' },
+      }),
+      expect.anything(),
+    );
     expect(delay).toHaveBeenCalledWith(1000);
   });
 
@@ -51,7 +99,7 @@ describe('gateway control ready probe', () => {
     });
 
     await expect(waitForGatewayControlReady({
-      runtimeHostManager: { request } as never,
+      runtimeHostManager: createRuntimeHostManagerMock(request) as never,
       nowMs: () => now,
       delay,
     }, 30000)).resolves.toBeUndefined();
@@ -74,7 +122,7 @@ describe('gateway control ready probe', () => {
     }));
 
     await expect(waitForGatewayControlReady({
-      runtimeHostManager: { request } as never,
+      runtimeHostManager: createRuntimeHostManagerMock(request) as never,
       nowMs: () => 0,
       delay: vi.fn(),
     }, 30000)).rejects.toThrow('GATEWAY_METHODS_UNAVAILABLE');

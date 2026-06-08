@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo } from 'react';
 import { toast } from 'sonner';
 import { Loader2 } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
@@ -7,12 +7,8 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { Switch } from '@/components/ui/switch';
 import { useGatewayStore } from '@/stores/gateway';
 import { usePluginsStore } from '@/stores/plugins-store';
-import { resolveSingleCapabilityRuntimeAddress } from '@/lib/host-api';
 import { useDelayedFlag } from '@/lib/use-delayed-flag';
 import { useTranslation } from 'react-i18next';
-import type { RuntimeAddress } from '../../../runtime-host/shared/runtime-address';
-
-const PLUGIN_RUNTIME_CAPABILITY_ID = 'plugin.runtime';
 
 function formatIsoTime(timestamp: number): string {
   const date = new Date(timestamp);
@@ -45,25 +41,6 @@ export function PluginsPage() {
   const togglePluginEnabledAction = usePluginsStore((state) => state.togglePluginEnabled);
   const manualRefreshing = refreshing && refreshReason === 'manual';
   const showRefreshingHint = useDelayedFlag(refreshing && !manualRefreshing, 180);
-  const [pluginRuntimeAddress, setPluginRuntimeAddress] = useState<RuntimeAddress | null>(null);
-
-  useEffect(() => {
-    let active = true;
-    void resolveSingleCapabilityRuntimeAddress(PLUGIN_RUNTIME_CAPABILITY_ID)
-      .then((runtimeAddress) => {
-        if (active) {
-          setPluginRuntimeAddress(runtimeAddress);
-        }
-      })
-      .catch(() => {
-        if (active) {
-          setPluginRuntimeAddress(null);
-        }
-      });
-    return () => {
-      active = false;
-    };
-  }, []);
 
   useEffect(() => {
     void initGatewayEvents();
@@ -129,15 +106,12 @@ export function PluginsPage() {
   }, [restartHostAction, t]);
 
   const togglePluginEnabled = useCallback(async (pluginId: string, nextEnabled: boolean) => {
-    if (!pluginRuntimeAddress) {
-      return;
-    }
     try {
-      await togglePluginEnabledAction(pluginId, nextEnabled, pluginRuntimeAddress);
+      await togglePluginEnabledAction(pluginId, nextEnabled);
     } catch {
       toast.error(t('plugins:errors.togglePluginFailed'));
     }
-  }, [pluginRuntimeAddress, togglePluginEnabledAction, t]);
+  }, [togglePluginEnabledAction, t]);
   const showRuntimeLoading = !runtimeReady && runtimePending;
   const showCatalogLoading = !catalogReady && catalogPending;
 
@@ -300,7 +274,6 @@ export function PluginsPage() {
                             || manualRefreshing
                             || mutatingAction !== null
                             || mutatingPluginId !== null
-                            || !pluginRuntimeAddress
                           }
                           onCheckedChange={(checked) => {
                             void togglePluginEnabled(plugin.id, checked);

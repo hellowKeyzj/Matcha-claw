@@ -1,6 +1,10 @@
 import type { ResourceStatusState } from '@/lib/resource-state';
-import type { RuntimeAddress } from '../../../runtime-host/shared/runtime-address';
-import type { SessionUpdateEvent } from '../../../runtime-host/shared/session-adapter-types';
+import type {
+  AgentScope,
+  RuntimeEndpointRef,
+  SessionIdentity,
+} from '../../../runtime-host/shared/runtime-address';
+import type { SessionContextTokenSnapshot, SessionUpdateEvent } from '../../../runtime-host/shared/session-adapter-types';
 import type { SessionRenderAttachedFile, SessionRenderItem } from '../../../runtime-host/shared/session-adapter-types';
 import type { SessionCatalogKind, SessionCatalogTitleSource } from '../../../runtime-host/shared/session-adapter-types';
 import type { GatewayTransportIssue } from '../../../runtime-host/shared/gateway-error';
@@ -44,7 +48,7 @@ export interface ChatSession {
   agentId: string;
   protocolId?: string;
   runtimeEndpointId?: string;
-  runtimeAddress: RuntimeAddress;
+  sessionIdentity: SessionIdentity;
   kind?: SessionCatalogKind;
   preferred?: boolean;
   label?: string;
@@ -52,6 +56,7 @@ export interface ChatSession {
   displayName?: string;
   thinkingLevel?: string;
   model?: string;
+  contextTokens?: SessionContextTokenSnapshot;
   updatedAt?: number;
 }
 
@@ -73,6 +78,7 @@ export type ChatRunPhase =
   | 'streaming'
   | 'waiting_tool'
   | 'finalizing'
+  | 'stopping'
   | 'done'
   | 'error'
   | 'aborted';
@@ -82,6 +88,7 @@ const ACTIVE_RUN_PHASES = new Set<ChatRunPhase>([
   'streaming',
   'waiting_tool',
   'finalizing',
+  'stopping',
 ]);
 
 /** 单一事实源派生：当前回合是否处于运行状态。 */
@@ -101,7 +108,7 @@ export interface ApprovalItem {
   id: string;
   sessionKey: string;
   backendSessionKey: string;
-  runtimeAddress: RuntimeAddress;
+  sessionIdentity: SessionIdentity;
   runId?: string;
   title: string;
   command?: string;
@@ -142,7 +149,7 @@ export interface ChatSessionMetaState {
   agentId: string | null;
   protocolId: string | null;
   runtimeEndpointId: string | null;
-  runtimeAddress: RuntimeAddress | null;
+  sessionIdentity: SessionIdentity | null;
   kind: SessionCatalogKind | null;
   preferred: boolean;
   label: string | null;
@@ -158,21 +165,22 @@ export interface ChatSessionMetaState {
 export interface ChatSessionRuntimeEndpointTarget {
   endpointId: string;
   protocolId: string;
+  endpoint: RuntimeEndpointRef;
   runtimeAdapterId?: string;
   runtimeInstanceId?: string;
   connectorId?: string;
   displayName: string;
   agentIds: string[];
   acceptsDynamicAgents: boolean;
-  sessionPromptAddresses: RuntimeAddress[];
-  defaultSessionPromptAddress: RuntimeAddress;
+  sessionPromptScopes: AgentScope[];
+  defaultSessionPromptScope: AgentScope;
 }
 
 export interface ChatSessionRuntimeCatalogState {
   status: 'idle' | 'loading' | 'ready' | 'error';
   error: string | null;
   endpoints: ChatSessionRuntimeEndpointTarget[];
-  defaultRuntimeAddress: RuntimeAddress | null;
+  defaultSessionPromptScope: AgentScope | null;
 }
 
 export interface ChatSessionRecord {
@@ -180,6 +188,7 @@ export interface ChatSessionRecord {
   runtime: ChatSessionRuntimeState;
   items: SessionRenderItem[];
   window: ChatSessionViewportState;
+  contextTokens?: SessionContextTokenSnapshot;
 }
 
 export interface ChatSessionViewportState {
@@ -206,6 +215,7 @@ export interface ChatStoreBaseState extends ChatViewState {
   currentSessionKey: string;
   sessionRuntimeCatalog: ChatSessionRuntimeCatalogState;
   loadedSessions: Record<string, ChatSessionRecord>;
+  sessionRecordKeyByIdentityKey: Record<string, string>;
   pendingApprovalsBySession: Record<string, ApprovalItem[]>;
   dismissedRuntimeErrorBySession: Record<string, ChatRuntimeErrorDismissMarker | undefined>;
 }
@@ -217,6 +227,12 @@ export interface ChatSendAttachment {
   stagedPath: string;
   preview: string | null;
 }
+
+export type ChatSendRejectReason = 'empty' | 'mutating' | 'active' | 'stopping' | 'missing-session' | 'error';
+
+export type ChatSendResult =
+  | { accepted: true }
+  | { accepted: false; reason: ChatSendRejectReason; error?: string };
 
 export type ChatHistoryLoadMode = 'active' | 'quiet';
 export type ChatHistoryLoadScope = 'foreground' | 'background';
@@ -249,11 +265,11 @@ export interface ChatStoreActions {
   loadOlderViewportItems: (sessionKey?: string) => Promise<void>;
   jumpViewportToLatest: (sessionKey?: string) => Promise<void>;
   setViewportAnchorItemKey: (itemKey: string | null, sessionKey?: string) => void;
-  sendMessage: (text: string, attachments?: ChatSendAttachment[]) => Promise<void>;
+  sendMessage: (text: string, attachments?: ChatSendAttachment[]) => Promise<ChatSendResult>;
   abortRun: () => Promise<void>;
-  resolveApproval: (id: string, decision: ApprovalDecision) => Promise<void>;
+  resolveApproval: (approval: ApprovalItem, decision: ApprovalDecision) => Promise<void>;
   syncPendingApprovals: (sessionKeyHint?: string) => Promise<void>;
-  setSessionRuntimeAddress: (sessionKey: string, runtimeAddress: RuntimeAddress) => void;
+  setSessionIdentity: (sessionKey: string, identity: SessionIdentity) => void;
   getTaskBridgeState: () => TaskChatBridgeState;
   openTaskSession: (sessionKey: string) => string;
   sendTaskRecoveryPrompt: (sessionKey: string, prompt: string) => Promise<boolean>;

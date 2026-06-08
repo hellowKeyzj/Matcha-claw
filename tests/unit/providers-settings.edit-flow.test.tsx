@@ -4,14 +4,6 @@ import i18n from '@/i18n';
 import { ProvidersSettings } from '@/components/settings/ProvidersSettings';
 import type { ProviderModel } from '@/lib/provider-model-catalog';
 
-const testRuntimeAddress = {
-  kind: 'native-runtime',
-  capabilityId: 'chat',
-  runtimeAdapterId: 'openclaw',
-  runtimeInstanceId: 'local',
-  agentId: 'main',
-} as const;
-
 const hoisted = vi.hoisted(() => {
   const defaultProviderSnapshot = {
     statuses: [
@@ -87,6 +79,15 @@ const settingsState = vi.hoisted(() => ({
   devModeUnlocked: false,
 }));
 
+const gatewayState = vi.hoisted(() => ({
+  status: {
+    processState: 'running',
+    gatewayReady: true,
+    healthSummary: 'healthy',
+    transportState: 'connected',
+  },
+}));
+
 vi.mock('@/stores/providers', () => ({
   useProviderStore: () => providerStoreState,
 }));
@@ -99,6 +100,10 @@ vi.mock('@/stores/settings', () => ({
   useSettingsStore: (selector: ((state: typeof settingsState) => unknown) | undefined) => (
     selector ? selector(settingsState) : settingsState
   ),
+}));
+
+vi.mock('@/stores/gateway', () => ({
+  useGatewayStore: (selector: (state: typeof gatewayState) => unknown) => selector(gatewayState),
 }));
 
 describe('providers settings edit flow', () => {
@@ -122,7 +127,7 @@ describe('providers settings edit flow', () => {
   }
 
   it('编辑态应提供清晰的取消入口', () => {
-    render(<ProvidersSettings runtimeAddress={testRuntimeAddress} />);
+    render(<ProvidersSettings />);
 
     expandProviderCard('Custom');
     fireEvent.click(screen.getByTitle('Edit API key'));
@@ -131,14 +136,14 @@ describe('providers settings edit flow', () => {
   });
 
   it('provider 卡片默认收起', () => {
-    render(<ProvidersSettings runtimeAddress={testRuntimeAddress} />);
+    render(<ProvidersSettings />);
 
     expect(screen.queryByTitle('Edit API key')).toBeNull();
     expect(screen.queryByText('Model catalog')).toBeNull();
   });
 
   it('按 Escape 键应退出编辑态', () => {
-    render(<ProvidersSettings runtimeAddress={testRuntimeAddress} />);
+    render(<ProvidersSettings />);
 
     expandProviderCard('Custom');
     fireEvent.click(screen.getByTitle('Edit API key'));
@@ -149,7 +154,7 @@ describe('providers settings edit flow', () => {
   });
 
   it('编辑态只显示凭证配置，不再显示模型和回退配置', () => {
-    render(<ProvidersSettings runtimeAddress={testRuntimeAddress} />);
+    render(<ProvidersSettings />);
 
     expandProviderCard('Custom');
     fireEvent.click(screen.getByTitle('Edit API key'));
@@ -171,7 +176,7 @@ describe('providers settings edit flow', () => {
       contextWindow: 200000,
     }];
 
-    render(<ProvidersSettings runtimeAddress={testRuntimeAddress} />);
+    render(<ProvidersSettings />);
 
     expandProviderCard('Custom');
     expect(screen.getByText('Model catalog')).toBeInTheDocument();
@@ -193,12 +198,12 @@ describe('providers settings edit flow', () => {
       expect(catalogState.replaceCredentialModels).toHaveBeenCalledWith('custom-1', [
         { modelId: 'gpt-5.4', capabilities: ['chat'], contextWindow: 200000 },
         { modelId: 'gpt-5.5', capabilities: ['chat'] },
-      ], testRuntimeAddress);
+      ], 'custom');
     });
   });
 
   it('模型限制输入框使用 OpenClaw 内部默认值作为 placeholder', () => {
-    render(<ProvidersSettings runtimeAddress={testRuntimeAddress} />);
+    render(<ProvidersSettings />);
 
     expandProviderCard('Custom');
     fireEvent.click(screen.getByRole('button', { name: 'Add model' }));
@@ -234,7 +239,7 @@ describe('providers settings edit flow', () => {
       modelCapabilities: ['chat', 'imageUnderstand'],
     }];
 
-    render(<ProvidersSettings runtimeAddress={testRuntimeAddress} />);
+    render(<ProvidersSettings />);
 
     expandProviderCard('Ark');
     fireEvent.click(screen.getByRole('button', { name: 'Add ark-code-latest' }));
@@ -242,12 +247,12 @@ describe('providers settings edit flow', () => {
     await waitFor(() => {
       expect(catalogState.replaceCredentialModels).toHaveBeenCalledWith('ark-main', [
         { modelId: 'ark-code-latest', capabilities: ['chat'] },
-      ], testRuntimeAddress);
+      ], 'ark');
     });
   });
 
   it('自定义 provider 可登记聊天和图像理解，但不显示生成类媒体能力', () => {
-    render(<ProvidersSettings runtimeAddress={testRuntimeAddress} />);
+    render(<ProvidersSettings />);
 
     expandProviderCard('Custom');
     fireEvent.click(screen.getByRole('button', { name: 'Add model' }));
@@ -262,7 +267,7 @@ describe('providers settings edit flow', () => {
   });
 
   it('新增自定义 provider 时只提交凭证配置', async () => {
-    render(<ProvidersSettings runtimeAddress={testRuntimeAddress} />);
+    render(<ProvidersSettings />);
 
     fireEvent.click(screen.getByRole('button', { name: 'Add Provider' }));
     const dialog = screen.getByRole('dialog', { name: 'Add AI Provider' });
@@ -286,7 +291,6 @@ describe('providers settings edit flow', () => {
           baseUrl: 'https://custom.example/v1',
           apiProtocol: 'openai-completions',
         }),
-        testRuntimeAddress,
         'sk-custom',
       );
     });
@@ -309,7 +313,7 @@ describe('providers settings edit flow', () => {
       supportsMultipleAccounts: true,
     }];
 
-    render(<ProvidersSettings runtimeAddress={testRuntimeAddress} />);
+    render(<ProvidersSettings />);
 
     fireEvent.click(screen.getByRole('button', { name: 'Add Provider' }));
     const dialog = screen.getByRole('dialog', { name: 'Add AI Provider' });
@@ -329,14 +333,13 @@ describe('providers settings edit flow', () => {
           vendorId: 'openai',
           authMode: 'api_key',
         }),
-        testRuntimeAddress,
         'sk-openai',
       );
     });
   });
 
   it('新增自定义媒体 provider 时只提交接口契约，不登记模型', async () => {
-    render(<ProvidersSettings runtimeAddress={testRuntimeAddress} />);
+    render(<ProvidersSettings />);
 
     fireEvent.click(screen.getByRole('button', { name: 'Add Provider' }));
     const dialog = screen.getByRole('dialog', { name: 'Add AI Provider' });
@@ -356,7 +359,6 @@ describe('providers settings edit flow', () => {
           mediaApiProtocol: 'openai',
           apiProtocol: undefined,
         }),
-        testRuntimeAddress,
         'sk-media',
       );
     });
@@ -390,7 +392,7 @@ describe('providers settings edit flow', () => {
       resolution: '2K',
     }];
 
-    render(<ProvidersSettings runtimeAddress={testRuntimeAddress} />);
+    render(<ProvidersSettings />);
 
     expandProviderCard('Images');
 
@@ -408,7 +410,7 @@ describe('providers settings edit flow', () => {
       error: 'Invalid API key',
     });
 
-    render(<ProvidersSettings runtimeAddress={testRuntimeAddress} />);
+    render(<ProvidersSettings />);
 
     expandProviderCard('Custom');
     fireEvent.click(screen.getByTitle('Edit API key'));

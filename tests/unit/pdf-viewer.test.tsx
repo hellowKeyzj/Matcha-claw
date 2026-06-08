@@ -4,6 +4,16 @@ import { PdfViewer } from '@/components/file-preview/PdfViewer';
 
 const hostFileReadBinaryMock = vi.fn();
 
+const sessionIdentity = {
+  endpoint: {
+    kind: 'native-runtime' as const,
+    runtimeAdapterId: 'openclaw',
+    runtimeInstanceId: 'openclaw:default',
+  },
+  agentId: 'files',
+  sessionKey: 'files:test',
+};
+
 vi.mock('react-i18next', () => ({
   useTranslation: () => ({
     t: (key: string, options?: Record<string, unknown>) => {
@@ -34,12 +44,13 @@ describe('pdf viewer', () => {
       mimeType: 'application/pdf',
     });
 
-    render(<PdfViewer filePath="/workspace/demo.pdf" fileName="demo.pdf" />);
+    render(<PdfViewer filePath="/workspace/demo.pdf" fileName="demo.pdf" sessionIdentity={sessionIdentity} />);
 
     await waitFor(() => {
       expect(hostFileReadBinaryMock).toHaveBeenCalledWith({
         path: '/workspace/demo.pdf',
         maxBytes: 50 * 1024 * 1024,
+        sessionIdentity,
       });
     });
 
@@ -55,7 +66,7 @@ describe('pdf viewer', () => {
       error: 'tooLarge',
     });
 
-    render(<PdfViewer filePath="/workspace/demo.pdf" />);
+    render(<PdfViewer filePath="/workspace/demo.pdf" sessionIdentity={sessionIdentity} />);
 
     expect(await screen.findByText('artifacts.previewTooLarge')).toBeInTheDocument();
   });

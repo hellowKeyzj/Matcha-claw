@@ -24,6 +24,8 @@ export type {
   ChatViewState,
   ChatStoreBaseState,
   ChatSendAttachment,
+  ChatSendRejectReason,
+  ChatSendResult,
   ChatStoreActions,
   ChatStoreState,
 } from './chat/types';

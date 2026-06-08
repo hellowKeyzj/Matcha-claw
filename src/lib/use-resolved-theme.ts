@@ -3,6 +3,14 @@ import { useEffect, useState } from 'react';
 type ThemePreference = 'light' | 'dark' | 'system';
 type ResolvedTheme = 'light' | 'dark';
 
+export function applyResolvedTheme(resolvedTheme: ResolvedTheme) {
+  const root = window.document.documentElement;
+  const body = window.document.body;
+  root.classList.remove('light', 'dark');
+  body.classList.remove('light', 'dark');
+  root.classList.add(resolvedTheme);
+}
+
 function resolveTheme(theme: ThemePreference): ResolvedTheme {
   if (theme !== 'system') {
     return theme;

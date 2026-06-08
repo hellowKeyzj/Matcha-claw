@@ -1,4 +1,4 @@
-import { buildRuntimeAddressKey, type RuntimeAddress } from './runtime-address';
+import { buildRuntimeEndpointKey, type RuntimeEndpointRef, type SessionIdentity } from './runtime-address';
 import {
   type RuntimeEndpointIdentity,
   type RuntimeEndpointId,
@@ -6,46 +6,36 @@ import {
   type RuntimeSessionContext,
 } from './runtime-endpoint-types';
 
-function buildRuntimeEndpointIdentity(address: RuntimeAddress): RuntimeEndpointIdentity {
-  if (address.kind === 'protocol-connector') {
+function buildRuntimeEndpointIdentity(endpoint: RuntimeEndpointRef): RuntimeEndpointIdentity {
+  if (endpoint.kind === 'protocol-connector') {
     return {
-      scopeKey: buildRuntimeAddressKey(address),
-      capabilityId: address.capabilityId,
-      protocolId: address.protocolId,
-      connectorId: address.connectorId,
-      endpointId: address.endpointId,
-      agentId: address.agentId,
+      scopeKey: buildRuntimeEndpointKey(endpoint),
+      protocolId: endpoint.protocolId,
+      connectorId: endpoint.connectorId,
+      endpointId: endpoint.endpointId,
     };
   }
   return {
-    scopeKey: buildRuntimeAddressKey(address),
-    capabilityId: address.capabilityId,
-    runtimeAdapterId: address.runtimeAdapterId,
-    runtimeInstanceId: address.runtimeInstanceId,
-    agentId: address.agentId,
+    scopeKey: buildRuntimeEndpointKey(endpoint),
+    runtimeAdapterId: endpoint.runtimeAdapterId,
+    runtimeInstanceId: endpoint.runtimeInstanceId,
   };
 }
 
 export function createRuntimeSessionContext(input: {
-  sessionKey: string;
+  identity: SessionIdentity;
   protocolId: RuntimeProtocolId;
   runtimeEndpointId: RuntimeEndpointId;
   endpointSessionId?: string;
-  agentId?: string;
-  address: RuntimeAddress;
 }): RuntimeSessionContext {
-  const agentId = input.agentId || input.address.agentId;
-  const address = {
-    ...input.address,
-    sessionKey: input.sessionKey,
-  };
   return {
-    sessionKey: input.sessionKey,
+    identity: input.identity,
+    sessionKey: input.identity.sessionKey,
     protocolId: input.protocolId,
     runtimeEndpointId: input.runtimeEndpointId,
-    endpoint: buildRuntimeEndpointIdentity(address),
+    endpoint: buildRuntimeEndpointIdentity(input.identity.endpoint),
+    endpointRef: input.identity.endpoint,
     ...(input.endpointSessionId ? { endpointSessionId: input.endpointSessionId } : {}),
-    agentId,
-    address,
+    agentId: input.identity.agentId,
   };
 }

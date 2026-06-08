@@ -1,4 +1,4 @@
-import { hostCapabilityExecute } from '@/lib/host-api';
+import { hostApiFetch, resolveSingleCapabilityScope } from '@/lib/host-api';
 import type {
   ModelCapability,
   ProviderCredential,
@@ -6,23 +6,24 @@ import type {
   ProviderVendorInfo,
   ProviderWithKeyInfo,
 } from '@/lib/providers';
-import type { RuntimeAddress } from '../../runtime-host/shared/runtime-address';
+import type { CapabilityTarget } from '../../runtime-host/shared/runtime-address';
 
 const MODEL_PROVIDER_CAPABILITY_ID = 'model.provider';
 
 async function modelProviderCapabilityExecute<TResult>(
   operationId: string,
-  runtimeAddress: RuntimeAddress,
   input: Record<string, unknown> = {},
+  target: CapabilityTarget | null = null,
 ): Promise<TResult> {
-  return await hostCapabilityExecute<TResult>({
-    id: MODEL_PROVIDER_CAPABILITY_ID,
-    operationId,
-    runtimeAddress,
-    input: {
-      ...input,
-      runtimeAddress,
-    },
+  return await hostApiFetch<TResult>('/api/capabilities/execute', {
+    method: 'POST',
+    body: JSON.stringify({
+      id: MODEL_PROVIDER_CAPABILITY_ID,
+      operationId,
+      scope: await resolveSingleCapabilityScope(MODEL_PROVIDER_CAPABILITY_ID),
+      target,
+      input,
+    }),
   });
 }
 
@@ -83,10 +84,9 @@ export function normalizeProviderSnapshot(value: unknown): ProviderSnapshot {
   };
 }
 
-export async function fetchProviderSnapshot(runtimeAddress: RuntimeAddress): Promise<ProviderSnapshot> {
+export async function fetchProviderSnapshot(): Promise<ProviderSnapshot> {
   const snapshot = await modelProviderCapabilityExecute<ProviderSnapshot | undefined>(
     'providers.listAccounts',
-    runtimeAddress,
   );
   return normalizeProviderSnapshot(snapshot);
 }

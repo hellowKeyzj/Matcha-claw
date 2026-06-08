@@ -1,0 +1,57 @@
+{
+  "id": "team-runtime",
+  "name": "Team Runtime",
+  "version": "0.1.0",
+  "category": "automation",
+  "description": "Production TeamSkill runtime for MatchaClaw multi-agent workflows.",
+  "activation": {
+    "onStartup": true
+  },
+  "contracts": {
+    "gatewayMethods": [
+      "matchaclaw.team.package.validate",
+      "matchaclaw.team.run.create",
+      "matchaclaw.team.run.start",
+      "matchaclaw.team.run.snapshot",
+      "matchaclaw.team.run.diagnostics",
+      "matchaclaw.team.run.decision.submit",
+      "matchaclaw.team.stage.complete",
+      "matchaclaw.team.dispatch.prepare",
+      "matchaclaw.team.dispatch.execute",
+      "matchaclaw.team.approval.resolve",
+      "matchaclaw.team.run.cancel",
+      "matchaclaw.team.run.tick",
+      "matchaclaw.team.gate.evaluate"
+    ],
+    "tools": [
+      "team_submit_artifact",
+      "team_update_task",
+      "team_request_approval",
+      "team_send_message"
+    ]
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["availableSkills", "availableTools"],
+    "properties": {
+      "storageRoot": {
+        "type": "string"
+      },
+      "availableSkills": {
+        "type": "array",
+        "items": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "availableTools": {
+        "type": "array",
+        "items": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    }
+  }
+}

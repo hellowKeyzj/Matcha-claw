@@ -21,18 +21,18 @@ function expectCanonicalBase(event: CanonicalSessionEvent, protocolId: string, r
 
 function openClawContext(sessionKey = 'agent:main:main', agentId = 'main-agent') {
   return createRuntimeSessionContext({
-    sessionKey,
-    protocolId: OPENCLAW_RUNTIME_PROTOCOL_ID,
-    runtimeEndpointId: OPENCLAW_RUNTIME_ENDPOINT_ID,
-    endpointSessionId: sessionKey,
-    address: {
-      kind: 'native-runtime',
-      capabilityId: 'session.prompt',
-      runtimeAdapterId: OPENCLAW_RUNTIME_ADAPTER_ID,
-      runtimeInstanceId: OPENCLAW_RUNTIME_INSTANCE_ID,
+    identity: {
+      endpoint: {
+        kind: 'native-runtime',
+        runtimeAdapterId: OPENCLAW_RUNTIME_ADAPTER_ID,
+        runtimeInstanceId: OPENCLAW_RUNTIME_INSTANCE_ID,
+      },
       agentId,
       sessionKey,
     },
+    protocolId: OPENCLAW_RUNTIME_PROTOCOL_ID,
+    runtimeEndpointId: OPENCLAW_RUNTIME_ENDPOINT_ID,
+    endpointSessionId: sessionKey,
   });
 }
 
@@ -245,19 +245,19 @@ describe('canonical runtime contracts', () => {
 
   it('represents Claude Code session/project/toolUse identity without runtime raw leaking into projection', () => {
     const state = createEmptyCanonicalSessionState('claude-code:project:e-code-matcha-claw', createRuntimeSessionContext({
-      sessionKey: 'claude-code:project:e-code-matcha-claw',
-      protocolId: 'acp',
-      runtimeEndpointId: 'claude-code',
-      endpointSessionId: 'session-1',
-      address: {
-        kind: 'protocol-connector',
-        capabilityId: 'session.prompt',
-        protocolId: 'acp',
-        connectorId: 'acp',
-        endpointId: 'claude-code',
+      identity: {
+        endpoint: {
+          kind: 'protocol-connector',
+          protocolId: 'acp',
+          connectorId: 'acp',
+          endpointId: 'claude-code',
+        },
         agentId: 'default',
         sessionKey: 'claude-code:project:e-code-matcha-claw',
       },
+      protocolId: 'acp',
+      runtimeEndpointId: 'claude-code',
+      endpointSessionId: 'session-1',
     }));
     const events: CanonicalSessionEvent[] = [{
       eventId: 'claude-code:message:session-1:turn-1',
@@ -332,19 +332,19 @@ describe('canonical runtime contracts', () => {
 
   it('represents Codex session/turn identity through the same canonical reducer and projection', () => {
     const state = createEmptyCanonicalSessionState('codex:session:codex-session-1', createRuntimeSessionContext({
-      sessionKey: 'codex:session:codex-session-1',
-      protocolId: 'acp',
-      runtimeEndpointId: 'codex',
-      endpointSessionId: 'codex-session-1',
-      address: {
-        kind: 'protocol-connector',
-        capabilityId: 'session.prompt',
-        protocolId: 'acp',
-        connectorId: 'acp',
-        endpointId: 'codex',
+      identity: {
+        endpoint: {
+          kind: 'protocol-connector',
+          protocolId: 'acp',
+          connectorId: 'acp',
+          endpointId: 'codex',
+        },
         agentId: 'default',
         sessionKey: 'codex:session:codex-session-1',
       },
+      protocolId: 'acp',
+      runtimeEndpointId: 'codex',
+      endpointSessionId: 'codex-session-1',
     }));
     const events: CanonicalSessionEvent[] = [{
       eventId: 'codex:message:codex-session-1:turn-7',

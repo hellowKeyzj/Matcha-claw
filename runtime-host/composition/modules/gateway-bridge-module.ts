@@ -29,7 +29,7 @@ import type { ParentTransportClient } from '../parent-transport-client';
 import type { RuntimeHostContainer } from '../container';
 import type { RuntimeRouteResponse } from '../../api/dispatch/runtime-route-dispatcher';
 import type { RuntimeHostLogger } from '../../shared/logger';
-import type { RuntimeAddress } from '../../application/agent-runtime/contracts/runtime-address';
+import type { RuntimeEndpointRef } from '../../application/agent-runtime/contracts/runtime-address';
 
 export interface GatewayBridgeModule {
   readonly close: () => void;
@@ -50,12 +50,16 @@ interface RuntimeHostGatewayClient extends OpenClawGatewayClient {
   close: () => void;
 }
 
-function resolveRuntimeHostCapabilityAddress(registry: AgentRuntimeRegistry): RuntimeAddress {
+function resolveRuntimeHostEndpoint(registry: AgentRuntimeRegistry): RuntimeEndpointRef {
   const descriptors = registry.listCapabilities().filter((capability) => capability.id === RUNTIME_HOST_CAPABILITY_ID);
   if (descriptors.length !== 1) {
     throw new Error(`Expected exactly one runtime.host capability: ${String(descriptors.length)}`);
   }
-  return descriptors[0].address;
+  const scope = descriptors[0].scope;
+  if (scope.kind !== 'runtime-instance') {
+    throw new Error(`runtime.host capability must use runtime-instance scope: ${scope.kind}`);
+  }
+  return scope.endpoint;
 }
 
 export interface GatewayBridgeRuntimeDataPort {
@@ -134,7 +138,7 @@ function createGatewayClientForEnvironment(deps: {
   readonly dispatchRoute: (method: string, route: string, payload: unknown) => Promise<RuntimeRouteResponse | null>;
   readonly getSessionRuntime: () => SessionRuntimeService | null;
   readonly endpointControlState: RuntimeEndpointControlStatePort;
-  readonly runtimeHostCapabilityAddress: RuntimeAddress;
+  readonly runtimeHostEndpoint: RuntimeEndpointRef;
   readonly runtimeHostDataDir: string;
   readonly rawGatewayPort: string;
   readonly readGatewayToken: () => Promise<string>;
@@ -154,7 +158,7 @@ function createGatewayClientForEnvironment(deps: {
       dispatchRoute: deps.dispatchRoute,
       getSessionRuntime: deps.getSessionRuntime,
       endpointControlState: deps.endpointControlState,
-      runtimeHostCapabilityAddress: deps.runtimeHostCapabilityAddress,
+      runtimeHostEndpoint: deps.runtimeHostEndpoint,
       runtimeHostDataDir: deps.runtimeHostDataDir,
       gatewayPort,
       readGatewayToken: deps.readGatewayToken,
@@ -179,9 +183,9 @@ export function registerGatewayBridgeModule(
 ): void {
   let sessionRuntimeService: SessionRuntimeService | null = null;
   container.register('gateway.endpointControlState', (scope): RuntimeEndpointControlStatePort => ({
-    updateRuntimeEndpointControlState: ({ address, ...input }) => scope
+    updateRuntimeEndpointControlState: ({ endpoint, ...input }) => scope
       .resolve<AgentRuntimeRegistry>('agentRuntime.registry')
-      .updateRuntimeEndpointControlState({ address, ...input }),
+      .updateRuntimeEndpointControlState({ endpoint, ...input }),
   }));
   container.register('gateway.bridgeClient', (scope) => {
     const runtimeData = scope.resolve<GatewayBridgeRuntimeDataPort>('gateway.runtimeData');
@@ -191,7 +195,7 @@ export function registerGatewayBridgeModule(
       dispatchRoute: deps.dispatchRoute,
       getSessionRuntime: () => sessionRuntimeService,
       endpointControlState: scope.resolve('gateway.endpointControlState'),
-      runtimeHostCapabilityAddress: resolveRuntimeHostCapabilityAddress(scope.resolve<AgentRuntimeRegistry>('agentRuntime.registry')),
+      runtimeHostEndpoint: resolveRuntimeHostEndpoint(scope.resolve<AgentRuntimeRegistry>('agentRuntime.registry')),
       runtimeHostDataDir: runtimeData.getRuntimeHostDataDir(),
       rawGatewayPort: deps.systemEnvironment.getEnv('MATCHACLAW_RUNTIME_HOST_GATEWAY_PORT'),
       readGatewayToken: () => settings.readGatewayToken(),

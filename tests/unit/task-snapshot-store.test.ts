@@ -1,4 +1,15 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import type { SessionIdentity } from '../../runtime-host/shared/runtime-address';
+
+const sessionIdentity: SessionIdentity = {
+  endpoint: {
+    kind: 'native-runtime',
+    runtimeAdapterId: 'openclaw',
+    runtimeInstanceId: 'local',
+  },
+  agentId: 'main',
+  sessionKey: 'agent:main:main',
+};
 
 describe('task snapshot store', () => {
   beforeEach(() => {
@@ -137,7 +148,15 @@ describe('task snapshot store', () => {
 
     useTaskSnapshotStore.getState().reportSessionSnapshot({
       sessionKey: 'agent:main:main',
-      catalog: { key: 'agent:main:main', agentId: 'main', kind: 'main', preferred: true },
+      catalog: {
+        key: 'agent:main:main',
+        agentId: 'main',
+        protocolId: 'openclaw',
+        runtimeEndpointId: 'openclaw',
+        sessionIdentity,
+        kind: 'main',
+        preferred: true,
+      },
       items: [],
       replayComplete: true,
       runtime: {
@@ -180,7 +199,15 @@ describe('task snapshot store', () => {
 
     useTaskSnapshotStore.getState().reportSessionSnapshot({
       sessionKey: 'agent:main:main',
-      catalog: { key: 'agent:main:main', agentId: 'main', kind: 'main', preferred: true },
+      catalog: {
+        key: 'agent:main:main',
+        agentId: 'main',
+        protocolId: 'openclaw',
+        runtimeEndpointId: 'openclaw',
+        sessionIdentity,
+        kind: 'main',
+        preferred: true,
+      },
       items: [{
         key: 'assistant-turn:1',
         kind: 'assistant-turn',

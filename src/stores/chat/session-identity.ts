@@ -1,58 +1,78 @@
-import { buildRuntimeAddressKey, type RuntimeAddress } from '../../../runtime-host/shared/runtime-address';
+import {
+  buildRuntimeEndpointKey,
+  buildSessionIdentityKey,
+  sessionIdentitiesEqual,
+  sessionScope,
+  type AgentScope,
+  type RuntimeEndpointRef,
+  type RuntimeScope,
+  type SessionIdentity,
+} from '../../../runtime-host/shared/runtime-address';
 import type { ChatStoreState } from './types';
 import { getSessionMeta } from './store-state-helpers';
 
 export interface SessionOperationTarget {
   sessionKey: string;
-  runtimeAddress: RuntimeAddress;
+  sessionIdentity: SessionIdentity;
 }
 
-export function buildRuntimeScopeKey(runtimeAddress: RuntimeAddress): string {
-  if (runtimeAddress.kind === 'native-runtime') {
-    return `native:${runtimeAddress.runtimeAdapterId}:${runtimeAddress.runtimeInstanceId}`;
+export function buildRuntimeScopeKey(endpoint: RuntimeEndpointRef): string {
+  return buildRuntimeEndpointKey(endpoint);
+}
+
+export function buildSessionRecordKey(identity: SessionIdentity): string {
+  return buildSessionIdentityKey(identity);
+}
+
+export function sameRuntimeEndpointScope(left: RuntimeEndpointRef, right: RuntimeEndpointRef): boolean {
+  return buildRuntimeEndpointKey(left) === buildRuntimeEndpointKey(right);
+}
+
+export function scopeEndpoint(scope: RuntimeScope): RuntimeEndpointRef | null {
+  if ('endpoint' in scope) {
+    return scope.endpoint;
   }
-  return `connector:${runtimeAddress.protocolId}:${runtimeAddress.connectorId}:${runtimeAddress.endpointId}`;
-}
-
-export function buildSessionIdentityKey(runtimeAddress: RuntimeAddress, backendSessionKey: string): string {
-  return `${buildRuntimeAddressKey(runtimeAddress)}::${backendSessionKey}`;
-}
-
-export function buildSessionRecordKey(runtimeAddress: RuntimeAddress, backendSessionKey: string): string {
-  return buildSessionIdentityKey(runtimeAddress, backendSessionKey);
-}
-
-export function sameRuntimeAddressIdentity(left: RuntimeAddress, right: RuntimeAddress): boolean {
-  return buildRuntimeAddressKey(left) === buildRuntimeAddressKey(right);
-}
-
-export function sameRuntimeEndpointScope(left: RuntimeAddress, right: RuntimeAddress): boolean {
-  if (left.kind !== right.kind) {
-    return false;
+  if (scope.kind === 'session') {
+    return scope.identity.endpoint;
   }
-  if (left.kind === 'native-runtime' && right.kind === 'native-runtime') {
-    return left.runtimeAdapterId === right.runtimeAdapterId
-      && left.runtimeInstanceId === right.runtimeInstanceId;
+  return null;
+}
+
+export function findAgentScope(scopes: readonly AgentScope[], agentId: string): AgentScope | null {
+  return scopes.find((scope) => scope.agentId === agentId) ?? null;
+}
+
+export function sessionIdentityForAgentScope(scope: AgentScope, sessionKey: string): SessionIdentity {
+  return {
+    endpoint: scope.endpoint,
+    agentId: scope.agentId,
+    sessionKey,
+  };
+}
+
+export function buildSessionIdentityRecordIndex(
+  loadedSessions: ChatStoreState['loadedSessions'],
+): Record<string, string> {
+  const index: Record<string, string> = {};
+  for (const [recordKey, record] of Object.entries(loadedSessions)) {
+    if (record.meta.sessionIdentity) {
+      index[buildSessionIdentityKey(record.meta.sessionIdentity)] = recordKey;
+    }
   }
-  if (left.kind === 'protocol-connector' && right.kind === 'protocol-connector') {
-    return left.protocolId === right.protocolId
-      && left.connectorId === right.connectorId
-      && left.endpointId === right.endpointId;
-  }
-  return false;
+  return index;
 }
 
 export function findSessionRecordKey(
-  state: Pick<ChatStoreState, 'loadedSessions'>,
-  backendSessionKey: string,
-  runtimeAddress: RuntimeAddress,
+  state: Pick<ChatStoreState, 'loadedSessions'> & Partial<Pick<ChatStoreState, 'sessionRecordKeyByIdentityKey'>>,
+  identity: SessionIdentity,
 ): string | null {
+  const identityKey = buildSessionIdentityKey(identity);
+  const indexedRecordKey = state.sessionRecordKeyByIdentityKey?.[identityKey];
+  if (indexedRecordKey && state.loadedSessions[indexedRecordKey]?.meta.sessionIdentity) {
+    return indexedRecordKey;
+  }
   for (const [recordKey, record] of Object.entries(state.loadedSessions)) {
-    if (
-      record.meta.backendSessionKey === backendSessionKey
-      && record.meta.runtimeAddress
-      && sameRuntimeAddressIdentity(record.meta.runtimeAddress, runtimeAddress)
-    ) {
+    if (record.meta.sessionIdentity && sessionIdentitiesEqual(record.meta.sessionIdentity, identity)) {
       return recordKey;
     }
   }
@@ -64,11 +84,15 @@ export function resolveSessionOperationTarget(state: ChatStoreState, recordKey: 
   if (!meta.backendSessionKey) {
     throw new Error(`Backend session key is required: ${recordKey}`);
   }
-  if (!meta.runtimeAddress) {
-    throw new Error(`RuntimeAddress is required: ${recordKey}`);
+  if (!meta.sessionIdentity) {
+    throw new Error(`SessionIdentity is required: ${recordKey}`);
   }
   return {
     sessionKey: meta.backendSessionKey,
-    runtimeAddress: meta.runtimeAddress,
+    sessionIdentity: meta.sessionIdentity,
   };
+}
+
+export function sessionOperationScope(target: SessionOperationTarget) {
+  return sessionScope(target.sessionIdentity);
 }

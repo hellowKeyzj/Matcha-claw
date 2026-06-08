@@ -49,7 +49,8 @@ export class OpenClawRuntimeTransport implements RuntimeSessionTransport {
       id,
       decision: 'deny',
     }, 5000).catch(() => undefined)));
-    await this.gateway.gatewayRpc('chat.abort', { sessionKey: input.context.endpointSessionId ?? input.context.sessionKey }, 5000);
+    const sessionKey = input.context.endpointSessionId ?? input.context.sessionKey;
+    await this.gateway.gatewayRpc('chat.abort', input.runId ? { sessionKey, runId: input.runId } : { sessionKey }, 5000);
   }
 
   async resolveApproval(input: RuntimeResolveApprovalRequest): Promise<unknown> {

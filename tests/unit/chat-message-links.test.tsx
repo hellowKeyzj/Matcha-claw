@@ -9,6 +9,15 @@ import type { ChatAssistantTurnItem } from '@/pages/Chat/chat-render-item-model'
 
 const invokeIpcMock = vi.fn();
 const hostFileStatMock = vi.fn();
+const sessionIdentity = {
+  endpoint: {
+    kind: 'native-runtime' as const,
+    runtimeAdapterId: 'openclaw',
+    runtimeInstanceId: 'openclaw:default',
+  },
+  agentId: 'files',
+  sessionKey: 'files:test',
+};
 
 vi.mock('@/lib/api-client', () => ({
   invokeIpc: (...args: unknown[]) => invokeIpcMock(...args),
@@ -174,6 +183,7 @@ describe('chat message links', () => {
       <ChatAssistantTurn
         item={buildItem(message)}
         showThinking={false}
+        sessionIdentity={sessionIdentity}
         onOpenAttachedArtifact={onOpenAttachedArtifact}
       />,
     );
@@ -208,6 +218,7 @@ describe('chat message links', () => {
       <ChatAssistantTurn
         item={buildItem(message)}
         showThinking={false}
+        sessionIdentity={sessionIdentity}
         onOpenAttachedArtifact={onOpenAttachedArtifact}
       />,
     );
@@ -242,6 +253,7 @@ describe('chat message links', () => {
       <ChatAssistantTurn
         item={buildItem(message)}
         showThinking={false}
+        sessionIdentity={sessionIdentity}
         onOpenAttachedArtifact={onOpenAttachedArtifact}
       />,
     );
@@ -275,6 +287,7 @@ describe('chat message links', () => {
       <ChatAssistantTurn
         item={buildItem(message)}
         showThinking={false}
+        sessionIdentity={sessionIdentity}
         onOpenAttachedArtifact={onOpenAttachedArtifact}
       />,
     );
@@ -303,10 +316,13 @@ describe('chat message links', () => {
       content: '位置： ~/.openclaw/skills/open-eastmoney',
     };
 
-    render(<ChatAssistantTurn item={buildItem(message)} showThinking={false} />);
+    render(<ChatAssistantTurn item={buildItem(message)} showThinking={false} sessionIdentity={sessionIdentity} />);
 
     await waitFor(() => {
-      expect(hostFileStatMock).toHaveBeenCalledWith({ path: '~/.openclaw/skills/open-eastmoney' });
+      expect(hostFileStatMock).toHaveBeenCalledWith({
+        path: '~/.openclaw/skills/open-eastmoney',
+        sessionIdentity,
+      });
     });
     expect(await screen.findByRole('button', { name: /open-eastmoney/i })).toBeInTheDocument();
   });

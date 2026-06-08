@@ -628,8 +628,8 @@ describe('chat content rail layout', () => {
     const controlsRow = pickerWrap?.parentElement as HTMLElement | null;
     const statusRow = controlsRow?.nextElementSibling as HTMLElement | null;
 
-    expect(pickerWrap?.className).toContain('w-[clamp(0px,calc(100%-5.25rem),148px)]');
-    expect(pickerWrap?.className).toContain('max-sm:w-[clamp(0px,calc(100%-5.25rem),132px)]');
+    expect(pickerWrap?.className).toContain('w-[clamp(0px,calc(100%-7.5rem),148px)]');
+    expect(pickerWrap?.className).toContain('max-sm:w-[clamp(0px,calc(100%-7.5rem),132px)]');
     expect(pickerWrap?.className).toContain('flex-none');
     expect(controlsRow?.className).toContain('w-full');
     expect(controlsRow?.className).toContain('min-w-0');

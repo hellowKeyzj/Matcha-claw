@@ -122,6 +122,10 @@ function createServiceWithStore(store: {
       nowIso: () => '2023-11-14T22:13:20.000Z',
     },
   });
+  const httpClientRequest = vi.fn(async () => ({
+    status: 200,
+    json: async () => ({}),
+  }));
   const service = new ProviderAccountsService({
     store: storePort,
     parentShell: {
@@ -133,7 +137,7 @@ function createServiceWithStore(store: {
       completeDevice: async () => ({}),
     },
     httpClient: {
-      request: vi.fn(),
+      request: httpClientRequest,
     },
     projection: projectionPort,
     mutations: mutationWorkflow,
@@ -144,7 +148,7 @@ function createServiceWithStore(store: {
     },
     projectionKeys,
   });
-  return { service, writeProviderStore, syncRuntimeModelProjectionMock, removeCredentialModelsMock };
+  return { service, writeProviderStore, syncRuntimeModelProjectionMock, removeCredentialModelsMock, httpClientRequest };
 }
 
 describe('ProviderAccountsService list', () => {
@@ -156,7 +160,7 @@ describe('ProviderAccountsService list', () => {
     upsertProviderInAgentModelsMock.mockReset();
   });
 
-  it('返回 credentials/statuses/vendors，不再返回 defaultAccountId', async () => {
+  it('返回 credentials/statuses/vendors，不再返回 defaultAccountId 或 secret-bearing headers', async () => {
     const store = {
       accounts: {
         'openai-main': {
@@ -167,6 +171,9 @@ describe('ProviderAccountsService list', () => {
         'custom-1': {
           id: 'custom-1',
           vendorId: 'custom',
+          headers: { Authorization: 'Bearer secret-header' },
+          customHeaders: { 'x-api-key': 'custom-header-secret' },
+          metadata: { refreshToken: 'refresh-secret', publicLabel: 'custom metadata' },
           updatedAt: '2026-04-09T00:00:00.000Z',
         },
       },
@@ -184,6 +191,12 @@ describe('ProviderAccountsService list', () => {
     expect(result.vendors.find((item) => item.id === 'custom')?.modelCapabilities).toEqual(['chat', 'imageUnderstand']);
     expect(result.vendors.find((item) => item.id === 'openai')?.modelCapabilities).toContain('imageGenerate');
     expect(result).not.toHaveProperty('defaultAccountId');
+    expect(result.credentials[0]).not.toHaveProperty('headers');
+    expect(result.credentials[0]).not.toHaveProperty('customHeaders');
+    expect(result.credentials[0].metadata).toEqual({ publicLabel: 'custom metadata' });
+    expect(JSON.stringify(result.credentials)).not.toContain('secret-header');
+    expect(JSON.stringify(result.credentials)).not.toContain('custom-header-secret');
+    expect(JSON.stringify(result.credentials)).not.toContain('refresh-secret');
     expect(writeProviderStore).not.toHaveBeenCalled();
   });
 
@@ -240,6 +253,67 @@ describe('ProviderAccountsService list', () => {
     expect(store.accounts['minimax-portal']).toBeUndefined();
     expect(store.apiKeys['minimax-portal']).toBeUndefined();
     expect(writeProviderStore).toHaveBeenCalledTimes(1);
+  });
+
+  it('getApiKey returns masked metadata instead of the full secret', async () => {
+    const store = {
+      accounts: {
+        'openai-main': { id: 'openai-main', vendorId: 'openai', updatedAt: '2026-04-08T00:00:00.000Z' },
+      },
+      apiKeys: {
+        'openai-main': 'sk-1234567890abcdef',
+      },
+    };
+
+    const { service } = createServiceWithStore(store);
+    const result = await service.getApiKey('openai-main');
+
+    expect(result).toEqual({
+      hasKey: true,
+      keyMasked: 'sk-1***********cdef',
+      last4: 'cdef',
+    });
+    expect(result).not.toHaveProperty('apiKey');
+    expect(JSON.stringify(result)).not.toContain('sk-1234567890abcdef');
+  });
+
+  it('get sanitizes sensitive provider account headers', async () => {
+    const store = {
+      accounts: {
+        'custom-1': {
+          id: 'custom-1',
+          vendorId: 'custom',
+          headers: { Authorization: 'Bearer secret' },
+          updatedAt: '2026-04-08T00:00:00.000Z',
+        },
+      },
+      apiKeys: {},
+    };
+
+    const { service } = createServiceWithStore(store);
+    const result = await service.get('custom-1');
+
+    expect(result).toEqual({
+      id: 'custom-1',
+      vendorId: 'custom',
+      updatedAt: '2026-04-08T00:00:00.000Z',
+    });
+    expect(result).not.toHaveProperty('headers');
+  });
+
+  it('validate rejects account/vendor mismatch before probing provider API', async () => {
+    const store = {
+      accounts: {
+        'openai-main': { id: 'openai-main', vendorId: 'openai', updatedAt: '2026-04-08T00:00:00.000Z' },
+      },
+      apiKeys: {},
+    };
+
+    const { service, httpClientRequest } = createServiceWithStore(store);
+    const result = await service.validate({ accountId: 'openai-main', vendorId: 'anthropic', apiKey: 'sk-test' });
+
+    expect(result).toEqual({ valid: false, error: 'Provider account does not match vendor' });
+    expect(httpClientRequest).not.toHaveBeenCalled();
   });
 });
 

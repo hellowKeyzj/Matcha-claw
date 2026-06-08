@@ -146,13 +146,17 @@ describe('runtime-host service-injected routes', () => {
       .resolves.toEqual({ status: 200, data: { skills: [] } });
 
     const subagentService = {
-      listAgents: vi.fn(async () => ({ status: 200, data: { agents: [] } })),
+      listAgents: vi.fn(),
       getConfig: vi.fn(),
       getAgentFile: vi.fn(),
       listAgentFiles: vi.fn(),
     };
     await expect(dispatchRuntimeRouteDefinition(subagentRoutes, 'POST', '/api/subagents/list', {}, { subagentService }))
-      .resolves.toEqual({ status: 200, data: { agents: [] } });
+      .resolves.toEqual({
+        status: 400,
+        data: { success: false, error: 'Legacy subagent read route is disabled; use /api/capabilities/execute with an agent target' },
+      });
+    expect(subagentService.listAgents).not.toHaveBeenCalled();
 
     const securityService = {
       readPolicy: vi.fn(() => ({ policy: true })),

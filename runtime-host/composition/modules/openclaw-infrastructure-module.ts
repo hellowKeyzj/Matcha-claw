@@ -66,7 +66,6 @@ import type { SessionDefaultModelResolverPort } from '../../application/sessions
 import { OpenClawSessionArtefactResolver } from '../../application/adapters/openclaw/runtime/openclaw-session-artefact-resolver';
 import { OpenClawSessionMetadataResolver } from '../../application/adapters/openclaw/runtime/openclaw-session-metadata-resolver';
 import type { TaskWorkspacePort } from '../../application/workflows/task-runtime/task-runtime-workflow';
-import type { TeamRuntimeStorageRootPort } from '../../application/team-runtime/service';
 import type { ToolchainUvRuntimePort } from '../../application/toolchain/uv-service';
 import type { TokenUsageRuntimeDataPort, TokenUsageTranscriptLayoutPort } from '../../application/usage/token-usage-history';
 import type { DiagnosticsRuntimeBundleLayoutPort } from '../../application/support/diagnostics-bundle';
@@ -595,7 +594,6 @@ export function registerOpenClawInfrastructure(container: RuntimeHostContainer):
   ));
   container.register('usage.transcriptLayout', (scope): TokenUsageTranscriptLayoutPort => scope.resolve<OpenClawRuntimeDataLayout>('openclaw.runtimeDataLayout'));
   container.register('diagnostics.runtimeLayout', (scope): DiagnosticsRuntimeBundleLayoutPort => scope.resolve<OpenClawRuntimeDataLayout>('openclaw.runtimeDataLayout'));
-  container.register('teamRuntime.storageRoot', (scope): TeamRuntimeStorageRootPort => scope.resolve<TeamRuntimeStorageRootPort>('operations.runtimeDataRoot'));
   container.register('toolchainUv.runtime', (scope): ToolchainUvRuntimePort => createToolchainUvRuntimePort(
     scope.resolve<OpenClawEnvironmentRepository>('openclaw.environmentRepository'),
   ));

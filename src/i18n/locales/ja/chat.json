@@ -23,7 +23,9 @@
         "skillActive": "スキル {{count}} 件を使用中",
         "skillsActive": "スキル {{count}} 件を使用中",
         "attachmentReady": "添付 {{count}} 件を追加済み",
-        "attachmentsReady": "添付 {{count}} 件を追加済み"
+        "attachmentsReady": "添付 {{count}} 件を追加済み",
+        "contextUsageLabel": "コンテキスト使用 {{pct}}%",
+        "contextUsageTitle": "コンテキスト使用 {{pct}}%（{{detail}}）"
     },
     "noLogs": "（ログはまだありません）",
     "toolbar": {
@@ -51,6 +53,7 @@
     },
     "errors": {
         "activeRunDisconnected": "この実行は終了イベントを受け取る前に切断されました。",
+        "abortStoppingTimeout": "停止に時間がかかっています。必要であれば新しいセッションで続行できます。",
         "modelUnavailable": "現在のモデルは利用できません。しばらく待って再試行するか、モデルを切り替えてください。",
         "gatewayAuthRequired": "OpenClaw ゲートウェイで認証が必要です。認証設定を確認してください。",
         "gatewayAuthFailed": "OpenClaw ゲートウェイの認証に失敗しました。資格情報または認証設定を確認してください。",

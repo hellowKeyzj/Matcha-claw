@@ -3,7 +3,7 @@ import type {
   SessionStateSnapshot,
 } from '../../../runtime-host/shared/session-adapter-types';
 import { resolveSessionThinkingLevelFromList } from './session-helpers';
-import type { RuntimeAddress } from '../../../runtime-host/shared/runtime-address';
+import type { SessionIdentity } from '../../../runtime-host/shared/runtime-address';
 import type { ChatSession } from './types';
 
 export interface HistoryWindowResult {
@@ -20,7 +20,7 @@ export interface HistoryWindowResult {
 interface FetchHistoryWindowInput {
   recordKey: string;
   backendSessionKey: string;
-  runtimeAddress: RuntimeAddress;
+  sessionIdentity: SessionIdentity;
   sessions: ChatSession[];
   limit: number;
   timeoutMs?: number;
@@ -32,7 +32,7 @@ export async function fetchHistoryWindow(
   const {
     recordKey,
     backendSessionKey,
-    runtimeAddress,
+    sessionIdentity,
     sessions,
     limit,
     timeoutMs,
@@ -42,7 +42,7 @@ export async function fetchHistoryWindow(
 
   const initial = await hostSessionLoad({
     sessionKey: backendSessionKey,
-    runtimeAddress,
+    sessionIdentity,
     limit,
   }, {
     timeoutMs,
@@ -52,7 +52,7 @@ export async function fetchHistoryWindow(
     timeoutMs,
     refetch: async () => await hostSessionWindowFetch({
       sessionKey: backendSessionKey,
-      runtimeAddress,
+      sessionIdentity,
       mode: 'latest',
       limit,
     }),

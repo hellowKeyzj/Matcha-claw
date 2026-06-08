@@ -1,6 +1,10 @@
 import type {
   SessionStateSnapshot,
 } from '../../../shared/session-adapter-types';
+import {
+  buildSessionIdentityKey,
+  type SessionIdentity,
+} from '../../agent-runtime/contracts/runtime-address';
 import type {
   SessionOperationKind,
   SessionOperationResult,
@@ -9,12 +13,13 @@ import type {
 export class SessionOperationResultWorkflow {
   private readonly latestResults = new Map<string, SessionOperationResult>();
 
-  getLatestResult(sessionKey: string): SessionOperationResult | null {
-    return this.latestResults.get(sessionKey) ?? null;
+  getLatestResult(sessionIdentity: SessionIdentity): SessionOperationResult | null {
+    return this.latestResults.get(buildSessionIdentityKey(sessionIdentity)) ?? null;
   }
 
   rememberResult(input: {
-    sessionKey: string;
+    identityKey: string;
+    sessionIdentity: SessionIdentity;
     operationId: string;
     kind: SessionOperationKind;
     result: unknown;
@@ -23,8 +28,10 @@ export class SessionOperationResultWorkflow {
     if (!snapshot) {
       return;
     }
-    this.latestResults.set(input.sessionKey, {
-      sessionKey: input.sessionKey,
+    this.latestResults.set(input.identityKey, {
+      identityKey: input.identityKey,
+      sessionIdentity: input.sessionIdentity,
+      sessionKey: input.sessionIdentity.sessionKey,
       operationId: input.operationId,
       kind: input.kind,
       snapshot,

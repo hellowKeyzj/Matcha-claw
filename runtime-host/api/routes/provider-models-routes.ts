@@ -1,5 +1,5 @@
 import {
-  decodeRouteParam,
+  badRequest,
   routeResponder,
   type RuntimeRouteDefinition,
 } from './route-utils';
@@ -11,8 +11,9 @@ interface ProviderModelsRouteDeps {
 interface ProviderModelsRouteService {
   readAll(): Promise<unknown>;
   readSelectable(): Promise<unknown>;
-  read(credentialId: string): Promise<unknown>;
 }
+
+const LEGACY_PROVIDER_MODEL_DETAIL_ROUTE_REJECTION = 'Legacy provider model detail route is disabled; use /api/capabilities/execute with a provider target';
 
 export const providerModelsRoutes: readonly RuntimeRouteDefinition<ProviderModelsRouteDeps>[] = [
   {
@@ -28,6 +29,6 @@ export const providerModelsRoutes: readonly RuntimeRouteDefinition<ProviderModel
   {
     method: 'GET',
     pattern: /^\/api\/provider-models\/([^/]+)$/,
-    handle: (_context, deps, match) => routeResponder.value(() => deps.providerModelsService.read(decodeRouteParam(match.params[0]))),
+    handle: () => badRequest(LEGACY_PROVIDER_MODEL_DETAIL_ROUTE_REJECTION),
   },
 ] as const;

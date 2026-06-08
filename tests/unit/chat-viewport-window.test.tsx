@@ -151,7 +151,7 @@ describe('chat viewport window', () => {
   it('detached viewport send does not require页面层先 jumpViewportToLatest', async () => {
     const currentSessionKey = 'agent:test:main';
     const jumpViewportToLatest = vi.fn().mockResolvedValue(undefined);
-    const sendMessage = vi.fn().mockResolvedValue(undefined);
+    const sendMessage = vi.fn().mockResolvedValue({ accepted: true });
     const allMessages = buildSessionMessages(20);
 
     useGatewayStore.setState({

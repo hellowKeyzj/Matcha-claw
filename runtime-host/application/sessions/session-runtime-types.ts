@@ -6,24 +6,31 @@ import type {
   SessionTimelineEntry,
   SessionWindowStateSnapshot,
 } from '../../shared/session-adapter-types';
-import type { RuntimeAddress } from '../agent-runtime/contracts/runtime-address';
+import type { RuntimeEndpointRef, SessionIdentity } from '../agent-runtime/contracts/runtime-address';
 import type { CanonicalProjectionRenderItemKeyIndex } from './canonical/canonical-projection';
 import type { CanonicalSessionState } from './canonical/canonical-state';
 
 export interface SessionNewPayload {
   sessionKey?: unknown;
-  runtimeAddress?: unknown;
+  endpoint?: unknown;
+  agentId?: unknown;
 }
 
-export interface RuntimeAddressRequest {
-  runtimeAddress: RuntimeAddress | null;
-  runtimeAddressError: string | null;
+export interface SessionIdentityRequest {
+  sessionIdentity: SessionIdentity | null;
+  sessionIdentityError: string | null;
+}
+
+export interface SessionCreateTargetRequest {
+  endpoint: RuntimeEndpointRef | null;
+  endpointError: string | null;
+  agentId: string;
 }
 
 export interface SessionLoadPayload {
   sessionKey?: unknown;
   limit?: unknown;
-  runtimeAddress?: unknown;
+  sessionIdentity?: unknown;
 }
 
 export interface SessionWindowPayload {
@@ -32,7 +39,7 @@ export interface SessionWindowPayload {
   limit?: unknown;
   offset?: unknown;
   includeCanonical?: unknown;
-  runtimeAddress?: unknown;
+  sessionIdentity?: unknown;
 }
 
 export interface SessionPromptPayload {
@@ -42,37 +49,37 @@ export interface SessionPromptPayload {
   runId?: unknown;
   idempotencyKey?: unknown;
   media?: unknown;
-  runtimeAddress?: unknown;
+  sessionIdentity?: unknown;
 }
 
 export interface SessionAbortRuntimePayload {
   sessionKey?: unknown;
   approvalIds?: unknown;
-  runtimeAddress?: unknown;
+  sessionIdentity?: unknown;
 }
 
 export interface SessionResolveApprovalPayload {
   id?: unknown;
   decision?: unknown;
   sessionKey?: unknown;
-  runtimeAddress?: unknown;
+  sessionIdentity?: unknown;
 }
 
 export interface SessionPatchPayload {
   sessionKey?: unknown;
-  runtimeAddress?: unknown;
+  sessionIdentity?: unknown;
   runtimeModelRef?: unknown;
 }
 
 export interface SessionRenamePayload {
   sessionKey?: unknown;
-  runtimeAddress?: unknown;
+  sessionIdentity?: unknown;
   label?: unknown;
 }
 
 export interface SessionStatusPayload {
   sessionKey?: unknown;
-  runtimeAddress?: unknown;
+  sessionIdentity?: unknown;
   status?: unknown;
 }
 

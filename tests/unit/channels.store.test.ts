@@ -1,13 +1,4 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { RuntimeAddress } from '../../runtime-host/shared/runtime-address';
-
-const integrationChannelAddress: RuntimeAddress = {
-  kind: 'native-runtime',
-  capabilityId: 'integration.channel',
-  runtimeAdapterId: 'openclaw',
-  runtimeInstanceId: 'local',
-  agentId: 'default',
-};
 
 const hostChannelsFetchSnapshotMock = vi.fn();
 const hostChannelsDeleteConfigMock = vi.fn();
@@ -165,7 +156,7 @@ describe('channels store', () => {
       { id: 'wecom-main', type: 'wecom', name: 'main', status: 'connected', accountId: 'main' },
     ]);
 
-    const deletePromise = useChannelsStore.getState().deleteChannel('wecom-main', integrationChannelAddress);
+    const deletePromise = useChannelsStore.getState().deleteChannel('wecom-main');
     expect(useChannelsStore.getState().mutating).toBe(true);
     expect(useChannelsStore.getState().mutatingByChannelId['wecom-main']).toBe(1);
 
@@ -173,7 +164,7 @@ describe('channels store', () => {
     await deletePromise;
 
     const state = useChannelsStore.getState();
-    expect(hostChannelsDeleteConfigMock).toHaveBeenCalledWith('wecom', integrationChannelAddress);
+    expect(hostChannelsDeleteConfigMock).toHaveBeenCalledWith('wecom');
     expect(state.mutating).toBe(false);
     expect(state.mutatingByChannelId['wecom-main']).toBeUndefined();
     expect(state.channels).toEqual([]);
@@ -267,7 +258,7 @@ describe('channels store', () => {
       { id: 'wecom-main', type: 'wecom', name: 'main', status: 'disconnected', accountId: 'main' },
     ]);
 
-    const connectPromise = useChannelsStore.getState().connectChannel('wecom-main', integrationChannelAddress);
+    const connectPromise = useChannelsStore.getState().connectChannel('wecom-main');
     expect(useChannelsStore.getState().mutating).toBe(true);
     expect(useChannelsStore.getState().mutatingByChannelId['wecom-main']).toBe(1);
     expect(useChannelsStore.getState().channels[0]?.status).toBe('connecting');
@@ -276,7 +267,7 @@ describe('channels store', () => {
     await connectPromise;
 
     const state = useChannelsStore.getState();
-    expect(hostChannelsConnectMock).toHaveBeenCalledWith('wecom', 'main', integrationChannelAddress);
+    expect(hostChannelsConnectMock).toHaveBeenCalledWith('wecom', 'main');
     expect(state.mutating).toBe(false);
     expect(state.mutatingByChannelId['wecom-main']).toBeUndefined();
     expect(state.channels[0]?.status).toBe('connected');
@@ -295,7 +286,7 @@ describe('channels store', () => {
       { id: 'wecom-main', type: 'wecom', name: 'main', status: 'connected', accountId: 'main' },
     ]);
 
-    const disconnectPromise = useChannelsStore.getState().disconnectChannel('wecom-main', integrationChannelAddress);
+    const disconnectPromise = useChannelsStore.getState().disconnectChannel('wecom-main');
     expect(useChannelsStore.getState().mutating).toBe(true);
     expect(useChannelsStore.getState().mutatingByChannelId['wecom-main']).toBe(1);
 
@@ -303,7 +294,7 @@ describe('channels store', () => {
     await disconnectPromise;
 
     const state = useChannelsStore.getState();
-    expect(hostChannelsDisconnectMock).toHaveBeenCalledWith('wecom', 'main', integrationChannelAddress);
+    expect(hostChannelsDisconnectMock).toHaveBeenCalledWith('wecom', 'main');
     expect(state.mutating).toBe(false);
     expect(state.mutatingByChannelId['wecom-main']).toBeUndefined();
     expect(state.channels[0]?.status).toBe('disconnected');
@@ -314,9 +305,9 @@ describe('channels store', () => {
 
     hostChannelsRequestQrCodeMock.mockResolvedValue({ success: true, qrCode: 'qr', sessionId: 's-1' });
 
-    const qr = await useChannelsStore.getState().requestQrCode('whatsapp', integrationChannelAddress);
+    const qr = await useChannelsStore.getState().requestQrCode('whatsapp');
 
-    expect(hostChannelsRequestQrCodeMock).toHaveBeenCalledWith('whatsapp', integrationChannelAddress);
+    expect(hostChannelsRequestQrCodeMock).toHaveBeenCalledWith('whatsapp');
     expect(qr).toEqual({ qrCode: 'qr', sessionId: 's-1' });
   });
 });

@@ -1,12 +1,31 @@
 import { createRuntimeSessionContext } from './runtime-session-context';
 import { buildRuntimeEndpointCapabilityDescriptors } from './runtime-capability-descriptors';
-import { buildRuntimeAddressKey, type RuntimeAddress } from './runtime-address';
-import { SESSION_PROMPT_CAPABILITY_ID } from '../../capabilities/session/session-prompt-capability';
-import type { RuntimeSessionIdentity } from './runtime-identity-contract';
+import {
+  agentScope,
+  buildRuntimeEndpointKey,
+  buildSessionIdentityKey,
+  connectorRuntimeEndpoint,
+  nativeRuntimeEndpoint,
+  runtimeInstanceScope,
+  sessionScope,
+  type RuntimeEndpointRef,
+  type RuntimeScope,
+  type SessionIdentity,
+} from './runtime-address';
 import { CapabilityRegistry } from '../../capabilities/contracts/capability-registry';
 import type { CapabilityDescriptor } from '../../capabilities/contracts/capability-descriptor';
 import type { GatewayCapabilitiesSnapshot, GatewayConnectionStatePayload, GatewayControlReadiness } from '../../gateway/gateway-runtime-port';
-import type { RuntimeAdapterInstanceSummary, RuntimeAdapterSummary, RuntimeConnectorSummary, RuntimeEndpointControlStateSummary, RuntimeEndpointReadinessSummary, RuntimeEndpointSummary, RuntimeProtocolSummary, RuntimeTopologySnapshot } from '../../../shared/runtime-topology';
+import type {
+  RuntimeAdapterInstanceSummary,
+  RuntimeAdapterSummary,
+  RuntimeConnectorSummary,
+  RuntimeEndpointCapabilitySummary,
+  RuntimeEndpointControlStateSummary,
+  RuntimeEndpointReadinessSummary,
+  RuntimeEndpointSummary,
+  RuntimeProtocolSummary,
+  RuntimeTopologySnapshot,
+} from '../../../shared/runtime-topology';
 import type {
   RuntimeAdapter,
   RuntimeAdapterId,
@@ -171,6 +190,12 @@ class RuntimeEndpointCatalog {
     return this.endpoints.get(endpointKeys[0]!)!;
   }
 
+  getByRef(endpointRef: RuntimeEndpointRef): RuntimeEndpointProfile {
+    return endpointRef.kind === 'native-runtime'
+      ? this.getNative(endpointRef.runtimeAdapterId, endpointRef.runtimeInstanceId)
+      : this.getConnector(endpointRef.protocolId, endpointRef.connectorId, endpointRef.endpointId);
+  }
+
   getNative(runtimeAdapterId: RuntimeAdapterId, runtimeInstanceId: string): RuntimeEndpointProfile {
     const key = this.buildNativeKey(runtimeAdapterId, runtimeInstanceId);
     const endpoint = this.nativeEndpoints.get(key);
@@ -249,19 +274,48 @@ function applyEndpointDiscovery(
   };
 }
 
-function connectorScopeAddress(input: {
+function connectorEndpointRef(input: {
   protocolId: RuntimeProtocolId;
   connectorId: RuntimeConnectorId;
   endpointId: RuntimeEndpointId;
-}): RuntimeAddress {
-  return {
-    kind: 'protocol-connector',
-    capabilityId: SESSION_PROMPT_CAPABILITY_ID,
+}): RuntimeEndpointRef {
+  return connectorRuntimeEndpoint({
     protocolId: input.protocolId,
     connectorId: input.connectorId,
     endpointId: input.endpointId,
-    agentId: 'runtime-endpoint-scope',
-  };
+  });
+}
+
+function endpointRefForProfile(endpoint: RuntimeEndpointProfile): RuntimeEndpointRef {
+  if (endpoint.runtimeAdapterId && endpoint.runtimeInstanceId) {
+    return nativeRuntimeEndpoint({
+      runtimeAdapterId: endpoint.runtimeAdapterId,
+      runtimeInstanceId: endpoint.runtimeInstanceId,
+    });
+  }
+  if (endpoint.connectorId) {
+    return connectorRuntimeEndpoint({
+      protocolId: endpoint.protocolId,
+      connectorId: endpoint.connectorId,
+      endpointId: endpoint.id,
+    });
+  }
+  throw new Error(`Runtime endpoint cannot be referenced: ${endpoint.id}`);
+}
+
+function scopeEndpoint(scope: RuntimeScope): RuntimeEndpointRef | null {
+  if ('endpoint' in scope) {
+    return scope.endpoint;
+  }
+  if (scope.kind === 'session') {
+    return scope.identity.endpoint;
+  }
+  return null;
+}
+
+function scopeBelongsToEndpoint(scope: RuntimeScope, endpoint: RuntimeEndpointProfile): boolean {
+  const scopedEndpoint = scopeEndpoint(scope);
+  return scopedEndpoint ? buildRuntimeEndpointKey(scopedEndpoint) === buildRuntimeEndpointKey(endpointRefForProfile(endpoint)) : false;
 }
 
 function summarizeRuntimeEndpoint(
@@ -269,19 +323,20 @@ function summarizeRuntimeEndpoint(
   capabilities: CapabilityRegistry,
   controlState: RuntimeEndpointControlStateSummary,
 ): RuntimeEndpointSummary {
-  const capabilityAddresses = capabilities.list()
-    .filter((descriptor) => {
-      if (descriptor.address.kind === 'native-runtime') {
-        return descriptor.address.runtimeAdapterId === endpoint.runtimeAdapterId
-          && descriptor.address.runtimeInstanceId === endpoint.runtimeInstanceId
-          && endpoint.agentIds.includes(descriptor.address.agentId);
-      }
-      return descriptor.address.protocolId === endpoint.protocolId
-        && descriptor.address.connectorId === endpoint.connectorId
-        && descriptor.address.endpointId === endpoint.id
-        && endpoint.agentIds.includes(descriptor.address.agentId);
-    })
-    .map((descriptor) => descriptor.address);
+  const capabilitySummaries = capabilities.list()
+    .filter((descriptor) => scopeBelongsToEndpoint(descriptor.scope, endpoint))
+    .map((descriptor): RuntimeEndpointCapabilitySummary => ({
+      id: descriptor.id,
+      scopeKind: descriptor.scopeKind,
+      scope: descriptor.scope,
+      targetKinds: [...descriptor.targetKinds],
+      operations: descriptor.operations.map((operation) => ({
+        id: operation.id,
+        targetKind: operation.targetKind,
+        ...(operation.targetRequired === undefined ? {} : { targetRequired: operation.targetRequired }),
+      })),
+      availability: descriptor.availability,
+    }));
   return {
     id: endpoint.id,
     protocolId: endpoint.protocolId,
@@ -292,7 +347,7 @@ function summarizeRuntimeEndpoint(
     agentIds: [...endpoint.agentIds],
     acceptsDynamicAgents: endpoint.acceptsDynamicAgents === true,
     capabilities: { ...endpoint.capabilities },
-    capabilityAddresses,
+    capabilitySummaries,
     controlState,
   };
 }
@@ -367,13 +422,7 @@ class RuntimeEndpointControlStateStore {
   }
 
   private buildEndpointKey(endpoint: RuntimeEndpointProfile): string {
-    if (endpoint.runtimeAdapterId) {
-      return `native:${endpoint.runtimeAdapterId}:${endpoint.runtimeInstanceId ?? ''}`;
-    }
-    if (endpoint.connectorId) {
-      return `connector:${endpoint.protocolId}:${endpoint.connectorId}:${endpoint.id}`;
-    }
-    return `protocol:${endpoint.protocolId}:${endpoint.id}`;
+    return buildRuntimeEndpointKey(endpointRefForProfile(endpoint));
   }
 }
 
@@ -381,57 +430,20 @@ class RuntimeSessionContextStore {
   private readonly sessionContexts = new Map<string, RuntimeSessionContext>();
 
   remember(context: RuntimeSessionContext): RuntimeSessionContext {
-    this.sessionContexts.set(this.buildSessionContextKey(context.sessionKey, context.address), context);
+    this.sessionContexts.set(buildSessionIdentityKey(context.identity), context);
     return context;
   }
 
-  forget(sessionKey: string): void {
-    for (const [key, context] of this.sessionContexts.entries()) {
-      if (context.sessionKey === sessionKey) {
-        this.sessionContexts.delete(key);
-      }
-    }
+  forget(identity: SessionIdentity): void {
+    this.sessionContexts.delete(buildSessionIdentityKey(identity));
   }
 
-  resolve(sessionKey: string, metadata?: Partial<RuntimeSessionContext> | null): RuntimeSessionContext {
-    if (metadata?.address) {
-      const address = { ...metadata.address, sessionKey };
-      const cached = this.sessionContexts.get(this.buildSessionContextKey(sessionKey, address));
-      if (cached) {
-        return cached;
-      }
-    } else if (!metadata) {
-      const cached = this.resolveUniqueSessionContext(sessionKey);
-      if (cached) {
-        return cached;
-      }
+  resolve(identity: SessionIdentity): RuntimeSessionContext {
+    const cached = this.sessionContexts.get(buildSessionIdentityKey(identity));
+    if (!cached) {
+      throw new Error(`Runtime session context requires explicit session identity metadata: ${identity.sessionKey}`);
     }
-    if (metadata?.runtimeEndpointId && metadata.protocolId && metadata.address) {
-      return this.remember(createRuntimeSessionContext({
-        sessionKey,
-        protocolId: metadata.protocolId,
-        runtimeEndpointId: metadata.runtimeEndpointId,
-        ...(metadata.endpointSessionId ? { endpointSessionId: metadata.endpointSessionId } : {}),
-        ...(metadata.agentId ? { agentId: metadata.agentId } : {}),
-        address: {
-          ...metadata.address,
-          sessionKey,
-        },
-      }));
-    }
-    throw new Error(`Runtime session context requires explicit runtime address metadata: ${sessionKey}`);
-  }
-
-  private resolveUniqueSessionContext(sessionKey: string): RuntimeSessionContext | null {
-    const matches = Array.from(this.sessionContexts.values()).filter((context) => context.sessionKey === sessionKey);
-    if (matches.length > 1) {
-      throw new Error(`Runtime session context requires explicit runtime address metadata: ${sessionKey}`);
-    }
-    return matches[0] ?? null;
-  }
-
-  private buildSessionContextKey(sessionKey: string, address: RuntimeAddress): string {
-    return `${buildRuntimeAddressKey(address)}::${sessionKey}`;
+    return cached;
   }
 }
 
@@ -448,19 +460,17 @@ class RuntimeTransportRouter {
   ) {}
 
   resolve(context: RuntimeSessionContext): RuntimeSessionTransport {
-    return this.resolveAddress(context.address);
+    return this.resolveEndpoint(context.endpointRef, context.agentId);
   }
 
-  resolveAddress(address: RuntimeAddress): RuntimeSessionTransport {
-    if (address.kind === 'native-runtime') {
-      const adapter = this.adapters.get(address.runtimeAdapterId);
-      const endpoint = this.endpoints.getNative(address.runtimeAdapterId, address.runtimeInstanceId);
-      assertEndpointAgent(endpoint, address.agentId);
+  resolveEndpoint(endpointRef: RuntimeEndpointRef, agentId: string): RuntimeSessionTransport {
+    const endpoint = this.endpoints.getByRef(endpointRef);
+    assertEndpointAgent(endpoint, agentId);
+    if (endpointRef.kind === 'native-runtime') {
+      const adapter = this.adapters.get(endpointRef.runtimeAdapterId);
       return adapter.createTransport(endpoint, { gateway: this.nativePorts.gateway() });
     }
-    const connector = this.connectors.get(address.protocolId, address.connectorId);
-    const endpoint = this.endpoints.getConnector(address.protocolId, address.connectorId, address.endpointId);
-    assertEndpointAgent(endpoint, address.agentId);
+    const connector = this.connectors.get(endpointRef.protocolId, endpointRef.connectorId);
     return connector.connect(endpoint);
   }
 }
@@ -560,21 +570,11 @@ export class AgentRuntimeRegistry {
     };
   }
 
-  getCapability(descriptor: Pick<CapabilityDescriptor, 'id' | 'address'>): CapabilityDescriptor {
+  getCapability(descriptor: Pick<CapabilityDescriptor, 'id' | 'scope'>): CapabilityDescriptor {
     try {
       return this.capabilities.get(descriptor);
     } catch (error) {
-      const endpoint = this.resolveEndpointForAddress(descriptor.address);
-      if (!endpoint.acceptsDynamicAgents) {
-        throw error;
-      }
-      const dynamicDescriptor = buildRuntimeEndpointCapabilityDescriptors({
-        endpoint,
-        supportLevel: 'native',
-        address: descriptor.address,
-        ownerModuleId: descriptor.address.kind === 'native-runtime' ? descriptor.address.runtimeAdapterId : descriptor.address.connectorId,
-        routeOwnerId: 'sessions',
-      }).find((candidate) => candidate.id === descriptor.id);
+      const dynamicDescriptor = this.buildDynamicCapability(descriptor);
       if (!dynamicDescriptor) {
         throw error;
       }
@@ -598,61 +598,49 @@ export class AgentRuntimeRegistry {
     return this.endpoints.get(endpointId);
   }
 
-  resolveEndpointForAddress(address: RuntimeAddress): RuntimeEndpointProfile {
-    const endpoint = address.kind === 'native-runtime'
-      ? this.endpoints.getNative(address.runtimeAdapterId, address.runtimeInstanceId)
-      : this.endpoints.getConnector(address.protocolId, address.connectorId, address.endpointId);
-    assertEndpointAgent(endpoint, address.agentId);
+  resolveEndpointForRef(endpointRef: RuntimeEndpointRef, agentId?: string): RuntimeEndpointProfile {
+    const endpoint = this.endpoints.getByRef(endpointRef);
+    if (agentId) {
+      assertEndpointAgent(endpoint, agentId);
+    }
     return endpoint;
   }
 
   updateRuntimeEndpointControlState(input: {
-    readonly address: RuntimeAddress;
+    readonly endpoint: RuntimeEndpointRef;
     readonly connection?: GatewayConnectionStatePayload | null;
     readonly readiness?: GatewayControlReadiness | null;
     readonly capabilities?: GatewayCapabilitiesSnapshot | null;
     readonly updatedAt: number;
   }): RuntimeEndpointControlStateSummary {
-    const endpoint = this.resolveEndpointForAddress(input.address);
+    const endpoint = this.resolveEndpointForRef(input.endpoint);
     return this.endpointControlStates.update(endpoint, input, input.updatedAt);
   }
 
-  resolveSessionIdentityForAddress(address: RuntimeAddress): RuntimeSessionIdentity {
-    const endpoint = this.resolveEndpointForAddress(address);
-    return {
+  rememberSessionIdentity(identity: SessionIdentity): RuntimeSessionContext {
+    const endpoint = this.resolveEndpointForRef(identity.endpoint, identity.agentId);
+    return this.contexts.remember(createRuntimeSessionContext({
+      identity,
       protocolId: endpoint.protocolId,
       runtimeEndpointId: endpoint.id,
-    };
+      endpointSessionId: identity.sessionKey,
+    }));
   }
 
-  rememberSessionAddress(sessionKey: string, address: RuntimeAddress): RuntimeSessionContext {
-    const endpoint = this.resolveEndpointForAddress(address);
-    return this.contexts.resolve(sessionKey, {
-      protocolId: endpoint.protocolId,
-      runtimeEndpointId: endpoint.id,
-      endpointSessionId: sessionKey,
-      agentId: address.agentId,
-      address: {
-        ...address,
-        sessionKey,
-      },
-    });
-  }
-
-  resolveApprovalNotificationsForAddress(address: RuntimeAddress): RuntimeApprovalNotificationAdapter | null {
-    this.resolveEndpointForAddress(address);
-    if (address.kind === 'native-runtime') {
-      return this.adapters.get(address.runtimeAdapterId).approvalNotifications ?? null;
+  resolveApprovalNotificationsForEndpoint(endpointRef: RuntimeEndpointRef): RuntimeApprovalNotificationAdapter | null {
+    this.resolveEndpointForRef(endpointRef);
+    if (endpointRef.kind === 'native-runtime') {
+      return this.adapters.get(endpointRef.runtimeAdapterId).approvalNotifications ?? null;
     }
-    return this.connectors.get(address.protocolId, address.connectorId).approvalNotifications ?? null;
+    return this.connectors.get(endpointRef.protocolId, endpointRef.connectorId).approvalNotifications ?? null;
   }
 
   resolveTransport(context: RuntimeSessionContext): RuntimeSessionTransport {
     return this.transports.resolve(context);
   }
 
-  resolveTransportForAddress(address: RuntimeAddress): RuntimeSessionTransport {
-    return this.transports.resolveAddress(address);
+  resolveTransportForEndpoint(endpointRef: RuntimeEndpointRef, agentId: string): RuntimeSessionTransport {
+    return this.transports.resolveEndpoint(endpointRef, agentId);
   }
 
   async connectRuntimeEndpoint(input: { protocolId: RuntimeProtocolId; connectorId: RuntimeConnectorId; endpointId: RuntimeEndpointId }): Promise<RuntimeEndpointReadinessSummary> {
@@ -686,17 +674,28 @@ export class AgentRuntimeRegistry {
   ): void {
     this.unregisterConnectorRuntimeEndpoint(input);
     this.endpoints.register(endpoint, this.protocols);
-    const scopeAddress = connectorScopeAddress(input);
-    this.capabilities.replaceForRuntimeEndpointScope(scopeAddress, endpoint.agentIds.flatMap((agentId) => buildRuntimeEndpointCapabilityDescriptors({
-      endpoint,
-      supportLevel: 'native',
-      address: {
-        ...scopeAddress,
+    const endpointRef = connectorEndpointRef(input);
+    const descriptors: CapabilityDescriptor[] = [
+      ...buildRuntimeEndpointCapabilityDescriptors({
+        endpoint,
+        endpointRef,
+        scope: runtimeInstanceScope(endpointRef),
+        supportLevel: 'native',
+        ownerModuleId: input.connectorId,
+        routeOwnerId: 'sessions',
+      }),
+    ];
+    for (const agentId of endpoint.agentIds) {
+      descriptors.push(...buildRuntimeEndpointCapabilityDescriptors({
+        endpoint,
+        endpointRef,
         agentId,
-      },
-      ownerModuleId: input.connectorId,
-      routeOwnerId: 'sessions',
-    })));
+        supportLevel: 'native',
+        ownerModuleId: input.connectorId,
+        routeOwnerId: 'sessions',
+      }));
+    }
+    this.capabilities.replaceForRuntimeEndpointScope(runtimeInstanceScope(endpointRef), descriptors);
     this.endpointControlStates.update(endpoint, {
       readiness: toGatewayControlReadiness(readiness),
     }, Date.now());
@@ -704,8 +703,7 @@ export class AgentRuntimeRegistry {
 
   private unregisterConnectorRuntimeEndpoint(input: { protocolId: RuntimeProtocolId; connectorId: RuntimeConnectorId; endpointId: RuntimeEndpointId }): void {
     const removed = this.endpoints.unregisterConnectorEndpoint(input.protocolId, input.connectorId, input.endpointId);
-    const scopeAddress = connectorScopeAddress(input);
-    this.capabilities.removeForRuntimeEndpointScope(scopeAddress);
+    this.capabilities.removeForRuntimeEndpointScope(runtimeInstanceScope(connectorEndpointRef(input)));
     if (removed) {
       this.endpointControlStates.remove(removed);
     }
@@ -715,21 +713,52 @@ export class AgentRuntimeRegistry {
     return this.contexts.remember(context);
   }
 
-  forgetSessionContext(sessionKey: string): void {
-    this.contexts.forget(sessionKey);
+  forgetSessionContext(identity: SessionIdentity): void {
+    this.contexts.forget(identity);
   }
 
-  resolveSessionContext(sessionKey: string, metadata?: Partial<RuntimeSessionContext> | null): RuntimeSessionContext {
-    return this.contexts.resolve(sessionKey, metadata);
+  resolveSessionContext(identity: SessionIdentity): RuntimeSessionContext {
+    return this.contexts.resolve(identity);
   }
 
-  resolveProtocolForSession(sessionKey: string, metadata?: Partial<RuntimeSessionContext> | null): RuntimeProtocolAdapter {
-    const context = this.resolveSessionContext(sessionKey, metadata);
+  resolveProtocolForSession(identity: SessionIdentity): RuntimeProtocolAdapter {
+    const context = this.resolveSessionContext(identity);
     return this.getProtocol(context.protocolId);
   }
 
-  resolveEndpointForSession(sessionKey: string, metadata?: Partial<RuntimeSessionContext> | null): RuntimeEndpointProfile {
-    const context = this.resolveSessionContext(sessionKey, metadata);
+  resolveEndpointForSession(identity: SessionIdentity): RuntimeEndpointProfile {
+    const context = this.resolveSessionContext(identity);
     return this.getEndpoint(context.runtimeEndpointId);
+  }
+
+  private buildDynamicCapability(descriptor: Pick<CapabilityDescriptor, 'id' | 'scope'>): CapabilityDescriptor | null {
+    const endpointRef = scopeEndpoint(descriptor.scope);
+    if (!endpointRef) {
+      return null;
+    }
+    if (descriptor.scope.kind === 'team-run') {
+      const runtimeDescriptor = this.capabilities.get({
+        id: descriptor.id,
+        scope: runtimeInstanceScope(endpointRef),
+      });
+      return {
+        ...runtimeDescriptor,
+        scopeKind: descriptor.scope.kind,
+        scope: descriptor.scope,
+      };
+    }
+    const endpoint = this.resolveEndpointForRef(endpointRef, descriptor.scope.kind === 'agent' ? descriptor.scope.agentId : undefined);
+    if (descriptor.scope.kind === 'agent' && !endpoint.acceptsDynamicAgents) {
+      return null;
+    }
+    const dynamicDescriptors = buildRuntimeEndpointCapabilityDescriptors({
+      endpoint,
+      endpointRef,
+      scope: descriptor.scope.kind === 'session' ? sessionScope(descriptor.scope.identity) : descriptor.scope,
+      supportLevel: 'native',
+      ownerModuleId: endpoint.runtimeAdapterId ?? endpoint.connectorId ?? endpoint.protocolId,
+      routeOwnerId: 'sessions',
+    });
+    return dynamicDescriptors.find((candidate) => candidate.id === descriptor.id) ?? null;
   }
 }

@@ -11,9 +11,16 @@ export const REFRESH_PLUGIN_CATALOG_JOB = 'plugins.refreshCatalog';
 
 export interface SetEnabledPluginsJobPayload {
   readonly pluginIds: readonly string[];
+  readonly enabled?: boolean;
 }
 
 export type PluginRuntimeJobSubmission = RuntimeLongTaskSubmission;
+
+function buildSetEnabledPluginsDedupeKey(payload: SetEnabledPluginsJobPayload): string {
+  const enabled = payload.enabled === false ? 'disable' : 'enable';
+  const pluginIds = Array.from(new Set(payload.pluginIds)).sort().join(',');
+  return `${SET_ENABLED_PLUGINS_JOB}:${enabled}:${pluginIds}`;
+}
 
 export interface PluginRuntimeJobPort {
   submitSetEnabledPlugins(
@@ -29,7 +36,7 @@ export function createPluginRuntimeJobPort(
 ): PluginRuntimeJobPort {
   return {
     submitSetEnabledPlugins: (payload) => tasks.submit(SET_ENABLED_PLUGINS_JOB, payload, {
-      dedupeKey: SET_ENABLED_PLUGINS_JOB,
+      dedupeKey: buildSetEnabledPluginsDedupeKey(payload),
     }),
     submitRefreshCatalog: () => tasks.submit(REFRESH_PLUGIN_CATALOG_JOB, null, {
       queue: 'low',

@@ -78,7 +78,7 @@ function areChatSessionsEqual(left: ChatSession | undefined, right: ChatSession)
     && (left.agentId ?? null) === (right.agentId ?? null)
     && (left.protocolId ?? null) === (right.protocolId ?? null)
     && (left.runtimeEndpointId ?? null) === (right.runtimeEndpointId ?? null)
-    && JSON.stringify(left.runtimeAddress ?? null) === JSON.stringify(right.runtimeAddress ?? null)
+    && JSON.stringify(left.sessionIdentity ?? null) === JSON.stringify(right.sessionIdentity ?? null)
     && (left.kind ?? null) === (right.kind ?? null)
     && (left.preferred ?? false) === (right.preferred ?? false)
     && (left.label ?? null) === (right.label ?? null)
@@ -86,6 +86,9 @@ function areChatSessionsEqual(left: ChatSession | undefined, right: ChatSession)
     && (left.displayName ?? null) === (right.displayName ?? null)
     && (left.thinkingLevel ?? null) === (right.thinkingLevel ?? null)
     && (left.model ?? null) === (right.model ?? null)
+    && (left.contextTokens?.totalTokens ?? null) === (right.contextTokens?.totalTokens ?? null)
+    && (left.contextTokens?.totalTokensFresh ?? null) === (right.contextTokens?.totalTokensFresh ?? null)
+    && (left.contextTokens?.contextTokens ?? null) === (right.contextTokens?.contextTokens ?? null)
     && (left.updatedAt ?? null) === (right.updatedAt ?? null)
   );
 }
@@ -111,17 +114,17 @@ export function readSessionsFromState(
       continue;
     }
     const meta = getSessionMeta(state, sessionKey);
-    if (!meta.runtimeAddress) {
+    if (!meta.sessionIdentity) {
       continue;
     }
-    const agentId = meta.agentId ?? meta.runtimeAddress.agentId;
+    const agentId = meta.agentId ?? meta.sessionIdentity.agentId;
     const nextSession = {
       key: sessionKey,
       backendSessionKey: meta.backendSessionKey,
       agentId,
       protocolId: meta.protocolId ?? undefined,
       runtimeEndpointId: meta.runtimeEndpointId ?? undefined,
-      runtimeAddress: meta.runtimeAddress,
+      sessionIdentity: meta.sessionIdentity,
       kind: meta.kind ?? undefined,
       preferred: meta.preferred,
       label: normalizeSessionLabel(meta.label) ?? undefined,
@@ -129,6 +132,7 @@ export function readSessionsFromState(
       displayName: normalizeSessionLabel(meta.displayName) ?? sessionKey,
       thinkingLevel: meta.thinkingLevel ?? undefined,
       model: normalizeSessionLabel(meta.model) ?? undefined,
+      contextTokens: state.loadedSessions[sessionKey]?.contextTokens,
       updatedAt: typeof meta.lastActivityAt === 'number' ? meta.lastActivityAt : undefined,
     } satisfies ChatSession;
     mergedSessionsByKey.set(sessionKey, reuseChatSession(cachedReadSessionsByKey.get(sessionKey), nextSession));
@@ -241,7 +245,7 @@ export function buildTaskBridgeState(
   const meta = getSessionMeta(state, sessionKey);
   return {
     sessionKey,
-    owner: meta.agentId ?? meta.runtimeAddress?.agentId ?? 'main',
+    owner: meta.agentId ?? meta.sessionIdentity?.agentId ?? 'main',
     canSendRecoveryPrompt: !isRunActive(runtime) && !runtime.activeRunId,
   };
 }

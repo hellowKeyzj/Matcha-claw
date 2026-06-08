@@ -18,7 +18,8 @@ import { invokeIpc } from '@/lib/api-client';
 import { FilePreviewBody, type FilePreviewMode } from '@/components/file-preview/FilePreviewBody';
 import { WorkspaceBrowserBody } from '@/components/file-preview/WorkspaceBrowserBody';
 import type { ArtifactPreviewTarget } from '@/components/file-preview/types';
-import type { RuntimeAddress } from '../../../../runtime-host/shared/runtime-address';
+import type { WorkspaceFileContext } from '@/lib/host-api';
+import type { SessionIdentity } from '../../../../runtime-host/shared/runtime-address';
 import type { DerivedPlanStatus } from '@/stores/chat/task-snapshot-store';
 import type { TaskInboxTask } from '../useChatSidePanelController';
 
@@ -65,13 +66,14 @@ interface ChatSidePanelProps {
   artifactActiveSection: 'changes' | 'preview' | 'workspace';
   artifactViewMode: FilePreviewMode;
   artifactWorkspaceRoot: string | null;
+  artifactWorkspaceContext?: WorkspaceFileContext;
   onArtifactFocusFile: (file: ArtifactPreviewTarget, options?: { preserveSection?: 'workspace' }) => void;
   onOpenGeneratedArtifactFile: (file: GeneratedFile, options?: { preserveSection?: boolean | 'current' }) => void;
   onOpenArtifactGroup: (groupKey: string, options?: { preserveSection?: boolean | 'current' }) => void;
   onArtifactSectionChange: (section: 'changes' | 'preview' | 'workspace') => void;
   onArtifactViewModeChange: (mode: FilePreviewMode) => void;
   onArtifactRevealInFileManager: (filePath: string) => void;
-  runtimeAddress?: RuntimeAddress;
+  sessionIdentity?: SessionIdentity;
 }
 
 const ARTIFACT_GROUP_RAIL_MIN_WIDTH = 240;
@@ -137,13 +139,14 @@ export const ChatSidePanel = memo(function ChatSidePanel({
   artifactActiveSection,
   artifactViewMode,
   artifactWorkspaceRoot,
+  artifactWorkspaceContext,
   onArtifactFocusFile,
   onOpenGeneratedArtifactFile,
   onOpenArtifactGroup,
   onArtifactSectionChange,
   onArtifactViewModeChange,
   onArtifactRevealInFileManager,
-  runtimeAddress,
+  sessionIdentity,
 }: ChatSidePanelProps) {
   const { t } = useTranslation('chat');
   const gatewayStatus = useGatewayStore((state) => state.status);
@@ -347,7 +350,8 @@ export const ChatSidePanel = memo(function ChatSidePanel({
         <FilePreviewBody
           file={artifactFocusedFile}
           mode={artifactViewMode}
-          runtimeAddress={runtimeAddress}
+          sessionIdentity={sessionIdentity}
+          workspaceContext={artifactWorkspaceContext}
           className="h-full"
           headerAccessory={(
             <>
@@ -737,7 +741,8 @@ export const ChatSidePanel = memo(function ChatSidePanel({
                 rootPath={artifactWorkspaceRoot}
                 selectedFilePath={artifactFocusedFile?.filePath ?? null}
                 selectedFile={artifactFocusedFile}
-                runtimeAddress={runtimeAddress}
+                sessionIdentity={sessionIdentity}
+                workspaceContext={artifactWorkspaceContext}
                 availableWidth={width}
                 previewMode={artifactViewMode}
                 onSelectFile={(file) => onArtifactFocusFile(file, { preserveSection: 'workspace' })}

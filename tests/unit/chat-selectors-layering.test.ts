@@ -7,8 +7,9 @@ import {
   selectViewLayerState,
 } from '@/stores/chat/selectors';
 import { buildRenderItemsFromMessages } from './helpers/timeline-fixtures';
+import { buildRuntimeScopeKey } from '@/stores/chat/session-identity';
 import { createViewportWindowState } from '@/stores/chat/viewport-state';
-import { createOpenClawTestRuntimeAddress } from './helpers/runtime-address-fixtures';
+import { createOpenClawTestSessionIdentity } from './helpers/runtime-address-fixtures';
 
 function createSessionRecord(input?: {
   sessionKey?: string;
@@ -18,6 +19,7 @@ function createSessionRecord(input?: {
   items?: ReturnType<typeof buildRenderItemsFromMessages>;
 }) {
   const sessionKey = input?.sessionKey ?? 'agent:main:main';
+  const sessionIdentity = createOpenClawTestSessionIdentity(sessionKey, sessionKey.split(':')[1] ?? 'default');
   const items = input?.items ?? buildRenderItemsFromMessages(sessionKey, [
     { role: 'assistant', content: 'hello', id: 'm1' },
   ]);
@@ -26,10 +28,12 @@ function createSessionRecord(input?: {
     : 'Main';
   return {
     meta: {
-      agentId: sessionKey.split(':')[1] ?? null,
+      backendSessionKey: sessionKey,
+      runtimeScopeKey: buildRuntimeScopeKey(sessionIdentity.endpoint),
+      agentId: sessionIdentity.agentId,
       protocolId: null,
       runtimeEndpointId: 'local',
-      runtimeAddress: createOpenClawTestRuntimeAddress(sessionKey),
+      sessionIdentity,
       kind: sessionKey.endsWith(':main') ? 'main' : 'session',
       preferred: sessionKey.endsWith(':main'),
       label,
@@ -126,7 +130,8 @@ describe('chat selectors layering', () => {
         'agent:main:main': [{
           id: 'ap-1',
           sessionKey: 'agent:main:main',
-          runtimeAddress: createOpenClawTestRuntimeAddress('agent:main:main'),
+          backendSessionKey: 'agent:main:main',
+          sessionIdentity: createOpenClawTestSessionIdentity('agent:main:main', 'main'),
           title: 'gateway',
           allowedDecisions: ['allow-once', 'deny'],
           createdAtMs: 1,

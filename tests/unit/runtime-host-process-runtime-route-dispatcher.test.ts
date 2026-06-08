@@ -55,12 +55,12 @@ describe('runtime-host process runtime route dispatcher', () => {
       data: { success: true, route: 'other' },
     }));
     const dispatcher = createRuntimeRouteDispatcher([
-      { key: 'runtime_host.POST /api/runtime-host/jobs/get', method: 'POST', matcher: { type: 'exact', path: '/api/runtime-host/jobs/get' }, handle: exact },
+      { key: 'runtime_host.POST /api/runtime-host/exact-action', method: 'POST', matcher: { type: 'exact', path: '/api/runtime-host/exact-action' }, handle: exact },
       { key: 'runtime_host.POST /api/runtime-host/', method: 'POST', matcher: { type: 'prefix', prefix: '/api/runtime-host/' }, handle: fallback },
       { key: 'runtime_host.GET /api/runtime-host/', method: 'GET', matcher: { type: 'prefix', prefix: '/api/runtime-host/' }, handle: otherMethod },
     ]);
 
-    await expect(dispatcher('POST', '/api/runtime-host/jobs/get', undefined)).resolves.toEqual({
+    await expect(dispatcher('POST', '/api/runtime-host/exact-action', undefined)).resolves.toEqual({
       status: 200,
       data: { success: true, route: 'exact' },
     });
@@ -103,11 +103,11 @@ describe('runtime-host process runtime route dispatcher', () => {
       data: { success: true, route: 'fallback' },
     }));
     const dispatcher = createRuntimeRouteDispatcher([
-      { key: 'runtime_host.POST /api/runtime-host/jobs/get', method: 'POST', matcher: { type: 'exact', path: '/api/runtime-host/jobs/get' }, handle: exact },
+      { key: 'runtime_host.POST /api/runtime-host/exact-action', method: 'POST', matcher: { type: 'exact', path: '/api/runtime-host/exact-action' }, handle: exact },
       { key: 'runtime_host.POST /api/runtime-host/', method: 'POST', matcher: { type: 'prefix', prefix: '/api/runtime-host/' }, handle: fallback },
     ]);
 
-    await expect(dispatcher('POST', '/api/runtime-host/jobs/get', undefined)).resolves.toEqual({
+    await expect(dispatcher('POST', '/api/runtime-host/exact-action', undefined)).resolves.toEqual({
       status: 200,
       data: { success: true, route: 'fallback' },
     });
@@ -117,9 +117,9 @@ describe('runtime-host process runtime route dispatcher', () => {
 
   it('rejects duplicate exact routes for the same method and path', () => {
     expect(() => createRuntimeRouteDispatcher([
-      { key: 'first', method: 'POST', matcher: { type: 'exact', path: '/api/runtime-host/jobs/get' }, handle: vi.fn() },
-      { key: 'second', method: 'POST', matcher: { type: 'exact', path: '/api/runtime-host/jobs/get' }, handle: vi.fn() },
-    ])).toThrow('Duplicate exact runtime route: POST /api/runtime-host/jobs/get (first vs second)');
+      { key: 'first', method: 'POST', matcher: { type: 'exact', path: '/api/runtime-host/exact-action' }, handle: vi.fn() },
+      { key: 'second', method: 'POST', matcher: { type: 'exact', path: '/api/runtime-host/exact-action' }, handle: vi.fn() },
+    ])).toThrow('Duplicate exact runtime route: POST /api/runtime-host/exact-action (first vs second)');
   });
 
   it('prefix trie 只调用匹配分支并保留 fallback 注册顺序', async () => {

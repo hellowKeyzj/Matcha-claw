@@ -29,15 +29,15 @@ export class SessionPromptService {
       sessionKey,
       message,
       requestedRunId,
-      runtimeAddress,
-      runtimeAddressError,
+      sessionIdentity,
+      sessionIdentityError,
     } = readPromptSessionRequest(payload);
     const sessionId = sessionKey;
     if (!sessionId) {
       return badRequest('sessionKey is required');
     }
-    if (runtimeAddressError || !runtimeAddress) {
-      return badRequest(runtimeAddressError ?? 'RuntimeAddress is required');
+    if (sessionIdentityError || !sessionIdentity) {
+      return badRequest(sessionIdentityError ?? 'SessionIdentity is required');
     }
     if (!message.trim() && !(Array.isArray(mediaBody?.media) && mediaBody.media.length > 0)) {
       return badRequest('message is required');
@@ -49,7 +49,7 @@ export class SessionPromptService {
       sessionId,
       message,
       runId: requestedRunId || this.deps.idGenerator.randomId(),
-      runtimeAddress,
+      sessionIdentity,
     }));
   }
 }

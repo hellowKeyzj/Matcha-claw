@@ -1,4 +1,4 @@
-import { buildRuntimeAddressKey, type RuntimeAddress } from '../agent-runtime/contracts/runtime-address';
+import { buildSessionIdentityKey, type SessionIdentity } from '../agent-runtime/contracts/runtime-address';
 import type {
   SessionApprovalRequestItem,
   SessionExecutionGraphItem,
@@ -23,7 +23,7 @@ export interface SessionRuntimeOverlay {
   sessionKey: string;
   protocolId: string;
   runtimeEndpointId: string;
-  runtimeAddress: RuntimeAddress;
+  sessionIdentity: SessionIdentity;
   timelineEntries: SessionTimelineEntry[];
   runtime: SessionRuntimeStateSnapshot;
   runtimeModel: string | null;
@@ -64,9 +64,14 @@ function clearRuntimeIssueIfMatches(
 export class SessionRuntimeStateStore {
   private readonly sessionStates = new Map<string, SessionRuntimeTimelineState>();
   private readonly parentSessionsByChildStateKey = new Map<string, Set<string>>();
+  private readonly childStateKeysByParentStateKey = new Map<string, Set<string>>();
   private readonly sessionKeysWithTransportIssue = new Set<string>();
-  private readonly approvalsByAddressKey = new Map<string, SessionApprovalIndexEntry[]>();
+  private readonly approvalsByIdentityKey = new Map<string, SessionApprovalIndexEntry[]>();
   private readonly approvalsById = new Map<string, SessionApprovalIndexEntry>();
+  private readonly approvalIndexKeysByStateKey = new Map<string, {
+    identityKeys: Set<string>;
+    approvalKeys: Set<string>;
+  }>();
   private readonly resolvedSessionModels = new Map<string, string>();
   private readonly persistedStoreReady: Promise<void>;
   private activeSessionKey: string | null = null;
@@ -127,8 +132,8 @@ export class SessionRuntimeStateStore {
     return this.findUniqueSessionState(sessionKey);
   }
 
-  findSessionStateByAddress(sessionKey: string, runtimeAddress: RuntimeAddress): SessionRuntimeTimelineState | null {
-    return this.sessionStates.get(this.buildAddressStateKey(sessionKey, runtimeAddress)) ?? null;
+  findSessionStateByIdentity(identity: SessionIdentity): SessionRuntimeTimelineState | null {
+    return this.sessionStates.get(this.buildIdentityStateKey(identity)) ?? null;
   }
 
   hasSessionState(sessionKey: string, context?: RuntimeSessionContext): boolean {
@@ -144,9 +149,8 @@ export class SessionRuntimeStateStore {
       this.parentSessionsByChildStateKey.delete(stateKey);
       this.sessionKeysWithTransportIssue.delete(stateKey);
       this.removeSessionFromApprovalIndexes(stateKey);
-      for (const parents of this.parentSessionsByChildStateKey.values()) {
-        parents.delete(stateKey);
-      }
+      this.removeParentFromExecutionGraphIndex(stateKey);
+      this.childStateKeysByParentStateKey.delete(stateKey);
       this.resolvedSessionModels.delete(stateKey);
     }
     this.clearActiveSessionKey(sessionKey);
@@ -161,7 +165,7 @@ export class SessionRuntimeStateStore {
       sessionKey: state.sessionKey,
       protocolId: state.canonical.protocolId,
       runtimeEndpointId: state.canonical.runtimeEndpointId,
-      runtimeAddress: state.canonical.context.address,
+      sessionIdentity: state.canonical.context.identity,
       timelineEntries: state.timelineEntries,
       runtime: state.runtime,
       runtimeModel: this.getResolvedSessionModel(state.sessionKey, state.canonical.context),
@@ -185,26 +189,29 @@ export class SessionRuntimeStateStore {
     graphs: SessionExecutionGraphItem[],
   ): void {
     const parentStateKey = this.buildStateKey(sessionKey, parentContext);
-    for (const parents of this.parentSessionsByChildStateKey.values()) {
-      parents.delete(parentStateKey);
-    }
+    this.removeParentFromExecutionGraphIndex(parentStateKey);
+    const childStateKeys = new Set<string>();
     for (const graph of graphs) {
       const childSessionKey = normalizeString(graph.childSessionKey);
-      if (!childSessionKey || !graph.childRuntimeAddress) {
+      if (!childSessionKey || !graph.childSessionIdentity) {
         continue;
       }
-      const childStateKey = this.buildAddressStateKey(childSessionKey, graph.childRuntimeAddress);
+      const childStateKey = this.buildIdentityStateKey(graph.childSessionIdentity);
       let parents = this.parentSessionsByChildStateKey.get(childStateKey);
       if (!parents) {
         parents = new Set<string>();
         this.parentSessionsByChildStateKey.set(childStateKey, parents);
       }
       parents.add(parentStateKey);
+      childStateKeys.add(childStateKey);
+    }
+    if (childStateKeys.size > 0) {
+      this.childStateKeysByParentStateKey.set(parentStateKey, childStateKeys);
     }
   }
 
-  listParentSessionStates(childSessionKey: string, runtimeAddress: RuntimeAddress): SessionRuntimeTimelineState[] {
-    const parentStateKeys = this.parentSessionsByChildStateKey.get(this.buildAddressStateKey(childSessionKey, runtimeAddress)) ?? [];
+  listParentSessionStates(identity: SessionIdentity): SessionRuntimeTimelineState[] {
+    const parentStateKeys = this.parentSessionsByChildStateKey.get(this.buildIdentityStateKey(identity)) ?? [];
     const states: SessionRuntimeTimelineState[] = [];
     for (const stateKey of parentStateKeys) {
       const state = this.sessionStates.get(stateKey);
@@ -224,46 +231,79 @@ export class SessionRuntimeStateStore {
     this.sessionKeysWithTransportIssue.delete(stateKey);
   }
 
-  private removeSessionFromApprovalIndexes(stateKey: string): void {
-    for (const [addressKey, entries] of this.approvalsByAddressKey.entries()) {
-      const retained = entries.filter((entry) => entry.stateKey !== stateKey);
-      if (retained.length === 0) {
-        this.approvalsByAddressKey.delete(addressKey);
+  private removeParentFromExecutionGraphIndex(parentStateKey: string): void {
+    const previousChildStateKeys = this.childStateKeysByParentStateKey.get(parentStateKey);
+    if (!previousChildStateKeys) {
+      return;
+    }
+    for (const childStateKey of previousChildStateKeys) {
+      const parents = this.parentSessionsByChildStateKey.get(childStateKey);
+      if (!parents) {
         continue;
       }
-      this.approvalsByAddressKey.set(addressKey, retained);
-    }
-    for (const [approvalId, entry] of this.approvalsById.entries()) {
-      if (entry.stateKey === stateKey) {
-        this.approvalsById.delete(approvalId);
+      parents.delete(parentStateKey);
+      if (parents.size === 0) {
+        this.parentSessionsByChildStateKey.delete(childStateKey);
       }
     }
+    this.childStateKeysByParentStateKey.delete(parentStateKey);
   }
 
-  syncApprovalAddressIndex(sessionKey: string, state: SessionRuntimeTimelineState): void {
+  private removeSessionFromApprovalIndexes(stateKey: string): void {
+    const previousIndexKeys = this.approvalIndexKeysByStateKey.get(stateKey);
+    if (!previousIndexKeys) {
+      return;
+    }
+    for (const identityKey of previousIndexKeys.identityKeys) {
+      const entries = this.approvalsByIdentityKey.get(identityKey);
+      if (!entries) {
+        continue;
+      }
+      const retained = entries.filter((entry) => entry.stateKey !== stateKey);
+      if (retained.length === 0) {
+        this.approvalsByIdentityKey.delete(identityKey);
+        continue;
+      }
+      this.approvalsByIdentityKey.set(identityKey, retained);
+    }
+    for (const approvalKey of previousIndexKeys.approvalKeys) {
+      this.approvalsById.delete(approvalKey);
+    }
+    this.approvalIndexKeysByStateKey.delete(stateKey);
+  }
+
+  syncApprovalIdentityIndex(sessionKey: string, state: SessionRuntimeTimelineState): void {
     const stateKey = this.buildStateKey(sessionKey, state.canonical.context);
     this.removeSessionFromApprovalIndexes(stateKey);
+    const identityKeys = new Set<string>();
+    const approvalKeys = new Set<string>();
     for (const approval of state.canonical.approvals) {
       const entry = { sessionKey, stateKey, approval };
-      const addressKey = buildRuntimeAddressKey(approval.runtimeAddress);
-      const entries = this.approvalsByAddressKey.get(addressKey) ?? [];
+      const identityKey = buildSessionIdentityKey(approval.sessionIdentity);
+      const entries = this.approvalsByIdentityKey.get(identityKey) ?? [];
       entries.push(entry);
-      this.approvalsByAddressKey.set(addressKey, entries);
-      this.approvalsById.set(approval.id, entry);
+      this.approvalsByIdentityKey.set(identityKey, entries);
+      const approvalKey = this.buildApprovalIndexKey(approval.sessionIdentity, approval.id);
+      this.approvalsById.set(approvalKey, entry);
+      identityKeys.add(identityKey);
+      approvalKeys.add(approvalKey);
+    }
+    if (identityKeys.size > 0 || approvalKeys.size > 0) {
+      this.approvalIndexKeysByStateKey.set(stateKey, { identityKeys, approvalKeys });
     }
   }
 
-  listApprovals(runtimeAddress: RuntimeAddress): SessionApprovalIndexEntry[] {
-    return [...this.approvalsByAddressKey.get(buildRuntimeAddressKey(runtimeAddress)) ?? []];
+  listApprovals(identity: SessionIdentity): SessionApprovalIndexEntry[] {
+    return [...this.approvalsByIdentityKey.get(buildSessionIdentityKey(identity)) ?? []];
   }
 
-  findApproval(approvalId: string): SessionApprovalIndexEntry | null {
-    return this.approvalsById.get(approvalId) ?? null;
+  findApproval(identity: SessionIdentity, approvalId: string): SessionApprovalIndexEntry | null {
+    return this.approvalsById.get(this.buildApprovalIndexKey(identity, approvalId)) ?? null;
   }
 
-  listApprovalSessionStates(runtimeAddress: RuntimeAddress): Array<[string, SessionRuntimeTimelineState]> {
+  listApprovalSessionStates(identity: SessionIdentity): Array<[string, SessionRuntimeTimelineState]> {
     const states: Array<[string, SessionRuntimeTimelineState]> = [];
-    for (const entry of this.listApprovals(runtimeAddress)) {
+    for (const entry of this.listApprovals(identity)) {
       const state = this.sessionStates.get(entry.stateKey);
       if (state) {
         states.push([entry.sessionKey, state]);
@@ -281,7 +321,7 @@ export class SessionRuntimeStateStore {
   private findUniqueSessionState(sessionKey: string): SessionRuntimeTimelineState | null {
     const matches = this.findStateKeys(sessionKey).map((stateKey) => this.sessionStates.get(stateKey)!);
     if (matches.length > 1) {
-      throw new Error(`Session state requires explicit runtime address metadata: ${sessionKey}`);
+      throw new Error(`Session state requires explicit session identity metadata: ${sessionKey}`);
     }
     return matches[0] ?? null;
   }
@@ -297,17 +337,21 @@ export class SessionRuntimeStateStore {
   private resolveExistingStateKeyOrNull(sessionKey: string): string | null {
     const matches = this.findStateKeys(sessionKey);
     if (matches.length > 1) {
-      throw new Error(`Session state requires explicit runtime address metadata: ${sessionKey}`);
+      throw new Error(`Session state requires explicit session identity metadata: ${sessionKey}`);
     }
     return matches[0] ?? null;
   }
 
-  private buildStateKey(sessionKey: string, context: RuntimeSessionContext): string {
-    return this.buildAddressStateKey(sessionKey, context.address);
+  private buildStateKey(_sessionKey: string, context: RuntimeSessionContext): string {
+    return this.buildIdentityStateKey(context.identity);
   }
 
-  private buildAddressStateKey(sessionKey: string, runtimeAddress: RuntimeAddress): string {
-    return `${buildRuntimeAddressKey(runtimeAddress)}::${sessionKey}`;
+  private buildIdentityStateKey(identity: SessionIdentity): string {
+    return buildSessionIdentityKey(identity);
+  }
+
+  private buildApprovalIndexKey(identity: SessionIdentity, approvalId: string): string {
+    return `${buildSessionIdentityKey(identity)}:${approvalId}`;
   }
 
   getLatestConnectedTransportEpoch(): number {

@@ -132,8 +132,12 @@ function createPluginRuntimeJobDefinitions(
         const pluginIds = Array.isArray(body.pluginIds)
           ? body.pluginIds.filter((pluginId): pluginId is string => typeof pluginId === 'string')
           : [];
+        const currentPluginIds = module.pluginRegistry.getEnabledPluginIds();
+        const nextPluginIds = body.enabled === false
+          ? currentPluginIds.filter((pluginId) => !pluginIds.includes(pluginId))
+          : Array.from(new Set([...currentPluginIds, ...pluginIds]));
         return await module.pluginRegistry.executeSetEnabledPluginIds(
-          pluginIds,
+          nextPluginIds,
           deps.gatewayControl,
         );
       },

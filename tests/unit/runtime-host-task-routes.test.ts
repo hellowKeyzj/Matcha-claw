@@ -6,7 +6,7 @@ import { TaskRuntimeWorkflow } from '../../runtime-host/application/workflows/ta
 import { createTaskControlCapabilityOperationRoutes } from '../../runtime-host/application/capabilities/task/task-control-capability';
 import { createToolInvokeCapabilityOperationRoutes } from '../../runtime-host/application/capabilities/tool/tool-invoke-capability';
 import type { CapabilityOperationContext } from '../../runtime-host/application/capabilities/contracts/capability-router';
-import { createOpenClawTestRuntimeAddress } from './helpers/runtime-address-fixtures';
+import { createOpenClawTestSessionIdentity } from './helpers/runtime-address-fixtures';
 
 function taskServiceWith(gatewayRpc = vi.fn(async () => ({})), inspectGatewayMethodReadiness = vi.fn(async () => ({
   ready: true,
@@ -46,17 +46,25 @@ function capabilityContext(
   capabilityId: string,
   operationId: string,
   input: Record<string, unknown>,
+  targetOverride?: CapabilityOperationContext['target'],
+  scopeOverride?: CapabilityOperationContext['scope'],
 ): CapabilityOperationContext {
   const sessionKey = typeof input.params === 'object' && input.params && 'sessionKey' in input.params
     ? String((input.params as { sessionKey?: unknown }).sessionKey)
     : 'agent:main:main';
-  const address = createOpenClawTestRuntimeAddress(sessionKey);
+  const sessionIdentity = createOpenClawTestSessionIdentity(sessionKey);
+  const taskId = typeof input.taskId === 'string' ? input.taskId : '';
   return {
     capabilityId,
     operationId,
-    address: { ...address, capabilityId },
-    input: { ...input, runtimeAddress: { ...address, capabilityId } },
-    domainInput: input,
+    scope: scopeOverride ?? (capabilityId === 'task.control'
+      ? { kind: 'session', identity: sessionIdentity }
+      : { kind: 'session', identity: sessionIdentity }),
+    target: targetOverride ?? (capabilityId === 'task.control'
+      ? { kind: 'task', taskId, owner: { kind: 'session', identity: sessionIdentity } }
+      : { kind: 'tool', toolName: typeof input.method === 'string' ? input.method : operationId, identity: sessionIdentity }),
+    input: { ...input, sessionIdentity },
+    domainInput: { ...input, sessionIdentity },
   };
 }
 
@@ -277,6 +285,34 @@ describe('runtime-host task routes', () => {
       status: 200,
       data: { success: true, task: { id: 'job-1', status: 'cancelled' } },
     });
+  });
+
+  it('rejects task.control when target taskId or owner does not match input', async () => {
+    const sessionIdentity = createOpenClawTestSessionIdentity('agent:main:main');
+    const otherIdentity = createOpenClawTestSessionIdentity('agent:other:main');
+    const taskService = {
+      output: vi.fn(async () => ({ status: 200, data: { success: true } })),
+      stop: vi.fn(async () => ({ status: 200, data: { success: true } })),
+    } as never;
+    const [outputRoute, stopRoute] = taskControlRoutes(taskService);
+
+    expect(await outputRoute.handle(capabilityContext('task.control', 'tasks.output', {
+      sessionIdentity,
+      taskId: 'job-1',
+    }, { kind: 'task', taskId: 'job-2', owner: { kind: 'session', identity: sessionIdentity } }))).toEqual({
+      status: 400,
+      data: { success: false, error: 'Capability target taskId must match input taskId' },
+    });
+
+    expect(await stopRoute.handle(capabilityContext('task.control', 'tasks.stop', {
+      sessionIdentity,
+      taskId: 'job-1',
+    }, { kind: 'task', taskId: 'job-1', owner: { kind: 'session', identity: otherIdentity } }))).toEqual({
+      status: 400,
+      data: { success: false, error: 'Capability target owner must match input owner' },
+    });
+    expect(taskService.output).not.toHaveBeenCalled();
+    expect(taskService.stop).not.toHaveBeenCalled();
   });
 
   it('returns structured 503 when required gateway method is absent', async () => {

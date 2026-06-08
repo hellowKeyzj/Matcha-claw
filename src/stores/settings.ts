@@ -11,7 +11,6 @@ import {
   hostSettingsPutValue,
   hostSettingsReset,
 } from '@/lib/settings-runtime';
-import type { RuntimeAddress } from '../../runtime-host/shared/runtime-address';
 
 type Theme = 'light' | 'dark' | 'system';
 type UpdateChannel = 'stable' | 'beta' | 'dev';
@@ -47,20 +46,20 @@ interface SettingsState {
 
   // Actions
   init: () => Promise<void>;
-  setTheme: (theme: Theme, runtimeAddress: RuntimeAddress) => Promise<void>;
-  setLanguage: (language: string, runtimeAddress: RuntimeAddress) => Promise<void>;
-  setUserAvatarDataUrl: (dataUrl: string | null, runtimeAddress: RuntimeAddress) => Promise<void>;
-  clearUserAvatar: (runtimeAddress: RuntimeAddress) => Promise<void>;
-  setStartMinimized: (value: boolean, runtimeAddress: RuntimeAddress) => Promise<void>;
-  setLaunchAtStartup: (value: boolean, runtimeAddress: RuntimeAddress) => Promise<void>;
-  setTelemetryEnabled: (value: boolean, runtimeAddress: RuntimeAddress) => Promise<void>;
-  setGatewayAutoStart: (value: boolean, runtimeAddress: RuntimeAddress) => Promise<void>;
-  setGatewayPort: (port: number, runtimeAddress: RuntimeAddress) => Promise<void>;
-  setUpdateChannel: (channel: UpdateChannel, runtimeAddress: RuntimeAddress) => Promise<void>;
-  setAutoCheckUpdate: (value: boolean, runtimeAddress: RuntimeAddress) => Promise<void>;
-  setDevModeUnlocked: (value: boolean, runtimeAddress: RuntimeAddress) => Promise<void>;
-  markSetupComplete: (runtimeAddress: RuntimeAddress) => Promise<void>;
-  resetSettings: (runtimeAddress: RuntimeAddress) => Promise<void>;
+  setTheme: (theme: Theme) => Promise<void>;
+  setLanguage: (language: string) => Promise<void>;
+  setUserAvatarDataUrl: (dataUrl: string | null) => Promise<void>;
+  clearUserAvatar: () => Promise<void>;
+  setStartMinimized: (value: boolean) => Promise<void>;
+  setLaunchAtStartup: (value: boolean) => Promise<void>;
+  setTelemetryEnabled: (value: boolean) => Promise<void>;
+  setGatewayAutoStart: (value: boolean) => Promise<void>;
+  setGatewayPort: (port: number) => Promise<void>;
+  setUpdateChannel: (channel: UpdateChannel) => Promise<void>;
+  setAutoCheckUpdate: (value: boolean) => Promise<void>;
+  setDevModeUnlocked: (value: boolean) => Promise<void>;
+  markSetupComplete: () => Promise<void>;
+  resetSettings: () => Promise<void>;
 }
 
 const defaultSettings = {
@@ -116,62 +115,62 @@ export const useSettingsStore = create<SettingsState>()(
         }
       },
 
-      setTheme: async (theme, runtimeAddress) => {
-        await hostSettingsPutValue('theme', theme, runtimeAddress);
+      setTheme: async (theme) => {
         set({ theme });
+        await hostSettingsPutValue('theme', theme);
       },
-      setLanguage: async (language, runtimeAddress) => {
+      setLanguage: async (language) => {
         const resolvedLanguage = resolveSupportedLanguage(language);
-        await hostSettingsPutValue('language', resolvedLanguage, runtimeAddress);
+        await hostSettingsPutValue('language', resolvedLanguage);
         i18n.changeLanguage(resolvedLanguage);
         set({ language: resolvedLanguage });
       },
-      setUserAvatarDataUrl: async (userAvatarDataUrl, runtimeAddress) => {
-        await hostSettingsPutValue('userAvatarDataUrl', userAvatarDataUrl, runtimeAddress);
+      setUserAvatarDataUrl: async (userAvatarDataUrl) => {
+        await hostSettingsPutValue('userAvatarDataUrl', userAvatarDataUrl);
         set({ userAvatarDataUrl });
       },
-      clearUserAvatar: async (runtimeAddress) => {
-        await hostSettingsPutValue('userAvatarDataUrl', null, runtimeAddress);
+      clearUserAvatar: async () => {
+        await hostSettingsPutValue('userAvatarDataUrl', null);
         set({ userAvatarDataUrl: null });
       },
-      setStartMinimized: async (startMinimized, runtimeAddress) => {
-        await hostSettingsPutValue('startMinimized', startMinimized, runtimeAddress);
+      setStartMinimized: async (startMinimized) => {
+        await hostSettingsPutValue('startMinimized', startMinimized);
         set({ startMinimized });
       },
-      setLaunchAtStartup: async (launchAtStartup, runtimeAddress) => {
-        await hostSettingsPutValue('launchAtStartup', launchAtStartup, runtimeAddress);
+      setLaunchAtStartup: async (launchAtStartup) => {
+        await hostSettingsPutValue('launchAtStartup', launchAtStartup);
         set({ launchAtStartup });
       },
-      setTelemetryEnabled: async (telemetryEnabled, runtimeAddress) => {
-        await hostSettingsPutValue('telemetryEnabled', telemetryEnabled, runtimeAddress);
+      setTelemetryEnabled: async (telemetryEnabled) => {
+        await hostSettingsPutValue('telemetryEnabled', telemetryEnabled);
         set({ telemetryEnabled });
       },
-      setGatewayAutoStart: async (gatewayAutoStart, runtimeAddress) => {
-        await hostSettingsPutValue('gatewayAutoStart', gatewayAutoStart, runtimeAddress);
+      setGatewayAutoStart: async (gatewayAutoStart) => {
+        await hostSettingsPutValue('gatewayAutoStart', gatewayAutoStart);
         set({ gatewayAutoStart });
       },
-      setGatewayPort: async (gatewayPort, runtimeAddress) => {
-        await hostSettingsPutValue('gatewayPort', gatewayPort, runtimeAddress);
+      setGatewayPort: async (gatewayPort) => {
+        await hostSettingsPutValue('gatewayPort', gatewayPort);
         set({ gatewayPort });
       },
-      setUpdateChannel: async (updateChannel, runtimeAddress) => {
-        await hostSettingsPutValue('updateChannel', updateChannel, runtimeAddress);
+      setUpdateChannel: async (updateChannel) => {
+        await hostSettingsPutValue('updateChannel', updateChannel);
         set({ updateChannel });
       },
-      setAutoCheckUpdate: async (autoCheckUpdate, runtimeAddress) => {
-        await hostSettingsPutValue('autoCheckUpdate', autoCheckUpdate, runtimeAddress);
+      setAutoCheckUpdate: async (autoCheckUpdate) => {
+        await hostSettingsPutValue('autoCheckUpdate', autoCheckUpdate);
         set({ autoCheckUpdate });
       },
-      setDevModeUnlocked: async (devModeUnlocked, runtimeAddress) => {
-        await hostSettingsPutValue('devModeUnlocked', devModeUnlocked, runtimeAddress);
+      setDevModeUnlocked: async (devModeUnlocked) => {
+        await hostSettingsPutValue('devModeUnlocked', devModeUnlocked);
         set({ devModeUnlocked });
       },
-      markSetupComplete: async (runtimeAddress) => {
-        await hostSettingsPutValue('setupComplete', true, runtimeAddress);
+      markSetupComplete: async () => {
+        await hostSettingsPutValue('setupComplete', true);
         set({ setupComplete: true });
       },
-      resetSettings: async (runtimeAddress) => {
-        const settings = await hostSettingsReset<Partial<SettingsSnapshot>>(runtimeAddress);
+      resetSettings: async () => {
+        const settings = await hostSettingsReset<Partial<SettingsSnapshot>>();
         const resolvedLanguage = settings.language
           ? resolveSupportedLanguage(settings.language)
           : undefined;

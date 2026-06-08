@@ -1,4 +1,4 @@
-import type { RuntimeAddress } from '../../agent-runtime/contracts/runtime-address';
+import type { SessionIdentity } from '../../agent-runtime/contracts/runtime-address';
 import type { SessionStorageIndexWorkflow } from './session-storage-index-workflow';
 import type { SessionStorageMutationWorkflow } from './session-storage-mutation-workflow';
 import type { SessionStorageTranscriptWorkflow } from './session-storage-transcript-workflow';
@@ -6,7 +6,7 @@ import type { SessionStorageDescriptor, SessionTranscriptFingerprint } from '../
 
 export interface SessionStorageRepositoryWorkflowDeps {
   readonly indexWorkflow: Pick<SessionStorageIndexWorkflow, 'listStorageDescriptors' | 'findStorageDescriptor' | 'invalidateAgentDescriptorsCache'>;
-  readonly mutationWorkflow: Pick<SessionStorageMutationWorkflow, 'upsertRuntimeAddress' | 'updateStatus' | 'rename' | 'delete'>;
+  readonly mutationWorkflow: Pick<SessionStorageMutationWorkflow, 'upsertSessionIdentity' | 'updateStatus' | 'rename' | 'delete'>;
   readonly transcriptWorkflow: Pick<SessionStorageTranscriptWorkflow,
     | 'getTranscriptFingerprint'
     | 'readTranscriptDescriptorContent'
@@ -21,16 +21,16 @@ export class SessionStorageRepositoryWorkflow {
     return await this.deps.indexWorkflow.listStorageDescriptors();
   }
 
-  async findStorageDescriptor(sessionKey: string): Promise<SessionStorageDescriptor | null> {
-    return await this.deps.indexWorkflow.findStorageDescriptor(sessionKey);
+  async findStorageDescriptor(identity: SessionIdentity): Promise<SessionStorageDescriptor | null> {
+    return await this.deps.indexWorkflow.findStorageDescriptor(identity);
   }
 
   async getTranscriptFingerprint(pathname: string): Promise<SessionTranscriptFingerprint | null> {
     return await this.deps.transcriptWorkflow.getTranscriptFingerprint(pathname);
   }
 
-  async readTranscriptContent(sessionKey: string): Promise<string | null> {
-    const descriptor = await this.findStorageDescriptor(sessionKey);
+  async readTranscriptContent(identity: SessionIdentity): Promise<string | null> {
+    const descriptor = await this.findStorageDescriptor(identity);
     return descriptor ? await this.readTranscriptDescriptorContent(descriptor) : null;
   }
 
@@ -38,8 +38,8 @@ export class SessionStorageRepositoryWorkflow {
     return await this.deps.transcriptWorkflow.readTranscriptDescriptorContent(descriptor);
   }
 
-  async *readTranscriptLines(sessionKey: string): AsyncIterable<string> {
-    const descriptor = await this.findStorageDescriptor(sessionKey);
+  async *readTranscriptLines(identity: SessionIdentity): AsyncIterable<string> {
+    const descriptor = await this.findStorageDescriptor(identity);
     if (!descriptor) {
       return;
     }
@@ -50,55 +50,55 @@ export class SessionStorageRepositoryWorkflow {
     yield* this.deps.transcriptWorkflow.readTranscriptDescriptorLines(descriptor);
   }
 
-  async upsertSessionRuntimeAddress(sessionKey: string, runtimeAddress: RuntimeAddress): Promise<boolean> {
-    const descriptor = await this.findWritableDescriptor(sessionKey);
+  async upsertSessionIdentity(sessionIdentity: SessionIdentity): Promise<boolean> {
+    const descriptor = await this.findWritableDescriptor(sessionIdentity);
     if (!descriptor) {
       return false;
     }
-    await this.deps.mutationWorkflow.upsertRuntimeAddress(descriptor, sessionKey, runtimeAddress);
+    await this.deps.mutationWorkflow.upsertSessionIdentity(descriptor, sessionIdentity.sessionKey, sessionIdentity);
     this.deps.indexWorkflow.invalidateAgentDescriptorsCache(descriptor.agentId);
     return true;
   }
 
   async updateSessionStatus(
-    sessionKey: string,
+    identity: SessionIdentity,
     status: 'active' | 'completed' | 'archived' | 'deleted',
   ): Promise<boolean> {
-    const descriptor = await this.findWritableDescriptor(sessionKey);
+    const descriptor = await this.findWritableDescriptor(identity);
     if (!descriptor) {
       return false;
     }
-    await this.deps.mutationWorkflow.updateStatus(descriptor, sessionKey, status);
+    await this.deps.mutationWorkflow.updateStatus(descriptor, identity.sessionKey, status);
     this.deps.indexWorkflow.invalidateAgentDescriptorsCache(descriptor.agentId);
     return true;
   }
 
-  async renameSession(sessionKey: string, label: string): Promise<boolean> {
+  async renameSession(identity: SessionIdentity, label: string): Promise<boolean> {
     const normalizedLabel = normalizeString(label);
     if (!normalizedLabel) {
       return false;
     }
-    const descriptor = await this.findWritableDescriptor(sessionKey);
+    const descriptor = await this.findWritableDescriptor(identity);
     if (!descriptor) {
       return false;
     }
-    await this.deps.mutationWorkflow.rename(descriptor, sessionKey, normalizedLabel);
+    await this.deps.mutationWorkflow.rename(descriptor, identity.sessionKey, normalizedLabel);
     this.deps.indexWorkflow.invalidateAgentDescriptorsCache(descriptor.agentId);
     return true;
   }
 
-  async deleteSession(sessionKey: string): Promise<boolean> {
-    const descriptor = await this.findWritableDescriptor(sessionKey);
+  async deleteSession(identity: SessionIdentity): Promise<boolean> {
+    const descriptor = await this.findWritableDescriptor(identity);
     if (!descriptor) {
       return false;
     }
-    await this.deps.mutationWorkflow.delete(descriptor, sessionKey);
+    await this.deps.mutationWorkflow.delete(descriptor, identity.sessionKey);
     this.deps.indexWorkflow.invalidateAgentDescriptorsCache(descriptor.agentId);
     return true;
   }
 
-  private async findWritableDescriptor(sessionKey: string): Promise<SessionStorageDescriptor | null> {
-    const descriptor = await this.findStorageDescriptor(sessionKey);
+  private async findWritableDescriptor(identity: SessionIdentity): Promise<SessionStorageDescriptor | null> {
+    const descriptor = await this.findStorageDescriptor(identity);
     return descriptor?.sessionsJson && descriptor.sessionsJsonPath ? descriptor : null;
   }
 }

@@ -38,8 +38,8 @@ import {
   type ChatStoreState,
 } from './types';
 import { getSessionMeta, getSessionRuntime, patchSessionMeta } from './store-state-helpers';
-import { buildRuntimeScopeKey, buildSessionRecordKey, findSessionRecordKey, resolveSessionOperationTarget, sameRuntimeEndpointScope } from './session-identity';
-import type { RuntimeAddress } from '../../../runtime-host/shared/runtime-address';
+import { buildRuntimeScopeKey, buildSessionIdentityRecordIndex, buildSessionRecordKey, findSessionRecordKey, resolveSessionOperationTarget, sameRuntimeEndpointScope, sessionIdentityForAgentScope } from './session-identity';
+import { buildSessionIdentityKey, type AgentScope } from '../../../runtime-host/shared/runtime-address';
 import type { RuntimeEndpointSummary } from '../../../runtime-host/shared/runtime-topology';
 import { finishChatRunTelemetry } from './telemetry';
 import { buildRuntimeErrorDismissMarker } from './runtime-error-view';
@@ -48,54 +48,45 @@ function isStaleApprovalResolveError(message: string): boolean {
   return /not found|expired|already resolved|unknown approval|invalid approval/i.test(message);
 }
 
-function runtimeEndpointIdFromAddress(runtimeAddress: RuntimeAddress): string {
-  return runtimeAddress.kind === 'native-runtime'
-    ? runtimeAddress.runtimeInstanceId
-    : runtimeAddress.endpointId;
-}
-
-function protocolIdFromAddress(runtimeAddress: RuntimeAddress): string | null {
-  return runtimeAddress.kind === 'protocol-connector'
-    ? runtimeAddress.protocolId
-    : null;
-}
-
 const SESSION_PROMPT_CAPABILITY_ID = 'session.prompt';
 
-function readSessionPromptAddresses(endpoint: RuntimeEndpointSummary): RuntimeAddress[] {
-  return endpoint.capabilityAddresses.filter((address) => address.capabilityId === SESSION_PROMPT_CAPABILITY_ID);
+function readSessionPromptScopes(endpoint: RuntimeEndpointSummary): AgentScope[] {
+  return endpoint.capabilitySummaries
+    .filter((capability) => capability.id === SESSION_PROMPT_CAPABILITY_ID && capability.scope.kind === 'agent')
+    .map((capability) => capability.scope as AgentScope);
 }
 
 function isReadySessionEndpoint(endpoint: RuntimeEndpointSummary): boolean {
-  return readSessionPromptAddresses(endpoint).length > 0
+  return readSessionPromptScopes(endpoint).length > 0
     && endpoint.controlState.readiness?.ready !== false;
 }
 
 function compareRuntimeEndpointTarget(left: ChatSessionRuntimeEndpointTarget, right: ChatSessionRuntimeEndpointTarget): number {
   return left.endpointId.localeCompare(right.endpointId)
-    || left.defaultSessionPromptAddress.agentId.localeCompare(right.defaultSessionPromptAddress.agentId)
-    || JSON.stringify(left.defaultSessionPromptAddress).localeCompare(JSON.stringify(right.defaultSessionPromptAddress));
+    || left.defaultSessionPromptScope.agentId.localeCompare(right.defaultSessionPromptScope.agentId)
+    || JSON.stringify(left.defaultSessionPromptScope).localeCompare(JSON.stringify(right.defaultSessionPromptScope));
 }
 
 function buildSessionRuntimeEndpointTargets(endpoints: RuntimeEndpointSummary[]): ChatSessionRuntimeEndpointTarget[] {
   return endpoints
     .filter(isReadySessionEndpoint)
     .map((endpoint) => {
-      const sessionPromptAddresses = readSessionPromptAddresses(endpoint)
+      const sessionPromptScopes = readSessionPromptScopes(endpoint)
         .sort((left, right) => left.agentId.localeCompare(right.agentId) || JSON.stringify(left).localeCompare(JSON.stringify(right)));
-      const defaultSessionPromptAddress = sessionPromptAddresses.find((address) => address.agentId === 'main' || address.agentId === 'default')
-        ?? sessionPromptAddresses[0]!;
+      const defaultSessionPromptScope = sessionPromptScopes.find((scope) => scope.agentId === 'main' || scope.agentId === 'default')
+        ?? sessionPromptScopes[0]!;
       return {
         endpointId: endpoint.id,
-        protocolId: endpoint.protocolId ?? protocolIdFromAddress(defaultSessionPromptAddress) ?? '',
+        protocolId: endpoint.protocolId,
+        endpoint: defaultSessionPromptScope.endpoint,
         runtimeAdapterId: endpoint.runtimeAdapterId,
         runtimeInstanceId: endpoint.runtimeInstanceId,
         connectorId: endpoint.connectorId,
         displayName: endpoint.displayName,
         agentIds: [...endpoint.agentIds],
         acceptsDynamicAgents: endpoint.acceptsDynamicAgents,
-        sessionPromptAddresses,
-        defaultSessionPromptAddress,
+        sessionPromptScopes,
+        defaultSessionPromptScope,
       };
     })
     .sort(compareRuntimeEndpointTarget);
@@ -105,20 +96,20 @@ function matchesCurrentSessionRuntime(
   target: ChatSessionRuntimeEndpointTarget,
   state: ChatStoreState,
 ): boolean {
-  const meta = getSessionMeta(state, state.currentSessionKey);
-  return Boolean(meta.runtimeAddress && sameRuntimeEndpointScope(target.defaultSessionPromptAddress, meta.runtimeAddress));
+  const identity = getSessionMeta(state, state.currentSessionKey).sessionIdentity;
+  return Boolean(identity && sameRuntimeEndpointScope(target.endpoint, identity.endpoint));
 }
 
-function selectDefaultRuntimeAddress(
+function selectDefaultSessionPromptScope(
   targets: ChatSessionRuntimeEndpointTarget[],
   state: ChatStoreState,
-): RuntimeAddress | null {
+): AgentScope | null {
   if (targets.length === 0) {
     return null;
   }
-  return targets.find((target) => matchesCurrentSessionRuntime(target, state))?.defaultSessionPromptAddress
-    ?? targets.find((target) => target.defaultSessionPromptAddress.agentId === 'main' || target.defaultSessionPromptAddress.agentId === 'default')?.defaultSessionPromptAddress
-    ?? targets[0]!.defaultSessionPromptAddress;
+  return targets.find((target) => matchesCurrentSessionRuntime(target, state))?.defaultSessionPromptScope
+    ?? targets.find((target) => target.defaultSessionPromptScope.agentId === 'main' || target.defaultSessionPromptScope.agentId === 'default')?.defaultSessionPromptScope
+    ?? targets[0]!.defaultSessionPromptScope;
 }
 
 export const useChatStore = create<ChatStoreState>((set, get) => {
@@ -139,9 +130,10 @@ export const useChatStore = create<ChatStoreState>((set, get) => {
       status: 'idle',
       error: null,
       endpoints: [],
-      defaultRuntimeAddress: null,
+      defaultSessionPromptScope: null,
     },
     loadedSessions: {},
+    sessionRecordKeyByIdentityKey: {},
     pendingApprovalsBySession: {},
     dismissedRuntimeErrorBySession: {},
     foregroundHistorySessionKey: null,
@@ -160,50 +152,51 @@ export const useChatStore = create<ChatStoreState>((set, get) => {
       try {
         const { endpoints } = await hostRuntimeEndpointsList();
         const targets = buildSessionRuntimeEndpointTargets(endpoints);
-        const defaultRuntimeAddress = selectDefaultRuntimeAddress(targets, get());
-        if (!defaultRuntimeAddress) {
+        const defaultSessionPromptScope = selectDefaultSessionPromptScope(targets, get());
+        if (!defaultSessionPromptScope) {
           throw new Error('No session runtime endpoint is available');
         }
         set((state) => {
           const currentMeta = getSessionMeta(state, state.currentSessionKey);
-          if (currentMeta.runtimeAddress) {
+          if (currentMeta.sessionIdentity) {
             return {
               sessionRuntimeCatalog: {
                 status: 'ready',
                 error: null,
                 endpoints: targets,
-                defaultRuntimeAddress,
+                defaultSessionPromptScope,
               },
             };
           }
-          const runtimeAddress = {
-            ...defaultRuntimeAddress,
-            sessionKey: defaultRuntimeAddress.sessionKey ?? DEFAULT_SESSION_KEY,
-          };
-          const recordKey = buildSessionRecordKey(runtimeAddress, DEFAULT_SESSION_KEY);
+          const sessionIdentity = sessionIdentityForAgentScope(defaultSessionPromptScope, DEFAULT_SESSION_KEY);
+          const recordKey = buildSessionRecordKey(sessionIdentity);
+          const loadedSessions = patchSessionMeta(
+            { loadedSessions: state.loadedSessions },
+            recordKey,
+            {
+              backendSessionKey: DEFAULT_SESSION_KEY,
+              runtimeScopeKey: buildRuntimeScopeKey(sessionIdentity.endpoint),
+              agentId: sessionIdentity.agentId,
+              protocolId: defaultSessionPromptScope.endpoint.kind === 'protocol-connector' ? defaultSessionPromptScope.endpoint.protocolId : null,
+              runtimeEndpointId: defaultSessionPromptScope.endpoint.kind === 'native-runtime'
+                ? defaultSessionPromptScope.endpoint.runtimeInstanceId
+                : defaultSessionPromptScope.endpoint.endpointId,
+              sessionIdentity,
+              kind: 'main',
+              preferred: true,
+              displayName: 'Main',
+            },
+          );
           return {
             sessionRuntimeCatalog: {
               status: 'ready',
               error: null,
               endpoints: targets,
-              defaultRuntimeAddress,
+              defaultSessionPromptScope,
             },
             currentSessionKey: recordKey,
-            loadedSessions: patchSessionMeta(
-              { loadedSessions: state.loadedSessions },
-              recordKey,
-              {
-                backendSessionKey: DEFAULT_SESSION_KEY,
-                runtimeScopeKey: buildRuntimeScopeKey(runtimeAddress),
-                agentId: runtimeAddress.agentId,
-                protocolId: protocolIdFromAddress(runtimeAddress),
-                runtimeEndpointId: runtimeEndpointIdFromAddress(runtimeAddress),
-                runtimeAddress,
-                kind: 'main',
-                preferred: true,
-                displayName: 'Main',
-              },
-            ),
+            loadedSessions,
+            sessionRecordKeyByIdentityKey: buildSessionIdentityRecordIndex(loadedSessions),
           };
         });
       } catch (error) {
@@ -214,7 +207,7 @@ export const useChatStore = create<ChatStoreState>((set, get) => {
             status: 'error',
             error: message,
             endpoints: [],
-            defaultRuntimeAddress: null,
+            defaultSessionPromptScope: null,
           },
           sessionCatalogStatus: createIdleResourceStatusState(),
           error: message,
@@ -291,13 +284,13 @@ export const useChatStore = create<ChatStoreState>((set, get) => {
       try {
         const targetSessionKey = normalizeTaskSessionKey(sessionKeyHint, get().currentSessionKey);
         const target = resolveSessionOperationTarget(get(), targetSessionKey);
-        const payload = await hostSessionApprovals({ runtimeAddress: target.runtimeAddress });
+        const payload = await hostSessionApprovals({ sessionIdentity: target.sessionIdentity });
         const stateAfterFetch = get();
         const endpointSessionKeys = Object.entries(stateAfterFetch.loadedSessions)
-          .filter(([, record]) => record.meta.runtimeAddress && sameRuntimeEndpointScope(record.meta.runtimeAddress, target.runtimeAddress))
+          .filter(([, record]) => record.meta.sessionIdentity && sameRuntimeEndpointScope(record.meta.sessionIdentity.endpoint, target.sessionIdentity.endpoint))
           .map(([recordKey]) => recordKey);
         const grouped = groupApprovalsBySession(payload.approvals.flatMap((approval) => {
-          const recordKey = findSessionRecordKey(stateAfterFetch, approval.sessionKey, approval.runtimeAddress);
+          const recordKey = findSessionRecordKey(stateAfterFetch, approval.sessionIdentity);
           if (!recordKey) {
             return [];
           }
@@ -317,27 +310,27 @@ export const useChatStore = create<ChatStoreState>((set, get) => {
         // ignore
       }
     },
-    resolveApproval: async (id, decision) => {
-      const approvalId = id.trim();
+    resolveApproval: async (approval, decision) => {
+      const approvalId = approval.id.trim();
       if (!approvalId) return;
       beginMutating();
       try {
-        const approval = Object.values(get().pendingApprovalsBySession)
-          .flat()
-          .find((item) => item.id === approvalId);
-        if (!approval) {
+        const pendingApproval = (get().pendingApprovalsBySession[approval.sessionKey] ?? [])
+          .find((item) => item.id === approvalId
+            && buildSessionIdentityKey(item.sessionIdentity) === buildSessionIdentityKey(approval.sessionIdentity));
+        if (!pendingApproval) {
           throw new Error('approval not found');
         }
         await hostSessionResolveApproval({
           id: approvalId,
-          sessionKey: approval.backendSessionKey,
-          runtimeAddress: approval.runtimeAddress,
+          sessionKey: pendingApproval.backendSessionKey,
+          sessionIdentity: pendingApproval.sessionIdentity,
           decision,
         });
         set((state) => buildApprovalResolvedPatch({
           state,
           id: approvalId,
-          resolvedSessionKey: approval.sessionKey,
+          resolvedSessionKey: pendingApproval.sessionKey,
           decision,
         }) ?? state);
       } catch (error) {
@@ -346,33 +339,41 @@ export const useChatStore = create<ChatStoreState>((set, get) => {
           set((state) => buildApprovalResolvedPatch({
             state,
             id: approvalId,
+            resolvedSessionKey: approval.sessionKey,
             decision: 'deny',
           }) ?? state);
         }
         set({ error: message });
-        await get().syncPendingApprovals(get().currentSessionKey);
+        await get().syncPendingApprovals(approval.sessionKey || get().currentSessionKey);
       } finally {
         finishMutating();
       }
     },
-    setSessionRuntimeAddress: (sessionKey, runtimeAddress) => {
+    setSessionIdentity: (sessionKey, identity) => {
       const normalizedSessionKey = sessionKey.trim();
       if (!normalizedSessionKey) {
         return;
       }
-      set((state) => ({
-        loadedSessions: patchSessionMeta(state, normalizedSessionKey, {
-          backendSessionKey: runtimeAddress.sessionKey ?? normalizedSessionKey,
-          runtimeScopeKey: buildRuntimeScopeKey(runtimeAddress),
-          agentId: runtimeAddress.agentId,
-          protocolId: protocolIdFromAddress(runtimeAddress),
-          runtimeEndpointId: runtimeEndpointIdFromAddress(runtimeAddress),
-          runtimeAddress: {
-            ...runtimeAddress,
-            sessionKey: runtimeAddress.sessionKey ?? normalizedSessionKey,
-          },
-        }),
-      }));
+      const sessionIdentity = {
+        ...identity,
+        sessionKey: identity.sessionKey || normalizedSessionKey,
+      };
+      set((state) => {
+        const loadedSessions = patchSessionMeta(state, normalizedSessionKey, {
+          backendSessionKey: sessionIdentity.sessionKey,
+          runtimeScopeKey: buildRuntimeScopeKey(sessionIdentity.endpoint),
+          agentId: sessionIdentity.agentId,
+          protocolId: sessionIdentity.endpoint.kind === 'protocol-connector' ? sessionIdentity.endpoint.protocolId : null,
+          runtimeEndpointId: sessionIdentity.endpoint.kind === 'native-runtime'
+            ? sessionIdentity.endpoint.runtimeInstanceId
+            : sessionIdentity.endpoint.endpointId,
+          sessionIdentity,
+        });
+        return {
+          loadedSessions,
+          sessionRecordKeyByIdentityKey: buildSessionIdentityRecordIndex(loadedSessions),
+        };
+      });
     },
     getTaskBridgeState: () => buildTaskBridgeState(get(), DEFAULT_SESSION_KEY),
     openTaskSession: (sessionKey) => {
@@ -394,8 +395,8 @@ export const useChatStore = create<ChatStoreState>((set, get) => {
       if (bridge.sessionKey !== targetSessionKey || !bridge.canSendRecoveryPrompt) {
         return false;
       }
-      await state.sendMessage(text);
-      return true;
+      const result = await state.sendMessage(text);
+      return result.accepted;
     },
     handleSessionUpdateEvent: (event) => {
       handleStoreSessionUpdateEvent({ set, get }, event);

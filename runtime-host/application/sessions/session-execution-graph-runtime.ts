@@ -9,7 +9,7 @@ import type {
   SessionRuntimeTimelineState,
 } from './session-runtime-types';
 import { SessionRuntimeStateStore } from './session-runtime-state';
-import type { RuntimeAddress } from '../agent-runtime/contracts/runtime-address';
+import type { SessionIdentity } from '../agent-runtime/contracts/runtime-address';
 
 interface SessionExecutionGraphRuntimeDeps {
   stateStore: SessionRuntimeStateStore;
@@ -39,8 +39,8 @@ export class SessionExecutionGraphRuntime {
     state.renderItemKeyIndex = projection.renderItemKeyIndex;
   }
 
-  refreshParents(childSessionKey: string, runtimeAddress: RuntimeAddress): void {
-    for (const parentState of this.deps.stateStore.listParentSessionStates(childSessionKey, runtimeAddress)) {
+  refreshParents(identity: SessionIdentity): void {
+    for (const parentState of this.deps.stateStore.listParentSessionStates(identity)) {
       if (!parentState.hydrated) {
         continue;
       }

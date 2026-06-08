@@ -74,7 +74,11 @@ import {
 import { ProviderAccountsService } from '../../application/providers/accounts';
 import { ProviderAccountMutationWorkflow } from '../../application/workflows/provider-account/provider-account-mutation-workflow';
 import { ProviderModelsOperationsWorkflow } from '../../application/workflows/provider-model/provider-models-operations-workflow';
-import { ProviderModelsProjectionWorkflow } from '../../application/workflows/provider-model/provider-models-projection-workflow';
+import { ProviderModelsProjectionWorkflow, type ProviderModelsAgentModelProjectionNormalizerPort } from '../../application/workflows/provider-model/provider-models-projection-workflow';
+import {
+  isAnthropicMessagesApi,
+  withAnthropicMessagesModelMaxTokens,
+} from '../../application/adapters/openclaw/projections/openclaw-anthropic-messages-max-tokens';
 import { ProviderCapabilityRoutingWorkflow } from '../../application/workflows/provider-capability-routing/provider-capability-routing-workflow';
 import { ProviderCapabilityRoutingStorePersistenceWorkflow } from '../../application/workflows/provider-capability-routing-store/provider-capability-routing-store-persistence-workflow';
 import { ProviderModelsStorePersistenceWorkflow } from '../../application/workflows/provider-models-store/provider-models-store-persistence-workflow';
@@ -125,6 +129,14 @@ import { createSettingsRuntimeCapabilityOperationRoutes } from '../../applicatio
 import { createSkillManagementCapabilityOperationRoutes } from '../../application/capabilities/skill/skill-management-capability';
 import type { CapabilityOperationRoute } from '../../application/capabilities/contracts/capability-router';
 import type { RuntimeHostLogger } from '../../shared/logger';
+
+const openClawProviderModelNormalizer: ProviderModelsAgentModelProjectionNormalizerPort = {
+  normalizeProviderModel: ({ provider, entry, model }) => (
+    isAnthropicMessagesApi(entry.api)
+      ? withAnthropicMessagesModelMaxTokens(model, provider, entry)
+      : model
+  ),
+};
 
 export function registerOpenClawApplicationServices(
   container: RuntimeHostContainer,
@@ -250,6 +262,7 @@ export function registerOpenClawApplicationServices(
     agentModels: scope.resolve<ProviderModelsAgentProjectionPort>('providers.agentModelsProjection'),
     projectionKeys: scope.resolve<ProviderProjectionKeyResolverPort>('providers.projectionKeyResolver'),
     projectionPolicy: scope.resolve<ProviderProjectionPolicyPort>('providers.projectionPolicy'),
+    agentModelNormalizer: openClawProviderModelNormalizer,
   }));
   container.register('providers.modelsOperationsWorkflow', (scope) => new ProviderModelsOperationsWorkflow({
     credentials: scope.resolve<ProviderStoreRepository>('providers.storeRepository'),
@@ -353,6 +366,7 @@ export function registerOpenClawApplicationServices(
   }));
   container.register('subagents.service', (scope) => new SubagentRuntimeService({
     runtimeWorkflow: scope.resolve<SubagentRuntimeWorkflow>('subagents.runtimeWorkflow'),
+    skillRuntimeWorkflow: scope.resolve<SkillRuntimeWorkflow>('skills.runtimeWorkflow'),
   }));
   container.register('clawhub.skillInstallWorkflow', (scope) => new ClawHubSkillInstallWorkflow({
     cliRunner: scope.resolve<ClawHubCliRunner>('clawhub.cliRunner'),

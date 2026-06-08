@@ -2,7 +2,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import { OpenClawV4Adapter } from '../../runtime-host/application/adapters/openclaw/runtime/openclaw-v4-canonical-adapter';
-import { createOpenClawTestRuntimeAddress, createOpenClawTestRuntimeContext, createTestSessionRuntimeService, openClawTestRuntimeIdentity } from './helpers/session-runtime-fixture';
+import { createOpenClawTestSessionIdentity, createOpenClawTestRuntimeContext, createTestSessionRuntimeService, openClawTestRuntimeIdentity } from './helpers/session-runtime-fixture';
 import { buildCanonicalReplayEventsFromTranscriptMessages } from '../../runtime-host/application/sessions/canonical/canonical-transcript-replay';
 import { createEmptyCanonicalSessionState, reduceCanonicalSessionEvents } from '../../runtime-host/application/sessions/canonical/canonical-reducer';
 import { buildRenderItemsFromCanonicalState } from '../../runtime-host/application/sessions/canonical/canonical-projection';
@@ -57,13 +57,31 @@ async function createServiceWithConnectedAcpEndpoint() {
 }
 
 async function consumeOpenClawTestGatewayEvent(service: ReturnType<typeof createService>, payload: Record<string, unknown>, sessionKey = 'agent:main:main') {
-  return await service.consumeEndpointConversationEvent(createOpenClawTestRuntimeAddress(sessionKey), payload);
+  const sessionIdentity = createOpenClawTestSessionIdentity(sessionKey);
+  return await service.consumeEndpointConversationEvent(sessionIdentity.endpoint, {
+    ...payload,
+    sessionIdentity,
+  });
 }
 
-function createOpenClawApprovalRuntimeAddress(sessionKey = 'agent:main:main', agentId = 'default'): ReturnType<typeof createOpenClawTestRuntimeAddress> {
+function createOpenClawApprovalEndpoint(agentId = 'default'): ReturnType<typeof createOpenClawTestSessionIdentity>['endpoint'] {
+  return createOpenClawTestSessionIdentity(`agent:${agentId}:main`, agentId).endpoint;
+}
+
+function createOpenClawApprovalSessionIdentity(sessionKey = 'agent:main:main', agentId = 'main'): ReturnType<typeof createOpenClawTestSessionIdentity> {
+  return createOpenClawTestSessionIdentity(sessionKey, agentId);
+}
+
+function createClaudeCodeSessionIdentity(sessionKey = 'claude-code:session:1') {
   return {
-    ...createOpenClawTestRuntimeAddress(sessionKey, agentId),
-    capabilityId: 'session.approval',
+    endpoint: {
+      kind: 'protocol-connector' as const,
+      protocolId: 'acp',
+      connectorId: 'acp',
+      endpointId: 'claude-code',
+    },
+    agentId: 'default',
+    sessionKey,
   };
 }
 
@@ -72,7 +90,7 @@ describe('session runtime ACP adapter service', () => {
     const service = createService();
 
     const response = await service.getSessionStateSnapshot({
-      runtimeAddress: createOpenClawTestRuntimeAddress('agent:main:main'),
+      sessionIdentity: createOpenClawTestSessionIdentity('agent:main:main'),
     });
 
     expect(response).toEqual({
@@ -458,22 +476,33 @@ describe('session runtime ACP adapter service', () => {
     }]);
   });
 
-  it('rejects session creation without an explicit RuntimeAddress', async () => {
+  it('rejects session creation without an explicit RuntimeEndpointRef', async () => {
     const service = createService();
 
-    const response = await service.createSession({ sessionKey: 'agent:main:missing-address' });
+    const response = await service.createSession({ sessionKey: 'agent:main:missing-identity' });
 
     expect(response).toEqual({
       status: 400,
       data: {
         success: false,
-        error: 'RuntimeAddress is required',
+        error: 'RuntimeEndpointRef is required',
+      },
+    });
+  });
+
+  it('rejects listSessions without an explicit RuntimeEndpointRef', async () => {
+    const service = createService();
+
+    await expect(service.listSessions({})).resolves.toEqual({
+      status: 400,
+      data: {
+        success: false,
+        error: 'RuntimeEndpointRef is required',
       },
     });
   });
 
   it.each([
-    ['listSessions', (service: ReturnType<typeof createService>) => service.listSessions({})],
     ['loadSession', (service: ReturnType<typeof createService>) => service.loadSession({ sessionKey: 'agent:main:main' })],
     ['resumeSession', (service: ReturnType<typeof createService>) => service.resumeSession({ sessionKey: 'agent:main:main' })],
     ['getSessionStateSnapshot', (service: ReturnType<typeof createService>) => service.getSessionStateSnapshot({ sessionKey: 'agent:main:main' })],
@@ -487,32 +516,32 @@ describe('session runtime ACP adapter service', () => {
     ['unarchiveSession', (service: ReturnType<typeof createService>) => service.unarchiveSession({ sessionKey: 'agent:main:main' })],
     ['updateSessionStatus', (service: ReturnType<typeof createService>) => service.updateSessionStatus({ sessionKey: 'agent:main:main', status: 'archived' })],
     ['renameSession', (service: ReturnType<typeof createService>) => service.renameSession({ sessionKey: 'agent:main:main', label: 'renamed' })],
-  ])('rejects %s without an explicit RuntimeAddress', async (_name, action) => {
+  ])('rejects %s without an explicit SessionIdentity', async (_name, action) => {
     const service = createService();
 
     await expect(action(service)).resolves.toEqual({
       status: 400,
       data: {
         success: false,
-        error: 'RuntimeAddress is required',
+        error: 'SessionIdentity is required',
       },
     });
   });
 
-  it('rejects prompts without an explicit RuntimeAddress', async () => {
+  it('rejects prompts without an explicit SessionIdentity', async () => {
     const service = createService();
 
     const response = await service.promptSession({
       sessionKey: 'agent:main:main',
-      message: '缺地址',
-      idempotencyKey: 'client-run-missing-address',
+      message: '缺身份',
+      idempotencyKey: 'client-run-missing-identity',
     });
 
     expect(response).toEqual({
       status: 400,
       data: {
         success: false,
-        error: 'RuntimeAddress is required',
+        error: 'SessionIdentity is required',
       },
     });
   });
@@ -531,7 +560,7 @@ describe('session runtime ACP adapter service', () => {
 
     const response = await service.promptSession({
       sessionKey: 'agent:main:main',
-      runtimeAddress: createOpenClawTestRuntimeAddress('agent:main:main'),
+      sessionIdentity: createOpenClawTestSessionIdentity('agent:main:main'),
       message: '帮我检查项目',
       idempotencyKey: 'client-run-1',
     });
@@ -589,20 +618,21 @@ describe('session runtime ACP adapter service', () => {
         gatewayRpc: async () => ({}),
       },
     });
-    const runtimeAddress = createOpenClawTestRuntimeAddress('agent:main:main', 'main');
+    const sessionIdentity = createOpenClawTestSessionIdentity('agent:main:main', 'main');
 
     await service.promptSession({
       sessionKey: 'agent:main:main',
-      runtimeAddress,
+      sessionIdentity,
       message: '你好',
       idempotencyKey: 'client-run-bound',
     });
     await vi.waitFor(() => expect(chatSend).toHaveBeenCalledTimes(1));
-    const [message] = await service.consumeEndpointConversationEvent({ ...runtimeAddress, sessionKey: 'agent:main:main' }, {
+    const [message] = await service.consumeEndpointConversationEvent(sessionIdentity.endpoint, {
       type: 'chat.message',
       event: {
         state: 'final',
         sessionKey: 'agent:main:main',
+        sessionIdentity,
         runId: 'client-run-bound',
         seq: 1,
         message: { role: 'assistant', content: [{ type: 'text', text: '你好，主人' }] },
@@ -636,7 +666,7 @@ describe('session runtime ACP adapter service', () => {
 
     const response = await service.promptSession({
       sessionKey: 'agent:main:main',
-      runtimeAddress: createOpenClawTestRuntimeAddress('agent:main:main'),
+      sessionIdentity: createOpenClawTestSessionIdentity('agent:main:main'),
       message: '触发失败',
       idempotencyKey: 'client-run-fail',
     });
@@ -698,9 +728,11 @@ describe('session runtime ACP adapter service', () => {
 
   it('creates session keys from the runtime endpoint keying namespace', async () => {
     const service = createService();
+    const sessionIdentity = createOpenClawTestSessionIdentity('agent:default:main', 'default');
 
     const response = await service.createSession({
-      runtimeAddress: createOpenClawTestRuntimeAddress('agent:default:main', 'default'),
+      endpoint: sessionIdentity.endpoint,
+      agentId: 'default',
     });
 
     expect(response.status).toBe(200);
@@ -709,8 +741,8 @@ describe('session runtime ACP adapter service', () => {
       sessionKey: expect.stringMatching(/^agent:default:session-1700000000000-/),
       snapshot: {
         catalog: {
-          runtimeAddress: expect.objectContaining({
-            kind: 'native-runtime',
+          sessionIdentity: expect.objectContaining({
+            endpoint: expect.objectContaining({ kind: 'native-runtime' }),
             agentId: 'default',
           }),
         },
@@ -719,10 +751,10 @@ describe('session runtime ACP adapter service', () => {
     if (!('snapshot' in response.data)) {
       throw new Error('Expected create session snapshot');
     }
-    expect(response.data.snapshot.catalog.runtimeAddress?.sessionKey).toBe(response.data.sessionKey);
+    expect(response.data.snapshot.catalog.sessionIdentity?.sessionKey).toBe(response.data.sessionKey);
   });
 
-  it('keeps gateway-level control state out of session ingress while approval notifications still require RuntimeAddress context', async () => {
+  it('keeps gateway-level control state out of session ingress while approval notifications still require SessionIdentity context', async () => {
     const service = createService({
       sessionRuntimeStore: {
         load: async () => ({
@@ -732,10 +764,10 @@ describe('session runtime ACP adapter service', () => {
         save: async () => undefined,
       },
     });
-    await service.listSessions({ runtimeAddress: createOpenClawTestRuntimeAddress('agent:main:session-legacy-active') });
+    await service.listSessions({ endpoint: createOpenClawTestSessionIdentity('agent:main:session-legacy-active').endpoint });
 
     const [pending] = service.consumeEndpointNotification(
-      createOpenClawApprovalRuntimeAddress('agent:main:session-legacy-active', 'main'),
+      createOpenClawApprovalEndpoint('main'),
       {
         method: 'exec.approval.requested',
         params: {
@@ -788,18 +820,20 @@ describe('session runtime ACP adapter service', () => {
     });
   });
 
-  it('filters pending approvals by explicit RuntimeAddress', async () => {
+  it('filters pending approvals by explicit SessionIdentity', async () => {
     const service = createService();
 
     await service.createSession({
       sessionKey: 'agent:main:main',
-      runtimeAddress: createOpenClawTestRuntimeAddress('agent:main:main'),
+      endpoint: createOpenClawTestSessionIdentity('agent:main:main').endpoint,
+      agentId: 'main',
     });
     await service.createSession({
       sessionKey: 'agent:test:main',
-      runtimeAddress: createOpenClawTestRuntimeAddress('agent:test:main', 'test'),
+      endpoint: createOpenClawTestSessionIdentity('agent:test:main', 'test').endpoint,
+      agentId: 'test',
     });
-    service.consumeEndpointNotification(createOpenClawApprovalRuntimeAddress('agent:main:main', 'main'), {
+    service.consumeEndpointNotification(createOpenClawApprovalEndpoint('main'), {
       method: 'exec.approval.requested',
       params: {
         id: 'approval-main',
@@ -808,7 +842,7 @@ describe('session runtime ACP adapter service', () => {
         createdAtMs: 1_700_000_000_060,
       },
     });
-    service.consumeEndpointNotification(createOpenClawApprovalRuntimeAddress('agent:test:main', 'test'), {
+    service.consumeEndpointNotification(createOpenClawApprovalEndpoint('test'), {
       method: 'exec.approval.requested',
       params: {
         id: 'approval-test',
@@ -819,7 +853,7 @@ describe('session runtime ACP adapter service', () => {
     });
 
     const response = await service.listPendingApprovals({
-      runtimeAddress: createOpenClawApprovalRuntimeAddress('agent:test:main', 'test'),
+      sessionIdentity: createOpenClawApprovalSessionIdentity('agent:test:main', 'test'),
     });
 
     expect(response.data).toEqual({
@@ -827,14 +861,14 @@ describe('session runtime ACP adapter service', () => {
     });
   });
 
-  it('rejects pending approval list requests without RuntimeAddress', async () => {
+  it('rejects pending approval list requests without SessionIdentity', async () => {
     const service = createService();
 
     const response = await service.listPendingApprovals({});
 
     expect(response).toEqual({
       status: 400,
-      data: { success: false, error: 'RuntimeAddress is required' },
+      data: { success: false, error: 'SessionIdentity is required' },
     });
   });
 
@@ -849,9 +883,10 @@ describe('session runtime ACP adapter service', () => {
 
     await service.createSession({
       sessionKey: 'agent:main:main',
-      runtimeAddress: createOpenClawTestRuntimeAddress('agent:main:main'),
+      endpoint: createOpenClawTestSessionIdentity('agent:main:main').endpoint,
+      agentId: 'main',
     });
-    const [pending] = service.consumeEndpointNotification(createOpenClawApprovalRuntimeAddress('agent:main:main', 'main'), {
+    const [pending] = service.consumeEndpointNotification(createOpenClawApprovalEndpoint('main'), {
       method: 'exec.approval.requested',
       params: {
         id: 'approval-1',
@@ -866,11 +901,11 @@ describe('session runtime ACP adapter service', () => {
     const response = await service.resolveApproval({
       id: 'approval-1',
       sessionKey: 'agent:main:main',
-      runtimeAddress: createOpenClawTestRuntimeAddress('agent:main:main'),
+      sessionIdentity: createOpenClawTestSessionIdentity('agent:main:main', 'main'),
       decision: 'allow-once',
     });
     const list = await service.listPendingApprovals({
-      runtimeAddress: createOpenClawApprovalRuntimeAddress('agent:main:main'),
+      sessionIdentity: createOpenClawApprovalSessionIdentity('agent:main:main'),
     });
 
     expect(pending).toMatchObject({
@@ -896,9 +931,10 @@ describe('session runtime ACP adapter service', () => {
 
     await service.createSession({
       sessionKey: 'agent:main:main',
-      runtimeAddress: createOpenClawTestRuntimeAddress('agent:main:main'),
+      endpoint: createOpenClawTestSessionIdentity('agent:main:main').endpoint,
+      agentId: 'main',
     });
-    service.consumeEndpointNotification(createOpenClawApprovalRuntimeAddress('agent:main:main', 'main'), {
+    service.consumeEndpointNotification(createOpenClawApprovalEndpoint('main'), {
       method: 'plugin.approval.requested',
       params: {
         data: {
@@ -916,7 +952,7 @@ describe('session runtime ACP adapter service', () => {
     const response = await service.resolveApproval({
       id: 'plugin:approval-2',
       sessionKey: 'agent:main:main',
-      runtimeAddress: createOpenClawTestRuntimeAddress('agent:main:main'),
+      sessionIdentity: createOpenClawTestSessionIdentity('agent:main:main', 'main'),
       decision: 'allow-once',
     });
 
@@ -935,12 +971,13 @@ describe('session runtime ACP adapter service', () => {
 
     await service.createSession({
       sessionKey: 'agent:main:main',
-      runtimeAddress: createOpenClawTestRuntimeAddress('agent:main:main'),
+      endpoint: createOpenClawTestSessionIdentity('agent:main:main').endpoint,
+      agentId: 'main',
     });
 
     const response = await service.abortSession({
       sessionKey: 'agent:main:main',
-      runtimeAddress: createOpenClawTestRuntimeAddress('agent:main:main'),
+      sessionIdentity: createOpenClawTestSessionIdentity('agent:main:main'),
       approvalIds: ['plugin:approval-2', 'approval-1'],
     });
 
@@ -979,15 +1016,13 @@ describe('session runtime ACP adapter service', () => {
     });
   });
 
-  it('rejects endpoint ingress with an invalid RuntimeAddress', async () => {
+  it('rejects endpoint ingress with an invalid endpoint ref', async () => {
     const service = createService();
 
     await expect(service.consumeEndpointConversationEvent({
       kind: 'protocol-connector',
-      capabilityId: 'session.prompt',
       protocolId: 'acp',
       connectorId: 'acp',
-      agentId: 'default',
     } as never, {
       method: 'session/message',
       params: {
@@ -995,54 +1030,69 @@ describe('session runtime ACP adapter service', () => {
         runId: 'run-1',
         text: 'hello',
       },
-    })).rejects.toThrow('RuntimeAddress endpointId is required');
+    })).rejects.toThrow('Connector runtime endpoint not registered: acp:acp:undefined');
   });
 
-  it('rejects endpoint ingress when payload RuntimeAddress differs from the ingress address', async () => {
+  it('rejects endpoint ingress when agentId cannot be resolved from event metadata', async () => {
     const service = await createServiceWithConnectedAcpEndpoint();
+    const sessionIdentity = createClaudeCodeSessionIdentity();
 
-    await expect(service.consumeEndpointConversationEvent({
-      kind: 'protocol-connector',
-      capabilityId: 'session.prompt',
-      protocolId: 'acp',
-      connectorId: 'acp',
-      endpointId: 'claude-code',
-      agentId: 'default',
-    }, {
+    await expect(service.consumeEndpointConversationEvent(sessionIdentity.endpoint, {
       method: 'session/message',
       params: {
         sessionKey: 'claude-code:session:1',
-        runtimeAddress: {
-          kind: 'protocol-connector',
-          capabilityId: 'session.prompt',
-          protocolId: 'acp',
-          connectorId: 'acp',
-          endpointId: 'hermes',
-          agentId: 'default',
+        runId: 'run-1',
+        text: 'hello',
+      },
+    })).rejects.toThrow('Session event requires agentId metadata');
+  });
+
+  it('rejects approval notifications when agentId cannot be resolved from sessionKey metadata', () => {
+    const service = createService();
+
+    expect(() => service.consumeEndpointNotification(
+      createOpenClawApprovalEndpoint('main'),
+      {
+        method: 'exec.approval.requested',
+        params: {
+          id: 'approval-missing-agent',
+          sessionKey: 'main',
+          runId: 'run-approval',
+        },
+      },
+    )).toThrow('Session approval notification requires agentId metadata');
+  });
+
+  it('rejects endpoint ingress when payload SessionIdentity references an unregistered endpoint', async () => {
+    const service = await createServiceWithConnectedAcpEndpoint();
+    const sessionIdentity = createClaudeCodeSessionIdentity();
+
+    await expect(service.consumeEndpointConversationEvent(sessionIdentity.endpoint, {
+      method: 'session/message',
+      params: {
+        sessionKey: 'claude-code:session:1',
+        sessionIdentity: {
+          ...sessionIdentity,
+          endpoint: {
+            ...sessionIdentity.endpoint,
+            endpointId: 'hermes',
+          },
         },
         runId: 'run-1',
         text: 'hello',
       },
-    })).rejects.toThrow('RuntimeAddress payload does not match endpoint ingress address');
+    })).rejects.toThrow('Connector runtime endpoint not registered: acp:acp:hermes');
   });
 
-  it('projects connector endpoint events with an explicit connector RuntimeAddress', async () => {
+  it('projects connector endpoint events with an explicit connector SessionIdentity', async () => {
     const service = await createServiceWithConnectedAcpEndpoint();
-    const runtimeAddress = {
-      kind: 'protocol-connector' as const,
-      capabilityId: 'session.prompt',
-      protocolId: 'acp',
-      connectorId: 'acp',
-      endpointId: 'claude-code',
-      agentId: 'default',
-      sessionKey: 'claude-code:session:1',
-    };
+    const sessionIdentity = createClaudeCodeSessionIdentity();
 
-    const [message] = await service.consumeEndpointConversationEvent(runtimeAddress, {
+    const [message] = await service.consumeEndpointConversationEvent(sessionIdentity.endpoint, {
       method: 'session/message',
       params: {
         sessionKey: 'claude-code:session:1',
-        runtimeAddress,
+        sessionIdentity,
         runId: 'run-1',
         text: 'hello',
         status: 'final',
@@ -1059,13 +1109,7 @@ describe('session runtime ACP adapter service', () => {
       },
       snapshot: {
         catalog: {
-          runtimeAddress: {
-            kind: 'protocol-connector',
-            protocolId: 'acp',
-            connectorId: 'acp',
-            endpointId: 'claude-code',
-            agentId: 'default',
-          },
+          sessionIdentity,
         },
       },
     });
@@ -1081,10 +1125,10 @@ describe('session runtime ACP adapter service', () => {
         listStorageDescriptors: async () => [],
         findStorageDescriptor: async () => null,
         getTranscriptFingerprint: async () => null,
-        readTranscriptContent: async (sessionKey) => (sessionKey === 'agent:main:main' ? transcript : null),
+        readTranscriptContent: async (identity) => (identity.sessionKey === 'agent:main:main' ? transcript : null),
         readTranscriptDescriptorContent: async () => null,
-        readTranscriptLines: async function* (sessionKey) {
-          if (sessionKey === 'agent:main:main') {
+        readTranscriptLines: async function* (identity) {
+          if (identity.sessionKey === 'agent:main:main') {
             yield* transcript.split('\n');
           }
         },
@@ -1092,17 +1136,18 @@ describe('session runtime ACP adapter service', () => {
         deleteSession: async () => false,
         renameSession: async () => false,
         updateSessionStatus: async () => false,
-        upsertSessionRuntimeAddress: async () => true,
+        upsertSessionIdentity: async () => true,
       },
     });
     await service.createSession({
       sessionKey: 'agent:main:main',
-      runtimeAddress: createOpenClawTestRuntimeAddress('agent:main:main'),
+      endpoint: createOpenClawTestSessionIdentity('agent:main:main').endpoint,
+      agentId: 'main',
     });
 
     const response = await service.executeSessionHydration({
       sessionKey: 'agent:main:main',
-      runtimeAddress: createOpenClawTestRuntimeAddress('agent:main:main'),
+      sessionIdentity: createOpenClawTestSessionIdentity('agent:main:main', 'main'),
       snapshot: { kind: 'latest' },
     });
 
@@ -1135,13 +1180,13 @@ describe('session runtime ACP adapter service', () => {
         deleteSession: async () => false,
         renameSession: async () => false,
         updateSessionStatus: async () => false,
-        upsertSessionRuntimeAddress: async () => true,
+        upsertSessionIdentity: async () => true,
       },
     });
 
     await service.promptSession({
       sessionKey: 'agent:main:main',
-      runtimeAddress: createOpenClawTestRuntimeAddress('agent:main:main'),
+      sessionIdentity: createOpenClawTestSessionIdentity('agent:main:main'),
       message: '你好',
       idempotencyKey: 'client-run-1',
     });
@@ -1149,7 +1194,7 @@ describe('session runtime ACP adapter service', () => {
 
     const response = await service.executeSessionHydration({
       sessionKey: 'agent:main:main',
-      runtimeAddress: createOpenClawTestRuntimeAddress('agent:main:main'),
+      sessionIdentity: createOpenClawTestSessionIdentity('agent:main:main'),
       snapshot: { kind: 'latest' },
     });
 

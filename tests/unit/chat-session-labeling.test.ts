@@ -9,7 +9,9 @@ import {
   buildRenderItemsFromMessages,
   buildRenderableTimelineEntriesFromMessages,
 } from './helpers/timeline-fixtures';
+import { buildRuntimeScopeKey, buildSessionRecordKey } from '@/stores/chat/session-identity';
 import { resolveSessionLabelDetailsFromTimelineEntries } from '../../runtime-host/application/sessions/transcript-labels';
+import { createOpenClawTestSessionIdentity, openClawTestRuntimeEndpoint } from './helpers/runtime-address-fixtures';
 
 const hostApiFetchMock = vi.fn();
 const hostSessionLoadMock = vi.fn();
@@ -20,29 +22,17 @@ vi.mock('@/lib/host-api', () => ({
   hostRuntimeEndpointsList: (...args: unknown[]) => hostRuntimeEndpointsListMock(...args),
   hostSessionList: (...args: unknown[]) => hostApiFetchMock(...args),
   hostSessionLoad: (...args: unknown[]) => hostSessionLoadMock(...args),
+  hostSessionWindowFetch: (...args: unknown[]) => hostSessionLoadMock(...args),
+  resolveHydratedSessionSnapshot: vi.fn(async ({ initial }: { initial: { snapshot?: unknown } }) => initial.snapshot ?? null),
 }));
 
-const alphaRuntimeAddress = {
-  kind: 'native-runtime' as const,
-  capabilityId: 'session.prompt',
-  runtimeAdapterId: 'openclaw',
-  runtimeInstanceId: 'local',
-  agentId: 'alpha',
-  sessionKey: 'agent:alpha:session-1',
-};
-
-function buildActiveSessionRuntime(runtimeAddress = alphaRuntimeAddress) {
-  return {
-    status: 'ready' as const,
-    error: null,
-    endpointId: 'local',
-    protocolId: 'openclaw-v4',
-    runtimeAdapterId: 'openclaw',
-    runtimeInstanceId: 'local',
-    agentId: runtimeAddress.agentId,
-    sessionPromptAddress: runtimeAddress,
-  };
-}
+const alphaSessionKey = 'agent:alpha:session-1';
+const alphaSessionIdentity = createOpenClawTestSessionIdentity(alphaSessionKey, 'alpha');
+const alphaRecordKey = buildSessionRecordKey(alphaSessionIdentity);
+const alphaSession2Key = 'agent:alpha:session-2';
+const alphaSession2Identity = createOpenClawTestSessionIdentity(alphaSession2Key, 'alpha');
+const alphaSession2RecordKey = buildSessionRecordKey(alphaSession2Identity);
+const alphaAgentScope = { kind: 'agent' as const, endpoint: openClawTestRuntimeEndpoint, agentId: 'alpha' };
 
 function buildSessionRecord(overrides?: Partial<ReturnType<typeof createEmptySessionRecord>>) {
   const base = createEmptySessionRecord();
@@ -65,6 +55,23 @@ function resetChatStoreState() {
     snapshotReady: false,
     initialLoading: false,
     refreshing: false,
+    sessionRuntimeCatalog: {
+      status: 'ready',
+      error: null,
+      endpoints: [{
+        endpointId: 'openclaw-local',
+        protocolId: 'openclaw-v4',
+        endpoint: openClawTestRuntimeEndpoint,
+        runtimeAdapterId: 'openclaw',
+        runtimeInstanceId: 'local',
+        displayName: 'OpenClaw Local',
+        agentIds: ['alpha'],
+        acceptsDynamicAgents: true,
+        sessionPromptScopes: [alphaAgentScope],
+        defaultSessionPromptScope: alphaAgentScope,
+      }],
+      defaultSessionPromptScope: alphaAgentScope,
+    },
     sessionCatalogStatus: {
       status: 'idle',
       error: null,
@@ -73,15 +80,16 @@ function resetChatStoreState() {
     },
     mutating: false,
     error: null,
-    currentSessionKey: 'agent:alpha:session-1',
-    activeSessionRuntime: buildActiveSessionRuntime(),
+    currentSessionKey: alphaRecordKey,
     loadedSessions: {
-      'agent:alpha:session-1': buildSessionRecord({
+      [alphaRecordKey]: buildSessionRecord({
         meta: {
+          backendSessionKey: alphaSessionKey,
+          runtimeScopeKey: buildRuntimeScopeKey(alphaSessionIdentity.endpoint),
           agentId: 'alpha',
           protocolId: 'openclaw-v4',
-          runtimeEndpointId: 'openclaw-local',
-          runtimeAddress: alphaRuntimeAddress,
+          runtimeEndpointId: 'local',
+          sessionIdentity: alphaSessionIdentity,
         },
       }),
     },
@@ -91,9 +99,13 @@ function resetChatStoreState() {
 
 function buildSnapshotCatalog(sessionKey: string, entries: ReturnType<typeof buildRenderableTimelineEntriesFromMessages>) {
   const { label, titleSource } = resolveSessionLabelDetailsFromTimelineEntries(entries);
+  const agentId = sessionKey.split(':')[1] ?? 'alpha';
   return {
     key: sessionKey,
-    agentId: 'alpha',
+    agentId,
+    protocolId: 'openclaw-v4',
+    runtimeEndpointId: 'local',
+    sessionIdentity: createOpenClawTestSessionIdentity(sessionKey, agentId),
     kind: 'named' as const,
     preferred: false,
     ...(label ? { label } : {}),
@@ -103,16 +115,31 @@ function buildSnapshotCatalog(sessionKey: string, entries: ReturnType<typeof bui
   };
 }
 
+function buildCatalogSession(sessionKey: string, overrides?: Record<string, unknown>) {
+  const agentId = sessionKey.split(':')[1] ?? 'alpha';
+  return {
+    key: sessionKey,
+    agentId,
+    protocolId: 'openclaw-v4',
+    runtimeEndpointId: 'local',
+    sessionIdentity: createOpenClawTestSessionIdentity(sessionKey, agentId),
+    kind: 'named' as const,
+    preferred: false,
+    ...overrides,
+  };
+}
+
 function setupSessionLoad(messages: RawMessage[]): void {
-  const sessionKey = 'agent:alpha:session-1';
-  const entries = buildRenderableTimelineEntriesFromMessages(sessionKey, messages);
-  const items = buildRenderItemsFromMessages(sessionKey, messages);
+  const entries = buildRenderableTimelineEntriesFromMessages(alphaSessionKey, messages);
+  const items = buildRenderItemsFromMessages(alphaSessionKey, messages);
   hostSessionLoadMock.mockResolvedValueOnce({
     snapshot: {
-      sessionKey,
-      catalog: buildSnapshotCatalog(sessionKey, entries),
+      sessionKey: alphaSessionKey,
+      catalog: buildSnapshotCatalog(alphaSessionKey, entries),
       items,
       approvals: [],
+      usage: [],
+      artifacts: [],
       replayComplete: true,
       runtime: {
         activeRunId: null,
@@ -156,28 +183,20 @@ describe('chat session labeling', () => {
     resetChatStoreState();
   });
 
-  it('bootstrap 多个 session.prompt 候选后，loadSessions 使用明确 active runtime 地址', async () => {
-    const mainRuntimeAddress = {
-      ...alphaRuntimeAddress,
-      agentId: 'main',
-    };
+  it('bootstrap 多个 session.prompt 候选后，loadSessions 使用明确 default session prompt scope', async () => {
+    const zetaAgentScope = { kind: 'agent' as const, endpoint: openClawTestRuntimeEndpoint, agentId: 'zeta' };
+    const mainAgentScope = { kind: 'agent' as const, endpoint: openClawTestRuntimeEndpoint, agentId: 'main' };
     useChatStore.setState((state) => ({
-      activeSessionRuntime: {
-        status: 'idle',
-        error: null,
-        endpointId: null,
-        protocolId: null,
-        agentId: null,
-        sessionPromptAddress: null,
-      },
       loadedSessions: {
         ...state.loadedSessions,
-        'agent:alpha:session-1': buildSessionRecord({
+        [alphaRecordKey]: buildSessionRecord({
           meta: {
+            backendSessionKey: alphaSessionKey,
+            runtimeScopeKey: null,
             agentId: null,
             protocolId: null,
             runtimeEndpointId: null,
-            runtimeAddress: null,
+            sessionIdentity: null,
           },
         }),
       },
@@ -187,21 +206,25 @@ describe('chat session labeling', () => {
         {
           id: 'zeta-endpoint',
           protocolId: 'openclaw-v4',
+          runtimeAdapterId: 'openclaw',
+          runtimeInstanceId: 'local',
           displayName: 'Zeta',
           agentIds: ['zeta'],
           acceptsDynamicAgents: true,
-          capabilities: {},
-          capabilityAddresses: [{ ...alphaRuntimeAddress, agentId: 'zeta' }],
+          capabilities: { chat: true, streaming: true, tools: true, approvals: true, replay: true, modelSelection: true },
+          capabilitySummaries: [{ id: 'session.prompt', scopeKind: 'agent', scope: zetaAgentScope, targetKinds: ['session'], operations: [], availability: 'available' }],
           controlState: { connection: null, readiness: null, capabilities: null, updatedAt: null },
         },
         {
           id: 'main-endpoint',
           protocolId: 'openclaw-v4',
+          runtimeAdapterId: 'openclaw',
+          runtimeInstanceId: 'local',
           displayName: 'Main',
           agentIds: ['main'],
           acceptsDynamicAgents: true,
-          capabilities: {},
-          capabilityAddresses: [mainRuntimeAddress],
+          capabilities: { chat: true, streaming: true, tools: true, approvals: true, replay: true, modelSelection: true },
+          capabilitySummaries: [{ id: 'session.prompt', scopeKind: 'agent', scope: mainAgentScope, targetKinds: ['session'], operations: [], availability: 'available' }],
           controlState: { connection: null, readiness: null, capabilities: null, updatedAt: null },
         },
       ],
@@ -213,14 +236,10 @@ describe('chat session labeling', () => {
 
     expect(hostRuntimeEndpointsListMock).toHaveBeenCalledTimes(1);
     expect(hostApiFetchMock).toHaveBeenCalledWith({
-      runtimeAddress: mainRuntimeAddress,
+      endpoint: mainAgentScope.endpoint,
     });
     const state = useChatStore.getState();
-    expect(state.activeSessionRuntime.sessionPromptAddress).toEqual(mainRuntimeAddress);
-    expect(state.loadedSessions['agent:alpha:session-1']?.meta.runtimeAddress).toEqual({
-      ...mainRuntimeAddress,
-      sessionKey: 'agent:alpha:session-1',
-    });
+    expect(state.sessionRuntimeCatalog.defaultSessionPromptScope).toEqual(mainAgentScope);
   });
 
   it('当会话没有用户消息时，允许使用 assistant 有效内容作为会话标题兜底', async () => {
@@ -235,7 +254,7 @@ describe('chat session labeling', () => {
     await loadCurrentHistory();
 
     const state = useChatStore.getState();
-    expect(state.loadedSessions['agent:alpha:session-1']?.meta.label).toBe('本次讨论聚焦任务拆解与风险清单');
+    expect(state.loadedSessions[alphaRecordKey]?.meta.label).toBe('本次讨论聚焦任务拆解与风险清单');
   });
 
   it('assistant 模板语句不应污染会话标题', async () => {
@@ -250,7 +269,7 @@ describe('chat session labeling', () => {
     await loadCurrentHistory();
 
     const state = useChatStore.getState();
-    expect(state.loadedSessions['agent:alpha:session-1']?.meta.label).toBeNull();
+    expect(state.loadedSessions[alphaRecordKey]?.meta.label).toBeNull();
   });
 
   it('会话标题应跟随最新一条用户输入，而不是停留在最早一条', async () => {
@@ -275,7 +294,7 @@ describe('chat session labeling', () => {
     await loadCurrentHistory();
 
     const state = useChatStore.getState();
-    expect(state.loadedSessions['agent:alpha:session-1']?.meta.label).toBe('最后一条输入');
+    expect(state.loadedSessions[alphaRecordKey]?.meta.label).toBe('最后一条输入');
   });
 
   it('gateway 注入的 Sender metadata 前缀不应污染会话标题', async () => {
@@ -299,7 +318,7 @@ describe('chat session labeling', () => {
     await loadCurrentHistory();
 
     const state = useChatStore.getState();
-    expect(state.loadedSessions['agent:alpha:session-1']?.meta.label).toBe('真正的用户问题');
+    expect(state.loadedSessions[alphaRecordKey]?.meta.label).toBe('真正的用户问题');
   });
 
   it('memory recall 注入块和 Sender metadata 都不应污染会话标题', async () => {
@@ -330,8 +349,8 @@ describe('chat session labeling', () => {
     await loadCurrentHistory();
 
     const state = useChatStore.getState();
-    expect(state.loadedSessions['agent:alpha:session-1']?.meta.label).toBe('中午好');
-    expect(getSessionItems(state, 'agent:alpha:session-1')[0]?.text).toBe('中午好');
+    expect(state.loadedSessions[alphaRecordKey]?.meta.label).toBe('中午好');
+    expect(getSessionItems(state, alphaRecordKey)[0]?.text).toBe('中午好');
   });
 
   it('sending 期间 loadHistory 若已包含同语义用户消息，不应再追加 optimistic 用户消息', async () => {
@@ -344,10 +363,10 @@ describe('chat session labeling', () => {
       timestamp: sentAtMs / 1000,
     };
     useChatStore.setState({
-      currentSessionKey: 'agent:alpha:session-1',
+      currentSessionKey: alphaRecordKey,
       loadedSessions: {
-        'agent:alpha:session-1': buildSessionRecord({
-          items: buildRenderItemsFromMessages('agent:alpha:session-1', [{
+        [alphaRecordKey]: buildSessionRecord({
+          items: buildRenderItemsFromMessages(alphaRecordKey, [{
             ...optimisticUserMessage,
             clientId: 'optimistic-user-1',
             messageId: 'optimistic-user-1',
@@ -357,7 +376,9 @@ describe('chat session labeling', () => {
             lastUserMessageAt: sentAtMs,
           },
           meta: {
-            runtimeAddress: alphaRuntimeAddress,
+            backendSessionKey: alphaSessionKey,
+            runtimeScopeKey: buildRuntimeScopeKey(alphaSessionIdentity.endpoint),
+            sessionIdentity: alphaSessionIdentity,
           },
         }),
       },
@@ -374,7 +395,7 @@ describe('chat session labeling', () => {
 
     await loadCurrentHistory('active');
 
-    const userItems = getSessionItems(useChatStore.getState(), 'agent:alpha:session-1')
+    const userItems = getSessionItems(useChatStore.getState(), alphaRecordKey)
       .filter((item) => item.kind === 'user-message');
     expect(userItems).toHaveLength(1);
     expect(userItems[0]?.key).toContain('gateway-user-1');
@@ -383,61 +404,54 @@ describe('chat session labeling', () => {
   it('loadSessions 直接信任 session.management sessions.list 的显式标题，不再补抓正文生成标题', async () => {
     hostApiFetchMock.mockResolvedValueOnce({
       sessions: [
-        {
-          key: 'agent:alpha:session-1',
-          agentId: 'alpha',
-          runtimeAddress: alphaRuntimeAddress,
+        buildCatalogSession(alphaSessionKey, {
           label: 'Alpha 会话标题',
           updatedAt: 1_800_000_111_000,
-        },
-        {
-          key: 'agent:alpha:session-2',
-          agentId: 'alpha',
-          runtimeAddress: { ...alphaRuntimeAddress, sessionKey: 'agent:alpha:session-2' },
+        }),
+        buildCatalogSession(alphaSession2Key, {
           displayName: 'Alpha Session 2',
           updatedAt: '2026-04-10T14:20:00.000Z',
-        },
+        }),
       ],
     });
 
     await useChatStore.getState().loadSessions();
 
     expect(hostApiFetchMock).toHaveBeenCalledTimes(1);
-    expect(hostApiFetchMock).toHaveBeenCalledWith({ runtimeAddress: alphaRuntimeAddress });
+    expect(hostApiFetchMock).toHaveBeenCalledWith({ endpoint: alphaAgentScope.endpoint });
     const state = useChatStore.getState();
     expect(state.sessionCatalogStatus.status).toBe('ready');
-    expect(state.loadedSessions['agent:alpha:session-1']?.meta.label).toBe('Alpha 会话标题');
-    expect(state.loadedSessions['agent:alpha:session-2']?.meta.label).toBeNull();
-    expect(state.loadedSessions['agent:alpha:session-1']?.meta.lastActivityAt).toBe(1_800_000_111_000);
-    expect(state.loadedSessions['agent:alpha:session-2']?.meta.lastActivityAt).toBe(Date.parse('2026-04-10T14:20:00.000Z'));
+    expect(state.loadedSessions[alphaRecordKey]?.meta.label).toBe('Alpha 会话标题');
+    expect(state.loadedSessions[alphaSession2RecordKey]?.meta.label).toBeNull();
+    expect(state.loadedSessions[alphaRecordKey]?.meta.lastActivityAt).toBe(1_800_000_111_000);
+    expect(state.loadedSessions[alphaSession2RecordKey]?.meta.lastActivityAt).toBe(Date.parse('2026-04-10T14:20:00.000Z'));
   });
 
   it('loadSessions 不应把 displayName 提升成正式会话标题', async () => {
     hostApiFetchMock.mockResolvedValueOnce({
       sessions: [
-        {
-          key: 'agent:alpha:session-2',
-          agentId: 'alpha',
-          runtimeAddress: { ...alphaRuntimeAddress, sessionKey: 'agent:alpha:session-2' },
+        buildCatalogSession(alphaSession2Key, {
           displayName: 'MatchaClaw Runtime Host',
           updatedAt: '2026-04-10T14:20:00.000Z',
-        },
+        }),
       ],
     });
 
     await useChatStore.getState().loadSessions();
 
     const state = useChatStore.getState();
-    expect(state.loadedSessions['agent:alpha:session-2']?.meta.label).toBeNull();
+    expect(state.loadedSessions[alphaSession2RecordKey]?.meta.label).toBeNull();
   });
 
   it('loadSessions 遇到无显式标题的会话时，应保留本地已加载标题而不是重抓正文', async () => {
     useChatStore.setState({
       loadedSessions: {
         ...useChatStore.getState().loadedSessions,
-        'agent:alpha:session-2': buildSessionRecord({
+        [alphaSession2RecordKey]: buildSessionRecord({
           meta: {
-            runtimeAddress: { ...alphaRuntimeAddress, sessionKey: 'agent:alpha:session-2' },
+            backendSessionKey: alphaSession2Key,
+            runtimeScopeKey: buildRuntimeScopeKey(alphaSession2Identity.endpoint),
+            sessionIdentity: alphaSession2Identity,
             label: '本地已加载标题',
             lastActivityAt: 1_800_000_100_000,
           },
@@ -447,48 +461,50 @@ describe('chat session labeling', () => {
 
     hostApiFetchMock.mockResolvedValueOnce({
       sessions: [
-        {
-          key: 'agent:alpha:session-2',
-          agentId: 'alpha',
-          runtimeAddress: { ...alphaRuntimeAddress, sessionKey: 'agent:alpha:session-2' },
+        buildCatalogSession(alphaSession2Key, {
           displayName: 'MatchaClaw Runtime Host',
           updatedAt: '2026-04-10T14:20:00.000Z',
-        },
+        }),
       ],
     });
 
     await useChatStore.getState().loadSessions();
 
     const state = useChatStore.getState();
-    expect(hostApiFetchMock).toHaveBeenCalledWith({ runtimeAddress: alphaRuntimeAddress });
-    expect(state.loadedSessions['agent:alpha:session-2']?.meta.label).toBe('本地已加载标题');
-    expect(state.loadedSessions['agent:alpha:session-2']?.meta.lastActivityAt).toBe(Date.parse('2026-04-10T14:20:00.000Z'));
+    expect(hostApiFetchMock).toHaveBeenCalledWith({ endpoint: alphaAgentScope.endpoint });
+    expect(state.loadedSessions[alphaSession2RecordKey]?.meta.label).toBe('本地已加载标题');
+    expect(state.loadedSessions[alphaSession2RecordKey]?.meta.lastActivityAt).toBe(Date.parse('2026-04-10T14:20:00.000Z'));
   });
 
-  it('loadSessions 即使改写 currentSessionKey，也只按 session.management sessions.list 收口当前会话', async () => {
+  it('loadSessions 遇到有痕迹但后端不存在的 currentSessionKey 时切到后端会话', async () => {
     resetChatStoreState();
     useChatStore.setState({
       currentSessionKey: 'agent:missing:session-x',
+      loadedSessions: {
+        ...useChatStore.getState().loadedSessions,
+        'agent:missing:session-x': buildSessionRecord({
+          meta: { label: '本地旧会话' },
+        }),
+      },
     } as never);
 
     hostApiFetchMock.mockResolvedValueOnce({
       sessions: [
-        {
-          key: 'agent:alpha:session-1',
+        buildCatalogSession(alphaSessionKey, {
           label: 'Alpha 会话',
           updatedAt: 1_800_000_222_000,
-        },
+        }),
       ],
     });
 
     await useChatStore.getState().loadSessions();
 
     expect(hostApiFetchMock).toHaveBeenCalledTimes(1);
-    expect(hostApiFetchMock).toHaveBeenCalledWith({ runtimeAddress: alphaRuntimeAddress });
+    expect(hostApiFetchMock).toHaveBeenCalledWith({ endpoint: alphaAgentScope.endpoint });
     const state = useChatStore.getState();
     expect(state.sessionCatalogStatus.status).toBe('ready');
-    expect(state.currentSessionKey).toBe('agent:alpha:session-1');
-    expect(state.loadedSessions['agent:alpha:session-1']?.meta.label).toBe('Alpha 会话');
+    expect(state.currentSessionKey).toBe(alphaRecordKey);
+    expect(state.loadedSessions[alphaRecordKey]?.meta.label).toBe('Alpha 会话');
   });
 
   it('loadSessions 首次失败后应明确进入 error 状态，便于侧栏独立收口', async () => {
@@ -511,63 +527,40 @@ describe('chat session labeling', () => {
     expect(state.sessionCatalogStatus.hasLoadedOnce).toBe(false);
   });
 
-  it('loadSessions 收到 ready:false 时保持加载态并自动重试 snapshot', async () => {
-    vi.useFakeTimers();
-    try {
-      resetChatStoreState();
-      hostApiFetchMock
-        .mockResolvedValueOnce({
-          sessions: [],
-          ready: false,
-          refreshing: true,
-          updatedAt: null,
-          error: null,
-        })
-        .mockResolvedValueOnce({
-          sessions: [
-            {
-              key: 'agent:alpha:session-ready',
-              agentId: 'alpha',
-              runtimeAddress: { ...alphaRuntimeAddress, sessionKey: 'agent:alpha:session-ready' },
-              label: '刷新后的会话',
-              updatedAt: 1_800_000_444_000,
-            },
-          ],
-          ready: true,
-          refreshing: false,
-          updatedAt: 1_800_000_444_000,
-          error: null,
-        });
+  it('loadSessions 收到 ready:false 且没有可用 sessions 时进入 error 状态', async () => {
+    resetChatStoreState();
+    hostApiFetchMock.mockResolvedValueOnce({
+      sessions: [],
+      ready: false,
+      refreshing: true,
+      updatedAt: null,
+      error: 'catalog refreshing',
+    });
 
-      await useChatStore.getState().loadSessions();
+    await useChatStore.getState().loadSessions();
 
-      expect(hostApiFetchMock).toHaveBeenCalledTimes(1);
-      expect(useChatStore.getState().sessionCatalogStatus.status).toBe('loading');
-      expect(useChatStore.getState().sessionCatalogStatus.hasLoadedOnce).toBe(false);
-      expect(useChatStore.getState().loadedSessions['agent:alpha:session-ready']).toBeUndefined();
-
-      await vi.advanceTimersByTimeAsync(1200);
-
-      expect(hostApiFetchMock).toHaveBeenCalledTimes(2);
-      const state = useChatStore.getState();
-      expect(state.sessionCatalogStatus.status).toBe('ready');
-      expect(state.loadedSessions['agent:alpha:session-ready']?.meta.label).toBe('刷新后的会话');
-    } finally {
-      vi.useRealTimers();
-    }
+    expect(hostApiFetchMock).toHaveBeenCalledTimes(1);
+    expect(useChatStore.getState().sessionCatalogStatus.status).toBe('error');
+    expect(useChatStore.getState().sessionCatalogStatus.hasLoadedOnce).toBe(false);
+    expect(useChatStore.getState().sessionCatalogStatus.error).toBe('catalog refreshing');
   });
 
   it('loadSessions 不应保留无本地痕迹且后端不存在的 canonical main 会话 key', async () => {
     resetChatStoreState();
+    const feedbackLocalIdentity = createOpenClawTestSessionIdentity('agent:feedback:main', 'feedback');
+    const feedbackMainIdentity = createOpenClawTestSessionIdentity('agent:main:main', 'feedback');
+    const feedbackMainRecordKey = buildSessionRecordKey(feedbackMainIdentity);
     useChatStore.setState({
       currentSessionKey: 'agent:feedback:main',
       loadedSessions: {
         'agent:feedback:main': buildSessionRecord({
           meta: {
+            backendSessionKey: 'agent:feedback:main',
+            runtimeScopeKey: buildRuntimeScopeKey(feedbackLocalIdentity.endpoint),
             agentId: 'feedback',
             protocolId: 'openclaw-v4',
             runtimeEndpointId: 'openclaw-local',
-            runtimeAddress: { ...alphaRuntimeAddress, agentId: 'feedback', sessionKey: 'agent:feedback:main' },
+            sessionIdentity: feedbackLocalIdentity,
           },
         }),
       },
@@ -581,20 +574,19 @@ describe('chat session labeling', () => {
 
     hostApiFetchMock.mockResolvedValueOnce({
       sessions: [
-        {
-          key: 'agent:main:main',
+        buildCatalogSession('agent:main:main', {
           agentId: 'feedback',
-          runtimeAddress: { ...alphaRuntimeAddress, agentId: 'feedback', sessionKey: 'agent:main:main' },
+          sessionIdentity: feedbackMainIdentity,
           label: 'Main 会话',
           updatedAt: 1_800_000_333_000,
-        },
+        }),
       ],
     });
 
     await useChatStore.getState().loadSessions();
 
     const state = useChatStore.getState();
-    expect(state.currentSessionKey).toBe('agent:main:main');
+    expect(state.currentSessionKey).toBe(feedbackMainRecordKey);
     expect(state.sessionCatalogStatus.status).toBe('ready');
   });
 
@@ -605,13 +597,7 @@ describe('chat session labeling', () => {
       let resolveHistory!: (value: {
         snapshot: {
           sessionKey: string;
-          catalog: {
-            key: string;
-            agentId: string;
-            kind: 'named';
-            preferred: false;
-            displayName: string;
-          };
+          catalog: ReturnType<typeof buildSnapshotCatalog>;
           rows: unknown[];
           replayComplete: boolean;
           runtime: {
@@ -638,7 +624,7 @@ describe('chat session labeling', () => {
       }));
 
       const loadPromise = loadCurrentHistory('active');
-      expect(useChatStore.getState().foregroundHistorySessionKey).toBe('agent:alpha:session-1');
+      expect(useChatStore.getState().foregroundHistorySessionKey).toBe(alphaRecordKey);
 
       // 模拟加载中被其它入口改写当前会话（首屏并发常见路径）
       useChatStore.setState({ currentSessionKey: 'agent:beta:session-2' } as never);
@@ -649,16 +635,12 @@ describe('chat session labeling', () => {
       await Promise.resolve();
       resolveHistory({
         snapshot: {
-          sessionKey: 'agent:alpha:session-1',
-          catalog: {
-            key: 'agent:alpha:session-1',
-            agentId: 'alpha',
-            kind: 'named',
-            preferred: false,
-            displayName: 'agent:alpha:session-1',
-          },
+          sessionKey: alphaSessionKey,
+          catalog: buildSnapshotCatalog(alphaSessionKey, []),
           items: [],
           approvals: [],
+          usage: [],
+          artifacts: [],
           replayComplete: true,
           runtime: {
             activeRunId: null,
@@ -694,11 +676,13 @@ describe('chat session labeling', () => {
         hasLoadedOnce: true,
         lastLoadedAt: 1,
       },
-      currentSessionKey: 'agent:alpha:session-1',
+      currentSessionKey: alphaRecordKey,
       loadedSessions: {
-        'agent:alpha:session-1': buildSessionRecord({
+        [alphaRecordKey]: buildSessionRecord({
           meta: {
-            runtimeAddress: alphaRuntimeAddress,
+            backendSessionKey: alphaSessionKey,
+            runtimeScopeKey: buildRuntimeScopeKey(alphaSessionIdentity.endpoint),
+            sessionIdentity: alphaSessionIdentity,
             thinkingLevel: 'high',
           },
         }),
@@ -715,19 +699,19 @@ describe('chat session labeling', () => {
     await loadCurrentHistory('active');
 
     expect(hostSessionLoadMock).toHaveBeenCalledWith({
-      sessionKey: 'agent:alpha:session-1',
-      runtimeAddress: alphaRuntimeAddress,
+      sessionKey: alphaSessionKey,
+      sessionIdentity: alphaSessionIdentity,
       limit: 200,
     }, { timeoutMs: undefined });
     const state = useChatStore.getState();
-    expect(getSessionItems(state, 'agent:alpha:session-1')).toMatchObject([
+    expect(getSessionItems(state, alphaRecordKey)).toMatchObject([
       {
         kind: 'assistant-turn',
         text: 'history from session.load',
         createdAt: 1_800_000_333,
       },
     ]);
-    expect(state.loadedSessions['agent:alpha:session-1']?.meta.thinkingLevel).toBe('high');
+    expect(state.loadedSessions[alphaRecordKey]?.meta.thinkingLevel).toBe('high');
   });
 });
 

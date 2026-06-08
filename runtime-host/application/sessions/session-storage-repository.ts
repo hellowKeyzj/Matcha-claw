@@ -1,4 +1,4 @@
-import type { RuntimeAddress } from '../agent-runtime/contracts/runtime-address';
+import type { SessionIdentity } from '../agent-runtime/contracts/runtime-address';
 import type { SessionStorageRepositoryWorkflow } from '../workflows/session-storage/session-storage-repository-workflow';
 
 export interface SessionStorageDescriptor {
@@ -8,7 +8,7 @@ export interface SessionStorageDescriptor {
   sessionsJsonPath: string | null;
   sessionsJson: Record<string, unknown> | null;
   sessionStoreEntry: Record<string, unknown> | null;
-  runtimeAddress: RuntimeAddress;
+  sessionIdentity: SessionIdentity;
   transcriptPath: string | null;
 }
 
@@ -39,7 +39,7 @@ export interface SessionStorageRepositoryDeps {
     | 'readTranscriptDescriptorContent'
     | 'readTranscriptLines'
     | 'readTranscriptDescriptorLines'
-    | 'upsertSessionRuntimeAddress'
+    | 'upsertSessionIdentity'
     | 'updateSessionStatus'
     | 'renameSession'
     | 'deleteSession'
@@ -48,16 +48,16 @@ export interface SessionStorageRepositoryDeps {
 
 export interface SessionStoragePort {
   listStorageDescriptors(): Promise<SessionStorageDescriptor[]>;
-  findStorageDescriptor(sessionKey: string): Promise<SessionStorageDescriptor | null>;
+  findStorageDescriptor(identity: SessionIdentity): Promise<SessionStorageDescriptor | null>;
   getTranscriptFingerprint(pathname: string): Promise<SessionTranscriptFingerprint | null>;
-  readTranscriptContent(sessionKey: string): Promise<string | null>;
+  readTranscriptContent(identity: SessionIdentity): Promise<string | null>;
   readTranscriptDescriptorContent(descriptor: SessionStorageDescriptor): Promise<string | null>;
-  readTranscriptLines(sessionKey: string): AsyncIterable<string>;
+  readTranscriptLines(identity: SessionIdentity): AsyncIterable<string>;
   readTranscriptDescriptorLines(descriptor: SessionStorageDescriptor): AsyncIterable<string>;
-  deleteSession(sessionKey: string): Promise<boolean>;
-  renameSession(sessionKey: string, label: string): Promise<boolean>;
-  updateSessionStatus(sessionKey: string, status: 'active' | 'completed' | 'archived' | 'deleted'): Promise<boolean>;
-  upsertSessionRuntimeAddress(sessionKey: string, runtimeAddress: RuntimeAddress): Promise<boolean>;
+  deleteSession(identity: SessionIdentity): Promise<boolean>;
+  renameSession(identity: SessionIdentity, label: string): Promise<boolean>;
+  updateSessionStatus(identity: SessionIdentity, status: 'active' | 'completed' | 'archived' | 'deleted'): Promise<boolean>;
+  upsertSessionIdentity(sessionIdentity: SessionIdentity): Promise<boolean>;
 }
 
 function normalizeString(value: unknown): string {
@@ -76,46 +76,46 @@ export class SessionStorageRepository implements SessionStoragePort {
     return await this.deps.repositoryWorkflow.listStorageDescriptors();
   }
 
-  async findStorageDescriptor(sessionKey: string): Promise<SessionStorageDescriptor | null> {
-    return await this.deps.repositoryWorkflow.findStorageDescriptor(sessionKey);
+  async findStorageDescriptor(identity: SessionIdentity): Promise<SessionStorageDescriptor | null> {
+    return await this.deps.repositoryWorkflow.findStorageDescriptor(identity);
   }
 
   async getTranscriptFingerprint(pathname: string): Promise<SessionTranscriptFingerprint | null> {
     return await this.deps.repositoryWorkflow.getTranscriptFingerprint(pathname);
   }
 
-  async readTranscriptContent(sessionKey: string): Promise<string | null> {
-    return await this.deps.repositoryWorkflow.readTranscriptContent(sessionKey);
+  async readTranscriptContent(identity: SessionIdentity): Promise<string | null> {
+    return await this.deps.repositoryWorkflow.readTranscriptContent(identity);
   }
 
   async readTranscriptDescriptorContent(descriptor: SessionStorageDescriptor): Promise<string | null> {
     return await this.deps.repositoryWorkflow.readTranscriptDescriptorContent(descriptor);
   }
 
-  async *readTranscriptLines(sessionKey: string): AsyncIterable<string> {
-    yield* this.deps.repositoryWorkflow.readTranscriptLines(sessionKey);
+  async *readTranscriptLines(identity: SessionIdentity): AsyncIterable<string> {
+    yield* this.deps.repositoryWorkflow.readTranscriptLines(identity);
   }
 
   async *readTranscriptDescriptorLines(descriptor: SessionStorageDescriptor): AsyncIterable<string> {
     yield* this.deps.repositoryWorkflow.readTranscriptDescriptorLines(descriptor);
   }
 
-  async upsertSessionRuntimeAddress(sessionKey: string, runtimeAddress: RuntimeAddress): Promise<boolean> {
-    return await this.deps.repositoryWorkflow.upsertSessionRuntimeAddress(sessionKey, runtimeAddress);
+  async upsertSessionIdentity(sessionIdentity: SessionIdentity): Promise<boolean> {
+    return await this.deps.repositoryWorkflow.upsertSessionIdentity(sessionIdentity);
   }
 
   async updateSessionStatus(
-    sessionKey: string,
+    identity: SessionIdentity,
     status: 'active' | 'completed' | 'archived' | 'deleted',
   ): Promise<boolean> {
-    return await this.deps.repositoryWorkflow.updateSessionStatus(sessionKey, status);
+    return await this.deps.repositoryWorkflow.updateSessionStatus(identity, status);
   }
 
-  async renameSession(sessionKey: string, label: string): Promise<boolean> {
-    return await this.deps.repositoryWorkflow.renameSession(sessionKey, label);
+  async renameSession(identity: SessionIdentity, label: string): Promise<boolean> {
+    return await this.deps.repositoryWorkflow.renameSession(identity, label);
   }
 
-  async deleteSession(sessionKey: string): Promise<boolean> {
-    return await this.deps.repositoryWorkflow.deleteSession(sessionKey);
+  async deleteSession(identity: SessionIdentity): Promise<boolean> {
+    return await this.deps.repositoryWorkflow.deleteSession(identity);
   }
 }

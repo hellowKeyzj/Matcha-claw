@@ -40,12 +40,12 @@ describe('security-core 插件规范对齐', () => {
     });
   });
 
-  it('package 扩展入口声明源码入口和构建后运行时入口', () => {
+  it('package 扩展入口声明构建后运行时入口', () => {
     const openclawMeta = packageJson.openclaw as {
       extensions?: unknown;
       runtimeExtensions?: unknown;
     } | undefined;
-    expect(openclawMeta?.extensions).toEqual(['./src/index.ts']);
+    expect(openclawMeta?.extensions).toEqual(['./dist/index.js']);
     expect(openclawMeta?.runtimeExtensions).toEqual(['./dist/index.js']);
     expect(typeof plugin.register).toBe('function');
   });

@@ -15,7 +15,7 @@ import { buildRenderItemsFromMessages, type RawMessage } from './helpers/timelin
 import { createViewportWindowState } from '@/stores/chat/viewport-state';
 import type { StoreHistoryCache } from '@/stores/chat/history-cache';
 import type { ChatStoreState } from '@/stores/chat/types';
-import { createOpenClawTestRuntimeAddress } from './helpers/runtime-address-fixtures';
+import { createOpenClawTestSessionIdentity } from './helpers/runtime-address-fixtures';
 
 const hostSessionWindowFetchMock = vi.fn();
 const hostSessionResumeMock = vi.fn();
@@ -74,7 +74,7 @@ function buildWindowSnapshotResult(input: {
         kind: input.sessionKey.endsWith(':main') ? 'main' as const : 'session' as const,
         preferred: input.sessionKey.endsWith(':main'),
         displayName: input.sessionKey,
-        runtimeAddress: createOpenClawTestRuntimeAddress(input.sessionKey),
+        sessionIdentity: createOpenClawTestSessionIdentity(input.sessionKey),
         updatedAt: input.messages[input.messages.length - 1]?.timestamp,
       },
       items: buildRenderItemsFromMessages(input.sessionKey, input.messages),
@@ -114,7 +114,7 @@ function buildSessionSnapshotResult(input: {
         kind: input.sessionKey.endsWith(':main') ? 'main' as const : 'session' as const,
         preferred: input.sessionKey.endsWith(':main'),
         displayName: input.sessionKey,
-        runtimeAddress: createOpenClawTestRuntimeAddress(input.sessionKey),
+        sessionIdentity: createOpenClawTestSessionIdentity(input.sessionKey),
         updatedAt: input.messages[input.messages.length - 1]?.timestamp,
       },
       items: buildRenderItemsFromMessages(input.sessionKey, input.messages),
@@ -160,7 +160,7 @@ function createStateHarness(input: {
           kind: input.currentSessionKey.endsWith(':main') ? 'main' : 'session',
           preferred: input.currentSessionKey.endsWith(':main'),
           titleSource: 'none',
-          runtimeAddress: createOpenClawTestRuntimeAddress(input.currentSessionKey),
+          sessionIdentity: createOpenClawTestSessionIdentity(input.currentSessionKey),
           ...input.meta,
         },
         items: buildRenderItemsFromMessages(input.currentSessionKey, input.messages),
@@ -342,7 +342,7 @@ describe('chat session window ops', () => {
           meta: {
             ...createEmptySessionRecord().meta,
             backendSessionKey: sessionKey,
-            runtimeAddress: createOpenClawTestRuntimeAddress(sessionKey),
+            sessionIdentity: createOpenClawTestSessionIdentity(sessionKey),
           },
           items: buildRenderItemsFromMessages(sessionKey, [{
             id: 'assistant-local-stream',
@@ -455,7 +455,7 @@ describe('chat session window ops', () => {
 
     expect(hostSessionResumeMock).toHaveBeenCalledWith(expect.objectContaining({
       sessionKey,
-      runtimeAddress: createOpenClawTestRuntimeAddress(sessionKey),
+      sessionIdentity: createOpenClawTestSessionIdentity(sessionKey),
     }));
     expect(loadHistoryMock).not.toHaveBeenCalled();
     for (let index = 0; index < 5; index += 1) {
@@ -481,7 +481,7 @@ describe('chat session window ops', () => {
           meta: {
             ...createEmptySessionRecord().meta,
             historyStatus: 'ready' as const,
-            runtimeAddress: createOpenClawTestRuntimeAddress(currentSessionKey),
+            sessionIdentity: createOpenClawTestSessionIdentity(currentSessionKey),
           },
           window: createViewportWindowState({
             ...createEmptySessionViewportState(),
@@ -497,7 +497,7 @@ describe('chat session window ops', () => {
           ...createEmptySessionRecord(),
           meta: {
             ...createEmptySessionRecord().meta,
-            runtimeAddress: createOpenClawTestRuntimeAddress(targetSessionKey),
+            sessionIdentity: createOpenClawTestSessionIdentity(targetSessionKey),
           },
         },
       },

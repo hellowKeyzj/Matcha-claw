@@ -3,9 +3,14 @@
  * Manages scheduled task state
  */
 import { create } from 'zustand';
-import { hostApiFetch, hostCapabilityExecute, waitForRuntimeJobResult, type RuntimeJobSubmission } from '@/lib/host-api';
+import {
+  hostApiFetch,
+  resolveSingleCapabilityScope,
+  waitForRuntimeJobResult,
+  type RuntimeJobSubmission,
+} from '@/lib/host-api';
 import type { CronJob, CronJobCreateInput, CronJobUpdateInput } from '../types/cron';
-import type { RuntimeAddress } from '../../runtime-host/shared/runtime-address';
+import type { CapabilityTarget } from '../../runtime-host/shared/runtime-address';
 
 interface CronState {
   jobs: CronJob[];
@@ -18,11 +23,11 @@ interface CronState {
   
   // Actions
   fetchJobs: (options?: { silent?: boolean }) => Promise<void>;
-  createJob: (input: CronJobCreateInput, runtimeAddress: RuntimeAddress) => Promise<CronJob>;
-  updateJob: (id: string, input: CronJobUpdateInput, runtimeAddress: RuntimeAddress) => Promise<void>;
-  deleteJob: (id: string, runtimeAddress: RuntimeAddress) => Promise<void>;
-  toggleJob: (id: string, enabled: boolean, runtimeAddress: RuntimeAddress) => Promise<void>;
-  triggerJob: (id: string, runtimeAddress: RuntimeAddress) => Promise<{ ran: boolean; reason?: string }>;
+  createJob: (input: CronJobCreateInput) => Promise<CronJob>;
+  updateJob: (id: string, input: CronJobUpdateInput) => Promise<void>;
+  deleteJob: (id: string) => Promise<void>;
+  toggleJob: (id: string, enabled: boolean) => Promise<void>;
+  triggerJob: (id: string) => Promise<{ ran: boolean; reason?: string }>;
   setJobs: (jobs: CronJob[]) => void;
 }
 
@@ -57,15 +62,20 @@ function scheduleCronSnapshotRetry(fetchJobs: () => Promise<void>): void {
   }, CRON_SNAPSHOT_NOT_READY_RETRY_MS);
 }
 
-async function cronCapabilityExecute<TResult>(operationId: string, runtimeAddress: RuntimeAddress, input: Record<string, unknown>): Promise<TResult> {
-  return await hostCapabilityExecute<TResult>({
-    id: SCHEDULER_CRON_CAPABILITY_ID,
-    operationId,
-    runtimeAddress,
-    input: {
-      ...input,
-      runtimeAddress,
-    },
+async function cronCapabilityExecute<TResult>(
+  operationId: string,
+  input: Record<string, unknown>,
+  target: CapabilityTarget,
+): Promise<TResult> {
+  return await hostApiFetch<TResult>('/api/capabilities/execute', {
+    method: 'POST',
+    body: JSON.stringify({
+      id: SCHEDULER_CRON_CAPABILITY_ID,
+      operationId,
+      scope: await resolveSingleCapabilityScope(SCHEDULER_CRON_CAPABILITY_ID),
+      target,
+      input,
+    }),
   });
 }
 
@@ -174,10 +184,10 @@ export const useCronStore = create<CronState>((set, get) => ({
     }
   },
   
-  createJob: async (input, runtimeAddress) => {
+  createJob: async (input) => {
     set({ mutating: true });
     try {
-      const submission = await cronCapabilityExecute<RuntimeJobSubmission<CronJob>>('cron.create', runtimeAddress, { ...input });
+      const submission = await cronCapabilityExecute<RuntimeJobSubmission<CronJob>>('cron.create', { ...input }, { kind: 'cron-job' });
       const job = await waitForRuntimeJobResult<CronJob>(submission.job.id);
       if (!job || typeof job.id !== 'string') {
         throw new Error('Invalid cron create job result');
@@ -192,7 +202,7 @@ export const useCronStore = create<CronState>((set, get) => ({
     }
   },
   
-  updateJob: async (id, input, runtimeAddress) => {
+  updateJob: async (id, input) => {
     set((state) => {
       const next = incrementMutatingJob(state.mutatingByJobId, id);
       return {
@@ -201,9 +211,12 @@ export const useCronStore = create<CronState>((set, get) => ({
       };
     });
     try {
-      const submission = await cronCapabilityExecute<RuntimeJobSubmission>('cron.update', runtimeAddress, {
+      const submission = await cronCapabilityExecute<RuntimeJobSubmission>('cron.update', {
         jobId: id,
         updates: input,
+      }, {
+        kind: 'cron-job',
+        jobId: id,
       });
       await waitForRuntimeJobResult(submission.job.id);
       set((state) => ({
@@ -232,7 +245,7 @@ export const useCronStore = create<CronState>((set, get) => ({
     }
   },
   
-  deleteJob: async (id, runtimeAddress) => {
+  deleteJob: async (id) => {
     set((state) => {
       const next = incrementMutatingJob(state.mutatingByJobId, id);
       return {
@@ -241,7 +254,7 @@ export const useCronStore = create<CronState>((set, get) => ({
       };
     });
     try {
-      const submission = await cronCapabilityExecute<RuntimeJobSubmission>('cron.delete', runtimeAddress, { jobId: id });
+      const submission = await cronCapabilityExecute<RuntimeJobSubmission>('cron.delete', { jobId: id }, { kind: 'cron-job', jobId: id });
       await waitForRuntimeJobResult(submission.job.id);
       set((state) => ({
         jobs: state.jobs.filter((job) => job.id !== id),
@@ -260,7 +273,7 @@ export const useCronStore = create<CronState>((set, get) => ({
     }
   },
   
-  toggleJob: async (id, enabled, runtimeAddress) => {
+  toggleJob: async (id, enabled) => {
     set((state) => {
       const next = incrementMutatingJob(state.mutatingByJobId, id);
       return {
@@ -269,7 +282,7 @@ export const useCronStore = create<CronState>((set, get) => ({
       };
     });
     try {
-      const submission = await cronCapabilityExecute<RuntimeJobSubmission>('cron.toggle', runtimeAddress, { id, enabled });
+      const submission = await cronCapabilityExecute<RuntimeJobSubmission>('cron.toggle', { id, enabled }, { kind: 'cron-job', jobId: id });
       await waitForRuntimeJobResult(submission.job.id);
       set((state) => ({
         jobs: state.jobs.map((job) =>
@@ -290,7 +303,7 @@ export const useCronStore = create<CronState>((set, get) => ({
     }
   },
   
-  triggerJob: async (id, runtimeAddress) => {
+  triggerJob: async (id) => {
     set((state) => {
       const next = incrementMutatingJob(state.mutatingByJobId, id);
       return {
@@ -299,7 +312,7 @@ export const useCronStore = create<CronState>((set, get) => ({
       };
     });
     try {
-      const submission = await cronCapabilityExecute<RuntimeJobSubmission<{ ok?: boolean; ran?: boolean; reason?: string }>>('cron.trigger', runtimeAddress, { id });
+      const submission = await cronCapabilityExecute<RuntimeJobSubmission<{ ok?: boolean; ran?: boolean; reason?: string }>>('cron.trigger', { id }, { kind: 'cron-job', jobId: id });
       const result = await waitForRuntimeJobResult<{ ok?: boolean; ran?: boolean; reason?: string }>(
         submission.job.id,
       );

@@ -27,7 +27,7 @@ import { SessionLifecycleWorkflow } from '../../application/workflows/session-li
 import { SessionCatalogWorkflow } from '../../application/workflows/session-catalog/session-catalog-workflow';
 import { SessionModelResolutionWorkflow } from '../../application/workflows/session-metadata/session-model-resolution-workflow';
 import { SessionOperationResultWorkflow } from '../../application/workflows/session-operation/session-operation-result-workflow';
-import { SessionStorageIndexWorkflow, type SessionStorageRuntimeAddressResolverPort } from '../../application/workflows/session-storage/session-storage-index-workflow';
+import { SessionStorageIndexWorkflow, type SessionStorageSessionIdentityResolverPort } from '../../application/workflows/session-storage/session-storage-index-workflow';
 import { SessionStorageMutationWorkflow } from '../../application/workflows/session-storage/session-storage-mutation-workflow';
 import { SessionStorageRepositoryWorkflow } from '../../application/workflows/session-storage/session-storage-repository-workflow';
 import { SessionStorageTranscriptWorkflow } from '../../application/workflows/session-storage/session-storage-transcript-workflow';
@@ -66,7 +66,7 @@ import type {
 } from '../../application/runtime-host/runtime-task-ports';
 import type { AgentRuntimeRegistry } from '../../application/agent-runtime/contracts/agent-runtime-registry';
 import type { RuntimeEndpointProfile } from '../../application/agent-runtime/contracts/runtime-endpoint-types';
-import { validateRuntimeAddress, type RuntimeAddress } from '../../application/agent-runtime/contracts/runtime-address';
+import { nativeRuntimeEndpoint, connectorRuntimeEndpoint, validateSessionIdentity, type SessionIdentity } from '../../application/agent-runtime/contracts/runtime-address';
 import type { GatewayChatPort } from '../../application/gateway/gateway-runtime-port';
 
 export interface SessionRuntimeModule {
@@ -74,15 +74,15 @@ export interface SessionRuntimeModule {
   readonly sessionCatalog: SessionCatalogService;
 }
 
-class AgentNamespaceSessionStorageRuntimeAddressResolver implements SessionStorageRuntimeAddressResolverPort {
+class AgentNamespaceSessionStorageIdentityResolver implements SessionStorageSessionIdentityResolverPort {
   constructor(private readonly registry: AgentRuntimeRegistry) {}
 
-  resolveStorageRuntimeAddress(input: {
+  resolveStorageSessionIdentity(input: {
     agentId: string;
     sessionKey: string;
     sessionStoreEntry: Record<string, unknown> | null;
-  }): RuntimeAddress | null {
-    const stored = this.readStoredRuntimeAddress(input.sessionStoreEntry);
+  }): SessionIdentity | null {
+    const stored = this.readStoredSessionIdentity(input.sessionStoreEntry, input.agentId, input.sessionKey);
     if (stored) {
       return stored;
     }
@@ -92,21 +92,28 @@ class AgentNamespaceSessionStorageRuntimeAddressResolver implements SessionStora
       && candidate.keying?.namespace === 'agent'
       && (candidate.agentIds.includes(input.agentId) || candidate.acceptsDynamicAgents === true)
     ));
-    return endpoint ? this.buildRuntimeAddress(endpoint, input.agentId, input.sessionKey) : null;
+    return endpoint ? this.buildSessionIdentity(endpoint, input.agentId, input.sessionKey) : null;
   }
 
-  private readStoredRuntimeAddress(entry: Record<string, unknown> | null): RuntimeAddress | null {
-    const candidate = entry?.runtimeAddress;
-    return validateRuntimeAddress(candidate) === null ? candidate as RuntimeAddress : null;
+  private readStoredSessionIdentity(entry: Record<string, unknown> | null, agentId: string, sessionKey: string): SessionIdentity | null {
+    const candidate = entry?.sessionIdentity;
+    if (candidate === undefined) {
+      return null;
+    }
+    if (validateSessionIdentity(candidate) !== null) {
+      return null;
+    }
+    const identity = candidate as SessionIdentity;
+    return identity.agentId === agentId && identity.sessionKey === sessionKey ? identity : null;
   }
 
-  private buildRuntimeAddress(endpoint: RuntimeEndpointProfile, agentId: string, sessionKey: string): RuntimeAddress {
+  private buildSessionIdentity(endpoint: RuntimeEndpointProfile, agentId: string, sessionKey: string): SessionIdentity {
     if (endpoint.runtimeAdapterId) {
       return {
-        kind: 'native-runtime',
-        capabilityId: SESSION_PROMPT_CAPABILITY_ID,
-        runtimeAdapterId: endpoint.runtimeAdapterId,
-        runtimeInstanceId: endpoint.runtimeInstanceId ?? endpoint.id,
+        endpoint: nativeRuntimeEndpoint({
+          runtimeAdapterId: endpoint.runtimeAdapterId,
+          runtimeInstanceId: endpoint.runtimeInstanceId ?? endpoint.id,
+        }),
         agentId,
         sessionKey,
       };
@@ -115,11 +122,11 @@ class AgentNamespaceSessionStorageRuntimeAddressResolver implements SessionStora
       throw new Error(`Runtime endpoint cannot address sessions: ${endpoint.id}`);
     }
     return {
-      kind: 'protocol-connector',
-      capabilityId: SESSION_PROMPT_CAPABILITY_ID,
-      protocolId: endpoint.protocolId,
-      connectorId: endpoint.connectorId,
-      endpointId: endpoint.id,
+      endpoint: connectorRuntimeEndpoint({
+        protocolId: endpoint.protocolId,
+        connectorId: endpoint.connectorId,
+        endpointId: endpoint.id,
+      }),
       agentId,
       sessionKey,
     };
@@ -132,13 +139,13 @@ export function registerSessionRuntimeModule(
     emit: (eventName: ParentGatewayForwardEventName, payload: unknown) => Promise<void>;
   },
 ): void {
-  container.register('sessionStorageRuntimeAddressResolver', (scope) => new AgentNamespaceSessionStorageRuntimeAddressResolver(
+  container.register('sessionStorageSessionIdentityResolver', (scope) => new AgentNamespaceSessionStorageIdentityResolver(
     scope.resolve<AgentRuntimeRegistry>('sessionAgentRuntimeRegistry'),
   ));
   container.register('sessionStorageIndexWorkflow', (scope) => new SessionStorageIndexWorkflow({
     workspace: scope.resolve<SessionConfigDirectoryPort>('sessionConfigDirectory'),
     fileSystem: scope.resolve<RuntimeFileSystemPort>('runtime.fileSystem'),
-    runtimeAddressResolver: scope.resolve<SessionStorageRuntimeAddressResolverPort>('sessionStorageRuntimeAddressResolver'),
+    sessionIdentityResolver: scope.resolve<SessionStorageSessionIdentityResolverPort>('sessionStorageSessionIdentityResolver'),
   }));
   container.register('sessionStorageMutationWorkflow', (scope) => new SessionStorageMutationWorkflow({
     fileSystem: scope.resolve<RuntimeFileSystemPort>('runtime.fileSystem'),

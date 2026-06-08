@@ -9,7 +9,7 @@ import {
   readPatchSessionRequest,
   readRenameSessionRequest,
   readResolveApprovalRequest,
-  readRuntimeAddressRequest,
+  readSessionIdentityRequest,
   readSessionListRequest,
   readSessionLoadRequest,
   readSessionStatusRequest,
@@ -21,6 +21,7 @@ import {
   ok,
   type ApplicationResponseOf,
 } from '../../common/application-response';
+import type { SessionIdentity } from '../../agent-runtime/contracts/runtime-address';
 import type {
   SessionHydratingLoadResult,
   SessionHydratingWindowResult,
@@ -38,33 +39,45 @@ export interface SessionCommandOperationsWorkflowDeps {
   sessionModelSelectionWorkflow: SessionModelSelectionWorkflow;
 }
 
+function sessionIdentityMatchesSessionKey(sessionIdentity: SessionIdentity, sessionKey: string): boolean {
+  return sessionIdentity.sessionKey === sessionKey;
+}
+
 export class SessionCommandOperationsWorkflow {
   constructor(private readonly deps: SessionCommandOperationsWorkflowDeps) {}
 
   async createSession(payload: unknown): Promise<ApplicationResponseOf<SessionNewResult>> {
     const {
       explicitSessionKey,
-      runtimeAddress,
-      runtimeAddressError,
+      endpoint,
+      endpointError,
+      agentId,
     } = readCreateSessionRequest(payload);
-    if (runtimeAddressError || !runtimeAddress) {
-      return badRequest(runtimeAddressError ?? 'RuntimeAddress is required');
+    if (endpointError || !endpoint) {
+      return badRequest(endpointError ?? 'RuntimeEndpointRef is required');
+    }
+    if (!agentId) {
+      return badRequest('agentId is required');
     }
     return await this.deps.sessionLifecycleWorkflow.create({
       explicitSessionKey,
-      runtimeAddress,
+      endpoint,
+      agentId,
     });
   }
 
   async deleteSession(payload: unknown): Promise<ApplicationResponseOf> {
-    const { sessionKey, runtimeAddress, runtimeAddressError } = readRuntimeAddressRequest(payload);
-    if (runtimeAddressError || !runtimeAddress) {
-      return badRequest(runtimeAddressError ?? 'RuntimeAddress is required');
+    const { sessionKey, sessionIdentity, sessionIdentityError } = readSessionIdentityRequest(payload);
+    if (sessionIdentityError || !sessionIdentity) {
+      return badRequest(sessionIdentityError ?? 'SessionIdentity is required');
     }
     if (!sessionKey) {
       return badRequest('sessionKey is required');
     }
-    return await this.deps.sessionLifecycleWorkflow.delete({ sessionKey, runtimeAddress });
+    if (!sessionIdentityMatchesSessionKey(sessionIdentity, sessionKey)) {
+      return badRequest('sessionKey must match SessionIdentity.sessionKey');
+    }
+    return await this.deps.sessionLifecycleWorkflow.delete({ identity: sessionIdentity });
   }
 
   async archiveSession(payload: unknown): Promise<ApplicationResponseOf> {
@@ -81,47 +94,50 @@ export class SessionCommandOperationsWorkflow {
   ): Promise<ApplicationResponseOf> {
     const {
       sessionKey,
-      runtimeAddress,
-      runtimeAddressError,
+      sessionIdentity,
+      sessionIdentityError,
       status: requestedStatus,
     } = readSessionStatusRequest(payload);
-    if (runtimeAddressError || !runtimeAddress) {
-      return badRequest(runtimeAddressError ?? 'RuntimeAddress is required');
+    if (sessionIdentityError || !sessionIdentity) {
+      return badRequest(sessionIdentityError ?? 'SessionIdentity is required');
     }
     if (!sessionKey) {
       return badRequest('sessionKey is required');
+    }
+    if (!sessionIdentityMatchesSessionKey(sessionIdentity, sessionKey)) {
+      return badRequest('sessionKey must match SessionIdentity.sessionKey');
     }
     const status = forcedStatus ?? requestedStatus;
     if (!status) {
       return badRequest('status is required');
     }
-    return await this.deps.sessionLifecycleWorkflow.updateStatus({ sessionKey, runtimeAddress, status });
+    return await this.deps.sessionLifecycleWorkflow.updateStatus({ identity: sessionIdentity, status });
   }
 
   async listSessions(payload: unknown) {
-    const { runtimeAddress, runtimeAddressError } = readSessionListRequest(payload);
-    if (runtimeAddressError || !runtimeAddress) {
-      return badRequest(runtimeAddressError ?? 'RuntimeAddress is required');
+    const { endpoint, endpointError } = readSessionListRequest(payload);
+    if (endpointError || !endpoint) {
+      return badRequest(endpointError ?? 'RuntimeEndpointRef is required');
     }
-    return await this.deps.sessionLifecycleWorkflow.list({ runtimeAddress });
+    return await this.deps.sessionLifecycleWorkflow.list({ endpoint });
   }
 
   async loadSession(payload: unknown): Promise<ApplicationResponseOf<SessionLoadResult | SessionHydratingLoadResult | { success: false; error: string }>> {
     const {
       sessionKey,
       limit,
-      runtimeAddress,
-      runtimeAddressError,
+      sessionIdentity,
+      sessionIdentityError,
     } = readSessionLoadRequest(payload);
     if (!sessionKey) {
       return badRequest('sessionKey is required');
     }
-    if (runtimeAddressError || !runtimeAddress) {
-      return badRequest(runtimeAddressError ?? 'RuntimeAddress is required');
+    if (sessionIdentityError || !sessionIdentity) {
+      return badRequest(sessionIdentityError ?? 'SessionIdentity is required');
     }
     return this.deps.sessionHydrationWorkflow.load({
       sessionKey,
-      runtimeAddress,
+      sessionIdentity,
       limit,
     });
   }
@@ -129,56 +145,62 @@ export class SessionCommandOperationsWorkflow {
   async resumeSession(payload: unknown): Promise<ApplicationResponseOf<SessionLoadResult | SessionHydratingLoadResult | { success: false; error: string }>> {
     const {
       sessionKey,
-      runtimeAddress,
-      runtimeAddressError,
+      sessionIdentity,
+      sessionIdentityError,
     } = readSessionLoadRequest(payload);
     if (!sessionKey) {
       return badRequest('sessionKey is required');
     }
-    if (runtimeAddressError || !runtimeAddress) {
-      return badRequest(runtimeAddressError ?? 'RuntimeAddress is required');
+    if (sessionIdentityError || !sessionIdentity) {
+      return badRequest(sessionIdentityError ?? 'SessionIdentity is required');
     }
     return this.deps.sessionHydrationWorkflow.resume({
       sessionKey,
-      runtimeAddress,
+      sessionIdentity,
     });
   }
 
   async patchSession(payload: unknown): Promise<ApplicationResponseOf> {
     const {
       sessionKey,
-      runtimeAddress,
-      runtimeAddressError,
+      sessionIdentity,
+      sessionIdentityError,
       runtimeModelRef,
     } = readPatchSessionRequest(payload);
     if (!sessionKey) {
       return badRequest('sessionKey is required');
     }
-    if (runtimeAddressError || !runtimeAddress) {
-      return badRequest(runtimeAddressError ?? 'RuntimeAddress is required');
+    if (sessionIdentityError || !sessionIdentity) {
+      return badRequest(sessionIdentityError ?? 'SessionIdentity is required');
+    }
+    if (!sessionIdentityMatchesSessionKey(sessionIdentity, sessionKey)) {
+      return badRequest('sessionKey must match SessionIdentity.sessionKey');
     }
     if (!runtimeModelRef) {
       return badRequest('runtimeModelRef is required');
     }
     return await this.deps.sessionModelSelectionWorkflow.patch({
       sessionKey,
-      runtimeAddress,
+      sessionIdentity,
       runtimeModelRef,
     });
   }
 
   async renameSession(payload: unknown): Promise<ApplicationResponseOf> {
-    const { sessionKey, runtimeAddress, runtimeAddressError, label } = readRenameSessionRequest(payload);
-    if (runtimeAddressError || !runtimeAddress) {
-      return badRequest(runtimeAddressError ?? 'RuntimeAddress is required');
+    const { sessionKey, sessionIdentity, sessionIdentityError, label } = readRenameSessionRequest(payload);
+    if (sessionIdentityError || !sessionIdentity) {
+      return badRequest(sessionIdentityError ?? 'SessionIdentity is required');
     }
     if (!sessionKey) {
       return badRequest('sessionKey is required');
     }
+    if (!sessionIdentityMatchesSessionKey(sessionIdentity, sessionKey)) {
+      return badRequest('sessionKey must match SessionIdentity.sessionKey');
+    }
     if (!label) {
       return badRequest('label is required');
     }
-    return await this.deps.sessionLifecycleWorkflow.rename({ sessionKey, runtimeAddress, label });
+    return await this.deps.sessionLifecycleWorkflow.rename({ identity: sessionIdentity, label });
   }
 
   async switchSession(payload: unknown): Promise<ApplicationResponseOf<SessionLoadResult | SessionHydratingLoadResult | { success: false; error: string }>> {
@@ -188,19 +210,19 @@ export class SessionCommandOperationsWorkflow {
   async getSessionStateSnapshot(payload: unknown): Promise<ApplicationResponseOf<SessionLoadResult | SessionHydratingLoadResult | { success: false; error: string }>> {
     const {
       sessionKey: requestedSessionKey,
-      runtimeAddress,
-      runtimeAddressError,
+      sessionIdentity,
+      sessionIdentityError,
     } = readSessionLoadRequest(payload);
     const sessionKey = requestedSessionKey;
     if (!sessionKey) {
       return badRequest('sessionKey is required');
     }
-    if (runtimeAddressError || !runtimeAddress) {
-      return badRequest(runtimeAddressError ?? 'RuntimeAddress is required');
+    if (sessionIdentityError || !sessionIdentity) {
+      return badRequest(sessionIdentityError ?? 'SessionIdentity is required');
     }
     return this.deps.sessionHydrationWorkflow.state({
       sessionKey,
-      runtimeAddress,
+      sessionIdentity,
     });
   }
 
@@ -210,14 +232,14 @@ export class SessionCommandOperationsWorkflow {
       mode,
       limit,
       offset,
-      runtimeAddress,
-      runtimeAddressError,
+      sessionIdentity,
+      sessionIdentityError,
     } = readSessionWindowRequest(payload);
     if (!sessionKey) {
       return badRequest('sessionKey is required');
     }
-    if (runtimeAddressError || !runtimeAddress) {
-      return badRequest(runtimeAddressError ?? 'RuntimeAddress is required');
+    if (sessionIdentityError || !sessionIdentity) {
+      return badRequest(sessionIdentityError ?? 'SessionIdentity is required');
     }
 
     if ((mode === 'older' || mode === 'newer') && offset == null) {
@@ -226,7 +248,7 @@ export class SessionCommandOperationsWorkflow {
 
     return await this.deps.sessionHydrationWorkflow.window({
       sessionKey,
-      runtimeAddress,
+      sessionIdentity,
       mode,
       limit,
       offset,
@@ -237,33 +259,33 @@ export class SessionCommandOperationsWorkflow {
     const {
       sessionKey,
       approvalIds,
-      runtimeAddress,
-      runtimeAddressError,
+      sessionIdentity,
+      sessionIdentityError,
     } = readAbortSessionRequest(payload);
     if (!sessionKey) {
       return badRequest('sessionKey is required');
     }
-    if (runtimeAddressError || !runtimeAddress) {
-      return badRequest(runtimeAddressError ?? 'RuntimeAddress is required');
+    if (sessionIdentityError || !sessionIdentity) {
+      return badRequest(sessionIdentityError ?? 'SessionIdentity is required');
     }
 
     return await this.deps.sessionApprovalWorkflow.abort({
       sessionKey,
       approvalIds,
-      runtimeAddress,
+      sessionIdentity,
     });
   }
 
   async listPendingApprovals(payload: unknown): Promise<ApplicationResponseOf<unknown>> {
     const {
-      runtimeAddress,
-      runtimeAddressError,
-    } = readRuntimeAddressRequest(payload);
-    if (runtimeAddressError || !runtimeAddress) {
-      return badRequest(runtimeAddressError ?? 'RuntimeAddress is required');
+      sessionIdentity,
+      sessionIdentityError,
+    } = readSessionIdentityRequest(payload);
+    if (sessionIdentityError || !sessionIdentity) {
+      return badRequest(sessionIdentityError ?? 'SessionIdentity is required');
     }
     return ok({
-      approvals: this.deps.stateStore.listApprovals(runtimeAddress)
+      approvals: this.deps.stateStore.listApprovals(sessionIdentity)
         .map((entry) => structuredClone(entry.approval))
         .sort((left, right) => left.createdAtMs - right.createdAtMs),
     });
@@ -274,8 +296,8 @@ export class SessionCommandOperationsWorkflow {
       id,
       decision,
       sessionKey,
-      runtimeAddress,
-      runtimeAddressError,
+      sessionIdentity,
+      sessionIdentityError,
     } = readResolveApprovalRequest(payload);
     if (!id) {
       return badRequest('approval id is required');
@@ -286,15 +308,18 @@ export class SessionCommandOperationsWorkflow {
     if (!sessionKey) {
       return badRequest('approval sessionKey is required');
     }
-    if (runtimeAddressError || !runtimeAddress) {
-      return badRequest(runtimeAddressError ?? 'RuntimeAddress is required');
+    if (sessionIdentityError || !sessionIdentity) {
+      return badRequest(sessionIdentityError ?? 'SessionIdentity is required');
+    }
+    if (!sessionIdentityMatchesSessionKey(sessionIdentity, sessionKey)) {
+      return badRequest('sessionKey must match SessionIdentity.sessionKey');
     }
 
     return await this.deps.sessionApprovalWorkflow.resolve({
       id,
       decision,
       sessionKey,
-      runtimeAddress,
+      sessionIdentity,
     });
   }
 

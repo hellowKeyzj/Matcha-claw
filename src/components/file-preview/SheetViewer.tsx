@@ -4,16 +4,17 @@ import { useTranslation } from 'react-i18next';
 import { LoadingSpinner } from '@/components/common/LoadingSpinner';
 import { Button } from '@/components/ui/button';
 import { StructuredTablePreview } from '@/pages/Chat/components/StructuredTablePreview';
-import { hostFileReadBinary } from '@/lib/host-api';
+import { hostFileReadBinary, type WorkspaceFileContext } from '@/lib/host-api';
 import { cn } from '@/lib/utils';
-import type { RuntimeAddress } from '../../../runtime-host/shared/runtime-address';
+import type { SessionIdentity } from '../../../runtime-host/shared/runtime-address';
 
 const SHEET_MAX_BYTES = 50 * 1024 * 1024;
 const ROWS_PER_PAGE = 200;
 
 interface SheetViewerProps {
   filePath: string;
-  runtimeAddress?: RuntimeAddress;
+  sessionIdentity?: SessionIdentity;
+  workspaceContext?: WorkspaceFileContext;
   className?: string;
 }
 
@@ -78,7 +79,8 @@ function formatCell(value: unknown): string {
 
 export function SheetViewer({
   filePath,
-  runtimeAddress,
+  sessionIdentity,
+  workspaceContext,
   className,
 }: SheetViewerProps) {
   const { t } = useTranslation('chat');
@@ -94,13 +96,14 @@ export function SheetViewer({
 
     void (async () => {
       try {
-        if (!runtimeAddress) {
-          throw new Error('RuntimeAddress is required');
+        if (!sessionIdentity) {
+          throw new Error('SessionIdentity is required');
         }
         const result = await hostFileReadBinary({
           path: filePath,
           maxBytes: SHEET_MAX_BYTES,
-          runtimeAddress,
+          sessionIdentity,
+          ...workspaceContext,
         });
         if (cancelled) {
           return;
@@ -159,7 +162,7 @@ export function SheetViewer({
     return () => {
       cancelled = true;
     };
-  }, [filePath, runtimeAddress]);
+  }, [filePath, sessionIdentity, workspaceContext]);
 
   const activeSheet = state.status === 'ready' ? state.sheets[sheetIndex] ?? null : null;
   const totalRows = activeSheet?.rowCount ?? 0;

@@ -5,7 +5,7 @@ import { OpenClawApprovalAdapter } from '../../runtime-host/application/adapters
 import { SessionCommandService } from '../../runtime-host/application/sessions/session-command-service';
 import { SessionCommandOperationsWorkflow } from '../../runtime-host/application/workflows/session-command/session-command-operations-workflow';
 import { SessionOperationCoordinator } from '../../runtime-host/application/sessions/session-operation-coordinator';
-import { createOpenClawTestRuntimeAddress, createOpenClawTestRuntimeContext } from './helpers/runtime-address-fixtures';
+import { createOpenClawTestSessionIdentity, createOpenClawTestRuntimeContext } from './helpers/runtime-address-fixtures';
 
 const testClock = {
   nowMs: () => 1_700_000_000_000,
@@ -70,10 +70,7 @@ describe('runtime-host ACP approvals', () => {
     expect(state.approvals).toEqual([{
       id: 'approval-1',
       sessionKey: 'agent:main:main',
-      runtimeAddress: {
-        ...createOpenClawTestRuntimeAddress('agent:main:main'),
-        capabilityId: 'session.approval',
-      },
+      sessionIdentity: createOpenClawTestSessionIdentity('agent:main:main'),
       runId: 'run-1',
       title: 'gateway',
       command: 'Remove-Item demo.txt',
@@ -159,13 +156,13 @@ describe('runtime-host ACP approvals', () => {
 });
 
 describe('session approval command service', () => {
-  it('lists pending approvals through the RuntimeAddress approval index', async () => {
-    const runtimeAddress = createOpenClawTestRuntimeAddress('agent:main:main');
+  it('lists pending approvals through the SessionIdentity approval index', async () => {
+    const sessionIdentity = createOpenClawTestSessionIdentity('agent:main:main');
     const canonical = createEmptyCanonicalSessionState('agent:main:main', createOpenClawTestRuntimeContext('agent:main:main'));
     canonical.approvals = [{
       id: 'approval-1',
       sessionKey: 'agent:main:main',
-      runtimeAddress,
+      sessionIdentity,
       title: 'gateway',
       allowedDecisions: ['allow-once', 'deny'],
       createdAtMs: 1_700_000_000_010,
@@ -185,20 +182,20 @@ describe('session approval command service', () => {
       }),
     });
 
-    await expect(service.listPendingApprovals({ runtimeAddress })).resolves.toEqual({
+    await expect(service.listPendingApprovals({ sessionIdentity })).resolves.toEqual({
       status: 200,
       data: {
         approvals: [{
           id: 'approval-1',
           sessionKey: 'agent:main:main',
-          runtimeAddress,
+          sessionIdentity,
           title: 'gateway',
           allowedDecisions: ['allow-once', 'deny'],
           createdAtMs: 1_700_000_000_010,
         }],
       },
     });
-    expect(listApprovals).toHaveBeenCalledWith(runtimeAddress);
+    expect(listApprovals).toHaveBeenCalledWith(sessionIdentity);
     expect(listSessionStates).not.toHaveBeenCalled();
   });
 });

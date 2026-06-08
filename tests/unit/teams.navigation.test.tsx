@@ -75,7 +75,7 @@ function enableMainAppRoutes() {
 }
 
 describe('teams navigation', () => {
-  it('hides teams entry in sidebar while the feature flag is off', () => {
+  it('shows teams entry in sidebar when the feature flag is enabled by default', () => {
     enableMainAppRoutes();
 
     render(
@@ -84,7 +84,7 @@ describe('teams navigation', () => {
       </MemoryRouter>,
     );
 
-    expect(screen.queryByRole('link', { name: 'Teams' })).not.toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'Teams' })).toHaveAttribute('href', '/teams');
   });
 
   it('redirects /teams while the feature flag is off', async () => {
@@ -101,8 +101,8 @@ describe('teams navigation', () => {
     expect(screen.queryByText('Agents Workspace')).not.toBeInTheDocument();
   });
 
-  it('does not preload teams routes while the feature flag is off', () => {
-    expect(preloadLazyRouteForPath('/teams')).toBeNull();
-    expect(preloadLazyRouteForPath('/teams/team-1')).toBeNull();
+  it('preloads teams routes when the feature flag is enabled by default', () => {
+    expect(preloadLazyRouteForPath('/teams')).toBeInstanceOf(Promise);
+    expect(preloadLazyRouteForPath('/teams/team-1')).toBeInstanceOf(Promise);
   });
 });

@@ -6,7 +6,7 @@ import type { CapabilityOperationRoute } from '../contracts/capability-router';
 export const AGENT_RUN_CAPABILITY_ID = 'agent.run';
 
 export const agentRunCapabilityOperations: readonly CapabilityOperationDescriptor[] = [
-  { id: 'agent.wait', title: 'Wait for agent run' },
+  { id: 'agent.wait', title: 'Wait for agent run', targetKind: 'agent' },
 ] as const;
 
 export function createAgentRunCapabilityOperationRoutes(deps: {

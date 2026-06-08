@@ -23,7 +23,9 @@
     "skillActive": "{{count}} skill active",
     "skillsActive": "{{count}} skills active",
     "attachmentReady": "{{count}} attachment ready",
-    "attachmentsReady": "{{count}} attachments ready"
+    "attachmentsReady": "{{count}} attachments ready",
+    "contextUsageLabel": "Context used {{pct}}%",
+    "contextUsageTitle": "Context used {{pct}}% ({{detail}})"
   },
   "noLogs": "(Журналы ещё недоступны)",
   "toolbar": {
@@ -51,6 +53,7 @@
   },
   "errors": {
     "activeRunDisconnected": "The active run disconnected before a terminal event was received.",
+    "abortStoppingTimeout": "Stopping is taking longer than expected. Start a new session to continue if needed.",
     "modelUnavailable": "The current model is unavailable. Please try again later or switch models.",
     "gatewayAuthRequired": "The OpenClaw Gateway requires authentication. Check your authentication configuration.",
     "gatewayAuthFailed": "OpenClaw Gateway authentication failed. Check your credentials or authentication configuration.",

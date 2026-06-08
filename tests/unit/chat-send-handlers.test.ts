@@ -6,18 +6,10 @@ import type { RawMessage } from './helpers/timeline-fixtures';
 import { getSessionItems } from '@/stores/chat/store-state-helpers';
 import { createViewportWindowState } from '@/stores/chat/viewport-state';
 import type { SessionRenderItem } from '../../runtime-host/shared/session-adapter-types';
-import type { RuntimeAddress } from '../../runtime-host/shared/runtime-address';
 import { buildRenderItemsFromMessages } from './helpers/timeline-fixtures';
+import { createOpenClawTestSessionIdentity } from './helpers/runtime-address-fixtures';
 
 const sendChatTransportMock = vi.fn();
-
-const testRuntimeAddress: RuntimeAddress = {
-  kind: 'native-runtime',
-  capabilityId: 'session.prompt',
-  runtimeAdapterId: 'openclaw',
-  runtimeInstanceId: 'local',
-  agentId: 'default',
-};
 
 vi.mock('@/stores/chat/send-transport', () => ({
   CHAT_SEND_RPC_TIMEOUT_MS: 120000,
@@ -31,9 +23,15 @@ function createSessionRecord(input?: {
   const sessionKey = input?.sessionKey ?? 'agent:main:session-1';
   const messages = input?.messages ?? [];
   const items: SessionRenderItem[] = buildRenderItemsFromMessages(sessionKey, messages);
+  const sessionIdentity = createOpenClawTestSessionIdentity(sessionKey);
   return {
     meta: {
+      backendSessionKey: sessionKey,
+      runtimeScopeKey: 'native-runtime:openclaw:local',
       agentId: sessionKey.split(':')[1] ?? null,
+      protocolId: 'openclaw-v4',
+      runtimeEndpointId: 'local',
+      sessionIdentity,
       kind: sessionKey.endsWith(':main') ? 'main' : 'session',
       preferred: sessionKey.endsWith(':main'),
       label: null,
@@ -41,7 +39,6 @@ function createSessionRecord(input?: {
       lastActivityAt: null,
       historyStatus: 'ready' as const,
       thinkingLevel: null,
-      runtimeAddress: testRuntimeAddress,
     },
     runtime: {
       activeRunId: null,
@@ -114,6 +111,9 @@ describe('chat send handlers', () => {
         catalog: {
           key: sessionKey,
           agentId: 'main',
+          protocolId: 'openclaw-v4',
+          runtimeEndpointId: 'local',
+          sessionIdentity: createOpenClawTestSessionIdentity(sessionKey),
           kind: 'session' as const,
           preferred: false,
           label: 'latest reply',
@@ -558,6 +558,9 @@ describe('chat send handlers', () => {
         catalog: {
           key: sessionKey,
           agentId: 'main',
+          protocolId: 'openclaw-v4',
+          runtimeEndpointId: 'local',
+          sessionIdentity: createOpenClawTestSessionIdentity(sessionKey),
           kind: 'session' as const,
           preferred: false,
           label: 'late reply',

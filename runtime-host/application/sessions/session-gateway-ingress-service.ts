@@ -1,4 +1,4 @@
-import type { RuntimeAddress } from '../agent-runtime/contracts/runtime-address';
+import type { RuntimeEndpointRef } from '../agent-runtime/contracts/runtime-address';
 import type { SessionUpdateEvent } from '../../shared/session-adapter-types';
 import type { CanonicalApprovalNotification } from './canonical/canonical-approval-events';
 import type { SessionGatewayIngressWorkflow } from '../workflows/session-gateway-ingress/session-gateway-ingress-workflow';
@@ -11,12 +11,12 @@ export interface SessionGatewayIngressServiceDeps {
 export class SessionGatewayIngressService {
   constructor(private readonly deps: SessionGatewayIngressServiceDeps) {}
 
-  consumeEndpointNotification(runtimeAddress: RuntimeAddress, notification: CanonicalApprovalNotification): SessionUpdateEvent[] {
-    return this.emitUpdates(this.deps.ingressWorkflow.consumeEndpointNotification(runtimeAddress, notification));
+  consumeEndpointNotification(endpoint: RuntimeEndpointRef, notification: CanonicalApprovalNotification): SessionUpdateEvent[] {
+    return this.emitUpdates(this.deps.ingressWorkflow.consumeEndpointNotification(endpoint, notification));
   }
 
-  async consumeEndpointConversationEvent(runtimeAddress: RuntimeAddress, payload: unknown): Promise<SessionUpdateEvent[]> {
-    return this.emitUpdates(await this.deps.ingressWorkflow.consumeEndpointConversationEvent(runtimeAddress, payload));
+  async consumeEndpointConversationEvent(endpoint: RuntimeEndpointRef, payload: unknown): Promise<SessionUpdateEvent[]> {
+    return this.emitUpdates(await this.deps.ingressWorkflow.consumeEndpointConversationEvent(endpoint, payload));
   }
 
   private emitUpdates(events: SessionUpdateEvent[]): SessionUpdateEvent[] {

@@ -1,7 +1,7 @@
 import type {
   SessionListResult,
 } from '../../shared/session-adapter-types';
-import type { RuntimeAddress } from '../agent-runtime/contracts/runtime-address';
+import type { RuntimeEndpointRef } from '../agent-runtime/contracts/runtime-address';
 import type {
   SessionStorageDescriptor,
 } from './session-storage-repository';
@@ -32,7 +32,7 @@ export interface SessionCatalogPort {
     error: string | null;
   };
   listSessions(input: {
-    runtimeAddress: RuntimeAddress;
+    endpoint: RuntimeEndpointRef;
     runtimeOverlays?: readonly SessionCatalogRuntimeOverlay[];
   }): Promise<SessionListResult>;
   scanSessions(): Promise<SessionListResult>;
@@ -58,7 +58,7 @@ export class SessionCatalogService implements SessionCatalogPort {
   }
 
   async listSessions(input: {
-    runtimeAddress: RuntimeAddress;
+    endpoint: RuntimeEndpointRef;
     runtimeOverlays?: readonly SessionCatalogRuntimeOverlay[];
   }): Promise<SessionListResult> {
     return await this.deps.catalogWorkflow.listSessions(input);

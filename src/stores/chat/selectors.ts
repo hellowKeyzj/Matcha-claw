@@ -35,7 +35,7 @@ function normalizeAgentPaneSessionLabel(value: string | null | undefined): strin
 
 function resolveCurrentAgentId(state: ChatStoreState): string {
   const meta = getSessionMeta(state, state.currentSessionKey);
-  return meta.agentId ?? meta.runtimeAddress?.agentId ?? '';
+  return meta.agentId ?? meta.sessionIdentity?.agentId ?? '';
 }
 
 function hasSessionPaneActivity(record: ChatSessionRecord): boolean {

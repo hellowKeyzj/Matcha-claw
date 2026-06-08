@@ -4,10 +4,13 @@ import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import boundarySpec from '../../electron/api/main-api-boundary.json';
 import {
+  HOSTAPI_PROXY_PUBLIC_READONLY_EXACT_ROUTES,
+  HOSTAPI_PROXY_PUBLIC_READONLY_PREFIX_ROUTES,
   MAIN_API_ALLOWED_ROUTE_FILES,
   MAIN_OWNED_EXACT_ROUTES,
   MAIN_OWNED_PREFIX_ROUTES,
   getMainApiBoundarySnapshot,
+  isHostApiProxyAllowedRoute,
   isMainOwnedRoute,
   isRuntimeHostBusinessRoute,
 } from '../../electron/api/route-boundary';
@@ -36,12 +39,32 @@ describe('main api boundary', () => {
     const snapshot = getMainApiBoundarySnapshot();
     expect(snapshot.allowedRouteFiles.length).toBeGreaterThan(0);
     expect(snapshot.mainOwnedExactRoutes.length).toBeGreaterThan(0);
+    expect(snapshot.hostapiProxyPublicReadonlyExactRoutes.length).toBeGreaterThan(0);
+  });
+
+  it('hostapi proxy 只允许 capabilities 与明确公开只读路由', () => {
+    expect(isHostApiProxyAllowedRoute('GET', '/api/capabilities/list')).toBe(true);
+    expect(isHostApiProxyAllowedRoute('POST', '/api/capabilities/describe')).toBe(true);
+    expect(isHostApiProxyAllowedRoute('POST', '/api/capabilities/execute')).toBe(true);
+    expect(isHostApiProxyAllowedRoute('GET', '/api/openclaw/subagent-templates/brand-guardian')).toBe(true);
+    expect(isHostApiProxyAllowedRoute('GET', '/api/settings/model')).toBe(true);
+
+    expect(isHostApiProxyAllowedRoute('POST', '/api/settings')).toBe(false);
+    expect(isHostApiProxyAllowedRoute('POST', '/api/gateway/start')).toBe(false);
+    expect(isHostApiProxyAllowedRoute('POST', '/api/runtime-host/restart')).toBe(false);
+    expect(isHostApiProxyAllowedRoute('POST', '/api/files/read-text')).toBe(false);
+    expect(isHostApiProxyAllowedRoute('POST', '/api/files/write-text')).toBe(false);
+    expect(isHostApiProxyAllowedRoute('GET', '/api/provider-accounts/account-1/api-key')).toBe(false);
+    expect(isHostApiProxyAllowedRoute('POST', '/api/provider-accounts/validate')).toBe(false);
+    expect(isHostApiProxyAllowedRoute('POST', '/internal/runtime-host/shell-actions')).toBe(false);
   });
 
   it('ts 边界定义必须与 JSON 边界清单保持一致', () => {
     expect([...MAIN_API_ALLOWED_ROUTE_FILES]).toEqual(boundarySpec.allowedRouteFiles);
     expect([...MAIN_OWNED_EXACT_ROUTES]).toEqual(boundarySpec.mainOwnedExactRoutes);
     expect([...MAIN_OWNED_PREFIX_ROUTES]).toEqual(boundarySpec.mainOwnedPrefixRoutes);
+    expect([...HOSTAPI_PROXY_PUBLIC_READONLY_EXACT_ROUTES]).toEqual(boundarySpec.hostapiProxyPublicReadonlyExactRoutes);
+    expect([...HOSTAPI_PROXY_PUBLIC_READONLY_PREFIX_ROUTES]).toEqual(boundarySpec.hostapiProxyPublicReadonlyPrefixRoutes);
   });
 
   it('electron/api/routes 目录必须与边界清单一致', async () => {

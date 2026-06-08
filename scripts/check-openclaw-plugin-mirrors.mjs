@@ -20,6 +20,10 @@ const REQUIRED_PLUGIN_MIRRORS = [
     dir: 'browser-relay',
   },
   {
+    pluginId: 'team-runtime',
+    dir: 'team-runtime',
+  },
+  {
     pluginId: 'memory-lancedb-pro',
     dir: 'memory-lancedb-pro',
     requiredFiles: [

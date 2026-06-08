@@ -46,6 +46,7 @@ describe('runtime-host internal routes', () => {
       action: 'provider_oauth_start',
       payload: {
         provider: 'openai',
+        flowId: 'flow-1',
         accountId: 'acc-1',
       },
     });
@@ -75,6 +76,7 @@ describe('runtime-host internal routes', () => {
     expect(handled).toBe(true);
     expect(executeShellAction).toHaveBeenCalledWith('provider_oauth_start', {
       provider: 'openai',
+      flowId: 'flow-1',
       accountId: 'acc-1',
     });
     expect(sendJsonMock).toHaveBeenCalledWith(expect.anything(), 200, {

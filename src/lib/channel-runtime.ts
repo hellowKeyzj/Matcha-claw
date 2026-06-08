@@ -1,31 +1,32 @@
-import { hostApiFetch, hostCapabilityExecute, waitForRuntimeJobResult, type RuntimeJobSubmission } from '@/lib/host-api';
+import { hostApiFetch, resolveSingleCapabilityScope, waitForRuntimeJobResult, type RuntimeJobSubmission } from '@/lib/host-api';
 import type { ChannelType } from '@/types/channel';
-import type { RuntimeAddress } from '../../runtime-host/shared/runtime-address';
+import type { CapabilityTarget } from '../../runtime-host/shared/runtime-address';
 
 const CHANNEL_INTEGRATION_CAPABILITY_ID = 'integration.channel';
 
 async function channelIntegrationCapabilityExecute<TResult>(
   operationId: string,
-  runtimeAddress: RuntimeAddress,
   input: Record<string, unknown> = {},
+  target: CapabilityTarget | null = null,
 ): Promise<TResult> {
-  return await hostCapabilityExecute<TResult>({
-    id: CHANNEL_INTEGRATION_CAPABILITY_ID,
-    operationId,
-    runtimeAddress,
-    input: {
-      ...input,
-      runtimeAddress,
-    },
+  return await hostApiFetch<TResult>('/api/capabilities/execute', {
+    method: 'POST',
+    body: JSON.stringify({
+      id: CHANNEL_INTEGRATION_CAPABILITY_ID,
+      operationId,
+      scope: await resolveSingleCapabilityScope(CHANNEL_INTEGRATION_CAPABILITY_ID),
+      target,
+      input,
+    }),
   });
 }
 
 async function submitChannelCapabilityJob<TResult = unknown>(
   operationId: string,
-  runtimeAddress: RuntimeAddress,
   input: Record<string, unknown> = {},
+  target: CapabilityTarget | null = null,
 ): Promise<TResult> {
-  const submission = await channelIntegrationCapabilityExecute<RuntimeJobSubmission<TResult>>(operationId, runtimeAddress, input);
+  const submission = await channelIntegrationCapabilityExecute<RuntimeJobSubmission<TResult>>(operationId, input, target);
   return await waitForRuntimeJobResult<TResult>(submission.job.id);
 }
 
@@ -50,8 +51,8 @@ export async function hostChannelsFetchSnapshot(): Promise<ChannelSnapshotFetchR
   return await hostApiFetch<ChannelSnapshotFetchResult>('/api/channels/snapshot');
 }
 
-export async function hostChannelsProbe(runtimeAddress: RuntimeAddress): Promise<unknown> {
-  return await submitChannelCapabilityJob('channels.probe', runtimeAddress);
+export async function hostChannelsProbe(): Promise<unknown> {
+  return await submitChannelCapabilityJob('channels.probe', {}, { kind: 'none' });
 }
 
 export async function hostChannelsReadConfig(
@@ -68,18 +69,19 @@ export async function hostChannelsActivate(input: {
   channelType: ChannelType;
   config: Record<string, unknown>;
   accountId?: string;
-}, runtimeAddress: RuntimeAddress): Promise<{ success?: boolean; error?: string; warning?: string; pluginInstalled?: boolean }> {
+}): Promise<{ success?: boolean; error?: string; warning?: string; pluginInstalled?: boolean }> {
+  const target = { kind: 'channel' as const, channelType: input.channelType, ...(input.accountId ? { accountId: input.accountId } : {}) };
   if (input.channelType === 'whatsapp' || input.channelType === 'openclaw-weixin') {
     return await channelIntegrationCapabilityExecute<{ success?: boolean; error?: string; warning?: string; pluginInstalled?: boolean }>(
       'channels.activate',
-      runtimeAddress,
       input,
+      target,
     );
   }
   return await submitChannelCapabilityJob<{ success?: boolean; error?: string; warning?: string; pluginInstalled?: boolean }>(
     'channels.activate',
-    runtimeAddress,
     input,
+    target,
   );
 }
 
@@ -105,42 +107,50 @@ export async function hostChannelsValidateCredentials(
   });
 }
 
-export async function hostChannelsDeleteConfig(channelType: ChannelType, runtimeAddress: RuntimeAddress): Promise<unknown> {
-  return await submitChannelCapabilityJob('channels.deleteConfig', runtimeAddress, { channelType });
+export async function hostChannelsDeleteConfig(channelType: ChannelType): Promise<unknown> {
+  return await submitChannelCapabilityJob('channels.deleteConfig', { channelType }, { kind: 'channel', channelType });
 }
 
 export async function hostChannelsConnect(
   channelType: ChannelType,
-  accountId: string | undefined,
-  runtimeAddress: RuntimeAddress,
+  accountId?: string,
 ): Promise<{ success: boolean }> {
-  return await channelIntegrationCapabilityExecute<{ success: boolean }>('channels.connect', runtimeAddress, { channelType, accountId });
+  return await channelIntegrationCapabilityExecute<{ success: boolean }>(
+    'channels.connect',
+    { channelType, accountId },
+    { kind: 'channel', channelType, ...(accountId ? { accountId } : {}) },
+  );
 }
 
 export async function hostChannelsDisconnect(
   channelType: ChannelType,
-  accountId: string | undefined,
-  runtimeAddress: RuntimeAddress,
+  accountId?: string,
 ): Promise<{ success: boolean }> {
-  return await channelIntegrationCapabilityExecute<{ success: boolean }>('channels.disconnect', runtimeAddress, { channelType, accountId });
+  return await channelIntegrationCapabilityExecute<{ success: boolean }>(
+    'channels.disconnect',
+    { channelType, accountId },
+    { kind: 'channel', channelType, ...(accountId ? { accountId } : {}) },
+  );
 }
 
 export async function hostChannelsRequestQrCode(
   channelType: ChannelType,
-  runtimeAddress: RuntimeAddress,
 ): Promise<{ success: boolean; qrCode?: string; sessionId?: string }> {
   return await channelIntegrationCapabilityExecute<{ success: boolean; qrCode?: string; sessionId?: string }>(
     'channels.requestQr',
-    runtimeAddress,
     { channelType },
+    { kind: 'channel-pairing', channelType },
   );
 }
 
 export async function hostChannelsCancelSession(
   channelType: Extract<ChannelType, 'whatsapp' | 'openclaw-weixin'>,
-  runtimeAddress: RuntimeAddress,
 ): Promise<unknown> {
-  return await channelIntegrationCapabilityExecute('channels.cancelSession', runtimeAddress, { channelType });
+  return await channelIntegrationCapabilityExecute(
+    'channels.cancelSession',
+    { channelType },
+    { kind: 'channel-pairing', channelType },
+  );
 }
 
 export async function hostChannelsListPairingRequests(
@@ -156,11 +166,10 @@ export async function hostChannelsListPairingRequests(
 export async function hostChannelsApprovePairingRequest(
   channelType: ChannelType,
   input: { code: string; accountId?: string },
-  runtimeAddress: RuntimeAddress,
 ): Promise<{ success: boolean; approved?: { id: string; entry?: ChannelPairingRequest } }> {
   return await channelIntegrationCapabilityExecute<{ success: boolean; approved?: { id: string; entry?: ChannelPairingRequest } }>(
     'channels.approvePairing',
-    runtimeAddress,
     { ...input, channelType },
+    { kind: 'channel-pairing', channelType, ...(input.accountId ? { accountId: input.accountId } : {}), pairingId: input.code },
   );
 }

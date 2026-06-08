@@ -1,4 +1,5 @@
 import { dialog, ipcMain } from 'electron';
+import { readFile, writeFile } from 'node:fs/promises';
 import { getE2EDialogOpenResult } from '../e2e-fixture-loader';
 
 export function registerDialogHandlers(): void {
@@ -16,5 +17,33 @@ export function registerDialogHandlers(): void {
 
   ipcMain.handle('dialog:message', async (_, options: Electron.MessageBoxOptions) => {
     return await dialog.showMessageBox(options);
+  });
+
+  ipcMain.handle('dialog:readSelectedTextFile', async (_, options: Electron.OpenDialogOptions) => {
+    const result = await dialog.showOpenDialog({
+      ...options,
+      properties: ['openFile'],
+    });
+    const filePath = result.filePaths[0];
+    if (result.canceled || !filePath) {
+      return { canceled: true };
+    }
+    return {
+      canceled: false,
+      filePath,
+      content: await readFile(filePath, 'utf8'),
+    };
+  });
+
+  ipcMain.handle('dialog:writeSelectedTextFile', async (_, options: Electron.SaveDialogOptions, content: string) => {
+    if (typeof content !== 'string') {
+      throw new Error('content is required');
+    }
+    const result = await dialog.showSaveDialog(options);
+    if (result.canceled || !result.filePath) {
+      return { canceled: true };
+    }
+    await writeFile(result.filePath, content, 'utf8');
+    return { canceled: false, filePath: result.filePath };
   });
 }

@@ -4,6 +4,7 @@ import { copyFile, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promis
 import path from 'node:path';
 import {
   normalizeLicenseKey,
+  sanitizeLicenseGateSnapshot,
   validateLicenseKeyLocally,
   type LicenseGateSnapshot,
   type LicenseRuntimePort,
@@ -130,7 +131,7 @@ function setGateSnapshot(patch: Partial<LicenseGateSnapshot>): void {
   });
   // 把当前快照推给 listener，让 main 通过 license:gate-changed 事件转发到 renderer，
   // 替代 renderer 15s 轮询 /api/license/gate 的兜底行为。
-  gateChangeListener?.({ ...licenseGateSnapshot });
+  gateChangeListener?.(sanitizeLicenseGateSnapshot({ ...licenseGateSnapshot }));
 }
 
 function clearRevalidateTimer(): void {
@@ -1065,7 +1066,7 @@ export async function validateLicenseKey(
 }
 
 export function getLicenseGateSnapshot(): LicenseGateSnapshot {
-  return { ...licenseGateSnapshot };
+  return sanitizeLicenseGateSnapshot({ ...licenseGateSnapshot });
 }
 
 async function bootstrapLicenseGateInternal(): Promise<void> {

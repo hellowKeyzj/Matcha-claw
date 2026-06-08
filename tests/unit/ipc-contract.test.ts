@@ -30,6 +30,10 @@ describe('ipc contract', () => {
     expect(INFRASTRUCTURE_TRANSPORT_INVOKE_CHANNELS).toContain('hostapi:fetch');
     expect(INFRASTRUCTURE_TRANSPORT_INVOKE_CHANNELS).not.toContain('gateway:rpc');
     expect(SHELL_INVOKE_CHANNELS).toContain('dialog:open');
+    expect(SHELL_INVOKE_CHANNELS).toContain('dialog:readSelectedTextFile');
+    expect(SHELL_INVOKE_CHANNELS).toContain('dialog:writeSelectedTextFile');
+    expect(SHELL_INVOKE_CHANNELS).not.toContain('dialog:readTextFile');
+    expect(SHELL_INVOKE_CHANNELS).not.toContain('dialog:writeTextFile');
     expect(SHELL_INVOKE_CHANNELS).toContain('shell:openResourcePath');
     expect(SHELL_INVOKE_CHANNELS).toContain('shell:showItemInFolder');
     expect(SHELL_INVOKE_CHANNELS).toContain('window:minimize');

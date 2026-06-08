@@ -9,7 +9,7 @@ import type { SessionTimelineRuntime } from '../../sessions/session-timeline-run
 import type { SessionOperationCoordinator } from '../../sessions/session-operation-coordinator';
 import type { CanonicalSessionEvent } from '../../sessions/canonical/canonical-events';
 import type { RuntimeClockPort } from '../../common/runtime-ports';
-import type { RuntimeAddress } from '../../agent-runtime/contracts/runtime-address';
+import { buildSessionIdentityKey, type SessionIdentity } from '../../agent-runtime/contracts/runtime-address';
 import type { RuntimeSessionContext } from '../../agent-runtime/contracts/runtime-endpoint-types';
 import type { AgentRuntimeRegistry } from '../../agent-runtime/contracts/agent-runtime-registry';
 import {
@@ -33,28 +33,30 @@ export class SessionApprovalWorkflow {
   async abort(input: {
     sessionKey: string;
     approvalIds: string[];
-    runtimeAddress: RuntimeAddress;
+    sessionIdentity: SessionIdentity;
   }): Promise<ApplicationResponseOf<SessionLoadResult & { success: boolean } | { success: false; error: string }>> {
-    const context = this.deps.agentRuntimeRegistry.rememberSessionAddress(input.sessionKey, input.runtimeAddress);
+    const context = this.deps.agentRuntimeRegistry.rememberSessionIdentity(input.sessionIdentity);
+    const currentRunId = this.deps.stateStore.getSessionState(input.sessionKey, context).runtime.activeRunId ?? undefined;
     try {
       await this.deps.agentRuntimeRegistry.resolveTransport(context).abortSession({
         context,
         approvalIds: input.approvalIds,
+        ...(currentRunId ? { runId: currentRunId } : {}),
       });
     } catch (error) {
       return serverError(error instanceof Error ? error.message : String(error));
     }
-    return await this.commitAbortSession(input.sessionKey, context);
+    return await this.commitAbortSession(input.sessionIdentity, context, currentRunId);
   }
 
   async resolve(input: {
     id: string;
     decision: SessionApprovalDecision;
     sessionKey: string;
-    runtimeAddress: RuntimeAddress;
+    sessionIdentity: SessionIdentity;
   }): Promise<ApplicationResponseOf> {
-    const context = this.deps.agentRuntimeRegistry.rememberSessionAddress(input.sessionKey, input.runtimeAddress);
-    const pendingApproval = this.findPendingApproval(input.sessionKey, input.id);
+    const context = this.deps.agentRuntimeRegistry.rememberSessionIdentity(input.sessionIdentity);
+    const pendingApproval = this.findPendingApproval(input.sessionIdentity, input.id);
     const result = await this.deps.agentRuntimeRegistry.resolveTransport(context).resolveApproval({
       context,
       id: input.id,
@@ -72,28 +74,28 @@ export class SessionApprovalWorkflow {
     return ok(result);
   }
 
-  private async commitAbortSession(sessionKey: string, context: RuntimeSessionContext): Promise<ApplicationResponseOf<SessionLoadResult & { success: boolean } | { success: false; error: string }>> {
-    return await this.deps.operationCoordinator.run(sessionKey, 'abort', async () => {
-      const currentRunId = this.deps.stateStore.getSessionState(sessionKey, context).runtime.activeRunId ?? undefined;
+  private async commitAbortSession(sessionIdentity: SessionIdentity, context: RuntimeSessionContext, runId: string | undefined): Promise<ApplicationResponseOf<SessionLoadResult & { success: boolean } | { success: false; error: string }>> {
+    const sessionKey = sessionIdentity.sessionKey;
+    return await this.deps.operationCoordinator.run(sessionIdentity, 'abort', async () => {
       const committed = this.deps.timelineRuntime.appendCanonicalEvents(sessionKey, [{
-        eventId: `local:lifecycle:${sessionKey}:${currentRunId ?? 'active'}:aborted`,
+        eventId: `local:lifecycle:${sessionKey}:${runId ?? 'active'}:stopping`,
         type: 'lifecycle',
         protocolId: context.protocolId,
         runtimeEndpointId: context.runtimeEndpointId,
         source: 'live',
         sessionId: sessionKey,
-        ...(currentRunId ? { runId: currentRunId } : {}),
+        ...(runId ? { runId } : {}),
         timestamp: this.deps.clock.nowMs(),
         laneKey: 'main',
         origin: {
           runtimeEventType: 'local.abort',
           runtimeIds: {
             sessionKey,
-            ...(currentRunId ? { runId: currentRunId } : {}),
+            ...(runId ? { runId } : {}),
           },
         },
         phase: 'aborted',
-        runPhase: 'aborted',
+        runPhase: 'stopping',
         error: null,
       }], context);
       committed.state.window = createLatestWindowState(committed.state.renderItems.length);
@@ -111,9 +113,12 @@ export class SessionApprovalWorkflow {
     });
   }
 
-  private findPendingApproval(sessionKey: string, approvalId: string): { runId?: string } | null {
-    const entry = this.deps.stateStore.findApproval(approvalId);
-    if (!entry || entry.sessionKey !== sessionKey) {
+  private findPendingApproval(sessionIdentity: SessionIdentity, approvalId: string): { runId?: string } | null {
+    const entry = this.deps.stateStore.findApproval(sessionIdentity, approvalId);
+    if (!entry || entry.sessionKey !== sessionIdentity.sessionKey) {
+      return null;
+    }
+    if (buildSessionIdentityKey(entry.approval.sessionIdentity) !== buildSessionIdentityKey(sessionIdentity)) {
       return null;
     }
     return {

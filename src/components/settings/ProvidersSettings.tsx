@@ -58,7 +58,6 @@ import { isGatewayOperational } from '@/lib/gateway-status';
 import { useDelayedFlag } from '@/lib/use-delayed-flag';
 import { useGatewayStore } from '@/stores/gateway';
 import { cn } from '@/lib/utils';
-import type { RuntimeAddress } from '../../../runtime-host/shared/runtime-address';
 
 function getProtocolBaseUrlPlaceholder(apiProtocol: ProviderCredential['apiProtocol']): string {
   if (apiProtocol === 'anthropic-messages') {
@@ -111,7 +110,7 @@ function modelsForCredential(models: readonly ProviderModel[], credentialId: str
   return models.filter((model) => model.credentialId === credentialId);
 }
 
-export function ProvidersSettings({ runtimeAddress }: { runtimeAddress: RuntimeAddress | null }) {
+export function ProvidersSettings() {
   const { t } = useTranslation('settings');
   const gatewayStatus = useGatewayStore((state) => state.status);
   const {
@@ -152,30 +151,23 @@ export function ProvidersSettings({ runtimeAddress }: { runtimeAddress: RuntimeA
   const showRefreshingHint = useDelayedFlag(refreshing && snapshotReady, 180);
 
   useEffect(() => {
-    if (!runtimeAddress) {
-      return;
-    }
     void refreshProviderSnapshot({
       trigger: 'background',
       reason: 'providers_settings_mount',
-      runtimeAddress,
     });
-    void refreshModelCatalog(runtimeAddress);
-  }, [refreshModelCatalog, refreshProviderSnapshot, runtimeAddress]);
+    void refreshModelCatalog();
+  }, [refreshModelCatalog, refreshProviderSnapshot]);
 
   useEffect(() => {
-    if (!runtimeAddress) {
-      return;
-    }
     const handleFocus = () => {
-      void refreshProviderSnapshot({ trigger: 'background', reason: 'window_focus', runtimeAddress });
+      void refreshProviderSnapshot({ trigger: 'background', reason: 'window_focus' });
     };
     const handleOnline = () => {
-      void refreshProviderSnapshot({ trigger: 'background', reason: 'network_online', runtimeAddress });
+      void refreshProviderSnapshot({ trigger: 'background', reason: 'network_online' });
     };
     const handleVisibilityChange = () => {
       if (document.visibilityState === 'visible') {
-        void refreshProviderSnapshot({ trigger: 'background', reason: 'visibility_visible', runtimeAddress });
+        void refreshProviderSnapshot({ trigger: 'background', reason: 'visibility_visible' });
       }
     };
 
@@ -187,27 +179,26 @@ export function ProvidersSettings({ runtimeAddress }: { runtimeAddress: RuntimeA
       window.removeEventListener('online', handleOnline);
       document.removeEventListener('visibilitychange', handleVisibilityChange);
     };
-  }, [refreshProviderSnapshot, runtimeAddress]);
+  }, [refreshProviderSnapshot]);
 
   useEffect(() => {
-    if (!wasGatewayRunningRef.current && gatewayOperational && runtimeAddress) {
-      void refreshProviderSnapshot({ trigger: 'background', reason: 'gateway_reconnected', runtimeAddress });
+    if (!wasGatewayRunningRef.current && gatewayOperational) {
+      void refreshProviderSnapshot({ trigger: 'background', reason: 'gateway_reconnected' });
     }
     wasGatewayRunningRef.current = gatewayOperational;
-  }, [gatewayOperational, refreshProviderSnapshot, runtimeAddress]);
+  }, [gatewayOperational, refreshProviderSnapshot]);
 
   const handleManualRefresh = useCallback(() => {
-    if (manualRefreshPending || !runtimeAddress) return;
+    if (manualRefreshPending) return;
     setManualRefreshPending(true);
     void Promise.all([
       refreshProviderSnapshot({
         trigger: 'manual',
         reason: 'user_manual_refresh',
-        runtimeAddress,
       }),
-      refreshModelCatalog(runtimeAddress),
+      refreshModelCatalog(),
     ]).finally(() => setManualRefreshPending(false));
-  }, [manualRefreshPending, refreshModelCatalog, refreshProviderSnapshot, runtimeAddress]);
+  }, [manualRefreshPending, refreshModelCatalog, refreshProviderSnapshot]);
 
   const handleAddProvider = async (
     type: ProviderType,
@@ -222,9 +213,6 @@ export function ProvidersSettings({ runtimeAddress }: { runtimeAddress: RuntimeA
       mediaApiProtocol?: ProviderCredential['mediaApiProtocol'];
     },
   ) => {
-    if (!runtimeAddress) {
-      return;
-    }
     const vendor = vendors.find((item) => item.id === type);
     const id = buildProviderCredentialId(type, null, vendors);
     const effectiveApiKey = resolveProviderApiKeyForSave(type, apiKey);
@@ -244,7 +232,7 @@ export function ProvidersSettings({ runtimeAddress }: { runtimeAddress: RuntimeA
         enabled: true,
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString(),
-      }, runtimeAddress, effectiveApiKey);
+      }, effectiveApiKey);
       setShowAddDialog(false);
       toast.success(t('aiProviders.toast.added'));
     } catch (addError) {
@@ -282,7 +270,7 @@ export function ProvidersSettings({ runtimeAddress }: { runtimeAddress: RuntimeA
                 setOpen(true);
                 setShowAddDialog(true);
               }}
-              disabled={!runtimeAddress}
+              disabled={!gatewayOperational}
             >
               <Plus className="h-4 w-4 mr-2" />
               {t('aiProviders.add')}
@@ -321,10 +309,7 @@ export function ProvidersSettings({ runtimeAddress }: { runtimeAddress: RuntimeA
               variant="outline"
               size="sm"
               onClick={() => {
-                if (!runtimeAddress) {
-                  return;
-                }
-                void refreshProviderSnapshot({ trigger: 'manual', reason: 'user_retry_refresh', runtimeAddress });
+                void refreshProviderSnapshot({ trigger: 'manual', reason: 'user_retry_refresh' });
               }}
             >
               <RefreshCw className="h-4 w-4 mr-2" />
@@ -340,7 +325,7 @@ export function ProvidersSettings({ runtimeAddress }: { runtimeAddress: RuntimeA
             <p className="text-muted-foreground text-center mb-4">
               {t('aiProviders.empty.desc')}
             </p>
-            <Button onClick={() => setShowAddDialog(true)} disabled={!runtimeAddress}>
+            <Button onClick={() => setShowAddDialog(true)} disabled={!gatewayOperational}>
               <Plus className="h-4 w-4 mr-2" />
               {t('aiProviders.empty.cta')}
             </Button>
@@ -363,35 +348,19 @@ export function ProvidersSettings({ runtimeAddress }: { runtimeAddress: RuntimeA
               onEdit={() => setEditingProvider(item.account.id)}
               onCancelEdit={() => setEditingProvider(null)}
               onDelete={async () => {
-                if (!runtimeAddress) {
-                  return;
-                }
                 try {
-                  await removeAccount(item.account.id, runtimeAddress);
+                  await removeAccount(item.account.id);
                   toast.success(t('aiProviders.toast.deleted'));
                 } catch (deleteError) {
                   toast.error(`${t('aiProviders.toast.failedDelete')}: ${deleteError}`);
                 }
               }}
               onSaveEdits={async (payload) => {
-                if (!runtimeAddress) {
-                  return;
-                }
-                await updateAccount(item.account.id, payload.updates ?? {}, runtimeAddress, payload.newApiKey);
+                await updateAccount(item.account.id, payload.updates ?? {}, payload.newApiKey);
                 setEditingProvider(null);
               }}
-              onValidateKey={(key, options) => {
-                if (!runtimeAddress) {
-                  return Promise.resolve({ valid: false, error: 'RuntimeAddress is required' });
-                }
-                return validateAccountApiKey(item.account.id, key, runtimeAddress, options);
-              }}
-              onReplaceModels={(next) => {
-                if (!runtimeAddress) {
-                  return Promise.resolve();
-                }
-                return replaceCredentialModels(item.account.id, next, runtimeAddress);
-              }}
+              onValidateKey={(key, options) => validateAccountApiKey(item.account.id, key, options)}
+              onReplaceModels={(next) => replaceCredentialModels(item.account.id, next, item.account.vendorId)}
             />
           ))}
         </div>
@@ -403,14 +372,8 @@ export function ProvidersSettings({ runtimeAddress }: { runtimeAddress: RuntimeA
           existingVendorIds={existingVendorIds}
           vendors={vendors}
           onClose={() => setShowAddDialog(false)}
-          runtimeAddress={runtimeAddress}
           onAdd={handleAddProvider}
-          onValidateKey={(type, key, options) => {
-            if (!runtimeAddress) {
-              return Promise.resolve({ valid: false, error: 'RuntimeAddress is required' });
-            }
-            return validateAccountApiKey(type, key, runtimeAddress, options);
-          }}
+          onValidateKey={(type, key, options) => validateAccountApiKey(type, key, options)}
         />
       ) : null}
     </Card>
@@ -819,7 +782,6 @@ function ProviderCard({
 interface AddProviderDialogProps {
   existingVendorIds: Set<string>;
   vendors: ProviderVendorInfo[];
-  runtimeAddress: RuntimeAddress | null;
   onClose: () => void;
   onAdd: (
     type: ProviderType,
@@ -848,7 +810,6 @@ interface AddProviderDialogProps {
 function AddProviderDialog({
   existingVendorIds,
   vendors,
-  runtimeAddress,
   onClose,
   onAdd,
   onValidateKey,
@@ -911,7 +872,7 @@ function AddProviderDialog({
   }, [selectedVendor, isOAuth, supportsApiKey, oauthUiHidden]);
 
   const latestRef = useRef({ selectedType, typeInfo, onClose, t });
-  const [pendingOAuth, setPendingOAuth] = useState<{ accountId: string; label: string } | null>(null);
+  const [pendingOAuth, setPendingOAuth] = useState<{ flowId: string; accountId: string; vendorId: string; label: string } | null>(null);
   useEffect(() => {
     latestRef.current = { selectedType, typeInfo, onClose, t };
   });
@@ -942,13 +903,10 @@ function AddProviderDialog({
       setManualCodeInput('');
       setValidationError(null);
       try {
-        if (runtimeAddress) {
-          await useProviderStore.getState().refreshProviderSnapshot({
-            trigger: 'reconcile',
-            reason: 'oauth_success_reconcile',
-            runtimeAddress,
-          });
-        }
+        await useProviderStore.getState().refreshProviderSnapshot({
+          trigger: 'reconcile',
+          reason: 'oauth_success_reconcile',
+        });
       } catch (refreshError) {
         console.error('Failed to refresh providers after OAuth:', refreshError);
       }
@@ -986,7 +944,7 @@ function AddProviderDialog({
   });
 
   const handleStartOAuth = async () => {
-    if (!selectedType || !runtimeAddress) return;
+    if (!selectedType) return;
     const hasMinimax = existingVendorIds.has('minimax-portal') || existingVendorIds.has('minimax-portal-cn');
     if ((selectedType === 'minimax-portal' || selectedType === 'minimax-portal-cn') && hasMinimax) {
       toast.error(t('aiProviders.toast.minimaxConflict'));
@@ -1001,14 +959,15 @@ function AddProviderDialog({
     try {
       const vendor = vendorMap.get(selectedType);
       const accountId = buildProviderCredentialId(selectedType, null, vendors);
+      const flowId = `${accountId}:${Date.now().toString(36)}`;
       const label = name || (typeInfo?.id === 'custom' ? t('aiProviders.custom') : typeInfo?.name) || selectedType;
       if (vendor?.supportsMultipleAccounts === false && existingVendorIds.has(selectedType)) {
         toast.error(t('aiProviders.toast.duplicateSingleProvider'));
         setOauthFlowing(false);
         return;
       }
-      setPendingOAuth({ accountId, label });
-      await hostProviderStartOAuth({ provider: selectedType, accountId, label }, runtimeAddress);
+      setPendingOAuth({ flowId, accountId, vendorId: selectedType, label });
+      await hostProviderStartOAuth({ provider: selectedType, flowId, accountId, label });
     } catch (oauthStartError) {
       setOauthError(String(oauthStartError));
       setOauthFlowing(false);
@@ -1017,20 +976,31 @@ function AddProviderDialog({
   };
 
   const handleCancelOAuth = async () => {
-    if (!runtimeAddress) return;
+    const binding = pendingOAuth;
     setOauthFlowing(false);
     setOauthData(null);
     setManualCodeInput('');
     setOauthError(null);
     setPendingOAuth(null);
-    await hostProviderCancelOAuth(runtimeAddress);
+    if (binding) {
+      await hostProviderCancelOAuth({
+        flowId: binding.flowId,
+        accountId: binding.accountId,
+        vendorId: binding.vendorId,
+      });
+    }
   };
 
   const handleSubmitManualOAuthCode = async () => {
     const value = manualCodeInput.trim();
-    if (!value || !runtimeAddress) return;
+    if (!value || !pendingOAuth) return;
     try {
-      await hostProviderSubmitOAuthCode(value, runtimeAddress);
+      await hostProviderSubmitOAuthCode({
+        flowId: pendingOAuth.flowId,
+        accountId: pendingOAuth.accountId,
+        vendorId: pendingOAuth.vendorId,
+        code: value,
+      });
       setOauthError(null);
     } catch (submitError) {
       setOauthError(String(submitError));
@@ -1038,7 +1008,7 @@ function AddProviderDialog({
   };
 
   const handleAdd = async () => {
-    if (!selectedType || !runtimeAddress) return;
+    if (!selectedType) return;
     const hasMinimax = existingVendorIds.has('minimax-portal') || existingVendorIds.has('minimax-portal-cn');
     if ((selectedType === 'minimax-portal' || selectedType === 'minimax-portal-cn') && hasMinimax) {
       toast.error(t('aiProviders.toast.minimaxConflict'));
@@ -1354,7 +1324,7 @@ function AddProviderDialog({
 
           <div className="flex justify-end gap-2">
             <Button variant="outline" onClick={onClose}>{t('aiProviders.dialog.cancel')}</Button>
-            <Button onClick={handleAdd} className={cn(useOAuthFlow && 'hidden')} disabled={!selectedType || saving || !runtimeAddress}>
+            <Button onClick={handleAdd} className={cn(useOAuthFlow && 'hidden')} disabled={!selectedType || saving}>
               {saving ? <Loader2 className="h-4 w-4 animate-spin mr-2" /> : null}
               {t('aiProviders.dialog.add')}
             </Button>
@@ -1380,7 +1350,7 @@ function OAuthPanel(props: {
   } | null;
   oauthError: string | null;
   manualCodeInput: string;
-  pendingOAuth: { accountId: string; label: string } | null;
+  pendingOAuth: { flowId: string; accountId: string; vendorId: string; label: string } | null;
   onStart: () => void;
   onCancel: () => void;
   onManualCodeChange: (value: string) => void;

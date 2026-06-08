@@ -1,4 +1,4 @@
-import type { RuntimeAddress } from './contracts/runtime-address';
+import type { RuntimeScope } from './contracts/runtime-address';
 import type { AgentRuntimeRegistry } from './contracts/agent-runtime-registry';
 import type { CapabilityExecuteRequest } from '../capabilities/contracts/capability-router';
 import { CapabilityRouter } from '../capabilities/contracts/capability-router';
@@ -35,7 +35,7 @@ export class AgentRuntimeApplicationService {
     return this.deps.agentRuntimeRegistry.listCapabilities();
   }
 
-  describeCapability(input: { id: string; address: RuntimeAddress }) {
+  describeCapability(input: { id: string; scope: RuntimeScope }) {
     return this.deps.agentRuntimeRegistry.getCapability(input);
   }
 

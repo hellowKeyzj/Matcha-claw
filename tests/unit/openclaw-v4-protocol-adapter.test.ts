@@ -16,19 +16,19 @@ async function* transcriptLines(): AsyncGenerator<string> {
 
 function runtimeContext(agentId = 'agent-1') {
   return createRuntimeSessionContext({
-    sessionKey: 'session-1',
-    protocolId: OPENCLAW_RUNTIME_PROTOCOL_ID,
-    runtimeEndpointId: OPENCLAW_RUNTIME_ENDPOINT_ID,
-    endpointSessionId: 'session-1',
-    address: {
-      kind: 'protocol-connector',
-      capabilityId: 'session.prompt',
-      protocolId: OPENCLAW_RUNTIME_PROTOCOL_ID,
-      connectorId: 'openclaw',
-      endpointId: OPENCLAW_RUNTIME_ENDPOINT_ID,
+    identity: {
+      endpoint: {
+        kind: 'protocol-connector',
+        protocolId: OPENCLAW_RUNTIME_PROTOCOL_ID,
+        connectorId: 'openclaw',
+        endpointId: OPENCLAW_RUNTIME_ENDPOINT_ID,
+      },
       agentId,
       sessionKey: 'session-1',
     },
+    protocolId: OPENCLAW_RUNTIME_PROTOCOL_ID,
+    runtimeEndpointId: OPENCLAW_RUNTIME_ENDPOINT_ID,
+    endpointSessionId: 'session-1',
   });
 }
 

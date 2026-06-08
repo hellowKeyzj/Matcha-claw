@@ -4,13 +4,6 @@ import { gatewayClientRpcMock, resetGatewayClientMocks } from './helpers/mock-ga
 import { useSubagentsStore } from '@/stores/subagents';
 
 const AVATAR_STORAGE_KEY = 'matchaclaw-subagent-avatar-presentations';
-const subagentManagementAddress = {
-  kind: 'native-runtime' as const,
-  capabilityId: 'subagent.management',
-  runtimeAdapterId: 'openclaw',
-  runtimeInstanceId: 'local',
-  agentId: 'default',
-};
 
 describe('subagents crud', () => {
   beforeEach(() => {
@@ -63,7 +56,6 @@ describe('subagents crud', () => {
       name: 'writer',
       workspace: '/tmp/writer',
       model: 'gpt-4.1-mini',
-      runtimeAddress: subagentManagementAddress,
     });
     expect(createResult).toEqual({ agentId: 'writer-v2' });
 
@@ -91,7 +83,6 @@ describe('subagents crud', () => {
       name: 'writer',
       workspace: '',
       model: 'gpt-4.1-mini',
-      runtimeAddress: subagentManagementAddress,
     })).rejects.toThrow('Subagent workspace is required');
 
     expect(rpc).not.toHaveBeenCalled();
@@ -127,7 +118,6 @@ describe('subagents crud', () => {
       model: 'gpt-4.1-mini',
       avatarSeed: 'picker:writer:page:0:option:3',
       avatarStyle: 'bottts',
-      runtimeAddress: subagentManagementAddress,
     });
 
     expect(rpc).toHaveBeenCalledWith(
@@ -176,7 +166,6 @@ describe('subagents crud', () => {
       name: 'test4',
       workspace: '/tmp/test4',
       model: 'gpt-4.1-mini',
-      runtimeAddress: subagentManagementAddress,
     })).resolves.toEqual({ agentId: 'test4' });
 
     expect(updateCallCount).toBe(2);
@@ -213,7 +202,6 @@ describe('subagents crud', () => {
       name: 'writer',
       workspace: '/tmp/writer',
       model: 'gpt-4.1-mini',
-      runtimeAddress: subagentManagementAddress,
     })).resolves.toEqual({
       agentId: 'writer',
       warning: '智能体 "writer" 已创建，但模型配置写入失败：RPC timeout: agents.update。请在编辑中重新确认',
@@ -256,8 +244,7 @@ describe('subagents crud', () => {
         model: 'gpt-4.1-mini',
         avatarSeed: 'picker:writer:page:0:option:1',
         avatarStyle: 'botttsNeutral',
-        runtimeAddress: subagentManagementAddress,
-      })).resolves.toEqual({
+        })).resolves.toEqual({
         agentId: 'writer',
         warning: '智能体 "writer" 已创建，但头像展示配置写入失败：localStorage quota exceeded。请在编辑中重新确认',
       });
@@ -285,7 +272,6 @@ describe('subagents crud', () => {
       name: 'test-missing-id',
       workspace: '/tmp/test-missing-id',
       model: 'gpt-4.1-mini',
-      runtimeAddress: subagentManagementAddress,
     })).rejects.toThrow('agents.create returned missing agentId');
 
     expect(rpc).not.toHaveBeenCalledWith('agents.update', expect.anything());
@@ -301,7 +287,6 @@ describe('subagents crud', () => {
       name: 'writer-v2',
       workspace: '/tmp/writer-v2',
       model: 'gpt-4.1-mini',
-      runtimeAddress: subagentManagementAddress,
     });
 
     expect(rpc).toHaveBeenCalledWith(
@@ -342,7 +327,6 @@ describe('subagents crud', () => {
       model: 'gpt-4.1-mini',
       avatarSeed: 'picker:writer:page:1:option:2',
       avatarStyle: 'bottts',
-      runtimeAddress: subagentManagementAddress,
     });
 
     expect(rpc).not.toHaveBeenCalledWith('config.get', {}, undefined);
@@ -415,7 +399,6 @@ describe('subagents crud', () => {
       name: 'writer-v2',
       workspace: '/tmp/writer-v2',
       model: undefined,
-      runtimeAddress: subagentManagementAddress,
     });
 
     expect(rpc).toHaveBeenCalledWith('config.get', {}, undefined);
@@ -492,7 +475,6 @@ describe('subagents crud', () => {
       workspace: '/tmp/writer-v2',
       model: 'gpt-4.1-mini',
       skills: ['web-search', 'feishu-doc'],
-      runtimeAddress: subagentManagementAddress,
     });
 
     expect(rpc).toHaveBeenCalledWith('config.get', {}, undefined);
@@ -528,7 +510,6 @@ describe('subagents crud', () => {
       name: 'writer-v2',
       workspace: '/tmp/writer-v2',
       model: 'gpt-4.1-mini',
-      runtimeAddress: subagentManagementAddress,
     });
 
     expect(rpc).not.toHaveBeenCalled();
@@ -539,7 +520,7 @@ describe('subagents crud', () => {
     const rpc = gatewayClientRpcMock;
     rpc.mockResolvedValueOnce({ success: true, result: {} });
 
-    await useSubagentsStore.getState().deleteAgent('writer', subagentManagementAddress);
+    await useSubagentsStore.getState().deleteAgent('writer');
 
     expect(rpc).toHaveBeenCalledWith(
       'agents.delete',

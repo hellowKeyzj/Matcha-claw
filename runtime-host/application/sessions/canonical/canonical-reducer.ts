@@ -190,6 +190,22 @@ function cloneIssue(issue: GatewayTransportIssue | null | undefined): GatewayTra
   return issue ? structuredClone(issue) : null;
 }
 
+function eventMatchesActiveRun(state: CanonicalSessionState, event: { runId?: string }): boolean {
+  return !!event.runId && event.runId === state.runtime.activeRunId;
+}
+
+function canClaimIdleRuntime(state: CanonicalSessionState, event: { runId?: string }): boolean {
+  return state.runtime.activeRunId == null && !!event.runId;
+}
+
+function canMutateRuntimeForRun(state: CanonicalSessionState, event: { runId?: string }): boolean {
+  return eventMatchesActiveRun(state, event) || canClaimIdleRuntime(state, event);
+}
+
+function isStoppingActiveRunEvent(state: CanonicalSessionState, event: { runId?: string }): boolean {
+  return state.runtime.runPhase === 'stopping' && eventMatchesActiveRun(state, event);
+}
+
 export function buildRuntimeWithControlOverlay(
   runtime: SessionRuntimeStateSnapshot,
   control: Pick<CanonicalControlState, 'issue'>,
@@ -208,6 +224,22 @@ function applyLifecycle(state: CanonicalSessionState, event: CanonicalLifecycleE
   if (event.source === 'replay') {
     return;
   }
+  if (event.runPhase === 'stopping') {
+    if (event.runId && state.runtime.activeRunId != null && !eventMatchesActiveRun(state, event)) {
+      return;
+    }
+    state.runtime = {
+      ...state.runtime,
+      activeRunId: event.runId ?? state.runtime.activeRunId,
+      runPhase: 'stopping',
+      pendingTurnKey: event.runId ?? state.runtime.pendingTurnKey,
+      pendingTurnLaneKey: laneKeyOf(event),
+      lastError: null,
+      lastIssue: null,
+      runtimeActivity: null,
+    };
+    return;
+  }
   if (event.phase === 'started') {
     state.runtime = {
       ...state.runtime,
@@ -219,6 +251,9 @@ function applyLifecycle(state: CanonicalSessionState, event: CanonicalLifecycleE
       lastIssue: null,
       runtimeActivity: null,
     };
+    return;
+  }
+  if (!canMutateRuntimeForRun(state, event)) {
     return;
   }
   state.runtime = {
@@ -241,7 +276,7 @@ function messageHasToolCall(content: unknown): boolean {
 }
 
 function applyMessageRuntime(state: CanonicalSessionState, event: CanonicalMessageSnapshotEvent): void {
-  if (event.source === 'replay') {
+  if (event.source === 'replay' || !canMutateRuntimeForRun(state, event)) {
     return;
   }
   if (event.role === 'user') {
@@ -251,10 +286,13 @@ function applyMessageRuntime(state: CanonicalSessionState, event: CanonicalMessa
     };
     return;
   }
-  if (event.role !== 'assistant') {
+  if (event.role !== 'assistant' || !canMutateRuntimeForRun(state, event)) {
     return;
   }
   if (event.status === 'streaming') {
+    if (isStoppingActiveRunEvent(state, event)) {
+      return;
+    }
     state.runtime = {
       ...state.runtime,
       activeRunId: event.runId ?? state.runtime.activeRunId,
@@ -270,6 +308,9 @@ function applyMessageRuntime(state: CanonicalSessionState, event: CanonicalMessa
   }
   if (event.status === 'final') {
     if (messageHasToolCall(event.content)) {
+      if (isStoppingActiveRunEvent(state, event)) {
+        return;
+      }
       state.runtime = {
         ...state.runtime,
         activeRunId: event.runId ?? state.runtime.activeRunId,
@@ -305,13 +346,6 @@ function rebuildApprovalIndex(state: CanonicalSessionState): void {
   state.approvalIndexById = new Map(state.approvals.map((approval, index) => [approval.id, index]));
 }
 
-function approvalRuntimeAddress(state: CanonicalSessionState): RuntimeSessionContext['address'] {
-  return {
-    ...state.context.address,
-    capabilityId: 'session.approval',
-  };
-}
-
 function applyApproval(state: CanonicalSessionState, event: CanonicalApprovalEvent): void {
   const index = state.approvalIndexById.get(event.approvalId) ?? -1;
   if (event.status === 'resolved') {
@@ -324,7 +358,7 @@ function applyApproval(state: CanonicalSessionState, event: CanonicalApprovalEve
   const approval = {
     id: event.approvalId,
     sessionKey: event.sessionId,
-    runtimeAddress: approvalRuntimeAddress(state),
+    sessionIdentity: state.context.identity,
     ...(event.runId ? { runId: event.runId } : {}),
     title: event.title,
     ...(event.command ? { command: event.command } : {}),
@@ -353,10 +387,13 @@ function pruneExpiredApprovals(state: CanonicalSessionState, nowMs: number): voi
 }
 
 function applyToolRuntime(state: CanonicalSessionState, event: CanonicalToolCallEvent | CanonicalToolProgressEvent | CanonicalToolResultEvent): void {
-  if (event.source === 'replay') {
+  if (event.source === 'replay' || !canMutateRuntimeForRun(state, event)) {
     return;
   }
   if (event.type === 'tool_call' || event.type === 'tool_progress') {
+    if (isStoppingActiveRunEvent(state, event)) {
+      return;
+    }
     state.runtime = {
       ...state.runtime,
       activeRunId: event.runId ?? state.runtime.activeRunId,

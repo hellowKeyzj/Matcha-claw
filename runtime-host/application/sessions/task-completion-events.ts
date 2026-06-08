@@ -1,6 +1,6 @@
 import { normalizeOptionalString } from '../../shared/chat-message-normalization';
 import type { SessionTaskCompletionEvent } from '../../shared/session-adapter-types';
-import { validateRuntimeAddress, type RuntimeAddress } from '../agent-runtime/contracts/runtime-address';
+import { validateSessionIdentity, type SessionIdentity } from '../agent-runtime/contracts/runtime-address';
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
@@ -36,12 +36,12 @@ function normalizeTaskCompletionEventRecord(
   }
   const childSessionId = normalizeOptionalString(record.childSessionId);
   const childAgentId = normalizeOptionalString(record.childAgentId) ?? resolveChildAgentId(childSessionKey);
-  const childRuntimeAddress = readRuntimeAddress(record.childRuntimeAddress);
+  const childSessionIdentity = readSessionIdentity(record.childSessionIdentity);
   return {
     kind: 'task_completion',
     source: normalizeCompletionSource(record.source),
     childSessionKey,
-    ...(childRuntimeAddress ? { childRuntimeAddress } : {}),
+    ...(childSessionIdentity ? { childSessionIdentity } : {}),
     ...(childSessionId ? { childSessionId } : {}),
     ...(childAgentId ? { childAgentId } : {}),
     ...(normalizeOptionalString(record.announceType) ? { announceType: normalizeOptionalString(record.announceType)! } : {}),
@@ -53,11 +53,11 @@ function normalizeTaskCompletionEventRecord(
   };
 }
 
-function readRuntimeAddress(value: unknown): RuntimeAddress | undefined {
-  if (validateRuntimeAddress(value) !== null) {
+function readSessionIdentity(value: unknown): SessionIdentity | undefined {
+  if (validateSessionIdentity(value) !== null) {
     return undefined;
   }
-  return value as RuntimeAddress;
+  return value as SessionIdentity;
 }
 
 function dedupeTaskCompletionEvents(

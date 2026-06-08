@@ -98,6 +98,11 @@ function createSkillsService(input: {
       },
     })),
   };
+  const defaultKnownSkillConfigs = {
+    'multi-search-engine': {},
+    'web-extract': {},
+    'tavily-search': {},
+  };
   const workingDir = input.workingDir ?? join(input.skillsDir ?? 'C:\\openclaw\\skills', '..', 'workspace');
   const openClawDir = input.openClawDir ?? join(input.skillsDir ?? 'C:\\openclaw\\skills', '..', 'openclaw-package');
   const fileSystem = createTestRuntimeFileSystem();
@@ -110,7 +115,7 @@ function createSkillsService(input: {
     error: vi.fn(),
   };
   const repository = {
-    getAllConfigs: input.getAllSkillConfigs ?? (async () => ({})),
+    getAllConfigs: input.getAllSkillConfigs ?? (async () => defaultKnownSkillConfigs),
     updateConfig: input.updateSkillConfig ?? (async () => ({ success: true })),
     setEnabled: input.setSkillEnabled ?? (async () => ({ success: true })),
     setManyEnabled: input.setManySkillsEnabled ?? (async () => ({ success: true })),
@@ -205,7 +210,7 @@ async function dispatchSkillManagementCapability(
   if (!route) {
     throw new Error(`Missing skill management operation: ${operationId}`);
   }
-  return await route.handle(payload);
+  return await route.handle({ domainInput: payload });
 }
 
 async function writeSkillManifest(root: string, slug: string, input: { name?: string; description?: string } = {}) {
@@ -937,6 +942,49 @@ describe('skills route state sync', () => {
       apiKey: 'tv-key',
     });
     expect(gatewayRpc).not.toHaveBeenCalled();
+  });
+
+  it('skills.update* capability 拒绝 unknown/noncanonical skillKey 且不写入本地配置', async () => {
+    const gatewayRpc = vi.fn(async () => ({}));
+    const updateSkillConfig = vi.fn(async () => ({ success: true }));
+    const setSkillEnabled = vi.fn(async () => ({ success: true }));
+    const setManySkillsEnabled = vi.fn(async () => ({ success: true }));
+    const tempRoot = await mkdtemp(join(tmpdir(), 'matchaclaw-skills-canonical-'));
+    const skillsDir = join(tempRoot, 'skills');
+    await writeSkillManifest(skillsDir, 'web-search', { name: 'Web Search' });
+    const skillsService = createSkillsService({
+      skillsDir,
+      getAllSkillConfigs: async () => ({
+        'web-search': {},
+      }),
+      updateSkillConfig,
+      setSkillEnabled,
+      setManySkillsEnabled,
+      gateway: {
+        isGatewayRunning: async () => true,
+        gatewayRpc,
+      },
+    });
+
+    await expect(dispatchSkillManagementCapability(skillsService, 'skills.updateConfig', {
+      skillKey: 'missing',
+      apiKey: 'secret',
+    })).resolves.toEqual({ status: 400, data: { success: false, error: 'Unknown skillKey: missing' } });
+    await expect(dispatchSkillManagementCapability(skillsService, 'skills.updateState', {
+      skillKey: 'Web Search',
+      enabled: true,
+    })).resolves.toEqual({ status: 400, data: { success: false, error: 'skillKey must be canonical: Web Search' } });
+    await expect(dispatchSkillManagementCapability(skillsService, 'skills.updateBatchState', {
+      skillKeys: ['web-search', 'missing'],
+      enabled: false,
+    })).resolves.toEqual({ status: 400, data: { success: false, error: 'Unknown skillKey: missing' } });
+
+    expect(updateSkillConfig).not.toHaveBeenCalled();
+    expect(setSkillEnabled).not.toHaveBeenCalled();
+    expect(setManySkillsEnabled).not.toHaveBeenCalled();
+    expect(gatewayRpc).not.toHaveBeenCalled();
+    expect((skillsService as any).deps.operationsWorkflow.deps.jobs.submitGatewayUpdate).not.toHaveBeenCalled();
+    await rm(tempRoot, { recursive: true, force: true });
   });
 
   it('后台执行 Gateway 同步失败时返回 syncError，不影响本地写入路径', async () => {

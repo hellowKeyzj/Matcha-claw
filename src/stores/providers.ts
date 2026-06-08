@@ -21,7 +21,6 @@ import {
   hostProviderValidate,
 } from '@/lib/provider-projection';
 import { startUiTiming, trackUiEvent } from '@/lib/telemetry';
-import type { RuntimeAddress } from '../../runtime-host/shared/runtime-address';
 
 const PROVIDER_SNAPSHOT_TIMEOUT_MS = 20000;
 const PROVIDER_SNAPSHOT_CACHE_KEY = 'matchaclaw:providers:snapshot:v2';
@@ -189,7 +188,6 @@ export type ProviderRefreshTrigger = 'manual' | 'background' | 'reconcile';
 interface ProviderRefreshOptions {
   trigger?: ProviderRefreshTrigger;
   reason?: string;
-  runtimeAddress: RuntimeAddress;
 }
 
 function incrementMutation(
@@ -285,23 +283,22 @@ interface ProviderState {
   error: string | null;
 
   // Actions
-  init: (runtimeAddress: RuntimeAddress) => Promise<void>;
+  init: () => Promise<void>;
   refreshProviderSnapshot: (options: ProviderRefreshOptions) => Promise<void>;
   resetProviderScope: (scopeKey?: string) => void;
-  createAccount: (account: ProviderCredential, runtimeAddress: RuntimeAddress, apiKey?: string) => Promise<void>;
-  updateAccount: (accountId: string, updates: Partial<ProviderCredential>, runtimeAddress: RuntimeAddress, apiKey?: string) => Promise<void>;
-  removeAccount: (accountId: string, runtimeAddress: RuntimeAddress) => Promise<void>;
+  createAccount: (account: ProviderCredential, apiKey?: string) => Promise<void>;
+  updateAccount: (accountId: string, updates: Partial<ProviderCredential>, apiKey?: string) => Promise<void>;
+  removeAccount: (accountId: string) => Promise<void>;
   validateAccountApiKey: (
     accountOrVendorId: string,
     apiKey: string,
-    runtimeAddress: RuntimeAddress,
     options?: {
       baseUrl?: string;
       apiProtocol?: ProviderCredential['apiProtocol'];
       headers?: Record<string, string>;
     },
   ) => Promise<{ valid: boolean; error?: string }>;
-  getAccountApiKey: (accountId: string, runtimeAddress: RuntimeAddress) => Promise<string | null>;
+  getAccountApiKey: (accountId: string) => Promise<string | null>;
 }
 
 export const useProviderStore = create<ProviderState>((set, get) => ({
@@ -314,14 +311,13 @@ export const useProviderStore = create<ProviderState>((set, get) => ({
   mutatingActionsByAccountId: {},
   error: null,
 
-  init: async (runtimeAddress) => {
-    await get().refreshProviderSnapshot({ trigger: 'background', reason: 'app_init', runtimeAddress });
+  init: async () => {
+    await get().refreshProviderSnapshot({ trigger: 'background', reason: 'app_init' });
   },
 
   refreshProviderSnapshot: async (options) => {
     const trigger = options.trigger ?? 'background';
     const reason = resolveRefreshReason(trigger, options.reason);
-    const { runtimeAddress } = options;
     const refreshEvent = resolveRefreshEventName(trigger);
 
     if (inflightProviderSnapshotTask) {
@@ -371,7 +367,7 @@ export const useProviderStore = create<ProviderState>((set, get) => ({
     const task = (async () => {
       try {
         const snapshot = await withTimeout(
-          fetchProviderSnapshot(runtimeAddress),
+          fetchProviderSnapshot(),
           PROVIDER_SNAPSHOT_TIMEOUT_MS,
           `Provider snapshot request timed out after ${String(PROVIDER_SNAPSHOT_TIMEOUT_MS)}ms`,
         );
@@ -472,7 +468,7 @@ export const useProviderStore = create<ProviderState>((set, get) => ({
     });
   },
 
-  createAccount: async (account, runtimeAddress, apiKey) => {
+  createAccount: async (account, apiKey) => {
     set((state) => {
       const nextMutating = incrementMutation(state.mutatingActionsByAccountId, account.id, 'create');
       return {
@@ -482,7 +478,7 @@ export const useProviderStore = create<ProviderState>((set, get) => ({
     });
 
     try {
-      const result = await hostProviderCreateAccount(account, runtimeAddress, apiKey);
+      const result = await hostProviderCreateAccount(account, apiKey);
       if (!result.success) {
         throw new Error(result.error || 'Failed to create provider account');
       }
@@ -519,7 +515,6 @@ export const useProviderStore = create<ProviderState>((set, get) => ({
       void get().refreshProviderSnapshot({
         trigger: 'reconcile',
         reason: 'mutation_create',
-        runtimeAddress,
       });
     } catch (error) {
       console.error('Failed to add account:', error);
@@ -535,7 +530,7 @@ export const useProviderStore = create<ProviderState>((set, get) => ({
     }
   },
 
-  updateAccount: async (accountId, updates, runtimeAddress, apiKey) => {
+  updateAccount: async (accountId, updates, apiKey) => {
     set((state) => {
       const nextMutating = incrementMutation(state.mutatingActionsByAccountId, accountId, 'update');
       return {
@@ -545,7 +540,7 @@ export const useProviderStore = create<ProviderState>((set, get) => ({
     });
 
     try {
-      const result = await hostProviderUpdateAccount(accountId, updates, runtimeAddress, apiKey);
+      const result = await hostProviderUpdateAccount(accountId, updates, apiKey);
       if (!result.success) {
         throw new Error(result.error || 'Failed to update provider account');
       }
@@ -594,7 +589,6 @@ export const useProviderStore = create<ProviderState>((set, get) => ({
       void get().refreshProviderSnapshot({
         trigger: 'reconcile',
         reason: 'mutation_update',
-        runtimeAddress,
       });
     } catch (error) {
       console.error('Failed to update account:', error);
@@ -610,7 +604,7 @@ export const useProviderStore = create<ProviderState>((set, get) => ({
     }
   },
 
-  removeAccount: async (accountId, runtimeAddress) => {
+  removeAccount: async (accountId) => {
     set((state) => {
       const nextMutating = incrementMutation(state.mutatingActionsByAccountId, accountId, 'delete');
       return {
@@ -620,7 +614,7 @@ export const useProviderStore = create<ProviderState>((set, get) => ({
     });
 
     try {
-      const result = await hostProviderDeleteAccount(accountId, runtimeAddress);
+      const result = await hostProviderDeleteAccount(accountId);
       if (!result.success) {
         throw new Error(result.error || 'Failed to delete provider account');
       }
@@ -644,7 +638,6 @@ export const useProviderStore = create<ProviderState>((set, get) => ({
       void get().refreshProviderSnapshot({
         trigger: 'reconcile',
         reason: 'mutation_remove',
-        runtimeAddress,
       });
     } catch (error) {
       console.error('Failed to delete account:', error);
@@ -660,24 +653,26 @@ export const useProviderStore = create<ProviderState>((set, get) => ({
     }
   },
 
-  validateAccountApiKey: async (accountOrVendorId, apiKey, runtimeAddress, options) => {
+  validateAccountApiKey: async (accountOrVendorId, apiKey, options) => {
     try {
       const normalizedApiKey = normalizeProviderApiKeyInput(apiKey);
       const account = get().providerSnapshot.credentials.find((candidate) => candidate.id === accountOrVendorId);
       const payload = account
         ? { accountId: account.id, vendorId: account.vendorId, apiKey: normalizedApiKey, options }
         : { vendorId: accountOrVendorId, apiKey: normalizedApiKey, options };
-      const result = await hostProviderValidate(payload, runtimeAddress);
+      const result = await hostProviderValidate(payload);
       return result;
     } catch (error) {
       return { valid: false, error: String(error) };
     }
   },
 
-  getAccountApiKey: async (accountId, runtimeAddress) => {
+  getAccountApiKey: async (accountId) => {
     try {
-      const result = await hostProviderReadApiKey(accountId, runtimeAddress);
-      return result.apiKey;
+      const account = get().providerSnapshot.credentials.find((candidate) => candidate.id === accountId);
+      if (!account) return null;
+      const result = await hostProviderReadApiKey(accountId, account.vendorId);
+      return result.keyMasked;
     } catch {
       return null;
     }

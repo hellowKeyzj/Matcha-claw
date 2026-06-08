@@ -1,7 +1,7 @@
 import { hostSessionAbort } from '@/lib/host-api';
 import type { StoreSessionRunCache } from './session-run-cache';
-import { resolveSessionOperationTarget } from './session-identity';
-import { patchSessionSnapshot } from './store-state-helpers';
+import { buildSessionIdentityRecordIndex, resolveSessionOperationTarget } from './session-identity';
+import { getSessionRuntime, patchSessionSnapshot } from './store-state-helpers';
 import { clearErrorRecoveryTimer, clearHistoryPoll } from './timers';
 import type {
   ApprovalItem,
@@ -14,6 +14,11 @@ type ChatStoreSetFn = (
 ) => void;
 
 type ChatStoreGetFn = () => ChatStoreState;
+
+export const ABORT_STOPPING_TIMEOUT_ERROR = 'chat.abort.stopping-timeout';
+
+const ABORT_RETRY_INTERVAL_MS = 3_000;
+const ABORT_RETRY_TIMEOUT_MS = 15_000;
 
 interface ExecuteStoreAbortRunParams {
   set: ChatStoreSetFn;
@@ -30,6 +35,47 @@ function getPendingApprovalsForCurrentSession(
   const sessionKey = state.currentSessionKey;
   const pendingApprovals = state.pendingApprovalsBySession[sessionKey] ?? [];
   return { sessionKey, pendingApprovals };
+}
+
+function scheduleAbortRetry(params: {
+  set: ChatStoreSetFn;
+  get: ChatStoreGetFn;
+  sessionKey: string;
+  targetSessionKey: string;
+  sessionIdentity: ChatStoreState['loadedSessions'][string]['meta']['sessionIdentity'];
+  approvalIds: string[];
+  startedAtMs: number;
+}): void {
+  const { set, get, sessionKey, targetSessionKey, sessionIdentity, approvalIds, startedAtMs } = params;
+  if (!sessionIdentity) {
+    return;
+  }
+  setTimeout(() => {
+    const runtime = getSessionRuntime(get(), sessionKey);
+    if (runtime.runPhase !== 'stopping') {
+      return;
+    }
+    if (Date.now() - startedAtMs >= ABORT_RETRY_TIMEOUT_MS) {
+      set({ error: ABORT_STOPPING_TIMEOUT_ERROR });
+      return;
+    }
+    void hostSessionAbort({
+      sessionKey: targetSessionKey,
+      sessionIdentity,
+      approvalIds,
+    }).then((abortRuntime) => {
+      set((state) => {
+        const loadedSessions = patchSessionSnapshot(state, sessionKey, abortRuntime.snapshot);
+        return {
+          loadedSessions,
+          sessionRecordKeyByIdentityKey: buildSessionIdentityRecordIndex(loadedSessions),
+        };
+      });
+      scheduleAbortRetry(params);
+    }).catch(() => {
+      scheduleAbortRetry(params);
+    });
+  }, ABORT_RETRY_INTERVAL_MS);
 }
 
 export async function executeStoreAbortRun(params: ExecuteStoreAbortRunParams): Promise<void> {
@@ -50,14 +96,28 @@ export async function executeStoreAbortRun(params: ExecuteStoreAbortRunParams): 
       },
     }));
     const target = resolveSessionOperationTarget(get(), sessionKey);
+    const approvalIds = pendingApprovals.map((approval) => approval.id);
     const abortRuntime = await hostSessionAbort({
       sessionKey: target.sessionKey,
-      runtimeAddress: target.runtimeAddress,
-      approvalIds: pendingApprovals.map((approval) => approval.id),
+      sessionIdentity: target.sessionIdentity,
+      approvalIds,
     });
-    set((state) => ({
-      loadedSessions: patchSessionSnapshot(state, sessionKey, abortRuntime.snapshot),
-    }));
+    set((state) => {
+      const loadedSessions = patchSessionSnapshot(state, sessionKey, abortRuntime.snapshot);
+      return {
+        loadedSessions,
+        sessionRecordKeyByIdentityKey: buildSessionIdentityRecordIndex(loadedSessions),
+      };
+    });
+    scheduleAbortRetry({
+      set,
+      get,
+      sessionKey,
+      targetSessionKey: target.sessionKey,
+      sessionIdentity: target.sessionIdentity,
+      approvalIds,
+      startedAtMs: Date.now(),
+    });
   } catch (err) {
     set({ error: String(err) });
   } finally {

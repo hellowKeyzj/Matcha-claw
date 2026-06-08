@@ -60,10 +60,9 @@ function equalSkillIds(left: string[], right: string[]): boolean {
 function normalizeSelectedSkillIds(params: {
   currentAgent?: AgentLike;
   availableSkillIds: string[];
-  availableSkillSet: Set<string>;
   skillsSnapshotReady: boolean;
 }): string[] {
-  const { currentAgent, availableSkillIds, availableSkillSet, skillsSnapshotReady } = params;
+  const { currentAgent, availableSkillIds, skillsSnapshotReady } = params;
   if (!currentAgent) {
     return [];
   }
@@ -72,9 +71,7 @@ function normalizeSelectedSkillIds(params: {
     ? currentAgent.skills
     : (skillsSnapshotReady ? availableSkillIds : []);
 
-  return skillsSnapshotReady
-    ? Array.from(new Set(currentSkills.filter((id) => availableSkillSet.has(id))))
-    : Array.from(new Set(currentSkills));
+  return Array.from(new Set(currentSkills));
 }
 
 export function useSkillConfig(input: UseSkillConfigInput): UseSkillConfigResult {
@@ -113,10 +110,6 @@ export function useSkillConfig(input: UseSkillConfigInput): UseSkillConfigResult
     () => availableSkillOptions.map((skill) => skill.id),
     [availableSkillOptions],
   );
-  const availableSkillSet = useMemo(
-    () => new Set(availableSkillIds),
-    [availableSkillIds],
-  );
   const applySelectedSkillIds = useCallback((nextSkillIds: string[]) => {
     if (equalSkillIds(selectedSkillIdsRef.current, nextSkillIds)) {
       return;
@@ -136,9 +129,8 @@ export function useSkillConfig(input: UseSkillConfigInput): UseSkillConfigResult
   const resolveAgentSkillIds = useCallback((agent?: AgentLike) => normalizeSelectedSkillIds({
     currentAgent: agent,
     availableSkillIds,
-    availableSkillSet,
     skillsSnapshotReady,
-  }), [availableSkillIds, availableSkillSet, skillsSnapshotReady]);
+  }), [availableSkillIds, skillsSnapshotReady]);
 
   const syncLatestSkillSelection = useCallback(() => {
     const agentId = preparedAgentIdRef.current;

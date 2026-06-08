@@ -176,7 +176,7 @@ describe('runtime-host cron routes', () => {
     const triggerRoute = createCronSchedulerCapabilityOperationRoutes({ cronService: service })
       .find((route) => route.operationId === 'cron.trigger');
 
-    expect(await triggerRoute?.handle({ id: 'job-1' })).toMatchObject({
+    expect(await triggerRoute?.handle({ domainInput: { id: 'job-1' }, target: { kind: 'cron-job', jobId: 'job-1' } })).toMatchObject({
       status: 202,
       data: {
         success: true,

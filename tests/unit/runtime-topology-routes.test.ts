@@ -24,13 +24,25 @@ const topology: RuntimeTopologySnapshot = {
         replay: true,
         modelSelection: false,
       },
-      capabilityAddresses: [{
-        kind: 'protocol-connector',
-        capabilityId: 'session.prompt',
-        protocolId: 'acp',
-        connectorId: 'acp',
-        endpointId: 'claude-code',
-        agentId: 'default',
+      capabilitySummaries: [{
+        id: 'session.prompt',
+        scopeKind: 'agent',
+        scope: {
+          kind: 'agent',
+          endpoint: {
+            kind: 'protocol-connector',
+            protocolId: 'acp',
+            connectorId: 'acp',
+            endpointId: 'claude-code',
+          },
+          agentId: 'default',
+        },
+        targetKinds: ['agent', 'session'],
+        operations: [
+          { id: 'sessions.create', targetKind: 'agent' },
+          { id: 'sessions.prompt', targetKind: 'session' },
+        ],
+        availability: 'available',
       }],
       controlState: {
         connection: null,
@@ -115,52 +127,35 @@ describe('runtime topology routes', () => {
     });
   });
 
-  it('connects runtime connector endpoint', async () => {
-    const payload = { protocolId: 'acp', connectorId: 'acp', endpointId: 'claude-code' };
+  it('rejects runtime connector connect without dispatching lifecycle service', async () => {
+    const service = createService();
     await expect(dispatchRuntimeRouteDefinition(
       runtimeTopologyRoutes,
       'POST',
       '/api/runtime-connectors/connect',
-      payload,
-      createService(),
-    )).resolves.toEqual({
-      status: 200,
-      data: { success: true, readiness: { ready: true, phase: 'connected' }, payload },
-    });
-  });
-
-  it.each([
-    [{ connectorId: 'acp', endpointId: 'claude-code' }, 'protocolId is required'],
-    [{ protocolId: 'acp', endpointId: 'claude-code' }, 'connectorId is required'],
-    [{ protocolId: 'acp', connectorId: 'acp' }, 'endpointId is required'],
-  ] as const)('rejects runtime connector connect requests with missing address fields', async (payload, error) => {
-    await expect(dispatchRuntimeRouteDefinition(
-      runtimeTopologyRoutes,
-      'POST',
-      '/api/runtime-connectors/connect',
-      payload,
-      createService(),
-    )).resolves.toEqual({
+      { protocolId: 'acp', connectorId: 'acp', endpointId: 'claude-code' },
+      service,
+    )).resolves.toMatchObject({
       status: 400,
-      data: { success: false, error },
+      data: { success: false },
     });
   });
 
-  it('disconnects runtime connector endpoint', async () => {
-    const payload = { protocolId: 'acp', connectorId: 'acp', endpointId: 'claude-code' };
+  it('rejects runtime connector disconnect without dispatching lifecycle service', async () => {
+    const service = createService();
     await expect(dispatchRuntimeRouteDefinition(
       runtimeTopologyRoutes,
       'POST',
       '/api/runtime-connectors/disconnect',
-      payload,
-      createService(),
-    )).resolves.toEqual({
-      status: 200,
-      data: { success: true, readiness: { ready: false, phase: 'disconnected' }, payload },
+      { protocolId: 'acp', connectorId: 'acp', endpointId: 'claude-code' },
+      service,
+    )).resolves.toMatchObject({
+      status: 400,
+      data: { success: false },
     });
   });
 
-  it('lists runtime endpoints with explicit RuntimeAddress entries', async () => {
+  it('lists runtime endpoints with explicit capability summaries', async () => {
     await expect(dispatchRuntimeRouteDefinition(
       runtimeTopologyRoutes,
       'GET',

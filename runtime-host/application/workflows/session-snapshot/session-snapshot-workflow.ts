@@ -1,5 +1,6 @@
 import type {
   SessionArtifactSnapshotItem,
+  SessionContextTokenSnapshot,
   SessionRenderItem,
   SessionStateSnapshot,
   SessionTimelineEntry,
@@ -24,6 +25,7 @@ import {
 import {
   createSessionCatalogItem,
 } from '../../sessions/session-catalog-model';
+import { readSessionContextTokenSnapshot } from '../../sessions/session-context-tokens';
 import {
   cloneRenderItems,
   isAssistantTurnTimelineEntry,
@@ -71,6 +73,7 @@ export class SessionSnapshotWorkflow {
       replayComplete?: boolean;
       resolvedModel?: string | null;
       label?: string | null;
+      contextTokens?: SessionContextTokenSnapshot;
     } = {},
   ): SessionStateSnapshot {
     const allItems = options.items ?? state.renderItems;
@@ -92,22 +95,25 @@ export class SessionSnapshotWorkflow {
       hasNewer: end < allItems.length,
       isAtLatest: end >= allItems.length,
     });
+    const catalog = createSessionCatalogItem({
+      sessionKey,
+      timelineEntries: state.timelineEntries,
+      runtime: state.runtime,
+      runtimeModel: this.deps.stateStore.getResolvedSessionModel(sessionKey, state.canonical.context),
+      resolvedModel: options.resolvedModel
+        ?? this.deps.stateStore.getResolvedSessionModel(sessionKey, state.canonical.context),
+      label: options.label,
+      contextTokens: options.contextTokens,
+      context: state.canonical.context,
+    });
     return {
       sessionKey,
-      catalog: createSessionCatalogItem({
-        sessionKey,
-        timelineEntries: state.timelineEntries,
-        runtime: state.runtime,
-        runtimeModel: this.deps.stateStore.getResolvedSessionModel(sessionKey, state.canonical.context),
-        resolvedModel: options.resolvedModel
-          ?? this.deps.stateStore.getResolvedSessionModel(sessionKey, state.canonical.context),
-        label: options.label,
-        context: state.canonical.context,
-      }),
+      catalog,
       items: cloneRenderItems(allItems.slice(start, end)),
       approvals: state.canonical.approvals.map((approval) => structuredClone(approval)),
       usage: this.buildUsageSnapshotItems(state),
       artifacts: this.buildArtifactSnapshotItems(state),
+      ...(catalog.contextTokens ? { contextTokens: catalog.contextTokens } : {}),
       ...(state.taskSnapshot ? { taskSnapshot: structuredClone(state.taskSnapshot) } : {}),
       replayComplete: options.replayComplete ?? true,
       runtime: cloneSessionRuntimeState(state.runtime),
@@ -124,9 +130,9 @@ export class SessionSnapshotWorkflow {
       replayComplete?: boolean;
     } = {},
   ): Promise<SessionStateSnapshot> {
-    const storageDescriptor = await this.deps.sessionStorage.findStorageDescriptor(sessionKey);
+    const storageDescriptor = await this.deps.sessionStorage.findStorageDescriptor(state.canonical.context.identity);
     const resolvedModel = await this.deps.sessionMetadata.resolveSessionModel({
-      sessionKey,
+      sessionIdentity: state.canonical.context.identity,
       storageDescriptor,
       runtimeModel: this.deps.stateStore.getResolvedSessionModel(sessionKey, state.canonical.context),
     });
@@ -134,6 +140,7 @@ export class SessionSnapshotWorkflow {
       ...options,
       resolvedModel,
       label: readSessionStoreLabel(storageDescriptor?.sessionStoreEntry ?? null),
+      contextTokens: readSessionContextTokenSnapshot(storageDescriptor?.sessionStoreEntry),
     });
   }
 

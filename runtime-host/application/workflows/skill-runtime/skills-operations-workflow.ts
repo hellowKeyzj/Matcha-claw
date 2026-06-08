@@ -16,7 +16,7 @@ export interface SkillsOperationsWorkflowDeps {
   readonly repository: Pick<SkillsConfigRepository, 'updateConfig' | 'setEnabled' | 'setManyEnabled' | 'listEffective'>;
   readonly readmePreviews: Pick<SkillReadmePreviewRepository, 'read'>;
   readonly jobs: SkillsJobPort;
-  readonly skillRuntimeWorkflow: Pick<SkillRuntimeWorkflow, 'refreshStatus'>;
+  readonly skillRuntimeWorkflow: Pick<SkillRuntimeWorkflow, 'refreshStatus' | 'validateCanonicalSkillKeys'>;
   readonly skillBundleTransferWorkflow: Pick<SkillBundleTransferWorkflow, 'importBundles'>;
   readonly localSkillImportWorkflow: Pick<LocalSkillImportWorkflow, 'execute'>;
   readonly logger: RuntimeHostLogger;
@@ -72,10 +72,14 @@ export class SkillsOperationsWorkflow {
     if (Object.keys(updates).length === 0) {
       return badRequest('No config updates provided');
     }
+    const validatedSkillKey = await this.validateSingleSkillKey(skillKey);
+    if (!validatedSkillKey.ok) {
+      return badRequest(validatedSkillKey.error);
+    }
     return await this.applyUpdates(
-      skillKey,
+      validatedSkillKey.skillKey,
       updates,
-      async () => await this.deps.repository.updateConfig(skillKey, updates),
+      async () => await this.deps.repository.updateConfig(validatedSkillKey.skillKey, updates),
     );
   }
 
@@ -88,11 +92,15 @@ export class SkillsOperationsWorkflow {
     if (typeof body.enabled !== 'boolean') {
       return badRequest('enabled must be a boolean');
     }
+    const validatedSkillKey = await this.validateSingleSkillKey(skillKey);
+    if (!validatedSkillKey.ok) {
+      return badRequest(validatedSkillKey.error);
+    }
 
     return await this.applyUpdates(
-      skillKey,
+      validatedSkillKey.skillKey,
       { enabled: body.enabled },
-      async () => await this.deps.repository.setEnabled(skillKey, Boolean(body.enabled)),
+      async () => await this.deps.repository.setEnabled(validatedSkillKey.skillKey, Boolean(body.enabled)),
     );
   }
 
@@ -110,8 +118,12 @@ export class SkillsOperationsWorkflow {
     if (typeof body.enabled !== 'boolean') {
       return badRequest('enabled must be a boolean');
     }
+    const validatedSkillKeys = await this.deps.skillRuntimeWorkflow.validateCanonicalSkillKeys(skillKeys);
+    if (!validatedSkillKeys.ok) {
+      return badRequest(validatedSkillKeys.error);
+    }
 
-    const localResult = await this.deps.repository.setManyEnabled(skillKeys, body.enabled);
+    const localResult = await this.deps.repository.setManyEnabled(validatedSkillKeys.skillKeys, body.enabled);
     if (localResult.success !== true) {
       return serverError(localResult.error || 'Failed to persist local skills config');
     }
@@ -123,7 +135,7 @@ export class SkillsOperationsWorkflow {
 
     return ok({
       success: true,
-      updated: skillKeys,
+      updated: validatedSkillKeys.skillKeys,
       enabled: body.enabled,
     });
   }
@@ -151,6 +163,21 @@ export class SkillsOperationsWorkflow {
   private readRequiredSourcePath(payload: unknown): string {
     const body = isRecord(payload) ? payload : {};
     return typeof body.sourcePath === 'string' ? body.sourcePath.trim() : '';
+  }
+
+  private async validateSingleSkillKey(skillKey: string): Promise<
+    { ok: true; skillKey: string }
+    | { ok: false; error: string }
+  > {
+    const validatedSkillKeys = await this.deps.skillRuntimeWorkflow.validateCanonicalSkillKeys([skillKey.trim()]);
+    if (!validatedSkillKeys.ok) {
+      return validatedSkillKeys;
+    }
+    const [validatedSkillKey] = validatedSkillKeys.skillKeys;
+    if (!validatedSkillKey) {
+      return { ok: false, error: `Unknown skillKey: ${skillKey.trim()}` };
+    }
+    return { ok: true, skillKey: validatedSkillKey };
   }
 
   private async applyUpdates(

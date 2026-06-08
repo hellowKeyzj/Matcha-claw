@@ -1,5 +1,5 @@
 import type { AttachedFileMeta } from '@/stores/chat';
-import type { RuntimeAddress } from '../../../runtime-host/shared/runtime-address';
+import type { SessionIdentity } from '../../../runtime-host/shared/runtime-address';
 import {
   classifyFileContentType,
   extnameOf,
@@ -25,7 +25,9 @@ export interface ArtifactPreviewTarget {
   content?: string;
   lineStats?: GeneratedFileLineStats;
   toolId?: string;
-  runtimeAddress?: RuntimeAddress;
+  sessionIdentity?: SessionIdentity;
+  workspaceId?: string;
+  sourceId?: string;
 }
 
 export function buildArtifactPreviewTargetFromGeneratedFile(file: GeneratedFile): ArtifactPreviewTarget {

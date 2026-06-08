@@ -1,21 +1,9 @@
 import {
-  buildRuntimeAddressKey,
-  validateRuntimeAddress,
-  type RuntimeAddress,
+  buildCapabilityScopeKey,
+  validateRuntimeScope,
+  type RuntimeScope,
 } from '../../agent-runtime/contracts/runtime-address';
 import type { CapabilityDescriptor } from './capability-descriptor';
-
-function assertEqual(field: string, expected: string | undefined, actual: string | undefined): void {
-  if (actual !== expected) {
-    throw new Error(`Capability descriptor ${field} does not match RuntimeAddress`);
-  }
-}
-
-function assertForbidden(field: string, actual: string | undefined, address: RuntimeAddress): void {
-  if (actual !== undefined) {
-    throw new Error(`Capability descriptor ${field} is not allowed for ${address.kind}`);
-  }
-}
 
 function assertCapabilityDescriptorMetadata(descriptor: CapabilityDescriptor): void {
   if (typeof descriptor.policyScope !== 'string' || !descriptor.policyScope.trim()) {
@@ -27,66 +15,54 @@ function assertCapabilityDescriptorMetadata(descriptor: CapabilityDescriptor): v
   if (typeof descriptor.routeOwnerId !== 'string' || !descriptor.routeOwnerId.trim()) {
     throw new Error('Capability descriptor routeOwnerId is required');
   }
+  if (descriptor.scope.kind !== descriptor.scopeKind) {
+    throw new Error('Capability descriptor scopeKind does not match scope kind');
+  }
+  const scopeError = validateRuntimeScope(descriptor.scope);
+  if (scopeError) {
+    throw new Error(scopeError);
+  }
   if (descriptor.operations.length === 0) {
     throw new Error('Capability descriptor operations are required');
+  }
+  if (descriptor.targetKinds.length === 0) {
+    throw new Error('Capability descriptor targetKinds are required');
   }
   for (const operation of descriptor.operations) {
     if (!operation.id.trim()) {
       throw new Error('Capability operation id is required');
     }
+    if (!descriptor.targetKinds.includes(operation.targetKind)) {
+      throw new Error(`Capability operation targetKind is not declared: ${operation.id}`);
+    }
   }
 }
 
-function isSameRuntimeEndpointScope(left: RuntimeAddress, right: RuntimeAddress): boolean {
-  if (left.kind !== right.kind) {
-    return false;
+function isSameRuntimeEndpointScope(left: RuntimeScope, right: RuntimeScope): boolean {
+  if ('endpoint' in left && 'endpoint' in right) {
+    return buildRuntimeEndpointScopeKey(left) === buildRuntimeEndpointScopeKey(right);
   }
-  if (left.kind === 'native-runtime') {
-    return left.runtimeAdapterId === right.runtimeAdapterId
-      && left.runtimeInstanceId === right.runtimeInstanceId;
+  if (left.kind === 'session' && right.kind === 'session') {
+    return buildRuntimeEndpointScopeKey({ kind: 'runtime-instance', endpoint: left.identity.endpoint })
+      === buildRuntimeEndpointScopeKey({ kind: 'runtime-instance', endpoint: right.identity.endpoint });
   }
-  return left.protocolId === right.protocolId
-    && left.connectorId === right.connectorId
-    && left.endpointId === right.endpointId;
+  if (left.kind === 'team-run' && right.kind === 'team-run') {
+    return buildRuntimeEndpointScopeKey(left) === buildRuntimeEndpointScopeKey(right);
+  }
+  return left.kind === right.kind;
 }
 
-function assertCapabilityDescriptorAddress(descriptor: CapabilityDescriptor): void {
-  assertCapabilityDescriptorMetadata(descriptor);
-  const addressError = validateRuntimeAddress(descriptor.address);
-  if (addressError) {
-    throw new Error(addressError);
-  }
-  if (descriptor.id !== descriptor.address.capabilityId) {
-    throw new Error('Capability descriptor id does not match RuntimeAddress capabilityId');
-  }
-  if (!descriptor.targetAgentIds.includes(descriptor.address.agentId)) {
-    throw new Error('Capability descriptor targetAgentIds must include RuntimeAddress agentId');
-  }
-  if (descriptor.modelProviderId !== descriptor.address.modelProviderId) {
-    throw new Error('Capability descriptor modelProviderId does not match RuntimeAddress');
-  }
-
-  if (descriptor.address.kind === 'native-runtime') {
-    assertEqual('runtimeAdapterId', descriptor.address.runtimeAdapterId, descriptor.runtimeAdapterId);
-    assertEqual('runtimeInstanceId', descriptor.address.runtimeInstanceId, descriptor.runtimeInstanceId);
-    assertForbidden('protocolId', descriptor.protocolId, descriptor.address);
-    assertForbidden('connectorId', descriptor.connectorId, descriptor.address);
-    assertForbidden('endpointId', descriptor.endpointId, descriptor.address);
-    return;
-  }
-
-  assertEqual('protocolId', descriptor.address.protocolId, descriptor.protocolId);
-  assertEqual('connectorId', descriptor.address.connectorId, descriptor.connectorId);
-  assertEqual('endpointId', descriptor.address.endpointId, descriptor.endpointId);
-  assertForbidden('runtimeAdapterId', descriptor.runtimeAdapterId, descriptor.address);
-  assertForbidden('runtimeInstanceId', descriptor.runtimeInstanceId, descriptor.address);
+function buildRuntimeEndpointScopeKey(scope: Extract<RuntimeScope, { endpoint: unknown }>): string {
+  return scope.endpoint.kind === 'native-runtime'
+    ? `native-runtime:${scope.endpoint.runtimeAdapterId}:${scope.endpoint.runtimeInstanceId}`
+    : `protocol-connector:${scope.endpoint.protocolId}:${scope.endpoint.connectorId}:${scope.endpoint.endpointId}`;
 }
 
 export class CapabilityRegistry {
   private readonly descriptors = new Map<string, CapabilityDescriptor>();
 
   register(descriptor: CapabilityDescriptor): void {
-    assertCapabilityDescriptorAddress(descriptor);
+    assertCapabilityDescriptorMetadata(descriptor);
     const key = this.buildDescriptorKey(descriptor);
     if (this.descriptors.has(key)) {
       throw new Error(`Capability already registered: ${key}`);
@@ -100,15 +76,15 @@ export class CapabilityRegistry {
     }
   }
 
-  replaceForRuntimeEndpointScope(scope: RuntimeAddress, descriptors: Iterable<CapabilityDescriptor>): void {
+  replaceForRuntimeEndpointScope(scope: RuntimeScope, descriptors: Iterable<CapabilityDescriptor>): void {
     this.removeForRuntimeEndpointScope(scope);
     this.registerMany(descriptors);
   }
 
-  removeForRuntimeEndpointScope(scope: RuntimeAddress): void {
+  removeForRuntimeEndpointScope(scope: RuntimeScope): void {
     for (const key of Array.from(this.descriptors.keys())) {
       const descriptor = this.descriptors.get(key)!;
-      if (isSameRuntimeEndpointScope(descriptor.address, scope)) {
+      if (isSameRuntimeEndpointScope(descriptor.scope, scope)) {
         this.descriptors.delete(key);
       }
     }
@@ -122,7 +98,7 @@ export class CapabilityRegistry {
     return this.list().filter((descriptor) => descriptor.id === capabilityId);
   }
 
-  get(descriptor: Pick<CapabilityDescriptor, 'id' | 'address'>): CapabilityDescriptor {
+  get(descriptor: Pick<CapabilityDescriptor, 'id' | 'scope'>): CapabilityDescriptor {
     const key = this.buildDescriptorKey(descriptor);
     const found = this.descriptors.get(key);
     if (!found) {
@@ -131,7 +107,7 @@ export class CapabilityRegistry {
     return found;
   }
 
-  private buildDescriptorKey(descriptor: Pick<CapabilityDescriptor, 'id' | 'address'>): string {
-    return `${descriptor.id}:${buildRuntimeAddressKey(descriptor.address)}`;
+  private buildDescriptorKey(descriptor: Pick<CapabilityDescriptor, 'id' | 'scope'>): string {
+    return `${descriptor.id}:${buildCapabilityScopeKey(descriptor.scope)}`;
   }
 }

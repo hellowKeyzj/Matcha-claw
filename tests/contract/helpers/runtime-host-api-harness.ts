@@ -1,4 +1,5 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
+import { WebSocketServer } from 'ws';
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -38,6 +39,8 @@ export interface RuntimeHostApiHarness {
 interface RuntimeHostApiHarnessOptions {
   readonly enabledPluginIds?: string[];
   readonly pluginCatalog?: Array<Record<string, unknown>>;
+  readonly gatewayMethods?: readonly string[];
+  readonly gatewayHandler?: (input: { method: string; params: unknown }) => unknown;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -89,6 +92,72 @@ function createParentResponse(res: ServerResponse, payload: unknown, statusCode 
   res.statusCode = statusCode;
   res.setHeader('Content-Type', 'application/json; charset=utf-8');
   res.end(JSON.stringify(payload));
+}
+
+async function startGatewayRpcServer(input: {
+  readonly port: number;
+  readonly token: string;
+  readonly methods: readonly string[];
+  readonly handler?: (payload: { method: string; params: unknown }) => unknown;
+}): Promise<ParentApiServer> {
+  const wss = new WebSocketServer({ host: '127.0.0.1', port: input.port });
+  wss.on('connection', (socket) => {
+    socket.send(JSON.stringify({
+      type: 'event',
+      event: 'connect.challenge',
+      payload: { nonce: 'contract-test' },
+    }));
+    let authed = false;
+    socket.on('message', (rawData) => {
+      const message = JSON.parse(rawData.toString() || '{}') as Record<string, unknown>;
+      if (message.type !== 'req' || typeof message.id !== 'string') {
+        return;
+      }
+      if (message.method === 'connect') {
+        const params = isRecord(message.params) ? message.params : {};
+        const auth = isRecord(params.auth) ? params.auth : {};
+        if (auth.token !== input.token) {
+          socket.send(JSON.stringify({ type: 'res', id: message.id, ok: false, error: { code: 'FORBIDDEN', message: 'invalid gateway token' } }));
+          socket.close();
+          return;
+        }
+        authed = true;
+        socket.send(JSON.stringify({
+          type: 'res',
+          id: message.id,
+          ok: true,
+          payload: { features: { methods: input.methods } },
+        }));
+        return;
+      }
+      if (!authed || typeof message.method !== 'string') {
+        socket.send(JSON.stringify({ type: 'res', id: message.id, ok: false, error: { code: 'UNAUTHORIZED', message: 'handshake not completed' } }));
+        return;
+      }
+      socket.send(JSON.stringify({
+        type: 'res',
+        id: message.id,
+        ok: true,
+        payload: input.handler?.({ method: message.method, params: message.params }) ?? { ok: true },
+      }));
+    });
+  });
+  await new Promise<void>((resolve) => {
+    wss.on('listening', () => resolve());
+  });
+  return {
+    close: async () => {
+      await new Promise<void>((resolveClose, rejectClose) => {
+        wss.close((error) => {
+          if (error) {
+            rejectClose(error);
+            return;
+          }
+          resolveClose();
+        });
+      });
+    },
+  };
 }
 
 async function startParentApiServer(port: number, token: string): Promise<ParentApiServer> {
@@ -207,9 +276,21 @@ export async function createRuntimeHostApiHarness(
     } : {}),
   }, null, 2)}\n`, 'utf8');
 
-  const [runtimeHostPort, parentApiPort] = await Promise.all([findFreePort(), findFreePort()]);
+  const [runtimeHostPort, parentApiPort, gatewayPort] = await Promise.all([findFreePort(), findFreePort(), findFreePort()]);
   const parentDispatchToken = `runtime-host-test-token-${randomUUID()}`;
+  const gatewayToken = `runtime-host-gateway-token-${randomUUID()}`;
   const parentApiServer = await startParentApiServer(parentApiPort, parentDispatchToken);
+  const gatewayServer = options.gatewayMethods
+    ? await startGatewayRpcServer({
+        port: gatewayPort,
+        token: gatewayToken,
+        methods: options.gatewayMethods,
+        handler: options.gatewayHandler,
+      })
+    : null;
+  if (gatewayServer) {
+    writeFileSync(join(openclawConfigDir, 'matchaclaw-settings.json'), `${JSON.stringify({ gatewayToken }, null, 2)}\n`, 'utf8');
+  }
 
   const scriptPath = resolve(process.cwd(), 'runtime-host', 'host-process.cjs');
   const childLogs: string[] = [];
@@ -227,6 +308,10 @@ export async function createRuntimeHostApiHarness(
       MATCHACLAW_RUNTIME_HOST_DATA_DIR: runtimeHostDataDir,
       MATCHACLAW_RUNTIME_HOST_ENABLED_PLUGIN_IDS: JSON.stringify(enabledPluginIds),
       MATCHACLAW_RUNTIME_HOST_PLUGIN_CATALOG: JSON.stringify(options.pluginCatalog ?? []),
+      ...(gatewayServer ? {
+        MATCHACLAW_RUNTIME_HOST_GATEWAY_PORT: String(gatewayPort),
+        MATCHACLAW_RUNTIME_HOST_SETTINGS_FILE: join(openclawConfigDir, 'matchaclaw-settings.json'),
+      } : {}),
     }),
     logger: {
       info: (message) => appendChildLog('info', message),
@@ -238,6 +323,8 @@ export async function createRuntimeHostApiHarness(
   try {
     await manager.start();
   } catch (error) {
+    await manager.stop().catch(() => undefined);
+    await gatewayServer?.close();
     await parentApiServer.close();
     rmSync(rootDir, { recursive: true, force: true });
     throw new Error(`${error instanceof Error ? error.message : String(error)}\n${childLogs.join('\n')}`);
@@ -281,8 +368,14 @@ export async function createRuntimeHostApiHarness(
     await waitForCondition(async () => {
       const data = await dispatchOk<{ job: { status?: string; result?: unknown; error?: string } | null }>(
         'POST',
-        '/api/runtime-host/jobs/get',
-        { jobId },
+        '/api/capabilities/execute',
+        {
+          id: 'runtime.host',
+          operationId: 'runtimeHost.jobGet',
+          scope: { kind: 'runtime-instance', endpoint: { kind: 'native-runtime', runtimeAdapterId: 'openclaw', runtimeInstanceId: 'local' } },
+          target: { kind: 'runtime-job', jobId },
+          input: { jobId },
+        },
       );
       const job = data.job;
       if (!job) {
@@ -312,6 +405,7 @@ export async function createRuntimeHostApiHarness(
     waitForJob,
     stop: async () => {
       await manager.stop();
+      await gatewayServer?.close();
       await parentApiServer.close();
       rmSync(rootDir, { recursive: true, force: true });
     },

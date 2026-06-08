@@ -1,15 +1,15 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { SessionAssistantTurnItem } from '../../runtime-host/shared/session-adapter-types';
 
-const hostApiFetchMock = vi.fn();
+const hostFileThumbnailMock = vi.fn();
 
 vi.mock('@/lib/host-api', () => ({
-  hostApiFetch: (...args: unknown[]) => hostApiFetchMock(...args),
+  hostFileThumbnail: (...args: unknown[]) => hostFileThumbnailMock(...args),
 }));
 
 describe('chat attachment preview loads', () => {
   beforeEach(() => {
-    hostApiFetchMock.mockReset();
+    hostFileThumbnailMock.mockReset();
     localStorage.clear();
   });
 
@@ -53,24 +53,25 @@ describe('chat attachment preview loads', () => {
       }],
     };
 
-    hostApiFetchMock.mockResolvedValueOnce({
-      '/api/chat/media/outgoing/agent%3Atest%3Amain/attachment-1/full': {
-        preview: 'data:image/png;base64,abc',
-        fileSize: 123,
-      },
+    const sessionIdentity = {
+      endpoint: { kind: 'native-runtime' as const, runtimeAdapterId: 'openclaw', runtimeInstanceId: 'local' },
+      agentId: 'main',
+      sessionKey: 'agent:test:main',
+    };
+    hostFileThumbnailMock.mockResolvedValueOnce({
+      preview: 'data:image/png;base64,abc',
+      fileSize: 123,
     });
 
-    const result = await loadMissingItemPreviews([item]);
+    const result = await loadMissingItemPreviews([item], { sessionIdentity });
     const nextItem = result?.[0];
 
-    expect(hostApiFetchMock).toHaveBeenCalledWith('/api/files/thumbnails', {
-      method: 'POST',
-      body: JSON.stringify({
-        paths: [{
-          gatewayUrl: '/api/chat/media/outgoing/agent%3Atest%3Amain/attachment-1/full',
-          mimeType: 'image/png',
-        }],
-      }),
+    expect(hostFileThumbnailMock).toHaveBeenCalledWith({
+      path: '/api/chat/media/outgoing/agent%3Atest%3Amain/attachment-1/full',
+      mimeType: 'image/png',
+      sessionIdentity,
+      workspaceId: undefined,
+      sourceId: undefined,
     });
     expect(nextItem).toMatchObject({
       kind: 'assistant-turn',

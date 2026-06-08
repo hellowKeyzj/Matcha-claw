@@ -1,6 +1,6 @@
 import type { GatewayRpcInvoker } from '@/services/openclaw/types';
 import { fetchLatestAssistantSnapshot } from '@/services/runtime/session-runtime';
-import type { RuntimeAddress } from '../../../runtime-host/shared/runtime-address';
+import type { AgentScope, SessionIdentity } from '../../../runtime-host/shared/runtime-address';
 
 interface AgentRunResult {
   runId?: unknown;
@@ -32,13 +32,14 @@ export interface WaitAgentRunInput {
 export interface WaitAgentRunWithProgressInput {
   runId: string;
   sessionKey: string;
-  runtimeAddress: RuntimeAddress;
+  sessionIdentity: SessionIdentity;
+  waitScope: AgentScope;
   waitSliceMs: number;
   idleTimeoutMs: number;
   rpcTimeoutBufferMs: number;
   logPrefix?: string;
   waitSlice?: (input: {
-    runtimeAddress: RuntimeAddress;
+    scope: AgentScope;
     runId: string;
     waitSliceMs: number;
     rpcTimeoutBufferMs: number;
@@ -165,7 +166,7 @@ export async function waitAgentRunWithProgress(
   let fingerprint = '';
 
   try {
-    const initial = await fetchLatestAssistantSnapshot({ sessionKey, runtimeAddress: input.runtimeAddress, limit: 20 });
+    const initial = await fetchLatestAssistantSnapshot({ sessionKey, sessionIdentity: input.sessionIdentity, limit: 20 });
     fingerprint = buildSnapshotFingerprint(initial);
     if (fingerprint) {
       lastProgressAt = Date.now();
@@ -190,7 +191,7 @@ export async function waitAgentRunWithProgress(
     try {
       result = input.waitSlice
         ? await input.waitSlice({
-          runtimeAddress: input.runtimeAddress,
+          scope: input.waitScope,
           runId,
           waitSliceMs,
           rpcTimeoutBufferMs,
@@ -210,7 +211,7 @@ export async function waitAgentRunWithProgress(
       }
 
       try {
-        const snapshot = await fetchLatestAssistantSnapshot({ sessionKey, runtimeAddress: input.runtimeAddress, limit: 20 });
+        const snapshot = await fetchLatestAssistantSnapshot({ sessionKey, sessionIdentity: input.sessionIdentity, limit: 20 });
         const nextFingerprint = buildSnapshotFingerprint(snapshot);
         if (nextFingerprint !== fingerprint) {
           fingerprint = nextFingerprint;
@@ -236,7 +237,7 @@ export async function waitAgentRunWithProgress(
     }
 
     try {
-      const snapshot = await fetchLatestAssistantSnapshot({ sessionKey, runtimeAddress: input.runtimeAddress, limit: 20 });
+      const snapshot = await fetchLatestAssistantSnapshot({ sessionKey, sessionIdentity: input.sessionIdentity, limit: 20 });
       const nextFingerprint = buildSnapshotFingerprint(snapshot);
       if (nextFingerprint !== fingerprint) {
         fingerprint = nextFingerprint;

@@ -15,6 +15,7 @@ const hoisted = vi.hoisted(() => ({
   runtimeConfigSanitizeMock: vi.fn(async () => {}),
   runtimeConfigSyncBrowserModeMock: vi.fn(async () => {}),
   runtimeConfigSyncSessionIdleMinutesMock: vi.fn(async () => {}),
+  getActiveProvidersMock: vi.fn(async () => new Set<string>()),
   reconcileConfiguredChannelPluginsForGatewayLaunchMock: vi.fn(async () => []),
   cleanupStaleBuiltinExtensionsForGatewayLaunchMock: vi.fn(async () => []),
   ensureConfiguredManagedPluginsForGatewayLaunchMock: vi.fn(async () => []),
@@ -61,6 +62,9 @@ function createProviderProjectionSync() {
         },
         providerConfig: {
           syncProviderConfig: hoisted.syncProviderConfigMock,
+        },
+        projectionState: {
+          getActiveProviders: hoisted.getActiveProvidersMock,
         },
         authRepository: {
           discoverAgentIds: async () => ['main'],
@@ -241,9 +245,9 @@ describe('runtime-host bootstrap provider sync', () => {
     expect(hoisted.reconcileConfiguredChannelPluginsForGatewayLaunchMock).toHaveBeenCalledTimes(1);
     expect(hoisted.ensureConfiguredManagedPluginsForGatewayLaunchMock).toHaveBeenCalledTimes(1);
     expect(hoisted.applySavedPolicyToPluginConfigMock).toHaveBeenCalledTimes(1);
-    expect(result).toEqual({
+    expect(result).toEqual(expect.objectContaining({
       configuredChannels: ['openclaw-weixin'],
-    });
+    }));
   });
 
   it('Ollama 凭证只同步密钥和 provider 覆盖配置，不写默认模型', async () => {

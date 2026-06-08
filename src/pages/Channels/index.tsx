@@ -47,7 +47,6 @@ import { subscribeHostEvent } from '@/lib/host-events';
 import { isGatewayOperational, isGatewayPreparing } from '@/lib/gateway-status';
 import { useDelayedFlag } from '@/lib/use-delayed-flag';
 import { invokeIpc } from '@/lib/api-client';
-import { resolveSingleCapabilityRuntimeAddress } from '@/lib/host-api';
 import { cn } from '@/lib/utils';
 import {
   CHANNEL_ICONS,
@@ -61,9 +60,7 @@ import {
 } from '@/types/channel';
 import { toast } from 'sonner';
 import { useTranslation } from 'react-i18next';
-import type { RuntimeAddress } from '../../../runtime-host/shared/runtime-address';
 
-const CHANNEL_INTEGRATION_CAPABILITY_ID = 'integration.channel';
 const CHANNELS_EVENT_REFRESH_COOLDOWN_MS = 400;
 const CHANNELS_STATUS_POLL_MS = 10_000;
 const QR_EVENT_PREFIX_BY_TYPE: Partial<Record<ChannelType, string>> = {
@@ -141,7 +138,6 @@ export function Channels() {
   const [selectedChannelType, setSelectedChannelType] = useState<ChannelType | null>(null);
   const [channelToDelete, setChannelToDelete] = useState<{ id: string; type: ChannelType } | null>(null);
   const [pairingChannel, setPairingChannel] = useState<Channel | null>(null);
-  const [channelRuntimeAddress, setChannelRuntimeAddress] = useState<RuntimeAddress | null>(null);
   const statusRefreshPendingRef = useRef(false);
   const statusRefreshRafRef = useRef<number | null>(null);
   const statusRefreshLastAtRef = useRef(0);
@@ -212,28 +208,6 @@ export function Channels() {
   const showRefreshingHint = useDelayedFlag(refreshing && snapshotReady, 180);
 
   useEffect(() => {
-    if (!gatewayOperational) {
-      setChannelRuntimeAddress(null);
-      return;
-    }
-    let active = true;
-    void resolveSingleCapabilityRuntimeAddress(CHANNEL_INTEGRATION_CAPABILITY_ID)
-      .then((runtimeAddress) => {
-        if (active) {
-          setChannelRuntimeAddress(runtimeAddress);
-        }
-      })
-      .catch(() => {
-        if (active) {
-          setChannelRuntimeAddress(null);
-        }
-      });
-    return () => {
-      active = false;
-    };
-  }, [gatewayOperational]);
-
-  useEffect(() => {
     if (!gatewayOperational || configuredChannels.length === 0) {
       return undefined;
     }
@@ -259,11 +233,9 @@ export function Channels() {
           <Button
             variant="outline"
             onClick={() => {
-              if (channelRuntimeAddress) {
-                void probeChannels(channelRuntimeAddress);
-              }
+              void probeChannels();
             }}
-            disabled={manualRefreshBusy || !channelRuntimeAddress}
+            disabled={manualRefreshBusy || !gatewayOperational}
           >
             <RefreshCw className={cn('h-4 w-4 mr-2', refreshing && 'animate-spin')} />
             {t('refresh')}
@@ -440,7 +412,6 @@ export function Channels() {
       {showAddDialog && (
         <AddChannelDialog
           selectedType={selectedChannelType}
-          runtimeAddress={channelRuntimeAddress}
           onSelectType={setSelectedChannelType}
           onClose={() => {
             setShowAddDialog(false);
@@ -462,8 +433,8 @@ export function Channels() {
         cancelLabel={t('common.cancel', 'Cancel')}
         variant="destructive"
         onConfirm={async () => {
-          if (channelToDelete && channelRuntimeAddress) {
-            await deleteChannel(channelToDelete.id, channelRuntimeAddress);
+          if (channelToDelete) {
+            await deleteChannel(channelToDelete.id);
             await fetchChannels({ silent: true });
             setChannelToDelete(null);
           }
@@ -474,7 +445,6 @@ export function Channels() {
       {pairingChannel && (
         <ChannelPairingDialog
           channel={pairingChannel}
-          runtimeAddress={channelRuntimeAddress}
           onClose={() => setPairingChannel(null)}
         />
       )}
@@ -553,7 +523,6 @@ function ChannelCard({ channel, isMutating = false, onManagePairing, onDelete }:
 
 interface ChannelPairingDialogProps {
   channel: Channel;
-  runtimeAddress: RuntimeAddress | null;
   onClose: () => void;
 }
 
@@ -570,7 +539,7 @@ function formatPairingTime(value: string): string {
   }).format(new Date(timestamp));
 }
 
-function ChannelPairingDialog({ channel, runtimeAddress, onClose }: ChannelPairingDialogProps) {
+function ChannelPairingDialog({ channel, onClose }: ChannelPairingDialogProps) {
   const { t } = useTranslation('channels');
   const [requests, setRequests] = useState<ChannelPairingRequest[]>([]);
   const [code, setCode] = useState('');
@@ -597,7 +566,7 @@ function ChannelPairingDialog({ channel, runtimeAddress, onClose }: ChannelPairi
 
   const approveCode = async (rawCode: string) => {
     const pairingCode = rawCode.trim().toUpperCase();
-    if (!pairingCode || !runtimeAddress) {
+    if (!pairingCode) {
       return;
     }
     setSubmitting(true);
@@ -606,7 +575,7 @@ function ChannelPairingDialog({ channel, runtimeAddress, onClose }: ChannelPairi
       await hostChannelsApprovePairingRequest(channel.type, {
         code: pairingCode,
         accountId: channel.accountId,
-      }, runtimeAddress);
+      });
       toast.success(t('pairing.approvedToast'));
       setCode('');
       await refreshRequests();
@@ -652,7 +621,7 @@ function ChannelPairingDialog({ channel, runtimeAddress, onClose }: ChannelPairi
               />
               <Button
                 onClick={() => { void approveCode(code); }}
-                disabled={submitting || !code.trim() || !runtimeAddress}
+                disabled={submitting || !code.trim()}
               >
                 {submitting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Check className="h-4 w-4" />}
                 {t('pairing.approve')}
@@ -694,7 +663,7 @@ function ChannelPairingDialog({ channel, runtimeAddress, onClose }: ChannelPairi
                       variant="secondary"
                       size="sm"
                       onClick={() => { void approveCode(request.code); }}
-                      disabled={submitting || !runtimeAddress}
+                      disabled={submitting}
                     >
                       <Check className="h-4 w-4" />
                       {t('pairing.approve')}
@@ -718,13 +687,12 @@ function ChannelPairingDialog({ channel, runtimeAddress, onClose }: ChannelPairi
 
 interface AddChannelDialogProps {
   selectedType: ChannelType | null;
-  runtimeAddress: RuntimeAddress | null;
   onSelectType: (type: ChannelType | null) => void;
   onClose: () => void;
   onChannelAdded: () => void;
 }
 
-function AddChannelDialog({ selectedType, runtimeAddress, onSelectType, onClose, onChannelAdded }: AddChannelDialogProps) {
+function AddChannelDialog({ selectedType, onSelectType, onClose, onChannelAdded }: AddChannelDialogProps) {
   const { t } = useTranslation('channels');
   const [configValues, setConfigValues] = useState<Record<string, string>>({});
   const [channelName, setChannelName] = useState('');
@@ -878,13 +846,10 @@ function AddChannelDialog({ selectedType, runtimeAddress, onSelectType, onClose,
     return () => {
       if (typeof removeChannelStatusListener === 'function') removeChannelStatusListener();
       clearQrGenerateTimeout();
-      // Cancel when unmounting or switching types
       const qrChannelType = selectedType as Extract<ChannelType, 'whatsapp' | 'openclaw-weixin'>;
-      if (runtimeAddress) {
-        void hostChannelsCancelSession(qrChannelType, runtimeAddress).catch(() => { });
-      }
+      void hostChannelsCancelSession(qrChannelType).catch(() => { });
     };
-  }, [runtimeAddress, selectedType, t, clearQrGenerateTimeout]);
+  }, [selectedType, t, clearQrGenerateTimeout]);
 
   const handleValidate = async () => {
     if (!selectedType) return;
@@ -921,7 +886,7 @@ function AddChannelDialog({ selectedType, runtimeAddress, onSelectType, onClose,
 
 
   const handleConnect = async () => {
-    if (!selectedType || !meta || !runtimeAddress) return;
+    if (!selectedType || !meta) return;
 
     setConnecting(true);
     setValidationResult(null);
@@ -936,7 +901,7 @@ function AddChannelDialog({ selectedType, runtimeAddress, onSelectType, onClose,
         }, QR_GENERATE_TIMEOUT_MS);
         const accountId = channelName.trim() || 'default';
         const qrChannelType = selectedType as Extract<ChannelType, 'whatsapp' | 'openclaw-weixin'>;
-        await hostChannelsActivate({ channelType: qrChannelType, accountId, config: configValues }, runtimeAddress);
+        await hostChannelsActivate({ channelType: qrChannelType, accountId, config: configValues });
         // The QR code will be set via event listener
         return;
       }
@@ -980,7 +945,7 @@ function AddChannelDialog({ selectedType, runtimeAddress, onSelectType, onClose,
 
       // Step 2: Activate channel configuration
       const config: Record<string, unknown> = { ...configValues };
-      const saveResult = await hostChannelsActivate({ channelType: selectedType, config }, runtimeAddress);
+      const saveResult = await hostChannelsActivate({ channelType: selectedType, config });
       if (!saveResult?.success) {
         throw new Error(saveResult?.error || 'Failed to save channel config');
       }
@@ -1282,7 +1247,7 @@ function AddChannelDialog({ selectedType, runtimeAddress, onSelectType, onClose,
                   )}
                   <Button
                     onClick={handleConnect}
-                    disabled={connecting || !isFormValid() || !runtimeAddress}
+                    disabled={connecting || !isFormValid()}
                   >
                     {connecting ? (
                       <>

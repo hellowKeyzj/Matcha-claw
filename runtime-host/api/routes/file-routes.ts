@@ -1,5 +1,5 @@
 import {
-  routeResponder,
+  badRequest,
   type RuntimeRouteDefinition,
 } from './route-utils';
 
@@ -15,10 +15,24 @@ interface FileRouteService {
   thumbnails(payload: unknown): Promise<unknown>;
 }
 
+const LEGACY_FILE_ROUTE_REJECTION = 'Legacy file route is disabled; use /api/capabilities/execute with a workspace-file target';
+
+function rejectedFileRoute(path: string): RuntimeRouteDefinition<FileRouteDeps> {
+  return {
+    method: 'POST',
+    path,
+    handle: () => badRequest(LEGACY_FILE_ROUTE_REJECTION),
+  };
+}
+
 export const fileRoutes: readonly RuntimeRouteDefinition<FileRouteDeps>[] = [
-  { method: 'POST', path: '/api/files/read-text', handle: (context, deps) => routeResponder.value(() => deps.fileService.readText(context.payload)) },
-  { method: 'POST', path: '/api/files/read-binary', handle: (context, deps) => routeResponder.value(() => deps.fileService.readBinary(context.payload)) },
-  { method: 'POST', path: '/api/files/stat', handle: (context, deps) => routeResponder.value(() => deps.fileService.stat(context.payload)) },
-  { method: 'POST', path: '/api/files/list-dir', handle: (context, deps) => routeResponder.value(() => deps.fileService.listDir(context.payload)) },
-  { method: 'POST', path: '/api/files/thumbnails', handle: (context, deps) => routeResponder.value(() => deps.fileService.thumbnails(context.payload)) },
+  rejectedFileRoute('/api/files/read-text'),
+  rejectedFileRoute('/api/files/read-binary'),
+  rejectedFileRoute('/api/files/stat'),
+  rejectedFileRoute('/api/files/list-dir'),
+  rejectedFileRoute('/api/files/thumbnails'),
+  rejectedFileRoute('/api/files/write-text'),
+  rejectedFileRoute('/api/files/stage-paths'),
+  rejectedFileRoute('/api/files/stage-buffer'),
+  rejectedFileRoute('/api/files/thumbnail'),
 ] as const;

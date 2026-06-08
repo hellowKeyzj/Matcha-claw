@@ -59,6 +59,7 @@ interface ControllerState {
   lastScopeKey: string | null;
   pendingPrepend: PendingPrepend | null;
   pendingTransition: PendingTransition | null;
+  userLeavingBottom: boolean;
   /** 触摸手势起始 y 坐标，用于在 touchmove 时判定手势方向 */
   touchStartY: number | null;
 }
@@ -85,6 +86,7 @@ export function createChatScrollController(
     lastScopeKey: null,
     pendingPrepend: null,
     pendingTransition: null,
+    userLeavingBottom: false,
     touchStartY: null,
   };
   ensureScopeState(initialConfig.scrollScopeKey, state.scopeStateByScope);
@@ -94,6 +96,9 @@ export function createChatScrollController(
   const setPhase = (phase: ChatScrollPhase) => {
     const config = getConfig();
     const scope = getScope(config.scrollScopeKey);
+    if (phase === 'follow') {
+      state.userLeavingBottom = false;
+    }
     if (scope.phase !== phase) {
       scope.phase = phase;
       if (phase === 'follow') {
@@ -218,6 +223,7 @@ export function createChatScrollController(
     }
     // 手指下移 = 视图上滑 = 用户在往回看历史。
     if (touch.clientY > previousY) {
+      state.userLeavingBottom = true;
       setPhase('detached');
     }
   };
@@ -232,11 +238,7 @@ export function createChatScrollController(
       return;
     }
     if (deltaY < 0) {
-      // 用户上滑：预设 detached。这条很关键——
-      // 如果浏览器的 scroll 派发跟流式 token 重排撞在同一帧，
-      // onGeometryChanged 会在 scroll 事件之前先看到 phase=detached，
-      // 从而不再 stickToBottom，把用户的上滑意图保住。
-      setPhase('detached');
+      state.userLeavingBottom = true;
     }
     // deltaY > 0：不主动改 phase；如果滚到底部 scroll 事件会把它转回 follow。
   }
@@ -253,10 +255,10 @@ export function createChatScrollController(
   };
 
   /**
-   * scroll 事件 = phase 的几何真值同步器：
-   *   到底  → follow
-   *   未到底 → detached
-   * 这是唯一一处"按几何把 phase 拉回 follow"的入口。
+   * scroll 事件只确认两件事：
+   *   到底                 → follow
+   *   用户离底意图已成立   → detached
+   * 被动几何变化造成的 not-at-bottom 不能反推用户意图。
    */
   const handleViewportScroll = () => {
     const config = getConfig();
@@ -268,10 +270,9 @@ export function createChatScrollController(
       return;
     }
     if (isAtBottom(metrics)) {
-      // 用户主动滚到底部：清掉残留的 prepend 补偿，避免被它把位置拉回。
       state.pendingPrepend = null;
       setPhase('follow');
-    } else {
+    } else if (state.userLeavingBottom) {
       setPhase('detached');
     }
     syncSyncContainerDataset();
@@ -399,6 +400,7 @@ export function createChatScrollController(
   const cleanup = () => {
     state.pendingPrepend = null;
     state.pendingTransition = null;
+    state.userLeavingBottom = false;
     state.touchStartY = null;
   };
 

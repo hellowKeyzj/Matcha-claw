@@ -20,28 +20,37 @@ const runtimeHostClient = createDefaultRuntimeHostHttpClient({
 });
 
 async function modelProviderCapabilityPayload(operationId: string, input: Record<string, unknown>) {
-  return await createCapabilityPayload(runtimeHostClient, MODEL_PROVIDER_CAPABILITY_ID, operationId, input);
+  return await createCapabilityPayload(runtimeHostClient, MODEL_PROVIDER_CAPABILITY_ID, operationId, input, {
+    target: {
+      kind: 'provider-oauth',
+      flowId: typeof input.flowId === 'string' ? input.flowId : undefined,
+      accountId: typeof input.accountId === 'string' ? input.accountId : undefined,
+      vendorId: typeof input.providerType === 'string' ? input.providerType : undefined,
+    },
+  });
 }
 
 class DeviceOAuthManager extends EventEmitter {
   private activeProvider: OAuthProviderType | null = null;
+  private activeFlowId: string | null = null;
   private activeAccountId: string | null = null;
   private activeLabel: string | null = null;
   private active = false;
   async startFlow(
     provider: OAuthProviderType,
     region: MiniMaxRegion = 'global',
-    options?: { accountId?: string; label?: string },
+    options: { flowId: string; accountId: string; label?: string },
   ): Promise<boolean> {
-    if (this.active) {
-      await this.stopFlow();
+    if (this.active && this.activeFlowId && this.activeAccountId && this.activeProvider) {
+      await this.stopFlow({ flowId: this.activeFlowId, accountId: this.activeAccountId, vendorId: this.activeProvider });
     }
 
     this.active = true;
-    this.emit('oauth:start', { provider, accountId: options?.accountId || provider });
     this.activeProvider = provider;
-    this.activeAccountId = options?.accountId || provider;
-    this.activeLabel = options?.label || null;
+    this.activeFlowId = options.flowId;
+    this.activeAccountId = options.accountId;
+    this.activeLabel = options.label || null;
+    this.emit('oauth:start', { provider, flowId: this.activeFlowId, accountId: this.activeAccountId });
 
     try {
       if (provider === 'minimax-portal' || provider === 'minimax-portal-cn') {
@@ -61,15 +70,24 @@ class DeviceOAuthManager extends EventEmitter {
       this.emitError(error instanceof Error ? error.message : String(error));
       this.active = false;
       this.activeProvider = null;
+      this.activeFlowId = null;
       this.activeAccountId = null;
       this.activeLabel = null;
       return false;
     }
   }
 
-  async stopFlow(): Promise<void> {
+  async stopFlow(binding: { flowId: string; accountId: string; vendorId: string }): Promise<void> {
+    if (this.active && (
+      this.activeFlowId !== binding.flowId
+      || this.activeAccountId !== binding.accountId
+      || this.activeProvider !== binding.vendorId
+    )) {
+      return;
+    }
     this.active = false;
     this.activeProvider = null;
+    this.activeFlowId = null;
     this.activeAccountId = null;
     this.activeLabel = null;
     logger.info('[DeviceOAuth] Flow explicitly stopped');
@@ -157,18 +175,25 @@ class DeviceOAuthManager extends EventEmitter {
     api: 'anthropic-messages' | 'openai-completions';
     region?: MiniMaxRegion;
   }) {
-    const accountId = this.activeAccountId || providerType;
+    const flowId = this.activeFlowId;
+    const accountId = this.activeAccountId;
     const accountLabel = this.activeLabel;
     this.active = false;
     this.activeProvider = null;
+    this.activeFlowId = null;
     this.activeAccountId = null;
     this.activeLabel = null;
+    if (!flowId || !accountId) {
+      this.emitError('OAuth flow context missing');
+      return;
+    }
     logger.info(`[DeviceOAuth] Successfully completed OAuth for ${providerType}`);
     await runtimeHostClient.request(
       'POST',
       '/api/capabilities/execute',
       await modelProviderCapabilityPayload('providers.oauthCompleteDevice', {
         providerType,
+        flowId,
         accountId,
         ...(accountLabel ? { accountLabel } : {}),
         token,

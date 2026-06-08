@@ -67,7 +67,7 @@ export function ApprovalActionsPanel({
   onResolve,
 }: {
   approvals: ApprovalItem[];
-  onResolve: (id: string, decision: ApprovalDecision) => void;
+  onResolve: (approval: ApprovalItem, decision: ApprovalDecision) => void;
 }) {
   const { t } = useTranslation('chat');
   const decisionLabels: Record<ApprovalDecision, string> = {
@@ -94,7 +94,7 @@ export function ApprovalActionsPanel({
                 <button
                   key={decision}
                   type="button"
-                  onClick={() => onResolve(approval.id, decision)}
+                  onClick={() => onResolve(approval, decision)}
                   className={decision === 'deny'
                     ? 'rounded-full border border-destructive/20 bg-destructive/8 px-3 py-1 text-xs font-medium text-destructive transition hover:bg-destructive/14'
                     : 'rounded-full border border-primary/20 bg-primary/8 px-3 py-1 text-xs font-medium text-primary transition hover:bg-primary/14'}

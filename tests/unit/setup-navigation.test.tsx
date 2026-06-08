@@ -6,13 +6,22 @@ import { useGatewayStore } from '@/stores/gateway';
 import { useSettingsStore } from '@/stores/settings';
 
 const hostApiFetchMock = vi.fn();
-const hostCapabilityExecuteMock = vi.fn();
+const capabilityExecuteMock = vi.fn();
 const hostOpenClawGetStatusMock = vi.fn();
 const hostUvInstallAllMock = vi.fn();
 
 vi.mock('@/lib/host-api', () => ({
-  hostApiFetch: (...args: unknown[]) => hostApiFetchMock(...args),
-  hostCapabilityExecute: (...args: unknown[]) => hostCapabilityExecuteMock(...args),
+  hostApiFetch: async (path: string, init?: { body?: string; timeoutMs?: number }) => {
+    if (path === '/api/capabilities/execute') {
+      const payload = init?.body ? JSON.parse(init.body) : {};
+      return await capabilityExecuteMock(payload, { timeoutMs: init?.timeoutMs });
+    }
+    return await hostApiFetchMock(path, init);
+  },
+  resolveSingleCapabilityScope: vi.fn().mockResolvedValue({
+    kind: 'runtime-instance',
+    endpoint: { kind: 'native-runtime', runtimeAdapterId: 'openclaw', runtimeInstanceId: 'local' },
+  }),
   hostOpenClawGetStatus: (...args: unknown[]) => hostOpenClawGetStatusMock(...args),
   hostUvInstallAll: (...args: unknown[]) => hostUvInstallAllMock(...args),
 }));
@@ -65,7 +74,7 @@ describe('setup navigation', () => {
       throw new Error(`Unexpected hostApiFetch path: ${path}`);
     });
 
-    hostCapabilityExecuteMock.mockResolvedValue({
+    capabilityExecuteMock.mockResolvedValue({
       valid: true,
       code: 'valid',
       normalizedKey: 'MATCHACLAW-TEST-KEY-0000-0000-0000',
@@ -91,7 +100,11 @@ describe('setup navigation', () => {
     fireEvent.change(await screen.findByLabelText('License Key'), {
       target: { value: 'MATCHACLAW-TEST-KEY-0000-0000-0000' },
     });
-    fireEvent.click(screen.getByRole('button', { name: 'Validate' }));
+    const validateButton = screen.getByRole('button', { name: 'Validate' });
+    await waitFor(() => {
+      expect(validateButton).toBeEnabled();
+    });
+    fireEvent.click(validateButton);
     const welcomeNextButton = screen.getByRole('button', { name: 'Next' });
     await waitFor(() => {
       expect(welcomeNextButton).toBeEnabled();

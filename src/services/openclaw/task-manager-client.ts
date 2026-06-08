@@ -1,5 +1,5 @@
-import { hostCapabilityExecute } from '@/lib/host-api';
-import type { RuntimeAddress } from '../../../runtime-host/shared/runtime-address';
+import { hostApiFetch } from '@/lib/host-api';
+import type { SessionIdentity } from '../../../runtime-host/shared/runtime-address';
 
 export type TaskStatus = 'pending' | 'in_progress' | 'completed' | 'deleted';
 
@@ -43,53 +43,41 @@ export interface TaskListSnapshot {
 const TOOL_INVOKE_CAPABILITY_ID = 'tool.invoke';
 const TASK_CONTROL_CAPABILITY_ID = 'task.control';
 
-function runtimeAddressForToolInvoke(address: RuntimeAddress): RuntimeAddress {
-  return {
-    ...address,
-    capabilityId: TOOL_INVOKE_CAPABILITY_ID,
-  };
-}
-
 async function taskToolApi<T>(operationId: string, payload: {
-  runtimeAddress: RuntimeAddress;
+  sessionIdentity: SessionIdentity;
   method: string;
   params: Record<string, unknown>;
 }): Promise<T> {
-  const runtimeAddress = runtimeAddressForToolInvoke(payload.runtimeAddress);
-  return await hostCapabilityExecute<T>({
-    id: TOOL_INVOKE_CAPABILITY_ID,
-    operationId,
-    runtimeAddress,
-    input: {
-      ...payload,
-      runtimeAddress,
-    },
-  }, { timeoutMs: 60_000 });
-}
-
-function runtimeAddressForTaskControl(address: RuntimeAddress): RuntimeAddress {
-  return {
-    ...address,
-    capabilityId: TASK_CONTROL_CAPABILITY_ID,
-  };
+  return await hostApiFetch<T>('/api/capabilities/execute', {
+    method: 'POST',
+    body: JSON.stringify({
+      id: TOOL_INVOKE_CAPABILITY_ID,
+      operationId,
+      scope: { kind: 'session', identity: payload.sessionIdentity },
+      target: { kind: 'tool', toolName: payload.method, identity: payload.sessionIdentity },
+      input: payload,
+    }),
+    timeoutMs: 60_000,
+  });
 }
 
 async function taskControlApi<T>(operationId: string, payload: {
-  runtimeAddress: RuntimeAddress;
+  sessionIdentity: SessionIdentity;
   taskId: string;
   wait?: boolean;
   timeoutMs?: number;
 }): Promise<T> {
-  const runtimeAddress = runtimeAddressForTaskControl(payload.runtimeAddress);
-  return await hostCapabilityExecute<T>({
-    id: TASK_CONTROL_CAPABILITY_ID,
-    operationId,
-    runtimeAddress,
-    input: {
-      ...payload,
-      runtimeAddress,
-    },
-  }, { timeoutMs: payload.timeoutMs ?? 60_000 });
+  return await hostApiFetch<T>('/api/capabilities/execute', {
+    method: 'POST',
+    body: JSON.stringify({
+      id: TASK_CONTROL_CAPABILITY_ID,
+      operationId,
+      scope: { kind: 'session', identity: payload.sessionIdentity },
+      target: { kind: 'task', taskId: payload.taskId, owner: { kind: 'session', identity: payload.sessionIdentity } },
+      input: payload,
+    }),
+    timeoutMs: payload.timeoutMs ?? 60_000,
+  });
 }
 
 function normalizeStatus(raw: unknown): TaskStatus {
@@ -161,11 +149,11 @@ function normalizeScope(raw: unknown): TaskScope | undefined {
 
 export async function listTaskSnapshot(payload: {
   sessionKey: string;
-  runtimeAddress: RuntimeAddress;
+  sessionIdentity: SessionIdentity;
   teamKey?: string;
 }): Promise<TaskListSnapshot> {
   const result = await taskToolApi<{ scope?: unknown; tasks?: unknown[]; todos?: unknown[] }>('tools.invoke', {
-    runtimeAddress: payload.runtimeAddress,
+    sessionIdentity: payload.sessionIdentity,
     method: 'TaskList',
     params: {
       sessionKey: payload.sessionKey,
@@ -177,9 +165,9 @@ export async function listTaskSnapshot(payload: {
   return { ...(normalizeScope(result.scope) ? { scope: normalizeScope(result.scope) } : {}), tasks, todos };
 }
 
-export async function getTask(payload: { sessionKey: string; runtimeAddress: RuntimeAddress; taskId: string }): Promise<Task | null> {
+export async function getTask(payload: { sessionKey: string; sessionIdentity: SessionIdentity; taskId: string }): Promise<Task | null> {
   const result = await taskToolApi<{ task?: unknown | null }>('tools.invoke', {
-    runtimeAddress: payload.runtimeAddress,
+    sessionIdentity: payload.sessionIdentity,
     method: 'TaskGet',
     params: {
       sessionKey: payload.sessionKey,
@@ -191,7 +179,7 @@ export async function getTask(payload: { sessionKey: string; runtimeAddress: Run
 
 export async function createTask(payload: {
   sessionKey: string;
-  runtimeAddress: RuntimeAddress;
+  sessionIdentity: SessionIdentity;
   subject: string;
   description: string;
   activeForm?: string;
@@ -199,7 +187,7 @@ export async function createTask(payload: {
   owner?: string;
 }): Promise<{ task: Task; todos: TodoItem[] }> {
   const result = await taskToolApi<{ task: unknown; todos?: unknown[] }>('tools.invoke', {
-    runtimeAddress: payload.runtimeAddress,
+    sessionIdentity: payload.sessionIdentity,
     method: 'TaskCreate',
     params: {
       sessionKey: payload.sessionKey,
@@ -218,7 +206,7 @@ export async function createTask(payload: {
 
 export async function updateTask(payload: {
   sessionKey: string;
-  runtimeAddress: RuntimeAddress;
+  sessionIdentity: SessionIdentity;
   taskId: string;
   teamKey?: string;
   status?: TaskStatus;
@@ -231,7 +219,7 @@ export async function updateTask(payload: {
   metadata?: Record<string, unknown>;
 }): Promise<{ task?: Task; taskId?: string; deleted?: boolean; todos: TodoItem[] }> {
   const result = await taskToolApi<{ task?: unknown; taskId?: string; deleted?: boolean; todos?: unknown[] }>('tools.invoke', {
-    runtimeAddress: payload.runtimeAddress,
+    sessionIdentity: payload.sessionIdentity,
     method: 'TaskUpdate',
     params: {
       sessionKey: payload.sessionKey,
@@ -257,12 +245,12 @@ export async function updateTask(payload: {
 
 export async function writeTodos(payload: {
   sessionKey: string;
-  runtimeAddress: RuntimeAddress;
+  sessionIdentity: SessionIdentity;
   oldTodos: TodoItem[];
   newTodos: TodoItem[];
 }): Promise<{ todos: TodoItem[]; updatedAt?: number }> {
   const result = await taskToolApi<{ todos?: unknown[]; updatedAt?: unknown }>('tools.invoke', {
-    runtimeAddress: payload.runtimeAddress,
+    sessionIdentity: payload.sessionIdentity,
     method: 'TodoWrite',
     params: {
       sessionKey: payload.sessionKey,
@@ -278,10 +266,10 @@ export async function writeTodos(payload: {
 
 export async function getTodos(payload: {
   sessionKey: string;
-  runtimeAddress: RuntimeAddress;
+  sessionIdentity: SessionIdentity;
 }): Promise<{ todos: TodoItem[]; updatedAt?: number }> {
   const result = await taskToolApi<{ todos?: unknown[]; updatedAt?: unknown }>('tools.invoke', {
-    runtimeAddress: payload.runtimeAddress,
+    sessionIdentity: payload.sessionIdentity,
     method: 'TodoGet',
     params: {
       sessionKey: payload.sessionKey,
@@ -294,7 +282,7 @@ export async function getTodos(payload: {
 }
 
 export async function getTaskOutput(payload: {
-  runtimeAddress: RuntimeAddress;
+  sessionIdentity: SessionIdentity;
   taskId: string;
   wait?: boolean;
   timeoutMs?: number;
@@ -303,7 +291,7 @@ export async function getTaskOutput(payload: {
 }
 
 export async function stopTask(payload: {
-  runtimeAddress: RuntimeAddress;
+  sessionIdentity: SessionIdentity;
   taskId: string;
 }): Promise<unknown> {
   return await taskControlApi('tasks.stop', payload);

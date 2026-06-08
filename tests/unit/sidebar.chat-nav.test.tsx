@@ -15,7 +15,7 @@ import { createEmptySessionRecord } from '@/stores/chat/store-state-helpers';
 import { buildRenderItemsFromMessages } from './helpers/timeline-fixtures';
 import type { RawMessage } from './helpers/timeline-fixtures';
 import { createViewportWindowState } from '@/stores/chat/viewport-state';
-import { createOpenClawTestRuntimeAddress } from './helpers/runtime-address-fixtures';
+import { createOpenClawTestSessionIdentity } from './helpers/runtime-address-fixtures';
 
 vi.mock('@/features/teams/feature-flag', () => ({
   TEAMS_FEATURE_ENABLED: true,
@@ -45,22 +45,27 @@ function mountSidebar(initialPath: string) {
 }
 
 function createSessionRecord(input?: {
+  sessionKey?: string;
   messages?: RawMessage[];
   label?: string | null;
   historyStatus?: 'idle' | 'loading' | 'ready' | 'error';
 }) {
+  const recordKey = input?.sessionKey ?? 'agent:main:main';
   const messages = input?.messages ?? [];
   const base = createEmptySessionRecord();
   return {
     meta: {
       ...base.meta,
+      backendSessionKey: recordKey,
+      agentId: recordKey.split(':')[1] ?? null,
+      sessionIdentity: createOpenClawTestSessionIdentity(recordKey),
       label: input?.label ?? null,
       historyStatus: input?.historyStatus ?? 'idle',
     },
     runtime: {
       ...base.runtime,
     },
-    items: buildRenderItemsFromMessages('agent:main:main', messages),
+    items: buildRenderItemsFromMessages(recordKey, messages),
     window: createViewportWindowState({
       totalItemCount: messages.length,
       windowStartOffset: 0,
@@ -114,25 +119,27 @@ function setupSidebarState() {
   useTeamsStore.setState({
     teams: [],
     activeTeamId: null,
-    runMetaByTeamId: {},
-    tasksByTeamId: {},
-    mailboxByTeamId: {},
-    mailboxCursorByTeamId: {},
+    runByTeamId: {},
+    rolesByTeamId: {},
+    stagesByTeamId: {},
+    approvalsByTeamId: {},
+    messagesByTeamId: {},
+    dispatchesByTeamId: {},
+    dispatchExecutionsByTeamId: {},
     eventsByTeamId: {},
+    eventCursorByTeamId: {},
     loadingByTeamId: {},
     errorByTeamId: {},
     createTeam: vi.fn(),
     setActiveTeam: vi.fn(),
     deleteTeam: vi.fn(),
-    initRuntime: vi.fn().mockResolvedValue(undefined),
+    ensureRunCreated: vi.fn().mockResolvedValue(undefined),
+    startRun: vi.fn().mockResolvedValue(undefined),
     refreshSnapshot: vi.fn().mockResolvedValue(undefined),
-    planUpsert: vi.fn().mockResolvedValue(undefined),
-    claimNext: vi.fn().mockResolvedValue(null),
-    heartbeat: vi.fn().mockResolvedValue(true),
-    updateTaskStatus: vi.fn().mockResolvedValue(undefined),
-    postMailbox: vi.fn().mockResolvedValue(undefined),
-    pullMailbox: vi.fn().mockResolvedValue(undefined),
-    releaseClaim: vi.fn().mockResolvedValue(undefined),
+    tickRun: vi.fn().mockResolvedValue(undefined),
+    cancelRun: vi.fn().mockResolvedValue(undefined),
+    resolveApproval: vi.fn().mockResolvedValue(undefined),
+    submitDecision: vi.fn().mockResolvedValue(undefined),
   } as never);
   useTaskCenterStore.setState({
     sessionKey: 'agent:main:main',
@@ -253,7 +260,7 @@ describe('sidebar chat nav', () => {
     expect(newSession).toHaveBeenCalledTimes(1);
   });
 
-  it('renders pending question cards and navigates to team detail', async () => {
+  it('renders pending team approval cards and navigates to team detail', async () => {
     setupSidebarState();
     useTeamsStore.setState({
       teams: [
@@ -262,19 +269,22 @@ describe('sidebar chat nav', () => {
           name: 'Team One',
           leadAgentId: 'main',
           memberIds: ['main'],
+          packagePath: '.tmp/team-skill',
           createdAt: 1,
           updatedAt: 1,
         },
       ],
-      mailboxByTeamId: {
+      approvalsByTeamId: {
         'team-1': [
           {
-            msgId: 'q1',
-            fromAgentId: 'main',
-            to: 'main',
-            kind: 'question',
-            relatedTaskId: 'task-123',
-            content: '[AUTO-BLOCKED] need decision',
+            approvalId: 'approval-1',
+            runId: 'team-1',
+            stageId: 'stage-123',
+            roleId: 'main',
+            reason: 'Need decision',
+            requestedAction: 'Run profiling',
+            status: 'pending',
+            idempotencyKey: 'approval-1',
             createdAt: Date.now(),
           },
         ],
@@ -284,16 +294,15 @@ describe('sidebar chat nav', () => {
     mountSidebar('/dashboard');
 
     expect(screen.getByText('Session Blockers')).toBeInTheDocument();
-    expect(screen.getByText('Task task-123')).toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: /Task task-123/i }));
+    expect(screen.getByText('Stage stage-123')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /Stage stage-123/i }));
     await waitFor(() => {
       expect(screen.getByTestId('location-echo')).toHaveTextContent('/teams/team-1');
     });
   });
 
-  it('hides question blocker when the same task has a newer decision', () => {
+  it('hides resolved team approval blockers', () => {
     setupSidebarState();
-    const now = Date.now();
     useTeamsStore.setState({
       teams: [
         {
@@ -301,29 +310,23 @@ describe('sidebar chat nav', () => {
           name: 'Team One',
           leadAgentId: 'main',
           memberIds: ['main'],
+          packagePath: '.tmp/team-skill',
           createdAt: 1,
           updatedAt: 1,
         },
       ],
-      mailboxByTeamId: {
+      approvalsByTeamId: {
         'team-1': [
           {
-            msgId: 'q2',
-            fromAgentId: 'main',
-            to: 'main',
-            kind: 'question',
-            relatedTaskId: 'task-456',
-            content: 'need decision',
-            createdAt: now - 1000,
-          },
-          {
-            msgId: 'd2',
-            fromAgentId: 'lead',
-            to: 'main',
-            kind: 'decision',
-            relatedTaskId: 'task-456',
-            content: 'approved',
-            createdAt: now,
+            approvalId: 'approval-2',
+            runId: 'team-1',
+            stageId: 'stage-456',
+            roleId: 'main',
+            reason: 'Need decision',
+            requestedAction: 'Run profiling',
+            status: 'approved',
+            idempotencyKey: 'approval-2',
+            createdAt: Date.now(),
           },
         ],
       },
@@ -331,7 +334,7 @@ describe('sidebar chat nav', () => {
 
     mountSidebar('/dashboard');
 
-    expect(screen.queryByText('Task task-456')).not.toBeInTheDocument();
+    expect(screen.queryByText('Stage stage-456')).not.toBeInTheDocument();
   });
 
   it('renders chat approval blockers and navigates to target chat session', async () => {
@@ -346,14 +349,15 @@ describe('sidebar chat nav', () => {
       },
       loadedSessions: {
         'agent:main:main': createSessionRecord({ historyStatus: 'ready' }),
-        'agent:analytics:main': createSessionRecord({ historyStatus: 'ready' }),
+        'agent:analytics:main': createSessionRecord({ sessionKey: 'agent:analytics:main', historyStatus: 'ready' }),
       },
       pendingApprovalsBySession: {
         'agent:analytics:main': [
           {
             id: 'approval-chat-1',
             sessionKey: 'agent:analytics:main',
-            runtimeAddress: createOpenClawTestRuntimeAddress('agent:analytics:main'),
+            backendSessionKey: 'agent:analytics:main',
+            sessionIdentity: createOpenClawTestSessionIdentity('agent:analytics:main'),
             runId: 'run-chat-1',
             title: 'gateway',
             command: 'Remove-Item demo.txt',
@@ -391,7 +395,8 @@ describe('sidebar chat nav', () => {
           {
             id: 'approval-chat-1',
             sessionKey: 'agent:main:main',
-            runtimeAddress: createOpenClawTestRuntimeAddress('agent:main:main'),
+            backendSessionKey: 'agent:main:main',
+            sessionIdentity: createOpenClawTestSessionIdentity('agent:main:main'),
             runId: 'run-chat-1',
             title: 'gateway',
             command: 'Remove-Item demo.txt',

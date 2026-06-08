@@ -27,11 +27,6 @@ import type {
   ProviderModelsProjectionPort,
 } from '../../providers/provider-models-service';
 import type { CapabilityRoutingApplicationService } from '../../providers/capability-routing-service';
-import {
-  isAnthropicMessagesApi,
-  withAnthropicMessagesModelMaxTokens,
-} from '../../adapters/openclaw/projections/openclaw-anthropic-messages-max-tokens';
-
 const RUNTIME_ZERO_MODEL_COST = {
   input: 0,
   output: 0,
@@ -91,6 +86,14 @@ export type RuntimeCustomMediaProjectionMap = Record<string, {
   }>;
 }>;
 
+export interface ProviderModelsAgentModelProjectionNormalizerPort {
+  normalizeProviderModel(input: {
+    readonly provider: string;
+    readonly entry: RuntimeConfigProviderModelsProjectionMap[string];
+    readonly model: Record<string, unknown>;
+  }): Record<string, unknown>;
+}
+
 export interface ProviderModelsProjectionWorkflowDeps {
   readonly store: ProviderModelsStorePort;
   readonly credentials: ProviderStorePort;
@@ -101,6 +104,7 @@ export interface ProviderModelsProjectionWorkflowDeps {
   readonly agentModels: ProviderModelsAgentProjectionPort;
   readonly projectionKeys: ProviderProjectionKeyResolverPort;
   readonly projectionPolicy: ProviderProjectionPolicyPort;
+  readonly agentModelNormalizer?: ProviderModelsAgentModelProjectionNormalizerPort;
 }
 
 function normalizePositiveInteger(value: unknown): number | undefined {
@@ -328,9 +332,11 @@ export class ProviderModelsProjectionWorkflow {
               maxTokens: model.maxTokens,
               cost: model.cost,
             };
-            return isAnthropicMessagesApi(entry.api)
-              ? withAnthropicMessagesModelMaxTokens(out, provider, entry)
-              : out;
+            return this.deps.agentModelNormalizer?.normalizeProviderModel({
+              provider,
+              entry,
+              model: out,
+            }) ?? out;
           }),
         },
       });

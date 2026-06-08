@@ -1,7 +1,8 @@
 import {
-  buildRuntimeAddressKey,
-  validateRuntimeAddress,
-  type RuntimeAddress,
+  buildSessionIdentityKey,
+  validateSessionIdentity,
+  type RuntimeEndpointRef,
+  type SessionIdentity,
 } from '../../agent-runtime/contracts/runtime-address';
 import type { AgentRuntimeRegistry } from '../../agent-runtime/contracts/agent-runtime-registry';
 import type { RuntimeSessionContext } from '../../agent-runtime/contracts/runtime-endpoint-types';
@@ -37,43 +38,27 @@ export interface SessionGatewayIngressWorkflowDeps {
 export class SessionGatewayIngressWorkflow {
   constructor(private readonly deps: SessionGatewayIngressWorkflowDeps) {}
 
-  consumeEndpointNotification(runtimeAddress: RuntimeAddress, notification: CanonicalApprovalNotification): SessionUpdateEvent[] {
-    const addressError = validateRuntimeAddress(runtimeAddress);
-    if (addressError) {
-      throw new Error(addressError);
-    }
-    return this.consumeEndpointNotificationByAddress(runtimeAddress, notification);
+  consumeEndpointNotification(endpoint: RuntimeEndpointRef, notification: CanonicalApprovalNotification): SessionUpdateEvent[] {
+    return this.consumeEndpointNotificationByEndpoint(endpoint, notification);
   }
 
-  async consumeEndpointConversationEvent(runtimeAddress: RuntimeAddress, payload: unknown): Promise<SessionUpdateEvent[]> {
-    const addressError = validateRuntimeAddress(runtimeAddress);
-    if (addressError) {
-      throw new Error(addressError);
-    }
+  async consumeEndpointConversationEvent(endpointRef: RuntimeEndpointRef, payload: unknown): Promise<SessionUpdateEvent[]> {
     if (!isRecord(payload)) {
       return [];
     }
     const registry = this.deps.agentRuntimeRegistry;
-    const endpoint = registry.resolveEndpointForAddress(runtimeAddress);
+    const endpoint = registry.resolveEndpointForRef(endpointRef);
     const protocol = registry.getProtocol(endpoint.protocolId);
     const sessionKey = this.readEndpointEventSessionKey(payload);
     if (!sessionKey) {
       return [];
     }
-    const payloadRuntimeAddress = this.readEndpointEventRuntimeAddress(payload);
-    if (payloadRuntimeAddress && buildRuntimeAddressKey(payloadRuntimeAddress) !== buildRuntimeAddressKey(runtimeAddress)) {
-      throw new Error('RuntimeAddress payload does not match endpoint ingress address');
+    const identity = this.resolveEventSessionIdentity(endpointRef, sessionKey, payload);
+    const payloadSessionIdentity = this.readEndpointEventSessionIdentity(payload);
+    if (payloadSessionIdentity && buildSessionIdentityKey(payloadSessionIdentity) !== buildSessionIdentityKey(identity)) {
+      throw new Error('SessionIdentity payload does not match endpoint ingress identity');
     }
-    const context = registry.resolveSessionContext(sessionKey, {
-      protocolId: endpoint.protocolId,
-      runtimeEndpointId: endpoint.id,
-      endpointSessionId: sessionKey,
-      agentId: runtimeAddress.agentId,
-      address: {
-        ...runtimeAddress,
-        sessionKey,
-      },
-    });
+    const context = registry.rememberSessionIdentity(identity);
     if (!protocol.eventAdapter.canTranslate(payload, context)) {
       return [];
     }
@@ -84,15 +69,19 @@ export class SessionGatewayIngressWorkflow {
     return this.commitCanonicalEvents(canonicalEvents, context);
   }
 
-  private consumeEndpointNotificationByAddress(runtimeAddress: RuntimeAddress, notification: CanonicalApprovalNotification): SessionUpdateEvent[] {
-    const adapter = this.deps.agentRuntimeRegistry.resolveApprovalNotificationsForAddress(runtimeAddress);
+  private consumeEndpointNotificationByEndpoint(endpoint: RuntimeEndpointRef, notification: CanonicalApprovalNotification): SessionUpdateEvent[] {
+    const adapter = this.deps.agentRuntimeRegistry.resolveApprovalNotificationsForEndpoint(endpoint);
     if (!adapter) {
       return [];
     }
     const canonicalEvents = adapter.translateNotification(notification, this.deps.clock.nowMs());
     const sessionKey = canonicalEvents[0]?.sessionId;
+    const agentId = sessionKey ? this.readAgentIdFromSessionKey(sessionKey) : '';
+    if (sessionKey && !agentId) {
+      throw new Error('Session approval notification requires agentId metadata');
+    }
     const context = sessionKey
-      ? this.deps.agentRuntimeRegistry.rememberSessionAddress(sessionKey, runtimeAddress)
+      ? this.deps.agentRuntimeRegistry.rememberSessionIdentity(this.buildSessionIdentity(endpoint, sessionKey, agentId))
       : undefined;
     return this.commitCanonicalEvents(canonicalEvents, context);
   }
@@ -196,19 +185,44 @@ export class SessionGatewayIngressWorkflow {
     return '';
   }
 
-  private readEndpointEventRuntimeAddress(payload: Record<string, unknown>): RuntimeAddress | null {
+  private resolveEventSessionIdentity(endpoint: RuntimeEndpointRef, sessionKey: string, payload: Record<string, unknown>): SessionIdentity {
+    const payloadIdentity = this.readEndpointEventSessionIdentity(payload);
+    if (payloadIdentity) {
+      return payloadIdentity;
+    }
+    const agentId = this.readAgentIdFromSessionKey(sessionKey);
+    if (!agentId) {
+      throw new Error('Session event requires agentId metadata');
+    }
+    return this.buildSessionIdentity(endpoint, sessionKey, agentId);
+  }
+
+  private buildSessionIdentity(endpoint: RuntimeEndpointRef, sessionKey: string, agentId: string): SessionIdentity {
+    return {
+      endpoint,
+      agentId,
+      sessionKey,
+    };
+  }
+
+  private readAgentIdFromSessionKey(sessionKey: string): string {
+    const parts = sessionKey.trim().split(':');
+    return parts[0] === 'agent' && parts[1]?.trim() ? parts[1].trim() : '';
+  }
+
+  private readEndpointEventSessionIdentity(payload: Record<string, unknown>): SessionIdentity | null {
     const event = isRecord(payload.event) ? payload.event : null;
     const params = isRecord(payload.params) ? payload.params : null;
-    const candidates = [payload.runtimeAddress, event?.runtimeAddress, params?.runtimeAddress];
+    const candidates = [payload.sessionIdentity, event?.sessionIdentity, params?.sessionIdentity];
     for (const candidate of candidates) {
       if (candidate === undefined) {
         continue;
       }
-      const error = validateRuntimeAddress(candidate);
+      const error = validateSessionIdentity(candidate);
       if (error) {
         throw new Error(error);
       }
-      return candidate as RuntimeAddress;
+      return candidate as SessionIdentity;
     }
     return null;
   }

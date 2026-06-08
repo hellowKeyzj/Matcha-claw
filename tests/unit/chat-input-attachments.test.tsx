@@ -28,12 +28,14 @@ const hostFileStagePathsMock = vi.fn();
 const hostFileStageBufferMock = vi.fn();
 const fetchSkillsMock = vi.fn(async () => {});
 
-const testRuntimeAddress = {
-  kind: 'native-runtime' as const,
-  capabilityId: 'session.prompt',
-  runtimeAdapterId: 'openclaw',
-  runtimeInstanceId: 'local',
+const testSessionIdentity = {
+  endpoint: {
+    kind: 'native-runtime' as const,
+    runtimeAdapterId: 'openclaw',
+    runtimeInstanceId: 'local',
+  },
   agentId: 'default',
+  sessionKey: 'test-session',
 };
 
 const skillsStoreState: {
@@ -92,7 +94,7 @@ describe('chat input attachments', () => {
       },
     ]);
 
-    render(<ChatInput onSend={vi.fn()} runtimeAddress={testRuntimeAddress} />);
+    render(<ChatInput onSend={vi.fn()} sessionIdentity={testSessionIdentity} />);
 
     fireEvent.click(screen.getByRole('button', { name: /attach files/i }));
 
@@ -106,6 +108,28 @@ describe('chat input attachments', () => {
 
     expect(screen.getByRole('dialog', { name: /image\.png/i })).toBeInTheDocument();
     expect(screen.getByRole('img', { name: /image\.png/i })).toBeInTheDocument();
+  });
+
+  it('paste/drag buffer attachments reject oversized files before reading base64', async () => {
+    const onSend = vi.fn();
+    render(<ChatInput onSend={onSend} sessionIdentity={testSessionIdentity} />);
+    const input = screen.getByPlaceholderText('input.messagePlaceholder');
+    const file = new File(['small'], 'huge.bin', { type: 'application/octet-stream' });
+    Object.defineProperty(file, 'size', { value: 50 * 1024 * 1024 + 1 });
+
+    fireEvent.paste(input, {
+      clipboardData: {
+        items: [{ kind: 'file', getAsFile: () => file }],
+      },
+    });
+
+    await waitFor(() => {
+      expect(screen.getByText('huge.bin')).toBeInTheDocument();
+    });
+    await waitFor(() => {
+      expect(hostFileStageBufferMock).not.toHaveBeenCalled();
+    });
+    expect(screen.getByLabelText('Remove huge.bin')).toBeInTheDocument();
   });
 
   it('普通文件附件支持点击打开本地路径', async () => {
@@ -129,7 +153,7 @@ describe('chat input attachments', () => {
       },
     ]);
 
-    render(<ChatInput onSend={vi.fn()} runtimeAddress={testRuntimeAddress} />);
+    render(<ChatInput onSend={vi.fn()} sessionIdentity={testSessionIdentity} />);
 
     fireEvent.click(screen.getByRole('button', { name: /attach files/i }));
 

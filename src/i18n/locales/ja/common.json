@@ -40,6 +40,7 @@
         "pendingBlockers": "セッション阻害",
         "pendingBlockersEmpty": "未処理の阻害はありません",
         "pendingBlockerTask": "タスク {{taskId}}",
+        "pendingBlockerStage": "ステージ {{stageId}}",
         "pendingBlockerGeneral": "一般阻害",
         "pendingBlockerFrom": "{{from}} から",
         "pendingBlockerTypeApproval": "承認待ち阻害",

@@ -38,14 +38,6 @@ vi.mock('@/lib/telemetry', () => ({
 
 import { useProviderStore } from '@/stores/providers';
 
-const TEST_RUNTIME_ADDRESS = {
-  kind: 'native-runtime',
-  capabilityId: 'model.provider',
-  runtimeAdapterId: 'openclaw',
-  runtimeInstanceId: 'local',
-  agentId: 'default',
-} as const;
-
 describe('useProviderStore.init', () => {
   beforeEach(() => {
     vi.useRealTimers();
@@ -75,7 +67,7 @@ describe('useProviderStore.init', () => {
     });
 
     await act(async () => {
-      await useProviderStore.getState().init(TEST_RUNTIME_ADDRESS);
+      await useProviderStore.getState().init();
     });
 
     expect(fetchProviderSnapshotMock).toHaveBeenCalledTimes(1);
@@ -97,7 +89,7 @@ describe('useProviderStore.init', () => {
     fetchProviderSnapshotMock.mockRejectedValueOnce(new Error('snapshot failed'));
 
     await act(async () => {
-      await useProviderStore.getState().init(TEST_RUNTIME_ADDRESS);
+      await useProviderStore.getState().init();
     });
 
     const state = useProviderStore.getState();
@@ -113,8 +105,8 @@ describe('useProviderStore.init', () => {
     });
     fetchProviderSnapshotMock.mockReturnValue(snapshotTask);
 
-    const first = useProviderStore.getState().refreshProviderSnapshot({ runtimeAddress: TEST_RUNTIME_ADDRESS });
-    const second = useProviderStore.getState().refreshProviderSnapshot({ runtimeAddress: TEST_RUNTIME_ADDRESS });
+    const first = useProviderStore.getState().refreshProviderSnapshot({});
+    const second = useProviderStore.getState().refreshProviderSnapshot({});
 
     expect(fetchProviderSnapshotMock).toHaveBeenCalledTimes(1);
     resolveSnapshot?.({
@@ -137,7 +129,7 @@ describe('useProviderStore.init', () => {
     vi.useFakeTimers();
     fetchProviderSnapshotMock.mockImplementation(() => new Promise(() => {}));
 
-    const task = useProviderStore.getState().refreshProviderSnapshot({ runtimeAddress: TEST_RUNTIME_ADDRESS });
+    const task = useProviderStore.getState().refreshProviderSnapshot({});
     expect(useProviderStore.getState().initialLoading).toBe(true);
     expect(useProviderStore.getState().refreshing).toBe(false);
 
@@ -197,7 +189,7 @@ describe('useProviderStore.init', () => {
       error: null,
     });
 
-    const refreshTask = useProviderStore.getState().refreshProviderSnapshot({ runtimeAddress: TEST_RUNTIME_ADDRESS });
+    const refreshTask = useProviderStore.getState().refreshProviderSnapshot({});
     expect(useProviderStore.getState().initialLoading).toBe(false);
     expect(useProviderStore.getState().refreshing).toBe(false);
 
@@ -223,7 +215,7 @@ describe('useProviderStore.init', () => {
     });
 
     await act(async () => {
-      await useProviderStore.getState().refreshProviderSnapshot({ runtimeAddress: TEST_RUNTIME_ADDRESS });
+      await useProviderStore.getState().refreshProviderSnapshot({});
     });
 
     let resolveSnapshot: ((value: unknown) => void) | null = null;
@@ -232,7 +224,7 @@ describe('useProviderStore.init', () => {
     });
     fetchProviderSnapshotMock.mockReturnValueOnce(secondTask);
 
-    const refreshTask = useProviderStore.getState().refreshProviderSnapshot({ runtimeAddress: TEST_RUNTIME_ADDRESS });
+    const refreshTask = useProviderStore.getState().refreshProviderSnapshot({});
     expect(useProviderStore.getState().snapshotReady).toBe(true);
     expect(useProviderStore.getState().initialLoading).toBe(false);
     expect(useProviderStore.getState().refreshing).toBe(false);
@@ -262,7 +254,6 @@ describe('useProviderStore.init', () => {
       await useProviderStore.getState().refreshProviderSnapshot({
         trigger: 'manual',
         reason: 'user_manual_refresh',
-        runtimeAddress: TEST_RUNTIME_ADDRESS,
       });
     });
 

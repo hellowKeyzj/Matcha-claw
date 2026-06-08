@@ -3,18 +3,19 @@ import { ChevronDown, ChevronRight, FolderTree, GitCompare, RefreshCw } from 'lu
 import { useTranslation } from 'react-i18next';
 import { Button } from '@/components/ui/button';
 import { LoadingSpinner } from '@/components/common/LoadingSpinner';
-import { hostFileListDir, type FilePreviewDirEntry } from '@/lib/host-api';
+import { hostFileListDir, type FilePreviewDirEntry, type WorkspaceFileContext } from '@/lib/host-api';
 import { classifyFileContentType, extnameOf, getMimeTypeForPath, supportsInlineDiff } from '@/lib/generated-files';
 import { cn } from '@/lib/utils';
 import { FilePreviewBody, type FilePreviewMode } from './FilePreviewBody';
 import type { ArtifactPreviewTarget } from './types';
-import type { RuntimeAddress } from '../../../runtime-host/shared/runtime-address';
+import type { SessionIdentity } from '../../../runtime-host/shared/runtime-address';
 
 interface WorkspaceBrowserBodyProps {
   rootPath: string | null;
   selectedFilePath: string | null;
   selectedFile: ArtifactPreviewTarget | null;
-  runtimeAddress?: RuntimeAddress;
+  sessionIdentity?: SessionIdentity;
+  workspaceContext?: WorkspaceFileContext;
   availableWidth?: number;
   previewMode?: FilePreviewMode;
   onSelectFile: (file: ArtifactPreviewTarget) => void;
@@ -95,7 +96,7 @@ function nodeCanExpand(node: WorkspaceTreeNode): boolean {
   return node.hasChildren === true;
 }
 
-function toPreviewFile(node: WorkspaceTreeNode): ArtifactPreviewTarget {
+function toPreviewFile(node: WorkspaceTreeNode, workspaceContext?: WorkspaceFileContext): ArtifactPreviewTarget {
   const ext = extnameOf(node.path);
   const mimeType = getMimeTypeForPath(node.path);
   return {
@@ -105,6 +106,7 @@ function toPreviewFile(node: WorkspaceTreeNode): ArtifactPreviewTarget {
     mimeType,
     contentType: classifyFileContentType(ext, mimeType),
     fileSize: node.size > 0 ? node.size : undefined,
+    ...workspaceContext,
   };
 }
 
@@ -206,8 +208,9 @@ function FileTreeNodeRow(input: {
   selectedFilePath: string | null;
   onToggle: (path: string) => void;
   onSelectFile: (file: ArtifactPreviewTarget) => void;
+  workspaceContext?: WorkspaceFileContext;
 }): React.ReactNode {
-  const { node, depth, expandedPaths, loadingPaths, selectedFilePath, onToggle, onSelectFile } = input;
+  const { node, depth, expandedPaths, loadingPaths, selectedFilePath, onToggle, onSelectFile, workspaceContext } = input;
   const isExpanded = expandedPaths.has(node.path);
   const hasChildren = nodeCanExpand(node);
   const isLoading = loadingPaths.has(node.path);
@@ -249,7 +252,7 @@ function FileTreeNodeRow(input: {
             type="button"
             data-testid="workspace-tree-node"
             data-path={node.path}
-            onClick={() => onSelectFile(toPreviewFile(node))}
+            onClick={() => onSelectFile(toPreviewFile(node, workspaceContext))}
             className="flex min-w-0 flex-1 items-center gap-1.5 rounded-md py-0 text-left"
           >
             <span className="ml-5 truncate">{node.name}</span>
@@ -266,6 +269,7 @@ function FileTreeNodeRow(input: {
             selectedFilePath,
             onToggle,
             onSelectFile,
+            workspaceContext,
           }))}
         </div>
       ) : null}
@@ -277,7 +281,8 @@ export function WorkspaceBrowserBody({
   rootPath,
   selectedFilePath,
   selectedFile,
-  runtimeAddress,
+  sessionIdentity,
+  workspaceContext,
   availableWidth = Number.POSITIVE_INFINITY,
   previewMode = 'preview',
   onSelectFile,
@@ -351,13 +356,14 @@ export function WorkspaceBrowserBody({
     });
 
     try {
-      if (!runtimeAddress) {
+      if (!sessionIdentity) {
         return;
       }
       const result = await hostFileListDir(
         {
           path,
-          runtimeAddress,
+          sessionIdentity,
+          ...workspaceContext,
         },
         {
           timeoutMs: WORKSPACE_DIR_LIST_TIMEOUT_MS,
@@ -406,15 +412,15 @@ export function WorkspaceBrowserBody({
 
     void (async () => {
       try {
-        if (!runtimeAddress) {
-          setTreeState({ status: 'error', message: 'RuntimeAddress is required' });
+        if (!sessionIdentity) {
+          setTreeState({ status: 'error', message: 'SessionIdentity is required' });
           replaceLoadingPaths(new Set());
           return;
         }
         const result = await hostFileListDir(
           {
             path: effectiveRootPath,
-            runtimeAddress,
+            sessionIdentity,
           },
           {
             timeoutMs: WORKSPACE_DIR_LIST_TIMEOUT_MS,
@@ -452,7 +458,7 @@ export function WorkspaceBrowserBody({
     return () => {
       cancelled = true;
     };
-  }, [effectiveRootPath, reloadToken, runtimeAddress]);
+  }, [effectiveRootPath, reloadToken, sessionIdentity, workspaceContext]);
 
   useEffect(() => {
     if (treeState.status !== 'ready' || !selectedFilePath) {
@@ -529,8 +535,9 @@ export function WorkspaceBrowserBody({
       selectedFilePath,
       onToggle: handleTogglePath,
       onSelectFile,
+      workspaceContext,
     });
-  }, [expandedPaths, loadingPaths, onSelectFile, selectedFilePath, treeState]);
+  }, [expandedPaths, loadingPaths, onSelectFile, selectedFilePath, treeState, workspaceContext]);
 
   return (
     <div
@@ -599,7 +606,8 @@ export function WorkspaceBrowserBody({
           <FilePreviewBody
             file={selectedFile}
             mode={supportsInlineDiff(selectedFile) ? previewMode : 'preview'}
-            runtimeAddress={runtimeAddress}
+            sessionIdentity={sessionIdentity}
+            workspaceContext={workspaceContext}
             className="h-full"
             headerAccessory={(
               <>

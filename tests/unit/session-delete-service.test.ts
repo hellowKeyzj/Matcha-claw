@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { OpenClawSessionArtefactResolver } from '../../runtime-host/application/adapters/openclaw/runtime/openclaw-session-artefact-resolver';
-import { createOpenClawTestRuntimeAddress, createTestSessionRuntimeService } from './helpers/session-runtime-fixture';
+import { createOpenClawTestSessionIdentity, createTestSessionRuntimeService } from './helpers/session-runtime-fixture';
 
 describe('session adapter service status management', () => {
   const tempDirs: string[] = [];
@@ -61,8 +61,8 @@ describe('session adapter service status management', () => {
     mkdirSync(trajectoryDir, { recursive: true });
     writeFileSync(join(sessionsDir, 'sessions.json'), JSON.stringify({
       sessions: [
-        { key: 'agent:alpha:session-a', id: 'session-a', runtimeAddress: createOpenClawTestRuntimeAddress('agent:alpha:session-a', 'alpha') },
-        { key: 'agent:alpha:session-b', id: 'session-b', runtimeAddress: createOpenClawTestRuntimeAddress('agent:alpha:session-b', 'alpha') },
+        { key: 'agent:alpha:session-a', id: 'session-a', sessionIdentity: createOpenClawTestSessionIdentity('agent:alpha:session-a', 'alpha') },
+        { key: 'agent:alpha:session-b', id: 'session-b', sessionIdentity: createOpenClawTestSessionIdentity('agent:alpha:session-b', 'alpha') },
       ],
     }, null, 2));
     writeFileSync(join(sessionsDir, 'session-a.jsonl'), '{"hello":"world"}\n', 'utf8');
@@ -88,7 +88,7 @@ describe('session adapter service status management', () => {
 
     const response = await service.deleteSession({
       sessionKey: 'agent:alpha:session-a',
-      runtimeAddress: createOpenClawTestRuntimeAddress('agent:alpha:session-a', 'alpha'),
+      sessionIdentity: createOpenClawTestSessionIdentity('agent:alpha:session-a', 'alpha'),
     });
 
     expect(response.status).toBe(200);
@@ -102,12 +102,12 @@ describe('session adapter service status management', () => {
     expect(existsSync(join(sessionsDir, 'session-b.jsonl'))).toBe(true);
     expect(JSON.parse(readFileSync(join(sessionsDir, 'sessions.json'), 'utf8'))).toEqual({
       sessions: [
-        { key: 'agent:alpha:session-b', id: 'session-b', runtimeAddress: createOpenClawTestRuntimeAddress('agent:alpha:session-b', 'alpha') },
+        { key: 'agent:alpha:session-b', id: 'session-b', sessionIdentity: createOpenClawTestSessionIdentity('agent:alpha:session-b', 'alpha') },
       ],
     });
   });
 
-  it('rejects destructive operations when RuntimeAddress does not own the session', async () => {
+  it('does not delete sessions outside the requested SessionIdentity namespace', async () => {
     const configDir = mkdtempSync(join(tmpdir(), 'matchaclaw-session-delete-'));
     tempDirs.push(configDir);
 
@@ -115,7 +115,7 @@ describe('session adapter service status management', () => {
     mkdirSync(sessionsDir, { recursive: true });
     writeFileSync(join(sessionsDir, 'sessions.json'), JSON.stringify({
       sessions: [
-        { key: 'agent:alpha:session-a', id: 'session-a', runtimeAddress: createOpenClawTestRuntimeAddress('agent:alpha:session-a', 'alpha') },
+        { key: 'agent:alpha:session-a', id: 'session-a', sessionIdentity: createOpenClawTestSessionIdentity('agent:alpha:session-a', 'alpha') },
       ],
     }, null, 2));
     writeFileSync(join(sessionsDir, 'session-a.jsonl'), '{"hello":"world"}\n', 'utf8');
@@ -130,10 +130,10 @@ describe('session adapter service status management', () => {
 
     const response = await service.deleteSession({
       sessionKey: 'agent:alpha:session-a',
-      runtimeAddress: createOpenClawTestRuntimeAddress('agent:alpha:session-a', 'beta'),
+      sessionIdentity: createOpenClawTestSessionIdentity('agent:alpha:session-a', 'beta'),
     });
 
-    expect(response.status).toBe(409);
+    expect(response.status).toBe(404);
     expect(existsSync(join(sessionsDir, 'session-a.jsonl'))).toBe(true);
   });
 
@@ -147,12 +147,12 @@ describe('session adapter service status management', () => {
       'agent:alpha:main': {
         sessionId: 'session-main',
         sessionFile: join(sessionsDir, 'session-main.jsonl'),
-        runtimeAddress: createOpenClawTestRuntimeAddress('agent:alpha:main', 'alpha'),
+        sessionIdentity: createOpenClawTestSessionIdentity('agent:alpha:main', 'alpha'),
       },
       'agent:alpha:session-b': {
         sessionId: 'session-b',
         sessionFile: join(sessionsDir, 'session-b.jsonl'),
-        runtimeAddress: createOpenClawTestRuntimeAddress('agent:alpha:session-b', 'alpha'),
+        sessionIdentity: createOpenClawTestSessionIdentity('agent:alpha:session-b', 'alpha'),
       },
     }, null, 2));
     writeFileSync(join(sessionsDir, 'session-main.jsonl'), '{"hello":"world"}\n', 'utf8');
@@ -167,7 +167,7 @@ describe('session adapter service status management', () => {
 
     const archived = await service.archiveSession({
       sessionKey: 'agent:alpha:main',
-      runtimeAddress: createOpenClawTestRuntimeAddress('agent:alpha:main', 'alpha'),
+      sessionIdentity: createOpenClawTestSessionIdentity('agent:alpha:main', 'alpha'),
     });
     expect(archived.status).toBe(200);
     expect(JSON.parse(readFileSync(join(sessionsDir, 'sessions.json'), 'utf8'))['agent:alpha:main']).toMatchObject({
@@ -177,7 +177,7 @@ describe('session adapter service status management', () => {
 
     const unarchived = await service.unarchiveSession({
       sessionKey: 'agent:alpha:main',
-      runtimeAddress: createOpenClawTestRuntimeAddress('agent:alpha:main', 'alpha'),
+      sessionIdentity: createOpenClawTestSessionIdentity('agent:alpha:main', 'alpha'),
     });
     expect(unarchived.status).toBe(200);
     expect(existsSync(join(sessionsDir, 'session-main.jsonl'))).toBe(true);
@@ -196,9 +196,9 @@ describe('session adapter service status management', () => {
     mkdirSync(sessionsDir, { recursive: true });
     writeFileSync(join(sessionsDir, 'sessions.json'), JSON.stringify({
       sessions: [
-        { key: 'agent:alpha:session-active', id: 'session-active', status: 'completed', runtimeAddress: createOpenClawTestRuntimeAddress('agent:alpha:session-active') },
-        { key: 'agent:alpha:session-archived', id: 'session-archived', status: 'archived', runtimeAddress: createOpenClawTestRuntimeAddress('agent:alpha:session-archived') },
-        { key: 'agent:alpha:session-deleted', id: 'session-deleted', status: 'deleted', runtimeAddress: createOpenClawTestRuntimeAddress('agent:alpha:session-deleted') },
+        { key: 'agent:alpha:session-active', id: 'session-active', status: 'completed', sessionIdentity: createOpenClawTestSessionIdentity('agent:alpha:session-active') },
+        { key: 'agent:alpha:session-archived', id: 'session-archived', status: 'archived', sessionIdentity: createOpenClawTestSessionIdentity('agent:alpha:session-archived') },
+        { key: 'agent:alpha:session-deleted', id: 'session-deleted', status: 'deleted', sessionIdentity: createOpenClawTestSessionIdentity('agent:alpha:session-deleted') },
       ],
     }, null, 2));
     writeFileSync(join(sessionsDir, 'session-active.jsonl'), '{"message":{"role":"user","content":"active","timestamp":1}}\n', 'utf8');
@@ -215,7 +215,7 @@ describe('session adapter service status management', () => {
 
     await service.refreshSessionCatalog();
     const response = await service.listSessions({
-      runtimeAddress: createOpenClawTestRuntimeAddress('agent:alpha:session-active'),
+      endpoint: createOpenClawTestSessionIdentity('agent:alpha:session-active').endpoint,
     });
 
     expect(response.status).toBe(200);

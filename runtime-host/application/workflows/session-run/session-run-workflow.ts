@@ -6,7 +6,7 @@ import {
   buildSendWithMediaGatewayParams,
 } from '../../chat/send-media';
 import type { AgentRuntimeRegistry } from '../../agent-runtime/contracts/agent-runtime-registry';
-import type { RuntimeAddress } from '../../agent-runtime/contracts/runtime-address';
+import type { SessionIdentity } from '../../agent-runtime/contracts/runtime-address';
 import type { RuntimeSessionContext } from '../../agent-runtime/contracts/runtime-endpoint-types';
 import type {
   RuntimeClockPort,
@@ -44,7 +44,7 @@ export interface SessionRunWorkflowInput {
   sessionId: string;
   message: string;
   runId: string;
-  runtimeAddress: RuntimeAddress;
+  sessionIdentity: SessionIdentity;
 }
 
 interface SubmittedPromptSnapshot {
@@ -56,21 +56,21 @@ export class SessionRunWorkflow {
   constructor(private readonly deps: SessionRunWorkflowDeps) {}
 
   async execute(input: SessionRunWorkflowInput): Promise<SessionPromptResult> {
-    const context = this.rememberSessionAddress(input);
+    const context = this.rememberSessionIdentity(input);
     const submitted = await this.commitSubmittedPrompt(input, context);
     this.startRuntimeSendInBackground({ ...input, context });
     return this.buildPromptResult(input, submitted);
   }
 
-  private rememberSessionAddress(input: SessionRunWorkflowInput): RuntimeSessionContext {
-    return this.deps.agentRuntimeRegistry.rememberSessionAddress(input.sessionId, input.runtimeAddress);
+  private rememberSessionIdentity(input: SessionRunWorkflowInput): RuntimeSessionContext {
+    return this.deps.agentRuntimeRegistry.rememberSessionIdentity(input.sessionIdentity);
   }
 
   private async commitSubmittedPrompt(
     input: SessionRunWorkflowInput,
     context: RuntimeSessionContext,
   ): Promise<SubmittedPromptSnapshot> {
-    return await this.deps.operationCoordinator.run(input.sessionId, 'prompt', async () => {
+    return await this.deps.operationCoordinator.run(input.sessionIdentity, 'prompt', async () => {
       await this.deps.timelineRuntime.activateSession(input.sessionId, {
         resetWindowToLatest: true,
         context,
@@ -215,8 +215,8 @@ export class SessionRunWorkflow {
     error: string;
     context?: RuntimeSessionContext;
   }): Promise<void> {
-    await this.deps.operationCoordinator.run(input.sessionId, 'prompt', async () => {
-      const context = input.context ?? this.deps.agentRuntimeRegistry.resolveSessionContext(input.sessionId);
+    const context = input.context ?? this.deps.agentRuntimeRegistry.resolveSessionContext(input.sessionId);
+    await this.deps.operationCoordinator.run(context.identity, 'prompt', async () => {
       const state = this.deps.stateStore.getSessionState(input.sessionId, context);
       if (state.runtime.activeRunId !== input.runId) {
         return;

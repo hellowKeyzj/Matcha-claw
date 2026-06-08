@@ -1,3 +1,4 @@
+import { waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { CronJob } from '@/types/cron';
 
@@ -6,8 +7,14 @@ const hostCapabilityExecuteMock = vi.fn();
 const waitForRuntimeJobResultMock = vi.fn();
 
 vi.mock('@/lib/host-api', () => ({
-  hostApiFetch: (...args: unknown[]) => hostApiFetchMock(...args),
-  hostCapabilityExecute: (...args: unknown[]) => hostCapabilityExecuteMock(...args),
+  hostApiFetch: async (path: string, init?: { body?: string; timeoutMs?: number }) => {
+    if (path === '/api/capabilities/execute') {
+      const payload = init?.body ? JSON.parse(init.body) : {};
+      return await hostCapabilityExecuteMock(payload, { timeoutMs: init?.timeoutMs });
+    }
+    return await hostApiFetchMock(path, init);
+  },
+  resolveSingleCapabilityScope: () => ({ kind: 'app' }),
   waitForRuntimeJobResult: (...args: unknown[]) => waitForRuntimeJobResultMock(...args),
 }));
 
@@ -169,8 +176,10 @@ describe('cron store', () => {
     waitForRuntimeJobResultMock.mockResolvedValueOnce({ success: true });
 
     const updatePromise = useCronStore.getState().updateJob('job-4', { name: 'updated-name' });
-    expect(useCronStore.getState().mutating).toBe(true);
-    expect(useCronStore.getState().mutatingByJobId['job-4']).toBe(1);
+    await waitFor(() => {
+      expect(useCronStore.getState().mutating).toBe(true);
+      expect(useCronStore.getState().mutatingByJobId['job-4']).toBe(1);
+    });
 
     resolveUpdate?.();
     await updatePromise;
@@ -216,7 +225,7 @@ describe('cron store', () => {
         schedule: '0 9 * * *',
         enabled: true,
       }),
-    }));
+    }), { timeoutMs: undefined });
     expect(result.agentId).toBe('agent-alpha');
     expect(useCronStore.getState().jobs[0]?.agentId).toBe('agent-alpha');
   });
@@ -257,7 +266,7 @@ describe('cron store', () => {
       id: 'scheduler.cron',
       operationId: 'cron.trigger',
       input: expect.objectContaining({ id: 'job-6' }),
-    }));
+    }), { timeoutMs: undefined });
     expect(waitForRuntimeJobResultMock).toHaveBeenCalledWith('runtime-job-6');
     expect(result).toEqual({ ran: true, reason: undefined });
     expect(useCronStore.getState().jobs).toEqual([refreshedJob]);

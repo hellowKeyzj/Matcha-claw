@@ -14,11 +14,19 @@ const runtimeHostClient = createDefaultRuntimeHostHttpClient({
 });
 
 async function modelProviderCapabilityPayload(operationId: string, input: Record<string, unknown>) {
-  return await createCapabilityPayload(runtimeHostClient, MODEL_PROVIDER_CAPABILITY_ID, operationId, input);
+  return await createCapabilityPayload(runtimeHostClient, MODEL_PROVIDER_CAPABILITY_ID, operationId, input, {
+    target: {
+      kind: 'provider-oauth',
+      flowId: typeof input.flowId === 'string' ? input.flowId : undefined,
+      accountId: typeof input.accountId === 'string' ? input.accountId : undefined,
+      vendorId: typeof input.providerType === 'string' ? input.providerType : undefined,
+    },
+  });
 }
 
 class BrowserOAuthManager extends EventEmitter {
   private activeProvider: BrowserOAuthProviderType | null = null;
+  private activeFlowId: string | null = null;
   private activeAccountId: string | null = null;
   private activeLabel: string | null = null;
   private active = false;
@@ -27,17 +35,18 @@ class BrowserOAuthManager extends EventEmitter {
 
   async startFlow(
     provider: BrowserOAuthProviderType,
-    options?: { accountId?: string; label?: string },
+    options: { flowId: string; accountId: string; label?: string },
   ): Promise<boolean> {
-    if (this.active) {
-      await this.stopFlow();
+    if (this.active && this.activeFlowId && this.activeAccountId && this.activeProvider) {
+      await this.stopFlow({ flowId: this.activeFlowId, accountId: this.activeAccountId, vendorId: this.activeProvider });
     }
 
     this.active = true;
     this.activeProvider = provider;
-    this.activeAccountId = options?.accountId || provider;
-    this.activeLabel = options?.label || null;
-    this.emit('oauth:start', { provider, accountId: this.activeAccountId });
+    this.activeFlowId = options.flowId;
+    this.activeAccountId = options.accountId;
+    this.activeLabel = options.label || null;
+    this.emit('oauth:start', { provider, flowId: this.activeFlowId, accountId: this.activeAccountId });
 
     void this.executeFlow(provider);
     return true;
@@ -79,6 +88,7 @@ class BrowserOAuthManager extends EventEmitter {
       this.emitError(error instanceof Error ? error.message : String(error));
       this.active = false;
       this.activeProvider = null;
+      this.activeFlowId = null;
       this.activeAccountId = null;
       this.activeLabel = null;
       this.pendingManualCodeResolve = null;
@@ -86,9 +96,17 @@ class BrowserOAuthManager extends EventEmitter {
     }
   }
 
-  async stopFlow(): Promise<void> {
+  async stopFlow(binding: { flowId: string; accountId: string; vendorId: string }): Promise<void> {
+    if (this.active && (
+      this.activeFlowId !== binding.flowId
+      || this.activeAccountId !== binding.accountId
+      || this.activeProvider !== binding.vendorId
+    )) {
+      return;
+    }
     this.active = false;
     this.activeProvider = null;
+    this.activeFlowId = null;
     this.activeAccountId = null;
     this.activeLabel = null;
     if (this.pendingManualCodeReject) {
@@ -99,9 +117,15 @@ class BrowserOAuthManager extends EventEmitter {
     logger.info('[BrowserOAuth] Flow explicitly stopped');
   }
 
-  submitManualCode(code: string): boolean {
-    const value = code.trim();
-    if (!value || !this.pendingManualCodeResolve) {
+  submitManualCode(input: { flowId: string; accountId: string; vendorId: string; code: string }): boolean {
+    const value = input.code.trim();
+    if (
+      !value
+      || !this.pendingManualCodeResolve
+      || this.activeFlowId !== input.flowId
+      || this.activeAccountId !== input.accountId
+      || this.activeProvider !== input.vendorId
+    ) {
       return false;
     }
     this.pendingManualCodeResolve(value);
@@ -114,12 +138,18 @@ class BrowserOAuthManager extends EventEmitter {
     providerType: BrowserOAuthProviderType,
     token: OpenAICodexOAuthCredentials,
   ) {
-    const accountId = this.activeAccountId || providerType;
+    const flowId = this.activeFlowId;
+    const accountId = this.activeAccountId;
     const accountLabel = this.activeLabel;
     this.active = false;
     this.activeProvider = null;
+    this.activeFlowId = null;
     this.activeAccountId = null;
     this.activeLabel = null;
+    if (!flowId || !accountId) {
+      this.emitError('OAuth flow context missing');
+      return;
+    }
     this.pendingManualCodeResolve = null;
     this.pendingManualCodeReject = null;
     logger.info(`[BrowserOAuth] Successfully completed OAuth for ${providerType}`);
@@ -133,6 +163,7 @@ class BrowserOAuthManager extends EventEmitter {
       '/api/capabilities/execute',
       await modelProviderCapabilityPayload('providers.oauthCompleteBrowser', {
         providerType,
+        flowId,
         accountId,
         ...(accountLabel ? { accountLabel } : {}),
         oauthProviderTokenKey,

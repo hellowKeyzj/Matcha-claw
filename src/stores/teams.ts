@@ -1,27 +1,35 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 import {
-  teamClaimNext,
-  teamHeartbeat,
-  teamInit,
-  teamMailboxPost,
-  teamMailboxPull,
-  teamPlanUpsert,
-  teamReleaseClaim,
-  teamSnapshot,
-  teamTaskUpdate,
-  type TeamMailboxMessage,
-  type TeamRunMeta,
-  type TeamTask,
-  type TeamTaskStatus,
-} from '@/features/teams/api/runtime-client';
-import type { RuntimeAddress } from '../../runtime-host/shared/runtime-address';
+  cancelTeamRun,
+  createTeamRun,
+  readTeamRunSnapshot,
+  resolveTeamApproval,
+  startTeamRun,
+  submitTeamRunDecision,
+  tickTeamRun,
+  type TeamApprovalRecord,
+  type TeamArtifactRecord,
+  type TeamDecisionRecord,
+  type TeamDecisionType,
+  type TeamDispatchExecutionRecord,
+  type TeamDispatchRecord,
+  type TeamEventRecord,
+  type TeamGateRecord,
+  type TeamKickbackRecord,
+  type TeamMessageRecord,
+  type TeamRoleBindingRecord,
+  type TeamRunRecord,
+  type TeamRunSummary,
+  type TeamStageRecord,
+} from '@/services/openclaw/team-runtime-client';
 
 export interface TeamMeta {
   id: string;
   name: string;
   leadAgentId: string;
   memberIds: string[];
+  packagePath: string;
   createdAt: number;
   updatedAt: number;
 }
@@ -29,54 +37,47 @@ export interface TeamMeta {
 interface TeamsState {
   teams: TeamMeta[];
   activeTeamId: string | null;
-  runMetaByTeamId: Record<string, TeamRunMeta | undefined>;
-  tasksByTeamId: Record<string, TeamTask[]>;
-  mailboxByTeamId: Record<string, TeamMailboxMessage[]>;
-  mailboxCursorByTeamId: Record<string, string | undefined>;
-  eventsByTeamId: Record<string, Array<Record<string, unknown>>>;
+  runByTeamId: Record<string, TeamRunRecord | undefined>;
+  rolesByTeamId: Record<string, TeamRoleBindingRecord[]>;
+  stagesByTeamId: Record<string, TeamStageRecord[]>;
+  approvalsByTeamId: Record<string, TeamApprovalRecord[]>;
+  artifactsByTeamId: Record<string, TeamArtifactRecord[]>;
+  messagesByTeamId: Record<string, TeamMessageRecord[]>;
+  dispatchesByTeamId: Record<string, TeamDispatchRecord[]>;
+  dispatchExecutionsByTeamId: Record<string, TeamDispatchExecutionRecord[]>;
+  gatesByTeamId: Record<string, TeamGateRecord[]>;
+  kickbacksByTeamId: Record<string, TeamKickbackRecord[]>;
+  decisionsByTeamId: Record<string, TeamDecisionRecord[]>;
+  eventsByTeamId: Record<string, TeamEventRecord[]>;
+  eventCursorByTeamId: Record<string, number | undefined>;
   loadingByTeamId: Record<string, boolean>;
   errorByTeamId: Record<string, string | undefined>;
   createTeam: (input: {
     name: string;
     leadAgentId: string;
     memberIds: string[];
+    packagePath: string;
   }) => string;
   setActiveTeam: (teamId: string | null) => void;
   deleteTeam: (teamId: string) => void;
-  initRuntime: (teamId: string, runtimeAddress: RuntimeAddress) => Promise<void>;
-  refreshSnapshot: (teamId: string) => Promise<void>;
-  planUpsert: (
+  ensureRunCreated: (teamId: string) => Promise<TeamRunSummary | undefined>;
+  startRun: (teamId: string) => Promise<void>;
+  refreshSnapshot: (teamId: string, options?: { force?: boolean }) => Promise<void>;
+  tickRun: (teamId: string) => Promise<void>;
+  cancelRun: (teamId: string, reason?: string) => Promise<void>;
+  resolveApproval: (
     teamId: string,
-    tasks: Array<{ taskId: string; title?: string; instruction: string; dependsOn?: string[] }>,
+    approvalId: string,
+    decision: 'approve' | 'deny' | 'abort',
+    note?: string,
   ) => Promise<void>;
-  claimNext: (teamId: string, agentId: string, sessionKey: string) => Promise<TeamTask | null>;
-  heartbeat: (teamId: string, taskId: string, agentId: string, sessionKey: string) => Promise<boolean>;
-  updateTaskStatus: (
-    teamId: string,
-    taskId: string,
-    status: TeamTaskStatus,
-    options?: { resultSummary?: string; error?: string },
-  ) => Promise<void>;
-  postMailbox: (
-    teamId: string,
-    message: Omit<TeamMailboxMessage, 'createdAt'> & { createdAt?: number },
-  ) => Promise<void>;
-  pullMailbox: (teamId: string, limit?: number) => Promise<void>;
-  releaseClaim: (teamId: string, taskId: string, agentId: string, sessionKey: string) => Promise<void>;
+  submitDecision: (teamId: string, decision: TeamDecisionType, note?: string) => Promise<void>;
 }
 
-function mergeMailboxMessages(
-  current: TeamMailboxMessage[],
-  incoming: TeamMailboxMessage[],
-): TeamMailboxMessage[] {
-  const byId = new Map(current.map((message) => [message.msgId, message]));
-  for (const message of incoming) {
-    byId.set(message.msgId, message);
-  }
-  return Array.from(byId.values()).sort(
-    (a, b) => a.createdAt - b.createdAt || a.msgId.localeCompare(b.msgId),
-  );
-}
+const snapshotInFlightByTeamId = new Map<string, Promise<void>>();
+const actionInFlightByKey = new Map<string, { requestId: string; promise: Promise<void> }>();
+
+const STARTABLE_RUN_STATUSES: ReadonlySet<TeamRunRecord['status']> = new Set(['created', 'paused']);
 
 function resolveTeamMeta(teams: TeamMeta[], teamId: string): TeamMeta {
   const team = teams.find((row) => row.id === teamId);
@@ -86,53 +87,61 @@ function resolveTeamMeta(teams: TeamMeta[], teamId: string): TeamMeta {
   return team;
 }
 
-function resolveTeamRuntimeAddress(runMetaByTeamId: Record<string, TeamRunMeta | undefined>, teamId: string): RuntimeAddress {
-  const runtimeAddress = runMetaByTeamId[teamId]?.runtimeAddress;
-  if (!runtimeAddress) {
-    throw new Error(`Team runtimeAddress is required: ${teamId}`);
+function resolveRunId(runByTeamId: Record<string, TeamRunRecord | undefined>, teamId: string): string {
+  const runId = runByTeamId[teamId]?.runId;
+  if (!runId) {
+    throw new Error(`Team run is required: ${teamId}`);
   }
-  return runtimeAddress;
+  return runId;
 }
 
-function upsertTaskList(current: TeamTask[], task: TeamTask): TeamTask[] {
-  const index = current.findIndex((row) => row.taskId === task.taskId);
-  if (index < 0) {
-    return [...current, task].sort((a, b) => a.createdAt - b.createdAt || a.taskId.localeCompare(b.taskId));
-  }
-  const next = [...current];
-  next[index] = task;
-  return next;
+function idempotencyKey(teamId: string, action: string): string {
+  return `${teamId}:${action}`;
 }
 
-const TEAM_SYNC_MIN_GAP_ACTIVE_MS = 2_500;
-const TEAM_SYNC_MIN_GAP_IDLE_MS = 8_000;
-const TEAM_SYNC_MIN_GAP_BACKGROUND_MS = 20_000;
-const snapshotInFlightByTeamId = new Map<string, Promise<void>>();
-const snapshotLastAtByTeamId = new Map<string, number>();
-const mailboxInFlightByTeamId = new Map<string, Promise<void>>();
-const mailboxLastAtByTeamId = new Map<string, number>();
-
-function isDocumentVisible(): boolean {
-  if (typeof document === 'undefined') {
-    return true;
-  }
-  return document.visibilityState === 'visible';
+function createRequestId(actionKey: string): string {
+  const cryptoApi = globalThis.crypto as Crypto | undefined;
+  return `${actionKey}:${cryptoApi?.randomUUID?.() ?? Math.random().toString(36).slice(2)}`;
 }
 
-function hasTeamWorkload(tasks: TeamTask[]): boolean {
-  return tasks.some((task) => (
-    task.status === 'todo'
-    || task.status === 'claimed'
-    || task.status === 'running'
-    || task.status === 'blocked'
-  ));
+async function runActionOnce(actionKey: string, action: (requestId: string) => Promise<void>): Promise<void> {
+  const inFlight = actionInFlightByKey.get(actionKey);
+  if (inFlight) {
+    await inFlight.promise;
+    return;
+  }
+
+  const requestId = createRequestId(actionKey);
+  const promise = action(requestId);
+  actionInFlightByKey.set(actionKey, { requestId, promise });
+  try {
+    await promise;
+  } finally {
+    actionInFlightByKey.delete(actionKey);
+  }
 }
 
-function resolveTeamSyncMinGapMs(tasks: TeamTask[]): number {
-  if (!isDocumentVisible()) {
-    return TEAM_SYNC_MIN_GAP_BACKGROUND_MS;
+function mergeEvents(existing: TeamEventRecord[], incoming: TeamEventRecord[]): TeamEventRecord[] {
+  if (incoming.length === 0) {
+    return existing;
   }
-  return hasTeamWorkload(tasks) ? TEAM_SYNC_MIN_GAP_ACTIVE_MS : TEAM_SYNC_MIN_GAP_IDLE_MS;
+  const byEventId = new Map<string, TeamEventRecord>();
+  for (const event of existing) {
+    byEventId.set(event.eventId, event);
+  }
+  for (const event of incoming) {
+    byEventId.set(event.eventId, event);
+  }
+  return Array.from(byEventId.values()).sort((left, right) => {
+    if (left.revision !== right.revision) {
+      return left.revision - right.revision;
+    }
+    return left.createdAt - right.createdAt;
+  });
+}
+
+function withoutKey<T>(record: Record<string, T>, key: string): Record<string, T> {
+  return Object.fromEntries(Object.entries(record).filter(([candidate]) => candidate !== key));
 }
 
 export const useTeamsStore = create<TeamsState>()(
@@ -140,11 +149,19 @@ export const useTeamsStore = create<TeamsState>()(
     (set, get) => ({
       teams: [],
       activeTeamId: null,
-      runMetaByTeamId: {},
-      tasksByTeamId: {},
-      mailboxByTeamId: {},
-      mailboxCursorByTeamId: {},
+      runByTeamId: {},
+      rolesByTeamId: {},
+      stagesByTeamId: {},
+      approvalsByTeamId: {},
+      artifactsByTeamId: {},
+      messagesByTeamId: {},
+      dispatchesByTeamId: {},
+      dispatchExecutionsByTeamId: {},
+      gatesByTeamId: {},
+      kickbacksByTeamId: {},
+      decisionsByTeamId: {},
       eventsByTeamId: {},
+      eventCursorByTeamId: {},
       loadingByTeamId: {},
       errorByTeamId: {},
       createTeam: (input) => {
@@ -155,15 +172,23 @@ export const useTeamsStore = create<TeamsState>()(
           name: input.name.trim() || `Team ${now}`,
           leadAgentId: input.leadAgentId,
           memberIds: Array.from(new Set(input.memberIds.filter(Boolean))),
+          packagePath: input.packagePath.trim(),
           createdAt: now,
           updatedAt: now,
         };
         set((state) => ({
           teams: [...state.teams, team],
           activeTeamId: id,
-          tasksByTeamId: { ...state.tasksByTeamId, [id]: [] },
-          mailboxByTeamId: { ...state.mailboxByTeamId, [id]: [] },
-          mailboxCursorByTeamId: { ...state.mailboxCursorByTeamId, [id]: undefined },
+          rolesByTeamId: { ...state.rolesByTeamId, [id]: [] },
+          stagesByTeamId: { ...state.stagesByTeamId, [id]: [] },
+          approvalsByTeamId: { ...state.approvalsByTeamId, [id]: [] },
+          artifactsByTeamId: { ...state.artifactsByTeamId, [id]: [] },
+          messagesByTeamId: { ...state.messagesByTeamId, [id]: [] },
+          dispatchesByTeamId: { ...state.dispatchesByTeamId, [id]: [] },
+          dispatchExecutionsByTeamId: { ...state.dispatchExecutionsByTeamId, [id]: [] },
+          gatesByTeamId: { ...state.gatesByTeamId, [id]: [] },
+          kickbacksByTeamId: { ...state.kickbacksByTeamId, [id]: [] },
+          decisionsByTeamId: { ...state.decisionsByTeamId, [id]: [] },
           eventsByTeamId: { ...state.eventsByTeamId, [id]: [] },
         }));
         return id;
@@ -172,47 +197,42 @@ export const useTeamsStore = create<TeamsState>()(
       deleteTeam: (teamId) => set((state) => ({
         teams: state.teams.filter((team) => team.id !== teamId),
         activeTeamId: state.activeTeamId === teamId ? null : state.activeTeamId,
-        runMetaByTeamId: Object.fromEntries(
-          Object.entries(state.runMetaByTeamId).filter(([key]) => key !== teamId),
-        ),
-        tasksByTeamId: Object.fromEntries(
-          Object.entries(state.tasksByTeamId).filter(([key]) => key !== teamId),
-        ),
-        mailboxByTeamId: Object.fromEntries(
-          Object.entries(state.mailboxByTeamId).filter(([key]) => key !== teamId),
-        ),
-        mailboxCursorByTeamId: Object.fromEntries(
-          Object.entries(state.mailboxCursorByTeamId).filter(([key]) => key !== teamId),
-        ),
-        eventsByTeamId: Object.fromEntries(
-          Object.entries(state.eventsByTeamId).filter(([key]) => key !== teamId),
-        ),
-        loadingByTeamId: Object.fromEntries(
-          Object.entries(state.loadingByTeamId).filter(([key]) => key !== teamId),
-        ),
-        errorByTeamId: Object.fromEntries(
-          Object.entries(state.errorByTeamId).filter(([key]) => key !== teamId),
-        ),
+        runByTeamId: withoutKey(state.runByTeamId, teamId),
+        rolesByTeamId: withoutKey(state.rolesByTeamId, teamId),
+        stagesByTeamId: withoutKey(state.stagesByTeamId, teamId),
+        approvalsByTeamId: withoutKey(state.approvalsByTeamId, teamId),
+        artifactsByTeamId: withoutKey(state.artifactsByTeamId, teamId),
+        messagesByTeamId: withoutKey(state.messagesByTeamId, teamId),
+        dispatchesByTeamId: withoutKey(state.dispatchesByTeamId, teamId),
+        dispatchExecutionsByTeamId: withoutKey(state.dispatchExecutionsByTeamId, teamId),
+        gatesByTeamId: withoutKey(state.gatesByTeamId, teamId),
+        kickbacksByTeamId: withoutKey(state.kickbacksByTeamId, teamId),
+        decisionsByTeamId: withoutKey(state.decisionsByTeamId, teamId),
+        eventsByTeamId: withoutKey(state.eventsByTeamId, teamId),
+        eventCursorByTeamId: withoutKey(state.eventCursorByTeamId, teamId),
+        loadingByTeamId: withoutKey(state.loadingByTeamId, teamId),
+        errorByTeamId: withoutKey(state.errorByTeamId, teamId),
       })),
-      initRuntime: async (teamId, runtimeAddress) => {
+      ensureRunCreated: async (teamId) => {
         const team = resolveTeamMeta(get().teams, teamId);
         set((state) => ({
           loadingByTeamId: { ...state.loadingByTeamId, [teamId]: true },
           errorByTeamId: { ...state.errorByTeamId, [teamId]: undefined },
         }));
         try {
-          const result = await teamInit({
-            teamId,
-            runtimeAddress,
-            leadAgentId: team.leadAgentId,
+          await get().refreshSnapshot(teamId, { force: true });
+          const existingRun = get().runByTeamId[teamId];
+          if (existingRun) {
+            return existingRun;
+          }
+
+          const created = await createTeamRun({
+            packagePath: team.packagePath,
+            runId: team.id,
+            idempotencyKey: idempotencyKey(team.id, 'create'),
           });
-          set((state) => ({
-            runMetaByTeamId: {
-              ...state.runMetaByTeamId,
-              [teamId]: result.run,
-            },
-          }));
-          await get().refreshSnapshot(teamId);
+          await get().refreshSnapshot(teamId, { force: true });
+          return get().runByTeamId[teamId] ?? created;
         } catch (error) {
           set((state) => ({
             errorByTeamId: {
@@ -227,53 +247,54 @@ export const useTeamsStore = create<TeamsState>()(
           }));
         }
       },
-      refreshSnapshot: async (teamId) => {
-        const inFlight = snapshotInFlightByTeamId.get(teamId);
-        if (inFlight) {
-          await inFlight;
+      startRun: async (teamId) => {
+        const run = await get().ensureRunCreated(teamId);
+        if (!run || !STARTABLE_RUN_STATUSES.has(run.status)) {
           return;
         }
-        const tasks = get().tasksByTeamId[teamId] ?? [];
-        const minGapMs = resolveTeamSyncMinGapMs(tasks);
-        const lastAt = snapshotLastAtByTeamId.get(teamId) ?? 0;
-        if (Date.now() - lastAt < minGapMs) {
-          return;
+        await startTeamRun({
+          runId: run.runId,
+          idempotencyKey: idempotencyKey(teamId, `start:${run.revision}`),
+        });
+        await get().refreshSnapshot(teamId, { force: true });
+      },
+      refreshSnapshot: async (teamId, options) => {
+        while (true) {
+          const inFlight = snapshotInFlightByTeamId.get(teamId);
+          if (!inFlight) {
+            break;
+          }
+          await inFlight;
+          if (!options?.force) {
+            return;
+          }
         }
 
         const run = async () => {
           const state = get();
-          const cursor = state.mailboxCursorByTeamId[teamId];
-          const runtimeAddress = resolveTeamRuntimeAddress(state.runMetaByTeamId, teamId);
-          const snapshot = await teamSnapshot({
-            teamId,
-            runtimeAddress,
-            mailboxCursor: cursor,
-            mailboxLimit: 200,
+          const runId = state.runByTeamId[teamId]?.runId ?? teamId;
+          const snapshot = await readTeamRunSnapshot({
+            runId,
+            eventCursor: state.eventCursorByTeamId[teamId],
+            eventLimit: 200,
           });
           set((state) => ({
-            runMetaByTeamId: {
-              ...state.runMetaByTeamId,
-              [teamId]: snapshot.run ?? undefined,
-            },
-            tasksByTeamId: {
-              ...state.tasksByTeamId,
-              [teamId]: snapshot.tasks,
-            },
-            mailboxByTeamId: {
-              ...state.mailboxByTeamId,
-              [teamId]: mergeMailboxMessages(
-                state.mailboxByTeamId[teamId] ?? [],
-                snapshot.mailbox.messages,
-              ),
-            },
-            mailboxCursorByTeamId: {
-              ...state.mailboxCursorByTeamId,
-              [teamId]: snapshot.mailbox.nextCursor ?? cursor,
-            },
+            runByTeamId: { ...state.runByTeamId, [teamId]: snapshot.run ?? undefined },
+            rolesByTeamId: { ...state.rolesByTeamId, [teamId]: snapshot.roles },
+            stagesByTeamId: { ...state.stagesByTeamId, [teamId]: snapshot.stages },
+            approvalsByTeamId: { ...state.approvalsByTeamId, [teamId]: snapshot.approvals },
+            artifactsByTeamId: { ...state.artifactsByTeamId, [teamId]: snapshot.artifacts },
+            messagesByTeamId: { ...state.messagesByTeamId, [teamId]: snapshot.messages },
+            dispatchesByTeamId: { ...state.dispatchesByTeamId, [teamId]: snapshot.dispatches },
+            dispatchExecutionsByTeamId: { ...state.dispatchExecutionsByTeamId, [teamId]: snapshot.dispatchExecutions },
+            gatesByTeamId: { ...state.gatesByTeamId, [teamId]: snapshot.gates },
+            kickbacksByTeamId: { ...state.kickbacksByTeamId, [teamId]: snapshot.kickbacks },
+            decisionsByTeamId: { ...state.decisionsByTeamId, [teamId]: snapshot.decisions },
             eventsByTeamId: {
               ...state.eventsByTeamId,
-              [teamId]: snapshot.events,
+              [teamId]: mergeEvents(state.eventsByTeamId[teamId] ?? [], snapshot.events),
             },
+            eventCursorByTeamId: { ...state.eventCursorByTeamId, [teamId]: snapshot.nextEventCursor },
           }));
         };
 
@@ -283,144 +304,64 @@ export const useTeamsStore = create<TeamsState>()(
           await promise;
         } finally {
           snapshotInFlightByTeamId.delete(teamId);
-          snapshotLastAtByTeamId.set(teamId, Date.now());
         }
       },
-      planUpsert: async (teamId, tasks) => {
-        const runtimeAddress = resolveTeamRuntimeAddress(get().runMetaByTeamId, teamId);
-        const result = await teamPlanUpsert({ teamId, runtimeAddress, tasks });
-        set((state) => ({
-          tasksByTeamId: {
-            ...state.tasksByTeamId,
-            [teamId]: result.tasks,
-          },
-        }));
-      },
-      claimNext: async (teamId, agentId, sessionKey) => {
-        const runtimeAddress = resolveTeamRuntimeAddress(get().runMetaByTeamId, teamId);
-        const result = await teamClaimNext({ teamId, runtimeAddress, agentId, sessionKey });
-        if (!result.task) {
-          return null;
-        }
-        set((state) => ({
-          tasksByTeamId: {
-            ...state.tasksByTeamId,
-            [teamId]: upsertTaskList(state.tasksByTeamId[teamId] ?? [], result.task as TeamTask),
-          },
-        }));
-        return result.task;
-      },
-      heartbeat: async (teamId, taskId, agentId, sessionKey) => {
-        const runtimeAddress = resolveTeamRuntimeAddress(get().runMetaByTeamId, teamId);
-        const result = await teamHeartbeat({ teamId, runtimeAddress, taskId, agentId, sessionKey });
-        if (result.ok && result.task) {
-          set((state) => ({
-            tasksByTeamId: {
-              ...state.tasksByTeamId,
-              [teamId]: upsertTaskList(state.tasksByTeamId[teamId] ?? [], result.task as TeamTask),
-            },
-          }));
-        }
-        return result.ok;
-      },
-      updateTaskStatus: async (teamId, taskId, status, options) => {
-        const runtimeAddress = resolveTeamRuntimeAddress(get().runMetaByTeamId, teamId);
-        const payload: {
-          teamId: string;
-          runtimeAddress: RuntimeAddress;
-          taskId: string;
-          status: TeamTaskStatus;
-          resultSummary?: string;
-          error?: string;
-        } = {
-          teamId,
-          runtimeAddress,
-          taskId,
-          status,
-        };
-        if (options && Object.prototype.hasOwnProperty.call(options, 'resultSummary')) {
-          payload.resultSummary = options.resultSummary;
-        }
-        if (options && Object.prototype.hasOwnProperty.call(options, 'error')) {
-          payload.error = options.error;
-        }
-        const result = await teamTaskUpdate({
-          ...payload,
-        });
-        set((state) => ({
-          tasksByTeamId: {
-            ...state.tasksByTeamId,
-            [teamId]: upsertTaskList(state.tasksByTeamId[teamId] ?? [], result.task as TeamTask),
-          },
-        }));
-      },
-      postMailbox: async (teamId, message) => {
-        const runtimeAddress = resolveTeamRuntimeAddress(get().runMetaByTeamId, teamId);
-        const result = await teamMailboxPost({
-          teamId,
-          runtimeAddress,
-          message: {
-            ...message,
-            createdAt: message.createdAt ?? Date.now(),
-          },
-        });
-        set((state) => ({
-          mailboxByTeamId: {
-            ...state.mailboxByTeamId,
-            [teamId]: mergeMailboxMessages(state.mailboxByTeamId[teamId] ?? [], [result.message]),
-          },
-        }));
-      },
-      pullMailbox: async (teamId, limit) => {
-        const inFlight = mailboxInFlightByTeamId.get(teamId);
-        if (inFlight) {
-          await inFlight;
-          return;
-        }
-        const tasks = get().tasksByTeamId[teamId] ?? [];
-        const minGapMs = resolveTeamSyncMinGapMs(tasks);
-        const lastAt = mailboxLastAtByTeamId.get(teamId) ?? 0;
-        if (Date.now() - lastAt < minGapMs) {
-          return;
-        }
-
-        const run = async () => {
+      tickRun: async (teamId) => {
+        const actionKey = idempotencyKey(teamId, 'tick');
+        await runActionOnce(actionKey, async (requestId) => {
           const state = get();
-          const cursor = state.mailboxCursorByTeamId[teamId];
-          const runtimeAddress = resolveTeamRuntimeAddress(state.runMetaByTeamId, teamId);
-          const result = await teamMailboxPull({ teamId, runtimeAddress, cursor, limit });
-          set((state) => ({
-            mailboxByTeamId: {
-              ...state.mailboxByTeamId,
-              [teamId]: mergeMailboxMessages(state.mailboxByTeamId[teamId] ?? [], result.messages),
-            },
-            mailboxCursorByTeamId: {
-              ...state.mailboxCursorByTeamId,
-              [teamId]: result.nextCursor ?? cursor,
-            },
-          }));
-        };
-
-        const promise = run();
-        mailboxInFlightByTeamId.set(teamId, promise);
-        try {
-          await promise;
-        } finally {
-          mailboxInFlightByTeamId.delete(teamId);
-          mailboxLastAtByTeamId.set(teamId, Date.now());
-        }
+          const runId = resolveRunId(state.runByTeamId, teamId);
+          await tickTeamRun({
+            runId,
+            idempotencyKey: requestId,
+          });
+          await get().refreshSnapshot(teamId, { force: true });
+        });
       },
-      releaseClaim: async (teamId, taskId, agentId, sessionKey) => {
-        const runtimeAddress = resolveTeamRuntimeAddress(get().runMetaByTeamId, teamId);
-        const result = await teamReleaseClaim({ teamId, runtimeAddress, taskId, agentId, sessionKey });
-        if (result.task) {
-          set((state) => ({
-            tasksByTeamId: {
-              ...state.tasksByTeamId,
-              [teamId]: upsertTaskList(state.tasksByTeamId[teamId] ?? [], result.task as TeamTask),
-            },
-          }));
+      cancelRun: async (teamId, reason) => {
+        const state = get();
+        const runId = resolveRunId(state.runByTeamId, teamId);
+        await cancelTeamRun({
+          runId,
+          reason,
+          idempotencyKey: idempotencyKey(teamId, 'cancel'),
+        });
+        await get().refreshSnapshot(teamId, { force: true });
+      },
+      resolveApproval: async (teamId, approvalId, decision, note) => {
+        const state = get();
+        const runId = resolveRunId(state.runByTeamId, teamId);
+        await resolveTeamApproval({
+          runId,
+          approvalId,
+          decision,
+          note,
+          idempotencyKey: idempotencyKey(teamId, `approval:${approvalId}:${decision}`),
+        });
+        await get().refreshSnapshot(teamId, { force: true });
+      },
+      submitDecision: async (teamId, decision, note) => {
+        const state = get();
+        const run = state.runByTeamId[teamId];
+        if (!run) {
+          throw new Error(`Team run is required: ${teamId}`);
         }
+        if (run.status !== 'waiting_for_user') {
+          return;
+        }
+        const actionKey = idempotencyKey(
+          teamId,
+          `decision:${run.currentStageId ?? 'no-stage'}:${run.revision}:${decision}`,
+        );
+        await runActionOnce(actionKey, async () => {
+          await submitTeamRunDecision({
+            runId: run.runId,
+            decision,
+            note,
+            idempotencyKey: actionKey,
+          });
+          await get().refreshSnapshot(teamId, { force: true });
+        });
       },
     }),
     {

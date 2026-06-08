@@ -5,7 +5,7 @@ import type { SessionCommandService } from '../../sessions/session-command-servi
 export const SESSION_MODEL_SELECTION_CAPABILITY_ID = 'session.modelSelection';
 
 export const sessionModelSelectionCapabilityOperations: readonly CapabilityOperationDescriptor[] = [
-  { id: 'sessions.patchModel', title: 'Patch session model' },
+  { id: 'sessions.patchModel', title: 'Patch session model', targetKind: 'model-selection' },
 ] as const;
 
 export function createSessionModelSelectionCapabilityOperationRoutes(deps: {

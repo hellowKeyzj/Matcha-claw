@@ -1,8 +1,8 @@
 import type { IncomingMessage, ServerResponse } from 'http';
 import { PORTS } from '../../utils/config';
 import { buildOpenClawControlUiUrl } from '../../utils/openclaw-control-ui';
-import { loadHostBootstrapSettings } from '../../gateway/config-sync';
 import { buildPublicGatewayStatus } from '../../gateway/public-status';
+import { createRuntimeHostCapabilityPayload, resolveRuntimeHostEndpoint } from '../../main/runtime-host-capabilities';
 import { logger } from '../../utils/logger';
 import type { GatewayApiContext } from '../context';
 import { sendJson } from '../route-utils';
@@ -43,7 +43,13 @@ function scheduleControlUiDeviceAutoApproval(ctx: GatewayApiContext): void {
   const startedAt = Date.now();
   const tick = async () => {
     try {
-      await ctx.runtimeHost.request('POST', '/api/gateway/control-ui/auto-approve', {}, { timeoutMs: 20_000 });
+      const endpoint = await resolveRuntimeHostEndpoint(ctx.runtimeHost);
+      await ctx.runtimeHost.request(
+        'POST',
+        '/api/capabilities/execute',
+        await createRuntimeHostCapabilityPayload(ctx.runtimeHost, 'runtimeHost.gatewayControlUiAutoApprove', {}, { endpoint }),
+        { timeoutMs: 20_000 },
+      );
     } catch (error) {
       logger.debug(`[control-ui] Auto-approve pairing check failed: ${String(error)}`);
     }
@@ -122,11 +128,10 @@ export async function handleGatewayRoutes(
   if (url.pathname === '/api/gateway/control-ui' && req.method === 'GET') {
     try {
       const status = ctx.gatewayManager.getStatus();
-      const { gatewayToken: token } = await loadHostBootstrapSettings();
       const port = status.port || PORTS.OPENCLAW_GATEWAY;
-      const urlValue = buildOpenClawControlUiUrl(port, token);
+      const urlValue = buildOpenClawControlUiUrl(port, '');
       scheduleControlUiDeviceAutoApproval(ctx);
-      sendJson(res, 200, { success: true, url: urlValue, token, port });
+      sendJson(res, 200, { success: true, url: urlValue, port });
     } catch (error) {
       sendJson(res, 500, { success: false, error: String(error) });
     }

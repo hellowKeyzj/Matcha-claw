@@ -8,13 +8,15 @@ import { useGatewayStore } from '@/stores/gateway';
 import { useSubagentsStore } from '@/stores/subagents';
 import { useTaskCenterStore } from '@/stores/task-center-store';
 import { createEmptySessionRecord, createEmptySessionViewportState } from '@/stores/chat/store-state-helpers';
+import { buildRuntimeScopeKey, buildSessionRecordKey } from '@/stores/chat/session-identity';
 import { createViewportWindowState } from '@/stores/chat/viewport-state';
 import { buildRenderItemsFromMessages } from './helpers/timeline-fixtures';
 import {
+  hostRuntimeEndpointsListMock,
   hostSessionPatchMock,
   resetGatewayClientMocks,
 } from './helpers/mock-gateway-client';
-import { createOpenClawTestRuntimeAddress } from './helpers/runtime-address-fixtures';
+import { createOpenClawTestSessionIdentity, openClawTestRuntimeIdentity } from './helpers/runtime-address-fixtures';
 
 vi.mock('sonner', () => ({
   toast: {
@@ -29,7 +31,13 @@ class ResizeObserverStub {
 }
 
 const TEST_SESSION_KEY = 'agent:test:main';
-const TEST_RUNTIME_ADDRESS = createOpenClawTestRuntimeAddress(TEST_SESSION_KEY, 'test');
+const TEST_SESSION_IDENTITY = createOpenClawTestSessionIdentity(TEST_SESSION_KEY, 'test');
+const TEST_AGENT_SCOPE = {
+  kind: 'agent' as const,
+  endpoint: TEST_SESSION_IDENTITY.endpoint,
+  agentId: 'test',
+};
+const TEST_RECORD_KEY = buildSessionRecordKey(TEST_SESSION_IDENTITY);
 
 function renderChat() {
   return render(
@@ -47,7 +55,6 @@ describe('chat model picker', () => {
     (globalThis as unknown as { ResizeObserver: typeof ResizeObserver }).ResizeObserver = ResizeObserverStub as unknown as typeof ResizeObserver;
 
     const sessionKey = TEST_SESSION_KEY;
-    const runtimeAddress = TEST_RUNTIME_ADDRESS;
     const messages = buildRenderItemsFromMessages(sessionKey, [
       {
         id: 'user-1',
@@ -63,40 +70,8 @@ describe('chat model picker', () => {
       },
     ]);
 
-    hostSessionPatchMock.mockImplementation(async (payload: { sessionKey: string; runtimeAddress: typeof runtimeAddress; runtimeModelRef: string }) => ({
+    hostSessionPatchMock.mockImplementation(async () => ({
       success: true,
-      snapshot: {
-        sessionKey: payload.sessionKey,
-        catalog: {
-          key: payload.sessionKey,
-          agentId: 'test',
-          kind: 'main',
-          preferred: true,
-          displayName: payload.sessionKey,
-          model: payload.runtimeModelRef,
-          updatedAt: 10,
-        },
-        items: messages,
-        replayComplete: true,
-          runtime: {
-          activeRunId: null,
-          runPhase: 'idle',
-          activeTurnItemKey: null,
-          pendingTurnKey: null,
-          pendingTurnLaneKey: null,
-          lastUserMessageAt: null,
-          lastError: null,
-          lastIssue: null,
-        },
-        window: {
-          totalItemCount: messages.length,
-          windowStartOffset: 0,
-          windowEndOffset: messages.length,
-          hasMore: false,
-          hasNewer: false,
-          isAtLatest: true,
-        },
-      },
     }));
 
     useGatewayStore.setState({
@@ -129,6 +104,24 @@ describe('chat model picker', () => {
           updatedAt: 1,
         },
       ],
+      agentsResource: {
+        status: 'ready',
+        data: [
+          {
+            id: 'test',
+            name: 'Test Agent',
+            workspace: '.',
+            model: 'openai/gpt-5.4',
+            skills: [],
+            isDefault: false,
+            createdAt: 1,
+            updatedAt: 1,
+          },
+        ],
+        error: null,
+        hasLoadedOnce: true,
+        lastLoadedAt: 1,
+      },
       availableModels: [
         {
           id: 'openai/gpt-5.4',
@@ -167,16 +160,42 @@ describe('chat model picker', () => {
       clearError: vi.fn(),
     } as never);
 
-    useChatStore.setState({
-      currentSessionKey: sessionKey,
-      currentSession: {
-        ...createEmptySessionRecord(),
-        meta: {
-          ...createEmptySessionRecord().meta,
-          model: 'openai/gpt-5.4',
-          runtimeAddress: TEST_RUNTIME_ADDRESS,
+    hostRuntimeEndpointsListMock.mockResolvedValue({
+      endpoints: [{
+        id: openClawTestRuntimeIdentity.runtimeEndpointId,
+        protocolId: openClawTestRuntimeIdentity.protocolId,
+        runtimeAdapterId: TEST_SESSION_IDENTITY.endpoint.runtimeAdapterId,
+        runtimeInstanceId: TEST_SESSION_IDENTITY.endpoint.runtimeInstanceId,
+        displayName: 'OpenClaw Local',
+        agentIds: ['test'],
+        acceptsDynamicAgents: true,
+        capabilities: {
+          chat: true,
+          streaming: true,
+          tools: true,
+          approvals: true,
+          replay: true,
+          modelSelection: true,
         },
-      },
+        capabilitySummaries: [{
+          id: 'session.prompt',
+          scopeKind: 'agent',
+          scope: TEST_AGENT_SCOPE,
+          targetKinds: ['session'],
+          operations: [],
+          availability: 'available',
+        }],
+        controlState: {
+          connection: null,
+          readiness: null,
+          capabilities: null,
+          updatedAt: null,
+        },
+      }],
+    });
+
+    useChatStore.setState({
+      currentSessionKey: TEST_RECORD_KEY,
       pendingApprovalsBySession: {},
       foregroundHistorySessionKey: null,
       sessionsLoading: false,
@@ -202,8 +221,25 @@ describe('chat model picker', () => {
         hasLoadedOnce: true,
         lastLoadedAt: 1,
       },
+      sessionRuntimeCatalog: {
+        status: 'ready',
+        error: null,
+        endpoints: [{
+          endpointId: openClawTestRuntimeIdentity.runtimeEndpointId,
+          protocolId: openClawTestRuntimeIdentity.protocolId,
+          endpoint: TEST_SESSION_IDENTITY.endpoint,
+          runtimeAdapterId: TEST_SESSION_IDENTITY.endpoint.runtimeAdapterId,
+          runtimeInstanceId: TEST_SESSION_IDENTITY.endpoint.runtimeInstanceId,
+          displayName: 'OpenClaw Local',
+          agentIds: ['test'],
+          acceptsDynamicAgents: true,
+          sessionPromptScopes: [TEST_AGENT_SCOPE],
+          defaultSessionPromptScope: TEST_AGENT_SCOPE,
+        }],
+        defaultSessionPromptScope: TEST_AGENT_SCOPE,
+      },
       loadedSessions: {
-        [sessionKey]: {
+        [TEST_RECORD_KEY]: {
           ...createEmptySessionRecord(),
           items: messages,
           window: createViewportWindowState({
@@ -217,10 +253,17 @@ describe('chat model picker', () => {
           }),
           meta: {
             ...createEmptySessionRecord().meta,
+            backendSessionKey: TEST_SESSION_KEY,
+            runtimeScopeKey: buildRuntimeScopeKey(TEST_SESSION_IDENTITY.endpoint),
+            agentId: 'test',
+            protocolId: openClawTestRuntimeIdentity.protocolId,
+            runtimeEndpointId: openClawTestRuntimeIdentity.runtimeEndpointId,
+            sessionIdentity: TEST_SESSION_IDENTITY,
+            kind: 'main',
+            preferred: true,
             historyStatus: 'ready',
             lastActivityAt: Date.now(),
             model: 'openai/gpt-5.4',
-            runtimeAddress: TEST_RUNTIME_ADDRESS,
           },
         },
       },
@@ -237,12 +280,12 @@ describe('chat model picker', () => {
     fireEvent.click(screen.getByRole('option', { name: 'anthropic / claude-opus-4-6' }));
 
     expect(screen.getByTestId('chat-model-picker')).toHaveTextContent('anthropic / claude-opus-4-6');
-    expect(useChatStore.getState().loadedSessions['agent:test:main']?.meta.model).toBe('anthropic/claude-opus-4-6');
+    expect(useChatStore.getState().loadedSessions[TEST_RECORD_KEY]?.meta.model).toBe('anthropic/claude-opus-4-6');
 
     await waitFor(() => {
       expect(hostSessionPatchMock).toHaveBeenCalledWith({
-        sessionKey: 'agent:test:main',
-        runtimeAddress: TEST_RUNTIME_ADDRESS,
+        sessionKey: TEST_SESSION_KEY,
+        sessionIdentity: TEST_SESSION_IDENTITY,
         runtimeModelRef: 'anthropic/claude-opus-4-6',
       });
     });
@@ -251,7 +294,7 @@ describe('chat model picker', () => {
       expect(screen.getByTestId('chat-model-picker')).toHaveTextContent('anthropic / claude-opus-4-6');
     });
 
-    expect(useChatStore.getState().loadedSessions['agent:test:main']?.meta.model).toBe('anthropic/claude-opus-4-6');
+    expect(useChatStore.getState().loadedSessions[TEST_RECORD_KEY]?.meta.model).toBe('anthropic/claude-opus-4-6');
   });
 
   it('rolls back the optimistic session model when session patch fails', async () => {
@@ -266,10 +309,10 @@ describe('chat model picker', () => {
     fireEvent.click(screen.getByRole('option', { name: 'anthropic / claude-opus-4-6' }));
 
     expect(screen.getByTestId('chat-model-picker')).toHaveTextContent('anthropic / claude-opus-4-6');
-    expect(useChatStore.getState().loadedSessions['agent:test:main']?.meta.model).toBe('anthropic/claude-opus-4-6');
+    expect(useChatStore.getState().loadedSessions[TEST_RECORD_KEY]?.meta.model).toBe('anthropic/claude-opus-4-6');
 
     await waitFor(() => {
-      expect(useChatStore.getState().loadedSessions['agent:test:main']?.meta.model).toBe('openai/gpt-5.4');
+      expect(useChatStore.getState().loadedSessions[TEST_RECORD_KEY]?.meta.model).toBe('openai/gpt-5.4');
     });
 
     await waitFor(() => {
@@ -278,11 +321,10 @@ describe('chat model picker', () => {
   });
 
   it('uses the first available model for sessions without a session or agent default model', async () => {
-    const sessionKey = 'agent:test:main';
-    const current = useChatStore.getState().loadedSessions[sessionKey]!;
+    const current = useChatStore.getState().loadedSessions[TEST_RECORD_KEY]!;
     useChatStore.setState({
       loadedSessions: {
-        [sessionKey]: {
+        [TEST_RECORD_KEY]: {
           ...current,
           meta: {
             ...current.meta,
@@ -328,19 +370,18 @@ describe('chat model picker', () => {
     expect(await screen.findByTestId('chat-model-picker')).toHaveTextContent('openai / gpt-5.4');
     await waitFor(() => {
       expect(hostSessionPatchMock).toHaveBeenCalledWith({
-        sessionKey: 'agent:test:main',
-        runtimeAddress: TEST_RUNTIME_ADDRESS,
+        sessionKey: TEST_SESSION_KEY,
+        sessionIdentity: TEST_SESSION_IDENTITY,
         runtimeModelRef: 'openai/gpt-5.4',
       });
     });
   });
 
   it('replaces a stale session model with the current available model', async () => {
-    const sessionKey = 'agent:test:main';
-    const current = useChatStore.getState().loadedSessions[sessionKey]!;
+    const current = useChatStore.getState().loadedSessions[TEST_RECORD_KEY]!;
     useChatStore.setState({
       loadedSessions: {
-        [sessionKey]: {
+        [TEST_RECORD_KEY]: {
           ...current,
           meta: {
             ...current.meta,
@@ -386,8 +427,8 @@ describe('chat model picker', () => {
     expect(await screen.findByTestId('chat-model-picker')).toHaveTextContent('openai / gpt-5.4');
     await waitFor(() => {
       expect(hostSessionPatchMock).toHaveBeenCalledWith({
-        sessionKey: 'agent:test:main',
-        runtimeAddress: TEST_RUNTIME_ADDRESS,
+        sessionKey: TEST_SESSION_KEY,
+        sessionIdentity: TEST_SESSION_IDENTITY,
         runtimeModelRef: 'openai/gpt-5.4',
       });
     });
@@ -407,11 +448,10 @@ describe('chat model picker', () => {
   });
 
   it('disables model switching while the current session has an active run', async () => {
-    const sessionKey = 'agent:test:main';
-    const current = useChatStore.getState().loadedSessions[sessionKey];
+    const current = useChatStore.getState().loadedSessions[TEST_RECORD_KEY];
     useChatStore.setState({
       loadedSessions: {
-        [sessionKey]: {
+        [TEST_RECORD_KEY]: {
           ...current!,
           runtime: {
             ...current!.runtime,

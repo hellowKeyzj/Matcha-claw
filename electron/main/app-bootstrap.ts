@@ -18,7 +18,7 @@ import { emitHostEvent, registerHostEventBridge } from './host-event-bridge';
 import { createMainWindow, loadMainWindowContent } from './main-window';
 import { isQuitting } from './app-state';
 import { waitForRuntimeHostJob, type RuntimeHostJobSnapshot } from './runtime-host-jobs';
-import { createRuntimeHostCapabilityPayload } from './runtime-host-capabilities';
+import { createRuntimeHostCapabilityPayload, resolveRuntimeHostEndpoint } from './runtime-host-capabilities';
 
 const isE2EMode = process.env.MATCHACLAW_E2E === '1';
 
@@ -96,13 +96,14 @@ async function autoStartGatewayIfEnabled(deps: {
   }
 
   try {
+    const endpoint = await resolveRuntimeHostEndpoint(deps.runtimeHostManager);
     const response = await deps.runtimeHostManager.request<{
       success?: boolean;
       job?: RuntimeHostJobSnapshot;
     }>(
       'POST',
       '/api/capabilities/execute',
-      await createRuntimeHostCapabilityPayload(deps.runtimeHostManager, 'runtimeHost.syncProviderAuthBootstrap'),
+      await createRuntimeHostCapabilityPayload(deps.runtimeHostManager, 'runtimeHost.syncProviderAuthBootstrap', {}, { endpoint }),
     );
     const job = response.data?.job;
     if (!job?.id) {

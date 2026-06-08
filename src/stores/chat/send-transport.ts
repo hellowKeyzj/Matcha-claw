@@ -1,5 +1,5 @@
 import { hostSessionPrompt } from '@/lib/host-api';
-import type { RuntimeAddress } from '../../../runtime-host/shared/runtime-address';
+import type { SessionIdentity } from '../../../runtime-host/shared/runtime-address';
 import type { SessionStateSnapshot } from '../../../runtime-host/shared/session-adapter-types';
 import type { ChatSendAttachment } from './types';
 
@@ -9,7 +9,7 @@ const CHAT_SEND_DEFAULT_ERROR = 'Failed to send message';
 
 export interface SendChatTransportParams {
   sessionKey: string;
-  runtimeAddress: RuntimeAddress;
+  sessionIdentity: SessionIdentity;
   message: string;
   idempotencyKey: string;
   attachments?: ChatSendAttachment[];
@@ -26,7 +26,7 @@ export async function sendChatTransport(
   const attachments = params.attachments ?? [];
   const response = await hostSessionPrompt({
     sessionKey: params.sessionKey,
-    runtimeAddress: params.runtimeAddress,
+    sessionIdentity: params.sessionIdentity,
     message: params.message || (attachments.length > 0 ? CHAT_SEND_WITH_MEDIA_FALLBACK_PROMPT : ''),
     idempotencyKey: params.idempotencyKey,
     deliver: false,

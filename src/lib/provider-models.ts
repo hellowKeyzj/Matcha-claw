@@ -1,8 +1,7 @@
-import { hostCapabilityExecute } from '@/lib/host-api';
+import { hostApiFetch, resolveSingleCapabilityScope } from '@/lib/host-api';
 import type { ModelCapability } from '@/lib/provider-model-catalog';
 import { MODEL_CAPABILITIES } from '@/lib/provider-model-capabilities';
 import type { ModelCatalogEntry } from '@/types/subagent';
-import type { RuntimeAddress } from '../../runtime-host/shared/runtime-address';
 
 type SelectableProviderModel = {
   credentialId: string;
@@ -20,17 +19,17 @@ const MODEL_CAPABILITY_SET = new Set<ModelCapability>(MODEL_CAPABILITIES);
 
 async function modelProviderCapabilityExecute<TResult>(
   operationId: string,
-  runtimeAddress: RuntimeAddress,
   input: Record<string, unknown> = {},
 ): Promise<TResult> {
-  return await hostCapabilityExecute<TResult>({
-    id: MODEL_PROVIDER_CAPABILITY_ID,
-    operationId,
-    runtimeAddress,
-    input: {
-      ...input,
-      runtimeAddress,
-    },
+  return await hostApiFetch<TResult>('/api/capabilities/execute', {
+    method: 'POST',
+    body: JSON.stringify({
+      id: MODEL_PROVIDER_CAPABILITY_ID,
+      operationId,
+      scope: await resolveSingleCapabilityScope(MODEL_PROVIDER_CAPABILITY_ID),
+      target: null,
+      input,
+    }),
   });
 }
 
@@ -104,10 +103,9 @@ export function buildSelectableProviderModels(models: readonly SelectableProvide
   return out.sort((left, right) => left.displayLabel.localeCompare(right.displayLabel));
 }
 
-export async function fetchSelectableProviderModels(runtimeAddress: RuntimeAddress): Promise<ModelCatalogEntry[]> {
+export async function fetchSelectableProviderModels(): Promise<ModelCatalogEntry[]> {
   const payload = await modelProviderCapabilityExecute<unknown>(
     'providerModels.listSelectable',
-    runtimeAddress,
   );
   const rawModels = isRecord(payload) && Array.isArray(payload.models) ? payload.models : [];
   return buildSelectableProviderModels(

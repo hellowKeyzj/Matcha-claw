@@ -8,7 +8,7 @@ import {
   hostSessionWindowFetch,
   resolveHydratedSessionSnapshot,
 } from '@/lib/host-api';
-import type { RuntimeAddress } from '../../../runtime-host/shared/runtime-address';
+import type { RuntimeEndpointRef, SessionIdentity } from '../../../runtime-host/shared/runtime-address';
 import type { SessionRenderItem, SessionStateSnapshot } from '../../../runtime-host/shared/session-adapter-types';
 import type { ChatSession } from '@/stores/chat/types';
 import {
@@ -24,19 +24,19 @@ export interface AssistantSnapshot {
 
 export interface FetchChatHistoryInput {
   sessionKey: string;
-  runtimeAddress: RuntimeAddress;
+  sessionIdentity: SessionIdentity;
   limit?: number;
 }
 
 export interface FetchChatTimelineInput {
   sessionKey: string;
-  runtimeAddress: RuntimeAddress;
+  sessionIdentity: SessionIdentity;
   limit?: number;
 }
 
 export interface SendChatMessageInput {
   sessionKey: string;
-  runtimeAddress: RuntimeAddress;
+  sessionIdentity: SessionIdentity;
   message: string;
   deliver?: boolean;
   idempotencyKey?: string;
@@ -44,11 +44,11 @@ export interface SendChatMessageInput {
 
 export interface DeleteSessionInput {
   key: string;
-  runtimeAddress: RuntimeAddress;
+  sessionIdentity: SessionIdentity;
 }
 
 export interface ListSessionsInput {
-  runtimeAddress: RuntimeAddress;
+  endpoint: RuntimeEndpointRef;
   limit?: number;
   offset?: number;
 }
@@ -66,7 +66,7 @@ export async function fetchChatTimeline(
 ): Promise<SessionRenderItem[]> {
   const initial = await hostSessionWindowFetch({
     sessionKey: input.sessionKey,
-    runtimeAddress: input.runtimeAddress,
+    sessionIdentity: input.sessionIdentity,
     mode: 'latest',
     limit: input.limit ?? DEFAULT_CHAT_HISTORY_LIMIT,
     includeCanonical: true,
@@ -75,7 +75,7 @@ export async function fetchChatTimeline(
     initial,
     refetch: async () => await hostSessionWindowFetch({
       sessionKey: input.sessionKey,
-      runtimeAddress: input.runtimeAddress,
+      sessionIdentity: input.sessionIdentity,
       mode: 'latest',
       limit: input.limit ?? DEFAULT_CHAT_HISTORY_LIMIT,
       includeCanonical: true,
@@ -89,7 +89,7 @@ export async function fetchLatestAssistantText(
 ): Promise<string> {
   const items = await fetchChatTimeline({
     sessionKey: input.sessionKey,
-    runtimeAddress: input.runtimeAddress,
+    sessionIdentity: input.sessionIdentity,
     limit: input.limit,
   });
   return findLatestAssistantTextFromItems(items);
@@ -100,7 +100,7 @@ export async function fetchLatestAssistantTurnText(
 ): Promise<string> {
   const items = await fetchChatTimeline({
     sessionKey: input.sessionKey,
-    runtimeAddress: input.runtimeAddress,
+    sessionIdentity: input.sessionIdentity,
     limit: input.limit,
   });
   return findLatestAssistantTurnTextFromItems(items);
@@ -111,7 +111,7 @@ export async function fetchLatestAssistantSnapshot(
 ): Promise<AssistantSnapshot> {
   const items = await fetchChatTimeline({
     sessionKey: input.sessionKey,
-    runtimeAddress: input.runtimeAddress,
+    sessionIdentity: input.sessionIdentity,
     limit: input.limit,
   });
   return findLatestAssistantSnapshotFromItems(items);
@@ -122,7 +122,7 @@ export async function sendChatMessage(
 ): Promise<Awaited<ReturnType<typeof hostSessionPrompt>>> {
   return await hostSessionPrompt({
     sessionKey: input.sessionKey,
-    runtimeAddress: input.runtimeAddress,
+    sessionIdentity: input.sessionIdentity,
     message: input.message,
     deliver: input.deliver,
     idempotencyKey: input.idempotencyKey,
@@ -134,32 +134,32 @@ export async function deleteSession(
 ): Promise<void> {
   await hostSessionDelete({
     sessionKey: input.key,
-    runtimeAddress: input.runtimeAddress,
+    sessionIdentity: input.sessionIdentity,
   });
 }
 
 export async function archiveSession(input: DeleteSessionInput): Promise<void> {
   await hostSessionArchive({
     sessionKey: input.key,
-    runtimeAddress: input.runtimeAddress,
+    sessionIdentity: input.sessionIdentity,
   });
 }
 
 export async function unarchiveSession(input: DeleteSessionInput): Promise<void> {
   await hostSessionUnarchive({
     sessionKey: input.key,
-    runtimeAddress: input.runtimeAddress,
+    sessionIdentity: input.sessionIdentity,
   });
 }
 
 export async function updateSessionStatus(input: {
   key: string;
-  runtimeAddress: RuntimeAddress;
+  sessionIdentity: SessionIdentity;
   status: 'active' | 'completed' | 'archived' | 'deleted';
 }): Promise<void> {
   await hostSessionUpdateStatus({
     sessionKey: input.key,
-    runtimeAddress: input.runtimeAddress,
+    sessionIdentity: input.sessionIdentity,
     status: input.status,
   });
 }
@@ -167,6 +167,6 @@ export async function updateSessionStatus(input: {
 export async function listSessions(
   input: ListSessionsInput,
 ): Promise<ChatSession[]> {
-  const result = await hostSessionList({ runtimeAddress: input.runtimeAddress });
+  const result = await hostSessionList({ endpoint: input.endpoint });
   return Array.isArray(result.sessions) ? result.sessions as ChatSession[] : [];
 }

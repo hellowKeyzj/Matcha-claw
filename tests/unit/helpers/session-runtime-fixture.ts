@@ -16,7 +16,7 @@ import { SessionLifecycleWorkflow } from '../../../runtime-host/application/work
 import { SessionCatalogWorkflow } from '../../../runtime-host/application/workflows/session-catalog/session-catalog-workflow';
 import { SessionModelResolutionWorkflow } from '../../../runtime-host/application/workflows/session-metadata/session-model-resolution-workflow';
 import { SessionOperationResultWorkflow } from '../../../runtime-host/application/workflows/session-operation/session-operation-result-workflow';
-import { SessionStorageIndexWorkflow, type SessionStorageRuntimeAddressResolverPort } from '../../../runtime-host/application/workflows/session-storage/session-storage-index-workflow';
+import { SessionStorageIndexWorkflow, type SessionStorageSessionIdentityResolverPort } from '../../../runtime-host/application/workflows/session-storage/session-storage-index-workflow';
 import { SessionStorageMutationWorkflow } from '../../../runtime-host/application/workflows/session-storage/session-storage-mutation-workflow';
 import { SessionStorageRepositoryWorkflow } from '../../../runtime-host/application/workflows/session-storage/session-storage-repository-workflow';
 import { SessionStorageTranscriptWorkflow } from '../../../runtime-host/application/workflows/session-storage/session-storage-transcript-workflow';
@@ -38,18 +38,21 @@ import { createTestRuntimeIdGenerator } from './runtime-id-generator';
 import { AgentRuntimeRegistry } from '../../../runtime-host/application/agent-runtime/contracts/agent-runtime-registry';
 import { OpenClawRuntimeAdapter } from '../../../runtime-host/application/adapters/openclaw/runtime/openclaw-runtime-adapter';
 import { createTestAcpClientConnector } from './acp-test-connector';
-import { validateRuntimeAddress } from '../../../runtime-host/application/agent-runtime/contracts/runtime-address';
-import { createOpenClawTestRuntimeAddress } from './runtime-address-fixtures';
-export { createOpenClawTestRuntimeAddress, createOpenClawTestRuntimeContext, openClawTestRuntimeIdentity } from './runtime-address-fixtures';
+import { validateSessionIdentity, type SessionIdentity } from '../../../runtime-host/application/agent-runtime/contracts/runtime-address';
+import { createOpenClawTestSessionIdentity } from './runtime-address-fixtures';
+export { createOpenClawTestRuntimeContext, createOpenClawTestSessionIdentity, openClawTestRuntimeEndpoint, openClawTestRuntimeIdentity } from './runtime-address-fixtures';
 
-function createTestSessionStorageRuntimeAddressResolver(): SessionStorageRuntimeAddressResolverPort {
+function createTestSessionStorageIdentityResolver(): SessionStorageSessionIdentityResolverPort {
   return {
-    resolveStorageRuntimeAddress: ({ agentId, sessionKey, sessionStoreEntry }) => {
-      const stored = sessionStoreEntry?.runtimeAddress;
-      if (validateRuntimeAddress(stored) === null) {
-        return stored as ReturnType<typeof createOpenClawTestRuntimeAddress>;
+    resolveStorageSessionIdentity: ({ agentId, sessionKey, sessionStoreEntry }) => {
+      const stored = sessionStoreEntry?.sessionIdentity;
+      if (validateSessionIdentity(stored) === null) {
+        const identity = stored as SessionIdentity;
+        if (identity.agentId === agentId && identity.sessionKey === sessionKey) {
+          return identity;
+        }
       }
-      return createOpenClawTestRuntimeAddress(sessionKey, agentId);
+      return createOpenClawTestSessionIdentity(sessionKey, agentId);
     },
   };
 }
@@ -83,7 +86,7 @@ export function createTestSessionCatalogService(input: {
       indexWorkflow: new SessionStorageIndexWorkflow({
         workspace: input.workspace,
         fileSystem,
-        runtimeAddressResolver: createTestSessionStorageRuntimeAddressResolver(),
+        sessionIdentityResolver: createTestSessionStorageIdentityResolver(),
       }),
       mutationWorkflow: new SessionStorageMutationWorkflow({
         fileSystem,
@@ -132,7 +135,7 @@ export function createTestSessionRuntimeService(deps: TestSessionRuntimeServiceD
       indexWorkflow: new SessionStorageIndexWorkflow({
         workspace: deps.workspace,
         fileSystem,
-        runtimeAddressResolver: createTestSessionStorageRuntimeAddressResolver(),
+        sessionIdentityResolver: createTestSessionStorageIdentityResolver(),
       }),
       mutationWorkflow: new SessionStorageMutationWorkflow({
         fileSystem,

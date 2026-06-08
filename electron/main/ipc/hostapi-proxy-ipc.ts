@@ -1,4 +1,5 @@
 import { ipcMain } from 'electron';
+import { isHostApiProxyAllowedRoute } from '../../api/route-boundary';
 import { proxyAwareFetch } from '../../utils/proxy-fetch';
 import { getPort } from '../../utils/config';
 import { getHostApiToken } from '../../api/server';
@@ -18,8 +19,18 @@ type HostApiAbortRequest = {
 };
 
 const DEFAULT_HOST_API_TIMEOUT_MS = 15000;
-const FILE_DIRECTORY_TIMEOUT_MS = 60000;
 const REQUEST_TIMEOUT_HEADER = 'x-matchaclaw-request-timeout-ms';
+
+function normalizeHostApiProxyPath(path: unknown): string {
+  if (typeof path !== 'string') {
+    return '/';
+  }
+  const trimmedPath = path.trim();
+  if (!trimmedPath || /^[a-z][a-z\d+.-]*:/i.test(trimmedPath) || trimmedPath.startsWith('//')) {
+    return '/';
+  }
+  return trimmedPath.startsWith('/') ? trimmedPath : `/${trimmedPath}`;
+}
 
 export function registerHostApiProxyHandlers(): void {
   // requestId → AbortController 注册表，让 renderer 通过 hostapi:abort 真正取消正在进行的 upstream fetch，
@@ -49,16 +60,16 @@ export function registerHostApiProxyHandlers(): void {
     const requestId = typeof request?.requestId === 'string' ? request.requestId : '';
     try {
       const port = getPort('MATCHACLAW_HOST_API');
-      const normalizedPath = request?.path
-        ? (request.path.startsWith('/') ? request.path : `/${request.path}`)
-        : '/';
+      const normalizedPath = normalizeHostApiProxyPath(request?.path);
       const method = (request?.method || 'GET').toUpperCase();
+      const routeUrl = new URL(normalizedPath, 'http://127.0.0.1');
+      if (!isHostApiProxyAllowedRoute(method, routeUrl.pathname)) {
+        throw new Error(`hostapi proxy route is not allowed: ${method} ${routeUrl.pathname}`);
+      }
       const timeoutMs =
         typeof request?.timeoutMs === 'number' && request.timeoutMs > 0
           ? request.timeoutMs
-          : normalizedPath === '/api/files/list-dir'
-            ? FILE_DIRECTORY_TIMEOUT_MS
-            : DEFAULT_HOST_API_TIMEOUT_MS;
+          : DEFAULT_HOST_API_TIMEOUT_MS;
 
       const headers: Record<string, string> = { ...(request?.headers ?? {}) };
       headers.Authorization = `Bearer ${getHostApiToken()}`;

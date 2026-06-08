@@ -5,14 +5,6 @@ import { MediaCapabilitiesPanel } from '@/components/settings/MediaCapabilitiesP
 import type { CapabilityRouting } from '@/lib/capability-routing';
 import type { ProviderModel } from '@/lib/provider-model-catalog';
 
-const TEST_RUNTIME_ADDRESS = {
-  kind: 'native-runtime',
-  capabilityId: 'model.provider',
-  runtimeAdapterId: 'openclaw',
-  runtimeInstanceId: 'local',
-  agentId: 'default',
-} as const;
-
 const routingState = vi.hoisted(() => ({
   routing: {} as CapabilityRouting,
   ready: true,
@@ -77,7 +69,7 @@ describe('media capabilities panel', () => {
   });
 
   it('saves capability routes using credential-scoped model refs', async () => {
-    render(<MediaCapabilitiesPanel runtimeAddress={TEST_RUNTIME_ADDRESS} />);
+    render(<MediaCapabilitiesPanel />);
 
     expect(screen.getByRole('button', { name: 'Default Models' })).toHaveAttribute('aria-expanded', 'false');
     fireEvent.click(screen.getByRole('button', { name: 'Default Models' }));
@@ -96,12 +88,12 @@ describe('media capabilities panel', () => {
       expect(routingState.setRoute).toHaveBeenCalledWith('chat', {
         primary: { credentialId: 'openai-main', modelId: 'gpt-5.5' },
         fallbacks: [{ credentialId: 'ark-main', modelId: 'ark-code-latest' }],
-      }, TEST_RUNTIME_ADDRESS);
+      });
     });
   });
 
   it('saves TTS through the same model route contract', async () => {
-    render(<MediaCapabilitiesPanel runtimeAddress={TEST_RUNTIME_ADDRESS} />);
+    render(<MediaCapabilitiesPanel />);
 
     fireEvent.click(screen.getByRole('button', { name: 'Default Models' }));
 
@@ -114,12 +106,12 @@ describe('media capabilities panel', () => {
       expect(routingState.setRoute).toHaveBeenCalledWith('tts', {
         primary: { credentialId: 'openai-main', modelId: 'tts-1' },
         fallbacks: [],
-      }, TEST_RUNTIME_ADDRESS);
+      });
     });
   });
 
   it('uses catalog credential labels before falling back to credential ids', async () => {
-    render(<MediaCapabilitiesPanel runtimeAddress={TEST_RUNTIME_ADDRESS} />);
+    render(<MediaCapabilitiesPanel />);
 
     fireEvent.click(screen.getByRole('button', { name: 'Default Models' }));
 

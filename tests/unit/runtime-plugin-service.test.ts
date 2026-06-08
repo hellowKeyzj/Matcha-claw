@@ -182,6 +182,17 @@ describe('runtime plugin service', () => {
     );
   });
 
+  it('team-runtime 作为托管能力插件可通过插件中心安装入口安装', async () => {
+    writeManagedPluginSource('team-runtime');
+
+    await createRuntimePluginRepository().ensureManagedPluginInstalled('team-runtime');
+
+    const installedManifest = JSON.parse(readFileSync(join(configDir, 'extensions', 'team-runtime', 'openclaw.plugin.json'), 'utf8')) as {
+      id: string;
+    };
+    expect(installedManifest.id).toBe('team-runtime');
+  });
+
   it('首次启用 memory-lancedb-pro 时会补默认 memory slot 和 local MiniLM 配置', async () => {
     writeManagedPluginSource('memory-lancedb-pro');
     writeCompanionSkillSource('memory-lancedb-pro-skill');

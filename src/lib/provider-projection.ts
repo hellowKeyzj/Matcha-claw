@@ -1,57 +1,80 @@
 import {
-  hostCapabilityExecute,
+  hostApiFetch,
+  resolveSingleCapabilityScope,
   waitForRuntimeJobResult,
   type RuntimeJobSubmission,
 } from '@/lib/host-api';
 import type { ProviderCredential, ProviderType } from '@/lib/providers';
-import type { RuntimeAddress } from '../../runtime-host/shared/runtime-address';
+import type { CapabilityTarget } from '../../runtime-host/shared/runtime-address';
 
 const MODEL_PROVIDER_CAPABILITY_ID = 'model.provider';
 
 async function modelProviderCapabilityExecute<TResult>(
   operationId: string,
-  runtimeAddress: RuntimeAddress,
   input: Record<string, unknown> = {},
+  target: CapabilityTarget | null = null,
 ): Promise<TResult> {
-  return await hostCapabilityExecute<TResult>({
-    id: MODEL_PROVIDER_CAPABILITY_ID,
-    operationId,
-    runtimeAddress,
-    input: {
-      ...input,
-      runtimeAddress,
-    },
+  return await hostApiFetch<TResult>('/api/capabilities/execute', {
+    method: 'POST',
+    body: JSON.stringify({
+      id: MODEL_PROVIDER_CAPABILITY_ID,
+      operationId,
+      scope: await resolveSingleCapabilityScope(MODEL_PROVIDER_CAPABILITY_ID),
+      target,
+      input,
+    }),
   });
 }
 
 async function submitProviderJob<TResult = { success: boolean; error?: string }>(
   operationId: string,
-  runtimeAddress: RuntimeAddress,
   input: Record<string, unknown>,
+  target: CapabilityTarget | null,
 ): Promise<TResult> {
-  const submission = await modelProviderCapabilityExecute<RuntimeJobSubmission<TResult>>(operationId, runtimeAddress, input);
+  const submission = await modelProviderCapabilityExecute<RuntimeJobSubmission<TResult>>(operationId, input, target);
   return await waitForRuntimeJobResult<TResult>(submission.job.id);
 }
 
 export async function hostProviderStartOAuth(input: {
   provider: string;
+  flowId: string;
   accountId: string;
   label: string;
-}, runtimeAddress: RuntimeAddress): Promise<{ success: boolean }> {
-  return await modelProviderCapabilityExecute<{ success: boolean }>('providers.oauthStart', runtimeAddress, input);
+}): Promise<{ success: boolean }> {
+  return await modelProviderCapabilityExecute<{ success: boolean }>(
+    'providers.oauthStart',
+    input,
+    { kind: 'provider-oauth', flowId: input.flowId, accountId: input.accountId, vendorId: input.provider },
+  );
 }
 
-export async function hostProviderCancelOAuth(runtimeAddress: RuntimeAddress): Promise<{ success: boolean }> {
-  return await modelProviderCapabilityExecute<{ success: boolean }>('providers.oauthCancel', runtimeAddress);
+export async function hostProviderCancelOAuth(input: {
+  flowId: string;
+  accountId: string;
+  vendorId: string;
+}): Promise<{ success: boolean }> {
+  return await modelProviderCapabilityExecute<{ success: boolean }>(
+    'providers.oauthCancel',
+    input,
+    { kind: 'provider-oauth', flowId: input.flowId, accountId: input.accountId, vendorId: input.vendorId },
+  );
 }
 
-export async function hostProviderSubmitOAuthCode(code: string, runtimeAddress: RuntimeAddress): Promise<{ success: boolean }> {
-  return await modelProviderCapabilityExecute<{ success: boolean }>('providers.oauthSubmit', runtimeAddress, { code });
+export async function hostProviderSubmitOAuthCode(input: {
+  flowId: string;
+  accountId: string;
+  vendorId: string;
+  code: string;
+}): Promise<{ success: boolean }> {
+  return await modelProviderCapabilityExecute<{ success: boolean }>(
+    'providers.oauthSubmit',
+    input,
+    { kind: 'provider-oauth', flowId: input.flowId, accountId: input.accountId, vendorId: input.vendorId },
+  );
 }
 
 export async function hostProviderReadAccount(
   accountId: string,
-  runtimeAddress: RuntimeAddress,
 ): Promise<{
   baseUrl?: string;
   apiProtocol?: ProviderCredential['apiProtocol'];
@@ -61,11 +84,15 @@ export async function hostProviderReadAccount(
     baseUrl?: string;
     apiProtocol?: ProviderCredential['apiProtocol'];
     headers?: Record<string, string>;
-  } | null>('providers.getAccount', runtimeAddress, { accountId });
+  } | null>('providers.getAccount', { accountId }, { kind: 'provider-account', accountId });
 }
 
-export async function hostProviderReadApiKey(accountId: string, runtimeAddress: RuntimeAddress): Promise<{ apiKey: string | null }> {
-  return await modelProviderCapabilityExecute<{ apiKey: string | null }>('providers.getApiKey', runtimeAddress, { accountId });
+export async function hostProviderReadApiKey(accountId: string, vendorId: string): Promise<{ hasKey: boolean; keyMasked: string | null; last4: string | null }> {
+  return await modelProviderCapabilityExecute<{ hasKey: boolean; keyMasked: string | null; last4: string | null }>(
+    'providers.getApiKey',
+    { accountId, vendorId },
+    { kind: 'provider-credential', accountId, vendorId },
+  );
 }
 
 export async function hostProviderValidate(
@@ -79,37 +106,44 @@ export async function hostProviderValidate(
       headers?: Record<string, string>;
     };
   },
-  runtimeAddress: RuntimeAddress,
 ): Promise<{ valid: boolean; error?: string }> {
-  return await modelProviderCapabilityExecute<{ valid: boolean; error?: string }>('providers.validate', runtimeAddress, input);
+  return await modelProviderCapabilityExecute<{ valid: boolean; error?: string }>(
+    'providers.validate',
+    input,
+    input.accountId
+      ? { kind: 'provider-credential', accountId: input.accountId, vendorId: input.vendorId }
+      : { kind: 'provider-credential', accountId: input.vendorId, vendorId: input.vendorId },
+  );
 }
 
 export async function hostProviderCreateAccount(
   account: ProviderCredential,
-  runtimeAddress: RuntimeAddress,
   apiKey?: string,
 ): Promise<{ success: boolean; error?: string }> {
-  return await submitProviderJob<{ success: boolean; error?: string }>('providers.createAccount', runtimeAddress, { account, apiKey });
+  return await submitProviderJob<{ success: boolean; error?: string }>(
+    'providers.createAccount',
+    { account, apiKey },
+    { kind: 'provider-account', accountId: account.id, vendorId: account.vendorId },
+  );
 }
 
 export async function hostProviderUpdateAccount(
   accountId: string,
   updates: Partial<ProviderCredential>,
-  runtimeAddress: RuntimeAddress,
   apiKey?: string,
 ): Promise<{ success: boolean; error?: string }> {
   return await submitProviderJob<{ success: boolean; error?: string }>(
     'providers.updateAccount',
-    runtimeAddress,
     { accountId, updates, apiKey },
+    { kind: 'provider-account', accountId },
   );
 }
 
-export async function hostProviderDeleteAccount(accountId: string, runtimeAddress: RuntimeAddress): Promise<{ success: boolean; error?: string }> {
+export async function hostProviderDeleteAccount(accountId: string): Promise<{ success: boolean; error?: string }> {
   return await submitProviderJob<{ success: boolean; error?: string }>(
     'providers.deleteAccount',
-    runtimeAddress,
     { accountId },
+    { kind: 'provider-account', accountId },
   );
 }
 

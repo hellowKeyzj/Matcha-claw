@@ -40,6 +40,7 @@
         "pendingBlockers": "Session Blockers",
         "pendingBlockersEmpty": "No pending blockers",
         "pendingBlockerTask": "Task {{taskId}}",
+        "pendingBlockerStage": "Stage {{stageId}}",
         "pendingBlockerGeneral": "General Blocker",
         "pendingBlockerFrom": "From {{from}}",
         "pendingBlockerTypeApproval": "Approval Blocker",

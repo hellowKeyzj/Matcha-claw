@@ -52,7 +52,7 @@ import {
   hostApiFetch,
   hostDiagnosticsCollect,
   hostOpenClawGetCliCommand,
-  resolveSingleCapabilityRuntimeAddress,
+  resolveSingleCapabilityScope,
   waitForRuntimeJobResult,
 } from '@/lib/host-api';
 import { subscribeHostEvent } from '@/lib/host-events';
@@ -70,14 +70,12 @@ import {
   type SettingsSectionKey,
 } from '@/lib/sections';
 import { isGatewayOperational } from '@/lib/gateway-status';
-import type { RuntimeAddress } from '../../../runtime-host/shared/runtime-address';
+import type { RuntimeEndpointRef } from '../../../runtime-host/shared/runtime-address';
 
-const SETTINGS_RUNTIME_CAPABILITY_ID = 'settings.runtime';
-const LICENSE_RUNTIME_CAPABILITY_ID = 'license.runtime';
 const RUNTIME_HOST_CAPABILITY_ID = 'runtime.host';
 type ControlUiInfo = {
   url: string;
-  token: string;
+  token?: string;
   port: number;
 };
 
@@ -300,35 +298,36 @@ export function Settings() {
     lastValidation: null,
     renewalAlert: null,
   });
-  const [settingsRuntimeAddress, setSettingsRuntimeAddress] = useState<RuntimeAddress | null>(null);
-  const [licenseRuntimeAddress, setLicenseRuntimeAddress] = useState<RuntimeAddress | null>(null);
-  const [runtimeHostAddress, setRuntimeHostAddress] = useState<RuntimeAddress | null>(null);
+  const [runtimeHostEndpoint, setRuntimeHostEndpoint] = useState<RuntimeEndpointRef | null>(null);
 
   useEffect(() => {
     if (!gatewayOperational) {
-      setSettingsRuntimeAddress(null);
-      setLicenseRuntimeAddress(null);
-      setRuntimeHostAddress(null);
+      setRuntimeHostEndpoint(null);
       return;
     }
     let active = true;
-    void Promise.all([
-      resolveSingleCapabilityRuntimeAddress(SETTINGS_RUNTIME_CAPABILITY_ID),
-      resolveSingleCapabilityRuntimeAddress(LICENSE_RUNTIME_CAPABILITY_ID),
-      resolveSingleCapabilityRuntimeAddress(RUNTIME_HOST_CAPABILITY_ID),
-    ])
-      .then(([settingsAddress, licenseAddress, hostAddress]) => {
-        if (active) {
-          setSettingsRuntimeAddress(settingsAddress);
-          setLicenseRuntimeAddress(licenseAddress);
-          setRuntimeHostAddress(hostAddress);
+    void resolveSingleCapabilityScope(RUNTIME_HOST_CAPABILITY_ID)
+      .then((scope) => {
+        if (!active) {
+          return;
+        }
+        switch (scope.kind) {
+          case 'runtime-instance':
+          case 'agent':
+          case 'workspace':
+          case 'team-run':
+            setRuntimeHostEndpoint(scope.endpoint);
+            break;
+          case 'session':
+            setRuntimeHostEndpoint(scope.identity.endpoint);
+            break;
+          default:
+            setRuntimeHostEndpoint(null);
         }
       })
       .catch(() => {
         if (active) {
-          setSettingsRuntimeAddress(null);
-          setLicenseRuntimeAddress(null);
-          setRuntimeHostAddress(null);
+          setRuntimeHostEndpoint(null);
         }
       });
     return () => {
@@ -371,8 +370,8 @@ export function Settings() {
 
   const loadStoredLicenseKey = useCallback(async () => {
     try {
-      const payload = await hostApiFetch<{ key: string | null }>('/api/license/stored-key');
-      const storedKey = typeof payload.key === 'string' ? payload.key.trim() : '';
+      const payload = await hostApiFetch<{ masked: string | null }>('/api/license/stored-key');
+      const storedKey = typeof payload.masked === 'string' ? payload.masked.trim() : '';
       if (storedKey) {
         setLicenseKeyInput(storedKey);
       }
@@ -421,13 +420,9 @@ export function Settings() {
   }, [resolveLicenseMessage, t]);
 
   const runValidateLicense = useCallback(async () => {
-    if (!licenseRuntimeAddress) {
-      toast.error(t('license.messages.unknown'));
-      return;
-    }
     setLicenseBusy(true);
     try {
-      const result = await hostLicenseValidate<LicenseValidationResponse>(licenseKeyInput, licenseRuntimeAddress);
+      const result = await hostLicenseValidate<LicenseValidationResponse>(licenseKeyInput);
       applyLicenseResult(result);
       await refreshLicenseGateSnapshot();
     } catch (error) {
@@ -437,7 +432,7 @@ export function Settings() {
     } finally {
       setLicenseBusy(false);
     }
-  }, [applyLicenseResult, licenseKeyInput, licenseRuntimeAddress, refreshLicenseGateSnapshot, resolveLicenseMessage, t]);
+  }, [applyLicenseResult, licenseKeyInput, refreshLicenseGateSnapshot, resolveLicenseMessage]);
 
   const handleValidateLicense = useCallback(() => {
     if (!licenseKeyInput.trim()) {
@@ -450,13 +445,9 @@ export function Settings() {
   }, [licenseKeyInput, resolveLicenseMessage, runValidateLicense]);
 
   const handleForceRevalidate = useCallback(async () => {
-    if (!licenseRuntimeAddress) {
-      toast.error(t('license.messages.unknown'));
-      return;
-    }
     setLicenseBusy(true);
     try {
-      const result = await hostLicenseRevalidate<LicenseValidationResponse>(licenseRuntimeAddress);
+      const result = await hostLicenseRevalidate<LicenseValidationResponse>();
       applyLicenseResult(result);
       await refreshLicenseGateSnapshot();
     } catch (error) {
@@ -466,16 +457,12 @@ export function Settings() {
     } finally {
       setLicenseBusy(false);
     }
-  }, [applyLicenseResult, licenseRuntimeAddress, refreshLicenseGateSnapshot, resolveLicenseMessage, t]);
+  }, [applyLicenseResult, refreshLicenseGateSnapshot, resolveLicenseMessage]);
 
   const handleClearStoredLicense = useCallback(async () => {
-    if (!licenseRuntimeAddress) {
-      toast.error(t('license.toast.clearFailed', { error: t('license.messages.unknown') }));
-      return;
-    }
     setLicenseBusy(true);
     try {
-      await hostLicenseClear(licenseRuntimeAddress);
+      await hostLicenseClear();
       setLicenseKeyInput('');
       setLicenseValidationCode(null);
       setLicenseValidationMessage('');
@@ -487,16 +474,16 @@ export function Settings() {
     } finally {
       setLicenseBusy(false);
     }
-  }, [licenseRuntimeAddress, refreshLicenseGateSnapshot, t]);
+  }, [refreshLicenseGateSnapshot, t]);
 
   const handleCollectDiagnosticsBundle = useCallback(async () => {
-    if (!runtimeHostAddress) {
+    if (!runtimeHostEndpoint) {
       toast.error(t('diagnostics.toast.failed', { error: t('common:status.error') }));
       return;
     }
     setCollectingDiagnostics(true);
     try {
-      const submission = await hostDiagnosticsCollect(runtimeHostAddress);
+      const submission = await hostDiagnosticsCollect(runtimeHostEndpoint);
       const result = await waitForRuntimeJobResult<DiagnosticsBundleResponse>(submission.job.id, {
         timeoutMs: 180000,
       });
@@ -512,7 +499,7 @@ export function Settings() {
     } finally {
       setCollectingDiagnostics(false);
     }
-  }, [runtimeHostAddress, t]);
+  }, [runtimeHostEndpoint, t]);
 
   const handleOpenDiagnosticsBundleFolder = useCallback(async () => {
     if (!lastDiagnosticsZipPath) {
@@ -577,12 +564,8 @@ export function Settings() {
 
     try {
       const sourceDataUrl = await readFileAsDataUrl(selectedFile);
-      if (!settingsRuntimeAddress) {
-        toast.error(t('common:status.error'));
-        return;
-      }
       const squareAvatarDataUrl = await cropImageToSquareDataUrl(sourceDataUrl, 128);
-      await setUserAvatarDataUrl(squareAvatarDataUrl, settingsRuntimeAddress);
+      await setUserAvatarDataUrl(squareAvatarDataUrl);
       toast.success(t('appearance.avatarUpdated'));
     } catch (error) {
       toast.error(t('appearance.avatarUpdateFailed', { error: String(error) }));
@@ -590,12 +573,8 @@ export function Settings() {
   };
 
   const handleClearAvatar = async () => {
-    if (!settingsRuntimeAddress) {
-      toast.error(t('common:status.error'));
-      return;
-    }
     try {
-      await clearUserAvatar(settingsRuntimeAddress);
+      await clearUserAvatar();
       if (userAvatarInputRef.current) {
         userAvatarInputRef.current.value = '';
       }
@@ -611,12 +590,11 @@ export function Settings() {
       const result = await hostApiFetch<{
         success: boolean;
         url?: string;
-        token?: string;
         port?: number;
         error?: string;
       }>('/api/gateway/control-ui');
-      if (result.success && result.url && result.token && typeof result.port === 'number') {
-        setControlUiInfo({ url: result.url, token: result.token, port: result.port });
+      if (result.success && result.url && typeof result.port === 'number') {
+        setControlUiInfo({ url: result.url, port: result.port });
         trackUiEvent('settings.open_dev_console');
         window.electron.openExternal(result.url);
       } else {
@@ -632,11 +610,10 @@ export function Settings() {
       const result = await hostApiFetch<{
         success: boolean;
         url?: string;
-        token?: string;
         port?: number;
       }>('/api/gateway/control-ui');
-      if (result.success && result.url && result.token && typeof result.port === 'number') {
-        setControlUiInfo({ url: result.url, token: result.token, port: result.port });
+      if (result.success && result.url && typeof result.port === 'number') {
+        setControlUiInfo({ url: result.url, port: result.port });
       }
     } catch {
       // Ignore refresh errors
@@ -797,10 +774,6 @@ export function Settings() {
   }, []);
 
   const handleSaveProxySettings = async () => {
-    if (!settingsRuntimeAddress) {
-      toast.error(t('gateway.proxySaveFailed'));
-      return;
-    }
     setSavingProxy(true);
     try {
       const normalizedProxyServer = proxyServerDraft.trim();
@@ -809,7 +782,7 @@ export function Settings() {
         proxyEnabled: proxyEnabledDraft,
         proxyServer: normalizedProxyServer,
         proxyBypassRules: normalizedBypassRules,
-      }, settingsRuntimeAddress);
+      });
 
       useSettingsStore.setState({
         proxyEnabled: proxyEnabledDraft,
@@ -830,15 +803,11 @@ export function Settings() {
     if (savingBrowserMode || nextMode === browserMode) {
       return;
     }
-    if (!settingsRuntimeAddress) {
-      toast.error(t('gateway.browser.modeSaveFailed'));
-      return;
-    }
     setSavingBrowserMode(true);
     try {
       await hostSettingsPutPatch({
         browserMode: nextMode,
-      }, settingsRuntimeAddress);
+      });
       useSettingsStore.setState({ browserMode: nextMode });
       toast.success(t('gateway.browser.modeSaved'));
     } catch (error) {
@@ -846,7 +815,7 @@ export function Settings() {
     } finally {
       setSavingBrowserMode(false);
     }
-  }, [browserMode, savingBrowserMode, settingsRuntimeAddress, t]);
+  }, [browserMode, savingBrowserMode, t]);
 
   const filteredTelemetryEntries = useMemo(() => {
     let entries = telemetryEntries;
@@ -1153,6 +1122,7 @@ export function Settings() {
                       onClick={() => setShowLicenseKeyPlain((prev) => !prev)}
                       title={showLicenseKeyPlain ? t('license.hideKey') : t('license.showKey')}
                       aria-label={showLicenseKeyPlain ? t('license.hideKey') : t('license.showKey')}
+                      disabled={licenseGateSnapshot.hasStoredKey}
                     >
                       {showLicenseKeyPlain ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
                     </Button>
@@ -1219,11 +1189,9 @@ export function Settings() {
                 variant={theme === 'light' ? 'default' : 'outline'}
                 size="sm"
                 onClick={() => {
-                  if (settingsRuntimeAddress) {
-                    void setTheme('light', settingsRuntimeAddress).catch((error) => {
-                      toast.error(`${t('common:status.error')}: ${toUserMessage(error)}`);
-                    });
-                  }
+                  void setTheme('light').catch((error) => {
+                    toast.error(`${t('common:status.error')}: ${toUserMessage(error)}`);
+                  });
                 }}
               >
                 <Sun className="h-4 w-4 mr-2" />
@@ -1233,11 +1201,9 @@ export function Settings() {
                 variant={theme === 'dark' ? 'default' : 'outline'}
                 size="sm"
                 onClick={() => {
-                  if (settingsRuntimeAddress) {
-                    void setTheme('dark', settingsRuntimeAddress).catch((error) => {
-                      toast.error(`${t('common:status.error')}: ${toUserMessage(error)}`);
-                    });
-                  }
+                  void setTheme('dark').catch((error) => {
+                    toast.error(`${t('common:status.error')}: ${toUserMessage(error)}`);
+                  });
                 }}
               >
                 <Moon className="h-4 w-4 mr-2" />
@@ -1246,7 +1212,11 @@ export function Settings() {
               <Button
                 variant={theme === 'system' ? 'default' : 'outline'}
                 size="sm"
-                onClick={() => { if (settingsRuntimeAddress) void setTheme('system', settingsRuntimeAddress).catch(() => {}); }}
+                onClick={() => {
+                  void setTheme('system').catch((error) => {
+                    toast.error(`${t('common:status.error')}: ${toUserMessage(error)}`);
+                  });
+                }}
               >
                 <Monitor className="h-4 w-4 mr-2" />
                 {t('appearance.system')}
@@ -1261,7 +1231,7 @@ export function Settings() {
                   key={lang.code}
                   variant={language === lang.code ? 'default' : 'outline'}
                   size="sm"
-                  onClick={() => { if (settingsRuntimeAddress) void setLanguage(lang.code, settingsRuntimeAddress).catch(() => {}); }}
+                  onClick={() => { void setLanguage(lang.code).catch(() => {}); }}
                 >
                   {lang.label}
                 </Button>
@@ -1325,7 +1295,7 @@ export function Settings() {
                   </div>
                   <Switch
                     checked={launchAtStartup}
-                    onCheckedChange={(value) => { if (settingsRuntimeAddress) void setLaunchAtStartup(value, settingsRuntimeAddress).catch(() => {}); }}
+                    onCheckedChange={(value) => { void setLaunchAtStartup(value).catch(() => {}); }}
                   />
                 </div>
               </div>
@@ -1556,7 +1526,7 @@ export function Settings() {
             </div>
             <Switch
               checked={gatewayAutoStart}
-              onCheckedChange={(value) => { if (settingsRuntimeAddress) void setGatewayAutoStart(value, settingsRuntimeAddress).catch(() => {}); }}
+              onCheckedChange={(value) => { void setGatewayAutoStart(value).catch(() => {}); }}
             />
           </div>
 
@@ -1666,7 +1636,7 @@ export function Settings() {
             </div>
             <Switch
               checked={autoCheckUpdate}
-              onCheckedChange={(value) => { if (settingsRuntimeAddress) void setAutoCheckUpdate(value, settingsRuntimeAddress).catch(() => {}); }}
+              onCheckedChange={(value) => { void setAutoCheckUpdate(value).catch(() => {}); }}
             />
           </div>
 
@@ -1744,7 +1714,7 @@ export function Settings() {
             </div>
             <Switch
               checked={devModeUnlocked}
-              onCheckedChange={(value) => { if (settingsRuntimeAddress) void setDevModeUnlocked(value, settingsRuntimeAddress).catch(() => {}); }}
+              onCheckedChange={(value) => { void setDevModeUnlocked(value).catch(() => {}); }}
             />
           </div>
         </CardContent>

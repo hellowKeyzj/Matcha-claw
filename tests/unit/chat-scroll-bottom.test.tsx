@@ -245,6 +245,94 @@ describe('chat 滚动模型 - phase=follow', () => {
     });
   });
 
+  it('被动 scroll 事件看到短暂未到底时不应离开 follow', async () => {
+    const { container } = renderChat();
+    const viewport = container.querySelector('.overflow-y-auto') as HTMLDivElement;
+    const metrics = { scrollHeight: 980, clientHeight: 320, scrollTop: 660 };
+    installViewportMetrics(viewport, metrics);
+
+    act(() => {
+      triggerResizeObserver?.();
+    });
+
+    act(() => {
+      metrics.scrollHeight = 1001;
+      fireEvent.scroll(viewport);
+    });
+
+    act(() => {
+      metrics.scrollHeight = 1320;
+      triggerResizeObserver?.();
+    });
+
+    await waitFor(() => {
+      expect(metrics.scrollTop).toBe(1000);
+    });
+  });
+
+  it('last item renderSignature 变化应触发 follow 贴底', async () => {
+    const now = Date.now() / 1000;
+    useChatStore.setState({
+      loadedSessions: {
+        'agent:test:main': buildSessionRecord({
+          messages: [
+            { role: 'user', content: 'hello', timestamp: now, id: 'user-1' },
+            streamingAssistant('first chunk', now),
+          ],
+          window: createViewportWindowState({
+            totalItemCount: 2,
+            windowStartOffset: 0,
+            windowEndOffset: 2,
+            isAtLatest: true,
+          }),
+          meta: { historyStatus: 'ready', lastActivityAt: now * 1000 },
+          runtime: {
+            ...useChatStore.getState().loadedSessions['agent:test:main']!.runtime,
+            activeTurnItemKey: 'assistant-1',
+          },
+        }),
+      },
+    } as never);
+
+    const { container } = renderChat();
+    const viewport = container.querySelector('.overflow-y-auto') as HTMLDivElement;
+    const metrics = { scrollHeight: 980, clientHeight: 320, scrollTop: 660 };
+    installViewportMetrics(viewport, metrics);
+
+    act(() => {
+      triggerResizeObserver?.();
+    });
+
+    act(() => {
+      metrics.scrollHeight = 1320;
+      useChatStore.setState({
+        loadedSessions: {
+          'agent:test:main': buildSessionRecord({
+            messages: [
+              { role: 'user', content: 'hello', timestamp: now, id: 'user-1' },
+              streamingAssistant('first chunk second chunk', now),
+            ],
+            window: createViewportWindowState({
+              totalItemCount: 2,
+              windowStartOffset: 0,
+              windowEndOffset: 2,
+              isAtLatest: true,
+            }),
+            meta: { historyStatus: 'ready', lastActivityAt: now * 1000 },
+            runtime: {
+              ...useChatStore.getState().loadedSessions['agent:test:main']!.runtime,
+              activeTurnItemKey: 'assistant-1',
+            },
+          }),
+        },
+      } as never);
+    });
+
+    await waitFor(() => {
+      expect(metrics.scrollTop).toBe(1000);
+    });
+  });
+
   it('viewport 高度变小时也应继续贴底', async () => {
     useChatStore.setState({
       loadedSessions: {

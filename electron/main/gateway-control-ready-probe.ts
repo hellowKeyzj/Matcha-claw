@@ -1,3 +1,4 @@
+import { createRuntimeHostCapabilityPayload, resolveRuntimeHostEndpoint } from './runtime-host-capabilities';
 import type { RuntimeHostManager } from './runtime-host-manager';
 
 export interface GatewayControlReadyResponse {
@@ -32,10 +33,11 @@ export async function waitForGatewayControlReady(
   while (deps.nowMs() - startedAt < timeoutMs) {
     const remainingMs = Math.max(100, timeoutMs - (deps.nowMs() - startedAt));
     const requestTimeoutMs = Math.min(15000, remainingMs);
+    const endpoint = await resolveRuntimeHostEndpoint(deps.runtimeHostManager);
     const result = await deps.runtimeHostManager.request<GatewayControlReadyResponse>(
       'POST',
-      '/api/gateway/ready',
-      { timeoutMs: requestTimeoutMs },
+      '/api/capabilities/execute',
+      await createRuntimeHostCapabilityPayload(deps.runtimeHostManager, 'runtimeHost.gatewayReady', { timeoutMs: requestTimeoutMs }, { endpoint }),
       { timeoutMs: requestTimeoutMs },
     );
     if (result.data?.success === true) {

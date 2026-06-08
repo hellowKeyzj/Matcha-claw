@@ -22,7 +22,6 @@ const RUNTIME_HOST_STORAGE_HOT_PATHS = [
   'runtime-host/application/settings',
   'runtime-host/application/providers/provider-store-repository.ts',
   'runtime-host/application/adapters/openclaw/infrastructure/openclaw-environment-repository.ts',
-  'runtime-host/application/team-runtime',
 ] as const;
 const RUNTIME_HOST_APPLICATION_ROOTS = [
   'runtime-host/application',
@@ -974,45 +973,68 @@ describe('runtime-host implementation boundary', () => {
     expect(source).not.toContain('new ParentShellGatewayControl');
   });
 
-  it('session routes are explicit RuntimeAddress API boundaries, not implicit OpenClaw defaults', async () => {
+  it('session routes are explicit endpoint/session identity API boundaries, not implicit OpenClaw defaults', async () => {
     const routeSource = await readFile(path.join(process.cwd(), 'runtime-host/api/routes/session-routes.ts'), 'utf8');
     const hostApiSource = await readFile(path.join(process.cwd(), 'src/lib/host-api.ts'), 'utf8');
     const commandWorkflowSource = await readFile(path.join(process.cwd(), 'runtime-host/application/workflows/session-command/session-command-operations-workflow.ts'), 'utf8');
     const catalogWorkflowSource = await readFile(path.join(process.cwd(), 'runtime-host/application/workflows/session-catalog/session-catalog-workflow.ts'), 'utf8');
 
-    expect(routeSource).toContain("sessionRoute('/api/sessions/list'");
-    expect(routeSource).toContain("sessionRoute('/api/sessions/prompt'");
+    expect(routeSource).toContain('LEGACY_READ_ONLY_SESSION_ROUTES');
+    expect(routeSource).toContain("sessionReadOnlyRoute('/api/sessions/list'");
+    expect(routeSource).toContain("rejectedSessionRoute('/api/sessions/prompt'");
+    expect(routeSource).toContain('validateLegacyReadOnlySessionPayload');
+    expect(routeSource).toContain('sanitizeReadOnlyRouteResponse(await operation(service, context.payload))');
     expect(routeSource).not.toContain('OPENCLAW');
     expect(routeSource).not.toContain('openclaw');
-    expect(hostApiSource).toContain("hostSessionPost<SessionListResult>('/api/sessions/list', payload)");
-    expect(hostApiSource).toContain("hostSessionPost<SessionPromptResult>('/api/sessions/prompt'");
-    expect(hostApiSource).not.toContain('resolveSingleAgentCapabilityRuntimeAddress');
-    expect(hostApiSource).not.toContain('Expected exactly one RuntimeAddress for capability and agent');
-    expect(hostApiSource).not.toContain('endpoint.capabilityAddresses');
+    expect(hostApiSource).toContain("capabilityId: SESSION_MANAGEMENT_CAPABILITY_ID");
+    expect(hostApiSource).toContain("operationId: 'sessions.list'");
+    expect(hostApiSource).toContain("capabilityId: SESSION_PROMPT_CAPABILITY_ID");
+    expect(hostApiSource).toContain("operationId: payload.media?.length ? 'sessions.sendWithMedia' : 'sessions.prompt'");
+    expect(hostApiSource).not.toContain('/api/sessions/');
+    expect(hostApiSource).toContain('buildCapabilityScopeKey(scope)');
+    expect(hostApiSource).toContain('capabilityScopeInflight');
+    expect(hostApiSource).toContain('available scopes:');
     expect(commandWorkflowSource).toContain('readSessionListRequest(payload)');
-    expect(commandWorkflowSource).toContain("RuntimeAddress is required");
-    expect(catalogWorkflowSource).toContain('isSameRuntimeTarget(session.runtimeAddress, input.runtimeAddress)');
-    expect(catalogWorkflowSource).not.toContain('buildRuntimeAddressKey(session.runtimeAddress) === buildRuntimeAddressKey(input.runtimeAddress)');
+    expect(commandWorkflowSource).toContain('RuntimeEndpointRef is required');
+    expect(commandWorkflowSource).toContain('SessionIdentity is required');
+    expect(catalogWorkflowSource).toContain('buildSessionIdentityKey(session.sessionIdentity)');
+    expect(catalogWorkflowSource).toContain('resolveEndpointForRef(sessionIdentity.endpoint, sessionIdentity.agentId)');
   });
 
-  it('gateway bridge 按 RuntimeAddress 更新 endpoint 状态，不回退到 OpenClaw 单例寻址', async () => {
+  it('renderer 外部调用点不直接使用 hostCapabilityExecute', async () => {
+    const srcFiles = await listSourceFiles(path.join(process.cwd(), 'src'));
+    const offenders: string[] = [];
+    for (const file of srcFiles) {
+      if (path.relative(process.cwd(), file).replace(/\\/g, '/') === 'src/lib/host-api.ts') {
+        continue;
+      }
+      const source = await readFile(file, 'utf8');
+      if (source.includes('hostCapabilityExecute')) {
+        offenders.push(path.relative(process.cwd(), file));
+      }
+    }
+
+    expect(offenders).toEqual([]);
+  });
+
+  it('gateway bridge 按 runtime endpoint scope 更新 endpoint 状态，不回退到 OpenClaw 单例寻址', async () => {
     const bridgeSource = await readFile(path.join(process.cwd(), 'runtime-host/application/adapters/openclaw/gateway/openclaw-gateway-event-bridge.ts'), 'utf8');
     const moduleSource = await readFile(path.join(process.cwd(), 'runtime-host/composition/modules/gateway-bridge-module.ts'), 'utf8');
     const registrySource = await readFile(path.join(process.cwd(), 'runtime-host/application/agent-runtime/contracts/agent-runtime-registry.ts'), 'utf8');
 
     expect(bridgeSource).toContain('updateRuntimeEndpointControlState');
-    expect(bridgeSource).toContain('address: deps.runtimeHostCapabilityAddress');
+    expect(bridgeSource).toContain('endpoint: deps.runtimeHostEndpoint');
     expect(bridgeSource).not.toContain('updateOpenClawControlState');
-    expect(moduleSource).toContain('resolveRuntimeHostCapabilityAddress');
+    expect(moduleSource).toContain('resolveRuntimeHostEndpoint');
     expect(moduleSource).toContain('capability.id === RUNTIME_HOST_CAPABILITY_ID');
     expect(moduleSource).toContain("from '../../application/adapters/openclaw/gateway/openclaw-gateway-event-bridge'");
-    expect(moduleSource).toContain('.updateRuntimeEndpointControlState({ address, ...input })');
+    expect(moduleSource).toContain("scope.kind !== 'runtime-instance'");
     expect(moduleSource).not.toContain('resolveOpenClawRuntimeHostCapabilityAddress');
     expect(moduleSource).not.toContain('OPENCLAW_RUNTIME_ENDPOINT_ID');
     expect(moduleSource).not.toContain('Expected exactly one OpenClaw runtime.host capability');
-    expect(registrySource).toContain('readonly address: RuntimeAddress');
-    expect(registrySource).toContain('const endpoint = this.resolveEndpointForAddress(input.address)');
-    expect(registrySource).not.toContain('readonly runtimeAdapterId: RuntimeAdapterId;\n    readonly runtimeInstanceId: string;');
+    expect(registrySource).toContain('resolveEndpointForRef(endpointRef: RuntimeEndpointRef');
+    expect(registrySource).toContain('const endpoint = this.endpoints.getByRef(endpointRef)');
+    expect(registrySource).toContain('updateRuntimeEndpointControlState(input: {');
   });
 
   it('ACP connector 由独立 connector module 注册，不藏在 OpenClaw infrastructure 里', async () => {
@@ -1236,7 +1258,7 @@ describe('runtime-host implementation boundary', () => {
     const sessionModuleSource = await readFile(path.join(process.cwd(), 'runtime-host/composition/modules/session-runtime-module.ts'), 'utf8');
 
     expect(workflowSource).toContain('export class SessionStorageMutationWorkflow');
-    expect(workflowSource).toContain('updateStorageIndexRuntimeAddress');
+    expect(workflowSource).toContain('updateStorageIndexSessionIdentity');
     expect(workflowSource).toContain('updateStorageIndexStatus');
     expect(workflowSource).toContain('updateStorageIndexLabel');
     expect(workflowSource).toContain('removeSessionFromStorageIndex');
@@ -1245,7 +1267,7 @@ describe('runtime-host implementation boundary', () => {
     expect(repositoryWorkflowSource).toContain('findWritableDescriptor');
     expect(repositoryWorkflowSource).toContain('invalidateAgentDescriptorsCache');
     expect(repositorySource).toContain('repositoryWorkflow');
-    expect(repositorySource).not.toContain('updateStorageIndexRuntimeAddress');
+    expect(repositorySource).not.toContain('updateStorageIndexSessionIdentity');
     expect(repositorySource).not.toContain('updateStorageIndexStatus');
     expect(repositorySource).not.toContain('updateStorageIndexLabel');
     expect(repositorySource).not.toContain('removeSessionFromStorageIndex');
@@ -1269,14 +1291,14 @@ describe('runtime-host implementation boundary', () => {
 
     expect(workflowSource).toContain('export class SessionLifecycleWorkflow');
     expect(workflowSource).toContain('activateSession');
-    expect(workflowSource).toContain('upsertSessionRuntimeAddress');
+    expect(workflowSource).toContain('upsertSessionIdentity');
     expect(workflowSource).toContain('deleteSession');
     expect(workflowSource).toContain('updateSessionStatus');
     expect(workflowSource).toContain('refreshCatalogQuietly');
     expect(commandServiceSource).toContain('operationsWorkflow');
     expect(commandServiceSource).not.toContain('sessionLifecycleWorkflow');
     expect(commandServiceSource).not.toContain('activateSession');
-    expect(commandServiceSource).not.toContain('upsertSessionRuntimeAddress');
+    expect(commandServiceSource).not.toContain('upsertSessionIdentity');
     expect(commandServiceSource).not.toContain('await this.deps.sessionStorage.deleteSession');
     expect(commandServiceSource).not.toContain('await this.deps.sessionStorage.updateSessionStatus');
     expect(commandServiceSource).not.toContain('refreshCache().catch');
@@ -1293,7 +1315,7 @@ describe('runtime-host implementation boundary', () => {
     const sessionModuleSource = await readFile(path.join(process.cwd(), 'runtime-host/composition/modules/session-runtime-module.ts'), 'utf8');
 
     expect(workflowSource).toContain('export class SessionRunWorkflow');
-    expect(workflowSource).toContain('rememberSessionAddress');
+    expect(workflowSource).toContain('rememberSessionIdentity');
     expect(workflowSource).toContain('commitSubmittedPrompt');
     expect(workflowSource).toContain('startRuntimeSendInBackground');
     expect(workflowSource).toContain('buildRuntimePromptPayload');
@@ -1317,7 +1339,7 @@ describe('runtime-host implementation boundary', () => {
     expect(workflowSource).toContain('readCreateSessionRequest');
     expect(workflowSource).toContain('readSessionWindowRequest');
     expect(workflowSource).toContain('readResolveApprovalRequest');
-    expect(workflowSource).toContain('listApprovals(runtimeAddress)');
+    expect(workflowSource).toContain('listApprovals(sessionIdentity)');
     expect(workflowSource).toContain('sessionHydrationWorkflow.load');
     expect(workflowSource).toContain('sessionApprovalWorkflow.resolve');
     expect(workflowSource).toContain('sessionModelSelectionWorkflow.patch');
@@ -1325,7 +1347,7 @@ describe('runtime-host implementation boundary', () => {
     expect(commandServiceSource).not.toContain('readCreateSessionRequest');
     expect(commandServiceSource).not.toContain('readSessionWindowRequest');
     expect(commandServiceSource).not.toContain('readResolveApprovalRequest');
-    expect(commandServiceSource).not.toContain('listApprovals(runtimeAddress)');
+    expect(commandServiceSource).not.toContain('listApprovals(sessionIdentity)');
     expect(commandServiceSource).not.toContain('sessionHydrationWorkflow.load');
     expect(commandServiceSource).not.toContain('sessionApprovalWorkflow.resolve');
     expect(commandServiceSource).not.toContain('sessionModelSelectionWorkflow.patch');
@@ -1472,12 +1494,13 @@ describe('runtime-host implementation boundary', () => {
     expect(workflowSource).toContain('export class SessionGatewayIngressWorkflow');
     expect(workflowSource).toContain('appendCanonicalEvents');
     expect(workflowSource).toContain('buildSnapshot');
-    expect(workflowSource).toContain('resolveEndpointForAddress');
+    expect(workflowSource).toContain('resolveEndpointForRef(endpointRef)');
+    expect(workflowSource).toContain('rememberSessionIdentity(identity)');
     expect(workflowSource).toContain('translate(payload, context)');
     expect(serviceSource).toContain('ingressWorkflow');
     expect(serviceSource).not.toContain('appendCanonicalEvents');
     expect(serviceSource).not.toContain('buildSnapshot');
-    expect(serviceSource).not.toContain('resolveEndpointForAddress');
+    expect(serviceSource).not.toContain('resolveEndpointForRef(endpointRef)');
     expect(serviceSource).not.toContain('translate(payload, context)');
     expect(serviceSource).not.toContain('new SessionGatewayIngressWorkflow');
     expect(sessionModuleSource).toContain("container.register('sessionGatewayIngressWorkflow'");
@@ -1577,50 +1600,37 @@ describe('runtime-host implementation boundary', () => {
     expect(runtimeModuleSource).toContain("readinessWorkflow: scope.resolve<GatewayReadinessWorkflow>('gateway.readinessWorkflow')");
   });
 
-  it('team runtime 状态机、事件流与 payload 解析留在 workflow 层，不回流到 service/application service', async () => {
-    const serviceSource = await readFile(path.join(process.cwd(), 'runtime-host/application/team-runtime/service.ts'), 'utf8');
-    const applicationServiceSource = await readFile(path.join(process.cwd(), 'runtime-host/application/team-runtime/team-runtime-application-service.ts'), 'utf8');
-    const operationsWorkflowSource = await readFile(path.join(process.cwd(), 'runtime-host/application/workflows/team-runtime/team-runtime-operations-workflow.ts'), 'utf8');
-    const stateWorkflowSource = await readFile(path.join(process.cwd(), 'runtime-host/application/workflows/team-runtime/team-runtime-state-workflow.ts'), 'utf8');
+  it('team runtime gateway 映射与任务投影留在 TeamSkill workflow 层，不回流到 service', async () => {
+    const serviceSource = await readFile(path.join(process.cwd(), 'runtime-host/application/team-skill/team-skill-service.ts'), 'utf8');
+    const gatewayWorkflowSource = await readFile(path.join(process.cwd(), 'runtime-host/application/workflows/team-skill/team-skill-gateway-workflow.ts'), 'utf8');
+    const taskProjectionWorkflowSource = await readFile(path.join(process.cwd(), 'runtime-host/application/workflows/team-skill/team-run-task-projection-workflow.ts'), 'utf8');
     const operationsModuleSource = await readFile(path.join(process.cwd(), 'runtime-host/composition/modules/operations-application-module.ts'), 'utf8');
 
-    expect(stateWorkflowSource).toContain('export class TeamRuntimeStateWorkflow');
-    expect(stateWorkflowSource).toContain('appendAndEmit');
-    expect(stateWorkflowSource).toContain('appendEvent(input)');
-    expect(stateWorkflowSource).toContain('onEventEmitted?.(event)');
-    expect(stateWorkflowSource).toContain('readRecentEvents(runtimeRoot, 200)');
-    expect(stateWorkflowSource).toContain('mailboxPull({');
-    expect(stateWorkflowSource).toContain('listTasks(runtimeRoot)');
-    expect(stateWorkflowSource).toContain('claimNextTask');
-    expect(stateWorkflowSource).toContain('heartbeatTaskClaim');
-    expect(stateWorkflowSource).toContain('releaseTaskClaim');
-    expect(stateWorkflowSource).toContain('clearRuntime');
-    expect(operationsWorkflowSource).toContain('export class TeamRuntimeOperationsWorkflow');
-    expect(operationsWorkflowSource).toContain('normalizeMailboxMessagePayload');
-    expect(operationsWorkflowSource).toContain('normalizeTaskStatus');
-    expect(operationsWorkflowSource).toContain('tasks must be an array');
-    expect(operationsWorkflowSource).toContain('assertRequiredString(body.teamId');
-    expect(serviceSource).toContain('operationsWorkflow');
-    expect(serviceSource).not.toContain('normalizeMailboxMessagePayload');
-    expect(serviceSource).not.toContain('normalizeTaskStatus');
-    expect(serviceSource).not.toContain('tasks must be an array');
-    expect(serviceSource).not.toContain('assertRequiredString(body.teamId');
-    expect(applicationServiceSource).toContain('stateWorkflow');
-    expect(applicationServiceSource).not.toContain('appendAndEmit');
-    expect(applicationServiceSource).not.toContain('appendEvent(input)');
-    expect(applicationServiceSource).not.toContain('onEventEmitted?.(event)');
-    expect(applicationServiceSource).not.toContain('readRecentEvents(runtimeRoot, 200)');
-    expect(applicationServiceSource).not.toContain('mailboxPull({');
-    expect(applicationServiceSource).not.toContain('listTasks(runtimeRoot)');
-    expect(applicationServiceSource).not.toContain('claimNextTask');
-    expect(applicationServiceSource).not.toContain('heartbeatTaskClaim');
-    expect(applicationServiceSource).not.toContain('releaseTaskClaim');
-    expect(applicationServiceSource).not.toContain('clearRuntime');
-    expect(applicationServiceSource).not.toContain('new TeamRuntimeStateWorkflow');
-    expect(operationsModuleSource).toContain("container.register('teamRuntime.stateWorkflow'");
-    expect(operationsModuleSource).toContain("container.register('teamRuntime.operationsWorkflow'");
-    expect(operationsModuleSource).toContain("scope.resolve<TeamRuntimeStateWorkflow>('teamRuntime.stateWorkflow')");
-    expect(operationsModuleSource).toContain("scope.resolve<TeamRuntimeOperationsWorkflow>('teamRuntime.operationsWorkflow')");
+    expect(gatewayWorkflowSource).toContain('export class TeamSkillGatewayWorkflow');
+    expect(gatewayWorkflowSource).toContain('TEAM_RUNTIME_OPERATION_METHODS');
+    expect(gatewayWorkflowSource).toContain('matchaclaw.team.run.snapshot');
+    expect(gatewayWorkflowSource).toContain('requirePluginMethod');
+    expect(gatewayWorkflowSource).toContain('gatewayRpc(method');
+    expect(taskProjectionWorkflowSource).toContain('export class TeamRunTaskProjectionWorkflow');
+    expect(taskProjectionWorkflowSource).toContain('projectAfterOperation');
+    expect(taskProjectionWorkflowSource).toContain("this.deps.gatewayWorkflow.invoke('team.runSnapshot'");
+    expect(taskProjectionWorkflowSource).toContain("method: 'TaskList'");
+    expect(taskProjectionWorkflowSource).toContain('selectProjectionTarget');
+    expect(taskProjectionWorkflowSource).toContain("target.action === 'update' ? 'TaskUpdate' : 'TaskCreate'");
+    expect(serviceSource).toContain('gatewayWorkflow.invoke(operationId, params)');
+    expect(serviceSource).toContain('taskProjectionWorkflow?.projectAfterOperation');
+    expect(serviceSource).not.toContain('TEAM_RUNTIME_OPERATION_METHODS');
+    expect(serviceSource).not.toContain('matchaclaw.team.run.snapshot');
+    expect(serviceSource).not.toContain('gatewayRpc(method');
+    expect(serviceSource).not.toContain("method: 'TaskList'");
+    expect(serviceSource).not.toContain("TaskCreate'");
+    expect(serviceSource).not.toContain("TaskUpdate'");
+    expect(operationsModuleSource).toContain("container.register('teamSkill.gatewayWorkflow'");
+    expect(operationsModuleSource).toContain("container.register('teamSkill.taskProjectionWorkflow'");
+    expect(operationsModuleSource).toContain("container.register('teamSkill.service'");
+    expect(operationsModuleSource).toContain("scope.resolve<TeamSkillGatewayWorkflow>('teamSkill.gatewayWorkflow')");
+    expect(operationsModuleSource).toContain("scope.resolve<TeamRunTaskProjectionWorkflow>('teamSkill.taskProjectionWorkflow')");
+    expect(operationsModuleSource).toContain('createTeamRuntimeCapabilityOperationRoutes');
   });
 
   it('task runtime RPC 与 snapshot 编排留在 workflow 层，不回流到 task service', async () => {

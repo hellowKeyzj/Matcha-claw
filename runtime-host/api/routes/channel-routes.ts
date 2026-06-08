@@ -1,6 +1,8 @@
 import {
+  badRequest,
   decodeRouteParam,
   routeResponder,
+  sanitizeReadOnlyRouteResponse,
   type ApplicationResponse,
   type RuntimeRouteDefinition,
 } from './route-utils';
@@ -24,6 +26,8 @@ const channelValidationError = (message: string) => ({
   warnings: [],
 });
 
+const LEGACY_CHANNEL_CONFIG_ROUTE_REJECTION = 'Legacy channel config read is disabled; use channel capability operations';
+
 export const channelRoutes: readonly RuntimeRouteDefinition<ChannelRouteDeps>[] = [
   { method: 'GET', path: '/api/channels/snapshot', handle: (_context, deps) => routeResponder.value(() => deps.channelService.snapshot()) },
   {
@@ -45,17 +49,14 @@ export const channelRoutes: readonly RuntimeRouteDefinition<ChannelRouteDeps>[] 
   {
     method: 'GET',
     pattern: /^\/api\/channels\/pairing\/([^/]+)$/,
-    handle: (context, deps, match) => routeResponder.result(() => deps.channelService.listPairingRequests(
+    handle: (context, deps, match) => routeResponder.result(async () => sanitizeReadOnlyRouteResponse(await deps.channelService.listPairingRequests(
       decodeRouteParam(match.params[0]),
       context.routeUrl.searchParams.get('accountId') || undefined,
-    )),
+    ))),
   },
   {
     method: 'GET',
     pattern: /^\/api\/channels\/config\/(.+)$/,
-    handle: (context, deps, match) => routeResponder.value(() => deps.channelService.getConfigValues(
-      decodeRouteParam(match.params[0]),
-      context.routeUrl.searchParams.get('accountId') || undefined,
-    )),
+    handle: () => badRequest(LEGACY_CHANNEL_CONFIG_ROUTE_REJECTION),
   },
 ] as const;

@@ -25,10 +25,37 @@ function createContext() {
       rpc: vi.fn(async () => ({ legacy: true })),
     },
     runtimeHost: {
-      request: vi.fn(async () => ({
-        status: 200,
-        data: { success: true, result: { id: 'run-1' } },
-      })),
+      request: vi.fn(async (_method: string, route: string) => {
+        if (route === '/api/runtime-endpoints/list') {
+          return {
+            status: 200,
+            data: {
+              endpoints: [{
+                kind: 'native-runtime',
+                runtimeAdapterId: 'openclaw',
+                runtimeInstanceId: 'local',
+                capabilitySummaries: [{ id: 'runtime.host', availability: 'available' }],
+              }],
+            },
+          };
+        }
+        if (route === '/api/capabilities/list') {
+          return {
+            status: 200,
+            data: {
+              capabilities: [{
+                id: 'runtime.host',
+                scope: { kind: 'runtime-instance', endpoint: { kind: 'native-runtime', runtimeAdapterId: 'openclaw', runtimeInstanceId: 'local' } },
+                availability: 'available',
+              }],
+            },
+          };
+        }
+        return {
+          status: 200,
+          data: { success: true, result: { id: 'run-1' } },
+        };
+      }),
       readGatewayStatus: vi.fn(async () => ({
         state: 'reconnecting',
         portReachable: true,
@@ -76,7 +103,7 @@ describe('main gateway routes', () => {
     expect(sendJsonMock).not.toHaveBeenCalled();
   });
 
-  it('/api/gateway/control-ui 返回使用 hash token 的 URL，并触发 Control UI 配对自动批准', async () => {
+  it('/api/gateway/control-ui 不返回 gateway token，并触发 Control UI 配对自动批准', async () => {
     vi.useFakeTimers();
     const ctx = createContext();
     const { handleGatewayRoutes } = await import('../../electron/api/routes/gateway');
@@ -88,16 +115,22 @@ describe('main gateway routes', () => {
       ctx as never,
     );
 
-    await Promise.resolve();
-    await Promise.resolve();
+    for (let index = 0; index < 10; index += 1) {
+      await Promise.resolve();
+    }
     vi.clearAllTimers();
     vi.useRealTimers();
 
     expect(handled).toBe(true);
     expect(ctx.runtimeHost.request).toHaveBeenCalledWith(
       'POST',
-      '/api/gateway/control-ui/auto-approve',
-      {},
+      '/api/capabilities/execute',
+      expect.objectContaining({
+        id: 'runtime.host',
+        operationId: 'runtimeHost.gatewayControlUiAutoApprove',
+        target: { kind: 'gateway-control' },
+        input: {},
+      }),
       { timeoutMs: 20000 },
     );
     expect(sendJsonMock).toHaveBeenCalledWith(
@@ -105,11 +138,11 @@ describe('main gateway routes', () => {
       200,
       expect.objectContaining({
         success: true,
-        url: 'http://127.0.0.1:18789/#token=token-test',
-        token: 'token-test',
+        url: 'http://127.0.0.1:18789/',
         port: 18789,
       }),
     );
+    expect(JSON.stringify(sendJsonMock.mock.calls)).not.toContain('token-test');
   });
 
   it('/api/gateway/health 直接透传 runtime health 的端口态和连接态', async () => {

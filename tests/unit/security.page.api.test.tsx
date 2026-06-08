@@ -5,6 +5,7 @@ import { SecurityPage } from '@/pages/Security';
 import { useSecuritySupportStore } from '@/stores/security-support-store';
 
 const hostApiFetchMock = vi.fn();
+const resolveSingleCapabilityScopeMock = vi.fn();
 const gatewayRpcMock = vi.fn();
 const loadAgentsMock = vi.fn(async () => {});
 
@@ -41,6 +42,7 @@ vi.mock('@/stores/gateway', () => ({
 
 vi.mock('@/lib/host-api', () => ({
   hostApiFetch: (...args: unknown[]) => hostApiFetchMock(...args),
+  resolveSingleCapabilityScope: (...args: unknown[]) => resolveSingleCapabilityScopeMock(...args),
 }));
 
 vi.mock('react-i18next', () => ({
@@ -71,6 +73,14 @@ describe('SecurityPage API 接入', () => {
       ruleCatalogError: null,
       securityOpBusy: null,
       securityOpResult: '',
+    });
+    resolveSingleCapabilityScopeMock.mockResolvedValue({
+      kind: 'runtime-instance',
+      endpoint: {
+        kind: 'native-runtime',
+        runtimeAdapterId: 'openclaw',
+        runtimeInstanceId: 'local',
+      },
     });
     hostApiFetchMock.mockImplementation(async (path: string) => {
       if (path === '/api/security') {

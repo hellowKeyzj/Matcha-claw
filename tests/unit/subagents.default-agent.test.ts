@@ -1,59 +1,50 @@
-import { describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it } from 'vitest';
+import {
+  gatewayClientRpcMock,
+  hostApiFetchMock,
+  resetGatewayClientMocks,
+} from './helpers/mock-gateway-client';
 import { useSubagentsStore } from '@/stores/subagents';
 
 describe('subagents default agent', () => {
+  beforeEach(() => {
+    resetGatewayClientMocks();
+    useSubagentsStore.setState(useSubagentsStore.getInitialState(), true);
+  });
+
   it('loadAgents 以 agents.list.defaultId 作为默认标记，不强制 main 为默认', async () => {
-    const invoke = vi.mocked(window.electron.ipcRenderer.invoke);
-    invoke.mockImplementation(async (channel, payload) => {
-      if (channel !== 'hostapi:fetch') {
+    gatewayClientRpcMock.mockImplementation(async (method) => {
+      if (method === 'agents.list') {
         return {
-          ok: false,
-          error: { message: `Unexpected channel: ${String(channel)}` },
-        };
-      }
-      const path = (payload as { path?: string } | undefined)?.path;
-      if (path === '/api/subagents/list') {
-        return {
-          ok: true,
-          data: {
-            status: 200,
-            ok: true,
-            json: {
-              agents: [
-                { id: 'main', name: 'Main' },
-                { id: 'writer', name: 'Writer' },
-              ],
-              defaultId: 'writer',
-              mainKey: 'main',
-              scope: 'per-sender',
-            },
+          success: true,
+          result: {
+            agents: [
+              { id: 'main', name: 'Main' },
+              { id: 'writer', name: 'Writer' },
+            ],
+            defaultId: 'writer',
+            mainKey: 'main',
+            scope: 'per-sender',
           },
         };
       }
-      if (path === '/api/subagents/config/get') {
+      if (method === 'config.get') {
         return {
-          ok: true,
-          data: {
-            status: 200,
-            ok: true,
-            json: {
-              hash: 'hash-default',
-              config: {
-                agents: {
-                  list: [
-                    { id: 'main', name: 'Main', default: false },
-                    { id: 'writer', name: 'Writer', default: true },
-                  ],
-                },
+          success: true,
+          result: {
+            hash: 'hash-default',
+            config: {
+              agents: {
+                list: [
+                  { id: 'main', name: 'Main', default: false },
+                  { id: 'writer', name: 'Writer', default: true },
+                ],
               },
             },
           },
         };
       }
-      return {
-        ok: false,
-        error: { message: `Unexpected host API path: ${String(path)}` },
-      };
+      throw new Error(`Unexpected gateway rpc method: ${String(method)}`);
     });
 
     await useSubagentsStore.getState().loadAgents();
@@ -74,5 +65,7 @@ describe('subagents default agent', () => {
         isDefault: true,
       },
     ]);
+    expect(hostApiFetchMock).not.toHaveBeenCalledWith('/api/subagents/list', expect.anything());
+    expect(hostApiFetchMock).not.toHaveBeenCalledWith('/api/subagents/config/get', expect.anything());
   });
 });

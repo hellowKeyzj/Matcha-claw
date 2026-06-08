@@ -7,8 +7,45 @@ import { useTeamsStore } from '@/stores/teams';
 import { useSubagentsStore } from '@/stores/subagents';
 import i18n from '@/i18n';
 
+const runtimeInstanceScope = {
+  kind: 'runtime-instance' as const,
+  endpoint: {
+    kind: 'native-runtime' as const,
+    runtimeAdapterId: 'openclaw',
+    runtimeInstanceId: 'local',
+  },
+};
+
+vi.mock('@/lib/host-api', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/lib/host-api')>();
+  return {
+    ...actual,
+    resolveSingleCapabilityScope: vi.fn(async () => runtimeInstanceScope),
+  };
+});
+
 describe('teams page', () => {
   const loadAgentsMock = vi.fn().mockResolvedValue(undefined);
+  const agents = [
+    {
+      id: 'agent-alpha',
+      name: 'Alpha',
+      workspace: '/home/dev/.openclaw/workspace-subagents/alpha',
+      model: 'gpt-4o-mini',
+      avatarSeed: 'agent:agent-alpha',
+      avatarStyle: 'pixelArt',
+      isDefault: false,
+    },
+    {
+      id: 'agent-beta',
+      name: 'Beta',
+      workspace: '/home/dev/.openclaw/workspace-subagents/beta',
+      model: 'gpt-4o-mini',
+      avatarSeed: 'agent:agent-beta',
+      avatarStyle: 'bottts',
+      isDefault: false,
+    },
+  ];
 
   beforeEach(() => {
     i18n.changeLanguage('en');
@@ -35,26 +72,15 @@ describe('teams page', () => {
     });
 
     useSubagentsStore.setState({
-      agents: [
-        {
-          id: 'agent-alpha',
-          name: 'Alpha',
-          workspace: '/home/dev/.openclaw/workspace-subagents/alpha',
-          model: 'gpt-4o-mini',
-          avatarSeed: 'agent:agent-alpha',
-          avatarStyle: 'pixelArt',
-          isDefault: false,
-        },
-        {
-          id: 'agent-beta',
-          name: 'Beta',
-          workspace: '/home/dev/.openclaw/workspace-subagents/beta',
-          model: 'gpt-4o-mini',
-          avatarSeed: 'agent:agent-beta',
-          avatarStyle: 'bottts',
-          isDefault: false,
-        },
-      ],
+      agents,
+      agentsResource: {
+        status: 'ready',
+        data: agents,
+        error: null,
+        loadedAt: 1,
+        requestId: 0,
+        hasLoadedOnce: true,
+      },
       loadAgents: loadAgentsMock,
       managedAgentId: null,
     } as never);
@@ -62,14 +88,20 @@ describe('teams page', () => {
     useTeamsStore.setState({
       teams: [],
       activeTeamId: null,
-      runMetaByTeamId: {},
-      tasksByTeamId: {},
-      mailboxByTeamId: {},
-      mailboxCursorByTeamId: {},
+      runByTeamId: {},
+      rolesByTeamId: {},
+      stagesByTeamId: {},
+      approvalsByTeamId: {},
+      messagesByTeamId: {},
+      dispatchesByTeamId: {},
+      dispatchExecutionsByTeamId: {},
       eventsByTeamId: {},
+      eventCursorByTeamId: {},
       loadingByTeamId: {},
       errorByTeamId: {},
-      initRuntime: vi.fn().mockResolvedValue(undefined),
+      ensureRunCreated: vi.fn().mockResolvedValue(undefined),
+      startRun: vi.fn().mockResolvedValue(undefined),
+      refreshSnapshot: vi.fn().mockResolvedValue(undefined),
     } as never);
   });
 
@@ -126,6 +158,14 @@ describe('teams page', () => {
     });
     useSubagentsStore.setState({
       agents: [],
+      agentsResource: {
+        status: 'idle',
+        data: [],
+        error: null,
+        loadedAt: null,
+        requestId: 0,
+        hasLoadedOnce: false,
+      },
       loadAgents: loadAgentsMock,
       managedAgentId: null,
     } as never);
@@ -148,6 +188,7 @@ describe('teams page', () => {
           name: 'Design Team',
           leadAgentId: 'agent-alpha',
           memberIds: ['agent-alpha', 'agent-beta'],
+          packagePath: '.tmp/team-skill',
           createdAt: 1,
           updatedAt: 1,
         },
@@ -166,9 +207,24 @@ describe('teams page', () => {
     expect(screen.getByText(/Lead:\s*agent-alpha/)).toBeInTheDocument();
   });
 
-  it('creates a new team and initializes runtime', async () => {
-    const initRuntimeMock = vi.fn().mockResolvedValue(undefined);
-    useTeamsStore.setState({ initRuntime: initRuntimeMock } as never);
+  it('creates a new team without starting runtime', async () => {
+    const startRunMock = vi.fn().mockResolvedValue(undefined);
+    useGatewayStore.setState({
+      status: {
+        processState: 'running',
+        port: 18789,
+        gatewayReady: true,
+        healthSummary: 'healthy',
+        transportState: 'connected',
+        portReachable: true,
+        diagnostics: {
+          consecutiveHeartbeatMisses: 0,
+          consecutiveRpcFailures: 0,
+        },
+        updatedAt: 2,
+      },
+    });
+    useTeamsStore.setState({ startRun: startRunMock } as never);
 
     render(
       <MemoryRouter>
@@ -177,6 +233,7 @@ describe('teams page', () => {
     );
 
     fireEvent.change(await screen.findByLabelText('Team Name'), { target: { value: 'Growth Team' } });
+    fireEvent.change(screen.getByLabelText('TeamSkill Package Path'), { target: { value: '.tmp/team-skill' } });
     fireEvent.click(screen.getByRole('button', { name: 'Create Team' }));
 
     await waitFor(() => {
@@ -186,9 +243,10 @@ describe('teams page', () => {
       expect(state.teams[0]?.name).toBe('Growth Team');
       expect(state.teams[0]?.leadAgentId).toBe('agent-alpha');
       expect(state.teams[0]?.memberIds).toContain('agent-alpha');
+      expect(state.teams[0]?.packagePath).toBe('.tmp/team-skill');
     });
 
-    expect(initRuntimeMock).toHaveBeenCalledTimes(1);
+    expect(startRunMock).not.toHaveBeenCalled();
   });
 
   it('deletes an existing team', async () => {
@@ -199,6 +257,7 @@ describe('teams page', () => {
           name: 'Design Team',
           leadAgentId: 'agent-alpha',
           memberIds: ['agent-alpha'],
+          packagePath: '.tmp/team-skill',
           createdAt: 1,
           updatedAt: 1,
         },

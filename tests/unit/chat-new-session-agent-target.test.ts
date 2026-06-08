@@ -3,8 +3,8 @@ import { useChatStore } from '@/stores/chat';
 import { createEmptySessionRecord, getSessionItems } from '@/stores/chat/store-state-helpers';
 import { createViewportWindowState } from '@/stores/chat/viewport-state';
 import { buildRenderItemsFromMessages } from './helpers/timeline-fixtures';
-import { createOpenClawTestRuntimeAddress } from './helpers/runtime-address-fixtures';
-import { buildSessionRecordKey } from '@/stores/chat/session-identity';
+import { createOpenClawTestSessionIdentity, openClawTestRuntimeEndpoint } from './helpers/runtime-address-fixtures';
+import { buildRuntimeScopeKey, buildSessionRecordKey } from '@/stores/chat/session-identity';
 
 const hostSessionNewMock = vi.fn();
 
@@ -17,14 +17,16 @@ function buildSessionRecord(overrides?: Partial<ReturnType<typeof createEmptySes
   const base = createEmptySessionRecord();
   const sessionKey = overrides?.sessionKey ?? 'agent:test:main';
   const agentId = sessionKey.split(':')[1] ?? 'main';
+  const sessionIdentity = createOpenClawTestSessionIdentity(sessionKey, agentId);
   return {
     meta: {
       ...base.meta,
       backendSessionKey: sessionKey,
+      runtimeScopeKey: buildRuntimeScopeKey(sessionIdentity.endpoint),
       agentId,
       protocolId: 'openclaw-v4',
       runtimeEndpointId: 'openclaw-local',
-      runtimeAddress: createOpenClawTestRuntimeAddress(sessionKey, agentId),
+      sessionIdentity,
       ...overrides?.meta,
     },
     runtime: {
@@ -45,13 +47,16 @@ function buildNewSessionSnapshot(sessionKey: string) {
       agentId,
       protocolId: 'openclaw-v4',
       runtimeEndpointId: 'openclaw-local',
-      runtimeAddress: createOpenClawTestRuntimeAddress(sessionKey, agentId),
+      sessionIdentity: createOpenClawTestSessionIdentity(sessionKey, agentId),
       kind: 'session' as const,
       preferred: false,
       displayName: sessionKey,
       updatedAt: 1,
     },
     items: [],
+    approvals: [],
+    usage: [],
+    artifacts: [],
     replayComplete: true,
     runtime: {
       activeRunId: null,
@@ -59,7 +64,10 @@ function buildNewSessionSnapshot(sessionKey: string) {
       activeTurnItemKey: null,
       pendingTurnKey: null,
       pendingTurnLaneKey: null,
+      runtimeActivity: null,
       lastUserMessageAt: null,
+      lastError: null,
+      lastIssue: null,
       updatedAt: 1,
     },
     window: {
@@ -75,16 +83,18 @@ function buildNewSessionSnapshot(sessionKey: string) {
 
 describe('chat store newSession agent targeting', () => {
   const loadHistory = vi.fn().mockResolvedValue(undefined);
-  const testRuntimeAddress = createOpenClawTestRuntimeAddress('agent:test:main', 'test');
-  const mainRuntimeAddress = createOpenClawTestRuntimeAddress('agent:main:main', 'main');
-  const testRecordKey = buildSessionRecordKey(testRuntimeAddress, 'agent:test:main');
-  const mainRecordKey = buildSessionRecordKey(mainRuntimeAddress, 'agent:main:main');
+  const testSessionIdentity = createOpenClawTestSessionIdentity('agent:test:main', 'test');
+  const mainSessionIdentity = createOpenClawTestSessionIdentity('agent:main:main', 'main');
+  const testAgentScope = { kind: 'agent' as const, endpoint: openClawTestRuntimeEndpoint, agentId: 'test' };
+  const mainAgentScope = { kind: 'agent' as const, endpoint: openClawTestRuntimeEndpoint, agentId: 'main' };
+  const testRecordKey = buildSessionRecordKey(testSessionIdentity);
+  const mainRecordKey = buildSessionRecordKey(mainSessionIdentity);
 
   beforeEach(() => {
     vi.restoreAllMocks();
     hostSessionNewMock.mockReset();
-    hostSessionNewMock.mockImplementation(async (payload?: { runtimeAddress?: ReturnType<typeof createOpenClawTestRuntimeAddress> }) => {
-      const agentId = payload?.runtimeAddress?.agentId ?? 'main';
+    hostSessionNewMock.mockImplementation(async (payload?: { agentId?: string }) => {
+      const agentId = payload?.agentId ?? 'main';
       const sessionKey = `agent:${agentId}:session-${Date.now()}`;
       return {
         success: true,
@@ -113,12 +123,13 @@ describe('chat store newSession agent targeting', () => {
           runtimeAdapterId: 'openclaw',
           runtimeInstanceId: 'local',
           displayName: 'OpenClaw Local',
+          endpoint: openClawTestRuntimeEndpoint,
           agentIds: ['main', 'test'],
           acceptsDynamicAgents: true,
-          sessionPromptAddresses: [mainRuntimeAddress, testRuntimeAddress],
-          defaultSessionPromptAddress: mainRuntimeAddress,
+          sessionPromptScopes: [mainAgentScope, testAgentScope],
+          defaultSessionPromptScope: mainAgentScope,
         }],
-        defaultRuntimeAddress: mainRuntimeAddress,
+        defaultSessionPromptScope: mainAgentScope,
       },
       loadedSessions: {
         [mainRecordKey]: buildSessionRecord({ sessionKey: 'agent:main:main' }),
@@ -134,17 +145,18 @@ describe('chat store newSession agent targeting', () => {
 
     await useChatStore.getState().newSession();
 
-    expect(useChatStore.getState().currentSessionKey).toBe(buildSessionRecordKey(createOpenClawTestRuntimeAddress('agent:test:session-1711111111111', 'test'), 'agent:test:session-1711111111111'));
+    expect(useChatStore.getState().currentSessionKey).toBe(buildSessionRecordKey(createOpenClawTestSessionIdentity('agent:test:session-1711111111111', 'test')));
     expect(hostSessionNewMock).toHaveBeenCalledWith({
-      runtimeAddress: createOpenClawTestRuntimeAddress('agent:test:main', 'test'),
+      endpoint: openClawTestRuntimeEndpoint,
+      agentId: 'test',
     });
-    expect(useChatStore.getState().loadedSessions[buildSessionRecordKey(createOpenClawTestRuntimeAddress('agent:test:session-1711111111111', 'test'), 'agent:test:session-1711111111111')]?.meta.historyStatus).toBe('ready');
+    expect(useChatStore.getState().loadedSessions[buildSessionRecordKey(createOpenClawTestSessionIdentity('agent:test:session-1711111111111', 'test'))]?.meta.historyStatus).toBe('ready');
     nowSpy.mockRestore();
   });
 
-  it('当前 session meta 缺少 agentId 时，应从 RuntimeAddress 读取目标 agent', async () => {
+  it('当前 session meta 缺少 agentId 时，应从 SessionIdentity 读取目标 agent', async () => {
     const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(1_733_222_222_222);
-    const runtimeAddress = createOpenClawTestRuntimeAddress('agent:test:main', 'runtime-owner');
+    const sessionIdentity = createOpenClawTestSessionIdentity('agent:test:main', 'runtime-owner');
     useChatStore.setState({
       loadedSessions: {
         ...useChatStore.getState().loadedSessions,
@@ -152,7 +164,7 @@ describe('chat store newSession agent targeting', () => {
           sessionKey: 'agent:test:main',
           meta: {
             agentId: null,
-            runtimeAddress,
+            sessionIdentity,
           },
         }),
       },
@@ -160,9 +172,10 @@ describe('chat store newSession agent targeting', () => {
 
     await useChatStore.getState().newSession();
 
-    expect(useChatStore.getState().currentSessionKey).toBe(buildSessionRecordKey(createOpenClawTestRuntimeAddress('agent:runtime-owner:session-1733222222222', 'runtime-owner'), 'agent:runtime-owner:session-1733222222222'));
+    expect(useChatStore.getState().currentSessionKey).toBe(buildSessionRecordKey(createOpenClawTestSessionIdentity('agent:runtime-owner:session-1733222222222', 'runtime-owner')));
     expect(hostSessionNewMock).toHaveBeenCalledWith({
-      runtimeAddress: createOpenClawTestRuntimeAddress('agent:main:main', 'runtime-owner'),
+      endpoint: openClawTestRuntimeEndpoint,
+      agentId: 'runtime-owner',
     });
     nowSpy.mockRestore();
   });
@@ -172,9 +185,10 @@ describe('chat store newSession agent targeting', () => {
 
     await useChatStore.getState().newSession('main');
 
-    expect(useChatStore.getState().currentSessionKey).toBe(buildSessionRecordKey(createOpenClawTestRuntimeAddress('agent:main:session-1733333333333', 'main'), 'agent:main:session-1733333333333'));
+    expect(useChatStore.getState().currentSessionKey).toBe(buildSessionRecordKey(createOpenClawTestSessionIdentity('agent:main:session-1733333333333', 'main')));
     expect(hostSessionNewMock).toHaveBeenCalledWith({
-      runtimeAddress: createOpenClawTestRuntimeAddress('agent:main:main', 'main'),
+      endpoint: openClawTestRuntimeEndpoint,
+      agentId: 'main',
     });
     nowSpy.mockRestore();
   });
@@ -322,7 +336,7 @@ describe('chat store newSession agent targeting', () => {
 
     const state = useChatStore.getState();
     const runtime = state.loadedSessions[state.currentSessionKey]?.runtime;
-    expect(state.currentSessionKey).toBe(buildSessionRecordKey(createOpenClawTestRuntimeAddress('agent:test:session-1722222222222', 'test'), 'agent:test:session-1722222222222'));
+    expect(state.currentSessionKey).toBe(buildSessionRecordKey(createOpenClawTestSessionIdentity('agent:test:session-1722222222222', 'test')));
     expect(runtime?.activeRunId).toBeNull();
     expect(runtime?.runPhase).toBe('idle');
     nowSpy.mockRestore();
@@ -334,7 +348,7 @@ describe('chat store newSession agent targeting', () => {
     await useChatStore.getState().newSession();
 
     const state = useChatStore.getState();
-    expect(state.currentSessionKey).toBe(buildSessionRecordKey(createOpenClawTestRuntimeAddress('agent:test:session-1744444444444', 'test'), 'agent:test:session-1744444444444'));
+    expect(state.currentSessionKey).toBe(buildSessionRecordKey(createOpenClawTestSessionIdentity('agent:test:session-1744444444444', 'test')));
     expect(state.sessionCatalogStatus.status).toBe('ready');
     expect(state.loadedSessions[state.currentSessionKey]).toBeDefined();
     nowSpy.mockRestore();

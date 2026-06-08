@@ -30,14 +30,6 @@ vi.mock('@/lib/telemetry', () => ({
   startUiTiming: vi.fn(() => () => 1),
 }));
 
-const TEST_RUNTIME_ADDRESS = {
-  kind: 'native-runtime',
-  capabilityId: 'model.provider',
-  runtimeAdapterId: 'openclaw',
-  runtimeInstanceId: 'local',
-  agentId: 'default',
-} as const;
-
 describe('useProviderStore validateAccountApiKey', () => {
   beforeEach(() => {
     vi.resetModules();
@@ -73,7 +65,7 @@ describe('useProviderStore validateAccountApiKey', () => {
       error: null,
     });
 
-    await useProviderStore.getState().validateAccountApiKey('custom-1', '  sk-lm-test \n', TEST_RUNTIME_ADDRESS, {
+    await useProviderStore.getState().validateAccountApiKey('custom-1', '  sk-lm-test \n', {
       baseUrl: 'https://example.com',
     });
 
@@ -84,6 +76,6 @@ describe('useProviderStore validateAccountApiKey', () => {
       options: {
         baseUrl: 'https://example.com',
       },
-    }, TEST_RUNTIME_ADDRESS);
+    });
   });
 });

@@ -6,18 +6,18 @@ import type { CapabilityOperationRoute } from '../contracts/capability-router';
 export const SKILL_MANAGEMENT_CAPABILITY_ID = 'skill.management';
 
 export const skillManagementCapabilityOperations: readonly CapabilityOperationDescriptor[] = [
-  { id: 'skills.updateConfig', title: 'Update skill configuration' },
-  { id: 'skills.updateState', title: 'Update skill state' },
-  { id: 'skills.updateBatchState', title: 'Update skill state batch' },
-  { id: 'skills.importLocal', title: 'Import local skill' },
-  { id: 'skills.exportBundles', title: 'Export skill bundles' },
-  { id: 'skills.importBundles', title: 'Import skill bundles' },
-  { id: 'skills.refreshStatus', title: 'Refresh skill status' },
-  { id: 'clawhub.login', title: 'Log in to ClawHub' },
-  { id: 'clawhub.openReadme', title: 'Open ClawHub skill readme' },
-  { id: 'clawhub.openPath', title: 'Open ClawHub skill path' },
-  { id: 'clawhub.install', title: 'Install ClawHub skill' },
-  { id: 'clawhub.uninstall', title: 'Uninstall ClawHub skill' },
+  { id: 'skills.updateConfig', title: 'Update skill configuration', targetKind: 'skill' },
+  { id: 'skills.updateState', title: 'Update skill state', targetKind: 'skill' },
+  { id: 'skills.updateBatchState', title: 'Update skill state batch', targetKind: 'skill' },
+  { id: 'skills.importLocal', title: 'Import local skill', targetKind: 'skill' },
+  { id: 'skills.exportBundles', title: 'Export skill bundles', targetKind: 'skill-bundle' },
+  { id: 'skills.importBundles', title: 'Import skill bundles', targetKind: 'skill-bundle' },
+  { id: 'skills.refreshStatus', title: 'Refresh skill status', targetKind: 'none' },
+  { id: 'clawhub.login', title: 'Log in to ClawHub', targetKind: 'none' },
+  { id: 'clawhub.openReadme', title: 'Open ClawHub skill readme', targetKind: 'skill' },
+  { id: 'clawhub.openPath', title: 'Open ClawHub skill path', targetKind: 'skill' },
+  { id: 'clawhub.install', title: 'Install ClawHub skill', targetKind: 'skill' },
+  { id: 'clawhub.uninstall', title: 'Uninstall ClawHub skill', targetKind: 'skill' },
 ] as const;
 
 export function createSkillManagementCapabilityOperationRoutes(deps: {

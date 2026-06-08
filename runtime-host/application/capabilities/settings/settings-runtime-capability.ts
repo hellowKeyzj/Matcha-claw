@@ -5,9 +5,9 @@ import type { CapabilityOperationRoute } from '../contracts/capability-router';
 export const SETTINGS_RUNTIME_CAPABILITY_ID = 'settings.runtime';
 
 export const settingsRuntimeCapabilityOperations: readonly CapabilityOperationDescriptor[] = [
-  { id: 'settings.patch', title: 'Patch runtime settings' },
-  { id: 'settings.reset', title: 'Reset runtime settings' },
-  { id: 'settings.setValue', title: 'Set runtime setting value' },
+  { id: 'settings.patch', title: 'Patch runtime settings', targetKind: 'setting' },
+  { id: 'settings.reset', title: 'Reset runtime settings', targetKind: 'setting' },
+  { id: 'settings.setValue', title: 'Set runtime setting value', targetKind: 'setting' },
 ] as const;
 
 export function createSettingsRuntimeCapabilityOperationRoutes(deps: {
@@ -22,7 +22,7 @@ export function createSettingsRuntimeCapabilityOperationRoutes(deps: {
     {
       capabilityId: SETTINGS_RUNTIME_CAPABILITY_ID,
       operationId: 'settings.reset',
-      handle: (context) => deps.settingsService.reset(context.address),
+      handle: () => deps.settingsService.reset(),
     },
     {
       capabilityId: SETTINGS_RUNTIME_CAPABILITY_ID,

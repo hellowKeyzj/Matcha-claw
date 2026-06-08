@@ -1,4 +1,4 @@
-import type { RuntimeAddress } from './runtime-address';
+import type { SessionIdentity } from './runtime-address';
 import type { GatewayTransportIssue } from './gateway-error';
 
 export type SessionMessageRole =
@@ -38,7 +38,7 @@ export interface SessionTaskCompletionEvent {
   kind: 'task_completion';
   source: 'subagent' | 'cron' | 'unknown';
   childSessionKey: string;
-  childRuntimeAddress?: RuntimeAddress;
+  childSessionIdentity?: SessionIdentity;
   sequenceId?: number;
   laneKey?: string;
   turnKey?: string;
@@ -80,6 +80,7 @@ export type SessionRunPhase =
   | 'streaming'
   | 'waiting_tool'
   | 'finalizing'
+  | 'stopping'
   | 'done'
   | 'error'
   | 'aborted';
@@ -104,6 +105,7 @@ const ACTIVE_RUN_PHASES: ReadonlySet<SessionRunPhase> = new Set([
   'streaming',
   'waiting_tool',
   'finalizing',
+  'stopping',
 ]);
 
 /**
@@ -308,7 +310,7 @@ export interface SessionRenderExecutionGraphItem extends SessionTimelineEntryBas
   completionItemKey: string;
   anchorItemKey?: string;
   childSessionKey: string;
-  childRuntimeAddress?: RuntimeAddress;
+  childSessionIdentity?: SessionIdentity;
   childSessionId?: string;
   childAgentId?: string;
   agentLabel: string;
@@ -385,7 +387,7 @@ export type SessionApprovalDecision = 'allow-once' | 'allow-always' | 'deny';
 export interface SessionApprovalRequestItem {
   id: string;
   sessionKey: string;
-  runtimeAddress: RuntimeAddress;
+  sessionIdentity: SessionIdentity;
   runId?: string;
   title: string;
   command?: string;
@@ -411,6 +413,12 @@ export interface SessionArtifactSnapshotItem {
   payload: unknown;
 }
 
+export interface SessionContextTokenSnapshot {
+  totalTokens?: number;
+  totalTokensFresh?: boolean;
+  contextTokens?: number;
+}
+
 export interface SessionStateSnapshot {
   sessionKey: string;
   catalog: SessionCatalogItem;
@@ -418,6 +426,7 @@ export interface SessionStateSnapshot {
   approvals: SessionApprovalRequestItem[];
   usage: SessionUsageSnapshotItem[];
   artifacts: SessionArtifactSnapshotItem[];
+  contextTokens?: SessionContextTokenSnapshot;
   taskSnapshot?: TaskSnapshotEvent;
   replayComplete: boolean;
   runtime: SessionRuntimeStateSnapshot;
@@ -433,7 +442,7 @@ export interface SessionCatalogItem {
   agentId: string;
   protocolId: string;
   runtimeEndpointId: string;
-  runtimeAddress: RuntimeAddress;
+  sessionIdentity: SessionIdentity;
   kind: SessionCatalogKind;
   preferred: boolean;
   status?: 'active' | 'completed' | 'archived' | 'deleted';
@@ -441,6 +450,7 @@ export interface SessionCatalogItem {
   titleSource?: SessionCatalogTitleSource;
   displayName?: string;
   model?: string;
+  contextTokens?: SessionContextTokenSnapshot;
   updatedAt?: number;
 }
 

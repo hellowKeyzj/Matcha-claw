@@ -12,7 +12,7 @@ export class SessionTranscriptTimelineLoader {
   constructor(private readonly deps: SessionTranscriptTimelineLoaderDeps) {}
 
   async readCanonicalReplayEvents(context: RuntimeSessionContext): Promise<AsyncIterable<CanonicalSessionEvent> | Iterable<CanonicalSessionEvent>> {
-    const lines = this.deps.sessionStorage.readTranscriptLines(context.sessionKey);
+    const lines = this.deps.sessionStorage.readTranscriptLines(context.identity);
     const registry = this.deps.agentRuntimeRegistry;
     const protocol = registry.getProtocol(context.protocolId);
     return protocol.replayAdapter.replayTranscript(context.sessionKey, lines, context);

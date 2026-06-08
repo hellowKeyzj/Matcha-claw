@@ -22,6 +22,8 @@ export interface LicenseValidationResult {
   valid: boolean;
   code: LicenseValidationCode;
   normalizedKey?: string;
+  masked?: string | null;
+  last4?: string | null;
   mode: 'online' | 'cache' | 'allowlist' | 'checksum' | 'none';
   source?: 'server' | 'cache' | 'local';
   message?: string;
@@ -39,6 +41,12 @@ export interface LicenseGateSnapshot {
   nextRevalidateAtMs: number | null;
   lastValidation: LicenseValidationResult | null;
   renewalAlert: 'near_expiry_renew_failed' | null;
+}
+
+export interface StoredLicenseKeySummary {
+  hasStoredKey: boolean;
+  masked: string | null;
+  last4: string | null;
 }
 
 export interface LicenseRuntimePort {
@@ -133,20 +141,56 @@ function readPayloadRecord(payload: unknown): Record<string, unknown> {
     : {};
 }
 
+function summarizeStoredKey(key: string | null): StoredLicenseKeySummary {
+  if (!key) {
+    return { hasStoredKey: false, masked: null, last4: null };
+  }
+  const normalizedKey = normalizeLicenseKey(key);
+  const last4 = normalizedKey.slice(-4);
+  return {
+    hasStoredKey: true,
+    masked: `${LICENSE_PREFIX}-****-****-****-${last4}`,
+    last4,
+  };
+}
+
+export function sanitizeLicenseValidationResult(result: LicenseValidationResult | null): LicenseValidationResult | null {
+  if (!result) {
+    return null;
+  }
+  const { normalizedKey, ...safeResult } = result;
+  if (!normalizedKey) {
+    return safeResult;
+  }
+  const summary = summarizeStoredKey(normalizedKey);
+  return {
+    ...safeResult,
+    masked: summary.masked,
+    last4: summary.last4,
+  };
+}
+
+export function sanitizeLicenseGateSnapshot(snapshot: LicenseGateSnapshot): LicenseGateSnapshot {
+  return {
+    ...snapshot,
+    lastValidation: sanitizeLicenseValidationResult(snapshot.lastValidation),
+  };
+}
+
 export class LicenseService {
   constructor(private readonly runtime: LicenseRuntimePort) {}
 
   async gate() {
     return {
       status: 200,
-      data: await this.runtime.gate(),
+      data: sanitizeLicenseGateSnapshot(await this.runtime.gate()),
     };
   }
 
   async storedKey() {
     return {
       status: 200,
-      data: { key: await this.runtime.storedKey() },
+      data: summarizeStoredKey(await this.runtime.storedKey()),
     };
   }
 
@@ -155,14 +199,14 @@ export class LicenseService {
     const key = typeof body.key === 'string' ? body.key : '';
     return {
       status: 200,
-      data: await this.runtime.validate(key),
+      data: sanitizeLicenseValidationResult(await this.runtime.validate(key)),
     };
   }
 
   async revalidate() {
     return {
       status: 200,
-      data: await this.runtime.revalidate(),
+      data: sanitizeLicenseValidationResult(await this.runtime.revalidate()),
     };
   }
 

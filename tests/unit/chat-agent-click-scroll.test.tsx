@@ -12,7 +12,101 @@ import i18n from '@/i18n';
 import { createEmptySessionRecord } from '@/stores/chat/store-state-helpers';
 import { buildRenderItemsFromMessages } from './helpers/timeline-fixtures';
 import { createViewportWindowState } from '@/stores/chat/viewport-state';
+import { buildRuntimeScopeKey, buildSessionRecordKey } from '@/stores/chat/session-identity';
 import type { RawMessage } from './helpers/timeline-fixtures';
+
+const runtimeFixtures = vi.hoisted(() => {
+  const mainSessionKey = 'agent:main:main';
+  const anotherSessionKey = 'agent:another:main';
+  const runtimeEndpoint = {
+    kind: 'native-runtime' as const,
+    runtimeAdapterId: 'openclaw',
+    runtimeInstanceId: 'local',
+  };
+  const mainAgentScope = {
+    kind: 'agent' as const,
+    endpoint: runtimeEndpoint,
+    agentId: 'main',
+  };
+  const anotherAgentScope = {
+    kind: 'agent' as const,
+    endpoint: runtimeEndpoint,
+    agentId: 'another',
+  };
+  const mainSessionIdentity = {
+    endpoint: runtimeEndpoint,
+    agentId: 'main',
+    sessionKey: mainSessionKey,
+  };
+  const anotherSessionIdentity = {
+    endpoint: runtimeEndpoint,
+    agentId: 'another',
+    sessionKey: anotherSessionKey,
+  };
+  return {
+    mainSessionKey,
+    anotherSessionKey,
+    runtimeEndpoint,
+    mainAgentScope,
+    anotherAgentScope,
+    mainSessionIdentity,
+    anotherSessionIdentity,
+  };
+});
+
+const {
+  mainSessionKey,
+  anotherSessionKey,
+  runtimeEndpoint,
+  mainAgentScope,
+  anotherAgentScope,
+  mainSessionIdentity,
+  anotherSessionIdentity,
+} = runtimeFixtures;
+const mainRecordKey = buildSessionRecordKey(mainSessionIdentity);
+const anotherRecordKey = buildSessionRecordKey(anotherSessionIdentity);
+
+vi.mock('@/lib/host-api', () => ({
+  hostApiFetch: vi.fn().mockResolvedValue({}),
+  hostSessionPatch: vi.fn().mockResolvedValue({ success: true }),
+  hostRuntimeEndpointsList: vi.fn().mockResolvedValue({
+    endpoints: [{
+      id: 'openclaw-local',
+      protocolId: 'openclaw-v4',
+      runtimeAdapterId: 'openclaw',
+      runtimeInstanceId: 'local',
+      displayName: 'OpenClaw Local',
+      agentIds: ['main', 'another'],
+      acceptsDynamicAgents: true,
+      capabilities: {
+        chat: true,
+        streaming: true,
+        tools: true,
+        approvals: true,
+        replay: true,
+        modelSelection: true,
+      },
+      capabilitySummaries: [
+        { id: 'session.prompt', scope: runtimeFixtures.mainAgentScope },
+        { id: 'session.prompt', scope: runtimeFixtures.anotherAgentScope },
+      ],
+      controlState: {
+        connection: null,
+        readiness: null,
+        capabilities: null,
+        updatedAt: null,
+      },
+    }],
+  }),
+  resolveSingleCapabilityScope: vi.fn().mockResolvedValue({
+    kind: 'runtime-instance',
+    endpoint: { kind: 'native-runtime', runtimeAdapterId: 'openclaw', runtimeInstanceId: 'local' },
+  }),
+  hostSessionList: vi.fn().mockResolvedValue({ ready: true, sessions: [] }),
+  hostSessionLoad: vi.fn().mockResolvedValue({ snapshot: null }),
+  hostSessionWindowFetch: vi.fn().mockResolvedValue({ snapshot: null }),
+  resolveHydratedSessionSnapshot: vi.fn(async ({ initial }: { initial: { snapshot?: unknown } }) => initial.snapshot ?? null),
+}));
 
 function buildSessionRecord(
   sessionKey: string,
@@ -128,9 +222,26 @@ describe('chat 左侧点击链路回归', () => {
         hasLoadedOnce: true,
         lastLoadedAt: 1,
       },
-      currentSessionKey: 'agent:main:main',
+      sessionRuntimeCatalog: {
+        status: 'ready',
+        error: null,
+        endpoints: [{
+          endpointId: 'openclaw-local',
+          protocolId: 'openclaw-v4',
+          endpoint: runtimeEndpoint,
+          runtimeAdapterId: 'openclaw',
+          runtimeInstanceId: 'local',
+          displayName: 'OpenClaw Local',
+          agentIds: ['main', 'another'],
+          acceptsDynamicAgents: true,
+          sessionPromptScopes: [mainAgentScope, anotherAgentScope],
+          defaultSessionPromptScope: mainAgentScope,
+        }],
+        defaultSessionPromptScope: mainAgentScope,
+      },
+      currentSessionKey: mainRecordKey,
       loadedSessions: {
-        'agent:main:main': buildSessionRecord('agent:main:main', {
+        [mainRecordKey]: buildSessionRecord(mainSessionKey, {
           messages: [
             {
               role: 'user',
@@ -158,10 +269,18 @@ describe('chat 左侧点击链路回归', () => {
             isAtLatest: true,
           }),
           meta: {
+            backendSessionKey: mainSessionKey,
+            runtimeScopeKey: buildRuntimeScopeKey(runtimeEndpoint),
+            agentId: 'main',
+            protocolId: null,
+            runtimeEndpointId: 'local',
+            sessionIdentity: mainSessionIdentity,
+            kind: 'main',
+            preferred: true,
             historyStatus: 'ready',
           },
         }),
-        'agent:another:main': buildSessionRecord('agent:another:main', {
+        [anotherRecordKey]: buildSessionRecord(anotherSessionKey, {
           messages: [
             {
               role: 'user',
@@ -189,6 +308,14 @@ describe('chat 左侧点击链路回归', () => {
             isAtLatest: true,
           }),
           meta: {
+            backendSessionKey: anotherSessionKey,
+            runtimeScopeKey: buildRuntimeScopeKey(runtimeEndpoint),
+            agentId: 'another',
+            protocolId: null,
+            runtimeEndpointId: 'local',
+            sessionIdentity: anotherSessionIdentity,
+            kind: 'main',
+            preferred: true,
             label: 'another latest session',
             lastActivityAt: 3,
             historyStatus: 'ready',

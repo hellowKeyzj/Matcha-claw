@@ -27,15 +27,13 @@ import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip
 import { SUPPORTED_LANGUAGES } from '@/i18n';
 import { invokeIpc } from '@/lib/api-client';
 import { isGatewayOperational, isGatewayRecovering, isGatewayUnavailable } from '@/lib/gateway-status';
-import { hostApiFetch, hostOpenClawGetStatus, hostUvInstallAll, resolveSingleCapabilityRuntimeAddress, waitForRuntimeJobResult } from '@/lib/host-api';
+import { hostApiFetch, hostOpenClawGetStatus, hostUvInstallAll, resolveSingleCapabilityScope, waitForRuntimeJobResult } from '@/lib/host-api';
 import { hostLicenseValidate } from '@/lib/license-runtime';
 import { cn } from '@/lib/utils';
 import { useGatewayStore } from '@/stores/gateway';
 import { useSettingsStore } from '@/stores/settings';
-import type { RuntimeAddress } from '../../../runtime-host/shared/runtime-address';
+import type { RuntimeEndpointRef } from '../../../runtime-host/shared/runtime-address';
 
-const SETTINGS_RUNTIME_CAPABILITY_ID = 'settings.runtime';
-const LICENSE_RUNTIME_CAPABILITY_ID = 'license.runtime';
 const PLATFORM_RUNTIME_CAPABILITY_ID = 'platform.runtime';
 
 interface SetupStep {
@@ -123,9 +121,7 @@ export function Setup() {
   const [licenseValidation, setLicenseValidation] = useState<LicenseValidationResponse | null>(null);
   const [licenseValidationCode, setLicenseValidationCode] = useState<LicenseValidationCode | 'unknown' | null>(null);
   const [licenseValidating, setLicenseValidating] = useState(false);
-  const [settingsRuntimeAddress, setSettingsRuntimeAddress] = useState<RuntimeAddress | null>(null);
-  const [licenseRuntimeAddress, setLicenseRuntimeAddress] = useState<RuntimeAddress | null>(null);
-  const [platformRuntimeAddress, setPlatformRuntimeAddress] = useState<RuntimeAddress | null>(null);
+  const [platformRuntimeEndpoint, setPlatformRuntimeEndpoint] = useState<RuntimeEndpointRef | null>(null);
   const bootstrappedLicenseRef = useRef(false);
   const markSetupComplete = useSettingsStore((state) => state.markSetupComplete);
 
@@ -154,23 +150,28 @@ export function Setup() {
 
   useEffect(() => {
     let active = true;
-    void Promise.all([
-      resolveSingleCapabilityRuntimeAddress(SETTINGS_RUNTIME_CAPABILITY_ID),
-      resolveSingleCapabilityRuntimeAddress(LICENSE_RUNTIME_CAPABILITY_ID),
-      resolveSingleCapabilityRuntimeAddress(PLATFORM_RUNTIME_CAPABILITY_ID),
-    ])
-      .then(([settingsAddress, licenseAddress, platformAddress]) => {
-        if (active) {
-          setSettingsRuntimeAddress(settingsAddress);
-          setLicenseRuntimeAddress(licenseAddress);
-          setPlatformRuntimeAddress(platformAddress);
+    void resolveSingleCapabilityScope(PLATFORM_RUNTIME_CAPABILITY_ID)
+      .then((scope) => {
+        if (!active) {
+          return;
+        }
+        switch (scope.kind) {
+          case 'runtime-instance':
+          case 'agent':
+          case 'workspace':
+          case 'team-run':
+            setPlatformRuntimeEndpoint(scope.endpoint);
+            break;
+          case 'session':
+            setPlatformRuntimeEndpoint(scope.identity.endpoint);
+            break;
+          default:
+            setPlatformRuntimeEndpoint(null);
         }
       })
       .catch(() => {
         if (active) {
-          setSettingsRuntimeAddress(null);
-          setLicenseRuntimeAddress(null);
-          setPlatformRuntimeAddress(null);
+          setPlatformRuntimeEndpoint(null);
         }
       });
     return () => {
@@ -180,12 +181,8 @@ export function Setup() {
 
   const handleNext = async () => {
     if (isLastStep) {
-      if (!settingsRuntimeAddress) {
-        toast.error(t('license.messages.unknown'));
-        return;
-      }
       try {
-        await markSetupComplete(settingsRuntimeAddress);
+        await markSetupComplete();
         toast.success(t('complete.title'));
         navigate('/');
       } catch {
@@ -205,11 +202,7 @@ export function Setup() {
       toast.error(t('license.messages.requiredBeforeSkip'));
       return;
     }
-    if (!settingsRuntimeAddress) {
-      toast.error(t('license.messages.unknown'));
-      return;
-    }
-    void markSetupComplete(settingsRuntimeAddress)
+    void markSetupComplete()
       .then(() => {
         navigate('/');
       })
@@ -225,15 +218,9 @@ export function Setup() {
   }, []);
 
   const handleValidateLicense = useCallback(async () => {
-    if (!licenseRuntimeAddress) {
-      setLicenseValidation(null);
-      setLicenseValidationCode('unknown');
-      toast.error(t('license.messages.unknown'));
-      return;
-    }
     setLicenseValidating(true);
     try {
-      const result = await hostLicenseValidate<LicenseValidationResponse>(licenseKey, licenseRuntimeAddress);
+      const result = await hostLicenseValidate<LicenseValidationResponse>(licenseKey);
 
       setLicenseValidation(result);
       setLicenseValidationCode(result.code);
@@ -259,7 +246,7 @@ export function Setup() {
     } finally {
       setLicenseValidating(false);
     }
-  }, [licenseKey, licenseRuntimeAddress, t]);
+  }, [licenseKey, t]);
 
   useEffect(() => {
     if (bootstrappedLicenseRef.current) {
@@ -270,12 +257,12 @@ export function Setup() {
     const bootstrapFromGate = async () => {
       try {
         const [storedKeyPayload, gate] = await Promise.all([
-          hostApiFetch<{ key: string | null }>('/api/license/stored-key'),
+          hostApiFetch<{ masked: string | null }>('/api/license/stored-key'),
           hostApiFetch<LicenseGateSnapshot>('/api/license/gate'),
         ]);
 
-        const normalizedStoredKey = typeof storedKeyPayload?.key === 'string'
-          ? storedKeyPayload.key.trim()
+        const normalizedStoredKey = typeof storedKeyPayload?.masked === 'string'
+          ? storedKeyPayload.masked.trim()
           : '';
         if (normalizedStoredKey) {
           setLicenseKey(normalizedStoredKey);
@@ -374,14 +361,13 @@ export function Setup() {
                   onValidateLicense={handleValidateLicense}
                   licenseValidating={licenseValidating}
                   licenseValidationCode={licenseValidationCode}
-                  settingsRuntimeAddress={settingsRuntimeAddress}
                 />
               )}
               {safeStepIndex === STEP.RUNTIME && <RuntimeContent onStatusChange={setRuntimeChecksPassed} />}
               {safeStepIndex === STEP.INSTALLING && (
                 <InstallingContent
                   skills={defaultSkills}
-                  runtimeAddress={platformRuntimeAddress}
+                  endpoint={platformRuntimeEndpoint}
                   onComplete={handleInstallationComplete}
                   onSkip={() => setCurrentStep((index) => index + 1)}
                 />
@@ -431,7 +417,6 @@ interface WelcomeContentProps {
   onValidateLicense: () => Promise<void>;
   licenseValidating: boolean;
   licenseValidationCode: LicenseValidationCode | 'unknown' | null;
-  settingsRuntimeAddress: RuntimeAddress | null;
 }
 
 function WelcomeContent({
@@ -440,7 +425,6 @@ function WelcomeContent({
   onValidateLicense,
   licenseValidating,
   licenseValidationCode,
-  settingsRuntimeAddress,
 }: WelcomeContentProps) {
   const { t } = useTranslation('setup');
   const { language, setLanguage } = useSettingsStore();
@@ -497,7 +481,7 @@ function WelcomeContent({
             key={lang.code}
             variant={language === lang.code ? 'secondary' : 'ghost'}
             size="sm"
-            onClick={() => { if (settingsRuntimeAddress) void setLanguage(lang.code, settingsRuntimeAddress).catch(() => {}); }}
+            onClick={() => { void setLanguage(lang.code).catch(() => {}); }}
             className="h-7 text-xs"
           >
             {lang.label}
@@ -839,12 +823,12 @@ interface SkillInstallState {
 
 interface InstallingContentProps {
   skills: DefaultSkill[];
-  runtimeAddress: RuntimeAddress | null;
+  endpoint: RuntimeEndpointRef | null;
   onComplete: (installedSkills: string[]) => void;
   onSkip: () => void;
 }
 
-function InstallingContent({ skills, runtimeAddress, onComplete, onSkip }: InstallingContentProps) {
+function InstallingContent({ skills, endpoint, onComplete, onSkip }: InstallingContentProps) {
   const { t } = useTranslation('setup');
   const [skillStates, setSkillStates] = useState<SkillInstallState[]>(
     skills.map((skill) => ({ ...skill, status: 'pending' as InstallStatus }))
@@ -861,13 +845,13 @@ function InstallingContent({ skills, runtimeAddress, onComplete, onSkip }: Insta
 
     const runRealInstall = async () => {
       try {
-        if (!runtimeAddress) {
+        if (!endpoint) {
           throw new Error('platform runtime address unavailable');
         }
         setSkillStates((prev) => prev.map((skill) => ({ ...skill, status: 'installing' })));
         setOverallProgress(10);
 
-        const submission = await hostUvInstallAll(runtimeAddress);
+        const submission = await hostUvInstallAll(endpoint);
         await waitForRuntimeJobResult(submission.job.id, {
           timeoutMs: 120000,
           intervalMs: 500,
@@ -884,7 +868,7 @@ function InstallingContent({ skills, runtimeAddress, onComplete, onSkip }: Insta
     };
 
     void runRealInstall();
-  }, [onComplete, runtimeAddress, skills]);
+  }, [onComplete, endpoint, skills]);
 
   const getStatusIcon = (status: InstallStatus) => {
     switch (status) {

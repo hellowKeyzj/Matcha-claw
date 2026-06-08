@@ -7,7 +7,8 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { WebSocketServer } from 'ws';
 import { createRuntimeHostProcessManager } from '../../electron/main/runtime-host-process-manager';
 import { buildLicenseKey } from '../../runtime-host/application/license/service';
-import { OPENCLAW_RUNTIME_ENDPOINT_ID, OPENCLAW_RUNTIME_INSTANCE_ID } from '../../runtime-host/application/adapters/openclaw/runtime/openclaw-runtime-identity';
+import { OPENCLAW_RUNTIME_ADAPTER_ID, OPENCLAW_RUNTIME_INSTANCE_ID } from '../../runtime-host/application/adapters/openclaw/runtime/openclaw-runtime-identity';
+import type { CapabilityTarget, RuntimeEndpointRef, RuntimeScope, SessionIdentity } from '../../runtime-host/application/agent-runtime/contracts/runtime-address';
 
 const scriptPath = join(process.cwd(), 'runtime-host', 'host-process.cjs');
 
@@ -39,38 +40,131 @@ function writeRuntimeHostSettings(filePath: string, settings: Record<string, unk
   writeFileSync(filePath, `${JSON.stringify(settings, null, 2)}\n`, 'utf8');
 }
 
-function createOpenClawRuntimeAddress(sessionKey: string, agentId: string) {
+const openClawRuntimeEndpoint: RuntimeEndpointRef = {
+  kind: 'native-runtime',
+  runtimeAdapterId: OPENCLAW_RUNTIME_ADAPTER_ID,
+  runtimeInstanceId: OPENCLAW_RUNTIME_INSTANCE_ID,
+};
+
+const openClawRuntimeScope: RuntimeScope = {
+  kind: 'runtime-instance',
+  endpoint: openClawRuntimeEndpoint,
+};
+
+function createOpenClawSessionIdentity(sessionKey: string, agentId: string): SessionIdentity {
   return {
-    kind: 'native-runtime' as const,
-    capabilityId: 'session.prompt',
-    runtimeAdapterId: OPENCLAW_RUNTIME_ENDPOINT_ID,
-    runtimeInstanceId: OPENCLAW_RUNTIME_INSTANCE_ID,
+    endpoint: openClawRuntimeEndpoint,
     agentId,
     sessionKey,
   };
 }
 
-function createOpenClawCapabilityPayload(capabilityId: string, operationId: string, input: Record<string, unknown>) {
-  const runtimeAddress = {
-    kind: 'native-runtime' as const,
-    capabilityId,
-    runtimeAdapterId: OPENCLAW_RUNTIME_ENDPOINT_ID,
-    runtimeInstanceId: OPENCLAW_RUNTIME_INSTANCE_ID,
-    agentId: 'default',
-  };
+function createOpenClawCapabilityPayload(
+  capabilityId: string,
+  operationId: string,
+  input: Record<string, unknown>,
+  target: CapabilityTarget | null = defaultCapabilityTarget(capabilityId, operationId, input),
+  scope: RuntimeScope = defaultCapabilityScope(capabilityId),
+) {
   return {
     id: capabilityId,
     operationId,
-    runtimeAddress,
-    input: {
-      ...input,
-      runtimeAddress,
-    },
+    scope,
+    target,
+    input,
   };
 }
 
-async function waitForRuntimeHostJob(port: number, jobId: string | undefined): Promise<void> {
+function defaultCapabilityScope(capabilityId: string): RuntimeScope {
+  return capabilityId === 'settings.runtime' || capabilityId === 'license.runtime'
+    ? { kind: 'app' }
+    : openClawRuntimeScope;
+}
+
+function defaultCapabilityTarget(capabilityId: string, operationId: string, input: Record<string, unknown>): CapabilityTarget | null {
+  if (capabilityId === 'settings.runtime') {
+    return { kind: 'setting', ...(typeof input.key === 'string' ? { key: input.key } : {}) };
+  }
+  if (capabilityId === 'license.runtime') {
+    return {
+      kind: 'license',
+      ...(operationId === 'license.validate' || operationId === 'license.revalidate' || operationId === 'license.clear' ? { subject: 'key' as const } : {}),
+    };
+  }
+  if (capabilityId === 'platform.runtime') {
+    return operationId === 'platform.reconcileTools'
+      || operationId === 'platform.upsertTools'
+      || operationId === 'platform.setToolEnabled'
+      ? { kind: 'runtime-endpoint' }
+      : { kind: 'runtime-job', ...(typeof input.runId === 'string' ? { jobId: input.runId } : {}) };
+  }
+  if (capabilityId === 'model.provider') {
+    if (operationId === 'providers.oauthStart' || operationId === 'providers.oauthCancel' || operationId === 'providers.oauthSubmit') {
+      return {
+        kind: 'provider-oauth',
+        ...(typeof input.flowId === 'string' ? { flowId: input.flowId } : {}),
+        ...(typeof input.accountId === 'string' ? { accountId: input.accountId } : {}),
+        ...(typeof input.provider === 'string' ? { vendorId: input.provider } : {}),
+        ...(typeof input.vendorId === 'string' ? { vendorId: input.vendorId } : {}),
+      };
+    }
+    if (operationId === 'providers.createAccount') {
+      const account = input.account && typeof input.account === 'object' && !Array.isArray(input.account)
+        ? input.account as Record<string, unknown>
+        : {};
+      return {
+        kind: 'provider-account',
+        ...(typeof account.id === 'string' ? { accountId: account.id } : {}),
+        ...(typeof account.vendorId === 'string' ? { vendorId: account.vendorId } : {}),
+      };
+    }
+    return null;
+  }
+  if (capabilityId === 'skill.management') {
+    return { kind: 'skill', ...(typeof input.skillKey === 'string' ? { skillId: input.skillKey } : {}) };
+  }
+  if (capabilityId === 'integration.channel' && typeof input.channelType === 'string') {
+    if (operationId === 'channels.cancelSession' || operationId === 'channels.requestQr' || operationId === 'channels.approvePairing') {
+      return {
+        kind: 'channel-pairing',
+        channelType: input.channelType,
+        ...(typeof input.accountId === 'string' ? { accountId: input.accountId } : {}),
+      };
+    }
+    return {
+      kind: 'channel',
+      channelType: input.channelType,
+      ...(typeof input.accountId === 'string' ? { accountId: input.accountId } : {}),
+    };
+  }
+  if (capabilityId === 'security.runtime') {
+    if (operationId === 'security.applyRemediation' || operationId === 'security.rollbackRemediation' || operationId === 'security.previewRemediation') {
+      return {
+        kind: 'security-remediation',
+        ...(typeof input.remediationId === 'string' ? { remediationId: input.remediationId } : {}),
+        ...(typeof input.snapshotId === 'string' ? { snapshotId: input.snapshotId } : {}),
+      };
+    }
+    return { kind: 'security-policy' };
+  }
+  if (capabilityId === 'runtime.host') {
+    return operationId === 'runtimeHost.prepareGatewayLaunch' || operationId === 'runtimeHost.gatewayLifecycle'
+      ? { kind: 'gateway-control' }
+      : { kind: 'runtime-endpoint' };
+  }
+  if (capabilityId === 'plugin.runtime') {
+    const pluginIds = input.pluginIds;
+    return {
+      kind: 'plugin',
+      ...(Array.isArray(pluginIds) && pluginIds.length === 1 && typeof pluginIds[0] === 'string' ? { pluginId: pluginIds[0] } : {}),
+    };
+  }
+  return null;
+}
+
+async function waitForRuntimeHostJob<TResult = unknown>(port: number, jobId: string | undefined): Promise<TResult> {
   expect(jobId).toBeTruthy();
+  let result: unknown;
   await waitForCondition(async () => {
     const jobResponse = await fetch(`http://127.0.0.1:${port}/dispatch`, {
       method: 'POST',
@@ -78,23 +172,35 @@ async function waitForRuntimeHostJob(port: number, jobId: string | undefined): P
       body: JSON.stringify({
         version: 1,
         method: 'POST',
-        route: '/api/runtime-host/jobs/get',
-        payload: { jobId },
+        route: '/api/capabilities/execute',
+        payload: createOpenClawCapabilityPayload(
+          'runtime.host',
+          'runtimeHost.jobGet',
+          { jobId },
+          { kind: 'runtime-job', jobId: jobId ?? '' },
+        ),
       }),
     });
     const jobPayload = await jobResponse.json() as {
       data?: {
         job?: {
           status?: string;
+          result?: unknown;
           error?: string;
         };
       };
     };
-    if (jobPayload.data?.job?.status === 'failed') {
-      throw new Error(jobPayload.data.job.error || `Runtime host job failed: ${String(jobId)}`);
+    const job = jobPayload.data?.job;
+    if (job?.status === 'failed') {
+      throw new Error(job.error || `Runtime host job failed: ${String(jobId)}`);
     }
-    return jobPayload.data?.job?.status === 'succeeded';
+    if (job?.status === 'succeeded') {
+      result = job.result;
+      return true;
+    }
+    return false;
   }, 15000);
+  return result as TResult;
 }
 
 async function startParentDispatchServer(
@@ -356,6 +462,7 @@ async function startGatewayRpcServer(
   port: number,
   token: string,
   options?: {
+    methods?: readonly string[];
     onRequest?: (payload: { method: string; params: unknown }) => unknown;
   },
 ): Promise<{
@@ -418,7 +525,12 @@ async function startGatewayRpcServer(
           type: 'res',
           id: message.id,
           ok: true,
-          payload: { hello: 'ok' },
+          payload: {
+            hello: 'ok',
+            features: {
+              methods: options?.methods ?? [],
+            },
+          },
         }));
         return;
       }
@@ -560,7 +672,7 @@ describe('runtime-host process manager', () => {
     }
   });
 
-  it('dispatch endpoint 对未实现runtime 路由直接返回 404，不再回跳主进程分发', async () => {
+  it('legacy runtime job detail route 返回 404，不再回跳主进程分发', async () => {
     const port = createPort(3);
     const parentApiPort = createPort(30);
     const token = 'test-runtime-host-dispatch-token';
@@ -582,8 +694,8 @@ describe('runtime-host process manager', () => {
         body: JSON.stringify({
           version: 1,
           method: 'POST',
-          route: '/api/echo',
-          payload: { hello: 'world' },
+          route: '/api/runtime-host/jobs/get',
+          payload: { jobId: 'job-1' },
         }),
       });
       const payload = await response.json() as {
@@ -1096,12 +1208,26 @@ describe('runtime-host process manager', () => {
     }
   });
 
-  it('team coordination capability 在子进程本地执行任务编排，不走 parent dispatch', async () => {
+  it('team runtime capability 在子进程本地直连 gateway rpc，不走 parent dispatch', async () => {
     const port = createPort(92);
     const parentApiPort = createPort(93);
+    const gatewayPort = createPort(97);
     const token = 'test-runtime-host-dispatch-token-team-runtime-local';
+    const gatewayToken = 'test-runtime-host-team-runtime-gateway-token';
     const parentDispatchServer = await startParentDispatchServer(parentApiPort, token);
     const configDir = mkdtempSync(join(tmpdir(), 'matchaclaw-team-runtime-config-'));
+    const settingsFile = join(configDir, 'matchaclaw-settings.json');
+    writeRuntimeHostSettings(settingsFile, { gatewayToken });
+    const gatewayServer = await startGatewayRpcServer(gatewayPort, gatewayToken, {
+      methods: ['matchaclaw.team.run.snapshot'],
+      onRequest: ({ method }) => ({
+        runId: 'team-alpha',
+        status: method.endsWith('.snapshot') ? undefined : 'ok',
+        run: { runId: 'team-alpha' },
+        stages: [],
+        events: [],
+      }),
+    });
 
     const manager = createRuntimeHostProcessManager({
       scriptPath,
@@ -1111,141 +1237,38 @@ describe('runtime-host process manager', () => {
       parentDispatchToken: token,
       childEnv: () => ({
         OPENCLAW_CONFIG_DIR: configDir,
+        MATCHACLAW_RUNTIME_HOST_GATEWAY_PORT: String(gatewayPort),
+        MATCHACLAW_RUNTIME_HOST_SETTINGS_FILE: settingsFile,
       }),
     });
 
     try {
       await manager.start();
 
-      const teamCapabilityPayload = (operationId: string, input: Record<string, unknown>) => {
-        const runtimeAddress = {
-          kind: 'native-runtime' as const,
-          capabilityId: 'team.coordination',
-          runtimeAdapterId: OPENCLAW_RUNTIME_ENDPOINT_ID,
-          runtimeInstanceId: OPENCLAW_RUNTIME_INSTANCE_ID,
-          agentId: 'default',
-        };
-        return {
-          id: 'team.coordination',
-          operationId,
-          runtimeAddress,
-          input: {
-            ...input,
-            runtimeAddress,
-          },
-        };
-      };
-      const dispatchTeamCapability = async (operationId: string, input: Record<string, unknown>) => await fetch(`http://127.0.0.1:${port}/dispatch`, {
+      const response = await fetch(`http://127.0.0.1:${port}/dispatch`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           version: 1,
           method: 'POST',
           route: '/api/capabilities/execute',
-          payload: teamCapabilityPayload(operationId, input),
+          payload: createOpenClawCapabilityPayload(
+            'team.runtime',
+            'team.runSnapshot',
+            { runId: 'team-alpha' },
+            { kind: 'team-run', runId: 'team-alpha' },
+          ),
         }),
       });
+      const payload = await response.json() as unknown;
+      expect(response.status, JSON.stringify(payload)).toBe(200);
 
-      const initResponse = await dispatchTeamCapability('team.init', { teamId: 'team-alpha', leadAgentId: 'lead-1' });
-      expect(initResponse.status).toBe(200);
-
-      const upsertResponse = await dispatchTeamCapability('team.planUpsert', {
-        teamId: 'team-alpha',
-        tasks: [
-          { taskId: 'task-1', instruction: 'do task 1' },
-          { taskId: 'task-2', instruction: 'do task 2', dependsOn: ['task-1'] },
-        ],
-      });
-      const upsertPayload = await upsertResponse.json() as {
-        success: boolean;
-        status: number;
-        data?: { tasks?: Array<{ taskId?: string }> };
-      };
-      expect(upsertResponse.status).toBe(200);
-      expect(upsertPayload.data?.tasks?.length).toBe(2);
-
-      const claimResponse = await dispatchTeamCapability('team.claimNext', {
-        teamId: 'team-alpha',
-        agentId: 'agent-a',
-        sessionKey: 'session-a',
-      });
-      const claimPayload = await claimResponse.json() as {
-        success: boolean;
-        status: number;
-        data?: { task?: { taskId?: string; status?: string } };
-      };
-      expect(claimResponse.status).toBe(200);
-      expect(claimPayload.data?.task).toMatchObject({
-        taskId: 'task-1',
-        status: 'claimed',
-      });
-
-      const updateResponse = await dispatchTeamCapability('team.taskUpdate', {
-        teamId: 'team-alpha',
-        taskId: 'task-1',
-        status: 'running',
-      });
-      const updateToRunningPayload = await updateResponse.json() as {
-        success: boolean;
-        status: number;
-        data?: { task?: { taskId?: string; status?: string } };
-      };
-      expect(updateResponse.status).toBe(200);
-      expect(updateToRunningPayload.data?.task).toMatchObject({
-        taskId: 'task-1',
-        status: 'running',
-      });
-
-      const doneResponse = await dispatchTeamCapability('team.taskUpdate', {
-        teamId: 'team-alpha',
-        taskId: 'task-1',
-        status: 'done',
-      });
-      const updatePayload = await doneResponse.json() as {
-        success: boolean;
-        status: number;
-        data?: { task?: { taskId?: string; status?: string } };
-      };
-      expect(doneResponse.status).toBe(200);
-      expect(updatePayload.data?.task).toMatchObject({
-        taskId: 'task-1',
-        status: 'done',
-      });
-
-      const mailboxPostResponse = await dispatchTeamCapability('team.mailboxPost', {
-        teamId: 'team-alpha',
-        message: {
-          msgId: 'msg-1',
-          fromAgentId: 'agent-a',
-          content: 'hello team',
-        },
-      });
-      expect(mailboxPostResponse.status).toBe(200);
-
-      const snapshotResponse = await dispatchTeamCapability('team.snapshot', { teamId: 'team-alpha', mailboxLimit: 20 });
-      const snapshotPayload = await snapshotResponse.json() as {
-        success: boolean;
-        status: number;
-        data?: {
-          run?: { teamId?: string };
-          tasks?: Array<{ taskId?: string; status?: string }>;
-          mailbox?: { messages?: Array<{ msgId?: string; content?: string }> };
-          events?: Array<{ type?: string }>;
-        };
-      };
-      expect(snapshotResponse.status).toBe(200);
-      expect(snapshotPayload.data?.run?.teamId).toBe('team-alpha');
-      expect(snapshotPayload.data?.tasks?.find((task) => task.taskId === 'task-1')?.status).toBe('done');
-      expect(snapshotPayload.data?.mailbox?.messages?.[0]).toMatchObject({
-        msgId: 'msg-1',
-        content: 'hello team',
-      });
-      expect((snapshotPayload.data?.events || []).length).toBeGreaterThan(0);
-
+      expect(gatewayServer.getRequests().map((item) => item.method)).toContain('matchaclaw.team.run.snapshot');
       expect(parentDispatchServer.getDispatchRequestCount()).toBe(0);
       expect(parentDispatchServer.getExecutionSyncRequestCount()).toBe(0);
     } finally {
       await manager.stop();
+      await gatewayServer.close();
       await parentDispatchServer.close();
     }
   });
@@ -1406,12 +1429,14 @@ describe('runtime-host process manager', () => {
     const configDir = mkdtempSync(join(tmpdir(), 'matchaclaw-openclaw-config-'));
     const sessionsDir = join(configDir, 'agents', 'foo', 'sessions');
     mkdirSync(sessionsDir, { recursive: true });
+    const sessionIdentity = createOpenClawSessionIdentity('agent:foo:session-a', 'foo');
+    const mainSessionIdentity = createOpenClawSessionIdentity('agent:foo:main', 'foo');
     writeFileSync(
       join(sessionsDir, 'sessions.json'),
       JSON.stringify({
         sessions: [
-          { key: 'agent:foo:session-a', id: 'uuid-a' },
-          { key: 'agent:foo:main', id: 'uuid-main' },
+          { key: 'agent:foo:session-a', id: 'uuid-a', sessionIdentity },
+          { key: 'agent:foo:main', id: 'uuid-main', sessionIdentity: mainSessionIdentity },
         ],
       }, null, 2),
       'utf8',
@@ -1438,21 +1463,13 @@ describe('runtime-host process manager', () => {
           version: 1,
           method: 'POST',
           route: '/api/capabilities/execute',
-          payload: {
-            id: 'session.management',
-            operationId: 'sessions.delete',
-            runtimeAddress: {
-              ...createOpenClawRuntimeAddress('agent:foo:session-a', 'foo'),
-              capabilityId: 'session.management',
-            },
-            input: {
-              sessionKey: 'agent:foo:session-a',
-              runtimeAddress: {
-                ...createOpenClawRuntimeAddress('agent:foo:session-a', 'foo'),
-                capabilityId: 'session.management',
-              },
-            },
-          },
+          payload: createOpenClawCapabilityPayload(
+            'session.management',
+            'sessions.delete',
+            { sessionKey: 'agent:foo:session-a', sessionIdentity },
+            { kind: 'session', identity: sessionIdentity },
+            { kind: 'session', identity: sessionIdentity },
+          ),
         }),
       });
       const payload = await response.json() as {
@@ -1475,7 +1492,7 @@ describe('runtime-host process manager', () => {
       const sessionsIndex = JSON.parse(readFileSync(join(sessionsDir, 'sessions.json'), 'utf8')) as {
         sessions?: Array<{ key?: string }>;
       };
-      expect(sessionsIndex.sessions).toEqual([{ key: 'agent:foo:main', id: 'uuid-main' }]);
+      expect(sessionsIndex.sessions).toEqual([{ key: 'agent:foo:main', id: 'uuid-main', sessionIdentity: mainSessionIdentity }]);
     } finally {
       await manager.stop();
       await parentDispatchServer.close();
@@ -1666,17 +1683,28 @@ describe('runtime-host process manager', () => {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           version: 1,
-          method: 'GET',
-          route: '/api/provider-accounts/openai-main/api-key',
+          method: 'POST',
+          route: '/api/capabilities/execute',
+          payload: createOpenClawCapabilityPayload(
+            'model.provider',
+            'providers.getApiKey',
+            { accountId: 'openai-main', vendorId: 'openai' },
+            { kind: 'provider-credential', accountId: 'openai-main', vendorId: 'openai' },
+          ),
         }),
       });
       const keyPayload = await keyResponse.json() as {
         success: boolean;
         status: number;
-        data?: { apiKey?: string | null };
+        data?: { hasKey?: boolean; keyMasked?: string | null; last4?: string | null; apiKey?: string | null };
       };
       expect(keyResponse.status).toBe(200);
-      expect(keyPayload.data?.apiKey).toBe('sk-test-openai-main');
+      expect(keyPayload.data).toMatchObject({
+        hasKey: true,
+        last4: 'main',
+      });
+      expect(keyPayload.data?.apiKey).toBeUndefined();
+      expect(JSON.stringify(keyPayload.data)).not.toContain('sk-test-openai-main');
 
       expect(parentDispatchServer.getDispatchRequestCount()).toBe(0);
       expect(parentDispatchServer.getExecutionSyncRequestCount()).toBe(0);
@@ -1737,6 +1765,7 @@ describe('runtime-host process manager', () => {
           route: '/api/capabilities/execute',
           payload: createOpenClawCapabilityPayload('model.provider', 'providers.oauthStart', {
             provider: 'openai',
+            flowId: 'flow-openai-main',
             accountId: 'openai-main',
             label: 'OpenAI Main',
           }),
@@ -1761,7 +1790,12 @@ describe('runtime-host process manager', () => {
           version: 1,
           method: 'POST',
           route: '/api/capabilities/execute',
-          payload: createOpenClawCapabilityPayload('model.provider', 'providers.oauthSubmit', { code: 'oauth-demo-code' }),
+          payload: createOpenClawCapabilityPayload('model.provider', 'providers.oauthSubmit', {
+            code: 'oauth-demo-code',
+            flowId: 'flow-openai-main',
+            accountId: 'openai-main',
+            vendorId: 'openai',
+          }),
         }),
       });
       expect(submitResponse.status).toBe(200);
@@ -1773,7 +1807,11 @@ describe('runtime-host process manager', () => {
           version: 1,
           method: 'POST',
           route: '/api/capabilities/execute',
-          payload: createOpenClawCapabilityPayload('model.provider', 'providers.oauthCancel', {}),
+          payload: createOpenClawCapabilityPayload('model.provider', 'providers.oauthCancel', {
+            flowId: 'flow-openai-main',
+            accountId: 'openai-main',
+            vendorId: 'openai',
+          }),
         }),
       });
       expect(cancelResponse.status).toBe(200);
@@ -1825,6 +1863,7 @@ describe('runtime-host process manager', () => {
           route: '/api/capabilities/execute',
           payload: createOpenClawCapabilityPayload('model.provider', 'providers.oauthStart', {
             provider: 'openai',
+            flowId: 'flow-openai-main',
             accountId: 'openai-main',
             label: 'OpenAI Main',
           }),
@@ -1984,8 +2023,12 @@ describe('runtime-host process manager', () => {
         }),
       });
       expect(storedResponse.status).toBe(200);
-      const storedPayload = await storedResponse.json() as { data?: { key?: string | null } };
-      expect(storedPayload.data?.key).toBeNull();
+      const storedPayload = await storedResponse.json() as { data?: { hasStoredKey?: boolean; masked?: string | null; last4?: string | null } };
+      expect(storedPayload.data).toMatchObject({
+        hasStoredKey: false,
+        masked: null,
+        last4: null,
+      });
 
       const validateResponse = await fetch(`http://127.0.0.1:${port}/dispatch`, {
         method: 'POST',
@@ -2653,35 +2696,16 @@ describe('runtime-host process manager', () => {
       });
       const jobId = payload.data?.job?.id;
       expect(jobId).toBeTruthy();
-      await waitForCondition(async () => {
-        const jobResponse = await fetch(`http://127.0.0.1:${port}/dispatch`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            version: 1,
-            method: 'POST',
-            route: '/api/runtime-host/jobs/get',
-            payload: { jobId },
-          }),
-        });
-        const jobPayload = await jobResponse.json() as {
-          data?: {
-            job?: {
-              status?: string;
-              result?: {
-                lockdownApplied?: boolean;
-                emergency?: { incidentId?: string };
-                emergencyError?: string | null;
-                policy?: { preset?: string };
-              };
-            };
-          };
-        };
-        expect(jobPayload.data?.job?.status).not.toBe('failed');
-        return jobPayload.data?.job?.status === 'succeeded'
-          && jobPayload.data.job.result?.lockdownApplied === true
-          && jobPayload.data.job.result?.emergency?.incidentId === 'incident-1'
-          && jobPayload.data.job.result?.policy?.preset === 'strict';
+      const jobResult = await waitForRuntimeHostJob<{
+        lockdownApplied?: boolean;
+        emergency?: { incidentId?: string };
+        emergencyError?: string | null;
+        policy?: { preset?: string };
+      }>(port, jobId);
+      expect(jobResult).toMatchObject({
+        lockdownApplied: true,
+        emergency: { incidentId: 'incident-1' },
+        policy: { preset: 'strict' },
       });
 
       const policyPath = join(configDir, 'policies', 'security.policy.json');
@@ -2734,6 +2758,7 @@ describe('runtime-host process manager', () => {
 
     try {
       await manager.start();
+      const sessionIdentity = createOpenClawSessionIdentity('agent:main:session-1', 'main');
       const response = await fetch(`http://127.0.0.1:${port}/dispatch`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -2741,17 +2766,18 @@ describe('runtime-host process manager', () => {
           version: 1,
           method: 'POST',
           route: '/api/capabilities/execute',
-          payload: {
-            id: 'session.prompt',
-            operationId: 'sessions.sendWithMedia',
-            runtimeAddress: createOpenClawRuntimeAddress('agent:main:session-1', 'main'),
-            input: {
+          payload: createOpenClawCapabilityPayload(
+            'session.prompt',
+            'sessions.sendWithMedia',
+            {
               sessionKey: 'agent:main:session-1',
               message: 'hello',
               idempotencyKey: 'idem-1',
               deliver: true,
             },
-          },
+            { kind: 'session', identity: sessionIdentity },
+            { kind: 'session', identity: sessionIdentity },
+          ),
         }),
       });
       const payload = await response.json() as {
@@ -2971,13 +2997,6 @@ describe('runtime-host process manager', () => {
 
     try {
       await manager.start();
-      const runtimeAddress = {
-        kind: 'native-runtime' as const,
-        capabilityId: 'scheduler.cron',
-        runtimeAdapterId: OPENCLAW_RUNTIME_ENDPOINT_ID,
-        runtimeInstanceId: OPENCLAW_RUNTIME_INSTANCE_ID,
-        agentId: 'default',
-      };
       const response = await fetch(`http://127.0.0.1:${port}/dispatch`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -2985,15 +3004,12 @@ describe('runtime-host process manager', () => {
           version: 1,
           method: 'POST',
           route: '/api/capabilities/execute',
-          payload: {
-            id: 'scheduler.cron',
-            operationId: 'cron.trigger',
-            runtimeAddress,
-            input: {
-              id: 'job-trigger-1',
-              runtimeAddress,
-            },
-          },
+          payload: createOpenClawCapabilityPayload(
+            'scheduler.cron',
+            'cron.trigger',
+            { id: 'job-trigger-1' },
+            { kind: 'cron-job', jobId: 'job-trigger-1' },
+          ),
         }),
       });
       const payload = await response.json() as {
@@ -3290,28 +3306,7 @@ describe('runtime-host process manager', () => {
       };
       const prepareJobId = preparePayload.data?.job?.id;
       expect(prepareJobId).toBeTruthy();
-      await waitForCondition(async () => {
-        const jobResponse = await fetch(`http://127.0.0.1:${port}/dispatch`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            version: 1,
-            method: 'POST',
-            route: '/api/runtime-host/jobs/get',
-            payload: {
-              jobId: prepareJobId,
-            },
-          }),
-        });
-        const jobPayload = await jobResponse.json() as {
-          data?: {
-            job?: {
-              status?: string;
-            };
-          };
-        };
-        return jobPayload.data?.job?.status === 'succeeded';
-      });
+      await waitForRuntimeHostJob(port, prepareJobId);
 
       expect(existsSync(join(openClawConfigDir, 'extensions', 'task-manager', 'openclaw.plugin.json'))).toBe(true);
       expect(existsSync(join(openClawConfigDir, 'extensions', 'security-core', 'openclaw.plugin.json'))).toBe(true);
@@ -3548,7 +3543,7 @@ describe('runtime-host process manager', () => {
         status: 200,
         data: {
           execution: {
-            enabledPluginIds: ['task-manager'],
+            enabledPluginIds: ['security-core', 'task-manager'],
           },
         },
       });

@@ -1,11 +1,17 @@
 import type {
   SessionStateSnapshot,
 } from '../../shared/session-adapter-types';
+import {
+  buildSessionIdentityKey,
+  type SessionIdentity,
+} from '../agent-runtime/contracts/runtime-address';
 import type { SessionOperationResultWorkflow } from '../workflows/session-operation/session-operation-result-workflow';
 
 export type SessionOperationKind = 'prompt' | 'abort' | 'patch-model' | 'resume' | 'reconcile';
 
 export interface SessionOperationResult {
+  identityKey: string;
+  sessionIdentity: SessionIdentity;
   sessionKey: string;
   operationId: string;
   kind: SessionOperationKind;
@@ -20,14 +26,14 @@ export class SessionOperationCoordinator {
     private readonly resultWorkflow: Pick<SessionOperationResultWorkflow, 'getLatestResult' | 'rememberResult'>,
   ) {}
 
-  getLatestResult(sessionKey: string): SessionOperationResult | null {
-    return this.resultWorkflow.getLatestResult(sessionKey);
+  getLatestResult(sessionIdentity: SessionIdentity): SessionOperationResult | null {
+    return this.resultWorkflow.getLatestResult(sessionIdentity);
   }
 
-  async run<T>(sessionKey: string, operation: () => Promise<T>): Promise<T>;
-  async run<T>(sessionKey: string, kind: SessionOperationKind, operation: () => Promise<T>): Promise<T>;
+  async run<T>(sessionIdentity: SessionIdentity, operation: () => Promise<T>): Promise<T>;
+  async run<T>(sessionIdentity: SessionIdentity, kind: SessionOperationKind, operation: () => Promise<T>): Promise<T>;
   async run<T>(
-    sessionKey: string,
+    sessionIdentity: SessionIdentity,
     kindOrOperation: SessionOperationKind | (() => Promise<T>),
     maybeOperation?: () => Promise<T>,
   ): Promise<T> {
@@ -36,19 +42,21 @@ export class SessionOperationCoordinator {
     if (!operation) {
       throw new Error('session operation is required');
     }
+    const identityKey = buildSessionIdentityKey(sessionIdentity);
     const operationId = `${kind}:${++this.nextOperationSequence}`;
-    const previous = this.queues.get(sessionKey) ?? Promise.resolve();
+    const previous = this.queues.get(identityKey) ?? Promise.resolve();
     let release: () => void = () => {};
     const current = new Promise<void>((resolve) => {
       release = resolve;
     });
     const tail = previous.then(() => current, () => current);
-    this.queues.set(sessionKey, tail);
+    this.queues.set(identityKey, tail);
     await previous.catch(() => undefined);
     try {
       const result = await operation();
       this.resultWorkflow.rememberResult({
-        sessionKey,
+        identityKey,
+        sessionIdentity,
         operationId,
         kind,
         result,
@@ -56,8 +64,8 @@ export class SessionOperationCoordinator {
       return result;
     } finally {
       release();
-      if (this.queues.get(sessionKey) === tail) {
-        this.queues.delete(sessionKey);
+      if (this.queues.get(identityKey) === tail) {
+        this.queues.delete(identityKey);
       }
     }
   }

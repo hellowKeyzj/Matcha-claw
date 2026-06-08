@@ -1,5 +1,4 @@
-import { hostCapabilityExecute } from '@/lib/host-api';
-import type { RuntimeAddress } from '../../runtime-host/shared/runtime-address';
+import { hostApiFetch, resolveSingleCapabilityScope } from '@/lib/host-api';
 
 export type CapabilityKey =
   | 'chat'
@@ -26,17 +25,20 @@ const MODEL_PROVIDER_CAPABILITY_ID = 'model.provider';
 
 async function modelProviderCapabilityExecute<TResult>(
   operationId: string,
-  runtimeAddress: RuntimeAddress,
   input: Record<string, unknown> = {},
 ): Promise<TResult> {
-  return await hostCapabilityExecute<TResult>({
-    id: MODEL_PROVIDER_CAPABILITY_ID,
-    operationId,
-    runtimeAddress,
-    input: {
-      ...input,
-      runtimeAddress,
-    },
+  const target = operationId === 'capabilityRouting.write'
+    ? { kind: 'capability-route' as const, capabilityId: MODEL_PROVIDER_CAPABILITY_ID }
+    : null;
+  return await hostApiFetch<TResult>('/api/capabilities/execute', {
+    method: 'POST',
+    body: JSON.stringify({
+      id: MODEL_PROVIDER_CAPABILITY_ID,
+      operationId,
+      scope: await resolveSingleCapabilityScope(MODEL_PROVIDER_CAPABILITY_ID),
+      target,
+      input,
+    }),
   });
 }
 
@@ -105,20 +107,17 @@ export function parseModelRouteRefString(raw: string): ModelRouteRef | null {
   return { credentialId, modelId };
 }
 
-export async function fetchCapabilityRouting(runtimeAddress: RuntimeAddress): Promise<CapabilityRouting> {
+export async function fetchCapabilityRouting(): Promise<CapabilityRouting> {
   return normalizeCapabilityRouting(await modelProviderCapabilityExecute<unknown>(
     'capabilityRouting.read',
-    runtimeAddress,
   ));
 }
 
 export async function persistCapabilityRouting(
   routing: CapabilityRouting,
-  runtimeAddress: RuntimeAddress,
 ): Promise<{ success: boolean; routing: CapabilityRouting; error?: string }> {
   const result = await modelProviderCapabilityExecute<{ success?: boolean; routing?: unknown; error?: string }>(
     'capabilityRouting.write',
-    runtimeAddress,
     routing,
   );
   return {

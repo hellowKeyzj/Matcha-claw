@@ -16,7 +16,8 @@ vi.mock('@/components/settings/UpdateSettings', () => ({
 }));
 
 vi.mock('@/lib/host-api', () => ({
-  hostCapabilityExecute: vi.fn(),
+  hostCapabilityExecute: vi.fn().mockResolvedValue(undefined),
+  resolveSingleCapabilityScope: vi.fn().mockResolvedValue({ kind: 'app' }),
   hostApiFetch: vi.fn(async (path: string) => {
     if (path === '/api/license/gate') {
       return {
@@ -32,6 +33,9 @@ vi.mock('@/lib/host-api', () => ({
     }
     if (path === '/api/license/stored-key') {
       return { key: null };
+    }
+    if (path === '/api/capabilities/execute') {
+      return { success: true };
     }
     throw new Error(`unhandled hostApiFetch path: ${path}`);
   }),

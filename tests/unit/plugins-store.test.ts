@@ -3,18 +3,26 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 const hostApiFetchMock = vi.fn();
 const hostCapabilityExecuteMock = vi.fn();
 const waitForRuntimeJobResultMock = vi.fn();
+const resolveSingleCapabilityScopeMock = vi.fn();
 
-const pluginRuntimeAddress = {
-  kind: 'native-runtime' as const,
-  capabilityId: 'plugin.runtime',
-  runtimeAdapterId: 'openclaw',
-  runtimeInstanceId: 'local',
-  agentId: 'default',
+const pluginRuntimeScope = {
+  kind: 'runtime-instance' as const,
+  endpoint: {
+    kind: 'native-runtime' as const,
+    runtimeAdapterId: 'openclaw',
+    runtimeInstanceId: 'local',
+  },
 };
 
 vi.mock('@/lib/host-api', () => ({
-  hostApiFetch: (...args: unknown[]) => hostApiFetchMock(...args),
-  hostCapabilityExecute: (...args: unknown[]) => hostCapabilityExecuteMock(...args),
+  hostApiFetch: async (path: string, init?: { body?: string; timeoutMs?: number }) => {
+    if (path === '/api/capabilities/execute') {
+      const payload = init?.body ? JSON.parse(init.body) : {};
+      return await hostCapabilityExecuteMock(payload, { timeoutMs: init?.timeoutMs });
+    }
+    return await hostApiFetchMock(path, init);
+  },
+  resolveSingleCapabilityScope: (...args: unknown[]) => resolveSingleCapabilityScopeMock(...args),
   waitForRuntimeJobResult: (...args: unknown[]) => waitForRuntimeJobResultMock(...args),
 }));
 
@@ -67,6 +75,8 @@ describe('plugins store', () => {
     hostApiFetchMock.mockReset();
     hostCapabilityExecuteMock.mockReset();
     waitForRuntimeJobResultMock.mockReset();
+    resolveSingleCapabilityScopeMock.mockReset();
+    resolveSingleCapabilityScopeMock.mockResolvedValue(pluginRuntimeScope);
   });
 
   it('首次加载时 runtime 和 catalog 分层写入，不再等整份 snapshot', async () => {
@@ -174,21 +184,20 @@ describe('plugins store', () => {
 
     const { usePluginsStore } = await import('@/stores/plugins-store');
     await usePluginsStore.getState().refreshSnapshot({ reason: 'initial', force: true });
-    await usePluginsStore.getState().togglePluginEnabled('plugin-a', false, pluginRuntimeAddress);
+    await usePluginsStore.getState().togglePluginEnabled('plugin-a', false);
 
     const state = usePluginsStore.getState();
     expect(state.mutating).toBe(false);
     expect(state.mutatingPluginId).toBeNull();
     expect(state.runtime?.execution.enabledPluginIds).toEqual(['plugin-a']);
+    expect(resolveSingleCapabilityScopeMock).toHaveBeenCalledWith('plugin.runtime');
     expect(hostCapabilityExecuteMock).toHaveBeenCalledWith(expect.objectContaining({
       id: 'plugin.runtime',
       operationId: 'plugins.setEnabled',
-      runtimeAddress: pluginRuntimeAddress,
-      input: expect.objectContaining({
-        pluginIds: [],
-        runtimeAddress: pluginRuntimeAddress,
-      }),
-    }));
+      scope: pluginRuntimeScope,
+      target: { kind: 'plugin', pluginId: 'plugin-a' },
+      input: { pluginIds: ['plugin-a'], enabled: false },
+    }), { timeoutMs: undefined });
     expect(waitForRuntimeJobResultMock).toHaveBeenCalledWith('job-1');
   });
 
@@ -215,8 +224,8 @@ describe('plugins store', () => {
     await usePluginsStore.getState().restartHost();
 
     expect(hostApiFetchMock).toHaveBeenNthCalledWith(1, '/api/runtime-host/restart', { method: 'POST' });
-    expect(hostApiFetchMock).toHaveBeenNthCalledWith(2, '/api/plugins/runtime');
-    expect(hostApiFetchMock).toHaveBeenNthCalledWith(3, '/api/plugins/runtime');
+    expect(hostApiFetchMock).toHaveBeenNthCalledWith(2, '/api/plugins/runtime', undefined);
+    expect(hostApiFetchMock).toHaveBeenNthCalledWith(3, '/api/plugins/runtime', undefined);
     expect(usePluginsStore.getState().runtime?.execution.enabledPluginIds).toEqual(['plugin-a']);
     expect(usePluginsStore.getState().mutating).toBe(false);
   });

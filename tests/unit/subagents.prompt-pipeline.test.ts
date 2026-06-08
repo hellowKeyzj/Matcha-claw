@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
+  capabilityExecuteMock,
   gatewayClientRpcMock,
-  hostCapabilityExecuteMock,
   hostSessionDeleteMock,
   hostSessionPromptMock,
   hostSessionWindowFetchMock,
@@ -10,7 +10,12 @@ import {
 import { SUBAGENT_TARGET_FILES } from '@/constants/subagent-files';
 import { useSubagentsStore } from '@/stores/subagents';
 import { buildRenderItemsFromMessages } from './helpers/timeline-fixtures';
-import type { RuntimeAddress } from '../../runtime-host/shared/runtime-address';
+
+const openClawEndpoint = {
+  kind: 'native-runtime' as const,
+  runtimeAdapterId: 'openclaw',
+  runtimeInstanceId: 'local',
+};
 
 function buildDraftOutput(
   files: Array<{ name: string; content: string; reason: string; confidence: number }>,
@@ -30,14 +35,6 @@ function buildDraftOutput(
     ],
   });
 }
-
-const subagentManagementAddress: RuntimeAddress = {
-  kind: 'native-runtime',
-  capabilityId: 'subagent.management',
-  runtimeAdapterId: 'openclaw',
-  runtimeInstanceId: 'local',
-  agentId: 'default',
-};
 
 function buildHistoryWindow(output: string) {
   return {
@@ -84,7 +81,6 @@ function generateDraft(
     agentId,
     prompt,
     includeCurrentFiles,
-    runtimeAddress: subagentManagementAddress,
   });
 }
 
@@ -138,9 +134,8 @@ describe('subagents prompt pipeline', () => {
     expect(hostSessionPromptMock).toHaveBeenCalledTimes(1);
     expect(hostSessionPromptMock).toHaveBeenCalledWith(expect.objectContaining({
       sessionKey: expect.stringContaining('subagent-draft'),
-      runtimeAddress: {
-        ...subagentManagementAddress,
-        capabilityId: 'session.prompt',
+      sessionIdentity: {
+        endpoint: openClawEndpoint,
         agentId: 'writer',
         sessionKey: 'agent:writer:subagent-draft',
       },
@@ -309,17 +304,26 @@ describe('subagents prompt pipeline', () => {
           confidence: 0.88,
         },
       ])));
-    hostCapabilityExecuteMock.mockResolvedValueOnce({
+    capabilityExecuteMock.mockResolvedValueOnce({
       runId: 'run-123',
       status: 'completed',
     });
 
     await generateDraft('writer', 'generate config');
 
-    expect(hostCapabilityExecuteMock).toHaveBeenCalledWith(
+    expect(capabilityExecuteMock).toHaveBeenCalledWith(
       expect.objectContaining({
         id: 'agent.run',
         operationId: 'agent.wait',
+        scope: {
+          kind: 'agent',
+          endpoint: openClawEndpoint,
+          agentId: 'writer',
+        },
+        target: {
+          kind: 'agent',
+          agentId: 'writer',
+        },
         input: expect.objectContaining({
           runId: 'run-123',
         }),

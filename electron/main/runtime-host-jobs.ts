@@ -1,3 +1,4 @@
+import { createRuntimeHostCapabilityPayload, resolveRuntimeHostEndpoint } from './runtime-host-capabilities';
 import type { RuntimeHostManager } from './runtime-host-manager';
 
 export type RuntimeHostJobSnapshot<TResult = unknown> = {
@@ -97,12 +98,15 @@ export async function waitForRuntimeHostJob<TResult = unknown>(
       finalize(() => reject(new Error(`Runtime Host job timed out: ${jobId}`)));
     }, options.timeoutMs);
 
-    void runtimeHost.request<{ success?: boolean; job?: RuntimeHostJobSnapshot | null }>(
-      'POST',
-      '/api/runtime-host/jobs/get',
-      { jobId },
-      { timeoutMs: 8_000 },
-    ).then((response) => {
+    void (async () => {
+      const endpoint = await resolveRuntimeHostEndpoint(runtimeHost);
+      return await runtimeHost.request<{ success?: boolean; job?: RuntimeHostJobSnapshot | null }>(
+        'POST',
+        '/api/capabilities/execute',
+        await createRuntimeHostCapabilityPayload(runtimeHost, 'runtimeHost.jobGet', { jobId }, { endpoint }),
+        { timeoutMs: 8_000 },
+      );
+    })().then((response) => {
       const job = response.data?.job ?? null;
       if (!job) {
         finalize(() => reject(new Error(`Runtime Host job not found: ${jobId}`)));

@@ -29,9 +29,11 @@ describe('clawhub routes', () => {
       clawHubService: createClawHubService(),
     }).filter((item) => item.operationId === 'clawhub.openReadme');
     const response = await route.handle({
-      skillKey: 'skill.alpha',
-      slug: 'skill-alpha',
-      baseDir: '/tmp/skills/skill-alpha',
+      domainInput: {
+        skillKey: 'skill.alpha',
+        slug: 'skill-alpha',
+        baseDir: '/tmp/skills/skill-alpha',
+      },
     });
 
     expect(response).toMatchObject({
@@ -49,9 +51,11 @@ describe('clawhub routes', () => {
       clawHubService: createClawHubService(),
     }).filter((item) => item.operationId === 'clawhub.openPath');
     const response = await route.handle({
-      skillKey: 'skill.beta',
-      slug: 'skill-beta',
-      baseDir: '/tmp/skills/skill-beta',
+      domainInput: {
+        skillKey: 'skill.beta',
+        slug: 'skill-beta',
+        baseDir: '/tmp/skills/skill-beta',
+      },
     });
 
     expect(response).toMatchObject({
@@ -75,7 +79,7 @@ describe('clawhub routes', () => {
       skillsService: {} as never,
       clawHubService: service,
     }).filter((route) => route.operationId === 'clawhub.install');
-    const response = await installRoute.handle({ slug: 'skill-alpha' });
+    const response = await installRoute.handle({ domainInput: { slug: 'skill-alpha' } });
 
     expect(service.install).toHaveBeenCalledWith({ slug: 'skill-alpha' });
     expect(response).toEqual({

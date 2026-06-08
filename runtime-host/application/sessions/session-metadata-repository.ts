@@ -1,3 +1,4 @@
+import type { SessionIdentity } from '../agent-runtime/contracts/runtime-address';
 import type { SessionStorageDescriptor } from './session-storage-repository';
 import type { SessionModelResolutionWorkflow } from '../workflows/session-metadata/session-model-resolution-workflow';
 export {
@@ -6,7 +7,7 @@ export {
 } from '../workflows/session-metadata/session-model-resolution-workflow';
 
 export interface SessionDefaultModelResolverPort {
-  resolveDefaultModel(sessionKey: string): Promise<string | null>;
+  resolveDefaultModel(sessionIdentity: SessionIdentity): Promise<string | null>;
 }
 
 export interface SessionMetadataRepositoryDeps {
@@ -15,7 +16,7 @@ export interface SessionMetadataRepositoryDeps {
 
 export interface SessionMetadataPort {
   resolveSessionModel(input: {
-    sessionKey: string;
+    sessionIdentity: SessionIdentity;
     storageDescriptor: SessionStorageDescriptor | null;
     runtimeModel?: string | null;
   }): Promise<string | null>;
@@ -25,7 +26,7 @@ export class SessionMetadataRepository implements SessionMetadataPort {
   constructor(private readonly deps: SessionMetadataRepositoryDeps) {}
 
   async resolveSessionModel(input: {
-    sessionKey: string;
+    sessionIdentity: SessionIdentity;
     storageDescriptor: SessionStorageDescriptor | null;
     runtimeModel?: string | null;
   }): Promise<string | null> {

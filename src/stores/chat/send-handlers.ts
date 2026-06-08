@@ -22,8 +22,8 @@ import {
   isRecoverableChatSendTimeout,
   getSessionItems,
 } from './store-state-helpers';
-import { resolveSessionOperationTarget } from './session-identity';
-import type { ChatSendAttachment, ChatStoreState } from './types';
+import { buildSessionIdentityRecordIndex, resolveSessionOperationTarget } from './session-identity';
+import type { ChatSendAttachment, ChatSendResult, ChatStoreState } from './types';
 import { isRunActive, isWaitingTool } from './types';
 
 export type ChatStoreSetFn = (
@@ -204,7 +204,7 @@ interface ExecuteStoreSendParams {
   attachments?: ChatSendAttachment[];
 }
 
-export async function executeStoreSend(params: ExecuteStoreSendParams): Promise<void> {
+export async function executeStoreSend(params: ExecuteStoreSendParams): Promise<ChatSendResult> {
   const {
     set,
     get,
@@ -216,12 +216,12 @@ export async function executeStoreSend(params: ExecuteStoreSendParams): Promise<
   } = params;
   const trimmed = text.trim();
   if (!trimmed && (!attachments || attachments.length === 0)) {
-    return;
+    return { accepted: false, reason: 'empty' };
   }
 
   const stateBeforeSend = get();
   if (stateBeforeSend.mutating === true) {
-    return;
+    return { accepted: false, reason: 'mutating' };
   }
   const { currentSessionKey } = stateBeforeSend;
   const runtimeBeforeSend = getSessionRuntime(stateBeforeSend, currentSessionKey);
@@ -229,11 +229,12 @@ export async function executeStoreSend(params: ExecuteStoreSendParams): Promise<
   try {
     target = resolveSessionOperationTarget(stateBeforeSend, currentSessionKey);
   } catch (error) {
-    set({ error: error instanceof Error ? error.message : String(error) });
-    return;
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    set({ error: errorMessage });
+    return { accepted: false, reason: 'missing-session', error: errorMessage };
   }
   if (isRunActive(runtimeBeforeSend)) {
-    return;
+    return { accepted: false, reason: runtimeBeforeSend.runPhase === 'stopping' ? 'stopping' : 'active' };
   }
   const nowMs = Date.now();
   const clientMessageId = crypto.randomUUID();
@@ -260,7 +261,7 @@ export async function executeStoreSend(params: ExecuteStoreSendParams): Promise<
 
     const sendResult = await sendChatTransport({
       sessionKey: target.sessionKey,
-      runtimeAddress: target.runtimeAddress,
+      sessionIdentity: target.sessionIdentity,
       message: trimmed,
       idempotencyKey: clientMessageId,
       attachments,
@@ -268,39 +269,44 @@ export async function executeStoreSend(params: ExecuteStoreSendParams): Promise<
     });
 
     if (sendGeneration !== sessionRunCache.getSendGeneration(currentSessionKey)) {
-      return;
+      return { accepted: true };
     }
 
-      if (!sendResult.ok) {
-        const errorMsg = sendResult.error;
-        if (isRecoverableChatSendTimeout(errorMsg)) {
-          if (await maybeEnterStoreWaitingApproval({
-            get,
-            sessionKey: currentSessionKey,
-          })) {
-            return;
-          }
-          return;
+    if (!sendResult.ok) {
+      const errorMsg = sendResult.error;
+      if (isRecoverableChatSendTimeout(errorMsg)) {
+        if (await maybeEnterStoreWaitingApproval({
+          get,
+          sessionKey: currentSessionKey,
+        })) {
+          return { accepted: true };
         }
+        return { accepted: true };
+      }
       if (await maybeEnterStoreWaitingApproval({
         get,
         sessionKey: currentSessionKey,
       })) {
-        return;
+        return { accepted: true };
       }
       finalizeStoreSendFailure({
         set,
         error: errorMsg,
       });
-      return;
+      return { accepted: true };
     }
 
-    set((state) => ({
-      loadedSessions: patchSessionSnapshot(state, currentSessionKey, sendResult.snapshot),
-    }));
+    set((state) => {
+      const loadedSessions = patchSessionSnapshot(state, currentSessionKey, sendResult.snapshot);
+      return {
+        loadedSessions,
+        sessionRecordKeyByIdentityKey: buildSessionIdentityRecordIndex(loadedSessions),
+      };
+    });
+    return { accepted: true };
   } catch (error) {
     if (sendGeneration !== sessionRunCache.getSendGeneration(currentSessionKey)) {
-      return;
+      return { accepted: true };
     }
     const errorMsg = String(error);
     if (isRecoverableChatSendTimeout(errorMsg)) {
@@ -308,9 +314,9 @@ export async function executeStoreSend(params: ExecuteStoreSendParams): Promise<
         get,
         sessionKey: currentSessionKey,
       })) {
-        return;
+        return { accepted: true };
       }
-      return;
+      return { accepted: true };
     }
     const timeoutSignal = hasTimeoutSignal(error);
     if (timeoutSignal) {
@@ -318,12 +324,13 @@ export async function executeStoreSend(params: ExecuteStoreSendParams): Promise<
     }
     const state = get();
     if (timeoutSignal && hasStoreApprovalEvidence(state, currentSessionKey)) {
-      return;
+      return { accepted: true };
     }
     finalizeStoreSendFailure({
       set,
       error: errorMsg,
     });
+    return { accepted: true };
   } finally {
     finishMutating();
   }

@@ -11,7 +11,7 @@ import type {
   SessionRuntimeTimelineState,
 } from '../../runtime-host/application/sessions/session-runtime-types';
 import { OPENCLAW_RUNTIME_PROTOCOL_ID, OPENCLAW_RUNTIME_ENDPOINT_ID } from '../../runtime-host/application/adapters/openclaw/runtime/openclaw-runtime-identity';
-import { createOpenClawTestRuntimeAddress, createOpenClawTestRuntimeContext } from './helpers/runtime-address-fixtures';
+import { createOpenClawTestSessionIdentity, createOpenClawTestRuntimeContext } from './helpers/runtime-address-fixtures';
 
 function buildRuntimeState(): ReturnType<typeof createEmptySessionRuntimeState> {
   return createEmptySessionRuntimeState();
@@ -24,7 +24,7 @@ function createTimelineRuntime(state: SessionRuntimeTimelineState) {
     persistStore: () => undefined,
     updateExecutionGraphDependencyIndex: () => undefined,
     syncTransportIssueIndex: () => undefined,
-    syncApprovalAddressIndex: () => undefined,
+    syncApprovalIdentityIndex: () => undefined,
     listParentSessionStates: () => [],
   };
   const executionGraphRuntime = new SessionExecutionGraphRuntime({
@@ -229,6 +229,136 @@ describe('Runtime Host canonical ACP projection', () => {
       pendingTurnKey: 'run-1',
       pendingTurnLaneKey: 'main',
       lastError: null,
+    });
+  });
+
+  it('does not let an old run final clear a newer active run', () => {
+    const state = createEmptyCanonicalSessionState('agent:main:main', createOpenClawTestRuntimeContext('agent:main:main'));
+    reduceCanonicalSessionEvents(state, [{
+      ...base('run-1-started'),
+      type: 'lifecycle',
+      phase: 'started',
+      runPhase: 'submitted',
+      error: null,
+    }, {
+      ...base('run-2-started'),
+      eventId: 'run-2-started',
+      runId: 'run-2',
+      seq: 2,
+      type: 'lifecycle',
+      phase: 'started',
+      runPhase: 'submitted',
+      error: null,
+    }, {
+      ...base('run-1-final-message'),
+      seq: 3,
+      type: 'message_snapshot',
+      role: 'assistant',
+      messageId: 'old-run-final',
+      content: [{ type: 'text', text: '旧 run 完成' }],
+      text: '旧 run 完成',
+      status: 'final',
+    }, {
+      ...base('run-1-final-lifecycle'),
+      seq: 4,
+      type: 'lifecycle',
+      phase: 'final',
+      runPhase: 'done',
+      error: null,
+    }]);
+
+    expect(state.messages).toContainEqual(expect.objectContaining({
+      runId: 'run-1',
+      text: '旧 run 完成',
+      status: 'final',
+    }));
+    expect(state.runtime).toMatchObject({
+      activeRunId: 'run-2',
+      runPhase: 'submitted',
+      pendingTurnKey: 'run-2',
+    });
+  });
+
+  it('does not let same-run progress leave stopping before terminal event', () => {
+    const state = createEmptyCanonicalSessionState('agent:main:main', createOpenClawTestRuntimeContext('agent:main:main'));
+    reduceCanonicalSessionEvents(state, [{
+      ...base('run-1-started'),
+      type: 'lifecycle',
+      phase: 'started',
+      runPhase: 'submitted',
+      error: null,
+    }, {
+      ...base('run-1-stopping'),
+      seq: 2,
+      type: 'lifecycle',
+      phase: 'aborted',
+      runPhase: 'stopping',
+      error: null,
+    }, {
+      ...base('run-1-late-streaming'),
+      seq: 3,
+      type: 'message_snapshot',
+      role: 'assistant',
+      messageId: 'late-streaming',
+      content: [{ type: 'text', text: '停止后的迟到 delta' }],
+      text: '停止后的迟到 delta',
+      status: 'streaming',
+    }, {
+      ...base('run-1-late-tool'),
+      seq: 4,
+      type: 'tool_call',
+      toolCallId: 'late-tool',
+      name: 'Read',
+      input: { file_path: 'package.json' },
+    }]);
+
+    expect(state.messages).toContainEqual(expect.objectContaining({
+      runId: 'run-1',
+      text: '停止后的迟到 delta',
+      status: 'streaming',
+    }));
+    expect(state.tools).toContainEqual(expect.objectContaining({
+      runId: 'run-1',
+      toolCallId: 'late-tool',
+      status: 'running',
+    }));
+    expect(state.runtime).toMatchObject({
+      activeRunId: 'run-1',
+      runPhase: 'stopping',
+      pendingTurnKey: 'run-1',
+    });
+  });
+
+  it('allows same-run terminal event to settle stopping', () => {
+    const state = createEmptyCanonicalSessionState('agent:main:main', createOpenClawTestRuntimeContext('agent:main:main'));
+    reduceCanonicalSessionEvents(state, [{
+      ...base('run-1-started'),
+      type: 'lifecycle',
+      phase: 'started',
+      runPhase: 'submitted',
+      error: null,
+    }, {
+      ...base('run-1-stopping'),
+      seq: 2,
+      type: 'lifecycle',
+      phase: 'aborted',
+      runPhase: 'stopping',
+      error: null,
+    }, {
+      ...base('run-1-aborted'),
+      seq: 3,
+      type: 'message_snapshot',
+      role: 'assistant',
+      messageId: 'aborted-message',
+      content: [],
+      text: '',
+      status: 'aborted',
+    }]);
+
+    expect(state.runtime).toMatchObject({
+      activeRunId: null,
+      runPhase: 'aborted',
+      pendingTurnKey: null,
     });
   });
 
@@ -639,11 +769,11 @@ describe('Runtime Host canonical ACP projection', () => {
       },
       activeTransportEpoch: null,
     };
-    const runtimeAddress = createOpenClawTestRuntimeAddress('agent:main:main');
+    const sessionIdentity = createOpenClawTestSessionIdentity('agent:main:main');
     state.canonical.approvals = [{
       id: 'approval-1',
       sessionKey: 'agent:main:main',
-      runtimeAddress,
+      sessionIdentity,
       runId: 'run-1',
       title: 'Run command',
       command: 'pnpm test',
@@ -665,7 +795,7 @@ describe('Runtime Host canonical ACP projection', () => {
     expect(snapshot.approvals).toEqual([{
       id: 'approval-1',
       sessionKey: 'agent:main:main',
-      runtimeAddress,
+      sessionIdentity,
       runId: 'run-1',
       title: 'Run command',
       command: 'pnpm test',

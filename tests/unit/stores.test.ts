@@ -6,13 +6,13 @@ import { waitFor } from '@testing-library/react';
 import { useLayoutStore } from '@/stores/layout';
 import { useSettingsStore } from '@/stores/settings';
 import { useGatewayStore } from '@/stores/gateway';
-import { hostApiFetchMock, hostCapabilityExecuteMock, resetGatewayClientMocks } from './helpers/mock-gateway-client';
+import { hostApiFetchMock, capabilityExecuteMock, resetGatewayClientMocks } from './helpers/mock-gateway-client';
 
 describe('Settings Store', () => {
   beforeEach(() => {
     // Reset store to default state
     hostApiFetchMock.mockReset();
-    hostCapabilityExecuteMock.mockReset();
+    capabilityExecuteMock.mockReset();
     useSettingsStore.setState({
       theme: 'system',
       language: 'en',
@@ -60,21 +60,21 @@ describe('Settings Store', () => {
     expect(useSettingsStore.getState().devModeUnlocked).toBe(true);
 
     await waitFor(() => {
-      expect(hostCapabilityExecuteMock).toHaveBeenCalledWith(
+      expect(capabilityExecuteMock).toHaveBeenCalledWith(
         expect.objectContaining({
           id: 'settings.runtime',
           operationId: 'settings.setValue',
           input: expect.objectContaining({ key: 'autoCheckUpdate', value: false }),
         }),
-        undefined,
+        { timeoutMs: undefined },
       );
-      expect(hostCapabilityExecuteMock).toHaveBeenCalledWith(
+      expect(capabilityExecuteMock).toHaveBeenCalledWith(
         expect.objectContaining({
           id: 'settings.runtime',
           operationId: 'settings.setValue',
           input: expect.objectContaining({ key: 'devModeUnlocked', value: true }),
         }),
-        undefined,
+        { timeoutMs: undefined },
       );
     });
   });
@@ -87,23 +87,47 @@ describe('Settings Store', () => {
 
     expect(useSettingsStore.getState().launchAtStartup).toBe(true);
     await waitFor(() => {
-      expect(hostCapabilityExecuteMock).toHaveBeenCalledWith(
+      expect(capabilityExecuteMock).toHaveBeenCalledWith(
         expect.objectContaining({
           id: 'settings.runtime',
           operationId: 'settings.setValue',
           input: expect.objectContaining({ key: 'launchAtStartup', value: true }),
         }),
-        undefined,
+        { timeoutMs: undefined },
       );
     });
   });
 
-  it('should keep previous local value when host settings write fails', async () => {
+  it('should persist theme through host settings runtime', async () => {
+    const { setTheme } = useSettingsStore.getState();
+
+    await setTheme('dark');
+
+    expect(useSettingsStore.getState().theme).toBe('dark');
+    expect(capabilityExecuteMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: 'settings.runtime',
+        operationId: 'settings.setValue',
+        scope: { kind: 'app' },
+        target: { kind: 'setting', key: 'theme' },
+        input: { key: 'theme', value: 'dark' },
+      }),
+      { timeoutMs: undefined },
+    );
+  });
+
+  it('should keep theme changes local when host settings write fails', async () => {
     hostApiFetchMock.mockRejectedValueOnce(new Error('write failed'));
     const { setTheme } = useSettingsStore.getState();
 
-    await expect(setTheme('dark')).rejects.toThrow('write failed');
-    expect(useSettingsStore.getState().theme).toBe('system');
+    await expect(setTheme('dark', {
+      kind: 'native-runtime',
+      capabilityId: 'settings.runtime',
+      runtimeAdapterId: 'openclaw',
+      runtimeInstanceId: 'local',
+      agentId: 'default',
+    })).rejects.toThrow('write failed');
+    expect(useSettingsStore.getState().theme).toBe('dark');
   });
 });
 

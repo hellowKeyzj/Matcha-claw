@@ -7,7 +7,7 @@ import { useTaskSnapshotStore } from '@/stores/chat/task-snapshot-store';
 import { useChatStore } from '@/stores/chat';
 import { createEmptySessionRecord } from '@/stores/chat/store-state-helpers';
 import { createReadyResourceStatusState } from '@/lib/resource-state';
-import { createOpenClawTestRuntimeAddress } from './helpers/runtime-address-fixtures';
+import { createOpenClawTestSessionIdentity } from './helpers/runtime-address-fixtures';
 
 const listTaskSnapshotMock = vi.fn();
 
@@ -40,7 +40,7 @@ describe('chat side panel controller', () => {
     listTaskSnapshotMock.mockResolvedValue({ tasks: [], todos: [] });
 
     const mainSession = createEmptySessionRecord();
-    const mainRuntimeAddress = createOpenClawTestRuntimeAddress('agent:main:main');
+    const mainSessionIdentity = createOpenClawTestSessionIdentity('agent:main:main');
     useChatStore.setState({
       currentSessionKey: 'agent:main:main',
       sessionCatalogStatus: createReadyResourceStatusState(1),
@@ -50,8 +50,9 @@ describe('chat side panel controller', () => {
           meta: {
             ...mainSession.meta,
             backendSessionKey: 'agent:main:main',
+            runtimeScopeKey: 'native:openclaw:openclaw:default',
             agentId: 'main',
-            runtimeAddress: mainRuntimeAddress,
+            sessionIdentity: mainSessionIdentity,
           },
         },
       },
@@ -161,8 +162,9 @@ describe('chat side panel controller', () => {
           meta: {
             ...state.loadedSessions['agent:main:main'].meta,
             backendSessionKey: 'agent:worker:session-1',
+            runtimeScopeKey: 'native:openclaw:openclaw:default',
             agentId: 'worker',
-            runtimeAddress: createOpenClawTestRuntimeAddress('agent:worker:session-1', 'worker'),
+            sessionIdentity: createOpenClawTestSessionIdentity('agent:worker:session-1', 'worker'),
           },
         },
       },
@@ -215,7 +217,7 @@ describe('chat side panel controller', () => {
     expect(listTaskSnapshotMock).toHaveBeenCalledTimes(1);
     expect(listTaskSnapshotMock).toHaveBeenCalledWith({
       sessionKey: 'agent:main:main',
-      runtimeAddress: createOpenClawTestRuntimeAddress('agent:main:main'),
+      sessionIdentity: createOpenClawTestSessionIdentity('agent:main:main'),
     });
     expect(result.current.taskInboxTasks.map((task) => task.subject)).toEqual(['手动刷新任务']);
   });

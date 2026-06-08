@@ -516,7 +516,10 @@ export const useTaskSnapshotStore = create<TaskSnapshotStoreState>((set, get) =>
   reportSessionUpdate: (event) => {
     const backendSessionKey = normalizeString(event.sessionKey) || event.snapshot.sessionKey;
     if (!backendSessionKey) return;
-    const recordKey = buildSessionRecordKey(event.snapshot.catalog.runtimeAddress, backendSessionKey);
+    const recordKey = buildSessionRecordKey({
+      ...event.snapshot.catalog.sessionIdentity,
+      sessionKey: event.snapshot.catalog.sessionIdentity.sessionKey || backendSessionKey,
+    });
     if (event.sessionUpdate === 'session_info_update') {
       if (event.phase === 'started') {
         get().notifyChatStarted(recordKey);
@@ -536,7 +539,10 @@ export const useTaskSnapshotStore = create<TaskSnapshotStoreState>((set, get) =>
 
   reportSessionSnapshot: (snapshot, source = 'replay') => {
     void source;
-    const recordKey = buildSessionRecordKey(snapshot.catalog.runtimeAddress, snapshot.sessionKey);
+    const recordKey = buildSessionRecordKey({
+      ...snapshot.catalog.sessionIdentity,
+      sessionKey: snapshot.catalog.sessionIdentity.sessionKey || snapshot.sessionKey,
+    });
     if (snapshot.taskSnapshot?.source === 'todo' || snapshot.taskSnapshot?.todos) {
       get().reportTodos(recordKey, snapshot.taskSnapshot.todos ?? []);
     }

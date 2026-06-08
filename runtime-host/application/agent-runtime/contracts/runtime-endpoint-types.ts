@@ -1,4 +1,4 @@
-import type { RuntimeAddress } from './runtime-address';
+import type { RuntimeEndpointRef, SessionIdentity } from './runtime-address';
 import type { CapabilityDescriptor } from '../../capabilities/contracts/capability-descriptor';
 import type { CanonicalSessionEvent, CanonicalApprovalEvent } from '../../sessions/canonical/canonical-events';
 import type {
@@ -14,23 +14,22 @@ export type RuntimeConnectorId = string;
 
 export interface RuntimeEndpointIdentity {
   scopeKey: string;
-  capabilityId: string;
   protocolId?: string;
   connectorId?: string;
   endpointId?: string;
   runtimeAdapterId?: string;
   runtimeInstanceId?: string;
-  agentId: string;
 }
 
 export interface RuntimeSessionContext {
+  identity: SessionIdentity;
   sessionKey: string;
   protocolId: RuntimeProtocolId;
   runtimeEndpointId: RuntimeEndpointId;
   endpoint: RuntimeEndpointIdentity;
+  endpointRef: RuntimeEndpointRef;
   endpointSessionId?: string;
-  agentId?: string;
-  address: RuntimeAddress;
+  agentId: string;
 }
 
 export interface RuntimeEndpointCapabilities {
@@ -87,6 +86,7 @@ export interface RuntimePromptResult {
 export interface RuntimeAbortRequest {
   context: RuntimeSessionContext;
   approvalIds?: readonly string[];
+  runId?: string;
 }
 
 export interface RuntimeResolveApprovalRequest {
@@ -141,8 +141,7 @@ export interface RuntimeReplayAdapter {
 
 export interface RuntimeIdentityPolicy {
   buildMessageId(input: {
-    address: RuntimeAddress;
-    sessionKey: string;
+    identity: SessionIdentity;
     runId: string;
     laneKey: string;
     role: string;
@@ -187,8 +186,4 @@ export interface RuntimeEndpointRegistration {
 
 export interface RuntimeAdapterRegistrationFactory {
   create(): readonly RuntimeAdapter[];
-}
-
-export interface RuntimeConnectorRegistrationFactory {
-  create(): readonly RuntimeProtocolConnector[];
 }

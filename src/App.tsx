@@ -13,9 +13,9 @@ import { useSettingsStore } from './stores/settings';
 import { useGatewayStore } from './stores/gateway';
 import { useProviderStore } from './stores/providers';
 import { useUpdateStore } from './stores/update';
-import { hostApiFetch, resolveSingleCapabilityRuntimeAddress } from './lib/host-api';
+import { hostApiFetch } from './lib/host-api';
 import { useDelayedFlag } from './lib/use-delayed-flag';
-import { TeamsRuntimeDaemon } from './components/runtime/TeamsRuntimeDaemon';
+import { applyResolvedTheme, useResolvedTheme } from './lib/use-resolved-theme';
 import { UpdateNotifier } from './components/update/UpdateNotifier';
 import { TEAMS_FEATURE_ENABLED } from '@/features/teams/feature-flag';
 import {
@@ -119,13 +119,12 @@ interface LicenseGateSnapshot {
   nextRevalidateAtMs: number | null;
 }
 
-const MODEL_PROVIDER_CAPABILITY_ID = 'model.provider';
-
 function App() {
   const navigate = useNavigate();
   const location = useLocation();
   const initSettings = useSettingsStore((state) => state.init);
   const theme = useSettingsStore((state) => state.theme);
+  const resolvedTheme = useResolvedTheme(theme);
   const language = useSettingsStore((state) => state.language);
   const setupComplete = useSettingsStore((state) => state.setupComplete);
   const settingsInitialized = useSettingsStore((state) => state.initialized);
@@ -171,21 +170,7 @@ function App() {
   // Initialize provider snapshot on mount so provider display state
   // survives app restarts without requiring settings page entry.
   useEffect(() => {
-    let cancelled = false;
-    resolveSingleCapabilityRuntimeAddress(MODEL_PROVIDER_CAPABILITY_ID)
-      .then((runtimeAddress) => {
-        if (!cancelled) {
-          void initProviders(runtimeAddress);
-        }
-      })
-      .catch((error) => {
-        if (!cancelled) {
-          console.error('Failed to resolve model provider runtime address:', error);
-        }
-      });
-    return () => {
-      cancelled = true;
-    };
+    void initProviders();
   }, [initProviders]);
 
   useEffect(() => {
@@ -245,22 +230,33 @@ function App() {
   // Apply theme
   useEffect(() => {
     const root = window.document.documentElement;
-    root.classList.remove('light', 'dark');
+    const body = window.document.body;
+    const staleTheme = resolvedTheme === 'dark' ? 'light' : 'dark';
 
-    if (theme === 'system') {
-      const systemTheme = window.matchMedia('(prefers-color-scheme: dark)').matches
-        ? 'dark'
-        : 'light';
-      root.classList.add(systemTheme);
-    } else {
-      root.classList.add(theme);
-    }
-  }, [theme]);
+    const enforceTheme = () => {
+      if (
+        root.classList.contains(resolvedTheme)
+        && !root.classList.contains(staleTheme)
+        && !body.classList.contains('light')
+        && !body.classList.contains('dark')
+      ) {
+        return;
+      }
+      applyResolvedTheme(resolvedTheme);
+    };
+
+    enforceTheme();
+    const observer = new MutationObserver(enforceTheme);
+    observer.observe(root, { attributes: true, attributeFilter: ['class'] });
+    observer.observe(body, { attributes: true, attributeFilter: ['class'] });
+    return () => {
+      observer.disconnect();
+    };
+  }, [resolvedTheme]);
 
   return (
     <ErrorBoundary>
       <TooltipProvider delayDuration={300}>
-        {TEAMS_FEATURE_ENABLED ? <TeamsRuntimeDaemon /> : null}
         <Routes>
           {/* Setup wizard (shown on first launch) */}
           <Route

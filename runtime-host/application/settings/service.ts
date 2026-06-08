@@ -2,7 +2,6 @@ import {
   ok,
   type ApplicationResponse,
 } from '../common/application-response';
-import type { RuntimeAddress } from '../agent-runtime/contracts/runtime-address';
 import type { SettingsRuntimeConfigSyncWorkflow } from '../workflows/settings-runtime-config/settings-runtime-config-sync-workflow';
 import type { SettingsRuntimeConfigSyncPayload } from './settings-jobs';
 import type { SettingsRepository } from './store';
@@ -36,11 +35,9 @@ export class SettingsService {
     return await this.deps.runtimeConfigSyncWorkflow.patch(payload);
   }
 
-  async reset(runtimeAddress?: RuntimeAddress): Promise<ApplicationResponse> {
+  async reset(): Promise<ApplicationResponse> {
     const settings = await this.deps.repository.reset();
-    if (runtimeAddress) {
-      await this.deps.runtimeConfigSyncWorkflow.reset(settings, runtimeAddress);
-    }
+    await this.deps.runtimeConfigSyncWorkflow.reset(settings);
     return ok({ success: true, settings });
   }
 

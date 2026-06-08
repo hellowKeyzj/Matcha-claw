@@ -1,37 +1,35 @@
-import { validateRuntimeAddress, type RuntimeAddress } from '../../application/agent-runtime/contracts/runtime-address';
+import {
+  validateCapabilityTarget,
+  validateRuntimeScope,
+  type CapabilityTarget,
+  type RuntimeScope,
+} from '../../application/agent-runtime/contracts/runtime-address';
 import type { CapabilityDescriptor } from '../../application/capabilities/contracts/capability-descriptor';
 import type { CapabilityExecuteRequest } from '../../application/capabilities/contracts/capability-router';
 import { badRequest, readRecord, routeResponder, type ApplicationResponse, type RuntimeRouteDefinition } from './route-utils';
 
 interface CapabilityRouteService {
   listCapabilities: () => readonly CapabilityDescriptor[];
-  describeCapability: (input: { id: string; address: RuntimeAddress }) => CapabilityDescriptor;
+  describeCapability: (input: { id: string; scope: RuntimeScope }) => CapabilityDescriptor;
   executeCapability: (request: CapabilityExecuteRequest) => Promise<ApplicationResponse>;
 }
 
-function readCapabilityAddressRequest(payload: unknown): { id: string; address: RuntimeAddress; body: Record<string, unknown> } | { error: string } {
+function readCapabilityScopeRequest(payload: unknown): { id: string; scope: RuntimeScope; body: Record<string, unknown> } | { error: string } {
   const body = readRecord(payload);
   const id = body.id;
   if (typeof id !== 'string' || !id.trim()) {
     return { error: 'Capability id is required' };
   }
-  const runtimeAddress = body.runtimeAddress;
-  if (runtimeAddress === undefined) {
-    return { error: 'RuntimeAddress is required' };
+  const scope = body.scope;
+  const scopeError = validateRuntimeScope(scope);
+  if (scopeError) {
+    return { error: scopeError };
   }
-  const runtimeAddressError = validateRuntimeAddress(runtimeAddress);
-  if (runtimeAddressError) {
-    return { error: runtimeAddressError };
-  }
-  const address = runtimeAddress as RuntimeAddress;
-  if (address.capabilityId !== id) {
-    return { error: 'Capability id does not match RuntimeAddress capabilityId' };
-  }
-  return { id, address, body };
+  return { id, scope: scope as RuntimeScope, body };
 }
 
 function readCapabilityExecuteRequest(payload: unknown): CapabilityExecuteRequest | { error: string } {
-  const request = readCapabilityAddressRequest(payload);
+  const request = readCapabilityScopeRequest(payload);
   if ('error' in request) {
     return request;
   }
@@ -39,10 +37,21 @@ function readCapabilityExecuteRequest(payload: unknown): CapabilityExecuteReques
   if (typeof operationId !== 'string' || !operationId.trim()) {
     return { error: 'Capability operationId is required' };
   }
+  if (request.body.runtimeAddress !== undefined) {
+    return { error: 'Capability runtimeAddress is not allowed' };
+  }
+  const target = request.body.target ?? null;
+  if (target !== null) {
+    const targetError = validateCapabilityTarget(target);
+    if (targetError) {
+      return { error: targetError };
+    }
+  }
   return {
     id: request.id,
     operationId,
-    address: request.address,
+    scope: request.scope,
+    target: target as CapabilityTarget | null,
     input: request.body.input,
   };
 }
@@ -59,7 +68,7 @@ export const capabilityRoutes: readonly RuntimeRouteDefinition<CapabilityRouteSe
     method: 'POST',
     path: '/api/capabilities/describe',
     handle: (context, service) => {
-      const request = readCapabilityAddressRequest(context.payload);
+      const request = readCapabilityScopeRequest(context.payload);
       if ('error' in request) {
         return badRequest(request.error);
       }

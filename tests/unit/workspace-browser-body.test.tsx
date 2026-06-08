@@ -2,6 +2,17 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import type { ReactNode } from 'react';
 import { WorkspaceBrowserBody } from '@/components/file-preview/WorkspaceBrowserBody';
+import type { SessionIdentity } from '../../runtime-host/shared/runtime-address';
+
+const sessionIdentity: SessionIdentity = {
+  endpoint: {
+    kind: 'native-runtime',
+    runtimeAdapterId: 'openclaw',
+    runtimeInstanceId: 'local',
+  },
+  agentId: 'default',
+  sessionKey: 'test-session',
+};
 
 const hostFileListDirMock = vi.fn();
 const openArtifactPathExternallyMock = vi.fn();
@@ -75,6 +86,7 @@ describe('workspace browser body', () => {
         rootPath="/workspace"
         selectedFilePath={null}
         selectedFile={null}
+        sessionIdentity={sessionIdentity}
         previewMode="preview"
         onSelectFile={onSelectFile}
       />,
@@ -84,6 +96,7 @@ describe('workspace browser body', () => {
       expect(hostFileListDirMock).toHaveBeenCalledWith(
         {
           path: '/workspace',
+          sessionIdentity,
         },
         {
           timeoutMs: 60000,
@@ -120,6 +133,7 @@ describe('workspace browser body', () => {
         rootPath="/workspace"
         selectedFilePath={null}
         selectedFile={null}
+        sessionIdentity={sessionIdentity}
         previewMode="preview"
         onSelectFile={onSelectFile}
       />,
@@ -149,6 +163,7 @@ describe('workspace browser body', () => {
           mimeType: 'text/typescript',
           contentType: 'code',
         }}
+        sessionIdentity={sessionIdentity}
         previewMode="preview"
         onSelectFile={vi.fn()}
         onPreviewModeChange={vi.fn()}
@@ -181,6 +196,7 @@ describe('workspace browser body', () => {
           contentType: 'code',
         }}
         availableWidth={480}
+        sessionIdentity={sessionIdentity}
         previewMode="preview"
         onSelectFile={vi.fn()}
       />,
@@ -207,6 +223,7 @@ describe('workspace browser body', () => {
           mimeType: 'text/markdown',
           contentType: 'markdown',
         }}
+        sessionIdentity={sessionIdentity}
         previewMode="preview"
         onSelectFile={vi.fn()}
         onPreviewModeChange={vi.fn()}
@@ -217,6 +234,7 @@ describe('workspace browser body', () => {
       expect(hostFileListDirMock).toHaveBeenCalledWith(
         {
           path: '/workspace',
+          sessionIdentity,
         },
         {
           timeoutMs: 60000,
@@ -274,6 +292,7 @@ describe('workspace browser body', () => {
           mimeType: 'text/typescript',
           contentType: 'code',
         }}
+        sessionIdentity={sessionIdentity}
         previewMode="preview"
         onSelectFile={vi.fn()}
       />,
@@ -284,6 +303,7 @@ describe('workspace browser body', () => {
       2,
       {
         path: '/workspace/src',
+        sessionIdentity,
       },
       {
         timeoutMs: 60000,
@@ -318,6 +338,7 @@ describe('workspace browser body', () => {
         rootPath="/workspace"
         selectedFilePath={null}
         selectedFile={null}
+        sessionIdentity={sessionIdentity}
         previewMode="preview"
         onSelectFile={onSelectFile}
       />,
@@ -329,6 +350,7 @@ describe('workspace browser body', () => {
         2,
         {
           path: '/workspace/memory',
+          sessionIdentity,
         },
         {
           timeoutMs: 60000,
@@ -370,6 +392,7 @@ describe('workspace browser body', () => {
           lineStats: { added: 1, removed: 1 },
           toolId: 'edit-1',
         }}
+        sessionIdentity={sessionIdentity}
         previewMode="diff"
         onSelectFile={vi.fn()}
         onPreviewModeChange={vi.fn()}

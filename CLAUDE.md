@@ -62,7 +62,24 @@ Strong success criteria let you loop independently. Weak criteria ("make it work
 
 ---
 
-## 5. Communication Language
+## 5. Subagent Parallel Development
+
+**Prefer parallel subagent implementation with low-conflict task boundaries.**
+
+When using subagents for development:
+- For every newly started subagent, first consider whether an existing related subagent session can be reused.
+- Use subagents for implementation work when the task can be split cleanly.
+- Do not use worktrees for subagent development; work directly on the current branch.
+- Run parallelizable subagent tasks in parallel, not serially; do not wait for one independent group to finish before starting another when their file/module boundaries do not conflict.
+- Prefer one broad upfront partition that covers the whole requested feature scope, assigning as many subagents as needed; agent count is not a concern when boundaries are low-conflict.
+- Split work by low-conflict boundaries: files, feature slices, providers/plugins, routes, clients, stores, UI components, or test areas.
+- Avoid assigning multiple subagents to edit the same file, shared contract, registry, core type definition, or common helper at the same time.
+- If shared contracts, public types, registries, or common helpers must change, make that shared change in one place first, then parallelize downstream call-site updates.
+- The main agent is responsible for final integration: inspect the combined diff, resolve conflicts, remove accidental overlap, and run verification.
+
+---
+
+## 6. Communication Language
 
 **Default to Chinese.**
 

@@ -7,7 +7,8 @@ import { ChannelConfigMutationWorkflow } from '../../runtime-host/application/wo
 import { ChannelRuntimeWorkflow } from '../../runtime-host/application/workflows/channel-runtime/channel-runtime-workflow';
 import { dispatchRuntimeRouteDefinition } from './helpers/runtime-route';
 import type { CapabilityOperationContext } from '../../runtime-host/application/capabilities/contracts/capability-router';
-import { createOpenClawTestRuntimeAddress } from './helpers/runtime-address-fixtures';
+import type { CapabilityTarget, RuntimeScope } from '../../runtime-host/application/agent-runtime/contracts/runtime-address';
+import { openClawTestRuntimeEndpoint } from './helpers/runtime-address-fixtures';
 
 const clock = {
   nowMs: () => 1234,
@@ -19,25 +20,55 @@ async function dispatchChannelIntegrationCapability(
   channelService: ChannelService,
   operationId: string,
   payload: Record<string, unknown> = {},
+  target: CapabilityTarget | null = channelCapabilityTarget(operationId, payload),
 ) {
   const route = createChannelIntegrationCapabilityOperationRoutes({ channelService })
     .find((candidate) => candidate.operationId === operationId);
   if (!route) {
     throw new Error(`Missing channel integration operation: ${operationId}`);
   }
-  return await route.handle(channelIntegrationContext(operationId, payload));
+  return await route.handle(channelIntegrationContext(operationId, payload, target));
+}
+
+const channelRuntimeScope: RuntimeScope = {
+  kind: 'runtime-instance',
+  endpoint: openClawTestRuntimeEndpoint,
+};
+
+function channelCapabilityTarget(operationId: string, payload: Record<string, unknown>): CapabilityTarget | null {
+  if (operationId === 'channels.probe') {
+    return null;
+  }
+  if (operationId === 'channels.cancelSession' || operationId === 'channels.requestQr' || operationId === 'channels.approvePairing') {
+    return channelPairingTarget(payload);
+  }
+  return channelTarget(payload);
+}
+
+function channelTarget(payload: Record<string, unknown>): CapabilityTarget {
+  const channelType = typeof payload.channelType === 'string' ? payload.channelType : '';
+  const accountId = typeof payload.accountId === 'string' ? payload.accountId : undefined;
+  return { kind: 'channel', channelType, ...(accountId ? { accountId } : {}) };
+}
+
+function channelPairingTarget(payload: Record<string, unknown>): CapabilityTarget {
+  const channelType = typeof payload.channelType === 'string' ? payload.channelType : '';
+  const accountId = typeof payload.accountId === 'string' ? payload.accountId : undefined;
+  const pairingId = typeof payload.code === 'string' ? payload.code.trim() : undefined;
+  return { kind: 'channel-pairing', channelType, ...(accountId ? { accountId } : {}), ...(pairingId ? { pairingId } : {}) };
 }
 
 function channelIntegrationContext(
   operationId: string,
   payload: Record<string, unknown>,
+  target: CapabilityTarget | null,
 ): CapabilityOperationContext {
-  const address = createOpenClawTestRuntimeAddress('agent:main:main');
   return {
     capabilityId: 'integration.channel',
     operationId,
-    address: { ...address, capabilityId: 'integration.channel' },
-    input: { ...payload, runtimeAddress: { ...address, capabilityId: 'integration.channel' } },
+    scope: channelRuntimeScope,
+    target,
+    input: payload,
     domainInput: payload,
   };
 }

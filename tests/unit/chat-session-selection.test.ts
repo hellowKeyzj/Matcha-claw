@@ -3,15 +3,20 @@ import { pickStartupSessionFallback } from '@/stores/chat/session-selection';
 import type { ChatSession } from '@/stores/chat/types';
 
 function session(key: string, updatedAt: number): ChatSession {
+  const agentId = key.split(':')[1] ?? 'main';
   return {
     key,
-    agentId: key.split(':')[1] ?? 'main',
-    runtimeAddress: {
-      kind: 'native-runtime',
-      capabilityId: 'session.prompt',
-      runtimeAdapterId: 'openclaw',
-      runtimeInstanceId: 'local',
-      agentId: key.split(':')[1] ?? 'main',
+    backendSessionKey: key,
+    agentId,
+    protocolId: 'openclaw-v4',
+    runtimeEndpointId: 'local',
+    sessionIdentity: {
+      endpoint: {
+        kind: 'native-runtime',
+        runtimeAdapterId: 'openclaw',
+        runtimeInstanceId: 'local',
+      },
+      agentId,
       sessionKey: key,
     },
     updatedAt,

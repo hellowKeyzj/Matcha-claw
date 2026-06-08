@@ -11,6 +11,7 @@ import {
   resolveTimelineLastActivityAt,
 } from './timeline-state';
 import type { RuntimeSessionContext } from '../agent-runtime/contracts/runtime-endpoint-types';
+import type { SessionContextTokenSnapshot } from '../../shared/session-adapter-types';
 
 function readSessionKeySuffix(sessionKey: string): string {
   const parts = sessionKey.split(':');
@@ -38,9 +39,10 @@ export function createSessionCatalogItem(input: {
   runtimeModel?: string | null;
   resolvedModel?: string | null;
   label?: string | null;
+  contextTokens?: SessionContextTokenSnapshot;
   context: RuntimeSessionContext;
 }): SessionCatalogItem {
-  const agentId = input.context.address.agentId;
+  const agentId = input.context.identity.agentId;
   const inputLabel = typeof input.label === 'string' ? input.label.trim() : '';
   const timelineLabel = resolveSessionLabelDetailsFromTimelineEntries(input.timelineEntries);
   const label = inputLabel || timelineLabel.label;
@@ -53,13 +55,14 @@ export function createSessionCatalogItem(input: {
     agentId,
     protocolId: input.context.protocolId,
     runtimeEndpointId: input.context.runtimeEndpointId,
-    runtimeAddress: input.context.address,
+    sessionIdentity: input.context.identity,
     kind,
     preferred: kind === 'main',
     ...(label ? { label } : {}),
     ...(titleSource !== 'none' ? { titleSource } : {}),
     displayName: input.sessionKey,
     ...(resolvedModel ? { model: resolvedModel } : {}),
+    ...(input.contextTokens ? { contextTokens: input.contextTokens } : {}),
     ...(typeof updatedAt === 'number' ? { updatedAt } : {}),
   };
 }

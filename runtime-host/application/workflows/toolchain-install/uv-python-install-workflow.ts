@@ -11,17 +11,17 @@ export class UvPythonInstallWorkflow {
   constructor(private readonly deps: UvPythonInstallWorkflowDeps) {}
 
   async checkInstalled(): Promise<boolean> {
-    for (const candidate of this.deps.projection.getBundledUvPathCandidates()) {
+    for (const candidate of this.deps.runtime.getBundledUvPathCandidates()) {
       if (await this.deps.fileSystem.exists(candidate)) {
         return true;
       }
     }
-    return await this.findUvInPath(this.deps.projection.getPlatform());
+    return await this.findUvInPath(this.deps.runtime.getPlatform());
   }
 
   async executeInstall() {
     const uvExecutable = await this.resolveUvExecutableForInstall();
-    if (uvExecutable === 'uv' && !(await this.findUvInPath(this.deps.projection.getPlatform()))) {
+    if (uvExecutable === 'uv' && !(await this.findUvInPath(this.deps.runtime.getPlatform()))) {
       return {
         success: false,
         error: 'uv not found in system PATH',
@@ -47,7 +47,7 @@ export class UvPythonInstallWorkflow {
   }
 
   private async resolveUvExecutableForInstall(): Promise<string> {
-    for (const candidate of this.deps.projection.getBundledUvPathCandidates()) {
+    for (const candidate of this.deps.runtime.getBundledUvPathCandidates()) {
       if (await this.deps.fileSystem.exists(candidate)) {
         return candidate;
       }

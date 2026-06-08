@@ -631,18 +631,9 @@ describe('chat message avatar', () => {
     expect(embeddedIframe).not.toBeNull();
     expect(embeddedIframe?.getAttribute('src')).toBe('/__openclaw__/canvas/documents/cv_inline/index.html');
 
-    const toggle = screen.getByLabelText('展开工具 canvas_render') as HTMLButtonElement | null;
-    expect(document.querySelector('[data-compact-rail="tool"]')?.textContent).not.toContain('已生成画布');
-    act(() => {
-      toggle?.click();
-    });
-
+    expect(document.querySelector('[data-compact-rail="embedded-tool-result"]')?.textContent).toContain('Inline demo');
+    expect(document.querySelector('[data-compact-rail="tool"]')).toBeNull();
     expect(screen.queryByText('预览已显示在助手消息里。')).toBeNull();
-    const outputToggle = screen.getByLabelText('展开输出结果') as HTMLButtonElement | null;
-    act(() => {
-      outputToggle?.click();
-    });
-    expect(screen.getByText('预览已显示在助手消息里。')).toBeInTheDocument();
     const rawToggle = screen.getAllByLabelText('展开原始内容')[0] as HTMLButtonElement | null;
     expect(rawToggle?.getAttribute('aria-expanded')).toBe('false');
     act(() => {

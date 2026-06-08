@@ -4,7 +4,7 @@ import type { SessionRuntimeStateStore } from '../../sessions/session-runtime-st
 import type { SessionSnapshotService } from '../../sessions/session-snapshot-service';
 import type { SessionTimelineRuntime } from '../../sessions/session-timeline-runtime';
 import type { SessionOperationCoordinator } from '../../sessions/session-operation-coordinator';
-import type { RuntimeAddress } from '../../agent-runtime/contracts/runtime-address';
+import type { SessionIdentity } from '../../agent-runtime/contracts/runtime-address';
 import type { AgentRuntimeRegistry } from '../../agent-runtime/contracts/agent-runtime-registry';
 import {
   badRequest,
@@ -26,11 +26,11 @@ export class SessionModelSelectionWorkflow {
 
   async patch(input: {
     sessionKey: string;
-    runtimeAddress: RuntimeAddress;
+    sessionIdentity: SessionIdentity;
     runtimeModelRef: string;
   }): Promise<ApplicationResponseOf> {
-    return await this.deps.operationCoordinator.run(input.sessionKey, 'patch-model', async () => {
-      const context = this.deps.agentRuntimeRegistry.rememberSessionAddress(input.sessionKey, input.runtimeAddress);
+    return await this.deps.operationCoordinator.run(input.sessionIdentity, 'patch-model', async () => {
+      const context = this.deps.agentRuntimeRegistry.rememberSessionIdentity(input.sessionIdentity);
       const current = this.deps.stateStore.getSessionState(input.sessionKey, context).runtime;
       if (isRunActive(current) || current.activeRunId) {
         const state = await this.deps.timelineRuntime.activateSession(input.sessionKey, {

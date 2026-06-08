@@ -57,12 +57,10 @@ describe('runtime host gateway event bridge', () => {
       dispatchRoute: vi.fn(async () => ({ status: 200, data: {} })),
       getSessionRuntime: () => currentRuntime,
       endpointControlState,
-      runtimeHostCapabilityAddress: {
+      runtimeHostEndpoint: {
         kind: 'native-runtime',
-        capabilityId: 'runtime.host',
         runtimeAdapterId: 'test-runtime',
         runtimeInstanceId: 'local',
-        agentId: 'default',
       },
       runtimeHostDataDir: process.cwd(),
       gatewayPort: 12345,
@@ -89,17 +87,13 @@ describe('runtime host gateway event bridge', () => {
     expect(runtime.consumeEndpointNotification.mock.calls.map((call) => call[0])).toEqual([
       {
         kind: 'native-runtime',
-        capabilityId: 'session.prompt',
         runtimeAdapterId: 'test-runtime',
         runtimeInstanceId: 'local',
-        agentId: 'default',
       },
       {
         kind: 'native-runtime',
-        capabilityId: 'session.prompt',
         runtimeAdapterId: 'test-runtime',
         runtimeInstanceId: 'local',
-        agentId: 'default',
       },
     ]);
     expect(runtime.consumeEndpointNotification.mock.calls.map((call) => call[1])).toEqual([
@@ -108,16 +102,25 @@ describe('runtime host gateway event bridge', () => {
     ]);
     expect(runtime.consumeEndpointConversationEvent).toHaveBeenCalledWith({
       kind: 'native-runtime',
-      capabilityId: 'session.prompt',
       runtimeAdapterId: 'test-runtime',
       runtimeInstanceId: 'local',
-      agentId: 'main',
-      sessionKey: 'agent:main:main',
-    }, { type: 'usage', event: { sessionKey: 'agent:main:main' } });
+    }, {
+      type: 'usage',
+      event: { sessionKey: 'agent:main:main' },
+      sessionIdentity: {
+        endpoint: {
+          kind: 'native-runtime',
+          runtimeAdapterId: 'test-runtime',
+          runtimeInstanceId: 'local',
+        },
+        agentId: 'main',
+        sessionKey: 'agent:main:main',
+      },
+    });
     expect(emitParentGatewayEvent).toHaveBeenCalledWith('session:update', { type: 'approval' });
   });
 
-  it('routes raw OpenClaw chat events through endpoint ingress with the session RuntimeAddress', async () => {
+  it('routes raw OpenClaw chat events through endpoint ingress with SessionIdentity', async () => {
     createGatewayClientMock.mockReturnValue(gatewayClient);
     const emitParentGatewayEvent = vi.fn(async () => undefined);
     const endpointControlState = {
@@ -146,12 +149,10 @@ describe('runtime host gateway event bridge', () => {
       dispatchRoute: vi.fn(async () => ({ status: 200, data: {} })),
       getSessionRuntime: () => runtime,
       endpointControlState,
-      runtimeHostCapabilityAddress: {
+      runtimeHostEndpoint: {
         kind: 'native-runtime',
-        capabilityId: 'runtime.host',
         runtimeAdapterId: 'test-runtime',
         runtimeInstanceId: 'local',
-        agentId: 'default',
       },
       runtimeHostDataDir: process.cwd(),
       gatewayPort: 12345,
@@ -181,12 +182,20 @@ describe('runtime host gateway event bridge', () => {
     await vi.waitFor(() => {
       expect(runtime.consumeEndpointConversationEvent).toHaveBeenCalledWith({
         kind: 'native-runtime',
-        capabilityId: 'session.prompt',
         runtimeAdapterId: 'test-runtime',
         runtimeInstanceId: 'local',
-        agentId: 'main',
-        sessionKey: 'agent:main:main',
-      }, event);
+      }, {
+        ...event,
+        sessionIdentity: {
+          endpoint: {
+            kind: 'native-runtime',
+            runtimeAdapterId: 'test-runtime',
+            runtimeInstanceId: 'local',
+          },
+          agentId: 'main',
+          sessionKey: 'agent:main:main',
+        },
+      });
     });
     expect(emitParentGatewayEvent).toHaveBeenCalledWith('session:update', {
       sessionUpdate: 'session_item',
@@ -209,7 +218,7 @@ describe('runtime host gateway event bridge', () => {
     const processed: string[] = [];
     let releaseFirstMain: () => void = () => undefined;
     const runtime = {
-      consumeEndpointConversationEvent: vi.fn(async (_runtimeAddress, payload: { event?: { sessionKey?: string; seq?: number } }) => {
+      consumeEndpointConversationEvent: vi.fn(async (_endpoint, payload: { event?: { sessionKey?: string; seq?: number } }) => {
         const sessionKey = payload.event?.sessionKey ?? 'unknown';
         const seq = payload.event?.seq ?? 0;
         processed.push(`start:${sessionKey}:${seq}`);
@@ -231,12 +240,10 @@ describe('runtime host gateway event bridge', () => {
       dispatchRoute: vi.fn(async () => ({ status: 200, data: {} })),
       getSessionRuntime: () => runtime,
       endpointControlState,
-      runtimeHostCapabilityAddress: {
+      runtimeHostEndpoint: {
         kind: 'native-runtime',
-        capabilityId: 'runtime.host',
         runtimeAdapterId: 'test-runtime',
         runtimeInstanceId: 'local',
-        agentId: 'default',
       },
       runtimeHostDataDir: process.cwd(),
       gatewayPort: 12345,
@@ -313,12 +320,10 @@ describe('runtime host gateway event bridge', () => {
       dispatchRoute: vi.fn(async () => ({ status: 200, data: {} })),
       getSessionRuntime: () => runtime,
       endpointControlState,
-      runtimeHostCapabilityAddress: {
+      runtimeHostEndpoint: {
         kind: 'native-runtime',
-        capabilityId: 'runtime.host',
         runtimeAdapterId: 'test-runtime',
         runtimeInstanceId: 'local',
-        agentId: 'default',
       },
       runtimeHostDataDir: process.cwd(),
       gatewayPort: 12345,
@@ -394,12 +399,10 @@ describe('runtime host gateway event bridge', () => {
       dispatchRoute: vi.fn(async () => ({ status: 200, data: {} })),
       getSessionRuntime: () => runtime,
       endpointControlState,
-      runtimeHostCapabilityAddress: {
+      runtimeHostEndpoint: {
         kind: 'native-runtime',
-        capabilityId: 'runtime.host',
         runtimeAdapterId: 'test-runtime',
         runtimeInstanceId: 'local',
-        agentId: 'default',
       },
       runtimeHostDataDir: process.cwd(),
       gatewayPort: 12345,
@@ -422,23 +425,19 @@ describe('runtime host gateway event bridge', () => {
     expect(gatewayClient.inspectGatewayControlReadiness).toHaveBeenCalledTimes(1);
     expect(gatewayClient.readGatewayCapabilities).not.toHaveBeenCalled();
     expect(endpointControlState.updateRuntimeEndpointControlState).toHaveBeenCalledWith({
-      address: {
+      endpoint: {
         kind: 'native-runtime',
-        capabilityId: 'runtime.host',
         runtimeAdapterId: 'test-runtime',
         runtimeInstanceId: 'local',
-        agentId: 'default',
       },
       connection: payload,
       updatedAt: payload.updatedAt,
     });
     expect(endpointControlState.updateRuntimeEndpointControlState).toHaveBeenCalledWith({
-      address: {
+      endpoint: {
         kind: 'native-runtime',
-        capabilityId: 'runtime.host',
         runtimeAdapterId: 'test-runtime',
         runtimeInstanceId: 'local',
-        agentId: 'default',
       },
       readiness: expect.objectContaining({ capabilities }),
       capabilities,

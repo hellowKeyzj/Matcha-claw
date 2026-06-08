@@ -40,6 +40,7 @@
     "pendingBlockers": "Блокировки сессии",
     "pendingBlockersEmpty": "Нет ожидающих блокировок",
     "pendingBlockerTask": "Задача {{taskId}}",
+    "pendingBlockerStage": "Stage {{stageId}}",
     "pendingBlockerGeneral": "Общая блокировка",
     "pendingBlockerFrom": "От {{from}}",
     "pendingBlockerTypeApproval": "Блокировка подтверждения",

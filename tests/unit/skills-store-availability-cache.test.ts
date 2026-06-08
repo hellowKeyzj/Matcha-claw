@@ -1,24 +1,37 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { RuntimeAddress } from '../../runtime-host/shared/runtime-address';
 
 const hostApiFetchMock = vi.fn();
-const hostCapabilityExecuteMock = vi.fn();
+const capabilityExecuteMock = vi.fn();
+const resolveSingleCapabilityScopeMock = vi.fn();
 
-const skillManagementAddress: RuntimeAddress = {
-  kind: 'native-runtime',
-  capabilityId: 'skill.management',
-  runtimeAdapterId: 'openclaw',
-  runtimeInstanceId: 'local',
-  agentId: 'default',
-};
+const skillManagementScope = {
+  kind: 'runtime-instance',
+  endpoint: {
+    kind: 'native-runtime',
+    runtimeAdapterId: 'openclaw',
+    runtimeInstanceId: 'local',
+  },
+} as const;
 
 vi.mock('@/lib/host-api', () => ({
-  hostApiFetch: (...args: unknown[]) => hostApiFetchMock(...args),
-  hostCapabilityExecute: (...args: unknown[]) => hostCapabilityExecuteMock(...args),
+  hostApiFetch: async (path: string, init?: { body?: string; timeoutMs?: number }) => {
+    if (path === '/api/capabilities/execute') {
+      const payload = init?.body ? JSON.parse(init.body) : {};
+      return await capabilityExecuteMock(payload, { timeoutMs: init?.timeoutMs });
+    }
+    return await hostApiFetchMock(path, init);
+  },
+  resolveSingleCapabilityScope: (...args: unknown[]) => resolveSingleCapabilityScopeMock(...args),
   waitForRuntimeJobResult: async (jobId: string) => {
-    const response = await hostApiFetchMock('/api/runtime-host/jobs/get', {
+    const response = await hostApiFetchMock('/api/capabilities/execute', {
       method: 'POST',
-      body: JSON.stringify({ jobId }),
+      body: JSON.stringify({
+        id: 'runtime.host',
+        operationId: 'runtimeHost.jobGet',
+        scope: skillManagementScope,
+        target: { kind: 'runtime-job', jobId },
+        input: { jobId },
+      }),
     });
     return response.job?.result;
   },
@@ -38,6 +51,7 @@ describe('skills store availability and search cache', () => {
   beforeEach(() => {
     vi.resetModules();
     vi.clearAllMocks();
+    resolveSingleCapabilityScopeMock.mockResolvedValue(skillManagementScope);
   });
 
   afterEach(() => {
@@ -114,7 +128,7 @@ describe('skills store availability and search cache', () => {
     const first = useSkillsStore.getState().fetchSkills();
     const second = useSkillsStore.getState().fetchSkills();
 
-    expect(hostApiFetchMock).toHaveBeenCalledWith('/api/skills/status');
+    expect(hostApiFetchMock).toHaveBeenCalledWith('/api/skills/status', undefined);
     expect(hostApiFetchMock.mock.calls.filter((call) => call[0] === '/api/skills/status')).toHaveLength(1);
 
     deferredStatus.resolve({ skills: [{ skillKey: 'singleflight-skill', disabled: false }] });
@@ -129,24 +143,25 @@ describe('skills store availability and search cache', () => {
       }
       throw new Error(`Unexpected hostApiFetch path: ${path}`);
     });
-    hostCapabilityExecuteMock.mockResolvedValueOnce({
+    capabilityExecuteMock.mockResolvedValueOnce({
       skills: [{ skillKey: 'fresh-skill', disabled: false }],
     });
 
     const { useSkillsStore } = await import('@/stores/skills');
     const staleFetch = useSkillsStore.getState().fetchSkills();
-    const forcedFetch = useSkillsStore.getState().fetchSkills({ force: true, fresh: true, runtimeAddress: skillManagementAddress });
+    const forcedFetch = useSkillsStore.getState().fetchSkills({ force: true, fresh: true });
 
     deferredStatus.resolve({ skills: [{ skillKey: 'stale-skill', disabled: false }] });
     await Promise.all([staleFetch, forcedFetch]);
 
     expect(hostApiFetchMock.mock.calls.filter((call) => call[0] === '/api/skills/status')).toHaveLength(1);
-    expect(hostCapabilityExecuteMock).toHaveBeenCalledWith(expect.objectContaining({
+    expect(capabilityExecuteMock).toHaveBeenCalledWith(expect.objectContaining({
       id: 'skill.management',
       operationId: 'skills.refreshStatus',
-      runtimeAddress: skillManagementAddress,
-      input: expect.objectContaining({ runtimeAddress: skillManagementAddress }),
-    }));
+      scope: skillManagementScope,
+      target: { kind: 'none' },
+      input: {},
+    }), { timeoutMs: undefined });
     expect(useSkillsStore.getState().skills.map((skill) => skill.id)).toEqual(['fresh-skill']);
   });
 
@@ -184,7 +199,7 @@ describe('skills store availability and search cache', () => {
   it('enableSkill 会维护 mutatingBySkillId 生命周期', async () => {
     const deferredJob = createDeferred<{ success: boolean }>();
     hostApiFetchMock.mockImplementation(async (path: string) => {
-      if (path === '/api/runtime-host/jobs/get') {
+      if (path === '/api/capabilities/execute') {
         await deferredJob.promise;
         return {
           success: true,
@@ -201,7 +216,7 @@ describe('skills store availability and search cache', () => {
       }
       throw new Error(`Unexpected hostApiFetch path: ${path}`);
     });
-    hostCapabilityExecuteMock.mockResolvedValueOnce({
+    capabilityExecuteMock.mockResolvedValueOnce({
       success: true,
       job: {
         id: 'job-demo-skill',
@@ -225,23 +240,23 @@ describe('skills store availability and search cache', () => {
       },
     ]);
 
-    const enablePromise = useSkillsStore.getState().enableSkill('demo-skill', skillManagementAddress);
+    const enablePromise = useSkillsStore.getState().enableSkill('demo-skill');
     expect(useSkillsStore.getState().mutating).toBe(true);
     expect(useSkillsStore.getState().mutatingBySkillId['demo-skill']).toBe(1);
 
     deferredJob.resolve({ success: true });
     await enablePromise;
 
-    expect(hostCapabilityExecuteMock).toHaveBeenCalledWith(expect.objectContaining({
+    expect(capabilityExecuteMock).toHaveBeenCalledWith(expect.objectContaining({
       id: 'skill.management',
       operationId: 'skills.updateState',
-      runtimeAddress: skillManagementAddress,
-      input: expect.objectContaining({
+      scope: skillManagementScope,
+      target: { kind: 'skill', skillId: 'demo-skill' },
+      input: {
         skillKey: 'demo-skill',
         enabled: true,
-        runtimeAddress: skillManagementAddress,
-      }),
-    }));
+      },
+    }), { timeoutMs: undefined });
 
     const state = useSkillsStore.getState();
     expect(state.mutating).toBe(false);
@@ -253,7 +268,7 @@ describe('skills store availability and search cache', () => {
     hostApiFetchMock.mockImplementation(async (path: string) => {
       throw new Error(`Unexpected hostApiFetch path: ${path}`);
     });
-    hostCapabilityExecuteMock.mockResolvedValueOnce({
+    capabilityExecuteMock.mockResolvedValueOnce({
       success: true,
       updated: ['skill-a', 'skill-b'],
       enabled: true,
@@ -265,19 +280,19 @@ describe('skills store availability and search cache', () => {
       { id: 'skill-b', slug: 'skill-b', name: 'Skill B', description: 'b', enabled: false, icon: '🧩' },
     ]);
 
-    await useSkillsStore.getState().batchSetSkillsEnabled(['skill-a', 'skill-b'], true, skillManagementAddress);
+    await useSkillsStore.getState().batchSetSkillsEnabled(['skill-a', 'skill-b'], true);
 
-    expect(hostCapabilityExecuteMock).toHaveBeenCalledWith(expect.objectContaining({
+    expect(capabilityExecuteMock).toHaveBeenCalledWith(expect.objectContaining({
       id: 'skill.management',
       operationId: 'skills.updateBatchState',
-      runtimeAddress: skillManagementAddress,
-      input: expect.objectContaining({
+      scope: skillManagementScope,
+      target: { kind: 'skill' },
+      input: {
         skillKeys: ['skill-a', 'skill-b'],
         enabled: true,
-        runtimeAddress: skillManagementAddress,
-      }),
-    }));
-    expect(hostApiFetchMock.mock.calls.filter((call) => call[0] === '/api/runtime-host/jobs/get')).toHaveLength(0);
+      },
+    }), { timeoutMs: undefined });
+    expect(hostApiFetchMock.mock.calls.filter((call) => call[0] === '/api/capabilities/execute')).toHaveLength(0);
     expect(useSkillsStore.getState().skills.map((skill) => skill.enabled)).toEqual([true, true]);
     expect(useSkillsStore.getState().mutating).toBe(false);
   });

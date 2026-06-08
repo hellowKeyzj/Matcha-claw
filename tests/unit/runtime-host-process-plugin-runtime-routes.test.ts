@@ -124,9 +124,16 @@ describe('runtime-host process plugin runtime routes', () => {
     });
 
     const [setEnabledRoute] = createPluginRuntimeCapabilityOperationRoutes({ pluginRuntimeService });
-    const result = setEnabledRoute.handle({ pluginIds: ['memory-lancedb-pro'] });
+    const result = setEnabledRoute.handle({
+      capabilityId: 'plugin.runtime',
+      operationId: 'plugins.setEnabled',
+      scope: { kind: 'runtime-instance', endpoint: { kind: 'native-runtime', runtimeAdapterId: 'openclaw', runtimeInstanceId: 'local' } },
+      target: { kind: 'plugin', pluginId: 'memory-lancedb-pro' },
+      input: { pluginIds: ['memory-lancedb-pro'] },
+      domainInput: { pluginIds: ['memory-lancedb-pro'] },
+    });
 
-    expect(submitSetEnabledPlugins).toHaveBeenCalledWith({ pluginIds: ['memory-lancedb-pro'] });
+    expect(submitSetEnabledPlugins).toHaveBeenCalledWith({ pluginIds: ['memory-lancedb-pro'], enabled: true });
     expect(result).toEqual({
       status: 202,
       data: {

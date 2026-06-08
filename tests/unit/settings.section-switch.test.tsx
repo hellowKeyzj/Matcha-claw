@@ -12,7 +12,8 @@ vi.mock('@/components/settings/UpdateSettings', () => ({
 }));
 
 vi.mock('@/lib/host-api', () => ({
-  hostCapabilityExecute: vi.fn(),
+  hostCapabilityExecute: vi.fn().mockResolvedValue(undefined),
+  resolveSingleCapabilityScope: vi.fn().mockResolvedValue({ kind: 'app' }),
   hostApiFetch: vi.fn(async (path: string) => {
     if (path === '/api/license/gate') {
       return {

@@ -15,6 +15,7 @@ import { CronRunHistoryRepository, CronSessionHistoryService, type CronRuntimeDa
 import { LicenseService } from '../../application/license/service';
 import { NodeLicenseRuntime } from '../license-node-runtime';
 import { FileService, type FileRuntimeDataStorePort } from '../../application/files/file-service';
+import type { OpenClawWorkspaceService } from '../../application/adapters/openclaw/infrastructure/openclaw-workspace-service';
 import { PlatformService } from '../../application/platform-runtime/service';
 import type { RuntimeHostPlatformFacade } from '../../application/platform-runtime';
 import {
@@ -42,12 +43,10 @@ import { SecurityRuntimeService } from '../../application/security/service';
 import { SecurityPluginConfigApplier, type SecurityPluginConfigProjectionPort } from '../../application/security/security-plugin-config-applier';
 import { SecurityPolicyRepository, type SecurityPolicyStoragePort } from '../../application/security/security-policy-store';
 import { SecurityPolicyStoreWorkflow } from '../../application/workflows/security-policy/security-policy-store-workflow';
-import { TeamRuntimeService, createTeamRuntimeRootResolver, type TeamRuntimeStorageRootPort } from '../../application/team-runtime/service';
-import { TeamRuntimeApplicationService } from '../../application/team-runtime/team-runtime-application-service';
-import { TeamRuntimeStorageRepository } from '../../application/team-runtime/team-runtime-storage-repository';
-import { MultiAgentTaskWorkflow } from '../../application/workflows/multi-agent-task/multi-agent-task-workflow';
-import { TeamRuntimeOperationsWorkflow } from '../../application/workflows/team-runtime/team-runtime-operations-workflow';
-import { TeamRuntimeStateWorkflow } from '../../application/workflows/team-runtime/team-runtime-state-workflow';
+import { TeamSkillService } from '../../application/team-skill/team-skill-service';
+import { TeamManagedAgentConfigWorkflow } from '../../application/team-skill/team-managed-agent-config-workflow';
+import { TeamSkillGatewayWorkflow } from '../../application/workflows/team-skill/team-skill-gateway-workflow';
+import { TeamRunTaskProjectionWorkflow } from '../../application/workflows/team-skill/team-run-task-projection-workflow';
 import { TaskManagerService } from '../../application/tasks/service';
 import type { SessionRuntimeService } from '../../application/sessions/service';
 import type { TaskWorkspacePort } from '../../application/workflows/task-runtime/task-runtime-workflow';
@@ -82,9 +81,8 @@ import { WorkspaceFileRuntimeWorkflow } from '../../application/workflows/worksp
 import { createPluginRuntimeCapabilityOperationRoutes } from '../../application/capabilities/plugin/plugin-runtime-capability';
 import { createCronSchedulerCapabilityOperationRoutes } from '../../application/capabilities/scheduler/cron-scheduler-capability';
 import { createSecurityRuntimeCapabilityOperationRoutes } from '../../application/capabilities/security/security-runtime-capability';
-import { createMultiAgentTaskCapabilityOperationRoutes } from '../../application/capabilities/task/multi-agent-task-capability';
 import { createTaskControlCapabilityOperationRoutes } from '../../application/capabilities/task/task-control-capability';
-import { createTeamCoordinationCapabilityOperationRoutes } from '../../application/capabilities/team/team-coordination-capability';
+import { createTeamRuntimeCapabilityOperationRoutes } from '../../application/capabilities/team/team-runtime-capability';
 import { createToolInvokeCapabilityOperationRoutes } from '../../application/capabilities/tool/tool-invoke-capability';
 import { createWorkspaceFileCapabilityOperationRoutes } from '../../application/capabilities/workspace/workspace-file-capability';
 import { createLicenseRuntimeCapabilityOperationRoutes } from '../../application/capabilities/license/license-runtime-capability';
@@ -111,7 +109,6 @@ import {
   PLATFORM_SERVICE_TOKEN,
   SECURITY_SERVICE_TOKEN,
   TASK_SERVICE_TOKEN,
-  TEAM_RUNTIME_SERVICE_TOKEN,
   TOOLCHAIN_UV_SERVICE_TOKEN,
 } from '../runtime-host-tokens';
 import type {
@@ -180,6 +177,7 @@ export function registerOperationsApplicationServices(
     systemEnvironment: scope.resolve<RuntimeSystemEnvironmentPort>('runtime.systemEnvironment'),
     runtimeDataStore: scope.resolve<FileRuntimeDataStorePort>('file.runtimeDataStore'),
     idGenerator: scope.resolve<RuntimeIdGeneratorPort>('runtime.idGenerator'),
+    workspaceRoots: scope.resolve<OpenClawWorkspaceService>('openclaw.workspaceService'),
   }));
   container.register('file.service', (scope) => new FileService({
     runtimeWorkflow: scope.resolve<WorkspaceFileRuntimeWorkflow>('file.runtimeWorkflow'),
@@ -245,26 +243,21 @@ export function registerOperationsApplicationServices(
   container.register('security.service', (scope) => new SecurityRuntimeService({
     operationsWorkflow: scope.resolve<SecurityOperationsWorkflow>('security.operationsWorkflow'),
   }));
-  container.register('teamRuntime.storageRepository', (scope) => new TeamRuntimeStorageRepository({
-    fileSystem: scope.resolve<RuntimeFileSystemPort>('runtime.fileSystem'),
-    idGenerator: scope.resolve<RuntimeIdGeneratorPort>('runtime.idGenerator'),
-    clock: scope.resolve<RuntimeClockPort>('runtime.clock'),
+  container.register('teamSkill.gatewayWorkflow', (scope) => new TeamSkillGatewayWorkflow({
+    gateway: scope.resolve<GatewayRuntimePort>('gateway.runtime'),
+    capabilities: scope.resolve<GatewayPluginCapabilityPort>('gateway.capabilities'),
   }));
-  container.register('teamRuntime.stateWorkflow', (scope) => new TeamRuntimeStateWorkflow({
-    storage: scope.resolve<TeamRuntimeStorageRepository>('teamRuntime.storageRepository'),
-    resolveRuntimeRoot: createTeamRuntimeRootResolver(scope.resolve<TeamRuntimeStorageRootPort>('teamRuntime.storageRoot')),
-    onEventEmitted: (event) => {
-      void scope.resolve<{ emit: (eventName: ParentGatewayForwardEventName, payload: unknown) => Promise<void> }>('runtimeHost.parentGatewayEvents').emit('team:event', event).catch(() => undefined);
-    },
+  container.register('teamSkill.taskProjectionWorkflow', (scope) => new TeamRunTaskProjectionWorkflow({
+    taskService: scope.resolve<TaskManagerService>('task.service'),
+    gatewayWorkflow: scope.resolve<TeamSkillGatewayWorkflow>('teamSkill.gatewayWorkflow'),
   }));
-  container.register('teamRuntime.applicationService', (scope) => new TeamRuntimeApplicationService(
-    scope.resolve<TeamRuntimeStateWorkflow>('teamRuntime.stateWorkflow'),
-  ));
-  container.register('teamRuntime.operationsWorkflow', (scope) => new TeamRuntimeOperationsWorkflow({
-    app: scope.resolve<TeamRuntimeApplicationService>('teamRuntime.applicationService'),
+  container.register('teamSkill.managedAgentConfigWorkflow', (scope) => new TeamManagedAgentConfigWorkflow({
+    configRepository: scope.resolve<OpenClawConfigRepositoryPort>('openclaw.configRepository'),
   }));
-  container.register('teamRuntime.service', (scope) => new TeamRuntimeService(
-    scope.resolve<TeamRuntimeOperationsWorkflow>('teamRuntime.operationsWorkflow'),
+  container.register('teamSkill.service', (scope) => new TeamSkillService(
+    scope.resolve<TeamSkillGatewayWorkflow>('teamSkill.gatewayWorkflow'),
+    scope.resolve<TeamRunTaskProjectionWorkflow>('teamSkill.taskProjectionWorkflow'),
+    scope.resolve<TeamManagedAgentConfigWorkflow>('teamSkill.managedAgentConfigWorkflow'),
   ));
   container.register('task.runtimeWorkflow', (scope) => new TaskRuntimeWorkflow({
     gateway: scope.resolve<GatewayRuntimePort>('gateway.runtime'),
@@ -281,11 +274,6 @@ export function registerOperationsApplicationServices(
   container.register('task.service', (scope) => new TaskManagerService(
     scope.resolve<TaskOperationsWorkflow>('task.operationsWorkflow'),
   ));
-  container.register('multiAgentTask.workflow', (scope) => new MultiAgentTaskWorkflow({
-    teamRuntimeService: scope.resolve<TeamRuntimeService>('teamRuntime.service'),
-    taskService: scope.resolve<TaskManagerService>('task.service'),
-    promptService: scope.resolve<SessionRuntimeService>('session.runtime'),
-  }));
   container.register('toolchainUv.installWorkflow', (scope) => new UvPythonInstallWorkflow({
     runtime: scope.resolve<ToolchainUvRuntimePort>('toolchainUv.runtime'),
     commandExecutor: scope.resolve<RuntimeCommandExecutorPort>('runtime.commandExecutor'),
@@ -302,7 +290,6 @@ export function registerOperationsApplicationServices(
   facades.registerContainerFacade('operations', CRON_SERVICE_TOKEN, container);
   facades.registerContainerFacade('operations', FILE_SERVICE_TOKEN, container);
   facades.registerContainerFacade('operations', LICENSE_SERVICE_TOKEN, container);
-  facades.registerContainerFacade('operations', TEAM_RUNTIME_SERVICE_TOKEN, container);
   facades.registerContainerFacade('operations', TOOLCHAIN_UV_SERVICE_TOKEN, container);
   facades.registerContainerFacade('operations', SECURITY_SERVICE_TOKEN, container);
   facades.registerContainerFacade('operations', TASK_SERVICE_TOKEN, container);
@@ -320,11 +307,8 @@ function registerOperationsCapabilityOperationRoutes(container: RuntimeHostConta
     ...createTaskControlCapabilityOperationRoutes({
       taskService: scope.resolve<TaskManagerService>('task.service'),
     }),
-    ...createTeamCoordinationCapabilityOperationRoutes({
-      teamRuntimeService: scope.resolve<TeamRuntimeService>('teamRuntime.service'),
-    }),
-    ...createMultiAgentTaskCapabilityOperationRoutes({
-      multiAgentTaskWorkflow: scope.resolve<MultiAgentTaskWorkflow>('multiAgentTask.workflow'),
+    ...createTeamRuntimeCapabilityOperationRoutes({
+      teamSkillService: scope.resolve<TeamSkillService>('teamSkill.service'),
     }),
     ...createToolInvokeCapabilityOperationRoutes({
       taskService: scope.resolve<TaskManagerService>('task.service'),

@@ -2,13 +2,13 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { StoreHistoryCache } from '@/stores/chat/history-cache';
 import type { ChatStoreState } from '@/stores/chat/types';
 import type { GatewayStatus } from '@/types/gateway';
-import type { RuntimeAddress } from '../../runtime-host/shared/runtime-address';
 import type { RawMessage } from './helpers/timeline-fixtures';
 import {
   createEmptySessionRecord,
   getSessionItems,
 } from '@/stores/chat/store-state-helpers';
 import { buildRenderItemsFromMessages } from './helpers/timeline-fixtures';
+import { createOpenClawTestSessionIdentity } from './helpers/runtime-address-fixtures';
 
 const fetchHistoryWindowMock = vi.fn();
 
@@ -35,11 +35,15 @@ function createHistoryRuntimeHarness(): StoreHistoryCache {
 
 function createSnapshot(sessionKey: string, messages: RawMessage[]) {
   const items = buildRenderItemsFromMessages(sessionKey, messages);
+  const sessionIdentity = createOpenClawTestSessionIdentity(sessionKey);
   return {
     sessionKey,
     catalog: {
       key: sessionKey,
       agentId: 'main',
+      protocolId: 'openclaw-v4',
+      runtimeEndpointId: 'local',
+      sessionIdentity,
       kind: 'main' as const,
       preferred: true,
       ...(messages.length > 0 && typeof messages[messages.length - 1]?.content === 'string'
@@ -76,24 +80,19 @@ function createSnapshot(sessionKey: string, messages: RawMessage[]) {
   };
 }
 
-function createTestRuntimeAddress(sessionKey: string): RuntimeAddress {
-  return {
-    kind: 'native-runtime',
-    capabilityId: 'session.prompt',
-    runtimeAdapterId: 'openclaw',
-    runtimeInstanceId: 'local',
-    agentId: 'default',
-    sessionKey,
-  };
-}
-
 function createTestSessionRecord(sessionKey: string) {
   const record = createEmptySessionRecord();
+  const sessionIdentity = createOpenClawTestSessionIdentity(sessionKey);
   return {
     ...record,
     meta: {
       ...record.meta,
-      runtimeAddress: createTestRuntimeAddress(sessionKey),
+      backendSessionKey: sessionKey,
+      runtimeScopeKey: 'native-runtime:openclaw:local',
+      agentId: sessionIdentity.agentId,
+      protocolId: 'openclaw-v4',
+      runtimeEndpointId: 'local',
+      sessionIdentity,
     },
   };
 }
@@ -360,11 +359,13 @@ describe('chat history load execution', () => {
 
       expect(fetchHistoryWindowMock).toHaveBeenCalledTimes(2);
       expect(fetchHistoryWindowMock).toHaveBeenNthCalledWith(1, expect.objectContaining({
-        requestedSessionKey,
+        recordKey: requestedSessionKey,
+        backendSessionKey: requestedSessionKey,
         timeoutMs: 35_000,
       }));
       expect(fetchHistoryWindowMock).toHaveBeenNthCalledWith(2, expect.objectContaining({
-        requestedSessionKey,
+        recordKey: requestedSessionKey,
+        backendSessionKey: requestedSessionKey,
         timeoutMs: 35_000,
       }));
       expect(get().loadedSessions[requestedSessionKey]?.meta.historyStatus).toBe('ready');
@@ -471,7 +472,8 @@ describe('chat history load execution', () => {
     expect(fetchHistoryWindowMock).toHaveBeenCalledTimes(1);
     const [firstCall] = fetchHistoryWindowMock.mock.calls[0] ?? [];
     expect(firstCall).toMatchObject({
-      requestedSessionKey,
+      recordKey: requestedSessionKey,
+      backendSessionKey: requestedSessionKey,
       limit: 200,
     });
     expect(firstCall).not.toHaveProperty('timeoutMs');

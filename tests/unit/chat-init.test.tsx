@@ -3,9 +3,11 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { useChatInit } from '@/pages/Chat/useChatInit';
 import { useChatStore } from '@/stores/chat';
 import { createEmptySessionRecord, createEmptySessionViewportState } from '@/stores/chat/store-state-helpers';
+import { buildRuntimeScopeKey, buildSessionRecordKey } from '@/stores/chat/session-identity';
 import { createViewportWindowState } from '@/stores/chat/viewport-state';
 import { useSubagentsStore } from '@/stores/subagents';
 import { buildRenderItemsFromMessages } from './helpers/timeline-fixtures';
+import { createOpenClawTestSessionIdentity, openClawTestRuntimeEndpoint } from './helpers/runtime-address-fixtures';
 
 const idleResource = {
   status: 'idle' as const,
@@ -21,25 +23,28 @@ const readyResource = {
   lastLoadedAt: 1,
 };
 
-const sessionRuntimeAddress = {
-  kind: 'native-runtime' as const,
-  capabilityId: 'session.prompt',
-  runtimeAdapterId: 'openclaw',
-  runtimeInstanceId: 'local',
-  agentId: 'main',
-};
+const mainSessionIdentity = createOpenClawTestSessionIdentity('agent:main:main', 'main');
+const mainRecordKey = buildSessionRecordKey(mainSessionIdentity);
+const mainAgentScope = { kind: 'agent' as const, endpoint: openClawTestRuntimeEndpoint, agentId: 'main' };
 
 function markSessionRuntimeReady() {
   useChatStore.setState({
-    activeSessionRuntime: {
+    sessionRuntimeCatalog: {
       status: 'ready',
       error: null,
-      endpointId: 'openclaw-local',
-      protocolId: 'openclaw-v4',
-      runtimeAdapterId: 'openclaw',
-      runtimeInstanceId: 'local',
-      agentId: 'main',
-      sessionPromptAddress: sessionRuntimeAddress,
+      endpoints: [{
+        endpointId: 'openclaw-local',
+        protocolId: 'openclaw-v4',
+        endpoint: openClawTestRuntimeEndpoint,
+        runtimeAdapterId: 'openclaw',
+        runtimeInstanceId: 'local',
+        displayName: 'OpenClaw Local',
+        agentIds: ['main'],
+        acceptsDynamicAgents: true,
+        sessionPromptScopes: [mainAgentScope],
+        defaultSessionPromptScope: mainAgentScope,
+      }],
+      defaultSessionPromptScope: mainAgentScope,
     },
   } as never);
 }
@@ -76,9 +81,18 @@ describe('useChatInit', () => {
       agentsResource: idleResource,
     } as never);
     useChatStore.setState({
-      currentSessionKey: 'agent:main:main',
+      currentSessionKey: mainRecordKey,
       loadedSessions: {
-        'agent:main:main': createEmptySessionRecord(),
+        [mainRecordKey]: buildSessionRecord({
+          meta: {
+            backendSessionKey: 'agent:main:main',
+            runtimeScopeKey: buildRuntimeScopeKey(mainSessionIdentity.endpoint),
+            agentId: 'main',
+            protocolId: 'openclaw-v4',
+            runtimeEndpointId: 'local',
+            sessionIdentity: mainSessionIdentity,
+          },
+        }),
       },
       sessionCatalogStatus: idleResource,
     } as never);
@@ -230,13 +244,11 @@ describe('useChatInit', () => {
       openAgentConversation: vi.fn(),
       bootstrapSessionRuntime: vi.fn().mockImplementation(async () => {
         useChatStore.setState({
-          activeSessionRuntime: {
+          sessionRuntimeCatalog: {
             status: 'error',
             error: 'No session runtime endpoint is available',
-            endpointId: null,
-            protocolId: null,
-            agentId: null,
-            sessionPromptAddress: null,
+            endpoints: [],
+            defaultSessionPromptScope: null,
           },
         } as never);
       }),
@@ -258,10 +270,10 @@ describe('useChatInit', () => {
   it('当前会话已有 viewport 快照时，初始化走 quiet refresh，不回退到阻塞加载', async () => {
     const loadHistory = vi.fn().mockResolvedValue(undefined);
     useChatStore.setState({
-      currentSessionKey: 'agent:main:main',
+      currentSessionKey: mainRecordKey,
       loadedSessions: {
-        'agent:main:main': buildSessionRecord({
-          sessionKey: 'agent:main:main',
+        [mainRecordKey]: buildSessionRecord({
+          sessionKey: mainRecordKey,
           messages: [{ id: 'm1', role: 'assistant', content: 'hello', timestamp: 1 }],
           meta: { historyStatus: 'ready' },
           window: createViewportWindowState({
@@ -305,7 +317,7 @@ describe('useChatInit', () => {
     });
 
     expect(loadHistory).toHaveBeenCalledWith({
-      sessionKey: 'agent:main:main',
+      sessionKey: mainRecordKey,
       mode: 'quiet',
       scope: 'foreground',
       reason: 'chat_init_snapshot_quiet_refresh',

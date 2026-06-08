@@ -14,6 +14,7 @@ interface FileServiceDeps {
     | 'listDir'
     | 'stagePaths'
     | 'stageBuffer'
+    | 'thumbnail'
     | 'thumbnails'
   >;
 }
@@ -47,6 +48,10 @@ export class FileService {
 
   async stageBuffer(payload: unknown) {
     return await this.deps.runtimeWorkflow.stageBuffer(payload);
+  }
+
+  async thumbnail(payload: unknown) {
+    return await this.deps.runtimeWorkflow.thumbnail(payload);
   }
 
   async thumbnails(payload: unknown) {

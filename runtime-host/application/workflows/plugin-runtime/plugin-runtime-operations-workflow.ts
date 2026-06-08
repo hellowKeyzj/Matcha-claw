@@ -48,7 +48,8 @@ export class PluginRuntimeOperationsWorkflow {
       return badRequest('pluginIds 必须是 string[]');
     }
 
-    return accepted(this.deps.jobs.submitSetEnabledPlugins({ pluginIds }));
+    const enabled = body?.enabled !== false;
+    return accepted(this.deps.jobs.submitSetEnabledPlugins({ pluginIds, enabled }));
   }
 
   private decoratePluginCatalogEntry(plugin: Record<string, any>, enabled: boolean): Record<string, any> {

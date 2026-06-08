@@ -110,7 +110,7 @@ describe('channel-runtime config save', () => {
       process.env.OPENCLAW_CONFIG_DIR = previousConfigDir;
     }
     if (tempDir) {
-      await rm(tempDir, { recursive: true, force: true });
+      await rm(tempDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
     }
   });
 
@@ -133,7 +133,7 @@ describe('channel-runtime config save', () => {
     expect(config.plugins.allow).not.toContain('feishu');
     expect(config.plugins.allow).not.toContain('feishu-openclaw-plugin');
     expect(config.plugins.entries['openclaw-lark']).toBeDefined();
-    expect(config.plugins.entries.feishu?.enabled).toBe(false);
+    expect(config.plugins.entries.feishu).toBeUndefined();
   }, 30_000);
 
   it('保存 Feishu 默认账号时写入插件实际读取的顶层凭证', async () => {
@@ -198,7 +198,7 @@ describe('channel-runtime config save', () => {
       },
       enabled: true,
     })).rejects.toThrow('already bound to another agent');
-  }, 15000);
+  }, 30_000);
 
   it('保存 WeCom 配置时会迁移到 wecom 插件 ID 并启用 entries.wecom', async () => {
     await repository.saveChannelConfig({

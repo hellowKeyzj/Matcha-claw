@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { buildLicenseKey, validateLicenseKeyLocally } from '../../runtime-host/application/license/service';
+import { buildLicenseKey, LicenseService, validateLicenseKeyLocally } from '../../runtime-host/application/license/service';
 
 const originalAllowlistEnv = process.env.MATCHACLAW_LICENSE_KEYS;
 const originalEndpoint = process.env.MATCHACLAW_LICENSE_ENDPOINT;
@@ -82,6 +82,42 @@ describe('validateLicenseKeyLocally', () => {
     expect(result.code).toBe('valid');
     expect(result.mode).toBe('allowlist');
     expect(result.normalizedKey).toBe('MATCHACLAW-AAAA-BBBB-CCCC-DDDD');
+  });
+});
+
+describe('LicenseService public projection', () => {
+  it('validate/revalidate/gate do not expose normalizedKey or full license key', async () => {
+    const fullKey = 'MATCHACLAW-AAAA-BBBB-CCCC-DDDD';
+    const service = new LicenseService({
+      gate: async () => ({
+        state: 'granted',
+        reason: 'valid',
+        checkedAtMs: 1,
+        hasStoredKey: true,
+        hasUsableCache: true,
+        nextRevalidateAtMs: null,
+        lastValidation: { valid: true, code: 'valid', normalizedKey: fullKey, mode: 'checksum', source: 'local' },
+        renewalAlert: null,
+      }),
+      storedKey: async () => fullKey,
+      validate: async () => ({ valid: true, code: 'valid', normalizedKey: fullKey, mode: 'checksum', source: 'local' }),
+      revalidate: async () => ({ valid: true, code: 'valid', normalizedKey: fullKey, mode: 'checksum', source: 'local' }),
+      clear: async () => {},
+    });
+
+    const validateResult = await service.validate({ key: fullKey });
+    const revalidateResult = await service.revalidate();
+    const gateResult = await service.gate();
+    const storedKeyResult = await service.storedKey();
+
+    expect(validateResult.data).toMatchObject({ valid: true, masked: 'MATCHACLAW-****-****-****-DDDD', last4: 'DDDD' });
+    expect(revalidateResult.data).toMatchObject({ valid: true, masked: 'MATCHACLAW-****-****-****-DDDD', last4: 'DDDD' });
+    expect(gateResult.data.lastValidation).toMatchObject({ valid: true, masked: 'MATCHACLAW-****-****-****-DDDD', last4: 'DDDD' });
+    expect(storedKeyResult.data).toEqual({ hasStoredKey: true, masked: 'MATCHACLAW-****-****-****-DDDD', last4: 'DDDD' });
+    expect(JSON.stringify([validateResult, revalidateResult, gateResult, storedKeyResult])).not.toContain(fullKey);
+    expect(validateResult.data).not.toHaveProperty('normalizedKey');
+    expect(revalidateResult.data).not.toHaveProperty('normalizedKey');
+    expect(gateResult.data.lastValidation).not.toHaveProperty('normalizedKey');
   });
 });
 

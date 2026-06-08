@@ -1,279 +1,393 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { AgentRuntimeRegistry } from '../../runtime-host/application/agent-runtime/contracts/agent-runtime-registry';
 import { OpenClawRuntimeAdapter } from '../../runtime-host/application/adapters/openclaw/runtime/openclaw-runtime-adapter';
 import { createTestAcpClientConnector } from './helpers/acp-test-connector';
-import type { RuntimeEndpointProfile, RuntimeSessionTransport } from '../../runtime-host/application/agent-runtime/contracts/runtime-endpoint-types';
+import { agentScope, connectorRuntimeEndpoint, nativeRuntimeEndpoint, runtimeInstanceScope } from '../../runtime-host/application/agent-runtime/contracts/runtime-address';
+import type { RuntimeProtocolConnector, RuntimeSessionTransport } from '../../runtime-host/application/agent-runtime/contracts/runtime-endpoint-types';
 
-function createReadyAcpTransport(): RuntimeSessionTransport & { stop: () => void } {
+const testProtocol: RuntimeProtocolConnector['protocol'] = {
+  protocolId: 'test-protocol',
+  eventAdapter: {
+    canTranslate: () => false,
+    translate: () => [],
+  },
+  replayAdapter: {
+    replayTranscript: () => [],
+  },
+  identityPolicy: {
+    buildMessageId: () => 'message-id',
+  },
+};
+
+function openClawEndpointRef() {
+  return nativeRuntimeEndpoint({
+    runtimeAdapterId: 'openclaw',
+    runtimeInstanceId: 'local',
+  });
+}
+
+function connectorEndpointRef(connectorId: string, endpointId = 'shared-endpoint') {
+  return connectorRuntimeEndpoint({
+    protocolId: 'test-protocol',
+    connectorId,
+    endpointId,
+  });
+}
+
+function createConnector(connectorId: string, transport: RuntimeSessionTransport): RuntimeProtocolConnector {
   return {
-    sendPrompt: async () => ({ success: true }),
-    abortSession: async () => {},
-    resolveApproval: async () => ({}),
-    inspectReadiness: async () => ({ ready: true, phase: 'ready' }),
-    stop: () => {},
+    connectorId,
+    protocol: testProtocol,
+    endpoints: [{
+      id: 'shared-endpoint',
+      protocolId: 'test-protocol',
+      displayName: connectorId,
+      agentIds: ['default'],
+      capabilities: {
+        chat: true,
+        streaming: false,
+        tools: false,
+        approvals: false,
+        replay: false,
+        modelSelection: false,
+      },
+    }],
+    capabilities: [],
+    connect: () => transport,
   };
 }
 
-function createNotReadyAcpTransport(): RuntimeSessionTransport & { stop: () => void } {
-  return {
-    sendPrompt: async () => ({ success: false, error: 'not ready' }),
-    abortSession: async () => {},
-    resolveApproval: async () => ({}),
-    inspectReadiness: async () => ({ ready: false, phase: 'unavailable', error: 'not ready' }),
-    stop: () => {},
-  };
+async function connectSharedEndpoint(registry: AgentRuntimeRegistry, connectorId: string): Promise<void> {
+  await registry.connectRuntimeEndpoint({
+    protocolId: 'test-protocol',
+    connectorId,
+    endpointId: 'shared-endpoint',
+  });
 }
 
-function createRegistryWithAcpTransport(createTransport: (endpoint: RuntimeEndpointProfile) => RuntimeSessionTransport & { stop?: () => void }): AgentRuntimeRegistry {
-  const nativeGateway = {
-    chatSend: async () => ({ success: true }),
-    gatewayRpc: async () => ({}),
-  };
-  const registry = new AgentRuntimeRegistry({ gateway: () => nativeGateway });
-  registry.register({
-    runtimeAdapters: [new OpenClawRuntimeAdapter()],
-    protocolConnectors: [createTestAcpClientConnector({ createTransport })],
+async function connectAcpEndpoint(registry: AgentRuntimeRegistry, endpointId: string): Promise<void> {
+  await registry.connectRuntimeEndpoint({
+    protocolId: 'acp',
+    connectorId: 'acp',
+    endpointId,
   });
-  return registry;
 }
 
-function createRegistry(): AgentRuntimeRegistry {
-  const nativeGateway = {
-    chatSend: async () => ({ success: true }),
-    gatewayRpc: async () => ({}),
-  };
-  const registry = new AgentRuntimeRegistry({ gateway: () => nativeGateway });
-  registry.register({
-    runtimeAdapters: [new OpenClawRuntimeAdapter()],
-    protocolConnectors: [createTestAcpClientConnector()],
-  });
-  return registry;
-}
+describe('runtime adapter and connector registry', () => {
+  it('routes native runtime transport through the runtime adapter', () => {
+    const nativeGateway = {
+      chatSend: async () => ({ success: true }),
+      gatewayRpc: async () => ({}),
+    };
+    const registry = new AgentRuntimeRegistry({ gateway: () => nativeGateway });
+    const adapter = new OpenClawRuntimeAdapter();
+    registry.register({ runtimeAdapters: [adapter] });
 
-describe('runtime endpoint registry', () => {
-  it('registers connector profiles without publishing connector runtime endpoints', () => {
-    const registry = createRegistry();
+    const createTransport = vi.spyOn(adapter, 'createTransport');
+    const transport = registry.resolveTransportForEndpoint(openClawEndpointRef(), 'default');
 
-    expect(registry.getEndpoint('openclaw-local').protocolId).toBe('openclaw-v4');
-    expect(() => registry.getEndpoint('claude-code')).toThrow('Runtime endpoint not registered: claude-code');
-    expect(() => registry.getEndpoint('hermes')).toThrow('Runtime endpoint not registered: hermes');
-    expect(registry.listRuntimeAdapters().map((adapter) => adapter.runtimeAdapterId)).toEqual(['openclaw']);
-    expect(registry.listProtocolConnectors().map((connector) => connector.connectorId)).toEqual(['acp']);
-    expect(registry.snapshotTopology().connectors[0]?.endpointIds).toEqual(['claude-code', 'hermes']);
-  });
-
-  it('requires explicit runtime metadata instead of defaulting to OpenClaw', () => {
-    const registry = createRegistry();
-
-    expect(() => registry.resolveSessionContext('agent:main:main')).toThrow(
-      'Runtime session context requires explicit runtime address metadata: agent:main:main',
-    );
-    expect(() => registry.resolveSessionContext('agent:main:main', {
-      protocolId: 'openclaw-v4',
-      runtimeEndpointId: 'openclaw-local',
-    })).toThrow(
-      'Runtime session context requires explicit runtime address metadata: agent:main:main',
-    );
-  });
-
-  it('resolves approval notification adapters from runtime addresses', () => {
-    const registry = createRegistry();
-
-    expect(registry.resolveApprovalNotificationsForAddress({
-      kind: 'native-runtime',
-      capabilityId: 'session.prompt',
+    expect(transport).toBeTruthy();
+    expect(createTransport).toHaveBeenCalledWith(expect.objectContaining({
+      id: 'openclaw-local',
       runtimeAdapterId: 'openclaw',
       runtimeInstanceId: 'local',
-      agentId: 'main',
-    })).not.toBeNull();
-    expect(() => registry.resolveApprovalNotificationsForAddress({
-      kind: 'protocol-connector',
-      capabilityId: 'session.prompt',
-      protocolId: 'acp',
-      connectorId: 'acp',
-      endpointId: 'claude-code',
-      agentId: 'default',
-    })).toThrow('Connector runtime endpoint not registered: acp:acp:claude-code');
+    }), { gateway: nativeGateway });
+    expect(registry.getProtocol('openclaw-v4')).toBe(adapter.protocol);
   });
 
-  it('summarizes only callable endpoint addresses from registered capabilities', () => {
-    const registry = createRegistry();
+  it('routes connector runtime transport through the protocol connector', async () => {
+    const registry = new AgentRuntimeRegistry();
+    const transport = {
+      sendPrompt: vi.fn(),
+      abortSession: vi.fn(),
+      resolveApproval: vi.fn(),
+    };
+    const createTransport = vi.fn(() => transport);
+    const connector = createTestAcpClientConnector({ createTransport });
+    registry.register({ protocolConnectors: [connector] });
+    await connectAcpEndpoint(registry, 'claude-code');
 
-    const openClawEndpoint = registry.snapshotTopology().endpoints.find((endpoint) => endpoint.id === 'openclaw-local');
-    const claudeCodeEndpoint = registry.snapshotTopology().endpoints.find((endpoint) => endpoint.id === 'claude-code');
-
-    expect(openClawEndpoint?.capabilityAddresses.map((address) => address.capabilityId).sort()).toEqual([
-      'agent.run',
-      'integration.channel',
-      'license.runtime',
-      'model.provider',
-      'multi-agent.task',
-      'platform.runtime',
-      'plugin.runtime',
-      'runtime.host',
-      'scheduler.cron',
-      'security.runtime',
-      'session.approval',
-      'session.management',
-      'session.modelSelection',
-      'session.prompt',
-      'settings.runtime',
-      'skill.management',
-      'subagent.management',
-      'task.control',
-      'team.coordination',
-      'tool.invoke',
-      'workspace.file',
-    ]);
-    expect(openClawEndpoint?.capabilityAddresses.every((address) => address.kind === 'native-runtime')).toBe(true);
-    expect(openClawEndpoint?.acceptsDynamicAgents).toBe(true);
-    expect(claudeCodeEndpoint).toBeUndefined();
-    expect(registry.listCapabilities().some((descriptor) => descriptor.address.kind === 'protocol-connector')).toBe(false);
+    expect(registry.resolveTransportForEndpoint(connectorRuntimeEndpoint({
+      protocolId: 'acp',
+      connectorId: 'acp',
+      endpointId: 'claude-code',
+    }), 'default')).toBe(transport);
+    expect(createTransport).toHaveBeenCalledWith(expect.objectContaining({
+      id: 'claude-code',
+      protocolId: 'acp',
+      connectorId: 'acp',
+    }));
+    expect(registry.getProtocol('acp')).toBe(connector.protocol);
   });
 
-  it('publishes connector runtime endpoints and capabilities only while connected and ready', async () => {
-    const registry = createRegistryWithAcpTransport(() => createReadyAcpTransport());
+  it('rejects connector endpoint refs for agents not declared by the endpoint', async () => {
+    const registry = new AgentRuntimeRegistry();
+    registry.register({
+      protocolConnectors: [createConnector('first', {
+        sendPrompt: vi.fn(),
+        abortSession: vi.fn(),
+        resolveApproval: vi.fn(),
+      })],
+    });
+    await connectSharedEndpoint(registry, 'first');
 
-    await expect(registry.connectRuntimeEndpoint({
-      protocolId: 'acp',
-      connectorId: 'acp',
-      endpointId: 'claude-code',
-    })).resolves.toEqual({ ready: true, phase: 'ready' });
+    expect(() => registry.resolveTransportForEndpoint(connectorEndpointRef('first'), 'reviewer'))
+      .toThrow('Runtime endpoint agent not registered: shared-endpoint:reviewer');
+  });
 
-    const claudeCodeEndpoint = registry.snapshotTopology().endpoints.find((endpoint) => endpoint.id === 'claude-code');
-    expect(claudeCodeEndpoint?.capabilityAddresses.map((address) => address.capabilityId).sort()).toEqual([
-      'agent.run',
-      'session.approval',
-      'session.management',
-      'session.prompt',
-      'tool.invoke',
-    ]);
-    expect(claudeCodeEndpoint?.capabilityAddresses.every((address) => (
-      address.kind === 'protocol-connector'
-      && address.protocolId === 'acp'
-      && address.connectorId === 'acp'
-      && address.endpointId === 'claude-code'
-    ))).toBe(true);
-
-    const readiness = registry.disconnectRuntimeEndpoint({
-      protocolId: 'acp',
-      connectorId: 'acp',
-      endpointId: 'claude-code',
+  it('resolves capability descriptors for native runtime dynamic agents without pre-registering every agent', () => {
+    const registry = new AgentRuntimeRegistry();
+    registry.register({
+      runtimeAdapters: [new OpenClawRuntimeAdapter()],
     });
 
-    expect(readiness).toEqual({ ready: false, phase: 'disconnected' });
-    expect(registry.snapshotTopology().endpoints.find((endpoint) => endpoint.id === 'claude-code')).toBeUndefined();
-    expect(registry.listCapabilities().some((descriptor) => descriptor.address.kind === 'protocol-connector')).toBe(false);
+    const scope = agentScope(openClawEndpointRef(), 'foo');
+
+    expect(registry.getCapability({
+      id: 'session.prompt',
+      scope,
+    })).toMatchObject({
+      id: 'session.prompt',
+      targetAgentIds: ['foo'],
+      scope,
+    });
   });
 
-  it('does not publish connector runtime endpoints when connect readiness fails', async () => {
-    const registry = createRegistryWithAcpTransport(() => createNotReadyAcpTransport());
+  it('exposes sessions.list as a runtime endpoint capability', () => {
+    const registry = new AgentRuntimeRegistry();
+    registry.register({
+      runtimeAdapters: [new OpenClawRuntimeAdapter()],
+    });
 
-    await expect(registry.connectRuntimeEndpoint({
-      protocolId: 'acp',
-      connectorId: 'acp',
-      endpointId: 'claude-code',
-    })).resolves.toEqual({ ready: false, phase: 'unavailable', error: 'not ready' });
+    const scope = runtimeInstanceScope(openClawEndpointRef());
 
-    expect(registry.snapshotTopology().endpoints.find((endpoint) => endpoint.id === 'claude-code')).toBeUndefined();
-    expect(registry.listCapabilities().some((descriptor) => descriptor.address.kind === 'protocol-connector')).toBe(false);
+    expect(registry.getCapability({
+      id: 'session.management',
+      scope,
+    })).toMatchObject({
+      id: 'session.management',
+      scope,
+      targetKinds: ['runtime-endpoint'],
+      operations: [expect.objectContaining({ id: 'sessions.list', targetKind: 'runtime-endpoint' })],
+    });
+    expect(() => registry.getCapability({
+      id: 'session.management',
+      scope: agentScope(openClawEndpointRef(), 'foo'),
+    })).toThrow('Capability not registered');
   });
 
-  it('stores runtime addresses on explicit session contexts', async () => {
-    const registry = createRegistryWithAcpTransport(() => createReadyAcpTransport());
+  it('allows a connector endpoint to expose multiple explicit agents', async () => {
+    const registry = new AgentRuntimeRegistry();
+    const transport = {
+      sendPrompt: vi.fn(),
+      abortSession: vi.fn(),
+      resolveApproval: vi.fn(),
+    };
+    registry.register({
+      protocolConnectors: [{
+        ...createConnector('multi-agent', transport),
+        endpoints: [{
+          ...createConnector('multi-agent', transport).endpoints[0]!,
+          agentIds: ['default', 'reviewer'],
+        }],
+      }],
+    });
+    await connectSharedEndpoint(registry, 'multi-agent');
+
+    expect(registry.resolveTransportForEndpoint(connectorEndpointRef('multi-agent'), 'reviewer')).toBe(transport);
+  });
+
+  it('refreshes connector endpoint agents and capability summaries from connection discovery', async () => {
+    const registry = new AgentRuntimeRegistry();
+    const transport = {
+      sendPrompt: vi.fn(),
+      abortSession: vi.fn(),
+      resolveApproval: vi.fn(),
+      discoverEndpoint: vi.fn(async () => ({
+        agentIds: ['default', 'reviewer'],
+        capabilities: {
+          chat: true,
+          streaming: true,
+          tools: true,
+          approvals: true,
+          replay: true,
+          modelSelection: false,
+        },
+      })),
+    };
+    registry.register({
+      protocolConnectors: [createConnector('discovering', transport)],
+    });
+
     await registry.connectRuntimeEndpoint({
+      protocolId: 'test-protocol',
+      connectorId: 'discovering',
+      endpointId: 'shared-endpoint',
+    });
+
+    const reviewerScope = agentScope(connectorEndpointRef('discovering'), 'reviewer');
+    expect(registry.getCapability({
+      id: 'session.prompt',
+      scope: reviewerScope,
+    }).scope).toEqual(reviewerScope);
+    expect(registry.snapshotTopology().endpoints.find((endpoint) => endpoint.connectorId === 'discovering')).toMatchObject({
+      agentIds: ['default', 'reviewer'],
+      capabilities: expect.objectContaining({ approvals: true, tools: true }),
+      capabilitySummaries: expect.arrayContaining([
+        expect.objectContaining({
+          id: 'session.prompt',
+          scope: reviewerScope,
+        }),
+      ]),
+    });
+  });
+
+  it('routes Claude Code and Hermes ACP endpoints through isolated transports and capability scopes', async () => {
+    const registry = new AgentRuntimeRegistry();
+    const claudeTransport = {
+      sendPrompt: vi.fn(),
+      abortSession: vi.fn(),
+      resolveApproval: vi.fn(),
+    };
+    const hermesTransport = {
+      sendPrompt: vi.fn(),
+      abortSession: vi.fn(),
+      resolveApproval: vi.fn(),
+    };
+    const createTransport = vi.fn((endpoint) => {
+      if (endpoint.id === 'claude-code') {
+        return claudeTransport;
+      }
+      if (endpoint.id === 'hermes') {
+        return hermesTransport;
+      }
+      throw new Error(`unexpected endpoint: ${endpoint.id}`);
+    });
+    const connector = createTestAcpClientConnector({ createTransport });
+    registry.register({ protocolConnectors: [connector] });
+    await connectAcpEndpoint(registry, 'claude-code');
+    await connectAcpEndpoint(registry, 'hermes');
+
+    const claudeEndpoint = connectorRuntimeEndpoint({
       protocolId: 'acp',
       connectorId: 'acp',
       endpointId: 'claude-code',
     });
-
-    expect(registry.resolveSessionContext('agent:main:main', {
-      protocolId: 'openclaw-v4',
-      runtimeEndpointId: 'openclaw-local',
-      endpointSessionId: 'agent:main:main',
-      agentId: 'main',
-      address: {
-        kind: 'native-runtime',
-        capabilityId: 'session.prompt',
-        runtimeAdapterId: 'openclaw',
-        runtimeInstanceId: 'local',
-        agentId: 'main',
-        sessionKey: 'agent:main:main',
-      },
-    })).toMatchObject({
-      sessionKey: 'agent:main:main',
-      protocolId: 'openclaw-v4',
-      runtimeEndpointId: 'openclaw-local',
-      endpointSessionId: 'agent:main:main',
-      agentId: 'main',
-      endpoint: {
-        scopeKey: 'session.prompt:native-runtime:openclaw:local:main:model-provider:',
-        capabilityId: 'session.prompt',
-        runtimeAdapterId: 'openclaw',
-        runtimeInstanceId: 'local',
-        agentId: 'main',
-      },
-      address: {
-        kind: 'native-runtime',
-        capabilityId: 'session.prompt',
-        runtimeAdapterId: 'openclaw',
-        runtimeInstanceId: 'local',
-        agentId: 'main',
-        sessionKey: 'agent:main:main',
-      },
-    });
-
-    const mainContext = registry.rememberSessionAddress('main', {
-      kind: 'native-runtime',
-      capabilityId: 'session.prompt',
-      runtimeAdapterId: 'openclaw',
-      runtimeInstanceId: 'local',
-      agentId: 'main',
-    });
-    const browserContext = registry.rememberSessionAddress('main', {
-      kind: 'native-runtime',
-      capabilityId: 'session.prompt',
-      runtimeAdapterId: 'openclaw',
-      runtimeInstanceId: 'local',
-      agentId: 'browser',
-    });
-
-    expect(mainContext).not.toBe(browserContext);
-    expect(registry.resolveSessionContext('main', { address: mainContext.address })).toBe(mainContext);
-    expect(registry.resolveSessionContext('main', { address: browserContext.address })).toBe(browserContext);
-    expect(() => registry.resolveSessionContext('main')).toThrow('Runtime session context requires explicit runtime address metadata: main');
-
-    expect(registry.resolveSessionContext('claude-code:session:1', {
+    const hermesEndpoint = connectorRuntimeEndpoint({
       protocolId: 'acp',
-      runtimeEndpointId: 'claude-code',
-      endpointSessionId: 'session:1',
-      agentId: 'default',
-      address: {
-        kind: 'protocol-connector',
-        capabilityId: 'session.prompt',
-        protocolId: 'acp',
-        connectorId: 'acp',
-        endpointId: 'claude-code',
-        agentId: 'default',
-        sessionKey: 'claude-code:session:1',
+      connectorId: 'acp',
+      endpointId: 'hermes',
+    });
+    const claudeScope = agentScope(claudeEndpoint, 'default');
+    const hermesScope = agentScope(hermesEndpoint, 'default');
+
+    expect(registry.resolveTransportForEndpoint(claudeEndpoint, 'default')).toBe(claudeTransport);
+    expect(registry.resolveTransportForEndpoint(hermesEndpoint, 'default')).toBe(hermesTransport);
+    expect(createTransport).toHaveBeenCalledWith(expect.objectContaining({ id: 'claude-code', connectorId: 'acp' }));
+    expect(createTransport).toHaveBeenCalledWith(expect.objectContaining({ id: 'hermes', connectorId: 'acp' }));
+    expect(registry.getCapability({ id: 'session.prompt', scope: claudeScope }).scope).toEqual(claudeScope);
+    expect(registry.getCapability({ id: 'session.prompt', scope: hermesScope }).scope).toEqual(hermesScope);
+  });
+
+  it('allows different connectors to expose the same endpoint id without transport cross-talk', async () => {
+    const registry = new AgentRuntimeRegistry();
+    const firstTransport = {
+      sendPrompt: vi.fn(),
+      abortSession: vi.fn(),
+      resolveApproval: vi.fn(),
+    };
+    const secondTransport = {
+      sendPrompt: vi.fn(),
+      abortSession: vi.fn(),
+      resolveApproval: vi.fn(),
+    };
+
+    registry.register({
+      protocolConnectors: [
+        createConnector('first', firstTransport),
+        createConnector('second', secondTransport),
+      ],
+    });
+    await connectSharedEndpoint(registry, 'first');
+    await connectSharedEndpoint(registry, 'second');
+
+    const firstEndpoint = connectorEndpointRef('first');
+    const secondEndpoint = connectorEndpointRef('second');
+
+    expect(registry.resolveTransportForEndpoint(firstEndpoint, 'default')).toBe(firstTransport);
+    expect(registry.resolveTransportForEndpoint(secondEndpoint, 'default')).toBe(secondTransport);
+    expect(() => registry.getEndpoint('shared-endpoint')).toThrow('Runtime endpoint id is ambiguous: shared-endpoint');
+    expect(registry.resolveApprovalNotificationsForEndpoint(firstEndpoint)).toBeNull();
+  });
+
+  it('stores gateway control state on the referenced runtime endpoint topology', async () => {
+    const registry = new AgentRuntimeRegistry();
+    registry.register({
+      runtimeAdapters: [new OpenClawRuntimeAdapter()],
+      protocolConnectors: [createConnector('test-connector', {
+        sendPrompt: vi.fn(),
+        abortSession: vi.fn(),
+        resolveApproval: vi.fn(),
+      })],
+    });
+    await connectSharedEndpoint(registry, 'test-connector');
+
+    const connection = {
+      state: 'connected' as const,
+      portReachable: true,
+      gatewayReady: true,
+      transportEpoch: 7,
+      diagnostics: {
+        consecutiveHeartbeatMisses: 0,
+        consecutiveRpcFailures: 0,
       },
-    })).toMatchObject({
-      endpoint: {
-        scopeKey: 'session.prompt:protocol-connector:acp:acp:claude-code:default:model-provider:',
-        capabilityId: 'session.prompt',
-        protocolId: 'acp',
-        connectorId: 'acp',
-        endpointId: 'claude-code',
-        agentId: 'default',
+      updatedAt: 1_700_000_000_001,
+    };
+    const readiness = {
+      ready: true,
+      phase: 'ready',
+      requiredMethods: ['status'],
+      missingMethods: [],
+      retryable: false,
+      capabilities: {
+        methods: ['status'],
+        updatedAt: 1_700_000_000_002,
       },
-      address: {
-        kind: 'protocol-connector',
-        capabilityId: 'session.prompt',
-        protocolId: 'acp',
-        connectorId: 'acp',
-        endpointId: 'claude-code',
-        agentId: 'default',
-        sessionKey: 'claude-code:session:1',
+    };
+
+    registry.updateRuntimeEndpointControlState({
+      endpoint: openClawEndpointRef(),
+      connection,
+      updatedAt: connection.updatedAt,
+    });
+    registry.updateRuntimeEndpointControlState({
+      endpoint: connectorEndpointRef('test-connector'),
+      readiness,
+      capabilities: readiness.capabilities,
+      updatedAt: readiness.capabilities.updatedAt,
+    });
+
+    const topology = registry.snapshotTopology();
+    expect(topology.endpoints.find((endpoint) => endpoint.id === 'openclaw-local')).toMatchObject({
+      id: 'openclaw-local',
+      runtimeAdapterId: 'openclaw',
+      runtimeInstanceId: 'local',
+      controlState: {
+        connection,
+        readiness: null,
+        capabilities: null,
+        updatedAt: connection.updatedAt,
+      },
+    });
+    expect(topology.endpoints.find((endpoint) => endpoint.connectorId === 'test-connector')).toMatchObject({
+      id: 'shared-endpoint',
+      protocolId: 'test-protocol',
+      connectorId: 'test-connector',
+      controlState: {
+        connection: null,
+        readiness,
+        capabilities: readiness.capabilities,
+        updatedAt: readiness.capabilities.updatedAt,
       },
     });
   });

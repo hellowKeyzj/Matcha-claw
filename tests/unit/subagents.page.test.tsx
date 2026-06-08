@@ -7,7 +7,7 @@ import { useGatewayStore } from '@/stores/gateway';
 import { useSubagentsStore } from '@/stores/subagents';
 import i18n from '@/i18n';
 import { __resetSubagentTemplateCatalogCacheForTest } from '@/services/openclaw/subagent-template-catalog';
-import type { RuntimeAddress } from '../../runtime-host/shared/runtime-address';
+import type { AgentScope, RuntimeEndpointRef, RuntimeScope } from '../../runtime-host/shared/runtime-address';
 
 vi.mock('sonner', () => ({
   toast: {
@@ -22,16 +22,19 @@ function LocationProbe() {
   return <div data-testid="router-location">{`${location.pathname}${location.search}`}</div>;
 }
 
-const subagentManagementAddress: RuntimeAddress = {
+const runtimeEndpoint: RuntimeEndpointRef = {
   kind: 'native-runtime',
-  capabilityId: 'subagent.management',
   runtimeAdapterId: 'openclaw',
   runtimeInstanceId: 'local',
+};
+const defaultAgentScope: AgentScope = {
+  kind: 'agent',
+  endpoint: runtimeEndpoint,
   agentId: 'default',
 };
-const modelProviderAddress: RuntimeAddress = {
-  ...subagentManagementAddress,
-  capabilityId: 'model.provider',
+const workspaceScope: RuntimeScope = {
+  kind: 'workspace',
+  endpoint: runtimeEndpoint,
 };
 
 function buildCapabilitiesListEnvelope() {
@@ -45,7 +48,9 @@ function buildCapabilitiesListEnvelope() {
           {
             id: 'subagent.management',
             kind: 'subagent.management',
-            address: subagentManagementAddress,
+            scopeKind: 'agent',
+            scope: defaultAgentScope,
+            targetKinds: ['subagent'],
             runtimeAdapterId: 'openclaw',
             runtimeInstanceId: 'local',
             targetAgentIds: ['default'],
@@ -53,11 +58,15 @@ function buildCapabilitiesListEnvelope() {
             availability: 'available',
             operations: [],
             policyScope: 'subagent.management',
+            ownerModuleId: 'openclaw',
+            routeOwnerId: 'openclaw',
           },
           {
             id: 'model.provider',
             kind: 'model.provider',
-            address: modelProviderAddress,
+            scopeKind: 'agent',
+            scope: defaultAgentScope,
+            targetKinds: ['model-selection'],
             runtimeAdapterId: 'openclaw',
             runtimeInstanceId: 'local',
             targetAgentIds: ['default'],
@@ -65,6 +74,24 @@ function buildCapabilitiesListEnvelope() {
             availability: 'available',
             operations: [],
             policyScope: 'model.provider',
+            ownerModuleId: 'openclaw',
+            routeOwnerId: 'openclaw',
+          },
+          {
+            id: 'workspace.file',
+            kind: 'workspace.file',
+            scopeKind: 'workspace',
+            scope: workspaceScope,
+            targetKinds: ['workspace-file'],
+            runtimeAdapterId: 'openclaw',
+            runtimeInstanceId: 'local',
+            targetAgentIds: ['default'],
+            supportLevel: 'native',
+            availability: 'available',
+            operations: [],
+            policyScope: 'workspace.file',
+            ownerModuleId: 'openclaw',
+            routeOwnerId: 'openclaw',
           },
         ],
       },
@@ -534,11 +561,7 @@ describe('subagents page', () => {
         updatedAt: 2,
       },
     });
-    const invoke = vi.mocked(window.electron.ipcRenderer.invoke);
     renderSubagentsPage();
-    await waitFor(() => {
-      expect(invoke).toHaveBeenCalledWith('hostapi:fetch', expect.objectContaining({ path: '/api/capabilities/list' }));
-    });
 
     fireEvent.click(screen.getByRole('button', { name: 'Manage agent-alpha' }));
     fireEvent.change(screen.getByLabelText('Prompt'), { target: { value: 'draft policy docs' } });
@@ -552,7 +575,6 @@ describe('subagents page', () => {
         agentId: 'agent-alpha',
         prompt: 'draft policy docs',
         includeCurrentFiles: false,
-        runtimeAddress: subagentManagementAddress,
       });
     });
   });
@@ -573,11 +595,7 @@ describe('subagents page', () => {
         updatedAt: 2,
       },
     });
-    const invoke = vi.mocked(window.electron.ipcRenderer.invoke);
     renderSubagentsPage();
-    await waitFor(() => {
-      expect(invoke).toHaveBeenCalledWith('hostapi:fetch', expect.objectContaining({ path: '/api/capabilities/list' }));
-    });
 
     fireEvent.click(screen.getByRole('button', { name: 'Manage agent-alpha' }));
     fireEvent.change(screen.getByLabelText('Prompt'), { target: { value: 'draft policy docs' } });
@@ -592,7 +610,6 @@ describe('subagents page', () => {
         agentId: 'agent-alpha',
         prompt: 'draft policy docs',
         includeCurrentFiles: true,
-        runtimeAddress: subagentManagementAddress,
       });
     });
   });
@@ -640,10 +657,9 @@ describe('subagents page', () => {
         name: 'Alpha v2',
         workspace: '/home/dev/.openclaw/workspace-subagents/alpha',
         model: 'claude-3-7-sonnet',
-        runtimeAddress: subagentManagementAddress,
       });
     });
-    expect(deleteAgent).toHaveBeenCalledWith('agent-alpha', subagentManagementAddress);
+    expect(deleteAgent).toHaveBeenCalledWith('agent-alpha');
   });
 
   it('exports selected agent config to a picked json path', async () => {
@@ -704,35 +720,14 @@ describe('subagents page', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Export agent-alpha' }));
 
     await waitFor(() => {
-      expect(exportAgentConfig).toHaveBeenCalledWith('agent-alpha', subagentManagementAddress);
+      expect(exportAgentConfig).toHaveBeenCalledWith('agent-alpha');
     });
-    expect(invoke).toHaveBeenCalledWith('dialog:save', expect.objectContaining({
+    const writeCall = invoke.mock.calls.find(([channel]) => channel === 'dialog:writeSelectedTextFile');
+    expect(writeCall).toBeTruthy();
+    expect(writeCall?.[1]).toEqual(expect.objectContaining({
       defaultPath: expect.stringContaining('alpha.matchaclaw-agent.json'),
     }));
-    const writeCall = invoke.mock.calls.find(([channel, payload]) => (
-      channel === 'hostapi:fetch'
-      && (payload as { path?: string } | undefined)?.path === '/api/capabilities/execute'
-    ));
-    expect(writeCall).toBeTruthy();
-    const writePayload = writeCall?.[1] as { body?: string };
-    const writeBody = JSON.parse(writePayload.body || '{}') as {
-      id?: string;
-      operationId?: string;
-      runtimeAddress?: RuntimeAddress;
-      input?: { path?: string; content?: string; runtimeAddress?: RuntimeAddress };
-    };
-    expect(writeBody.id).toBe('workspace.file');
-    expect(writeBody.operationId).toBe('files.writeText');
-    expect(writeBody.runtimeAddress).toEqual({
-      ...subagentManagementAddress,
-      capabilityId: 'workspace.file',
-    });
-    expect(writeBody.input?.runtimeAddress).toEqual({
-      ...subagentManagementAddress,
-      capabilityId: 'workspace.file',
-    });
-    expect(writeBody.input?.path).toBe('/tmp/alpha.matchaclaw-agent.json');
-    expect(JSON.parse(writeBody.input?.content || '{}')).toEqual(expect.objectContaining({
+    expect(JSON.parse(String(writeCall?.[2] ?? '{}'))).toEqual(expect.objectContaining({
       schema: 'matchaclaw.agent-config',
       version: 1,
     }));
@@ -745,30 +740,20 @@ describe('subagents page', () => {
     const invoke = vi.mocked(window.electron.ipcRenderer.invoke);
     invoke.mockImplementation(async (channel, payload) => {
       const path = (payload as { path?: string } | undefined)?.path;
-      if (channel === 'dialog:open') {
-        return { canceled: false, filePaths: ['/tmp/shared.matchaclaw-agent.json'] };
-      }
-      if (channel === 'hostapi:fetch' && path === '/api/files/read-text') {
+      if (channel === 'dialog:readSelectedTextFile') {
         return {
-          ok: true,
-          data: {
-            status: 200,
-            ok: true,
-            json: {
-              ok: true,
-              path: '/tmp/shared.matchaclaw-agent.json',
-              content: JSON.stringify({
-                schema: 'matchaclaw.agent-config',
-                version: 1,
-                agent: {
-                  name: 'Shared Agent',
-                  files: {
-                    'AGENTS.md': 'shared agents',
-                  },
-                },
-              }),
+          canceled: false,
+          filePath: '/tmp/shared.matchaclaw-agent.json',
+          content: JSON.stringify({
+            schema: 'matchaclaw.agent-config',
+            version: 1,
+            agent: {
+              name: 'Shared Agent',
+              files: {
+                'AGENTS.md': 'shared agents',
+              },
             },
-          },
+          }),
         };
       }
       if (channel === 'hostapi:fetch' && path === '/api/capabilities/list') {
@@ -815,7 +800,7 @@ describe('subagents page', () => {
       expect(importAgentConfig).toHaveBeenCalledWith(expect.objectContaining({
         schema: 'matchaclaw.agent-config',
         version: 1,
-      }), subagentManagementAddress);
+      }));
     });
     expect(loadPersistedFilesForAgent).toHaveBeenCalledWith('imported-agent');
     await waitFor(() => {
@@ -1057,10 +1042,10 @@ describe('subagents page', () => {
     expect(screen.getByRole('button', { name: 'Create' })).toBeDisabled();
   });
 
-  it('keeps main manageable but blocks direct edit/delete for protected default agent', () => {
+  it('keeps main manageable but blocks delete for protected default agent', () => {
     renderSubagentsPage();
 
-    expect(screen.getByRole('button', { name: 'Edit main' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Edit main' })).toBeEnabled();
     expect(screen.getByRole('button', { name: 'Delete main' })).toBeDisabled();
     expect(screen.getByRole('button', { name: 'Manage main' })).toBeEnabled();
     expect(screen.getByRole('button', { name: 'Chat main' })).toBeEnabled();
@@ -1140,7 +1125,6 @@ describe('subagents page', () => {
         updatedAt: 2,
       },
     });
-    const invoke = vi.mocked(window.electron.ipcRenderer.invoke);
     useSubagentsStore.setState({
       managedAgentId: 'agent-alpha',
       draftByFile: {
@@ -1156,13 +1140,11 @@ describe('subagents page', () => {
     });
 
     renderSubagentsPage();
-    await waitFor(() => {
-      expect(invoke).toHaveBeenCalledWith('hostapi:fetch', expect.objectContaining({ path: '/api/capabilities/list' }));
-    });
 
+    expect(await screen.findByRole('dialog', { name: 'Managing: agent-alpha' })).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'Close' }));
     await waitFor(() => {
-      expect(cancelDraft).toHaveBeenCalledWith('agent-alpha', subagentManagementAddress);
+      expect(cancelDraft).toHaveBeenCalledWith('agent-alpha');
     });
     expect(screen.queryByRole('dialog', { name: 'Managing: agent-alpha' })).toBeNull();
   });
@@ -1263,7 +1245,6 @@ describe('subagents page', () => {
       expect(createAgentFromTemplate).toHaveBeenCalledWith(
         expect.objectContaining({
           model: 'gpt-4.1-mini',
-          runtimeAddress: subagentManagementAddress,
           template: expect.objectContaining({
             id: 'brand-guardian',
             name: 'Brand Guardian',

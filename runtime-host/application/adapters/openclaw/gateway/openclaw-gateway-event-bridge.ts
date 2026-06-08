@@ -24,8 +24,7 @@ import type {
 } from '../../../../openclaw-bridge/client-auth-ports';
 import type { RuntimeHostLogger } from '../../../../shared/logger';
 import type { SessionUpdateEvent } from '../../../../shared/session-adapter-types';
-import type { RuntimeAddress } from '../../../agent-runtime/contracts/runtime-address';
-import { SESSION_PROMPT_CAPABILITY_ID } from '../../../capabilities/session/session-prompt-capability';
+import type { RuntimeEndpointRef, SessionIdentity } from '../../../agent-runtime/contracts/runtime-address';
 import {
   containsTodoToolDebugSignal,
   logTodoToolDebug,
@@ -33,25 +32,23 @@ import {
 } from '../../../sessions/todo-tool-debug';
 import { GatewayAutoRecovery } from '../../../../composition/gateway-auto-recovery';
 
-function createRuntimeHostCapabilityPayload(runtimeAddress: RuntimeAddress, operationId: string, input: Record<string, unknown> = {}) {
+function createRuntimeHostCapabilityPayload(endpoint: RuntimeEndpointRef, operationId: string, input: Record<string, unknown> = {}) {
   return {
-    id: runtimeAddress.capabilityId,
+    id: 'runtime.host',
     operationId,
-    runtimeAddress,
-    input: {
-      ...input,
-      runtimeAddress,
-    },
+    scope: { kind: 'runtime-instance' as const, endpoint },
+    target: { kind: 'runtime-endpoint' as const },
+    input,
   };
 }
 
 export interface GatewaySessionRuntimePort {
-  consumeEndpointConversationEvent(runtimeAddress: RuntimeAddress, payload: GatewayConversationEvent): Promise<unknown[]>;
-  consumeEndpointNotification(runtimeAddress: RuntimeAddress, payload: unknown): unknown[];
+  consumeEndpointConversationEvent(endpoint: RuntimeEndpointRef, payload: GatewayConversationEvent): Promise<unknown[]>;
+  consumeEndpointNotification(endpoint: RuntimeEndpointRef, payload: unknown): unknown[];
 }
 
 export interface RuntimeEndpointControlStatePatch {
-  readonly address: RuntimeAddress;
+  readonly endpoint: RuntimeEndpointRef;
   readonly connection?: GatewayConnectionStatePayload | null;
   readonly readiness?: GatewayControlReadiness | null;
   readonly capabilities?: GatewayCapabilitiesSnapshot | null;
@@ -67,7 +64,7 @@ export interface RuntimeHostGatewayBridgeDeps {
   readonly dispatchRoute: (method: string, route: string, payload: unknown) => Promise<RuntimeRouteResponse | null>;
   readonly getSessionRuntime: () => GatewaySessionRuntimePort | null;
   readonly endpointControlState: RuntimeEndpointControlStatePort;
-  readonly runtimeHostCapabilityAddress: RuntimeAddress;
+  readonly runtimeHostEndpoint: RuntimeEndpointRef;
   readonly runtimeHostDataDir: string;
   readonly gatewayPort: number;
   readonly readGatewayToken: () => Promise<string>;
@@ -94,13 +91,11 @@ function readOpenClawAgentIdFromSessionKey(sessionKey: string): string {
   return parts[0] === 'agent' && parts[1]?.trim() ? parts[1].trim() : '';
 }
 
-function toSessionRuntimeAddress(address: RuntimeAddress, sessionKey?: string): RuntimeAddress {
-  const agentId = sessionKey ? readOpenClawAgentIdFromSessionKey(sessionKey) : '';
+function toSessionIdentity(endpoint: RuntimeEndpointRef, sessionKey: string): SessionIdentity {
   return {
-    ...address,
-    capabilityId: SESSION_PROMPT_CAPABILITY_ID,
-    ...(agentId ? { agentId } : {}),
-    ...(sessionKey ? { sessionKey } : {}),
+    endpoint,
+    agentId: readOpenClawAgentIdFromSessionKey(sessionKey),
+    sessionKey,
   };
 }
 
@@ -108,7 +103,7 @@ export function createRuntimeHostGatewayClient(deps: RuntimeHostGatewayBridgeDep
   let latestObservedTransportEpoch = 0;
   const conversationEventChains = new Map<string, Promise<void>>();
   const pendingNotifications: unknown[] = [];
-  const sessionRuntimeAddress = toSessionRuntimeAddress(deps.runtimeHostCapabilityAddress);
+  const runtimeHostEndpoint = deps.runtimeHostEndpoint;
   let pendingNotificationHead = 0;
 
   const emitSessionUpdates = (sessionUpdates: unknown[]): void => {
@@ -125,7 +120,7 @@ export function createRuntimeHostGatewayClient(deps: RuntimeHostGatewayBridgeDep
     while (pendingNotificationHead < pendingNotifications.length) {
       const notification = pendingNotifications[pendingNotificationHead];
       pendingNotificationHead += 1;
-      emitSessionUpdates(runtime.consumeEndpointNotification(sessionRuntimeAddress, notification));
+      emitSessionUpdates(runtime.consumeEndpointNotification(runtimeHostEndpoint, notification));
     }
     pendingNotifications.length = 0;
     pendingNotificationHead = 0;
@@ -140,7 +135,10 @@ export function createRuntimeHostGatewayClient(deps: RuntimeHostGatewayBridgeDep
         return;
       }
       flushPendingRuntimeEvents(runtime);
-      const sessionUpdates = await runtime.consumeEndpointConversationEvent(toSessionRuntimeAddress(deps.runtimeHostCapabilityAddress, sessionKey), payload);
+      const sessionUpdates = await runtime.consumeEndpointConversationEvent(runtimeHostEndpoint, {
+        ...payload,
+        sessionIdentity: toSessionIdentity(runtimeHostEndpoint, sessionKey),
+      });
       for (const sessionUpdate of sessionUpdates) {
         if (containsTodoToolDebugSignal(sessionUpdate)) {
           logTodoToolDebug(
@@ -199,7 +197,7 @@ export function createRuntimeHostGatewayClient(deps: RuntimeHostGatewayBridgeDep
         return;
       }
       flushPendingRuntimeEvents(runtime);
-      emitSessionUpdates(runtime.consumeEndpointNotification(sessionRuntimeAddress, notification));
+      emitSessionUpdates(runtime.consumeEndpointNotification(runtimeHostEndpoint, notification));
     },
     onGatewayConversationEvent: (payload) => {
       logTodoToolDebug(deps.logger, 'gateway.raw-conversation-event', payload);
@@ -224,7 +222,7 @@ export function createRuntimeHostGatewayClient(deps: RuntimeHostGatewayBridgeDep
       void deps.parentTransport.emitParentGatewayEvent('gateway:lifecycle', payload).catch(() => undefined);
 
       deps.endpointControlState.updateRuntimeEndpointControlState({
-        address: deps.runtimeHostCapabilityAddress,
+        endpoint: deps.runtimeHostEndpoint,
         connection: payload,
         updatedAt: payload.updatedAt,
       });
@@ -240,7 +238,7 @@ export function createRuntimeHostGatewayClient(deps: RuntimeHostGatewayBridgeDep
       void deps.dispatchRoute(
         'POST',
         '/api/capabilities/execute',
-        createRuntimeHostCapabilityPayload(deps.runtimeHostCapabilityAddress, 'runtimeHost.gatewayLifecycle', {
+        createRuntimeHostCapabilityPayload(deps.runtimeHostEndpoint, 'runtimeHost.gatewayLifecycle', {
           state: 'running',
           transportEpoch: payload.transportEpoch,
           updatedAt: deps.clock.nowMs(),
@@ -252,7 +250,7 @@ export function createRuntimeHostGatewayClient(deps: RuntimeHostGatewayBridgeDep
           return;
         }
         deps.endpointControlState.updateRuntimeEndpointControlState({
-          address: deps.runtimeHostCapabilityAddress,
+          endpoint: deps.runtimeHostEndpoint,
           readiness,
           capabilities: readiness.capabilities ?? null,
           updatedAt: deps.clock.nowMs(),

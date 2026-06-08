@@ -23,7 +23,9 @@
         "skillActive": "已启用 {{count}} 个技能",
         "skillsActive": "已启用 {{count}} 个技能",
         "attachmentReady": "已添加 {{count}} 个附件",
-        "attachmentsReady": "已添加 {{count}} 个附件"
+        "attachmentsReady": "已添加 {{count}} 个附件",
+        "contextUsageLabel": "上下文已用 {{pct}}%",
+        "contextUsageTitle": "上下文已用 {{pct}}%（{{detail}}）"
     },
     "noLogs": "（暂无日志）",
     "toolbar": {
@@ -51,6 +53,7 @@
     },
     "errors": {
         "activeRunDisconnected": "当前这轮回复在收到结束事件前就断开了连接。",
+        "abortStoppingTimeout": "停止耗时较久。如果需要继续，可以新建会话。",
         "modelUnavailable": "当前模型不可用，请稍后重试或切换模型。",
         "gatewayAuthRequired": "OpenClaw 网关需要认证，请检查认证配置。",
         "gatewayAuthFailed": "OpenClaw 网关认证失败，请检查凭据或认证配置。",

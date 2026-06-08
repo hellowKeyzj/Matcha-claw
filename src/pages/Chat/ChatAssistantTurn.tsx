@@ -15,9 +15,9 @@ import {
   type MessageLightboxState,
 } from './chat-message-parts';
 import { extractArtifactRefsFromAssistantText } from './artifact-paths';
-import { hostFileStat } from '@/lib/host-api';
+import { hostFileStat, type WorkspaceFileContext } from '@/lib/host-api';
 import { DIRECTORY_MIME_TYPE } from '@/components/file-preview/types';
-import type { RuntimeAddress } from '../../../runtime-host/shared/runtime-address';
+import type { SessionIdentity } from '../../../runtime-host/shared/runtime-address';
 import {
   containsTodoToolDebugSignal,
   logRendererTodoToolDebug,
@@ -28,7 +28,8 @@ interface ChatAssistantTurnProps {
   item: ChatAssistantTurnItem;
   showThinking: boolean;
   userAvatarImageUrl?: string | null;
-  runtimeAddress?: RuntimeAddress;
+  sessionIdentity?: SessionIdentity;
+  workspaceContext?: WorkspaceFileContext;
   onOpenAttachedArtifact?: (file: AttachedFileMeta) => void;
 }
 
@@ -121,7 +122,8 @@ export const ChatAssistantTurn = memo(function ChatAssistantTurn({
   item,
   showThinking,
   userAvatarImageUrl,
-  runtimeAddress,
+  sessionIdentity,
+  workspaceContext,
   onOpenAttachedArtifact,
 }: ChatAssistantTurnProps) {
   const [collapseVersion, requestCollapse] = useReducer((value: number) => value + 1, 0);
@@ -175,7 +177,7 @@ export const ChatAssistantTurn = memo(function ChatAssistantTurn({
   ), [attachedByPath, plainText]);
 
   useEffect(() => {
-    if (!runtimeAddress) {
+    if (!sessionIdentity) {
       return;
     }
     if (derivedAttachedFiles.length === 0) {
@@ -191,7 +193,7 @@ export const ChatAssistantTurn = memo(function ChatAssistantTurn({
     let cancelled = false;
     void Promise.all(pendingPaths.map(async (filePath) => {
       try {
-        const stat = await hostFileStat({ path: filePath, runtimeAddress });
+        const stat = await hostFileStat({ path: filePath, sessionIdentity, ...workspaceContext });
         const expectDir = derivedAttachedFiles.find((file) => file.filePath === filePath)?.mimeType === DIRECTORY_MIME_TYPE;
         return {
           filePath,
@@ -216,7 +218,7 @@ export const ChatAssistantTurn = memo(function ChatAssistantTurn({
     return () => {
       cancelled = true;
     };
-  }, [derivedAttachedFiles, runtimeAddress, validatedDerivedPaths]);
+  }, [derivedAttachedFiles, sessionIdentity, validatedDerivedPaths, workspaceContext]);
 
   const visibleDerivedAttachedFiles = useMemo(() => (
     derivedAttachedFiles.filter((file) => !file.filePath || validatedDerivedPaths[file.filePath] === true)

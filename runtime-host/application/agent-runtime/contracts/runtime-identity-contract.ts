@@ -1,4 +1,4 @@
-import { buildRuntimeAddressKey, type RuntimeAddress } from './runtime-address';
+import { buildSessionIdentityKey, type SessionIdentity } from './runtime-address';
 import type { RuntimeProtocolId, RuntimeEndpointId } from './runtime-endpoint-types';
 
 export interface RuntimeSessionIdentity {
@@ -6,9 +6,8 @@ export interface RuntimeSessionIdentity {
   runtimeEndpointId: RuntimeEndpointId;
 }
 
-export function buildRuntimeAddressScopedMessageId(input: {
-  address: RuntimeAddress;
-  sessionKey: string;
+export function buildSessionIdentityScopedMessageId(input: {
+  identity: SessionIdentity;
   runId: string;
   laneKey: string;
   role: string;
@@ -23,8 +22,7 @@ export function buildRuntimeAddressScopedMessageId(input: {
     throw new Error('Runtime message identity requires laneKey');
   }
   return [
-    buildRuntimeAddressKey(input.address),
-    input.sessionKey,
+    buildSessionIdentityKey(input.identity),
     runId,
     laneKey,
     input.role,

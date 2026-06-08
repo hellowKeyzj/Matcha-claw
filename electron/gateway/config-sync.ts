@@ -9,7 +9,7 @@ import { createDefaultRuntimeHostHttpClient } from '../main/runtime-host-client'
 import { stripSystemdSupervisorEnv } from './config-sync-env';
 import { waitForRuntimeHostJob, type RuntimeHostJobSnapshot } from '../main/runtime-host-jobs';
 import type { RuntimeHostManager } from '../main/runtime-host-manager';
-import { createRuntimeHostCapabilityPayload } from '../main/runtime-host-capabilities';
+import { createRuntimeHostCapabilityPayload, resolveRuntimeHostEndpoint } from '../main/runtime-host-capabilities';
 
 function createGatewayConfigRuntimeHostClient() {
   return createDefaultRuntimeHostHttpClient({
@@ -59,13 +59,14 @@ export async function prepareGatewayRuntimeBeforeLaunch(
   _appSettings?: GatewayLaunchSettings,
 ): Promise<GatewayLaunchPlan> {
   const runtimeHostClient = createGatewayConfigRuntimeHostClient();
+  const endpoint = await resolveRuntimeHostEndpoint(runtimeHostClient);
   const response = await runtimeHostClient.request<{
     success?: boolean;
     job?: RuntimeHostJobSnapshot<GatewayPrelaunchResult>;
   }>(
     'POST',
     '/api/capabilities/execute',
-    await createRuntimeHostCapabilityPayload(runtimeHostClient, 'runtimeHost.prepareGatewayLaunch'),
+    await createRuntimeHostCapabilityPayload(runtimeHostClient, 'runtimeHost.prepareGatewayLaunch', {}, { endpoint }),
   );
   const job = response.data?.job;
   if (!job?.id) {
@@ -131,7 +132,11 @@ export async function prepareGatewayLaunchContext(
     throw new Error(`OpenClaw entry script not found at: ${entryScript}`);
   }
 
-  const gatewayArgs = ['gateway', '--port', String(port), '--token', appSettings.gatewayToken, '--allow-unconfigured'];
+  const gatewayToken = launchPlan.gatewayToken;
+  if (!gatewayToken) {
+    throw new Error('Runtime Host prelaunch job did not return a gateway token');
+  }
+  const gatewayArgs = ['gateway', '--port', String(port), '--token', gatewayToken, '--allow-unconfigured'];
   const mode = app.isPackaged ? 'packaged' : 'dev';
 
   const platform = process.platform;
@@ -161,9 +166,9 @@ export async function prepareGatewayLaunchContext(
     ...uvEnv,
     ...proxyEnv,
     OPENCLAW_GATEWAY_PORT: String(port),
-    OPENCLAW_GATEWAY_TOKEN: appSettings.gatewayToken,
+    OPENCLAW_GATEWAY_TOKEN: gatewayToken,
     MATCHACLAW_RUNTIME_HOST_GATEWAY_PORT: String(port),
-    MATCHACLAW_RUNTIME_HOST_GATEWAY_TOKEN: appSettings.gatewayToken,
+    MATCHACLAW_RUNTIME_HOST_GATEWAY_TOKEN: gatewayToken,
     OPENCLAW_SKIP_CHANNELS: skipChannels ? '1' : '',
     CLAWDBOT_SKIP_CHANNELS: skipChannels ? '1' : '',
     OPENCLAW_NO_RESPAWN: '1',

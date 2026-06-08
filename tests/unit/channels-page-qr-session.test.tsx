@@ -3,14 +3,15 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import i18n from '@/i18n';
 import { Channels } from '@/pages/Channels';
 import { useChannelsStore } from '@/stores/channels';
-import type { RuntimeAddress } from '../../runtime-host/shared/runtime-address';
+import type { RuntimeScope } from '../../runtime-host/shared/runtime-address';
 
-const integrationChannelAddress: RuntimeAddress = {
-  kind: 'native-runtime',
-  capabilityId: 'integration.channel',
-  runtimeAdapterId: 'openclaw',
-  runtimeInstanceId: 'local',
-  agentId: 'default',
+const integrationChannelScope: RuntimeScope = {
+  kind: 'runtime-instance',
+  endpoint: {
+    kind: 'native-runtime',
+    runtimeAdapterId: 'openclaw',
+    runtimeInstanceId: 'local',
+  },
 };
 
 const hostChannelsActivateMock = vi.fn();
@@ -66,7 +67,7 @@ vi.mock('@/lib/api-client', () => ({
 }));
 
 vi.mock('@/lib/host-api', () => ({
-  resolveSingleCapabilityRuntimeAddress: async () => integrationChannelAddress,
+  resolveSingleCapabilityScope: async () => integrationChannelScope,
 }));
 
 vi.mock('@/stores/gateway', () => ({
@@ -187,7 +188,7 @@ describe('Channels page QR session lifecycle', () => {
         channelType: 'openclaw-weixin',
         accountId: 'default',
         config: {},
-      }, integrationChannelAddress);
+      });
     });
 
     const channelStatusHandlers = subscribedHostEvents.get('gateway:channel-status');
@@ -240,7 +241,7 @@ describe('Channels page QR session lifecycle', () => {
       expect(hostChannelsApprovePairingRequestMock).toHaveBeenCalledWith('feishu', {
         code: 'RTHZA8EP',
         accountId: 'default',
-      }, integrationChannelAddress);
+      });
     });
     expect(hostChannelsListPairingRequestsMock).toHaveBeenCalledTimes(2);
   });

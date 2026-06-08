@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { OpenClawConfigRepository } from '../../runtime-host/application/adapters/openclaw/infrastructure/openclaw-config-repository';
+import { OpenClawEnvironmentConfigFileWorkflow } from '../../runtime-host/application/adapters/openclaw/workflows/openclaw-workspace/openclaw-environment-config-file-workflow';
 import { createTestOpenClawEnvironmentRepository } from './helpers/runtime-system-environment';
 import { ChannelConfigRepository, type ChannelPluginConfigProjectionPort } from '../../runtime-host/application/channels/channel-runtime';
 import { ChannelConfigWorkflow } from '../../runtime-host/application/workflows/channel-runtime/channel-config-workflow';
@@ -82,6 +83,46 @@ describe('openclaw-config-mutex', () => {
       return { result: undefined, changed: true };
     })).rejects.toThrow('Invalid OpenClaw config JSON');
     await expect(readFile(join(tempDir, 'openclaw.json'), 'utf8')).resolves.toBe('{ invalid json');
+  });
+
+  it('通过临时文件 rename 原子写入 openclaw.json，并在失败时清理临时文件', async () => {
+    const fileSystem = createTestRuntimeFileSystem();
+    const layout = {
+      getOpenClawConfigDir: () => tempDir,
+      getOpenClawConfigFilePath: () => join(tempDir, 'openclaw.json'),
+    };
+    const workflow = new OpenClawEnvironmentConfigFileWorkflow({ fileSystem, layout });
+    const renameSpy = vi.spyOn(fileSystem, 'rename');
+
+    await workflow.writeOpenClawConfigJson({ gateway: { mode: 'local' } });
+
+    expect(renameSpy).toHaveBeenCalledTimes(1);
+    expect(renameSpy.mock.calls[0]![0]).toContain('.openclaw.json.');
+    expect(renameSpy.mock.calls[0]![1]).toBe(join(tempDir, 'openclaw.json'));
+    await expect(readFile(join(tempDir, 'openclaw.json'), 'utf8')).resolves.toBe(JSON.stringify({ gateway: { mode: 'local' } }, null, 2));
+
+    renameSpy.mockRestore();
+    const failingRenameSpy = vi.spyOn(fileSystem, 'rename').mockRejectedValue(new Error('rename failed'));
+    await expect(workflow.writeOpenClawConfigJson({ gateway: { mode: 'remote' } })).rejects.toThrow('rename failed');
+    const failedTempPath = failingRenameSpy.mock.calls[0]![0];
+    await expect(readFile(failedTempPath, 'utf8')).rejects.toThrow();
+  });
+
+  it('openclaw.json rename 被 Windows 短暂占用拒绝时，仍提交同一份配置内容并清理临时文件', async () => {
+    const fileSystem = createTestRuntimeFileSystem();
+    const layout = {
+      getOpenClawConfigDir: () => tempDir,
+      getOpenClawConfigFilePath: () => join(tempDir, 'openclaw.json'),
+    };
+    const workflow = new OpenClawEnvironmentConfigFileWorkflow({ fileSystem, layout });
+    const error = Object.assign(new Error('operation not permitted'), { code: 'EPERM' });
+    const renameSpy = vi.spyOn(fileSystem, 'rename').mockRejectedValue(error);
+
+    await workflow.writeOpenClawConfigJson({ gateway: { mode: 'local' } });
+
+    const failedTempPath = renameSpy.mock.calls[0]![0];
+    await expect(readFile(join(tempDir, 'openclaw.json'), 'utf8')).resolves.toBe(JSON.stringify({ gateway: { mode: 'local' } }, null, 2));
+    await expect(readFile(failedTempPath, 'utf8')).rejects.toThrow();
   });
 
   it('updateDirty 由 mutator dirty bit 决定是否写盘', async () => {
