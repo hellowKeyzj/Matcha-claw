@@ -125,7 +125,7 @@ describe('session runtime ACP adapter service', () => {
     });
   });
 
-  it('translates V4 chat streaming snapshots into a stable assistant turn', async () => {
+  it('keeps V4 streaming and final chat snapshots on the same live owner turn', async () => {
     const service = createService();
 
     const [delta] = await consumeOpenClawTestGatewayEvent(service, {
@@ -162,23 +162,171 @@ describe('session runtime ACP adapter service', () => {
     expect(deltaItem.item).toMatchObject({
       kind: 'assistant-turn',
       runId: 'run-stream',
-      turnKey: 'openclaw-v4:chat:agent:main:main:run-stream:1',
+      turnKey: 'openclaw-v4:turn:agent:main:main:run-stream:member:default:0',
       text: '主人，我先看看',
     });
     expect(finalItem.sessionUpdate).toBe('session_item');
     expect(finalItem.item).toMatchObject({
       kind: 'assistant-turn',
       runId: 'run-stream',
-      turnKey: 'openclaw-v4:chat:agent:main:main:run-stream:1',
+      turnKey: 'openclaw-v4:turn:agent:main:main:run-stream:member:default:0',
       text: '主人，我先看看，已经确认完了',
     });
     expect(final.snapshot.items).toHaveLength(1);
   });
 
-  it('keeps accumulated visible text when a terminal V4 frame carries a shorter snapshot', async () => {
+  it('does not duplicate V4 patch deltas when content carries the full snapshot', async () => {
+    const service = createService();
+
+    const [first] = await consumeOpenClawTestGatewayEvent(service, {
+      type: 'chat.message',
+      event: {
+        state: 'delta',
+        sessionKey: 'agent:main:main',
+        runId: 'run-duplicate-streaming',
+        seq: 1,
+        deltaText: 'Planning',
+        message: {
+          role: 'assistant',
+          content: [{ type: 'text', text: 'Planning' }],
+        },
+      },
+    });
+    const [second] = await consumeOpenClawTestGatewayEvent(service, {
+      type: 'chat.message',
+      event: {
+        state: 'delta',
+        sessionKey: 'agent:main:main',
+        runId: 'run-duplicate-streaming',
+        seq: 2,
+        deltaText: ' workflow',
+        message: {
+          role: 'assistant',
+          content: [{ type: 'text', text: 'Planning workflow' }],
+        },
+      },
+    });
+
+    expect(expectItemEvent(first).item).toMatchObject({
+      kind: 'assistant-turn',
+      text: 'Planning',
+      segments: [{ kind: 'message', text: 'Planning' }],
+    });
+    expect(expectItemEvent(second).item).toMatchObject({
+      kind: 'assistant-turn',
+      text: 'Planning workflow',
+      segments: [{ kind: 'message', text: 'Planning workflow' }],
+    });
+    expect(second.snapshot.items.filter((item: { kind?: string }) => item.kind === 'assistant-turn')).toHaveLength(1);
+  });
+
+  it('starts a fresh V4 assistant turn after a live tool start without replaying prior text', async () => {
     const service = createService();
 
     await consumeOpenClawTestGatewayEvent(service, {
+      type: 'chat.message',
+      event: {
+        state: 'delta',
+        sessionKey: 'agent:main:main',
+        runId: 'run-tool-next-turn',
+        seq: 1,
+        timestamp: 1_700_000_000_000,
+        deltaText: 'Considering presentation',
+        message: {
+          role: 'assistant',
+          content: [{ type: 'text', text: 'Considering presentation' }],
+        },
+      },
+    });
+    await consumeOpenClawTestGatewayEvent(service, {
+      type: 'tool.lifecycle',
+      event: {
+        phase: 'start',
+        sessionKey: 'agent:main:main',
+        runId: 'run-tool-next-turn',
+        seq: 2,
+        timestamp: 1_700_000_000_010,
+        toolCallId: 'tool-next-turn-1',
+        name: 'Read',
+        args: { file_path: 'package.json' },
+      },
+    });
+    const [nextAssistant] = await consumeOpenClawTestGatewayEvent(service, {
+      type: 'chat.message',
+      event: {
+        state: 'delta',
+        sessionKey: 'agent:main:main',
+        runId: 'run-tool-next-turn',
+        seq: 3,
+        timestamp: 1_700_000_000_020,
+        deltaText: 'I need to answer concisely.',
+        message: {
+          role: 'assistant',
+          content: [{ type: 'text', text: 'Considering presentationI need to answer concisely.' }],
+        },
+      },
+    });
+
+    const assistantTurns = nextAssistant.snapshot.items.filter((item: { kind?: string; text?: string }) => item.kind === 'assistant-turn');
+    const newAssistantTurns = assistantTurns.filter((item) => item.text === 'I need to answer concisely.');
+    expect(newAssistantTurns).toHaveLength(1);
+    expect(expectItemEvent(nextAssistant).item).toMatchObject({
+      kind: 'assistant-turn',
+      text: 'I need to answer concisely.',
+      segments: [{ kind: 'message', text: 'I need to answer concisely.' }],
+    });
+    expect(newAssistantTurns[0]).toMatchObject({
+      kind: 'assistant-turn',
+      text: 'I need to answer concisely.',
+      segments: [{ kind: 'message', text: 'I need to answer concisely.' }],
+    });
+  });
+
+  it('replaces the current V4 assistant text when a streaming patch is marked replace', async () => {
+    const service = createService();
+
+    await consumeOpenClawTestGatewayEvent(service, {
+      type: 'chat.message',
+      event: {
+        state: 'delta',
+        sessionKey: 'agent:main:main',
+        runId: 'run-replace-streaming',
+        seq: 1,
+        deltaText: 'Hello world',
+        message: {
+          role: 'assistant',
+          content: [{ type: 'text', text: 'Hello world' }],
+        },
+      },
+    });
+    const [replace] = await consumeOpenClawTestGatewayEvent(service, {
+      type: 'chat.message',
+      event: {
+        state: 'delta',
+        sessionKey: 'agent:main:main',
+        runId: 'run-replace-streaming',
+        seq: 2,
+        deltaText: 'Hello',
+        replace: true,
+        message: {
+          role: 'assistant',
+          content: [{ type: 'text', text: 'Hello' }],
+        },
+      },
+    });
+
+    expect(expectItemEvent(replace).item).toMatchObject({
+      kind: 'assistant-turn',
+      text: 'Hello',
+      segments: [{ kind: 'message', text: 'Hello' }],
+    });
+    expect(replace.snapshot.items.filter((item: { kind?: string }) => item.kind === 'assistant-turn')).toHaveLength(1);
+  });
+
+  it('preserves buffered V4 assistant text when a later final snapshot regresses content', async () => {
+    const service = createService();
+
+    const [delta] = await consumeOpenClawTestGatewayEvent(service, {
       type: 'chat.message',
       event: {
         state: 'delta',
@@ -199,6 +347,11 @@ describe('session runtime ACP adapter service', () => {
       },
     });
 
+    expect(expectItemEvent(delta).item).toMatchObject({
+      kind: 'assistant-turn',
+      text: '已写入。',
+      segments: [{ kind: 'message', text: '已写入。' }],
+    });
     expect(expectItemEvent(final).item).toMatchObject({
       kind: 'assistant-turn',
       text: '已写入。',
@@ -285,6 +438,57 @@ describe('session runtime ACP adapter service', () => {
       turnKey: 'tool:tool-read-1',
       tools: [{ toolCallId: 'tool-read-1', name: 'Read', status: 'completed', output: 'package content' }],
     });
+  });
+
+  it('updates the existing V4 assistant turn when a live tool starts under the same owner message', async () => {
+    const service = createService();
+
+    const [delta] = await consumeOpenClawTestGatewayEvent(service, {
+      type: 'chat.message',
+      event: {
+        state: 'delta',
+        sessionKey: 'agent:main:main',
+        runId: 'run-tool-inline',
+        seq: 1,
+        timestamp: 1_700_000_000_000,
+        message: {
+          role: 'assistant',
+          content: [{ type: 'text', text: '我先读文件。' }],
+        },
+      },
+    });
+    const [start] = await consumeOpenClawTestGatewayEvent(service, {
+      type: 'tool.lifecycle',
+      event: {
+        phase: 'start',
+        sessionKey: 'agent:main:main',
+        runId: 'run-tool-inline',
+        seq: 2,
+        timestamp: 1_700_000_000_010,
+        toolCallId: 'tool-inline-read-1',
+        name: 'Read',
+        args: { file_path: 'package.json' },
+      },
+    });
+
+    const deltaItem = expectItemEvent(delta);
+    const startItem = expectItemEvent(start);
+    expect(deltaItem.item).toMatchObject({
+      kind: 'assistant-turn',
+      text: '我先读文件。',
+      tools: [],
+      segments: [{ kind: 'message', text: '我先读文件。' }],
+    });
+    expect(startItem.item).toMatchObject({
+      kind: 'assistant-turn',
+      text: '我先读文件。',
+      tools: [{ toolCallId: 'tool-inline-read-1', name: 'Read', status: 'running' }],
+      segments: [
+        { kind: 'message', text: '我先读文件。' },
+        { kind: 'tool', tool: { toolCallId: 'tool-inline-read-1', name: 'Read', status: 'running' } },
+      ],
+    });
+    expect(start.snapshot.items.filter((item: { kind?: string; text?: string }) => item.kind === 'assistant-turn' && item.text === '我先读文件。')).toHaveLength(1);
   });
 
   it('turns state-only TodoWrite lifecycle frames into plan snapshots without visible tool cards', async () => {
@@ -470,10 +674,11 @@ describe('session runtime ACP adapter service', () => {
       expect.objectContaining({ type: 'tool_result', toolCallId: 'tool-legacy-1', output: 'legacy result' }),
       expect.objectContaining({ type: 'replay_boundary', phase: 'end' }),
     ]);
-    expect(items).toMatchObject([{
+    expect(items).toEqual(expect.arrayContaining([expect.objectContaining({
       kind: 'assistant-turn',
-      tools: [{ toolCallId: 'tool-legacy-1', status: 'completed', output: 'legacy result' }],
-    }]);
+      turnKey: 'tool:tool-legacy-1',
+      tools: [expect.objectContaining({ toolCallId: 'tool-legacy-1', status: 'completed', output: 'legacy result' })],
+    })]));
   });
 
   it('rejects session creation without an explicit RuntimeEndpointRef', async () => {
@@ -1171,7 +1376,7 @@ describe('session runtime ACP adapter service', () => {
         listStorageDescriptors: async () => [],
         findStorageDescriptor: async () => null,
         getTranscriptFingerprint: async () => null,
-        readTranscriptContent: async (sessionKey) => (sessionKey === 'agent:main:main'
+        readTranscriptContent: async (identity) => (identity.sessionKey === 'agent:main:main'
           ? JSON.stringify({ timestamp: 1, message: { role: 'user', content: '你好', id: 'transcript-user' } })
           : null),
         readTranscriptDescriptorContent: async () => null,

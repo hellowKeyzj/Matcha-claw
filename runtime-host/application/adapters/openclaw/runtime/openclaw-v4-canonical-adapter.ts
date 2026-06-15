@@ -30,15 +30,33 @@ export type OpenClawV4ConversationEvent =
   | { type: 'run.phase'; phase: 'started' | 'completed' | 'error' | 'aborted'; runId?: string; sessionKey?: string; error?: string; errorMessage?: string; errorCode?: string; errorDetails?: unknown };
 
 interface ChatSnapshotBuffer {
-  messageId: string;
   text: string;
   content: unknown;
+  updatedAt: number;
+}
+
+interface LiveAssistantTurnState {
+  fallbackMessageId: string;
+  ownerMessageKey: string;
+  ownerTurnKey: string;
+  index: number;
+  closed: boolean;
   updatedAt: number;
 }
 
 interface CanonicalLane {
   laneKey: string;
   agentId?: string;
+}
+
+interface ToolOwnerBinding {
+  ownerTurnKey: string;
+  ownerMessageKey?: string;
+  turnBindingSource: 'synthetic';
+  turnBindingConfidence: 'low' | 'medium';
+  messageBindingSource?: 'synthetic';
+  messageBindingConfidence?: 'medium';
+  updatedAt: number;
 }
 
 const MAX_CHAT_SNAPSHOT_BUFFERS = 128;
@@ -213,6 +231,8 @@ function lifecyclePhase(phase: string): { phase: CanonicalLifecyclePhase; runPha
 
 export class OpenClawV4Adapter {
   private readonly chatSnapshots = new Map<string, ChatSnapshotBuffer>();
+  private readonly liveAssistantTurns = new Map<string, LiveAssistantTurnState>();
+  private readonly liveToolOwnerBindings = new Map<string, ToolOwnerBinding>();
 
   translate(input: OpenClawV4ConversationEvent, context: Pick<RuntimeSessionContext, 'agentId'>): CanonicalSessionEvent[] {
     switch (input.type) {
@@ -239,8 +259,96 @@ export class OpenClawV4Adapter {
     }
   }
 
-  private bufferKey(sessionKey: string, runId: string): string {
-    return `${sessionKey}\n${runId}`;
+  private chatSnapshotKey(sessionKey: string, messageId: string): string {
+    return `${sessionKey}\n${messageId}`;
+  }
+
+  private liveAssistantTurnKey(sessionKey: string, runId: string, laneKey: string): string {
+    return `${sessionKey}\n${runId}\n${laneKey}`;
+  }
+
+  private currentLiveAssistantTurn(sessionKey: string, runId: string, laneKey: string): LiveAssistantTurnState | null {
+    return this.liveAssistantTurns.get(this.liveAssistantTurnKey(sessionKey, runId, laneKey)) ?? null;
+  }
+
+  private ensureLiveAssistantTurn(input: {
+    sessionKey: string;
+    runId: string;
+    laneKey: string;
+    updatedAt: number;
+    startNextTurn?: boolean;
+  }): LiveAssistantTurnState {
+    const key = this.liveAssistantTurnKey(input.sessionKey, input.runId, input.laneKey);
+    const previous = this.liveAssistantTurns.get(key);
+    const shouldStartNextTurn = input.startNextTurn === true && !!previous;
+    const turn = previous && !shouldStartNextTurn
+      ? { ...previous, updatedAt: input.updatedAt }
+      : {
+          fallbackMessageId: `openclaw-v4:chat:${input.sessionKey}:${input.runId}:${input.laneKey}:${previous ? previous.index + 1 : 0}`,
+          ownerMessageKey: `openclaw-v4:owner-message:${input.sessionKey}:${input.runId}:${input.laneKey}:${previous ? previous.index + 1 : 0}`,
+          ownerTurnKey: `openclaw-v4:turn:${input.sessionKey}:${input.runId}:${input.laneKey}:${previous ? previous.index + 1 : 0}`,
+          index: previous ? previous.index + 1 : 0,
+          closed: false,
+          updatedAt: input.updatedAt,
+        };
+    this.liveAssistantTurns.set(key, turn);
+    return turn;
+  }
+
+  private bindLiveAssistantTurnMessageId(input: {
+    sessionKey: string;
+    runId: string;
+    laneKey: string;
+    providerMessageId?: string;
+    updatedAt: number;
+    startNextTurn?: boolean;
+  }): LiveAssistantTurnState {
+    return this.ensureLiveAssistantTurn(input);
+  }
+
+  private closeLiveAssistantTurn(input: {
+    sessionKey: string;
+    runId: string;
+    laneKey: string;
+    updatedAt: number;
+  }): void {
+    const key = this.liveAssistantTurnKey(input.sessionKey, input.runId, input.laneKey);
+    const previous = this.liveAssistantTurns.get(key);
+    if (!previous || previous.closed) {
+      return;
+    }
+    this.liveAssistantTurns.set(key, { ...previous, closed: true, updatedAt: input.updatedAt });
+  }
+
+  private toolOwnerBindingKey(sessionKey: string, runId: string, laneKey: string, toolCallId: string): string {
+    return `${sessionKey}\n${runId}\n${laneKey}\n${toolCallId}`;
+  }
+
+  private currentToolOwnerBinding(sessionKey: string, runId: string, laneKey: string, toolCallId: string): ToolOwnerBinding | null {
+    return this.liveToolOwnerBindings.get(this.toolOwnerBindingKey(sessionKey, runId, laneKey, toolCallId)) ?? null;
+  }
+
+  private bindLiveToolOwner(input: {
+    sessionKey: string;
+    runId: string;
+    laneKey: string;
+    toolCallId: string;
+    turn: LiveAssistantTurnState;
+    updatedAt: number;
+    turnBindingConfidence: 'low' | 'medium';
+  }): ToolOwnerBinding {
+    const key = this.toolOwnerBindingKey(input.sessionKey, input.runId, input.laneKey, input.toolCallId);
+    const binding: ToolOwnerBinding = {
+      ownerTurnKey: input.turn.ownerTurnKey,
+      ownerMessageKey: input.turn.ownerMessageKey,
+      turnBindingSource: 'synthetic',
+      turnBindingConfidence: input.turnBindingConfidence,
+      messageBindingSource: 'synthetic',
+      messageBindingConfidence: 'medium',
+      updatedAt: input.updatedAt,
+    };
+    this.liveToolOwnerBindings.set(key, binding);
+    return binding;
   }
 
   private pruneChatSnapshots(now: number): void {
@@ -249,12 +357,36 @@ export class OpenClawV4Adapter {
         this.chatSnapshots.delete(key);
       }
     }
+    for (const [key, turn] of this.liveAssistantTurns) {
+      if (now - turn.updatedAt > CHAT_SNAPSHOT_BUFFER_TTL_MS) {
+        this.liveAssistantTurns.delete(key);
+      }
+    }
+    for (const [key, binding] of this.liveToolOwnerBindings) {
+      if (now - binding.updatedAt > CHAT_SNAPSHOT_BUFFER_TTL_MS) {
+        this.liveToolOwnerBindings.delete(key);
+      }
+    }
     while (this.chatSnapshots.size > MAX_CHAT_SNAPSHOT_BUFFERS) {
       const oldestKey = this.chatSnapshots.keys().next().value as string | undefined;
       if (!oldestKey) {
         return;
       }
       this.chatSnapshots.delete(oldestKey);
+    }
+    while (this.liveAssistantTurns.size > MAX_CHAT_SNAPSHOT_BUFFERS) {
+      const oldestKey = this.liveAssistantTurns.keys().next().value as string | undefined;
+      if (!oldestKey) {
+        return;
+      }
+      this.liveAssistantTurns.delete(oldestKey);
+    }
+    while (this.liveToolOwnerBindings.size > MAX_CHAT_SNAPSHOT_BUFFERS) {
+      const oldestKey = this.liveToolOwnerBindings.keys().next().value as string | undefined;
+      if (!oldestKey) {
+        return;
+      }
+      this.liveToolOwnerBindings.delete(oldestKey);
     }
   }
 
@@ -313,6 +445,14 @@ export class OpenClawV4Adapter {
       return [];
     }
     const lane = liveCanonicalLane(context);
+    const previousLiveTurn = this.currentLiveAssistantTurn(sessionKey, runId, lane.laneKey);
+    const liveTurn = this.ensureLiveAssistantTurn({
+      sessionKey,
+      runId,
+      laneKey: lane.laneKey,
+      updatedAt: timestamp,
+      startNextTurn: previousLiveTurn?.closed === true,
+    });
     return [{
       ...openClawBase({
         eventId: eventId(['openclaw-v4', 'thinking', sessionKey, runId, seq]),
@@ -326,6 +466,12 @@ export class OpenClawV4Adapter {
         raw: payload,
       }),
       type: 'thought_snapshot',
+      ownerTurnKey: liveTurn.ownerTurnKey,
+      ownerMessageKey: liveTurn.ownerMessageKey,
+      turnBindingSource: 'synthetic',
+      turnBindingConfidence: 'medium',
+      messageBindingSource: 'synthetic',
+      messageBindingConfidence: 'medium',
       text,
       status: 'streaming',
     }];
@@ -341,32 +487,51 @@ export class OpenClawV4Adapter {
     const runId = readString(payload.runId);
     const seq = readNumber(payload.seq);
     const message = asRecord(payload.message);
-    const timestamp = readNumber(message?.timestamp) ?? Date.now();
-    this.pruneChatSnapshots(timestamp);
+    const timestamp = readNumber(message?.timestamp ?? payload.timestamp ?? payload.ts);
+    const snapshotUpdatedAt = timestamp ?? Date.now();
+    this.pruneChatSnapshots(snapshotUpdatedAt);
     if (!sessionKey || !runId || seq == null || !message) {
       return [];
     }
     if (message.role !== 'assistant') {
       return [];
     }
-    const key = this.bufferKey(sessionKey, runId);
+    const lane = liveCanonicalLane(context);
+    const providerMessageId = readString(message.messageId ?? message.id ?? payload.messageId ?? payload.id);
+    const previousLiveTurn = this.currentLiveAssistantTurn(sessionKey, runId, lane.laneKey);
+    const activeLiveTurn = this.bindLiveAssistantTurnMessageId({
+      sessionKey,
+      runId,
+      laneKey: lane.laneKey,
+      providerMessageId: providerMessageId || undefined,
+      updatedAt: snapshotUpdatedAt,
+      startNextTurn: status === 'streaming' && previousLiveTurn?.closed === true,
+    });
+    const resolvedMessageId = activeLiveTurn.fallbackMessageId;
+    const key = this.chatSnapshotKey(sessionKey, resolvedMessageId);
     const previous = this.chatSnapshots.get(key);
     const content = Object.prototype.hasOwnProperty.call(message, 'content') ? message.content : previous?.content ?? [];
     const snapshotText = readMessageText(content);
-    const deltaText = typeof payload.deltaText === 'string' ? payload.deltaText : '';
-    const bufferedText = payload.replace === true
-      ? deltaText
-      : `${previous?.text ?? ''}${deltaText}`;
-    const useBufferedSnapshot = bufferedText.length > snapshotText.length;
-    const visibleText = useBufferedSnapshot ? bufferedText : snapshotText;
-    const visibleContent = normalizeVisibleMessageContent(useBufferedSnapshot ? previous?.content ?? content : content, visibleText);
-    const providerMessageId = readString(message.messageId ?? message.id ?? payload.messageId ?? payload.id);
-    const messageId = previous?.messageId || providerMessageId || `openclaw-v4:chat:${sessionKey}:${runId}:${seq}`;
-    const lane = liveCanonicalLane(context);
+    const hasDeltaText = Object.prototype.hasOwnProperty.call(payload, 'deltaText') && typeof payload.deltaText === 'string';
+    const deltaText = hasDeltaText ? String(payload.deltaText) : '';
+    const visibleText = hasDeltaText
+      ? payload.replace === true
+        ? deltaText
+        : `${previous?.text ?? ''}${deltaText}`
+      : status !== 'streaming' && previous?.text && snapshotText.length < previous.text.length
+        ? previous.text
+        : snapshotText;
+    const visibleContent = normalizeVisibleMessageContent(content, visibleText);
     if (status === 'streaming') {
-      this.rememberChatSnapshot(key, { messageId, text: visibleText, content: visibleContent, updatedAt: timestamp });
+      this.rememberChatSnapshot(key, { text: visibleText, content: visibleContent, updatedAt: snapshotUpdatedAt });
     } else {
       this.chatSnapshots.delete(key);
+      this.closeLiveAssistantTurn({
+        sessionKey,
+        runId,
+        laneKey: lane.laneKey,
+        updatedAt: snapshotUpdatedAt,
+      });
     }
     const planEvents = this.derivePlanEventsFromMessageContent({
       content,
@@ -394,9 +559,17 @@ export class OpenClawV4Adapter {
         }),
         type: 'message_snapshot',
         role: 'assistant',
-        messageId,
-        ...(readString(message.originMessageId) ? { originMessageId: readString(message.originMessageId) } : {}),
-        ...(readString(message.clientId) ? { clientId: readString(message.clientId) } : {}),
+        messageId: resolvedMessageId,
+        ownerMessageKey: activeLiveTurn.ownerMessageKey,
+        ownerTurnKey: activeLiveTurn.ownerTurnKey,
+        turnBindingSource: 'synthetic',
+        turnBindingConfidence: 'medium',
+        messageBindingSource: 'synthetic',
+        messageBindingConfidence: 'medium',
+        ...(readString(message.originMessageId ?? payload.originMessageId) || providerMessageId
+          ? { originMessageId: readString(message.originMessageId ?? payload.originMessageId) || providerMessageId }
+          : {}),
+        ...(readString(message.clientId ?? payload.clientId) ? { clientId: readString(message.clientId ?? payload.clientId) } : {}),
         content: structuredClone(visibleContent),
         text: visibleText,
         status,
@@ -451,6 +624,7 @@ export class OpenClawV4Adapter {
     const seq = readNumber(payload.seq ?? message.seq);
     const timestamp = readNumber(message.timestamp ?? payload.timestamp ?? payload.ts);
     const messageId = readString(message.messageId ?? message.id) || `openclaw-v4:session-message:${sessionKey}:${role}:${seq ?? 'unsequenced'}`;
+    const ownerKey = `message:${agentId ? `member:${agentId}` : 'main'}:${messageId}`;
     return [{
       ...openClawBase({
         eventId: eventId(['openclaw-v4', 'session-message', sessionKey, runId, seq, messageId]),
@@ -467,6 +641,12 @@ export class OpenClawV4Adapter {
       type: 'message_snapshot',
       role,
       messageId,
+      ownerMessageKey: ownerKey,
+      ownerTurnKey: ownerKey,
+      turnBindingSource: 'adapter',
+      turnBindingConfidence: 'high',
+      messageBindingSource: 'adapter',
+      messageBindingConfidence: 'high',
       ...(readString(message.originMessageId) ? { originMessageId: readString(message.originMessageId) } : {}),
       ...(readString(message.clientId) ? { clientId: readString(message.clientId) } : {}),
       content: structuredClone(content),
@@ -486,6 +666,12 @@ export class OpenClawV4Adapter {
       return [];
     }
     const name = canonicalizeToolName(payload.name);
+    const liveTurn = source === 'live'
+      ? this.currentLiveAssistantTurn(sessionKey, runId, lane.laneKey)
+      : null;
+    const toolOwnerBinding = source === 'live'
+      ? this.currentToolOwnerBinding(sessionKey, runId, lane.laneKey, toolCallId)
+      : null;
     const base = openClawBase({
       eventId: eventId(['openclaw-v4', 'tool', sessionKey, runId, seq, toolCallId, phase]),
       runtimeEventType,
@@ -499,6 +685,23 @@ export class OpenClawV4Adapter {
       source,
       raw: payload,
     });
+    if (source === 'live' && phase === 'start' && liveTurn) {
+      this.bindLiveToolOwner({
+        sessionKey,
+        runId,
+        laneKey: lane.laneKey,
+        toolCallId,
+        turn: liveTurn,
+        updatedAt: timestamp ?? Date.now(),
+        turnBindingConfidence: 'medium',
+      });
+      this.closeLiveAssistantTurn({
+        sessionKey,
+        runId,
+        laneKey: lane.laneKey,
+        updatedAt: timestamp ?? Date.now(),
+      });
+    }
     if (phase === 'start') {
       if (!name) {
         return [];
@@ -521,10 +724,33 @@ export class OpenClawV4Adapter {
             })]
           : [];
       }
+      const ownerBinding = toolOwnerBinding ?? (source === 'live' && liveTurn
+        ? this.bindLiveToolOwner({
+            sessionKey,
+            runId,
+            laneKey: lane.laneKey,
+            toolCallId,
+            turn: liveTurn,
+            updatedAt: timestamp ?? Date.now(),
+            turnBindingConfidence: 'medium',
+          })
+        : null);
       return [{
         ...base,
         eventId: eventId(['openclaw-v4', 'tool-call', sessionKey, runId, seq, toolCallId]),
         type: 'tool_call',
+        ...(ownerBinding ? {
+          ownerTurnKey: ownerBinding.ownerTurnKey,
+          ownerMessageKey: ownerBinding.ownerMessageKey,
+          turnBindingSource: ownerBinding.turnBindingSource,
+          turnBindingConfidence: ownerBinding.turnBindingConfidence,
+          messageBindingSource: ownerBinding.messageBindingSource,
+          messageBindingConfidence: ownerBinding.messageBindingConfidence,
+        } : {
+          ownerTurnKey: `run:${lane.laneKey}:${runId}`,
+          turnBindingSource: 'synthetic',
+          turnBindingConfidence: 'low',
+        }),
         toolCallId,
         name,
         ...(Object.prototype.hasOwnProperty.call(payload, 'args') ? { input: structuredClone(payload.args) } : {}),
@@ -551,6 +777,18 @@ export class OpenClawV4Adapter {
         ...base,
         eventId: eventId(['openclaw-v4', 'tool-progress', sessionKey, runId, seq, toolCallId]),
         type: 'tool_progress',
+        ...(toolOwnerBinding ? {
+          ownerTurnKey: toolOwnerBinding.ownerTurnKey,
+          ownerMessageKey: toolOwnerBinding.ownerMessageKey,
+          turnBindingSource: toolOwnerBinding.turnBindingSource,
+          turnBindingConfidence: toolOwnerBinding.turnBindingConfidence,
+          messageBindingSource: toolOwnerBinding.messageBindingSource,
+          messageBindingConfidence: toolOwnerBinding.messageBindingConfidence,
+        } : {
+          ownerTurnKey: `run:${lane.laneKey}:${runId}`,
+          turnBindingSource: 'synthetic',
+          turnBindingConfidence: 'low',
+        }),
         toolCallId,
         ...(Object.prototype.hasOwnProperty.call(payload, 'partialResult') ? { partialResult: structuredClone(payload.partialResult) } : {}),
         outputText: extractToolResultOutputText(payload.partialResult),
@@ -581,6 +819,18 @@ export class OpenClawV4Adapter {
         ...base,
         eventId: eventId(['openclaw-v4', 'tool-result', sessionKey, runId, seq, toolCallId]),
         type: 'tool_result',
+        ...(toolOwnerBinding ? {
+          ownerTurnKey: toolOwnerBinding.ownerTurnKey,
+          ownerMessageKey: toolOwnerBinding.ownerMessageKey,
+          turnBindingSource: toolOwnerBinding.turnBindingSource,
+          turnBindingConfidence: toolOwnerBinding.turnBindingConfidence,
+          messageBindingSource: toolOwnerBinding.messageBindingSource,
+          messageBindingConfidence: toolOwnerBinding.messageBindingConfidence,
+        } : {
+          ownerTurnKey: `run:${lane.laneKey}:${runId}`,
+          turnBindingSource: 'synthetic',
+          turnBindingConfidence: 'low',
+        }),
         toolCallId,
         ...(name ? { name } : {}),
         ...(Object.prototype.hasOwnProperty.call(payload, 'result') ? { output: structuredClone(payload.result) } : {}),
