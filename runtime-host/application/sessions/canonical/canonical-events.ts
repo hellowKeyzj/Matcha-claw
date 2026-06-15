@@ -17,6 +17,8 @@ export type CanonicalEventSource = 'live' | 'replay' | 'imported' | 'snapshot' |
 export type CanonicalMessageStatus = 'streaming' | 'final' | 'error' | 'aborted';
 export type CanonicalLifecyclePhase = 'started' | 'final' | 'error' | 'aborted';
 export type CanonicalReplayBoundaryPhase = 'start' | 'end' | 'failed';
+export type CanonicalBindingSource = 'runtime' | 'adapter' | 'synthetic';
+export type CanonicalBindingConfidence = 'high' | 'medium' | 'low';
 
 export interface CanonicalOrigin {
   runtimeEventType?: string;
@@ -50,6 +52,12 @@ export interface CanonicalEventBase {
   timestamp?: number;
   laneKey?: string;
   agentId?: string;
+  ownerTurnKey?: string;
+  ownerMessageKey?: string;
+  turnBindingSource?: CanonicalBindingSource;
+  turnBindingConfidence?: CanonicalBindingConfidence;
+  messageBindingSource?: CanonicalBindingSource;
+  messageBindingConfidence?: CanonicalBindingConfidence;
   origin: CanonicalOrigin;
 }
 

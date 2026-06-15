@@ -60,8 +60,6 @@ describe('team runtime tick automation', () => {
       teams: [{
         id: 'team-1',
         name: 'Team A',
-        leadAgentId: 'lead',
-        memberIds: ['lead'],
         packagePath: '.tmp/team-skill',
         createdAt: 1,
         updatedAt: 1,

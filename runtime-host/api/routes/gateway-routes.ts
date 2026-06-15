@@ -6,6 +6,7 @@ interface GatewayRouteDeps {
 
 interface GatewayRouteService {
   status(): Promise<ApplicationResponse>;
+  recover(payload: unknown): Promise<ApplicationResponse>;
   ready(payload: unknown): Promise<ApplicationResponse>;
   approvePendingControlUiPairingRequests(): Promise<ApplicationResponse>;
 }
@@ -14,6 +15,7 @@ const LEGACY_GATEWAY_CONTROL_ROUTE_REJECTION = 'Legacy gateway control route is 
 
 export const gatewayRoutes: readonly RuntimeRouteDefinition<GatewayRouteDeps>[] = [
   { method: 'GET', path: '/api/gateway/status', handle: (_context, deps) => routeResponder.result(async () => sanitizeReadOnlyRouteResponse(await deps.gatewayService.status())) },
+  { method: 'POST', path: '/api/gateway/recover', handle: (context, deps) => routeResponder.result(async () => await deps.gatewayService.recover(context.payload)) },
   { method: 'POST', path: '/api/gateway/ready', handle: () => badRequest(LEGACY_GATEWAY_CONTROL_ROUTE_REJECTION) },
   { method: 'POST', path: '/api/gateway/control-ui/auto-approve', handle: () => badRequest(LEGACY_GATEWAY_CONTROL_ROUTE_REJECTION) },
 ] as const;

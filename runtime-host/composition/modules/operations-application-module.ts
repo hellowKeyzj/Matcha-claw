@@ -44,6 +44,7 @@ import { SecurityPluginConfigApplier, type SecurityPluginConfigProjectionPort } 
 import { SecurityPolicyRepository, type SecurityPolicyStoragePort } from '../../application/security/security-policy-store';
 import { SecurityPolicyStoreWorkflow } from '../../application/workflows/security-policy/security-policy-store-workflow';
 import { TeamSkillService } from '../../application/team-skill/team-skill-service';
+import type { RuntimePluginConfigProjectionPort, RuntimePluginConfigStorePort } from '../../application/plugins/runtime-plugin-service';
 import { TeamManagedAgentConfigWorkflow } from '../../application/team-skill/team-managed-agent-config-workflow';
 import { TeamSkillGatewayWorkflow } from '../../application/workflows/team-skill/team-skill-gateway-workflow';
 import { TeamRunTaskProjectionWorkflow } from '../../application/workflows/team-skill/team-run-task-projection-workflow';
@@ -258,6 +259,10 @@ export function registerOperationsApplicationServices(
     scope.resolve<TeamSkillGatewayWorkflow>('teamSkill.gatewayWorkflow'),
     scope.resolve<TeamRunTaskProjectionWorkflow>('teamSkill.taskProjectionWorkflow'),
     scope.resolve<TeamManagedAgentConfigWorkflow>('teamSkill.managedAgentConfigWorkflow'),
+    {
+      pluginConfigStore: scope.resolve<RuntimePluginConfigStorePort>('plugins.configStore'),
+      pluginConfigProjection: scope.resolve<RuntimePluginConfigProjectionPort>('plugins.configProjection'),
+    },
   ));
   container.register('task.runtimeWorkflow', (scope) => new TaskRuntimeWorkflow({
     gateway: scope.resolve<GatewayRuntimePort>('gateway.runtime'),

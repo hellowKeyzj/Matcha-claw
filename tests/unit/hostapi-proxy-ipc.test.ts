@@ -72,6 +72,22 @@ describe('hostapi proxy ipc', () => {
     );
   });
 
+  it('forwards explicit public validation POST routes', async () => {
+    await fetchViaProxy({
+      path: '/api/channels/credentials/validate',
+      method: 'POST',
+      body: { channelType: 'feishu', config: { appId: 'cli_xxx', appSecret: 'secret' } },
+    });
+
+    expect(proxyAwareFetchMock).toHaveBeenCalledWith(
+      'http://127.0.0.1:13210/api/channels/credentials/validate',
+      expect.objectContaining({
+        method: 'POST',
+        body: JSON.stringify({ channelType: 'feishu', config: { appId: 'cli_xxx', appSecret: 'secret' } }),
+      }),
+    );
+  });
+
   it('rejects legacy file routes, secret routes, mutations, internal routes, and absolute URLs before forwarding', async () => {
     for (const request of [
       { path: '/api/files/read-text', method: 'POST' },

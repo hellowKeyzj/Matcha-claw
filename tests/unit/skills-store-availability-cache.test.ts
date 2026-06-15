@@ -196,6 +196,84 @@ describe('skills store availability and search cache', () => {
     expect(state.skills[0]?.id).toBe('demo-skill');
   });
 
+  it('installSkill 成功后会自动启用并刷新技能快照', async () => {
+    hostApiFetchMock.mockImplementation(async (path: string, init?: { body?: string }) => {
+      if (path === '/api/capabilities/execute') {
+        const payload = init?.body ? JSON.parse(init.body) : {};
+        if (payload.input?.jobId === 'job-install-demo-skill') {
+          return { job: { result: { success: true } } };
+        }
+        if (payload.input?.jobId === 'job-enable-demo-skill') {
+          return { job: { result: { success: true } } };
+        }
+      }
+      throw new Error(`Unexpected hostApiFetch path: ${path}`);
+    });
+    capabilityExecuteMock.mockImplementation(async (payload) => {
+      if (payload.operationId === 'clawhub.install') {
+        return {
+          success: true,
+          job: {
+            id: 'job-install-demo-skill',
+            type: 'clawhub.install',
+            status: 'queued',
+            queuedAt: 1,
+            attempts: 0,
+            maxAttempts: 1,
+          },
+        };
+      }
+      if (payload.operationId === 'skills.updateState') {
+        return {
+          success: true,
+          job: {
+            id: 'job-enable-demo-skill',
+            type: 'skills.syncGatewayUpdate',
+            status: 'queued',
+            queuedAt: 2,
+            attempts: 0,
+            maxAttempts: 1,
+          },
+        };
+      }
+      if (payload.operationId === 'skills.refreshStatus') {
+        return { skills: [{ skillKey: 'demo-skill', disabled: false }] };
+      }
+      throw new Error(`Unexpected capability operation: ${payload.operationId}`);
+    });
+
+    const { useSkillsStore } = await import('@/stores/skills');
+    await useSkillsStore.getState().installSkill('demo-skill');
+
+    expect(capabilityExecuteMock).toHaveBeenCalledWith(expect.objectContaining({
+      id: 'skill.management',
+      operationId: 'clawhub.install',
+      scope: skillManagementScope,
+      target: { kind: 'skill', slug: 'demo-skill' },
+      input: { slug: 'demo-skill' },
+    }), { timeoutMs: undefined });
+    expect(capabilityExecuteMock).toHaveBeenCalledWith(expect.objectContaining({
+      id: 'skill.management',
+      operationId: 'skills.updateState',
+      scope: skillManagementScope,
+      target: { kind: 'skill', skillId: 'demo-skill' },
+      input: { skillKey: 'demo-skill', enabled: true },
+    }), { timeoutMs: undefined });
+    expect(capabilityExecuteMock).toHaveBeenCalledWith(expect.objectContaining({
+      id: 'skill.management',
+      operationId: 'skills.refreshStatus',
+      scope: skillManagementScope,
+      target: { kind: 'none' },
+      input: {},
+    }), { timeoutMs: undefined });
+    expect(useSkillsStore.getState().skills[0]).toMatchObject({
+      id: 'demo-skill',
+      enabled: true,
+    });
+    expect(useSkillsStore.getState().installing['demo-skill']).toBeUndefined();
+    expect(useSkillsStore.getState().mutatingBySkillId['demo-skill']).toBeUndefined();
+  });
+
   it('enableSkill 会维护 mutatingBySkillId 生命周期', async () => {
     const deferredJob = createDeferred<{ success: boolean }>();
     hostApiFetchMock.mockImplementation(async (path: string) => {

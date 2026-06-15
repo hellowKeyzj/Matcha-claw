@@ -48,29 +48,41 @@ describe('chat message view', () => {
   }
 
   it('exposes render fields from the assistant turn item', () => {
-    const item = buildItem([
-      { type: 'text', text: 'hello' },
-      { type: 'thinking', thinking: 'reviewing options' },
-      { type: 'tool_use', id: 'tool-1', name: 'read_file', input: { path: 'README.md' } },
-      { type: 'image', data: 'base64-image', mimeType: 'image/png' },
-    ]);
-    if (item.kind !== 'assistant-turn') {
+    const allItems = buildRenderItemsFromMessages('agent:test:main', [{
+      role: 'assistant',
+      content: [
+        { type: 'text', text: 'hello' },
+        { type: 'thinking', thinking: 'reviewing options' },
+        { type: 'tool_use', id: 'tool-1', name: 'read_file', input: { path: 'README.md' } },
+        { type: 'image', data: 'base64-image', mimeType: 'image/png' },
+      ],
+      _attachedFiles: [{
+        fileName: 'README.md',
+        mimeType: 'text/markdown',
+        fileSize: 123,
+        preview: null,
+        filePath: 'C:/workspace/README.md',
+      }],
+    }]);
+    const item = allItems.find((i) => i.kind === 'assistant-turn' && i.turnKey !== 'tool:tool-1');
+    if (!item || item.kind !== 'assistant-turn') {
       throw new Error('expected assistant-turn');
     }
 
     const view = getOrBuildChatMessageView(item);
 
     expect(view.thinking).toBe('reviewing options');
-    expect(view.toolUses).toEqual([{
-      id: 'tool-1',
-      name: 'read_file',
-      input: { path: 'README.md' },
-    }]);
+    expect(view.toolUses).toEqual([]);
     expect(view.images).toEqual([{
       mimeType: 'image/png',
       data: 'base64-image',
     }]);
     expect(view.attachedFiles.map((file) => file.fileName)).toEqual(['README.md']);
+    const toolItem = allItems.find((i) => i.kind === 'assistant-turn' && i.turnKey === 'tool:tool-1');
+    expect(toolItem).toBeDefined();
+    if (toolItem && toolItem.kind === 'assistant-turn') {
+      expect(toolItem.tools).toEqual([expect.objectContaining({ id: 'tool-1', name: 'read_file' })]);
+    }
   });
 
   it('returns the latest item fields on repeated reads', () => {
@@ -83,59 +95,63 @@ describe('chat message view', () => {
   });
 
   it('extracts tool cards from live assistant tool calls', () => {
-    const item = buildItem([{
-      type: 'toolCall',
-      id: 'tool-3',
-      name: 'read',
-      input: { filePath: 'README.md' },
+    const allItems = buildRenderItemsFromMessages('agent:test:main', [{
+      role: 'assistant',
+      content: [{
+        type: 'toolCall',
+        id: 'tool-3',
+        name: 'read',
+        input: { filePath: 'README.md' },
+      }],
     }]);
-    if (item.kind !== 'assistant-turn') {
-      throw new Error('expected assistant-turn');
+    const toolItem = allItems.find((i) => i.kind === 'assistant-turn' && i.turnKey === 'tool:tool-3');
+    expect(toolItem).toBeDefined();
+    if (toolItem && toolItem.kind === 'assistant-turn') {
+      expect(toolItem.tools).toEqual([expect.objectContaining({
+        id: 'tool-3',
+        name: 'read',
+        input: { filePath: 'README.md' },
+      })]);
     }
-
-    expect(getOrBuildChatMessageView(item).toolUses).toEqual([{
-      id: 'tool-3',
-      name: 'read',
-      input: { filePath: 'README.md' },
-    }]);
   });
 
   it('keeps assistant bubble tool previews on the turn item while exposing tool uses normally', () => {
-    const item = buildItem([
-      {
-        type: 'toolCall',
-        id: 'tool-canvas-1',
-        name: 'canvas_render',
-        input: { source: { type: 'handle', id: 'cv-inline' } },
-      },
-      {
-        type: 'tool_result',
-        id: 'tool-canvas-1',
-        name: 'canvas_render',
-        content: {
-          kind: 'canvas',
-          view: {
-            backend: 'canvas',
-            id: 'cv-inline',
-            url: '/__openclaw__/canvas/documents/cv_inline/index.html',
-          },
-          presentation: {
-            target: 'assistant_message',
+    const allItems = buildRenderItemsFromMessages('agent:test:main', [{
+      role: 'assistant',
+      content: [
+        {
+          type: 'toolCall',
+          id: 'tool-canvas-1',
+          name: 'canvas_render',
+          input: { source: { type: 'handle', id: 'cv-inline' } },
+        },
+        {
+          type: 'tool_result',
+          id: 'tool-canvas-1',
+          name: 'canvas_render',
+          content: {
+            kind: 'canvas',
+            view: {
+              backend: 'canvas',
+              id: 'cv-inline',
+              url: '/__openclaw__/canvas/documents/cv_inline/index.html',
+            },
+            presentation: {
+              target: 'assistant_message',
+            },
           },
         },
-      },
-    ]);
-    if (item.kind !== 'assistant-turn') {
-      throw new Error('expected assistant-turn');
-    }
-
-    const view = getOrBuildChatMessageView(item);
-    expect(view.toolUses).toEqual([{
-      id: 'tool-canvas-1',
-      name: 'canvas_render',
-      input: { source: { type: 'handle', id: 'cv-inline' } },
+      ],
     }]);
-    expect(item.embeddedToolResults).toHaveLength(1);
+    const toolItem = allItems.find((i) => i.kind === 'assistant-turn' && i.turnKey === 'tool:tool-canvas-1');
+    expect(toolItem).toBeDefined();
+    if (toolItem && toolItem.kind === 'assistant-turn') {
+      expect(toolItem.tools).toEqual([expect.objectContaining({
+        id: 'tool-canvas-1',
+        name: 'canvas_render',
+      })]);
+      expect(toolItem.embeddedToolResults).toHaveLength(1);
+    }
   });
 
   it('uses Runtime Host projected assistant attachments without segment re-filtering', () => {

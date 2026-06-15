@@ -126,7 +126,7 @@ describe('dispatchProtocolEvent', () => {
     });
   });
 
-  it('chat 事件会保留 V4 seq 并拒绝旧 sequenceId fallback', () => {
+  it('chat 事件会保留 V4 seq 和顶层消息身份字段', () => {
     const emitNotification = vi.fn();
     const emitConversationEvent = vi.fn();
     const emitChannelStatus = vi.fn();
@@ -139,7 +139,12 @@ describe('dispatchProtocolEvent', () => {
         runId: 'run-identity-1',
         sessionKey: 'agent:main:main',
         seq: 9,
-        agentId: 'agent-main',
+        messageId: 'message-1',
+        id: 'event-message-1',
+        originMessageId: 'origin-message-1',
+        clientId: 'client-message-1',
+        timestamp: 1_700_000_000_009,
+        ts: 1_700_000_000_010,
         message: {
           role: 'assistant',
           content: 'hello',
@@ -154,6 +159,12 @@ describe('dispatchProtocolEvent', () => {
         runId: 'run-identity-1',
         sessionKey: 'agent:main:main',
         seq: 9,
+        messageId: 'message-1',
+        id: 'event-message-1',
+        originMessageId: 'origin-message-1',
+        clientId: 'client-message-1',
+        timestamp: 1_700_000_000_009,
+        ts: 1_700_000_000_010,
       }),
     });
   });

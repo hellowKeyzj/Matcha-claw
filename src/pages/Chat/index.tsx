@@ -268,6 +268,13 @@ export function Chat({ isActive = true }: ChatProps) {
   const gatewayInitialized = useGatewayStore((state) => state.isInitialized);
   const isGatewayRunning = isGatewayOperational(gatewayStatus);
   const isGatewayPreparing = resolveGatewayPreparing(gatewayStatus, gatewayInitialized);
+  const hasGatewayBeenOperationalRef = useRef(false);
+  if (isGatewayRunning) {
+    hasGatewayBeenOperationalRef.current = true;
+  }
+  const preserveChatDuringGatewayRecovery = hasGatewayBeenOperationalRef.current
+    && !isGatewayRunning
+    && isGatewayPreparing;
   const localizedGatewayIssue = useMemo(() => {
     return localizeGatewayIssue(gatewayStatus.lastIssue, t)
       ?? gatewayStatus.lastError
@@ -866,7 +873,8 @@ export function Chat({ isActive = true }: ChatProps) {
         },
       } : null}
       contextUsage={contextUsage}
-      disabled={false}
+      disabled={!isGatewayRunning}
+      reconnecting={preserveChatDuringGatewayRecovery}
       sending={isRunActive(currentSession.runtime)}
       stopping={currentSession.runtime.runPhase === 'stopping'}
       approvalWaiting={approvalStatus === 'awaiting_approval'}
@@ -876,7 +884,7 @@ export function Chat({ isActive = true }: ChatProps) {
     />
   );
 
-  if (!isGatewayRunning && isGatewayPreparing) {
+  if (!isGatewayRunning && isGatewayPreparing && !preserveChatDuringGatewayRecovery) {
     return (
       <ChatOffline
         title={t('gatewayPreparing.title')}
@@ -886,7 +894,7 @@ export function Chat({ isActive = true }: ChatProps) {
     );
   }
 
-  if (!isGatewayRunning) {
+  if (!isGatewayRunning && !preserveChatDuringGatewayRecovery) {
     return (
       <ChatOffline
         title={t('gatewayNotRunning')}

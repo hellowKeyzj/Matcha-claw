@@ -75,6 +75,7 @@ interface ChatInputProps {
   modelPicker?: ModelPickerState | null;
   contextUsage?: ChatContextUsageViewModel | null;
   disabled?: boolean;
+  reconnecting?: boolean;
   sending?: boolean;
   approvalWaiting?: boolean;
   mentionCandidates?: MentionCandidate[];
@@ -272,6 +273,7 @@ export const ChatInput = memo(function ChatInput({
   modelPicker = null,
   contextUsage = null,
   disabled = false,
+  reconnecting = false,
   sending = false,
   approvalWaiting = false,
   mentionCandidates = [],
@@ -842,6 +844,11 @@ export const ChatInput = memo(function ChatInput({
       onDrop={handleDrop}
     >
       <div className={`${CHAT_LAYOUT_TOKENS.inputRail} chat-scroll-sync-input-inner`}>
+        {reconnecting ? (
+          <div className="mb-2 rounded-full border border-border/45 bg-background/84 px-3 py-1.5 text-xs text-muted-foreground shadow-sm backdrop-blur-sm">
+            {t('input.gatewayRecoveringNotice')}
+          </div>
+        ) : null}
         {/* Input Row */}
         <div
           className={cn(

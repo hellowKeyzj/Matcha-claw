@@ -103,7 +103,19 @@ vi.mock('@/pages/Chat/components/ChatRuntimeDock', () => ({
 }));
 
 vi.mock('@/pages/Chat/ChatInput', () => ({
-  ChatInput: () => <div data-testid="chat-input" />,
+  ChatInput: ({
+    disabled,
+    reconnecting,
+  }: {
+    disabled?: boolean;
+    reconnecting?: boolean;
+  }) => (
+    <div
+      data-testid="chat-input"
+      data-disabled={disabled ? 'true' : 'false'}
+      data-reconnecting={reconnecting ? 'true' : 'false'}
+    />
+  ),
 }));
 
 vi.mock('@/pages/Chat/components/ChatOffline', () => ({
@@ -349,6 +361,48 @@ describe('chat 顶层订阅收口', () => {
     );
 
     expect(screen.getByTestId('chat-error-banner')).toHaveTextContent('errors.activeRunDisconnected');
+  });
+
+  it('运行期 gateway 恢复中应保留 Chat 内容并禁用输入框', () => {
+    render(
+      <MemoryRouter>
+        <Chat isActive={false} />
+      </MemoryRouter>,
+    );
+
+    expect(screen.getByTestId('chat-shell')).toBeInTheDocument();
+    expect(screen.getByTestId('chat-input')).toHaveAttribute('data-disabled', 'false');
+
+    act(() => {
+      useGatewayStore.setState({
+        isInitialized: true,
+        status: {
+          processState: 'running',
+          port: 18789,
+          gatewayReady: false,
+          healthSummary: 'unresponsive',
+          transportState: 'disconnected',
+          portReachable: true,
+          lastError: 'Gateway RPC timeout: agents.list',
+          lastIssue: {
+            message: 'Gateway RPC timeout: agents.list',
+            source: 'rpc',
+            at: 2,
+          },
+          diagnostics: {
+            consecutiveHeartbeatMisses: 0,
+            consecutiveRpcFailures: 3,
+          },
+          updatedAt: 2,
+        },
+      } as never);
+    });
+
+    expect(screen.queryByTestId('chat-offline')).not.toBeInTheDocument();
+    expect(screen.getByTestId('chat-shell')).toBeInTheDocument();
+    expect(screen.getByTestId('chat-viewport-pane')).toHaveTextContent('1');
+    expect(screen.getByTestId('chat-input')).toHaveAttribute('data-disabled', 'true');
+    expect(screen.getByTestId('chat-input')).toHaveAttribute('data-reconnecting', 'true');
   });
 
   it('gateway 进程仍在恢复时，socket 1006 不应显示为断连错误', () => {

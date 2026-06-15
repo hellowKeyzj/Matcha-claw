@@ -73,6 +73,13 @@ describe('chat input attachments', () => {
     skillsStoreState.initialLoading = false;
   });
 
+  it('reconnecting 时在输入框上方显示轻量恢复提示并禁用输入', () => {
+    render(<ChatInput onSend={vi.fn()} sessionIdentity={testSessionIdentity} disabled reconnecting />);
+
+    expect(screen.getByText('input.gatewayRecoveringNotice')).toBeInTheDocument();
+    expect(screen.getByPlaceholderText('input.gatewayDisconnectedPlaceholder')).toBeDisabled();
+  });
+
   it('图片附件以紧凑 chip 展示并支持点击预览', async () => {
     invokeIpcMock.mockImplementation(async (channel: string) => {
       if (channel === 'dialog:open') {

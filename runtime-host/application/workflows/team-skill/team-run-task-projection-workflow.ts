@@ -9,6 +9,8 @@ export interface TeamRunTaskProjectionWorkflowDeps {
 
 type TaskMethod = 'TaskList' | 'TaskCreate' | 'TaskUpdate';
 
+type TaskProjectionStatus = 'pending' | 'in_progress' | 'completed' | 'deleted';
+
 type TeamRunStatus =
   | 'created'
   | 'provisioning'
@@ -20,7 +22,7 @@ type TeamRunStatus =
   | 'failed'
   | 'cancelled';
 
-type TeamStageStatus = 'pending' | 'running' | 'waiting_for_user' | 'passed' | 'failed' | 'skipped';
+type TeamDispatchTaskStatus = 'queued' | 'completed' | 'failed' | 'cancelled' | 'stale';
 
 interface TeamRunProjectionRun {
   runId: string;
@@ -31,11 +33,10 @@ interface TeamRunProjectionRun {
   revision: number;
 }
 
-interface TeamRunProjectionStage {
-  stageId: string;
-  roleId?: string;
-  status: TeamStageStatus;
-  attempt: number;
+interface TeamRunProjectionTask {
+  taskId: string;
+  roleId: string;
+  status: TeamDispatchTaskStatus;
 }
 
 interface TaskProjectionRow {
@@ -51,7 +52,7 @@ interface TaskProjectionModel {
     description: string;
     activeForm: string;
     owner: string;
-    status: 'pending' | 'in_progress' | 'completed';
+    status: TaskProjectionStatus;
     metadata: Record<string, unknown>;
   };
 }
@@ -60,12 +61,12 @@ const TEAM_RUNTIME_PROJECTION_SOURCE = 'matchaclaw.team-runtime';
 
 const PROJECTED_OPERATION_REASONS = new Map<string, string>([
   ['team.runStart', 'run:started'],
+  ['team.planWorkflow', 'workflow:planned'],
   ['team.runCancel', 'run:cancelled'],
+  ['team.runDelete', 'run:deleted'],
   ['team.runDecisionSubmit', 'decision:submitted'],
   ['team.approvalResolve', 'approval:resolved'],
-  ['team.stageComplete', 'stage:completed'],
   ['team.runTick', 'run:tick'],
-  ['team.gateEvaluate', 'stage:gate_transitioned'],
 ]);
 
 export class TeamRunTaskProjectionWorkflow {
@@ -94,6 +95,11 @@ export class TeamRunTaskProjectionWorkflow {
     if (existingTasksResponse.status >= 400) {
       throw new Error('Task manager projection failed: TaskList');
     }
+    const existingTasks = this.readTasks(existingTasksResponse.data);
+    if (input.operationId === 'team.runDelete') {
+      await this.deleteProjectedTasks({ sessionKey, runId, existingTasks });
+      return;
+    }
     const projected = await this.readTeamSnapshot(runId);
     if (!projected) {
       return;
@@ -101,13 +107,38 @@ export class TeamRunTaskProjectionWorkflow {
     await this.projectTeamRun({
       sessionKey,
       run: projected.run,
-      stages: projected.stages,
+      tasks: projected.tasks,
       reason,
-      existingTasks: this.readTasks(existingTasksResponse.data),
+      existingTasks,
     });
   }
 
-  private async readTeamSnapshot(runId: string): Promise<{ run: TeamRunProjectionRun; stages: TeamRunProjectionStage[] } | null> {
+  private async deleteProjectedTasks(input: {
+    readonly sessionKey: string;
+    readonly runId: string;
+    readonly existingTasks: readonly TaskProjectionRow[];
+  }): Promise<void> {
+    for (const task of input.existingTasks) {
+      if (!this.belongsToRunProjection(task.metadata, input.runId)) {
+        continue;
+      }
+      await this.callTaskTool('TaskUpdate', input.sessionKey, {
+        taskId: task.id,
+        sessionKey: input.sessionKey,
+        teamKey: this.teamKey(input.runId),
+        status: 'deleted',
+        metadata: {
+          ...task.metadata,
+          source: TEAM_RUNTIME_PROJECTION_SOURCE,
+          teamRunId: input.runId,
+          teamRunDeleted: true,
+          projectionReason: 'run:deleted',
+        },
+      });
+    }
+  }
+
+  private async readTeamSnapshot(runId: string): Promise<{ run: TeamRunProjectionRun; tasks: TeamRunProjectionTask[] } | null> {
     const response = await this.deps.gatewayWorkflow.invoke('team.runSnapshot', { runId });
     if (response.status >= 400) {
       return null;
@@ -118,12 +149,12 @@ export class TeamRunTaskProjectionWorkflow {
   private async projectTeamRun(input: {
     readonly sessionKey: string;
     readonly run: TeamRunProjectionRun;
-    readonly stages: readonly TeamRunProjectionStage[];
+    readonly tasks: readonly TeamRunProjectionTask[];
     readonly reason: string;
     readonly existingTasks: readonly TaskProjectionRow[];
   }): Promise<void> {
-    for (const stage of input.stages) {
-      const model = this.buildTaskProjectionModel(input.run, stage, input.reason);
+    for (const task of input.tasks) {
+      const model = this.buildTaskProjectionModel(input.run, task, input.reason);
       const target = this.selectProjectionTarget(input.existingTasks, model);
       if (target.action === 'skip') {
         continue;
@@ -148,44 +179,39 @@ export class TeamRunTaskProjectionWorkflow {
   }
 
   private projectionReason(operationId: string, responseData: unknown): string {
-    if (operationId === 'team.stageComplete') {
-      const status = this.readRecord(responseData).status;
-      return status === 'completed' ? 'run:completed' : 'stage:completed';
-    }
     if (operationId === 'team.runTick') {
       const action = this.readString(this.readRecord(responseData).action);
       if (action === 'dependency_missing') {
         return 'dependency:missing';
       }
-      if (action === 'stage_completed') {
-        return 'stage:completed';
+      if (action === 'dispatch_prepared' || action === 'dispatch_execution_queued') {
+        return 'dispatch:task_queued';
       }
-      return '';
+      return 'run:tick';
     }
     return PROJECTED_OPERATION_REASONS.get(operationId) ?? '';
   }
 
-  private buildTaskProjectionModel(run: TeamRunProjectionRun, stage: TeamRunProjectionStage, reason: string): TaskProjectionModel {
-    const identity = this.projectionIdentity(run.runId, stage.stageId);
+  private buildTaskProjectionModel(run: TeamRunProjectionRun, task: TeamRunProjectionTask, reason: string): TaskProjectionModel {
+    const identity = this.projectionIdentity(run.runId, task.taskId);
     return {
       identity,
       revision: run.revision,
       params: {
-        subject: `${run.packageName}: ${stage.stageId}`,
-        description: `TeamRun ${run.runId} stage ${stage.stageId}`,
-        activeForm: `Running ${stage.stageId}`,
-        owner: stage.roleId ?? 'team-runtime',
-        status: this.taskStatusForStage(run, stage),
+        subject: `${run.packageName}: ${task.taskId}`,
+        description: `TeamRun ${run.runId} task ${task.taskId}`,
+        activeForm: `Running ${task.taskId}`,
+        owner: task.roleId,
+        status: this.taskStatusForDispatchTask(run, task),
         metadata: {
           source: TEAM_RUNTIME_PROJECTION_SOURCE,
           projectionIdentity: identity,
           projectionRevision: run.revision,
           teamRunId: run.runId,
-          teamStageId: stage.stageId,
+          teamTaskId: task.taskId,
           teamRunStatus: run.status,
           teamRunRevision: run.revision,
-          stageStatus: stage.status,
-          stageAttempt: stage.attempt,
+          dispatchTaskStatus: task.status,
           packageName: run.packageName,
           packageVersion: run.packageVersion,
           currentStageId: run.currentStageId ?? null,
@@ -197,7 +223,7 @@ export class TeamRunTaskProjectionWorkflow {
 
   private selectProjectionTarget(tasks: readonly TaskProjectionRow[], model: TaskProjectionModel): { action: 'create' } | { action: 'update'; task: TaskProjectionRow } | { action: 'skip'; task: TaskProjectionRow } {
     const candidates = tasks
-      .filter((task) => this.isSameProjection(task.metadata, model.identity, model.params.metadata.teamRunId, model.params.metadata.teamStageId))
+      .filter((task) => this.isSameProjection(task.metadata, model.identity, model.params.metadata.teamRunId, model.params.metadata.teamTaskId))
       .sort((left, right) => this.compareProjectionRows(right, left, model.identity));
     const task = candidates[0];
     if (!task) {
@@ -210,28 +236,35 @@ export class TeamRunTaskProjectionWorkflow {
     return { action: 'update', task };
   }
 
-  private taskStatusForStage(run: TeamRunProjectionRun, stage: TeamRunProjectionStage): 'pending' | 'in_progress' | 'completed' {
-    if (stage.status === 'passed' || stage.status === 'failed' || stage.status === 'skipped') {
+  private taskStatusForDispatchTask(run: TeamRunProjectionRun, task: TeamRunProjectionTask): 'pending' | 'in_progress' | 'completed' {
+    if (task.status === 'completed' || task.status === 'failed' || task.status === 'cancelled' || task.status === 'stale') {
       return 'completed';
     }
     if (run.status === 'completed' || run.status === 'failed' || run.status === 'cancelled') {
       return 'completed';
     }
-    if (run.status === 'running' && stage.status === 'running') {
-      return 'in_progress';
-    }
-    return 'pending';
+    return task.status === 'queued' ? 'in_progress' : 'pending';
   }
 
-  private projectionIdentity(runId: string, stageId: string): string {
-    return `${TEAM_RUNTIME_PROJECTION_SOURCE}:${runId}:${stageId}`;
+  private projectionIdentity(runId: string, taskId: string): string {
+    return `${TEAM_RUNTIME_PROJECTION_SOURCE}:${runId}:${taskId}`;
   }
 
-  private isSameProjection(metadata: Record<string, unknown>, identity: string, runId: unknown, stageId: unknown): boolean {
+  private isSameProjection(metadata: Record<string, unknown>, identity: string, runId: unknown, taskId: unknown): boolean {
     if (metadata.projectionIdentity === identity) {
       return true;
     }
-    return metadata.teamRunId === runId && metadata.teamStageId === stageId;
+    return metadata.teamRunId === runId && metadata.teamTaskId === taskId;
+  }
+
+  private belongsToRunProjection(metadata: Record<string, unknown>, runId: string): boolean {
+    if (metadata.source !== TEAM_RUNTIME_PROJECTION_SOURCE) {
+      return false;
+    }
+    if (metadata.teamRunId === runId) {
+      return true;
+    }
+    return typeof metadata.projectionIdentity === 'string' && metadata.projectionIdentity.startsWith(`${TEAM_RUNTIME_PROJECTION_SOURCE}:${runId}:`);
   }
 
   private compareProjectionRows(left: TaskProjectionRow, right: TaskProjectionRow, identity: string): number {
@@ -263,11 +296,11 @@ export class TeamRunTaskProjectionWorkflow {
     return Number.isFinite(parsed) ? parsed : Number.MAX_SAFE_INTEGER;
   }
 
-  private readSnapshot(value: unknown): { run: TeamRunProjectionRun; stages: TeamRunProjectionStage[] } | null {
+  private readSnapshot(value: unknown): { run: TeamRunProjectionRun; tasks: TeamRunProjectionTask[] } | null {
     const record = this.readRecord(value);
     const run = this.readRun(record.run);
-    const stages = this.readStages(record.stages);
-    return run && stages.length > 0 ? { run, stages } : null;
+    const tasks = this.readDispatchTasks(record.dispatchTasks);
+    return run && tasks.length > 0 ? { run, tasks } : null;
   }
 
   private readRun(value: unknown): TeamRunProjectionRun | null {
@@ -290,21 +323,16 @@ export class TeamRunTaskProjectionWorkflow {
     };
   }
 
-  private readStages(value: unknown): TeamRunProjectionStage[] {
-    return Array.isArray(value) ? value.flatMap((item): TeamRunProjectionStage[] => {
+  private readDispatchTasks(value: unknown): TeamRunProjectionTask[] {
+    return Array.isArray(value) ? value.flatMap((item): TeamRunProjectionTask[] => {
       const record = this.readRecord(item);
-      const stageId = this.readString(record.stageId);
-      const status = this.readString(record.status) as TeamStageStatus;
-      const attempt = typeof record.attempt === 'number' && Number.isFinite(record.attempt) ? record.attempt : null;
-      if (!stageId || !status || attempt === null) {
+      const taskId = this.readString(record.taskId);
+      const roleId = this.readString(record.roleId);
+      const status = this.readString(record.status) as TeamDispatchTaskStatus;
+      if (!taskId || !roleId || !status) {
         return [];
       }
-      return [{
-        stageId,
-        status,
-        attempt,
-        ...(this.readString(record.roleId) ? { roleId: this.readString(record.roleId) } : {}),
-      }];
+      return [{ taskId, roleId, status }];
     }) : [];
   }
 

@@ -105,6 +105,17 @@ function createSkillsService(): SkillsService {
       skillRuntimeWorkflow,
       skillBundleTransferWorkflow,
       localSkillImportWorkflow,
+      pluginConfigStore: {
+        read: async () => ({}),
+        updateDirty: async (mutate) => {
+          const update = await mutate({});
+          return update.result;
+        },
+      },
+      pluginConfigProjection: {
+        readManuallyManagedPluginIds: async () => [],
+        applyManuallyManagedPluginIds: async (config) => config,
+      },
       logger,
     }),
     skillRuntimeWorkflow,

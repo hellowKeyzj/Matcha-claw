@@ -16,6 +16,7 @@ export interface OpenClawGatewayClient {
   gatewayRpc: (method: string, params: unknown, timeoutMs?: number) => Promise<unknown>;
   isGatewayRunning: (timeoutMs?: number) => Promise<boolean>;
   readGatewayConnectionState: (timeoutMs?: number) => Promise<GatewayConnectionStatePayload>;
+  recoverGatewayConnection: (reason: string, timeoutMs?: number) => Promise<GatewayConnectionStatePayload>;
   buildSecurityAuditQueryParams: (url: URL) => Record<string, string>;
 }
 
@@ -32,6 +33,7 @@ export interface OpenClawBridge {
   channelsDisconnect: (channelId: string) => Promise<unknown>;
   channelsRequestQr: (channelType: string) => Promise<unknown>;
   readGatewayConnectionState: () => Promise<GatewayConnectionStatePayload>;
+  recoverGatewayConnection: (reason: string) => Promise<GatewayConnectionStatePayload>;
   isGatewayRunning: () => Promise<boolean>;
   platformInstallTool: (source: ToolSource) => Promise<{ toolId?: string; id?: string }>;
   platformUninstallTool: (toolId: string) => Promise<void>;
@@ -65,6 +67,7 @@ export function createOpenClawBridge(client: OpenClawGatewayClient): OpenClawBri
     ensureGatewayMethods: (methods, timeoutMs) => client.ensureGatewayMethods(methods, timeoutMs),
     inspectGatewayMethodReadiness: (methods, timeoutMs) => client.inspectGatewayMethodReadiness(methods, timeoutMs),
     readGatewayCapabilities: (timeoutMs) => client.readGatewayCapabilities(timeoutMs),
+    recoverGatewayConnection: (reason) => client.recoverGatewayConnection(reason),
     gatewayRpc: (method, params = {}, timeoutMs) => client.gatewayRpc(method, params, timeoutMs),
     chatSend: (params) => client.gatewayRpc('chat.send', buildGatewayChatSendParams({
       sessionKey: typeof params.sessionKey === 'string' ? params.sessionKey : '',

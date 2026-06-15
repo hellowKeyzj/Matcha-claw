@@ -87,6 +87,13 @@ describe('Runtime Host canonical ACP projection', () => {
       ...base('message-1'),
       type: 'message_snapshot',
       role: 'assistant',
+      ownerMessageKey: 'message:main:assistant-1',
+      ownerTurnKey: 'message:main:assistant-1',
+      turnBindingSource: 'adapter',
+      turnBindingConfidence: 'high',
+      messageBindingSource: 'adapter',
+      messageBindingConfidence: 'high',
+      messageId: 'assistant-1',
       content: [{ type: 'text', text: 'I will inspect it' }],
       text: 'I will inspect it',
       status: 'streaming',
@@ -94,6 +101,12 @@ describe('Runtime Host canonical ACP projection', () => {
       ...base('tool-start-1'),
       seq: 2,
       type: 'tool_call',
+      ownerMessageKey: 'message:main:assistant-1',
+      ownerTurnKey: 'message:main:assistant-1',
+      turnBindingSource: 'adapter',
+      turnBindingConfidence: 'high',
+      messageBindingSource: 'adapter',
+      messageBindingConfidence: 'high',
       toolCallId: 'tool-read-1',
       name: 'Read',
       input: { file_path: 'package.json' },
@@ -102,6 +115,12 @@ describe('Runtime Host canonical ACP projection', () => {
       seq: 3,
       timestamp: 1_700_000_000_100,
       type: 'tool_result',
+      ownerMessageKey: 'message:main:assistant-1',
+      ownerTurnKey: 'message:main:assistant-1',
+      turnBindingSource: 'adapter',
+      turnBindingConfidence: 'high',
+      messageBindingSource: 'adapter',
+      messageBindingConfidence: 'high',
       toolCallId: 'tool-read-1',
       name: 'Read',
       output: 'package content',
@@ -109,31 +128,29 @@ describe('Runtime Host canonical ACP projection', () => {
       isError: false,
     }]);
 
+    const timelineEntries = buildTimelineEntriesFromCanonicalState(state);
     const items = buildRenderItemsFromCanonicalState({ state, executionGraphItems: [] });
+    expect(timelineEntries).toMatchObject([{
+      kind: 'assistant-turn',
+      key: 'session:agent:main:main|assistant-turn:main:message:main:assistant-1',
+      turnKey: 'message:main:assistant-1',
+      turnBindingSource: 'message',
+      turnIdentityMode: 'message',
+      turnBindingConfidence: 'strong',
+      turnIdentityConfidence: 'strong',
+    }]);
     expect(items).toHaveLength(1);
     expect(items[0]).toMatchObject({
       kind: 'assistant-turn',
-      key: 'session:agent:main:main|assistant-turn:main:message:assistant:main:1',
-      turnKey: 'message:assistant:main:1',
+      key: 'session:agent:main:main|assistant-turn:main:message:main:assistant-1',
+      turnKey: 'message:main:assistant-1',
       runId: 'run-1',
       tools: [{ toolCallId: 'tool-read-1', status: 'completed' }],
+      segments: [
+        { kind: 'message', text: 'I will inspect it' },
+        { kind: 'tool', tool: { toolCallId: 'tool-read-1', status: 'completed' } },
+      ],
     });
-    if (items[0]?.kind !== 'assistant-turn') {
-      throw new Error('Expected assistant turn');
-    }
-    expect(items[0].segments).toMatchObject([
-      { kind: 'message', key: 'message:message:assistant:main:1:main:0', text: 'I will inspect it' },
-      {
-        kind: 'tool',
-        key: 'tool:message:assistant:main:1:main:tool-read-1',
-        tool: {
-          toolCallId: 'tool-read-1',
-          name: 'Read',
-          status: 'completed',
-          output: 'package content',
-        },
-      },
-    ]);
   });
 
   it('projects state-only tool lifecycle as Runtime Host side state instead of visible tool cards', () => {
@@ -406,19 +423,12 @@ describe('Runtime Host canonical ACP projection', () => {
     const items = buildRenderItemsFromCanonicalState({ state, executionGraphItems: [] });
 
     expect(state.messages.filter((message) => message.role === 'assistant')).toHaveLength(2);
-    expect(items.filter((item) => item.kind === 'assistant-turn')).toMatchObject([
-      {
-        kind: 'assistant-turn',
-        turnKey: 'assistant-tool-call-message',
-        tools: [{ toolCallId: 'tool-read-1' }],
-      },
-      {
-        kind: 'assistant-turn',
-        turnKey: 'assistant-final-message',
-        text: '再总结',
-        tools: [],
-      },
-    ]);
+    expect(items.filter((item) => item.kind === 'assistant-turn').length).toBeGreaterThanOrEqual(2);
+    const assistantTurns = items.filter((item) => item.kind === 'assistant-turn');
+    const toolEntry = assistantTurns.find((item) => item.turnKey === 'tool:tool-read-1');
+    expect(toolEntry).toBeDefined();
+    const finalMessage = assistantTurns.find((item) => item.turnKey === 'message:assistant:main:assistant-final-message');
+    expect(finalMessage).toMatchObject({ text: '再总结', tools: [] });
   });
 
   it('uses seq as the local message identity fallback without conflating messages by runId', () => {
@@ -617,6 +627,63 @@ describe('Runtime Host canonical ACP projection', () => {
     expect(state.timelineEntries[1]).toMatchObject({ text: 'done', status: 'final' });
   });
 
+  it('projects a live tool start onto the existing owner-bound assistant turn before tool output arrives', () => {
+    const sessionKey = 'agent:main:main';
+    const state = createEmptyTimelineState({ sessionKey }, createOpenClawTestRuntimeContext(sessionKey));
+    const timelineRuntime = createTimelineRuntime(state);
+
+    timelineRuntime.appendCanonicalEvents(sessionKey, [{
+      ...base('assistant-owner-message'),
+      type: 'message_snapshot',
+      role: 'assistant',
+      messageId: 'assistant-1',
+      ownerMessageKey: 'message:main:assistant-1',
+      ownerTurnKey: 'message:main:assistant-1',
+      turnBindingSource: 'adapter',
+      turnBindingConfidence: 'high',
+      messageBindingSource: 'adapter',
+      messageBindingConfidence: 'high',
+      content: [{ type: 'text', text: '我先读文件。' }],
+      text: '我先读文件。',
+      status: 'streaming',
+    }]);
+    const initialTimelineEntry = state.timelineEntries[0];
+    const initialRenderItem = state.renderItems[0];
+
+    timelineRuntime.appendCanonicalEvents(sessionKey, [{
+      ...base('assistant-owner-tool-start'),
+      seq: 2,
+      timestamp: 1_700_000_000_010,
+      type: 'tool_call',
+      ownerTurnKey: 'message:main:assistant-1',
+      turnBindingSource: 'adapter',
+      turnBindingConfidence: 'high',
+      toolCallId: 'tool-inline-read-1',
+      name: 'Read',
+      input: { file_path: 'package.json' },
+    }]);
+
+    const fullProjection = buildProjectedCanonicalSessionState(state.canonical);
+
+    expect(state.timelineEntries).toEqual(fullProjection.timelineEntries);
+    expect(state.renderItems).toEqual(fullProjection.renderItems);
+    expect(state.timelineEntries).toHaveLength(1);
+    expect(state.timelineEntries[0]).not.toBe(initialTimelineEntry);
+    expect(state.renderItems).toHaveLength(1);
+    expect(state.renderItems[0]).not.toBe(initialRenderItem);
+    expect(state.renderItems[0]).toMatchObject({
+      kind: 'assistant-turn',
+      turnKey: 'message:main:assistant-1',
+      text: '我先读文件。',
+      tools: [{ toolCallId: 'tool-inline-read-1', name: 'Read', status: 'running' }],
+      segments: [
+        { kind: 'message', text: '我先读文件。' },
+        { kind: 'tool', tool: { toolCallId: 'tool-inline-read-1', name: 'Read', status: 'running' } },
+      ],
+    });
+    expect(state.renderItems.some((item) => item.kind === 'assistant-turn' && item.turnKey === 'tool:tool-inline-read-1')).toBe(false);
+  });
+
   it('reprojects lifecycle events through the canonical render path', () => {
     const sessionKey = 'agent:main:main';
     const state = createEmptyTimelineState({ sessionKey }, createOpenClawTestRuntimeContext(sessionKey));
@@ -722,24 +789,48 @@ describe('Runtime Host canonical ACP projection', () => {
       type: 'message_snapshot',
       role: 'assistant',
       messageId: 'assistant-tool-message',
+      ownerMessageKey: 'message:main:assistant-tool-message',
+      ownerTurnKey: 'message:main:assistant-tool-message',
+      turnBindingSource: 'adapter',
+      turnBindingConfidence: 'high',
+      messageBindingSource: 'adapter',
+      messageBindingConfidence: 'high',
       content: [
         { type: 'tool_call', toolCallId: 'tool-read-1', name: 'Read', input: { file_path: 'package.json' } },
         { type: 'text', text: '已读取。' },
       ],
       text: '已读取。',
       status: 'final',
+    }, {
+      ...base('tool-result-1-rebound'),
+      seq: 4,
+      timestamp: 1_700_000_000_030,
+      type: 'tool_result',
+      ownerMessageKey: 'message:main:assistant-tool-message',
+      ownerTurnKey: 'message:main:assistant-tool-message',
+      turnBindingSource: 'adapter',
+      turnBindingConfidence: 'high',
+      messageBindingSource: 'adapter',
+      messageBindingConfidence: 'high',
+      toolCallId: 'tool-read-1',
+      name: 'Read',
+      output: 'package content',
+      outputText: 'package content',
+      isError: false,
     }]);
 
     const fullProjection = buildProjectedCanonicalSessionState(state.canonical);
 
     expect(state.timelineEntries).toEqual(fullProjection.timelineEntries);
     expect(state.renderItems).toEqual(fullProjection.renderItems);
-    expect(state.renderItems.filter((item) => item.kind === 'assistant-turn')).toHaveLength(1);
-    expect(state.renderItems[0]).toMatchObject({
-      kind: 'assistant-turn',
+    const assistantTurns = state.renderItems.filter((item) => item.kind === 'assistant-turn');
+    expect(assistantTurns).toHaveLength(1);
+    expect(assistantTurns[0]).toMatchObject({
+      turnKey: 'message:main:assistant-tool-message',
       text: '已读取。',
-      tools: [{ toolCallId: 'tool-read-1', status: 'completed' }],
+      tools: [{ toolCallId: 'tool-read-1', status: 'completed', output: 'package content' }],
     });
+    expect(assistantTurns.some((item) => item.turnKey === 'tool:tool-read-1')).toBe(false);
   });
 
   it('exposes pending approvals through the Runtime Host session snapshot', () => {

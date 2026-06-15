@@ -14,3 +14,8 @@ export function formatTimestamp(timestamp: unknown): string {
 
   return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 }
+
+export function formatDuration(durationMs?: number): string | null {
+  if (typeof durationMs !== 'number' || !Number.isFinite(durationMs) || durationMs < 1000) return null;
+  return `${Math.floor(durationMs / 1000)}s`;
+}

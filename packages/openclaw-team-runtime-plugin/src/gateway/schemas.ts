@@ -1,22 +1,31 @@
+export const TEAM_DISPATCH_PROCESS_GATEWAY_METHOD = 'matchaclaw.team.dispatch.process' as const
+export const TEAM_LEADER_SYNTHESIS_PROCESS_GATEWAY_METHOD = 'matchaclaw.team.leader.synthesis.process' as const
+
 export type TeamGatewayMethod =
   | 'matchaclaw.team.package.validate'
+  | 'matchaclaw.team.dependency.plan'
   | 'matchaclaw.team.run.create'
   | 'matchaclaw.team.run.start'
   | 'matchaclaw.team.run.snapshot'
   | 'matchaclaw.team.run.diagnostics'
   | 'matchaclaw.team.run.decision.submit'
-  | 'matchaclaw.team.stage.complete'
+  | 'matchaclaw.team.workflow.plan'
   | 'matchaclaw.team.run.tick'
-  | 'matchaclaw.team.dispatch.prepare'
-  | 'matchaclaw.team.dispatch.execute'
+  | typeof TEAM_DISPATCH_PROCESS_GATEWAY_METHOD
+  | typeof TEAM_LEADER_SYNTHESIS_PROCESS_GATEWAY_METHOD
   | 'matchaclaw.team.approval.resolve'
   | 'matchaclaw.team.run.cancel'
-  | 'matchaclaw.team.gate.evaluate'
+  | 'matchaclaw.team.run.delete'
+
+export type TeamBackgroundGatewayMethod =
+  | typeof TEAM_DISPATCH_PROCESS_GATEWAY_METHOD
+  | typeof TEAM_LEADER_SYNTHESIS_PROCESS_GATEWAY_METHOD
 
 type FieldSchema =
   | { kind: 'string'; required: boolean }
   | { kind: 'number'; required: boolean }
   | { kind: 'stringArray'; required: boolean }
+  | { kind: 'objectArray'; required: boolean }
   | { kind: 'enum'; required: true; values: readonly string[] }
 
 type ParamsSchema = Record<string, FieldSchema>
@@ -24,10 +33,13 @@ type ParamsSchema = Record<string, FieldSchema>
 const requiredString = { kind: 'string', required: true } as const
 const optionalString = { kind: 'string', required: false } as const
 const optionalNumber = { kind: 'number', required: false } as const
-const optionalStringArray = { kind: 'stringArray', required: false } as const
+const requiredObjectArray = { kind: 'objectArray', required: true } as const
 
 export const TEAM_GATEWAY_PARAM_SCHEMAS: Record<TeamGatewayMethod, ParamsSchema> = {
   'matchaclaw.team.package.validate': {
+    packagePath: requiredString,
+  },
+  'matchaclaw.team.dependency.plan': {
     packagePath: requiredString,
   },
   'matchaclaw.team.run.create': {
@@ -38,6 +50,7 @@ export const TEAM_GATEWAY_PARAM_SCHEMAS: Record<TeamGatewayMethod, ParamsSchema>
   'matchaclaw.team.run.start': {
     runId: requiredString,
     idempotencyKey: requiredString,
+    initialPrompt: optionalString,
   },
   'matchaclaw.team.run.snapshot': {
     runId: requiredString,
@@ -53,26 +66,23 @@ export const TEAM_GATEWAY_PARAM_SCHEMAS: Record<TeamGatewayMethod, ParamsSchema>
     note: optionalString,
     idempotencyKey: requiredString,
   },
-  'matchaclaw.team.stage.complete': {
+  'matchaclaw.team.workflow.plan': {
     runId: requiredString,
-    stageId: requiredString,
-    outputArtifactIds: optionalStringArray,
+    title: requiredString,
+    summary: optionalString,
+    groups: requiredObjectArray,
+    tasks: requiredObjectArray,
     idempotencyKey: requiredString,
   },
   'matchaclaw.team.run.tick': {
     runId: requiredString,
     idempotencyKey: requiredString,
   },
-  'matchaclaw.team.dispatch.prepare': {
+  [TEAM_DISPATCH_PROCESS_GATEWAY_METHOD]: {
     runId: requiredString,
-    stageId: requiredString,
-    roleId: optionalString,
-    idempotencyKey: requiredString,
   },
-  'matchaclaw.team.dispatch.execute': {
+  [TEAM_LEADER_SYNTHESIS_PROCESS_GATEWAY_METHOD]: {
     runId: requiredString,
-    dispatchId: requiredString,
-    idempotencyKey: requiredString,
   },
   'matchaclaw.team.approval.resolve': {
     runId: requiredString,
@@ -86,11 +96,8 @@ export const TEAM_GATEWAY_PARAM_SCHEMAS: Record<TeamGatewayMethod, ParamsSchema>
     reason: optionalString,
     idempotencyKey: requiredString,
   },
-  'matchaclaw.team.gate.evaluate': {
+  'matchaclaw.team.run.delete': {
     runId: requiredString,
-    artifactId: requiredString,
-    gateType: requiredString,
-    idempotencyKey: requiredString,
   },
 }
 
@@ -139,6 +146,12 @@ function parseField(key: string, value: unknown, field: FieldSchema): unknown {
       throw new Error(`${key} must be an array of non-empty strings`)
     }
     return value.map((item) => item.trim())
+  }
+  if (field.kind === 'objectArray') {
+    if (!Array.isArray(value) || !value.every(isRecord)) {
+      throw new Error(`${key} must be an array of objects`)
+    }
+    return value
   }
 
   const parsed = parseField(key, value, requiredString) as string

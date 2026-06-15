@@ -58,6 +58,7 @@ export function buildAssistantTurnEntry(input: {
   status: SessionTimelineEntryStatus;
   text: string;
   createdAt?: number;
+  updatedAt?: number;
   sequenceId?: number;
   segments: ReadonlyArray<SessionAssistantTurnSegment>;
   isStreaming: boolean;
@@ -74,6 +75,7 @@ export function buildAssistantTurnEntry(input: {
     text: input.text,
     status: input.status,
     ...(input.createdAt != null ? { createdAt: input.createdAt } : {}),
+    ...(input.updatedAt != null ? { updatedAt: input.updatedAt } : {}),
     ...(input.sequenceId != null ? { sequenceId: input.sequenceId } : {}),
     ...(id.runId ? { runId: id.runId } : {}),
     entryId: id.entryId,

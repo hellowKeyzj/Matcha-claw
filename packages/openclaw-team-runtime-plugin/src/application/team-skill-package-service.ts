@@ -1,15 +1,17 @@
-import { readFile } from 'node:fs/promises'
+import { mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises'
+import os from 'node:os'
 import path from 'node:path'
+import { unzipSync } from 'fflate'
 import { parse as parseYaml } from 'yaml'
 import { TEAM_LEADER_ROLE_ID, TEAM_ROLE_MANAGED_DENIED_TOOLS } from '../domain/team-role.js'
 import type {
   TeamSkillBindSpec,
   TeamSkillDependencies,
+  TeamSkillDependencyEntry,
   TeamSkillPackageValidationResult,
   TeamSkillRoleSpec,
   TeamSkillValidationIssue,
   TeamSkillWorkflowSpec,
-  TeamSkillWorkflowStageSpec,
 } from '../domain/team-skill-package.js'
 
 interface SkillManifestRole {
@@ -27,19 +29,24 @@ interface SkillManifest {
   roles: SkillManifestRole[]
 }
 
-interface DependencyEntry {
-  name: string
-  required: boolean
-}
+type DependencyKind = 'skill' | 'tool'
 
 const REQUIRED_PACKAGE_FILES = ['SKILL.md', 'workflow.md', 'bind.md', 'dependencies.yaml'] as const
 const REQUIRED_ROLE_SECTIONS = ['Identity', 'Success Criteria', 'Boundary', 'Output Schema'] as const
+const ARCHIVE_EXTENSIONS = ['.zip', '.tar', '.tgz', '.tar.gz'] as const
+const ARCHIVE_CACHE_ROOT = path.join(os.tmpdir(), 'matchaclaw-team-skill-packages')
 
 export class TeamSkillPackageService {
   async validate(packagePath: string): Promise<TeamSkillPackageValidationResult> {
-    const sourcePath = path.resolve(packagePath)
+    const inputPath = path.resolve(packagePath)
     const errors: TeamSkillValidationIssue[] = []
     const warnings: TeamSkillValidationIssue[] = []
+    const sourcePath = await this.resolvePackageSourcePath(inputPath, errors)
+
+    if (!sourcePath) {
+      return { valid: false, errors, warnings }
+    }
+
     const files = await this.readRequiredFiles(sourcePath, errors)
 
     if (!files) {
@@ -80,6 +87,98 @@ export class TeamSkillPackageService {
       errors,
       warnings,
     }
+  }
+
+  private async resolvePackageSourcePath(inputPath: string, errors: TeamSkillValidationIssue[]): Promise<string | null> {
+    if (!this.isArchivePath(inputPath)) {
+      return inputPath
+    }
+    const archiveRoot = this.buildArchiveExtractRoot(inputPath)
+    try {
+      await rm(archiveRoot, { recursive: true, force: true })
+      await mkdir(archiveRoot, { recursive: true })
+      await this.extractArchive(inputPath, archiveRoot)
+      return await this.findExtractedPackageRoot(archiveRoot)
+    } catch (error) {
+      errors.push({
+        code: 'archive_extract_failed',
+        message: `Failed to extract TeamSkill archive: ${error instanceof Error ? error.message : String(error)}`,
+        path: inputPath,
+      })
+      return null
+    }
+  }
+
+  private isArchivePath(inputPath: string): boolean {
+    const normalized = inputPath.toLowerCase()
+    return ARCHIVE_EXTENSIONS.some((extension) => normalized.endsWith(extension))
+  }
+
+  private buildArchiveExtractRoot(inputPath: string): string {
+    const hash = Buffer.from(inputPath).toString('base64url')
+    return path.join(ARCHIVE_CACHE_ROOT, hash)
+  }
+
+  private async extractArchive(inputPath: string, outputRoot: string): Promise<void> {
+    const normalized = inputPath.toLowerCase()
+    if (normalized.endsWith('.zip')) {
+      await this.extractZip(inputPath, outputRoot)
+      return
+    }
+    if (normalized.endsWith('.tar') || normalized.endsWith('.tgz') || normalized.endsWith('.tar.gz')) {
+      const { x: extractTar } = await import('tar')
+      await extractTar({
+        file: inputPath,
+        cwd: outputRoot,
+        preservePaths: false,
+        strict: true,
+        filter: (entryPath) => {
+          this.resolveArchiveEntryPath(outputRoot, entryPath)
+          return true
+        },
+      })
+      return
+    }
+    throw new Error('Unsupported archive extension')
+  }
+
+  private async extractZip(inputPath: string, outputRoot: string): Promise<void> {
+    const entries = unzipSync(await readFile(inputPath))
+    await Promise.all(Object.entries(entries).map(async ([entryName, content]) => {
+      if (entryName.endsWith('/')) {
+        await mkdir(this.resolveArchiveEntryPath(outputRoot, entryName), { recursive: true })
+        return
+      }
+      const outputPath = this.resolveArchiveEntryPath(outputRoot, entryName)
+      await mkdir(path.dirname(outputPath), { recursive: true })
+      await writeFile(outputPath, content)
+    }))
+  }
+
+  private resolveArchiveEntryPath(outputRoot: string, entryName: string): string {
+    const outputPath = path.resolve(outputRoot, entryName)
+    const root = path.resolve(outputRoot)
+    if (outputPath !== root && !outputPath.startsWith(`${root}${path.sep}`)) {
+      throw new Error(`Archive entry escapes package root: ${entryName}`)
+    }
+    return outputPath
+  }
+
+  private async findExtractedPackageRoot(archiveRoot: string): Promise<string> {
+    try {
+      await readFile(path.join(archiveRoot, 'SKILL.md'), 'utf8')
+      return archiveRoot
+    } catch {}
+    const entries = await readdir(archiveRoot, { withFileTypes: true })
+    const directories = entries.filter((entry) => entry.isDirectory())
+    if (directories.length === 1) {
+      const nestedRoot = path.join(archiveRoot, directories[0]!.name)
+      try {
+        await readFile(path.join(nestedRoot, 'SKILL.md'), 'utf8')
+        return nestedRoot
+      } catch {}
+    }
+    return archiveRoot
   }
 
   private async readRequiredFiles(sourcePath: string, errors: TeamSkillValidationIssue[]) {
@@ -131,9 +230,6 @@ export class TeamSkillPackageService {
       return null
     }
 
-    const skills = this.readDependencyEntries(raw.skills)
-    const tools = this.readDependencyEntries(raw.tools)
-
     if (!Array.isArray(raw.skills)) {
       errors.push({
         code: 'dependencies_skills_missing',
@@ -150,9 +246,8 @@ export class TeamSkillPackageService {
     }
 
     return {
-      requiredSkills: skills.filter((item) => item.required).map((item) => item.name),
-      requiredTools: tools.filter((item) => item.required).map((item) => item.name),
-      optionalTools: tools.filter((item) => !item.required).map((item) => item.name),
+      skills: this.readDependencyEntries(raw.skills, 'skill', errors),
+      tools: this.readDependencyEntries(raw.tools, 'tool', errors),
     }
   }
 
@@ -195,15 +290,15 @@ export class TeamSkillPackageService {
     dependencies: TeamSkillDependencies,
     errors: TeamSkillValidationIssue[],
   ) {
-    const declaredSkills = new Set(dependencies.requiredSkills)
-    const declaredTools = new Set([...dependencies.requiredTools, ...dependencies.optionalTools])
+    const declaredSkills = new Set(dependencies.skills.map((item) => item.name))
+    const declaredTools = new Set(dependencies.tools.map((item) => item.name))
 
     for (const role of manifest.roles) {
       for (const skill of role.skills) {
         if (!declaredSkills.has(skill)) {
           errors.push({
             code: 'role_skill_not_declared',
-            message: `Role ${role.id} references skill ${skill}, but dependencies.yaml does not declare it as a required skill.`,
+            message: `Role ${role.id} references skill ${skill}, but dependencies.yaml does not declare it.`,
             path: 'dependencies.yaml',
           })
         }
@@ -273,71 +368,8 @@ export class TeamSkillPackageService {
   }
 
   private readWorkflow(markdown: string): TeamSkillWorkflowSpec {
-    const stages = Array.from(markdown.matchAll(/^### Step\s+(\d+)\s+[—-]\s+(.+)$/gm)).map((match, index, matches) => {
-      const step = match[1]
-      const title = match[2]?.trim() ?? ''
-      const nextMatch = matches[index + 1]
-      const blockStart = match.index ?? 0
-      const blockEnd = nextMatch?.index ?? markdown.length
-      return this.readWorkflowStage({ step, title, block: markdown.slice(blockStart, blockEnd) })
-    })
     const gateKeywords = Array.from(new Set(markdown.match(/\b[A-Z][A-Z0-9-]*(?:-[A-Z0-9]+)+\b/g) ?? []))
-    return { markdown, stages, gateKeywords }
-  }
-
-  private readWorkflowStage(input: { step: string; title: string; block: string }): TeamSkillWorkflowStageSpec {
-    const executor = this.readWorkflowField(input.block, 'Executor')
-    const roleId = executor && executor !== 'Leader' ? executor : undefined
-    return {
-      stageId: `step-${input.step}-${this.slugify(input.title)}`,
-      title: input.title,
-      executor,
-      ...(roleId ? { roleId } : {}),
-      ...this.readGateSpec(input.block),
-    }
-  }
-
-  private readWorkflowField(block: string, field: string): string {
-    const match = block.match(new RegExp(`^- \\*\\*${this.escapeRegExp(field)}\\*\\*:\\s*(.+)$`, 'm'))
-    return match?.[1]?.trim() ?? ''
-  }
-
-  private readGateSpec(block: string): { gateType?: string; maxAttempts: number } {
-    const qualityGate = this.readWorkflowField(block, 'Quality gate')
-    const gateType = this.readGateType(qualityGate)
-    const maxAttempts = this.readMaxAttempts(qualityGate)
-    return {
-      ...(gateType ? { gateType } : {}),
-      maxAttempts,
-    }
-  }
-
-  private readGateType(qualityGate: string): string | undefined {
-    const normalized = qualityGate.toLowerCase()
-    if (normalized.includes('design document')) {
-      return 'design'
-    }
-    if (normalized.includes('compilation')) {
-      return 'compile'
-    }
-    if (normalized.includes('adversary verdict')) {
-      return 'adversary'
-    }
-    if (normalized.includes('precision verdict')) {
-      return 'precision'
-    }
-    if (normalized.includes('performance verdict')) {
-      return 'performance'
-    }
-    return undefined
-  }
-
-  private readMaxAttempts(qualityGate: string): number {
-    const retryMatch = qualityGate.match(/Max\s+(\d+)\s+(?:retries|kick-back cycles|optimization iterations)/i)
-    if (retryMatch?.[1]) {
-      return Number(retryMatch[1])
-    }
-    return 1
+    return { markdown, stages: [], gateKeywords }
   }
 
   private readBind(markdown: string): TeamSkillBindSpec {
@@ -451,23 +483,54 @@ export class TeamSkillPackageService {
     }
   }
 
-  private readDependencyEntries(value: unknown): DependencyEntry[] {
+  private readDependencyEntries(value: unknown, dependencyKind: DependencyKind, errors: TeamSkillValidationIssue[]): TeamSkillDependencyEntry[] {
     if (!Array.isArray(value)) {
       return []
     }
-    return value.filter(this.isRecord).map((item) => ({
-      name: this.readString(item.name),
-      required: item.required === true,
-    })).filter((item) => item.name)
+    return value.flatMap((item, index) => this.readDependencyEntry(item, dependencyKind, index, errors))
+  }
+
+  private readDependencyEntry(
+    value: unknown,
+    dependencyKind: DependencyKind,
+    index: number,
+    errors: TeamSkillValidationIssue[],
+  ): TeamSkillDependencyEntry[] {
+    if (!this.isRecord(value)) {
+      errors.push({ code: 'dependency_entry_invalid', message: `dependencies.yaml ${dependencyKind}s[${index}] must be an object.`, path: 'dependencies.yaml' })
+      return []
+    }
+
+    const name = this.readString(value.name)
+    const purpose = this.readString(value.purpose)
+    const source = this.readString(value.source)
+    const required = value.required
+    if (!name) {
+      errors.push({ code: 'dependency_name_missing', message: `dependencies.yaml ${dependencyKind}s[${index}].name must be a non-empty string.`, path: 'dependencies.yaml' })
+    }
+    if (typeof required !== 'boolean') {
+      errors.push({ code: 'dependency_required_missing', message: `dependencies.yaml ${dependencyKind}s[${index}].required must be true or false.`, path: 'dependencies.yaml' })
+    }
+    if (!purpose) {
+      errors.push({ code: 'dependency_purpose_missing', message: `dependencies.yaml ${dependencyKind}s[${index}].purpose must be a non-empty string.`, path: 'dependencies.yaml' })
+    }
+    if (dependencyKind === 'skill' && !source) {
+      errors.push({ code: 'dependency_source_missing', message: `dependencies.yaml skills[${index}].source must be a non-empty string.`, path: 'dependencies.yaml' })
+    }
+    if (!name || typeof required !== 'boolean' || !purpose || (dependencyKind === 'skill' && !source)) {
+      return []
+    }
+
+    return [{ name, required, purpose, ...(source ? { source } : {}) }]
   }
 
   private hasMarkdownSection(markdown: string, section: string): boolean {
-    return new RegExp(`^##\\s+${this.escapeRegExp(section)}\\s*$`, 'm').test(markdown)
+    return this.markdownSectionHeading(section).test(markdown)
   }
 
   private extractMarkdownSection(markdown: string, section: string): string {
     const lines = markdown.split(/\r?\n/)
-    const targetHeading = new RegExp(`^##\\s+${this.escapeRegExp(section)}\\s*$`)
+    const targetHeading = this.markdownSectionHeading(section)
     let collecting = false
     let inFence = false
     const collected: string[] = []
@@ -498,6 +561,10 @@ export class TeamSkillPackageService {
     return collected.join('\n').trim()
   }
 
+  private markdownSectionHeading(section: string): RegExp {
+    return new RegExp(`^##\\s+(?:${this.escapeRegExp(section)}|[^\r\n#]*[（(]${this.escapeRegExp(section)}[）)][^\r\n#]*)\\s*$`, 'm')
+  }
+
   private readString(value: unknown): string {
     return typeof value === 'string' ? value.trim() : ''
   }
@@ -508,10 +575,6 @@ export class TeamSkillPackageService {
 
   private isRecord(value: unknown): value is Record<string, unknown> {
     return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
-  }
-
-  private slugify(value: string): string {
-    return value.trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')
   }
 
   private escapeRegExp(value: string): string {

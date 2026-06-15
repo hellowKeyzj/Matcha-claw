@@ -26,6 +26,17 @@ function createDeps() {
       },
       updatedAt: 1,
     })),
+    recoverGatewayConnection: vi.fn(async () => ({
+      state: 'connected',
+      portReachable: true,
+      gatewayReady: true,
+      healthSummary: 'healthy',
+      diagnostics: {
+        consecutiveHeartbeatMisses: 0,
+        consecutiveRpcFailures: 0,
+      },
+      updatedAt: 2,
+    })),
     chatSend: vi.fn(async () => ({ id: 'msg-1' })),
   };
   return {
@@ -128,6 +139,7 @@ describe('runtime-host process gateway routes', () => {
     );
 
     expect(deps.openclawBridge.readGatewayConnectionState).toHaveBeenCalledTimes(1);
+    expect(deps.openclawBridge.recoverGatewayConnection).not.toHaveBeenCalled();
     expect(result).toEqual({
       status: 200,
       data: {
@@ -142,6 +154,37 @@ describe('runtime-host process gateway routes', () => {
             consecutiveRpcFailures: 0,
           },
           updatedAt: 1,
+        },
+      },
+    });
+  });
+
+  it('POST /api/gateway/recover 显式重建 transport 控制通道', async () => {
+    const deps = createDeps();
+
+    const result = await dispatchRuntimeRouteDefinition(
+      gatewayRoutes,
+      'POST',
+      '/api/gateway/recover',
+      { reason: 'gateway-restart', timeoutMs: 15000 },
+      deps,
+    );
+
+    expect(deps.openclawBridge.recoverGatewayConnection).toHaveBeenCalledWith('gateway-restart', 15000);
+    expect(result).toEqual({
+      status: 200,
+      data: {
+        success: true,
+        status: {
+          state: 'connected',
+          portReachable: true,
+          gatewayReady: true,
+          healthSummary: 'healthy',
+          diagnostics: {
+            consecutiveHeartbeatMisses: 0,
+            consecutiveRpcFailures: 0,
+          },
+          updatedAt: 2,
         },
       },
     });

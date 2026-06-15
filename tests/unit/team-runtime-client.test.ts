@@ -1,5 +1,13 @@
-import { beforeEach, describe, expect, it } from 'vitest';
-import { capabilityExecuteMock, resetGatewayClientMocks } from './helpers/mock-gateway-client';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { capabilityExecuteMock, hostApiFetchMock, resetGatewayClientMocks } from './helpers/mock-gateway-client';
+
+vi.mock('@/lib/host-api', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/lib/host-api')>();
+  return {
+    ...actual,
+    waitForRuntimeJobResult: vi.fn(async () => ({ execution: { enabledPluginIds: ['team-runtime'] } })),
+  };
+});
 
 const runtimeInstanceScope = {
   kind: 'runtime-instance',
@@ -13,10 +21,14 @@ const runtimeInstanceScope = {
 describe('team runtime client', () => {
   beforeEach(() => {
     resetGatewayClientMocks();
+    hostApiFetchMock.mockResolvedValue({ execution: { enabledPluginIds: ['team-runtime'] } });
   });
 
-  it('createTeamRun executes typed team.runtime operation', async () => {
-    capabilityExecuteMock.mockResolvedValueOnce({ runId: 'run-1', status: 'created', revision: 1 });
+  it('createTeamRun enables the team-runtime plugin before executing typed team.runtime operation', async () => {
+    hostApiFetchMock.mockResolvedValueOnce({ execution: { enabledPluginIds: [] } });
+    capabilityExecuteMock
+      .mockResolvedValueOnce({ success: true, job: { id: 'job-1', type: 'plugins.setEnabled', status: 'succeeded', queuedAt: 1, attempts: 1, maxAttempts: 1 } })
+      .mockResolvedValueOnce({ runId: 'run-1', status: 'created', revision: 1 });
     const { createTeamRun } = await import('@/services/openclaw/team-runtime-client');
 
     await createTeamRun({
@@ -25,7 +37,19 @@ describe('team runtime client', () => {
       idempotencyKey: 'create-1',
     });
 
-    expect(capabilityExecuteMock).toHaveBeenCalledWith(
+    expect(capabilityExecuteMock).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({
+        id: 'plugin.runtime',
+        operationId: 'plugins.setEnabled',
+        scope: runtimeInstanceScope,
+        target: { kind: 'plugin', pluginId: 'team-runtime' },
+        input: { pluginIds: ['team-runtime'], enabled: true },
+      }),
+      { timeoutMs: undefined },
+    );
+    expect(capabilityExecuteMock).toHaveBeenNthCalledWith(
+      2,
       expect.objectContaining({
         id: 'team.runtime',
         operationId: 'team.runCreate',
@@ -36,6 +60,45 @@ describe('team runtime client', () => {
           runId: 'run-1',
           idempotencyKey: 'create-1',
         }),
+      }),
+      { timeoutMs: 60_000 },
+    );
+  });
+
+  it('does not enable the team-runtime plugin again when runtime already has it enabled', async () => {
+    hostApiFetchMock.mockResolvedValueOnce({ execution: { enabledPluginIds: ['team-runtime'] } });
+    capabilityExecuteMock.mockResolvedValueOnce({ runId: 'run-1', status: 'created', revision: 1 });
+    const { createTeamRun } = await import('@/services/openclaw/team-runtime-client');
+
+    await createTeamRun({
+      packagePath: '.tmp/team-skill',
+      runId: 'run-1',
+      idempotencyKey: 'create-1',
+    });
+
+    expect(capabilityExecuteMock).toHaveBeenCalledTimes(1);
+    expect(capabilityExecuteMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: 'team.runtime',
+        operationId: 'team.runCreate',
+      }),
+      { timeoutMs: 60_000 },
+    );
+  });
+
+  it('planTeamDependencies executes dependency plan operation through team.runtime', async () => {
+    capabilityExecuteMock.mockResolvedValueOnce({ packageName: 'team-a', packageVersion: '1.0.0', items: [], canProceed: true });
+    const { planTeamDependencies } = await import('@/services/openclaw/team-runtime-client');
+
+    await planTeamDependencies({ packagePath: '.tmp/team-skill' });
+
+    expect(capabilityExecuteMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: 'team.runtime',
+        operationId: 'team.dependencyPlan',
+        scope: runtimeInstanceScope,
+        target: { kind: 'team', packagePath: '.tmp/team-skill' },
+        input: { packagePath: '.tmp/team-skill' },
       }),
       { timeoutMs: 60_000 },
     );
@@ -77,110 +140,35 @@ describe('team runtime client', () => {
     );
   });
 
-  it('executeTeamDispatch does not send synthetic status', async () => {
-    capabilityExecuteMock.mockResolvedValueOnce({ execution: { executionId: 'openclaw-run-1' }, created: true });
-    const { executeTeamDispatch } = await import('@/services/openclaw/team-runtime-client');
+  it('planTeamWorkflow forwards workflow payload through team.runtime without synthetic status', async () => {
+    capabilityExecuteMock.mockResolvedValueOnce({ plan: { workflowPlanId: 'plan-1' }, created: true });
+    const { planTeamWorkflow } = await import('@/services/openclaw/team-runtime-client');
 
-    await executeTeamDispatch({
+    await planTeamWorkflow({
       runId: 'run-1',
-      dispatchId: 'dispatch-1',
-      idempotencyKey: 'execute-1',
+      title: 'Workflow plan',
+      summary: 'Plan summary',
+      groups: [{ groupId: 'group-1', taskIds: ['task-1'] }],
+      tasks: [{ taskId: 'task-1', roleId: 'operator', title: 'Task 1' }],
+      idempotencyKey: 'plan-1',
     });
 
     const payload = capabilityExecuteMock.mock.calls[0][0];
     expect(payload).toMatchObject({
       id: 'team.runtime',
-      operationId: 'team.dispatchExecute',
-      scope: runtimeInstanceScope,
-      target: { kind: 'team-dispatch', runId: 'run-1', dispatchId: 'dispatch-1' },
-      input: {
-        runId: 'run-1',
-        dispatchId: 'dispatch-1',
-        idempotencyKey: 'execute-1',
-      },
-    });
-    expect(payload.input).not.toHaveProperty('status');
-  });
-
-  it('completeTeamStage does not send synthetic status', async () => {
-    capabilityExecuteMock.mockResolvedValueOnce({ runId: 'run-1', status: 'running', revision: 2 });
-    const { completeTeamStage } = await import('@/services/openclaw/team-runtime-client');
-
-    await completeTeamStage({
-      runId: 'run-1',
-      stageId: 'stage-1',
-      outputArtifactIds: ['artifact-1'],
-      idempotencyKey: 'complete-1',
-    });
-
-    const payload = capabilityExecuteMock.mock.calls[0][0];
-    expect(payload).toMatchObject({
-      id: 'team.runtime',
-      operationId: 'team.stageComplete',
-      scope: runtimeInstanceScope,
-      target: { kind: 'team-stage', runId: 'run-1', stageId: 'stage-1' },
-      input: {
-        runId: 'run-1',
-        stageId: 'stage-1',
-        outputArtifactIds: ['artifact-1'],
-        idempotencyKey: 'complete-1',
-      },
-    });
-    expect(payload.input).not.toHaveProperty('status');
-  });
-
-  it('evaluateTeamGate does not send synthetic status', async () => {
-    capabilityExecuteMock.mockResolvedValueOnce({ gate: { gateId: 'gate-1' }, created: true });
-    const { evaluateTeamGate } = await import('@/services/openclaw/team-runtime-client');
-
-    await evaluateTeamGate({
-      runId: 'run-1',
-      artifactId: 'artifact-1',
-      gateType: 'design',
-      idempotencyKey: 'gate-1',
-    });
-
-    const payload = capabilityExecuteMock.mock.calls[0][0];
-    expect(payload).toMatchObject({
-      id: 'team.runtime',
-      operationId: 'team.gateEvaluate',
+      operationId: 'team.planWorkflow',
       scope: runtimeInstanceScope,
       target: { kind: 'team-run', runId: 'run-1' },
       input: {
         runId: 'run-1',
-        artifactId: 'artifact-1',
-        gateType: 'design',
-        idempotencyKey: 'gate-1',
+        title: 'Workflow plan',
+        summary: 'Plan summary',
+        groups: [{ groupId: 'group-1', taskIds: ['task-1'] }],
+        tasks: [{ taskId: 'task-1', roleId: 'operator', title: 'Task 1' }],
+        idempotencyKey: 'plan-1',
       },
     });
     expect(payload.input).not.toHaveProperty('status');
   });
 
-  it('prepareTeamDispatch targets the stage being prepared', async () => {
-    capabilityExecuteMock.mockResolvedValueOnce({ dispatchId: 'dispatch-1' });
-    const { prepareTeamDispatch } = await import('@/services/openclaw/team-runtime-client');
-
-    await prepareTeamDispatch({
-      runId: 'run-1',
-      stageId: 'stage-1',
-      roleId: 'operator',
-      idempotencyKey: 'prepare-1',
-    });
-
-    expect(capabilityExecuteMock).toHaveBeenCalledWith(
-      expect.objectContaining({
-        id: 'team.runtime',
-        operationId: 'team.dispatchPrepare',
-        scope: runtimeInstanceScope,
-        target: { kind: 'team-stage', runId: 'run-1', stageId: 'stage-1' },
-        input: expect.objectContaining({
-          runId: 'run-1',
-          stageId: 'stage-1',
-          roleId: 'operator',
-          idempotencyKey: 'prepare-1',
-        }),
-      }),
-      { timeoutMs: 60_000 },
-    );
-  });
 });

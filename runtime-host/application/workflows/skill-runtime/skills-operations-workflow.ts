@@ -10,6 +10,7 @@ import type { SkillsJobPort } from '../../skills/skills-jobs';
 import type { SkillRuntimeWorkflow } from './skill-runtime-workflow';
 import type { LocalSkillImportResult, LocalSkillImportWorkflow } from '../skill-install/local-skill-import-workflow';
 import type { SkillBundleTransferWorkflow } from '../skill-install/skill-bundle-transfer-workflow';
+import type { RuntimePluginConfigProjectionPort, RuntimePluginConfigStorePort } from '../../plugins/runtime-plugin-service';
 import type { RuntimeHostLogger } from '../../../shared/logger';
 
 export interface SkillsOperationsWorkflowDeps {
@@ -19,6 +20,8 @@ export interface SkillsOperationsWorkflowDeps {
   readonly skillRuntimeWorkflow: Pick<SkillRuntimeWorkflow, 'refreshStatus' | 'validateCanonicalSkillKeys'>;
   readonly skillBundleTransferWorkflow: Pick<SkillBundleTransferWorkflow, 'importBundles'>;
   readonly localSkillImportWorkflow: Pick<LocalSkillImportWorkflow, 'execute'>;
+  readonly pluginConfigStore: RuntimePluginConfigStorePort;
+  readonly pluginConfigProjection: Pick<RuntimePluginConfigProjectionPort, 'readManuallyManagedPluginIds' | 'applyManuallyManagedPluginIds'>;
   readonly logger: RuntimeHostLogger;
 }
 
@@ -44,12 +47,16 @@ export class SkillsOperationsWorkflow {
     if (!sourcePath) {
       throw new Error('sourcePath is required');
     }
-    return await this.deps.localSkillImportWorkflow.execute({ sourcePath });
+    const result = await this.deps.localSkillImportWorkflow.execute({ sourcePath });
+    await this.refreshPluginDependencyProjection();
+    return result;
   }
 
   async importBundles(payload: unknown): Promise<ApplicationResponse> {
     try {
-      return ok(await this.deps.skillBundleTransferWorkflow.importBundles(payload));
+      const result = await this.deps.skillBundleTransferWorkflow.importBundles(payload);
+      await this.refreshPluginDependencyProjection();
+      return ok(result);
     } catch (error) {
       return serverError(error instanceof Error ? error.message : String(error));
     }
@@ -80,6 +87,7 @@ export class SkillsOperationsWorkflow {
       validatedSkillKey.skillKey,
       updates,
       async () => await this.deps.repository.updateConfig(validatedSkillKey.skillKey, updates),
+      false,
     );
   }
 
@@ -101,6 +109,7 @@ export class SkillsOperationsWorkflow {
       validatedSkillKey.skillKey,
       { enabled: body.enabled },
       async () => await this.deps.repository.setEnabled(validatedSkillKey.skillKey, Boolean(body.enabled)),
+      true,
     );
   }
 
@@ -127,6 +136,7 @@ export class SkillsOperationsWorkflow {
     if (localResult.success !== true) {
       return serverError(localResult.error || 'Failed to persist local skills config');
     }
+    await this.refreshPluginDependencyProjection();
     try {
       await this.deps.skillRuntimeWorkflow.refreshStatus();
     } catch (error) {
@@ -184,6 +194,7 @@ export class SkillsOperationsWorkflow {
     skillKey: string,
     updates: Record<string, unknown>,
     persistLocal: () => Promise<unknown>,
+    refreshPluginDependencyProjection: boolean,
   ): Promise<ApplicationResponse> {
     const localResult = await persistLocal();
     const normalizedLocalResult = isRecord(localResult) && typeof localResult.success === 'boolean'
@@ -192,8 +203,23 @@ export class SkillsOperationsWorkflow {
     if (normalizedLocalResult.success !== true) {
       return serverError(normalizedLocalResult.error || 'Failed to persist local skills config');
     }
+    if (refreshPluginDependencyProjection) {
+      await this.refreshPluginDependencyProjection();
+    }
 
     return accepted(this.deps.jobs.submitGatewayUpdate({ skillKey, updates }));
+  }
+
+  private async refreshPluginDependencyProjection(): Promise<void> {
+    await this.deps.pluginConfigStore.updateDirty(async (config) => {
+      const manualPluginIds = await this.deps.pluginConfigProjection.readManuallyManagedPluginIds(config);
+      const nextConfig = await this.deps.pluginConfigProjection.applyManuallyManagedPluginIds(config, manualPluginIds);
+      for (const key of Object.keys(config)) {
+        delete config[key];
+      }
+      Object.assign(config, nextConfig);
+      return { result: undefined, changed: true };
+    });
   }
 }
 

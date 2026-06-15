@@ -185,6 +185,202 @@ describe('chat content rail layout', () => {
     expect(viewport?.style.paddingBottom).toContain('--chat-thread-bottom-padding');
   });
 
+  it('chat list passes matching user send time to assistant turns by run and lane', () => {
+    const items = decorateItems([
+      {
+        key: 'session:agent:test:main|user:run-timer-1',
+        kind: 'user-message',
+        sessionKey: 'agent:test:main',
+        role: 'user',
+        text: 'hello',
+        images: [],
+        attachedFiles: [],
+        runId: 'run-timer-1',
+        laneKey: 'main',
+        createdAt: 1000,
+      },
+      {
+        key: 'session:agent:test:main|assistant-turn:main:assistant-message-timer-1',
+        kind: 'assistant-turn',
+        sessionKey: 'agent:test:main',
+        role: 'assistant',
+        text: 'world',
+        status: 'final',
+        runId: 'run-timer-1',
+        laneKey: 'main',
+        turnKey: 'assistant-message-timer-1',
+        identitySource: 'run',
+        identityMode: 'run',
+        identityConfidence: 'strong',
+        segments: [{ kind: 'message', key: 'message:timer-1:main:0', text: 'world' }],
+        thinking: null,
+        tools: [],
+        images: [],
+        attachedFiles: [],
+        createdAt: 3000,
+        updatedAt: 5300,
+      },
+    ]);
+
+    render(
+      <ChatListSurface
+        messagesViewportRef={{ current: null }}
+        messageContentRef={{ current: null }}
+        isEmptyState={false}
+        showBlockingLoading={false}
+        showBlockingError={false}
+        errorMessage={null}
+        onPointerDown={vi.fn()}
+        onScroll={vi.fn()}
+        onTouchMove={vi.fn()}
+        onWheel={vi.fn()}
+        items={items}
+        showLoadOlder={false}
+        isLoadingOlder={false}
+        onLoadOlder={vi.fn()}
+        loadOlderLabel="Load older"
+        scrollChromeStore={buildScrollChromeStore()}
+        showThinking={false}
+        userAvatarImageUrl={null}
+        onJumpToItemKey={vi.fn()}
+      />,
+    );
+
+    expect(assistantTurnPropsSpy).toHaveBeenCalledWith(expect.objectContaining({
+      replyStartedAt: 1000,
+    }));
+  });
+
+  it('chat list keeps active assistant timer when exact run identity is not projected yet', () => {
+    const items = decorateItems([
+      {
+        key: 'session:agent:test:main|user:run-timer-active-fallback',
+        kind: 'user-message',
+        sessionKey: 'agent:test:main',
+        role: 'user',
+        text: 'hello',
+        images: [],
+        attachedFiles: [],
+        runId: 'run-timer-active-fallback',
+        laneKey: 'main',
+        createdAt: 1000,
+      },
+      {
+        key: 'session:agent:test:main|assistant-turn:main:assistant-message-active-fallback',
+        kind: 'assistant-turn',
+        sessionKey: 'agent:test:main',
+        role: 'assistant',
+        text: 'world',
+        status: 'streaming',
+        laneKey: 'main',
+        turnKey: 'assistant-message-active-fallback',
+        identitySource: 'run',
+        identityMode: 'run',
+        identityConfidence: 'strong',
+        segments: [{ kind: 'message', key: 'message:timer-active-fallback:main:0', text: 'world' }],
+        thinking: null,
+        tools: [],
+        images: [],
+        attachedFiles: [],
+        createdAt: 3000,
+        updatedAt: 5300,
+      },
+    ]);
+
+    render(
+      <ChatListSurface
+        messagesViewportRef={{ current: null }}
+        messageContentRef={{ current: null }}
+        isEmptyState={false}
+        showBlockingLoading={false}
+        showBlockingError={false}
+        errorMessage={null}
+        onPointerDown={vi.fn()}
+        onScroll={vi.fn()}
+        onTouchMove={vi.fn()}
+        onWheel={vi.fn()}
+        items={items}
+        showLoadOlder={false}
+        isLoadingOlder={false}
+        onLoadOlder={vi.fn()}
+        loadOlderLabel="Load older"
+        scrollChromeStore={buildScrollChromeStore()}
+        showThinking={false}
+        userAvatarImageUrl={null}
+        onJumpToItemKey={vi.fn()}
+      />,
+    );
+
+    expect(assistantTurnPropsSpy).toHaveBeenCalledWith(expect.objectContaining({
+      replyStartedAt: 1000,
+    }));
+  });
+
+  it('chat list keeps completed assistant timer when exact run identity is not projected', () => {
+    const items = decorateItems([
+      {
+        key: 'session:agent:test:main|user:run-timer-final-no-match',
+        kind: 'user-message',
+        sessionKey: 'agent:test:main',
+        role: 'user',
+        text: 'hello',
+        images: [],
+        attachedFiles: [],
+        runId: 'run-timer-final-no-match',
+        laneKey: 'main',
+        createdAt: 1000,
+      },
+      {
+        key: 'session:agent:test:main|assistant-turn:main:assistant-message-final-no-match',
+        kind: 'assistant-turn',
+        sessionKey: 'agent:test:main',
+        role: 'assistant',
+        text: 'world',
+        status: 'final',
+        laneKey: 'main',
+        turnKey: 'assistant-message-final-no-match',
+        identitySource: 'run',
+        identityMode: 'run',
+        identityConfidence: 'strong',
+        segments: [{ kind: 'message', key: 'message:timer-final-no-match:main:0', text: 'world' }],
+        thinking: null,
+        tools: [],
+        images: [],
+        attachedFiles: [],
+        createdAt: 3000,
+        updatedAt: 5300,
+      },
+    ]);
+
+    render(
+      <ChatListSurface
+        messagesViewportRef={{ current: null }}
+        messageContentRef={{ current: null }}
+        isEmptyState={false}
+        showBlockingLoading={false}
+        showBlockingError={false}
+        errorMessage={null}
+        onPointerDown={vi.fn()}
+        onScroll={vi.fn()}
+        onTouchMove={vi.fn()}
+        onWheel={vi.fn()}
+        items={items}
+        showLoadOlder={false}
+        isLoadingOlder={false}
+        onLoadOlder={vi.fn()}
+        loadOlderLabel="Load older"
+        scrollChromeStore={buildScrollChromeStore()}
+        showThinking={false}
+        userAvatarImageUrl={null}
+        onJumpToItemKey={vi.fn()}
+      />,
+    );
+
+    expect(assistantTurnPropsSpy).toHaveBeenCalledWith(expect.objectContaining({
+      replyStartedAt: 1000,
+    }));
+  });
+
   it('chat list writes assistant turn/lane identity onto the rendered item wrapper', () => {
     const items = decorateItems(buildRenderItemsFromMessages('agent:test:main', [
       {
@@ -448,31 +644,41 @@ describe('chat content rail layout', () => {
       />,
     );
 
-    expect(assistantTurnPropsSpy).toHaveBeenCalledTimes(2);
-    expect(assistantTurnPropsSpy.mock.calls[0]?.[0]).toMatchObject({
+    expect(assistantTurnPropsSpy).toHaveBeenCalledTimes(4);
+    const agentATurn = assistantTurnPropsSpy.mock.calls.find(
+      (call: any[]) => call[0]?.item?.kind === 'assistant-turn' && call[0]?.item?.turnKey !== 'tool:tool-a',
+    );
+    const agentATool = assistantTurnPropsSpy.mock.calls.find(
+      (call: any[]) => call[0]?.item?.kind === 'assistant-turn' && call[0]?.item?.turnKey === 'tool:tool-a',
+    );
+    const agentBTool = assistantTurnPropsSpy.mock.calls.find(
+      (call: any[]) => call[0]?.item?.kind === 'assistant-turn' && call[0]?.item?.turnKey === 'tool:tool-b',
+    );
+    expect(agentATurn?.[0]).toMatchObject({
       item: {
         kind: 'assistant-turn',
         agentId: 'agent-a',
-        tools: [{
-          id: 'tool-a',
-          name: 'read_file',
-          status: 'running',
-        }],
+        tools: [],
         assistantPresentation: {
           agentId: 'agent-a',
           agentName: 'Agent A',
         },
       },
     });
-    expect(assistantTurnPropsSpy.mock.calls[1]?.[0]).toMatchObject({
+    expect(agentATool?.[0]).toMatchObject({
       item: {
         kind: 'assistant-turn',
-        agentId: 'agent-b',
-        tools: [{
-          id: 'tool-b',
-          name: 'search',
-          status: 'running',
-        }],
+        tools: [expect.objectContaining({ id: 'tool-a', name: 'read_file' })],
+        assistantPresentation: {
+          agentId: 'agent-a',
+          agentName: 'Agent A',
+        },
+      },
+    });
+    expect(agentBTool?.[0]).toMatchObject({
+      item: {
+        kind: 'assistant-turn',
+        tools: [expect.objectContaining({ id: 'tool-b', name: 'search' })],
         assistantPresentation: {
           agentId: 'agent-b',
           agentName: 'Agent B',

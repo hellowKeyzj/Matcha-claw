@@ -21,10 +21,16 @@ export interface TeamSkillRoleSpec {
   outputSchemaMarkdown: string
 }
 
+export interface TeamSkillDependencyEntry {
+  name: string
+  required: boolean
+  purpose: string
+  source?: string
+}
+
 export interface TeamSkillDependencies {
-  requiredSkills: string[]
-  requiredTools: string[]
-  optionalTools: string[]
+  skills: TeamSkillDependencyEntry[]
+  tools: TeamSkillDependencyEntry[]
 }
 
 export interface TeamSkillWorkflowSpec {

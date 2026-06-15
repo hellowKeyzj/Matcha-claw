@@ -6,6 +6,7 @@ import boundarySpec from '../../electron/api/main-api-boundary.json';
 import {
   HOSTAPI_PROXY_PUBLIC_READONLY_EXACT_ROUTES,
   HOSTAPI_PROXY_PUBLIC_READONLY_PREFIX_ROUTES,
+  HOSTAPI_PROXY_PUBLIC_VALIDATION_POST_EXACT_ROUTES,
   MAIN_API_ALLOWED_ROUTE_FILES,
   MAIN_OWNED_EXACT_ROUTES,
   MAIN_OWNED_PREFIX_ROUTES,
@@ -46,9 +47,11 @@ describe('main api boundary', () => {
     expect(isHostApiProxyAllowedRoute('GET', '/api/capabilities/list')).toBe(true);
     expect(isHostApiProxyAllowedRoute('POST', '/api/capabilities/describe')).toBe(true);
     expect(isHostApiProxyAllowedRoute('POST', '/api/capabilities/execute')).toBe(true);
+    expect(isHostApiProxyAllowedRoute('POST', '/api/channels/credentials/validate')).toBe(true);
     expect(isHostApiProxyAllowedRoute('GET', '/api/openclaw/subagent-templates/brand-guardian')).toBe(true);
     expect(isHostApiProxyAllowedRoute('GET', '/api/settings/model')).toBe(true);
 
+    expect(isHostApiProxyAllowedRoute('POST', '/api/channels/config/validate')).toBe(false);
     expect(isHostApiProxyAllowedRoute('POST', '/api/settings')).toBe(false);
     expect(isHostApiProxyAllowedRoute('POST', '/api/gateway/start')).toBe(false);
     expect(isHostApiProxyAllowedRoute('POST', '/api/runtime-host/restart')).toBe(false);
@@ -65,6 +68,7 @@ describe('main api boundary', () => {
     expect([...MAIN_OWNED_PREFIX_ROUTES]).toEqual(boundarySpec.mainOwnedPrefixRoutes);
     expect([...HOSTAPI_PROXY_PUBLIC_READONLY_EXACT_ROUTES]).toEqual(boundarySpec.hostapiProxyPublicReadonlyExactRoutes);
     expect([...HOSTAPI_PROXY_PUBLIC_READONLY_PREFIX_ROUTES]).toEqual(boundarySpec.hostapiProxyPublicReadonlyPrefixRoutes);
+    expect([...HOSTAPI_PROXY_PUBLIC_VALIDATION_POST_EXACT_ROUTES]).toEqual(boundarySpec.hostapiProxyPublicValidationPostExactRoutes);
   });
 
   it('electron/api/routes 目录必须与边界清单一致', async () => {

@@ -109,6 +109,50 @@ function getMessageDataAttributes(item: ChatRenderItem) {
   };
 }
 
+function replyTimerKey(runId?: string, laneKey?: string): string | null {
+  if (!runId) {
+    return null;
+  }
+  return `${runId}::${laneKey || 'main'}`;
+}
+
+function buildReplyStartedAtByAssistantKey(items: ReadonlyArray<ChatRenderItem>): Map<string, number> {
+  const startedAtByTimerKey = new Map<string, number>();
+  const startedAtByAssistantKey = new Map<string, number>();
+  let latestUserMessageCreatedAt: number | undefined;
+
+  for (const item of items) {
+    if (item.kind === 'user-message') {
+      if (typeof item.createdAt !== 'number') {
+        continue;
+      }
+      latestUserMessageCreatedAt = item.createdAt;
+      const key = replyTimerKey(item.runId, item.laneKey);
+      if (key) {
+        startedAtByTimerKey.set(key, item.createdAt);
+      }
+      continue;
+    }
+
+    if (item.kind !== 'assistant-turn') {
+      continue;
+    }
+
+    const timerKey = replyTimerKey(item.runId, item.laneKey);
+    const exactStartedAt = timerKey ? startedAtByTimerKey.get(timerKey) : undefined;
+    if (typeof exactStartedAt === 'number') {
+      startedAtByAssistantKey.set(item.key, exactStartedAt);
+      continue;
+    }
+
+    if (typeof latestUserMessageCreatedAt === 'number') {
+      startedAtByAssistantKey.set(item.key, latestUserMessageCreatedAt);
+    }
+  }
+
+  return startedAtByAssistantKey;
+}
+
 function SystemInfoRow({ item }: { item: ChatRenderItem }) {
   const text = item.text.trim();
   if (!text) {
@@ -125,6 +169,7 @@ function SystemInfoRow({ item }: { item: ChatRenderItem }) {
 
 function renderChatItem(input: {
   item: ChatRenderItem;
+  replyStartedAtByAssistantKey: ReadonlyMap<string, number>;
   showThinking: boolean;
   userAvatarImageUrl: string | null;
   sessionIdentity?: SessionIdentity;
@@ -139,6 +184,7 @@ function renderChatItem(input: {
       <ChatAssistantTurn
         item={input.item}
         showThinking={input.showThinking}
+        replyStartedAt={input.replyStartedAtByAssistantKey.get(input.item.key)}
         userAvatarImageUrl={input.userAvatarImageUrl}
         sessionIdentity={input.sessionIdentity}
         workspaceContext={input.workspaceContext}
@@ -216,6 +262,7 @@ const ChatListContent = memo(function ChatListContent({
   onOpenAttachedArtifact = () => {},
 }: ChatListContentProps) {
   const showLoadOlderButton = showLoadOlder || isLoadingOlder;
+  const replyStartedAtByAssistantKey = useMemo(() => buildReplyStartedAtByAssistantKey(items), [items]);
 
   if (showBlockingLoading) {
     return (
@@ -264,6 +311,7 @@ const ChatListContent = memo(function ChatListContent({
                 >
                   {renderChatItem({
                     item,
+                    replyStartedAtByAssistantKey,
                     showThinking,
                     userAvatarImageUrl,
                     sessionIdentity,

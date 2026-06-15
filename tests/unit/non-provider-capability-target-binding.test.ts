@@ -285,10 +285,8 @@ describe('non-provider capability target-input binding', () => {
     const routes = createTeamRuntimeCapabilityOperationRoutes({ teamSkillService: teamSkillService as never });
     const cases = [
       { operationId: 'team.runCreate', target: { kind: 'team' as const, packagePath: '/pkg-1' }, input: { packagePath: '/pkg-2', idempotencyKey: 'create-1' }, error: 'Team runtime target packagePath must match input packagePath' },
-      { operationId: 'team.stageComplete', target: { kind: 'team-stage' as const, runId: 'run-1', stageId: 'stage-1' }, input: { runId: 'run-1', stageId: 'stage-2' }, error: 'Team runtime target stageId must match input stageId' },
-      { operationId: 'team.dispatchExecute', target: { kind: 'team-dispatch' as const, runId: 'run-1', dispatchId: 'dispatch-1' }, input: { runId: 'run-1', dispatchId: 'dispatch-2' }, error: 'Team runtime target dispatchId must match input dispatchId' },
+      { operationId: 'team.planWorkflow', target: { kind: 'team-run' as const, runId: 'run-1' }, input: { runId: 'run-2', title: 'Workflow', groups: [], tasks: [], idempotencyKey: 'plan-1' }, error: 'Team runtime target runId must match input runId' },
       { operationId: 'team.approvalResolve', target: { kind: 'team-approval' as const, runId: 'run-1', approvalId: 'approval-1' }, input: { runId: 'run-1', approvalId: 'approval-2', decision: 'approve' }, error: 'Team runtime target approvalId must match input approvalId' },
-      { operationId: 'team.gateEvaluate', target: { kind: 'team-run' as const, runId: 'run-1' }, input: { runId: 'run-1' }, error: 'Team runtime input gateType is required' },
     ];
 
     for (const item of cases) {

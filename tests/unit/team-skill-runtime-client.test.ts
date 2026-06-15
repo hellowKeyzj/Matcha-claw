@@ -16,6 +16,10 @@ vi.mock('@/lib/host-api', () => ({
   resolveSingleCapabilityScope: (...args: unknown[]) => resolveSingleCapabilityScopeMock(...args),
 }));
 
+vi.mock('@/services/openclaw/plugin-manager-client', () => ({
+  ensurePluginEnabled: vi.fn(async () => undefined),
+}));
+
 describe('team skill runtime client', () => {
   beforeEach(() => {
     hostApiFetchMock.mockReset();
@@ -52,86 +56,41 @@ describe('team skill runtime client', () => {
     });
   });
 
-  it('executes dispatches through the Team runtime gateway without synthetic status', async () => {
-    hostApiFetchMock.mockResolvedValueOnce({ execution: { executionId: 'openclaw-session-1' }, created: true });
-    const { executeTeamDispatch } = await import('@/services/openclaw/team-runtime-client');
+  it('plans workflows through the Team runtime gateway without synthetic status', async () => {
+    hostApiFetchMock.mockResolvedValueOnce({ plan: { workflowPlanId: 'plan-1' }, created: true });
+    const { planTeamWorkflow } = await import('@/services/openclaw/team-runtime-client');
 
-    await expect(executeTeamDispatch({
+    await expect(planTeamWorkflow({
       runId: 'run-1',
-      dispatchId: 'dispatch-1',
-      idempotencyKey: 'execute-1',
-    })).resolves.toEqual({ execution: { executionId: 'openclaw-session-1' }, created: true });
+      title: 'Workflow',
+      summary: 'Leader-planned workflow',
+      groups: [],
+      tasks: [],
+      idempotencyKey: 'plan-1',
+    })).resolves.toEqual({ plan: { workflowPlanId: 'plan-1' }, created: true });
     expect(hostApiFetchMock).toHaveBeenCalledWith('/api/capabilities/execute', expect.objectContaining({
       method: 'POST',
-      body: expect.stringContaining('"operationId":"team.dispatchExecute"'),
+      body: expect.stringContaining('"operationId":"team.planWorkflow"'),
       timeoutMs: 60000,
     }));
     const requestBody = JSON.parse(hostApiFetchMock.mock.calls[0][1].body);
     expect(requestBody).toMatchObject({
       id: 'team.runtime',
-      operationId: 'team.dispatchExecute',
-      scope: testRuntimeScope,
-      target: { kind: 'team-dispatch', runId: 'run-1', dispatchId: 'dispatch-1' },
-      input: {
-        runId: 'run-1',
-        dispatchId: 'dispatch-1',
-        idempotencyKey: 'execute-1',
-      },
-    });
-    expect(requestBody.input).not.toHaveProperty('status');
-  });
-
-  it('completes stages through the Team runtime gateway without synthetic status', async () => {
-    hostApiFetchMock.mockResolvedValueOnce({ runId: 'run-1', status: 'running', revision: 2 });
-    const { completeTeamStage } = await import('@/services/openclaw/team-runtime-client');
-
-    await expect(completeTeamStage({
-      runId: 'run-1',
-      stageId: 'stage-1',
-      outputArtifactIds: ['artifact-1'],
-      idempotencyKey: 'complete-1',
-    })).resolves.toEqual({ runId: 'run-1', status: 'running', revision: 2 });
-    const requestBody = JSON.parse(hostApiFetchMock.mock.calls[0][1].body);
-    expect(requestBody).toMatchObject({
-      id: 'team.runtime',
-      operationId: 'team.stageComplete',
-      scope: testRuntimeScope,
-      target: { kind: 'team-stage', runId: 'run-1', stageId: 'stage-1' },
-      input: {
-        runId: 'run-1',
-        stageId: 'stage-1',
-        outputArtifactIds: ['artifact-1'],
-        idempotencyKey: 'complete-1',
-      },
-    });
-    expect(requestBody.input).not.toHaveProperty('status');
-  });
-
-  it('evaluates gates through the Team runtime gateway without synthetic status', async () => {
-    hostApiFetchMock.mockResolvedValueOnce({ gate: { gateId: 'gate-1' }, created: true });
-    const { evaluateTeamGate } = await import('@/services/openclaw/team-runtime-client');
-
-    await expect(evaluateTeamGate({
-      runId: 'run-1',
-      artifactId: 'artifact-1',
-      gateType: 'design',
-      idempotencyKey: 'gate-1',
-    })).resolves.toEqual({ gate: { gateId: 'gate-1' }, created: true });
-    const requestBody = JSON.parse(hostApiFetchMock.mock.calls[0][1].body);
-    expect(requestBody).toMatchObject({
-      id: 'team.runtime',
-      operationId: 'team.gateEvaluate',
+      operationId: 'team.planWorkflow',
       scope: testRuntimeScope,
       target: { kind: 'team-run', runId: 'run-1' },
       input: {
         runId: 'run-1',
-        artifactId: 'artifact-1',
-        gateType: 'design',
-        idempotencyKey: 'gate-1',
+        title: 'Workflow',
+        summary: 'Leader-planned workflow',
+        groups: [],
+        tasks: [],
+        idempotencyKey: 'plan-1',
       },
     });
     expect(requestBody.input).not.toHaveProperty('status');
   });
+
 
   it('ticks TeamRuns through the Team runtime gateway', async () => {
     hostApiFetchMock.mockResolvedValueOnce({ action: 'dispatch_prepared', currentStageId: 'step-1-design-operator-blueprint' });

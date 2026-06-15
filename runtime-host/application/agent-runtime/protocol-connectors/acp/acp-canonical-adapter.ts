@@ -38,11 +38,12 @@ function base(input: {
   runtimeEventType: string;
   context: RuntimeSessionContext;
   runId?: string;
+  turnId?: string;
   timestamp?: number;
   laneKey?: string;
   seq?: number;
   raw: unknown;
-}): Pick<CanonicalSessionEvent, 'eventId' | 'protocolId' | 'runtimeEndpointId' | 'source' | 'sessionId' | 'runId' | 'timestamp' | 'laneKey' | 'seq' | 'origin'> {
+}): Pick<CanonicalSessionEvent, 'eventId' | 'protocolId' | 'runtimeEndpointId' | 'source' | 'sessionId' | 'runId' | 'turnId' | 'timestamp' | 'laneKey' | 'seq' | 'origin'> {
   return {
     eventId: input.eventId,
     protocolId: input.context.protocolId,
@@ -50,6 +51,7 @@ function base(input: {
     source: 'live',
     sessionId: input.context.sessionKey,
     ...(input.runId ? { runId: input.runId } : {}),
+    ...(input.turnId ? { turnId: input.turnId } : {}),
     ...(input.timestamp != null ? { timestamp: input.timestamp } : {}),
     laneKey: input.laneKey ?? 'main',
     ...(input.seq != null ? { seq: input.seq } : {}),
@@ -76,12 +78,15 @@ export class AcpCanonicalAdapter implements RuntimeEventAdapter {
       return [];
     }
     const method = asString(record.method) ?? asString(record.type) ?? 'acp.event';
-    const runId = asString(payload.runId) ?? asString(payload.turnId) ?? asString(payload.sessionId);
+    const turnId = asString(payload.turnId);
+    const runId = asString(payload.runId) ?? turnId ?? asString(payload.sessionId);
     const timestamp = asNumber(payload.timestamp) ?? asNumber(payload.createdAtMs);
     const laneKey = asString(payload.laneKey) ?? asString(payload.agentId) ?? 'main';
     const seq = asNumber(payload.seq);
     const messageId = asString(payload.messageId) ?? asString(payload.id);
     const toolCallId = asString(payload.toolCallId) ?? asString(payload.toolUseId);
+    const ownerTurnKey = turnId ? `turn:${laneKey}:${turnId}` : runId ? `run:${laneKey}:${runId}` : undefined;
+    const ownerMessageKey = messageId ? `message:${laneKey}:${messageId}` : ownerTurnKey;
 
     if (method.includes('tool') && toolCallId) {
       if (method.includes('result') || method.includes('completed')) {
@@ -91,12 +96,23 @@ export class AcpCanonicalAdapter implements RuntimeEventAdapter {
             runtimeEventType: method,
             context,
             ...(runId ? { runId } : {}),
+            ...(turnId ? { turnId } : {}),
             ...(timestamp != null ? { timestamp } : {}),
             laneKey,
             ...(seq != null ? { seq } : {}),
             raw: input,
           }),
           type: 'tool_result',
+          ...(ownerTurnKey ? {
+            ownerTurnKey,
+            turnBindingSource: turnId ? 'runtime' : 'synthetic',
+            turnBindingConfidence: turnId ? 'high' : 'low',
+          } : {}),
+          ...(ownerMessageKey ? {
+            ownerMessageKey,
+            messageBindingSource: messageId ? 'runtime' : 'synthetic',
+            messageBindingConfidence: messageId ? 'high' : 'low',
+          } : {}),
           toolCallId,
           name: asString(payload.name) ?? asString(payload.toolName),
           output: payload.output ?? payload.result,
@@ -110,12 +126,23 @@ export class AcpCanonicalAdapter implements RuntimeEventAdapter {
           runtimeEventType: method,
           context,
           ...(runId ? { runId } : {}),
+          ...(turnId ? { turnId } : {}),
           ...(timestamp != null ? { timestamp } : {}),
           laneKey,
           ...(seq != null ? { seq } : {}),
           raw: input,
         }),
         type: 'tool_call',
+        ...(ownerTurnKey ? {
+          ownerTurnKey,
+          turnBindingSource: turnId ? 'runtime' : 'synthetic',
+          turnBindingConfidence: turnId ? 'high' : 'low',
+        } : {}),
+        ...(ownerMessageKey ? {
+          ownerMessageKey,
+          messageBindingSource: messageId ? 'runtime' : 'synthetic',
+          messageBindingConfidence: messageId ? 'high' : 'low',
+        } : {}),
         toolCallId,
         name: asString(payload.name) ?? asString(payload.toolName) ?? 'tool',
         input: payload.input ?? payload.arguments,
@@ -133,6 +160,7 @@ export class AcpCanonicalAdapter implements RuntimeEventAdapter {
         runtimeEventType: method,
         context,
         ...(runId ? { runId } : {}),
+        ...(turnId ? { turnId } : {}),
         ...(timestamp != null ? { timestamp } : {}),
         laneKey,
         ...(seq != null ? { seq } : {}),
@@ -140,6 +168,16 @@ export class AcpCanonicalAdapter implements RuntimeEventAdapter {
       }),
       type: 'message_snapshot',
       role,
+      ...(ownerTurnKey ? {
+        ownerTurnKey,
+        turnBindingSource: turnId ? 'runtime' : 'synthetic',
+        turnBindingConfidence: turnId ? 'high' : 'low',
+      } : {}),
+      ...(ownerMessageKey ? {
+        ownerMessageKey,
+        messageBindingSource: messageId ? 'runtime' : 'synthetic',
+        messageBindingConfidence: messageId ? 'high' : 'low',
+      } : {}),
       ...(messageId ? { messageId } : {}),
       content: payload.content ?? text,
       text,

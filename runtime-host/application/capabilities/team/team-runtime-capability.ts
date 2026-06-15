@@ -9,18 +9,17 @@ export const TEAM_RUNTIME_CAPABILITY_ID = 'team.runtime';
 
 export const teamRuntimeCapabilityOperations = [
   { id: 'team.packageValidate', title: 'Validate TeamSkill package', targetKind: 'team' },
+  { id: 'team.dependencyPlan', title: 'Plan TeamSkill dependencies', targetKind: 'team' },
   { id: 'team.runCreate', title: 'Create TeamRun', targetKind: 'team' },
   { id: 'team.runStart', title: 'Start TeamRun', targetKind: 'team-run' },
   { id: 'team.runSnapshot', title: 'Read TeamRun snapshot', targetKind: 'team-run' },
   { id: 'team.runDiagnostics', title: 'Read TeamRun diagnostics', targetKind: 'team-run' },
   { id: 'team.runDecisionSubmit', title: 'Submit TeamRun decision', targetKind: 'team-run' },
-  { id: 'team.stageComplete', title: 'Complete TeamRun stage', targetKind: 'team-stage' },
+  { id: 'team.planWorkflow', title: 'Plan TeamRun workflow', targetKind: 'team-run' },
   { id: 'team.runTick', title: 'Tick TeamRun', targetKind: 'team-run' },
-  { id: 'team.dispatchPrepare', title: 'Prepare Team dispatch', targetKind: 'team-stage' },
-  { id: 'team.dispatchExecute', title: 'Execute Team dispatch', targetKind: 'team-dispatch' },
   { id: 'team.approvalResolve', title: 'Resolve Team approval', targetKind: 'team-approval' },
   { id: 'team.runCancel', title: 'Cancel TeamRun', targetKind: 'team-run' },
-  { id: 'team.gateEvaluate', title: 'Evaluate Team gate', targetKind: 'team-run' },
+  { id: 'team.runDelete', title: 'Delete TeamRun', targetKind: 'team-run' },
 ] as const satisfies readonly CapabilityOperationDescriptor[];
 
 const TEAM_RUNTIME_OPERATION_IDS = new Set<TeamRuntimeOperationId>(
@@ -52,6 +51,7 @@ function validateTeamRuntimeTargetInput(
 ): string | null {
   switch (operationId) {
     case 'team.packageValidate':
+    case 'team.dependencyPlan':
       return validateMatchingRequiredString(target, 'packagePath', input, 'packagePath');
     case 'team.runCreate':
       return validateMatchingRequiredString(target, 'packagePath', input, 'packagePath');
@@ -61,25 +61,20 @@ function validateTeamRuntimeTargetInput(
     case 'team.runDecisionSubmit':
     case 'team.runTick':
     case 'team.runCancel':
+    case 'team.runDelete':
       return validateMatchingRequiredString(target, 'runId', input, 'runId')
         ?? validateMatchingOptionalString(target, 'teamId', input, 'teamId')
         ?? validateTeamRunScope(target, scope);
-    case 'team.stageComplete':
+    case 'team.planWorkflow':
       return validateMatchingRequiredString(target, 'runId', input, 'runId')
-        ?? validateMatchingRequiredString(target, 'stageId', input, 'stageId');
-    case 'team.dispatchPrepare':
-      return validateMatchingRequiredString(target, 'runId', input, 'runId')
-        ?? validateMatchingRequiredString(target, 'stageId', input, 'stageId');
-    case 'team.dispatchExecute':
-      return validateMatchingRequiredString(target, 'runId', input, 'runId')
-        ?? validateMatchingRequiredString(target, 'dispatchId', input, 'dispatchId');
+        ?? validateRequiredInputString(input, 'title')
+        ?? validateRequiredInputArray(input, 'groups')
+        ?? validateRequiredInputArray(input, 'tasks')
+        ?? validateTeamRunScope(target, scope);
     case 'team.approvalResolve':
       return validateMatchingRequiredString(target, 'runId', input, 'runId')
         ?? validateMatchingRequiredString(target, 'approvalId', input, 'approvalId')
         ?? validateRequiredInputString(input, 'decision');
-    case 'team.gateEvaluate':
-      return validateMatchingRequiredString(target, 'runId', input, 'runId')
-        ?? validateRequiredInputString(input, 'gateType');
   }
 }
 
@@ -116,6 +111,11 @@ function validateMatchingOptionalString(
 
 function validateRequiredInputString(input: Record<string, unknown>, inputField: string): string | null {
   return readStringField(input, inputField) ? null : `Team runtime input ${inputField} is required`;
+}
+
+function validateRequiredInputArray(input: Record<string, unknown>, inputField: string): string | null {
+  const value = input[inputField];
+  return Array.isArray(value) ? null : `Team runtime input ${inputField} is required`;
 }
 
 function validateTeamRunScope(target: CapabilityTarget | null, scope: RuntimeScope): string | null {

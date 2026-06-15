@@ -145,6 +145,28 @@ describe('main gateway routes', () => {
     expect(JSON.stringify(sendJsonMock.mock.calls)).not.toContain('token-test');
   });
 
+  it('/api/gateway/restart 会在后端重启后重建 runtime-host 控制通道', async () => {
+    const ctx = createContext();
+    const { handleGatewayRoutes } = await import('../../electron/api/routes/gateway');
+
+    const handled = await handleGatewayRoutes(
+      { method: 'POST' } as IncomingMessage,
+      {} as ServerResponse,
+      new URL('http://127.0.0.1:3210/api/gateway/restart'),
+      ctx as never,
+    );
+
+    expect(handled).toBe(true);
+    expect(ctx.gatewayManager.restart).toHaveBeenCalledTimes(1);
+    expect(ctx.runtimeHost.request).toHaveBeenCalledWith(
+      'POST',
+      '/api/gateway/recover',
+      { reason: 'gateway-restart', timeoutMs: 15000 },
+      { timeoutMs: 20000 },
+    );
+    expect(sendJsonMock).toHaveBeenCalledWith(expect.anything(), 200, { success: true });
+  });
+
   it('/api/gateway/health 直接透传 runtime health 的端口态和连接态', async () => {
     const ctx = createContext();
     const { handleGatewayRoutes } = await import('../../electron/api/routes/gateway');

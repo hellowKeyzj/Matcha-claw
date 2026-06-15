@@ -1,10 +1,9 @@
 import type { TeamRun } from '../domain/team-run.js'
-import type { TeamStage } from '../domain/team-stage.js'
+import type { TeamDispatchTaskRecord } from '../domain/team-workflow.js'
 
 const TEAM_RUNTIME_PROJECTION_SOURCE = 'matchaclaw.team-runtime'
 
 type TeamTaskProjectionRunStatus = 'created' | 'provisioning' | 'waiting_for_user' | 'running' | 'paused' | 'cancelling' | 'completed' | 'failed' | 'cancelled'
-type TeamTaskProjectionStageStatus = 'pending' | 'running' | 'waiting_for_user' | 'passed' | 'failed' | 'skipped'
 
 export interface TeamTaskProjectionRunModel {
   runId: string
@@ -13,13 +12,6 @@ export interface TeamTaskProjectionRunModel {
   status: TeamTaskProjectionRunStatus
   currentStageId?: string
   revision: number
-}
-
-export interface TeamTaskProjectionStageModel {
-  stageId: string
-  roleId?: string
-  status: TeamTaskProjectionStageStatus
-  attempt: number
 }
 
 export interface TeamTaskProjectionRow {
@@ -47,7 +39,7 @@ export type TeamTaskProjectionTarget =
 
 export interface TeamTaskManagerProjectionInput {
   run: TeamRun
-  stages: TeamStage[]
+  dispatchTasks: TeamDispatchTaskRecord[]
   reason: string
 }
 
@@ -57,29 +49,28 @@ export interface TaskManagerProjectionPort {
 
 export function buildTeamTaskProjectionModel(input: {
   run: TeamTaskProjectionRunModel
-  stage: TeamTaskProjectionStageModel
+  task: TeamDispatchTaskRecord
   reason: string
 }): TeamTaskProjectionModel {
-  const identity = teamTaskProjectionIdentity(input.run.runId, input.stage.stageId)
+  const identity = teamTaskProjectionIdentity(input.run.runId, input.task.taskId)
   return {
     identity,
     revision: input.run.revision,
     params: {
-      subject: `${input.run.packageName}: ${input.stage.stageId}`,
-      description: `TeamRun ${input.run.runId} stage ${input.stage.stageId}`,
-      activeForm: `Running ${input.stage.stageId}`,
-      owner: input.stage.roleId ?? 'team-runtime',
-      status: taskStatusForStage(input.run, input.stage),
+      subject: `${input.run.packageName}: ${input.task.taskId}`,
+      description: `TeamRun ${input.run.runId} task ${input.task.taskId}`,
+      activeForm: `Running ${input.task.taskId}`,
+      owner: input.task.roleId,
+      status: taskStatusForDispatchTask(input.run, input.task),
       metadata: {
         source: TEAM_RUNTIME_PROJECTION_SOURCE,
         projectionIdentity: identity,
         projectionRevision: input.run.revision,
         teamRunId: input.run.runId,
-        teamStageId: input.stage.stageId,
+        teamTaskId: input.task.taskId,
         teamRunStatus: input.run.status,
         teamRunRevision: input.run.revision,
-        stageStatus: input.stage.status,
-        stageAttempt: input.stage.attempt,
+        dispatchTaskStatus: input.task.status,
         packageName: input.run.packageName,
         packageVersion: input.run.packageVersion,
         currentStageId: input.run.currentStageId ?? null,
@@ -91,7 +82,7 @@ export function buildTeamTaskProjectionModel(input: {
 
 export function selectTeamTaskProjectionTarget(tasks: readonly TeamTaskProjectionRow[], model: TeamTaskProjectionModel): TeamTaskProjectionTarget {
   const candidates = tasks
-    .filter((task) => isSameProjection(task.metadata, model.identity, model.params.metadata.teamRunId, model.params.metadata.teamStageId))
+    .filter((task) => isSameProjection(task.metadata, model.identity, model.params.metadata.teamRunId, model.params.metadata.teamTaskId))
     .sort((left, right) => compareProjectionRows(right, left, model.identity))
   const task = candidates[0]
   if (!task) {
@@ -104,28 +95,25 @@ export function selectTeamTaskProjectionTarget(tasks: readonly TeamTaskProjectio
   return { action: 'update', task }
 }
 
-export function teamTaskProjectionIdentity(runId: string, stageId: string): string {
-  return `${TEAM_RUNTIME_PROJECTION_SOURCE}:${runId}:${stageId}`
+export function teamTaskProjectionIdentity(runId: string, taskId: string): string {
+  return `${TEAM_RUNTIME_PROJECTION_SOURCE}:${runId}:${taskId}`
 }
 
-function taskStatusForStage(run: TeamTaskProjectionRunModel, stage: TeamTaskProjectionStageModel): 'pending' | 'in_progress' | 'completed' {
-  if (stage.status === 'passed' || stage.status === 'failed' || stage.status === 'skipped') {
+function taskStatusForDispatchTask(run: TeamTaskProjectionRunModel, task: TeamDispatchTaskRecord): 'pending' | 'in_progress' | 'completed' {
+  if (task.status === 'completed' || task.status === 'failed' || task.status === 'cancelled' || task.status === 'stale') {
     return 'completed'
   }
   if (run.status === 'completed' || run.status === 'failed' || run.status === 'cancelled') {
     return 'completed'
   }
-  if (run.status === 'running' && stage.status === 'running') {
-    return 'in_progress'
-  }
-  return 'pending'
+  return task.status === 'queued' ? 'in_progress' : 'pending'
 }
 
-function isSameProjection(metadata: Record<string, unknown>, identity: string, runId: unknown, stageId: unknown): boolean {
+function isSameProjection(metadata: Record<string, unknown>, identity: string, runId: unknown, taskId: unknown): boolean {
   if (metadata.projectionIdentity === identity) {
     return true
   }
-  return metadata.teamRunId === runId && metadata.teamStageId === stageId
+  return metadata.teamRunId === runId && metadata.teamTaskId === taskId
 }
 
 function compareProjectionRows(left: TeamTaskProjectionRow, right: TeamTaskProjectionRow, identity: string): number {

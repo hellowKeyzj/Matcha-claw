@@ -5,12 +5,24 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Select } from '@/components/ui/select';
+import { invokeIpc } from '@/lib/api-client';
+import { pickLocalSkillSource } from '@/services/local-path-picker';
+import type { TeamSkillDependencyEntry } from '@/services/openclaw/team-runtime-client';
+import {
+  isClawHubDependencySource,
+  isLocalDependencySource,
+  isOpenableDependencySource,
+  normalizeDependencySource,
+  readClawHubSkillSlug,
+} from './dependency-source';
 import { useGatewayStore } from '@/stores/gateway';
+import { useSkillsStore } from '@/stores/skills';
 import { useTeamsStore } from '@/stores/teams';
 import { useTranslation } from 'react-i18next';
 import { isGatewayOperational } from '@/lib/gateway-status';
-const EMPTY_STAGES: ReturnType<typeof useTeamsStore.getState>['stagesByTeamId'][string] = [];
 const EMPTY_ROLES: ReturnType<typeof useTeamsStore.getState>['rolesByTeamId'][string] = [];
+const EMPTY_DISPATCH_GROUPS: ReturnType<typeof useTeamsStore.getState>['dispatchGroupsByTeamId'][string] = [];
+const EMPTY_DISPATCH_TASKS: ReturnType<typeof useTeamsStore.getState>['dispatchTasksByTeamId'][string] = [];
 const EMPTY_APPROVALS: ReturnType<typeof useTeamsStore.getState>['approvalsByTeamId'][string] = [];
 const EMPTY_ARTIFACTS: ReturnType<typeof useTeamsStore.getState>['artifactsByTeamId'][string] = [];
 const EMPTY_MESSAGES: ReturnType<typeof useTeamsStore.getState>['messagesByTeamId'][string] = [];
@@ -21,31 +33,12 @@ const EMPTY_KICKBACKS: ReturnType<typeof useTeamsStore.getState>['kickbacksByTea
 const EMPTY_DECISIONS: ReturnType<typeof useTeamsStore.getState>['decisionsByTeamId'][string] = [];
 const EMPTY_EVENTS: ReturnType<typeof useTeamsStore.getState>['eventsByTeamId'][string] = [];
 
-type StageStatus = 'pending' | 'running' | 'waiting_for_user' | 'passed' | 'failed' | 'skipped' | 'cancelled';
-
-type StageSummary = {
-  stagesByStatus: Record<StageStatus, typeof EMPTY_STAGES>;
-  roleStageCountByRoleId: Record<string, number>;
-};
-
-function buildStageSummary(stages: typeof EMPTY_STAGES): StageSummary {
-  const stagesByStatus: Record<StageStatus, typeof EMPTY_STAGES> = {
-    pending: [],
-    running: [],
-    waiting_for_user: [],
-    passed: [],
-    failed: [],
-    skipped: [],
-    cancelled: [],
-  };
-  const roleStageCountByRoleId: Record<string, number> = {};
-  for (const stage of stages) {
-    stagesByStatus[stage.status].push(stage);
-    if (stage.roleId) {
-      roleStageCountByRoleId[stage.roleId] = (roleStageCountByRoleId[stage.roleId] ?? 0) + 1;
-    }
+function countDispatchTasksByRoleId(tasks: typeof EMPTY_DISPATCH_TASKS): Record<string, number> {
+  const counts: Record<string, number> = {};
+  for (const task of tasks) {
+    counts[task.roleId] = (counts[task.roleId] ?? 0) + 1;
   }
-  return { stagesByStatus, roleStageCountByRoleId };
+  return counts;
 }
 
 function formatTimestamp(value: number): string {
@@ -53,6 +46,68 @@ function formatTimestamp(value: number): string {
     return '-';
   }
   return new Date(value).toLocaleString();
+}
+
+const EVENT_PAYLOAD_SUMMARY_FIELDS = ['reason', 'error', 'message', 'workflowPlanId'] as const;
+
+function isDisplayableEventPayloadValue(value: unknown): value is string | number | boolean {
+  return typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean';
+}
+
+function formatEventPayloadSummary(payload: Record<string, unknown>): string | undefined {
+  const summaryParts = EVENT_PAYLOAD_SUMMARY_FIELDS.flatMap((field) => {
+    const value = payload[field];
+    return isDisplayableEventPayloadValue(value) ? [`${field}: ${String(value)}`] : [];
+  });
+  return summaryParts.length > 0 ? summaryParts.join(' · ') : undefined;
+}
+
+type DependencyMissingDetails = {
+  stageId: string;
+  missingRequiredSkills: TeamSkillDependencyEntry[];
+  missingOptionalSkills: TeamSkillDependencyEntry[];
+  missingRequiredTools: TeamSkillDependencyEntry[];
+  missingOptionalTools: TeamSkillDependencyEntry[];
+};
+
+function isDependencyEntry(value: unknown): value is TeamSkillDependencyEntry {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return false;
+  }
+  const entry = value as Record<string, unknown>;
+  return typeof entry.name === 'string'
+    && typeof entry.required === 'boolean'
+    && typeof entry.purpose === 'string'
+    && (entry.source === undefined || typeof entry.source === 'string');
+}
+
+function readDependencyEntries(payload: Record<string, unknown>, field: string): TeamSkillDependencyEntry[] {
+  const value = payload[field];
+  return Array.isArray(value) ? value.filter(isDependencyEntry) : [];
+}
+
+function readDependencyMissingDetails(
+  events: typeof EMPTY_EVENTS,
+  currentStageId: string | undefined,
+): DependencyMissingDetails | null {
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index];
+    if (event.type !== 'dependency:missing') {
+      continue;
+    }
+    const stageId = typeof event.payload.stageId === 'string' ? event.payload.stageId : undefined;
+    if (!stageId || (currentStageId && stageId !== currentStageId)) {
+      continue;
+    }
+    return {
+      stageId,
+      missingRequiredSkills: readDependencyEntries(event.payload, 'missingRequiredSkills'),
+      missingOptionalSkills: readDependencyEntries(event.payload, 'missingOptionalSkills'),
+      missingRequiredTools: readDependencyEntries(event.payload, 'missingRequiredTools'),
+      missingOptionalTools: readDependencyEntries(event.payload, 'missingOptionalTools'),
+    };
+  }
+  return null;
 }
 
 export function TeamChat({ teamId }: { teamId?: string }) {
@@ -69,11 +124,16 @@ export function TeamChat({ teamId }: { teamId?: string }) {
   const cancelRun = useTeamsStore((state) => state.cancelRun);
   const resolveApproval = useTeamsStore((state) => state.resolveApproval);
   const submitDecision = useTeamsStore((state) => state.submitDecision);
+  const installSkill = useSkillsStore((state) => state.installSkill);
+  const importLocalSkill = useSkillsStore((state) => state.importLocalSkill);
+  const fetchSkills = useSkillsStore((state) => state.fetchSkills);
 
   const resolvedTeamId = teamId ?? activeTeamId ?? undefined;
   const team = teams.find((row) => row.id === resolvedTeamId);
   const run = useTeamsStore((state) => (resolvedTeamId ? state.runByTeamId[resolvedTeamId] : undefined));
-  const stages = useTeamsStore((state) => (resolvedTeamId ? (state.stagesByTeamId[resolvedTeamId] ?? EMPTY_STAGES) : EMPTY_STAGES));
+  const workflowPlan = useTeamsStore((state) => (resolvedTeamId ? state.workflowPlanByTeamId[resolvedTeamId] : undefined));
+  const dispatchGroups = useTeamsStore((state) => (resolvedTeamId ? (state.dispatchGroupsByTeamId[resolvedTeamId] ?? EMPTY_DISPATCH_GROUPS) : EMPTY_DISPATCH_GROUPS));
+  const dispatchTasks = useTeamsStore((state) => (resolvedTeamId ? (state.dispatchTasksByTeamId[resolvedTeamId] ?? EMPTY_DISPATCH_TASKS) : EMPTY_DISPATCH_TASKS));
   const roles = useTeamsStore((state) => (resolvedTeamId ? (state.rolesByTeamId[resolvedTeamId] ?? EMPTY_ROLES) : EMPTY_ROLES));
   const approvals = useTeamsStore((state) => (resolvedTeamId ? (state.approvalsByTeamId[resolvedTeamId] ?? EMPTY_APPROVALS) : EMPTY_APPROVALS));
   const artifacts = useTeamsStore((state) => (resolvedTeamId ? (state.artifactsByTeamId[resolvedTeamId] ?? EMPTY_ARTIFACTS) : EMPTY_ARTIFACTS));
@@ -112,8 +172,68 @@ export function TeamChat({ teamId }: { teamId?: string }) {
     }
   };
 
-  const stageSummary = useMemo(() => buildStageSummary(stages), [stages]);
+  const roleDispatchTaskCountByRoleId = useMemo(() => countDispatchTasksByRoleId(dispatchTasks), [dispatchTasks]);
+  const dispatchTasksByTaskId = useMemo(() => new Map(dispatchTasks.map((task) => [task.taskId, task])), [dispatchTasks]);
+  const dispatchGroupsByGroupId = useMemo(() => new Map(dispatchGroups.map((group) => [group.groupId, group])), [dispatchGroups]);
+  const dependencyMissingDetails = useMemo(
+    () => readDependencyMissingDetails(events, run?.currentStageId),
+    [events, run?.currentStageId],
+  );
   const pendingApprovals = approvals.filter((approval) => approval.status === 'pending');
+
+  const retryDependencyPreflightAfterSkillChange = async (): Promise<void> => {
+    if (!team) {
+      return;
+    }
+    await fetchSkills({ force: true, fresh: true });
+    await submitDecision(team.id, 'retry', t('run.dependencyMissing.retryAfterInstall'));
+    await tickRun(team.id);
+  };
+
+  const handleInstallMissingSkill = async (entry: TeamSkillDependencyEntry): Promise<void> => {
+    if (!team || !isClawHubDependencySource(entry.source)) {
+      return;
+    }
+    await runUiAction(`dependency-skill-install:${team.id}:${entry.name}`, async () => {
+      await installSkill(readClawHubSkillSlug(entry.name, entry.source));
+      await retryDependencyPreflightAfterSkillChange();
+    });
+  };
+
+  const handleImportMissingSkillFromDeclaredSource = async (entry: TeamSkillDependencyEntry): Promise<void> => {
+    if (!team || !isLocalDependencySource(entry.source)) {
+      return;
+    }
+    await runUiAction(`dependency-skill-import:${team.id}:${entry.name}`, async () => {
+      await importLocalSkill(normalizeDependencySource(entry.source));
+      await retryDependencyPreflightAfterSkillChange();
+    });
+  };
+
+  const handleImportMissingSkillFromLocalPicker = async (entry: TeamSkillDependencyEntry): Promise<void> => {
+    if (!team) {
+      return;
+    }
+    await runUiAction(`dependency-skill-import:${team.id}:${entry.name}`, async () => {
+      const selectedPath = await pickLocalSkillSource({
+        title: t('run.dependencyMissing.importLocalSkill'),
+        buttonLabel: t('run.dependencyMissing.importLocalSkill'),
+      });
+      if (!selectedPath) {
+        return;
+      }
+      await importLocalSkill(selectedPath);
+      await retryDependencyPreflightAfterSkillChange();
+    });
+  };
+
+  const handleOpenDependencySource = async (source: string | undefined): Promise<void> => {
+    const value = normalizeDependencySource(source);
+    if (!isOpenableDependencySource(value)) {
+      return;
+    }
+    await invokeIpc('shell:openExternal', value);
+  };
 
   if (!team || !resolvedTeamId) {
     return (
@@ -155,7 +275,7 @@ export function TeamChat({ teamId }: { teamId?: string }) {
           </Button>
           <Button
             variant="outline"
-            onClick={() => void runUiAction(`start:${team.id}`, () => startRun(team.id))}
+            onClick={() => void runUiAction(`start:${team.id}`, () => startRun(team.id, 'Analyze Series B investment in Anthropic, AI safety company, $5B valuation.'))}
             disabled={!canStart}
           >
             {t('run.start')}
@@ -182,38 +302,53 @@ export function TeamChat({ teamId }: { teamId?: string }) {
       <div className="grid gap-4 xl:grid-cols-[1.4fr_1fr_1fr]">
         <Card>
           <CardHeader>
-            <CardTitle className="text-base">{t('run.stages')}</CardTitle>
+            <CardTitle className="text-base">{t('run.workflow')}</CardTitle>
           </CardHeader>
           <CardContent className="space-y-3">
-            <div className="grid gap-3 lg:grid-cols-2 2xl:grid-cols-3">
-              {(['pending', 'running', 'waiting_for_user', 'passed', 'failed', 'skipped'] as const).map((status) => (
-                <Card key={status}>
-                  <CardHeader className="pb-2">
-                    <CardTitle className="text-sm">
-                      {t(`run.stageStatus.${status}`)} ({stageSummary.stagesByStatus[status].length})
-                    </CardTitle>
-                  </CardHeader>
-                  <CardContent className="space-y-2">
-                    {stageSummary.stagesByStatus[status].length === 0 ? (
-                      <div className="text-xs text-muted-foreground">{t('run.emptyStages')}</div>
-                    ) : (
-                      stageSummary.stagesByStatus[status].map((stage) => (
-                        <div key={stage.stageId} className="rounded border p-2">
-                          <div className="text-sm font-medium">{stage.title}</div>
-                          <div className="text-xs text-muted-foreground">{stage.stageId}</div>
-                          <div className="mt-1 text-xs text-muted-foreground">
-                            {t('run.executor')}: {stage.roleId ?? stage.executor}
+            {!workflowPlan ? (
+              <div className="rounded border p-3 text-xs text-muted-foreground">{t('run.emptyWorkflow')}</div>
+            ) : (
+              <>
+                <div className="rounded border p-3">
+                  <div className="text-sm font-medium">{workflowPlan.title}</div>
+                  <div className="text-xs text-muted-foreground">{workflowPlan.workflowPlanId} · {workflowPlan.status}</div>
+                  {workflowPlan.summary ? <div className="mt-1 text-xs text-muted-foreground">{workflowPlan.summary}</div> : null}
+                </div>
+                <div className="space-y-3">
+                  {workflowPlan.groups.map((group) => {
+                    const dispatchGroup = dispatchGroupsByGroupId.get(group.groupId);
+                    return (
+                      <div key={group.groupId} className="rounded border p-3">
+                        <div className="flex items-start justify-between gap-2">
+                          <div>
+                            <div className="text-sm font-medium">{group.title}</div>
+                            <div className="text-xs text-muted-foreground">{group.groupId}</div>
                           </div>
-                          <div className="mt-1 text-xs text-muted-foreground">
-                            {t('run.attempt')}: {stage.attempt}/{stage.maxAttempts}
-                          </div>
+                          <div className="text-xs text-muted-foreground">{dispatchGroup?.status ?? t('run.workflowNotDispatched')}</div>
                         </div>
-                      ))
-                    )}
-                  </CardContent>
-                </Card>
-              ))}
-            </div>
+                        <div className="mt-3 grid gap-2 lg:grid-cols-2">
+                          {group.taskIds.map((taskId) => {
+                            const plannedTask = workflowPlan.tasks.find((task) => task.taskId === taskId);
+                            const dispatchTask = dispatchTasksByTaskId.get(taskId);
+                            if (!plannedTask) {
+                              return null;
+                            }
+                            return (
+                              <div key={taskId} className="rounded border bg-background/70 p-2">
+                                <div className="text-sm font-medium">{plannedTask.title}</div>
+                                <div className="text-xs text-muted-foreground">{plannedTask.taskId} · {plannedTask.roleId}</div>
+                                <div className="mt-1 text-xs text-muted-foreground">{dispatchTask?.status ?? t('run.workflowTaskPending')}</div>
+                                {dispatchTask?.statusReason ? <div className="mt-1 text-xs text-destructive">{dispatchTask.statusReason}</div> : null}
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </>
+            )}
           </CardContent>
         </Card>
 
@@ -268,7 +403,127 @@ export function TeamChat({ teamId }: { teamId?: string }) {
               ))
             )}
 
-            {run?.status === 'waiting_for_user' ? (
+            {run?.status === 'waiting_for_user' && dependencyMissingDetails ? (
+              <div className="rounded border border-amber-500/40 bg-amber-500/10 p-3 text-sm">
+                <div className="font-medium">{t('run.dependencyMissing.title')}</div>
+                <div className="mt-1 text-xs text-muted-foreground">
+                  {t('run.dependencyMissing.description')}
+                </div>
+
+                {dependencyMissingDetails.missingRequiredSkills.length > 0 || dependencyMissingDetails.missingOptionalSkills.length > 0 ? (
+                  <div className="mt-3 space-y-2">
+                    <div className="text-xs font-medium text-muted-foreground">{t('run.dependencyMissing.skills')}</div>
+                    {[...dependencyMissingDetails.missingRequiredSkills, ...dependencyMissingDetails.missingOptionalSkills].map((entry) => {
+                      const canInstallFromClawHub = isClawHubDependencySource(entry.source);
+                      const canImportFromDeclaredSource = isLocalDependencySource(entry.source);
+                      const canImportFromPicker = !canImportFromDeclaredSource;
+                      const canOpenSource = isOpenableDependencySource(entry.source);
+                      const isImportingThisSkill = pendingActionId === `dependency-skill-import:${team.id}:${entry.name}`;
+                      return (
+                        <div key={`skill:${entry.name}`} className="rounded border bg-background/70 p-2">
+                          <div className="flex items-start justify-between gap-2">
+                            <div className="min-w-0">
+                              <div className="font-medium">{entry.name}</div>
+                              <div className="mt-1 text-xs text-muted-foreground">{entry.purpose}</div>
+                              {entry.source ? <div className="mt-1 truncate text-xs text-muted-foreground">{entry.source}</div> : null}
+                              {!canInstallFromClawHub ? (
+                                <div className="mt-1 text-xs text-muted-foreground">{t('run.dependencyMissing.noAutomaticInstallSource')}</div>
+                              ) : null}
+                            </div>
+                            <div className="flex shrink-0 flex-wrap justify-end gap-2">
+                              {canOpenSource ? (
+                                <Button
+                                  size="sm"
+                                  variant="outline"
+                                  onClick={() => void handleOpenDependencySource(entry.source)}
+                                  disabled={loading || Boolean(pendingActionId)}
+                                >
+                                  {t('run.dependencyMissing.openSource')}
+                                </Button>
+                              ) : null}
+                              {canInstallFromClawHub ? (
+                                <Button
+                                  size="sm"
+                                  variant="outline"
+                                  onClick={() => void handleInstallMissingSkill(entry)}
+                                  disabled={loading || Boolean(pendingActionId)}
+                                >
+                                  {t('run.dependencyMissing.installSkill')}
+                                </Button>
+                              ) : null}
+                              {canImportFromDeclaredSource ? (
+                                <Button
+                                  size="sm"
+                                  variant="outline"
+                                  onClick={() => void handleImportMissingSkillFromDeclaredSource(entry)}
+                                  disabled={loading || Boolean(pendingActionId)}
+                                >
+                                  {isImportingThisSkill ? t('run.dependencyMissing.importingLocalSkill') : t('run.dependencyMissing.importLocalSkill')}
+                                </Button>
+                              ) : null}
+                              {canImportFromPicker ? (
+                                <Button
+                                  size="sm"
+                                  variant="outline"
+                                  onClick={() => void handleImportMissingSkillFromLocalPicker(entry)}
+                                  disabled={loading || Boolean(pendingActionId)}
+                                >
+                                  {isImportingThisSkill ? t('run.dependencyMissing.importingLocalSkill') : t('run.dependencyMissing.importLocalSkill')}
+                                </Button>
+                              ) : null}
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                ) : null}
+
+                {dependencyMissingDetails.missingRequiredTools.length > 0 || dependencyMissingDetails.missingOptionalTools.length > 0 ? (
+                  <div className="mt-3 space-y-2">
+                    <div className="text-xs font-medium text-muted-foreground">{t('run.dependencyMissing.tools')}</div>
+                    {[...dependencyMissingDetails.missingRequiredTools, ...dependencyMissingDetails.missingOptionalTools].map((entry) => (
+                      <div key={`tool:${entry.name}`} className="rounded border bg-background/70 p-2">
+                        <div className="font-medium">{entry.name}</div>
+                        <div className="mt-1 text-xs text-muted-foreground">{entry.purpose}</div>
+                        {entry.source ? <div className="mt-1 truncate text-xs text-muted-foreground">{entry.source}</div> : null}
+                      </div>
+                    ))}
+                  </div>
+                ) : null}
+
+                {dependencyMissingDetails.missingRequiredTools.length > 0 ? (
+                  <div className="mt-3 rounded border border-destructive/30 bg-destructive/10 p-2 text-xs text-destructive">
+                    {t('run.dependencyMissing.requiredToolBlocker')}
+                  </div>
+                ) : null}
+
+                <div className="mt-3 flex flex-wrap gap-2">
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() => void runUiAction(`decision:${team.id}:dependency-retry`, async () => {
+                      await submitDecision(team.id, 'retry', t('run.dependencyMissing.retryNote'));
+                      await tickRun(team.id);
+                    })}
+                    disabled={!canSubmitDecision}
+                  >
+                    {t('run.runDecision.retry')}
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() => void runUiAction(
+                      `decision:${team.id}:dependency-abort`,
+                      () => submitDecision(team.id, 'abort', t('run.dependencyMissing.abortNote')),
+                    )}
+                    disabled={!canSubmitDecision}
+                  >
+                    {t('run.runDecision.abort')}
+                  </Button>
+                </div>
+              </div>
+            ) : run?.status === 'waiting_for_user' ? (
               <div className="rounded border p-3 text-sm">
                 <div className="font-medium">{t('run.waitingDecision')}</div>
                 <div className="mt-2 grid gap-2 sm:grid-cols-[11rem_1fr]">
@@ -311,7 +566,7 @@ export function TeamChat({ teamId }: { teamId?: string }) {
               <div key={role.roleId} className="rounded border p-2">
                 <div className="text-sm font-medium">{role.roleId}</div>
                 <div className="text-xs text-muted-foreground">{role.agentName} · {role.status}</div>
-                <div className="mt-1 text-xs text-muted-foreground">{t('run.roleStages')}: {stageSummary.roleStageCountByRoleId[role.roleId] ?? 0}</div>
+                <div className="mt-1 text-xs text-muted-foreground">{t('run.roleTasks')}: {roleDispatchTaskCountByRoleId[role.roleId] ?? 0}</div>
               </div>
             ))}
           </CardContent>
@@ -454,12 +709,16 @@ export function TeamChat({ teamId }: { teamId?: string }) {
           <CardContent className="max-h-[360px] space-y-2 overflow-y-auto">
             {events.length === 0 ? (
               <div className="rounded border p-3 text-xs text-muted-foreground">{t('run.emptyEvents')}</div>
-            ) : events.map((event) => (
-              <div key={event.eventId} className="rounded border p-2 text-sm">
-                <div className="font-medium">{event.type}</div>
-                <div className="text-xs text-muted-foreground">rev {event.revision} · {formatTimestamp(event.createdAt)}</div>
-              </div>
-            ))}
+            ) : events.map((event) => {
+              const payloadSummary = formatEventPayloadSummary(event.payload);
+              return (
+                <div key={event.eventId} className="rounded border p-2 text-sm">
+                  <div className="font-medium">{event.type}</div>
+                  <div className="text-xs text-muted-foreground">rev {event.revision} · {formatTimestamp(event.createdAt)}</div>
+                  {payloadSummary ? <div className="mt-1 text-xs text-muted-foreground">{payloadSummary}</div> : null}
+                </div>
+              );
+            })}
           </CardContent>
         </Card>
       </div>

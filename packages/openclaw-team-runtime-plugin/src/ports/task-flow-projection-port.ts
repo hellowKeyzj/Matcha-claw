@@ -1,15 +1,15 @@
 import type { TeamRun } from '../domain/team-run.js'
-import type { TeamStage } from '../domain/team-stage.js'
+import type { TeamDispatchTaskRecord } from '../domain/team-workflow.js'
 
 export interface TeamTaskFlowProjectionInput {
   run: TeamRun
-  stages: TeamStage[]
+  dispatchTasks: TeamDispatchTaskRecord[]
   reason: string
 }
 
 export interface TeamTaskUpdateProjectionInput {
   run: TeamRun
-  stage: TeamStage
+  taskId: string
   roleId: string
   status: 'in_progress' | 'waiting' | 'blocked'
   summary: string

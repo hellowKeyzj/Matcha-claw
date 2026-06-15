@@ -39,9 +39,9 @@ describe('chat artifacts', () => {
       },
     ]);
 
-    const replyTurn = protocolItems.find((item) => item.kind === 'assistant-turn');
-    if (!replyTurn || replyTurn.kind !== 'assistant-turn') {
-      throw new Error('expected assistant-turn');
+    const toolTurn = protocolItems.find((item) => item.kind === 'assistant-turn' && item.turnKey === 'tool:edit-1');
+    if (!toolTurn || toolTurn.kind !== 'assistant-turn') {
+      throw new Error('expected tool assistant-turn');
     }
 
     const graph: SessionRenderExecutionGraphItem = {
@@ -57,7 +57,7 @@ describe('chat artifacts', () => {
       sessionLabel: 'child',
       steps: [],
       active: false,
-      replyItemKey: replyTurn.key,
+      replyItemKey: toolTurn.key,
     };
 
     const items = applyAssistantPresentationToItems({

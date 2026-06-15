@@ -1,22 +1,23 @@
 import { mkdir, rm, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import {
-  TEAM_AGENT_ID_PREFIX,
+  buildTeamManagedAgentId,
   TEAM_LEADER_ROLE_ID,
+  TEAM_LEADER_MANAGED_DENIED_TOOLS,
   TEAM_MANAGED_AGENT_CONFIG_KIND,
   TEAM_MANAGED_AGENT_CONFIG_SOURCE,
   TEAM_MANAGED_AGENT_CONFIG_VERSION,
   TEAM_MANAGED_AGENT_KIND,
   TEAM_MANAGED_AGENT_SANDBOX,
   TEAM_MANAGED_AGENT_TOOLS_PROFILE,
-  TEAM_LEADER_SUBAGENT_TOOLS,
+  TEAM_LEADER_RUNTIME_TOOLS,
   TEAM_ROLE_MANAGED_DENIED_TOOLS,
   TEAM_ROLE_RUNTIME_TOOLS,
   type TeamManagedAgentConfigProjection,
   type TeamRoleAgentConfigProjection,
   type TeamRoleBinding,
 } from '../domain/team-role.js'
-import type { TeamSkillPackage } from '../domain/team-skill-package.js'
+import type { TeamSkillDependencyEntry, TeamSkillPackage } from '../domain/team-skill-package.js'
 import { atomicWriteJson } from '../infrastructure/atomic-json.js'
 import { FileRoleBindingStore } from '../infrastructure/file-role-binding-store.js'
 
@@ -45,7 +46,7 @@ export class TeamProvisioningService {
   }): Promise<ProvisionRoleAgentsResult> {
     const roles = input.teamSkillPackage.roles.map((role) => {
       this.assertProvisionableRole(role.id)
-      this.assertProvisionableRoleTools(role.id, role.tools, input.teamSkillPackage.dependencies.requiredTools, input.teamSkillPackage.dependencies.optionalTools)
+      this.assertProvisionableRoleTools(role.id, role.tools, input.teamSkillPackage.dependencies.tools)
       const workspaceDir = path.join(input.runtimeRoot, 'roles', role.id)
       return {
         runId: input.runId,
@@ -117,8 +118,15 @@ export class TeamProvisioningService {
     await mkdir(leaderWorkspace, { recursive: true })
     await mkdir(this.leaderAgentDir(runId), { recursive: true })
     await writeFile(path.join(leaderWorkspace, 'AGENTS.md'), this.buildLeaderAgentsMd(teamSkillPackage, roles), 'utf8')
+    await writeFile(path.join(leaderWorkspace, 'SKILL.md'), this.buildSkillSummary(teamSkillPackage), 'utf8')
     await writeFile(path.join(leaderWorkspace, 'workflow.md'), teamSkillPackage.workflow.markdown, 'utf8')
     await writeFile(path.join(leaderWorkspace, 'bind.md'), teamSkillPackage.bind.markdown, 'utf8')
+    await writeFile(path.join(leaderWorkspace, 'dependencies.json'), JSON.stringify(teamSkillPackage.dependencies, null, 2), 'utf8')
+    for (const roleSpec of teamSkillPackage.roles) {
+      const roleDir = path.join(leaderWorkspace, 'roles', roleSpec.id)
+      await mkdir(roleDir, { recursive: true })
+      await writeFile(path.join(roleDir, 'AGENTS.md'), roleSpec.agentsMd, 'utf8')
+    }
   }
 
   private buildLeaderAgentsMd(teamSkillPackage: TeamSkillPackage, roles: TeamRoleBinding[]): string {
@@ -126,8 +134,86 @@ export class TeamProvisioningService {
       `# Team Leader: ${teamSkillPackage.name}`,
       '',
       'You orchestrate this TeamSkill run. Do not perform role work yourself.',
-      'Dispatch role agents sequentially according to workflow.md and bind.md.',
-      'Use explicit agent ids for subagent dispatch; do not spawn unspecified agents.',
+      '',
+      '## Workspace layout',
+      '- SKILL.md — skill overview',
+      '- workflow.md — workflow stages',
+      '- bind.md — role bindings and constraints',
+      '- dependencies.json — dependency manifest',
+      '- roles/{roleId}/AGENTS.md — role specification (one directory per role)',
+      '',
+      'Read all of the above before dispatching. Role specs are directories, not .md files.',
+      '',
+      '## Dispatch',
+      String.raw`<team_workflow_orchestration>
+You are the TeamRun leader. Your job is orchestration, not role execution.
+
+Core contract:
+- team_plan_workflow describes only work assigned to concrete Team roles from the roster.
+- Leader-only work stays outside team_plan_workflow.
+- Never include tasks with roleId "leader"; leader is orchestrator, not a workflow task role.
+- Never use managed OpenClaw agent ids in tasks[].roleId.
+- Every workflow task must include a concrete prompt for the assigned role.
+
+Execution pattern:
+1. Read SKILL.md, workflow.md, bind.md, dependencies.json, and each roles/{roleId}/AGENTS.md.
+2. If workflow.md contains leader-only context extraction, perform that extraction yourself before calling team_plan_workflow.
+3. Build team_plan_workflow with only concrete role-agent tasks.
+4. Embed any leader-extracted context directly into each role task prompt that needs it.
+5. After role artifacts finish, synthesize the final TeamRun output yourself as the leader response.
+
+Role id rules:
+- Valid tasks[].roleId values are exactly the Team role ids listed in the Role roster below.
+- Invalid tasks[].roleId values include "leader", managed OpenClaw agent ids, display names, and ad-hoc aliases.
+
+Correct example:
+<example>
+The workflow asks the leader to extract context, then asks Financial Analyst and Risk Analyst to work in parallel.
+The leader first extracts the context personally, then calls team_plan_workflow with role tasks only:
+{
+  "tasks": [
+    {
+      "taskId": "financial-analysis",
+      "roleId": "financial-analyst",
+      "title": "Financial analysis",
+      "dependsOnTaskIds": [],
+      "prompt": "Use this leader-extracted context: ... Produce the financial lens."
+    },
+    {
+      "taskId": "risk-analysis",
+      "roleId": "risk-analyst",
+      "title": "Risk analysis",
+      "dependsOnTaskIds": [],
+      "prompt": "Use this leader-extracted context: ... Produce the risk lens."
+    }
+  ]
+}
+</example>
+
+Incorrect example:
+<example>
+Do not model leader work as a workflow task:
+{
+  "tasks": [
+    {
+      "taskId": "leader-context-extraction",
+      "roleId": "leader",
+      "title": "Extract context",
+      "prompt": "Extract context for downstream roles."
+    }
+  ]
+}
+This is invalid because "leader" is not a dispatchable Team role and leader tasks cannot complete via team_submit_artifact.
+</example>
+
+Tool boundary:
+- Your first orchestration action must be a successful team_plan_workflow call once you finish any leader-only context extraction.
+- Until team_plan_workflow returns success, do not claim that roles were dispatched, do not say work is running in parallel, and do not say you are waiting for role outputs.
+- After calling team_plan_workflow, role agents are dispatched automatically. Do NOT call sessions_spawn.
+- team_send_message is reserved for real role child sessions and mailbox/audit traffic, not leader follow-up dispatch.
+- As leader, do not call team_send_message, team_submit_artifact, team_update_task, or team_request_approval.
+- Produce the final integrated TeamRun output as your leader response.
+</team_workflow_orchestration>`,
       '',
       '## Role roster',
       ...roles.map((role) => `- ${role.roleId}: ${role.agentId}`),
@@ -135,9 +221,25 @@ export class TeamProvisioningService {
     ].join('\n')
   }
 
+  private buildSkillSummary(teamSkillPackage: TeamSkillPackage): string {
+    return [
+      `# ${teamSkillPackage.name}`,
+      '',
+      `version: ${teamSkillPackage.version}`,
+      `kind: ${teamSkillPackage.kind}`,
+      '',
+      teamSkillPackage.description,
+      '',
+      '## Roles',
+      ...teamSkillPackage.roles.map((role) => `- ${role.id}: ${role.purpose}`),
+      '',
+    ].join('\n')
+  }
+
   private toLeaderConfigProjection(runtimeRoot: string, runId: string, roles: TeamRoleBinding[]): TeamRoleAgentConfigProjection {
+    const leaderAgentId = this.buildAgentId(runId, 'leader')
     return {
-      id: this.buildAgentId(runId, 'leader'),
+      id: leaderAgentId,
       name: 'leader',
       workspace: this.leaderWorkspaceDir(runtimeRoot),
       agentDir: this.leaderAgentDir(runId),
@@ -153,8 +255,8 @@ export class TeamProvisioningService {
       },
       tools: {
         profile: TEAM_MANAGED_AGENT_TOOLS_PROFILE,
-        alsoAllow: [...TEAM_LEADER_SUBAGENT_TOOLS],
-        deny: [],
+        allow: Array.from(new Set([...TEAM_LEADER_RUNTIME_TOOLS, ...TEAM_ROLE_RUNTIME_TOOLS, ...roles.flatMap((role) => role.tools)])),
+        deny: [...TEAM_LEADER_MANAGED_DENIED_TOOLS],
       },
       sandbox: { ...TEAM_MANAGED_AGENT_SANDBOX },
     }
@@ -190,7 +292,7 @@ export class TeamProvisioningService {
   }
 
   private buildAgentId(runId: string, roleId: string): string {
-    return `${TEAM_AGENT_ID_PREFIX}${runId}:${roleId}`
+    return buildTeamManagedAgentId(runId, roleId)
   }
 
   private assertProvisionableRole(roleId: string): void {
@@ -213,8 +315,8 @@ export class TeamProvisioningService {
     }
   }
 
-  private assertProvisionableRoleTools(roleId: string, tools: string[], requiredTools: string[], optionalTools: string[]): void {
-    const declaredTools = new Set([...requiredTools, ...optionalTools])
+  private assertProvisionableRoleTools(roleId: string, tools: string[], dependencyTools: TeamSkillDependencyEntry[]): void {
+    const declaredTools = new Set(dependencyTools.map((item) => item.name))
     for (const tool of tools) {
       if (!declaredTools.has(tool)) {
         throw new Error(`Role ${roleId} references tool ${tool}, but dependencies.yaml does not declare it.`)

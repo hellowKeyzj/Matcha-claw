@@ -22,49 +22,49 @@ const run = {
   packageVersion: '1.0.0',
   sourcePath: '.tmp/team',
   status: 'running',
-  currentStageId: 'step-1-design-operator-blueprint',
+  currentStageId: 'design-operator-blueprint',
   revision: 2,
   createdAt: 1,
   updatedAt: 2,
 };
 
-const stages = [
+const dispatchTasks = [
   {
+    dispatchTaskId: 'dispatch-task-pre-flight',
     runId: 'run-1',
-    stageId: 'step-0-pre-flight-dependency-check',
-    title: 'Pre-flight: dependency check',
-    executor: 'Leader',
-    status: 'passed',
-    attempt: 1,
-    maxAttempts: 1,
-    inputArtifactIds: [],
-    outputArtifactIds: [],
+    workflowPlanId: 'workflow-plan-1',
+    dispatchGroupId: 'dispatch-group-pre-flight',
+    groupId: 'pre-flight',
+    taskId: 'pre-flight-dependency-check',
+    roleId: 'team-runtime',
+    dispatchId: 'dispatch-pre-flight',
+    status: 'completed',
+    idempotencyKey: 'run-1:pre-flight-dependency-check',
     createdAt: 1,
-    updatedAt: 2,
+    completedAt: 2,
+    artifactId: 'artifact-pre-flight',
   },
   {
+    dispatchTaskId: 'dispatch-task-design',
     runId: 'run-1',
-    stageId: 'step-1-design-operator-blueprint',
-    title: 'Design: operator blueprint',
-    executor: 'operator-designer',
+    workflowPlanId: 'workflow-plan-1',
+    dispatchGroupId: 'dispatch-group-design',
+    groupId: 'design',
+    taskId: 'design-operator-blueprint',
     roleId: 'operator-designer',
-    gateType: 'design',
-    status: 'running',
-    attempt: 1,
-    maxAttempts: 2,
-    inputArtifactIds: [],
-    outputArtifactIds: [],
+    dispatchId: 'dispatch-design',
+    status: 'queued',
+    idempotencyKey: 'run-1:design-operator-blueprint',
     createdAt: 1,
-    updatedAt: 2,
   },
 ];
 
 describe('TeamRunTaskProjectionWorkflow', () => {
-  it('projects changed TeamRun stages into task-manager scope', async () => {
+  it('projects changed TeamRun workflow dispatch tasks into task-manager scope', async () => {
     const invokeTool = vi.fn()
       .mockResolvedValueOnce({ status: 200, data: { tasks: [] } })
       .mockResolvedValue({ status: 200, data: {} });
-    const gatewayInvoke = vi.fn().mockResolvedValue({ status: 200, data: { run, stages } });
+    const gatewayInvoke = vi.fn().mockResolvedValue({ status: 200, data: { run, dispatchTasks } });
     const workflow = new TeamRunTaskProjectionWorkflow({
       taskService: { invokeTool },
       gatewayWorkflow: { invoke: gatewayInvoke },
@@ -91,15 +91,17 @@ describe('TeamRunTaskProjectionWorkflow', () => {
       sessionKey: 'run-1',
       params: expect.objectContaining({
         teamKey: 'matchaclaw-team:run-1',
-        subject: 'ascendc-team: step-0-pre-flight-dependency-check',
+        subject: 'ascendc-team: pre-flight-dependency-check',
+        description: 'TeamRun run-1 task pre-flight-dependency-check',
         status: 'completed',
         owner: 'team-runtime',
         metadata: expect.objectContaining({
           source: 'matchaclaw.team-runtime',
-          projectionIdentity: 'matchaclaw.team-runtime:run-1:step-0-pre-flight-dependency-check',
+          projectionIdentity: 'matchaclaw.team-runtime:run-1:pre-flight-dependency-check',
           projectionRevision: 2,
           teamRunId: 'run-1',
-          teamStageId: 'step-0-pre-flight-dependency-check',
+          teamTaskId: 'pre-flight-dependency-check',
+          dispatchTaskStatus: 'completed',
           projectionReason: 'run:started',
         }),
       }),
@@ -109,14 +111,96 @@ describe('TeamRunTaskProjectionWorkflow', () => {
       sessionKey: 'run-1',
       params: expect.objectContaining({
         teamKey: 'matchaclaw-team:run-1',
+        subject: 'ascendc-team: design-operator-blueprint',
+        description: 'TeamRun run-1 task design-operator-blueprint',
+        activeForm: 'Running design-operator-blueprint',
         status: 'in_progress',
         owner: 'operator-designer',
-        metadata: expect.objectContaining({ teamStageId: 'step-1-design-operator-blueprint' }),
+        metadata: expect.objectContaining({
+          teamTaskId: 'design-operator-blueprint',
+          dispatchTaskStatus: 'queued',
+        }),
       }),
     });
   });
 
-  it('updates existing projected tasks by TeamRun metadata', async () => {
+  it('deletes existing projected tasks without reading deleted TeamRun snapshot', async () => {
+    const invokeTool = vi.fn()
+      .mockResolvedValueOnce({
+        status: 200,
+        data: {
+          tasks: [
+            {
+              id: 'task-design',
+              metadata: {
+                source: 'matchaclaw.team-runtime',
+                projectionIdentity: 'matchaclaw.team-runtime:run-1:design-operator-blueprint',
+                projectionRevision: 2,
+                teamRunId: 'run-1',
+                teamTaskId: 'design-operator-blueprint',
+              },
+            },
+            {
+              id: 'task-other-run',
+              metadata: {
+                source: 'matchaclaw.team-runtime',
+                projectionIdentity: 'matchaclaw.team-runtime:run-2:other-task',
+                teamRunId: 'run-2',
+              },
+            },
+            {
+              id: 'task-unrelated',
+              metadata: {
+                source: 'manual',
+                teamRunId: 'run-1',
+              },
+            },
+          ],
+        },
+      })
+      .mockResolvedValue({ status: 200, data: {} });
+    const gatewayInvoke = vi.fn();
+    const workflow = new TeamRunTaskProjectionWorkflow({
+      taskService: { invokeTool },
+      gatewayWorkflow: { invoke: gatewayInvoke },
+    });
+
+    await workflow.projectAfterOperation({
+      operationId: 'team.runDelete',
+      scope: teamRunScope('run-1'),
+      params: { runId: 'run-1' },
+      responseData: { runId: 'run-1', deleted: true },
+    });
+
+    expect(gatewayInvoke).not.toHaveBeenCalled();
+    expect(invokeTool).toHaveBeenNthCalledWith(1, {
+      method: 'TaskList',
+      sessionKey: 'run-1',
+      params: {
+        sessionKey: 'run-1',
+        teamKey: 'matchaclaw-team:run-1',
+      },
+    });
+    expect(invokeTool).toHaveBeenNthCalledWith(2, {
+      method: 'TaskUpdate',
+      sessionKey: 'run-1',
+      params: expect.objectContaining({
+        taskId: 'task-design',
+        teamKey: 'matchaclaw-team:run-1',
+        status: 'deleted',
+        metadata: expect.objectContaining({
+          source: 'matchaclaw.team-runtime',
+          projectionIdentity: 'matchaclaw.team-runtime:run-1:design-operator-blueprint',
+          teamRunId: 'run-1',
+          teamRunDeleted: true,
+          projectionReason: 'run:deleted',
+        }),
+      }),
+    });
+    expect(invokeTool).toHaveBeenCalledTimes(2);
+  });
+
+  it('updates existing projected tasks from TeamRun tick dispatch actions', async () => {
     const invokeTool = vi.fn()
       .mockResolvedValueOnce({
         status: 200,
@@ -125,23 +209,23 @@ describe('TeamRunTaskProjectionWorkflow', () => {
             id: 'task-design',
             metadata: {
               teamRunId: 'run-1',
-              teamStageId: 'step-1-design-operator-blueprint',
+              teamTaskId: 'design-operator-blueprint',
             },
           }],
         },
       })
       .mockResolvedValue({ status: 200, data: {} });
-    const gatewayInvoke = vi.fn().mockResolvedValue({ status: 200, data: { run, stages: [stages[1]] } });
+    const gatewayInvoke = vi.fn().mockResolvedValue({ status: 200, data: { run, dispatchTasks: [dispatchTasks[1]] } });
     const workflow = new TeamRunTaskProjectionWorkflow({
       taskService: { invokeTool },
       gatewayWorkflow: { invoke: gatewayInvoke },
     });
 
     await workflow.projectAfterOperation({
-      operationId: 'team.gateEvaluate',
+      operationId: 'team.runTick',
       scope: teamRunScope('run-1'),
       params: { runId: 'run-1' },
-      responseData: { gate: { created: true } },
+      responseData: { action: 'dispatch_prepared', currentStageId: 'design-operator-blueprint' },
     });
 
     expect(invokeTool).toHaveBeenNthCalledWith(2, {
@@ -152,22 +236,22 @@ describe('TeamRunTaskProjectionWorkflow', () => {
         teamKey: 'matchaclaw-team:run-1',
         metadata: expect.objectContaining({
           teamRunRevision: 2,
-          projectionReason: 'stage:gate_transitioned',
+          projectionReason: 'dispatch:task_queued',
         }),
       }),
     });
     expect(invokeTool).toHaveBeenCalledTimes(2);
   });
 
-  it('projects failed and cancelled TeamRun stages as completed tasks', async () => {
+  it.each(['failed', 'cancelled', 'stale'] as const)('projects %s TeamRun workflow dispatch tasks as completed tasks', async (dispatchTaskStatus) => {
     const invokeTool = vi.fn()
       .mockResolvedValueOnce({ status: 200, data: { tasks: [] } })
       .mockResolvedValue({ status: 200, data: {} });
     const gatewayInvoke = vi.fn().mockResolvedValue({
       status: 200,
       data: {
-        run: { ...run, status: 'failed', currentStageId: 'step-1-design-operator-blueprint', revision: 3 },
-        stages: [{ ...stages[1], status: 'failed' }],
+        run: { ...run, revision: 3 },
+        dispatchTasks: [{ ...dispatchTasks[1], status: dispatchTaskStatus, statusReason: `${dispatchTaskStatus}:reason` }],
       },
     });
     const workflow = new TeamRunTaskProjectionWorkflow({
@@ -179,7 +263,7 @@ describe('TeamRunTaskProjectionWorkflow', () => {
       operationId: 'team.runDecisionSubmit',
       scope: teamRunScope('run-1'),
       params: { runId: 'run-1' },
-      responseData: { runId: 'run-1', status: 'failed', revision: 3 },
+      responseData: { runId: 'run-1', status: dispatchTaskStatus, revision: 3 },
     });
 
     expect(invokeTool).toHaveBeenNthCalledWith(2, {
@@ -188,8 +272,9 @@ describe('TeamRunTaskProjectionWorkflow', () => {
       params: expect.objectContaining({
         status: 'completed',
         metadata: expect.objectContaining({
-          teamRunStatus: 'failed',
-          stageStatus: 'failed',
+          teamRunStatus: 'running',
+          dispatchTaskStatus,
+          projectionReason: 'decision:submitted',
         }),
       }),
     });
@@ -205,17 +290,17 @@ describe('TeamRunTaskProjectionWorkflow', () => {
               id: '1',
               metadata: {
                 teamRunId: 'run-1',
-                teamStageId: 'step-1-design-operator-blueprint',
+                teamTaskId: 'design-operator-blueprint',
                 teamRunRevision: 1,
               },
             },
             {
               id: '2',
               metadata: {
-                projectionIdentity: 'matchaclaw.team-runtime:run-1:step-1-design-operator-blueprint',
+                projectionIdentity: 'matchaclaw.team-runtime:run-1:design-operator-blueprint',
                 projectionRevision: 2,
                 teamRunId: 'run-1',
-                teamStageId: 'step-1-design-operator-blueprint',
+                teamTaskId: 'design-operator-blueprint',
               },
             },
           ],
@@ -224,7 +309,7 @@ describe('TeamRunTaskProjectionWorkflow', () => {
       .mockResolvedValue({ status: 200, data: {} });
     const gatewayInvoke = vi.fn().mockResolvedValue({
       status: 200,
-      data: { run: { ...run, revision: 3 }, stages: [stages[1]] },
+      data: { run: { ...run, revision: 3 }, dispatchTasks: [dispatchTasks[1]] },
     });
     const workflow = new TeamRunTaskProjectionWorkflow({
       taskService: { invokeTool },
@@ -232,10 +317,10 @@ describe('TeamRunTaskProjectionWorkflow', () => {
     });
 
     await workflow.projectAfterOperation({
-      operationId: 'team.gateEvaluate',
+      operationId: 'team.runTick',
       scope: teamRunScope('run-1'),
       params: { runId: 'run-1' },
-      responseData: { gate: { created: true } },
+      responseData: { action: 'dispatch_prepared', currentStageId: 'design-operator-blueprint' },
     });
 
     expect(invokeTool).toHaveBeenNthCalledWith(2, {
@@ -244,7 +329,7 @@ describe('TeamRunTaskProjectionWorkflow', () => {
       params: expect.objectContaining({
         taskId: '2',
         metadata: expect.objectContaining({
-          projectionIdentity: 'matchaclaw.team-runtime:run-1:step-1-design-operator-blueprint',
+          projectionIdentity: 'matchaclaw.team-runtime:run-1:design-operator-blueprint',
           projectionRevision: 3,
         }),
       }),
@@ -260,16 +345,16 @@ describe('TeamRunTaskProjectionWorkflow', () => {
           tasks: [{
             id: 'task-design',
             metadata: {
-              projectionIdentity: 'matchaclaw.team-runtime:run-1:step-1-design-operator-blueprint',
+              projectionIdentity: 'matchaclaw.team-runtime:run-1:design-operator-blueprint',
               projectionRevision: 4,
               teamRunId: 'run-1',
-              teamStageId: 'step-1-design-operator-blueprint',
+              teamTaskId: 'design-operator-blueprint',
             },
           }],
         },
       })
       .mockResolvedValue({ status: 200, data: {} });
-    const gatewayInvoke = vi.fn().mockResolvedValue({ status: 200, data: { run, stages: [stages[1]] } });
+    const gatewayInvoke = vi.fn().mockResolvedValue({ status: 200, data: { run, dispatchTasks: [dispatchTasks[1]] } });
     const workflow = new TeamRunTaskProjectionWorkflow({
       taskService: { invokeTool },
       gatewayWorkflow: { invoke: gatewayInvoke },

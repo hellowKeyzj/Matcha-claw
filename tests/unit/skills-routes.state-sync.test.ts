@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { describe, expect, it, vi } from 'vitest';
 import { skillsRoutes } from '../../runtime-host/api/routes/skills-routes';
+import type { RuntimePluginConfigProjectionPort, RuntimePluginConfigStorePort } from '../../runtime-host/application/plugins/runtime-plugin-service';
 import { createSkillManagementCapabilityOperationRoutes } from '../../runtime-host/application/capabilities/skill/skill-management-capability';
 import { SkillsService } from '../../runtime-host/application/skills/service';
 import { LocalSkillImportWorkflow } from '../../runtime-host/application/workflows/skill-install/local-skill-import-workflow';
@@ -47,6 +48,8 @@ function createSkillsService(input: {
   };
   getPreviewRoots?: () => Promise<string[]>;
   readmePreview?: (skillKey: string, input: { filePath?: string; baseDir?: string }) => Promise<unknown>;
+  pluginConfigStore?: RuntimePluginConfigStorePort;
+  pluginConfigProjection?: Pick<RuntimePluginConfigProjectionPort, 'readManuallyManagedPluginIds' | 'applyManuallyManagedPluginIds'>;
   openClawDir?: string;
   workingDir?: string;
 }) {
@@ -121,6 +124,18 @@ function createSkillsService(input: {
     setManyEnabled: input.setManySkillsEnabled ?? (async () => ({ success: true })),
     listEffective: input.listEffectiveSkills ?? (async () => []),
   };
+  const pluginConfigStore = input.pluginConfigStore ?? {
+    read: vi.fn(async () => ({})),
+    updateDirty: vi.fn(async (mutate) => {
+      const config: Record<string, unknown> = {};
+      const update = await mutate(config);
+      return update.result;
+    }),
+  };
+  const pluginConfigProjection = input.pluginConfigProjection ?? {
+    readManuallyManagedPluginIds: vi.fn(async () => []),
+    applyManuallyManagedPluginIds: vi.fn(async (config: Record<string, unknown>) => config),
+  };
   const skillRuntimeWorkflow = new SkillRuntimeWorkflow({
     gateway: {
       readGatewayConnectionState: async () => ({ state: 'connected', gatewayReady: true }),
@@ -186,6 +201,8 @@ function createSkillsService(input: {
       skillRuntimeWorkflow,
       skillBundleTransferWorkflow,
       localSkillImportWorkflow,
+      pluginConfigStore,
+      pluginConfigProjection,
       logger,
     }),
     skillRuntimeWorkflow,
@@ -813,6 +830,87 @@ describe('skills route state sync', () => {
     });
   });
 
+  it('skills.updateState capability 会同步刷新 team-runtime 依赖可用清单', async () => {
+    const pluginConfig = {
+      plugins: {
+        allow: ['team-runtime'],
+        entries: {
+          'team-runtime': {
+            enabled: true,
+            config: {
+              availableSkills: ['*'],
+              availableTools: ['*'],
+            },
+          },
+        },
+      },
+      skills: {
+        entries: {
+          'multi-search-engine': { enabled: false },
+          'web-extract': { enabled: true },
+        },
+      },
+    } as Record<string, unknown>;
+    const pluginConfigStore = {
+      read: vi.fn(async () => pluginConfig),
+      updateDirty: vi.fn(async (mutate) => {
+        const update = await mutate(pluginConfig);
+        return update.result;
+      }),
+    };
+    const pluginConfigProjection = {
+      readManuallyManagedPluginIds: vi.fn(async () => ['team-runtime']),
+      applyManuallyManagedPluginIds: vi.fn(async (config: Record<string, any>) => {
+        const skills = config.skills?.entries ?? {};
+        return {
+          ...config,
+          plugins: {
+            ...config.plugins,
+            entries: {
+              ...config.plugins.entries,
+              'team-runtime': {
+                ...config.plugins.entries['team-runtime'],
+                config: {
+                  ...config.plugins.entries['team-runtime'].config,
+                  availableSkills: Object.entries(skills)
+                    .filter(([, entry]) => (entry as { enabled?: boolean }).enabled === true)
+                    .map(([skillKey]) => skillKey),
+                  availableTools: ['*'],
+                },
+              },
+            },
+          },
+        };
+      }),
+    };
+    const setSkillEnabled = vi.fn(async (skillKey: string, enabled: boolean) => {
+      ((pluginConfig.skills as any).entries as Record<string, { enabled?: boolean }>)[skillKey] = { enabled };
+      return { success: true };
+    });
+    const skillsService = createSkillsService({
+      getAllSkillConfigs: async () => (pluginConfig.skills as any).entries,
+      setSkillEnabled,
+      pluginConfigStore,
+      pluginConfigProjection,
+      gateway: {
+        isGatewayRunning: async () => true,
+        gatewayRpc: vi.fn(async () => ({})),
+      },
+    });
+
+    await dispatchSkillManagementCapability(skillsService, 'skills.updateState', {
+      skillKey: 'multi-search-engine',
+      enabled: true,
+    });
+
+    expect(pluginConfigStore.updateDirty).toHaveBeenCalledTimes(1);
+    expect(pluginConfigProjection.readManuallyManagedPluginIds).toHaveBeenCalledWith(pluginConfig);
+    expect((pluginConfig.plugins as any).entries['team-runtime'].config.availableSkills).toEqual([
+      'multi-search-engine',
+      'web-extract',
+    ]);
+  });
+
   it('skills.updateState capability 在 Gateway 未运行时仍只提交同一个后台同步任务', async () => {
     const gatewayRpc = vi.fn(async () => ({}));
     const setSkillEnabled = vi.fn(async () => ({ success: true }));
@@ -1085,10 +1183,63 @@ describe('skills route state sync', () => {
     const tempDir = await mkdtemp(join(tmpdir(), 'matchaclaw-skills-import-'));
     try {
       const skillsDir = join(tempDir, 'skills');
-      const setSkillEnabled = vi.fn(async () => ({ success: true }));
+      const pluginConfig = {
+        plugins: {
+          allow: ['team-runtime'],
+          entries: {
+            'team-runtime': {
+              enabled: true,
+              config: {
+                availableSkills: [],
+                availableTools: ['*'],
+              },
+            },
+          },
+        },
+        skills: {
+          entries: {
+            'web-search': { enabled: false },
+          },
+        },
+      } as Record<string, unknown>;
+      const pluginConfigStore = {
+        read: vi.fn(async () => pluginConfig),
+        updateDirty: vi.fn(async (mutate) => {
+          const update = await mutate(pluginConfig);
+          return update.result;
+        }),
+      };
+      const pluginConfigProjection = {
+        readManuallyManagedPluginIds: vi.fn(async () => ['team-runtime']),
+        applyManuallyManagedPluginIds: vi.fn(async (config: Record<string, any>) => ({
+          ...config,
+          plugins: {
+            ...config.plugins,
+            entries: {
+              ...config.plugins.entries,
+              'team-runtime': {
+                ...config.plugins.entries['team-runtime'],
+                config: {
+                  ...config.plugins.entries['team-runtime'].config,
+                  availableSkills: Object.entries(config.skills?.entries ?? {})
+                    .filter(([, entry]) => (entry as { enabled?: boolean }).enabled === true)
+                    .map(([skillKey]) => skillKey),
+                  availableTools: ['*'],
+                },
+              },
+            },
+          },
+        })),
+      };
+      const setSkillEnabled = vi.fn(async (skillKey: string, enabled: boolean) => {
+        ((pluginConfig.skills as any).entries as Record<string, { enabled?: boolean }>)[skillKey] = { enabled };
+        return { success: true };
+      });
       const skillsService = createSkillsService({
         skillsDir,
         setSkillEnabled,
+        pluginConfigStore,
+        pluginConfigProjection,
         gateway: {
           isGatewayRunning: async () => false,
           gatewayRpc: vi.fn(async () => ({})),
@@ -1116,6 +1267,9 @@ describe('skills route state sync', () => {
       });
       await expect(readFile(join(skillsDir, 'web-search', 'scripts', 'run.py'), 'utf8')).resolves.toBe('print("hi")\n');
       expect(setSkillEnabled).toHaveBeenCalledWith('web-search', true);
+      expect(pluginConfigStore.updateDirty).toHaveBeenCalledTimes(1);
+      expect(pluginConfigProjection.readManuallyManagedPluginIds).toHaveBeenCalledWith(pluginConfig);
+      expect((pluginConfig.plugins as any).entries['team-runtime'].config.availableSkills).toEqual(['web-search']);
       expect((skillsService as any).deps.operationsWorkflow.deps.jobs.submitGatewayUpdate).toHaveBeenCalledWith({
         skillKey: 'web-search',
         updates: { enabled: true },

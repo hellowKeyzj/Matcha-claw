@@ -3,16 +3,23 @@ import type { TeamManagedAgentConfigProjection, TeamRoleAgentConfigProjection } 
 
 export type { TeamManagedAgentConfigProjection, TeamRoleAgentConfigProjection };
 
-const TEAM_AGENT_ID_PREFIX = 'matchaclaw-team:';
+const TEAM_LEADER_ROLE_ID = 'leader';
 const TEAM_MANAGED_AGENT_CONFIG_KIND = 'matchaclaw-team-managed-openclaw-agents';
 const TEAM_MANAGED_AGENT_CONFIG_VERSION = 1;
 const TEAM_MANAGED_AGENT_CONFIG_SOURCE = 'matchaclaw.team-runtime';
 const TEAM_MANAGED_AGENT_KIND = 'team-role-agent';
-const TEAM_LEADER_ROLE_ID = 'leader';
-const TEAM_MANAGED_AGENT_TOOLS_PROFILE = 'coding';
-const TEAM_MANAGED_AGENT_SANDBOX = { mode: 'all', scope: 'agent', workspaceAccess: 'rw' } as const;
-const LEADER_ALLOWED_ALSO_ALLOW_TOOLS = new Set<string>(['sessions_spawn', 'sessions_yield', 'subagents']);
-const ROLE_DENIED_TOOLS = new Set<string>(['sessions_spawn', 'sessions_yield', 'subagents']);
+const TEAM_MANAGED_AGENT_TOOLS_PROFILE = 'full';
+const TEAM_LEADER_RUNTIME_TOOLS = ['team_plan_workflow'] as const;
+const TEAM_ROLE_RUNTIME_TOOLS = ['team_submit_artifact', 'team_send_message', 'team_request_approval', 'team_update_task'] as const;
+const TEAM_LEADER_MANAGED_DENIED_TOOLS = ['sessions_yield', 'subagents'] as const;
+const TEAM_ROLE_MANAGED_DENIED_TOOLS = ['sessions_spawn', 'sessions_yield', 'subagents'] as const;
+const OPENCLAW_AGENT_ID_PATTERN = /^[a-z0-9][a-z0-9_-]{0,63}$/;
+const SANDBOX_MODES = new Set<string>(['off', 'non-main', 'all']);
+const SANDBOX_SCOPES = new Set<string>(['session', 'agent', 'shared']);
+const SANDBOX_WORKSPACE_ACCESSES = new Set<string>(['none', 'ro', 'rw']);
+const LEADER_REQUIRED_TOOLS = new Set<string>([...TEAM_LEADER_RUNTIME_TOOLS, ...TEAM_ROLE_RUNTIME_TOOLS]);
+const LEADER_DENIED_TOOLS = new Set<string>(TEAM_LEADER_MANAGED_DENIED_TOOLS);
+const ROLE_DENIED_TOOLS = new Set<string>(TEAM_ROLE_MANAGED_DENIED_TOOLS);
 
 export interface TeamManagedAgentConfigWorkflowDeps {
   readonly configRepository: Pick<OpenClawConfigRepositoryPort, 'updateDirty'>;
@@ -28,19 +35,15 @@ export class TeamManagedAgentConfigWorkflow {
       const agents = readRecord(config.agents);
       const existingList = Array.isArray(agents.list) ? agents.list : [];
       const nextManagedAgents = managedAgentConfig.agents.map((agent) => this.toOpenClawAgentConfig(agent));
-      const nextManagedIds = new Set(nextManagedAgents.map((agent) => agent.id));
+      const nextManagedIds = new Set(nextManagedAgents.map((agent) => readString(agent.id)));
       for (const item of existingList) {
         const record = readRecord(item);
         const id = readString(record.id);
-        if (nextManagedIds.has(id) && !this.isOwnedManagedAgent(record, managedAgentConfig.runId)) {
+        if (nextManagedIds.has(id) && this.hasForeignManagedOwnership(record, managedAgentConfig.runId)) {
           throw new Error(`Team managed agent id collides with unmanaged OpenClaw agent: ${id}`);
         }
       }
-      const retained = existingList.filter((item) => {
-        const record = readRecord(item);
-        const id = readString(record.id);
-        return !this.isOwnedManagedAgent(record, managedAgentConfig.runId) || nextManagedIds.has(id);
-      });
+      const retained = existingList.filter((item) => !nextManagedIds.has(readString(readRecord(item).id)));
       const merged = upsertAgents(retained, nextManagedAgents);
       const nextAgents = { ...agents, list: merged };
       const changed = config.agents !== agents || JSON.stringify(agents.list ?? []) !== JSON.stringify(nextAgents.list);
@@ -49,6 +52,32 @@ export class TeamManagedAgentConfigWorkflow {
       }
       return {
         result: { changed, agentIds },
+        changed,
+      };
+    });
+  }
+
+  async removeRun(managedAgentConfig: TeamManagedAgentConfigProjection): Promise<{ changed: boolean; agentIds: string[] }> {
+    this.assertManagedAgentConfig(managedAgentConfig);
+    const targetAgentIds = new Set(managedAgentConfig.agents.map((agent) => agent.id));
+    return await this.deps.configRepository.updateDirty((config) => {
+      const agents = readRecord(config.agents);
+      const existingList = Array.isArray(agents.list) ? agents.list : [];
+      const removedAgentIds: string[] = [];
+      const retained = existingList.filter((item) => {
+        const id = readString(readRecord(item).id);
+        if (!targetAgentIds.has(id)) {
+          return true;
+        }
+        removedAgentIds.push(id);
+        return false;
+      });
+      const changed = removedAgentIds.length > 0;
+      if (changed) {
+        config.agents = { ...agents, list: retained };
+      }
+      return {
+        result: { changed, agentIds: removedAgentIds },
         changed,
       };
     });
@@ -114,8 +143,8 @@ export class TeamManagedAgentConfigWorkflow {
     const ids = new Set<string>();
     const agentsById = new Map<string, TeamRoleAgentConfigProjection>();
     for (const agent of config.agents) {
-      if (!agent.id.startsWith(`${TEAM_AGENT_ID_PREFIX}${config.runId}:`)) {
-        throw new Error(`Team managed agent id does not belong to run ${config.runId}: ${agent.id}`);
+      if (!OPENCLAW_AGENT_ID_PATTERN.test(agent.id)) {
+        throw new Error(`Team managed agent id is invalid for OpenClaw config: ${agent.id}`);
       }
       if (ids.has(agent.id)) {
         throw new Error(`Duplicate Team managed agent id: ${agent.id}`);
@@ -125,7 +154,7 @@ export class TeamManagedAgentConfigWorkflow {
       if (agent.managedBy !== TEAM_MANAGED_AGENT_CONFIG_SOURCE || agent.source !== TEAM_MANAGED_AGENT_CONFIG_SOURCE || agent.managedRunId !== config.runId || agent.managedKind !== TEAM_MANAGED_AGENT_KIND) {
         throw new Error(`Team managed agent ownership is invalid: ${agent.id}`);
       }
-      if (!agent.managedRoleId.trim() || agent.id !== `${TEAM_AGENT_ID_PREFIX}${config.runId}:${agent.managedRoleId}`) {
+      if (!agent.managedRoleId.trim()) {
         throw new Error(`Team managed agent role ownership is invalid: ${agent.id}`);
       }
       this.assertTools(agent);
@@ -164,11 +193,6 @@ export class TeamManagedAgentConfigWorkflow {
       tools: agent.tools,
       sandbox: agent.sandbox,
       ...(agent.subagents ? { subagents: agent.subagents } : {}),
-      managedBy: agent.managedBy,
-      source: agent.source,
-      managedRunId: agent.managedRunId,
-      managedRoleId: agent.managedRoleId,
-      managedKind: agent.managedKind,
     };
   }
 
@@ -251,11 +275,15 @@ export class TeamManagedAgentConfigWorkflow {
     };
   }
 
-  private isOwnedManagedAgent(agent: Record<string, unknown>, runId: string): boolean {
-    return readString(agent.managedBy) === TEAM_MANAGED_AGENT_CONFIG_SOURCE
-      && readString(agent.source) === TEAM_MANAGED_AGENT_CONFIG_SOURCE
-      && readString(agent.managedRunId) === runId
-      && readString(agent.managedKind) === TEAM_MANAGED_AGENT_KIND;
+  private hasForeignManagedOwnership(agent: Record<string, unknown>, runId: string): boolean {
+    const hasOwnershipFields = agent.managedBy !== undefined || agent.source !== undefined || agent.managedRunId !== undefined || agent.managedRoleId !== undefined || agent.managedKind !== undefined;
+    if (!hasOwnershipFields) {
+      return false;
+    }
+    return readString(agent.managedBy) !== TEAM_MANAGED_AGENT_CONFIG_SOURCE
+      || readString(agent.source) !== TEAM_MANAGED_AGENT_CONFIG_SOURCE
+      || readString(agent.managedRunId) !== runId
+      || readString(agent.managedKind) !== TEAM_MANAGED_AGENT_KIND;
   }
 
   private assertTools(agent: TeamRoleAgentConfigProjection): void {
@@ -266,8 +294,11 @@ export class TeamManagedAgentConfigWorkflow {
     const allow = agent.tools.allow ?? [];
     const alsoAllow = agent.tools.alsoAllow ?? [];
     if (isLeader) {
-      if (allow.length > 0 || !sameStringSet(alsoAllow, LEADER_ALLOWED_ALSO_ALLOW_TOOLS) || agent.tools.deny.length > 0) {
+      if (!containsStringSet(allow, LEADER_REQUIRED_TOOLS) || hasIntersection(allow, LEADER_DENIED_TOOLS) || alsoAllow.length > 0 || !sameStringSet(agent.tools.deny, LEADER_DENIED_TOOLS)) {
         throw new Error(`Team managed leader tools are invalid: ${agent.id}`);
+      }
+      if (!agent.subagents || agent.subagents.requireAgentId !== true) {
+        throw new Error(`Team managed leader subagent routing is invalid: ${agent.id}`);
       }
       return;
     }
@@ -280,7 +311,7 @@ export class TeamManagedAgentConfigWorkflow {
   }
 
   private assertSandbox(agent: TeamRoleAgentConfigProjection): void {
-    if (agent.sandbox.mode !== TEAM_MANAGED_AGENT_SANDBOX.mode || agent.sandbox.scope !== TEAM_MANAGED_AGENT_SANDBOX.scope || agent.sandbox.workspaceAccess !== TEAM_MANAGED_AGENT_SANDBOX.workspaceAccess) {
+    if (!SANDBOX_MODES.has(agent.sandbox.mode) || !SANDBOX_SCOPES.has(agent.sandbox.scope) || !SANDBOX_WORKSPACE_ACCESSES.has(agent.sandbox.workspaceAccess)) {
       throw new Error(`Team managed agent sandbox is invalid: ${agent.id}`);
     }
   }
@@ -317,6 +348,11 @@ function isStringArray(value: unknown): value is string[] {
 
 function sameStringSet(values: string[], expected: Set<string>): boolean {
   return values.length === expected.size && values.every((value) => expected.has(value));
+}
+
+function containsStringSet(values: string[], expected: Set<string>): boolean {
+  const actual = new Set(values);
+  return Array.from(expected).every((value) => actual.has(value));
 }
 
 function hasIntersection(values: string[], disallowed: Set<string>): boolean {

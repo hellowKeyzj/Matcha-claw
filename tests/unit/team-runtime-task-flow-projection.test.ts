@@ -2,6 +2,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { buildTeamManagedAgentId } from '../../packages/openclaw-team-runtime-plugin/src/domain/team-role';
 import { OpenClawTaskFlowProjection } from '../../packages/openclaw-team-runtime-plugin/src/infrastructure/openclaw-task-flow-projection';
 
 const run = {
@@ -10,26 +11,24 @@ const run = {
   packageVersion: '1.0.0',
   sourcePath: '.tmp/team',
   status: 'running' as const,
-  currentStageId: 'step-1-design-operator-blueprint',
+  currentStageId: 'design-operator-blueprint',
   revision: 2,
   createdAt: 1,
   updatedAt: 2,
 };
 
-const stage = {
+const dispatchTask = {
+  dispatchTaskId: 'dispatch-task-design',
   runId: 'run-1',
-  stageId: 'step-1-design-operator-blueprint',
-  title: 'Design: operator blueprint',
-  executor: 'operator-designer',
+  workflowPlanId: 'workflow-plan-1',
+  dispatchGroupId: 'dispatch-group-design',
+  groupId: 'design',
+  taskId: 'design-operator-blueprint',
   roleId: 'operator-designer',
-  gateType: 'design',
-  status: 'running' as const,
-  attempt: 1,
-  maxAttempts: 2,
-  inputArtifactIds: [],
-  outputArtifactIds: [],
+  dispatchId: 'dispatch-design',
+  status: 'queued' as const,
+  idempotencyKey: 'run-1:design-operator-blueprint',
   createdAt: 1,
-  updatedAt: 2,
 };
 
 function createManagedFlows() {
@@ -86,7 +85,7 @@ describe('OpenClawTaskFlowProjection', () => {
     await rm(storageRoot, { recursive: true, force: true });
   });
 
-  it('creates and resumes a managed flow with TeamRun state', async () => {
+  it('creates and resumes a managed flow with TeamRun workflow dispatch task state', async () => {
     const flowRuntime = createManagedFlows();
     const bindSession = vi.fn(() => flowRuntime);
     const projection = new OpenClawTaskFlowProjection({
@@ -96,23 +95,38 @@ describe('OpenClawTaskFlowProjection', () => {
       nowMs: () => 10,
     });
 
-    await projection.projectTeamRun({ run, stages: [stage], reason: 'run:started' });
+    await projection.projectTeamRun({ run, dispatchTasks: [dispatchTask], reason: 'run:started' });
 
     expect(bindSession).toHaveBeenCalledWith({ sessionKey: 'matchaclaw-team:run-1' });
     expect(flowRuntime.createManaged).toHaveBeenCalledWith(expect.objectContaining({
       controllerId: 'matchaclaw.team-runtime',
       goal: 'ascendc-team run-1',
       status: 'running',
-      currentStep: 'step-1-design-operator-blueprint',
+      currentStep: 'design-operator-blueprint',
+      stateJson: expect.objectContaining({
+        dispatchTasks: [expect.objectContaining({
+          dispatchTaskId: 'dispatch-task-design',
+          workflowPlanId: 'workflow-plan-1',
+          dispatchGroupId: 'dispatch-group-design',
+          groupId: 'design',
+          taskId: 'design-operator-blueprint',
+          roleId: 'operator-designer',
+          dispatchId: 'dispatch-design',
+          status: 'queued',
+          artifactId: null,
+          statusReason: null,
+        })],
+      }),
     }));
     expect(flowRuntime.resume).toHaveBeenCalledWith(expect.objectContaining({
       flowId: 'flow-1',
       status: 'running',
-      currentStep: 'step-1-design-operator-blueprint',
+      currentStep: 'design-operator-blueprint',
       stateJson: expect.objectContaining({
         source: 'matchaclaw.team-runtime',
         teamRunId: 'run-1',
         projectionReason: 'run:started',
+        dispatchTasks: [expect.objectContaining({ taskId: 'design-operator-blueprint', status: 'queued' })],
       }),
     }));
   });
@@ -131,8 +145,8 @@ describe('OpenClawTaskFlowProjection', () => {
       nowMs: () => 10,
     });
 
-    await projection.projectTeamRun({ run, stages: [stage], reason: 'run:started' });
-    await projection.projectTeamRun({ run: { ...run, status }, stages: [stage], reason: `run:${status}` });
+    await projection.projectTeamRun({ run, dispatchTasks: [dispatchTask], reason: 'run:started' });
+    await projection.projectTeamRun({ run: { ...run, status }, dispatchTasks: [dispatchTask], reason: `run:${status}` });
 
     expect(flowRuntime[mutationName]).toHaveBeenCalled();
     if (status === 'cancelled') {
@@ -149,10 +163,10 @@ describe('OpenClawTaskFlowProjection', () => {
       nowMs: () => 10,
     });
 
-    await projection.projectTeamRun({ run, stages: [stage], reason: 'run:started' });
+    await projection.projectTeamRun({ run, dispatchTasks: [dispatchTask], reason: 'run:started' });
     await projection.projectTaskUpdate({
       run,
-      stage,
+      taskId: 'design-operator-blueprint',
       roleId: 'operator-designer',
       status: 'blocked',
       summary: 'Need clarification.',
@@ -163,14 +177,16 @@ describe('OpenClawTaskFlowProjection', () => {
     expect(flowRuntime.runTask).toHaveBeenCalledWith(expect.objectContaining({
       flowId: 'flow-1',
       runtime: 'agent',
-      sourceId: 'run-1:step-1-design-operator-blueprint:operator-designer',
-      agentId: 'matchaclaw-team:run-1:operator-designer',
-      label: 'operator-designer: step-1-design-operator-blueprint',
+      sourceId: 'run-1:design-operator-blueprint:operator-designer',
+      agentId: buildTeamManagedAgentId('run-1', 'operator-designer'),
+      label: 'operator-designer: design-operator-blueprint',
       status: 'running',
       progressSummary: 'Need clarification.',
     }));
     expect(flowRuntime.resume).toHaveBeenLastCalledWith(expect.objectContaining({
+      currentStep: 'design-operator-blueprint',
       stateJson: expect.objectContaining({
+        stageId: 'design-operator-blueprint',
         taskUpdateStatus: 'blocked',
         summary: 'Need clarification.',
         progress: 0.5,
@@ -188,11 +204,11 @@ describe('OpenClawTaskFlowProjection', () => {
       nowMs: () => 10,
     });
 
-    await projection.projectTeamRun({ run, stages: [stage], reason: 'run:started' });
+    await projection.projectTeamRun({ run, dispatchTasks: [dispatchTask], reason: 'run:started' });
 
     await expect(projection.projectTeamRun({
       run: { ...run, status: 'cancelled' },
-      stages: [stage],
+      dispatchTasks: [dispatchTask],
       reason: 'run:cancelled',
     })).rejects.toThrow('Task Flow projection failed: cancel_failed');
   });
@@ -206,12 +222,12 @@ describe('OpenClawTaskFlowProjection', () => {
       nowMs: () => 10,
     });
 
-    await projection.projectTeamRun({ run, stages: [stage], reason: 'run:started' });
+    await projection.projectTeamRun({ run, dispatchTasks: [dispatchTask], reason: 'run:started' });
     flowRuntime.get.mockReturnValue(undefined);
 
     await projection.projectTeamRun({
       run: { ...run, runId: 'run-2', revision: 1 },
-      stages: [{ ...stage, runId: 'run-2' }],
+      dispatchTasks: [{ ...dispatchTask, runId: 'run-2' }],
       reason: 'run:started',
     });
 
@@ -228,11 +244,11 @@ describe('OpenClawTaskFlowProjection', () => {
       nowMs: () => 10,
     });
 
-    await projection.projectTeamRun({ run, stages: [stage], reason: 'run:started' });
+    await projection.projectTeamRun({ run, dispatchTasks: [dispatchTask], reason: 'run:started' });
 
     await expect(projection.projectTaskUpdate({
       run,
-      stage,
+      taskId: 'design-operator-blueprint',
       roleId: 'operator-designer',
       status: 'blocked',
       summary: 'Need clarification.',

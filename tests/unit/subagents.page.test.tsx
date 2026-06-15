@@ -1051,7 +1051,7 @@ describe('subagents page', () => {
     expect(screen.getByRole('button', { name: 'Chat main' })).toBeEnabled();
   });
 
-  it('disables manage/chat actions when model is missing', () => {
+  it('keeps manage available and disables chat when model is missing', () => {
     useSubagentsStore.setState({
       agents: [
         {
@@ -1077,8 +1077,13 @@ describe('subagents page', () => {
 
     renderSubagentsPage();
 
-    expect(screen.getByRole('button', { name: 'Manage agent-no-model' })).toBeDisabled();
+    const manageButton = screen.getByRole('button', { name: 'Manage agent-no-model' });
+    expect(manageButton).toBeEnabled();
     expect(screen.getByRole('button', { name: 'Chat agent-no-model' })).toBeDisabled();
+
+    fireEvent.click(manageButton);
+    expect(loadPersistedFilesForAgent).toHaveBeenCalledWith('agent-no-model');
+    expect(screen.getByText('Managing: agent-no-model')).toBeInTheDocument();
   });
 
   it('keeps managed panel visible after page remount', () => {

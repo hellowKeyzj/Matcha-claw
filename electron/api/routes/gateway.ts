@@ -7,6 +7,18 @@ import { logger } from '../../utils/logger';
 import type { GatewayApiContext } from '../context';
 import { sendJson } from '../route-utils';
 
+async function recoverRuntimeHostGatewayConnection(ctx: GatewayApiContext): Promise<void> {
+  const result = await ctx.runtimeHost.request<{ success?: boolean; error?: string }>(
+    'POST',
+    '/api/gateway/recover',
+    { reason: 'gateway-restart', timeoutMs: 15_000 },
+    { timeoutMs: 20_000 },
+  );
+  if (result.status < 200 || result.status >= 300 || result.data?.success !== true) {
+    throw new Error(result.data?.error ?? 'Runtime-host gateway recovery failed');
+  }
+}
+
 async function readPlatformHealth(ctx: GatewayApiContext): Promise<{
   state: 'connected' | 'reconnecting' | 'disconnected';
   portReachable: boolean;
@@ -118,6 +130,7 @@ export async function handleGatewayRoutes(
   if (url.pathname === '/api/gateway/restart' && req.method === 'POST') {
     try {
       await ctx.gatewayManager.restart();
+      await recoverRuntimeHostGatewayConnection(ctx);
       sendJson(res, 200, { success: true });
     } catch (error) {
       sendJson(res, 500, { success: false, error: String(error) });

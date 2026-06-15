@@ -22,10 +22,14 @@ const teamRunScope = {
 } as const;
 
 describe('team runtime capability', () => {
-  it('describes dispatch prepare as a stage target operation', () => {
-    expect(teamRuntimeCapabilityOperations.find((operation) => operation.id === 'team.dispatchPrepare')).toEqual(
-      expect.objectContaining({ targetKind: 'team-stage' }),
-    );
+  it('describes workflow planning as a team-run target operation', () => {
+    expect(teamRuntimeCapabilityOperations).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: 'team.planWorkflow', targetKind: 'team-run' }),
+    ]));
+    expect(teamRuntimeCapabilityOperations).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: 'team.dispatchGroup' }),
+      expect.objectContaining({ id: 'team.dispatchTask' }),
+    ]));
   });
 
   it('rejects target and input runId mismatches before invoking the service', async () => {
@@ -48,24 +52,63 @@ describe('team runtime capability', () => {
     expect(invoke).not.toHaveBeenCalled();
   });
 
-  it('rejects dispatch prepare target and input stageId mismatches', async () => {
+
+  it('rejects workflow plan requests missing required workflow fields', async () => {
     const invoke = vi.fn();
     const [route] = createTeamRuntimeCapabilityOperationRoutes({
       teamSkillService: { invoke } as never,
-    }).filter((candidate) => candidate.operationId === 'team.dispatchPrepare');
+    }).filter((candidate) => candidate.operationId === 'team.planWorkflow');
 
     await expect(Promise.resolve(route?.handle({
       capabilityId: TEAM_RUNTIME_CAPABILITY_ID,
-      operationId: 'team.dispatchPrepare',
+      operationId: 'team.planWorkflow',
       scope: { ...teamRunScope, runId: 'run-1' },
-      target: { kind: 'team-stage', runId: 'run-1', stageId: 'stage-target' },
-      input: { runId: 'run-1', stageId: 'stage-input', idempotencyKey: 'prepare-1' },
-      domainInput: { runId: 'run-1', stageId: 'stage-input', idempotencyKey: 'prepare-1' },
+      target: { kind: 'team-run', runId: 'run-1' },
+      input: { runId: 'run-1', title: 'Workflow plan', tasks: [], idempotencyKey: 'plan-1' },
+      domainInput: { runId: 'run-1', title: 'Workflow plan', tasks: [], idempotencyKey: 'plan-1' },
     }))).resolves.toEqual({
       status: 400,
-      data: { success: false, error: 'Team runtime target stageId must match input stageId' },
+      data: { success: false, error: 'Team runtime input groups is required' },
     });
     expect(invoke).not.toHaveBeenCalled();
+  });
+
+
+  it('allows dependencyPlan team targets under the runtime-instance scope without teamId binding', async () => {
+    const invoke = vi.fn(async () => ({ status: 200, data: { success: true, canProceed: true } }));
+    const router = new CapabilityRouter({
+      getCapability: () => ({
+        id: TEAM_RUNTIME_CAPABILITY_ID,
+        kind: TEAM_RUNTIME_CAPABILITY_ID,
+        scopeKind: 'runtime-instance',
+        scope: runtimeScope,
+        targetKinds: ['team', 'team-run', 'team-approval'],
+        runtimeAdapterId: 'openclaw',
+        runtimeInstanceId: 'local',
+        supportLevel: 'native',
+        availability: 'available',
+        operations: teamRuntimeCapabilityOperations,
+        policyScope: TEAM_RUNTIME_CAPABILITY_ID,
+        ownerModuleId: 'test',
+        routeOwnerId: 'test',
+      }),
+      operations: createTeamRuntimeCapabilityOperationRoutes({
+        teamSkillService: { invoke } as never,
+      }),
+    });
+
+    await expect(router.execute({
+      id: TEAM_RUNTIME_CAPABILITY_ID,
+      operationId: 'team.dependencyPlan',
+      scope: runtimeScope,
+      target: { kind: 'team', packagePath: '/pkg' },
+      input: { packagePath: '/pkg' },
+    })).resolves.toEqual({ status: 200, data: { success: true, canProceed: true } });
+    expect(invoke).toHaveBeenCalledWith(
+      'team.dependencyPlan',
+      { packagePath: '/pkg' },
+      runtimeScope,
+    );
   });
 
   it('allows packageValidate team targets under the runtime-instance scope without teamId binding', async () => {
@@ -76,7 +119,7 @@ describe('team runtime capability', () => {
         kind: TEAM_RUNTIME_CAPABILITY_ID,
         scopeKind: 'runtime-instance',
         scope: runtimeScope,
-        targetKinds: ['team', 'team-run', 'team-stage', 'team-dispatch', 'team-approval'],
+        targetKinds: ['team', 'team-run', 'team-approval'],
         runtimeAdapterId: 'openclaw',
         runtimeInstanceId: 'local',
         supportLevel: 'native',
@@ -113,7 +156,7 @@ describe('team runtime capability', () => {
         kind: TEAM_RUNTIME_CAPABILITY_ID,
         scopeKind: 'runtime-instance',
         scope: runtimeScope,
-        targetKinds: ['team', 'team-run', 'team-stage', 'team-dispatch', 'team-approval'],
+        targetKinds: ['team', 'team-run', 'team-approval'],
         runtimeAdapterId: 'openclaw',
         runtimeInstanceId: 'local',
         supportLevel: 'native',

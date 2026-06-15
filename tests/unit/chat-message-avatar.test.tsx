@@ -55,7 +55,7 @@ vi.mock('react-i18next', async (importOriginal) => {
   };
 });
 
-function buildRenderItem(message: RawMessage) {
+function buildAllRenderItems(message: RawMessage) {
   return applyAssistantPresentationToItems({
     items: buildRenderItemsFromMessages('agent:test:main', [message]),
     agents: [{
@@ -65,7 +65,18 @@ function buildRenderItem(message: RawMessage) {
       avatarStyle: 'bottts',
     }],
     defaultAssistant: null,
-  })[0]!;
+  });
+}
+
+function buildRenderItem(message: RawMessage) {
+  return buildAllRenderItems(message)[0]!;
+}
+
+/** Find the first tool-item from the render items array (turnKey starts with 'tool:'). */
+function findToolRenderItem(message: RawMessage) {
+  return buildAllRenderItems(message).find(
+    (item) => item.kind === 'assistant-turn' && item.turnKey?.startsWith('tool:'),
+  ) as import('@/pages/Chat/chat-render-item-model').ChatAssistantTurnItem | undefined;
 }
 
 describe('chat message avatar', () => {
@@ -130,11 +141,11 @@ describe('chat message avatar', () => {
       role: 'assistant',
       content: [{ type: 'thinking', thinking: 'reviewing options' }],
     });
-    const toolItem = buildRenderItem({
+    const toolItem = findToolRenderItem({
       role: 'assistant',
       content: [{ type: 'toolCall', id: 'tool-1', name: 'read', input: { filePath: 'README.md' } }],
     });
-    if (thinkingItem.kind !== 'assistant-turn' || toolItem.kind !== 'assistant-turn') {
+    if (thinkingItem.kind !== 'assistant-turn' || !toolItem || toolItem.kind !== 'assistant-turn') {
       throw new Error('expected assistant turns');
     }
 
@@ -170,7 +181,7 @@ describe('chat message avatar', () => {
   });
 
   it('tool-only assistant turn renders expandable tool cards without empty assistant body shell', () => {
-    const item = buildRenderItem({
+    const item = findToolRenderItem({
       role: 'assistant',
       content: [{
         type: 'toolCall',
@@ -180,7 +191,7 @@ describe('chat message avatar', () => {
       }],
       streaming: true,
     });
-    if (item.kind !== 'assistant-turn') {
+    if (!item || item.kind !== 'assistant-turn') {
       throw new Error('expected assistant turn');
     }
 
@@ -260,7 +271,7 @@ describe('chat message avatar', () => {
   });
 
   it('tool card stays collapsed by default and expands to show tool output', () => {
-    const item = buildRenderItem({
+    const item = findToolRenderItem({
       role: 'assistant',
       content: [{
         type: 'toolCall',
@@ -274,7 +285,7 @@ describe('chat message avatar', () => {
         result: { text: 'tool output body' },
       }],
     });
-    if (item.kind !== 'assistant-turn') {
+    if (!item || item.kind !== 'assistant-turn') {
       throw new Error('expected assistant turn');
     }
 
@@ -377,7 +388,7 @@ describe('chat message avatar', () => {
   });
 
   it('tool card renders json output as a collapsible JSON block', () => {
-    const item = buildRenderItem({
+    const item = findToolRenderItem({
       role: 'assistant',
       content: [{
         type: 'toolCall',
@@ -391,7 +402,7 @@ describe('chat message avatar', () => {
         result: '{"text":"tool output body","ok":true}',
       }],
     });
-    if (item.kind !== 'assistant-turn') {
+    if (!item || item.kind !== 'assistant-turn') {
       throw new Error('expected assistant turn');
     }
 
@@ -420,7 +431,7 @@ describe('chat message avatar', () => {
   });
 
   it('collapsed tool summary avoids exposing raw object-like payload text', () => {
-    const item = buildRenderItem({
+    const item = findToolRenderItem({
       role: 'assistant',
       content: [{
         type: 'toolCall',
@@ -434,7 +445,7 @@ describe('chat message avatar', () => {
         result: "{'status': 'error', 'message': 'store_failed', 'tool': 'read'}",
       }],
     });
-    if (item.kind !== 'assistant-turn') {
+    if (!item || item.kind !== 'assistant-turn') {
       throw new Error('expected assistant turn');
     }
 
@@ -459,7 +470,7 @@ describe('chat message avatar', () => {
   });
 
   it('collapsed tool header avoids exposing raw object-like input payload text', () => {
-    const item = buildRenderItem({
+    const item = findToolRenderItem({
       role: 'assistant',
       content: [{
         type: 'toolCall',
@@ -473,7 +484,7 @@ describe('chat message avatar', () => {
         result: "{'status': 'error', 'tool': 'web_search', 'message': 'search_failed'}",
       }],
     });
-    if (item.kind !== 'assistant-turn') {
+    if (!item || item.kind !== 'assistant-turn') {
       throw new Error('expected assistant turn');
     }
 
@@ -499,13 +510,11 @@ describe('chat message avatar', () => {
     expect(screen.getByText(/search_failed/)).toBeInTheDocument();
   });
 
-  it('clicking the assistant body collapses open thinking and tool sections in the same turn', () => {
+  it('clicking the assistant body collapses open thinking section in the same turn', () => {
     const item = buildRenderItem({
       role: 'assistant',
       content: [
         { type: 'thinking', thinking: 'reviewing options' },
-        { type: 'toolCall', id: 'tool-1', name: 'read', input: { filePath: 'README.md' } },
-        { type: 'tool_result', toolCallId: 'tool-1', name: 'read', result: { text: 'tool output body' } },
         { type: 'text', text: 'final answer body' },
       ],
     });
@@ -523,32 +532,19 @@ describe('chat message avatar', () => {
     act(() => {
       screen.getByLabelText('展开思考').click();
     });
-    act(() => {
-      screen.getByLabelText('展开工具 read').click();
-    });
-    act(() => {
-      screen.getByLabelText('展开输入参数').click();
-    });
-    act(() => {
-      screen.getByLabelText('展开输出结果').click();
-    });
 
     expect(screen.getByText(/reviewing options/)).toBeInTheDocument();
-    expect(screen.getAllByText(/README\.md/).length).toBeGreaterThan(0);
-    expect(screen.getAllByText(/tool output body/).length).toBeGreaterThan(0);
 
     act(() => {
       screen.getByText('final answer body').click();
     });
 
     expect(screen.queryByText(/reviewing options/)).toBeNull();
-    expect(document.querySelector('[data-compact-rail="tool"]')?.textContent).toContain('README.md');
-    expect(document.querySelector('[data-compact-rail="tool"]')?.textContent).not.toContain('tool output body');
   });
 
   it('long tool output uses its own scroll region instead of expanding the chat column indefinitely', () => {
     const longOutput = Array.from({ length: 80 }, (_, index) => `line-${index}: long tool output content`).join('\n');
-    const item = buildRenderItem({
+    const item = findToolRenderItem({
       role: 'assistant',
       content: [{
         type: 'toolCall',
@@ -562,7 +558,7 @@ describe('chat message avatar', () => {
         result: { text: longOutput },
       }],
     });
-    if (item.kind !== 'assistant-turn') {
+    if (!item || item.kind !== 'assistant-turn') {
       throw new Error('expected assistant turn');
     }
 
@@ -590,7 +586,7 @@ describe('chat message avatar', () => {
   });
 
   it('tool card renders canvas preview with raw details disclosure', () => {
-    const item = buildRenderItem({
+    const item = findToolRenderItem({
       role: 'assistant',
       content: [{
         type: 'toolCall',
@@ -616,7 +612,7 @@ describe('chat message avatar', () => {
         },
       }],
     });
-    if (item.kind !== 'assistant-turn') {
+    if (!item || item.kind !== 'assistant-turn') {
       throw new Error('expected assistant turn');
     }
 

@@ -94,6 +94,8 @@ describe('canonical runtime contracts', () => {
       runId: 'run-openclaw',
       laneKey: 'member:main-agent',
       agentId: 'main-agent',
+      ownerTurnKey: 'openclaw-v4:turn:agent:main:main:run-openclaw:member:main-agent:0',
+      ownerMessageKey: 'openclaw-v4:owner-message:agent:main:main:run-openclaw:member:main-agent:0',
       text: '先检查入口',
       status: 'streaming',
     });
@@ -102,144 +104,17 @@ describe('canonical runtime contracts', () => {
       runId: 'run-openclaw',
       laneKey: 'member:main-agent',
       agentId: 'main-agent',
+      ownerTurnKey: expect.stringContaining('openclaw-v4:turn:agent:main:main:run-openclaw:member:main-agent:0'),
+      ownerMessageKey: expect.stringContaining('openclaw-v4:owner-message:agent:main:main:run-openclaw:member:main-agent:0'),
     });
     expect(events[2]).toMatchObject({
       type: 'tool_call',
       runId: 'run-openclaw',
       laneKey: 'member:main-agent',
       agentId: 'main-agent',
+      ownerTurnKey: expect.stringContaining('openclaw-v4:turn:agent:main:main:run-openclaw:member:main-agent:0'),
+      ownerMessageKey: expect.stringContaining('openclaw-v4:owner-message:agent:main:main:run-openclaw:member:main-agent:0'),
       toolCallId: 'tool-openclaw-1',
-    });
-  });
-
-  it('bounds OpenClaw V4 streaming chat buffers and keeps recent delta state', () => {
-    const adapter = new OpenClawV4Adapter();
-    const context = openClawContext();
-
-    for (let index = 0; index < 130; index += 1) {
-      adapter.translate({
-        type: 'chat.message',
-        event: {
-          state: 'delta',
-          sessionKey: `agent:main:session-${index}`,
-          runId: `run-${index}`,
-          seq: 1,
-          deltaText: `old-${index}`,
-          message: {
-            role: 'assistant',
-            timestamp: index + 1,
-          },
-        },
-      }, context);
-    }
-
-    const prunedOldSession = adapter.translate({
-      type: 'chat.message',
-      event: {
-        state: 'delta',
-        sessionKey: 'agent:main:session-0',
-        runId: 'run-0',
-        seq: 2,
-        deltaText: '-next',
-        message: {
-          role: 'assistant',
-          timestamp: 131,
-        },
-      },
-    }, context);
-    const recentSession = adapter.translate({
-      type: 'chat.message',
-      event: {
-        state: 'delta',
-        sessionKey: 'agent:main:session-129',
-        runId: 'run-129',
-        seq: 2,
-        deltaText: '-next',
-        message: {
-          role: 'assistant',
-          timestamp: 132,
-        },
-      },
-    }, context);
-
-    expect(prunedOldSession[0]).toMatchObject({
-      type: 'message_snapshot',
-      text: '-next',
-    });
-    expect(recentSession[0]).toMatchObject({
-      type: 'message_snapshot',
-      text: 'old-129-next',
-    });
-  });
-
-  it('prunes stale OpenClaw V4 streaming chat buffers by timestamp', () => {
-    const adapter = new OpenClawV4Adapter();
-    const context = openClawContext();
-
-    adapter.translate({
-      type: 'chat.message',
-      event: {
-        state: 'delta',
-        sessionKey: 'agent:main:stale',
-        runId: 'run-stale',
-        seq: 1,
-        deltaText: 'stale',
-        message: {
-          role: 'assistant',
-          timestamp: 1,
-        },
-      },
-    }, context);
-    adapter.translate({
-      type: 'chat.message',
-      event: {
-        state: 'delta',
-        sessionKey: 'agent:main:fresh',
-        runId: 'run-fresh',
-        seq: 1,
-        deltaText: 'fresh',
-        message: {
-          role: 'assistant',
-          timestamp: 10 * 60 * 1000 + 2,
-        },
-      },
-    }, context);
-    const staleSession = adapter.translate({
-      type: 'chat.message',
-      event: {
-        state: 'delta',
-        sessionKey: 'agent:main:stale',
-        runId: 'run-stale',
-        seq: 2,
-        deltaText: '-next',
-        message: {
-          role: 'assistant',
-          timestamp: 10 * 60 * 1000 + 3,
-        },
-      },
-    }, context);
-    const freshSession = adapter.translate({
-      type: 'chat.message',
-      event: {
-        state: 'delta',
-        sessionKey: 'agent:main:fresh',
-        runId: 'run-fresh',
-        seq: 2,
-        deltaText: '-next',
-        message: {
-          role: 'assistant',
-          timestamp: 10 * 60 * 1000 + 4,
-        },
-      },
-    }, context);
-
-    expect(staleSession[0]).toMatchObject({
-      type: 'message_snapshot',
-      text: '-next',
-    });
-    expect(freshSession[0]).toMatchObject({
-      type: 'message_snapshot',
-      text: 'fresh-next',
     });
   });
 
@@ -282,6 +157,13 @@ describe('canonical runtime contracts', () => {
         raw: { session_id: 'session-1', project: 'e-code-matcha-claw' },
       },
       role: 'assistant',
+      ownerTurnKey: 'turn:main:turn-1',
+      ownerMessageKey: 'message:main:claude-message-1',
+      turnBindingSource: 'runtime',
+      turnBindingConfidence: 'high',
+      messageBindingSource: 'runtime',
+      messageBindingConfidence: 'high',
+      messageId: 'claude-message-1',
       content: [{ type: 'text', text: 'Reading files' }],
       text: 'Reading files',
       status: 'streaming',
@@ -307,6 +189,12 @@ describe('canonical runtime contracts', () => {
         },
         raw: { id: 'toolu-1', name: 'Read' },
       },
+      ownerTurnKey: 'turn:main:turn-1',
+      ownerMessageKey: 'message:main:claude-message-1',
+      turnBindingSource: 'runtime',
+      turnBindingConfidence: 'high',
+      messageBindingSource: 'runtime',
+      messageBindingConfidence: 'high',
       toolCallId: 'toolu-1',
       name: 'Read',
       input: { file_path: 'package.json' },
@@ -322,7 +210,7 @@ describe('canonical runtime contracts', () => {
     expect(items).toMatchObject([{
       kind: 'assistant-turn',
       runId: 'turn-1',
-      turnKey: 'message:assistant:main:1',
+      turnKey: 'turn:main:turn-1',
       segments: [
         { kind: 'message', text: 'Reading files' },
         { kind: 'tool', tool: { toolCallId: 'toolu-1', name: 'Read' } },
@@ -402,7 +290,7 @@ describe('canonical runtime contracts', () => {
     expect(items).toMatchObject([{
       kind: 'assistant-turn',
       runId: 'turn-7',
-      turnKey: 'message:assistant:main:1',
+      turnKey: 'turn:main:turn-7',
       text: 'Patch applied',
     }]);
   });

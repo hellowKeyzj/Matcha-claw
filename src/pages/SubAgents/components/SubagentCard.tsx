@@ -34,7 +34,7 @@ export function SubagentCard({
   onChat,
 }: SubagentCardProps) {
   const { t } = useTranslation('subagents');
-  const runDisabled = !modelReady;
+  const chatDisabled = !modelReady;
 
   return (
     <article className="rounded-lg border bg-card p-4 text-card-foreground shadow-sm">
@@ -94,8 +94,7 @@ export function SubagentCard({
         <Button
           size="sm"
           aria-label={`Manage ${agent.id}`}
-          disabled={manageLocked || runDisabled}
-          title={runDisabled ? t('card.modelMissingHint') : undefined}
+          disabled={manageLocked}
           onClick={onManage}
         >
           {t('card.actions.manage')}
@@ -104,8 +103,8 @@ export function SubagentCard({
           variant="secondary"
           size="sm"
           aria-label={`Chat ${agent.id}`}
-          disabled={runDisabled}
-          title={runDisabled ? t('card.modelMissingHint') : undefined}
+          disabled={chatDisabled}
+          title={chatDisabled ? t('card.modelMissingHint') : undefined}
           onClick={onChat}
         >
           {t('card.actions.chat')}

@@ -9,7 +9,7 @@ import {
 const CONTROL_UI_BROWSER_CLIENT_ID = 'openclaw-control-ui';
 
 export interface GatewayReadinessWorkflowDeps {
-  readonly gateway: Pick<GatewayConnectionPort, 'inspectGatewayControlReadiness' | 'readGatewayConnectionState'> & Pick<GatewayRpcPort, 'gatewayRpc'>;
+  readonly gateway: Pick<GatewayConnectionPort, 'inspectGatewayControlReadiness' | 'readGatewayConnectionState' | 'recoverGatewayConnection'> & Pick<GatewayRpcPort, 'gatewayRpc'>;
 }
 
 type PendingDevicePairingRequest = {
@@ -24,6 +24,20 @@ export class GatewayReadinessWorkflow {
     return ok({
       success: true,
       status: await this.deps.gateway.readGatewayConnectionState(),
+    });
+  }
+
+  async recover(payload: unknown) {
+    const body = isRecord(payload) ? payload : {};
+    const reason = typeof body.reason === 'string' && body.reason.trim()
+      ? body.reason.trim()
+      : 'manual';
+    const timeoutMs = typeof body.timeoutMs === 'number' && body.timeoutMs > 0
+      ? body.timeoutMs
+      : undefined;
+    return ok({
+      success: true,
+      status: await this.deps.gateway.recoverGatewayConnection(reason, timeoutMs),
     });
   }
 

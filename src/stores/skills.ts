@@ -56,6 +56,13 @@ type MarketplaceSearchResult = {
   error?: string;
 };
 
+type LocalSkillImportResult = {
+  success: true;
+  skillKey: string;
+  installedPath: string;
+  sourceKind: 'directory' | 'zip' | 'markdown';
+};
+
 const SKILL_MANAGEMENT_CAPABILITY_ID = 'skill.management';
 const MARKETPLACE_SEARCH_CACHE_TTL_MS = 2500;
 const SKILLS_FETCH_MIN_INTERVAL_MS = 30000;
@@ -189,6 +196,7 @@ interface SkillsState {
   fetchSkills: (options?: { force?: boolean; silent?: boolean; fresh?: boolean }) => Promise<void>;
   searchSkills: (query: string) => Promise<void>;
   installSkill: (slug: string, version?: string) => Promise<void>;
+  importLocalSkill: (sourcePath: string) => Promise<string>;
   uninstallSkill: (slug: string) => Promise<void>;
   enableSkill: (skillId: string) => Promise<void>;
   disableSkill: (skillId: string) => Promise<void>;
@@ -401,7 +409,7 @@ export const useSkillsStore = create<SkillsState>((set, get) => ({
         throw new Error(errorKey ?? appError.message);
       }
       await waitForRuntimeJobResult<{ success: boolean }>(result.job.id);
-      // Refresh skills after install
+      await get().enableSkill(slug);
       await get().fetchSkills({ force: true, fresh: true });
     } catch (error) {
       console.error('Install error:', error);
@@ -411,6 +419,50 @@ export const useSkillsStore = create<SkillsState>((set, get) => ({
         const newInstalling = { ...state.installing };
         delete newInstalling[slug];
         const nextMutating = decrementMutatingSkill(state.mutatingBySkillId, slug);
+        return {
+          installing: newInstalling,
+          mutatingBySkillId: nextMutating,
+          mutating: hasMutatingSkills(nextMutating),
+        };
+      });
+    }
+  },
+
+  importLocalSkill: async (sourcePath: string) => {
+    const trimmedSourcePath = sourcePath.trim();
+    if (!trimmedSourcePath) {
+      throw new Error('Local skill source path is required');
+    }
+    if (get().installing[trimmedSourcePath]) {
+      return trimmedSourcePath;
+    }
+    set((state) => {
+      const nextMutating = incrementMutatingSkill(state.mutatingBySkillId, trimmedSourcePath);
+      return {
+        installing: { ...state.installing, [trimmedSourcePath]: true },
+        mutatingBySkillId: nextMutating,
+        mutating: true,
+      };
+    });
+    try {
+      const submission = await skillManagementCapabilityExecute<RuntimeJobSubmission<LocalSkillImportResult>>(
+        'skills.importLocal',
+        { sourcePath: trimmedSourcePath },
+        { kind: 'skill' },
+      );
+      const result = await waitForRuntimeJobResult<LocalSkillImportResult>(submission.job.id);
+      const skillKey = result.skillKey.trim();
+      if (!skillKey) {
+        throw new Error('Imported skill did not return a skill key');
+      }
+      await get().enableSkill(skillKey);
+      await get().fetchSkills({ force: true, fresh: true });
+      return skillKey;
+    } finally {
+      set((state) => {
+        const newInstalling = { ...state.installing };
+        delete newInstalling[trimmedSourcePath];
+        const nextMutating = decrementMutatingSkill(state.mutatingBySkillId, trimmedSourcePath);
         return {
           installing: newInstalling,
           mutatingBySkillId: nextMutating,

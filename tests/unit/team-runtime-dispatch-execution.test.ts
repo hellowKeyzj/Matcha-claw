@@ -1,9 +1,18 @@
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, rm, stat } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { TeamRunService } from '../../packages/openclaw-team-runtime-plugin/src/application/team-run-service';
+import { TeamRunService, type TeamRunContextPort } from '../../packages/openclaw-team-runtime-plugin/src/application/team-run-service';
 import { TeamSkillPackageService } from '../../packages/openclaw-team-runtime-plugin/src/application/team-skill-package-service';
+import { buildTeamManagedAgentId } from '../../packages/openclaw-team-runtime-plugin/src/domain/team-role';
+import {
+  TEAM_DISPATCH_PROCESS_GATEWAY_METHOD,
+  TEAM_LEADER_SYNTHESIS_PROCESS_GATEWAY_METHOD,
+} from '../../packages/openclaw-team-runtime-plugin/src/gateway/schemas';
+import { OpenClawRoleSessionExecution } from '../../packages/openclaw-team-runtime-plugin/src/infrastructure/openclaw-role-session-execution';
+import type { TeamGatewayRequestPort } from '../../packages/openclaw-team-runtime-plugin/src/gateway/team-gateway-methods';
+import type { RoleSessionExecutionPort } from '../../packages/openclaw-team-runtime-plugin/src/ports/role-session-execution-port';
+import type { TaskFlowProjectionPort } from '../../packages/openclaw-team-runtime-plugin/src/ports/task-flow-projection-port';
 
 const fixturePath = path.resolve('.tmp/ascendc-operator-dev-optimize-team_1.0.0');
 
@@ -12,94 +21,270 @@ let nextId = 0;
 const idGenerator = { randomId: () => `id-${nextId += 1}` };
 const dependencyChecker = {
   async check() {
-    return { missingRequiredSkills: [], missingRequiredTools: [], missingOptionalTools: [] };
+    return { missingRequiredSkills: [], missingOptionalSkills: [], missingRequiredTools: [], missingOptionalTools: [] };
   },
 };
-
-function designCompleteReport(): string {
-  return [
-    '# Operator Design Report',
-    '',
-    '## Tiling Strategy',
-    '- Split M dimension into 128-row tiles.',
-    '- Use double buffering for input tiles.',
-    '- Align tail handling to vector block size.',
-    '',
-    '## Memory Layout',
-    '- Store input A in global memory contiguous by row.',
-    '- Stage input B tiles into UB with 32-byte alignment.',
-    '- Reuse output buffer across pipeline iterations.',
-    '',
-    '## Data Flow',
-    '- Load shape metadata before kernel loop.',
-    '- Copy input tiles from GM to UB.',
-    '- Compute tile output and copy result back to GM.',
-    '',
-    '## Interface Specification',
-    '- Accept GM pointers for input, output, and tiling data.',
-    '- Validate dtype support for float16 and bfloat16.',
-    '- Expose blockDim derived from tiling key.',
-    '',
-    '## Performance Estimation',
-    '- Expected memory bandwidth utilization is 70%.',
-    '- Expected vector utilization is 65%.',
-    '- Tail tiles add less than 5% overhead.',
-    '',
-    'Verdict: DESIGN-COMPLETE',
-  ].join('\n');
-}
-
-function passContentForStage(stageId: string): { kind: string; title: string; content: string } {
-  if (stageId.includes('design')) {
-    return { kind: 'design_report', title: 'Operator blueprint', content: designCompleteReport() };
-  }
-  if (stageId.includes('code')) {
-    return { kind: 'compile_report', title: 'Kernel implementation', content: 'Compilation succeeded. Verdict: CODE-COMPILABLE' };
-  }
-  if (stageId.includes('adversarial')) {
-    return { kind: 'adversary_report', title: 'Adversarial review', content: 'Review completed. Verdict: ACCEPTABLE-RISK' };
-  }
-  if (stageId.includes('precision')) {
-    return { kind: 'precision_report', title: 'Precision validation', content: 'All cases passed. Verdict: PRECISION-PASS' };
-  }
-  if (stageId.includes('performance')) {
-    return { kind: 'performance_report', title: 'Performance optimization', content: 'Optimization reached target. Verdict: PERFORMANCE-TARGET-MET' };
-  }
-  throw new Error(`No pass content for stage: ${stageId}`);
-}
-
-function roleIdForStage(stageId: string): string {
-  if (stageId.includes('design')) return 'operator-designer';
-  if (stageId.includes('code')) return 'kernel-coder';
-  if (stageId.includes('adversarial')) return 'code-adversary';
-  if (stageId.includes('precision')) return 'precision-validator';
-  if (stageId.includes('performance')) return 'performance-optimizer';
-  throw new Error(`No role for stage: ${stageId}`);
-}
-
-async function advanceToDesign(service: TeamRunService, runId: string): Promise<void> {
-  await service.completeStage({
-    runId,
-    stageId: 'step-0-pre-flight-dependency-check',
-    idempotencyKey: `advance-${runId}-preflight`,
-  });
-}
 
 function roleWorkspace(storageRoot: string, runId: string, roleId: string): string {
   return path.join(storageRoot, 'runs', runId, 'roles', roleId);
 }
 
-async function patchRun(storageRoot: string, runId: string, patch: Record<string, unknown>): Promise<void> {
-  const runPath = path.join(storageRoot, 'runs', runId, 'run.json');
-  const run = JSON.parse(await readFile(runPath, 'utf8')) as Record<string, unknown>;
-  await writeFile(runPath, `${JSON.stringify({ ...run, ...patch }, null, 2)}\n`, 'utf8');
+function leaderWorkspace(storageRoot: string, runId: string): string {
+  return path.join(storageRoot, 'runs', runId, 'leader');
 }
 
-function bindExecutionPort(service: TeamRunService, executeDispatch: ReturnType<typeof vi.fn>, cancelDispatchExecution = vi.fn(async () => ({ cancelled: true }))): void {
-  Object.assign(service, { roleSessionExecution: { executeDispatch, cancelDispatchExecution } });
+async function directoryExists(directoryPath: string): Promise<boolean> {
+  try {
+    return (await stat(directoryPath)).isDirectory();
+  } catch (error) {
+    if (error instanceof Error && 'code' in error && error.code === 'ENOENT') {
+      return false;
+    }
+    throw error;
+  }
 }
 
-describe('TeamRunService dispatch execution', () => {
+function workflowTasks(): Record<string, unknown>[] {
+  return [
+    {
+      taskId: 'design-blueprint',
+      roleId: 'operator-designer',
+      title: 'Design operator blueprint',
+      prompt: 'Produce the operator design blueprint.',
+      dependsOnTaskIds: [],
+      outputArtifactKind: 'design_report',
+    },
+    {
+      taskId: 'code-kernel',
+      roleId: 'kernel-coder',
+      title: 'Implement kernel',
+      prompt: 'Implement the kernel from the design blueprint.',
+      dependsOnTaskIds: ['design-blueprint'],
+      outputArtifactKind: 'compile_report',
+    },
+  ];
+}
+
+function workflowGroups(): Record<string, unknown>[] {
+  return [
+    {
+      groupId: 'round-1',
+      title: 'Design round',
+      taskIds: ['design-blueprint'],
+      join: { requireCompleted: true, allowFailed: false, retryLimit: 0 },
+    },
+    {
+      groupId: 'round-2',
+      title: 'Implementation round',
+      taskIds: ['code-kernel'],
+      join: { requireCompleted: true, allowFailed: false, retryLimit: 0 },
+    },
+  ];
+}
+
+function parallelWorkflowTasks(): Record<string, unknown>[] {
+  return [
+    {
+      taskId: 'parallel-design',
+      roleId: 'operator-designer',
+      title: 'Design operator blueprint',
+      prompt: 'Produce the operator design blueprint.',
+      dependsOnTaskIds: [],
+      outputArtifactKind: 'design_report',
+    },
+    {
+      taskId: 'parallel-code',
+      roleId: 'kernel-coder',
+      title: 'Implement kernel',
+      prompt: 'Implement the kernel from the design blueprint.',
+      dependsOnTaskIds: [],
+      outputArtifactKind: 'compile_report',
+    },
+  ];
+}
+
+function parallelWorkflowGroups(): Record<string, unknown>[] {
+  return [
+    {
+      groupId: 'parallel-round-1',
+      title: 'Parallel design round',
+      taskIds: ['parallel-design'],
+      join: { requireCompleted: true, allowFailed: false, retryLimit: 0 },
+    },
+    {
+      groupId: 'parallel-round-2',
+      title: 'Parallel implementation round',
+      taskIds: ['parallel-code'],
+      join: { requireCompleted: true, allowFailed: false, retryLimit: 0 },
+    },
+  ];
+}
+
+function singleTaskWorkflowTasks(taskId = 'retry-task', roleId = 'operator-designer'): Record<string, unknown>[] {
+  return [
+    {
+      taskId,
+      roleId,
+      title: 'Single workflow task',
+      prompt: `Execute ${taskId}.`,
+      dependsOnTaskIds: [],
+      outputArtifactKind: 'design_report',
+    },
+  ];
+}
+
+function singleTaskWorkflowGroups(taskId = 'retry-task', retryLimit = 0): Record<string, unknown>[] {
+  return [
+    {
+      groupId: `${taskId}-group`,
+      title: 'Single workflow group',
+      taskIds: [taskId],
+      join: { requireCompleted: true, allowFailed: false, retryLimit },
+    },
+  ];
+}
+
+function createExecuteLeader(runId: string) {
+  return vi.fn(async (input) => ({
+    executionId: `openclaw-session-${runId}-leader`,
+    childSessionKey: `agent:${buildTeamManagedAgentId(runId, 'leader')}:main`,
+    spawnMode: 'run' as const,
+    status: 'queued' as const,
+    roleId: input.dispatch.roleId,
+    dispatchId: input.dispatch.dispatchId,
+  }));
+}
+
+function createRoleSessionExecution(runId: string) {
+  return {
+    executeLeader: createExecuteLeader(runId),
+    executeRole: vi.fn(),
+    sendMessage: vi.fn(),
+    cancelRunSessions: vi.fn().mockResolvedValue(undefined),
+  };
+}
+
+function createRoleDispatchSessionExecution(runId: string) {
+  return {
+    ...createRoleSessionExecution(runId),
+    executeRole: vi.fn(async (input) => ({
+      executionId: `openclaw-session-${runId}-${input.taskId}`,
+      childSessionKey: childSessionKey(runId, input.role.roleId, input.taskId),
+      spawnMode: 'run' as const,
+      status: 'queued' as const,
+      roleId: input.dispatch.roleId,
+      dispatchId: input.dispatch.dispatchId,
+    })),
+  };
+}
+
+function createService(
+  storageRoot: string,
+  roleSessionExecution: RoleSessionExecutionPort = createRoleSessionExecution('run'),
+  disableAutoDispatch = true,
+  taskFlowProjection?: TaskFlowProjectionPort,
+  runContext?: TeamRunContextPort,
+  teamGatewayRequest?: TeamGatewayRequestPort,
+): TeamRunService {
+  return new TeamRunService({
+    storageRoot,
+    clock,
+    idGenerator,
+    packageService: new TeamSkillPackageService(),
+    dependencyChecker,
+    roleSessionExecution,
+    disableAutoDispatch,
+    ...(taskFlowProjection ? { taskFlowProjection } : {}),
+    ...(runContext ? { runContext } : {}),
+    ...(teamGatewayRequest ? { teamGatewayRequest } : {}),
+  });
+}
+
+function createOpenClawBackedService(storageRoot: string, deleteSession = vi.fn().mockResolvedValue(undefined), options?: { disableAutoDispatch?: boolean }): { service: TeamRunService; deleteSession: ReturnType<typeof vi.fn> } {
+  const run = vi.fn(async (input: { sessionKey: string }) => ({
+    runId: `openclaw-session-${input.sessionKey}`,
+  }));
+  const service = new TeamRunService({
+    storageRoot,
+    clock,
+    idGenerator,
+    packageService: new TeamSkillPackageService(),
+    dependencyChecker,
+    roleSessionExecution: new OpenClawRoleSessionExecution({ run, deleteSession }),
+    disableAutoDispatch: options?.disableAutoDispatch,
+  });
+  return { service, deleteSession };
+}
+
+async function createStartedRun(service: TeamRunService, runId: string): Promise<void> {
+  await service.create({ packagePath: fixturePath, runId, idempotencyKey: `create-${runId}` });
+  await service.start({ runId, idempotencyKey: `start-${runId}` });
+}
+
+async function planWorkflow(
+  service: TeamRunService,
+  storageRoot: string,
+  runId: string,
+  options?: {
+    groups?: Record<string, unknown>[];
+    tasks?: Record<string, unknown>[];
+    title?: string;
+    summary?: string;
+    idempotencyKey?: string;
+  },
+) {
+  return await service.planWorkflow({
+    runId,
+    title: options?.title ?? 'Operator workflow',
+    summary: options?.summary ?? 'Leader-planned workflow',
+    groups: options?.groups ?? workflowGroups(),
+    tasks: options?.tasks ?? workflowTasks(),
+    idempotencyKey: options?.idempotencyKey ?? `plan-${runId}`,
+    workspaceDir: leaderWorkspace(storageRoot, runId),
+  });
+}
+
+async function roleAgentId(service: TeamRunService, runId: string, roleId: string): Promise<string> {
+  const snapshot = await service.snapshot({ runId, eventCursor: 0, eventLimit: 0 });
+  const role = snapshot.roles.find((binding) => binding.roleId === roleId);
+  if (!role) {
+    throw new Error(`Test role not found: ${roleId}`);
+  }
+  return role.agentId;
+}
+
+function childSessionKey(runId: string, roleId: string, taskId: string): string {
+  return `agent:${buildTeamManagedAgentId(runId, roleId)}:task:${taskId}`;
+}
+
+async function completeDefaultWorkflowTasks(service: TeamRunService, storageRoot: string, runId: string): Promise<void> {
+  await service.submitArtifact({
+    runId,
+    stageId: 'design-blueprint',
+    roleId: 'operator-designer',
+    kind: 'design_report',
+    title: 'Operator blueprint',
+    content: 'Design complete.',
+    idempotencyKey: `artifact-${runId}-design`,
+    workspaceDir: roleWorkspace(storageRoot, runId, 'operator-designer'),
+    callerAgentId: await roleAgentId(service, runId, 'operator-designer'),
+    childSessionKey: childSessionKey(runId, 'operator-designer', 'design-blueprint'),
+  });
+  await service.submitArtifact({
+    runId,
+    stageId: 'code-kernel',
+    roleId: 'kernel-coder',
+    kind: 'compile_report',
+    title: 'Kernel implementation',
+    content: 'Implementation complete.',
+    idempotencyKey: `artifact-${runId}-code`,
+    workspaceDir: roleWorkspace(storageRoot, runId, 'kernel-coder'),
+    callerAgentId: await roleAgentId(service, runId, 'kernel-coder'),
+    childSessionKey: childSessionKey(runId, 'kernel-coder', 'code-kernel'),
+  });
+}
+
+describe('TeamRunService native workflow execution', () => {
   let storageRoot = '';
 
   beforeEach(async () => {
@@ -111,549 +296,852 @@ describe('TeamRunService dispatch execution', () => {
     await rm(storageRoot, { recursive: true, force: true });
   });
 
-  it('pauses preflight when required dependencies are missing and proceeds only after user decision', async () => {
-    const service = new TeamRunService({
-      storageRoot,
-      clock,
-      idGenerator,
-      packageService: new TeamSkillPackageService(),
-      dependencyChecker: {
-        async check() {
-          return {
-            missingRequiredSkills: ['ascendc-operator-design'],
-            missingRequiredTools: ['bash'],
-            missingOptionalTools: ['edit_file'],
-          };
-        },
-      },
-    });
+  it('starts TeamRuns by queueing only the managed leader execution', async () => {
+    const roleSessionExecution = createRoleSessionExecution('run-start-leader');
+    const service = createService(storageRoot, roleSessionExecution);
 
-    await service.create({ packagePath: fixturePath, runId: 'run-preflight-missing', idempotencyKey: 'create-preflight-missing' });
-    await service.start({ runId: 'run-preflight-missing', idempotencyKey: 'start-preflight-missing' });
+    await service.create({ packagePath: fixturePath, runId: 'run-start-leader', idempotencyKey: 'create-start-leader' });
 
-    await expect(service.tick({ runId: 'run-preflight-missing', idempotencyKey: 'tick-preflight-missing' })).resolves.toEqual(expect.objectContaining({
-      action: 'dependency_missing',
-      status: 'waiting_for_user',
-      currentStageId: 'step-0-pre-flight-dependency-check',
-      missingRequiredSkills: ['ascendc-operator-design'],
-      missingRequiredTools: ['bash'],
-      missingOptionalTools: ['edit_file'],
+    await expect(service.start({ runId: 'run-start-leader', idempotencyKey: 'start-leader' })).resolves.toEqual(expect.objectContaining({
+      runId: 'run-start-leader',
+      status: 'running',
     }));
-    await expect(service.snapshot({ runId: 'run-preflight-missing', eventCursor: 0 })).resolves.toEqual(expect.objectContaining({
-      run: expect.objectContaining({ status: 'waiting_for_user', currentStageId: 'step-0-pre-flight-dependency-check' }),
-      stages: expect.arrayContaining([
-        expect.objectContaining({ stageId: 'step-0-pre-flight-dependency-check', status: 'waiting_for_user' }),
-        expect.objectContaining({ stageId: 'step-1-design-operator-blueprint', status: 'pending' }),
-      ]),
+    const leaderExecutionInput = roleSessionExecution.executeLeader.mock.calls[0]?.[0];
+    expect(leaderExecutionInput).toEqual(expect.objectContaining({
+      runId: 'run-start-leader',
+      dispatch: expect.objectContaining({ stageId: 'leader', roleId: 'leader' }),
+      role: expect.objectContaining({ roleId: 'leader' }),
+      prompt: expect.stringContaining('<team_workflow_orchestration>'),
+    }));
+    expect(leaderExecutionInput.prompt).toContain('You are the TeamRun leader. Your job is orchestration, not role execution.');
+    expect(leaderExecutionInput.prompt).toContain('Core contract:');
+    expect(leaderExecutionInput.prompt).toContain('- team_plan_workflow describes only work assigned to concrete Team roles from the roster.');
+    expect(leaderExecutionInput.prompt).toContain('Execution pattern:');
+    expect(leaderExecutionInput.prompt).toContain('If workflow.md contains leader-only context extraction, perform that extraction yourself before calling team_plan_workflow.');
+    expect(leaderExecutionInput.prompt).toContain('Role id rules:');
+    expect(leaderExecutionInput.prompt).toContain('Invalid tasks[].roleId values include "leader", managed OpenClaw agent ids, display names, and ad-hoc aliases.');
+    expect(leaderExecutionInput.prompt).toContain('Correct example:');
+    expect(leaderExecutionInput.prompt).toContain('"roleId": "financial-analyst"');
+    expect(leaderExecutionInput.prompt).toContain('Incorrect example:');
+    expect(leaderExecutionInput.prompt).toContain('"roleId": "leader"');
+    expect(leaderExecutionInput.prompt).toContain('This is invalid because "leader" is not a dispatchable Team role and leader tasks cannot complete via team_submit_artifact.');
+    expect(leaderExecutionInput.prompt).toContain('Tool boundary:');
+    expect(leaderExecutionInput.prompt).toContain('Your first orchestration action must be a successful team_plan_workflow call once you finish any leader-only context extraction.');
+    expect(leaderExecutionInput.prompt).toContain('Until team_plan_workflow returns success, do not claim that roles were dispatched, do not say work is running in parallel, and do not say you are waiting for role outputs.');
+    expect(leaderExecutionInput.prompt).toContain('team_send_message is reserved for real role child sessions and mailbox/audit traffic, not leader follow-up dispatch.');
+    expect(leaderExecutionInput.prompt).toContain('As leader, do not call team_send_message, team_submit_artifact, team_update_task, or team_request_approval.');
+    expect(leaderExecutionInput.prompt).toContain('</team_workflow_orchestration>');
+    await expect(service.snapshot({ runId: 'run-start-leader', eventCursor: 0, eventLimit: 20 })).resolves.toEqual(expect.objectContaining({
+      run: expect.objectContaining({ status: 'running' }),
+      stages: [],
+      dispatches: [expect.objectContaining({ stageId: 'leader', roleId: 'leader' })],
+      dispatchTasks: [],
       events: expect.arrayContaining([
-        expect.objectContaining({ type: 'dependency:missing' }),
+        expect.objectContaining({ type: 'run:started' }),
+        expect.objectContaining({ type: 'leader:execution_queued' }),
       ]),
     }));
-
-    await expect(service.submitDecision({
-      runId: 'run-preflight-missing',
-      decision: 'proceed_degraded',
-      idempotencyKey: 'decision-proceed-degraded',
-    })).resolves.toEqual(expect.objectContaining({ created: true }));
-    await expect(service.snapshot({ runId: 'run-preflight-missing', eventCursor: 0 })).resolves.toEqual(expect.objectContaining({
-      run: expect.objectContaining({ status: 'running', currentStageId: 'step-1-design-operator-blueprint' }),
-      stages: expect.arrayContaining([
-        expect.objectContaining({ stageId: 'step-0-pre-flight-dependency-check', status: 'passed' }),
-        expect.objectContaining({ stageId: 'step-1-design-operator-blueprint', status: 'running' }),
-      ]),
-      decisions: [expect.objectContaining({ decision: 'proceed_degraded' })],
-    }));
   });
 
-  it('rejects starting terminal TeamRuns', async () => {
-    const service = new TeamRunService({
-      storageRoot,
-      clock,
-      idGenerator,
-      packageService: new TeamSkillPackageService(),
-      dependencyChecker,
-    });
+  it('requires the leader workspace to submit a structured workflow plan', async () => {
+    const service = createService(storageRoot, createRoleSessionExecution('run-plan-auth'));
+    await createStartedRun(service, 'run-plan-auth');
 
-    await service.create({ packagePath: fixturePath, runId: 'run-start-terminal', idempotencyKey: 'create-start-terminal' });
-    await service.start({ runId: 'run-start-terminal', idempotencyKey: 'start-start-terminal' });
-    await advanceToDesign(service, 'run-start-terminal');
-    const runtimeRoot = service.resolveRuntimeRoot('run-start-terminal');
-    await service['stageStore'].updateStatus({ runtimeRoot, stageId: 'step-1-design-operator-blueprint', status: 'failed' });
-    await service['runStore'].update({ runtimeRoot, status: 'failed', currentStageId: 'step-1-design-operator-blueprint' });
+    await expect(service.planWorkflow({
+      runId: 'run-plan-auth',
+      title: 'Operator workflow',
+      groups: workflowGroups(),
+      tasks: workflowTasks(),
+      idempotencyKey: 'plan-missing-workspace',
+    })).rejects.toThrow('Tool caller workspace is required for Team leader');
 
-    await expect(service.start({ runId: 'run-start-terminal', idempotencyKey: 'restart-terminal' }))
-      .rejects.toThrow('TeamRun cannot be started from status failed: run-start-terminal');
+    await expect(planWorkflow(service, storageRoot, 'run-plan-auth')).resolves.toEqual(expect.objectContaining({
+      created: true,
+      plan: expect.objectContaining({
+        title: 'Operator workflow',
+        groups: expect.arrayContaining([expect.objectContaining({ groupId: 'round-1' })]),
+        tasks: expect.arrayContaining([expect.objectContaining({ taskId: 'design-blueprint', roleId: 'operator-designer' })]),
+      }),
+    }));
+    await expect(planWorkflow(service, storageRoot, 'run-plan-auth')).resolves.toEqual(expect.objectContaining({ created: false }));
   });
 
-  it('ticks role stages into queued dispatch executions when an execution port is configured', async () => {
-    const executeDispatch = vi.fn(async (input) => ({
-      executionId: 'openclaw-session-tick',
-      childSessionKey: 'agent:matchaclaw-team:run-tick-exec:operator-designer:subagent:child-tick',
-      spawnMode: 'run' as const,
-      status: 'queued' as const,
-      roleId: input.dispatch.roleId,
-      dispatchId: input.dispatch.dispatchId,
-    }));
-    const service = new TeamRunService({
-      storageRoot,
-      clock,
-      idGenerator,
-      packageService: new TeamSkillPackageService(),
-      dependencyChecker,
-      roleSessionExecution: { executeDispatch, cancelDispatchExecution: vi.fn(async () => ({ cancelled: true })) },
-    });
+  it('injects assigned task identity into auto-dispatched role prompts', async () => {
+    const roleSessionExecution = createRoleDispatchSessionExecution('run-role-prompt');
+    const gatewayRequest = { request: vi.fn(async (method: string, params: { runId: string }) => {
+      if (method === TEAM_DISPATCH_PROCESS_GATEWAY_METHOD) {
+        await service.processDispatchQueue(params);
+        return;
+      }
+      if (method === TEAM_LEADER_SYNTHESIS_PROCESS_GATEWAY_METHOD) {
+        await service.processLeaderSynthesis(params);
+        return;
+      }
+      throw new Error(`Unexpected gateway method: ${method}`);
+    }) };
+    const service = createService(storageRoot, roleSessionExecution, false, undefined, undefined, gatewayRequest);
+    await createStartedRun(service, 'run-role-prompt');
 
-    await service.create({ packagePath: fixturePath, runId: 'run-tick-exec', idempotencyKey: 'create-tick-exec' });
-    await service.start({ runId: 'run-tick-exec', idempotencyKey: 'start-tick-exec' });
+    await planWorkflow(service, storageRoot, 'run-role-prompt');
+    await expect.poll(() => roleSessionExecution.executeRole.mock.calls.length).toBeGreaterThan(0);
+    expect(gatewayRequest.request).toHaveBeenCalledWith(TEAM_DISPATCH_PROCESS_GATEWAY_METHOD, { runId: 'run-role-prompt' });
+    await service.cancel({ runId: 'run-role-prompt', reason: 'test cleanup', idempotencyKey: 'cancel-role-prompt' });
 
-    await expect(service.tick({ runId: 'run-tick-exec', idempotencyKey: 'tick-design' })).resolves.toEqual(expect.objectContaining({
-      action: 'dispatch_execution_queued',
-      currentStageId: 'step-1-design-operator-blueprint',
-      dispatch: expect.objectContaining({ roleId: 'operator-designer' }),
-      execution: expect.objectContaining({ executionId: 'openclaw-session-tick' }),
-      created: false,
+    const roleExecutionInput = roleSessionExecution.executeRole.mock.calls[0]?.[0];
+    expect(roleExecutionInput).toEqual(expect.objectContaining({
+      runId: 'run-role-prompt',
+      taskId: 'design-blueprint',
+      role: expect.objectContaining({ roleId: 'operator-designer' }),
+      prompt: expect.stringContaining('# Team Workflow Task: design-blueprint'),
     }));
-    expect(executeDispatch).toHaveBeenCalledTimes(1);
+    expect(roleExecutionInput.prompt).toContain('<team_task_execution>');
+    expect(roleExecutionInput.prompt).toContain('You are executing one assigned TeamRun workflow task as a role agent.');
+    expect(roleExecutionInput.prompt).toContain('Assigned identity:');
+    expect(roleExecutionInput.prompt).toContain('- runId: run-role-prompt');
+    expect(roleExecutionInput.prompt).toContain('- stageId: design-blueprint');
+    expect(roleExecutionInput.prompt).toContain('- roleId: operator-designer');
+    expect(roleExecutionInput.prompt).toContain('Core contract:');
+    expect(roleExecutionInput.prompt).toContain('- Use the exact runId, stageId, and roleId above for every Team Runtime tool call.');
+    expect(roleExecutionInput.prompt).toContain('- Submit progress with team_update_task only while this task is still queued.');
+    expect(roleExecutionInput.prompt).toContain('- Submit completion exactly once with team_submit_artifact using runId, stageId, roleId, and an idempotencyKey.');
+    expect(roleExecutionInput.prompt).toContain('Execution pattern:');
+    expect(roleExecutionInput.prompt).toContain('Correct example:');
+    expect(roleExecutionInput.prompt).toContain('Incorrect example:');
+    expect(roleExecutionInput.prompt).toContain('This is invalid because stageId must be the assigned task id, roleId must be your assigned role, and completion must use team_submit_artifact.');
+    expect(roleExecutionInput.prompt).toContain('</team_task_execution>');
   });
 
-  it('marks failed claimed dispatch executions when role session spawn fails', async () => {
-    const executeDispatch = vi.fn().mockRejectedValue(new Error('subagent target is not allowed'));
-    const service = new TeamRunService({
-      storageRoot,
-      clock,
-      idGenerator,
-      packageService: new TeamSkillPackageService(),
-      dependencyChecker,
-    });
+  it('validates workflow plan roles, groups, tasks, and dependency references', async () => {
+    const service = createService(storageRoot, createRoleSessionExecution('run-plan-guards'));
+    await createStartedRun(service, 'run-plan-guards');
+    const workspaceDir = leaderWorkspace(storageRoot, 'run-plan-guards');
 
-    await service.create({ packagePath: fixturePath, runId: 'run-spawn-fails', idempotencyKey: 'create-spawn-fails' });
-    await service.start({ runId: 'run-spawn-fails', idempotencyKey: 'start-spawn-fails' });
-    await advanceToDesign(service, 'run-spawn-fails');
-    const prepared = await service.prepareDispatch({
-      runId: 'run-spawn-fails',
-      stageId: 'step-1-design-operator-blueprint',
+    await expect(service.planWorkflow({
+      runId: 'run-plan-guards',
+      title: 'Invalid role plan',
+      groups: [{ ...workflowGroups()[0], taskIds: ['unknown-role-task'] }],
+      tasks: [{ ...workflowTasks()[0], taskId: 'unknown-role-task', roleId: 'missing-role' }],
+      idempotencyKey: 'plan-invalid-role',
+      workspaceDir,
+    })).rejects.toThrow('Team workflow task references unknown role: missing-role');
+
+    await expect(service.planWorkflow({
+      runId: 'run-plan-guards',
+      title: 'Unassigned task plan',
+      groups: workflowGroups().slice(0, 1),
+      tasks: workflowTasks(),
+      idempotencyKey: 'plan-unassigned-task',
+      workspaceDir,
+    })).rejects.toThrow('Team workflow task is not assigned to a group: code-kernel');
+
+    await expect(service.planWorkflow({
+      runId: 'run-plan-guards',
+      title: 'Missing dependency plan',
+      groups: [{ ...workflowGroups()[0], taskIds: ['design-blueprint'] }],
+      tasks: [{ ...workflowTasks()[0], dependsOnTaskIds: ['missing-task'] }],
+      idempotencyKey: 'plan-missing-dependency',
+      workspaceDir,
+    })).rejects.toThrow('Team workflow task dependency not found: missing-task');
+  });
+
+  it('limits initial task release by maxParallelTeammates without counting the leader execution', async () => {
+    const roleSessionExecution = createRoleDispatchSessionExecution('run-max-parallel');
+    const gatewayRequest = { request: vi.fn(async (method: string, params: { runId: string }) => {
+      if (method === TEAM_DISPATCH_PROCESS_GATEWAY_METHOD) {
+        await service.processDispatchQueue(params);
+        return;
+      }
+      if (method === TEAM_LEADER_SYNTHESIS_PROCESS_GATEWAY_METHOD) {
+        await service.processLeaderSynthesis(params);
+        return;
+      }
+      throw new Error(`Unexpected gateway method: ${method}`);
+    }) };
+    const service = createService(storageRoot, roleSessionExecution, false, undefined, undefined, gatewayRequest);
+    await createStartedRun(service, 'run-max-parallel');
+
+    await planWorkflow(service, storageRoot, 'run-max-parallel', {
+      groups: parallelWorkflowGroups(),
+      tasks: parallelWorkflowTasks(),
+    });
+    await expect.poll(() => roleSessionExecution.executeRole.mock.calls.length).toBe(1);
+
+    const snapshot = await service.snapshot({ runId: 'run-max-parallel', eventCursor: 0, eventLimit: 40 });
+    expect(snapshot.dispatchTasks).toHaveLength(1);
+    expect(snapshot.dispatchTasks[0]).toEqual(expect.objectContaining({
+      taskId: 'parallel-design',
+      status: 'queued',
       roleId: 'operator-designer',
-      idempotencyKey: 'dispatch-spawn-fails',
-    });
-    bindExecutionPort(service, executeDispatch);
+    }));
+    expect(snapshot.dispatchExecutions).toEqual(expect.arrayContaining([
+      expect.objectContaining({ stageId: 'leader', roleId: 'leader', status: 'queued' }),
+      expect.objectContaining({ stageId: 'parallel-design', roleId: 'operator-designer', status: 'queued' }),
+    ]));
+    expect(snapshot.dispatchExecutions).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ stageId: 'parallel-code' }),
+    ]));
+    expect(roleSessionExecution.executeRole.mock.calls[0]?.[0]).toEqual(expect.objectContaining({
+      taskId: 'parallel-design',
+      role: expect.objectContaining({ roleId: 'operator-designer' }),
+    }));
 
-    await expect(service.executeDispatch({
-      runId: 'run-spawn-fails',
-      dispatchId: prepared.dispatch.dispatchId,
-      idempotencyKey: 'execute-spawn-fails',
-    })).rejects.toThrow('subagent target is not allowed');
-    await expect(service.snapshot({ runId: 'run-spawn-fails', eventCursor: 0, eventLimit: 30 })).resolves.toEqual(expect.objectContaining({
-      dispatchExecutions: [expect.objectContaining({
-        dispatchId: prepared.dispatch.dispatchId,
-        status: 'failed',
-        statusReason: 'subagent target is not allowed',
-      })],
+    await service.cancel({ runId: 'run-max-parallel', reason: 'test cleanup', idempotencyKey: 'cancel-max-parallel' });
+  });
+
+  it('lazy-activates a workflow task from a native child session for task updates', async () => {
+    const service = createService(storageRoot, createRoleSessionExecution('run-lazy-update'), true);
+    await createStartedRun(service, 'run-lazy-update');
+    await planWorkflow(service, storageRoot, 'run-lazy-update');
+    const designChildSessionKey = childSessionKey('run-lazy-update', 'operator-designer', 'design-blueprint');
+
+    await expect(service.updateTask({
+      runId: 'run-lazy-update',
+      stageId: 'design-blueprint',
+      roleId: 'operator-designer',
+      status: 'in_progress',
+      summary: 'Started from native child session.',
+      idempotencyKey: 'task-lazy-activate',
+      workspaceDir: roleWorkspace(storageRoot, 'run-lazy-update', 'operator-designer'),
+      callerAgentId: await roleAgentId(service, 'run-lazy-update', 'operator-designer'),
+      childSessionKey: designChildSessionKey,
+    })).resolves.toEqual(expect.objectContaining({ stageId: 'design-blueprint', roleId: 'operator-designer', status: 'in_progress' }));
+
+    await expect(service.snapshot({ runId: 'run-lazy-update', eventCursor: 0, eventLimit: 60 })).resolves.toEqual(expect.objectContaining({
+      dispatchGroups: [expect.objectContaining({ groupId: 'round-1', status: 'queued' })],
+      dispatchTasks: [expect.objectContaining({ taskId: 'design-blueprint', status: 'queued', roleId: 'operator-designer' })],
+      dispatchExecutions: expect.arrayContaining([
+        expect.objectContaining({ stageId: 'design-blueprint', roleId: 'operator-designer', status: 'queued', childSessionKey: designChildSessionKey }),
+      ]),
       events: expect.arrayContaining([
-        expect.objectContaining({ type: 'dispatch:execution_failed' }),
+        expect.objectContaining({ type: 'dispatch:group_queued' }),
+        expect.objectContaining({ type: 'dispatch:task_queued' }),
+        expect.objectContaining({ type: 'dispatch:execution_queued' }),
       ]),
     }));
   });
 
-  it('marks completed dispatch executions after role artifact submission', async () => {
-    const executeDispatch = vi.fn(async (input) => ({
-      executionId: 'openclaw-session-complete',
-      childSessionKey: 'agent:matchaclaw-team:run-complete-exec:operator-designer:subagent:child-1',
-      spawnMode: 'run' as const,
-      status: 'queued' as const,
-      roleId: input.dispatch.roleId,
-      dispatchId: input.dispatch.dispatchId,
-    }));
-    const service = new TeamRunService({
+  it('records task flow projection events for role task updates', async () => {
+    const projectTaskUpdate = vi.fn().mockResolvedValue(undefined);
+    const service = createService(
       storageRoot,
-      clock,
-      idGenerator,
-      packageService: new TeamSkillPackageService(),
-      dependencyChecker,
-    });
+      createRoleSessionExecution('run-task-update-projection'),
+      true,
+      { projectTeamRun: vi.fn(), projectTaskUpdate },
+    );
+    await createStartedRun(service, 'run-task-update-projection');
+    await planWorkflow(service, storageRoot, 'run-task-update-projection');
+    const designChildSessionKey = childSessionKey('run-task-update-projection', 'operator-designer', 'design-blueprint');
 
-    await service.create({ packagePath: fixturePath, runId: 'run-complete-exec', idempotencyKey: 'create-complete-exec' });
-    await service.start({ runId: 'run-complete-exec', idempotencyKey: 'start-complete-exec' });
-    await service.tick({ runId: 'run-complete-exec', idempotencyKey: 'tick-complete-preflight' });
-    bindExecutionPort(service, executeDispatch);
-    await service.tick({ runId: 'run-complete-exec', idempotencyKey: 'tick-complete-design' });
+    await expect(service.updateTask({
+      runId: 'run-task-update-projection',
+      stageId: 'design-blueprint',
+      roleId: 'operator-designer',
+      status: 'in_progress',
+      summary: 'Started design projection.',
+      idempotencyKey: 'task-update-projection',
+      workspaceDir: roleWorkspace(storageRoot, 'run-task-update-projection', 'operator-designer'),
+      callerAgentId: await roleAgentId(service, 'run-task-update-projection', 'operator-designer'),
+      childSessionKey: designChildSessionKey,
+    })).resolves.toEqual(expect.objectContaining({ stageId: 'design-blueprint' }));
 
-    await expect(service.submitArtifact({
-      runId: 'run-complete-exec',
-      stageId: 'step-1-design-operator-blueprint',
+    expect(projectTaskUpdate).toHaveBeenCalledWith(expect.objectContaining({
+      taskId: 'design-blueprint',
+      roleId: 'operator-designer',
+      status: 'in_progress',
+      summary: 'Started design projection.',
+    }));
+    await expect(service.snapshot({ runId: 'run-task-update-projection', eventCursor: 0, eventLimit: 80 })).resolves.toEqual(expect.objectContaining({
+      events: expect.arrayContaining([
+        expect.objectContaining({
+          type: 'projection:taskFlow:task_update_queued',
+          payload: { stageId: 'design-blueprint', roleId: 'operator-designer', status: 'in_progress' },
+        }),
+      ]),
+    }));
+  });
+
+  it('lazy-activates and completes workflow tasks from native child session artifacts', async () => {
+    const service = createService(storageRoot, createRoleSessionExecution('run-lazy-artifact'), true);
+    await createStartedRun(service, 'run-lazy-artifact');
+    await planWorkflow(service, storageRoot, 'run-lazy-artifact');
+    const designChildSessionKey = childSessionKey('run-lazy-artifact', 'operator-designer', 'design-blueprint');
+
+    const submitted = await service.submitArtifact({
+      runId: 'run-lazy-artifact',
+      stageId: 'design-blueprint',
       roleId: 'operator-designer',
       kind: 'design_report',
       title: 'Operator blueprint',
-      content: designCompleteReport(),
-      idempotencyKey: 'artifact-complete-exec',
-      workspaceDir: roleWorkspace(storageRoot, 'run-complete-exec', 'operator-designer'),
-    })).resolves.toEqual(expect.objectContaining({ created: true }));
+      content: 'Design complete from native child session.',
+      idempotencyKey: 'artifact-lazy-activate',
+      workspaceDir: roleWorkspace(storageRoot, 'run-lazy-artifact', 'operator-designer'),
+      callerAgentId: await roleAgentId(service, 'run-lazy-artifact', 'operator-designer'),
+      childSessionKey: designChildSessionKey,
+    });
 
-    await expect(service.snapshot({ runId: 'run-complete-exec', eventCursor: 0, eventLimit: 30 })).resolves.toEqual(expect.objectContaining({
-      run: expect.objectContaining({ status: 'running', currentStageId: 'step-2-code-kernel-implementation' }),
-      dispatchExecutions: expect.arrayContaining([expect.objectContaining({
-        executionId: 'openclaw-session-complete',
-        stageId: 'step-1-design-operator-blueprint',
-        status: 'completed',
-        statusReason: expect.stringContaining('Artifact submitted:'),
-      })]),
-      stages: expect.arrayContaining([
-        expect.objectContaining({ stageId: 'step-1-design-operator-blueprint', status: 'passed' }),
-        expect.objectContaining({ stageId: 'step-2-code-kernel-implementation', status: 'running' }),
+    expect(submitted).toEqual(expect.objectContaining({
+      artifact: expect.objectContaining({ stageId: 'design-blueprint', roleId: 'operator-designer' }),
+      created: true,
+    }));
+    await expect(service.snapshot({ runId: 'run-lazy-artifact', eventCursor: 0, eventLimit: 80 })).resolves.toEqual(expect.objectContaining({
+      dispatchGroups: [expect.objectContaining({ groupId: 'round-1', status: 'completed' })],
+      dispatchTasks: [expect.objectContaining({ taskId: 'design-blueprint', status: 'completed', artifactId: submitted.artifact.artifactId })],
+      dispatchExecutions: expect.arrayContaining([
+        expect.objectContaining({ stageId: 'design-blueprint', status: 'completed', childSessionKey: designChildSessionKey }),
       ]),
       events: expect.arrayContaining([
+        expect.objectContaining({ type: 'artifact:submitted' }),
         expect.objectContaining({ type: 'dispatch:execution_completed' }),
-        expect.objectContaining({ type: 'gate:evaluated' }),
-        expect.objectContaining({ type: 'stage:gate_transitioned' }),
+        expect.objectContaining({ type: 'dispatch:task_completed' }),
+        expect.objectContaining({ type: 'dispatch:group_completed' }),
+      ]),
+    }));
+
+    await expect(service.updateTask({
+      runId: 'run-lazy-artifact',
+      stageId: 'design-blueprint',
+      roleId: 'operator-designer',
+      status: 'in_progress',
+      summary: 'Tried to update after artifact submission.',
+      idempotencyKey: 'task-update-after-completion',
+      workspaceDir: roleWorkspace(storageRoot, 'run-lazy-artifact', 'operator-designer'),
+      callerAgentId: await roleAgentId(service, 'run-lazy-artifact', 'operator-designer'),
+      childSessionKey: designChildSessionKey,
+    })).rejects.toThrow('Team workflow task is completed and cannot accept progress updates: design-blueprint');
+
+    const codeChildSessionKey = childSessionKey('run-lazy-artifact', 'kernel-coder', 'code-kernel');
+    await expect(service.updateTask({
+      runId: 'run-lazy-artifact',
+      stageId: 'code-kernel',
+      roleId: 'kernel-coder',
+      status: 'in_progress',
+      summary: 'Started implementation after design completion.',
+      idempotencyKey: 'task-code-lazy-activate',
+      workspaceDir: roleWorkspace(storageRoot, 'run-lazy-artifact', 'kernel-coder'),
+      callerAgentId: await roleAgentId(service, 'run-lazy-artifact', 'kernel-coder'),
+      childSessionKey: codeChildSessionKey,
+    })).resolves.toEqual(expect.objectContaining({ stageId: 'code-kernel', roleId: 'kernel-coder' }));
+  });
+
+  it('resolves approval requests against native child session workflow tasks', async () => {
+    const service = createService(storageRoot, createRoleSessionExecution('run-lazy-approval'), true);
+    await createStartedRun(service, 'run-lazy-approval');
+    await planWorkflow(service, storageRoot, 'run-lazy-approval');
+    const designChildSessionKey = childSessionKey('run-lazy-approval', 'operator-designer', 'design-blueprint');
+
+    const requested = await service.requestApproval({
+      runId: 'run-lazy-approval',
+      stageId: 'design-blueprint',
+      roleId: 'operator-designer',
+      reason: 'Need user authorization.',
+      requestedAction: 'Run live validation.',
+      risk: 'May consume quota.',
+      idempotencyKey: 'approval-lazy-activate',
+      workspaceDir: roleWorkspace(storageRoot, 'run-lazy-approval', 'operator-designer'),
+      callerAgentId: await roleAgentId(service, 'run-lazy-approval', 'operator-designer'),
+      childSessionKey: designChildSessionKey,
+    });
+
+    expect(requested).toEqual(expect.objectContaining({
+      approval: expect.objectContaining({ stageId: 'design-blueprint', roleId: 'operator-designer', status: 'pending' }),
+      created: true,
+    }));
+    await expect(service.resolveApproval({
+      runId: 'run-lazy-approval',
+      approvalId: requested.approval.approvalId,
+      decision: 'deny',
+      note: 'Not allowed.',
+      idempotencyKey: 'approval-deny',
+    })).resolves.toEqual(expect.objectContaining({ approval: expect.objectContaining({ status: 'denied' }) }));
+    await expect(service.snapshot({ runId: 'run-lazy-approval', eventCursor: 0, eventLimit: 80 })).resolves.toEqual(expect.objectContaining({
+      run: expect.objectContaining({ status: 'failed', currentStageId: 'design-blueprint' }),
+      approvals: [expect.objectContaining({ status: 'denied', note: 'Not allowed.' })],
+      dispatchTasks: expect.arrayContaining([
+        expect.objectContaining({ taskId: 'design-blueprint', status: 'failed', statusReason: 'Approval denied' }),
+      ]),
+      events: expect.arrayContaining([
+        expect.objectContaining({ type: 'approval:requested' }),
+        expect.objectContaining({ type: 'approval:resolved', payload: expect.objectContaining({ decision: 'deny' }) }),
       ]),
     }));
   });
 
-  it('cancels active stages and dispatch executions for non-terminal runs', async () => {
-    const childSessionKey = 'agent:matchaclaw-team:run-cancel-active:operator-designer:subagent:child-1';
-    const executeDispatch = vi.fn(async (input) => ({
-      executionId: 'openclaw-session-cancel',
-      childSessionKey,
-      spawnMode: 'run' as const,
-      status: 'queued' as const,
-      roleId: input.dispatch.roleId,
-      dispatchId: input.dispatch.dispatchId,
-    }));
-    const cancelDispatchExecution = vi.fn(async () => ({ cancelled: true }));
-    const service = new TeamRunService({
-      storageRoot,
-      clock,
-      idGenerator,
-      packageService: new TeamSkillPackageService(),
-      dependencyChecker,
+  it('stops retrying once retryLimit is exhausted and fails the workflow task', async () => {
+    const gatewayRequest = { request: vi.fn(async (method: string, params: { runId: string }) => {
+      if (method === TEAM_DISPATCH_PROCESS_GATEWAY_METHOD) {
+        await service.processDispatchQueue(params);
+        return;
+      }
+      if (method === TEAM_LEADER_SYNTHESIS_PROCESS_GATEWAY_METHOD) {
+        await service.processLeaderSynthesis(params);
+        return;
+      }
+      throw new Error(`Unexpected gateway method: ${method}`);
+    }) };
+    const service = createService(storageRoot, createRoleSessionExecution('run-retry-limit'), true, undefined, undefined, gatewayRequest);
+    await createStartedRun(service, 'run-retry-limit');
+
+    const planned = await planWorkflow(service, storageRoot, 'run-retry-limit', {
+      groups: singleTaskWorkflowGroups('retry-task', 1),
+      tasks: singleTaskWorkflowTasks('retry-task', 'operator-designer'),
+    });
+    const runtimeRoot = service.resolveRuntimeRoot('run-retry-limit');
+    const internals = service as unknown as {
+      workflowStore: {
+        saveGroup: (input: Record<string, unknown>) => Promise<{ group: { dispatchGroupId: string } }>;
+        saveTask: (input: Record<string, unknown>) => Promise<unknown>;
+      };
+      dispatchQueueStore: {
+        read: (runId: string) => Promise<Array<{ taskId?: string; status: string }>>;
+      };
+      markDispatchTaskFailed: (input: { runtimeRoot: string; dispatchId: string; reason: string }) => Promise<void>;
+    };
+    const savedGroup = await internals.workflowStore.saveGroup({
+      runtimeRoot,
+      runId: 'run-retry-limit',
+      workflowPlanId: planned.plan.workflowPlanId,
+      groupId: 'retry-task-group',
+      taskIds: ['retry-task'],
+      idempotencyKey: `${planned.plan.workflowPlanId}:group:retry-task-group`,
+    });
+    await internals.workflowStore.saveTask({
+      runtimeRoot,
+      runId: 'run-retry-limit',
+      workflowPlanId: planned.plan.workflowPlanId,
+      dispatchGroupId: savedGroup.group.dispatchGroupId,
+      groupId: 'retry-task-group',
+      taskId: 'retry-task',
+      roleId: 'operator-designer',
+      dispatchId: 'dispatch-retry-1',
+      idempotencyKey: `${planned.plan.workflowPlanId}:group:retry-task-group:task:retry-task`,
     });
 
-    await service.create({ packagePath: fixturePath, runId: 'run-cancel-active', idempotencyKey: 'create-cancel-active' });
-    await service.start({ runId: 'run-cancel-active', idempotencyKey: 'start-cancel-active' });
-    await service.tick({ runId: 'run-cancel-active', idempotencyKey: 'tick-cancel-preflight' });
-    bindExecutionPort(service, executeDispatch, cancelDispatchExecution);
-    await service.tick({ runId: 'run-cancel-active', idempotencyKey: 'tick-cancel-design' });
+    await internals.markDispatchTaskFailed({ runtimeRoot, dispatchId: 'dispatch-retry-1', reason: 'first dispatch failed' });
+    await expect(internals.dispatchQueueStore.read('run-retry-limit')).resolves.toEqual(expect.arrayContaining([
+      expect.objectContaining({ taskId: 'retry-task', status: 'pending' }),
+    ]));
+    await internals.markDispatchTaskFailed({ runtimeRoot, dispatchId: 'dispatch-retry-1', reason: 'second dispatch failed' });
+
+    const snapshot = await service.snapshot({ runId: 'run-retry-limit', eventCursor: 0, eventLimit: 80 });
+
+    expect(snapshot.run).toEqual(expect.objectContaining({ status: 'failed', currentStageId: 'leader' }));
+    expect(snapshot.workflowPlan).toEqual(expect.objectContaining({ status: 'failed' }));
+    expect(snapshot.dispatchTasks).toEqual([
+      expect.objectContaining({
+        taskId: 'retry-task',
+        status: 'failed',
+        roleId: 'operator-designer',
+        attemptCount: 2,
+        statusReason: 'second dispatch failed',
+      }),
+    ]);
+    expect(snapshot.dispatchGroups).toEqual([
+      expect.objectContaining({ groupId: 'retry-task-group', status: 'failed' }),
+    ]);
+    expect(snapshot.events).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        type: 'dispatch:task_retry_scheduled',
+        payload: expect.objectContaining({ taskId: 'retry-task', attemptCount: 2, reason: 'first dispatch failed' }),
+      }),
+      expect.objectContaining({ type: 'dispatch:group_failed' }),
+      expect.objectContaining({ type: 'run:failed' }),
+    ]));
+
+    await expect(service.delete({ runId: 'run-retry-limit' })).resolves.toEqual(expect.objectContaining({
+      runId: 'run-retry-limit',
+      deleted: true,
+    }));
+  });
+
+  it('does not bootstrap leader synthesis directly from tick after workflow tasks complete', async () => {
+    const roleSessionExecution = createRoleSessionExecution('run-tick-synthesis-ready');
+    const service = createService(storageRoot, roleSessionExecution, true);
+
+    await createStartedRun(service, 'run-tick-synthesis-ready');
+    await planWorkflow(service, storageRoot, 'run-tick-synthesis-ready');
+    await completeDefaultWorkflowTasks(service, storageRoot, 'run-tick-synthesis-ready');
+
+    await expect(service.tick({ runId: 'run-tick-synthesis-ready', idempotencyKey: 'tick-synthesis-ready' })).resolves.toEqual(expect.objectContaining({
+      action: 'noop',
+      status: 'running',
+      reason: 'TeamRun is driven by leader workflow tools',
+    }));
+    expect(roleSessionExecution.executeLeader).toHaveBeenCalledTimes(1);
+
+    await expect(service.snapshot({ runId: 'run-tick-synthesis-ready', eventCursor: 0, eventLimit: 120 })).resolves.toEqual(expect.objectContaining({
+      events: expect.not.arrayContaining([
+        expect.objectContaining({ type: 'leader:synthesis_queued' }),
+        expect.objectContaining({ type: 'leader:synthesis_failed' }),
+      ]),
+    }));
+  })
+
+  it('requests leader synthesis through the handler gateway path when no dispatch work is pending', async () => {
+    const gatewayRequest = { request: vi.fn().mockResolvedValue(undefined) } satisfies TeamGatewayRequestPort;
+    const service = createService(storageRoot, createRoleSessionExecution('run-synthesis-handler'), true, undefined, undefined, gatewayRequest);
+    await createStartedRun(service, 'run-synthesis-handler');
+    await planWorkflow(service, storageRoot, 'run-synthesis-handler');
+    await completeDefaultWorkflowTasks(service, storageRoot, 'run-synthesis-handler');
+
+    const internals = service as unknown as {
+      eventBus: { enqueue(event: { type: 'poll:message'; runId: string; timestamp: number }): void };
+    };
+    internals.eventBus.enqueue({ type: 'poll:message', runId: 'run-synthesis-handler', timestamp: Date.now() });
+
+    await expect.poll(() => gatewayRequest.request.mock.calls).toEqual(expect.arrayContaining([
+      [TEAM_LEADER_SYNTHESIS_PROCESS_GATEWAY_METHOD, { runId: 'run-synthesis-handler' }],
+    ]));
+  });
+
+  it('records why leader synthesis is skipped before workflow tasks are ready', async () => {
+    const service = createService(storageRoot, createRoleSessionExecution('run-synthesis-skipped'), true);
+    await createStartedRun(service, 'run-synthesis-skipped');
+    const planned = await planWorkflow(service, storageRoot, 'run-synthesis-skipped');
+
+    await service.processLeaderSynthesis({ runId: 'run-synthesis-skipped' });
+    await service.processLeaderSynthesis({ runId: 'run-synthesis-skipped' });
+
+    const snapshot = await service.snapshot({ runId: 'run-synthesis-skipped', eventCursor: 0, eventLimit: 80 });
+    const skippedEvents = snapshot.events.filter((event) => event.type === 'leader:synthesis_skipped');
+    expect(skippedEvents).toEqual([
+      expect.objectContaining({
+        payload: expect.objectContaining({
+          workflowPlanId: planned.plan.workflowPlanId,
+          reason: 'workflow_not_ready',
+          readyForSynthesis: false,
+          finalStatus: 'running',
+        }),
+      }),
+    ]);
+  });
+
+  it('binds leader synthesis lifecycle tracking to the OpenClaw execution run', async () => {
+    const setRunContext = vi.fn().mockResolvedValue(true);
+    const roleSessionExecution = createRoleSessionExecution('run-synthesis-track');
+    const service = createService(storageRoot, roleSessionExecution, true, undefined, { setRunContext });
+    await createStartedRun(service, 'run-synthesis-track');
+    const planned = await planWorkflow(service, storageRoot, 'run-synthesis-track');
+    await completeDefaultWorkflowTasks(service, storageRoot, 'run-synthesis-track');
+
+    await service.processLeaderSynthesis({ runId: 'run-synthesis-track' });
+
+    expect(setRunContext).toHaveBeenCalledWith({
+      runId: 'openclaw-session-run-synthesis-track-leader',
+      namespace: 'matchaclaw.team-runtime.leader-synthesis',
+      value: { teamRunId: 'run-synthesis-track', workflowPlanId: planned.plan.workflowPlanId },
+    });
+    await expect(service.snapshot({ runId: 'run-synthesis-track', eventCursor: 0, eventLimit: 120 })).resolves.toEqual(expect.objectContaining({
+      events: expect.arrayContaining([
+        expect.objectContaining({
+          type: 'leader:synthesis_queued',
+          payload: expect.objectContaining({
+            workflowPlanId: planned.plan.workflowPlanId,
+            executionId: 'openclaw-session-run-synthesis-track-leader',
+          }),
+        }),
+      ]),
+    }));
+  });
+
+  it('records leader synthesis tracking failures when runContext binding is unavailable', async () => {
+    const service = createService(storageRoot, createRoleSessionExecution('run-synthesis-tracking-missing'), true);
+    await createStartedRun(service, 'run-synthesis-tracking-missing');
+    const planned = await planWorkflow(service, storageRoot, 'run-synthesis-tracking-missing');
+    await completeDefaultWorkflowTasks(service, storageRoot, 'run-synthesis-tracking-missing');
+
+    await service.processLeaderSynthesis({ runId: 'run-synthesis-tracking-missing' });
+
+    await expect(service.snapshot({ runId: 'run-synthesis-tracking-missing', eventCursor: 0, eventLimit: 120 })).resolves.toEqual(expect.objectContaining({
+      events: expect.arrayContaining([
+        expect.objectContaining({
+          type: 'leader:synthesis_tracking_failed',
+          payload: expect.objectContaining({
+            workflowPlanId: planned.plan.workflowPlanId,
+            executionId: 'openclaw-session-run-synthesis-tracking-missing-leader',
+            reason: 'run_context_missing',
+          }),
+        }),
+      ]),
+    }));
+  });
+
+  it('uses childSessionKey to resolve the queued workflow task when stageId is wrong', async () => {
+    const service = createService(storageRoot, createRoleSessionExecution('run-child-session-stage-correction'), true);
+    await createStartedRun(service, 'run-child-session-stage-correction');
+    await planWorkflow(service, storageRoot, 'run-child-session-stage-correction');
+    const designChildSessionKey = childSessionKey('run-child-session-stage-correction', 'operator-designer', 'design-blueprint');
+    await service.updateTask({
+      runId: 'run-child-session-stage-correction',
+      stageId: 'design-blueprint',
+      roleId: 'operator-designer',
+      status: 'in_progress',
+      summary: 'Started design.',
+      idempotencyKey: 'task-child-session-stage-correction',
+      workspaceDir: roleWorkspace(storageRoot, 'run-child-session-stage-correction', 'operator-designer'),
+      callerAgentId: await roleAgentId(service, 'run-child-session-stage-correction', 'operator-designer'),
+      childSessionKey: designChildSessionKey,
+    });
+
+    const submitted = await service.submitArtifact({
+      runId: 'run-child-session-stage-correction',
+      stageId: 'design',
+      roleId: 'operator-designer',
+      kind: 'design_report',
+      title: 'Operator blueprint',
+      content: 'Design complete after correcting guessed stageId.',
+      idempotencyKey: 'artifact-child-session-stage-correction',
+      workspaceDir: roleWorkspace(storageRoot, 'run-child-session-stage-correction', 'operator-designer'),
+      callerAgentId: await roleAgentId(service, 'run-child-session-stage-correction', 'operator-designer'),
+      childSessionKey: designChildSessionKey,
+    });
+
+    expect(submitted).toEqual(expect.objectContaining({
+      artifact: expect.objectContaining({ stageId: 'design-blueprint', roleId: 'operator-designer' }),
+      created: true,
+    }));
+  });
+
+  it('rejects role tools without a native role child session', async () => {
+    const service = createService(storageRoot, createRoleSessionExecution('run-invalid-stage-actionable'));
+    await createStartedRun(service, 'run-invalid-stage-actionable');
+    await planWorkflow(service, storageRoot, 'run-invalid-stage-actionable');
+    const operatorDesignerAgentId = await roleAgentId(service, 'run-invalid-stage-actionable', 'operator-designer');
+
+    await expect(service.updateTask({
+      runId: 'run-invalid-stage-actionable',
+      stageId: 'design',
+      roleId: 'operator-designer',
+      status: 'blocked',
+      summary: 'Guessed a short stage id.',
+      idempotencyKey: 'task-invalid-stage-actionable',
+      workspaceDir: roleWorkspace(storageRoot, 'run-invalid-stage-actionable', 'operator-designer'),
+      callerAgentId: operatorDesignerAgentId,
+    })).rejects.toThrow('Team role lifecycle tools require a native role child session for role: operator-designer');
+
+    await expect(service.updateTask({
+      runId: 'run-invalid-stage-actionable',
+      stageId: 'design-blueprint',
+      roleId: 'operator-designer',
+      status: 'blocked',
+      summary: 'Leader tried to update role task.',
+      idempotencyKey: 'task-leader-main-session',
+      workspaceDir: roleWorkspace(storageRoot, 'run-invalid-stage-actionable', 'operator-designer'),
+      callerAgentId: operatorDesignerAgentId,
+      childSessionKey: `agent:${buildTeamManagedAgentId('run-invalid-stage-actionable', 'leader')}:main`,
+    })).rejects.toThrow('Team role lifecycle tools require a native role child session for role: operator-designer');
+  });
+
+  it('rejects another role childSessionKey at the role lifecycle tool boundary', async () => {
+    const service = createService(storageRoot, createRoleSessionExecution('run-child-session-cross-role'), true);
+    await createStartedRun(service, 'run-child-session-cross-role');
+    await planWorkflow(service, storageRoot, 'run-child-session-cross-role');
+    const designChildSessionKey = childSessionKey('run-child-session-cross-role', 'operator-designer', 'design-blueprint');
+    await service.submitArtifact({
+      runId: 'run-child-session-cross-role',
+      stageId: 'design-blueprint',
+      roleId: 'operator-designer',
+      kind: 'design_report',
+      title: 'Operator blueprint',
+      content: 'Design complete before activating kernel task.',
+      idempotencyKey: 'artifact-cross-role-design',
+      workspaceDir: roleWorkspace(storageRoot, 'run-child-session-cross-role', 'operator-designer'),
+      callerAgentId: await roleAgentId(service, 'run-child-session-cross-role', 'operator-designer'),
+      childSessionKey: designChildSessionKey,
+    });
+    const codeChildSessionKey = childSessionKey('run-child-session-cross-role', 'kernel-coder', 'code-kernel');
+    await service.updateTask({
+      runId: 'run-child-session-cross-role',
+      stageId: 'code-kernel',
+      roleId: 'kernel-coder',
+      status: 'in_progress',
+      summary: 'Started code task.',
+      idempotencyKey: 'task-cross-role-code',
+      workspaceDir: roleWorkspace(storageRoot, 'run-child-session-cross-role', 'kernel-coder'),
+      callerAgentId: await roleAgentId(service, 'run-child-session-cross-role', 'kernel-coder'),
+      childSessionKey: codeChildSessionKey,
+    });
+
+    await expect(service.updateTask({
+      runId: 'run-child-session-cross-role',
+      stageId: 'design',
+      roleId: 'operator-designer',
+      status: 'blocked',
+      summary: 'Tried to use another role child session.',
+      idempotencyKey: 'task-cross-role-child-session',
+      workspaceDir: roleWorkspace(storageRoot, 'run-child-session-cross-role', 'operator-designer'),
+      callerAgentId: await roleAgentId(service, 'run-child-session-cross-role', 'operator-designer'),
+      childSessionKey: codeChildSessionKey,
+    })).rejects.toThrow('Team role lifecycle tools require a native role child session for role: operator-designer');
+  });
+
+  it('deletes created TeamRun runtime storage and reports missing runs as unchanged', async () => {
+    const service = createService(storageRoot, createRoleSessionExecution('run-delete-created'));
+    await service.create({ packagePath: fixturePath, runId: 'run-delete-created', idempotencyKey: 'create-delete-created' });
+    const runtimeRoot = service.resolveRuntimeRoot('run-delete-created');
+
+    await expect(directoryExists(runtimeRoot)).resolves.toBe(true);
+    await expect(service.delete({ runId: 'run-delete-created' })).resolves.toEqual(expect.objectContaining({
+      runId: 'run-delete-created',
+      deleted: true,
+      managedAgentConfig: expect.objectContaining({ runId: 'run-delete-created' }),
+    }));
+    await expect(directoryExists(runtimeRoot)).resolves.toBe(false);
+    await expect(service.delete({ runId: 'run-delete-created' })).resolves.toEqual({
+      runId: 'run-delete-created',
+      deleted: false,
+    });
+  });
+
+  it('cancels active native child sessions before deleting TeamRun runtime storage', async () => {
+    let runtimeRoot = '';
+    const deleteSession = vi.fn(async () => {
+      expect(await directoryExists(runtimeRoot)).toBe(true);
+    });
+    const { service } = createOpenClawBackedService(storageRoot, deleteSession, { disableAutoDispatch: true });
+    await createStartedRun(service, 'run-delete-active');
+    await planWorkflow(service, storageRoot, 'run-delete-active');
+    const designChildSessionKey = childSessionKey('run-delete-active', 'operator-designer', 'design-blueprint');
+    await service.updateTask({
+      runId: 'run-delete-active',
+      stageId: 'design-blueprint',
+      roleId: 'operator-designer',
+      status: 'in_progress',
+      summary: 'Started design.',
+      idempotencyKey: 'task-delete-active',
+      workspaceDir: roleWorkspace(storageRoot, 'run-delete-active', 'operator-designer'),
+      callerAgentId: await roleAgentId(service, 'run-delete-active', 'operator-designer'),
+      childSessionKey: designChildSessionKey,
+    });
+    runtimeRoot = service.resolveRuntimeRoot('run-delete-active');
+
+    await expect(service.delete({ runId: 'run-delete-active' })).resolves.toEqual(expect.objectContaining({
+      runId: 'run-delete-active',
+      deleted: true,
+      managedAgentConfig: expect.objectContaining({ runId: 'run-delete-active' }),
+    }));
+    expect(deleteSession).toHaveBeenCalledTimes(2);
+    expect(deleteSession).toHaveBeenCalledWith({ sessionKey: `agent:${buildTeamManagedAgentId('run-delete-active', 'leader')}:main` });
+    expect(deleteSession).toHaveBeenCalledWith({ sessionKey: designChildSessionKey });
+    expect(await directoryExists(runtimeRoot)).toBe(false);
+  });
+
+  it('cancels active workflow dispatch executions for non-terminal runs', async () => {
+    const { service, deleteSession } = createOpenClawBackedService(storageRoot, undefined, { disableAutoDispatch: true });
+    await createStartedRun(service, 'run-cancel-active');
+    await planWorkflow(service, storageRoot, 'run-cancel-active');
+    const designChildSessionKey = childSessionKey('run-cancel-active', 'operator-designer', 'design-blueprint');
+    await service.updateTask({
+      runId: 'run-cancel-active',
+      stageId: 'design-blueprint',
+      roleId: 'operator-designer',
+      status: 'in_progress',
+      summary: 'Started design.',
+      idempotencyKey: 'task-cancel-active',
+      workspaceDir: roleWorkspace(storageRoot, 'run-cancel-active', 'operator-designer'),
+      callerAgentId: await roleAgentId(service, 'run-cancel-active', 'operator-designer'),
+      childSessionKey: designChildSessionKey,
+    });
 
     await expect(service.cancel({
       runId: 'run-cancel-active',
       reason: 'user requested cancellation',
       idempotencyKey: 'cancel-active',
     })).resolves.toEqual(expect.objectContaining({ status: 'cancelled' }));
-    expect(cancelDispatchExecution).toHaveBeenCalledWith({
-      execution: expect.objectContaining({
-        executionId: 'openclaw-session-cancel',
-        childSessionKey,
-        status: 'queued',
-      }),
-      reason: 'user requested cancellation',
-    });
+    expect(deleteSession).toHaveBeenCalledTimes(2);
+    expect(deleteSession).toHaveBeenCalledWith({ sessionKey: `agent:${buildTeamManagedAgentId('run-cancel-active', 'leader')}:main` });
+    expect(deleteSession).toHaveBeenCalledWith({ sessionKey: designChildSessionKey });
     await expect(service.snapshot({ runId: 'run-cancel-active', eventCursor: 0, eventLimit: 40 })).resolves.toEqual(expect.objectContaining({
-      run: expect.objectContaining({ status: 'cancelled', currentStageId: 'step-1-design-operator-blueprint' }),
-      stages: expect.arrayContaining([
-        expect.objectContaining({ stageId: 'step-1-design-operator-blueprint', status: 'cancelled' }),
+      run: expect.objectContaining({ status: 'cancelled' }),
+      dispatchExecutions: expect.arrayContaining([
+        expect.objectContaining({ status: 'cancelled', statusReason: 'user requested cancellation' }),
       ]),
-      dispatchExecutions: [expect.objectContaining({
-        stageId: 'step-1-design-operator-blueprint',
-        status: 'cancelled',
-        statusReason: 'user requested cancellation',
-      })],
       events: expect.arrayContaining([
         expect.objectContaining({ type: 'dispatch:execution_cancelled' }),
         expect.objectContaining({ type: 'run:cancelled' }),
       ]),
     }));
-    await expect(service.cancel({ runId: 'run-cancel-active', idempotencyKey: 'cancel-terminal' }))
-      .rejects.toThrow('TeamRun cannot be cancelled from terminal status cancelled: run-cancel-active');
   });
 
-  it('requires role tool callers to present the provisioned run workspace', async () => {
-    const service = new TeamRunService({
-      storageRoot,
-      clock,
-      idGenerator,
-      packageService: new TeamSkillPackageService(),
-      dependencyChecker,
+  it('cancels queued workflow plan, groups, tasks, and queue items together', async () => {
+    const service = createService(storageRoot, createRoleSessionExecution('run-cancel-queued'), true);
+    await createStartedRun(service, 'run-cancel-queued');
+    const planned = await planWorkflow(service, storageRoot, 'run-cancel-queued');
+    const runtimeRoot = service.resolveRuntimeRoot('run-cancel-queued');
+    const internals = service as unknown as {
+      workflowStore: {
+        saveGroup: (input: Record<string, unknown>) => Promise<{ group: { dispatchGroupId: string } }>;
+        saveTask: (input: Record<string, unknown>) => Promise<unknown>;
+      };
+      dispatchQueueStore: {
+        enqueue: (input: Record<string, unknown>) => Promise<unknown>;
+      };
+    };
+    const savedGroup = await internals.workflowStore.saveGroup({
+      runtimeRoot,
+      runId: 'run-cancel-queued',
+      workflowPlanId: planned.plan.workflowPlanId,
+      groupId: 'round-1',
+      taskIds: ['design-blueprint'],
+      idempotencyKey: `${planned.plan.workflowPlanId}:group:round-1`,
     });
-
-    await service.create({ packagePath: fixturePath, runId: 'run-caller-auth', idempotencyKey: 'create-caller-auth' });
-    await service.start({ runId: 'run-caller-auth', idempotencyKey: 'start-caller-auth' });
-    await advanceToDesign(service, 'run-caller-auth');
-
-    await expect(service.updateTask({
-      runId: 'run-caller-auth',
-      stageId: 'step-1-design-operator-blueprint',
+    await internals.workflowStore.saveTask({
+      runtimeRoot,
+      runId: 'run-cancel-queued',
+      workflowPlanId: planned.plan.workflowPlanId,
+      dispatchGroupId: savedGroup.group.dispatchGroupId,
+      groupId: 'round-1',
+      taskId: 'design-blueprint',
       roleId: 'operator-designer',
-      status: 'blocked',
-      summary: 'Need clarification.',
-      idempotencyKey: 'task-missing-workspace',
-    })).rejects.toThrow('Tool caller workspace is required for role: operator-designer');
-    await expect(service.requestApproval({
-      runId: 'run-caller-auth',
-      stageId: 'step-1-design-operator-blueprint',
-      roleId: 'operator-designer',
-      reason: 'Need user authorization.',
-      requestedAction: 'Run external validation.',
-      risk: 'May consume quota.',
-      idempotencyKey: 'approval-missing-workspace',
-    })).rejects.toThrow('Tool caller workspace is required for role: operator-designer');
-    await expect(service.sendMessage({
-      runId: 'run-caller-auth',
-      fromRoleId: 'operator-designer',
-      toRoleId: 'leader',
-      summary: 'Blocked',
-      body: 'Need clarification.',
-      idempotencyKey: 'message-missing-workspace',
-    })).rejects.toThrow('Tool caller workspace is required for role: operator-designer');
-    await expect(service.submitArtifact({
-      runId: 'run-caller-auth',
-      stageId: 'step-1-design-operator-blueprint',
-      roleId: 'operator-designer',
-      kind: 'design_report',
-      title: 'Operator blueprint',
-      content: designCompleteReport(),
-      idempotencyKey: 'artifact-missing-workspace',
-    })).rejects.toThrow('Tool caller workspace is required for role: operator-designer');
-
-    await expect(service.updateTask({
-      runId: 'run-caller-auth',
-      stageId: 'step-1-design-operator-blueprint',
-      roleId: 'operator-designer',
-      status: 'blocked',
-      summary: 'Need clarification.',
-      idempotencyKey: 'task-correct-workspace',
-      workspaceDir: roleWorkspace(storageRoot, 'run-caller-auth', 'operator-designer'),
-    })).resolves.toEqual(expect.objectContaining({ runId: 'run-caller-auth', roleId: 'operator-designer' }));
-  });
-
-  it('rejects cross-run reuse of a same-role workspace for team tool calls', async () => {
-    const service = new TeamRunService({
-      storageRoot,
-      clock,
-      idGenerator,
-      packageService: new TeamSkillPackageService(),
-      dependencyChecker,
+      dispatchId: 'dispatch-cancel-queued-1',
+      idempotencyKey: `${planned.plan.workflowPlanId}:group:round-1:task:design-blueprint`,
+    });
+    await internals.dispatchQueueStore.enqueue({
+      runId: 'run-cancel-queued',
+      toRoleId: 'operator-designer',
+      taskId: 'design-blueprint',
+      prompt: 'Produce the operator design blueprint.',
+      idempotencyKey: 'orchestrate:run-cancel-queued:design-blueprint:queued',
     });
 
-    for (const runId of ['run-caller-owner', 'run-caller-victim']) {
-      await service.create({ packagePath: fixturePath, runId, idempotencyKey: `create-${runId}` });
-      await service.start({ runId, idempotencyKey: `start-${runId}` });
-      await advanceToDesign(service, runId);
-    }
+    await expect(service.cancel({
+      runId: 'run-cancel-queued',
+      reason: 'user requested cancellation',
+      idempotencyKey: 'cancel-queued',
+    })).resolves.toEqual(expect.objectContaining({ status: 'cancelled' }));
 
-    await expect(service.sendMessage({
-      runId: 'run-caller-victim',
-      fromRoleId: 'operator-designer',
-      toRoleId: 'leader',
-      summary: 'Impersonated update',
-      body: 'This should not be accepted.',
-      idempotencyKey: 'message-cross-run',
-      workspaceDir: roleWorkspace(storageRoot, 'run-caller-owner', 'operator-designer'),
-    })).rejects.toThrow('Tool caller workspace does not match role: operator-designer');
-
-    await expect(service.submitArtifact({
-      runId: 'run-caller-victim',
-      stageId: 'step-1-design-operator-blueprint',
-      roleId: 'operator-designer',
-      kind: 'design_report',
-      title: 'Operator blueprint',
-      content: designCompleteReport(),
-      idempotencyKey: 'artifact-correct-workspace',
-      workspaceDir: roleWorkspace(storageRoot, 'run-caller-victim', 'operator-designer'),
-    })).resolves.toEqual(expect.objectContaining({ created: true }));
-  });
-
-  it('reconciles an already persisted passing gate when the run cursor was not advanced', async () => {
-    const service = new TeamRunService({
-      storageRoot,
-      clock,
-      idGenerator,
-      packageService: new TeamSkillPackageService(),
-      dependencyChecker,
-    });
-    const runId = 'run-gate-reconcile';
-    await service.create({ packagePath: fixturePath, runId, idempotencyKey: 'create-gate-reconcile' });
-    await service.start({ runId, idempotencyKey: 'start-gate-reconcile' });
-    await advanceToDesign(service, runId);
-    const submitted = await service.submitArtifact({
-      runId,
-      stageId: 'step-1-design-operator-blueprint',
-      roleId: 'operator-designer',
-      ...passContentForStage('step-1-design-operator-blueprint'),
-      idempotencyKey: 'artifact-gate-reconcile',
-      workspaceDir: roleWorkspace(storageRoot, runId, 'operator-designer'),
-    });
-    await patchRun(storageRoot, runId, { status: 'running', currentStageId: 'step-1-design-operator-blueprint' });
-
-    await expect(service.evaluateGate({
-      runId,
-      artifactId: submitted.artifact.artifactId,
-      gateType: 'design',
-      idempotencyKey: 'artifact-gate-reconcile:gate:step-1-design-operator-blueprint',
-    })).resolves.toEqual(expect.objectContaining({ created: false }));
-    await expect(service.snapshot({ runId, eventCursor: 0, eventLimit: 40 })).resolves.toEqual(expect.objectContaining({
-      run: expect.objectContaining({ status: 'running', currentStageId: 'step-2-code-kernel-implementation' }),
-      stages: expect.arrayContaining([
-        expect.objectContaining({ stageId: 'step-1-design-operator-blueprint', status: 'passed' }),
-        expect.objectContaining({ stageId: 'step-2-code-kernel-implementation', status: 'running' }),
-      ]),
-    }));
-  });
-
-  it('reconciles already persisted approval request and resolution transitions', async () => {
-    const service = new TeamRunService({
-      storageRoot,
-      clock,
-      idGenerator,
-      packageService: new TeamSkillPackageService(),
-      dependencyChecker,
-    });
-    const runId = 'run-approval-reconcile';
-    await service.create({ packagePath: fixturePath, runId, idempotencyKey: 'create-approval-reconcile' });
-    await service.start({ runId, idempotencyKey: 'start-approval-reconcile' });
-    await advanceToDesign(service, runId);
-    const requested = await service.requestApproval({
-      runId,
-      stageId: 'step-1-design-operator-blueprint',
-      roleId: 'operator-designer',
-      reason: 'Need user authorization.',
-      requestedAction: 'Run live validation.',
-      risk: 'May consume quota.',
-      idempotencyKey: 'approval-reconcile-request',
-      workspaceDir: roleWorkspace(storageRoot, runId, 'operator-designer'),
-    });
-    await patchRun(storageRoot, runId, { status: 'running', currentStageId: 'step-1-design-operator-blueprint' });
-
-    await expect(service.requestApproval({
-      runId,
-      stageId: 'step-1-design-operator-blueprint',
-      roleId: 'operator-designer',
-      reason: 'Need user authorization.',
-      requestedAction: 'Run live validation.',
-      risk: 'May consume quota.',
-      idempotencyKey: 'approval-reconcile-request',
-      workspaceDir: roleWorkspace(storageRoot, runId, 'operator-designer'),
-    })).resolves.toEqual(expect.objectContaining({ created: false }));
-    await expect(service.snapshot({ runId, eventCursor: 0, eventLimit: 40 })).resolves.toEqual(expect.objectContaining({
-      run: expect.objectContaining({ status: 'waiting_for_user', currentStageId: 'step-1-design-operator-blueprint' }),
-      stages: expect.arrayContaining([
-        expect.objectContaining({ stageId: 'step-1-design-operator-blueprint', status: 'waiting_for_user' }),
-      ]),
-    }));
-
-    await service.resolveApproval({
-      runId,
-      approvalId: requested.approval.approvalId,
-      decision: 'approve',
-      idempotencyKey: 'approval-reconcile-resolve',
-    });
-    await patchRun(storageRoot, runId, { status: 'waiting_for_user', currentStageId: 'step-1-design-operator-blueprint' });
-    await expect(service.resolveApproval({
-      runId,
-      approvalId: requested.approval.approvalId,
-      decision: 'approve',
-      idempotencyKey: 'approval-reconcile-resolve',
-    })).resolves.toEqual(expect.objectContaining({ approval: expect.objectContaining({ status: 'approved' }) }));
-    await expect(service.snapshot({ runId, eventCursor: 0, eventLimit: 60 })).resolves.toEqual(expect.objectContaining({
-      run: expect.objectContaining({ status: 'running', currentStageId: 'step-1-design-operator-blueprint' }),
-      stages: expect.arrayContaining([
-        expect.objectContaining({ stageId: 'step-1-design-operator-blueprint', status: 'running' }),
-      ]),
-    }));
-  });
-
-  it('requires approval requests to target the running current stage and assigned role', async () => {
-    const service = new TeamRunService({
-      storageRoot,
-      clock,
-      idGenerator,
-      packageService: new TeamSkillPackageService(),
-      dependencyChecker,
-    });
-
-    await service.create({ packagePath: fixturePath, runId: 'run-approval-guards', idempotencyKey: 'create-approval-guards' });
-    await service.start({ runId: 'run-approval-guards', idempotencyKey: 'start-approval-guards' });
-    await advanceToDesign(service, 'run-approval-guards');
-
-    await expect(service.requestApproval({
-      runId: 'run-approval-guards',
-      stageId: 'step-2-code-kernel-implementation',
-      roleId: 'kernel-coder',
-      reason: 'Need user authorization.',
-      requestedAction: 'Run compile validation.',
-      risk: 'May consume quota.',
-      idempotencyKey: 'approval-wrong-stage',
-      workspaceDir: roleWorkspace(storageRoot, 'run-approval-guards', 'kernel-coder'),
-    })).rejects.toThrow('TeamRun current stage is step-1-design-operator-blueprint, got step-2-code-kernel-implementation');
-    await expect(service.requestApproval({
-      runId: 'run-approval-guards',
-      stageId: 'step-1-design-operator-blueprint',
-      roleId: 'kernel-coder',
-      reason: 'Need user authorization.',
-      requestedAction: 'Run design validation.',
-      risk: 'May consume quota.',
-      idempotencyKey: 'approval-wrong-role',
-      workspaceDir: roleWorkspace(storageRoot, 'run-approval-guards', 'kernel-coder'),
-    })).rejects.toThrow('Team stage step-1-design-operator-blueprint expects role operator-designer, got kernel-coder');
-  });
-
-  it('marks stale queued dispatch executions during recovery snapshot reads', async () => {
-    let now = 1;
-    const recoveryClock = { nowMs: () => now };
-    const executeDispatch = vi.fn(async (input) => ({
-      executionId: 'openclaw-session-stale',
-      childSessionKey: 'agent:matchaclaw-team:run-stale:operator-designer:subagent:child-1',
-      spawnMode: 'run' as const,
-      status: 'queued' as const,
-      roleId: input.dispatch.roleId,
-      dispatchId: input.dispatch.dispatchId,
-    }));
-    const service = new TeamRunService({
-      storageRoot,
-      clock: recoveryClock,
-      idGenerator,
-      packageService: new TeamSkillPackageService(),
-      dependencyChecker,
-      staleDispatchExecutionMs: 10,
-    });
-
-    await service.create({ packagePath: fixturePath, runId: 'run-stale', idempotencyKey: 'create-stale' });
-    await service.start({ runId: 'run-stale', idempotencyKey: 'start-stale' });
-    await advanceToDesign(service, 'run-stale');
-    const prepared = await service.prepareDispatch({
-      runId: 'run-stale',
-      stageId: 'step-1-design-operator-blueprint',
-      roleId: 'operator-designer',
-      idempotencyKey: 'dispatch-stale',
-    });
-    bindExecutionPort(service, executeDispatch);
-    await service.executeDispatch({
-      runId: 'run-stale',
-      dispatchId: prepared.dispatch.dispatchId,
-      idempotencyKey: 'execute-stale',
-    });
-
-    now = 20;
-    const recoveredService = new TeamRunService({
-      storageRoot,
-      clock: recoveryClock,
-      idGenerator,
-      packageService: new TeamSkillPackageService(),
-      dependencyChecker,
-      staleDispatchExecutionMs: 10,
-    });
-
-    await expect(recoveredService.snapshot({ runId: 'run-stale', eventCursor: 0, eventLimit: 30 })).resolves.toEqual(expect.objectContaining({
-      dispatchExecutions: [expect.objectContaining({ status: 'stale', staleAt: 20 })],
-      diagnostics: expect.objectContaining({
-        recoveredFromStorage: true,
-        staleDispatchExecutions: [expect.objectContaining({ executionId: 'openclaw-session-stale', status: 'stale' })],
+    const snapshot = await service.snapshot({ runId: 'run-cancel-queued', eventCursor: 0, eventLimit: 80 });
+    expect(snapshot.run).toEqual(expect.objectContaining({ status: 'cancelled' }));
+    expect(snapshot.workflowPlan).toEqual(expect.objectContaining({ status: 'cancelled' }));
+    expect(snapshot.dispatchGroups).toEqual([
+      expect.objectContaining({ groupId: 'round-1', status: 'cancelled' }),
+    ]);
+    expect(snapshot.dispatchTasks).toEqual([
+      expect.objectContaining({
+        taskId: 'design-blueprint',
+        roleId: 'operator-designer',
+        status: 'cancelled',
+        statusReason: 'user requested cancellation',
       }),
-      events: expect.arrayContaining([
-        expect.objectContaining({ type: 'dispatch:execution_stale' }),
-      ]),
-    }));
+    ]);
+    expect(snapshot.events).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: 'workflow:cancelled' }),
+      expect.objectContaining({
+        type: 'dispatch:queue_cancelled',
+        payload: expect.objectContaining({ taskId: 'design-blueprint', reason: 'user requested cancellation' }),
+      }),
+      expect.objectContaining({
+        type: 'dispatch:task_cancelled',
+        payload: expect.objectContaining({ taskId: 'design-blueprint', reason: 'user requested cancellation' }),
+      }),
+      expect.objectContaining({
+        type: 'dispatch:group_cancelled',
+        payload: expect.objectContaining({ groupId: 'round-1', reason: 'user requested cancellation' }),
+      }),
+      expect.objectContaining({ type: 'run:cancelled' }),
+    ]));
   });
 
-  it('fails running TeamRuns when the total wall-clock budget is exceeded before new dispatch', async () => {
+  it('fails running TeamRuns and queued workflow tasks when wall-clock budget is exceeded', async () => {
     let now = 1;
     const budgetClock = { nowMs: () => now };
     const service = new TeamRunService({
@@ -662,10 +1150,22 @@ describe('TeamRunService dispatch execution', () => {
       idGenerator,
       packageService: new TeamSkillPackageService(),
       dependencyChecker,
+      roleSessionExecution: createRoleSessionExecution('run-budget'),
+      disableAutoDispatch: true,
     });
-
-    await service.create({ packagePath: fixturePath, runId: 'run-budget', idempotencyKey: 'create-budget' });
-    await service.start({ runId: 'run-budget', idempotencyKey: 'start-budget' });
+    await createStartedRun(service, 'run-budget');
+    await planWorkflow(service, storageRoot, 'run-budget');
+    await service.updateTask({
+      runId: 'run-budget',
+      stageId: 'design-blueprint',
+      roleId: 'operator-designer',
+      status: 'in_progress',
+      summary: 'Started design.',
+      idempotencyKey: 'task-budget',
+      workspaceDir: roleWorkspace(storageRoot, 'run-budget', 'operator-designer'),
+      callerAgentId: await roleAgentId(service, 'run-budget', 'operator-designer'),
+      childSessionKey: childSessionKey('run-budget', 'operator-designer', 'design-blueprint'),
+    });
     now = 2_700_002;
 
     await expect(service.tick({ runId: 'run-budget', idempotencyKey: 'tick-budget' })).resolves.toEqual(expect.objectContaining({
@@ -673,496 +1173,41 @@ describe('TeamRunService dispatch execution', () => {
       status: 'failed',
       reason: 'TeamRun wall-clock budget exceeded',
     }));
-    await expect(service.snapshot({ runId: 'run-budget', eventCursor: 0, eventLimit: 20 })).resolves.toEqual(expect.objectContaining({
+    await expect(service.snapshot({ runId: 'run-budget', eventCursor: 0, eventLimit: 60 })).resolves.toEqual(expect.objectContaining({
       run: expect.objectContaining({ status: 'failed' }),
-      diagnostics: expect.objectContaining({
-        budgets: expect.objectContaining({ wallClockExceeded: true }),
-      }),
-      events: expect.arrayContaining([
-        expect.objectContaining({ type: 'run:budget_exceeded' }),
+      dispatchTasks: expect.arrayContaining([
+        expect.objectContaining({ taskId: 'design-blueprint', status: 'failed', statusReason: 'TeamRun wall clock budget exceeded' }),
       ]),
+      diagnostics: expect.objectContaining({ budgets: expect.objectContaining({ wallClockExceeded: true }) }),
+      events: expect.arrayContaining([expect.objectContaining({ type: 'run:budget_exceeded' })]),
     }));
   });
 
-  it('fails the run when approval is denied without leaving contradictory waiting state', async () => {
-    const service = new TeamRunService({
-      storageRoot,
-      clock,
-      idGenerator,
-      packageService: new TeamSkillPackageService(),
-      dependencyChecker,
-    });
-
-    await service.create({ packagePath: fixturePath, runId: 'run-approval-deny', idempotencyKey: 'create-approval-deny' });
-    await service.start({ runId: 'run-approval-deny', idempotencyKey: 'start-approval-deny' });
-    await advanceToDesign(service, 'run-approval-deny');
-    const requested = await service.requestApproval({
-      runId: 'run-approval-deny',
-      stageId: 'step-1-design-operator-blueprint',
-      roleId: 'operator-designer',
-      reason: 'Need user authorization.',
-      requestedAction: 'Run live validation.',
-      risk: 'May consume quota.',
-      idempotencyKey: 'approval-deny-request',
-      workspaceDir: roleWorkspace(storageRoot, 'run-approval-deny', 'operator-designer'),
-    });
-
-    await expect(service.resolveApproval({
-      runId: 'run-approval-deny',
-      approvalId: requested.approval.approvalId,
-      decision: 'deny',
-      note: 'Not allowed.',
-      idempotencyKey: 'approval-deny-resolve',
-    })).resolves.toEqual(expect.objectContaining({ approval: expect.objectContaining({ status: 'denied' }) }));
-    await expect(service.snapshot({ runId: 'run-approval-deny', eventCursor: 0, eventLimit: 40 })).resolves.toEqual(expect.objectContaining({
-      run: expect.objectContaining({ status: 'failed', currentStageId: 'step-1-design-operator-blueprint' }),
-      stages: expect.arrayContaining([
-        expect.objectContaining({ stageId: 'step-1-design-operator-blueprint', status: 'failed' }),
-      ]),
-      approvals: [expect.objectContaining({ status: 'denied', note: 'Not allowed.' })],
-      events: expect.arrayContaining([
-        expect.objectContaining({ type: 'approval:resolved', payload: expect.objectContaining({ decision: 'deny' }) }),
-      ]),
-    }));
-  });
-
-  it('recovers the artifact completion pipeline when an existing artifact retry finds a half-submitted stage', async () => {
-    const executeDispatch = vi.fn(async (input) => ({
-      executionId: 'openclaw-session-recover-artifact',
-      childSessionKey: 'agent:matchaclaw-team:run-recover-artifact:operator-designer:subagent:child-1',
-      spawnMode: 'run' as const,
-      status: 'queued' as const,
-      roleId: input.dispatch.roleId,
-      dispatchId: input.dispatch.dispatchId,
-    }));
-    const service = new TeamRunService({
-      storageRoot,
-      clock,
-      idGenerator,
-      packageService: new TeamSkillPackageService(),
-      dependencyChecker,
-    });
-
-    await service.create({ packagePath: fixturePath, runId: 'run-recover-artifact', idempotencyKey: 'create-recover-artifact' });
-    await service.start({ runId: 'run-recover-artifact', idempotencyKey: 'start-recover-artifact' });
-    await service.tick({ runId: 'run-recover-artifact', idempotencyKey: 'tick-recover-preflight' });
-    bindExecutionPort(service, executeDispatch);
-    await service.tick({ runId: 'run-recover-artifact', idempotencyKey: 'tick-recover-design' });
-
-    const firstSubmit = await service.submitArtifact({
-      runId: 'run-recover-artifact',
-      stageId: 'step-1-design-operator-blueprint',
-      roleId: 'operator-designer',
-      kind: 'design_report',
-      title: 'Operator blueprint',
-      content: designCompleteReport(),
-      idempotencyKey: 'artifact-recover-design',
-      workspaceDir: roleWorkspace(storageRoot, 'run-recover-artifact', 'operator-designer'),
-    });
-    const runtimeRoot = service.resolveRuntimeRoot('run-recover-artifact');
-    await service['stageStore'].updateStatus({ runtimeRoot, stageId: 'step-1-design-operator-blueprint', status: 'running' });
-    await service['stageStore'].updateStatus({ runtimeRoot, stageId: 'step-2-code-kernel-implementation', status: 'pending', attempt: 0 });
-    await service['runStore'].update({ runtimeRoot, status: 'running', currentStageId: 'step-1-design-operator-blueprint' });
-
-    await expect(service.submitArtifact({
-      runId: 'run-recover-artifact',
-      stageId: 'step-1-design-operator-blueprint',
-      roleId: 'operator-designer',
-      kind: 'design_report',
-      title: 'Operator blueprint',
-      content: designCompleteReport(),
-      idempotencyKey: 'artifact-recover-design',
-      workspaceDir: roleWorkspace(storageRoot, 'run-recover-artifact', 'operator-designer'),
-    })).resolves.toEqual(expect.objectContaining({ created: false, artifact: expect.objectContaining({ artifactId: firstSubmit.artifact.artifactId }) }));
-
-    await expect(service.snapshot({ runId: 'run-recover-artifact', eventCursor: 0, eventLimit: 50 })).resolves.toEqual(expect.objectContaining({
-      run: expect.objectContaining({ status: 'running', currentStageId: 'step-2-code-kernel-implementation' }),
-      dispatchExecutions: expect.arrayContaining([expect.objectContaining({ status: 'completed', stageId: 'step-1-design-operator-blueprint' })]),
-      stages: expect.arrayContaining([
-        expect.objectContaining({ stageId: 'step-1-design-operator-blueprint', status: 'passed', outputArtifactIds: [firstSubmit.artifact.artifactId] }),
-        expect.objectContaining({ stageId: 'step-2-code-kernel-implementation', status: 'running', inputArtifactIds: [firstSubmit.artifact.artifactId] }),
-      ]),
-      gates: [expect.objectContaining({ artifactId: firstSubmit.artifact.artifactId, passed: true })],
-      events: expect.arrayContaining([
-        expect.objectContaining({ type: 'dispatch:execution_completed' }),
-        expect.objectContaining({ type: 'stage:gate_transitioned' }),
-      ]),
-    }));
-  });
-
-  it('rejects artifact submission and dispatch preparation outside the current running stage', async () => {
-    const service = new TeamRunService({
-      storageRoot,
-      clock,
-      idGenerator,
-      packageService: new TeamSkillPackageService(),
-      dependencyChecker,
-    });
-
-    await service.create({ packagePath: fixturePath, runId: 'run-current-stage-guards', idempotencyKey: 'create-current-stage-guards' });
-    await service.start({ runId: 'run-current-stage-guards', idempotencyKey: 'start-current-stage-guards' });
-    await advanceToDesign(service, 'run-current-stage-guards');
+  it('explicitly rejects removed public stage, direct dispatch, and gate endpoints', async () => {
+    const service = createService(storageRoot, createRoleSessionExecution('run-old-endpoints'));
+    await createStartedRun(service, 'run-old-endpoints');
 
     await expect(service.prepareDispatch({
-      runId: 'run-current-stage-guards',
-      stageId: 'step-2-code-kernel-implementation',
-      roleId: 'kernel-coder',
-      idempotencyKey: 'dispatch-non-current-stage',
-    })).rejects.toThrow('TeamRun current stage is step-1-design-operator-blueprint, got step-2-code-kernel-implementation');
-    await expect(service.submitArtifact({
-      runId: 'run-current-stage-guards',
-      stageId: 'step-2-code-kernel-implementation',
-      roleId: 'kernel-coder',
-      kind: 'compile_report',
-      title: 'Kernel implementation',
-      content: 'Compilation succeeded. Verdict: CODE-COMPILABLE',
-      idempotencyKey: 'artifact-non-current-stage',
-      workspaceDir: roleWorkspace(storageRoot, 'run-current-stage-guards', 'kernel-coder'),
-    })).rejects.toThrow('TeamRun current stage is step-1-design-operator-blueprint, got step-2-code-kernel-implementation');
-  });
-
-  it('claims dispatch execution before spawning and does not spawn again for the same execution key', async () => {
-    const executeDispatch = vi.fn(async (input) => ({
-      executionId: 'openclaw-session-claim',
-      childSessionKey: 'agent:matchaclaw-team:run-claim:operator-designer:subagent:child-1',
-      spawnMode: 'run' as const,
-      status: 'queued' as const,
-      roleId: input.dispatch.roleId,
-      dispatchId: input.dispatch.dispatchId,
-    }));
-    const service = new TeamRunService({
-      storageRoot,
-      clock,
-      idGenerator,
-      packageService: new TeamSkillPackageService(),
-      dependencyChecker,
-    });
-
-    await service.create({ packagePath: fixturePath, runId: 'run-claim', idempotencyKey: 'create-claim' });
-    await service.start({ runId: 'run-claim', idempotencyKey: 'start-claim' });
-    await advanceToDesign(service, 'run-claim');
-    const prepared = await service.prepareDispatch({
-      runId: 'run-claim',
-      stageId: 'step-1-design-operator-blueprint',
+      runId: 'run-old-endpoints',
+      stageId: 'design-blueprint',
       roleId: 'operator-designer',
-      idempotencyKey: 'dispatch-claim',
-    });
-    const runtimeRoot = service.resolveRuntimeRoot('run-claim');
-    await service['dispatchExecutionStore'].claim({
-      runtimeRoot,
-      runId: 'run-claim',
-      dispatchId: prepared.dispatch.dispatchId,
-      stageId: prepared.dispatch.stageId,
-      roleId: prepared.dispatch.roleId,
-      idempotencyKey: 'execute-claim',
-    });
-    bindExecutionPort(service, executeDispatch);
-
+      idempotencyKey: 'old-prepare',
+    })).rejects.toThrow('TeamRun stage dispatch is not supported; the leader must use team_plan_workflow and OpenClaw native sessions_spawn.');
     await expect(service.executeDispatch({
-      runId: 'run-claim',
-      dispatchId: prepared.dispatch.dispatchId,
-      idempotencyKey: 'execute-claim',
-    })).resolves.toEqual(expect.objectContaining({
-      created: false,
-      execution: expect.objectContaining({ status: 'claimed', idempotencyKey: 'execute-claim' }),
-    }));
-    expect(executeDispatch).not.toHaveBeenCalled();
-  });
-
-  it('returns existing active execution for the same dispatch under concurrent claims', async () => {
-    const service = new TeamRunService({
-      storageRoot,
-      clock,
-      idGenerator,
-      packageService: new TeamSkillPackageService(),
-      dependencyChecker,
-    });
-
-    await service.create({ packagePath: fixturePath, runId: 'run-concurrent-claim', idempotencyKey: 'create-concurrent-claim' });
-    await service.start({ runId: 'run-concurrent-claim', idempotencyKey: 'start-concurrent-claim' });
-    await advanceToDesign(service, 'run-concurrent-claim');
-    const prepared = await service.prepareDispatch({
-      runId: 'run-concurrent-claim',
-      stageId: 'step-1-design-operator-blueprint',
-      roleId: 'operator-designer',
-      idempotencyKey: 'dispatch-concurrent-claim',
-    });
-    const runtimeRoot = service.resolveRuntimeRoot('run-concurrent-claim');
-
-    const claims = await Promise.all(Array.from({ length: 8 }, (_, index) => service['dispatchExecutionStore'].claim({
-      runtimeRoot,
-      runId: 'run-concurrent-claim',
-      dispatchId: prepared.dispatch.dispatchId,
-      stageId: prepared.dispatch.stageId,
-      roleId: prepared.dispatch.roleId,
-      idempotencyKey: `execute-concurrent-claim-${index}`,
-    })));
-    const executions = await service['dispatchExecutionStore'].read(runtimeRoot);
-
-    expect(executions).toHaveLength(1);
-    expect(claims.filter((claim) => claim.created)).toHaveLength(1);
-    expect(new Set(claims.map((claim) => claim.execution.executionRecordId)).size).toBe(1);
-  });
-
-  it('allows a new claim for the same dispatch after failed or stale execution records', async () => {
-    const service = new TeamRunService({
-      storageRoot,
-      clock,
-      idGenerator,
-      packageService: new TeamSkillPackageService(),
-      dependencyChecker,
-    });
-
-    await service.create({ packagePath: fixturePath, runId: 'run-reclaim', idempotencyKey: 'create-reclaim' });
-    await service.start({ runId: 'run-reclaim', idempotencyKey: 'start-reclaim' });
-    await advanceToDesign(service, 'run-reclaim');
-    const prepared = await service.prepareDispatch({
-      runId: 'run-reclaim',
-      stageId: 'step-1-design-operator-blueprint',
-      roleId: 'operator-designer',
-      idempotencyKey: 'dispatch-reclaim',
-    });
-    const runtimeRoot = service.resolveRuntimeRoot('run-reclaim');
-
-    const failedClaim = await service['dispatchExecutionStore'].claim({
-      runtimeRoot,
-      runId: 'run-reclaim',
-      dispatchId: prepared.dispatch.dispatchId,
-      stageId: prepared.dispatch.stageId,
-      roleId: prepared.dispatch.roleId,
-      idempotencyKey: 'execute-reclaim-failed',
-    });
-    await service['dispatchExecutionStore'].markFailed({
-      runtimeRoot,
-      executionRecordId: failedClaim.execution.executionRecordId,
-      reason: 'spawn failed',
-    });
-    const staleCandidate = await service['dispatchExecutionStore'].claim({
-      runtimeRoot,
-      runId: 'run-reclaim',
-      dispatchId: prepared.dispatch.dispatchId,
-      stageId: prepared.dispatch.stageId,
-      roleId: prepared.dispatch.roleId,
-      idempotencyKey: 'execute-reclaim-stale-candidate',
-    });
-    await service['dispatchExecutionStore'].markStale({
-      runtimeRoot,
-      executionRecordId: staleCandidate.execution.executionRecordId,
-      reason: 'timed out',
-    });
-    const finalClaim = await service['dispatchExecutionStore'].claim({
-      runtimeRoot,
-      runId: 'run-reclaim',
-      dispatchId: prepared.dispatch.dispatchId,
-      stageId: prepared.dispatch.stageId,
-      roleId: prepared.dispatch.roleId,
-      idempotencyKey: 'execute-reclaim-final',
-    });
-
-    expect(finalClaim.created).toBe(true);
-    await expect(service['dispatchExecutionStore'].read(runtimeRoot)).resolves.toEqual([
-      expect.objectContaining({ status: 'failed', idempotencyKey: 'execute-reclaim-failed' }),
-      expect.objectContaining({ status: 'stale', idempotencyKey: 'execute-reclaim-stale-candidate' }),
-      expect.objectContaining({ status: 'claimed', idempotencyKey: 'execute-reclaim-final' }),
-    ]);
-  });
-
-  it('rejects mismatched execution port dispatch and role identities', async () => {
-    const executeDispatch = vi.fn().mockResolvedValue({
-      executionId: 'openclaw-session-mismatch',
-      childSessionKey: 'agent:matchaclaw-team:run-mismatch:operator-designer:subagent:child-1',
-      spawnMode: 'run',
-      status: 'queued',
-      roleId: 'kernel-coder',
-      dispatchId: 'wrong-dispatch',
-    });
-    const service = new TeamRunService({
-      storageRoot,
-      clock,
-      idGenerator,
-      packageService: new TeamSkillPackageService(),
-      dependencyChecker,
-    });
-
-    await service.create({ packagePath: fixturePath, runId: 'run-mismatch', idempotencyKey: 'create-mismatch' });
-    await service.start({ runId: 'run-mismatch', idempotencyKey: 'start-mismatch' });
-    await advanceToDesign(service, 'run-mismatch');
-    const prepared = await service.prepareDispatch({
-      runId: 'run-mismatch',
-      stageId: 'step-1-design-operator-blueprint',
-      roleId: 'operator-designer',
-      idempotencyKey: 'dispatch-mismatch',
-    });
-    bindExecutionPort(service, executeDispatch);
-
-    await expect(service.executeDispatch({
-      runId: 'run-mismatch',
-      dispatchId: prepared.dispatch.dispatchId,
-      idempotencyKey: 'execute-mismatch',
-    })).rejects.toThrow(`Team dispatch execution returned dispatchId wrong-dispatch, expected ${prepared.dispatch.dispatchId}`);
-    await expect(service.snapshot({ runId: 'run-mismatch', eventCursor: 0, eventLimit: 30 })).resolves.toEqual(expect.objectContaining({
-      dispatchExecutions: [expect.objectContaining({ status: 'failed' })],
-      events: expect.arrayContaining([expect.objectContaining({ type: 'dispatch:execution_failed' })]),
-    }));
-  });
-
-  it('marks the TeamRun completed when the last gated role stage passes', async () => {
-    const service = new TeamRunService({
-      storageRoot,
-      clock,
-      idGenerator,
-      packageService: new TeamSkillPackageService(),
-      dependencyChecker,
-    });
-    const runId = 'run-final-gated';
-    await service.create({ packagePath: fixturePath, runId, idempotencyKey: 'create-final-gated' });
-    await service.start({ runId, idempotencyKey: 'start-final-gated' });
-    await advanceToDesign(service, runId);
-
-    for (const stageId of [
-      'step-1-design-operator-blueprint',
-      'step-2-code-kernel-implementation',
-      'step-3-adversarial-review-defect-hunting',
-      'step-4-precision-validation-accuracy-verification',
-      'step-5-performance-optimization-bottleneck-elimination',
-    ]) {
-      const roleId = roleIdForStage(stageId);
-      const artifact = passContentForStage(stageId);
-      await service.submitArtifact({
-        runId,
-        stageId,
-        roleId,
-        ...artifact,
-        idempotencyKey: `artifact-final-gated-${stageId}`,
-        workspaceDir: roleWorkspace(storageRoot, runId, roleId),
-      });
-    }
-
-    await expect(service.snapshot({ runId, eventCursor: 0, eventLimit: 80 })).resolves.toEqual(expect.objectContaining({
-      run: expect.objectContaining({ status: 'completed', currentStageId: 'step-6-final-emit-operator-dev-optimize-report' }),
-      stages: expect.arrayContaining([
-        expect.objectContaining({ stageId: 'step-5-performance-optimization-bottleneck-elimination', status: 'passed' }),
-        expect.objectContaining({ stageId: 'step-6-final-emit-operator-dev-optimize-report', status: 'passed' }),
-      ]),
-      events: expect.arrayContaining([
-        expect.objectContaining({ type: 'run:completed', payload: expect.objectContaining({ stageId: 'step-6-final-emit-operator-dev-optimize-report' }) }),
-      ]),
-    }));
-  });
-
-  it('rejects public completion of role stages so artifacts and gates cannot be bypassed', async () => {
-    const service = new TeamRunService({
-      storageRoot,
-      clock,
-      idGenerator,
-      packageService: new TeamSkillPackageService(),
-      dependencyChecker,
-    });
-
-    await service.create({ packagePath: fixturePath, runId: 'run-role-complete-reject', idempotencyKey: 'create-role-complete-reject' });
-    await service.start({ runId: 'run-role-complete-reject', idempotencyKey: 'start-role-complete-reject' });
-    await advanceToDesign(service, 'run-role-complete-reject');
-
+      runId: 'run-old-endpoints',
+      dispatchId: 'dispatch-1',
+      idempotencyKey: 'old-execute',
+    })).rejects.toThrow('TeamRun direct dispatch execution is not supported; TeamRun uses OpenClaw native sessions_spawn.');
     await expect(service.completeStage({
-      runId: 'run-role-complete-reject',
-      stageId: 'step-1-design-operator-blueprint',
-      idempotencyKey: 'complete-role-bypass',
-    })).rejects.toThrow('Role stage must be completed by artifact submission and gate evaluation: step-1-design-operator-blueprint');
-    await expect(service.snapshot({ runId: 'run-role-complete-reject', eventCursor: 0, eventLimit: 20 })).resolves.toEqual(expect.objectContaining({
-      run: expect.objectContaining({ status: 'running', currentStageId: 'step-1-design-operator-blueprint' }),
-      stages: expect.arrayContaining([
-        expect.objectContaining({ stageId: 'step-1-design-operator-blueprint', status: 'running' }),
-      ]),
-      gates: [],
-      artifacts: [],
-    }));
-  });
-
-  it('executes prepared dispatches through the injected role execution port and records events idempotently', async () => {
-    const executeDispatch = vi.fn(async (input) => ({
-      executionId: 'openclaw-session-1',
-      childSessionKey: 'agent:matchaclaw-team:run-exec:operator-designer:subagent:child-1',
-      spawnMode: 'run' as const,
-      status: 'queued' as const,
-      roleId: input.dispatch.roleId,
-      dispatchId: input.dispatch.dispatchId,
-    }));
-    const service = new TeamRunService({
-      storageRoot,
-      clock,
-      idGenerator,
-      packageService: new TeamSkillPackageService(),
-      dependencyChecker,
-    });
-
-    await service.create({ packagePath: fixturePath, runId: 'run-exec', idempotencyKey: 'create-exec' });
-    await service.start({ runId: 'run-exec', idempotencyKey: 'start-exec' });
-    await advanceToDesign(service, 'run-exec');
-    const prepared = await service.prepareDispatch({
-      runId: 'run-exec',
-      stageId: 'step-1-design-operator-blueprint',
-      roleId: 'operator-designer',
-      idempotencyKey: 'dispatch-exec',
-    });
-    bindExecutionPort(service, executeDispatch);
-    executeDispatch.mockImplementation(async (input) => ({
-      executionId: 'openclaw-session-1',
-      childSessionKey: 'agent:matchaclaw-team:run-exec:operator-designer:subagent:child-1',
-      spawnMode: 'run',
-      status: 'queued',
-      roleId: input.dispatch.roleId,
-      dispatchId: input.dispatch.dispatchId,
-    }));
-
-    await expect(service.executeDispatch({
-      runId: 'run-exec',
-      dispatchId: prepared.dispatch.dispatchId,
-      idempotencyKey: 'execute-exec',
-    })).resolves.toEqual({
-      created: true,
-      execution: expect.objectContaining({
-        runId: 'run-exec',
-        dispatchId: prepared.dispatch.dispatchId,
-        stageId: 'step-1-design-operator-blueprint',
-        roleId: 'operator-designer',
-        executionId: 'openclaw-session-1',
-        childSessionKey: 'agent:matchaclaw-team:run-exec:operator-designer:subagent:child-1',
-        spawnMode: 'run',
-        status: 'queued',
-        idempotencyKey: 'execute-exec',
-      }),
-    });
-    await expect(service.executeDispatch({
-      runId: 'run-exec',
-      dispatchId: prepared.dispatch.dispatchId,
-      idempotencyKey: 'execute-exec',
-    })).resolves.toEqual(expect.objectContaining({ created: false }));
-    expect(executeDispatch).toHaveBeenCalledTimes(1);
-    expect(executeDispatch).toHaveBeenCalledWith(expect.objectContaining({
-      runId: 'run-exec',
-      dispatch: expect.objectContaining({ dispatchId: prepared.dispatch.dispatchId }),
-      role: expect.objectContaining({ roleId: 'operator-designer' }),
-      prompt: expect.stringContaining('Role: operator-designer'),
-    }));
-
-    await expect(service.snapshot({ runId: 'run-exec', eventCursor: 0, eventLimit: 30 })).resolves.toEqual(expect.objectContaining({
-      dispatchExecutions: [expect.objectContaining({
-        executionId: 'openclaw-session-1',
-        childSessionKey: 'agent:matchaclaw-team:run-exec:operator-designer:subagent:child-1',
-        spawnMode: 'run',
-      })],
-      events: expect.arrayContaining([
-        expect.objectContaining({
-          type: 'dispatch:execution_queued',
-          payload: expect.objectContaining({
-            dispatchId: prepared.dispatch.dispatchId,
-            executionId: 'openclaw-session-1',
-            childSessionKey: 'agent:matchaclaw-team:run-exec:operator-designer:subagent:child-1',
-            spawnMode: 'run',
-            roleId: 'operator-designer',
-          }),
-        }),
-      ]),
-    }));
+      runId: 'run-old-endpoints',
+      stageId: 'design-blueprint',
+      idempotencyKey: 'old-complete',
+    })).rejects.toThrow('TeamRun stage completion is not supported; roles complete workflow tasks by calling team_submit_artifact.');
+    await expect(service.evaluateGate({
+      runId: 'run-old-endpoints',
+      artifactId: 'artifact-1',
+      gateType: 'design',
+      idempotencyKey: 'old-gate',
+    })).rejects.toThrow('TeamRun gate evaluation is not supported; model review gates in the workflow plan and submitted artifacts instead.');
   });
 });

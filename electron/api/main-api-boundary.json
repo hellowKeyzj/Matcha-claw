@@ -38,6 +38,7 @@
     "/api/cron/session-history",
     "/api/diagnostics/gateway-snapshot",
     "/api/diagnostics/memory",
+    "/api/gateway/control-ui",
     "/api/gateway/health",
     "/api/gateway/status",
     "/api/license/gate",
@@ -86,5 +87,8 @@
     "/api/channels/pairing/",
     "/api/openclaw/subagent-templates/",
     "/api/settings/"
+  ],
+  "hostapiProxyPublicValidationPostExactRoutes": [
+    "/api/channels/credentials/validate"
   ]
 }

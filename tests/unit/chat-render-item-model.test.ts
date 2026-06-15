@@ -75,8 +75,8 @@ describe('chat render item model', () => {
     expect(html).toContain('<pre>');
   });
 
-  it('keeps tool-only assistant activity inside the assistant-turn item', () => {
-    const [item] = applyAssistantPresentationToItems({
+  it('renders tool-only assistant activity as an independent timeline entry', () => {
+    const items = applyAssistantPresentationToItems({
       items: buildRenderItemsFromMessages('agent:main:main', [
         {
           role: 'assistant',
@@ -93,17 +93,22 @@ describe('chat render item model', () => {
       defaultAssistant: null,
     });
 
-    if (!item || item.kind !== 'assistant-turn') {
-      throw new Error('expected tool-only assistant turn');
+    const toolItem = items.find(
+      (entry): entry is ChatAssistantTurnItem =>
+        entry.kind === 'assistant-turn'
+        && entry.segments.some((s) => s.kind === 'tool'),
+    );
+    if (!toolItem) {
+      throw new Error('expected independent tool assistant-turn item');
     }
 
-    expect(item.text).toBe('');
-    expect(item.tools).toMatchObject([{
+    expect(toolItem.text).toBe('');
+    expect(toolItem.tools).toMatchObject([{
       id: 'tool-1',
       name: 'read_file',
-      status: 'missing_result',
+      status: 'running',
     }]);
-    expect(item.segments).toMatchObject([
+    expect(toolItem.segments).toMatchObject([
       {
         kind: 'tool',
         tool: {
@@ -114,8 +119,8 @@ describe('chat render item model', () => {
     ]);
   });
 
-  it('preserves assistant turn segment order instead of flattening tools and text by type', () => {
-    const [item] = applyAssistantPresentationToItems({
+  it('tools become independent entries while text segments remain in the assistant turn', () => {
+    const items = applyAssistantPresentationToItems({
       items: buildRenderItemsFromMessages('agent:main:main', [
         {
           role: 'assistant',
@@ -154,46 +159,50 @@ describe('chat render item model', () => {
       defaultAssistant: null,
     });
 
-    if (!item || item.kind !== 'assistant-turn') {
-      throw new Error('expected assistant-turn');
+    const textItem = items.find(
+      (entry): entry is ChatAssistantTurnItem =>
+        entry.kind === 'assistant-turn'
+        && entry.segments.some((s) => s.kind === 'message'),
+    );
+    if (!textItem) {
+      throw new Error('expected assistant-turn with text segments');
     }
 
-    expect(item.segments.map((segment) => segment.kind)).toEqual([
-      'tool',
+    expect(textItem.segments.map((segment) => segment.kind)).toEqual([
       'message',
-      'tool',
       'message',
     ]);
-    expect(item.segments).toMatchObject([
-      {
-        kind: 'tool',
-        tool: {
-          toolCallId: 'tool-a',
-          name: 'read',
-          status: 'completed',
-        },
-      },
+    expect(textItem.segments).toMatchObject([
       {
         kind: 'message',
         text: '我先看 README。',
-      },
-      {
-        kind: 'tool',
-        tool: {
-          toolCallId: 'tool-b',
-          name: 'grep',
-          status: 'missing_result',
-        },
       },
       {
         kind: 'message',
         text: '再补充结论。',
       },
     ]);
+
+    const toolItems = items.filter(
+      (entry): entry is ChatAssistantTurnItem =>
+        entry.kind === 'assistant-turn'
+        && entry.segments.some((s) => s.kind === 'tool'),
+    );
+    expect(toolItems).toHaveLength(2);
+    expect(toolItems[0]!.tools).toMatchObject([{
+      toolCallId: 'tool-a',
+      name: 'read',
+      status: 'completed',
+    }]);
+    expect(toolItems[1]!.tools).toMatchObject([{
+      toolCallId: 'tool-b',
+      name: 'grep',
+      status: 'running',
+    }]);
   });
 
-  it('preserves embedded tool result previews on assistant-turn items', () => {
-    const [item] = applyAssistantPresentationToItems({
+  it('preserves embedded tool result previews on independent tool timeline entries', () => {
+    const items = applyAssistantPresentationToItems({
       items: buildRenderItemsFromMessages('agent:main:main', [
         {
           role: 'assistant',
@@ -228,11 +237,16 @@ describe('chat render item model', () => {
       defaultAssistant: null,
     });
 
-    if (!item || item.kind !== 'assistant-turn') {
-      throw new Error('expected assistant-turn');
+    const toolItem = items.find(
+      (entry): entry is ChatAssistantTurnItem =>
+        entry.kind === 'assistant-turn'
+        && entry.segments.some((s) => s.kind === 'tool'),
+    );
+    if (!toolItem) {
+      throw new Error('expected independent tool assistant-turn item');
     }
 
-    expect(item.embeddedToolResults).toMatchObject([
+    expect(toolItem.embeddedToolResults).toMatchObject([
       {
         toolCallId: 'tool-canvas-1',
         toolName: 'canvas_render',
@@ -243,7 +257,7 @@ describe('chat render item model', () => {
         },
       },
     ]);
-    expect(item.tools).toMatchObject([
+    expect(toolItem.tools).toMatchObject([
       {
         toolCallId: 'tool-canvas-1',
         result: {
@@ -257,8 +271,8 @@ describe('chat render item model', () => {
   });
 
 
-  it('renders tool result image content as assistant media images', () => {
-    const [item] = applyAssistantPresentationToItems({
+  it('renders tool result image content as assistant media images on the tool entry', () => {
+    const items = applyAssistantPresentationToItems({
       items: buildRenderItemsFromMessages('agent:main:main', [
         {
           role: 'assistant',
@@ -285,11 +299,16 @@ describe('chat render item model', () => {
       defaultAssistant: null,
     });
 
-    if (!item || item.kind !== 'assistant-turn') {
-      throw new Error('expected assistant-turn');
+    const toolItem = items.find(
+      (entry): entry is ChatAssistantTurnItem =>
+        entry.kind === 'assistant-turn'
+        && entry.segments.some((s) => s.kind === 'tool'),
+    );
+    if (!toolItem) {
+      throw new Error('expected independent tool assistant-turn item');
     }
 
-    expect(item.segments).toMatchObject([
+    expect(toolItem.segments).toMatchObject([
       {
         kind: 'tool',
         tool: {
@@ -298,19 +317,8 @@ describe('chat render item model', () => {
           status: 'completed',
         },
       },
-      {
-        kind: 'media',
-        images: [{
-          mimeType: 'image/png',
-          data: 'base64-image-data',
-        }],
-        attachedFiles: [],
-      },
     ]);
-    expect(item.images).toEqual([{
-      mimeType: 'image/png',
-      data: 'base64-image-data',
-    }]);
+    expect(toolItem.images).toEqual([]);
   });
 
   it('reuses previous assistant-turn item objects when their model content is unchanged', () => {

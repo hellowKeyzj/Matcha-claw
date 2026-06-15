@@ -267,8 +267,6 @@ describe('sidebar chat nav', () => {
         {
           id: 'team-1',
           name: 'Team One',
-          leadAgentId: 'main',
-          memberIds: ['main'],
           packagePath: '.tmp/team-skill',
           createdAt: 1,
           updatedAt: 1,
@@ -308,8 +306,6 @@ describe('sidebar chat nav', () => {
         {
           id: 'team-1',
           name: 'Team One',
-          leadAgentId: 'main',
-          memberIds: ['main'],
           packagePath: '.tmp/team-skill',
           createdAt: 1,
           updatedAt: 1,

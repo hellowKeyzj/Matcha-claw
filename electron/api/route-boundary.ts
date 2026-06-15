@@ -40,6 +40,7 @@ export const HOSTAPI_PROXY_PUBLIC_READONLY_EXACT_ROUTES = Object.freeze([
   '/api/cron/session-history',
   '/api/diagnostics/gateway-snapshot',
   '/api/diagnostics/memory',
+  '/api/gateway/control-ui',
   '/api/gateway/health',
   '/api/gateway/status',
   '/api/license/gate',
@@ -91,6 +92,10 @@ export const HOSTAPI_PROXY_PUBLIC_READONLY_PREFIX_ROUTES = Object.freeze([
   '/api/settings/',
 ]);
 
+export const HOSTAPI_PROXY_PUBLIC_VALIDATION_POST_EXACT_ROUTES = Object.freeze([
+  '/api/channels/credentials/validate',
+]);
+
 export function getMainApiBoundarySnapshot() {
   return {
     allowedRouteFiles: [...MAIN_API_ALLOWED_ROUTE_FILES],
@@ -98,6 +103,7 @@ export function getMainApiBoundarySnapshot() {
     mainOwnedPrefixRoutes: [...MAIN_OWNED_PREFIX_ROUTES],
     hostapiProxyPublicReadonlyExactRoutes: [...HOSTAPI_PROXY_PUBLIC_READONLY_EXACT_ROUTES],
     hostapiProxyPublicReadonlyPrefixRoutes: [...HOSTAPI_PROXY_PUBLIC_READONLY_PREFIX_ROUTES],
+    hostapiProxyPublicValidationPostExactRoutes: [...HOSTAPI_PROXY_PUBLIC_VALIDATION_POST_EXACT_ROUTES],
   };
 }
 
@@ -124,6 +130,9 @@ export function isHostApiProxyAllowedRoute(method: string, pathname: string): bo
     (pathname === '/api/capabilities/describe' || pathname === '/api/capabilities/execute')
     && normalizedMethod === 'POST'
   ) {
+    return true;
+  }
+  if (normalizedMethod === 'POST' && HOSTAPI_PROXY_PUBLIC_VALIDATION_POST_EXACT_ROUTES.includes(pathname)) {
     return true;
   }
   if (normalizedMethod !== 'GET') {

@@ -7,69 +7,77 @@ const run = {
   packageVersion: '1.0.0',
   sourcePath: '.tmp/team',
   status: 'running' as const,
-  currentStageId: 'step-1-design-operator-blueprint',
+  currentStageId: 'design-operator-blueprint',
   revision: 2,
   createdAt: 1,
   updatedAt: 2,
 };
 
-const stages = [
+const dispatchTasks = [
   {
+    dispatchTaskId: 'dispatch-task-pre-flight',
     runId: 'run-1',
-    stageId: 'step-0-pre-flight-dependency-check',
-    title: 'Pre-flight: dependency check',
-    executor: 'Leader',
-    status: 'passed' as const,
-    attempt: 1,
-    maxAttempts: 1,
-    inputArtifactIds: [],
-    outputArtifactIds: [],
+    workflowPlanId: 'workflow-plan-1',
+    dispatchGroupId: 'dispatch-group-pre-flight',
+    groupId: 'pre-flight',
+    taskId: 'pre-flight-dependency-check',
+    roleId: 'team-runtime',
+    dispatchId: 'dispatch-pre-flight',
+    status: 'completed' as const,
+    idempotencyKey: 'run-1:pre-flight-dependency-check',
     createdAt: 1,
-    updatedAt: 2,
+    completedAt: 2,
+    artifactId: 'artifact-pre-flight',
   },
   {
+    dispatchTaskId: 'dispatch-task-design',
     runId: 'run-1',
-    stageId: 'step-1-design-operator-blueprint',
-    title: 'Design: operator blueprint',
-    executor: 'operator-designer',
+    workflowPlanId: 'workflow-plan-1',
+    dispatchGroupId: 'dispatch-group-design',
+    groupId: 'design',
+    taskId: 'design-operator-blueprint',
     roleId: 'operator-designer',
-    gateType: 'design',
-    status: 'running' as const,
-    attempt: 1,
-    maxAttempts: 2,
-    inputArtifactIds: [],
-    outputArtifactIds: [],
+    dispatchId: 'dispatch-design',
+    status: 'queued' as const,
+    idempotencyKey: 'run-1:design-operator-blueprint',
     createdAt: 1,
-    updatedAt: 2,
   },
 ];
 
 describe('TaskManagerGatewayProjection', () => {
-  it('creates missing Team stage tasks with TeamRun metadata', async () => {
+  it('creates missing Team workflow dispatch tasks with TeamRun metadata', async () => {
     const call = vi.fn().mockResolvedValueOnce({ tasks: [] }).mockResolvedValue({});
     const projection = new TaskManagerGatewayProjection({ client: { call } });
 
-    await projection.projectTeamRun({ run, stages, reason: 'run:started' });
+    await projection.projectTeamRun({ run, dispatchTasks, reason: 'run:started' });
 
     expect(call).toHaveBeenNthCalledWith(1, 'TaskList', { teamKey: 'matchaclaw-team:run-1' });
     expect(call).toHaveBeenNthCalledWith(2, 'TaskCreate', expect.objectContaining({
       teamKey: 'matchaclaw-team:run-1',
-      subject: 'ascendc-team: step-0-pre-flight-dependency-check',
+      subject: 'ascendc-team: pre-flight-dependency-check',
+      description: 'TeamRun run-1 task pre-flight-dependency-check',
       status: 'completed',
       owner: 'team-runtime',
       metadata: expect.objectContaining({
         source: 'matchaclaw.team-runtime',
-        projectionIdentity: 'matchaclaw.team-runtime:run-1:step-0-pre-flight-dependency-check',
+        projectionIdentity: 'matchaclaw.team-runtime:run-1:pre-flight-dependency-check',
         projectionRevision: 2,
         teamRunId: 'run-1',
-        teamStageId: 'step-0-pre-flight-dependency-check',
+        teamTaskId: 'pre-flight-dependency-check',
+        dispatchTaskStatus: 'completed',
         projectionReason: 'run:started',
       }),
     }));
     expect(call).toHaveBeenNthCalledWith(3, 'TaskCreate', expect.objectContaining({
+      subject: 'ascendc-team: design-operator-blueprint',
+      description: 'TeamRun run-1 task design-operator-blueprint',
+      activeForm: 'Running design-operator-blueprint',
       status: 'in_progress',
       owner: 'operator-designer',
-      metadata: expect.objectContaining({ teamStageId: 'step-1-design-operator-blueprint' }),
+      metadata: expect.objectContaining({
+        teamTaskId: 'design-operator-blueprint',
+        dispatchTaskStatus: 'queued',
+      }),
     }));
   });
 
@@ -79,13 +87,13 @@ describe('TaskManagerGatewayProjection', () => {
         id: 'task-design',
         metadata: {
           teamRunId: 'run-1',
-          teamStageId: 'step-1-design-operator-blueprint',
+          teamTaskId: 'design-operator-blueprint',
         },
       }],
     }).mockResolvedValue({});
     const projection = new TaskManagerGatewayProjection({ client: { call }, teamKeyPrefix: 'team' });
 
-    await projection.projectTeamRun({ run, stages: [stages[1]], reason: 'stage:gate_transitioned' });
+    await projection.projectTeamRun({ run, dispatchTasks: [dispatchTasks[1]], reason: 'dispatch:task_queued' });
 
     expect(call).toHaveBeenNthCalledWith(1, 'TaskList', { teamKey: 'team:run-1' });
     expect(call).toHaveBeenNthCalledWith(2, 'TaskUpdate', expect.objectContaining({
@@ -94,27 +102,27 @@ describe('TaskManagerGatewayProjection', () => {
       status: 'in_progress',
       metadata: expect.objectContaining({
         teamRunRevision: 2,
-        projectionReason: 'stage:gate_transitioned',
+        projectionReason: 'dispatch:task_queued',
       }),
     }));
     expect(call).toHaveBeenCalledTimes(2);
   });
 
-  it('projects failed TeamRun stages as completed tasks with TeamRun metadata', async () => {
+  it.each(['failed', 'cancelled', 'stale'] as const)('projects %s TeamRun workflow dispatch tasks as completed tasks with TeamRun metadata', async (dispatchTaskStatus) => {
     const call = vi.fn().mockResolvedValueOnce({ tasks: [] }).mockResolvedValue({});
     const projection = new TaskManagerGatewayProjection({ client: { call } });
 
     await projection.projectTeamRun({
-      run: { ...run, status: 'failed', revision: 3 },
-      stages: [{ ...stages[1], status: 'failed' }],
+      run: { ...run, revision: 3 },
+      dispatchTasks: [{ ...dispatchTasks[1], status: dispatchTaskStatus, statusReason: `${dispatchTaskStatus}:reason` }],
       reason: 'decision:submitted',
     });
 
     expect(call).toHaveBeenNthCalledWith(2, 'TaskCreate', expect.objectContaining({
       status: 'completed',
       metadata: expect.objectContaining({
-        teamRunStatus: 'failed',
-        stageStatus: 'failed',
+        teamRunStatus: 'running',
+        dispatchTaskStatus,
         projectionReason: 'decision:submitted',
       }),
     }));
@@ -127,29 +135,29 @@ describe('TaskManagerGatewayProjection', () => {
           id: '1',
           metadata: {
             teamRunId: 'run-1',
-            teamStageId: 'step-1-design-operator-blueprint',
+            teamTaskId: 'design-operator-blueprint',
             teamRunRevision: 1,
           },
         },
         {
           id: '2',
           metadata: {
-            projectionIdentity: 'matchaclaw.team-runtime:run-1:step-1-design-operator-blueprint',
+            projectionIdentity: 'matchaclaw.team-runtime:run-1:design-operator-blueprint',
             projectionRevision: 2,
             teamRunId: 'run-1',
-            teamStageId: 'step-1-design-operator-blueprint',
+            teamTaskId: 'design-operator-blueprint',
           },
         },
       ],
     }).mockResolvedValue({});
     const projection = new TaskManagerGatewayProjection({ client: { call } });
 
-    await projection.projectTeamRun({ run: { ...run, revision: 3 }, stages: [stages[1]], reason: 'stage:gate_transitioned' });
+    await projection.projectTeamRun({ run: { ...run, revision: 3 }, dispatchTasks: [dispatchTasks[1]], reason: 'dispatch:task_queued' });
 
     expect(call).toHaveBeenNthCalledWith(2, 'TaskUpdate', expect.objectContaining({
       taskId: '2',
       metadata: expect.objectContaining({
-        projectionIdentity: 'matchaclaw.team-runtime:run-1:step-1-design-operator-blueprint',
+        projectionIdentity: 'matchaclaw.team-runtime:run-1:design-operator-blueprint',
         projectionRevision: 3,
       }),
     }));
@@ -161,16 +169,16 @@ describe('TaskManagerGatewayProjection', () => {
       tasks: [{
         id: 'task-design',
         metadata: {
-          projectionIdentity: 'matchaclaw.team-runtime:run-1:step-1-design-operator-blueprint',
+          projectionIdentity: 'matchaclaw.team-runtime:run-1:design-operator-blueprint',
           projectionRevision: 4,
           teamRunId: 'run-1',
-          teamStageId: 'step-1-design-operator-blueprint',
+          teamTaskId: 'design-operator-blueprint',
         },
       }],
     }).mockResolvedValue({});
     const projection = new TaskManagerGatewayProjection({ client: { call } });
 
-    await projection.projectTeamRun({ run, stages: [stages[1]], reason: 'run:tick' });
+    await projection.projectTeamRun({ run, dispatchTasks: [dispatchTasks[1]], reason: 'run:tick' });
 
     expect(call).toHaveBeenCalledTimes(1);
   });

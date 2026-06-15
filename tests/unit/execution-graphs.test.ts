@@ -148,4 +148,74 @@ describe('ACP execution graph projection', () => {
       ],
     });
   });
+
+  it('prefers assistantTurnKey over runId when collecting graph steps and anchors', () => {
+    const state = createEmptyCanonicalSessionState('agent:main:main', createOpenClawTestRuntimeContext('agent:main:main'));
+    reduceCanonicalSessionEvents(state, [{
+      ...base('assistant-message-1'),
+      type: 'message_snapshot',
+      role: 'assistant',
+      ownerMessageKey: 'message:main:assistant-1',
+      ownerTurnKey: 'message:main:assistant-1',
+      turnBindingSource: 'adapter',
+      turnBindingConfidence: 'high',
+      messageBindingSource: 'adapter',
+      messageBindingConfidence: 'high',
+      messageId: 'assistant-1',
+      content: [{ type: 'text', text: 'I will inspect it' }],
+      text: 'I will inspect it',
+      status: 'streaming',
+    }, {
+      ...base('tool-read-start'),
+      seq: 2,
+      type: 'tool_call',
+      ownerMessageKey: 'message:main:assistant-1',
+      ownerTurnKey: 'message:main:assistant-1',
+      turnBindingSource: 'adapter',
+      turnBindingConfidence: 'high',
+      messageBindingSource: 'adapter',
+      messageBindingConfidence: 'high',
+      toolCallId: 'tool-read',
+      name: 'read',
+      input: { filePath: '/tmp/a.md' },
+    }, {
+      ...base('tool-read-result'),
+      seq: 3,
+      type: 'tool_result',
+      ownerMessageKey: 'message:main:assistant-1',
+      ownerTurnKey: 'message:main:assistant-1',
+      turnBindingSource: 'adapter',
+      turnBindingConfidence: 'high',
+      messageBindingSource: 'adapter',
+      messageBindingConfidence: 'high',
+      toolCallId: 'tool-read',
+      name: 'read',
+      output: 'done',
+      isError: false,
+    }, {
+      ...base('team-1'),
+      source: 'replay',
+      type: 'team',
+      event: {
+        kind: 'task_completion',
+        source: 'subagent',
+        childSessionKey: 'agent:coder:main',
+        turnKey: 'run-1',
+        assistantTurnKey: 'message:main:assistant-1',
+      },
+    }]);
+
+    const [graph] = buildExecutionGraphItemsFromCanonicalState(state);
+
+    expect(graph).toMatchObject({
+      runId: 'run-1',
+      turnKey: 'message:main:assistant-1',
+      anchorItemKey: 'session:agent:main:main|assistant-turn:main:message:main:assistant-1',
+      triggerItemKey: 'session:agent:main:main|assistant-turn:main:message:main:assistant-1',
+      replyItemKey: 'session:agent:main:main|assistant-turn:main:message:main:assistant-1',
+      steps: [
+        expect.objectContaining({ id: 'tool-read', label: 'read', status: 'completed' }),
+      ],
+    });
+  });
 });

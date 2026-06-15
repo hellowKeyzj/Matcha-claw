@@ -7,14 +7,26 @@ const CUSTOM_PROVIDER_API_OWNER_HINT_NEEDLE = 'const normalizedProvider = normal
 const CUSTOM_PROVIDER_API_OWNER_HINT_PATCHED_NEEDLE = 'const normalizedProvider = normalizeProviderId(params.provider);\n\tif (!normalizedProvider || normalizedProvider.startsWith("custom-")) return;';
 const CUSTOM_PROVIDER_SYNTHETIC_PROFILE_DEFER_NEEDLE = 'function shouldDeferSyntheticProfileAuth(params) {\n\tconst providerConfig = resolveProviderConfig(params.cfg, params.provider);';
 const CUSTOM_PROVIDER_SYNTHETIC_PROFILE_DEFER_PATCHED_NEEDLE = 'function shouldDeferSyntheticProfileAuth(params) {\n\tif (normalizeProviderId(params.provider).startsWith("custom-")) return false;\n\tconst providerConfig = resolveProviderConfig(params.cfg, params.provider);';
-const SUBAGENT_RUNTIME_UNAVAILABLE_NEEDLE = '\treturn {\n\t\trun: unavailable,\n\t\twaitForRun: unavailable,';
-const SUBAGENT_RUNTIME_UNAVAILABLE_PATCHED_NEEDLE = '\treturn {\n\t\tspawn: unavailable,\n\t\trun: unavailable,\n\t\twaitForRun: unavailable,';
-const SUBAGENT_GATEWAY_RUNTIME_NEEDLE = '\treturn {\n\t\tasync run(params) {';
-const SUBAGENT_GATEWAY_RUNTIME_PATCHED_NEEDLE = '\treturn {\n\t\tasync spawn(params) {\n\t\t\tconst result = await spawnSubagentDirect({\n\t\t\t\ttask: params.task,\n\t\t\t\ttaskName: params.taskName,\n\t\t\t\tlabel: params.label,\n\t\t\t\tagentId: params.agentId,\n\t\t\t\tmodel: params.model,\n\t\t\t\tthinking: params.thinking,\n\t\t\t\trunTimeoutSeconds: params.runTimeoutSeconds,\n\t\t\t\tthread: params.thread,\n\t\t\t\tmode: params.mode,\n\t\t\t\tcleanup: params.cleanup,\n\t\t\t\tsandbox: params.sandbox,\n\t\t\t\tcontext: params.context,\n\t\t\t\tlightContext: params.lightContext,\n\t\t\t\texpectsCompletionMessage: params.expectsCompletionMessage,\n\t\t\t\tattachments: params.attachments,\n\t\t\t\tattachMountPath: params.attachMountPath,\n\t\t\t}, {\n\t\t\t\tagentSessionKey: params.requesterSessionKey,\n\t\t\t\tagentChannel: params.requesterChannel,\n\t\t\t\tagentAccountId: params.requesterAccountId,\n\t\t\t\tagentTo: params.requesterTo,\n\t\t\t\tagentThreadId: params.requesterThreadId,\n\t\t\t\tagentGroupId: params.requesterGroupId,\n\t\t\t\tagentGroupChannel: params.requesterGroupChannel,\n\t\t\t\tagentGroupSpace: params.requesterGroupSpace,\n\t\t\t\tagentMemberRoleIds: params.requesterMemberRoleIds,\n\t\t\t\trequesterAgentIdOverride: params.requesterAgentId,\n\t\t\t\tworkspaceDir: params.workspaceDir,\n\t\t\t});\n\t\t\treturn result;\n\t\t},\n\t\tasync run(params) {';
-const SUBAGENT_GATEWAY_RUNTIME_IMPORT_NEEDLE = 'import { randomUUID } from "node:crypto";';
-const SUBAGENT_GATEWAY_RUNTIME_IMPORT_PATCHED_NEEDLE = 'import { randomUUID } from "node:crypto";\nimport { t as spawnSubagentDirect } from "./subagent-spawn-ALADHNnO.js";';
-const SUBAGENT_RUNTIME_PROXY_NEEDLE = '\t\t\treturn {\n\t\t\t\trun: (params) => withPluginRuntimePluginIdScope(pluginId, () => subagent.run(params)),';
-const SUBAGENT_RUNTIME_PROXY_PATCHED_NEEDLE = '\t\t\treturn {\n\t\t\t\tspawn: (params) => withPluginRuntimePluginIdScope(pluginId, () => subagent.spawn(params)),\n\t\t\t\trun: (params) => withPluginRuntimePluginIdScope(pluginId, () => subagent.run(params)),';
+const RUNTIME_GATEWAY_BINDINGS_NEEDLE = 'const gatewaySubagentState = resolveGlobalSingleton(Symbol.for("openclaw.plugin.gatewaySubagentRuntime"), () => ({\n\tsubagent: void 0,\n\tnodes: void 0\n}));';
+const RUNTIME_GATEWAY_BINDINGS_PATCHED_NEEDLE = 'const gatewaySubagentState = resolveGlobalSingleton(Symbol.for("openclaw.plugin.gatewaySubagentRuntime"), () => ({\n\tsubagent: void 0,\n\tnodes: void 0,\n\tgateway: void 0\n}));';
+const SET_GATEWAY_NODES_RUNTIME_NEEDLE = 'function setGatewayNodesRuntime(nodes) {\n\tgatewaySubagentState.nodes = nodes;\n}';
+const SET_GATEWAY_NODES_RUNTIME_PATCHED_NEEDLE = 'function setGatewayNodesRuntime(nodes) {\n\tgatewaySubagentState.nodes = nodes;\n}\nfunction setGatewayRuntime(gateway) {\n\tgatewaySubagentState.gateway = gateway;\n}';
+const CLEAR_GATEWAY_RUNTIME_NEEDLE = 'function clearGatewaySubagentRuntime() {\n\tgatewaySubagentState.subagent = void 0;\n\tgatewaySubagentState.nodes = void 0;\n}';
+const CLEAR_GATEWAY_RUNTIME_PATCHED_NEEDLE = 'function clearGatewaySubagentRuntime() {\n\tgatewaySubagentState.subagent = void 0;\n\tgatewaySubagentState.nodes = void 0;\n\tgatewaySubagentState.gateway = void 0;\n}';
+const GATEWAY_BINDINGS_EXPORT_NEEDLE = 'export { setGatewaySubagentRuntime as i, gatewaySubagentState as n, setGatewayNodesRuntime as r, clearGatewaySubagentRuntime as t };';
+const GATEWAY_BINDINGS_EXPORT_PATCHED_NEEDLE = 'export { setGatewaySubagentRuntime as i, gatewaySubagentState as n, setGatewayNodesRuntime as r, clearGatewaySubagentRuntime as t, setGatewayRuntime as u };';
+const LATE_BINDING_NODES_NEEDLE = 'function createLateBindingNodes(allowGatewayBinding = false) {\n\tconst unavailable = createUnavailableNodesRuntime();\n\tif (!allowGatewayBinding) return unavailable;\n\treturn new Proxy(unavailable, { get(_target, prop, _receiver) {\n\t\tconst resolved = gatewaySubagentState.nodes ?? unavailable;\n\t\treturn Reflect.get(resolved, prop, resolved);\n\t} });\n}';
+const LATE_BINDING_NODES_PATCHED_NEEDLE = 'function createLateBindingNodes(allowGatewayBinding = false) {\n\tconst unavailable = createUnavailableNodesRuntime();\n\tif (!allowGatewayBinding) return unavailable;\n\treturn new Proxy(unavailable, { get(_target, prop, _receiver) {\n\t\tconst resolved = gatewaySubagentState.nodes ?? unavailable;\n\t\treturn Reflect.get(resolved, prop, resolved);\n\t} });\n}\nfunction createUnavailableGatewayRuntime() {\n\treturn {\n\t\trequest: () => {\n\t\t\tthrow new Error("Plugin gateway runtime is only available inside the Gateway.");\n\t\t}\n\t};\n}\nfunction createLateBindingGateway(allowGatewayBinding = false) {\n\tconst unavailable = createUnavailableGatewayRuntime();\n\tif (!allowGatewayBinding) return unavailable;\n\treturn new Proxy(unavailable, { get(_target, prop, _receiver) {\n\t\tconst resolved = gatewaySubagentState.gateway ?? unavailable;\n\t\treturn Reflect.get(resolved, prop, resolved);\n\t} });\n}';
+const RUNTIME_OBJECT_NEEDLE = 'subagent: createLateBindingSubagent(_options.subagent, _options.allowGatewaySubagentBinding === true),\n\t\tnodes: _options.nodes ?? createLateBindingNodes(_options.allowGatewaySubagentBinding === true),\n\t\tsystem: createRuntimeSystem(),';
+const RUNTIME_OBJECT_PATCHED_NEEDLE = 'subagent: createLateBindingSubagent(_options.subagent, _options.allowGatewaySubagentBinding === true),\n\t\tnodes: _options.nodes ?? createLateBindingNodes(_options.allowGatewaySubagentBinding === true),\n\t\tgateway: createLateBindingGateway(_options.allowGatewaySubagentBinding === true),\n\t\tsystem: createRuntimeSystem(),';
+const SERVER_PLUGINS_GATEWAY_RUNTIME_INSERT_NEEDLE = 'function createGatewayNodesRuntime() {\n\treturn {\n\t\tasync list(params) {';
+const SERVER_PLUGINS_GATEWAY_RUNTIME_INSERT_PATCHED_NEEDLE = 'function createGatewayRequestRuntime() {\n\treturn {\n\t\tasync request(params) {\n\t\t\treturn await dispatchGatewayMethodInProcess(params.method, params.params ?? {}, {\n\t\t\t\texpectFinal: params.waitForFinal === true,\n\t\t\t\ttimeoutMs: params.timeoutMs\n\t\t\t});\n\t\t}\n\t};\n}\nfunction createGatewayNodesRuntime() {\n\treturn {\n\t\tasync list(params) {';
+const SERVER_PLUGINS_EXPORT_NEEDLE = 'export { loadGatewayPlugins as a, dispatchGatewayMethodInProcessRaw as i, createGatewaySubagentRuntime as n, setFallbackGatewayContextResolver as o, dispatchGatewayMethodInProcess as r, setPluginSubagentOverridePolicies as s, createGatewayNodesRuntime as t };';
+const SERVER_PLUGINS_EXPORT_PATCHED_NEEDLE = 'export { loadGatewayPlugins as a, dispatchGatewayMethodInProcessRaw as i, createGatewaySubagentRuntime as n, setFallbackGatewayContextResolver as o, dispatchGatewayMethodInProcess as r, setPluginSubagentOverridePolicies as s, createGatewayNodesRuntime as t, createGatewayRequestRuntime as u };';
+const SERVER_PLUGIN_BOOTSTRAP_IMPORT_NEEDLE = 'import { a as loadGatewayPlugins, n as createGatewaySubagentRuntime, s as setPluginSubagentOverridePolicies, t as createGatewayNodesRuntime } from "./server-plugins-B7V8TIyE.js";\nimport { t as primeConfiguredBindingRegistry } from "./binding-registry-C-jk6oB8.js";\nimport { i as setGatewaySubagentRuntime, r as setGatewayNodesRuntime } from "./gateway-bindings-BnMgV9Pk.js";';
+const SERVER_PLUGIN_BOOTSTRAP_IMPORT_PATCHED_NEEDLE = 'import { a as loadGatewayPlugins, n as createGatewaySubagentRuntime, s as setPluginSubagentOverridePolicies, t as createGatewayNodesRuntime, u as createGatewayRequestRuntime } from "./server-plugins-B7V8TIyE.js";\nimport { t as primeConfiguredBindingRegistry } from "./binding-registry-C-jk6oB8.js";\nimport { i as setGatewaySubagentRuntime, r as setGatewayNodesRuntime, u as setGatewayRuntime } from "./gateway-bindings-BnMgV9Pk.js";';
+const SERVER_PLUGIN_BOOTSTRAP_INSTALL_NEEDLE = 'function installGatewayPluginRuntimeEnvironment(cfg) {\n\tsetPluginSubagentOverridePolicies(cfg);\n\tsetGatewaySubagentRuntime(createGatewaySubagentRuntime());\n\tsetGatewayNodesRuntime(createGatewayNodesRuntime());\n}';
+const SERVER_PLUGIN_BOOTSTRAP_INSTALL_PATCHED_NEEDLE = 'function installGatewayPluginRuntimeEnvironment(cfg) {\n\tsetPluginSubagentOverridePolicies(cfg);\n\tsetGatewaySubagentRuntime(createGatewaySubagentRuntime());\n\tsetGatewayNodesRuntime(createGatewayNodesRuntime());\n\tsetGatewayRuntime(createGatewayRequestRuntime());\n}';
 
 function printLine(message = '') {
   process.stdout.write(`${message}\n`);
@@ -160,165 +172,155 @@ function verifyCustomProviderSyntheticProfileDeferPatch(source, patchId) {
   }
 }
 
-function patchNativeSubagentRuntimeSpawn(openclawDir) {
-  const patchId = 'native-subagent-runtime-spawn';
+function patchRuntimeGatewayBindings(openclawDir) {
+  const patchId = 'runtime-gateway-bindings';
   const distDir = path.join(openclawDir, 'dist');
   if (!fs.existsSync(distDir)) {
     return { status: 'skipped', detail: 'dist not found' };
   }
 
-  const runtimeIndex = path.join(distDir, 'plugins', 'runtime', 'index.js');
-  const runtimeTypes = path.join(distDir, 'plugin-sdk', 'src', 'plugins', 'runtime', 'types.d.ts');
-  const rootRuntimeTypes = locateSingleFile(distDir, patchId, {
-    fileNamePrefix: 'types-',
-    extension: '.d.ts',
+  const target = locateSingleJavaScriptFile(distDir, patchId, {
+    fileNamePrefix: 'gateway-bindings-',
     markers: [
-      'type SubagentRunParams = {',
-      'type SubagentRunResult = {',
-      'type PluginRuntime = PluginRuntimeCore & {',
-      'subagent: {',
+      'const gatewaySubagentState = resolveGlobalSingleton(Symbol.for("openclaw.plugin.gatewaySubagentRuntime")',
+      'function setGatewaySubagentRuntime(subagent)',
+      'function setGatewayNodesRuntime(nodes)',
+      'function clearGatewaySubagentRuntime()',
     ],
   });
-  const sdkIndex = path.join(distDir, 'plugin-sdk', 'src', 'plugin-sdk', 'index.d.ts');
-  const gatewayRuntime = locateSingleJavaScriptFile(distDir, patchId, {
+  const before = readText(target);
+  if (before.includes(GATEWAY_BINDINGS_EXPORT_PATCHED_NEEDLE)) {
+    return { status: 'clean', detail: path.relative(openclawDir, target) };
+  }
+
+  let source = before;
+  source = replaceOnce(source, RUNTIME_GATEWAY_BINDINGS_NEEDLE, RUNTIME_GATEWAY_BINDINGS_PATCHED_NEEDLE, patchId);
+  source = replaceOnce(source, SET_GATEWAY_NODES_RUNTIME_NEEDLE, SET_GATEWAY_NODES_RUNTIME_PATCHED_NEEDLE, patchId);
+  source = replaceOnce(source, CLEAR_GATEWAY_RUNTIME_NEEDLE, CLEAR_GATEWAY_RUNTIME_PATCHED_NEEDLE, patchId);
+  source = replaceOnce(source, GATEWAY_BINDINGS_EXPORT_NEEDLE, GATEWAY_BINDINGS_EXPORT_PATCHED_NEEDLE, patchId);
+  verifyRuntimeGatewayBindingsPatch(source, patchId);
+  writeText(target, source);
+  return { status: 'applied', detail: path.relative(openclawDir, target) };
+}
+
+function verifyRuntimeGatewayBindingsPatch(source, patchId) {
+  if (!source.includes(RUNTIME_GATEWAY_BINDINGS_PATCHED_NEEDLE)) {
+    throw new Error(`${patchId}: gateway state verification failed`);
+  }
+  if (!source.includes(SET_GATEWAY_NODES_RUNTIME_PATCHED_NEEDLE)) {
+    throw new Error(`${patchId}: setGatewayRuntime verification failed`);
+  }
+  if (!source.includes(CLEAR_GATEWAY_RUNTIME_PATCHED_NEEDLE)) {
+    throw new Error(`${patchId}: clear gateway verification failed`);
+  }
+  if (!source.includes(GATEWAY_BINDINGS_EXPORT_PATCHED_NEEDLE)) {
+    throw new Error(`${patchId}: export verification failed`);
+  }
+}
+
+function patchRuntimeGatewaySurface(openclawDir) {
+  const patchId = 'runtime-gateway-surface';
+  const target = path.join(openclawDir, 'dist', 'plugins', 'runtime', 'index.js');
+  if (!fs.existsSync(target)) {
+    return { status: 'skipped', detail: 'dist/plugins/runtime/index.js not found' };
+  }
+
+  const before = readText(target);
+  if (before.includes('function createLateBindingGateway(allowGatewayBinding = false)')) {
+    return { status: 'clean', detail: path.relative(openclawDir, target) };
+  }
+
+  let source = before;
+  source = replaceOnce(source, LATE_BINDING_NODES_NEEDLE, LATE_BINDING_NODES_PATCHED_NEEDLE, patchId);
+  source = replaceOnce(source, RUNTIME_OBJECT_NEEDLE, RUNTIME_OBJECT_PATCHED_NEEDLE, patchId);
+  verifyRuntimeGatewaySurfacePatch(source, patchId);
+  writeText(target, source);
+  return { status: 'applied', detail: path.relative(openclawDir, target) };
+}
+
+function verifyRuntimeGatewaySurfacePatch(source, patchId) {
+  if (!source.includes('function createLateBindingGateway(allowGatewayBinding = false)')) {
+    throw new Error(`${patchId}: late binding verification failed`);
+  }
+  if (!source.includes('gateway: createLateBindingGateway(_options.allowGatewaySubagentBinding === true),')) {
+    throw new Error(`${patchId}: runtime surface verification failed`);
+  }
+}
+
+function patchGatewayRequestRuntime(openclawDir) {
+  const patchId = 'gateway-request-runtime';
+  const distDir = path.join(openclawDir, 'dist');
+  if (!fs.existsSync(distDir)) {
+    return { status: 'skipped', detail: 'dist not found' };
+  }
+
+  const target = locateSingleJavaScriptFile(distDir, patchId, {
     fileNamePrefix: 'server-plugins-',
     markers: [
-      'function createGatewaySubagentRuntime() {',
-      'async run(params) {',
-      'dispatchGatewayMethod("agent", {',
+      'async function dispatchGatewayMethodInProcess(method, params, options)',
+      'function createGatewaySubagentRuntime()',
+      'function createGatewayNodesRuntime()',
     ],
   });
-  const runtimeProxy = locateSingleJavaScriptFile(distDir, patchId, {
-    fileNamePrefix: 'loader-',
+  const before = readText(target);
+  if (before.includes('function createGatewayRequestRuntime()')) {
+    return { status: 'clean', detail: path.relative(openclawDir, target) };
+  }
+
+  let source = before;
+  source = replaceOnce(source, SERVER_PLUGINS_GATEWAY_RUNTIME_INSERT_NEEDLE, SERVER_PLUGINS_GATEWAY_RUNTIME_INSERT_PATCHED_NEEDLE, patchId);
+  source = replaceOnce(source, SERVER_PLUGINS_EXPORT_NEEDLE, SERVER_PLUGINS_EXPORT_PATCHED_NEEDLE, patchId);
+  verifyGatewayRequestRuntimePatch(source, patchId);
+  writeText(target, source);
+  return { status: 'applied', detail: path.relative(openclawDir, target) };
+}
+
+function verifyGatewayRequestRuntimePatch(source, patchId) {
+  if (!source.includes('function createGatewayRequestRuntime()')) {
+    throw new Error(`${patchId}: createGatewayRequestRuntime verification failed`);
+  }
+  if (!source.includes('return await dispatchGatewayMethodInProcess(params.method, params.params ?? {}, {')) {
+    throw new Error(`${patchId}: dispatch bridge verification failed`);
+  }
+  if (!source.includes(SERVER_PLUGINS_EXPORT_PATCHED_NEEDLE)) {
+    throw new Error(`${patchId}: export verification failed`);
+  }
+}
+
+function patchGatewayBootstrapRuntime(openclawDir) {
+  const patchId = 'gateway-bootstrap-runtime';
+  const distDir = path.join(openclawDir, 'dist');
+  if (!fs.existsSync(distDir)) {
+    return { status: 'skipped', detail: 'dist not found' };
+  }
+
+  const target = locateSingleJavaScriptFile(distDir, patchId, {
+    fileNamePrefix: 'server-plugin-bootstrap-',
     markers: [
-      'withPluginRuntimePluginIdScope(pluginId, () => subagent.run(params))',
-      'deleteSession: (params) => withPluginRuntimePluginIdScope(pluginId, () => subagent.deleteSession(params))',
-      'pluginRuntimeById.set(pluginId, runtime)',
+      'function installGatewayPluginRuntimeEnvironment(cfg)',
+      'setGatewaySubagentRuntime(createGatewaySubagentRuntime());',
+      'setGatewayNodesRuntime(createGatewayNodesRuntime());',
     ],
   });
-  for (const target of [runtimeIndex, runtimeTypes, rootRuntimeTypes, sdkIndex, gatewayRuntime, runtimeProxy]) {
-    if (!fs.existsSync(target)) {
-      return { status: 'skipped', detail: `${path.relative(openclawDir, target)} not found` };
-    }
+  const before = readText(target);
+  if (before.includes('setGatewayRuntime(createGatewayRequestRuntime());')) {
+    return { status: 'clean', detail: path.relative(openclawDir, target) };
   }
 
-  let runtimeSource = readText(runtimeIndex);
-  const runtimeAlreadyPatched = runtimeSource.includes('spawn: unavailable');
-  if (!runtimeAlreadyPatched) {
-    runtimeSource = replaceOnce(runtimeSource, SUBAGENT_RUNTIME_UNAVAILABLE_NEEDLE, SUBAGENT_RUNTIME_UNAVAILABLE_PATCHED_NEEDLE, patchId);
-    verifyNativeSubagentRuntimeUnavailablePatch(runtimeSource, patchId);
-    writeText(runtimeIndex, runtimeSource);
-  }
-
-  let gatewayRuntimeSource = readText(gatewayRuntime);
-  const gatewayRuntimeAlreadyPatched = gatewayRuntimeSource.includes('async spawn(params) {') && gatewayRuntimeSource.includes('spawnSubagentDirect({');
-  if (!gatewayRuntimeAlreadyPatched) {
-    gatewayRuntimeSource = replaceOnce(gatewayRuntimeSource, SUBAGENT_GATEWAY_RUNTIME_IMPORT_NEEDLE, SUBAGENT_GATEWAY_RUNTIME_IMPORT_PATCHED_NEEDLE, patchId);
-    gatewayRuntimeSource = replaceOnce(gatewayRuntimeSource, SUBAGENT_GATEWAY_RUNTIME_NEEDLE, SUBAGENT_GATEWAY_RUNTIME_PATCHED_NEEDLE, patchId);
-    verifyNativeSubagentGatewayRuntimePatch(gatewayRuntimeSource, patchId);
-    writeText(gatewayRuntime, gatewayRuntimeSource);
-  }
-
-  let runtimeTypesSource = readText(runtimeTypes);
-  const runtimeTypesAlreadyPatched = runtimeTypesSource.includes('export type SubagentSpawnParams = {');
-  if (!runtimeTypesAlreadyPatched) {
-    runtimeTypesSource = patchNativeSubagentRuntimeTypes(runtimeTypesSource, patchId);
-    writeText(runtimeTypes, runtimeTypesSource);
-  }
-
-  let rootRuntimeTypesSource = readText(rootRuntimeTypes);
-  const rootRuntimeTypesAlreadyPatched = rootRuntimeTypesSource.includes('type SubagentSpawnParams = {');
-  if (!rootRuntimeTypesAlreadyPatched) {
-    rootRuntimeTypesSource = patchNativeSubagentRootRuntimeTypes(rootRuntimeTypesSource, patchId);
-    writeText(rootRuntimeTypes, rootRuntimeTypesSource);
-  }
-
-  let runtimeProxySource = readText(runtimeProxy);
-  const runtimeProxyAlreadyPatched = runtimeProxySource.includes('spawn: (params) => withPluginRuntimePluginIdScope(pluginId, () => subagent.spawn(params))');
-  if (!runtimeProxyAlreadyPatched) {
-    runtimeProxySource = replaceOnce(runtimeProxySource, SUBAGENT_RUNTIME_PROXY_NEEDLE, SUBAGENT_RUNTIME_PROXY_PATCHED_NEEDLE, patchId);
-    verifyNativeSubagentRuntimeProxyPatch(runtimeProxySource, patchId);
-    writeText(runtimeProxy, runtimeProxySource);
-  }
-
-  let sdkIndexSource = readText(sdkIndex);
-  if (!sdkIndexSource.includes('SubagentSpawnParams')) {
-    sdkIndexSource = replaceOnce(
-      sdkIndexSource,
-      'export type { PluginRuntime, RuntimeLogger, SubagentRunParams, SubagentRunResult, } from "../plugins/runtime/types.js";',
-      'export type { PluginRuntime, RuntimeLogger, SubagentRunParams, SubagentRunResult, SubagentSpawnParams, SubagentSpawnResult, } from "../plugins/runtime/types.js";',
-      patchId,
-    );
-    writeText(sdkIndex, sdkIndexSource);
-  }
-
-  const changed = runtimeAlreadyPatched && gatewayRuntimeAlreadyPatched && runtimeTypesAlreadyPatched && rootRuntimeTypesAlreadyPatched && runtimeProxyAlreadyPatched
-    ? 'clean'
-    : 'applied';
-  return { status: changed, detail: path.relative(openclawDir, runtimeIndex) };
+  let source = before;
+  source = replaceOnce(source, SERVER_PLUGIN_BOOTSTRAP_IMPORT_NEEDLE, SERVER_PLUGIN_BOOTSTRAP_IMPORT_PATCHED_NEEDLE, patchId);
+  source = replaceOnce(source, SERVER_PLUGIN_BOOTSTRAP_INSTALL_NEEDLE, SERVER_PLUGIN_BOOTSTRAP_INSTALL_PATCHED_NEEDLE, patchId);
+  verifyGatewayBootstrapRuntimePatch(source, patchId);
+  writeText(target, source);
+  return { status: 'applied', detail: path.relative(openclawDir, target) };
 }
 
-function patchNativeSubagentRuntimeTypes(source, patchId) {
-  const withSpawnTypes = replaceOnce(
-    source,
-    'export type SubagentRunResult = {\n    runId: string;\n};\n',
-    'export type SubagentRunResult = {\n    runId: string;\n};\nexport type SubagentSpawnParams = {\n    task: string;\n    taskName?: string;\n    label?: string;\n    agentId?: string;\n    model?: string;\n    thinking?: string;\n    runTimeoutSeconds?: number;\n    thread?: boolean;\n    mode?: "run" | "session";\n    cleanup?: "delete" | "keep";\n    sandbox?: "inherit" | "require";\n    context?: "isolated" | "fork";\n    lightContext?: boolean;\n    expectsCompletionMessage?: boolean;\n    attachments?: Array<Record<string, unknown>>;\n    attachMountPath?: string;\n    requesterSessionKey?: string;\n    requesterAgentId?: string;\n    requesterChannel?: string;\n    requesterAccountId?: string;\n    requesterTo?: string;\n    requesterThreadId?: string | number;\n    requesterGroupId?: string | null;\n    requesterGroupChannel?: string | null;\n    requesterGroupSpace?: string | null;\n    requesterMemberRoleIds?: string[];\n    workspaceDir?: string;\n};\nexport type SubagentSpawnResult = {\n    status: "accepted" | "forbidden" | "error";\n    childSessionKey?: string;\n    runId?: string;\n    mode?: "run" | "session";\n    taskName?: string;\n    note?: string;\n    modelApplied?: boolean;\n    error?: string;\n    attachments?: unknown;\n};\n',
-    patchId,
-  );
-  const patched = replaceOnce(
-    withSpawnTypes,
-    '    subagent: {\n        run: (params: SubagentRunParams) => Promise<SubagentRunResult>;',
-    '    subagent: {\n        spawn: (params: SubagentSpawnParams) => Promise<SubagentSpawnResult>;\n        run: (params: SubagentRunParams) => Promise<SubagentRunResult>;',
-    patchId,
-  );
-  if (!patched.includes('spawn: (params: SubagentSpawnParams) => Promise<SubagentSpawnResult>;')) {
-    throw new Error(`${patchId}: runtime types verification failed`);
+function verifyGatewayBootstrapRuntimePatch(source, patchId) {
+  if (!source.includes('createGatewayRequestRuntime')) {
+    throw new Error(`${patchId}: import verification failed`);
   }
-  return patched;
-}
-
-function patchNativeSubagentRootRuntimeTypes(source, patchId) {
-  const withSpawnTypes = replaceOnce(
-    source,
-    'type SubagentRunResult = {\n  runId: string;\n};\n',
-    'type SubagentRunResult = {\n  runId: string;\n};\ntype SubagentSpawnParams = {\n  task: string;\n  taskName?: string;\n  label?: string;\n  agentId?: string;\n  model?: string;\n  thinking?: string;\n  runTimeoutSeconds?: number;\n  thread?: boolean;\n  mode?: "run" | "session";\n  cleanup?: "delete" | "keep";\n  sandbox?: "inherit" | "require";\n  context?: "isolated" | "fork";\n  lightContext?: boolean;\n  expectsCompletionMessage?: boolean;\n  attachments?: Array<Record<string, unknown>>;\n  attachMountPath?: string;\n  requesterSessionKey?: string;\n  requesterAgentId?: string;\n  requesterChannel?: string;\n  requesterAccountId?: string;\n  requesterTo?: string;\n  requesterThreadId?: string | number;\n  requesterGroupId?: string | null;\n  requesterGroupChannel?: string | null;\n  requesterGroupSpace?: string | null;\n  requesterMemberRoleIds?: string[];\n  workspaceDir?: string;\n};\ntype SubagentSpawnResult = {\n  status: "accepted" | "forbidden" | "error";\n  childSessionKey?: string;\n  runId?: string;\n  mode?: "run" | "session";\n  taskName?: string;\n  note?: string;\n  modelApplied?: boolean;\n  error?: string;\n  attachments?: unknown;\n};\n',
-    patchId,
-  );
-  const withRuntimeSpawn = replaceOnce(
-    withSpawnTypes,
-    '  subagent: {\n    run: (params: SubagentRunParams) => Promise<SubagentRunResult>;',
-    '  subagent: {\n    spawn: (params: SubagentSpawnParams) => Promise<SubagentSpawnResult>;\n    run: (params: SubagentRunParams) => Promise<SubagentRunResult>;',
-    patchId,
-  );
-  const patched = replaceOnce(
-    withRuntimeSpawn,
-    'export { settleReplyDispatcher as a, SubagentRunResult as i, PluginRuntime as n, SubagentRunParams as r, CreatePluginRuntimeOptions as t };',
-    'export { settleReplyDispatcher as a, SubagentRunResult as i, SubagentSpawnResult as j, PluginRuntime as n, SubagentRunParams as r, SubagentSpawnParams as s, CreatePluginRuntimeOptions as t };',
-    patchId,
-  );
-  if (!patched.includes('spawn: (params: SubagentSpawnParams) => Promise<SubagentSpawnResult>;')) {
-    throw new Error(`${patchId}: root runtime types verification failed`);
-  }
-  return patched;
-}
-
-function verifyNativeSubagentRuntimeUnavailablePatch(source, patchId) {
-  if (!source.includes(SUBAGENT_RUNTIME_UNAVAILABLE_PATCHED_NEEDLE)) {
-    throw new Error(`${patchId}: unavailable runtime verification failed`);
-  }
-}
-
-function verifyNativeSubagentGatewayRuntimePatch(source, patchId) {
-  for (const marker of [SUBAGENT_GATEWAY_RUNTIME_IMPORT_PATCHED_NEEDLE, 'async spawn(params) {', 'spawnSubagentDirect({']) {
-    if (!source.includes(marker)) {
-      throw new Error(`${patchId}: gateway runtime verification failed for ${marker}`);
-    }
-  }
-}
-
-function verifyNativeSubagentRuntimeProxyPatch(source, patchId) {
-  if (!source.includes(SUBAGENT_RUNTIME_PROXY_PATCHED_NEEDLE)) {
-    throw new Error(`${patchId}: runtime proxy verification failed`);
+  if (!source.includes('setGatewayRuntime(createGatewayRequestRuntime());')) {
+    throw new Error(`${patchId}: install verification failed`);
   }
 }
 
@@ -336,8 +338,20 @@ const OPENCLAW_PATCHES = Object.freeze([
     apply: patchCustomProviderSyntheticProfileDefer,
   },
   {
-    id: 'native-subagent-runtime-spawn',
-    apply: patchNativeSubagentRuntimeSpawn,
+    id: 'runtime-gateway-bindings',
+    apply: patchRuntimeGatewayBindings,
+  },
+  {
+    id: 'runtime-gateway-surface',
+    apply: patchRuntimeGatewaySurface,
+  },
+  {
+    id: 'gateway-request-runtime',
+    apply: patchGatewayRequestRuntime,
+  },
+  {
+    id: 'gateway-bootstrap-runtime',
+    apply: patchGatewayBootstrapRuntime,
   },
 ]);
 

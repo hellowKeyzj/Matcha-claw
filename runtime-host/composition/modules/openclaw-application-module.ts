@@ -19,6 +19,7 @@ import { OpenClawWeixinAccountStoreWorkflow } from '../../application/adapters/o
 import { OpenClawCliCommandWorkflow } from '../../application/adapters/openclaw/workflows/openclaw-workspace/openclaw-cli-command-workflow';
 import { OpenClawService } from '../../application/adapters/openclaw/openclaw-service';
 import type { RuntimeHostRuntimeConfigPort, RuntimeHostWorkspaceBootstrapPort } from '../../application/runtime-host/bootstrap';
+import type { RuntimePluginConfigProjectionPort, RuntimePluginConfigStorePort } from '../../application/plugins/runtime-plugin-service';
 import {
   CAPABILITY_ROUTING_SERVICE_TOKEN,
   CHANNEL_SERVICE_TOKEN,
@@ -347,6 +348,8 @@ export function registerOpenClawApplicationServices(
     skillRuntimeWorkflow: scope.resolve<SkillRuntimeWorkflow>('skills.runtimeWorkflow'),
     skillBundleTransferWorkflow: scope.resolve<SkillBundleTransferWorkflow>('skills.bundleTransferWorkflow'),
     localSkillImportWorkflow: scope.resolve<LocalSkillImportWorkflow>('skills.localImportWorkflow'),
+    pluginConfigStore: scope.resolve<RuntimePluginConfigStorePort>('plugins.configStore'),
+    pluginConfigProjection: scope.resolve<RuntimePluginConfigProjectionPort>('plugins.configProjection'),
     logger: scope.resolve<RuntimeHostLogger>('logger'),
   }));
   container.register('skills.service', (scope) => new SkillsService({

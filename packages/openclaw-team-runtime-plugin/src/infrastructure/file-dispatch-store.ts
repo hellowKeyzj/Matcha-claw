@@ -20,6 +20,10 @@ export interface SaveDispatchInput {
   inputArtifactIds: string[]
   kickbackIds: string[]
   idempotencyKey: string
+  workflowPlanId?: string
+  dispatchGroupId?: string
+  groupId?: string
+  taskId?: string
 }
 
 export class FileDispatchStore {
@@ -32,6 +36,10 @@ export class FileDispatchStore {
         ?? dispatches.find((dispatch) => dispatch.runId === input.runId
           && dispatch.stageId === input.stageId
           && dispatch.roleId === input.roleId
+          && dispatch.workflowPlanId === input.workflowPlanId
+          && dispatch.dispatchGroupId === input.dispatchGroupId
+          && dispatch.groupId === input.groupId
+          && dispatch.taskId === input.taskId
           && stringArraysEqual(dispatch.inputArtifactIds, input.inputArtifactIds)
           && stringArraysEqual(dispatch.kickbackIds, input.kickbackIds))
       if (existing) {
@@ -50,6 +58,10 @@ export class FileDispatchStore {
         kickbackIds: input.kickbackIds,
         idempotencyKey: input.idempotencyKey,
         createdAt: this.deps.clock.nowMs(),
+        ...(input.workflowPlanId ? { workflowPlanId: input.workflowPlanId } : {}),
+        ...(input.dispatchGroupId ? { dispatchGroupId: input.dispatchGroupId } : {}),
+        ...(input.groupId ? { groupId: input.groupId } : {}),
+        ...(input.taskId ? { taskId: input.taskId } : {}),
       }
 
       await mkdir(path.join(input.runtimeRoot, 'dispatches', 'prompts'), { recursive: true })

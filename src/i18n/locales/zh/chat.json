@@ -15,6 +15,7 @@
     },
     "input": {
         "gatewayDisconnectedPlaceholder": "网关未连接...",
+        "gatewayRecoveringNotice": "连接中断，正在恢复…",
         "messagePlaceholder": "消息（输入 / 选skill，Enter 发送，Shift+Enter 换行）",
         "approvalWaitingPlaceholder": "等待审批中...",
         "pickModel": "选择模型",

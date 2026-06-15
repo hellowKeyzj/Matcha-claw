@@ -7,51 +7,48 @@ const TEAM_RUNTIME_CAPABILITY_TIMEOUT_MS = 5_000;
 
 export type TeamRuntimeOperationId =
   | 'team.packageValidate'
+  | 'team.dependencyPlan'
   | 'team.runCreate'
   | 'team.runStart'
   | 'team.runSnapshot'
   | 'team.runDiagnostics'
   | 'team.runDecisionSubmit'
-  | 'team.stageComplete'
+  | 'team.planWorkflow'
   | 'team.runTick'
-  | 'team.dispatchPrepare'
-  | 'team.dispatchExecute'
   | 'team.approvalResolve'
   | 'team.runCancel'
-  | 'team.gateEvaluate';
+  | 'team.runDelete';
 
 const TEAM_RUNTIME_OPERATION_METHODS: Record<TeamRuntimeOperationId, string> = {
   'team.packageValidate': 'matchaclaw.team.package.validate',
+  'team.dependencyPlan': 'matchaclaw.team.dependency.plan',
   'team.runCreate': 'matchaclaw.team.run.create',
   'team.runStart': 'matchaclaw.team.run.start',
   'team.runSnapshot': 'matchaclaw.team.run.snapshot',
   'team.runDiagnostics': 'matchaclaw.team.run.diagnostics',
   'team.runDecisionSubmit': 'matchaclaw.team.run.decision.submit',
-  'team.stageComplete': 'matchaclaw.team.stage.complete',
+  'team.planWorkflow': 'matchaclaw.team.workflow.plan',
   'team.runTick': 'matchaclaw.team.run.tick',
-  'team.dispatchPrepare': 'matchaclaw.team.dispatch.prepare',
-  'team.dispatchExecute': 'matchaclaw.team.dispatch.execute',
   'team.approvalResolve': 'matchaclaw.team.approval.resolve',
   'team.runCancel': 'matchaclaw.team.run.cancel',
-  'team.gateEvaluate': 'matchaclaw.team.gate.evaluate',
+  'team.runDelete': 'matchaclaw.team.run.delete',
 };
 
 export const TEAM_RUNTIME_GATEWAY_PLUGIN: GatewayPluginCapabilityDefinition = {
   pluginId: 'team-runtime',
   methods: [
     'matchaclaw.team.package.validate',
+    'matchaclaw.team.dependency.plan',
     'matchaclaw.team.run.create',
     'matchaclaw.team.run.start',
     'matchaclaw.team.run.snapshot',
     'matchaclaw.team.run.diagnostics',
     'matchaclaw.team.run.decision.submit',
-    'matchaclaw.team.stage.complete',
+    'matchaclaw.team.workflow.plan',
     'matchaclaw.team.run.tick',
-    'matchaclaw.team.dispatch.prepare',
-    'matchaclaw.team.dispatch.execute',
     'matchaclaw.team.approval.resolve',
     'matchaclaw.team.run.cancel',
-    'matchaclaw.team.gate.evaluate',
+    'matchaclaw.team.run.delete',
   ],
 };
 

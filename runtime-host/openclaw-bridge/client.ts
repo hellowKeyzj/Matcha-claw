@@ -82,6 +82,12 @@ export interface GatewayClientOptions {
 
 export { DEFAULT_GATEWAY_OPERATOR_SCOPES };
 
+const GATEWAY_RPC_RECOVERY_FAILURE_THRESHOLD = 3;
+const GATEWAY_RPC_RECOVERY_FAST_ATTEMPTS = 3;
+const GATEWAY_RPC_RECOVERY_FAST_DELAY_MS = 1_000;
+const GATEWAY_RPC_RECOVERY_BACKOFF_DELAYS_MS = [10_000, 30_000, 60_000] as const;
+const GATEWAY_RPC_RECOVERY_RESTART_PROBE_TIMEOUT_MS = 1_000;
+
 export function createGatewayClient(options: GatewayClientOptions) {
   let socket: WebSocket | null = null;
   let connectPromise: Promise<void> | null = null;
@@ -95,6 +101,9 @@ export function createGatewayClient(options: GatewayClientOptions) {
   let reconnectTimer: RuntimeScheduledTask | null = null;
   let reconnectAttempts = 0;
   let restartRequestedForTransportEpoch: number | null = null;
+  let recoverPromise: Promise<GatewayConnectionStatePayload> | null = null;
+  let rpcRecoveryTimer: RuntimeScheduledTask | null = null;
+  let rpcRecoveryAttempts = 0;
   const connectionTracker = new GatewayConnectionTracker(options.clock, options.onGatewayConnectionState);
   const pendingRpcRequests = new GatewayPendingRpcRequests(options.scheduler);
   const authService = new GatewayAuthService({
@@ -203,6 +212,29 @@ export function createGatewayClient(options: GatewayClientOptions) {
     pendingRpcRequests.rejectAll(error);
   }
 
+  function clearRpcRecoveryTimer(): void {
+    if (rpcRecoveryTimer) {
+      rpcRecoveryTimer.cancel();
+      rpcRecoveryTimer = null;
+    }
+  }
+
+  function resetRpcRecoveryState(): void {
+    clearRpcRecoveryTimer();
+    rpcRecoveryAttempts = 0;
+  }
+
+  function nextRpcRecoveryDelayMs(attempt: number): number {
+    if (attempt < GATEWAY_RPC_RECOVERY_FAST_ATTEMPTS) {
+      return GATEWAY_RPC_RECOVERY_FAST_DELAY_MS;
+    }
+    const backoffIndex = Math.min(
+      attempt - GATEWAY_RPC_RECOVERY_FAST_ATTEMPTS,
+      GATEWAY_RPC_RECOVERY_BACKOFF_DELAYS_MS.length - 1,
+    );
+    return GATEWAY_RPC_RECOVERY_BACKOFF_DELAYS_MS[backoffIndex]!;
+  }
+
   function reportGatewayError(error: unknown, issue?: GatewayTransportIssue): void {
     const normalized = ensureError(error);
     if (issue) {
@@ -255,6 +287,7 @@ export function createGatewayClient(options: GatewayClientOptions) {
   }
 
   function recordRpcSuccess() {
+    resetRpcRecoveryState();
     updateDiagnostics({
       lastRpcSuccessAt: options.clock.nowMs(),
       consecutiveRpcFailures: 0,
@@ -268,15 +301,74 @@ export function createGatewayClient(options: GatewayClientOptions) {
   }
 
   function recordRpcFailure(method: string, issue?: GatewayTransportIssue) {
+    const consecutiveRpcFailures = connectionTracker.diagnostics.consecutiveRpcFailures + 1;
     updateDiagnostics({
       lastRpcFailureAt: options.clock.nowMs(),
       lastRpcFailureMethod: method,
-      consecutiveRpcFailures: connectionTracker.diagnostics.consecutiveRpcFailures + 1,
+      consecutiveRpcFailures,
     });
     updateConnectionSnapshot({
       ...(issue ? { lastIssue: issue, lastError: issue.message } : {}),
       diagnostics: connectionTracker.diagnostics,
     });
+    maybeRecoverAfterRpcFailure(consecutiveRpcFailures, issue);
+  }
+
+  function maybeRecoverAfterRpcFailure(
+    consecutiveRpcFailures: number,
+    issue?: GatewayTransportIssue,
+  ): void {
+    if (issue?.source !== 'rpc' || consecutiveRpcFailures < GATEWAY_RPC_RECOVERY_FAILURE_THRESHOLD) {
+      return;
+    }
+    scheduleRpcRecovery('rpc-timeout', 0);
+  }
+
+  function scheduleRpcRecovery(reason: string, delayMs = nextRpcRecoveryDelayMs(rpcRecoveryAttempts)): void {
+    if (rpcRecoveryTimer || recoverPromise) {
+      return;
+    }
+    rpcRecoveryTimer = options.scheduler.schedule(delayMs, () => {
+      rpcRecoveryTimer = null;
+      void runRpcRecoveryAttempt(reason);
+    });
+  }
+
+  async function runRpcRecoveryAttempt(reason: string): Promise<void> {
+    const attempt = rpcRecoveryAttempts;
+    rpcRecoveryAttempts += 1;
+    try {
+      await recoverGatewayConnection(reason);
+    } catch (error) {
+      const failure = ensureError(error, 'Gateway RPC recovery failed');
+      reportGatewayError(failure, createGatewayTransportIssue({
+        message: failure.message,
+        source: 'runtime',
+        clock: options.clock,
+      }));
+      await maybeRestartAfterRpcRecoveryFailure();
+      scheduleRpcRecovery(reason, nextRpcRecoveryDelayMs(attempt));
+    }
+  }
+
+  async function maybeRestartAfterRpcRecoveryFailure(): Promise<void> {
+    if (connectionTracker.diagnostics.consecutiveHeartbeatMisses > 0) {
+      await requestGatewayRestart();
+      return;
+    }
+    const gatewayPort = options.gatewayPort;
+    const portReachable = await probeGatewayPortReachable(
+      options.tcpProbe,
+      gatewayPort,
+      GATEWAY_RPC_RECOVERY_RESTART_PROBE_TIMEOUT_MS,
+    );
+    updateConnectionSnapshot({
+      portReachable,
+      diagnostics: connectionTracker.diagnostics,
+    });
+    if (!portReachable) {
+      await requestGatewayRestart();
+    }
   }
 
   function recordSocketClose(code: number) {
@@ -289,6 +381,7 @@ export function createGatewayClient(options: GatewayClientOptions) {
 
   function recordConnectSuccess(expectedEpoch: number): void {
     reconnectAttempts = 0;
+    clearRpcRecoveryTimer();
     connectedAt = options.clock.nowMs();
     transportEpoch += 1;
     restartRequestedForTransportEpoch = null;
@@ -478,6 +571,50 @@ export function createGatewayClient(options: GatewayClientOptions) {
     });
   }
 
+  async function recoverGatewayConnection(
+    reason: string,
+    timeoutMs = GATEWAY_CONNECT_TIMEOUT_MS,
+  ): Promise<GatewayConnectionStatePayload> {
+    if (recoverPromise) {
+      return await recoverPromise;
+    }
+    recoverPromise = (async () => {
+      clearRpcRecoveryTimer();
+      if (reconnectTimer) {
+        reconnectTimer.cancel();
+        reconnectTimer = null;
+      }
+      reconnectAttempts = 0;
+      restartRequestedForTransportEpoch = null;
+      clearSocketTimers();
+      rejectAllPending(new Error(`Gateway connection recovery started: ${reason || 'manual'}`));
+      const currentSocket = socket;
+      clearConnectionState();
+      if (currentSocket) {
+        try {
+          currentSocket.close(1000, 'runtime-host gateway recovery');
+        } catch {
+          // Old socket is already detached from client state.
+        }
+      }
+      bumpLifecycleEpoch();
+      updateConnectionSnapshot({
+        state: 'reconnecting',
+        gatewayReady: false,
+        transportEpoch,
+        lastError: '',
+        diagnostics: connectionTracker.diagnostics,
+      });
+      await gatewayRpc('system-presence', {}, Math.max(1000, timeoutMs));
+      return await readGatewayConnectionState(Math.min(timeoutMs, 1000));
+    })();
+    try {
+      return await recoverPromise;
+    } finally {
+      recoverPromise = null;
+    }
+  }
+
   async function isGatewayRunning(timeoutMs = GATEWAY_CONNECT_TIMEOUT_MS) {
     const snapshot = await readGatewayConnectionState(timeoutMs);
     return snapshot.portReachable;
@@ -571,6 +708,7 @@ export function createGatewayClient(options: GatewayClientOptions) {
   function close() {
     heartbeat.clearHeartbeatTimers();
     heartbeat.clearRecoveryTimers();
+    clearRpcRecoveryTimer();
     if (reconnectTimer) {
       reconnectTimer.cancel();
       reconnectTimer = null;
@@ -618,6 +756,7 @@ export function createGatewayClient(options: GatewayClientOptions) {
     readGatewayCapabilities,
     inspectGatewayMethodReadiness,
     readGatewayConnectionState,
+    recoverGatewayConnection,
     buildSecurityAuditQueryParams,
     close,
   };

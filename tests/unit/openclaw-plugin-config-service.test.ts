@@ -19,6 +19,19 @@ function createConfigRepository(configDir: string, openclawDir: string) {
       }
       return update.result;
     },
+    patchSection: async <T>(sectionKey: string, mutate: (value: unknown, config: Record<string, unknown>) => Promise<{ result: T; value: unknown; changed: boolean }> | { result: T; value: unknown; changed: boolean }) => {
+      const config = JSON.parse(readFileSync(join(configDir, 'openclaw.json'), 'utf8')) as Record<string, unknown>;
+      const update = await mutate(config[sectionKey], config);
+      if (update.changed) {
+        if (update.value === undefined) {
+          delete config[sectionKey];
+        } else {
+          config[sectionKey] = update.value;
+        }
+        writeFileSync(join(configDir, 'openclaw.json'), JSON.stringify(config, null, 2), 'utf8');
+      }
+      return update.result;
+    },
     getConfigDir: () => configDir,
     getConfigFilePath: () => join(configDir, 'openclaw.json'),
     getOpenClawDirPath: () => openclawDir,
@@ -203,6 +216,148 @@ describe('openclaw plugin config service', () => {
     expect(nextConfig.skills.entries['unit-skill']).toMatchObject({
       enabled: true,
       env: { sample: '1' },
+    });
+  });
+
+  it('启用 team-runtime 时会写入符合 OpenClaw plugin configSchema 的默认配置且不假定所有 Skill 可用', async () => {
+    writeFileSync(join(configDir, 'openclaw.json'), JSON.stringify({}, null, 2));
+
+    const service = await createPluginConfigService(configDir, openclawDir);
+
+    await service.syncEnabledPluginIds(['team-runtime']);
+
+    const nextConfig = JSON.parse(readFileSync(join(configDir, 'openclaw.json'), 'utf8')) as {
+      plugins: {
+        allow: string[];
+        entries: Record<string, { enabled?: boolean; config?: Record<string, unknown> }>;
+      };
+    };
+
+    expect(nextConfig.plugins.allow).toEqual(['team-runtime']);
+    expect(nextConfig.plugins.entries['team-runtime']).toMatchObject({
+      enabled: true,
+      config: {
+        availableSkills: [],
+        availableTools: ['*'],
+      },
+    });
+  });
+
+  it('启用 team-runtime 时会用真实启用 Skill 清单替换旧的全量可用标记', async () => {
+    writeFileSync(join(configDir, 'openclaw.json'), JSON.stringify({
+      plugins: {
+        entries: {
+          'team-runtime': {
+            enabled: false,
+            config: {
+              storageRoot: '/tmp/team-runtime',
+              availableSkills: ['*'],
+              availableTools: ['*'],
+            },
+          },
+        },
+      },
+      skills: {
+        entries: {
+          'enabled-skill': { enabled: true },
+          'disabled-skill': { enabled: false },
+        },
+      },
+    }, null, 2));
+
+    const service = await createPluginConfigService(configDir, openclawDir);
+
+    await service.syncEnabledPluginIds(['team-runtime']);
+
+    const nextConfig = JSON.parse(readFileSync(join(configDir, 'openclaw.json'), 'utf8')) as {
+      plugins: {
+        entries: Record<string, { enabled?: boolean; config?: Record<string, unknown> }>;
+      };
+    };
+
+    expect(nextConfig.plugins.entries['team-runtime']).toMatchObject({
+      enabled: true,
+      config: {
+        storageRoot: '/tmp/team-runtime',
+        availableSkills: ['enabled-skill'],
+        availableTools: ['*'],
+      },
+    });
+  });
+
+  it('启用 team-runtime 时会保留其他配置但刷新 Skill 依赖清单', async () => {
+    writeFileSync(join(configDir, 'openclaw.json'), JSON.stringify({
+      plugins: {
+        entries: {
+          'team-runtime': {
+            enabled: false,
+            config: {
+              storageRoot: '/tmp/team-runtime',
+              availableSkills: ['stale-skill'],
+              availableTools: ['tool-a'],
+            },
+          },
+        },
+      },
+      skills: {
+        entries: {
+          'skill-a': { enabled: true },
+        },
+      },
+    }, null, 2));
+
+    const service = await createPluginConfigService(configDir, openclawDir);
+
+    await service.syncEnabledPluginIds(['team-runtime']);
+
+    const nextConfig = JSON.parse(readFileSync(join(configDir, 'openclaw.json'), 'utf8')) as {
+      plugins: {
+        entries: Record<string, { enabled?: boolean; config?: Record<string, unknown> }>;
+      };
+    };
+
+    expect(nextConfig.plugins.entries['team-runtime']).toMatchObject({
+      enabled: true,
+      config: {
+        storageRoot: '/tmp/team-runtime',
+        availableSkills: ['skill-a'],
+        availableTools: ['tool-a'],
+      },
+    });
+  });
+
+  it('启用 team-runtime 时会从已启用 OpenClaw skill entries 合成静态 skill inventory', async () => {
+    writeFileSync(join(configDir, 'openclaw.json'), JSON.stringify({
+      skills: {
+        entries: {
+          ' enabled-skill ': { enabled: true },
+          'disabled-skill': { enabled: false },
+          'shared-skill': { enabled: true },
+        },
+      },
+      agents: {
+        defaults: {
+          skills: ['agent-referenced-only-skill'],
+        },
+      },
+      tools: {
+        allow: ['bash', 'group:fs'],
+      },
+    }, null, 2));
+
+    const service = await createPluginConfigService(configDir, openclawDir);
+
+    await service.syncEnabledPluginIds(['team-runtime']);
+
+    const nextConfig = JSON.parse(readFileSync(join(configDir, 'openclaw.json'), 'utf8')) as {
+      plugins: {
+        entries: Record<string, { config?: Record<string, unknown> }>;
+      };
+    };
+
+    expect(nextConfig.plugins.entries['team-runtime'].config).toMatchObject({
+      availableSkills: ['enabled-skill', 'shared-skill'],
+      availableTools: ['*'],
     });
   });
 

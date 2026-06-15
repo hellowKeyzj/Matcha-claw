@@ -8,4 +8,8 @@ export interface TeamDispatchEnvelope {
   kickbackIds: string[]
   idempotencyKey: string
   createdAt: number
+  workflowPlanId?: string
+  dispatchGroupId?: string
+  groupId?: string
+  taskId?: string
 }

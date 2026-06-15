@@ -1,25 +1,23 @@
-export interface TeamDependencyCheckerPort {
-  check(input: TeamDependencyCheckInput): Promise<TeamDependencyCheckResult>
-}
+import type { TeamSkillDependencies, TeamSkillDependencyEntry } from '../domain/team-skill-package.js'
 
-export interface TeamDependencyCheckInput {
-  requiredSkills: string[]
-  requiredTools: string[]
-  optionalTools: string[]
+export interface TeamDependencyCheckerPort {
+  check(input: TeamSkillDependencies): Promise<TeamDependencyCheckResult>
 }
 
 export interface TeamDependencyCheckResult {
-  missingRequiredSkills: string[]
-  missingRequiredTools: string[]
-  missingOptionalTools: string[]
+  missingRequiredSkills: TeamSkillDependencyEntry[]
+  missingOptionalSkills: TeamSkillDependencyEntry[]
+  missingRequiredTools: TeamSkillDependencyEntry[]
+  missingOptionalTools: TeamSkillDependencyEntry[]
 }
 
 export const missingAllDependencyChecker: TeamDependencyCheckerPort = {
   async check(input) {
     return {
-      missingRequiredSkills: input.requiredSkills,
-      missingRequiredTools: input.requiredTools,
-      missingOptionalTools: input.optionalTools,
+      missingRequiredSkills: input.skills.filter((item) => item.required),
+      missingOptionalSkills: input.skills.filter((item) => !item.required),
+      missingRequiredTools: input.tools.filter((item) => item.required),
+      missingOptionalTools: input.tools.filter((item) => !item.required),
     }
   },
 }

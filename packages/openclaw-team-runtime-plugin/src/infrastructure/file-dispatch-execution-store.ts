@@ -17,12 +17,14 @@ export interface ClaimDispatchExecutionInput {
   stageId: string
   roleId: string
   idempotencyKey: string
+  childSessionKey?: string
+  spawnMode?: 'run' | 'session'
 }
 
 export interface AttachDispatchExecutionInput {
   runtimeRoot: string
   executionRecordId: string
-  executionId: string
+  executionId?: string
   childSessionKey?: string
   spawnMode?: 'run' | 'session'
 }
@@ -101,7 +103,7 @@ export class FileDispatchExecutionStore {
       const executions = await this.read(input.runtimeRoot)
       const index = input.executionRecordId
         ? executions.findIndex((execution) => execution.executionRecordId === input.executionRecordId)
-        : executions.findIndex((execution) => execution.dispatchId === input.dispatchId && (execution.status === 'queued' || execution.status === 'completed'))
+        : executions.findIndex((execution) => execution.dispatchId === input.dispatchId && (execution.status === 'claimed' || execution.status === 'queued' || execution.status === 'completed'))
       if (index < 0) {
         return { changed: false }
       }
@@ -109,7 +111,7 @@ export class FileDispatchExecutionStore {
       if (current.status === 'completed') {
         return { execution: current, changed: false }
       }
-      if (current.status !== 'queued') {
+      if (current.status !== 'claimed' && current.status !== 'queued') {
         return { execution: current, changed: false }
       }
       const next: TeamDispatchExecutionRecord = {

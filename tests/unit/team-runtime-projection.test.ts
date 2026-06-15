@@ -16,6 +16,25 @@ function createService(storageRoot: string, taskManagerProjection?: TaskManagerP
     clock: { nowMs: () => now++ },
     idGenerator: { randomId: () => `id-${now++}` },
     packageService: new TeamSkillPackageService(),
+    roleSessionExecution: {
+      executeLeader: vi.fn(async (input) => ({
+        executionId: `openclaw-session-${input.dispatch.roleId}`,
+        childSessionKey: `agent:matchaclaw-team:${input.dispatch.runId}:${input.dispatch.roleId}:leader`,
+        spawnMode: 'run' as const,
+        status: 'queued' as const,
+        roleId: input.dispatch.roleId,
+        dispatchId: input.dispatch.dispatchId,
+      })),
+      executeDispatch: vi.fn(async (input) => ({
+        executionId: `openclaw-session-${input.dispatch.roleId}`,
+        childSessionKey: `agent:matchaclaw-team:${input.dispatch.runId}:${input.dispatch.roleId}:leader`,
+        spawnMode: 'run' as const,
+        status: 'queued' as const,
+        roleId: input.dispatch.roleId,
+        dispatchId: input.dispatch.dispatchId,
+      })),
+      cancelRunSessions: vi.fn().mockResolvedValue(undefined),
+    },
     ...(taskManagerProjection ? { taskManagerProjection } : {}),
     ...(taskFlowProjection ? { taskFlowProjection } : {}),
   });
@@ -42,9 +61,7 @@ describe('TeamRunService task-manager projection', () => {
     const snapshot = await service.snapshot({ runId: 'run-project-success', eventCursor: 0 });
     expect(projectTeamRun).toHaveBeenCalledWith(expect.objectContaining({
       run: expect.objectContaining({ runId: 'run-project-success', status: 'running' }),
-      stages: expect.arrayContaining([
-        expect.objectContaining({ stageId: 'step-0-pre-flight-dependency-check', status: 'running' }),
-      ]),
+      dispatchTasks: [],
       reason: 'run:started',
     }));
     expect(snapshot.events).toEqual(expect.arrayContaining([

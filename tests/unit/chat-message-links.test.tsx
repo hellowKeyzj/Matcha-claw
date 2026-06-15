@@ -1,5 +1,5 @@
-import { describe, expect, it, vi, beforeEach } from 'vitest';
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { ChatAssistantTurn } from '@/pages/Chat/ChatAssistantTurn';
 import { applyAssistantPresentationToItems } from '@/pages/Chat/chat-render-item-model';
 import { prewarmAssistantMarkdownBody } from '@/lib/chat-markdown-body';
@@ -53,6 +53,10 @@ describe('chat message links', () => {
         mtimeMs: 1,
       },
     });
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
   });
 
   it('plain text file name should open mapped absolute path from attached files', () => {
@@ -502,6 +506,88 @@ describe('chat message links', () => {
     expect(screen.getByRole('table')).toBeInTheDocument();
     expect(screen.getByRole('columnheader', { name: 'Task' })).toBeInTheDocument();
     expect(screen.getByRole('cell', { name: 'Build UI' })).toBeInTheDocument();
+  });
+
+  it('assistant final reply should show completed duration from user send time only once', () => {
+    const item: ChatAssistantTurnItem = {
+      key: 'assistant-turn:reply-duration',
+      kind: 'assistant-turn',
+      sessionKey: 'agent:test:main',
+      role: 'assistant',
+      runId: 'run-reply-duration',
+      laneKey: 'main',
+      turnKey: 'assistant-message-reply-duration',
+      identitySource: 'run',
+      identityMode: 'run',
+      identityConfidence: 'strong',
+      status: 'final',
+      createdAt: 3000,
+      updatedAt: 5300,
+      segments: [
+        {
+          kind: 'message',
+          key: 'message:run-reply-duration:main:0',
+          text: '第一段回复',
+        },
+        {
+          kind: 'message',
+          key: 'message:run-reply-duration:main:1',
+          text: '第二段回复',
+        },
+      ],
+      thinking: null,
+      tools: [],
+      text: '第一段回复\n第二段回复',
+      images: [],
+      attachedFiles: [],
+    };
+
+    render(<ChatAssistantTurn item={item} showThinking={false} replyStartedAt={1000} />);
+
+    expect(screen.getAllByText('回复耗时 4s')).toHaveLength(1);
+  });
+
+  it('assistant streaming reply should show elapsed duration from user send time', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(5300);
+    const item: ChatAssistantTurnItem = {
+      key: 'assistant-turn:streaming-reply-duration',
+      kind: 'assistant-turn',
+      sessionKey: 'agent:test:main',
+      role: 'assistant',
+      runId: 'run-streaming-reply-duration',
+      laneKey: 'main',
+      turnKey: 'assistant-message-streaming-reply-duration',
+      identitySource: 'run',
+      identityMode: 'run',
+      identityConfidence: 'strong',
+      status: 'streaming',
+      createdAt: 3000,
+      updatedAt: 5300,
+      segments: [
+        {
+          kind: 'message',
+          key: 'message:run-streaming-reply-duration:main:0',
+          text: '正在回复',
+        },
+      ],
+      thinking: null,
+      tools: [],
+      text: '正在回复',
+      images: [],
+      attachedFiles: [],
+    };
+
+    render(<ChatAssistantTurn item={item} showThinking={false} replyStartedAt={1000} />);
+
+    expect(screen.getByText('回复耗时 4s')).toBeTruthy();
+
+    await act(async () => {
+      vi.setSystemTime(6000);
+      await vi.advanceTimersByTimeAsync(1000);
+    });
+
+    expect(screen.getByText('回复耗时 6s')).toBeTruthy();
   });
 
   it('assistant markdown remains rich when a tool card splits a code fence boundary', () => {

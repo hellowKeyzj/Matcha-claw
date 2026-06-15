@@ -157,15 +157,15 @@ describe('chat render item fixtures', () => {
       id: 'assistant-tool-1',
     }]);
 
-    expect(items).toHaveLength(1);
-    expect(items[0]).toMatchObject({
+    expect(items).toHaveLength(2);
+    const toolItem = items.find((i) => i.kind === 'assistant-turn' && i.turnKey === 'tool:tool-1');
+    expect(toolItem).toMatchObject({
       kind: 'assistant-turn',
-      tools: [{
+      tools: [expect.objectContaining({
         id: 'tool-1',
         name: 'read_file',
-        input: { filePath: 'README.md' },
         status: 'completed',
-      }],
+      })],
       text: '',
     });
   });

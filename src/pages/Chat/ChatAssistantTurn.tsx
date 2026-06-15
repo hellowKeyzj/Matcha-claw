@@ -14,6 +14,7 @@ import {
   ToolCardList,
   type MessageLightboxState,
 } from './chat-message-parts';
+import { formatDuration } from './message-utils';
 import { extractArtifactRefsFromAssistantText } from './artifact-paths';
 import { hostFileStat, type WorkspaceFileContext } from '@/lib/host-api';
 import { DIRECTORY_MIME_TYPE } from '@/components/file-preview/types';
@@ -27,6 +28,7 @@ import {
 interface ChatAssistantTurnProps {
   item: ChatAssistantTurnItem;
   showThinking: boolean;
+  replyStartedAt?: number;
   userAvatarImageUrl?: string | null;
   sessionIdentity?: SessionIdentity;
   workspaceContext?: WorkspaceFileContext;
@@ -118,9 +120,44 @@ function isAssistantBubbleCanvasTool(segment: ChatAssistantTurnItem['segments'][
     && segment.tool.result.preview.surface === 'assistant_message';
 }
 
+function isActiveReplyStatus(status: ChatAssistantTurnItem['status']): boolean {
+  return status === 'streaming' || status === 'waiting_tool';
+}
+
+function resolveReplyDurationEndAt(item: ChatAssistantTurnItem, now: number): number | undefined {
+  if (isActiveReplyStatus(item.status)) {
+    return now;
+  }
+  if (item.status === 'final' || item.status === 'error' || item.status === 'aborted') {
+    return item.updatedAt ?? item.createdAt;
+  }
+  return undefined;
+}
+
+function getReplyDurationLabel(input: {
+  item: ChatAssistantTurnItem;
+  replyStartedAt?: number;
+  now: number;
+}): string | undefined {
+  const startedAt = input.replyStartedAt;
+  const endedAt = resolveReplyDurationEndAt(input.item, input.now);
+  if (typeof startedAt !== 'number' || typeof endedAt !== 'number') {
+    return undefined;
+  }
+  if (!Number.isFinite(startedAt) || !Number.isFinite(endedAt)) {
+    return undefined;
+  }
+  if (endedAt < startedAt) {
+    return undefined;
+  }
+  const durationLabel = formatDuration(endedAt - startedAt);
+  return durationLabel ? `回复耗时 ${durationLabel}` : undefined;
+}
+
 export const ChatAssistantTurn = memo(function ChatAssistantTurn({
   item,
   showThinking,
+  replyStartedAt,
   userAvatarImageUrl,
   sessionIdentity,
   workspaceContext,
@@ -129,8 +166,22 @@ export const ChatAssistantTurn = memo(function ChatAssistantTurn({
   const [collapseVersion, requestCollapse] = useReducer((value: number) => value + 1, 0);
   const [lightboxImg, setLightboxImg] = useState<MessageLightboxState | null>(null);
   const [validatedDerivedPaths, setValidatedDerivedPaths] = useState<Record<string, boolean>>({});
+  const [now, setNow] = useState(() => Date.now());
 
-  const isStreaming = item.status === 'streaming' || item.status === 'waiting_tool';
+  const isStreaming = isActiveReplyStatus(item.status);
+  const replyDurationLabel = getReplyDurationLabel({ item, replyStartedAt, now });
+
+  useEffect(() => {
+    if (!isStreaming || typeof replyStartedAt !== 'number') {
+      return;
+    }
+    const intervalId = window.setInterval(() => {
+      setNow(Date.now());
+    }, 1000);
+    return () => {
+      window.clearInterval(intervalId);
+    };
+  }, [isStreaming, replyStartedAt]);
 
   useEffect(() => {
     if (!containsTodoToolDebugSignal(item)) {
@@ -237,6 +288,12 @@ export const ChatAssistantTurn = memo(function ChatAssistantTurn({
         assistantAvatarStyle={item.assistantPresentation?.avatarStyle}
         userAvatarImageUrl={userAvatarImageUrl}
       >
+        {replyDurationLabel ? (
+          <div className="mb-1 text-[11px] leading-4 text-muted-foreground/70 select-none">
+            {replyDurationLabel}
+          </div>
+        ) : null}
+
         {item.segments.map((segment) => {
           if (segment.kind === 'thinking') {
             if (!showThinking || !segment.text.trim()) {
@@ -273,16 +330,16 @@ export const ChatAssistantTurn = memo(function ChatAssistantTurn({
             );
           }
           if (segment.kind === 'message') {
-          return (
-            <AssistantMessageBody
-              key={segment.key}
-              itemKey={`${item.key}:segment:${segment.key}`}
-              createdAt={item.createdAt}
-              text={messageRenderTextByKey.get(segment.key) ?? segment.text}
-              isStreaming={isStreaming}
-              onBodyClick={requestCollapse}
-            />
-          );
+            return (
+              <AssistantMessageBody
+                key={segment.key}
+                itemKey={`${item.key}:segment:${segment.key}`}
+                createdAt={item.createdAt}
+                text={messageRenderTextByKey.get(segment.key) ?? segment.text}
+                isStreaming={isStreaming}
+                onBodyClick={requestCollapse}
+              />
+            );
           }
           return (
             <AssistantMessageMedia

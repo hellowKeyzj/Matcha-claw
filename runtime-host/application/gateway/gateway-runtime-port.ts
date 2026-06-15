@@ -103,6 +103,7 @@ export interface GatewayConnectionPort {
   inspectGatewayMethodReadiness(methods: readonly string[], timeoutMs?: number): Promise<GatewayMethodReadiness>;
   readGatewayCapabilities(timeoutMs?: number): Promise<GatewayCapabilitiesSnapshot | null>;
   readGatewayConnectionState(timeoutMs?: number): Promise<unknown>;
+  recoverGatewayConnection(reason: string, timeoutMs?: number): Promise<unknown>;
 }
 
 export interface GatewayChannelPort {

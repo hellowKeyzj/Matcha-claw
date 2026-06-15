@@ -7,6 +7,8 @@ import { createEmptySessionRuntimeState } from '../session-state-model';
 import type { RuntimeSessionContext } from '../../agent-runtime/contracts/runtime-endpoint-types';
 import type {
   CanonicalApprovalEvent,
+  CanonicalBindingConfidence,
+  CanonicalBindingSource,
   CanonicalLifecycleEvent,
   CanonicalMessageSnapshotEvent,
   CanonicalSessionEvent,
@@ -33,10 +35,100 @@ function laneKeyOf(event: Pick<CanonicalSessionEvent, 'laneKey'>): string {
   return event.laneKey || 'main';
 }
 
-export function buildCanonicalMessageStateKey(event: CanonicalMessageSnapshotEvent): string {
+export function resolveCanonicalMessageIdentity(event: CanonicalMessageSnapshotEvent): {
+  key: string;
+  ownerMessageKey: string;
+  messageBindingSource: CanonicalBindingSource;
+  messageBindingConfidence: CanonicalBindingConfidence;
+} {
   const laneKey = laneKeyOf(event);
   const stableId = event.messageId || event.clientId || event.originMessageId || String(event.seq ?? event.eventId);
-  return `message:${event.role}:${laneKey}:${stableId}`;
+  const key = `message:${event.role}:${laneKey}:${stableId}`;
+  if (event.ownerMessageKey) {
+    return {
+      key,
+      ownerMessageKey: event.ownerMessageKey,
+      messageBindingSource: event.messageBindingSource ?? 'runtime',
+      messageBindingConfidence: event.messageBindingConfidence ?? 'high',
+    };
+  }
+  if (event.messageId || event.clientId || event.originMessageId) {
+    return {
+      key,
+      ownerMessageKey: key,
+      messageBindingSource: event.messageBindingSource ?? 'adapter',
+      messageBindingConfidence: event.messageBindingConfidence ?? 'high',
+    };
+  }
+  return {
+    key,
+    ownerMessageKey: key,
+    messageBindingSource: event.messageBindingSource ?? 'synthetic',
+    messageBindingConfidence: event.messageBindingConfidence ?? 'medium',
+  };
+}
+
+export function resolveCanonicalTurnBinding(event: Pick<CanonicalSessionEvent, 'turnId' | 'ownerTurnKey' | 'turnBindingSource' | 'turnBindingConfidence' | 'runId' | 'laneKey'>): {
+  ownerTurnKey: string | undefined;
+  turnBindingSource: CanonicalBindingSource | undefined;
+  turnBindingConfidence: CanonicalBindingConfidence | undefined;
+} {
+  if (event.ownerTurnKey) {
+    return {
+      ownerTurnKey: event.ownerTurnKey,
+      turnBindingSource: event.turnBindingSource ?? 'runtime',
+      turnBindingConfidence: event.turnBindingConfidence ?? 'high',
+    };
+  }
+  if (event.turnId) {
+    return {
+      ownerTurnKey: `turn:${laneKeyOf(event)}:${event.turnId}`,
+      turnBindingSource: event.turnBindingSource ?? 'adapter',
+      turnBindingConfidence: event.turnBindingConfidence ?? 'high',
+    };
+  }
+  if (event.runId) {
+    return {
+      ownerTurnKey: `run:${laneKeyOf(event)}:${event.runId}`,
+      turnBindingSource: event.turnBindingSource ?? 'synthetic',
+      turnBindingConfidence: event.turnBindingConfidence ?? 'low',
+    };
+  }
+  return {
+    ownerTurnKey: undefined,
+    turnBindingSource: event.turnBindingSource,
+    turnBindingConfidence: event.turnBindingConfidence,
+  };
+}
+
+export function resolveCanonicalOwnerBindings(event: CanonicalSessionEvent): {
+  ownerTurnKey: string | undefined;
+  ownerMessageKey: string | undefined;
+  turnBindingSource: CanonicalBindingSource | undefined;
+  turnBindingConfidence: CanonicalBindingConfidence | undefined;
+  messageBindingSource: CanonicalBindingSource | undefined;
+  messageBindingConfidence: CanonicalBindingConfidence | undefined;
+} {
+  const turnBinding = resolveCanonicalTurnBinding(event);
+  if (event.type === 'message_snapshot') {
+    const messageIdentity = resolveCanonicalMessageIdentity(event);
+    return {
+      ...turnBinding,
+      ownerMessageKey: messageIdentity.ownerMessageKey,
+      messageBindingSource: messageIdentity.messageBindingSource,
+      messageBindingConfidence: messageIdentity.messageBindingConfidence,
+    };
+  }
+  return {
+    ...turnBinding,
+    ownerMessageKey: event.ownerMessageKey,
+    messageBindingSource: event.messageBindingSource,
+    messageBindingConfidence: event.messageBindingConfidence,
+  };
+}
+
+export function buildCanonicalMessageStateKey(event: CanonicalMessageSnapshotEvent): string {
+  return resolveCanonicalMessageIdentity(event).key;
 }
 
 function thoughtKey(event: CanonicalSessionEvent & { thoughtId?: string }): string {
@@ -47,9 +139,37 @@ export function buildCanonicalToolStateKey(event: Pick<CanonicalSessionEvent, 'l
   return `tool:${laneKeyOf(event)}:${event.toolCallId}`;
 }
 
+function setOwnerKeys(map: Map<string, string[]>, previousOwnerKey: string | undefined, nextOwnerKey: string | undefined, valueKey: string): void {
+  if (previousOwnerKey && previousOwnerKey !== nextOwnerKey) {
+    const current = map.get(previousOwnerKey);
+    if (current) {
+      const filtered = current.filter((candidate) => candidate !== valueKey);
+      if (filtered.length > 0) {
+        map.set(previousOwnerKey, filtered);
+      } else {
+        map.delete(previousOwnerKey);
+      }
+    }
+  }
+  if (!nextOwnerKey) {
+    return;
+  }
+  const current = map.get(nextOwnerKey);
+  if (!current) {
+    map.set(nextOwnerKey, [valueKey]);
+    return;
+  }
+  if (!current.includes(valueKey)) {
+    current.push(valueKey);
+  }
+}
+
 function upsertMessage(state: CanonicalSessionState, event: CanonicalMessageSnapshotEvent): void {
-  const key = buildCanonicalMessageStateKey(event);
+  const messageIdentity = resolveCanonicalMessageIdentity(event);
+  const turnBinding = resolveCanonicalTurnBinding(event);
+  const key = messageIdentity.key;
   const index = state.messageIndexByKey.get(key) ?? -1;
+  const previous = index >= 0 ? state.messages[index] : null;
   const now = eventTime(event);
   const next: CanonicalMessageState = {
     key,
@@ -58,8 +178,15 @@ function upsertMessage(state: CanonicalSessionState, event: CanonicalMessageSnap
     ...(event.originMessageId ? { originMessageId: event.originMessageId } : {}),
     ...(event.clientId ? { clientId: event.clientId } : {}),
     ...(event.runId ? { runId: event.runId } : {}),
+    ...(event.turnId ? { turnId: event.turnId } : previous?.turnId ? { turnId: previous.turnId } : {}),
     laneKey: laneKeyOf(event),
     ...(event.agentId ? { agentId: event.agentId } : {}),
+    ...(turnBinding.ownerTurnKey ? { ownerTurnKey: turnBinding.ownerTurnKey } : {}),
+    ownerMessageKey: messageIdentity.ownerMessageKey,
+    ...(turnBinding.turnBindingSource ? { turnBindingSource: turnBinding.turnBindingSource } : {}),
+    ...(turnBinding.turnBindingConfidence ? { turnBindingConfidence: turnBinding.turnBindingConfidence } : {}),
+    ...(messageIdentity.messageBindingSource ? { messageBindingSource: messageIdentity.messageBindingSource } : {}),
+    ...(messageIdentity.messageBindingConfidence ? { messageBindingConfidence: messageIdentity.messageBindingConfidence } : {}),
     content: structuredClone(event.content),
     text: event.text,
     status: event.status,
@@ -70,21 +197,36 @@ function upsertMessage(state: CanonicalSessionState, event: CanonicalMessageSnap
     ...(now != null ? { updatedAt: now } : {}),
   };
   if (index >= 0) {
+    const previousOwnerMessageKey = previous?.ownerMessageKey ?? previous?.key;
     state.messages[index] = next;
+    if (previousOwnerMessageKey !== next.ownerMessageKey) {
+      state.messageIndexByMessageKey.delete(previousOwnerMessageKey);
+    }
   } else {
     state.messageIndexByKey.set(key, state.messages.length);
     state.messages.push(next);
   }
+  state.messageIndexByKey.set(key, index >= 0 ? index : state.messages.length - 1);
+  state.messageIndexByMessageKey.set(next.ownerMessageKey ?? key, index >= 0 ? index : state.messages.length - 1);
 }
 
 function upsertThought(state: CanonicalSessionState, event: CanonicalSessionEvent & { text: string; status: CanonicalMessageState['status']; thoughtId?: string }): void {
+  const ownerBindings = resolveCanonicalOwnerBindings(event);
   const key = thoughtKey(event);
   const index = state.thoughtIndexByKey.get(key) ?? -1;
+  const previous = index >= 0 ? state.thoughts[index] : null;
   const next: CanonicalThoughtState = {
     key,
     ...(event.runId ? { runId: event.runId } : {}),
+    ...(event.turnId ? { turnId: event.turnId } : previous?.turnId ? { turnId: previous.turnId } : {}),
     laneKey: laneKeyOf(event),
     ...(event.agentId ? { agentId: event.agentId } : {}),
+    ...(ownerBindings.ownerTurnKey ? { ownerTurnKey: ownerBindings.ownerTurnKey } : {}),
+    ...(ownerBindings.ownerMessageKey ? { ownerMessageKey: ownerBindings.ownerMessageKey } : {}),
+    ...(ownerBindings.turnBindingSource ? { turnBindingSource: ownerBindings.turnBindingSource } : {}),
+    ...(ownerBindings.turnBindingConfidence ? { turnBindingConfidence: ownerBindings.turnBindingConfidence } : {}),
+    ...(ownerBindings.messageBindingSource ? { messageBindingSource: ownerBindings.messageBindingSource } : {}),
+    ...(ownerBindings.messageBindingConfidence ? { messageBindingConfidence: ownerBindings.messageBindingConfidence } : {}),
     text: event.text,
     status: event.status,
     ...(event.seq != null ? { seq: event.seq } : {}),
@@ -96,9 +238,12 @@ function upsertThought(state: CanonicalSessionState, event: CanonicalSessionEven
     state.thoughtIndexByKey.set(key, state.thoughts.length);
     state.thoughts.push(next);
   }
+  setOwnerKeys(state.thoughtKeysByOwnerMessageKey, previous?.ownerMessageKey, next.ownerMessageKey, key);
+  setOwnerKeys(state.thoughtKeysByOwnerTurnKey, previous?.ownerTurnKey, next.ownerTurnKey, key);
 }
 
 function upsertToolCall(state: CanonicalSessionState, event: CanonicalToolCallEvent): void {
+  const ownerBindings = resolveCanonicalOwnerBindings(event);
   const key = buildCanonicalToolStateKey(event);
   const index = state.toolIndexByKey.get(key) ?? -1;
   const previous = index >= 0 ? state.tools[index] : null;
@@ -107,8 +252,15 @@ function upsertToolCall(state: CanonicalSessionState, event: CanonicalToolCallEv
     key,
     toolCallId: event.toolCallId,
     ...(event.runId ? { runId: event.runId } : {}),
+    ...(event.turnId ? { turnId: event.turnId } : previous?.turnId ? { turnId: previous.turnId } : {}),
     laneKey: laneKeyOf(event),
     ...(event.agentId ? { agentId: event.agentId } : {}),
+    ...(ownerBindings.ownerTurnKey ? { ownerTurnKey: ownerBindings.ownerTurnKey } : previous?.ownerTurnKey ? { ownerTurnKey: previous.ownerTurnKey } : {}),
+    ...(ownerBindings.ownerMessageKey ? { ownerMessageKey: ownerBindings.ownerMessageKey } : previous?.ownerMessageKey ? { ownerMessageKey: previous.ownerMessageKey } : {}),
+    ...(ownerBindings.turnBindingSource ? { turnBindingSource: ownerBindings.turnBindingSource } : previous?.turnBindingSource ? { turnBindingSource: previous.turnBindingSource } : {}),
+    ...(ownerBindings.turnBindingConfidence ? { turnBindingConfidence: ownerBindings.turnBindingConfidence } : previous?.turnBindingConfidence ? { turnBindingConfidence: previous.turnBindingConfidence } : {}),
+    ...(ownerBindings.messageBindingSource ? { messageBindingSource: ownerBindings.messageBindingSource } : previous?.messageBindingSource ? { messageBindingSource: previous.messageBindingSource } : {}),
+    ...(ownerBindings.messageBindingConfidence ? { messageBindingConfidence: ownerBindings.messageBindingConfidence } : previous?.messageBindingConfidence ? { messageBindingConfidence: previous.messageBindingConfidence } : {}),
     name: event.name,
     ...(event.input !== undefined ? { input: structuredClone(event.input) } : previous?.input !== undefined ? { input: structuredClone(previous.input) } : {}),
     ...(previous?.partialResult !== undefined ? { partialResult: structuredClone(previous.partialResult) } : {}),
@@ -125,26 +277,40 @@ function upsertToolCall(state: CanonicalSessionState, event: CanonicalToolCallEv
     state.toolIndexByKey.set(key, state.tools.length);
     state.tools.push(next);
   }
+  setOwnerKeys(state.toolKeysByOwnerMessageKey, previous?.ownerMessageKey, next.ownerMessageKey, key);
+  setOwnerKeys(state.toolKeysByOwnerTurnKey, previous?.ownerTurnKey, next.ownerTurnKey, key);
 }
 
 function upsertToolProgress(state: CanonicalSessionState, event: CanonicalToolProgressEvent): void {
+  const ownerBindings = resolveCanonicalOwnerBindings(event);
   const key = buildCanonicalToolStateKey(event);
   const index = state.toolIndexByKey.get(key) ?? -1;
   if (index < 0) {
     return;
   }
   const previous = state.tools[index]!;
-  state.tools[index] = {
+  const next: CanonicalToolState = {
     ...previous,
     ...(event.partialResult !== undefined ? { partialResult: structuredClone(event.partialResult) } : {}),
     ...(event.outputText !== undefined ? { outputText: event.outputText } : {}),
+    ...(event.turnId ? { turnId: event.turnId } : {}),
+    ...(ownerBindings.ownerTurnKey ? { ownerTurnKey: ownerBindings.ownerTurnKey } : {}),
+    ...(ownerBindings.ownerMessageKey ? { ownerMessageKey: ownerBindings.ownerMessageKey } : {}),
+    ...(ownerBindings.turnBindingSource ? { turnBindingSource: ownerBindings.turnBindingSource } : {}),
+    ...(ownerBindings.turnBindingConfidence ? { turnBindingConfidence: ownerBindings.turnBindingConfidence } : {}),
+    ...(ownerBindings.messageBindingSource ? { messageBindingSource: ownerBindings.messageBindingSource } : {}),
+    ...(ownerBindings.messageBindingConfidence ? { messageBindingConfidence: ownerBindings.messageBindingConfidence } : {}),
     status: 'running',
     ...(event.seq != null ? { seq: event.seq } : {}),
     ...(eventTime(event) != null ? { updatedAt: eventTime(event) } : {}),
   };
+  state.tools[index] = next;
+  setOwnerKeys(state.toolKeysByOwnerMessageKey, previous.ownerMessageKey, next.ownerMessageKey, key);
+  setOwnerKeys(state.toolKeysByOwnerTurnKey, previous.ownerTurnKey, next.ownerTurnKey, key);
 }
 
 function upsertToolResult(state: CanonicalSessionState, event: CanonicalToolResultEvent): void {
+  const ownerBindings = resolveCanonicalOwnerBindings(event);
   const key = buildCanonicalToolStateKey(event);
   const index = state.toolIndexByKey.get(key) ?? -1;
   const previous = index >= 0 ? state.tools[index] : null;
@@ -153,8 +319,15 @@ function upsertToolResult(state: CanonicalSessionState, event: CanonicalToolResu
     key,
     toolCallId: event.toolCallId,
     ...(event.runId ? { runId: event.runId } : previous?.runId ? { runId: previous.runId } : {}),
+    ...(event.turnId ? { turnId: event.turnId } : previous?.turnId ? { turnId: previous.turnId } : {}),
     laneKey: laneKeyOf(event),
     ...(event.agentId ? { agentId: event.agentId } : previous?.agentId ? { agentId: previous.agentId } : {}),
+    ...(ownerBindings.ownerTurnKey ? { ownerTurnKey: ownerBindings.ownerTurnKey } : previous?.ownerTurnKey ? { ownerTurnKey: previous.ownerTurnKey } : {}),
+    ...(ownerBindings.ownerMessageKey ? { ownerMessageKey: ownerBindings.ownerMessageKey } : previous?.ownerMessageKey ? { ownerMessageKey: previous.ownerMessageKey } : {}),
+    ...(ownerBindings.turnBindingSource ? { turnBindingSource: ownerBindings.turnBindingSource } : previous?.turnBindingSource ? { turnBindingSource: previous.turnBindingSource } : {}),
+    ...(ownerBindings.turnBindingConfidence ? { turnBindingConfidence: ownerBindings.turnBindingConfidence } : previous?.turnBindingConfidence ? { turnBindingConfidence: previous.turnBindingConfidence } : {}),
+    ...(ownerBindings.messageBindingSource ? { messageBindingSource: ownerBindings.messageBindingSource } : previous?.messageBindingSource ? { messageBindingSource: previous.messageBindingSource } : {}),
+    ...(ownerBindings.messageBindingConfidence ? { messageBindingConfidence: ownerBindings.messageBindingConfidence } : previous?.messageBindingConfidence ? { messageBindingConfidence: previous.messageBindingConfidence } : {}),
     name: event.name || previous?.name || '',
     ...(previous?.input !== undefined ? { input: structuredClone(previous.input) } : {}),
     ...(previous?.partialResult !== undefined ? { partialResult: structuredClone(previous.partialResult) } : {}),
@@ -171,6 +344,8 @@ function upsertToolResult(state: CanonicalSessionState, event: CanonicalToolResu
     state.toolIndexByKey.set(key, state.tools.length);
     state.tools.push(next);
   }
+  setOwnerKeys(state.toolKeysByOwnerMessageKey, previous?.ownerMessageKey, next.ownerMessageKey, key);
+  setOwnerKeys(state.toolKeysByOwnerTurnKey, previous?.ownerTurnKey, next.ownerTurnKey, key);
 }
 
 function terminalRuntimePatch(runPhase: SessionRunPhase, lastError: string | null, lastIssue: GatewayTransportIssue | null): Partial<SessionRuntimeStateSnapshot> {
@@ -427,8 +602,13 @@ export function createEmptyCanonicalSessionState(
     eventIds: [],
     eventIdSet: new Set<string>(),
     messageIndexByKey: new Map<string, number>(),
+    messageIndexByMessageKey: new Map<string, number>(),
     thoughtIndexByKey: new Map<string, number>(),
     toolIndexByKey: new Map<string, number>(),
+    toolKeysByOwnerMessageKey: new Map<string, string[]>(),
+    thoughtKeysByOwnerMessageKey: new Map<string, string[]>(),
+    toolKeysByOwnerTurnKey: new Map<string, string[]>(),
+    thoughtKeysByOwnerTurnKey: new Map<string, string[]>(),
     approvalIndexById: new Map<string, number>(),
     messages: [],
     thoughts: [],

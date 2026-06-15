@@ -1,6 +1,6 @@
 import type { OpenClawConfig } from 'openclaw/plugin-sdk/plugin-entry'
+import { buildTeamManagedAgentId } from '../domain/team-role.js'
 import type { TeamRun, TeamRunStatus } from '../domain/team-run.js'
-import type { TeamStage } from '../domain/team-stage.js'
 import type { TaskFlowProjectionPort, TeamTaskFlowProjectionInput, TeamTaskUpdateProjectionInput } from '../ports/task-flow-projection-port.js'
 import { FileTaskFlowProjectionStore } from './file-task-flow-projection-store.js'
 
@@ -135,11 +135,11 @@ export class OpenClawTaskFlowProjection implements TaskFlowProjectionPort {
     const result = flowRuntime.runTask({
       flowId: flow.flowId,
       runtime: 'agent',
-      sourceId: `${input.run.runId}:${input.stage.stageId}:${input.roleId}`,
+      sourceId: `${input.run.runId}:${input.taskId}:${input.roleId}`,
       childSessionKey: `${this.sessionKey(input.run.runId)}:${input.roleId}`,
-      agentId: `matchaclaw-team:${input.run.runId}:${input.roleId}`,
+      agentId: buildTeamManagedAgentId(input.run.runId, input.roleId),
       runId: input.run.runId,
-      label: `${input.roleId}: ${input.stage.stageId}`,
+      label: `${input.roleId}: ${input.taskId}`,
       task: summary,
       status: taskRunStatus(input.status),
       progressSummary: input.summary,
@@ -152,7 +152,7 @@ export class OpenClawTaskFlowProjection implements TaskFlowProjectionPort {
       flowId: result.flow.flowId,
       expectedRevision: result.flow.revision,
       status: 'running',
-      currentStep: input.stage.stageId,
+      currentStep: input.taskId,
       stateJson,
       updatedAt: this.nowMs(),
     })
@@ -293,16 +293,17 @@ function buildStateJson(input: TeamTaskFlowProjectionInput): JsonValue {
     teamRunRevision: input.run.revision,
     currentStageId: input.run.currentStageId ?? null,
     projectionReason: input.reason,
-    stages: input.stages.map((stage) => ({
-      stageId: stage.stageId,
-      title: stage.title,
-      roleId: stage.roleId ?? null,
-      gateType: stage.gateType ?? null,
-      status: stage.status,
-      attempt: stage.attempt,
-      maxAttempts: stage.maxAttempts,
-      inputArtifactIds: stage.inputArtifactIds,
-      outputArtifactIds: stage.outputArtifactIds,
+    dispatchTasks: input.dispatchTasks.map((task) => ({
+      dispatchTaskId: task.dispatchTaskId,
+      workflowPlanId: task.workflowPlanId,
+      dispatchGroupId: task.dispatchGroupId,
+      groupId: task.groupId,
+      taskId: task.taskId,
+      roleId: task.roleId,
+      dispatchId: task.dispatchId,
+      status: task.status,
+      artifactId: task.artifactId ?? null,
+      statusReason: task.statusReason ?? null,
     })),
   }
 }
@@ -313,7 +314,7 @@ function buildTaskUpdateStateJson(input: TeamTaskUpdateProjectionInput): JsonVal
     teamRunId: input.run.runId,
     teamRunStatus: input.run.status,
     teamRunRevision: input.run.revision,
-    stageId: input.stage.stageId,
+    stageId: input.taskId,
     roleId: input.roleId,
     taskUpdateStatus: input.status,
     summary: input.summary,

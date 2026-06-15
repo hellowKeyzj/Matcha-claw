@@ -15,6 +15,7 @@
     },
     "input": {
         "gatewayDisconnectedPlaceholder": "Gateway not connected...",
+        "gatewayRecoveringNotice": "Connection interrupted, recovering…",
         "messagePlaceholder": "Message (Type / to see skills, Enter to send, Shift+Enter for new line)",
         "approvalWaitingPlaceholder": "Waiting for approval...",
         "pickModel": "Choose model",

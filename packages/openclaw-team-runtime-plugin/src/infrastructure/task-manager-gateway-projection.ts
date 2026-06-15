@@ -23,8 +23,8 @@ export class TaskManagerGatewayProjection implements TaskManagerProjectionPort {
     const listed = await this.deps.client.call('TaskList', { teamKey })
     const existingTasks = readTasks(listed)
 
-    for (const stage of input.stages) {
-      const model = buildTeamTaskProjectionModel({ run: input.run, stage, reason: input.reason })
+    for (const task of input.dispatchTasks) {
+      const model = buildTeamTaskProjectionModel({ run: input.run, task, reason: input.reason })
       const target = selectTeamTaskProjectionTarget(existingTasks, model)
       if (target.action === 'skip') {
         continue

@@ -20,6 +20,7 @@ describe('runtime-host gateway ready service', () => {
         code: 'GATEWAY_METHODS_UNAVAILABLE',
       })),
       readGatewayConnectionState: vi.fn(),
+      recoverGatewayConnection: vi.fn(),
       chatSend: vi.fn(),
     };
     const service = new GatewayService({ readinessWorkflow: new GatewayReadinessWorkflow({ gateway }) });
@@ -52,6 +53,7 @@ describe('runtime-host gateway ready service', () => {
         retryable: false,
       })),
       readGatewayConnectionState: vi.fn(),
+      recoverGatewayConnection: vi.fn(),
       chatSend: vi.fn(),
     };
     const service = new GatewayService({ readinessWorkflow: new GatewayReadinessWorkflow({ gateway }) });
@@ -82,6 +84,7 @@ describe('runtime-host gateway ready service', () => {
         details: { reason: 'startup-sidecars-pending' },
       })),
       readGatewayConnectionState: vi.fn(),
+      recoverGatewayConnection: vi.fn(),
       chatSend: vi.fn(),
     };
     const service = new GatewayService({ readinessWorkflow: new GatewayReadinessWorkflow({ gateway }) });
@@ -118,6 +121,7 @@ describe('runtime-host gateway ready service', () => {
       }),
       inspectGatewayControlReadiness: vi.fn(),
       readGatewayConnectionState: vi.fn(),
+      recoverGatewayConnection: vi.fn(),
       chatSend: vi.fn(),
     };
     const service = new GatewayService({ readinessWorkflow: new GatewayReadinessWorkflow({ gateway }) });

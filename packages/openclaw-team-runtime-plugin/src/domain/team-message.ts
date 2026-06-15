@@ -7,4 +7,5 @@ export interface TeamMessage {
   body: string
   idempotencyKey: string
   createdAt: number
+  dispatchedAt?: number
 }

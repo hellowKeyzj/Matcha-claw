@@ -1,56 +1,167 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
-import { MemoryRouter } from 'react-router-dom';
+import { MemoryRouter, useLocation } from 'react-router-dom';
 import { TeamsPage } from '@/pages/Teams';
 import { useGatewayStore } from '@/stores/gateway';
-import { useTeamsStore } from '@/stores/teams';
-import { useSubagentsStore } from '@/stores/subagents';
+import { useTeamsStore, type TeamMeta } from '@/stores/teams';
+import { useSkillsStore } from '@/stores/skills';
+import { capabilityExecuteMock, hostApiFetchMock, resetGatewayClientMocks } from './helpers/mock-gateway-client';
 import i18n from '@/i18n';
 
-const runtimeInstanceScope = {
-  kind: 'runtime-instance' as const,
-  endpoint: {
-    kind: 'native-runtime' as const,
-    runtimeAdapterId: 'openclaw',
-    runtimeInstanceId: 'local',
-  },
-};
+const TEAM_SKILL_PACKAGE_PATH = '.tmp/ascendc-operator-dev-optimize-team_1.0.0';
+
+const invokeIpcMock = vi.hoisted(() => vi.fn());
+const pickLocalSkillSourceMock = vi.hoisted(() => vi.fn());
+
+vi.mock('@/lib/api-client', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/lib/api-client')>();
+  return {
+    ...actual,
+    invokeIpc: (...args: unknown[]) => invokeIpcMock(...args),
+  };
+});
 
 vi.mock('@/lib/host-api', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/lib/host-api')>();
   return {
     ...actual,
-    resolveSingleCapabilityScope: vi.fn(async () => runtimeInstanceScope),
+    waitForRuntimeJobResult: vi.fn(async () => ({ execution: { enabledPluginIds: ['team-runtime'] } })),
   };
 });
 
+vi.mock('@/services/local-path-picker', () => ({
+  pickLocalArchive: vi.fn(),
+  pickLocalDirectory: vi.fn(),
+  pickLocalSkillSource: (...args: unknown[]) => pickLocalSkillSourceMock(...args),
+}));
+
+function teamMeta(input: Partial<TeamMeta> = {}): TeamMeta {
+  return {
+    id: 'team-1',
+    name: 'Design Team',
+    teamSkillName: 'ascendc-team',
+    teamSkillVersion: '1.0.0',
+    teamSkillDescription: 'AscendC team',
+    packagePath: TEAM_SKILL_PACKAGE_PATH,
+    sourcePath: `${TEAM_SKILL_PACKAGE_PATH}/SKILL.md`,
+    activeRunId: 'team-1-run-1.0.0-1000',
+    createdAt: 1,
+    updatedAt: 1,
+    ...input,
+  };
+}
+
+function validationResult(input: { version?: string; sourcePath?: string } = {}) {
+  return {
+    valid: true,
+    package: {
+      name: 'ascendc-team',
+      version: input.version ?? '1.0.0',
+      kind: 'team-skill',
+      description: `AscendC team ${input.version ?? '1.0.0'}`,
+      dependencies: { skills: [], tools: [] },
+      sourcePath: input.sourcePath ?? `${TEAM_SKILL_PACKAGE_PATH}/SKILL.md`,
+    },
+    errors: [],
+    warnings: [],
+  };
+}
+
+function dependencyPlan(input: {
+  version?: string;
+  canProceed?: boolean;
+  items?: unknown[];
+} = {}) {
+  return {
+    packageName: 'ascendc-team',
+    packageVersion: input.version ?? '1.0.0',
+    sourcePath: `${TEAM_SKILL_PACKAGE_PATH}/SKILL.md`,
+    items: input.items ?? [],
+    missingRequiredSkills: [],
+    missingOptionalSkills: [],
+    missingRequiredTools: [],
+    missingOptionalTools: [],
+    canProceed: input.canProceed ?? true,
+  };
+}
+
+function mockTeamRuntimeResponses(responses: unknown[]) {
+  capabilityExecuteMock.mockImplementation(async (payload) => {
+    if (payload.id === 'plugin.runtime') {
+      return { success: true, job: { id: 'job-1', type: 'plugins.setEnabled', status: 'succeeded', queuedAt: 1, attempts: 1, maxAttempts: 1 } };
+    }
+    if (payload.id === 'team.runtime') {
+      const response = responses.shift();
+      if (!response) {
+        throw new Error(`Unexpected team runtime call: ${payload.operationId}`);
+      }
+      return response;
+    }
+    return {};
+  });
+}
+
+function LocationEcho() {
+  const location = useLocation();
+  return <div data-testid="location-echo">{location.pathname}</div>;
+}
+
+function renderTeamsPage() {
+  return render(
+    <MemoryRouter initialEntries={['/teams']}>
+      <TeamsPage />
+      <LocationEcho />
+    </MemoryRouter>,
+  );
+}
+
+async function openCreateDialog() {
+  fireEvent.click(screen.getByRole('button', { name: 'Create Team' }));
+  return await screen.findByLabelText('TeamSkill Package Path');
+}
+
+function setGatewayRunning() {
+  act(() => {
+    useGatewayStore.setState({
+      status: {
+        processState: 'running',
+        port: 18789,
+        gatewayReady: true,
+        healthSummary: 'healthy',
+        transportState: 'connected',
+        portReachable: true,
+        diagnostics: {
+          consecutiveHeartbeatMisses: 0,
+          consecutiveRpcFailures: 0,
+        },
+        updatedAt: 2,
+      },
+    });
+  });
+}
+
+async function checkTeamSkill(path = TEAM_SKILL_PACKAGE_PATH) {
+  fireEvent.change(screen.getByLabelText('TeamSkill Package Path'), { target: { value: path } });
+  fireEvent.click(screen.getByRole('button', { name: 'Check TeamSkill' }));
+  await screen.findByText('Dependency preparation');
+}
+
 describe('teams page', () => {
-  const loadAgentsMock = vi.fn().mockResolvedValue(undefined);
-  const agents = [
-    {
-      id: 'agent-alpha',
-      name: 'Alpha',
-      workspace: '/home/dev/.openclaw/workspace-subagents/alpha',
-      model: 'gpt-4o-mini',
-      avatarSeed: 'agent:agent-alpha',
-      avatarStyle: 'pixelArt',
-      isDefault: false,
-    },
-    {
-      id: 'agent-beta',
-      name: 'Beta',
-      workspace: '/home/dev/.openclaw/workspace-subagents/beta',
-      model: 'gpt-4o-mini',
-      avatarSeed: 'agent:agent-beta',
-      avatarStyle: 'bottts',
-      isDefault: false,
-    },
-  ];
+  const ensureRunCreatedMock = vi.fn().mockResolvedValue(undefined);
+  const refreshSnapshotMock = vi.fn().mockResolvedValue(undefined);
 
   beforeEach(() => {
     i18n.changeLanguage('en');
+    resetGatewayClientMocks();
+    invokeIpcMock.mockReset();
+    invokeIpcMock.mockResolvedValue(undefined);
+    pickLocalSkillSourceMock.mockReset();
     localStorage.removeItem('teams-runtime-store');
-    loadAgentsMock.mockClear();
+    hostApiFetchMock.mockResolvedValue({ execution: { enabledPluginIds: ['team-runtime'] } });
+    ensureRunCreatedMock.mockReset();
+    ensureRunCreatedMock.mockResolvedValue(undefined);
+    refreshSnapshotMock.mockReset();
+    refreshSnapshotMock.mockResolvedValue(undefined);
 
     useGatewayStore.setState({
       status: {
@@ -71,20 +182,6 @@ describe('teams page', () => {
       lastError: null,
     });
 
-    useSubagentsStore.setState({
-      agents,
-      agentsResource: {
-        status: 'ready',
-        data: agents,
-        error: null,
-        loadedAt: 1,
-        requestId: 0,
-        hasLoadedOnce: true,
-      },
-      loadAgents: loadAgentsMock,
-      managedAgentId: null,
-    } as never);
-
     useTeamsStore.setState({
       teams: [],
       activeTeamId: null,
@@ -92,190 +189,279 @@ describe('teams page', () => {
       rolesByTeamId: {},
       stagesByTeamId: {},
       approvalsByTeamId: {},
+      artifactsByTeamId: {},
       messagesByTeamId: {},
       dispatchesByTeamId: {},
       dispatchExecutionsByTeamId: {},
+      gatesByTeamId: {},
+      kickbacksByTeamId: {},
+      decisionsByTeamId: {},
       eventsByTeamId: {},
       eventCursorByTeamId: {},
       loadingByTeamId: {},
       errorByTeamId: {},
-      ensureRunCreated: vi.fn().mockResolvedValue(undefined),
+      ensureRunCreated: ensureRunCreatedMock,
       startRun: vi.fn().mockResolvedValue(undefined),
-      refreshSnapshot: vi.fn().mockResolvedValue(undefined),
+      refreshSnapshot: refreshSnapshotMock,
+    } as never);
+
+    useSkillsStore.setState({
+      installSkill: vi.fn().mockResolvedValue(undefined),
+      importLocalSkill: vi.fn().mockResolvedValue('skill-key'),
+      fetchSkills: vi.fn().mockResolvedValue(undefined),
     } as never);
   });
 
-  it('gateway 恢复到 running 后才会刷新智能体列表', async () => {
-    render(
-      <MemoryRouter>
-        <TeamsPage />
-      </MemoryRouter>,
-    );
-
-    expect(loadAgentsMock).not.toHaveBeenCalled();
-
-    act(() => {
-      useGatewayStore.setState({
-        status: {
-          processState: 'running',
-          port: 18789,
-          gatewayReady: true,
-          healthSummary: 'healthy',
-          transportState: 'connected',
-          portReachable: true,
-          diagnostics: {
-            consecutiveHeartbeatMisses: 0,
-            consecutiveRpcFailures: 0,
-          },
-          updatedAt: 2,
-        },
-      });
-    });
-
-    await waitFor(() => {
-      expect(loadAgentsMock).toHaveBeenCalledTimes(1);
-    });
-  });
-
-  it('启动阶段且无本地 agent 时显示等待提示', async () => {
-    useGatewayStore.setState({
-      status: {
-        processState: 'starting',
-        port: 18789,
-        gatewayReady: false,
-        healthSummary: 'degraded',
-        transportState: 'reconnecting',
-        portReachable: false,
-        diagnostics: {
-          consecutiveHeartbeatMisses: 0,
-          consecutiveRpcFailures: 0,
-        },
-        updatedAt: 1,
-      },
-      health: null,
-      isInitialized: false,
-      lastError: null,
-    });
-    useSubagentsStore.setState({
-      agents: [],
-      agentsResource: {
-        status: 'idle',
-        data: [],
-        error: null,
-        loadedAt: null,
-        requestId: 0,
-        hasLoadedOnce: false,
-      },
-      loadAgents: loadAgentsMock,
-      managedAgentId: null,
-    } as never);
-
-    render(
-      <MemoryRouter>
-        <TeamsPage />
-      </MemoryRouter>,
-    );
-
-    expect(await screen.findByText('Waiting for the gateway to load agents...')).toBeInTheDocument();
-    expect(loadAgentsMock).not.toHaveBeenCalled();
-  });
-
-  it('renders create form and team list', async () => {
+  it('renders TeamSkill create controls and existing team list', async () => {
     useTeamsStore.setState({
-      teams: [
-        {
-          id: 'team-1',
-          name: 'Design Team',
-          leadAgentId: 'agent-alpha',
-          memberIds: ['agent-alpha', 'agent-beta'],
-          packagePath: '.tmp/team-skill',
-          createdAt: 1,
-          updatedAt: 1,
-        },
-      ],
+      teams: [teamMeta()],
+      rolesByTeamId: {
+        'team-1': [
+          {
+            runId: 'team-1-run-1.0.0-1000',
+            roleId: 'operator-designer',
+            agentId: 'matchaclaw-team:team-1:operator-designer',
+            agentName: 'operator-designer',
+            workspaceDir: '/workspace',
+            agentDir: '/agent',
+            skills: [],
+            tools: [],
+            status: 'idle',
+          },
+        ],
+      },
     } as never);
 
-    render(
-      <MemoryRouter>
-        <TeamsPage />
-      </MemoryRouter>,
-    );
+    renderTeamsPage();
 
     expect(await screen.findByRole('heading', { name: 'Agents Workspace' })).toBeInTheDocument();
-    expect(screen.getByRole('heading', { name: 'Create Team' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Create Team' })).toBeInTheDocument();
+    await openCreateDialog();
+    expect(screen.getByRole('button', { name: 'Select Directory' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Select Archive' })).toBeInTheDocument();
+    expect(screen.getByText('Team Overview')).toBeInTheDocument();
+    expect(screen.getByText('TeamSkill-defined team')).toBeInTheDocument();
     expect(screen.getByText('Design Team')).toBeInTheDocument();
-    expect(screen.getByText(/Lead:\s*agent-alpha/)).toBeInTheDocument();
+    expect(screen.getByText('ascendc-team@1.0.0')).toBeInTheDocument();
+    expect(screen.getByText(`Package: ${TEAM_SKILL_PACKAGE_PATH}`)).toBeInTheDocument();
+    expect(screen.getByText('Managed roles: 1')).toBeInTheDocument();
   });
 
-  it('creates a new team without starting runtime', async () => {
-    const startRunMock = vi.fn().mockResolvedValue(undefined);
-    useGatewayStore.setState({
-      status: {
-        processState: 'running',
-        port: 18789,
-        gatewayReady: true,
-        healthSummary: 'healthy',
-        transportState: 'connected',
-        portReachable: true,
-        diagnostics: {
-          consecutiveHeartbeatMisses: 0,
-          consecutiveRpcFailures: 0,
-        },
-        updatedAt: 2,
-      },
-    });
-    useTeamsStore.setState({ startRun: startRunMock } as never);
+  it('requires gateway readiness and package check before create is enabled', async () => {
+    renderTeamsPage();
 
-    render(
-      <MemoryRouter>
-        <TeamsPage />
-      </MemoryRouter>,
-    );
+    await openCreateDialog();
+    expect(screen.getByRole('button', { name: 'Check TeamSkill' })).toBeDisabled();
+    expect(screen.getAllByRole('button', { name: 'Create Team' }).at(-1)).toBeDisabled();
 
-    fireEvent.change(await screen.findByLabelText('Team Name'), { target: { value: 'Growth Team' } });
-    fireEvent.change(screen.getByLabelText('TeamSkill Package Path'), { target: { value: '.tmp/team-skill' } });
-    fireEvent.click(screen.getByRole('button', { name: 'Create Team' }));
+    fireEvent.change(screen.getByLabelText('TeamSkill Package Path'), { target: { value: TEAM_SKILL_PACKAGE_PATH } });
+    expect(screen.getByRole('button', { name: 'Check TeamSkill' })).toBeDisabled();
+
+    setGatewayRunning();
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Check TeamSkill' })).toBeEnabled());
+    expect(screen.getAllByRole('button', { name: 'Create Team' }).at(-1)).toBeDisabled();
+  });
+
+  it('checks package dependencies, creates a new TeamSkill team, provisions its TeamRun, then navigates to it', async () => {
+    setGatewayRunning();
+    mockTeamRuntimeResponses([validationResult(), dependencyPlan()]);
+
+    renderTeamsPage();
+
+    await openCreateDialog();
+    fireEvent.change(screen.getByLabelText('Team Name'), { target: { value: 'Growth Team' } });
+    await checkTeamSkill();
+    expect(screen.getByText('ascendc-team@1.0.0')).toBeInTheDocument();
+
+    fireEvent.click(screen.getAllByRole('button', { name: 'Create Team' }).at(-1)!);
 
     await waitFor(() => {
       const state = useTeamsStore.getState();
       expect(state.teams.length).toBe(1);
       expect(state.activeTeamId).toBe(state.teams[0]?.id);
       expect(state.teams[0]?.name).toBe('Growth Team');
-      expect(state.teams[0]?.leadAgentId).toBe('agent-alpha');
-      expect(state.teams[0]?.memberIds).toContain('agent-alpha');
-      expect(state.teams[0]?.packagePath).toBe('.tmp/team-skill');
+      expect(state.teams[0]?.teamSkillName).toBe('ascendc-team');
+      expect(ensureRunCreatedMock).toHaveBeenCalledWith(state.teams[0]?.id);
+      expect(screen.getByTestId('location-echo')).toHaveTextContent(`/teams/${state.teams[0]?.id}`);
     });
+  });
 
-    expect(startRunMock).not.toHaveBeenCalled();
+  it('keeps the create dialog open and removes the local team when TeamRun provisioning fails', async () => {
+    ensureRunCreatedMock.mockRejectedValueOnce(new Error('team-runtime plugin is not enabled'));
+    setGatewayRunning();
+    mockTeamRuntimeResponses([validationResult(), dependencyPlan(), { runId: 'team-174', deleted: false }]);
+
+    renderTeamsPage();
+
+    await openCreateDialog();
+    fireEvent.change(screen.getByLabelText('Team Name'), { target: { value: 'Broken Team' } });
+    await checkTeamSkill();
+    fireEvent.click(screen.getAllByRole('button', { name: 'Create Team' }).at(-1)!);
+
+    await waitFor(() => {
+      expect(ensureRunCreatedMock).toHaveBeenCalledTimes(1);
+      expect(useTeamsStore.getState().teams).toHaveLength(0);
+      expect(screen.getByTestId('location-echo')).toHaveTextContent('/teams');
+      expect(screen.getByText('team-runtime plugin is not enabled')).toBeInTheDocument();
+    });
+  });
+
+  it('opens an existing TeamSkill team with the same name and version without creating duplicate role agents', async () => {
+    setGatewayRunning();
+    mockTeamRuntimeResponses([validationResult(), dependencyPlan()]);
+    useTeamsStore.setState({
+      teams: [teamMeta()],
+      activeTeamId: null,
+    } as never);
+
+    renderTeamsPage();
+
+    await openCreateDialog();
+    await checkTeamSkill('.tmp/other-copy-of-same-team-skill');
+    expect(screen.getByText('This TeamSkill version already has a team. Open the existing team instead of creating a duplicate.')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Open Existing Team' }));
+
+    await waitFor(() => {
+      expect(useTeamsStore.getState().teams).toHaveLength(1);
+      expect(useTeamsStore.getState().activeTeamId).toBe('team-1');
+      expect(ensureRunCreatedMock).not.toHaveBeenCalled();
+      expect(refreshSnapshotMock).toHaveBeenCalledWith('team-1');
+      expect(screen.getByTestId('location-echo')).toHaveTextContent('/teams/team-1');
+    });
+  });
+
+  it('blocks creation when a required tool is missing', async () => {
+    setGatewayRunning();
+    mockTeamRuntimeResponses([
+      validationResult(),
+      dependencyPlan({
+        canProceed: false,
+        items: [{
+          name: 'browser-mcp',
+          required: true,
+          purpose: 'Browser automation',
+          kind: 'tool',
+          status: 'missing',
+          severity: 'blocker',
+          installable: false,
+        }],
+      }),
+    ]);
+
+    renderTeamsPage();
+
+    await openCreateDialog();
+    await checkTeamSkill();
+
+    expect(screen.getByText('browser-mcp · Tool · Required missing')).toBeInTheDocument();
+    expect(screen.getByText('Required dependencies are missing. Resolve required skills or configure required tools before continuing.')).toBeInTheDocument();
+    expect(screen.getAllByRole('button', { name: 'Create Team' }).at(-1)).toBeDisabled();
+  });
+
+  it('opens a non-ClawHub skill source and imports a downloaded local skill before replanning dependencies', async () => {
+    const installSkill = vi.fn().mockResolvedValue(undefined);
+    const importLocalSkill = vi.fn().mockResolvedValue('investment-memo');
+    pickLocalSkillSourceMock.mockResolvedValue('C:/Downloads/investment-memo/SKILL.md');
+    useSkillsStore.setState({ installSkill, importLocalSkill } as never);
+    setGatewayRunning();
+    mockTeamRuntimeResponses([
+      validationResult(),
+      dependencyPlan({
+        canProceed: false,
+        items: [{
+          name: 'investment-memo',
+          required: true,
+          purpose: 'Memo structure',
+          source: 'https://skills.sh/?q=investment-memo',
+          kind: 'skill',
+          status: 'missing',
+          severity: 'blocker',
+          installable: true,
+        }],
+      }),
+      dependencyPlan(),
+    ]);
+
+    renderTeamsPage();
+
+    await openCreateDialog();
+    await checkTeamSkill();
+    expect(screen.queryByRole('button', { name: 'Install Skill' })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Open Source' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Import Local Skill' }));
+
+    await waitFor(() => {
+      expect(invokeIpcMock).toHaveBeenCalledWith('shell:openExternal', 'https://skills.sh/?q=investment-memo');
+      expect(installSkill).not.toHaveBeenCalled();
+      expect(importLocalSkill).toHaveBeenCalledWith('C:/Downloads/investment-memo/SKILL.md');
+      expect(screen.queryByText('investment-memo · Skill · Required missing')).not.toBeInTheDocument();
+      expect(screen.getAllByRole('button', { name: 'Create Team' }).at(-1)).toBeEnabled();
+    });
+  });
+
+  it('requires explicit confirmation before replacing an existing TeamSkill version', async () => {
+    setGatewayRunning();
+    mockTeamRuntimeResponses([validationResult({ version: '1.1.0' }), dependencyPlan({ version: '1.1.0' })]);
+    useTeamsStore.setState({
+      teams: [teamMeta()],
+      activeTeamId: null,
+    } as never);
+
+    renderTeamsPage();
+
+    await openCreateDialog();
+    await checkTeamSkill(`${TEAM_SKILL_PACKAGE_PATH}-1.1.0`);
+
+    expect(screen.getByText('TeamSkill version change detected')).toBeInTheDocument();
+    const replaceButton = screen.getByRole('button', { name: 'Replace Team' });
+    expect(replaceButton).toBeDisabled();
+
+    fireEvent.click(screen.getByLabelText('I understand this will replace the current TeamSkill version for this team.'));
+    await waitFor(() => expect(replaceButton).toBeEnabled());
+    fireEvent.click(replaceButton);
+
+    await waitFor(() => {
+      const state = useTeamsStore.getState();
+      expect(state.teams).toHaveLength(1);
+      expect(state.teams[0]?.id).toBe('team-1');
+      expect(state.teams[0]?.teamSkillVersion).toBe('1.1.0');
+      expect(ensureRunCreatedMock).toHaveBeenCalledWith('team-1');
+      expect(screen.getByTestId('location-echo')).toHaveTextContent('/teams/team-1');
+    });
   });
 
   it('deletes an existing team', async () => {
+    setGatewayRunning();
+    mockTeamRuntimeResponses([{ runId: 'team-1-run-1.0.0-1000', deleted: true }]);
     useTeamsStore.setState({
-      teams: [
-        {
-          id: 'team-1',
-          name: 'Design Team',
-          leadAgentId: 'agent-alpha',
-          memberIds: ['agent-alpha'],
-          packagePath: '.tmp/team-skill',
-          createdAt: 1,
-          updatedAt: 1,
-        },
-      ],
+      teams: [teamMeta()],
       activeTeamId: 'team-1',
     } as never);
 
-    render(
-      <MemoryRouter>
-        <TeamsPage />
-      </MemoryRouter>,
-    );
+    renderTeamsPage();
 
     fireEvent.click(await screen.findByRole('button', { name: 'Delete' }));
 
     await waitFor(() => {
+      expect(capabilityExecuteMock).toHaveBeenCalledWith(expect.objectContaining({
+        id: 'team.runtime',
+        operationId: 'team.runDelete',
+        input: { runId: 'team-1-run-1.0.0-1000' },
+      }), expect.objectContaining({ timeoutMs: 60000 }));
       expect(useTeamsStore.getState().teams).toHaveLength(0);
       expect(useTeamsStore.getState().activeTeamId).toBeNull();
     });
+  });
+
+  it('disables delete when gateway is unavailable and keeps failed delete errors visible', async () => {
+    useTeamsStore.setState({
+      teams: [teamMeta()],
+      errorByTeamId: { 'team-1': 'backend delete failed' },
+    } as never);
+
+    renderTeamsPage();
+
+    expect(await screen.findByRole('button', { name: 'Delete' })).toBeDisabled();
+    expect(screen.getByText('backend delete failed')).toBeInTheDocument();
   });
 });

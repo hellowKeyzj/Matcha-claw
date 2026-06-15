@@ -10,20 +10,22 @@
   "contracts": {
     "gatewayMethods": [
       "matchaclaw.team.package.validate",
+      "matchaclaw.team.dependency.plan",
       "matchaclaw.team.run.create",
       "matchaclaw.team.run.start",
       "matchaclaw.team.run.snapshot",
       "matchaclaw.team.run.diagnostics",
       "matchaclaw.team.run.decision.submit",
-      "matchaclaw.team.stage.complete",
-      "matchaclaw.team.dispatch.prepare",
-      "matchaclaw.team.dispatch.execute",
+      "matchaclaw.team.workflow.plan",
+      "matchaclaw.team.run.tick",
+      "matchaclaw.team.dispatch.process",
+      "matchaclaw.team.leader.synthesis.process",
       "matchaclaw.team.approval.resolve",
       "matchaclaw.team.run.cancel",
-      "matchaclaw.team.run.tick",
-      "matchaclaw.team.gate.evaluate"
+      "matchaclaw.team.run.delete"
     ],
     "tools": [
+      "team_plan_workflow",
       "team_submit_artifact",
       "team_update_task",
       "team_request_approval",
@@ -36,6 +38,9 @@
     "required": ["availableSkills", "availableTools"],
     "properties": {
       "storageRoot": {
+        "type": "string"
+      },
+      "defaultChannel": {
         "type": "string"
       },
       "availableSkills": {

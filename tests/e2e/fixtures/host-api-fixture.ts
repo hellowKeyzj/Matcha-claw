@@ -286,15 +286,15 @@ function buildRuntimeEndpointCapabilitySummaries() {
       { id: 'approvals.list', targetKind: 'session' },
       { id: 'approvals.resolve', targetKind: 'approval' },
     ]),
-    buildCapabilitySummary('team.runtime', runtimeScope, ['team', 'team-run', 'team-stage', 'team-dispatch', 'team-approval'], [
+    buildCapabilitySummary('team.runtime', runtimeScope, ['team', 'team-run', 'team-approval'], [
       { id: 'team.runCreate', targetKind: 'team' },
     ]),
-    buildCapabilitySummary('team.runtime', teamRuntimeScope, ['team-run', 'team-stage', 'team-dispatch', 'team-approval'], [
+    buildCapabilitySummary('team.runtime', teamRuntimeScope, ['team-run', 'team-approval'], [
       { id: 'team.runStart', targetKind: 'team-run' },
       { id: 'team.runSnapshot', targetKind: 'team-run' },
-      { id: 'team.dispatchPrepare', targetKind: 'team-stage' },
-      { id: 'team.dispatchExecute', targetKind: 'team-dispatch' },
+      { id: 'team.planWorkflow', targetKind: 'team-run' },
       { id: 'team.approvalResolve', targetKind: 'team-approval' },
+      { id: 'team.runDelete', targetKind: 'team-run' },
     ]),
     buildCapabilitySummary('workspace.file', workspaceScope, ['workspace-file', 'workspace-staging'], [
       { id: 'files.readText', targetKind: 'workspace-file' },
