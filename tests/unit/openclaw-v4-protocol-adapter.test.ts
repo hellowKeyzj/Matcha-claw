@@ -435,6 +435,67 @@ describe('OpenClawV4ProtocolAdapter', () => {
     });
   });
 
+  it('starts a new fallback chat turn for the first post-tool final snapshot when V4 sends a cumulative snapshot', () => {
+    const adapter = new OpenClawV4ProtocolAdapter();
+    const context = runtimeContext();
+
+    const [firstDelta] = adapter.eventAdapter.translate({
+      type: 'chat.message',
+      event: {
+        state: 'delta',
+        sessionKey: 'session-1',
+        runId: 'run-post-tool-final',
+        seq: 1,
+        deltaText: 'Considering presentation',
+        message: {
+          role: 'assistant',
+          timestamp: 1_700_000_000_001,
+          content: [{ type: 'text', text: 'Considering presentation' }],
+        },
+      },
+    }, context);
+    adapter.eventAdapter.translate({
+      type: 'tool.lifecycle',
+      event: {
+        phase: 'start',
+        sessionKey: 'session-1',
+        runId: 'run-post-tool-final',
+        seq: 2,
+        timestamp: 1_700_000_000_002,
+        toolCallId: 'tool-1',
+        name: 'Read',
+        args: { file_path: 'workflow.md' },
+      },
+    }, context);
+    const [nextFinal] = adapter.eventAdapter.translate({
+      type: 'chat.message',
+      event: {
+        state: 'final',
+        sessionKey: 'session-1',
+        runId: 'run-post-tool-final',
+        seq: 3,
+        message: {
+          role: 'assistant',
+          timestamp: 1_700_000_000_003,
+          content: [{ type: 'text', text: 'Considering presentationI need to answer concisely.' }],
+        },
+      },
+    }, context);
+
+    expect(firstDelta).toMatchObject({
+      type: 'message_snapshot',
+      messageId: 'openclaw-v4:chat:session-1:run-post-tool-final:member:agent-1:0',
+      text: 'Considering presentation',
+    });
+    expect(nextFinal).toMatchObject({
+      type: 'message_snapshot',
+      status: 'final',
+      messageId: 'openclaw-v4:chat:session-1:run-post-tool-final:member:agent-1:1',
+      text: 'I need to answer concisely.',
+      content: [{ type: 'text', text: 'I need to answer concisely.' }],
+    });
+  });
+
   it('preserves buffered assistant text when a terminal snapshot regresses', () => {
     const adapter = new OpenClawV4ProtocolAdapter();
     const context = runtimeContext();

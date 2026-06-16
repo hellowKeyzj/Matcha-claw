@@ -243,9 +243,40 @@ describe('Runtime Host canonical ACP projection', () => {
     expect(state.runtime).toMatchObject({
       activeRunId: 'run-1',
       runPhase: 'waiting_tool',
-      pendingTurnKey: 'run-1',
+      pendingTurnKey: 'message:assistant:main:assistant-tool-turn',
       pendingTurnLaneKey: 'main',
       lastError: null,
+    });
+  });
+
+  it('does not append a duplicate pending assistant turn when the authoritative assistant turn already exists', () => {
+    const state = createEmptyCanonicalSessionState('agent:main:main', createOpenClawTestRuntimeContext('agent:main:main'));
+    reduceCanonicalSessionEvents(state, [{
+      ...base('message-streaming-1'),
+      seq: 1,
+      type: 'message_snapshot',
+      role: 'assistant',
+      messageId: 'assistant-streaming-1',
+      content: [{ type: 'text', text: 'Planning workflow tasks' }],
+      text: 'Planning workflow tasks',
+      status: 'streaming',
+    }]);
+
+    const items = buildRenderItemsFromCanonicalState({ state, executionGraphItems: [] });
+    const assistantTurns = items.filter((item) => item.kind === 'assistant-turn');
+
+    expect(state.runtime).toMatchObject({
+      activeRunId: 'run-1',
+      runPhase: 'streaming',
+      pendingTurnKey: 'message:assistant:main:assistant-streaming-1',
+      pendingTurnLaneKey: 'main',
+    });
+    expect(assistantTurns).toHaveLength(1);
+    expect(assistantTurns[0]).toMatchObject({
+      kind: 'assistant-turn',
+      turnKey: 'message:assistant:main:assistant-streaming-1',
+      text: 'Planning workflow tasks',
+      status: 'streaming',
     });
   });
 

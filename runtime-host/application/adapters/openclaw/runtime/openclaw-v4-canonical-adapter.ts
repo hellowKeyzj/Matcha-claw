@@ -35,12 +35,16 @@ interface ChatSnapshotBuffer {
   updatedAt: number;
 }
 
+type LiveAssistantTurnClosureReason = 'message_terminal' | 'tool_started';
+
 interface LiveAssistantTurnState {
   fallbackMessageId: string;
   ownerMessageKey: string;
   ownerTurnKey: string;
   index: number;
   closed: boolean;
+  closureReason: LiveAssistantTurnClosureReason | null;
+  providerMessageId?: string;
   updatedAt: number;
 }
 
@@ -131,6 +135,49 @@ function normalizeVisibleMessageContent(content: unknown, visibleText: string): 
     return next;
   }
   return content;
+}
+
+function trimPreviousTurnPrefix(snapshotText: string, previousTurnText: string): string {
+  if (!previousTurnText || !snapshotText.startsWith(previousTurnText)) {
+    return snapshotText;
+  }
+  return snapshotText.slice(previousTurnText.length);
+}
+
+function shouldStartNextAssistantTurnAfterTool(input: {
+  previousTurn: LiveAssistantTurnState | null;
+  previousTurnText: string;
+  providerMessageId: string;
+  status: CanonicalMessageStatus;
+  deltaText: string;
+  snapshotText: string;
+}): boolean {
+  const { previousTurn } = input;
+  if (!previousTurn || !previousTurn.closed || previousTurn.closureReason !== 'tool_started') {
+    return false;
+  }
+  if (input.status === 'streaming') {
+    return true;
+  }
+  if (input.providerMessageId && previousTurn.providerMessageId && input.providerMessageId === previousTurn.providerMessageId) {
+    return false;
+  }
+  if (input.deltaText) {
+    return true;
+  }
+  if (!input.snapshotText) {
+    return false;
+  }
+  if (!input.previousTurnText) {
+    return true;
+  }
+  if (input.snapshotText === input.previousTurnText) {
+    return false;
+  }
+  if (input.snapshotText.length < input.previousTurnText.length) {
+    return false;
+  }
+  return true;
 }
 
 function eventId(parts: ReadonlyArray<string | number | undefined>): string {
@@ -276,19 +323,26 @@ export class OpenClawV4Adapter {
     runId: string;
     laneKey: string;
     updatedAt: number;
-    startNextTurn?: boolean;
+    providerMessageId?: string;
+    shouldStartNextTurn?: boolean;
   }): LiveAssistantTurnState {
     const key = this.liveAssistantTurnKey(input.sessionKey, input.runId, input.laneKey);
     const previous = this.liveAssistantTurns.get(key);
-    const shouldStartNextTurn = input.startNextTurn === true && !!previous;
+    const shouldStartNextTurn = input.shouldStartNextTurn === true && !!previous;
     const turn = previous && !shouldStartNextTurn
-      ? { ...previous, updatedAt: input.updatedAt }
+      ? {
+          ...previous,
+          ...(input.providerMessageId ? { providerMessageId: input.providerMessageId } : {}),
+          updatedAt: input.updatedAt,
+        }
       : {
           fallbackMessageId: `openclaw-v4:chat:${input.sessionKey}:${input.runId}:${input.laneKey}:${previous ? previous.index + 1 : 0}`,
           ownerMessageKey: `openclaw-v4:owner-message:${input.sessionKey}:${input.runId}:${input.laneKey}:${previous ? previous.index + 1 : 0}`,
           ownerTurnKey: `openclaw-v4:turn:${input.sessionKey}:${input.runId}:${input.laneKey}:${previous ? previous.index + 1 : 0}`,
           index: previous ? previous.index + 1 : 0,
           closed: false,
+          closureReason: null,
+          ...(input.providerMessageId ? { providerMessageId: input.providerMessageId } : {}),
           updatedAt: input.updatedAt,
         };
     this.liveAssistantTurns.set(key, turn);
@@ -301,7 +355,7 @@ export class OpenClawV4Adapter {
     laneKey: string;
     providerMessageId?: string;
     updatedAt: number;
-    startNextTurn?: boolean;
+    shouldStartNextTurn?: boolean;
   }): LiveAssistantTurnState {
     return this.ensureLiveAssistantTurn(input);
   }
@@ -311,13 +365,19 @@ export class OpenClawV4Adapter {
     runId: string;
     laneKey: string;
     updatedAt: number;
+    reason: LiveAssistantTurnClosureReason;
   }): void {
     const key = this.liveAssistantTurnKey(input.sessionKey, input.runId, input.laneKey);
     const previous = this.liveAssistantTurns.get(key);
     if (!previous || previous.closed) {
       return;
     }
-    this.liveAssistantTurns.set(key, { ...previous, closed: true, updatedAt: input.updatedAt });
+    this.liveAssistantTurns.set(key, {
+      ...previous,
+      closed: true,
+      closureReason: input.reason,
+      updatedAt: input.updatedAt,
+    });
   }
 
   private toolOwnerBindingKey(sessionKey: string, runId: string, laneKey: string, toolCallId: string): string {
@@ -451,7 +511,7 @@ export class OpenClawV4Adapter {
       runId,
       laneKey: lane.laneKey,
       updatedAt: timestamp,
-      startNextTurn: previousLiveTurn?.closed === true,
+      shouldStartNextTurn: previousLiveTurn?.closed === true && previousLiveTurn.closureReason === 'tool_started',
     });
     return [{
       ...openClawBase({
@@ -499,28 +559,45 @@ export class OpenClawV4Adapter {
     const lane = liveCanonicalLane(context);
     const providerMessageId = readString(message.messageId ?? message.id ?? payload.messageId ?? payload.id);
     const previousLiveTurn = this.currentLiveAssistantTurn(sessionKey, runId, lane.laneKey);
+    const previousTurnSnapshot = previousLiveTurn
+      ? this.chatSnapshots.get(this.chatSnapshotKey(sessionKey, previousLiveTurn.fallbackMessageId))
+      : undefined;
+    const previousTurnText = previousTurnSnapshot?.text ?? '';
+    const content = Object.prototype.hasOwnProperty.call(message, 'content') ? message.content : previousTurnSnapshot?.content ?? [];
+    const snapshotText = readMessageText(content);
+    const hasDeltaText = Object.prototype.hasOwnProperty.call(payload, 'deltaText') && typeof payload.deltaText === 'string';
+    const deltaText = hasDeltaText ? String(payload.deltaText) : '';
+    const shouldStartNextTurn = previousLiveTurn?.closed === true
+      ? previousLiveTurn.closureReason === 'message_terminal'
+        ? status === 'streaming'
+        : shouldStartNextAssistantTurnAfterTool({
+            previousTurn: previousLiveTurn,
+            previousTurnText,
+            providerMessageId,
+            status,
+            deltaText,
+            snapshotText,
+          })
+      : false;
     const activeLiveTurn = this.bindLiveAssistantTurnMessageId({
       sessionKey,
       runId,
       laneKey: lane.laneKey,
       providerMessageId: providerMessageId || undefined,
       updatedAt: snapshotUpdatedAt,
-      startNextTurn: status === 'streaming' && previousLiveTurn?.closed === true,
+      shouldStartNextTurn,
     });
     const resolvedMessageId = activeLiveTurn.fallbackMessageId;
     const key = this.chatSnapshotKey(sessionKey, resolvedMessageId);
     const previous = this.chatSnapshots.get(key);
-    const content = Object.prototype.hasOwnProperty.call(message, 'content') ? message.content : previous?.content ?? [];
-    const snapshotText = readMessageText(content);
-    const hasDeltaText = Object.prototype.hasOwnProperty.call(payload, 'deltaText') && typeof payload.deltaText === 'string';
-    const deltaText = hasDeltaText ? String(payload.deltaText) : '';
+    const visibleSnapshotText = shouldStartNextTurn ? trimPreviousTurnPrefix(snapshotText, previousTurnText) : snapshotText;
     const visibleText = hasDeltaText
       ? payload.replace === true
         ? deltaText
         : `${previous?.text ?? ''}${deltaText}`
-      : status !== 'streaming' && previous?.text && snapshotText.length < previous.text.length
+      : status !== 'streaming' && previous?.text && visibleSnapshotText.length < previous.text.length
         ? previous.text
-        : snapshotText;
+        : visibleSnapshotText;
     const visibleContent = normalizeVisibleMessageContent(content, visibleText);
     if (status === 'streaming') {
       this.rememberChatSnapshot(key, { text: visibleText, content: visibleContent, updatedAt: snapshotUpdatedAt });
@@ -531,6 +608,7 @@ export class OpenClawV4Adapter {
         runId,
         laneKey: lane.laneKey,
         updatedAt: snapshotUpdatedAt,
+        reason: 'message_terminal',
       });
     }
     const planEvents = this.derivePlanEventsFromMessageContent({
@@ -700,6 +778,7 @@ export class OpenClawV4Adapter {
         runId,
         laneKey: lane.laneKey,
         updatedAt: timestamp ?? Date.now(),
+        reason: 'tool_started',
       });
     }
     if (phase === 'start') {

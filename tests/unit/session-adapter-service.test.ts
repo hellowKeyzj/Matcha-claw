@@ -217,7 +217,16 @@ describe('session runtime ACP adapter service', () => {
       text: 'Planning workflow',
       segments: [{ kind: 'message', text: 'Planning workflow' }],
     });
-    expect(second.snapshot.items.filter((item: { kind?: string }) => item.kind === 'assistant-turn')).toHaveLength(1);
+    const assistantTurns = second.snapshot.items.filter((item: { kind?: string }) => item.kind === 'assistant-turn');
+    expect(assistantTurns).toHaveLength(1);
+    expect(assistantTurns[0]).toMatchObject({
+      kind: 'assistant-turn',
+      turnKey: 'openclaw-v4:turn:agent:main:main:run-duplicate-streaming:member:default:0',
+      text: 'Planning workflow',
+    });
+    expect(second.snapshot.runtime).toMatchObject({
+      pendingTurnKey: 'openclaw-v4:turn:agent:main:main:run-duplicate-streaming:member:default:0',
+    });
   });
 
   it('starts a fresh V4 assistant turn after a live tool start without replaying prior text', async () => {
@@ -254,12 +263,11 @@ describe('session runtime ACP adapter service', () => {
     const [nextAssistant] = await consumeOpenClawTestGatewayEvent(service, {
       type: 'chat.message',
       event: {
-        state: 'delta',
+        state: 'final',
         sessionKey: 'agent:main:main',
         runId: 'run-tool-next-turn',
         seq: 3,
         timestamp: 1_700_000_000_020,
-        deltaText: 'I need to answer concisely.',
         message: {
           role: 'assistant',
           content: [{ type: 'text', text: 'Considering presentationI need to answer concisely.' }],
@@ -268,14 +276,21 @@ describe('session runtime ACP adapter service', () => {
     });
 
     const assistantTurns = nextAssistant.snapshot.items.filter((item: { kind?: string; text?: string }) => item.kind === 'assistant-turn');
-    const newAssistantTurns = assistantTurns.filter((item) => item.text === 'I need to answer concisely.');
-    expect(newAssistantTurns).toHaveLength(1);
-    expect(expectItemEvent(nextAssistant).item).toMatchObject({
+    const oldAssistantTurn = assistantTurns.find((item) => item.text === 'Considering presentation');
+    const newAssistantTurn = assistantTurns.find((item) => item.text === 'I need to answer concisely.');
+    expect(oldAssistantTurn).toMatchObject({
+      kind: 'assistant-turn',
+      text: 'Considering presentation',
+      segments: expect.arrayContaining([
+        expect.objectContaining({ kind: 'message', text: 'Considering presentation' }),
+      ]),
+    });
+    expect(newAssistantTurn).toMatchObject({
       kind: 'assistant-turn',
       text: 'I need to answer concisely.',
       segments: [{ kind: 'message', text: 'I need to answer concisely.' }],
     });
-    expect(newAssistantTurns[0]).toMatchObject({
+    expect(expectItemEvent(nextAssistant).item).toMatchObject({
       kind: 'assistant-turn',
       text: 'I need to answer concisely.',
       segments: [{ kind: 'message', text: 'I need to answer concisely.' }],

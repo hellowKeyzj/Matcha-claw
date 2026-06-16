@@ -127,6 +127,42 @@ export function resolveCanonicalOwnerBindings(event: CanonicalSessionEvent): {
   };
 }
 
+function hasExplicitTurnBinding(binding: {
+  ownerTurnKey?: string;
+  turnBindingConfidence?: CanonicalBindingConfidence;
+}): boolean {
+  return Boolean(binding.ownerTurnKey) && binding.turnBindingConfidence !== 'low';
+}
+
+function resolveRuntimePendingTurnKeyForMessage(
+  event: CanonicalMessageSnapshotEvent,
+  currentPendingTurnKey: string | null,
+): string | null {
+  const ownerBindings = resolveCanonicalOwnerBindings(event);
+  if (hasExplicitTurnBinding(ownerBindings)) {
+    return ownerBindings.ownerTurnKey ?? currentPendingTurnKey;
+  }
+  return ownerBindings.ownerMessageKey
+    ?? ownerBindings.ownerTurnKey
+    ?? event.runId
+    ?? event.messageId
+    ?? currentPendingTurnKey;
+}
+
+function resolveRuntimePendingTurnKeyForTool(
+  event: CanonicalToolCallEvent | CanonicalToolProgressEvent | CanonicalToolResultEvent,
+  currentPendingTurnKey: string | null,
+): string | null {
+  const ownerBindings = resolveCanonicalOwnerBindings(event);
+  if (hasExplicitTurnBinding(ownerBindings)) {
+    return ownerBindings.ownerTurnKey ?? currentPendingTurnKey;
+  }
+  return ownerBindings.ownerMessageKey
+    ?? ownerBindings.ownerTurnKey
+    ?? event.runId
+    ?? currentPendingTurnKey;
+}
+
 export function buildCanonicalMessageStateKey(event: CanonicalMessageSnapshotEvent): string {
   return resolveCanonicalMessageIdentity(event).key;
 }
@@ -473,7 +509,7 @@ function applyMessageRuntime(state: CanonicalSessionState, event: CanonicalMessa
       activeRunId: event.runId ?? state.runtime.activeRunId,
       runPhase: 'streaming',
       activeTurnItemKey: null,
-      pendingTurnKey: event.runId ?? event.messageId ?? state.runtime.pendingTurnKey,
+      pendingTurnKey: resolveRuntimePendingTurnKeyForMessage(event, state.runtime.pendingTurnKey),
       pendingTurnLaneKey: laneKeyOf(event),
       lastError: null,
       lastIssue: null,
@@ -490,7 +526,7 @@ function applyMessageRuntime(state: CanonicalSessionState, event: CanonicalMessa
         ...state.runtime,
         activeRunId: event.runId ?? state.runtime.activeRunId,
         runPhase: 'waiting_tool',
-        pendingTurnKey: event.runId ?? event.messageId ?? state.runtime.pendingTurnKey,
+        pendingTurnKey: resolveRuntimePendingTurnKeyForMessage(event, state.runtime.pendingTurnKey),
         pendingTurnLaneKey: laneKeyOf(event),
         lastError: null,
         lastIssue: null,
@@ -572,7 +608,7 @@ function applyToolRuntime(state: CanonicalSessionState, event: CanonicalToolCall
     state.runtime = {
       ...state.runtime,
       activeRunId: event.runId ?? state.runtime.activeRunId,
-      pendingTurnKey: event.runId ?? state.runtime.pendingTurnKey,
+      pendingTurnKey: resolveRuntimePendingTurnKeyForTool(event, state.runtime.pendingTurnKey),
       pendingTurnLaneKey: event.laneKey ?? state.runtime.pendingTurnLaneKey,
       runPhase: 'waiting_tool',
     };
