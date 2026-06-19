@@ -99,7 +99,8 @@ export class SessionRunWorkflow {
     const now = this.deps.clock.nowMs();
     return [{
       eventId: `local:user:${input.sessionId}:${input.runId}`,
-      type: 'message_snapshot',
+      type: 'message_part',
+      partId: input.runId,
       protocolId: context.protocolId,
       runtimeEndpointId: context.runtimeEndpointId,
       source: 'live',
@@ -115,6 +116,8 @@ export class SessionRunWorkflow {
         },
       },
       role: 'user',
+      kind: 'text',
+      mode: 'final',
       messageId: input.runId,
       content: input.message,
       text: input.message,

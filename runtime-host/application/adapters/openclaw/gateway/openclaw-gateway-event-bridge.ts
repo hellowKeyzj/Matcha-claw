@@ -43,7 +43,7 @@ function createRuntimeHostCapabilityPayload(endpoint: RuntimeEndpointRef, operat
 }
 
 export interface GatewaySessionRuntimePort {
-  consumeEndpointConversationEvent(endpoint: RuntimeEndpointRef, payload: GatewayConversationEvent): Promise<unknown[]>;
+  consumeEndpointConversationEvent(endpoint: RuntimeEndpointRef, payload: GatewayConversationEvent & { sessionIdentity: SessionIdentity }): Promise<unknown[]>;
   consumeEndpointNotification(endpoint: RuntimeEndpointRef, payload: unknown): unknown[];
 }
 
@@ -99,11 +99,15 @@ function toSessionIdentity(endpoint: RuntimeEndpointRef, sessionKey: string): Se
   };
 }
 
+const MAX_PENDING_RUNTIME_EVENTS = 1000;
+
 export function createRuntimeHostGatewayClient(deps: RuntimeHostGatewayBridgeDeps) {
   let latestObservedTransportEpoch = 0;
   const conversationEventChains = new Map<string, Promise<void>>();
+  const pendingConversationEventsBySessionKey = new Map<string, GatewayConversationEvent[]>();
   const pendingNotifications: unknown[] = [];
   const runtimeHostEndpoint = deps.runtimeHostEndpoint;
+  let pendingConversationEventCount = 0;
   let pendingNotificationHead = 0;
 
   const emitSessionUpdates = (sessionUpdates: unknown[]): void => {
@@ -113,7 +117,61 @@ export function createRuntimeHostGatewayClient(deps: RuntimeHostGatewayBridgeDep
     }
   };
 
-  const flushPendingRuntimeEvents = (runtime: GatewaySessionRuntimePort | null): void => {
+  const readPendingRuntimeEventCount = (): number => {
+    return pendingConversationEventCount + pendingNotifications.length - pendingNotificationHead;
+  };
+
+  const hasPendingRuntimeEvents = (): boolean => {
+    return readPendingRuntimeEventCount() > 0;
+  };
+
+  const canEnqueuePendingRuntimeEvent = (eventKind: string, sessionKey?: string): boolean => {
+    if (readPendingRuntimeEventCount() < MAX_PENDING_RUNTIME_EVENTS) {
+      return true;
+    }
+    deps.logger?.warn('[gateway-event-bridge] pending runtime event queue full', {
+      eventKind,
+      ...(sessionKey ? { sessionKey } : {}),
+      maxPendingRuntimeEvents: MAX_PENDING_RUNTIME_EVENTS,
+    });
+    return false;
+  };
+
+  const enqueuePendingNotification = (notification: unknown): void => {
+    if (!canEnqueuePendingRuntimeEvent('notification')) {
+      return;
+    }
+    pendingNotifications.push(notification);
+  };
+
+  const enqueuePendingConversationEvent = (sessionKey: string, payload: GatewayConversationEvent): void => {
+    if (!canEnqueuePendingRuntimeEvent('conversation', sessionKey)) {
+      return;
+    }
+    const pendingSessionEvents = pendingConversationEventsBySessionKey.get(sessionKey) ?? [];
+    pendingSessionEvents.push(payload);
+    pendingConversationEventsBySessionKey.set(sessionKey, pendingSessionEvents);
+    pendingConversationEventCount += 1;
+  };
+
+  const consumeConversationEvent = async (runtime: GatewaySessionRuntimePort, sessionKey: string, payload: GatewayConversationEvent): Promise<void> => {
+    const sessionUpdates = await runtime.consumeEndpointConversationEvent(runtimeHostEndpoint, {
+      ...payload,
+      sessionIdentity: toSessionIdentity(runtimeHostEndpoint, sessionKey),
+    });
+    for (const sessionUpdate of sessionUpdates) {
+      if (containsTodoToolDebugSignal(sessionUpdate)) {
+        logTodoToolDebug(
+          deps.logger,
+          'runtime-host.emit-session-update',
+          summarizeSessionUpdateForTodoToolDebug(sessionUpdate as SessionUpdateEvent),
+        );
+      }
+    }
+    emitSessionUpdates(sessionUpdates);
+  };
+
+  const flushPendingRuntimeEvents = async (runtime: GatewaySessionRuntimePort | null): Promise<void> => {
     if (!runtime) {
       return;
     }
@@ -124,31 +182,42 @@ export function createRuntimeHostGatewayClient(deps: RuntimeHostGatewayBridgeDep
     }
     pendingNotifications.length = 0;
     pendingNotificationHead = 0;
+
+    for (const sessionKey of Array.from(pendingConversationEventsBySessionKey.keys())) {
+      const pendingSessionEvents = pendingConversationEventsBySessionKey.get(sessionKey) ?? [];
+      pendingConversationEventsBySessionKey.delete(sessionKey);
+      pendingConversationEventCount -= pendingSessionEvents.length;
+      for (const payload of pendingSessionEvents) {
+        try {
+          await consumeConversationEvent(runtime, sessionKey, payload);
+        } catch (error) {
+          deps.logger?.warn('[gateway-event-bridge] conversation event ingress failed', {
+            sessionKey,
+            error: String(error),
+          });
+        }
+      }
+    }
   };
 
   const enqueueConversationEvent = (payload: GatewayConversationEvent): void => {
     const sessionKey = readConversationEventSessionKey(payload);
+    const runtimeAtEnqueue = deps.getSessionRuntime();
+    if (!runtimeAtEnqueue) {
+      enqueuePendingConversationEvent(sessionKey, payload);
+      return;
+    }
     const previous = conversationEventChains.get(sessionKey) ?? Promise.resolve();
     const next = previous.then(async () => {
       const runtime = deps.getSessionRuntime();
       if (!runtime) {
+        enqueuePendingConversationEvent(sessionKey, payload);
         return;
       }
-      flushPendingRuntimeEvents(runtime);
-      const sessionUpdates = await runtime.consumeEndpointConversationEvent(runtimeHostEndpoint, {
-        ...payload,
-        sessionIdentity: toSessionIdentity(runtimeHostEndpoint, sessionKey),
-      });
-      for (const sessionUpdate of sessionUpdates) {
-        if (containsTodoToolDebugSignal(sessionUpdate)) {
-          logTodoToolDebug(
-            deps.logger,
-            'runtime-host.emit-session-update',
-            summarizeSessionUpdateForTodoToolDebug(sessionUpdate as SessionUpdateEvent),
-          );
-        }
+      if (hasPendingRuntimeEvents()) {
+        await flushPendingRuntimeEvents(runtime);
       }
-      emitSessionUpdates(sessionUpdates);
+      await consumeConversationEvent(runtime, sessionKey, payload);
     }).catch((error) => {
       deps.logger?.warn('[gateway-event-bridge] conversation event ingress failed', {
         sessionKey,
@@ -193,11 +262,16 @@ export function createRuntimeHostGatewayClient(deps: RuntimeHostGatewayBridgeDep
     onGatewayNotification: (notification) => {
       const runtime = deps.getSessionRuntime();
       if (!runtime) {
-        pendingNotifications.push(notification);
+        enqueuePendingNotification(notification);
         return;
       }
-      flushPendingRuntimeEvents(runtime);
-      emitSessionUpdates(runtime.consumeEndpointNotification(runtimeHostEndpoint, notification));
+      void flushPendingRuntimeEvents(runtime).then(() => {
+        emitSessionUpdates(runtime.consumeEndpointNotification(runtimeHostEndpoint, notification));
+      }).catch((error) => {
+        deps.logger?.warn('[gateway-event-bridge] notification ingress failed', {
+          error: String(error),
+        });
+      });
     },
     onGatewayConversationEvent: (payload) => {
       logTodoToolDebug(deps.logger, 'gateway.raw-conversation-event', payload);

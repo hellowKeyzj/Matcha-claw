@@ -5,7 +5,6 @@ import type {
   SessionMessageRole,
   SessionRenderAttachedFile,
   SessionRenderImage,
-  SessionRenderToolStatusKind,
   SessionRunPhase,
   SessionTaskCompletionEvent,
   TaskSnapshotEvent,
@@ -19,6 +18,13 @@ export type CanonicalLifecyclePhase = 'started' | 'final' | 'error' | 'aborted';
 export type CanonicalReplayBoundaryPhase = 'start' | 'end' | 'failed';
 export type CanonicalBindingSource = 'runtime' | 'adapter' | 'synthetic';
 export type CanonicalBindingConfidence = 'high' | 'medium' | 'low';
+
+export interface CanonicalOrderKey {
+  seq: number;
+  subSeq: number;
+  sourceIndex: number;
+  timestamp?: number;
+}
 
 export interface CanonicalOrigin {
   runtimeEventType?: string;
@@ -58,12 +64,16 @@ export interface CanonicalEventBase {
   turnBindingConfidence?: CanonicalBindingConfidence;
   messageBindingSource?: CanonicalBindingSource;
   messageBindingConfidence?: CanonicalBindingConfidence;
+  order?: CanonicalOrderKey;
   origin: CanonicalOrigin;
 }
 
-export interface CanonicalMessageSnapshotEvent extends CanonicalEventBase {
-  type: 'message_snapshot';
+export interface CanonicalMessagePartEvent extends CanonicalEventBase {
+  type: 'message_part';
+  partId: string;
   role: Extract<SessionMessageRole, 'user' | 'assistant' | 'system'>;
+  kind: 'text' | 'media';
+  mode: 'delta' | 'snapshot' | 'replace' | 'final';
   messageId?: string;
   originMessageId?: string;
   clientId?: string;
@@ -74,34 +84,24 @@ export interface CanonicalMessageSnapshotEvent extends CanonicalEventBase {
   attachedFiles?: ReadonlyArray<SessionRenderAttachedFile>;
 }
 
-export interface CanonicalThoughtSnapshotEvent extends CanonicalEventBase {
-  type: 'thought_snapshot';
-  thoughtId?: string;
+export interface CanonicalThoughtEvent extends CanonicalEventBase {
+  type: 'thought';
+  thoughtId: string;
+  mode: 'delta' | 'snapshot' | 'replace' | 'final';
   text: string;
   status: CanonicalMessageStatus;
 }
 
-export interface CanonicalToolCallEvent extends CanonicalEventBase {
-  type: 'tool_call';
+export interface CanonicalToolEvent extends CanonicalEventBase {
+  type: 'tool';
   toolCallId: string;
-  name: string;
-  input?: unknown;
-}
-
-export interface CanonicalToolProgressEvent extends CanonicalEventBase {
-  type: 'tool_progress';
-  toolCallId: string;
-  partialResult?: unknown;
-  outputText?: string;
-}
-
-export interface CanonicalToolResultEvent extends CanonicalEventBase {
-  type: 'tool_result';
-  toolCallId: string;
+  phase: 'started' | 'updated' | 'completed' | 'failed';
   name?: string;
+  input?: unknown;
+  inputDelta?: string;
+  partialResult?: unknown;
   output?: unknown;
   outputText?: string;
-  isError: boolean;
 }
 
 export interface CanonicalLifecycleEvent extends CanonicalEventBase {
@@ -167,11 +167,9 @@ export interface CanonicalReplayBoundaryEvent extends CanonicalEventBase {
 }
 
 export type CanonicalSessionEvent =
-  | CanonicalMessageSnapshotEvent
-  | CanonicalThoughtSnapshotEvent
-  | CanonicalToolCallEvent
-  | CanonicalToolProgressEvent
-  | CanonicalToolResultEvent
+  | CanonicalMessagePartEvent
+  | CanonicalThoughtEvent
+  | CanonicalToolEvent
   | CanonicalLifecycleEvent
   | CanonicalRuntimeActivityEvent
   | CanonicalApprovalEvent

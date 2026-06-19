@@ -118,11 +118,11 @@ describe('dispatchProtocolEvent', () => {
     expect(emitConversationEvent).toHaveBeenCalledTimes(2);
     expect(emitConversationEvent).toHaveBeenNthCalledWith(1, {
       type: 'chat.message',
-      event,
+      event: expect.objectContaining(event),
     });
     expect(emitConversationEvent).toHaveBeenNthCalledWith(2, {
       type: 'chat.message',
-      event,
+      event: expect.objectContaining(event),
     });
   });
 
@@ -229,7 +229,7 @@ describe('dispatchProtocolEvent', () => {
     expect(emitNotification).toHaveBeenCalledWith(expect.objectContaining({ method: 'agent' }));
   });
 
-  it('agent native plan stream 当前只透传 notification，不进入 conversation 通道', () => {
+  it('agent native plan stream 会进入 conversation 通道', () => {
     const emitNotification = vi.fn();
     const emitConversationEvent = vi.fn();
     const emitChannelStatus = vi.fn();
@@ -249,7 +249,16 @@ describe('dispatchProtocolEvent', () => {
       },
     );
 
-    expect(emitConversationEvent).not.toHaveBeenCalled();
+    expect(emitConversationEvent).toHaveBeenCalledWith({
+      type: 'plan.snapshot',
+      event: expect.objectContaining({
+        runId: 'run-plan-1',
+        sessionKey: 'agent:main:main',
+        seq: 6,
+        timestamp: 1_700_000_000_020,
+        data: expect.objectContaining({ title: 'Assistant proposed a plan' }),
+      }),
+    });
     expect(emitNotification).toHaveBeenCalledWith(expect.objectContaining({ method: 'agent' }));
   });
 

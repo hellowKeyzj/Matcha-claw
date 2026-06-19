@@ -1,4 +1,7 @@
 import type { CanonicalSessionEvent } from '../../../sessions/canonical/canonical-events';
+import { iterateCanonicalReplayEventsFromTranscriptMessages } from '../../../sessions/canonical/canonical-transcript-replay';
+import { iterateTranscriptMessages } from '../../../sessions/transcript-parser';
+import type { SessionTranscriptMessage } from '../../../sessions/transcript-types';
 import { buildSessionIdentityScopedMessageId } from '../../contracts/runtime-identity-contract';
 import type {
   RuntimeProtocolAdapter,
@@ -11,13 +14,29 @@ import { ACP_PROTOCOL_ID } from './acp-identity';
 class AcpReplayAdapter implements RuntimeReplayAdapter {
   constructor(private readonly eventAdapter: AcpCanonicalAdapter) {}
 
-  async *replayTranscript(_sessionKey: string, transcript: unknown, context: RuntimeSessionContext): AsyncIterable<CanonicalSessionEvent> {
+  async *replayTranscript(sessionKey: string, transcript: unknown, context: RuntimeSessionContext): AsyncIterable<CanonicalSessionEvent> {
+    const transcriptMessages: SessionTranscriptMessage[] = [];
+    const acpPayloads: unknown[] = [];
     for await (const line of this.readLines(transcript)) {
-      const payload = this.parseLine(line);
-      if (!payload) {
+      const message = Array.from(iterateTranscriptMessages([line]))[0];
+      if (message) {
+        transcriptMessages.push(message);
         continue;
       }
-      yield* this.eventAdapter.translate(payload, context);
+      const payload = this.parseLine(line);
+      if (payload) {
+        acpPayloads.push(payload);
+      }
+    }
+
+    if (transcriptMessages.length > 0) {
+      yield* iterateCanonicalReplayEventsFromTranscriptMessages(sessionKey, transcriptMessages, {
+        protocolId: context.protocolId,
+        runtimeEndpointId: context.runtimeEndpointId,
+      });
+    }
+    for (const payload of acpPayloads) {
+      yield* this.eventAdapter.translate(this.markReplayPayload(payload), context);
     }
   }
 
@@ -53,6 +72,17 @@ class AcpReplayAdapter implements RuntimeReplayAdapter {
     } catch {
       return null;
     }
+  }
+
+  private markReplayPayload(payload: unknown): unknown {
+    if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+      return payload;
+    }
+    const record = payload as Record<string, unknown>;
+    return {
+      ...record,
+      source: 'replay',
+    };
   }
 
   private isAsyncIterable(input: unknown): input is AsyncIterable<unknown> {

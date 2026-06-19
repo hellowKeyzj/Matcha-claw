@@ -46,7 +46,7 @@ describe('OpenClawV4ProtocolAdapter', () => {
 
     expect(events.map((event) => event.type)).toEqual([
       'replay_boundary',
-      'message_snapshot',
+      'message_part',
       'replay_boundary',
     ]);
   });
@@ -87,14 +87,126 @@ describe('OpenClawV4ProtocolAdapter', () => {
     }, context);
 
     expect(firstDelta).toMatchObject({
-      type: 'message_snapshot',
+      type: 'message_part',
       messageId: 'openclaw-v4:chat:session-1:run-1:member:agent-1:0',
       text: 'first',
     });
     expect(secondDelta).toMatchObject({
-      type: 'message_snapshot',
+      type: 'message_part',
       messageId: 'openclaw-v4:chat:session-1:run-1:member:agent-1:0',
       text: 'firstsecond',
+    });
+  });
+
+  it('uses cumulative deltaText as the visible text without duplicating previous text', () => {
+    const adapter = new OpenClawV4ProtocolAdapter();
+    const context = runtimeContext();
+
+    adapter.eventAdapter.translate({
+      type: 'chat.message',
+      event: {
+        state: 'delta',
+        sessionKey: 'session-1',
+        runId: 'run-cumulative-delta',
+        seq: 1,
+        deltaText: 'Hello',
+        message: {
+          role: 'assistant',
+          timestamp: 1_700_000_000_001,
+          content: [],
+        },
+      },
+    }, context);
+    const [secondDelta] = adapter.eventAdapter.translate({
+      type: 'chat.message',
+      event: {
+        state: 'delta',
+        sessionKey: 'session-1',
+        runId: 'run-cumulative-delta',
+        seq: 2,
+        deltaText: 'Hello world',
+        message: {
+          role: 'assistant',
+          timestamp: 1_700_000_000_002,
+          content: [],
+        },
+      },
+    }, context);
+
+    expect(secondDelta).toMatchObject({
+      type: 'message_part',
+      text: 'Hello world',
+    });
+  });
+
+  it('keeps appending true incremental deltaText', () => {
+    const adapter = new OpenClawV4ProtocolAdapter();
+    const context = runtimeContext();
+
+    adapter.eventAdapter.translate({
+      type: 'chat.message',
+      event: {
+        state: 'delta',
+        sessionKey: 'session-1',
+        runId: 'run-incremental-delta',
+        seq: 1,
+        deltaText: 'Hello',
+        message: {
+          role: 'assistant',
+          timestamp: 1_700_000_000_001,
+          content: [],
+        },
+      },
+    }, context);
+    const [secondDelta] = adapter.eventAdapter.translate({
+      type: 'chat.message',
+      event: {
+        state: 'delta',
+        sessionKey: 'session-1',
+        runId: 'run-incremental-delta',
+        seq: 2,
+        deltaText: ' world',
+        message: {
+          role: 'assistant',
+          timestamp: 1_700_000_000_002,
+          content: [],
+        },
+      },
+    }, context);
+
+    expect(secondDelta).toMatchObject({
+      type: 'message_part',
+      text: 'Hello world',
+    });
+  });
+
+  it('replays session.tool on the historical member agent lane', () => {
+    const adapter = new OpenClawV4ProtocolAdapter();
+    const context = runtimeContext();
+
+    const [toolEvent] = adapter.eventAdapter.translate({
+      type: 'session.tool',
+      event: {
+        phase: 'result',
+        sessionKey: 'session-1',
+        runId: 'run-history',
+        seq: 3,
+        timestamp: 1_700_000_000_003,
+        toolCallId: 'tool-1',
+        name: 'Read',
+        result: 'done',
+        agentId: 'writer',
+        laneKey: 'member:writer',
+      },
+    }, context);
+
+    expect(toolEvent).toMatchObject({
+      type: 'tool',
+      phase: 'completed',
+      source: 'replay',
+      laneKey: 'member:writer',
+      agentId: 'writer',
+      ownerTurnKey: 'run:member:writer:run-history',
     });
   });
 
@@ -148,26 +260,26 @@ describe('OpenClawV4ProtocolAdapter', () => {
     }, context);
 
     expect(firstDelta).toMatchObject({
-      type: 'message_snapshot',
+      type: 'message_part',
       status: 'streaming',
       messageId: 'openclaw-v4:chat:session-1:run-1:member:agent-1:0',
       text: 'first',
     });
     expect(final).toMatchObject({
-      type: 'message_snapshot',
+      type: 'message_part',
       status: 'final',
       messageId: 'openclaw-v4:chat:session-1:run-1:member:agent-1:0',
       text: 'first',
     });
     expect(nextDelta).toMatchObject({
-      type: 'message_snapshot',
+      type: 'message_part',
       status: 'streaming',
       messageId: 'openclaw-v4:chat:session-1:run-1:member:agent-1:1',
       text: 'next',
     });
   });
 
-  it('starts a new fallback chat turn after live tool start without provider messageId', () => {
+  it('keeps post-tool assistant text on the same owner turn without provider messageId', () => {
     const adapter = new OpenClawV4ProtocolAdapter();
     const context = runtimeContext();
 
@@ -230,21 +342,23 @@ describe('OpenClawV4ProtocolAdapter', () => {
     }, context);
 
     expect(firstDelta).toMatchObject({
-      type: 'message_snapshot',
+      type: 'message_part',
       status: 'streaming',
       messageId: 'openclaw-v4:chat:session-1:run-1:member:agent-1:0',
       text: 'Reading SKILL.md',
     });
     expect(lateFinal).toMatchObject({
-      type: 'message_snapshot',
+      type: 'message_part',
       status: 'final',
       messageId: 'openclaw-v4:chat:session-1:run-1:member:agent-1:0',
       text: 'Reading SKILL.md',
     });
     expect(nextDelta).toMatchObject({
-      type: 'message_snapshot',
+      type: 'message_part',
       status: 'streaming',
-      messageId: 'openclaw-v4:chat:session-1:run-1:member:agent-1:1',
+      messageId: 'openclaw-v4:chat:session-1:run-1:member:agent-1:0:1',
+      ownerTurnKey: 'openclaw-v4:turn:session-1:run-1:member:agent-1:0',
+      ownerMessageKey: 'openclaw-v4:owner-message:session-1:run-1:member:agent-1:0',
       text: 'Reading workflow.md',
     });
   });
@@ -288,11 +402,11 @@ describe('OpenClawV4ProtocolAdapter', () => {
     }, context);
 
     expect(firstDelta).toMatchObject({
-      type: 'message_snapshot',
+      type: 'message_part',
       text: 'Planning workflow tasks',
     });
     expect(secondDelta).toMatchObject({
-      type: 'message_snapshot',
+      type: 'message_part',
       text: 'Planning workflow tasks\nI need to respond by orchestrating the team workflow instead of performing any role work.',
       content: [{
         type: 'text',
@@ -338,11 +452,11 @@ describe('OpenClawV4ProtocolAdapter', () => {
     }, context);
 
     expect(firstDelta).toMatchObject({
-      type: 'message_snapshot',
+      type: 'message_part',
       text: 'Hello world',
     });
     expect(replacement).toMatchObject({
-      type: 'message_snapshot',
+      type: 'message_part',
       text: 'Hello',
       content: [{ type: 'text', text: 'Hello' }],
     });
@@ -368,13 +482,13 @@ describe('OpenClawV4ProtocolAdapter', () => {
     }, context);
 
     expect(delta).toMatchObject({
-      type: 'message_snapshot',
+      type: 'message_part',
       text: 'Full snapshot',
       content: [{ type: 'text', text: 'Full snapshot' }],
     });
   });
 
-  it('does not carry the previous turn text into the first post-tool streaming delta when V4 sends a cumulative snapshot', () => {
+  it('keeps post-tool streaming delta on the same owner turn while trimming cumulative snapshot text', () => {
     const adapter = new OpenClawV4ProtocolAdapter();
     const context = runtimeContext();
 
@@ -423,19 +537,21 @@ describe('OpenClawV4ProtocolAdapter', () => {
     }, context);
 
     expect(firstDelta).toMatchObject({
-      type: 'message_snapshot',
+      type: 'message_part',
       messageId: 'openclaw-v4:chat:session-1:run-post-tool-cumulative:member:agent-1:0',
       text: 'Considering presentation',
     });
     expect(nextDelta).toMatchObject({
-      type: 'message_snapshot',
-      messageId: 'openclaw-v4:chat:session-1:run-post-tool-cumulative:member:agent-1:1',
+      type: 'message_part',
+      messageId: 'openclaw-v4:chat:session-1:run-post-tool-cumulative:member:agent-1:0:1',
+      ownerTurnKey: 'openclaw-v4:turn:session-1:run-post-tool-cumulative:member:agent-1:0',
+      ownerMessageKey: 'openclaw-v4:owner-message:session-1:run-post-tool-cumulative:member:agent-1:0',
       text: 'I need to answer concisely.',
       content: [{ type: 'text', text: 'I need to answer concisely.' }],
     });
   });
 
-  it('starts a new fallback chat turn for the first post-tool final snapshot when V4 sends a cumulative snapshot', () => {
+  it('keeps the first post-tool final snapshot on the same owner turn while trimming cumulative text', () => {
     const adapter = new OpenClawV4ProtocolAdapter();
     const context = runtimeContext();
 
@@ -483,14 +599,16 @@ describe('OpenClawV4ProtocolAdapter', () => {
     }, context);
 
     expect(firstDelta).toMatchObject({
-      type: 'message_snapshot',
+      type: 'message_part',
       messageId: 'openclaw-v4:chat:session-1:run-post-tool-final:member:agent-1:0',
       text: 'Considering presentation',
     });
     expect(nextFinal).toMatchObject({
-      type: 'message_snapshot',
+      type: 'message_part',
       status: 'final',
-      messageId: 'openclaw-v4:chat:session-1:run-post-tool-final:member:agent-1:1',
+      messageId: 'openclaw-v4:chat:session-1:run-post-tool-final:member:agent-1:0:1',
+      ownerTurnKey: 'openclaw-v4:turn:session-1:run-post-tool-final:member:agent-1:0',
+      ownerMessageKey: 'openclaw-v4:owner-message:session-1:run-post-tool-final:member:agent-1:0',
       text: 'I need to answer concisely.',
       content: [{ type: 'text', text: 'I need to answer concisely.' }],
     });
@@ -531,7 +649,7 @@ describe('OpenClawV4ProtocolAdapter', () => {
     }, context);
 
     expect(final).toMatchObject({
-      type: 'message_snapshot',
+      type: 'message_part',
       status: 'final',
       text: '已写入。',
       content: [{ type: 'text', text: '已写入。' }],
@@ -562,7 +680,7 @@ describe('OpenClawV4ProtocolAdapter', () => {
     }, context);
 
     expect(delta).toMatchObject({
-      type: 'message_snapshot',
+      type: 'message_part',
       text: 'Visible text',
       content: [
         { type: 'text', text: 'Visible text' },
@@ -610,7 +728,7 @@ describe('OpenClawV4ProtocolAdapter', () => {
     }, context);
 
     expect(firstDelta).toMatchObject({
-      type: 'message_snapshot',
+      type: 'message_part',
       messageId: 'openclaw-v4:chat:session-1:run-1:member:agent-1:0',
       originMessageId: 'origin-message-1',
       clientId: 'client-message-1',
@@ -620,7 +738,7 @@ describe('OpenClawV4ProtocolAdapter', () => {
       text: 'first',
     });
     expect(secondDelta).toMatchObject({
-      type: 'message_snapshot',
+      type: 'message_part',
       messageId: 'openclaw-v4:chat:session-1:run-1:member:agent-1:0',
       ownerTurnKey: 'openclaw-v4:turn:session-1:run-1:member:agent-1:0',
       ownerMessageKey: 'openclaw-v4:owner-message:session-1:run-1:member:agent-1:0',
@@ -679,7 +797,7 @@ describe('OpenClawV4ProtocolAdapter', () => {
     }, context);
 
     expect(streaming).toMatchObject({
-      type: 'message_snapshot',
+      type: 'message_part',
       status: 'streaming',
       text: 'The longer streamed answer.',
       laneKey: 'member:agent-1',
@@ -689,12 +807,12 @@ describe('OpenClawV4ProtocolAdapter', () => {
       ownerMessageKey: 'openclaw-v4:owner-message:session-1:run-1:member:agent-1:0',
     });
     expect(toolStart).toMatchObject({
-      type: 'tool_call',
+      type: 'tool', phase: 'started',
       ownerTurnKey: 'openclaw-v4:turn:session-1:run-1:member:agent-1:0',
       ownerMessageKey: 'openclaw-v4:owner-message:session-1:run-1:member:agent-1:0',
     });
     expect(final).toMatchObject({
-      type: 'message_snapshot',
+      type: 'message_part',
       status: 'final',
       text: 'The longer streamed answer.',
       laneKey: 'member:agent-1',

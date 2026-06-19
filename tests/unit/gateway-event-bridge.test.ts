@@ -67,10 +67,10 @@ describe('runtime host gateway event bridge', () => {
       readGatewayToken: vi.fn(async () => 'token'),
       platform: process.platform,
       clock: { nowMs: () => 1 },
-      idGenerator: { randomUUID: () => 'id-1' },
+      idGenerator: { randomId: () => 'id-1', randomHex: () => '00' },
       identityRepository: {} as never,
       deviceCrypto: {} as never,
-      scheduler: {} as never,
+      scheduler: { schedule: vi.fn(() => ({ cancel: vi.fn() })) },
       tcpProbe: {} as never,
     });
 
@@ -120,6 +120,103 @@ describe('runtime host gateway event bridge', () => {
     expect(emitParentGatewayEvent).toHaveBeenCalledWith('session:update', { type: 'approval' });
   });
 
+  it('flushes pending conversation events in session order when the session runtime becomes available', async () => {
+    createGatewayClientMock.mockReturnValue(gatewayClient);
+    const emitParentGatewayEvent = vi.fn(async () => undefined);
+    const endpointControlState = {
+      updateRuntimeEndpointControlState: vi.fn(() => ({
+        connection: null,
+        readiness: null,
+        capabilities: null,
+        updatedAt: null,
+      })),
+    };
+    const consumedEvents: string[] = [];
+    const runtime = {
+      consumeEndpointConversationEvent: vi.fn(async (_endpoint, payload: { event?: { sessionKey?: string; seq?: number } }) => {
+        consumedEvents.push(`conversation:${String(payload.event?.seq ?? 0)}`);
+        return [{ sessionKey: payload.event?.sessionKey, seq: payload.event?.seq }];
+      }),
+      consumeEndpointNotification: vi.fn(() => {
+        consumedEvents.push('notification:approval');
+        return [{ type: 'approval' }];
+      }),
+    };
+    let currentRuntime: typeof runtime | null = null;
+    const { createRuntimeHostGatewayClient } = await import('../../runtime-host/application/adapters/openclaw/gateway/openclaw-gateway-event-bridge');
+
+    createRuntimeHostGatewayClient({
+      parentTransport: {
+        requestParentShellAction: vi.fn(async () => ({ success: true, status: 200, data: {} })),
+        emitParentGatewayEvent,
+      },
+      dispatchRoute: vi.fn(async () => ({ status: 200, data: {} })),
+      getSessionRuntime: () => currentRuntime,
+      endpointControlState,
+      runtimeHostEndpoint: {
+        kind: 'native-runtime',
+        runtimeAdapterId: 'test-runtime',
+        runtimeInstanceId: 'local',
+      },
+      runtimeHostDataDir: process.cwd(),
+      gatewayPort: 12345,
+      readGatewayToken: vi.fn(async () => 'token'),
+      platform: process.platform,
+      clock: { nowMs: () => 1 },
+      idGenerator: { randomId: () => 'id-1', randomHex: () => '00' },
+      identityRepository: {} as never,
+      deviceCrypto: {} as never,
+      scheduler: { schedule: vi.fn(() => ({ cancel: vi.fn() })) },
+      tcpProbe: {} as never,
+    });
+
+    const options = createGatewayClientMock.mock.calls[0]?.[0];
+    options.onGatewayConversationEvent({ type: 'usage', event: { sessionKey: 'agent:main:main', seq: 1 } });
+    options.onGatewayConversationEvent({ type: 'usage', event: { sessionKey: 'agent:main:main', seq: 2 } });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(runtime.consumeEndpointConversationEvent).not.toHaveBeenCalled();
+
+    currentRuntime = runtime;
+    options.onGatewayNotification({ method: 'exec.approval.requested', params: { id: 'approval-1' } });
+
+    await vi.waitFor(() => {
+      expect(consumedEvents).toEqual([
+        'conversation:1',
+        'conversation:2',
+        'notification:approval',
+      ]);
+    });
+    expect(runtime.consumeEndpointConversationEvent.mock.calls.map((call) => call[1])).toEqual([
+      {
+        type: 'usage',
+        event: { sessionKey: 'agent:main:main', seq: 1 },
+        sessionIdentity: {
+          endpoint: {
+            kind: 'native-runtime',
+            runtimeAdapterId: 'test-runtime',
+            runtimeInstanceId: 'local',
+          },
+          agentId: 'main',
+          sessionKey: 'agent:main:main',
+        },
+      },
+      {
+        type: 'usage',
+        event: { sessionKey: 'agent:main:main', seq: 2 },
+        sessionIdentity: {
+          endpoint: {
+            kind: 'native-runtime',
+            runtimeAdapterId: 'test-runtime',
+            runtimeInstanceId: 'local',
+          },
+          agentId: 'main',
+          sessionKey: 'agent:main:main',
+        },
+      },
+    ]);
+  });
+
   it('routes raw OpenClaw chat events through endpoint ingress with SessionIdentity', async () => {
     createGatewayClientMock.mockReturnValue(gatewayClient);
     const emitParentGatewayEvent = vi.fn(async () => undefined);
@@ -159,10 +256,10 @@ describe('runtime host gateway event bridge', () => {
       readGatewayToken: vi.fn(async () => 'token'),
       platform: process.platform,
       clock: { nowMs: () => 1 },
-      idGenerator: { randomUUID: () => 'id-1' },
+      idGenerator: { randomId: () => 'id-1', randomHex: () => '00' },
       identityRepository: {} as never,
       deviceCrypto: {} as never,
-      scheduler: {} as never,
+      scheduler: { schedule: vi.fn(() => ({ cancel: vi.fn() })) },
       tcpProbe: {} as never,
     });
 
@@ -250,10 +347,10 @@ describe('runtime host gateway event bridge', () => {
       readGatewayToken: vi.fn(async () => 'token'),
       platform: process.platform,
       clock: { nowMs: () => 1 },
-      idGenerator: { randomUUID: () => 'id-1' },
+      idGenerator: { randomId: () => 'id-1', randomHex: () => '00' },
       identityRepository: {} as never,
       deviceCrypto: {} as never,
-      scheduler: {} as never,
+      scheduler: { schedule: vi.fn(() => ({ cancel: vi.fn() })) },
       tcpProbe: {} as never,
     });
 
@@ -330,10 +427,10 @@ describe('runtime host gateway event bridge', () => {
       readGatewayToken: vi.fn(async () => 'token'),
       platform: process.platform,
       clock: { nowMs: () => 1 },
-      idGenerator: { randomUUID: () => 'id-1' },
+      idGenerator: { randomId: () => 'id-1', randomHex: () => '00' },
       identityRepository: {} as never,
       deviceCrypto: {} as never,
-      scheduler: {} as never,
+      scheduler: { schedule: vi.fn(() => ({ cancel: vi.fn() })) },
       tcpProbe: {} as never,
     });
 
@@ -409,10 +506,10 @@ describe('runtime host gateway event bridge', () => {
       readGatewayToken: vi.fn(async () => 'token'),
       platform: process.platform,
       clock: { nowMs: () => 1 },
-      idGenerator: { randomUUID: () => 'id-1' },
+      idGenerator: { randomId: () => 'id-1', randomHex: () => '00' },
       identityRepository: {} as never,
       deviceCrypto: {} as never,
-      scheduler: {} as never,
+      scheduler: { schedule: vi.fn(() => ({ cancel: vi.fn() })) },
       tcpProbe: {} as never,
     });
 

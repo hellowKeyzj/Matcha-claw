@@ -26,6 +26,7 @@ import {
   executeLoadSessions,
   executeNewSession,
   executeOpenAgentConversation,
+  executeOpenSessionIdentity,
   executeRenameSession,
   executeSetViewportAnchorItemKey,
   executeSwitchSession,
@@ -217,6 +218,9 @@ export const useChatStore = create<ChatStoreState>((set, get) => {
     loadSessions: () => executeLoadSessions(sessionInput),
     openAgentConversation: (agentId) => {
       executeOpenAgentConversation(sessionInput, agentId);
+    },
+    openSessionIdentity: (identity) => {
+      executeOpenSessionIdentity(sessionInput, identity);
     },
     switchSession: (key) => {
       executeSwitchSession(sessionInput, key);

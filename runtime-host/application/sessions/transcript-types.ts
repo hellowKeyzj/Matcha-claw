@@ -27,6 +27,7 @@ export interface SessionTranscriptMessage {
 export interface TranscriptMessageShape {
   role?: unknown;
   content?: unknown;
+  text?: unknown;
   timestamp?: unknown;
   id?: unknown;
   messageId?: unknown;
@@ -45,6 +46,9 @@ export interface TranscriptMessageShape {
   tool_call_id?: unknown;
   toolName?: unknown;
   tool_name?: unknown;
+  metadata?: unknown;
+  status?: unknown;
+  streaming?: unknown;
   name?: unknown;
   details?: unknown;
   isError?: unknown;
@@ -55,6 +59,8 @@ export interface TranscriptMessageShape {
 
 export interface TranscriptLineShape {
   id?: unknown;
+  parentId?: unknown;
+  parent_id?: unknown;
   timestamp?: unknown;
   message?: TranscriptMessageShape;
 }

@@ -256,6 +256,7 @@ export interface ChatStoreActions {
   bootstrapSessionRuntime: () => Promise<void>;
   loadSessions: () => Promise<void>;
   openAgentConversation: (agentId: string) => void;
+  openSessionIdentity: (identity: SessionIdentity) => void;
   switchSession: (key: string) => void;
   newSession: (agentId?: string) => Promise<void>;
   deleteSession: (key: string) => Promise<void>;

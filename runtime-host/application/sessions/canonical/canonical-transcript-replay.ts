@@ -27,6 +27,20 @@ export interface CanonicalReplayRuntimeIdentity {
   runtimeEndpointId: RuntimeEndpointId;
 }
 
+interface IndexedTranscriptMessage {
+  message: SessionTranscriptMessage;
+  index: number;
+}
+
+interface ReplayOwnerBinding {
+  ownerTurnKey: string;
+  ownerMessageKey: string;
+  turnBindingSource: 'adapter';
+  turnBindingConfidence: 'high';
+  messageBindingSource: 'adapter';
+  messageBindingConfidence: 'high';
+}
+
 function eventId(parts: ReadonlyArray<string | number | undefined>): string {
   return parts.filter((part) => part !== undefined && String(part).trim()).join(':');
 }
@@ -187,6 +201,7 @@ function readToolEventsFromMessage(
   message: SessionTranscriptMessage,
   index: number,
   identity: CanonicalReplayRuntimeIdentity,
+  ownerBinding?: ReplayOwnerBinding,
 ): CanonicalSessionEvent[] {
   const content = readMessageContent(message);
   if (message.role !== 'assistant' || !Array.isArray(content)) {
@@ -218,7 +233,9 @@ function readToolEventsFromMessage(
           toolCallId,
           seq: index,
         }),
-        type: 'tool_call',
+        type: 'tool',
+        phase: 'started',
+        ...(ownerBinding ?? {}),
         toolCallId,
         name,
         input: resolveToolRecordCallPayload(block),
@@ -240,6 +257,7 @@ function readToolEventsFromMessage(
       ...(outputText ? { outputText } : {}),
       isError: block.isError === true || block.is_error === true,
       identity,
+      ownerBinding,
     })];
   });
 }
@@ -254,6 +272,7 @@ function buildToolResultEvent(input: {
   outputText?: string;
   isError: boolean;
   identity: CanonicalReplayRuntimeIdentity;
+  ownerBinding?: ReplayOwnerBinding;
 }): CanonicalSessionEvent {
   const agentId = normalizeString(input.message.agentId);
   const runId = messageRunId(input.message);
@@ -270,12 +289,13 @@ function buildToolResultEvent(input: {
       toolCallId: input.toolCallId,
       seq: input.index,
     }),
-    type: 'tool_result',
+    type: 'tool',
+    phase: input.isError ? 'failed' : 'completed',
+    ...(input.ownerBinding ?? {}),
     toolCallId: input.toolCallId,
     ...(input.name ? { name: input.name } : {}),
     output: input.output,
     ...(input.outputText ? { outputText: input.outputText } : {}),
-    isError: input.isError,
   };
 }
 
@@ -325,6 +345,180 @@ function hasToolEventContent(message: SessionTranscriptMessage): boolean {
       || type === 'function_call_output'
       || type === 'functionCallOutput';
   });
+}
+
+function transcriptRunLaneKey(message: SessionTranscriptMessage): string {
+  return `${messageRunId(message)}\n${messageLaneKey(message)}`;
+}
+
+function canBindReplayMessageToAssistantOutput(message: SessionTranscriptMessage): boolean {
+  return message.role === 'assistant' || message.role === 'toolresult' || message.role === 'tool_result';
+}
+
+function canBindReplayMessageToToolRun(message: SessionTranscriptMessage): boolean {
+  return canBindReplayMessageToAssistantOutput(message) && !!messageRunId(message);
+}
+
+function messageCarriesVisibleAssistantOutput(message: SessionTranscriptMessage): boolean {
+  if (message.role !== 'assistant') {
+    return false;
+  }
+  return resolveTranscriptDisplayText(message).trim().length > 0
+    || cloneAttachedFiles(message).length > 0
+    || hasContentMedia(message)
+    || hasThinkingContent(message);
+}
+
+function collectToolOwnerRunKeys(messages: ReadonlyArray<IndexedTranscriptMessage>): Set<string> {
+  const keys = new Set<string>();
+  for (const { message } of messages) {
+    if (!canBindReplayMessageToToolRun(message)) {
+      continue;
+    }
+    if (hasToolEventContent(message) || message.role === 'toolresult' || message.role === 'tool_result') {
+      keys.add(transcriptRunLaneKey(message));
+    }
+  }
+  return keys;
+}
+
+function transcriptMessageNodeId(message: SessionTranscriptMessage): string {
+  return normalizeString(message.messageId) || normalizeString(message.id);
+}
+
+function transcriptParentNodeId(message: SessionTranscriptMessage): string {
+  return normalizeString(message.originMessageId);
+}
+
+function buildMessagesByNodeId(messages: ReadonlyArray<IndexedTranscriptMessage>): Map<string, IndexedTranscriptMessage> {
+  const byNodeId = new Map<string, IndexedTranscriptMessage>();
+  for (const indexedMessage of messages) {
+    const nodeId = transcriptMessageNodeId(indexedMessage.message);
+    if (nodeId) {
+      byNodeId.set(nodeId, indexedMessage);
+    }
+  }
+  return byNodeId;
+}
+
+function resolveParentLinkedOwnerRootId(
+  message: SessionTranscriptMessage,
+  messagesByNodeId: ReadonlyMap<string, IndexedTranscriptMessage>,
+): string {
+  let parentId = transcriptParentNodeId(message);
+  let rootId = transcriptMessageNodeId(message);
+  const visited = new Set<string>();
+  while (parentId && !visited.has(parentId)) {
+    visited.add(parentId);
+    const parent = messagesByNodeId.get(parentId);
+    if (!parent) {
+      return parentId;
+    }
+    rootId = transcriptMessageNodeId(parent.message) || parentId;
+    if (parent.message.role === 'user') {
+      return rootId;
+    }
+    parentId = transcriptParentNodeId(parent.message);
+  }
+  return rootId;
+}
+
+function transcriptParentLaneKey(
+  message: SessionTranscriptMessage,
+  messagesByNodeId: ReadonlyMap<string, IndexedTranscriptMessage>,
+): string {
+  return `${resolveParentLinkedOwnerRootId(message, messagesByNodeId)}\n${messageLaneKey(message)}`;
+}
+
+function collectToolOwnerParentKeys(
+  messages: ReadonlyArray<IndexedTranscriptMessage>,
+  messagesByNodeId: ReadonlyMap<string, IndexedTranscriptMessage>,
+): Set<string> {
+  const keys = new Set<string>();
+  for (const { message } of messages) {
+    if (!canBindReplayMessageToAssistantOutput(message) || messageRunId(message)) {
+      continue;
+    }
+    if (hasToolEventContent(message) || message.role === 'toolresult' || message.role === 'tool_result') {
+      keys.add(transcriptParentLaneKey(message, messagesByNodeId));
+    }
+  }
+  return keys;
+}
+
+function buildReplayOwnerBindingForTurnKey(ownerTurnKey: string): ReplayOwnerBinding {
+  return {
+    ownerTurnKey,
+    ownerMessageKey: `${ownerTurnKey}:assistant-output`,
+    turnBindingSource: 'adapter',
+    turnBindingConfidence: 'high',
+    messageBindingSource: 'adapter',
+    messageBindingConfidence: 'high',
+  };
+}
+
+function buildRunReplayOwnerBinding(sessionId: string, message: SessionTranscriptMessage): ReplayOwnerBinding | undefined {
+  const runId = messageRunId(message);
+  if (!runId || !canBindReplayMessageToAssistantOutput(message)) {
+    return undefined;
+  }
+  const laneKey = messageLaneKey(message);
+  return buildReplayOwnerBindingForTurnKey(`transcript:${sessionId}:${laneKey}:${runId}`);
+}
+
+function buildParentLinkedReplayOwnerBinding(
+  sessionId: string,
+  message: SessionTranscriptMessage,
+  messagesByNodeId: ReadonlyMap<string, IndexedTranscriptMessage>,
+): ReplayOwnerBinding | undefined {
+  if (messageRunId(message) || !canBindReplayMessageToAssistantOutput(message)) {
+    return undefined;
+  }
+  const laneKey = messageLaneKey(message);
+  const rootId = resolveParentLinkedOwnerRootId(message, messagesByNodeId);
+  if (!rootId) {
+    return undefined;
+  }
+  return buildReplayOwnerBindingForTurnKey(`transcript:${sessionId}:${laneKey}:parent:${rootId}`);
+}
+
+function shouldBindReplayAssistantOutput(message: SessionTranscriptMessage): boolean {
+  return message.role !== 'assistant'
+    || messageCarriesVisibleAssistantOutput(message)
+    || hasToolEventContent(message);
+}
+
+function buildReplayOwnerBindingsByMessageIndex(
+  sessionId: string,
+  messages: ReadonlyArray<IndexedTranscriptMessage>,
+): Map<number, ReplayOwnerBinding> {
+  const messagesByNodeId = buildMessagesByNodeId(messages);
+  const toolRunKeys = collectToolOwnerRunKeys(messages);
+  const toolParentKeys = collectToolOwnerParentKeys(messages, messagesByNodeId);
+  const bindings = new Map<number, ReplayOwnerBinding>();
+  for (const { message, index } of messages) {
+    if (!canBindReplayMessageToAssistantOutput(message) || !shouldBindReplayAssistantOutput(message)) {
+      continue;
+    }
+    if (messageRunId(message)) {
+      if (!toolRunKeys.has(transcriptRunLaneKey(message))) {
+        continue;
+      }
+      const binding = buildRunReplayOwnerBinding(sessionId, message);
+      if (binding) {
+        bindings.set(index, binding);
+      }
+      continue;
+    }
+    if (!toolParentKeys.has(transcriptParentLaneKey(message, messagesByNodeId))) {
+      continue;
+    }
+    const binding = buildParentLinkedReplayOwnerBinding(sessionId, message, messagesByNodeId);
+    if (binding) {
+      bindings.set(index, binding);
+    }
+  }
+  return bindings;
 }
 
 function canReplayMessageSnapshot(message: SessionTranscriptMessage): boolean {
@@ -378,6 +572,7 @@ function* iterateCanonicalReplayEventsFromTranscriptMessage(
   message: SessionTranscriptMessage,
   index: number,
   identity: CanonicalReplayRuntimeIdentity,
+  ownerBinding?: ReplayOwnerBinding,
 ): Generator<CanonicalSessionEvent> {
   if (!canProjectTranscriptMessage(sessionId, message)) {
     return;
@@ -385,7 +580,7 @@ function* iterateCanonicalReplayEventsFromTranscriptMessage(
   if (message.role === 'toolresult' || message.role === 'tool_result') {
     const toolResult = buildStandaloneToolResultEvent(sessionId, message, index, identity);
     if (toolResult) {
-      yield toolResult;
+      yield ownerBinding ? { ...toolResult, ...ownerBinding } : toolResult;
     }
     const taskSnapshot = extractTaskSnapshotFromTranscriptMessage(sessionId, message);
     if (taskSnapshot) {
@@ -410,7 +605,7 @@ function* iterateCanonicalReplayEventsFromTranscriptMessage(
 
   const role = message.role;
   const text = resolveTranscriptDisplayText(message);
-  const toolEvents = readToolEventsFromMessage(sessionId, message, index, identity);
+  const toolEvents = readToolEventsFromMessage(sessionId, message, index, identity, ownerBinding);
   const runId = messageRunId(message);
   const agentId = normalizeString(message.agentId);
   const canonicalMessageId = messageId(message, sessionId, index);
@@ -427,8 +622,12 @@ function* iterateCanonicalReplayEventsFromTranscriptMessage(
         ...(agentId ? { agentId } : {}),
         seq: index,
       }),
-      type: 'message_snapshot',
+      type: 'message_part',
+      partId: canonicalMessageId,
       role,
+      kind: 'text',
+      mode: messageStatus(message) === 'final' ? 'final' : 'snapshot',
+      ...(ownerBinding ?? {}),
       messageId: canonicalMessageId,
       ...(message.originMessageId ? { originMessageId: message.originMessageId } : {}),
       ...(message.clientId ? { clientId: message.clientId } : {}),
@@ -468,13 +667,16 @@ export function* iterateCanonicalReplayEventsFromTranscriptMessages(
   identity: CanonicalReplayRuntimeIdentity,
 ): Generator<CanonicalSessionEvent> {
   yield buildReplayBoundaryEvent(sessionId, 'start', identity);
-  let index = 0;
-  for (const message of messages) {
-    try {
-      yield* iterateCanonicalReplayEventsFromTranscriptMessage(sessionId, message, index, identity);
-    } finally {
-      index += 1;
-    }
+  const indexedMessages = Array.from(messages, (message, index) => ({ message, index }));
+  const ownerBindingsByMessageIndex = buildReplayOwnerBindingsByMessageIndex(sessionId, indexedMessages);
+  for (const { message, index } of indexedMessages) {
+    yield* iterateCanonicalReplayEventsFromTranscriptMessage(
+      sessionId,
+      message,
+      index,
+      identity,
+      ownerBindingsByMessageIndex.get(index),
+    );
   }
   yield buildReplayBoundaryEvent(sessionId, 'end', identity);
 }
@@ -485,13 +687,21 @@ export async function* iterateCanonicalReplayEventsFromTranscriptMessagesAsync(
   identity: CanonicalReplayRuntimeIdentity,
 ): AsyncGenerator<CanonicalSessionEvent> {
   yield buildReplayBoundaryEvent(sessionId, 'start', identity);
+  const indexedMessages: IndexedTranscriptMessage[] = [];
   let index = 0;
   for await (const message of messages) {
-    try {
-      yield* iterateCanonicalReplayEventsFromTranscriptMessage(sessionId, message, index, identity);
-    } finally {
-      index += 1;
-    }
+    indexedMessages.push({ message, index });
+    index += 1;
+  }
+  const ownerBindingsByMessageIndex = buildReplayOwnerBindingsByMessageIndex(sessionId, indexedMessages);
+  for (const { message, index: messageIndex } of indexedMessages) {
+    yield* iterateCanonicalReplayEventsFromTranscriptMessage(
+      sessionId,
+      message,
+      messageIndex,
+      identity,
+      ownerBindingsByMessageIndex.get(messageIndex),
+    );
   }
   yield buildReplayBoundaryEvent(sessionId, 'end', identity);
 }

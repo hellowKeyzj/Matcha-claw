@@ -33,6 +33,103 @@ function readText(payload: AcpRecord): string {
     ?? '';
 }
 
+function readMessageRole(payload: AcpRecord): 'user' | 'assistant' | 'system' {
+  const role = asString(payload.role) ?? asString(asRecord(payload.message)?.role);
+  return role === 'user' || role === 'system' ? role : 'assistant';
+}
+
+type AcpToolMethodKind = 'call' | 'result';
+
+const ACP_TOOL_CALL_METHODS = new Set([
+  'session/toolCall',
+  'session/tool_call',
+  'session/toolUse',
+  'session/tool_use',
+  'tool/call',
+  'tool/use',
+  'tool/start',
+  'toolCall',
+  'toolUse',
+  'tool_call',
+  'tool_use',
+  'tool.started',
+  'tool_call.start',
+  'toolCallStart',
+  'tool_started',
+]);
+
+const ACP_TOOL_RESULT_METHODS = new Set([
+  'session/toolResult',
+  'session/tool_result',
+  'tool/result',
+  'tool/completed',
+  'tool/error',
+  'toolResult',
+  'tool_result',
+  'tool.completed',
+  'tool.failed',
+  'tool_call.completed',
+  'toolCallCompleted',
+  'toolCompleted',
+  'toolFailed',
+  'tool_error',
+]);
+
+function classifyAcpToolMethod(method: string): AcpToolMethodKind | null {
+  if (ACP_TOOL_RESULT_METHODS.has(method)) {
+    return 'result';
+  }
+  if (ACP_TOOL_CALL_METHODS.has(method)) {
+    return 'call';
+  }
+  return null;
+}
+
+function stableStringify(value: unknown): string {
+  if (value === undefined) {
+    return 'undefined';
+  }
+  if (value === null || typeof value !== 'object') {
+    return JSON.stringify(value);
+  }
+  if (Array.isArray(value)) {
+    return `[${value.map(stableStringify).join(',')}]`;
+  }
+  const record = value as Record<string, unknown>;
+  return `{${Object.keys(record).sort().map((key) => `${JSON.stringify(key)}:${stableStringify(record[key])}`).join(',')}}`;
+}
+
+function stableFingerprint(value: unknown): string {
+  const text = stableStringify(value);
+  let hash = 2166136261;
+  for (let index = 0; index < text.length; index += 1) {
+    hash ^= text.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(36);
+}
+
+function fallbackMessagePartKey(input: {
+  method: string;
+  payload: AcpRecord;
+  runId?: string;
+  laneKey: string;
+  role: 'user' | 'assistant' | 'system';
+  text: string;
+}): string {
+  return `fingerprint:${stableFingerprint({
+    method: input.method,
+    runId: input.runId,
+    laneKey: input.laneKey,
+    role: input.role,
+    text: input.text,
+    content: input.payload.content ?? asRecord(input.payload.message)?.content,
+    status: input.payload.status,
+    done: input.payload.done,
+    timestamp: input.payload.timestamp ?? input.payload.createdAtMs,
+  })}`;
+}
+
 function base(input: {
   eventId: string;
   runtimeEventType: string;
@@ -48,7 +145,7 @@ function base(input: {
     eventId: input.eventId,
     protocolId: input.context.protocolId,
     runtimeEndpointId: input.context.runtimeEndpointId,
-    source: 'live',
+    source: asRecord(input.raw)?.source === 'replay' ? 'replay' : 'live',
     sessionId: input.context.sessionKey,
     ...(input.runId ? { runId: input.runId } : {}),
     ...(input.turnId ? { turnId: input.turnId } : {}),
@@ -88,8 +185,9 @@ export class AcpCanonicalAdapter implements RuntimeEventAdapter {
     const ownerTurnKey = turnId ? `turn:${laneKey}:${turnId}` : runId ? `run:${laneKey}:${runId}` : undefined;
     const ownerMessageKey = messageId ? `message:${laneKey}:${messageId}` : ownerTurnKey;
 
-    if (method.includes('tool') && toolCallId) {
-      if (method.includes('result') || method.includes('completed')) {
+    const toolMethodKind = classifyAcpToolMethod(method);
+    if (toolMethodKind && toolCallId) {
+      if (toolMethodKind === 'result') {
         return [{
           ...base({
             eventId: `acp:${eventScope(context)}:tool-result:${context.sessionKey}:${runId ?? 'run'}:${toolCallId}`,
@@ -102,7 +200,8 @@ export class AcpCanonicalAdapter implements RuntimeEventAdapter {
             ...(seq != null ? { seq } : {}),
             raw: input,
           }),
-          type: 'tool_result',
+          type: 'tool',
+          phase: payload.isError === true ? 'failed' : 'completed',
           ...(ownerTurnKey ? {
             ownerTurnKey,
             turnBindingSource: turnId ? 'runtime' : 'synthetic',
@@ -117,7 +216,6 @@ export class AcpCanonicalAdapter implements RuntimeEventAdapter {
           name: asString(payload.name) ?? asString(payload.toolName),
           output: payload.output ?? payload.result,
           outputText: asString(payload.outputText) ?? asString(payload.text),
-          isError: payload.isError === true,
         }];
       }
       return [{
@@ -132,7 +230,8 @@ export class AcpCanonicalAdapter implements RuntimeEventAdapter {
           ...(seq != null ? { seq } : {}),
           raw: input,
         }),
-        type: 'tool_call',
+        type: 'tool',
+        phase: 'started',
         ...(ownerTurnKey ? {
           ownerTurnKey,
           turnBindingSource: turnId ? 'runtime' : 'synthetic',
@@ -153,10 +252,18 @@ export class AcpCanonicalAdapter implements RuntimeEventAdapter {
     if (!text && !messageId) {
       return [];
     }
-    const role = asString(payload.role) === 'user' || asString(payload.role) === 'system' ? asString(payload.role)! : 'assistant';
+    const role = readMessageRole(payload);
+    const messagePartKey = messageId ?? (seq != null ? String(seq) : fallbackMessagePartKey({
+      method,
+      payload,
+      ...(runId ? { runId } : {}),
+      laneKey,
+      role,
+      text,
+    }));
     return [{
       ...base({
-        eventId: `acp:${eventScope(context)}:message:${context.sessionKey}:${runId ?? 'run'}:${messageId ?? seq ?? 'message'}`,
+        eventId: `acp:${eventScope(context)}:message:${context.sessionKey}:${runId ?? 'run'}:${messagePartKey}`,
         runtimeEventType: method,
         context,
         ...(runId ? { runId } : {}),
@@ -166,8 +273,11 @@ export class AcpCanonicalAdapter implements RuntimeEventAdapter {
         ...(seq != null ? { seq } : {}),
         raw: input,
       }),
-      type: 'message_snapshot',
+      type: 'message_part',
+      partId: messageId ?? `${runId ?? 'run'}:${messagePartKey}`,
       role,
+      kind: 'text',
+      mode: payload.status === 'final' || payload.done === true ? 'final' : 'snapshot',
       ...(ownerTurnKey ? {
         ownerTurnKey,
         turnBindingSource: turnId ? 'runtime' : 'synthetic',

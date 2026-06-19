@@ -12,6 +12,14 @@ import {
   type TranscriptLineShape,
 } from './transcript-types';
 
+function readTranscriptMessageShape(parsed: TranscriptLineShape): Record<string, unknown> | null {
+  if (isRecord(parsed.message)) {
+    return parsed.message as Record<string, unknown>;
+  }
+  const record = isRecord(parsed) ? parsed as Record<string, unknown> : null;
+  return record && normalizeMessageRole(record.role) ? record : null;
+}
+
 function parseTranscriptLine(line: string): SessionTranscriptMessage | null {
   let parsed: TranscriptLineShape;
   try {
@@ -19,23 +27,25 @@ function parseTranscriptLine(line: string): SessionTranscriptMessage | null {
   } catch {
     return null;
   }
-  if (!isRecord(parsed.message)) {
+  const rawMessage = readTranscriptMessageShape(parsed);
+  if (!rawMessage) {
     return null;
   }
 
-  const role = normalizeMessageRole(parsed.message.role);
+  const role = normalizeMessageRole(rawMessage.role);
   if (!role) {
     return null;
   }
 
   const normalized = normalizeRawChatMessage({
-    ...parsed.message,
+    ...rawMessage,
     role,
-    content: Object.prototype.hasOwnProperty.call(parsed.message, 'content')
-      ? parsed.message.content
+    content: Object.prototype.hasOwnProperty.call(rawMessage, 'content')
+      ? rawMessage.content
       : '',
-    timestamp: normalizeTimestamp(parsed.timestamp ?? parsed.message.timestamp),
-    id: normalizeOptionalString(parsed.id ?? parsed.message.id),
+    timestamp: normalizeTimestamp(parsed.timestamp ?? rawMessage.timestamp),
+    id: normalizeOptionalString(parsed.id ?? rawMessage.id),
+    parentMessageId: normalizeOptionalString(rawMessage.parentMessageId ?? rawMessage.parent_message_id ?? parsed.parentId ?? parsed.parent_id),
   }, {
     fallbackMessageIdToId: false,
     fallbackOriginMessageIdToParentMessageId: true,
@@ -58,12 +68,12 @@ function parseTranscriptLine(line: string): SessionTranscriptMessage | null {
     tool_calls: Array.isArray(normalized.tool_calls) ? normalized.tool_calls as Array<Record<string, unknown>> : undefined,
     toolCalls: Array.isArray(normalized.toolCalls) ? normalized.toolCalls as Array<Record<string, unknown>> : undefined,
     toolName: normalizeOptionalString(normalized.toolName),
-    metadata: normalized.metadata as Record<string, unknown> | undefined,
+    metadata: isRecord(normalized.metadata) ? normalized.metadata : undefined,
     name: normalizeOptionalString(normalized.name),
     details: normalized.details,
-    taskCompletionEvents: normalizeTaskCompletionEvents(parsed.message.taskCompletionEvents ?? normalized.taskCompletionEvents),
-    _attachedFiles: Array.isArray(parsed.message._attachedFiles)
-      ? parsed.message._attachedFiles as Array<Record<string, unknown>>
+    taskCompletionEvents: normalizeTaskCompletionEvents(rawMessage.taskCompletionEvents ?? normalized.taskCompletionEvents),
+    _attachedFiles: Array.isArray(rawMessage._attachedFiles)
+      ? rawMessage._attachedFiles as Array<Record<string, unknown>>
       : undefined,
     isError: normalizeOptionalBoolean(normalized.isError ?? normalized.is_error),
   };

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { buildProjectedCanonicalSessionState, buildRenderItemsFromCanonicalState, buildTimelineEntriesFromCanonicalState } from '../../runtime-host/application/sessions/canonical/canonical-projection';
 import { createEmptyCanonicalSessionState, reduceCanonicalSessionEvents } from '../../runtime-host/application/sessions/canonical/canonical-reducer';
+import { buildCanonicalReplayEventsFromTranscriptMessages } from '../../runtime-host/application/sessions/canonical/canonical-transcript-replay';
 import { SessionSnapshotService } from '../../runtime-host/application/sessions/session-snapshot-service';
 import { SessionSnapshotWorkflow } from '../../runtime-host/application/workflows/session-snapshot/session-snapshot-workflow';
 import { createEmptySessionRuntimeState, createEmptyTimelineState } from '../../runtime-host/application/sessions/session-state-model';
@@ -11,7 +12,7 @@ import type {
   SessionRuntimeTimelineState,
 } from '../../runtime-host/application/sessions/session-runtime-types';
 import { OPENCLAW_RUNTIME_PROTOCOL_ID, OPENCLAW_RUNTIME_ENDPOINT_ID } from '../../runtime-host/application/adapters/openclaw/runtime/openclaw-runtime-identity';
-import { createOpenClawTestSessionIdentity, createOpenClawTestRuntimeContext } from './helpers/runtime-address-fixtures';
+import { createOpenClawTestSessionIdentity, createOpenClawTestRuntimeContext, openClawTestRuntimeIdentity } from './helpers/runtime-address-fixtures';
 
 function buildRuntimeState(): ReturnType<typeof createEmptySessionRuntimeState> {
   return createEmptySessionRuntimeState();
@@ -85,7 +86,7 @@ describe('Runtime Host canonical ACP projection', () => {
     const state = createEmptyCanonicalSessionState('agent:main:main', createOpenClawTestRuntimeContext('agent:main:main'));
     reduceCanonicalSessionEvents(state, [{
       ...base('message-1'),
-      type: 'message_snapshot',
+      type: 'message_part',
       role: 'assistant',
       ownerMessageKey: 'message:main:assistant-1',
       ownerTurnKey: 'message:main:assistant-1',
@@ -100,7 +101,7 @@ describe('Runtime Host canonical ACP projection', () => {
     }, {
       ...base('tool-start-1'),
       seq: 2,
-      type: 'tool_call',
+      type: 'tool', phase: 'started',
       ownerMessageKey: 'message:main:assistant-1',
       ownerTurnKey: 'message:main:assistant-1',
       turnBindingSource: 'adapter',
@@ -114,7 +115,7 @@ describe('Runtime Host canonical ACP projection', () => {
       ...base('tool-result-1'),
       seq: 3,
       timestamp: 1_700_000_000_100,
-      type: 'tool_result',
+      type: 'tool', phase: 'completed',
       ownerMessageKey: 'message:main:assistant-1',
       ownerTurnKey: 'message:main:assistant-1',
       turnBindingSource: 'adapter',
@@ -181,7 +182,7 @@ describe('Runtime Host canonical ACP projection', () => {
     reduceCanonicalSessionEvents(state, [{
       ...base('thought-1'),
       seq: 1,
-      type: 'thought_snapshot',
+      type: 'thought',
       text: '先检查入口',
       status: 'streaming',
     }]);
@@ -202,7 +203,7 @@ describe('Runtime Host canonical ACP projection', () => {
     reduceCanonicalSessionEvents(state, [{
       ...base('thought-1'),
       seq: 1,
-      type: 'thought_snapshot',
+      type: 'thought',
       text: '先检查入口',
       status: 'streaming',
     }, {
@@ -228,7 +229,7 @@ describe('Runtime Host canonical ACP projection', () => {
     reduceCanonicalSessionEvents(state, [{
       ...base('message-with-tool-call'),
       seq: 1,
-      type: 'message_snapshot',
+      type: 'message_part',
       role: 'assistant',
       messageId: 'assistant-tool-turn',
       content: [
@@ -254,7 +255,7 @@ describe('Runtime Host canonical ACP projection', () => {
     reduceCanonicalSessionEvents(state, [{
       ...base('message-streaming-1'),
       seq: 1,
-      type: 'message_snapshot',
+      type: 'message_part',
       role: 'assistant',
       messageId: 'assistant-streaming-1',
       content: [{ type: 'text', text: 'Planning workflow tasks' }],
@@ -300,7 +301,7 @@ describe('Runtime Host canonical ACP projection', () => {
     }, {
       ...base('run-1-final-message'),
       seq: 3,
-      type: 'message_snapshot',
+      type: 'message_part',
       role: 'assistant',
       messageId: 'old-run-final',
       content: [{ type: 'text', text: '旧 run 完成' }],
@@ -345,7 +346,7 @@ describe('Runtime Host canonical ACP projection', () => {
     }, {
       ...base('run-1-late-streaming'),
       seq: 3,
-      type: 'message_snapshot',
+      type: 'message_part',
       role: 'assistant',
       messageId: 'late-streaming',
       content: [{ type: 'text', text: '停止后的迟到 delta' }],
@@ -354,7 +355,7 @@ describe('Runtime Host canonical ACP projection', () => {
     }, {
       ...base('run-1-late-tool'),
       seq: 4,
-      type: 'tool_call',
+      type: 'tool', phase: 'started',
       toolCallId: 'late-tool',
       name: 'Read',
       input: { file_path: 'package.json' },
@@ -395,7 +396,7 @@ describe('Runtime Host canonical ACP projection', () => {
     }, {
       ...base('run-1-aborted'),
       seq: 3,
-      type: 'message_snapshot',
+      type: 'message_part',
       role: 'assistant',
       messageId: 'aborted-message',
       content: [],
@@ -410,13 +411,172 @@ describe('Runtime Host canonical ACP projection', () => {
     });
   });
 
-  it('keeps same-run assistant messages distinct and ordered around tool output', () => {
+  it('projects strongly bound assistant rows into one ordered text tool text turn', () => {
     const state = createEmptyCanonicalSessionState('agent:main:main', createOpenClawTestRuntimeContext('agent:main:main'));
     reduceCanonicalSessionEvents(state, [{
       ...base('message-before-tool'),
       seq: 1,
       timestamp: 1_700_000_000_000,
-      type: 'message_snapshot',
+      type: 'message_part',
+      role: 'assistant',
+      messageId: 'assistant-before-tool',
+      ownerMessageKey: 'owner-message:run-1:0',
+      ownerTurnKey: 'owner-turn:run-1',
+      turnBindingSource: 'adapter',
+      turnBindingConfidence: 'high',
+      messageBindingSource: 'adapter',
+      messageBindingConfidence: 'high',
+      content: [{ type: 'text', text: '先读文件' }],
+      text: '先读文件',
+      status: 'streaming',
+    }, {
+      ...base('tool-start-1'),
+      seq: 2,
+      timestamp: 1_700_000_000_010,
+      type: 'tool', phase: 'started',
+      ownerMessageKey: 'owner-message:run-1:0',
+      ownerTurnKey: 'owner-turn:run-1',
+      turnBindingSource: 'adapter',
+      turnBindingConfidence: 'high',
+      messageBindingSource: 'adapter',
+      messageBindingConfidence: 'high',
+      toolCallId: 'tool-read-1',
+      name: 'Read',
+      input: { file_path: 'package.json' },
+    }, {
+      ...base('tool-result-1'),
+      seq: 3,
+      timestamp: 1_700_000_000_020,
+      type: 'tool', phase: 'completed',
+      ownerMessageKey: 'owner-message:run-1:0',
+      ownerTurnKey: 'owner-turn:run-1',
+      turnBindingSource: 'adapter',
+      turnBindingConfidence: 'high',
+      messageBindingSource: 'adapter',
+      messageBindingConfidence: 'high',
+      toolCallId: 'tool-read-1',
+      name: 'Read',
+      output: 'package content',
+      outputText: 'package content',
+      isError: false,
+    }, {
+      ...base('message-after-tool'),
+      seq: 4,
+      timestamp: 1_700_000_000_030,
+      type: 'message_part',
+      role: 'assistant',
+      messageId: 'assistant-after-tool',
+      ownerMessageKey: 'owner-message:run-1:0',
+      ownerTurnKey: 'owner-turn:run-1',
+      turnBindingSource: 'adapter',
+      turnBindingConfidence: 'high',
+      messageBindingSource: 'adapter',
+      messageBindingConfidence: 'high',
+      content: [{ type: 'text', text: '再总结' }],
+      text: '再总结',
+      status: 'final',
+    }]);
+
+    const items = buildRenderItemsFromCanonicalState({ state, executionGraphItems: [] });
+    const assistantTurns = items.filter((item) => item.kind === 'assistant-turn');
+
+    expect(assistantTurns).toHaveLength(1);
+    expect(assistantTurns[0]).toMatchObject({
+      turnKey: 'owner-turn:run-1',
+      text: '先读文件\n再总结',
+      tools: [{ toolCallId: 'tool-read-1', status: 'completed' }],
+      segments: [
+        { kind: 'message', text: '先读文件' },
+        { kind: 'tool', tool: { toolCallId: 'tool-read-1', status: 'completed' } },
+        { kind: 'message', text: '再总结' },
+      ],
+    });
+  });
+
+  it('hydrates transcript tool runs into one ordered assistant turn', () => {
+    const state = createEmptyCanonicalSessionState('agent:main:main', createOpenClawTestRuntimeContext('agent:main:main'));
+    const events = buildCanonicalReplayEventsFromTranscriptMessages('agent:main:main', [{
+      role: 'assistant',
+      messageId: 'assistant-before-tool',
+      agentId: 'agent-1',
+      timestamp: 1_700_000_000_000,
+      metadata: { runId: 'run-replay-tool' },
+      content: [{ type: 'text', text: '先读文件' }],
+    }, {
+      role: 'assistant',
+      messageId: 'assistant-tool-call',
+      agentId: 'agent-1',
+      timestamp: 1_700_000_000_010,
+      metadata: { runId: 'run-replay-tool' },
+      content: [{ type: 'tool_call', toolCallId: 'tool-read-1', name: 'Read', input: { file_path: 'package.json' } }],
+    }, {
+      role: 'tool_result',
+      toolCallId: 'tool-read-1',
+      toolName: 'Read',
+      agentId: 'agent-1',
+      timestamp: 1_700_000_000_020,
+      metadata: { runId: 'run-replay-tool' },
+      content: 'package content',
+    }, {
+      role: 'assistant',
+      messageId: 'assistant-after-tool',
+      agentId: 'agent-1',
+      timestamp: 1_700_000_000_030,
+      metadata: { runId: 'run-replay-tool' },
+      content: [{ type: 'text', text: '再总结' }],
+    }], openClawTestRuntimeIdentity);
+    reduceCanonicalSessionEvents(state, events);
+
+    const items = buildRenderItemsFromCanonicalState({ state, executionGraphItems: [] });
+    const assistantTurns = items.filter((item) => item.kind === 'assistant-turn');
+
+    expect(assistantTurns).toHaveLength(1);
+    expect(assistantTurns[0]).toMatchObject({
+      turnKey: 'transcript:agent:main:main:member:agent-1:run-replay-tool',
+      text: '先读文件\n再总结',
+      tools: [{ toolCallId: 'tool-read-1', status: 'completed' }],
+      segments: [
+        { kind: 'message', text: '先读文件' },
+        { kind: 'tool', tool: { toolCallId: 'tool-read-1', status: 'completed' } },
+        { kind: 'message', text: '再总结' },
+      ],
+    });
+  });
+
+  it('keeps replayed same-run assistant messages distinct when no tool participates in the run', () => {
+    const state = createEmptyCanonicalSessionState('agent:main:main', createOpenClawTestRuntimeContext('agent:main:main'));
+    const events = buildCanonicalReplayEventsFromTranscriptMessages('agent:main:main', [{
+      role: 'assistant',
+      messageId: 'assistant-1',
+      agentId: 'agent-1',
+      timestamp: 1_700_000_000_000,
+      metadata: { runId: 'run-replay-plain' },
+      content: [{ type: 'text', text: '第一条' }],
+    }, {
+      role: 'assistant',
+      messageId: 'assistant-2',
+      agentId: 'agent-1',
+      timestamp: 1_700_000_000_010,
+      metadata: { runId: 'run-replay-plain' },
+      content: [{ type: 'text', text: '第二条' }],
+    }], openClawTestRuntimeIdentity);
+    reduceCanonicalSessionEvents(state, events);
+
+    const items = buildRenderItemsFromCanonicalState({ state, executionGraphItems: [] });
+
+    expect(items.filter((item) => item.kind === 'assistant-turn')).toMatchObject([
+      { kind: 'assistant-turn', text: '第一条' },
+      { kind: 'assistant-turn', text: '第二条' },
+    ]);
+  });
+
+  it('keeps same-run assistant messages distinct when they do not share an explicit owner turn', () => {
+    const state = createEmptyCanonicalSessionState('agent:main:main', createOpenClawTestRuntimeContext('agent:main:main'));
+    reduceCanonicalSessionEvents(state, [{
+      ...base('message-before-tool'),
+      seq: 1,
+      timestamp: 1_700_000_000_000,
+      type: 'message_part',
       role: 'assistant',
       messageId: 'assistant-tool-call-message',
       content: [{ type: 'tool_call', toolCallId: 'tool-read-1', name: 'Read', input: { file_path: 'package.json' } }],
@@ -426,7 +586,7 @@ describe('Runtime Host canonical ACP projection', () => {
       ...base('tool-start-1'),
       seq: 2,
       timestamp: 1_700_000_000_010,
-      type: 'tool_call',
+      type: 'tool', phase: 'started',
       toolCallId: 'tool-read-1',
       name: 'Read',
       input: { file_path: 'package.json' },
@@ -434,7 +594,7 @@ describe('Runtime Host canonical ACP projection', () => {
       ...base('tool-result-1'),
       seq: 3,
       timestamp: 1_700_000_000_020,
-      type: 'tool_result',
+      type: 'tool', phase: 'completed',
       toolCallId: 'tool-read-1',
       output: 'package content',
       outputText: 'package content',
@@ -443,7 +603,7 @@ describe('Runtime Host canonical ACP projection', () => {
       ...base('message-after-tool'),
       seq: 4,
       timestamp: 1_700_000_000_030,
-      type: 'message_snapshot',
+      type: 'message_part',
       role: 'assistant',
       messageId: 'assistant-final-message',
       content: [{ type: 'text', text: '再总结' }],
@@ -467,7 +627,7 @@ describe('Runtime Host canonical ACP projection', () => {
     reduceCanonicalSessionEvents(state, [{
       ...base('assistant-1'),
       seq: 1,
-      type: 'message_snapshot',
+      type: 'message_part',
       role: 'assistant',
       content: [{ type: 'text', text: '第一条' }],
       text: '第一条',
@@ -475,7 +635,7 @@ describe('Runtime Host canonical ACP projection', () => {
     }, {
       ...base('assistant-2'),
       seq: 2,
-      type: 'message_snapshot',
+      type: 'message_part',
       role: 'assistant',
       content: [{ type: 'text', text: '第二条' }],
       text: '第二条',
@@ -495,7 +655,7 @@ describe('Runtime Host canonical ACP projection', () => {
     const state = createEmptyCanonicalSessionState('agent:main:main', createOpenClawTestRuntimeContext('agent:main:main'));
     reduceCanonicalSessionEvents(state, [{
       ...base('message-1'),
-      type: 'message_snapshot',
+      type: 'message_part',
       role: 'assistant',
       content: [{ type: 'text', text: '主人，晚上好。抹茶在。🍵' }],
       text: '主人，晚上好。抹茶在。🍵',
@@ -523,7 +683,7 @@ describe('Runtime Host canonical ACP projection', () => {
     const state = createEmptyCanonicalSessionState('agent:main:main', createOpenClawTestRuntimeContext('agent:main:main'));
     const event: CanonicalSessionEvent = {
       ...base('message-1'),
-      type: 'message_snapshot',
+      type: 'message_part',
       role: 'assistant',
       content: 'first',
       text: 'first',
@@ -623,7 +783,7 @@ describe('Runtime Host canonical ACP projection', () => {
     timelineRuntime.appendCanonicalEvents(sessionKey, [{
       ...base('user-1'),
       runId: 'run-user',
-      type: 'message_snapshot',
+      type: 'message_part',
       role: 'user',
       content: 'hello',
       text: 'hello',
@@ -631,7 +791,7 @@ describe('Runtime Host canonical ACP projection', () => {
     }, {
       ...base('assistant-1'),
       seq: 2,
-      type: 'message_snapshot',
+      type: 'message_part',
       role: 'assistant',
       messageId: 'assistant-1',
       content: 'working',
@@ -644,7 +804,7 @@ describe('Runtime Host canonical ACP projection', () => {
     timelineRuntime.appendCanonicalEvents(sessionKey, [{
       ...base('assistant-1-final'),
       seq: 3,
-      type: 'message_snapshot',
+      type: 'message_part',
       role: 'assistant',
       messageId: 'assistant-1',
       content: 'done',
@@ -665,7 +825,7 @@ describe('Runtime Host canonical ACP projection', () => {
 
     timelineRuntime.appendCanonicalEvents(sessionKey, [{
       ...base('assistant-owner-message'),
-      type: 'message_snapshot',
+      type: 'message_part',
       role: 'assistant',
       messageId: 'assistant-1',
       ownerMessageKey: 'message:main:assistant-1',
@@ -685,7 +845,7 @@ describe('Runtime Host canonical ACP projection', () => {
       ...base('assistant-owner-tool-start'),
       seq: 2,
       timestamp: 1_700_000_000_010,
-      type: 'tool_call',
+      type: 'tool', phase: 'started',
       ownerTurnKey: 'message:main:assistant-1',
       turnBindingSource: 'adapter',
       turnBindingConfidence: 'high',
@@ -722,7 +882,7 @@ describe('Runtime Host canonical ACP projection', () => {
 
     timelineRuntime.appendCanonicalEvents(sessionKey, [{
       ...base('message-1'),
-      type: 'message_snapshot',
+      type: 'message_part',
       role: 'assistant',
       content: 'ready',
       text: 'ready',
@@ -754,7 +914,7 @@ describe('Runtime Host canonical ACP projection', () => {
 
     timelineRuntime.appendCanonicalEvents(sessionKey, [{
       ...base('message-1'),
-      type: 'message_snapshot',
+      type: 'message_part',
       role: 'assistant',
       content: 'ready',
       text: 'ready',
@@ -799,14 +959,14 @@ describe('Runtime Host canonical ACP projection', () => {
 
     timelineRuntime.appendCanonicalEvents(sessionKey, [{
       ...base('tool-call-1'),
-      type: 'tool_call',
+      type: 'tool', phase: 'started',
       toolCallId: 'tool-read-1',
       name: 'Read',
       input: { file_path: 'package.json' },
     }, {
       ...base('tool-result-1'),
       seq: 2,
-      type: 'tool_result',
+      type: 'tool', phase: 'completed',
       toolCallId: 'tool-read-1',
       name: 'Read',
       output: 'package content',
@@ -817,7 +977,7 @@ describe('Runtime Host canonical ACP projection', () => {
     timelineRuntime.appendCanonicalEvents(sessionKey, [{
       ...base('message-1'),
       seq: 3,
-      type: 'message_snapshot',
+      type: 'message_part',
       role: 'assistant',
       messageId: 'assistant-tool-message',
       ownerMessageKey: 'message:main:assistant-tool-message',
@@ -836,7 +996,7 @@ describe('Runtime Host canonical ACP projection', () => {
       ...base('tool-result-1-rebound'),
       seq: 4,
       timestamp: 1_700_000_000_030,
-      type: 'tool_result',
+      type: 'tool', phase: 'completed',
       ownerMessageKey: 'message:main:assistant-tool-message',
       ownerTurnKey: 'message:main:assistant-tool-message',
       turnBindingSource: 'adapter',

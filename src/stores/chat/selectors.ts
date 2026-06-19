@@ -107,6 +107,7 @@ function buildAgentSessionsPaneState(state: ChatStoreState, sessionEntries: Agen
     currentAgentId: resolveCurrentAgentId(state),
     switchSession: state.switchSession,
     openAgentConversation: state.openAgentConversation,
+    openSessionIdentity: state.openSessionIdentity,
     newSession: state.newSession,
     deleteSession: state.deleteSession,
     renameSession: state.renameSession,
@@ -168,6 +169,7 @@ export function selectAgentSessionsPaneState(state: ChatStoreState) {
     && cachedAgentSessionsPaneState.currentAgentId === resolveCurrentAgentId(state)
     && cachedAgentSessionsPaneState.switchSession === state.switchSession
     && cachedAgentSessionsPaneState.openAgentConversation === state.openAgentConversation
+    && cachedAgentSessionsPaneState.openSessionIdentity === state.openSessionIdentity
     && cachedAgentSessionsPaneState.newSession === state.newSession
     && cachedAgentSessionsPaneState.deleteSession === state.deleteSession
     && cachedAgentSessionsPaneState.renameSession === state.renameSession

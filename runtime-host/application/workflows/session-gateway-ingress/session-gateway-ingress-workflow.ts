@@ -135,8 +135,8 @@ export class SessionGatewayIngressWorkflow {
       }];
     }
     const isChunk = canonicalEvents.some((event) => (
-      (event.type === 'message_snapshot' || event.type === 'thought_snapshot') && event.status === 'streaming'
-    )) || canonicalEvents.some((event) => event.type === 'tool_call' || event.type === 'tool_progress');
+      (event.type === 'message_part' || event.type === 'thought') && event.status === 'streaming'
+    )) || canonicalEvents.some((event) => event.type === 'tool' && (event.phase === 'started' || event.phase === 'updated'));
     return [{
       sessionUpdate: isChunk ? 'session_item_chunk' : 'session_item',
       sessionKey: sessionId,
@@ -149,9 +149,9 @@ export class SessionGatewayIngressWorkflow {
   private resolvePrimaryCanonicalItem(state: SessionRuntimeTimelineState, events: ReadonlyArray<CanonicalSessionEvent>): SessionRenderItem | null {
     for (let index = events.length - 1; index >= 0; index -= 1) {
       const event = events[index]!;
-      const itemKey = event.type === 'message_snapshot'
+      const itemKey = event.type === 'message_part'
         ? state.renderItemKeyIndex.messageItemKeyByCanonicalKey.get(buildCanonicalMessageStateKey(event))
-        : (event.type === 'tool_call' || event.type === 'tool_progress' || event.type === 'tool_result')
+        : event.type === 'tool'
           ? state.renderItemKeyIndex.toolItemKeyByCanonicalKey.get(buildCanonicalToolStateKey(event))
           : undefined;
       if (itemKey) {
@@ -160,7 +160,7 @@ export class SessionGatewayIngressWorkflow {
           return state.renderItems[itemIndex] ?? null;
         }
       }
-      if (event.type === 'thought_snapshot') {
+      if (event.type === 'thought') {
         const laneKey = event.laneKey || 'main';
         for (let itemIndex = state.renderItems.length - 1; itemIndex >= 0; itemIndex -= 1) {
           const item = state.renderItems[itemIndex];

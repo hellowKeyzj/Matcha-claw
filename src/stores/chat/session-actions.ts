@@ -44,6 +44,7 @@ import {
   buildSessionIdentityRecordIndex,
   buildSessionRecordKey,
   findAgentScope,
+  findSessionRecordKey,
   resolveSessionOperationTarget,
   sameRuntimeEndpointScope,
 } from './session-identity';
@@ -496,6 +497,40 @@ export function executeOpenAgentConversation(input: CreateStoreSessionActionsInp
     return;
   }
   get().newSession(normalized);
+}
+
+export function executeOpenSessionIdentity(input: CreateStoreSessionActionsInput, identity: SessionIdentity): void {
+  const { get, set } = input;
+  const recordKey = findSessionRecordKey(get(), identity) ?? buildSessionRecordKey(identity);
+  if (get().loadedSessions[recordKey]) {
+    get().switchSession(recordKey);
+    return;
+  }
+  set((state) => {
+    const loadedSessions = patchSessionMeta({
+      loadedSessions: ensureSessionRecordMap(state.loadedSessions, recordKey),
+    }, recordKey, {
+      backendSessionKey: identity.sessionKey,
+      runtimeScopeKey: buildRuntimeScopeKey(identity.endpoint),
+      agentId: identity.agentId,
+      sessionIdentity: identity,
+      kind: 'session',
+      preferred: false,
+      historyStatus: 'loading',
+    });
+    return {
+      loadedSessions,
+      sessionRecordKeyByIdentityKey: buildSessionIdentityRecordIndex(loadedSessions),
+      currentSessionKey: recordKey,
+      error: null,
+    };
+  });
+  void get().loadHistory({
+    sessionKey: recordKey,
+    mode: 'active',
+    scope: 'foreground',
+    reason: 'open_session_identity',
+  });
 }
 
 export function executeSwitchSession(input: CreateStoreSessionActionsInput, key: string): void {

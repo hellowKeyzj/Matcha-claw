@@ -44,7 +44,7 @@ function buildStreamingShellSession() {
   const state = createEmptyCanonicalSessionState('agent:test:main', createOpenClawTestRuntimeContext('agent:test:main'));
   reduceCanonicalSessionEvents(state, [{
     eventId: 'assistant-empty-stream',
-    type: 'message_snapshot',
+    type: 'message_part',
     protocolId: OPENCLAW_RUNTIME_PROTOCOL_ID,
     runtimeEndpointId: OPENCLAW_RUNTIME_ENDPOINT_ID,
     source: 'live',

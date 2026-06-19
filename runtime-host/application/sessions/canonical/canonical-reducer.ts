@@ -10,11 +10,10 @@ import type {
   CanonicalBindingConfidence,
   CanonicalBindingSource,
   CanonicalLifecycleEvent,
-  CanonicalMessageSnapshotEvent,
+  CanonicalMessagePartEvent,
   CanonicalSessionEvent,
-  CanonicalToolCallEvent,
-  CanonicalToolProgressEvent,
-  CanonicalToolResultEvent,
+  CanonicalThoughtEvent,
+  CanonicalToolEvent,
 } from './canonical-events';
 import type {
   CanonicalControlState,
@@ -35,7 +34,7 @@ function laneKeyOf(event: Pick<CanonicalSessionEvent, 'laneKey'>): string {
   return event.laneKey || 'main';
 }
 
-export function resolveCanonicalMessageIdentity(event: CanonicalMessageSnapshotEvent): {
+export function resolveCanonicalMessageIdentity(event: CanonicalMessagePartEvent): {
   key: string;
   ownerMessageKey: string;
   messageBindingSource: CanonicalBindingSource;
@@ -110,7 +109,7 @@ export function resolveCanonicalOwnerBindings(event: CanonicalSessionEvent): {
   messageBindingConfidence: CanonicalBindingConfidence | undefined;
 } {
   const turnBinding = resolveCanonicalTurnBinding(event);
-  if (event.type === 'message_snapshot') {
+  if (event.type === 'message_part') {
     const messageIdentity = resolveCanonicalMessageIdentity(event);
     return {
       ...turnBinding,
@@ -135,7 +134,7 @@ function hasExplicitTurnBinding(binding: {
 }
 
 function resolveRuntimePendingTurnKeyForMessage(
-  event: CanonicalMessageSnapshotEvent,
+  event: CanonicalMessagePartEvent,
   currentPendingTurnKey: string | null,
 ): string | null {
   const ownerBindings = resolveCanonicalOwnerBindings(event);
@@ -150,7 +149,7 @@ function resolveRuntimePendingTurnKeyForMessage(
 }
 
 function resolveRuntimePendingTurnKeyForTool(
-  event: CanonicalToolCallEvent | CanonicalToolProgressEvent | CanonicalToolResultEvent,
+  event: CanonicalToolEvent,
   currentPendingTurnKey: string | null,
 ): string | null {
   const ownerBindings = resolveCanonicalOwnerBindings(event);
@@ -163,11 +162,11 @@ function resolveRuntimePendingTurnKeyForTool(
     ?? currentPendingTurnKey;
 }
 
-export function buildCanonicalMessageStateKey(event: CanonicalMessageSnapshotEvent): string {
+export function buildCanonicalMessageStateKey(event: CanonicalMessagePartEvent): string {
   return resolveCanonicalMessageIdentity(event).key;
 }
 
-function thoughtKey(event: CanonicalSessionEvent & { thoughtId?: string }): string {
+function thoughtKey(event: CanonicalThoughtEvent): string {
   return `thought:${laneKeyOf(event)}:${event.thoughtId || event.runId || event.seq || event.eventId}`;
 }
 
@@ -200,7 +199,7 @@ function setOwnerKeys(map: Map<string, string[]>, previousOwnerKey: string | und
   }
 }
 
-function upsertMessage(state: CanonicalSessionState, event: CanonicalMessageSnapshotEvent): void {
+function upsertMessage(state: CanonicalSessionState, event: CanonicalMessagePartEvent): void {
   const messageIdentity = resolveCanonicalMessageIdentity(event);
   const turnBinding = resolveCanonicalTurnBinding(event);
   const key = messageIdentity.key;
@@ -246,7 +245,7 @@ function upsertMessage(state: CanonicalSessionState, event: CanonicalMessageSnap
   state.messageIndexByMessageKey.set(next.ownerMessageKey ?? key, index >= 0 ? index : state.messages.length - 1);
 }
 
-function upsertThought(state: CanonicalSessionState, event: CanonicalSessionEvent & { text: string; status: CanonicalMessageState['status']; thoughtId?: string }): void {
+function upsertThought(state: CanonicalSessionState, event: CanonicalThoughtEvent): void {
   const ownerBindings = resolveCanonicalOwnerBindings(event);
   const key = thoughtKey(event);
   const index = state.thoughtIndexByKey.get(key) ?? -1;
@@ -278,79 +277,17 @@ function upsertThought(state: CanonicalSessionState, event: CanonicalSessionEven
   setOwnerKeys(state.thoughtKeysByOwnerTurnKey, previous?.ownerTurnKey, next.ownerTurnKey, key);
 }
 
-function upsertToolCall(state: CanonicalSessionState, event: CanonicalToolCallEvent): void {
+function upsertTool(state: CanonicalSessionState, event: CanonicalToolEvent): void {
   const ownerBindings = resolveCanonicalOwnerBindings(event);
   const key = buildCanonicalToolStateKey(event);
   const index = state.toolIndexByKey.get(key) ?? -1;
   const previous = index >= 0 ? state.tools[index] : null;
   const now = eventTime(event);
-  const next: CanonicalToolState = {
-    key,
-    toolCallId: event.toolCallId,
-    ...(event.runId ? { runId: event.runId } : {}),
-    ...(event.turnId ? { turnId: event.turnId } : previous?.turnId ? { turnId: previous.turnId } : {}),
-    laneKey: laneKeyOf(event),
-    ...(event.agentId ? { agentId: event.agentId } : {}),
-    ...(ownerBindings.ownerTurnKey ? { ownerTurnKey: ownerBindings.ownerTurnKey } : previous?.ownerTurnKey ? { ownerTurnKey: previous.ownerTurnKey } : {}),
-    ...(ownerBindings.ownerMessageKey ? { ownerMessageKey: ownerBindings.ownerMessageKey } : previous?.ownerMessageKey ? { ownerMessageKey: previous.ownerMessageKey } : {}),
-    ...(ownerBindings.turnBindingSource ? { turnBindingSource: ownerBindings.turnBindingSource } : previous?.turnBindingSource ? { turnBindingSource: previous.turnBindingSource } : {}),
-    ...(ownerBindings.turnBindingConfidence ? { turnBindingConfidence: ownerBindings.turnBindingConfidence } : previous?.turnBindingConfidence ? { turnBindingConfidence: previous.turnBindingConfidence } : {}),
-    ...(ownerBindings.messageBindingSource ? { messageBindingSource: ownerBindings.messageBindingSource } : previous?.messageBindingSource ? { messageBindingSource: previous.messageBindingSource } : {}),
-    ...(ownerBindings.messageBindingConfidence ? { messageBindingConfidence: ownerBindings.messageBindingConfidence } : previous?.messageBindingConfidence ? { messageBindingConfidence: previous.messageBindingConfidence } : {}),
-    name: event.name,
-    ...(event.input !== undefined ? { input: structuredClone(event.input) } : previous?.input !== undefined ? { input: structuredClone(previous.input) } : {}),
-    ...(previous?.partialResult !== undefined ? { partialResult: structuredClone(previous.partialResult) } : {}),
-    ...(previous?.output !== undefined ? { output: structuredClone(previous.output) } : {}),
-    ...(previous?.outputText !== undefined ? { outputText: previous.outputText } : {}),
-    status: previous?.status === 'completed' || previous?.status === 'error' ? previous.status : 'running',
-    ...(event.seq != null ? { seq: event.seq } : previous?.seq != null ? { seq: previous.seq } : {}),
-    ...(previous?.createdAt != null ? { createdAt: previous.createdAt } : now != null ? { createdAt: now } : {}),
-    ...(now != null ? { updatedAt: now } : previous?.updatedAt != null ? { updatedAt: previous.updatedAt } : {}),
-  };
-  if (index >= 0) {
-    state.tools[index] = next;
-  } else {
-    state.toolIndexByKey.set(key, state.tools.length);
-    state.tools.push(next);
-  }
-  setOwnerKeys(state.toolKeysByOwnerMessageKey, previous?.ownerMessageKey, next.ownerMessageKey, key);
-  setOwnerKeys(state.toolKeysByOwnerTurnKey, previous?.ownerTurnKey, next.ownerTurnKey, key);
-}
-
-function upsertToolProgress(state: CanonicalSessionState, event: CanonicalToolProgressEvent): void {
-  const ownerBindings = resolveCanonicalOwnerBindings(event);
-  const key = buildCanonicalToolStateKey(event);
-  const index = state.toolIndexByKey.get(key) ?? -1;
-  if (index < 0) {
-    return;
-  }
-  const previous = state.tools[index]!;
-  const next: CanonicalToolState = {
-    ...previous,
-    ...(event.partialResult !== undefined ? { partialResult: structuredClone(event.partialResult) } : {}),
-    ...(event.outputText !== undefined ? { outputText: event.outputText } : {}),
-    ...(event.turnId ? { turnId: event.turnId } : {}),
-    ...(ownerBindings.ownerTurnKey ? { ownerTurnKey: ownerBindings.ownerTurnKey } : {}),
-    ...(ownerBindings.ownerMessageKey ? { ownerMessageKey: ownerBindings.ownerMessageKey } : {}),
-    ...(ownerBindings.turnBindingSource ? { turnBindingSource: ownerBindings.turnBindingSource } : {}),
-    ...(ownerBindings.turnBindingConfidence ? { turnBindingConfidence: ownerBindings.turnBindingConfidence } : {}),
-    ...(ownerBindings.messageBindingSource ? { messageBindingSource: ownerBindings.messageBindingSource } : {}),
-    ...(ownerBindings.messageBindingConfidence ? { messageBindingConfidence: ownerBindings.messageBindingConfidence } : {}),
-    status: 'running',
-    ...(event.seq != null ? { seq: event.seq } : {}),
-    ...(eventTime(event) != null ? { updatedAt: eventTime(event) } : {}),
-  };
-  state.tools[index] = next;
-  setOwnerKeys(state.toolKeysByOwnerMessageKey, previous.ownerMessageKey, next.ownerMessageKey, key);
-  setOwnerKeys(state.toolKeysByOwnerTurnKey, previous.ownerTurnKey, next.ownerTurnKey, key);
-}
-
-function upsertToolResult(state: CanonicalSessionState, event: CanonicalToolResultEvent): void {
-  const ownerBindings = resolveCanonicalOwnerBindings(event);
-  const key = buildCanonicalToolStateKey(event);
-  const index = state.toolIndexByKey.get(key) ?? -1;
-  const previous = index >= 0 ? state.tools[index] : null;
-  const now = eventTime(event);
+  const status = event.phase === 'failed'
+    ? 'error'
+    : event.phase === 'completed'
+      ? 'completed'
+      : 'running';
   const next: CanonicalToolState = {
     key,
     toolCallId: event.toolCallId,
@@ -365,14 +302,14 @@ function upsertToolResult(state: CanonicalSessionState, event: CanonicalToolResu
     ...(ownerBindings.messageBindingSource ? { messageBindingSource: ownerBindings.messageBindingSource } : previous?.messageBindingSource ? { messageBindingSource: previous.messageBindingSource } : {}),
     ...(ownerBindings.messageBindingConfidence ? { messageBindingConfidence: ownerBindings.messageBindingConfidence } : previous?.messageBindingConfidence ? { messageBindingConfidence: previous.messageBindingConfidence } : {}),
     name: event.name || previous?.name || '',
-    ...(previous?.input !== undefined ? { input: structuredClone(previous.input) } : {}),
-    ...(previous?.partialResult !== undefined ? { partialResult: structuredClone(previous.partialResult) } : {}),
-    ...(event.output !== undefined ? { output: structuredClone(event.output) } : {}),
+    ...(event.input !== undefined ? { input: structuredClone(event.input) } : previous?.input !== undefined ? { input: structuredClone(previous.input) } : {}),
+    ...(event.partialResult !== undefined ? { partialResult: structuredClone(event.partialResult) } : previous?.partialResult !== undefined ? { partialResult: structuredClone(previous.partialResult) } : {}),
+    ...(event.output !== undefined ? { output: structuredClone(event.output) } : previous?.output !== undefined ? { output: structuredClone(previous.output) } : {}),
     ...(event.outputText !== undefined ? { outputText: event.outputText } : previous?.outputText !== undefined ? { outputText: previous.outputText } : {}),
-    status: event.isError ? 'error' : 'completed',
+    status,
     ...(event.seq != null ? { seq: event.seq } : previous?.seq != null ? { seq: previous.seq } : {}),
     ...(previous?.createdAt != null ? { createdAt: previous.createdAt } : now != null ? { createdAt: now } : {}),
-    ...(now != null ? { updatedAt: now } : {}),
+    ...(now != null ? { updatedAt: now } : previous?.updatedAt != null ? { updatedAt: previous.updatedAt } : {}),
   };
   if (index >= 0) {
     state.tools[index] = next;
@@ -486,7 +423,7 @@ function messageHasToolCall(content: unknown): boolean {
   });
 }
 
-function applyMessageRuntime(state: CanonicalSessionState, event: CanonicalMessageSnapshotEvent): void {
+function applyMessageRuntime(state: CanonicalSessionState, event: CanonicalMessagePartEvent): void {
   if (event.source === 'replay' || !canMutateRuntimeForRun(state, event)) {
     return;
   }
@@ -597,11 +534,11 @@ function pruneExpiredApprovals(state: CanonicalSessionState, nowMs: number): voi
   }
 }
 
-function applyToolRuntime(state: CanonicalSessionState, event: CanonicalToolCallEvent | CanonicalToolProgressEvent | CanonicalToolResultEvent): void {
+function applyToolRuntime(state: CanonicalSessionState, event: CanonicalToolEvent): void {
   if (event.source === 'replay' || !canMutateRuntimeForRun(state, event)) {
     return;
   }
-  if (event.type === 'tool_call' || event.type === 'tool_progress') {
+  if (event.phase === 'started' || event.phase === 'updated') {
     if (isStoppingActiveRunEvent(state, event)) {
       return;
     }
@@ -689,23 +626,15 @@ export function reduceCanonicalSessionEvent(state: CanonicalSessionState, event:
         state.hydrated = true;
       }
       break;
-    case 'message_snapshot':
+    case 'message_part':
       upsertMessage(state, event);
       applyMessageRuntime(state, event);
       break;
-    case 'thought_snapshot':
+    case 'thought':
       upsertThought(state, event);
       break;
-    case 'tool_call':
-      upsertToolCall(state, event);
-      applyToolRuntime(state, event);
-      break;
-    case 'tool_progress':
-      upsertToolProgress(state, event);
-      applyToolRuntime(state, event);
-      break;
-    case 'tool_result':
-      upsertToolResult(state, event);
+    case 'tool':
+      upsertTool(state, event);
       applyToolRuntime(state, event);
       break;
     case 'lifecycle':

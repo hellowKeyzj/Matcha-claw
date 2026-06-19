@@ -41,13 +41,72 @@ describe('ACP protocol adapter', () => {
     expect(events).toMatchObject([{
       protocolId: 'acp',
       runtimeEndpointId: 'claude-code',
-      type: 'message_snapshot',
+      type: 'message_part',
       sessionId: 'claude-code:session:1',
       runId: 'run-1',
       messageId: 'msg-1',
       text: 'hello',
       status: 'final',
     }]);
+  });
+
+  it('reads ACP message role from nested payload message', () => {
+    const adapter = new AcpProtocolAdapter();
+    const context = acpContext();
+
+    const [event] = adapter.eventAdapter.translate({
+      jsonrpc: '2.0',
+      method: 'session/message',
+      params: {
+        runId: 'run-1',
+        message: {
+          role: 'user',
+          content: 'nested hello',
+        },
+      },
+    }, context);
+
+    expect(event).toMatchObject({
+      type: 'message_part',
+      role: 'user',
+      text: 'nested hello',
+    });
+  });
+
+  it('keeps ACP messages without message id or seq distinct by stable content', () => {
+    const adapter = new AcpProtocolAdapter();
+    const context = acpContext();
+
+    const [firstEvent] = adapter.eventAdapter.translate({
+      jsonrpc: '2.0',
+      method: 'session/message',
+      params: {
+        runId: 'run-1',
+        role: 'assistant',
+        text: 'first segment',
+      },
+    }, context);
+    const [secondEvent] = adapter.eventAdapter.translate({
+      jsonrpc: '2.0',
+      method: 'session/message',
+      params: {
+        runId: 'run-1',
+        role: 'assistant',
+        text: 'second segment',
+      },
+    }, context);
+
+    expect(firstEvent?.eventId).not.toBe(secondEvent?.eventId);
+    expect(firstEvent).toMatchObject({
+      type: 'message_part',
+      partId: expect.not.stringContaining(':message'),
+      text: 'first segment',
+    });
+    expect(secondEvent).toMatchObject({
+      type: 'message_part',
+      partId: expect.not.stringContaining(':message'),
+      text: 'second segment',
+    });
   });
 
   it('keeps explicit ACP message ids stable across agents', () => {
@@ -112,10 +171,56 @@ describe('ACP protocol adapter', () => {
     expect(events[0]).toMatchObject({
       protocolId: 'acp',
       runtimeEndpointId: 'claude-code',
+      source: 'replay',
       sessionId: 'claude-code:session:1',
       messageId: 'msg-1',
     });
     expect((events[0] as { eventId: string }).eventId).toContain(`acp:${buildRuntimeEndpointKey(context.identity.endpoint)}:message:claude-code:session:1:run-1:msg-1`);
+  });
+
+  it('replays generic transcript message lines through canonical replay with boundaries', async () => {
+    const adapter = new AcpProtocolAdapter();
+    const context = acpContext('reviewer');
+
+    const events: unknown[] = [];
+    for await (const event of adapter.replayAdapter.replayTranscript('claude-code:session:1', [
+      '{"message":{"role":"user","content":"hello","metadata":{"runId":"run-1"}}}',
+      '{"role":"assistant","content":"hi","metadata":{"runId":"run-1"}}',
+      'not-json',
+    ], context)) {
+      events.push(event);
+    }
+
+    expect(events.map((event) => (event as { type: string }).type)).toEqual([
+      'replay_boundary',
+      'message_part',
+      'message_part',
+      'replay_boundary',
+    ]);
+    expect(events[0]).toMatchObject({
+      type: 'replay_boundary',
+      source: 'replay',
+      phase: 'start',
+    });
+    expect(events[1]).toMatchObject({
+      type: 'message_part',
+      source: 'replay',
+      role: 'user',
+      runId: 'run-1',
+      text: 'hello',
+    });
+    expect(events[2]).toMatchObject({
+      type: 'message_part',
+      source: 'replay',
+      role: 'assistant',
+      runId: 'run-1',
+      text: 'hi',
+    });
+    expect(events[3]).toMatchObject({
+      type: 'replay_boundary',
+      source: 'replay',
+      phase: 'end',
+    });
   });
 
   it('does not collide message ids for different agents on the same ACP endpoint', () => {

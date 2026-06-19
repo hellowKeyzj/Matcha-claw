@@ -335,26 +335,17 @@ function contentToolCallId(block: Record<string, unknown>): string {
   return resolveToolRecordCallId(block);
 }
 
-function buildSegmentsFromCanonicalMessage(message: CanonicalMessageState, tools: ReadonlyArray<CanonicalToolState>, thoughts: ReadonlyArray<CanonicalThoughtState> = []): SessionAssistantTurnSegment[] {
-  const laneKey = message.laneKey || 'main';
-  const turnKey = messageTurnKey(message);
-  const segments: SessionAssistantTurnSegment[] = [];
-  const renderedToolCallIds = new Set<string>();
-  const toolByCallId = new Map(tools.map((tool) => [tool.toolCallId, tool]));
-  const content = Array.isArray(message.content) ? message.content : null;
-  let slot = 0;
-
-  for (const thought of thoughts) {
-    if (!thought.text.trim()) {
-      continue;
-    }
-    segments.push({
-      kind: 'thinking',
-      key: `thinking:${turnKey}:${laneKey}:state:${segments.length}`,
-      text: thought.text.trim(),
-    });
-  }
-
+function appendMessageContentSegments(input: {
+  segments: SessionAssistantTurnSegment[];
+  renderedToolCallIds: Set<string>;
+  message: CanonicalMessageState;
+  toolsByCallId: ReadonlyMap<string, CanonicalToolState>;
+  turnKey: string;
+  laneKey: string;
+  slotOffset: number;
+}): number {
+  const content = Array.isArray(input.message.content) ? input.message.content : null;
+  let slot = input.slotOffset;
   if (content) {
     for (const block of content) {
       const row = asRecord(block);
@@ -364,15 +355,21 @@ function buildSegmentsFromCanonicalMessage(message: CanonicalMessageState, tools
       const type = typeof row.type === 'string' ? row.type : '';
       const toolCallId = contentToolCallId(row);
       if (toolCallId) {
-        const tool = toolByCallId.get(toolCallId);
+        const tool = input.toolsByCallId.get(toolCallId);
         if (tool) {
-          appendToolSegment({ segments, renderedToolCallIds, turnKey, laneKey, tool });
+          appendToolSegment({
+            segments: input.segments,
+            renderedToolCallIds: input.renderedToolCallIds,
+            turnKey: input.turnKey,
+            laneKey: input.laneKey,
+            tool,
+          });
         }
         continue;
       }
-      const segmentKey = `${turnKey}:${laneKey}:${slot++}`;
+      const segmentKey = `${input.turnKey}:${input.laneKey}:${slot++}`;
       if ((type === 'thinking' || type === 'thought') && (typeof row.thinking === 'string' || typeof row.text === 'string')) {
-        segments.push({
+        input.segments.push({
           kind: 'thinking',
           key: `thinking:${segmentKey}`,
           text: String(row.thinking ?? row.text).trim(),
@@ -382,7 +379,7 @@ function buildSegmentsFromCanonicalMessage(message: CanonicalMessageState, tools
       if (type === 'text' && typeof row.text === 'string') {
         const text = sanitizeAssistantDisplayText(row.text);
         if (text) {
-          segments.push({
+          input.segments.push({
             kind: 'message',
             key: `message:${segmentKey}`,
             text,
@@ -397,45 +394,114 @@ function buildSegmentsFromCanonicalMessage(message: CanonicalMessageState, tools
           attachedFiles: extractImageFiles([row]),
         });
         if (mediaSegment) {
-          segments.push(mediaSegment);
+          input.segments.push(mediaSegment);
         }
       }
     }
   }
 
-  if (segments.length === 0) {
-    for (const text of readThinkingFromContent(message.content)) {
-      segments.push({
+  if (slot === input.slotOffset) {
+    for (const text of readThinkingFromContent(input.message.content)) {
+      input.segments.push({
         kind: 'thinking',
-        key: `thinking:${turnKey}:${laneKey}:${segments.length}`,
+        key: `thinking:${input.turnKey}:${input.laneKey}:${slot++}`,
         text: text.trim(),
       });
     }
-    const text = sanitizeAssistantDisplayText(message.text || readTextFromContent(message.content));
+    const text = sanitizeAssistantDisplayText(input.message.text || readTextFromContent(input.message.content));
     if (text) {
-      segments.push({
+      input.segments.push({
         kind: 'message',
-        key: `message:${turnKey}:${laneKey}:${segments.length}`,
+        key: `message:${input.turnKey}:${input.laneKey}:${slot++}`,
         text,
       });
     }
   }
 
-  for (const tool of tools) {
-    appendToolSegment({ segments, renderedToolCallIds, turnKey, laneKey, tool });
-  }
-
-  const extraMessageMedia = mergeMedia({ attachedFiles: messageAttachedFiles(message) });
+  const extraMessageMedia = mergeMedia({ attachedFiles: messageAttachedFiles(input.message) });
   const mediaSegment = buildMediaSegment({
-    key: `media:${turnKey}:${laneKey}:message`,
+    key: `media:${input.turnKey}:${input.laneKey}:message:${input.message.key}`,
     images: extraMessageMedia.images,
     attachedFiles: extraMessageMedia.attachedFiles,
   });
-  if (mediaSegment && !segments.some((segment) => segment.key === mediaSegment.key)) {
-    segments.push(mediaSegment);
+  if (mediaSegment && !input.segments.some((segment) => segment.key === mediaSegment.key)) {
+    input.segments.push(mediaSegment);
+  }
+  return slot;
+}
+
+function canonicalRowOrderValue(value: { seq?: number; createdAt?: number; updatedAt?: number }, fallbackIndex: number): number {
+  if (typeof value.seq === 'number') {
+    return value.seq;
+  }
+  if (typeof value.createdAt === 'number') {
+    return value.createdAt;
+  }
+  if (typeof value.updatedAt === 'number') {
+    return value.updatedAt;
+  }
+  return fallbackIndex;
+}
+
+type AssistantTurnSegmentRow =
+  | { kind: 'message'; message: CanonicalMessageState; order: number; index: number }
+  | { kind: 'tool'; tool: CanonicalToolState; order: number; index: number }
+  | { kind: 'thought'; thought: CanonicalThoughtState; order: number; index: number };
+
+function buildSegmentsFromCanonicalTurnRows(input: {
+  turnKey: string;
+  laneKey: string;
+  messages: ReadonlyArray<CanonicalMessageState>;
+  tools: ReadonlyArray<CanonicalToolState>;
+  thoughts: ReadonlyArray<CanonicalThoughtState>;
+}): SessionAssistantTurnSegment[] {
+  const segments: SessionAssistantTurnSegment[] = [];
+  const renderedToolCallIds = new Set<string>();
+  const toolsByCallId = new Map(input.tools.map((tool) => [tool.toolCallId, tool]));
+  let slot = 0;
+  const rows: AssistantTurnSegmentRow[] = [
+    ...input.messages.map((message, index) => ({ kind: 'message' as const, message, order: canonicalRowOrderValue(message, index), index })),
+    ...input.tools.map((tool, index) => ({ kind: 'tool' as const, tool, order: canonicalRowOrderValue(tool, input.messages.length + index), index })),
+    ...input.thoughts.map((thought, index) => ({ kind: 'thought' as const, thought, order: canonicalRowOrderValue(thought, input.messages.length + input.tools.length + index), index })),
+  ].sort((left, right) => left.order - right.order || left.index - right.index);
+
+  for (const row of rows) {
+    if (row.kind === 'message') {
+      slot = appendMessageContentSegments({
+        segments,
+        renderedToolCallIds,
+        message: row.message,
+        toolsByCallId,
+        turnKey: input.turnKey,
+        laneKey: input.laneKey,
+        slotOffset: slot,
+      });
+      continue;
+    }
+    if (row.kind === 'tool') {
+      appendToolSegment({ segments, renderedToolCallIds, turnKey: input.turnKey, laneKey: input.laneKey, tool: row.tool });
+      continue;
+    }
+    if (row.thought.text.trim()) {
+      segments.push({
+        kind: 'thinking',
+        key: `thinking:${input.turnKey}:${input.laneKey}:state:${row.thought.key}`,
+        text: row.thought.text.trim(),
+      });
+    }
   }
 
   return segments.filter((segment) => segment.kind !== 'thinking' || segment.text.trim().length > 0);
+}
+
+function buildSegmentsFromCanonicalMessage(message: CanonicalMessageState, tools: ReadonlyArray<CanonicalToolState>, thoughts: ReadonlyArray<CanonicalThoughtState> = []): SessionAssistantTurnSegment[] {
+  return buildSegmentsFromCanonicalTurnRows({
+    turnKey: messageTurnKey(message),
+    laneKey: message.laneKey || 'main',
+    messages: [message],
+    tools,
+    thoughts,
+  });
 }
 
 function groupKey(runId: string | undefined, laneKey: string): string {
@@ -742,6 +808,76 @@ export function buildAssistantEntry(sessionId: string, message: CanonicalMessage
   });
 }
 
+function combinedAssistantStatus(messages: ReadonlyArray<CanonicalMessageState>, tools: ReadonlyArray<CanonicalToolState>): SessionTimelineAssistantTurnEntry['status'] {
+  if (messages.some((message) => message.status === 'error')) {
+    return 'error';
+  }
+  if (messages.some((message) => message.status === 'aborted')) {
+    return 'aborted';
+  }
+  if (messages.some((message) => message.status === 'streaming') || tools.some((tool) => tool.status === 'running')) {
+    return 'streaming';
+  }
+  return 'final';
+}
+
+function buildAssistantEntryForTurn(input: {
+  sessionId: string;
+  turnKey: string;
+  messages: ReadonlyArray<CanonicalMessageState>;
+  tools: ReadonlyArray<CanonicalToolState>;
+  thoughts: ReadonlyArray<CanonicalThoughtState>;
+}): SessionTimelineAssistantTurnEntry | null {
+  const messageOwner = pickAssistantGroupOwner(input.messages);
+  const toolOwner = input.tools[0];
+  const owner = messageOwner ?? toolOwner;
+  if (!owner) {
+    return null;
+  }
+  const laneKey = owner.laneKey || 'main';
+  const identity = messageOwner ? messageTurnIdentity(messageOwner) : toolTurnIdentity(toolOwner!);
+  const status = combinedAssistantStatus(input.messages, input.tools);
+  const text = input.messages
+    .map((message) => sanitizeAssistantDisplayText(message.text))
+    .filter(Boolean)
+    .join('\n');
+  return buildAssistantTurnEntry({
+    identity: {
+      sessionKey: input.sessionId,
+      ...(owner.runId ? { runId: owner.runId } : {}),
+      ...(owner.agentId ? { agentId: owner.agentId } : {}),
+      laneKey,
+      turnKey: input.turnKey,
+      turnBindingSource: identity.source,
+      turnBindingConfidence: identity.confidence,
+      turnIdentityMode: identity.mode,
+      turnIdentityConfidence: identity.confidence,
+      entryId: `canonical:${owner.key}`,
+      ...(messageOwner?.messageId ? { messageId: messageOwner.messageId } : {}),
+      ...(messageOwner?.originMessageId ? { originMessageId: messageOwner.originMessageId } : {}),
+      ...(messageOwner?.clientId ? { clientId: messageOwner.clientId } : {}),
+    },
+    status,
+    text,
+    ...(owner.createdAt != null ? { createdAt: owner.createdAt } : {}),
+    ...(input.messages.some((message) => message.updatedAt != null) || input.tools.some((tool) => tool.updatedAt != null)
+      ? { updatedAt: Math.max(...[
+          ...input.messages.map((message) => message.updatedAt ?? message.createdAt ?? 0),
+          ...input.tools.map((tool) => tool.updatedAt ?? tool.createdAt ?? 0),
+        ]) }
+      : {}),
+    ...(owner.seq != null ? { sequenceId: owner.seq } : {}),
+    segments: buildSegmentsFromCanonicalTurnRows({
+      turnKey: input.turnKey,
+      laneKey,
+      messages: input.messages,
+      tools: input.tools,
+      thoughts: input.thoughts,
+    }),
+    isStreaming: status === 'streaming',
+  });
+}
+
 export function buildUserTimelineEntry(sessionId: string, message: CanonicalMessageState): SessionTimelineUserMessageEntry {
   return {
     key: `session:${sessionId}|user:${message.key}`,
@@ -872,8 +1008,48 @@ function buildTimelineEntriesFromProjectionIndex(
   const entries: SessionTimelineEntry[] = [];
   const renderedToolCallIds = new Set<string>();
   const renderedThoughtKeys = new Set<string>();
+  const renderedAssistantTurnKeys = new Set<string>();
+  const assistantMessagesByExplicitTurnKey = new Map<string, CanonicalMessageState[]>();
+  for (const message of state.messages) {
+    if (message.role === 'assistant' && hasExplicitTurnBinding(message)) {
+      pushMapValue(assistantMessagesByExplicitTurnKey, messageTurnKey(message), message);
+    }
+  }
   for (const message of state.messages) {
     if (message.role === 'assistant') {
+      const turnKey = messageTurnKey(message);
+      if (hasExplicitTurnBinding(message)) {
+        if (renderedAssistantTurnKeys.has(turnKey)) {
+          continue;
+        }
+        renderedAssistantTurnKeys.add(turnKey);
+        const messages = assistantMessagesByExplicitTurnKey.get(turnKey) ?? [message];
+        const tools = mergeCanonicalRowsByKey(
+          projectionIndex.toolsByTurnKey.get(turnKey),
+          ...messages.map((current) => projectionIndex.toolsByMessageKey.get(messageOwnerKey(current))),
+        );
+        const thoughts = mergeCanonicalRowsByKey(
+          projectionIndex.thoughtsByTurnKey.get(turnKey),
+          ...messages.map((current) => projectionIndex.thoughtsByMessageKey.get(messageOwnerKey(current))),
+        );
+        for (const tool of tools) {
+          renderedToolCallIds.add(tool.toolCallId);
+        }
+        for (const thought of thoughts) {
+          renderedThoughtKeys.add(thought.key);
+        }
+        const entry = buildAssistantEntryForTurn({
+          sessionId: state.sessionId,
+          turnKey,
+          messages,
+          tools,
+          thoughts,
+        });
+        if (entry) {
+          entries.push(entry);
+        }
+        continue;
+      }
       const tools = resolveAssistantMessageTools(projectionIndex, message);
       const thoughts = resolveAssistantMessageThoughts(projectionIndex, message);
       for (const tool of tools) {
@@ -906,6 +1082,31 @@ function buildTimelineEntriesFromProjectionIndex(
   }
   for (const tool of state.tools) {
     if (renderedToolCallIds.has(tool.toolCallId)) {
+      continue;
+    }
+    if (hasExplicitTurnBinding(tool)) {
+      const turnKey = toolTurnKey(tool);
+      if (!renderedAssistantTurnKeys.has(turnKey)) {
+        renderedAssistantTurnKeys.add(turnKey);
+        const tools = projectionIndex.toolsByTurnKey.get(turnKey) ?? [tool];
+        for (const current of tools) {
+          renderedToolCallIds.add(current.toolCallId);
+        }
+        const thoughts = projectionIndex.thoughtsByTurnKey.get(turnKey) ?? [];
+        for (const thought of thoughts) {
+          renderedThoughtKeys.add(thought.key);
+        }
+        const entry = buildAssistantEntryForTurn({
+          sessionId: state.sessionId,
+          turnKey,
+          messages: assistantMessagesByExplicitTurnKey.get(turnKey) ?? [],
+          tools,
+          thoughts,
+        });
+        if (entry) {
+          entries.push(entry);
+        }
+      }
       continue;
     }
     const laneKey = tool.laneKey || 'main';
@@ -965,7 +1166,7 @@ function affectedTimelineEntryKeysForCanonicalEvents(
   const affected = new Set<string>();
   for (const event of events) {
     switch (event.type) {
-      case 'message_snapshot': {
+      case 'message_part': {
         const messageKey = buildCanonicalMessageStateKey(event);
         const messageIndex = state.messageIndexByKey.get(messageKey);
         const message = messageIndex == null ? undefined : state.messages[messageIndex];
@@ -987,9 +1188,7 @@ function affectedTimelineEntryKeysForCanonicalEvents(
         }
         break;
       }
-      case 'tool_call':
-      case 'tool_progress':
-      case 'tool_result': {
+      case 'tool': {
         const toolKey = buildCanonicalToolStateKey(event);
         const toolIndex = state.toolIndexByKey.get(toolKey);
         const tool = toolIndex == null ? undefined : state.tools[toolIndex];
@@ -1003,7 +1202,7 @@ function affectedTimelineEntryKeysForCanonicalEvents(
         }
         break;
       }
-      case 'thought_snapshot': {
+      case 'thought': {
         const thoughtKey = `thought:${event.laneKey || 'main'}:${event.thoughtId || event.runId || event.seq || event.eventId}`;
         affected.add(thoughtKey);
         if (event.ownerMessageKey) {
@@ -1188,7 +1387,10 @@ export function buildIncrementalProjectedCanonicalSessionState(input: Incrementa
 } {
   const projectionIndex = buildStateProjectionIndex(input.state);
   const affectedCanonicalKeys = affectedTimelineEntryKeysForCanonicalEvents(input.state, projectionIndex, input.committedEvents);
-  if (affectedCanonicalKeys.size === 0 || input.committedEvents.some((event) => event.type === 'team')) {
+  if (
+    affectedCanonicalKeys.size === 0
+    || input.committedEvents.some((event) => event.type === 'team' || hasExplicitTurnBinding(event))
+  ) {
     return buildProjectedCanonicalSessionState(input.state);
   }
   const timelineEntries = replaceTimelineEntries(input.timelineEntries, affectedCanonicalKeys, input.state, projectionIndex);

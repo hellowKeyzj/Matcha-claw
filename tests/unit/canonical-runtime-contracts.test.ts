@@ -90,7 +90,7 @@ describe('canonical runtime contracts', () => {
       });
     }
     expect(events[0]).toMatchObject({
-      type: 'thought_snapshot',
+      type: 'thought',
       runId: 'run-openclaw',
       laneKey: 'member:main-agent',
       agentId: 'main-agent',
@@ -100,7 +100,7 @@ describe('canonical runtime contracts', () => {
       status: 'streaming',
     });
     expect(events[1]).toMatchObject({
-      type: 'message_snapshot',
+      type: 'message_part',
       runId: 'run-openclaw',
       laneKey: 'member:main-agent',
       agentId: 'main-agent',
@@ -108,7 +108,7 @@ describe('canonical runtime contracts', () => {
       ownerMessageKey: expect.stringContaining('openclaw-v4:owner-message:agent:main:main:run-openclaw:member:main-agent:0'),
     });
     expect(events[2]).toMatchObject({
-      type: 'tool_call',
+      type: 'tool', phase: 'started',
       runId: 'run-openclaw',
       laneKey: 'member:main-agent',
       agentId: 'main-agent',
@@ -136,7 +136,7 @@ describe('canonical runtime contracts', () => {
     }));
     const events: CanonicalSessionEvent[] = [{
       eventId: 'claude-code:message:session-1:turn-1',
-      type: 'message_snapshot',
+      type: 'message_part',
       protocolId: 'acp',
       runtimeEndpointId: 'claude-code',
       source: 'live',
@@ -169,7 +169,7 @@ describe('canonical runtime contracts', () => {
       status: 'streaming',
     }, {
       eventId: 'claude-code:tool:session-1:toolu-1:start',
-      type: 'tool_call',
+      type: 'tool', phase: 'started',
       protocolId: 'acp',
       runtimeEndpointId: 'claude-code',
       source: 'live',
@@ -236,7 +236,7 @@ describe('canonical runtime contracts', () => {
     }));
     const events: CanonicalSessionEvent[] = [{
       eventId: 'codex:message:codex-session-1:turn-7',
-      type: 'message_snapshot',
+      type: 'message_part',
       protocolId: 'acp',
       runtimeEndpointId: 'codex',
       source: 'live',

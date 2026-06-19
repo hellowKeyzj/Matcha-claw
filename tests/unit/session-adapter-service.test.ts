@@ -4,9 +4,10 @@ import { describe, expect, it, vi } from 'vitest';
 import { OpenClawV4Adapter } from '../../runtime-host/application/adapters/openclaw/runtime/openclaw-v4-canonical-adapter';
 import { createOpenClawTestSessionIdentity, createOpenClawTestRuntimeContext, createTestSessionRuntimeService, openClawTestRuntimeIdentity } from './helpers/session-runtime-fixture';
 import { buildCanonicalReplayEventsFromTranscriptMessages } from '../../runtime-host/application/sessions/canonical/canonical-transcript-replay';
+import { parseTranscriptMessages } from '../../runtime-host/application/sessions/transcript-parser';
 import { createEmptyCanonicalSessionState, reduceCanonicalSessionEvents } from '../../runtime-host/application/sessions/canonical/canonical-reducer';
 import { buildRenderItemsFromCanonicalState } from '../../runtime-host/application/sessions/canonical/canonical-projection';
-import type { SessionItemUpdateEvent } from '../../runtime-host/shared/session-adapter-types';
+import type { SessionAssistantTurnSegment, SessionItemUpdateEvent, SessionRenderItem } from '../../runtime-host/shared/session-adapter-types';
 import { OPENCLAW_RUNTIME_PROTOCOL_ID, OPENCLAW_RUNTIME_ENDPOINT_ID } from '../../runtime-host/application/adapters/openclaw/runtime/openclaw-runtime-identity';
 import { AgentRuntimeRegistry } from '../../runtime-host/application/agent-runtime/contracts/agent-runtime-registry';
 import { createTestAcpClientConnector } from './helpers/acp-test-connector';
@@ -229,7 +230,7 @@ describe('session runtime ACP adapter service', () => {
     });
   });
 
-  it('starts a fresh V4 assistant turn after a live tool start without replaying prior text', async () => {
+  it('keeps post-tool V4 assistant text on the same ordered owner turn without replaying prior text', async () => {
     const service = createService();
 
     await consumeOpenClawTestGatewayEvent(service, {
@@ -275,26 +276,305 @@ describe('session runtime ACP adapter service', () => {
       },
     });
 
-    const assistantTurns = nextAssistant.snapshot.items.filter((item: { kind?: string; text?: string }) => item.kind === 'assistant-turn');
-    const oldAssistantTurn = assistantTurns.find((item) => item.text === 'Considering presentation');
-    const newAssistantTurn = assistantTurns.find((item) => item.text === 'I need to answer concisely.');
-    expect(oldAssistantTurn).toMatchObject({
+    const assistantTurns = nextAssistant.snapshot.items.filter((item: { kind?: string }) => item.kind === 'assistant-turn');
+    expect(assistantTurns).toHaveLength(1);
+    expect(assistantTurns[0]).toMatchObject({
       kind: 'assistant-turn',
-      text: 'Considering presentation',
-      segments: expect.arrayContaining([
-        expect.objectContaining({ kind: 'message', text: 'Considering presentation' }),
-      ]),
-    });
-    expect(newAssistantTurn).toMatchObject({
-      kind: 'assistant-turn',
-      text: 'I need to answer concisely.',
-      segments: [{ kind: 'message', text: 'I need to answer concisely.' }],
+      turnKey: 'openclaw-v4:turn:agent:main:main:run-tool-next-turn:member:default:0',
+      text: 'Considering presentation\nI need to answer concisely.',
+      tools: [{ toolCallId: 'tool-next-turn-1', name: 'Read', status: 'running' }],
+      segments: [
+        { kind: 'message', text: 'Considering presentation' },
+        { kind: 'tool', tool: { toolCallId: 'tool-next-turn-1', name: 'Read', status: 'running' } },
+        { kind: 'message', text: 'I need to answer concisely.' },
+      ],
     });
     expect(expectItemEvent(nextAssistant).item).toMatchObject({
       kind: 'assistant-turn',
-      text: 'I need to answer concisely.',
-      segments: [{ kind: 'message', text: 'I need to answer concisely.' }],
+      text: 'Considering presentation\nI need to answer concisely.',
+      segments: [
+        { kind: 'message', text: 'Considering presentation' },
+        { kind: 'tool', tool: { toolCallId: 'tool-next-turn-1', name: 'Read', status: 'running' } },
+        { kind: 'message', text: 'I need to answer concisely.' },
+      ],
     });
+  });
+
+  it('keeps raw V4 assistant tool result and final snapshot in one ordered session turn', async () => {
+    const service = createService();
+
+    await consumeOpenClawTestGatewayEvent(service, {
+      type: 'chat.message',
+      event: {
+        state: 'delta',
+        sessionKey: 'agent:main:main',
+        runId: 'run-v4-order',
+        seq: 1,
+        timestamp: 1_700_000_000_000,
+        deltaText: 'Inspecting',
+        message: { role: 'assistant', content: [] },
+      },
+    });
+    await consumeOpenClawTestGatewayEvent(service, {
+      type: 'tool.lifecycle',
+      event: {
+        phase: 'start',
+        sessionKey: 'agent:main:main',
+        runId: 'run-v4-order',
+        seq: 2,
+        timestamp: 1_700_000_000_010,
+        toolCallId: 'tool-v4-order-1',
+        name: 'Read',
+        args: { file_path: 'package.json' },
+      },
+    });
+    await consumeOpenClawTestGatewayEvent(service, {
+      type: 'tool.lifecycle',
+      event: {
+        phase: 'result',
+        sessionKey: 'agent:main:main',
+        runId: 'run-v4-order',
+        seq: 3,
+        timestamp: 1_700_000_000_020,
+        toolCallId: 'tool-v4-order-1',
+        name: 'Read',
+        result: 'package content',
+      },
+    });
+    const [final] = await consumeOpenClawTestGatewayEvent(service, {
+      type: 'chat.message',
+      event: {
+        state: 'final',
+        sessionKey: 'agent:main:main',
+        runId: 'run-v4-order',
+        seq: 4,
+        timestamp: 1_700_000_000_030,
+        message: {
+          role: 'assistant',
+          content: [{ type: 'text', text: 'InspectingDone.' }],
+        },
+      },
+    });
+
+    const assistantTurns = final.snapshot.items.filter((item: { kind?: string }) => item.kind === 'assistant-turn');
+    expect(assistantTurns).toHaveLength(1);
+    expect(assistantTurns[0]).toMatchObject({
+      kind: 'assistant-turn',
+      text: 'Inspecting\nDone.',
+      tools: [{ toolCallId: 'tool-v4-order-1', name: 'Read', status: 'completed', output: 'package content' }],
+      segments: [
+        { kind: 'message', text: 'Inspecting' },
+        { kind: 'tool', tool: { toolCallId: 'tool-v4-order-1', name: 'Read', status: 'completed', output: 'package content' } },
+        { kind: 'message', text: 'Done.' },
+      ],
+    });
+  });
+
+  it('keeps cumulative V4 delta snapshots with tool result and final snapshot deduplicated', async () => {
+    const service = createService();
+
+    await consumeOpenClawTestGatewayEvent(service, {
+      type: 'chat.message',
+      event: {
+        state: 'delta',
+        sessionKey: 'agent:main:main',
+        runId: 'run-v4-cumulative-tool',
+        seq: 1,
+        timestamp: 1_700_000_000_000,
+        deltaText: 'Hello',
+        message: { role: 'assistant', content: [] },
+      },
+    });
+    await consumeOpenClawTestGatewayEvent(service, {
+      type: 'chat.message',
+      event: {
+        state: 'delta',
+        sessionKey: 'agent:main:main',
+        runId: 'run-v4-cumulative-tool',
+        seq: 2,
+        timestamp: 1_700_000_000_010,
+        deltaText: 'Hello world',
+        message: { role: 'assistant', content: [] },
+      },
+    });
+    await consumeOpenClawTestGatewayEvent(service, {
+      type: 'tool.lifecycle',
+      event: {
+        phase: 'start',
+        sessionKey: 'agent:main:main',
+        runId: 'run-v4-cumulative-tool',
+        seq: 3,
+        timestamp: 1_700_000_000_020,
+        toolCallId: 'tool-cumulative-1',
+        name: 'Read',
+      },
+    });
+    await consumeOpenClawTestGatewayEvent(service, {
+      type: 'tool.lifecycle',
+      event: {
+        phase: 'result',
+        sessionKey: 'agent:main:main',
+        runId: 'run-v4-cumulative-tool',
+        seq: 4,
+        timestamp: 1_700_000_000_030,
+        toolCallId: 'tool-cumulative-1',
+        name: 'Read',
+        result: 'ok',
+      },
+    });
+    const [final] = await consumeOpenClawTestGatewayEvent(service, {
+      type: 'chat.message',
+      event: {
+        state: 'final',
+        sessionKey: 'agent:main:main',
+        runId: 'run-v4-cumulative-tool',
+        seq: 5,
+        timestamp: 1_700_000_000_040,
+        message: {
+          role: 'assistant',
+          content: [{ type: 'text', text: 'Hello worldDone' }],
+        },
+      },
+    });
+
+    const assistantTurn = final.snapshot.items.find((item: { kind?: string }) => item.kind === 'assistant-turn');
+    expect(assistantTurn).toMatchObject({
+      kind: 'assistant-turn',
+      text: 'Hello world\nDone',
+      segments: [
+        { kind: 'message', text: 'Hello world' },
+        { kind: 'tool', tool: { toolCallId: 'tool-cumulative-1', status: 'completed', output: 'ok' } },
+        { kind: 'message', text: 'Done' },
+      ],
+    });
+    expect((assistantTurn as { text?: string } | undefined)?.text).not.toContain('HelloHello');
+  });
+
+  it('projects equivalent live and historical V4 assistant-tool turns with the same render structure', async () => {
+    const liveService = createService();
+    const historyService = createService();
+
+    await consumeOpenClawTestGatewayEvent(liveService, {
+      type: 'chat.message',
+      event: {
+        state: 'delta',
+        sessionKey: 'agent:main:main',
+        runId: 'run-v4-parity',
+        seq: 1,
+        timestamp: 1_700_000_000_000,
+        deltaText: 'Inspecting',
+        message: { role: 'assistant', content: [] },
+      },
+    });
+    await consumeOpenClawTestGatewayEvent(liveService, {
+      type: 'tool.lifecycle',
+      event: {
+        phase: 'start',
+        sessionKey: 'agent:main:main',
+        runId: 'run-v4-parity',
+        seq: 2,
+        timestamp: 1_700_000_000_010,
+        toolCallId: 'tool-v4-parity-1',
+        name: 'Read',
+      },
+    });
+    await consumeOpenClawTestGatewayEvent(liveService, {
+      type: 'tool.lifecycle',
+      event: {
+        phase: 'result',
+        sessionKey: 'agent:main:main',
+        runId: 'run-v4-parity',
+        seq: 3,
+        timestamp: 1_700_000_000_020,
+        toolCallId: 'tool-v4-parity-1',
+        name: 'Read',
+        result: 'package content',
+      },
+    });
+    const [liveFinal] = await consumeOpenClawTestGatewayEvent(liveService, {
+      type: 'chat.message',
+      event: {
+        state: 'final',
+        sessionKey: 'agent:main:main',
+        runId: 'run-v4-parity',
+        seq: 4,
+        timestamp: 1_700_000_000_030,
+        message: { role: 'assistant', content: [{ type: 'text', text: 'InspectingDone.' }] },
+      },
+    });
+
+    await consumeOpenClawTestGatewayEvent(historyService, {
+      type: 'session.message',
+      event: {
+        sessionKey: 'agent:main:main',
+        seq: 1,
+        message: {
+          role: 'assistant',
+          id: 'history-assistant-1',
+          agentId: 'default',
+          metadata: { runId: 'run-v4-parity' },
+          content: [{ type: 'text', text: 'Inspecting' }],
+        },
+      },
+    });
+    await consumeOpenClawTestGatewayEvent(historyService, {
+      type: 'session.tool',
+      event: {
+        phase: 'start',
+        sessionKey: 'agent:main:main',
+        runId: 'run-v4-parity',
+        seq: 2,
+        timestamp: 1_700_000_000_010,
+        toolCallId: 'tool-v4-parity-1',
+        name: 'Read',
+        agentId: 'default',
+      },
+    });
+    await consumeOpenClawTestGatewayEvent(historyService, {
+      type: 'session.tool',
+      event: {
+        phase: 'result',
+        sessionKey: 'agent:main:main',
+        runId: 'run-v4-parity',
+        seq: 3,
+        timestamp: 1_700_000_000_020,
+        toolCallId: 'tool-v4-parity-1',
+        name: 'Read',
+        result: 'package content',
+        agentId: 'default',
+      },
+    });
+    const [historyFinal] = await consumeOpenClawTestGatewayEvent(historyService, {
+      type: 'session.message',
+      event: {
+        sessionKey: 'agent:main:main',
+        seq: 4,
+        message: {
+          role: 'assistant',
+          id: 'history-assistant-2',
+          agentId: 'default',
+          metadata: { runId: 'run-v4-parity' },
+          content: [{ type: 'text', text: 'Done.' }],
+        },
+      },
+    });
+
+    const summarizeAssistantTurns = (items: readonly SessionRenderItem[]) => items
+      .filter((item) => item.kind === 'assistant-turn')
+      .map((item) => ({
+        text: item.text,
+        segments: item.segments.map((segment: SessionAssistantTurnSegment) => segment.kind === 'tool'
+          ? {
+              kind: 'tool',
+              toolCallId: segment.tool.toolCallId,
+              name: segment.tool.name,
+              status: segment.tool.status,
+              output: segment.tool.output,
+            }
+          : { kind: 'message', text: 'text' in segment ? segment.text : undefined }),
+      }));
+
+    expect(summarizeAssistantTurns(historyFinal.snapshot.items)).toEqual(summarizeAssistantTurns(liveFinal.snapshot.items));
   });
 
   it('replaces the current V4 assistant text when a streaming patch is marked replace', async () => {
@@ -444,14 +724,80 @@ describe('session runtime ACP adapter service', () => {
     expect(startItem.item).toMatchObject({
       kind: 'assistant-turn',
       runId: 'run-tool',
-      turnKey: 'tool:tool-read-1',
+      turnKey: 'run:member:default:run-tool',
       tools: [{ toolCallId: 'tool-read-1', name: 'Read', status: 'running' }],
     });
     expect(resultItem.item).toMatchObject({
       kind: 'assistant-turn',
       runId: 'run-tool',
-      turnKey: 'tool:tool-read-1',
+      turnKey: 'run:member:default:run-tool',
       tools: [{ toolCallId: 'tool-read-1', name: 'Read', status: 'completed', output: 'package content' }],
+    });
+  });
+
+  it('groups live same-run tool-only lifecycle rows into one assistant turn', async () => {
+    const service = createService();
+
+    await consumeOpenClawTestGatewayEvent(service, {
+      type: 'tool.lifecycle',
+      event: {
+        phase: 'start',
+        sessionKey: 'agent:main:main',
+        runId: 'run-tool-only',
+        seq: 1,
+        timestamp: 1_700_000_000_000,
+        toolCallId: 'tool-live-1',
+        name: 'TaskList',
+      },
+    });
+    await consumeOpenClawTestGatewayEvent(service, {
+      type: 'tool.lifecycle',
+      event: {
+        phase: 'result',
+        sessionKey: 'agent:main:main',
+        runId: 'run-tool-only',
+        seq: 2,
+        timestamp: 1_700_000_000_010,
+        toolCallId: 'tool-live-1',
+        name: 'TaskList',
+        result: 'No tasks found.',
+      },
+    });
+    await consumeOpenClawTestGatewayEvent(service, {
+      type: 'tool.lifecycle',
+      event: {
+        phase: 'start',
+        sessionKey: 'agent:main:main',
+        runId: 'run-tool-only',
+        seq: 3,
+        timestamp: 1_700_000_000_020,
+        toolCallId: 'tool-live-2',
+        name: 'sessions_list',
+      },
+    });
+    const [secondResult] = await consumeOpenClawTestGatewayEvent(service, {
+      type: 'tool.lifecycle',
+      event: {
+        phase: 'result',
+        sessionKey: 'agent:main:main',
+        runId: 'run-tool-only',
+        seq: 4,
+        timestamp: 1_700_000_000_030,
+        toolCallId: 'tool-live-2',
+        name: 'sessions_list',
+        result: '查看 subagent 会话',
+      },
+    });
+
+    const assistantTurns = secondResult.snapshot.items.filter((item: { kind?: string }) => item.kind === 'assistant-turn');
+    expect(assistantTurns).toHaveLength(1);
+    expect(assistantTurns[0]).toMatchObject({
+      kind: 'assistant-turn',
+      turnKey: 'run:member:default:run-tool-only',
+      tools: [
+        expect.objectContaining({ toolCallId: 'tool-live-1', status: 'completed', output: 'No tasks found.' }),
+        expect.objectContaining({ toolCallId: 'tool-live-2', status: 'completed', output: '查看 subagent 会话' }),
+      ],
     });
   });
 
@@ -586,7 +932,7 @@ describe('session runtime ACP adapter service', () => {
     expect(events).toHaveLength(1);
     expect(events[0]).toMatchObject({
       eventId: 'openclaw-v4:session-message:agent:main:main:run-history:assistant-history-1',
-      type: 'message_snapshot',
+      type: 'message_part',
       protocolId: OPENCLAW_RUNTIME_PROTOCOL_ID,
       runtimeEndpointId: OPENCLAW_RUNTIME_ENDPOINT_ID,
       source: 'replay',
@@ -621,7 +967,7 @@ describe('session runtime ACP adapter service', () => {
     expect(events).toHaveLength(1);
     expect(events[0]).toMatchObject({
       eventId: 'openclaw-v4:tool-result:agent:main:main:run-tool-history:8:tool-2',
-      type: 'tool_result',
+      type: 'tool', phase: 'completed',
       protocolId: OPENCLAW_RUNTIME_PROTOCOL_ID,
       runtimeEndpointId: OPENCLAW_RUNTIME_ENDPOINT_ID,
       source: 'replay',
@@ -630,7 +976,6 @@ describe('session runtime ACP adapter service', () => {
       toolCallId: 'tool-2',
       name: 'Read',
       output: '历史工具结果',
-      isError: false,
       origin: {
         runtimeEventType: 'session.tool',
       },
@@ -662,7 +1007,7 @@ describe('session runtime ACP adapter service', () => {
     ]);
   });
 
-  it('replays standalone transcript tool_result rows into canonical tool facts', () => {
+  it('binds replayed transcript tool_call and standalone tool_result rows into one tool turn', () => {
     const replayEvents = buildCanonicalReplayEventsFromTranscriptMessages('agent:main:main', [{
       role: 'assistant',
       id: 'assistant-tool-call',
@@ -684,16 +1029,145 @@ describe('session runtime ACP adapter service', () => {
 
     expect(replayEvents).toEqual([
       expect.objectContaining({ type: 'replay_boundary', phase: 'start' }),
-      expect.objectContaining({ type: 'message_snapshot', messageId: 'assistant-tool-call' }),
-      expect.objectContaining({ type: 'tool_call', toolCallId: 'tool-legacy-1' }),
-      expect.objectContaining({ type: 'tool_result', toolCallId: 'tool-legacy-1', output: 'legacy result' }),
+      expect.objectContaining({ type: 'message_part', messageId: 'assistant-tool-call' }),
+      expect.objectContaining({ type: 'tool', phase: 'started', toolCallId: 'tool-legacy-1' }),
+      expect.objectContaining({ type: 'tool', phase: 'completed', toolCallId: 'tool-legacy-1', output: 'legacy result' }),
       expect.objectContaining({ type: 'replay_boundary', phase: 'end' }),
     ]);
     expect(items).toEqual(expect.arrayContaining([expect.objectContaining({
       kind: 'assistant-turn',
-      turnKey: 'tool:tool-legacy-1',
+      turnKey: 'transcript:agent:main:main:main:run-history',
       tools: [expect.objectContaining({ toolCallId: 'tool-legacy-1', status: 'completed', output: 'legacy result' })],
+      segments: [expect.objectContaining({
+        kind: 'tool',
+        tool: expect.objectContaining({ toolCallId: 'tool-legacy-1', status: 'completed' }),
+      })],
     })]));
+  });
+
+  it('groups replayed same-run tool_result rows into one historical assistant turn', () => {
+    const replayEvents = buildCanonicalReplayEventsFromTranscriptMessages('agent:main:main', [{
+      role: 'tool_result',
+      id: 'tool-row-1',
+      metadata: { runId: 'run-history' },
+      toolCallId: 'tool-history-1',
+      name: 'TaskList',
+      content: 'No tasks found.',
+      timestamp: 1,
+    }, {
+      role: 'tool_result',
+      id: 'tool-row-2',
+      metadata: { runId: 'run-history' },
+      toolCallId: 'tool-history-2',
+      name: '会话列表',
+      content: '查看 subagent 会话',
+      timestamp: 2,
+    }, {
+      role: 'tool_result',
+      id: 'tool-row-3',
+      metadata: { runId: 'run-history' },
+      toolCallId: 'tool-history-3',
+      name: '智能体',
+      content: '查看最近 30 分钟的智能体',
+      timestamp: 3,
+    }], openClawTestRuntimeIdentity);
+    const state = createEmptyCanonicalSessionState('agent:main:main', createOpenClawTestRuntimeContext('agent:main:main'));
+    reduceCanonicalSessionEvents(state, replayEvents);
+    const items = buildRenderItemsFromCanonicalState({ state, executionGraphItems: [] });
+    const assistantTurns = items.filter((item) => item.kind === 'assistant-turn');
+
+    expect(assistantTurns).toHaveLength(1);
+    expect(assistantTurns[0]).toMatchObject({
+      kind: 'assistant-turn',
+      turnKey: 'transcript:agent:main:main:main:run-history',
+      tools: [
+        expect.objectContaining({ toolCallId: 'tool-history-1', status: 'completed', output: 'No tasks found.' }),
+        expect.objectContaining({ toolCallId: 'tool-history-2', status: 'completed', output: '查看 subagent 会话' }),
+        expect.objectContaining({ toolCallId: 'tool-history-3', status: 'completed', output: '查看最近 30 分钟的智能体' }),
+      ],
+    });
+  });
+
+  it('groups replayed parent-linked tool rows without runId into one historical assistant turn', () => {
+    const transcript = [
+      {
+        id: 'user-row',
+        message: { role: 'user', content: '结束Sessions Yield' },
+      },
+      {
+        id: 'assistant-tool-1',
+        parentId: 'user-row',
+        message: {
+          role: 'assistant',
+          content: [{ type: 'toolCall', id: 'call_task_list', name: 'TaskList', input: {} }],
+        },
+      },
+      {
+        id: 'tool-result-1',
+        parentId: 'assistant-tool-1',
+        message: {
+          role: 'toolResult',
+          toolCallId: 'call_task_list',
+          toolName: 'TaskList',
+          content: 'No tasks found.',
+        },
+      },
+      {
+        id: 'assistant-tool-2',
+        parentId: 'tool-result-1',
+        message: {
+          role: 'assistant',
+          content: [{ type: 'toolCall', id: 'call_sessions_list', name: 'sessions_list', input: {} }],
+        },
+      },
+      {
+        id: 'tool-result-2',
+        parentId: 'assistant-tool-2',
+        message: {
+          role: 'toolResult',
+          toolCallId: 'call_sessions_list',
+          toolName: 'sessions_list',
+          content: '查看 subagent 会话',
+        },
+      },
+      {
+        id: 'assistant-final',
+        parentId: 'tool-result-2',
+        message: {
+          role: 'assistant',
+          content: [{ type: 'text', text: 'The team dispatch did not complete.' }],
+        },
+      },
+    ].map((line) => JSON.stringify(line)).join('\n');
+    const messages = parseTranscriptMessages(transcript);
+    const replayEvents = buildCanonicalReplayEventsFromTranscriptMessages('agent:main:main', messages, openClawTestRuntimeIdentity);
+    const state = createEmptyCanonicalSessionState('agent:main:main', createOpenClawTestRuntimeContext('agent:main:main'));
+    reduceCanonicalSessionEvents(state, replayEvents);
+    const items = buildRenderItemsFromCanonicalState({ state, executionGraphItems: [] });
+    const assistantTurns = items.filter((item) => item.kind === 'assistant-turn');
+
+    expect(messages.slice(1).map((message) => message.originMessageId)).toEqual([
+      'user-row',
+      'assistant-tool-1',
+      'tool-result-1',
+      'assistant-tool-2',
+      'tool-result-2',
+    ]);
+    expect(assistantTurns).toHaveLength(1);
+    expect(assistantTurns[0]).toMatchObject({
+      kind: 'assistant-turn',
+      turnKey: 'transcript:agent:main:main:main:parent:user-row',
+      text: 'The team dispatch did not complete.',
+      tools: [
+        expect.objectContaining({ toolCallId: 'call_task_list', status: 'completed', output: 'No tasks found.' }),
+        expect.objectContaining({ toolCallId: 'call_sessions_list', status: 'completed', output: '查看 subagent 会话' }),
+      ],
+      segments: [
+        expect.objectContaining({ kind: 'tool' }),
+        expect.objectContaining({ kind: 'tool' }),
+        expect.objectContaining({ kind: 'message', text: 'The team dispatch did not complete.' }),
+      ],
+    });
   });
 
   it('rejects session creation without an explicit RuntimeEndpointRef', async () => {
