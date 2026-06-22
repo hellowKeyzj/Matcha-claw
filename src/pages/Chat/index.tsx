@@ -10,7 +10,6 @@ import { useChatStore, type ApprovalItem, type ChatStoreState } from '@/stores/c
 import { ABORT_STOPPING_TIMEOUT_ERROR } from '@/stores/chat/abort-handlers';
 import { isRunActive } from '@/stores/chat/types';
 import { useGatewayStore } from '@/stores/gateway';
-import { useSkillsStore } from '@/stores/skills';
 import { useSubagentsStore } from '@/stores/subagents';
 import { useSettingsStore } from '@/stores/settings';
 import type { GatewayTransportIssue } from '../../../runtime-host/shared/gateway-error';
@@ -39,7 +38,7 @@ import { SessionTodoPanel } from './components/SessionTodoPanel';
 import { WelcomeScreen } from './components/ChatStates';
 import { useChatInit } from './useChatInit';
 import { useChatSidePanelController } from './useChatSidePanelController';
-import { useSkillConfig } from './useSkillConfig';
+import { useAgentSkillConfig } from './useAgentSkillConfig';
 import { useChatView } from './useChatView';
 import {
   applyAssistantPresentationToItems,
@@ -313,10 +312,6 @@ export function Chat({ isActive = true }: ChatProps) {
   const loadAgents = useSubagentsStore((state) => state.loadAgents);
   const loadAvailableModels = useSubagentsStore((state) => state.loadAvailableModels);
   const currentAgent = agents.find((agent) => agent.id === currentAgentId);
-  const skills = useSkillsStore((state) => state.skills);
-  const skillsSnapshotReady = useSkillsStore((state) => state.snapshotReady);
-  const skillsInitialLoading = useSkillsStore((state) => state.initialLoading);
-  const fetchSkills = useSkillsStore((state) => state.fetchSkills);
   const userAvatarDataUrl = useSettingsStore((state) => state.userAvatarDataUrl);
   const [skillPreview, setSkillPreview] = useState<ChatSkillPreviewState | null>(null);
   const [artifactActiveSection, setArtifactActiveSection] = useState<ChatArtifactSection>('changes');
@@ -370,33 +365,16 @@ export function Chat({ isActive = true }: ChatProps) {
     toggleArtifactWorkbenchFullscreen,
   } = useChatSidePanelController(sideEffectsActive, chatLayoutRef);
 
-  const updateAgentSkillConfig = useCallback(async (input: {
-    agentId: string;
-    name: string;
-    workspace: string;
-    model?: string;
-    skills?: string[] | null;
-  }) => {
-    await useSubagentsStore.getState().updateAgent(input);
-  }, []);
-
   const {
     selectedSkillIds,
+    allowedSkillIdsForChat,
     availableSkillOptions,
     skillsLoading: skillConfigSkillsLoading,
     prepare: prepareSkillConfig,
     resetSession: resetSkillConfigSession,
     toggleSkill: toggleSkillConfigSelection,
-  } = useSkillConfig({
-    currentAgent,
-    readAgent: (agentId) => (
-      useSubagentsStore.getState().agentsResource.data.find((agent) => agent.id === agentId)
-    ),
-    skills,
-    skillsSnapshotReady,
-    skillsInitialLoading,
-    fetchSkills,
-    updateAgent: updateAgentSkillConfig,
+  } = useAgentSkillConfig({
+    currentAgentId,
   });
 
   useEffect(() => {
@@ -413,10 +391,11 @@ export function Chat({ isActive = true }: ChatProps) {
   }, [isGatewayRunning, loadAvailableModels]);
 
   useEffect(() => {
-    if (sidePanelOpen && activeSidePanelTab === 'skills') {
-      prepareSkillConfig();
+    if (!sideEffectsActive) {
+      return;
     }
-  }, [activeSidePanelTab, prepareSkillConfig, sidePanelOpen]);
+    prepareSkillConfig();
+  }, [prepareSkillConfig, sideEffectsActive]);
   const refreshing = foregroundHistorySessionKey === currentSessionKey;
   const viewportItems = currentSession.items;
   const liveView = useChatView({
@@ -424,10 +403,6 @@ export function Chat({ isActive = true }: ChatProps) {
     itemCount: viewportItems.length,
     runActive: isRunActive(currentSession.runtime),
   });
-  const allowedSkillIds = useMemo(() => {
-    const matchedAgent = agents.find((agent) => agent.id === currentAgentId);
-    return Array.isArray(matchedAgent?.skills) ? matchedAgent.skills : null;
-  }, [agents, currentAgentId]);
   const assistantCatalogAgents = useMemo<ChatAssistantCatalogAgent[]>(
     () => agents.map((agent) => ({
       id: agent.id,
@@ -878,7 +853,7 @@ export function Chat({ isActive = true }: ChatProps) {
       sending={isRunActive(currentSession.runtime)}
       stopping={currentSession.runtime.runPhase === 'stopping'}
       approvalWaiting={approvalStatus === 'awaiting_approval'}
-      allowedSkillIds={allowedSkillIds}
+      allowedSkillIds={allowedSkillIdsForChat}
       sessionIdentity={currentSession.meta.sessionIdentity}
       workspaceContext={artifactWorkspaceContext}
     />
