@@ -48,6 +48,7 @@ describe('main api boundary', () => {
     expect(isHostApiProxyAllowedRoute('POST', '/api/capabilities/describe')).toBe(true);
     expect(isHostApiProxyAllowedRoute('POST', '/api/capabilities/execute')).toBe(true);
     expect(isHostApiProxyAllowedRoute('POST', '/api/channels/credentials/validate')).toBe(true);
+    expect(isHostApiProxyAllowedRoute('POST', '/api/clawhub/search')).toBe(true);
     expect(isHostApiProxyAllowedRoute('GET', '/api/openclaw/subagent-templates/brand-guardian')).toBe(true);
     expect(isHostApiProxyAllowedRoute('GET', '/api/settings/model')).toBe(true);
 

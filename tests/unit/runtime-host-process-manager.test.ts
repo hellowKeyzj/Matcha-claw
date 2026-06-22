@@ -1208,7 +1208,7 @@ describe('runtime-host process manager', () => {
     }
   });
 
-  it('team runtime capability 在子进程本地直连 gateway rpc，不走 parent dispatch', async () => {
+  it('team runtime capability 在子进程本地处理，不走 parent dispatch', async () => {
     const port = createPort(92);
     const parentApiPort = createPort(93);
     const gatewayPort = createPort(97);
@@ -1219,14 +1219,8 @@ describe('runtime-host process manager', () => {
     const settingsFile = join(configDir, 'matchaclaw-settings.json');
     writeRuntimeHostSettings(settingsFile, { gatewayToken });
     const gatewayServer = await startGatewayRpcServer(gatewayPort, gatewayToken, {
-      methods: ['matchaclaw.team.run.snapshot'],
-      onRequest: ({ method }) => ({
-        runId: 'team-alpha',
-        status: method.endsWith('.snapshot') ? undefined : 'ok',
-        run: { runId: 'team-alpha' },
-        stages: [],
-        events: [],
-      }),
+      methods: [],
+      onRequest: () => ({ ok: true }),
     });
 
     const manager = createRuntimeHostProcessManager({
@@ -1257,13 +1251,13 @@ describe('runtime-host process manager', () => {
             'team.runSnapshot',
             { runId: 'team-alpha' },
             { kind: 'team-run', runId: 'team-alpha' },
+            { kind: 'team-run', endpoint: openClawRuntimeEndpoint, runId: 'team-alpha' },
           ),
         }),
       });
       const payload = await response.json() as unknown;
       expect(response.status, JSON.stringify(payload)).toBe(200);
 
-      expect(gatewayServer.getRequests().map((item) => item.method)).toContain('matchaclaw.team.run.snapshot');
       expect(parentDispatchServer.getDispatchRequestCount()).toBe(0);
       expect(parentDispatchServer.getExecutionSyncRequestCount()).toBe(0);
     } finally {

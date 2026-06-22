@@ -94,6 +94,7 @@ export const HOSTAPI_PROXY_PUBLIC_READONLY_PREFIX_ROUTES = Object.freeze([
 
 export const HOSTAPI_PROXY_PUBLIC_VALIDATION_POST_EXACT_ROUTES = Object.freeze([
   '/api/channels/credentials/validate',
+  '/api/clawhub/search',
 ]);
 
 export function getMainApiBoundarySnapshot() {

@@ -7,7 +7,8 @@
  * are sent with the message (no base64 over WebSocket).
  */
 import { memo, useState, useRef, useEffect, useCallback, useMemo, type ReactNode } from 'react';
-import { Send, Square, X, Paperclip, FileText, Film, Music, FileArchive, File, Loader2, ImageIcon, AlertCircle, Check, ChevronDown } from 'lucide-react';
+import { createPortal } from 'react-dom';
+import { Send, Square, X, Paperclip, FileText, Film, Music, FileArchive, File, Loader2, ImageIcon, AlertCircle, Check, ChevronDown, MessageSquare } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
 import { hostFileStageBuffer, hostFileStagePaths, type WorkspaceFileContext } from '@/lib/host-api';
@@ -33,6 +34,25 @@ export interface FileAttachment {
   preview: string | null;    // data URL for images, null for others
   status: 'staging' | 'ready' | 'error';
   error?: string;
+}
+
+interface DialogStagedAttachmentPayload {
+  id: string;
+  fileName: string;
+  mimeType: string;
+  fileSize: number;
+  stagedPath: string;
+  preview: string | null;
+}
+
+interface StageOpenAttachmentsResult {
+  canceled: boolean;
+  selectedFiles?: Array<{
+    fileName: string;
+    mimeType?: string;
+    fileSize?: number;
+  }>;
+  attachments?: DialogStagedAttachmentPayload[];
 }
 
 export interface MentionCandidate {
@@ -66,6 +86,14 @@ interface ModelPickerState {
 
 const STAGE_BUFFER_CONCURRENCY = 3;
 const STAGE_BUFFER_MAX_BYTES = 50 * 1024 * 1024;
+const QUICK_PHRASE_STORAGE_KEY = 'matchaclaw:chat:quick-phrases';
+
+interface QuickPhrase {
+  id: string;
+  text: string;
+}
+
+const DEFAULT_QUICK_PHRASES: QuickPhrase[] = [];
 
 interface ChatInputProps {
   onSend: (text: string, attachments?: FileAttachment[]) => ChatSendResult | Promise<ChatSendResult>;
@@ -102,7 +130,6 @@ function resolveInputStatusText(
   disabled: boolean,
   approvalWaiting: boolean,
   selectedSkillCount: number,
-  attachmentCount: number,
   translate: (key: string, options?: Record<string, unknown>) => string,
 ): string | null {
   if (disabled) {
@@ -116,12 +143,6 @@ function resolveInputStatusText(
   }
   if (selectedSkillCount === 1) {
     return translate('input.skillActive', { count: selectedSkillCount });
-  }
-  if (attachmentCount > 1) {
-    return translate('input.attachmentsReady', { count: attachmentCount });
-  }
-  if (attachmentCount === 1) {
-    return translate('input.attachmentReady', { count: attachmentCount });
   }
   return null;
 }
@@ -239,6 +260,65 @@ function buildSkillPrefixedMessage(text: string, selectedSkills: SelectedSkill[]
   return `${prefix}\n${text}`;
 }
 
+function insertQuickPhraseText(inputText: string, phrase: string, selectionStart: number, selectionEnd: number): { nextValue: string; caret: number } {
+  const safeStart = Math.max(0, Math.min(selectionStart, inputText.length));
+  const safeEnd = Math.max(safeStart, Math.min(selectionEnd, inputText.length));
+  const before = inputText.slice(0, safeStart);
+  const after = inputText.slice(safeEnd);
+  const prefix = before.length > 0 && !/\s$/.test(before) ? ' ' : '';
+  const suffix = after.length > 0 && !/^\s/.test(after) ? ' ' : '';
+  const insertion = `${prefix}${phrase}${suffix}`;
+  return {
+    nextValue: `${before}${insertion}${after}`,
+    caret: before.length + prefix.length + phrase.length + suffix.length,
+  };
+}
+
+function loadQuickPhrases(): QuickPhrase[] {
+  if (typeof window === 'undefined') {
+    return DEFAULT_QUICK_PHRASES;
+  }
+  try {
+    const raw = window.localStorage.getItem(QUICK_PHRASE_STORAGE_KEY);
+    if (!raw) {
+      return DEFAULT_QUICK_PHRASES;
+    }
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) {
+      return DEFAULT_QUICK_PHRASES;
+    }
+    return parsed
+      .filter((item): item is QuickPhrase => (
+        Boolean(item)
+        && typeof item === 'object'
+        && typeof item.id === 'string'
+        && typeof item.text === 'string'
+        && item.text.trim().length > 0
+      ))
+      .map((item) => ({ id: item.id, text: item.text.trim() }));
+  } catch {
+    return DEFAULT_QUICK_PHRASES;
+  }
+}
+
+function saveQuickPhrases(phrases: QuickPhrase[]): void {
+  if (typeof window === 'undefined') {
+    return;
+  }
+  try {
+    window.localStorage.setItem(QUICK_PHRASE_STORAGE_KEY, JSON.stringify(phrases));
+  } catch {
+    // ignore localStorage failures
+  }
+}
+
+function createQuickPhraseId(): string {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID();
+  }
+  return `quick-phrase-${Date.now()}`;
+}
+
 function buildStagingAttachment(
   id: string,
   fileName: string,
@@ -261,6 +341,10 @@ function isPreviewableImageAttachment(attachment: FileAttachment): boolean {
     && attachment.mimeType.startsWith('image/')
     && typeof attachment.preview === 'string'
     && attachment.preview.length > 0;
+}
+
+function waitForAttachmentPlaceholderFrame(): Promise<void> {
+  return new Promise((resolve) => requestAnimationFrame(() => resolve()));
 }
 
 // ── Component ────────────────────────────────────────────────────
@@ -295,6 +379,10 @@ export const ChatInput = memo(function ChatInput({
   const [slashItems, setSlashItems] = useState<SelectedSkill[]>([]);
   const [slashActiveIndex, setSlashActiveIndex] = useState(0);
   const [selectedSkills, setSelectedSkills] = useState<SelectedSkill[]>([]);
+  const [quickPhrases, setQuickPhrases] = useState<QuickPhrase[]>(() => loadQuickPhrases());
+  const [quickPhraseOpen, setQuickPhraseOpen] = useState(false);
+  const [quickPhraseAddOpen, setQuickPhraseAddOpen] = useState(false);
+  const [quickPhraseDraft, setQuickPhraseDraft] = useState('');
   const [modelPickerOpen, setModelPickerOpen] = useState(false);
   const [lightboxAttachment, setLightboxAttachment] = useState<{
     src: string;
@@ -413,6 +501,12 @@ export const ChatInput = memo(function ChatInput({
     setSlashEnd(-1);
   }, []);
 
+  const closeQuickPhrase = useCallback(() => {
+    setQuickPhraseOpen(false);
+    setQuickPhraseAddOpen(false);
+    setQuickPhraseDraft('');
+  }, []);
+
   const refreshMentionCandidates = useCallback((nextInput: string, cursor: number) => {
     if (mentionCandidates.length === 0) {
       closeMention();
@@ -439,7 +533,8 @@ export const ChatInput = memo(function ChatInput({
     setMentionItems(matched);
     setMentionActiveIndex((prev) => (prev >= matched.length ? 0 : prev));
     closeSlash();
-  }, [closeMention, closeSlash, mentionCandidates]);
+    closeQuickPhrase();
+  }, [closeMention, closeQuickPhrase, closeSlash, mentionCandidates]);
 
   const applyMentionSelection = useCallback((candidate: MentionCandidate) => {
     if (!textareaRef.current || mentionStart < 0 || mentionEnd < mentionStart) {
@@ -491,7 +586,8 @@ export const ChatInput = memo(function ChatInput({
     setSlashItems(matched);
     setSlashActiveIndex((prev) => (prev >= matched.length ? 0 : prev));
     closeMention();
-  }, [allowedSkillIdSet, closeMention, closeSlash, selectedSkills, skills]);
+    closeQuickPhrase();
+  }, [allowedSkillIdSet, closeMention, closeQuickPhrase, closeSlash, selectedSkills, skills]);
 
   const applySlashSelection = useCallback((candidate: SelectedSkill) => {
     if (!textareaRef.current || slashStart < 0 || slashEnd < slashStart) {
@@ -514,9 +610,120 @@ export const ChatInput = memo(function ChatInput({
     });
   }, [closeSlash, input, slashEnd, slashStart]);
 
+  const toggleQuickPhrase = useCallback(() => {
+    setQuickPhraseOpen((open) => !open);
+    setQuickPhraseAddOpen(false);
+    setQuickPhraseDraft('');
+    closeMention();
+    closeSlash();
+  }, [closeMention, closeSlash]);
+
+  const applyQuickPhrase = useCallback((phrase: string) => {
+    const textarea = textareaRef.current;
+    const selectionStart = textarea?.selectionStart ?? input.length;
+    const selectionEnd = textarea?.selectionEnd ?? selectionStart;
+    const { nextValue, caret } = insertQuickPhraseText(input, phrase, selectionStart, selectionEnd);
+    setInput(nextValue);
+    closeQuickPhrase();
+    requestAnimationFrame(() => {
+      textareaRef.current?.focus();
+      textareaRef.current?.setSelectionRange(caret, caret);
+    });
+  }, [closeQuickPhrase, input]);
+
+  const commitQuickPhraseList = useCallback((nextPhrases: QuickPhrase[]) => {
+    setQuickPhrases(nextPhrases);
+    saveQuickPhrases(nextPhrases);
+  }, []);
+
+  const moveQuickPhrase = useCallback((phraseId: string, direction: -1 | 1) => {
+    const index = quickPhrases.findIndex((phrase) => phrase.id === phraseId);
+    const targetIndex = index + direction;
+    if (index < 0 || targetIndex < 0 || targetIndex >= quickPhrases.length) {
+      return;
+    }
+    const nextPhrases = [...quickPhrases];
+    const [phrase] = nextPhrases.splice(index, 1);
+    nextPhrases.splice(targetIndex, 0, phrase);
+    commitQuickPhraseList(nextPhrases);
+  }, [commitQuickPhraseList, quickPhrases]);
+
+  const removeQuickPhrase = useCallback((phraseId: string) => {
+    commitQuickPhraseList(quickPhrases.filter((phrase) => phrase.id !== phraseId));
+  }, [commitQuickPhraseList, quickPhrases]);
+
+  const addQuickPhrase = useCallback(() => {
+    const text = quickPhraseDraft.trim();
+    if (!text) {
+      return;
+    }
+    commitQuickPhraseList([...quickPhrases, { id: createQuickPhraseId(), text }]);
+    setQuickPhraseDraft('');
+    setQuickPhraseAddOpen(false);
+  }, [commitQuickPhraseList, quickPhraseDraft, quickPhrases]);
+
   // ── File staging via native dialog ─────────────────────────────
 
-  const stagePathFiles = useCallback(async (filePaths: string[]) => {
+  const stageSelectedDialogAttachments = useCallback(async () => {
+    const tempIds: string[] = [];
+    let stagingAttachments: FileAttachment[] = [];
+
+    try {
+      const result = await invokeIpc('dialog:stageOpenAttachments', {
+        properties: ['openFile', 'multiSelections'],
+      }) as StageOpenAttachmentsResult;
+      if (result.canceled) {
+        return;
+      }
+
+      const selectedFiles = result.selectedFiles?.length
+        ? result.selectedFiles
+        : result.attachments?.map((attachment) => ({
+          fileName: attachment.fileName,
+          mimeType: attachment.mimeType,
+          fileSize: attachment.fileSize,
+        })) ?? [];
+      if (selectedFiles.length === 0) {
+        return;
+      }
+
+      stagingAttachments = selectedFiles.map((file) => {
+        const tempId = crypto.randomUUID();
+        tempIds.push(tempId);
+        return buildStagingAttachment(
+          tempId,
+          file.fileName,
+          file.mimeType || 'application/octet-stream',
+          file.fileSize ?? 0,
+        );
+      });
+      setAttachments((prev) => [...prev, ...stagingAttachments]);
+      await waitForAttachmentPlaceholderFrame();
+
+      const updatesByTempId = new Map<string, FileAttachment>();
+      for (let i = 0; i < tempIds.length; i++) {
+        const tempId = tempIds[i];
+        const attachment = result.attachments?.[i];
+        updatesByTempId.set(tempId, attachment
+          ? { ...attachment, status: 'ready' }
+          : { ...stagingAttachments[i], status: 'error', error: 'Staging failed' });
+      }
+      setAttachments((prev) => prev.map((attachment) => updatesByTempId.get(attachment.id) ?? attachment));
+    } catch (err) {
+      if (tempIds.length === 0) {
+        console.error('[stageSelectedDialogAttachments] Failed to stage selected attachments:', err);
+        return;
+      }
+      const failedIds = new Set(tempIds);
+      setAttachments((prev) => prev.map((attachment) => (
+        failedIds.has(attachment.id)
+          ? { ...attachment, status: 'error', error: String(err) }
+          : attachment
+      )));
+    }
+  }, []);
+
+  const stageDroppedPathFiles = useCallback(async (filePaths: string[]) => {
     if (filePaths.length === 0) {
       return;
     }
@@ -552,18 +759,6 @@ export const ChatInput = memo(function ChatInput({
       )));
     }
   }, [sessionIdentity, workspaceContext]);
-
-  const pickFiles = useCallback(async () => {
-    try {
-      const result = await invokeIpc('dialog:open', {
-        properties: ['openFile', 'multiSelections'],
-      }) as { canceled: boolean; filePaths?: string[] };
-      if (result.canceled || !result.filePaths?.length) return;
-      await stagePathFiles(result.filePaths);
-    } catch (err) {
-      console.error('[pickFiles] Failed to open file dialog:', err);
-    }
-  }, [stagePathFiles]);
 
   // ── Stage browser File objects (paste / drag-drop) ─────────────
 
@@ -684,12 +879,13 @@ export const ChatInput = memo(function ChatInput({
     setInput('');
     closeMention();
     closeSlash();
+    closeQuickPhrase();
     setSelectedSkills([]);
     setAttachments([]);
     if (textareaRef.current) {
       textareaRef.current.style.height = 'auto';
     }
-  }, [attachments, canSend, closeMention, closeSlash, input, onSend, selectedSkills]);
+  }, [attachments, canSend, closeMention, closeQuickPhrase, closeSlash, input, onSend, selectedSkills]);
 
   const handleStop = useCallback(() => {
     if (!canStop) return;
@@ -748,6 +944,12 @@ export const ChatInput = memo(function ChatInput({
         }
       }
 
+      if (quickPhraseOpen && e.key === 'Escape') {
+        e.preventDefault();
+        closeQuickPhrase();
+        return;
+      }
+
       if (e.key === 'Enter' && !e.shiftKey) {
         const nativeEvent = e.nativeEvent as KeyboardEvent;
         if (isComposingRef.current || nativeEvent.isComposing || nativeEvent.keyCode === 229) {
@@ -761,11 +963,13 @@ export const ChatInput = memo(function ChatInput({
       applyMentionSelection,
       applySlashSelection,
       closeMention,
+      closeQuickPhrase,
       closeSlash,
       handleSend,
       mentionActiveIndex,
       mentionItems,
       mentionOpen,
+      quickPhraseOpen,
       slashActiveIndex,
       slashItems,
       slashOpen,
@@ -818,13 +1022,13 @@ export const ChatInput = memo(function ChatInput({
       }
       const { pathFiles, bufferFiles } = collectDroppedFiles(e.dataTransfer);
       if (pathFiles.length > 0) {
-        void stagePathFiles(pathFiles);
+        void stageDroppedPathFiles(pathFiles);
       }
       if (bufferFiles.length > 0) {
         stageBufferFiles(bufferFiles);
       }
     },
-    [stageBufferFiles, stagePathFiles],
+    [stageBufferFiles, stageDroppedPathFiles],
   );
 
   const placeholderText = resolveInputPlaceholder(disabled, approvalWaiting, t);
@@ -832,7 +1036,6 @@ export const ChatInput = memo(function ChatInput({
     disabled,
     approvalWaiting,
     selectedSkills.length,
-    attachments.length,
     t,
   );
 
@@ -1129,8 +1332,26 @@ export const ChatInput = memo(function ChatInput({
                 className={cn(
                   CHAT_LAYOUT_TOKENS.inputAttachButton,
                   'rounded-full border border-border/45 bg-background/74 text-muted-foreground shadow-sm hover:bg-background/88 hover:text-foreground',
+                  quickPhraseOpen && 'bg-background/90 text-foreground',
                 )}
-                onClick={pickFiles}
+                onClick={toggleQuickPhrase}
+                disabled={disabled || sending || approvalWaiting}
+                aria-label="快捷短语"
+                title="快捷短语"
+                aria-haspopup="dialog"
+                aria-expanded={quickPhraseOpen}
+              >
+                <MessageSquare className="h-4 w-4" />
+              </Button>
+
+              <Button
+                variant="ghost"
+                size="icon"
+                className={cn(
+                  CHAT_LAYOUT_TOKENS.inputAttachButton,
+                  'rounded-full border border-border/45 bg-background/74 text-muted-foreground shadow-sm hover:bg-background/88 hover:text-foreground',
+                )}
+                onClick={stageSelectedDialogAttachments}
                 disabled={disabled || sending || approvalWaiting}
                 aria-label="Attach files"
                 title="Attach files"
@@ -1166,6 +1387,160 @@ export const ChatInput = memo(function ChatInput({
             ) : null}
           </div>
         </div>
+        {quickPhraseOpen && typeof document !== 'undefined' ? createPortal((
+          <div
+            className="fixed inset-0 z-[120] flex items-center justify-center bg-black/55 p-6"
+            role="presentation"
+            onMouseDown={(event) => {
+              if (event.target === event.currentTarget) {
+                closeQuickPhrase();
+              }
+            }}
+          >
+            <section
+              role="dialog"
+              aria-modal="true"
+              aria-label={quickPhraseAddOpen ? '新增快捷短语' : '快捷短语'}
+              className="w-full max-w-[54rem] rounded-[1.25rem] border border-border bg-card p-5 shadow-[0_24px_70px_rgba(15,23,42,0.28)]"
+            >
+              <div className="flex items-start justify-between gap-4">
+                <div>
+                  <h2 className="text-base font-semibold text-foreground">
+                    {quickPhraseAddOpen ? '新增快捷短语' : '快捷短语'}
+                  </h2>
+                  <p className="mt-1 text-sm text-muted-foreground">
+                    {quickPhraseAddOpen
+                      ? '把常用指令单独存起来，后面可以直接复用。'
+                      : '这里集中管理你常用的会话指令，点一下就能直接填回当前输入框。'}
+                  </p>
+                </div>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon"
+                  className="h-9 w-9 shrink-0 rounded-full border border-border bg-background shadow-sm hover:bg-secondary"
+                  onClick={closeQuickPhrase}
+                  aria-label="关闭快捷短语"
+                  title="关闭快捷短语"
+                >
+                  <X className="h-4 w-4" />
+                </Button>
+              </div>
+
+              <div className="mt-4 border-t border-border/45 pt-4">
+                {quickPhraseAddOpen ? (
+                  <div>
+                    <label className="text-xs font-medium text-muted-foreground" htmlFor="quick-phrase-draft">
+                      新增短语
+                    </label>
+                    <Textarea
+                      id="quick-phrase-draft"
+                      value={quickPhraseDraft}
+                      onChange={(event) => setQuickPhraseDraft(event.target.value)}
+                      placeholder="输入一条常用短语，保存后下次可以直接复用。"
+                      className="mt-2 min-h-[6.5rem] resize-none rounded-xl border-border bg-background text-sm shadow-sm focus-visible:ring-2 focus-visible:ring-ring/35"
+                    />
+                    <div className="mt-3 flex justify-end gap-2">
+                      <Button
+                        type="button"
+                        variant="secondary"
+                        className="rounded-xl"
+                        onClick={() => {
+                          setQuickPhraseAddOpen(false);
+                          setQuickPhraseDraft('');
+                        }}
+                      >
+                        取消
+                      </Button>
+                      <Button
+                        type="button"
+                        className="rounded-xl"
+                        disabled={!quickPhraseDraft.trim()}
+                        onClick={addQuickPhrase}
+                      >
+                        添加短语
+                      </Button>
+                    </div>
+                  </div>
+                ) : (
+                  <div>
+                    <div className="mb-3 flex items-center justify-between gap-3">
+                      <span className="text-xs font-medium text-muted-foreground">快捷短语列表</span>
+                      <Button
+                        type="button"
+                        size="sm"
+                        className="h-8 rounded-xl px-3 text-xs"
+                        onClick={() => setQuickPhraseAddOpen(true)}
+                      >
+                        新增短语
+                      </Button>
+                    </div>
+                    {quickPhrases.length === 0 ? (
+                      <div className="rounded-xl border border-dashed border-border bg-background px-4 py-6 text-center text-sm text-muted-foreground">
+                        还没有快捷短语，点“新增短语”添加常用内容。
+                      </div>
+                    ) : (
+                      <div className="space-y-2">
+                        {quickPhrases.map((phrase, index) => (
+                          <div
+                            key={phrase.id}
+                            className="flex items-center gap-2 rounded-xl border border-border bg-background px-3 py-2 shadow-sm"
+                          >
+                            <button
+                              type="button"
+                              className="min-w-0 flex-1 text-left"
+                              onClick={() => applyQuickPhrase(phrase.text)}
+                            >
+                              <div className="text-xs font-semibold text-primary">第 {index + 1} 条</div>
+                              <div className="mt-0.5 truncate text-sm text-foreground">{phrase.text}</div>
+                            </button>
+                            <div className="flex shrink-0 items-center gap-1">
+                              <Button
+                                type="button"
+                                variant="secondary"
+                                size="icon"
+                                className="h-7 w-7 rounded-lg"
+                                disabled={index === 0}
+                                onClick={() => moveQuickPhrase(phrase.id, -1)}
+                                aria-label={`上移${phrase.text}`}
+                                title="上移"
+                              >
+                                ↑
+                              </Button>
+                              <Button
+                                type="button"
+                                variant="secondary"
+                                size="icon"
+                                className="h-7 w-7 rounded-lg"
+                                disabled={index === quickPhrases.length - 1}
+                                onClick={() => moveQuickPhrase(phrase.id, 1)}
+                                aria-label={`下移${phrase.text}`}
+                                title="下移"
+                              >
+                                ↓
+                              </Button>
+                              <Button
+                                type="button"
+                                variant="secondary"
+                                size="icon"
+                                className="h-7 w-7 rounded-lg text-destructive hover:text-destructive"
+                                onClick={() => removeQuickPhrase(phrase.id)}
+                                aria-label={`删除${phrase.text}`}
+                                title="删除"
+                              >
+                                ×
+                              </Button>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            </section>
+          </div>
+        ), document.body) : null}
         {hasFailedAttachments && (
           <div className="mt-1 flex items-center justify-end gap-2 text-xs text-muted-foreground">
             <Button
@@ -1174,7 +1549,7 @@ export const ChatInput = memo(function ChatInput({
               className="h-auto p-0 text-xs"
               onClick={() => {
                 setAttachments((prev) => prev.filter((att) => att.status !== 'error'));
-                void pickFiles();
+                void stageSelectedDialogAttachments();
               }}
             >
               Retry failed attachments

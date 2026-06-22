@@ -172,21 +172,21 @@ describe('runtime-host API 真实链路 contract', { timeout: 20000 }, () => {
         },
       ],
       gatewayMethods: [
-        'matchaclaw.team.run.create',
-        'matchaclaw.team.run.start',
-        'matchaclaw.team.run.snapshot',
+        'agents.list',
+        'agents.create',
+        'agents.update',
+        'agents.delete',
+        'agents.files.set',
       ],
       gatewayHandler: ({ method, params }) => {
         const body = isRecord(params) ? params : {};
-        const runId = typeof body.runId === 'string' ? body.runId : 'team-api-chain';
-        if (method === 'matchaclaw.team.run.snapshot') {
-          return {
-            run: { runId, status: 'running' },
-            stages: [{ stageId: 'stage-1' }],
-            events: [{ type: 'run:created' }],
-          };
+        if (method === 'agents.list') {
+          return { agents: [] };
         }
-        return { runId, status: method.endsWith('.create') ? 'created' : 'running' };
+        if (method === 'agents.create') {
+          return { agentId: typeof body.name === 'string' ? body.name : 'agent' };
+        }
+        return { ok: true };
       },
     });
   }, 20000);
@@ -350,6 +350,18 @@ describe('runtime-host API 真实链路 contract', { timeout: 20000 }, () => {
       scope: RuntimeScope = teamScope,
     ) => createOpenClawCapabilityPayload('team.runtime', operationId, target, input, scope);
 
+    await harness.dispatchOk<{ teamId: string; managedAgentCount: number }>(
+      'POST',
+      '/api/capabilities/execute',
+      teamCapabilityPayload('team.provisionAgents', {
+        kind: 'team',
+        packagePath: resolve('.tmp/ascendc-operator-dev-optimize-team_1.0.0'),
+      }, {
+        packagePath: resolve('.tmp/ascendc-operator-dev-optimize-team_1.0.0'),
+        idempotencyKey: `${runId}:provision-agents`,
+      }),
+    );
+
     const created = await harness.dispatchOk<{ runId: string; status: string }>(
       'POST',
       '/api/capabilities/execute',
@@ -365,22 +377,11 @@ describe('runtime-host API 真实链路 contract', { timeout: 20000 }, () => {
     expect(created, JSON.stringify(created)).toMatchObject({ runId, status: 'created' });
 
     const teamRunScope = await readTeamRunCapabilityScope(harness, runId);
-    const started = await harness.dispatchOk<{ runId: string; status: string }>(
-      'POST',
-      '/api/capabilities/execute',
-      teamCapabilityPayload('team.runStart', {
-        kind: 'team-run',
-        runId,
-      }, {
-        runId,
-        idempotencyKey: `${runId}:start`,
-      }, teamRunScope),
-    );
-    expect(started.runId).toBe(runId);
 
     const snapshot = await harness.dispatchOk<{
       run: { runId: string; status: string } | null;
-      stages: Array<{ stageId: string }>;
+      roles: unknown[];
+      dispatchTasks: unknown[];
       events: Array<{ type: string }>;
     }>(
       'POST',
@@ -391,8 +392,9 @@ describe('runtime-host API 真实链路 contract', { timeout: 20000 }, () => {
       }, { runId, eventLimit: 20 }, teamRunScope),
     );
     expect(snapshot.run?.runId).toBe(runId);
-    expect(snapshot.stages.length).toBeGreaterThan(0);
-    expect(snapshot.events.some((event) => event.type === 'run:created')).toBe(true);
+    expect(snapshot.roles.length).toBeGreaterThan(0);
+    expect(snapshot.dispatchTasks).toEqual([]);
+    expect(snapshot.events).toEqual([]);
   });
 
   it('openclaw workspace 与 usage 历史通过 API 返回', async () => {
@@ -530,7 +532,7 @@ describe('runtime-host API 真实链路 contract', { timeout: 20000 }, () => {
     expect(latest.snapshot.window.isAtLatest).toBe(true);
     expect(latest.snapshot.items.map((item) => item.key)).toEqual([
       'session:agent:main:session-window|user:message:user:main:m3',
-      'session:agent:main:session-window|assistant-turn:main:m4',
+      'session:agent:main:session-window|assistant-turn:main:message:assistant:main:m4',
     ]);
 
     const initialOlder = await dispatchSessionWindow(harness, {
@@ -556,9 +558,9 @@ describe('runtime-host API 真实链路 contract', { timeout: 20000 }, () => {
     expect(older.snapshot.window.isAtLatest).toBe(true);
     expect(older.snapshot.items.map((item) => item.key)).toEqual([
       'session:agent:main:session-window|user:message:user:main:m1',
-      'session:agent:main:session-window|assistant-turn:main:m2',
+      'session:agent:main:session-window|assistant-turn:main:message:assistant:main:m2',
       'session:agent:main:session-window|user:message:user:main:m3',
-      'session:agent:main:session-window|assistant-turn:main:m4',
+      'session:agent:main:session-window|assistant-turn:main:message:assistant:main:m4',
     ]);
   });
 });

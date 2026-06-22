@@ -82,24 +82,23 @@ describe('chat input attachments', () => {
 
   it('图片附件以紧凑 chip 展示并支持点击预览', async () => {
     invokeIpcMock.mockImplementation(async (channel: string) => {
-      if (channel === 'dialog:open') {
+      if (channel === 'dialog:stageOpenAttachments') {
         return {
           canceled: false,
-          filePaths: ['C:\\tmp\\image.png'],
+          attachments: [
+            {
+              id: 'staged-image',
+              fileName: 'image.png',
+              mimeType: 'image/png',
+              fileSize: 1024,
+              stagedPath: 'C:\\tmp\\image.png',
+              preview: 'data:image/png;base64,abc',
+            },
+          ],
         };
       }
       return null;
     });
-    hostFileStagePathsMock.mockResolvedValueOnce([
-      {
-        id: 'staged-image',
-        fileName: 'image.png',
-        mimeType: 'image/png',
-        fileSize: 1024,
-        stagedPath: 'C:\\tmp\\image.png',
-        preview: 'data:image/png;base64,abc',
-      },
-    ]);
 
     render(<ChatInput onSend={vi.fn()} sessionIdentity={testSessionIdentity} />);
 
@@ -109,6 +108,10 @@ describe('chat input attachments', () => {
       expect(screen.getByRole('button', { name: /preview image\.png/i })).toBeInTheDocument();
     });
 
+    expect(invokeIpcMock).toHaveBeenCalledWith('dialog:stageOpenAttachments', {
+      properties: ['openFile', 'multiSelections'],
+    });
+    expect(hostFileStagePathsMock).not.toHaveBeenCalled();
     expect(screen.queryByRole('img', { name: /image\.png/i })).toBeNull();
 
     fireEvent.click(screen.getByRole('button', { name: /preview image\.png/i }));
@@ -141,24 +144,23 @@ describe('chat input attachments', () => {
 
   it('普通文件附件支持点击打开本地路径', async () => {
     invokeIpcMock.mockImplementation(async (channel: string, payload?: unknown) => {
-      if (channel === 'dialog:open') {
+      if (channel === 'dialog:stageOpenAttachments') {
         return {
           canceled: false,
-          filePaths: ['C:\\tmp\\notes.txt'],
+          attachments: [
+            {
+              id: 'staged-text',
+              fileName: 'notes.txt',
+              mimeType: 'text/plain',
+              fileSize: 128,
+              stagedPath: 'C:\\tmp\\notes.txt',
+              preview: null,
+            },
+          ],
         };
       }
       return payload ?? null;
     });
-    hostFileStagePathsMock.mockResolvedValueOnce([
-      {
-        id: 'staged-text',
-        fileName: 'notes.txt',
-        mimeType: 'text/plain',
-        fileSize: 128,
-        stagedPath: 'C:\\tmp\\notes.txt',
-        preview: null,
-      },
-    ]);
 
     render(<ChatInput onSend={vi.fn()} sessionIdentity={testSessionIdentity} />);
 
@@ -167,6 +169,8 @@ describe('chat input attachments', () => {
     await waitFor(() => {
       expect(screen.getByRole('button', { name: /open notes\.txt/i })).toBeInTheDocument();
     });
+
+    expect(hostFileStagePathsMock).not.toHaveBeenCalled();
 
     fireEvent.click(screen.getByRole('button', { name: /open notes\.txt/i }));
 

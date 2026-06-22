@@ -136,6 +136,28 @@ describe('runtime-host http client', () => {
     );
   });
 
+  it('默认 dispatch 请求超时为 30 秒', async () => {
+    fetchMock.mockResolvedValueOnce(
+      new Response(JSON.stringify({
+        version: 1,
+        success: true,
+        status: 200,
+        data: { ok: true },
+      }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }),
+    );
+
+    const setTimeoutSpy = vi.spyOn(globalThis, 'setTimeout');
+    const client = createRuntimeHostHttpClient({ baseUrl: 'http://127.0.0.1:3211' });
+
+    await client.request('POST', '/api/capabilities/execute', { id: 'session.prompt' });
+
+    expect(setTimeoutSpy).toHaveBeenCalledWith(expect.any(Function), 30_000);
+    setTimeoutSpy.mockRestore();
+  });
+
   it('单次 request 支持覆盖默认超时', async () => {
     fetchMock.mockResolvedValueOnce(
       new Response(JSON.stringify({

@@ -18,7 +18,7 @@ type HostApiAbortRequest = {
   requestId?: string;
 };
 
-const DEFAULT_HOST_API_TIMEOUT_MS = 15000;
+const DEFAULT_HOST_API_TIMEOUT_MS = 30_000;
 const REQUEST_TIMEOUT_HEADER = 'x-matchaclaw-request-timeout-ms';
 
 function normalizeHostApiProxyPath(path: unknown): string {

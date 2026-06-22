@@ -1,6 +1,7 @@
 import { dialog, ipcMain } from 'electron';
 import { readFile, writeFile } from 'node:fs/promises';
 import { getE2EDialogOpenResult } from '../e2e-fixture-loader';
+import { stageDialogSelectedAttachments } from './dialog-attachment-staging';
 
 export function registerDialogHandlers(): void {
   ipcMain.handle('dialog:open', async (_, options: Electron.OpenDialogOptions) => {
@@ -17,6 +18,20 @@ export function registerDialogHandlers(): void {
 
   ipcMain.handle('dialog:message', async (_, options: Electron.MessageBoxOptions) => {
     return await dialog.showMessageBox(options);
+  });
+
+  ipcMain.handle('dialog:stageOpenAttachments', async (_, options: Electron.OpenDialogOptions) => {
+    const result = await dialog.showOpenDialog({
+      ...options,
+      properties: [...new Set([...(options.properties ?? []), 'openFile', 'multiSelections'])],
+    });
+    if (result.canceled) {
+      return { canceled: true };
+    }
+    return {
+      canceled: false,
+      attachments: await stageDialogSelectedAttachments(result.filePaths),
+    };
   });
 
   ipcMain.handle('dialog:readSelectedTextFile', async (_, options: Electron.OpenDialogOptions) => {

@@ -21,6 +21,7 @@ export const SHELL_INVOKE_CHANNELS = [
   'dialog:open',
   'dialog:save',
   'dialog:message',
+  'dialog:stageOpenAttachments',
   'dialog:readSelectedTextFile',
   'dialog:writeSelectedTextFile',
 ] as const;

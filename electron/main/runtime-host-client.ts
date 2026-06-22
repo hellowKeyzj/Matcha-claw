@@ -9,6 +9,8 @@ import { getPort } from '../utils/config';
 
 type RequestMethod = 'GET' | 'POST' | 'PUT' | 'DELETE';
 
+const DEFAULT_RUNTIME_HOST_REQUEST_TIMEOUT_MS = 30_000;
+
 export class RuntimeHostClientRequestError extends Error {
   readonly status: number;
   readonly code?: string;
@@ -129,7 +131,7 @@ export function createDefaultRuntimeHostHttpClient(
 export function createRuntimeHostHttpClient(options: RuntimeHostHttpClientOptions): RuntimeHostHttpClient {
   const timeoutMs = Number.isFinite(options.timeoutMs) && (options.timeoutMs ?? 0) > 0
     ? Number(options.timeoutMs)
-    : 15_000;
+    : DEFAULT_RUNTIME_HOST_REQUEST_TIMEOUT_MS;
   const baseUrl = normalizeBaseUrl(options.baseUrl);
 
   async function request<TResponse>(

@@ -89,6 +89,7 @@
     "/api/settings/"
   ],
   "hostapiProxyPublicValidationPostExactRoutes": [
-    "/api/channels/credentials/validate"
+    "/api/channels/credentials/validate",
+    "/api/clawhub/search"
   ]
 }

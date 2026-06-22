@@ -290,7 +290,6 @@ function buildRuntimeEndpointCapabilitySummaries() {
       { id: 'team.runCreate', targetKind: 'team' },
     ]),
     buildCapabilitySummary('team.runtime', teamRuntimeScope, ['team-run', 'team-approval'], [
-      { id: 'team.runStart', targetKind: 'team-run' },
       { id: 'team.runSnapshot', targetKind: 'team-run' },
       { id: 'team.planWorkflow', targetKind: 'team-run' },
       { id: 'team.approvalResolve', targetKind: 'team-approval' },
