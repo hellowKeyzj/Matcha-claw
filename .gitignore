@@ -69,7 +69,13 @@ packages/memory-lancedb-pro/models/
 .windsurf/
 _bmad/
 .codex/
-docs/
+.codegraph/
+.scratch/
+docs/*
+!docs/agents/
+!docs/agents/**
+!docs/architecture/
+!docs/architecture/**
 worktrees/
 _bmad-output/
 runtime-host/build/
@@ -84,3 +90,4 @@ clawsuite-main/
 .tmp/
 identity/
 matcha-agent/spec
+third_party/
