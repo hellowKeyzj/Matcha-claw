@@ -63,7 +63,8 @@ export function TeamsPage() {
   const replaceTeamSkillVersion = useTeamsStore((state) => state.replaceTeamSkillVersion);
   const setActiveTeam = useTeamsStore((state) => state.setActiveTeam);
   const deleteTeam = useTeamsStore((state) => state.deleteTeam);
-  const ensureRunCreated = useTeamsStore((state) => state.ensureRunCreated);
+  const provisionTeamAgents = useTeamsStore((state) => state.provisionTeamAgents);
+  const createRun = useTeamsStore((state) => state.createRun);
   const refreshSnapshot = useTeamsStore((state) => state.refreshSnapshot);
   const installSkill = useSkillsStore((state) => state.installSkill);
   const importLocalSkill = useSkillsStore((state) => state.importLocalSkill);
@@ -228,7 +229,8 @@ export function TeamsPage() {
     if (review.creationPlan.action === 'create') {
       const teamId = createTeam(review.candidate);
       try {
-        await ensureRunCreated(teamId);
+        await provisionTeamAgents(teamId);
+        await createRun(teamId);
         setActiveTeam(teamId);
         setCreateDialogOpen(false);
         navigate(`/teams/${teamId}`);
@@ -251,7 +253,8 @@ export function TeamsPage() {
       candidate: review.candidate,
     });
     try {
-      await ensureRunCreated(teamId);
+      await provisionTeamAgents(teamId);
+      await createRun(teamId);
       setActiveTeam(teamId);
       setCreateDialogOpen(false);
       navigate(`/teams/${teamId}`);
@@ -408,7 +411,6 @@ export function TeamsPage() {
                   <div>
                     <div className="text-sm font-medium text-foreground">{review.candidate.teamSkillPackage.name}@{review.candidate.teamSkillPackage.version}</div>
                     <div className="mt-1 text-sm text-muted-foreground">{review.candidate.teamSkillPackage.description}</div>
-                    <div className="mt-1 text-xs text-muted-foreground">{review.dependencyPlan.sourcePath}</div>
                   </div>
 
                   {review.creationPlan.action === 'open_existing' ? (
@@ -559,9 +561,6 @@ export function TeamsPage() {
                         <div className="truncate text-sm font-medium">{team.name}</div>
                         <div className="text-xs text-muted-foreground">
                           {team.teamSkillName}@{team.teamSkillVersion}
-                        </div>
-                        <div className="text-xs text-muted-foreground">
-                          {t('list.packagePath')}: {team.packagePath}
                         </div>
                         <div className="text-xs text-muted-foreground">
                           {t('list.managedRoles')}: {roleCount}

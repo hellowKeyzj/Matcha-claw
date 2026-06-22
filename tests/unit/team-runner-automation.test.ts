@@ -2,7 +2,6 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('@/services/openclaw/team-runtime-client', () => ({
   createTeamRun: vi.fn(),
-  startTeamRun: vi.fn(),
   readTeamRunSnapshot: vi.fn(),
   tickTeamRun: vi.fn(),
   cancelTeamRun: vi.fn(),

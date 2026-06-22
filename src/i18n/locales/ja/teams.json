@@ -79,6 +79,7 @@
   },
   "run": {
     "start": "Start Run",
+    "resume": "Resume Run",
     "notStarted": "Not started",
     "tick": "Tick Run",
     "cancel": "Cancel Run",

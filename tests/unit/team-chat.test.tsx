@@ -54,6 +54,36 @@ describe('team chat', () => {
         },
       ],
       activeTeamId: 'team-1',
+      runIdsByTeamId: { 'team-1': ['team-1'] },
+      runListByTeamId: {
+        'team-1': [
+          {
+            runId: 'team-1',
+            packageName: 'ascendc-team',
+            packageVersion: '1.0.0',
+            sourcePath: '.tmp/team-skill',
+            status: 'waiting_for_user',
+            currentStageId: 'stage-1',
+            revision: 2,
+            createdAt: 1,
+            updatedAt: 2,
+            sessions: [],
+          },
+        ],
+      },
+      runsById: {
+        'team-1': {
+          runId: 'team-1',
+          packageName: 'ascendc-team',
+          packageVersion: '1.0.0',
+          sourcePath: '.tmp/team-skill',
+          status: 'waiting_for_user',
+          currentStageId: 'stage-1',
+          revision: 2,
+          createdAt: 1,
+          updatedAt: 2,
+        },
+      },
       runByTeamId: {
         'team-1': {
           runId: 'team-1',
@@ -234,13 +264,17 @@ describe('team chat', () => {
         ],
       },
       eventsByTeamId: { 'team-1': [] },
+      eventsByRunId: { 'team-1': [] },
       eventCursorByTeamId: { 'team-1': 1 },
+      eventCursorByRunId: { 'team-1': 1 },
       loadingByTeamId: { 'team-1': false },
       errorByTeamId: { 'team-1': undefined },
       setActiveTeam: vi.fn(),
-      ensureRunCreated: vi.fn().mockResolvedValue(undefined),
-      startRun: vi.fn().mockResolvedValue(undefined),
+      setActiveRun: vi.fn(),
+      createRun: vi.fn().mockResolvedValue(undefined),
+      deleteRun: vi.fn().mockResolvedValue(undefined),
       refreshSnapshot: vi.fn().mockResolvedValue(undefined),
+      syncRunList: vi.fn().mockResolvedValue(undefined),
       tickRun: vi.fn().mockResolvedValue(undefined),
       cancelRun: vi.fn().mockResolvedValue(undefined),
       resolveApproval: vi.fn().mockResolvedValue(undefined),
@@ -312,7 +346,7 @@ describe('team chat', () => {
     expect(screen.getByText('workflowPlanId: workflow-plan-1', { exact: false })).toBeInTheDocument();
   });
 
-  it('refreshes snapshot on mount without auto-starting the TeamRun', async () => {
+  it('syncs run list before refreshing snapshot on mount without starting the TeamRun', async () => {
     render(
       <MemoryRouter>
         <TeamChat teamId="team-1" />
@@ -320,24 +354,104 @@ describe('team chat', () => {
     );
 
     await waitFor(() => {
+      expect(useTeamsStore.getState().syncRunList).toHaveBeenCalledWith('team-1');
       expect(useTeamsStore.getState().refreshSnapshot).toHaveBeenCalledWith('team-1');
     });
-    expect(useTeamsStore.getState().startRun).not.toHaveBeenCalled();
+    const syncRunListOrder = vi.mocked(useTeamsStore.getState().syncRunList).mock.invocationCallOrder[0];
+    const refreshSnapshotOrder = vi.mocked(useTeamsStore.getState().refreshSnapshot).mock.invocationCallOrder[0];
+    expect(syncRunListOrder).toBeLessThan(refreshSnapshotOrder);
+    expect(screen.queryByRole('button', { name: 'Start Run' })).not.toBeInTheDocument();
   });
 
-  it('disables start for a waiting TeamRun', async () => {
+  it('selects a run from the run list and refreshes the selected snapshot', async () => {
+    useTeamsStore.setState({
+      teams: [
+        {
+          ...useTeamsStore.getState().teams[0]!,
+          activeRunId: 'teamrun-new',
+        },
+      ],
+      runIdsByTeamId: { 'team-1': ['teamrun-old', 'teamrun-new'] },
+      runListByTeamId: {
+        'team-1': [
+          {
+            ...useTeamsStore.getState().runsById['team-1']!,
+            runId: 'teamrun-old',
+            status: 'completed',
+            revision: 1,
+            updatedAt: 1,
+            sessions: [],
+          },
+          {
+            ...useTeamsStore.getState().runsById['team-1']!,
+            runId: 'teamrun-new',
+            status: 'running',
+            revision: 2,
+            updatedAt: 2,
+            sessions: [],
+          },
+        ],
+      },
+      runsById: {
+        'teamrun-old': {
+          ...useTeamsStore.getState().runsById['team-1']!,
+          runId: 'teamrun-old',
+          status: 'completed',
+          revision: 1,
+          updatedAt: 1,
+        },
+        'teamrun-new': {
+          ...useTeamsStore.getState().runsById['team-1']!,
+          runId: 'teamrun-new',
+          status: 'running',
+          revision: 2,
+          updatedAt: 2,
+        },
+      },
+      runByTeamId: {
+        'team-1': {
+          ...useTeamsStore.getState().runsById['team-1']!,
+          runId: 'teamrun-new',
+          status: 'running',
+          revision: 2,
+          updatedAt: 2,
+        },
+      },
+    } as never);
+
     render(
       <MemoryRouter>
         <TeamChat teamId="team-1" />
       </MemoryRouter>,
     );
 
-    expect(await screen.findByRole('button', { name: 'Start Run' })).toBeDisabled();
-    expect(useTeamsStore.getState().startRun).not.toHaveBeenCalled();
+    fireEvent.click(await screen.findByRole('button', { name: /teamrun-old/i }));
+
+    await waitFor(() => {
+      expect(useTeamsStore.getState().setActiveRun).toHaveBeenCalledWith('team-1', 'teamrun-old');
+      expect(useTeamsStore.getState().refreshSnapshot).toHaveBeenCalledWith('team-1');
+    });
   });
 
-  it('starts the TeamRun only from the explicit start button when no run exists', async () => {
+  it('creates a new run from the header action', async () => {
+    render(
+      <MemoryRouter>
+        <TeamChat teamId="team-1" />
+      </MemoryRouter>,
+    );
+
+    fireEvent.click(await screen.findByRole('button', { name: 'New Run' }));
+
+    await waitFor(() => {
+      expect(useTeamsStore.getState().createRun).toHaveBeenCalledWith('team-1');
+    });
+  });
+
+  it('shows an empty run hint when no run exists', async () => {
     useTeamsStore.setState({
+      runIdsByTeamId: { 'team-1': [] },
+      runListByTeamId: { 'team-1': [] },
+      runsById: {},
       runByTeamId: {},
       stagesByTeamId: { 'team-1': [] },
       workflowPlanByTeamId: { 'team-1': null },
@@ -352,12 +466,8 @@ describe('team chat', () => {
       </MemoryRouter>,
     );
 
-    fireEvent.click(await screen.findByRole('button', { name: 'Start Run' }));
-
-    await waitFor(() => {
-      expect(useTeamsStore.getState().startRun).toHaveBeenCalledWith('team-1', expect.any(String));
-    });
-    expect(screen.getByText(/Run status:\s*Not started/)).toBeInTheDocument();
+    expect(await screen.findByText('No runs yet. Create a run, then open the leader session and send a message to run it.')).toBeInTheDocument();
+    expect(screen.queryByText(/Run status:\s*No run selected/)).not.toBeInTheDocument();
     expect(screen.queryByText('Waiting Run Decision')).not.toBeInTheDocument();
   });
 
@@ -368,7 +478,7 @@ describe('team chat', () => {
       </MemoryRouter>,
     );
 
-    expect(await screen.findByRole('button', { name: 'Cancel Run' })).toBeEnabled();
+    expect(await screen.findByRole('button', { name: 'Stop Run' })).toBeEnabled();
     expect(screen.getByRole('button', { name: 'Submit Decision' })).toBeEnabled();
     expect(screen.getByText('Waiting Run Decision')).toBeInTheDocument();
   });
@@ -476,7 +586,7 @@ describe('team chat', () => {
       </MemoryRouter>,
     );
 
-    expect(await screen.findByRole('button', { name: 'Cancel Run' })).toBeDisabled();
+    expect(await screen.findByRole('button', { name: 'Stop Run' })).toBeDisabled();
     expect(screen.queryByText('Waiting Run Decision')).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Submit Decision' })).not.toBeInTheDocument();
   });

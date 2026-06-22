@@ -1,12 +1,18 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
+import { useChatStore } from '@/stores/chat';
+import { buildSessionIdentityRecordIndex } from '@/stores/chat/session-identity';
+import { DEFAULT_SESSION_KEY, type ChatSessionRecord } from '@/stores/chat/types';
 import {
   cancelTeamRun,
   createTeamRun,
+  deleteTeamInstance,
   deleteTeamRun,
+  listTeamRuns,
+  provisionTeamAgents,
   readTeamRunSnapshot,
   resolveTeamApproval,
-  startTeamRun,
+  resumeTeam,
   submitTeamRunDecision,
   tickTeamRun,
   type TeamApprovalRecord,
@@ -20,8 +26,10 @@ import {
   type TeamEventRecord,
   type TeamGateRecord,
   type TeamKickbackRecord,
+  type TeamMailRecord,
   type TeamMessageRecord,
   type TeamRoleBindingRecord,
+  type TeamRunListItem,
   type TeamRunRecord,
   type TeamRunSummary,
   type TeamRunWorkflowPlan,
@@ -37,7 +45,7 @@ export interface TeamMeta {
   teamSkillDescription: string;
   packagePath: string;
   sourcePath: string;
-  activeRunId: string;
+  activeRunId?: string;
   createdAt: number;
   updatedAt: number;
 }
@@ -56,6 +64,9 @@ export type TeamSkillCreationPlan =
 interface TeamsState {
   teams: TeamMeta[];
   activeTeamId: string | null;
+  runIdsByTeamId: Record<string, string[]>;
+  runListByTeamId: Record<string, TeamRunListItem[]>;
+  runsById: Record<string, TeamRunRecord | undefined>;
   runByTeamId: Record<string, TeamRunRecord | undefined>;
   rolesByTeamId: Record<string, TeamRoleBindingRecord[]>;
   stagesByTeamId: Record<string, TeamStageRecord[]>;
@@ -65,24 +76,31 @@ interface TeamsState {
   approvalsByTeamId: Record<string, TeamApprovalRecord[]>;
   artifactsByTeamId: Record<string, TeamArtifactRecord[]>;
   messagesByTeamId: Record<string, TeamMessageRecord[]>;
+  mailsByTeamId: Record<string, TeamMailRecord[]>;
   dispatchesByTeamId: Record<string, TeamDispatchRecord[]>;
   dispatchExecutionsByTeamId: Record<string, TeamDispatchExecutionRecord[]>;
   gatesByTeamId: Record<string, TeamGateRecord[]>;
   kickbacksByTeamId: Record<string, TeamKickbackRecord[]>;
   decisionsByTeamId: Record<string, TeamDecisionRecord[]>;
   eventsByTeamId: Record<string, TeamEventRecord[]>;
+  eventsByRunId: Record<string, TeamEventRecord[]>;
   eventCursorByTeamId: Record<string, number | undefined>;
+  eventCursorByRunId: Record<string, number | undefined>;
   loadingByTeamId: Record<string, boolean>;
   errorByTeamId: Record<string, string | undefined>;
   planTeamSkillCreation: (candidate: TeamSkillCandidate) => TeamSkillCreationPlan;
   createTeam: (input: TeamSkillCandidate) => string;
   replaceTeamSkillVersion: (input: { teamId: string; expectedCurrentVersion: string; candidate: TeamSkillCandidate }) => string;
   setActiveTeam: (teamId: string | null) => void;
+  setActiveRun: (teamId: string, runId: string | null) => void;
   deleteTeam: (teamId: string) => Promise<void>;
-  ensureRunCreated: (teamId: string) => Promise<TeamRunSummary | undefined>;
-  startRun: (teamId: string, initialPrompt?: string) => Promise<void>;
+  provisionTeamAgents: (teamId: string) => Promise<void>;
+  createRun: (teamId: string) => Promise<TeamRunSummary | undefined>;
+  syncRunList: (teamId: string) => Promise<void>;
+  deleteRun: (teamId: string, runId?: string) => Promise<void>;
   refreshSnapshot: (teamId: string, options?: { force?: boolean }) => Promise<void>;
   tickRun: (teamId: string) => Promise<void>;
+  resumeRun: (teamId: string) => Promise<void>;
   cancelRun: (teamId: string, reason?: string) => Promise<void>;
   resolveApproval: (
     teamId: string,
@@ -95,8 +113,6 @@ interface TeamsState {
 
 const snapshotInFlightByTeamId = new Map<string, Promise<void>>();
 const actionInFlightByKey = new Map<string, { requestId: string; promise: Promise<void> }>();
-
-const STARTABLE_RUN_STATUSES: ReadonlySet<TeamRunRecord['status']> = new Set(['created', 'paused']);
 
 export function planTeamSkillCreation(teams: TeamMeta[], candidate: TeamSkillCandidate): TeamSkillCreationPlan {
   const teamSkillName = candidate.teamSkillPackage.name;
@@ -121,8 +137,10 @@ function sanitizeRunIdSegment(value: string): string {
   return value.trim().replace(/[^a-zA-Z0-9._-]+/g, '-').replace(/^-+|-+$/g, '') || 'run';
 }
 
-function createRunId(teamId: string, packageVersion: string): string {
-  return `${sanitizeRunIdSegment(teamId)}-run-${sanitizeRunIdSegment(packageVersion)}-${Date.now()}`;
+function createGeneratedTeamRunId(): string {
+  const cryptoApi = globalThis.crypto as Crypto | undefined;
+  const rawId = cryptoApi?.randomUUID?.() ?? Math.random().toString(36).slice(2);
+  return `teamrun-${sanitizeRunIdSegment(rawId)}`;
 }
 
 function isSafeRunId(value: string): boolean {
@@ -138,7 +156,6 @@ function toTeamMeta(input: TeamSkillCandidate, teamId: string, now: number): Tea
     teamSkillDescription: input.teamSkillPackage.description,
     packagePath: input.packagePath.trim(),
     sourcePath: input.teamSkillPackage.sourcePath,
-    activeRunId: createRunId(teamId, input.teamSkillPackage.version),
     createdAt: now,
     updatedAt: now,
   };
@@ -152,12 +169,12 @@ function resolveTeamMeta(teams: TeamMeta[], teamId: string): TeamMeta {
   return team;
 }
 
-function resolveRunId(runByTeamId: Record<string, TeamRunRecord | undefined>, teamId: string): string {
-  const runId = runByTeamId[teamId]?.runId;
-  if (!runId) {
+function resolveActiveRunId(state: Pick<TeamsState, 'teams' | 'runsById'>, teamId: string): string {
+  const team = resolveTeamMeta(state.teams, teamId);
+  if (!team.activeRunId) {
     throw new Error(`Team run is required: ${teamId}`);
   }
-  return runId;
+  return state.runsById[team.activeRunId]?.runId ?? team.activeRunId;
 }
 
 function idempotencyKey(teamId: string, action: string): string {
@@ -209,6 +226,81 @@ function withoutKey<T>(record: Record<string, T>, key: string): Record<string, T
   return Object.fromEntries(Object.entries(record).filter(([candidate]) => candidate !== key));
 }
 
+function appendRunId(existingRunIds: string[] | undefined, runId: string): string[] {
+  const runIds = existingRunIds ?? [];
+  return runIds.includes(runId) ? runIds : [...runIds, runId];
+}
+
+function equalStringArray(left: readonly string[] | undefined, right: readonly string[]): boolean {
+  if (!left || left.length !== right.length) {
+    return false;
+  }
+  return left.every((value, index) => value === right[index]);
+}
+
+function mergeRunIds(leftRunIds: string[], rightRunIds: string[]): string[] {
+  return Array.from(new Set([...leftRunIds, ...rightRunIds]));
+}
+
+function removeRunIdsFromRecord(runsById: Record<string, TeamRunRecord | undefined>, runIds: string[]): Record<string, TeamRunRecord | undefined> {
+  return runIds.reduce((nextRunsById, runId) => withoutKey(nextRunsById, runId), runsById);
+}
+
+function isTeamRunRoleSessionKey(sessionKey: string, runIds: ReadonlySet<string>): boolean {
+  const parts = sessionKey.split(':');
+  return parts.length === 5 && parts[0] === 'agent' && parts[2] === 'team-role' && runIds.has(parts[3] ?? '');
+}
+
+function removeTeamRunRoleSessions(runIds: string[]): void {
+  if (runIds.length === 0) {
+    return;
+  }
+  const runIdSet = new Set(runIds);
+  useChatStore.setState((state) => {
+    const sessionKeysToDelete = Object.entries(state.loadedSessions)
+      .filter(([, record]) => isTeamRunRoleSessionKey(record.meta.backendSessionKey, runIdSet))
+      .map(([sessionKey]) => sessionKey);
+    if (sessionKeysToDelete.length === 0) {
+      return state;
+    }
+    const deleteSet = new Set(sessionKeysToDelete);
+    const loadedSessions: Record<string, ChatSessionRecord> = Object.fromEntries(
+      Object.entries(state.loadedSessions).filter(([sessionKey]) => !deleteSet.has(sessionKey)),
+    );
+    const currentSessionKey = deleteSet.has(state.currentSessionKey)
+      ? Object.keys(loadedSessions)[0] ?? DEFAULT_SESSION_KEY
+      : state.currentSessionKey;
+    return {
+      ...state,
+      currentSessionKey,
+      loadedSessions,
+      sessionRecordKeyByIdentityKey: buildSessionIdentityRecordIndex(loadedSessions),
+      pendingApprovalsBySession: Object.fromEntries(
+        Object.entries(state.pendingApprovalsBySession).filter(([sessionKey]) => !deleteSet.has(sessionKey)),
+      ),
+      dismissedRuntimeErrorBySession: Object.fromEntries(
+        Object.entries(state.dismissedRuntimeErrorBySession).filter(([sessionKey]) => !deleteSet.has(sessionKey)),
+      ),
+      foregroundHistorySessionKey: state.foregroundHistorySessionKey && deleteSet.has(state.foregroundHistorySessionKey)
+        ? null
+        : state.foregroundHistorySessionKey,
+    };
+  });
+}
+
+function selectMostRecentRunId(runIds: string[], runsById: Record<string, TeamRunRecord | undefined>): string | undefined {
+  return [...runIds].sort((left, right) => {
+    const leftRun = runsById[left];
+    const rightRun = runsById[right];
+    const leftTime = leftRun?.updatedAt ?? leftRun?.createdAt ?? 0;
+    const rightTime = rightRun?.updatedAt ?? rightRun?.createdAt ?? 0;
+    if (leftTime !== rightTime) {
+      return rightTime - leftTime;
+    }
+    return runIds.indexOf(right) - runIds.indexOf(left);
+  })[0];
+}
+
 function isTeamMeta(value: unknown): value is TeamMeta {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     return false;
@@ -220,8 +312,45 @@ function isTeamMeta(value: unknown): value is TeamMeta {
     && typeof record.teamSkillVersion === 'string'
     && typeof record.packagePath === 'string'
     && typeof record.sourcePath === 'string'
-    && typeof record.activeRunId === 'string'
-    && isSafeRunId(record.activeRunId);
+    && (record.activeRunId === undefined || (typeof record.activeRunId === 'string' && isSafeRunId(record.activeRunId)));
+}
+
+function isTeamRunRecord(value: unknown): value is TeamRunRecord {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return false;
+  }
+  const record = value as Record<string, unknown>;
+  return typeof record.runId === 'string'
+    && isSafeRunId(record.runId)
+    && typeof record.status === 'string'
+    && typeof record.revision === 'number'
+    && typeof record.packageName === 'string'
+    && typeof record.packageVersion === 'string'
+    && typeof record.sourcePath === 'string'
+    && typeof record.createdAt === 'number'
+    && typeof record.updatedAt === 'number';
+}
+
+function emptyTeamRunProjection(teamId: string, state: TeamsState) {
+  return {
+    runByTeamId: { ...state.runByTeamId, [teamId]: undefined },
+    rolesByTeamId: { ...state.rolesByTeamId, [teamId]: [] },
+    stagesByTeamId: { ...state.stagesByTeamId, [teamId]: [] },
+    workflowPlanByTeamId: { ...state.workflowPlanByTeamId, [teamId]: null },
+    dispatchGroupsByTeamId: { ...state.dispatchGroupsByTeamId, [teamId]: [] },
+    dispatchTasksByTeamId: { ...state.dispatchTasksByTeamId, [teamId]: [] },
+    approvalsByTeamId: { ...state.approvalsByTeamId, [teamId]: [] },
+    artifactsByTeamId: { ...state.artifactsByTeamId, [teamId]: [] },
+    messagesByTeamId: { ...state.messagesByTeamId, [teamId]: [] },
+    mailsByTeamId: { ...state.mailsByTeamId, [teamId]: [] },
+    dispatchesByTeamId: { ...state.dispatchesByTeamId, [teamId]: [] },
+    dispatchExecutionsByTeamId: { ...state.dispatchExecutionsByTeamId, [teamId]: [] },
+    gatesByTeamId: { ...state.gatesByTeamId, [teamId]: [] },
+    kickbacksByTeamId: { ...state.kickbacksByTeamId, [teamId]: [] },
+    decisionsByTeamId: { ...state.decisionsByTeamId, [teamId]: [] },
+    eventsByTeamId: { ...state.eventsByTeamId, [teamId]: [] },
+    eventCursorByTeamId: { ...state.eventCursorByTeamId, [teamId]: undefined },
+  };
 }
 
 export const useTeamsStore = create<TeamsState>()(
@@ -229,6 +358,9 @@ export const useTeamsStore = create<TeamsState>()(
     (set, get) => ({
       teams: [],
       activeTeamId: null,
+      runIdsByTeamId: {},
+      runListByTeamId: {},
+      runsById: {},
       runByTeamId: {},
       rolesByTeamId: {},
       stagesByTeamId: {},
@@ -238,13 +370,16 @@ export const useTeamsStore = create<TeamsState>()(
       approvalsByTeamId: {},
       artifactsByTeamId: {},
       messagesByTeamId: {},
+      mailsByTeamId: {},
       dispatchesByTeamId: {},
       dispatchExecutionsByTeamId: {},
       gatesByTeamId: {},
       kickbacksByTeamId: {},
       decisionsByTeamId: {},
       eventsByTeamId: {},
+      eventsByRunId: {},
       eventCursorByTeamId: {},
+      eventCursorByRunId: {},
       loadingByTeamId: {},
       errorByTeamId: {},
       planTeamSkillCreation: (candidate) => planTeamSkillCreation(get().teams, candidate),
@@ -264,6 +399,8 @@ export const useTeamsStore = create<TeamsState>()(
         set((state) => ({
           teams: [...state.teams, team],
           activeTeamId: id,
+          runIdsByTeamId: { ...state.runIdsByTeamId, [id]: [] },
+          runListByTeamId: { ...state.runListByTeamId, [id]: [] },
           rolesByTeamId: { ...state.rolesByTeamId, [id]: [] },
           stagesByTeamId: { ...state.stagesByTeamId, [id]: [] },
           workflowPlanByTeamId: { ...state.workflowPlanByTeamId, [id]: null },
@@ -272,6 +409,7 @@ export const useTeamsStore = create<TeamsState>()(
           approvalsByTeamId: { ...state.approvalsByTeamId, [id]: [] },
           artifactsByTeamId: { ...state.artifactsByTeamId, [id]: [] },
           messagesByTeamId: { ...state.messagesByTeamId, [id]: [] },
+          mailsByTeamId: { ...state.mailsByTeamId, [id]: [] },
           dispatchesByTeamId: { ...state.dispatchesByTeamId, [id]: [] },
           dispatchExecutionsByTeamId: { ...state.dispatchExecutionsByTeamId, [id]: [] },
           gatesByTeamId: { ...state.gatesByTeamId, [id]: [] },
@@ -299,7 +437,7 @@ export const useTeamsStore = create<TeamsState>()(
           return duplicate.id;
         }
         const now = Date.now();
-        const nextRunId = createRunId(input.teamId, input.candidate.teamSkillPackage.version);
+        const previousRunIds = get().runIdsByTeamId[input.teamId] ?? [];
         set((state) => ({
           teams: state.teams.map((team) => team.id === input.teamId
             ? {
@@ -309,32 +447,49 @@ export const useTeamsStore = create<TeamsState>()(
               teamSkillDescription: input.candidate.teamSkillPackage.description,
               packagePath: input.candidate.packagePath.trim(),
               sourcePath: input.candidate.teamSkillPackage.sourcePath,
-              activeRunId: nextRunId,
+              activeRunId: undefined,
               updatedAt: now,
             }
             : team),
           activeTeamId: input.teamId,
-          runByTeamId: withoutKey(state.runByTeamId, input.teamId),
-          rolesByTeamId: { ...state.rolesByTeamId, [input.teamId]: [] },
-          stagesByTeamId: { ...state.stagesByTeamId, [input.teamId]: [] },
-          workflowPlanByTeamId: { ...state.workflowPlanByTeamId, [input.teamId]: null },
-          dispatchGroupsByTeamId: { ...state.dispatchGroupsByTeamId, [input.teamId]: [] },
-          dispatchTasksByTeamId: { ...state.dispatchTasksByTeamId, [input.teamId]: [] },
-          approvalsByTeamId: { ...state.approvalsByTeamId, [input.teamId]: [] },
-          artifactsByTeamId: { ...state.artifactsByTeamId, [input.teamId]: [] },
-          messagesByTeamId: { ...state.messagesByTeamId, [input.teamId]: [] },
-          dispatchesByTeamId: { ...state.dispatchesByTeamId, [input.teamId]: [] },
-          dispatchExecutionsByTeamId: { ...state.dispatchExecutionsByTeamId, [input.teamId]: [] },
-          gatesByTeamId: { ...state.gatesByTeamId, [input.teamId]: [] },
-          kickbacksByTeamId: { ...state.kickbacksByTeamId, [input.teamId]: [] },
-          decisionsByTeamId: { ...state.decisionsByTeamId, [input.teamId]: [] },
-          eventsByTeamId: { ...state.eventsByTeamId, [input.teamId]: [] },
-          eventCursorByTeamId: withoutKey(state.eventCursorByTeamId, input.teamId),
+          runIdsByTeamId: { ...state.runIdsByTeamId, [input.teamId]: [] },
+          runListByTeamId: { ...state.runListByTeamId, [input.teamId]: [] },
+          runsById: removeRunIdsFromRecord(state.runsById, previousRunIds),
+          eventsByRunId: previousRunIds.reduce((eventsByRunId, runId) => withoutKey(eventsByRunId, runId), state.eventsByRunId),
+          eventCursorByRunId: previousRunIds.reduce((eventCursorByRunId, runId) => withoutKey(eventCursorByRunId, runId), state.eventCursorByRunId),
+          ...emptyTeamRunProjection(input.teamId, state),
           errorByTeamId: { ...state.errorByTeamId, [input.teamId]: undefined },
         }));
         return input.teamId;
       },
       setActiveTeam: (teamId) => set({ activeTeamId: teamId }),
+      setActiveRun: (teamId, runId) => {
+        const state = get();
+        resolveTeamMeta(state.teams, teamId);
+        if (runId && !(state.runIdsByTeamId[teamId] ?? []).includes(runId)) {
+          throw new Error(`Team run does not belong to team: ${teamId}`);
+        }
+        set((state) => ({
+          teams: state.teams.map((team) => team.id === teamId ? { ...team, activeRunId: runId ?? undefined, updatedAt: Date.now() } : team),
+          runByTeamId: { ...state.runByTeamId, [teamId]: runId ? state.runsById[runId] : undefined },
+          rolesByTeamId: { ...state.rolesByTeamId, [teamId]: [] },
+          stagesByTeamId: { ...state.stagesByTeamId, [teamId]: [] },
+          workflowPlanByTeamId: { ...state.workflowPlanByTeamId, [teamId]: null },
+          dispatchGroupsByTeamId: { ...state.dispatchGroupsByTeamId, [teamId]: [] },
+          dispatchTasksByTeamId: { ...state.dispatchTasksByTeamId, [teamId]: [] },
+          approvalsByTeamId: { ...state.approvalsByTeamId, [teamId]: [] },
+          artifactsByTeamId: { ...state.artifactsByTeamId, [teamId]: [] },
+          messagesByTeamId: { ...state.messagesByTeamId, [teamId]: [] },
+          mailsByTeamId: { ...state.mailsByTeamId, [teamId]: [] },
+          dispatchesByTeamId: { ...state.dispatchesByTeamId, [teamId]: [] },
+          dispatchExecutionsByTeamId: { ...state.dispatchExecutionsByTeamId, [teamId]: [] },
+          gatesByTeamId: { ...state.gatesByTeamId, [teamId]: [] },
+          kickbacksByTeamId: { ...state.kickbacksByTeamId, [teamId]: [] },
+          decisionsByTeamId: { ...state.decisionsByTeamId, [teamId]: [] },
+          eventsByTeamId: { ...state.eventsByTeamId, [teamId]: runId ? state.eventsByRunId[runId] ?? [] : [] },
+          eventCursorByTeamId: { ...state.eventCursorByTeamId, [teamId]: runId ? state.eventCursorByRunId[runId] : undefined },
+        }));
+      },
       deleteTeam: async (teamId) => {
         const state = get();
         const team = state.teams.find((row) => row.id === teamId);
@@ -346,16 +501,22 @@ export const useTeamsStore = create<TeamsState>()(
           throw new Error(message);
         }
 
-        const runId = state.runByTeamId[teamId]?.runId ?? team.activeRunId;
+        const storedRunIds = state.runIdsByTeamId[teamId] ?? [];
+        const runIds = storedRunIds.length > 0 ? storedRunIds : team.activeRunId ? [team.activeRunId] : [];
         set((state) => ({
           loadingByTeamId: { ...state.loadingByTeamId, [teamId]: true },
           errorByTeamId: { ...state.errorByTeamId, [teamId]: undefined },
         }));
         try {
-          await deleteTeamRun({ runId });
+          const result = await deleteTeamInstance({ teamId });
+          const runIdsToDelete = mergeRunIds(runIds, result.deletedRunIds ?? []);
+          removeTeamRunRoleSessions(runIdsToDelete);
           set((state) => ({
             teams: state.teams.filter((team) => team.id !== teamId),
             activeTeamId: state.activeTeamId === teamId ? null : state.activeTeamId,
+            runIdsByTeamId: withoutKey(state.runIdsByTeamId, teamId),
+            runListByTeamId: withoutKey(state.runListByTeamId, teamId),
+            runsById: removeRunIdsFromRecord(state.runsById, runIdsToDelete),
             runByTeamId: withoutKey(state.runByTeamId, teamId),
             rolesByTeamId: withoutKey(state.rolesByTeamId, teamId),
             stagesByTeamId: withoutKey(state.stagesByTeamId, teamId),
@@ -365,13 +526,16 @@ export const useTeamsStore = create<TeamsState>()(
             approvalsByTeamId: withoutKey(state.approvalsByTeamId, teamId),
             artifactsByTeamId: withoutKey(state.artifactsByTeamId, teamId),
             messagesByTeamId: withoutKey(state.messagesByTeamId, teamId),
+            mailsByTeamId: withoutKey(state.mailsByTeamId, teamId),
             dispatchesByTeamId: withoutKey(state.dispatchesByTeamId, teamId),
             dispatchExecutionsByTeamId: withoutKey(state.dispatchExecutionsByTeamId, teamId),
             gatesByTeamId: withoutKey(state.gatesByTeamId, teamId),
             kickbacksByTeamId: withoutKey(state.kickbacksByTeamId, teamId),
             decisionsByTeamId: withoutKey(state.decisionsByTeamId, teamId),
             eventsByTeamId: withoutKey(state.eventsByTeamId, teamId),
+            eventsByRunId: runIdsToDelete.reduce((eventsByRunId, runId) => withoutKey(eventsByRunId, runId), state.eventsByRunId),
             eventCursorByTeamId: withoutKey(state.eventCursorByTeamId, teamId),
+            eventCursorByRunId: runIdsToDelete.reduce((eventCursorByRunId, runId) => withoutKey(eventCursorByRunId, runId), state.eventCursorByRunId),
             loadingByTeamId: withoutKey(state.loadingByTeamId, teamId),
             errorByTeamId: withoutKey(state.errorByTeamId, teamId),
           }));
@@ -386,26 +550,18 @@ export const useTeamsStore = create<TeamsState>()(
           throw error;
         }
       },
-      ensureRunCreated: async (teamId) => {
+      provisionTeamAgents: async (teamId) => {
         const team = resolveTeamMeta(get().teams, teamId);
         set((state) => ({
           loadingByTeamId: { ...state.loadingByTeamId, [teamId]: true },
           errorByTeamId: { ...state.errorByTeamId, [teamId]: undefined },
         }));
         try {
-          await get().refreshSnapshot(teamId, { force: true });
-          const existingRun = get().runByTeamId[teamId];
-          if (existingRun) {
-            return existingRun;
-          }
-
-          const created = await createTeamRun({
+          await provisionTeamAgents({
+            teamId: team.id,
             packagePath: team.packagePath,
-            runId: team.activeRunId,
-            idempotencyKey: idempotencyKey(team.id, `create:${team.activeRunId}`),
+            idempotencyKey: idempotencyKey(team.id, `provision-agents:${team.teamSkillName}:${team.teamSkillVersion}`),
           });
-          await get().refreshSnapshot(teamId, { force: true });
-          return get().runByTeamId[teamId] ?? created;
         } catch (error) {
           set((state) => ({
             errorByTeamId: {
@@ -420,17 +576,126 @@ export const useTeamsStore = create<TeamsState>()(
           }));
         }
       },
-      startRun: async (teamId, initialPrompt?: string) => {
-        const run = await get().ensureRunCreated(teamId);
-        if (!run || !STARTABLE_RUN_STATUSES.has(run.status)) {
-          return;
+      createRun: async (teamId) => {
+        const team = resolveTeamMeta(get().teams, teamId);
+        const runId = createGeneratedTeamRunId();
+        set((state) => ({
+          loadingByTeamId: { ...state.loadingByTeamId, [teamId]: true },
+          errorByTeamId: { ...state.errorByTeamId, [teamId]: undefined },
+        }));
+        try {
+          const created = await createTeamRun({
+            teamId: team.id,
+            packagePath: team.packagePath,
+            runId,
+            idempotencyKey: idempotencyKey(team.id, `create:${runId}`),
+          });
+          set((state) => ({
+            teams: state.teams.map((team) => team.id === teamId ? { ...team, activeRunId: created.runId, updatedAt: Date.now() } : team),
+            runIdsByTeamId: { ...state.runIdsByTeamId, [teamId]: appendRunId(state.runIdsByTeamId[teamId], created.runId) },
+          }));
+          await get().syncRunList(teamId);
+          await get().refreshSnapshot(teamId, { force: true });
+          return get().runByTeamId[teamId] ?? get().runsById[created.runId] ?? created;
+        } catch (error) {
+          set((state) => ({
+            errorByTeamId: {
+              ...state.errorByTeamId,
+              [teamId]: error instanceof Error ? error.message : String(error),
+            },
+          }));
+          throw error;
+        } finally {
+          set((state) => ({
+            loadingByTeamId: { ...state.loadingByTeamId, [teamId]: false },
+          }));
         }
-        await startTeamRun({
-          runId: run.runId,
-          idempotencyKey: idempotencyKey(teamId, `start:${run.revision}`),
-          initialPrompt,
+      },
+      syncRunList: async (teamId) => {
+        resolveTeamMeta(get().teams, teamId);
+        const result = await listTeamRuns({ teamId });
+        set((state) => {
+          const runtimeRunIds = result.runs.map((run) => run.runId);
+          const activeRunId = state.teams.find((team) => team.id === teamId)?.activeRunId;
+          const nextActiveRunId = activeRunId && runtimeRunIds.includes(activeRunId)
+            ? activeRunId
+            : selectMostRecentRunId(runtimeRunIds, Object.fromEntries(result.runs.map((run) => [run.runId, run])));
+          const nextActiveRun = nextActiveRunId ? result.runs.find((run) => run.runId === nextActiveRunId) : undefined;
+          const currentProjectedRunId = state.runByTeamId[teamId]?.runId;
+          const shouldClearTeamRunProjection = activeRunId !== nextActiveRunId || (currentProjectedRunId !== undefined && currentProjectedRunId !== nextActiveRunId);
+          const shouldUpdateActiveRunId = activeRunId !== nextActiveRunId;
+          const shouldUpdateRunIds = !equalStringArray(state.runIdsByTeamId[teamId], runtimeRunIds);
+          return {
+            teams: shouldUpdateActiveRunId
+              ? state.teams.map((team) => team.id === teamId ? { ...team, activeRunId: nextActiveRunId, updatedAt: Date.now() } : team)
+              : state.teams,
+            runIdsByTeamId: shouldUpdateRunIds ? { ...state.runIdsByTeamId, [teamId]: runtimeRunIds } : state.runIdsByTeamId,
+            runListByTeamId: { ...state.runListByTeamId, [teamId]: result.runs },
+            runsById: {
+              ...removeRunIdsFromRecord(state.runsById, state.runIdsByTeamId[teamId] ?? []),
+              ...Object.fromEntries(result.runs.map((run) => [run.runId, run])),
+            },
+            ...(shouldClearTeamRunProjection ? emptyTeamRunProjection(teamId, state) : {}),
+            runByTeamId: {
+              ...state.runByTeamId,
+              [teamId]: nextActiveRun,
+            },
+            rolesByTeamId: {
+              ...state.rolesByTeamId,
+              [teamId]: nextActiveRun?.sessions ?? [],
+            },
+          };
         });
-        await get().refreshSnapshot(teamId, { force: true });
+      },
+      deleteRun: async (teamId, requestedRunId) => {
+        const state = get();
+        const runId = requestedRunId ?? resolveActiveRunId(state, teamId);
+        set((state) => ({
+          loadingByTeamId: { ...state.loadingByTeamId, [teamId]: true },
+          errorByTeamId: { ...state.errorByTeamId, [teamId]: undefined },
+        }));
+        try {
+          await deleteTeamRun({ runId });
+          set((state) => {
+            const remainingRunIds = (state.runIdsByTeamId[teamId] ?? []).filter((candidate) => candidate !== runId);
+            const nextRunId = selectMostRecentRunId(remainingRunIds, state.runsById);
+            return {
+              teams: state.teams.map((team) => team.id === teamId ? { ...team, activeRunId: nextRunId, updatedAt: Date.now() } : team),
+              runIdsByTeamId: { ...state.runIdsByTeamId, [teamId]: remainingRunIds },
+              runListByTeamId: { ...state.runListByTeamId, [teamId]: (state.runListByTeamId[teamId] ?? []).filter((run) => run.runId !== runId) },
+              runsById: withoutKey(state.runsById, runId),
+              eventsByRunId: withoutKey(state.eventsByRunId, runId),
+              eventCursorByRunId: withoutKey(state.eventCursorByRunId, runId),
+              runByTeamId: { ...state.runByTeamId, [teamId]: nextRunId ? state.runsById[nextRunId] : undefined },
+              rolesByTeamId: { ...state.rolesByTeamId, [teamId]: [] },
+              stagesByTeamId: { ...state.stagesByTeamId, [teamId]: [] },
+              workflowPlanByTeamId: { ...state.workflowPlanByTeamId, [teamId]: null },
+              dispatchGroupsByTeamId: { ...state.dispatchGroupsByTeamId, [teamId]: [] },
+              dispatchTasksByTeamId: { ...state.dispatchTasksByTeamId, [teamId]: [] },
+              approvalsByTeamId: { ...state.approvalsByTeamId, [teamId]: [] },
+              artifactsByTeamId: { ...state.artifactsByTeamId, [teamId]: [] },
+              messagesByTeamId: { ...state.messagesByTeamId, [teamId]: [] },
+              mailsByTeamId: { ...state.mailsByTeamId, [teamId]: [] },
+              dispatchesByTeamId: { ...state.dispatchesByTeamId, [teamId]: [] },
+              dispatchExecutionsByTeamId: { ...state.dispatchExecutionsByTeamId, [teamId]: [] },
+              gatesByTeamId: { ...state.gatesByTeamId, [teamId]: [] },
+              kickbacksByTeamId: { ...state.kickbacksByTeamId, [teamId]: [] },
+              decisionsByTeamId: { ...state.decisionsByTeamId, [teamId]: [] },
+              eventsByTeamId: { ...state.eventsByTeamId, [teamId]: nextRunId ? state.eventsByRunId[nextRunId] ?? [] : [] },
+              eventCursorByTeamId: { ...state.eventCursorByTeamId, [teamId]: nextRunId ? state.eventCursorByRunId[nextRunId] : undefined },
+              loadingByTeamId: { ...state.loadingByTeamId, [teamId]: false },
+            };
+          });
+        } catch (error) {
+          set((state) => ({
+            loadingByTeamId: { ...state.loadingByTeamId, [teamId]: false },
+            errorByTeamId: {
+              ...state.errorByTeamId,
+              [teamId]: error instanceof Error ? error.message : String(error),
+            },
+          }));
+          throw error;
+        }
       },
       refreshSnapshot: async (teamId, options) => {
         while (true) {
@@ -447,33 +712,56 @@ export const useTeamsStore = create<TeamsState>()(
         const run = async () => {
           const state = get();
           const team = resolveTeamMeta(state.teams, teamId);
-          const runId = state.runByTeamId[teamId]?.runId ?? team.activeRunId;
+          const runId = team.activeRunId;
+          if (!runId) {
+            set((state) => emptyTeamRunProjection(teamId, state));
+            return;
+          }
           const snapshot = await readTeamRunSnapshot({
             runId,
-            eventCursor: state.eventCursorByTeamId[teamId],
+            eventCursor: state.eventCursorByRunId[runId],
             eventLimit: 200,
           });
-          set((state) => ({
-            runByTeamId: { ...state.runByTeamId, [teamId]: snapshot.run ?? undefined },
-            rolesByTeamId: { ...state.rolesByTeamId, [teamId]: snapshot.roles },
-            stagesByTeamId: { ...state.stagesByTeamId, [teamId]: snapshot.stages },
-            workflowPlanByTeamId: { ...state.workflowPlanByTeamId, [teamId]: snapshot.workflowPlan },
-            dispatchGroupsByTeamId: { ...state.dispatchGroupsByTeamId, [teamId]: snapshot.dispatchGroups },
-            dispatchTasksByTeamId: { ...state.dispatchTasksByTeamId, [teamId]: snapshot.dispatchTasks },
-            approvalsByTeamId: { ...state.approvalsByTeamId, [teamId]: snapshot.approvals },
-            artifactsByTeamId: { ...state.artifactsByTeamId, [teamId]: snapshot.artifacts },
-            messagesByTeamId: { ...state.messagesByTeamId, [teamId]: snapshot.messages },
-            dispatchesByTeamId: { ...state.dispatchesByTeamId, [teamId]: snapshot.dispatches },
-            dispatchExecutionsByTeamId: { ...state.dispatchExecutionsByTeamId, [teamId]: snapshot.dispatchExecutions },
-            gatesByTeamId: { ...state.gatesByTeamId, [teamId]: snapshot.gates },
-            kickbacksByTeamId: { ...state.kickbacksByTeamId, [teamId]: snapshot.kickbacks },
-            decisionsByTeamId: { ...state.decisionsByTeamId, [teamId]: snapshot.decisions },
-            eventsByTeamId: {
-              ...state.eventsByTeamId,
-              [teamId]: mergeEvents(state.eventsByTeamId[teamId] ?? [], snapshot.events),
-            },
-            eventCursorByTeamId: { ...state.eventCursorByTeamId, [teamId]: snapshot.nextEventCursor },
-          }));
+          set((state) => {
+            const isRequestedRunStillActive = state.teams.find((team) => team.id === teamId)?.activeRunId === runId;
+            const runIds = appendRunId(state.runIdsByTeamId[teamId], runId);
+            const eventsForRun = mergeEvents(state.eventsByRunId[runId] ?? [], snapshot.events);
+            const runLevelCache = {
+              runsById: snapshot.run ? { ...state.runsById, [runId]: snapshot.run } : state.runsById,
+              eventsByRunId: { ...state.eventsByRunId, [runId]: eventsForRun },
+              eventCursorByRunId: { ...state.eventCursorByRunId, [runId]: snapshot.nextEventCursor },
+            };
+            if (!isRequestedRunStillActive) {
+              return runLevelCache;
+            }
+            return {
+              runIdsByTeamId: { ...state.runIdsByTeamId, [teamId]: runIds },
+              runListByTeamId: snapshot.run ? {
+                ...state.runListByTeamId,
+                [teamId]: (state.runListByTeamId[teamId] ?? [])
+                  .filter((teamRun) => teamRun.runId !== runId)
+                  .concat({ ...snapshot.run, sessions: snapshot.roles }),
+              } : state.runListByTeamId,
+              ...runLevelCache,
+              runByTeamId: { ...state.runByTeamId, [teamId]: snapshot.run ?? state.runsById[runId] },
+              rolesByTeamId: { ...state.rolesByTeamId, [teamId]: snapshot.roles },
+              stagesByTeamId: { ...state.stagesByTeamId, [teamId]: snapshot.stages },
+              workflowPlanByTeamId: { ...state.workflowPlanByTeamId, [teamId]: snapshot.workflowPlan },
+              dispatchGroupsByTeamId: { ...state.dispatchGroupsByTeamId, [teamId]: snapshot.dispatchGroups },
+              dispatchTasksByTeamId: { ...state.dispatchTasksByTeamId, [teamId]: snapshot.dispatchTasks },
+              approvalsByTeamId: { ...state.approvalsByTeamId, [teamId]: snapshot.approvals },
+              artifactsByTeamId: { ...state.artifactsByTeamId, [teamId]: snapshot.artifacts },
+              messagesByTeamId: { ...state.messagesByTeamId, [teamId]: snapshot.messages },
+              mailsByTeamId: { ...state.mailsByTeamId, [teamId]: snapshot.mails },
+              dispatchesByTeamId: { ...state.dispatchesByTeamId, [teamId]: snapshot.dispatches },
+              dispatchExecutionsByTeamId: { ...state.dispatchExecutionsByTeamId, [teamId]: snapshot.dispatchExecutions },
+              gatesByTeamId: { ...state.gatesByTeamId, [teamId]: snapshot.gates },
+              kickbacksByTeamId: { ...state.kickbacksByTeamId, [teamId]: snapshot.kickbacks },
+              decisionsByTeamId: { ...state.decisionsByTeamId, [teamId]: snapshot.decisions },
+              eventsByTeamId: { ...state.eventsByTeamId, [teamId]: eventsForRun },
+              eventCursorByTeamId: { ...state.eventCursorByTeamId, [teamId]: snapshot.nextEventCursor },
+            };
+          });
         };
 
         const promise = run();
@@ -488,7 +776,7 @@ export const useTeamsStore = create<TeamsState>()(
         const actionKey = idempotencyKey(teamId, 'tick');
         await runActionOnce(actionKey, async (requestId) => {
           const state = get();
-          const runId = resolveRunId(state.runByTeamId, teamId);
+          const runId = resolveActiveRunId(state, teamId);
           await tickTeamRun({
             runId,
             idempotencyKey: requestId,
@@ -496,31 +784,51 @@ export const useTeamsStore = create<TeamsState>()(
           await get().refreshSnapshot(teamId, { force: true });
         });
       },
+      resumeRun: async (teamId) => {
+        const actionKey = idempotencyKey(teamId, 'resume');
+        await runActionOnce(actionKey, async (requestId) => {
+          const result = await resumeTeam({
+            teamId,
+            idempotencyKey: requestId,
+          });
+          const activeRunId = result.activeRunIds.length > 0
+            ? selectMostRecentRunId(result.activeRunIds, get().runsById) ?? result.activeRunIds[0]
+            : undefined;
+          if (activeRunId) {
+            set((state) => ({
+              teams: state.teams.map((team) => team.id === teamId ? { ...team, activeRunId, updatedAt: Date.now() } : team),
+              runIdsByTeamId: { ...state.runIdsByTeamId, [teamId]: mergeRunIds(state.runIdsByTeamId[teamId] ?? [], result.restoredRunIds) },
+            }));
+          }
+          await get().refreshSnapshot(teamId, { force: true });
+        });
+      },
       cancelRun: async (teamId, reason) => {
         const state = get();
-        const runId = resolveRunId(state.runByTeamId, teamId);
+        const runId = resolveActiveRunId(state, teamId);
         await cancelTeamRun({
           runId,
           reason,
-          idempotencyKey: idempotencyKey(teamId, 'cancel'),
+          idempotencyKey: idempotencyKey(teamId, `cancel:${runId}`),
         });
         await get().refreshSnapshot(teamId, { force: true });
       },
       resolveApproval: async (teamId, approvalId, decision, note) => {
         const state = get();
-        const runId = resolveRunId(state.runByTeamId, teamId);
+        const runId = resolveActiveRunId(state, teamId);
         await resolveTeamApproval({
           runId,
           approvalId,
           decision,
           note,
-          idempotencyKey: idempotencyKey(teamId, `approval:${approvalId}:${decision}`),
+          idempotencyKey: idempotencyKey(teamId, `approval:${runId}:${approvalId}:${decision}`),
         });
         await get().refreshSnapshot(teamId, { force: true });
       },
       submitDecision: async (teamId, decision, note) => {
         const state = get();
-        const run = state.runByTeamId[teamId];
+        const runId = resolveActiveRunId(state, teamId);
+        const run = state.runByTeamId[teamId] ?? state.runsById[runId];
         if (!run) {
           throw new Error(`Team run is required: ${teamId}`);
         }
@@ -529,7 +837,7 @@ export const useTeamsStore = create<TeamsState>()(
         }
         const actionKey = idempotencyKey(
           teamId,
-          `decision:${run.currentStageId ?? 'no-stage'}:${run.revision}:${decision}`,
+          `decision:${run.runId}:${run.currentStageId ?? 'no-stage'}:${run.revision}:${decision}`,
         );
         await runActionOnce(actionKey, async () => {
           await submitTeamRunDecision({
@@ -544,21 +852,35 @@ export const useTeamsStore = create<TeamsState>()(
     }),
     {
       name: 'teams-runtime-store',
-      version: 3,
+      version: 4,
       migrate: (persisted) => {
         if (!persisted || typeof persisted !== 'object' || Array.isArray(persisted)) {
-          return { teams: [], activeTeamId: null };
+          return { teams: [], activeTeamId: null, runIdsByTeamId: {}, runListByTeamId: {}, runsById: {} };
         }
-        const state = persisted as { teams?: unknown; activeTeamId?: unknown };
+        const state = persisted as { teams?: unknown; activeTeamId?: unknown; runIdsByTeamId?: unknown; runsById?: unknown };
         const teams = Array.isArray(state.teams) ? state.teams.filter(isTeamMeta) : [];
         const activeTeamId = typeof state.activeTeamId === 'string' && teams.some((team) => team.id === state.activeTeamId)
           ? state.activeTeamId
           : null;
-        return { teams, activeTeamId };
+        const runsById = state.runsById && typeof state.runsById === 'object' && !Array.isArray(state.runsById)
+          ? Object.fromEntries(Object.entries(state.runsById).filter((entry): entry is [string, TeamRunRecord] => isTeamRunRecord(entry[1])))
+          : {};
+        const runIdsByTeamId = state.runIdsByTeamId && typeof state.runIdsByTeamId === 'object' && !Array.isArray(state.runIdsByTeamId)
+          ? Object.fromEntries(Object.entries(state.runIdsByTeamId).flatMap(([teamId, runIds]) => {
+            if (!teams.some((team) => team.id === teamId) || !Array.isArray(runIds)) {
+              return [];
+            }
+            return [[teamId, runIds.filter((runId): runId is string => typeof runId === 'string' && isSafeRunId(runId))]];
+          }))
+          : {};
+        return { teams, activeTeamId, runIdsByTeamId, runListByTeamId: {}, runsById };
       },
       partialize: (state) => ({
         teams: state.teams,
         activeTeamId: state.activeTeamId,
+        runIdsByTeamId: state.runIdsByTeamId,
+        runListByTeamId: state.runListByTeamId,
+        runsById: state.runsById,
       }),
     },
   ),

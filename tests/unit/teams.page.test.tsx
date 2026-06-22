@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter, useLocation } from 'react-router-dom';
 import { TeamsPage } from '@/pages/Teams';
+import { TeamChat } from '@/pages/Teams/TeamChat';
 import { useGatewayStore } from '@/stores/gateway';
 import { useTeamsStore, type TeamMeta } from '@/stores/teams';
 import { useSkillsStore } from '@/stores/skills';
@@ -147,7 +148,8 @@ async function checkTeamSkill(path = TEAM_SKILL_PACKAGE_PATH) {
 }
 
 describe('teams page', () => {
-  const ensureRunCreatedMock = vi.fn().mockResolvedValue(undefined);
+  const provisionTeamAgentsMock = vi.fn().mockResolvedValue(undefined);
+  const createRunMock = vi.fn().mockResolvedValue(undefined);
   const refreshSnapshotMock = vi.fn().mockResolvedValue(undefined);
 
   beforeEach(() => {
@@ -158,8 +160,10 @@ describe('teams page', () => {
     pickLocalSkillSourceMock.mockReset();
     localStorage.removeItem('teams-runtime-store');
     hostApiFetchMock.mockResolvedValue({ execution: { enabledPluginIds: ['team-runtime'] } });
-    ensureRunCreatedMock.mockReset();
-    ensureRunCreatedMock.mockResolvedValue(undefined);
+    provisionTeamAgentsMock.mockReset();
+    provisionTeamAgentsMock.mockResolvedValue(undefined);
+    createRunMock.mockReset();
+    createRunMock.mockResolvedValue(undefined);
     refreshSnapshotMock.mockReset();
     refreshSnapshotMock.mockResolvedValue(undefined);
 
@@ -200,8 +204,9 @@ describe('teams page', () => {
       eventCursorByTeamId: {},
       loadingByTeamId: {},
       errorByTeamId: {},
-      ensureRunCreated: ensureRunCreatedMock,
-      startRun: vi.fn().mockResolvedValue(undefined),
+      provisionTeamAgents: provisionTeamAgentsMock,
+      createRun: createRunMock,
+      deleteRun: vi.fn().mockResolvedValue(undefined),
       refreshSnapshot: refreshSnapshotMock,
     } as never);
 
@@ -243,7 +248,7 @@ describe('teams page', () => {
     expect(screen.getByText('TeamSkill-defined team')).toBeInTheDocument();
     expect(screen.getByText('Design Team')).toBeInTheDocument();
     expect(screen.getByText('ascendc-team@1.0.0')).toBeInTheDocument();
-    expect(screen.getByText(`Package: ${TEAM_SKILL_PACKAGE_PATH}`)).toBeInTheDocument();
+    expect(screen.queryByText(`Package: ${TEAM_SKILL_PACKAGE_PATH}`)).not.toBeInTheDocument();
     expect(screen.getByText('Managed roles: 1')).toBeInTheDocument();
   });
 
@@ -262,7 +267,7 @@ describe('teams page', () => {
     expect(screen.getAllByRole('button', { name: 'Create Team' }).at(-1)).toBeDisabled();
   });
 
-  it('checks package dependencies, creates a new TeamSkill team, provisions its TeamRun, then navigates to it', async () => {
+  it('checks package dependencies, creates a new TeamSkill team, provisions its Team agents, then creates its first run', async () => {
     setGatewayRunning();
     mockTeamRuntimeResponses([validationResult(), dependencyPlan()]);
 
@@ -281,13 +286,15 @@ describe('teams page', () => {
       expect(state.activeTeamId).toBe(state.teams[0]?.id);
       expect(state.teams[0]?.name).toBe('Growth Team');
       expect(state.teams[0]?.teamSkillName).toBe('ascendc-team');
-      expect(ensureRunCreatedMock).toHaveBeenCalledWith(state.teams[0]?.id);
+      expect(provisionTeamAgentsMock).toHaveBeenCalledWith(state.teams[0]?.id);
+      expect(createRunMock).toHaveBeenCalledWith(state.teams[0]?.id);
+      expect(provisionTeamAgentsMock.mock.invocationCallOrder[0]).toBeLessThan(createRunMock.mock.invocationCallOrder[0]!);
       expect(screen.getByTestId('location-echo')).toHaveTextContent(`/teams/${state.teams[0]?.id}`);
     });
   });
 
-  it('keeps the create dialog open and removes the local team when TeamRun provisioning fails', async () => {
-    ensureRunCreatedMock.mockRejectedValueOnce(new Error('team-runtime plugin is not enabled'));
+  it('keeps the create dialog open and removes the local team when Team agent provisioning fails', async () => {
+    provisionTeamAgentsMock.mockRejectedValueOnce(new Error('team-runtime plugin is not enabled'));
     setGatewayRunning();
     mockTeamRuntimeResponses([validationResult(), dependencyPlan(), { runId: 'team-174', deleted: false }]);
 
@@ -299,7 +306,8 @@ describe('teams page', () => {
     fireEvent.click(screen.getAllByRole('button', { name: 'Create Team' }).at(-1)!);
 
     await waitFor(() => {
-      expect(ensureRunCreatedMock).toHaveBeenCalledTimes(1);
+      expect(provisionTeamAgentsMock).toHaveBeenCalledTimes(1);
+      expect(createRunMock).not.toHaveBeenCalled();
       expect(useTeamsStore.getState().teams).toHaveLength(0);
       expect(screen.getByTestId('location-echo')).toHaveTextContent('/teams');
       expect(screen.getByText('team-runtime plugin is not enabled')).toBeInTheDocument();
@@ -324,7 +332,8 @@ describe('teams page', () => {
     await waitFor(() => {
       expect(useTeamsStore.getState().teams).toHaveLength(1);
       expect(useTeamsStore.getState().activeTeamId).toBe('team-1');
-      expect(ensureRunCreatedMock).not.toHaveBeenCalled();
+      expect(provisionTeamAgentsMock).not.toHaveBeenCalled();
+      expect(createRunMock).not.toHaveBeenCalled();
       expect(refreshSnapshotMock).toHaveBeenCalledWith('team-1');
       expect(screen.getByTestId('location-echo')).toHaveTextContent('/teams/team-1');
     });
@@ -425,8 +434,52 @@ describe('teams page', () => {
       expect(state.teams).toHaveLength(1);
       expect(state.teams[0]?.id).toBe('team-1');
       expect(state.teams[0]?.teamSkillVersion).toBe('1.1.0');
-      expect(ensureRunCreatedMock).toHaveBeenCalledWith('team-1');
+      expect(provisionTeamAgentsMock).toHaveBeenCalledWith('team-1');
+      expect(createRunMock).toHaveBeenCalledWith('team-1');
+      expect(provisionTeamAgentsMock.mock.invocationCallOrder[0]).toBeLessThan(createRunMock.mock.invocationCallOrder[0]!);
       expect(screen.getByTestId('location-echo')).toHaveTextContent('/teams/team-1');
+    });
+  });
+
+  it('shows Resume Run for a newly created TeamRun without coupling New Run to resume', async () => {
+    const createdRun = {
+      runId: 'teamrun-created',
+      status: 'created' as const,
+      revision: 1,
+      packageName: 'ascendc-team',
+      packageVersion: '1.0.0',
+      sourcePath: TEAM_SKILL_PACKAGE_PATH,
+      createdAt: 1,
+      updatedAt: 1,
+    };
+    const resumeRunMock = vi.fn().mockResolvedValue(undefined);
+    const syncRunListMock = vi.fn().mockResolvedValue(undefined);
+    setGatewayRunning();
+    useTeamsStore.setState({
+      teams: [teamMeta({ activeRunId: 'teamrun-created' })],
+      activeTeamId: 'team-1',
+      runListByTeamId: { 'team-1': [{ ...createdRun, sessions: [] }] },
+      runsById: { 'teamrun-created': createdRun },
+      runByTeamId: { 'team-1': createdRun },
+      resumeRun: resumeRunMock,
+      syncRunList: syncRunListMock,
+    } as never);
+
+    render(
+      <MemoryRouter>
+        <TeamChat teamId="team-1" />
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByText('Run status: created · rev 1')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Resume Run' })).toBeEnabled();
+
+    fireEvent.click(screen.getByRole('button', { name: 'New Run' }));
+
+    await waitFor(() => {
+      expect(provisionTeamAgentsMock).not.toHaveBeenCalled();
+      expect(createRunMock).toHaveBeenCalledWith('team-1');
+      expect(resumeRunMock).not.toHaveBeenCalled();
     });
   });
 
@@ -445,8 +498,8 @@ describe('teams page', () => {
     await waitFor(() => {
       expect(capabilityExecuteMock).toHaveBeenCalledWith(expect.objectContaining({
         id: 'team.runtime',
-        operationId: 'team.runDelete',
-        input: { runId: 'team-1-run-1.0.0-1000' },
+        operationId: 'team.delete',
+        input: { kind: 'team', teamId: 'team-1' },
       }), expect.objectContaining({ timeoutMs: 60000 }));
       expect(useTeamsStore.getState().teams).toHaveLength(0);
       expect(useTeamsStore.getState().activeTeamId).toBeNull();

@@ -8,28 +8,12 @@
     "onStartup": true
   },
   "contracts": {
-    "gatewayMethods": [
-      "matchaclaw.team.package.validate",
-      "matchaclaw.team.dependency.plan",
-      "matchaclaw.team.run.create",
-      "matchaclaw.team.run.start",
-      "matchaclaw.team.run.snapshot",
-      "matchaclaw.team.run.diagnostics",
-      "matchaclaw.team.run.decision.submit",
-      "matchaclaw.team.workflow.plan",
-      "matchaclaw.team.run.tick",
-      "matchaclaw.team.dispatch.process",
-      "matchaclaw.team.leader.synthesis.process",
-      "matchaclaw.team.approval.resolve",
-      "matchaclaw.team.run.cancel",
-      "matchaclaw.team.run.delete"
-    ],
+    "gatewayMethods": [],
     "tools": [
-      "team_plan_workflow",
-      "team_submit_artifact",
-      "team_update_task",
-      "team_request_approval",
-      "team_send_message"
+      "team_submit_workflow_plan",
+      "team_complete_task",
+      "team_send_message",
+      "team_request_approval"
     ]
   },
   "configSchema": {

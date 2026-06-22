@@ -1,19 +1,21 @@
 import { hostApiFetch, resolveSingleCapabilityScope } from '@/lib/host-api';
-import { ensurePluginEnabled } from '@/services/openclaw/plugin-manager-client';
-import type { CapabilityTarget } from '../../../runtime-host/shared/runtime-address';
+import type { CapabilityTarget, SessionIdentity } from '../../../runtime-host/shared/runtime-address';
 
 export type TeamRunStatus = 'created' | 'provisioning' | 'waiting_for_user' | 'running' | 'paused' | 'cancelling' | 'completed' | 'failed' | 'cancelled';
 
 export type TeamRuntimeOperationId =
   | 'team.packageValidate'
   | 'team.dependencyPlan'
+  | 'team.provisionAgents'
+  | 'team.delete'
   | 'team.runCreate'
-  | 'team.runStart'
+  | 'team.runList'
   | 'team.runSnapshot'
   | 'team.runDiagnostics'
   | 'team.runDecisionSubmit'
   | 'team.planWorkflow'
   | 'team.runTick'
+  | 'team.resume'
   | 'team.approvalResolve'
   | 'team.runCancel'
   | 'team.runDelete';
@@ -88,6 +90,11 @@ export type TeamDecisionType = 'retry' | 'proceed_degraded' | 'abort';
 export type TeamWorkflowPlanStatus = 'planned';
 export type TeamDispatchGroupStatus = 'queued' | 'completed' | 'failed';
 export type TeamDispatchTaskStatus = 'queued' | 'completed' | 'failed' | 'cancelled' | 'stale';
+export type TeamMessageKind = 'note' | 'question' | 'kickback';
+export type TeamMailKind = 'task.assignment' | 'message.note' | 'message.question' | 'message.kickback';
+export type TeamMailRelatedEntityKind = 'run' | 'task' | 'message' | 'artifact' | 'gate' | 'dispatch';
+export type TeamMailStatus = 'pending' | 'delivering' | 'delivered' | 'retry_scheduled' | 'failed' | 'cancelled';
+export type TeamGateStatus = 'open' | 'passed' | 'failed';
 
 export interface TeamRunRecord extends TeamRunSummary {
   packageName: string;
@@ -177,15 +184,12 @@ export interface TeamStageRecord {
 }
 
 export interface TeamRoleBindingRecord {
+  teamId?: string;
   runId: string;
   roleId: string;
   agentId: string;
-  agentName: string;
-  workspaceDir: string;
-  agentDir: string;
-  skills: string[];
-  tools: string[];
-  status: string;
+  sessionKey: string;
+  sessionIdentity: SessionIdentity;
 }
 
 export interface TeamApprovalRecord {
@@ -203,13 +207,34 @@ export interface TeamApprovalRecord {
   resolvedAt?: number;
 }
 
+export interface TeamEvidenceRefRecord {
+  type: 'workspacePath' | 'uri' | 'artifact' | 'inlineText';
+  path?: string;
+  uri?: string;
+  artifactId?: string;
+  text?: string;
+  label?: string;
+}
+
+export interface TeamFailureItemRecord {
+  code: string;
+  message: string;
+  severity?: 'info' | 'warning' | 'blocker';
+  evidenceRefs?: TeamEvidenceRefRecord[];
+}
+
 export interface TeamMessageRecord {
   messageId: string;
   runId: string;
+  kind: TeamMessageKind;
   fromRoleId: string;
   toRoleId: string;
   summary: string;
   body: string;
+  relatedTaskId?: string;
+  relatedArtifactId?: string;
+  relatedGateId?: string;
+  failureItems: TeamFailureItemRecord[];
   idempotencyKey: string;
   createdAt: number;
 }
@@ -223,8 +248,39 @@ export interface TeamArtifactRecord {
   title: string;
   contentRef: string;
   summary?: string;
+  evidenceRefs?: TeamEvidenceRefRecord[];
+  sourceEnvelopeId?: string;
   idempotencyKey: string;
   createdAt: number;
+  updatedAt?: number;
+  relatedTaskId?: string;
+  relatedGateId?: string;
+}
+
+export interface TeamMailRecord {
+  mailId: string;
+  runId: string;
+  threadId: string;
+  kind: TeamMailKind;
+  toAgentId: string;
+  fromAgentId?: string;
+  subject: string;
+  body?: string;
+  bodyRef?: string;
+  payloadRef?: string;
+  relatedEntity: { kind: TeamMailRelatedEntityKind; id: string };
+  status: TeamMailStatus;
+  idempotencyKey: string;
+  causationId: string;
+  createdAt: number;
+  updatedAt?: number;
+  attempt?: number;
+  maxAttempts?: number;
+  required?: boolean;
+  nextRetryAt?: number;
+  lastError?: string;
+  deliveringAt?: number;
+  deliveredAt?: number;
 }
 
 export interface TeamDispatchRecord {
@@ -263,23 +319,35 @@ export interface TeamGateRecord {
   gateId: string;
   runId: string;
   stageId: string;
-  artifactId: string;
   gateType: string;
-  verdict: string;
-  passed: boolean;
-  failureItems: Array<{ code: string; message: string }>;
+  subjectArtifactId?: string;
+  relatedTaskId?: string;
+  blocking: boolean;
+  summary: string;
+  verdict?: string;
+  passed?: boolean;
+  status: TeamGateStatus;
+  failureItems: TeamFailureItemRecord[];
   idempotencyKey: string;
   createdAt: number;
+  resolvedAt?: number;
+  resolutionSummary?: string;
 }
 
 export interface TeamKickbackRecord {
   kickbackId: string;
   runId: string;
   stageId: string;
-  gateId: string;
-  failureItems: Array<{ code: string; message: string }>;
+  fromRoleId: string;
+  toRoleId: string;
+  gateId?: string;
+  artifactId?: string;
+  taskId?: string;
+  failureItems: TeamFailureItemRecord[];
+  messageId: string;
   idempotencyKey: string;
   createdAt: number;
+  resolvedAt?: number;
 }
 
 export interface TeamDecisionRecord {
@@ -334,6 +402,7 @@ export interface TeamRunSnapshot {
   dispatches: TeamDispatchRecord[];
   dispatchExecutions: TeamDispatchExecutionRecord[];
   messages: TeamMessageRecord[];
+  mails: TeamMailRecord[];
   gates: TeamGateRecord[];
   kickbacks: TeamKickbackRecord[];
   decisions: TeamDecisionRecord[];
@@ -342,34 +411,58 @@ export interface TeamRunSnapshot {
   nextEventCursor: number;
 }
 
-const TEAM_RUNTIME_CAPABILITY_ID = 'team.runtime';
-const TEAM_RUNTIME_PLUGIN_ID = 'team-runtime';
-
-let teamRuntimePluginTask: Promise<void> | null = null;
-
-async function ensureTeamRuntimePluginEnabled(): Promise<void> {
-  if (teamRuntimePluginTask) {
-    await teamRuntimePluginTask;
-    return;
-  }
-
-  const task = ensurePluginEnabled(TEAM_RUNTIME_PLUGIN_ID).then(() => undefined);
-  teamRuntimePluginTask = task;
-  try {
-    await task;
-  } finally {
-    if (teamRuntimePluginTask === task) {
-      teamRuntimePluginTask = null;
-    }
-  }
+export interface TeamRuntimeOperationReceipt {
+  success?: boolean;
+  code?: string;
+  operationId?: TeamRuntimeOperationId;
+  message?: string;
 }
+
+export type TeamRunTickResultType = 'noop' | 'outbox_pending';
+export type TeamRunTickAction = 'dependency_missing' | 'dispatch_prepared' | 'dispatch_execution_queued';
+
+export interface TeamRunDirtyRunSummary {
+  runId: string;
+  updatedAt?: number;
+}
+
+export interface TeamRunTickResult extends TeamRuntimeOperationReceipt {
+  runId?: string;
+  resultType?: TeamRunTickResultType;
+  action?: TeamRunTickAction;
+  dirtyRun?: TeamRunDirtyRunSummary | null;
+  run?: TeamRunSummary;
+  snapshot?: TeamRunSnapshot;
+}
+
+export interface TeamRunDecisionSubmitResult extends TeamRuntimeOperationReceipt {
+  runId?: string;
+  stageId?: string;
+  decisionId?: string;
+  decision?: TeamDecisionType;
+  run?: TeamRunSummary;
+  snapshot?: TeamRunSnapshot;
+}
+
+export type TeamApprovalResolutionDecision = 'approve' | 'deny' | 'abort';
+
+export interface TeamApprovalResolveResult extends TeamRuntimeOperationReceipt {
+  runId?: string;
+  approvalId?: string;
+  decision?: TeamApprovalResolutionDecision;
+  status?: TeamApprovalStatus;
+  approval?: TeamApprovalRecord;
+  run?: TeamRunSummary;
+  snapshot?: TeamRunSnapshot;
+}
+
+const TEAM_RUNTIME_CAPABILITY_ID = 'team.runtime';
 
 async function teamRuntimeApi<T>(payload: {
   operationId: TeamRuntimeOperationId;
   target: CapabilityTarget;
   input: Record<string, unknown>;
 }): Promise<T> {
-  await ensureTeamRuntimePluginEnabled();
   return await hostApiFetch<T>('/api/capabilities/execute', {
     method: 'POST',
     body: JSON.stringify({
@@ -403,15 +496,39 @@ export async function planTeamDependencies(payload: {
   });
 }
 
+export async function provisionTeamAgents(payload: {
+  teamId: string;
+  packagePath: string;
+  idempotencyKey: string;
+}): Promise<{ teamId: string; managedAgentCount: number }> {
+  return await teamRuntimeApi({
+    operationId: 'team.provisionAgents',
+    target: { kind: 'team', teamId: payload.teamId, packagePath: payload.packagePath },
+    input: { teamId: payload.teamId, packagePath: payload.packagePath, idempotencyKey: payload.idempotencyKey },
+  });
+}
+
+export async function deleteTeamInstance(payload: {
+  teamId: string;
+}): Promise<{ teamId: string; deleted: boolean; deletedRunIds: string[]; deletedAgentIds: string[] }> {
+  return await teamRuntimeApi({
+    operationId: 'team.delete',
+    target: { kind: 'team', teamId: payload.teamId },
+    input: { kind: 'team', teamId: payload.teamId },
+  });
+}
+
 export async function createTeamRun(payload: {
+  teamId?: string;
   packagePath: string;
   runId?: string;
   idempotencyKey: string;
 }): Promise<TeamRunSummary> {
   return await teamRuntimeApi({
     operationId: 'team.runCreate',
-    target: { kind: 'team', packagePath: payload.packagePath },
+    target: { kind: 'team', packagePath: payload.packagePath, ...(payload.teamId ? { teamId: payload.teamId } : {}) },
     input: {
+      ...(payload.teamId ? { teamId: payload.teamId } : {}),
       packagePath: payload.packagePath,
       ...(payload.runId ? { runId: payload.runId } : {}),
       idempotencyKey: payload.idempotencyKey,
@@ -419,30 +536,39 @@ export async function createTeamRun(payload: {
   });
 }
 
-export async function startTeamRun(payload: {
-  runId: string;
-  idempotencyKey: string;
-  initialPrompt?: string;
-}): Promise<TeamRunSummary> {
+export interface TeamRunListItem extends TeamRunRecord {
+  sessions: TeamRoleBindingRecord[];
+}
+
+export async function listTeamRuns(payload: {
+  teamId: string;
+}): Promise<{ teamId: string; runs: TeamRunListItem[] }> {
   return await teamRuntimeApi({
-    operationId: 'team.runStart',
-    target: { kind: 'team-run', runId: payload.runId },
-    input: {
-      runId: payload.runId,
-      idempotencyKey: payload.idempotencyKey,
-      ...(payload.initialPrompt ? { initialPrompt: payload.initialPrompt } : {}),
-    },
+    operationId: 'team.runList',
+    target: { kind: 'team', teamId: payload.teamId },
+    input: { teamId: payload.teamId },
   });
 }
 
 export async function tickTeamRun(payload: {
   runId: string;
   idempotencyKey: string;
-}): Promise<unknown> {
+}): Promise<TeamRunTickResult> {
   return await teamRuntimeApi({
     operationId: 'team.runTick',
     target: { kind: 'team-run', runId: payload.runId },
     input: { runId: payload.runId, idempotencyKey: payload.idempotencyKey },
+  });
+}
+
+export async function resumeTeam(payload: {
+  teamId: string;
+  idempotencyKey: string;
+}): Promise<{ success: true; teamId: string; restoredRunIds: string[]; activeRunIds: string[]; skippedTerminalRunIds: string[] }> {
+  return await teamRuntimeApi({
+    operationId: 'team.resume',
+    target: { kind: 'team', teamId: payload.teamId },
+    input: { teamId: payload.teamId, idempotencyKey: payload.idempotencyKey },
   });
 }
 
@@ -470,10 +596,10 @@ export async function planTeamWorkflow(payload: {
 
 export async function submitTeamRunDecision(payload: {
   runId: string;
-  decision: 'retry' | 'proceed_degraded' | 'abort';
+  decision: TeamDecisionType;
   note?: string;
   idempotencyKey: string;
-}): Promise<unknown> {
+}): Promise<TeamRunDecisionSubmitResult> {
   return await teamRuntimeApi({
     operationId: 'team.runDecisionSubmit',
     target: { kind: 'team-run', runId: payload.runId },
@@ -489,10 +615,10 @@ export async function submitTeamRunDecision(payload: {
 export async function resolveTeamApproval(payload: {
   runId: string;
   approvalId: string;
-  decision: 'approve' | 'deny' | 'abort';
+  decision: TeamApprovalResolutionDecision;
   note?: string;
   idempotencyKey: string;
-}): Promise<unknown> {
+}): Promise<TeamApprovalResolveResult> {
   return await teamRuntimeApi({
     operationId: 'team.approvalResolve',
     target: { kind: 'team-approval', runId: payload.runId, approvalId: payload.approvalId },

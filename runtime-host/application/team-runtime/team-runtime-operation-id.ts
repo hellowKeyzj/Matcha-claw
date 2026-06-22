@@ -1,0 +1,16 @@
+export type TeamRuntimeOperationId =
+  | 'team.packageValidate'
+  | 'team.dependencyPlan'
+  | 'team.provisionAgents'
+  | 'team.delete'
+  | 'team.runCreate'
+  | 'team.runList'
+  | 'team.runSnapshot'
+  | 'team.runDiagnostics'
+  | 'team.runDecisionSubmit'
+  | 'team.planWorkflow'
+  | 'team.runTick'
+  | 'team.resume'
+  | 'team.approvalResolve'
+  | 'team.runCancel'
+  | 'team.runDelete';

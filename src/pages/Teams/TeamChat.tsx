@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
+import { Minus, Plus } from 'lucide-react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -114,12 +115,17 @@ export function TeamChat({ teamId }: { teamId?: string }) {
   const { t } = useTranslation('teams');
   const navigate = useNavigate();
   const gatewayStatus = useGatewayStore((state) => state.status);
+  const isGatewayRunning = isGatewayOperational(gatewayStatus);
 
   const teams = useTeamsStore((state) => state.teams);
   const activeTeamId = useTeamsStore((state) => state.activeTeamId);
   const setActiveTeam = useTeamsStore((state) => state.setActiveTeam);
-  const startRun = useTeamsStore((state) => state.startRun);
+  const setActiveRun = useTeamsStore((state) => state.setActiveRun);
+  const createRun = useTeamsStore((state) => state.createRun);
+  const resumeRun = useTeamsStore((state) => state.resumeRun);
+  const deleteRun = useTeamsStore((state) => state.deleteRun);
   const refreshSnapshot = useTeamsStore((state) => state.refreshSnapshot);
+  const syncRunList = useTeamsStore((state) => state.syncRunList);
   const tickRun = useTeamsStore((state) => state.tickRun);
   const cancelRun = useTeamsStore((state) => state.cancelRun);
   const resolveApproval = useTeamsStore((state) => state.resolveApproval);
@@ -131,6 +137,7 @@ export function TeamChat({ teamId }: { teamId?: string }) {
   const resolvedTeamId = teamId ?? activeTeamId ?? undefined;
   const team = teams.find((row) => row.id === resolvedTeamId);
   const run = useTeamsStore((state) => (resolvedTeamId ? state.runByTeamId[resolvedTeamId] : undefined));
+  const runList = useTeamsStore((state) => (resolvedTeamId ? (state.runListByTeamId[resolvedTeamId] ?? []) : []));
   const workflowPlan = useTeamsStore((state) => (resolvedTeamId ? state.workflowPlanByTeamId[resolvedTeamId] : undefined));
   const dispatchGroups = useTeamsStore((state) => (resolvedTeamId ? (state.dispatchGroupsByTeamId[resolvedTeamId] ?? EMPTY_DISPATCH_GROUPS) : EMPTY_DISPATCH_GROUPS));
   const dispatchTasks = useTeamsStore((state) => (resolvedTeamId ? (state.dispatchTasksByTeamId[resolvedTeamId] ?? EMPTY_DISPATCH_TASKS) : EMPTY_DISPATCH_TASKS));
@@ -153,12 +160,15 @@ export function TeamChat({ teamId }: { teamId?: string }) {
   const [pendingActionId, setPendingActionId] = useState<string | null>(null);
 
   useEffect(() => {
-    if (!team || !resolvedTeamId || !isGatewayOperational(gatewayStatus)) {
+    if (!team || !resolvedTeamId || !isGatewayRunning) {
       return;
     }
     setActiveTeam(team.id);
-    void refreshSnapshot(team.id);
-  }, [gatewayStatus, team, resolvedTeamId, setActiveTeam, refreshSnapshot]);
+    void (async () => {
+      await syncRunList(team.id);
+      await refreshSnapshot(team.id);
+    })();
+  }, [isGatewayRunning, team, resolvedTeamId, setActiveTeam, syncRunList, refreshSnapshot]);
 
   const runUiAction = async (actionId: string, action: () => Promise<void>): Promise<void> => {
     if (pendingActionId) {
@@ -180,6 +190,7 @@ export function TeamChat({ teamId }: { teamId?: string }) {
     [events, run?.currentStageId],
   );
   const pendingApprovals = approvals.filter((approval) => approval.status === 'pending');
+  const runs = [...runList].sort((left, right) => right.updatedAt - left.updatedAt);
 
   const retryDependencyPreflightAfterSkillChange = async (): Promise<void> => {
     if (!team) {
@@ -249,8 +260,9 @@ export function TeamChat({ teamId }: { teamId?: string }) {
   }
 
   const canAct = Boolean(run) && !loading && !pendingActionId;
-  const canStart = !loading && !pendingActionId && (!run || run.status === 'created' || run.status === 'paused');
+  const canCreateRun = !loading && !pendingActionId;
   const canCancel = canAct && (run?.status === 'provisioning' || run?.status === 'running' || run?.status === 'waiting_for_user' || run?.status === 'paused');
+  const canDeleteRun = canAct;
   const canSubmitDecision = canAct && run?.status === 'waiting_for_user';
 
   return (
@@ -258,34 +270,28 @@ export function TeamChat({ teamId }: { teamId?: string }) {
       <header className="flex items-center justify-between">
         <div>
           <h1 className="text-xl font-semibold">{team.name}</h1>
-          <p className="text-sm text-muted-foreground">
-            {t('chat.runStatus')}: {run?.status ?? t('run.notStarted')} · rev {run?.revision ?? 0}
-          </p>
-          <p className="text-xs text-muted-foreground">
-            {t('create.packagePath')}: {team.packagePath}
-          </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
           <Button
             variant="outline"
-            onClick={() => void runUiAction(`refresh:${team.id}`, () => refreshSnapshot(team.id))}
-            disabled={loading || Boolean(pendingActionId)}
+            onClick={() => void runUiAction(`resume:${team.id}:${run?.runId ?? 'none'}`, () => resumeRun(team.id))}
+            disabled={!canAct}
           >
-            {t('chat.refresh')}
+            {t('run.resume')}
           </Button>
           <Button
             variant="outline"
-            onClick={() => void runUiAction(`start:${team.id}`, () => startRun(team.id, 'Analyze Series B investment in Anthropic, AI safety company, $5B valuation.'))}
-            disabled={!canStart}
-          >
-            {t('run.start')}
-          </Button>
-          <Button
-            variant="outline"
-            onClick={() => void runUiAction(`cancel:${team.id}`, () => cancelRun(team.id))}
+            onClick={() => void runUiAction(`cancel:${team.id}:${run?.runId ?? 'none'}`, () => cancelRun(team.id))}
             disabled={!canCancel}
           >
-            {t('run.cancel')}
+            {t('run.stop')}
+          </Button>
+          <Button
+            variant="outline"
+            onClick={() => void runUiAction(`refresh:${team.id}:${run?.runId ?? 'none'}`, () => refreshSnapshot(team.id))}
+            disabled={loading || Boolean(pendingActionId) || !run}
+          >
+            {t('chat.refresh')}
           </Button>
           <Button variant="outline" onClick={() => navigate('/teams')}>
             {t('chat.backToList')}
@@ -298,6 +304,63 @@ export function TeamChat({ teamId }: { teamId?: string }) {
           {error}
         </div>
       )}
+
+      <Card>
+        <CardHeader className="flex flex-row items-center justify-between gap-3">
+          <CardTitle className="text-base">{t('run.history')}</CardTitle>
+          <div className="flex items-center gap-2">
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              aria-label={t('run.create')}
+              className="h-8 w-8 p-0"
+              onClick={() => void runUiAction(`create-run:${team.id}`, async () => { await createRun(team.id); })}
+              disabled={!canCreateRun}
+            >
+              <Plus className="h-4 w-4" />
+            </Button>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              aria-label={t('run.delete')}
+              className="h-8 w-8 p-0"
+              onClick={() => void runUiAction(`delete-run:${team.id}:${run?.runId ?? 'none'}`, () => deleteRun(team.id))}
+              disabled={!canDeleteRun}
+            >
+              <Minus className="h-4 w-4" />
+            </Button>
+          </div>
+        </CardHeader>
+        <CardContent className="space-y-2">
+          {runs.length === 0 ? (
+            <div className="rounded border p-3 text-xs text-muted-foreground">{t('run.emptyRuns')}</div>
+          ) : runs.map((teamRun) => {
+            const isActiveRun = teamRun.runId === run?.runId;
+            return (
+              <button
+                key={teamRun.runId}
+                type="button"
+                className={`flex w-full items-center justify-between gap-3 rounded border px-3 py-2 text-left text-sm ${isActiveRun ? 'border-primary bg-primary/10' : 'bg-background'}`}
+                onClick={() => {
+                  setActiveRun(team.id, teamRun.runId);
+                  void runUiAction(`switch-run:${team.id}:${teamRun.runId}`, () => refreshSnapshot(team.id));
+                }}
+                disabled={loading || Boolean(pendingActionId) || isActiveRun}
+              >
+                <span className="min-w-0 truncate">{teamRun.runId}</span>
+              </button>
+            );
+          })}
+        </CardContent>
+      </Card>
+
+      {!run ? (
+        <div className="rounded-md border border-border bg-muted/25 p-3 text-sm text-muted-foreground">
+          {t('run.createFirstRunHint')}
+        </div>
+      ) : null}
 
       <div className="grid gap-4 xl:grid-cols-[1.4fr_1fr_1fr]">
         <Card>
@@ -565,7 +628,7 @@ export function TeamChat({ teamId }: { teamId?: string }) {
             ) : roles.map((role) => (
               <div key={role.roleId} className="rounded border p-2">
                 <div className="text-sm font-medium">{role.roleId}</div>
-                <div className="text-xs text-muted-foreground">{role.agentName} · {role.status}</div>
+                <div className="text-xs text-muted-foreground">{role.agentId}</div>
                 <div className="mt-1 text-xs text-muted-foreground">{t('run.roleTasks')}: {roleDispatchTaskCountByRoleId[role.roleId] ?? 0}</div>
               </div>
             ))}
