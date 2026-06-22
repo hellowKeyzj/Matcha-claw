@@ -301,6 +301,155 @@ describe('runtime host gateway event bridge', () => {
     });
   });
 
+  it('routes run lifecycle events without sessionKey through the observed run session', async () => {
+    createGatewayClientMock.mockReturnValue(gatewayClient);
+    const emitParentGatewayEvent = vi.fn(async () => undefined);
+    const endpointControlState = {
+      updateRuntimeEndpointControlState: vi.fn(() => ({
+        connection: null,
+        readiness: null,
+        capabilities: null,
+        updatedAt: null,
+      })),
+    };
+    const runtime = {
+      consumeEndpointConversationEvent: vi.fn(async () => []),
+      consumeEndpointNotification: vi.fn(() => []),
+    };
+    const { createRuntimeHostGatewayClient } = await import('../../runtime-host/application/adapters/openclaw/gateway/openclaw-gateway-event-bridge');
+
+    createRuntimeHostGatewayClient({
+      parentTransport: {
+        requestParentShellAction: vi.fn(async () => ({ success: true, status: 200, data: {} })),
+        emitParentGatewayEvent,
+      },
+      dispatchRoute: vi.fn(async () => ({ status: 200, data: {} })),
+      getSessionRuntime: () => runtime,
+      endpointControlState,
+      runtimeHostEndpoint: {
+        kind: 'native-runtime',
+        runtimeAdapterId: 'test-runtime',
+        runtimeInstanceId: 'local',
+      },
+      runtimeHostDataDir: process.cwd(),
+      gatewayPort: 12345,
+      readGatewayToken: vi.fn(async () => 'token'),
+      platform: process.platform,
+      clock: { nowMs: () => 1 },
+      idGenerator: { randomId: () => 'id-1', randomHex: () => '00' },
+      identityRepository: {} as never,
+      deviceCrypto: {} as never,
+      scheduler: { schedule: vi.fn(() => ({ cancel: vi.fn() })) },
+      tcpProbe: {} as never,
+    });
+
+    const options = createGatewayClientMock.mock.calls[0]?.[0];
+    options.onGatewayConversationEvent({
+      type: 'chat.message',
+      event: {
+        state: 'final',
+        sessionKey: 'agent:main:main',
+        runId: 'run-lifecycle-no-session',
+        seq: 1,
+        message: { role: 'assistant', content: [{ type: 'toolCall', id: 'tool-1', name: 'Read', input: {} }] },
+      },
+    });
+    options.onGatewayConversationEvent({
+      type: 'run.phase',
+      phase: 'completed',
+      runId: 'run-lifecycle-no-session',
+    });
+
+    await vi.waitFor(() => {
+      expect(runtime.consumeEndpointConversationEvent).toHaveBeenCalledTimes(2);
+    });
+    expect(runtime.consumeEndpointConversationEvent.mock.calls[1]?.[1]).toEqual({
+      type: 'run.phase',
+      phase: 'completed',
+      runId: 'run-lifecycle-no-session',
+      sessionIdentity: {
+        endpoint: {
+          kind: 'native-runtime',
+          runtimeAdapterId: 'test-runtime',
+          runtimeInstanceId: 'local',
+        },
+        agentId: 'main',
+        sessionKey: 'agent:main:main',
+      },
+    });
+  });
+
+  it('treats OpenClaw team outbox notifications as ordinary gateway notifications', async () => {
+    createGatewayClientMock.mockReturnValue(gatewayClient);
+    const emitParentGatewayEvent = vi.fn(async () => undefined);
+    const dispatchRoute = vi.fn(async () => ({ status: 200, data: { success: true } }));
+    const endpointControlState = {
+      updateRuntimeEndpointControlState: vi.fn(() => ({
+        connection: null,
+        readiness: null,
+        capabilities: null,
+        updatedAt: null,
+      })),
+    };
+    const sessionUpdate = { type: 'team-outbox-notification' };
+    const runtime = {
+      consumeEndpointConversationEvent: vi.fn(async () => []),
+      consumeEndpointNotification: vi.fn(() => [sessionUpdate]),
+    };
+    const { createRuntimeHostGatewayClient } = await import('../../runtime-host/application/adapters/openclaw/gateway/openclaw-gateway-event-bridge');
+
+    createRuntimeHostGatewayClient({
+      parentTransport: {
+        requestParentShellAction: vi.fn(async () => ({ success: true, status: 200, data: {} })),
+        emitParentGatewayEvent,
+      },
+      dispatchRoute,
+      getSessionRuntime: () => runtime,
+      endpointControlState,
+      runtimeHostEndpoint: {
+        kind: 'native-runtime',
+        runtimeAdapterId: 'test-runtime',
+        runtimeInstanceId: 'local',
+      },
+      runtimeHostDataDir: process.cwd(),
+      gatewayPort: 12345,
+      readGatewayToken: vi.fn(async () => 'token'),
+      platform: process.platform,
+      clock: { nowMs: () => 1 },
+      idGenerator: { randomId: () => 'id-1', randomHex: () => '00' },
+      identityRepository: {} as never,
+      deviceCrypto: {} as never,
+      scheduler: { schedule: vi.fn(() => ({ cancel: vi.fn() })) },
+      tcpProbe: {} as never,
+    });
+
+    const options = createGatewayClientMock.mock.calls[0]?.[0];
+    const notification = {
+      method: 'agent',
+      params: {
+        runId: 'teamrun-1',
+        stream: 'team-runtime.outbox',
+        data: {
+          phase: 'changed',
+          runId: 'teamrun-1',
+          latestSequence: 3,
+          recordId: 'team-outbox-1',
+        },
+      },
+    };
+    options.onGatewayNotification(notification);
+
+    await vi.waitFor(() => {
+      expect(runtime.consumeEndpointNotification).toHaveBeenCalledWith({
+        kind: 'native-runtime',
+        runtimeAdapterId: 'test-runtime',
+        runtimeInstanceId: 'local',
+      }, notification);
+    });
+    expect(dispatchRoute).not.toHaveBeenCalled();
+    expect(emitParentGatewayEvent).toHaveBeenCalledWith('session:update', sessionUpdate);
+  });
+
   it('serializes gateway conversation events per session without blocking other sessions', async () => {
     createGatewayClientMock.mockReturnValue(gatewayClient);
     const emitParentGatewayEvent = vi.fn(async () => undefined);

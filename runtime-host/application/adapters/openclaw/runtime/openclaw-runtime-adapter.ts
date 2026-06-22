@@ -14,6 +14,7 @@ import {
 } from '../../../agent-runtime/contracts/runtime-address';
 import { OPENCLAW_RUNTIME_ADAPTER_ID, OPENCLAW_RUNTIME_INSTANCE_ID } from './openclaw-runtime-identity';
 import { buildRuntimeEndpointCapabilityDescriptors } from '../../../agent-runtime/contracts/runtime-capability-descriptors';
+import { AGENT_SKILL_CONFIG_CAPABILITY_ID, agentSkillConfigCapabilityOperations } from '../../../capabilities/agent/agent-skill-config-capability';
 import { SUBAGENT_MANAGEMENT_CAPABILITY_ID, subagentManagementCapabilityOperations } from '../../../capabilities/agent/subagent-management-capability';
 import { CHANNEL_INTEGRATION_CAPABILITY_ID, channelIntegrationCapabilityOperations } from '../../../capabilities/integration/channel-integration-capability';
 import { LICENSE_RUNTIME_CAPABILITY_ID, licenseRuntimeCapabilityOperations } from '../../../capabilities/license/license-runtime-capability';
@@ -39,6 +40,7 @@ const CAPABILITY_OWNERS: Record<string, { ownerModuleId: string; routeOwnerId: s
   [MODEL_PROVIDER_CAPABILITY_ID]: { ownerModuleId: 'model', routeOwnerId: 'openclaw' },
   [LICENSE_RUNTIME_CAPABILITY_ID]: { ownerModuleId: 'license', routeOwnerId: 'operations' },
   [RUNTIME_HOST_CAPABILITY_ID]: { ownerModuleId: 'runtime', routeOwnerId: 'runtime' },
+  [AGENT_SKILL_CONFIG_CAPABILITY_ID]: { ownerModuleId: 'agent', routeOwnerId: 'openclaw' },
   [SUBAGENT_MANAGEMENT_CAPABILITY_ID]: { ownerModuleId: 'agent', routeOwnerId: 'openclaw' },
   [PLUGIN_RUNTIME_CAPABILITY_ID]: { ownerModuleId: 'plugin', routeOwnerId: 'runtime' },
   [SCHEDULER_CRON_CAPABILITY_ID]: { ownerModuleId: 'scheduler', routeOwnerId: 'operations' },
@@ -222,6 +224,12 @@ function buildAgentScopedCapabilities(endpoint: RuntimeEndpointProfile, endpoint
         supportLevel: 'native',
         ownerModuleId: OPENCLAW_RUNTIME_ADAPTER_ID,
         routeOwnerId: 'sessions',
+      }),
+      createScopedCapabilityDescriptor({
+        id: AGENT_SKILL_CONFIG_CAPABILITY_ID,
+        kind: 'agent-skill-config',
+        scope: { kind: 'agent', endpoint: endpointRef, agentId },
+        operations: agentSkillConfigCapabilityOperations,
       }),
       createScopedCapabilityDescriptor({
         id: SUBAGENT_MANAGEMENT_CAPABILITY_ID,

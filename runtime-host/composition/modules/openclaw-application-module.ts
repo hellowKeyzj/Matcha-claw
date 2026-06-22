@@ -33,8 +33,10 @@ import {
 } from '../runtime-host-tokens';
 import type { GatewayPluginCapabilityPort } from '../../application/gateway/gateway-capability-service';
 import type { GatewayChannelPort, GatewayChatPort, GatewayRuntimePort } from '../../application/gateway/gateway-runtime-port';
+import { OpenClawAgentSkillConfigProjection } from '../../application/adapters/openclaw/projections/openclaw-agent-skill-config-projection';
 import { OpenClawRuntimeConfigService } from '../../application/adapters/openclaw/projections/openclaw-runtime-config-service';
 import { SubagentTemplateService } from '../../application/adapters/openclaw/infrastructure/openclaw-subagent-template-service';
+import { AgentSkillConfigService } from '../../application/subagents/agent-skill-config-service';
 import { SubagentRuntimeService } from '../../application/subagents/service';
 import { SubagentRuntimeWorkflow } from '../../application/workflows/subagent-runtime/subagent-runtime-workflow';
 import {
@@ -123,6 +125,7 @@ import type { GatewayControlPort, ParentShellPort } from '../../application/runt
 import type { RuntimeLongTaskSubmissionPort } from '../../application/runtime-host/runtime-task-ports';
 import type { SettingsRepository } from '../../application/settings/store';
 import type { SkillReadmePreviewRepository, SkillsConfigRepository } from '../../application/skills/store';
+import { createAgentSkillConfigCapabilityOperationRoutes } from '../../application/capabilities/agent/agent-skill-config-capability';
 import { createSubagentManagementCapabilityOperationRoutes } from '../../application/capabilities/agent/subagent-management-capability';
 import { createChannelIntegrationCapabilityOperationRoutes } from '../../application/capabilities/integration/channel-integration-capability';
 import { createModelProviderCapabilityOperationRoutes } from '../../application/capabilities/model/model-provider-capability';
@@ -371,6 +374,13 @@ export function registerOpenClawApplicationServices(
     runtimeWorkflow: scope.resolve<SubagentRuntimeWorkflow>('subagents.runtimeWorkflow'),
     skillRuntimeWorkflow: scope.resolve<SkillRuntimeWorkflow>('skills.runtimeWorkflow'),
   }));
+  container.register('subagents.agentSkillConfigProjection', (scope) => new OpenClawAgentSkillConfigProjection({
+    runtimeWorkflow: scope.resolve<SubagentRuntimeWorkflow>('subagents.runtimeWorkflow'),
+    skillRuntimeWorkflow: scope.resolve<SkillRuntimeWorkflow>('skills.runtimeWorkflow'),
+  }));
+  container.register('subagents.agentSkillConfigService', (scope) => new AgentSkillConfigService({
+    projection: scope.resolve<OpenClawAgentSkillConfigProjection>('subagents.agentSkillConfigProjection'),
+  }));
   container.register('clawhub.skillInstallWorkflow', (scope) => new ClawHubSkillInstallWorkflow({
     cliRunner: scope.resolve<ClawHubCliRunner>('clawhub.cliRunner'),
     fileSystem: scope.resolve<RuntimeFileSystemPort>('runtime.fileSystem'),
@@ -421,6 +431,9 @@ function registerOpenClawCapabilityOperationRoutes(container: RuntimeHostContain
     }),
     ...createSubagentManagementCapabilityOperationRoutes({
       subagentService: scope.resolve<SubagentRuntimeService>('subagents.service'),
+    }),
+    ...createAgentSkillConfigCapabilityOperationRoutes({
+      agentSkillConfigService: scope.resolve<AgentSkillConfigService>('subagents.agentSkillConfigService'),
     }),
   ]);
 }

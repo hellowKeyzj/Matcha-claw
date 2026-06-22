@@ -147,6 +147,7 @@ function createSanitizeNeutralConfig(): Record<string, unknown> {
       defaults: {
         bootstrapMaxChars: 32_000,
         bootstrapTotalMaxChars: 100_000,
+        skipBootstrap: true,
       },
     },
     plugins: {
@@ -195,6 +196,78 @@ describe('sanitizeOpenClawConfig feishu plugin migration', () => {
     discoverAgentIdsMock.mockResolvedValue(['main']);
     readAuthProfilesMock.mockResolvedValue({ version: 1, profiles: {} });
     readOpenClawJsonMock.mockResolvedValue(createSanitizeNeutralConfig());
+  });
+
+  it('缺失 agents.defaults.skipBootstrap 时会补 true 并保留 defaults 其他字段', async () => {
+    readOpenClawJsonMock.mockResolvedValue({
+      ...createSanitizeNeutralConfig(),
+      agents: {
+        defaults: {
+          bootstrapMaxChars: 32_000,
+          bootstrapTotalMaxChars: 100_000,
+          model: {
+            primary: 'openai/gpt-5.4',
+          },
+        },
+      },
+    });
+
+    await sanitizeMockConfig();
+
+    expect(writeOpenClawJsonMock).toHaveBeenCalledTimes(1);
+    const nextConfig = writeOpenClawJsonMock.mock.calls[0][0] as Record<string, any>;
+    expect(nextConfig.agents.defaults).toMatchObject({
+      bootstrapMaxChars: 32_000,
+      bootstrapTotalMaxChars: 100_000,
+      skipBootstrap: true,
+      model: {
+        primary: 'openai/gpt-5.4',
+      },
+    });
+  });
+
+  it('agents.defaults.skipBootstrap 已为 true 时不会触发写入', async () => {
+    readOpenClawJsonMock.mockResolvedValue({
+      ...createSanitizeNeutralConfig(),
+      plugins: {
+        allow: ['openclaw-lark'],
+        entries: {
+          'openclaw-lark': { enabled: true },
+        },
+      },
+    });
+
+    await sanitizeMockConfig();
+
+    expect(writeOpenClawJsonMock).not.toHaveBeenCalled();
+  });
+
+  it('只强制 agents.defaults.skipBootstrap，不向 agents.list 条目补 skipBootstrap', async () => {
+    readOpenClawJsonMock.mockResolvedValue({
+      ...createSanitizeNeutralConfig(),
+      agents: {
+        defaults: {
+          bootstrapMaxChars: 32_000,
+          bootstrapTotalMaxChars: 100_000,
+        },
+        list: [
+          {
+            id: 'worker',
+            name: 'Worker',
+          },
+        ],
+      },
+    });
+
+    await sanitizeMockConfig();
+
+    expect(writeOpenClawJsonMock).toHaveBeenCalledTimes(1);
+    const nextConfig = writeOpenClawJsonMock.mock.calls[0][0] as Record<string, any>;
+    expect(nextConfig.agents.defaults.skipBootstrap).toBe(true);
+    expect(nextConfig.agents.list[0]).toEqual({
+      id: 'worker',
+      name: 'Worker',
+    });
   });
 
   it('会把 feishu-openclaw-plugin 迁移为 openclaw-lark 并移除冲突的 entries.feishu', async () => {

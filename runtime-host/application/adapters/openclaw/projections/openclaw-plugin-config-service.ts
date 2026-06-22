@@ -196,12 +196,13 @@ function canWritePluginToTrustedAllowlist(pluginId: string, bundledPluginIds: Re
   return !isChannelDerivedPluginId(pluginId) || getExternalChannelTypeByPluginId(pluginId) !== undefined;
 }
 
-function applyTeamRuntimePluginConfig(entry: Record<string, unknown>, config: Record<string, unknown>): Record<string, unknown> {
+function applyTeamRuntimePluginConfig(entry: Record<string, unknown>, config: Record<string, unknown>, storageRoot: string): Record<string, unknown> {
   const currentPluginConfig = isRecord(entry.config) ? entry.config : {};
   return {
     ...entry,
     config: {
       ...currentPluginConfig,
+      storageRoot,
       availableSkills: readTeamRuntimeAvailableSkills(currentPluginConfig, config),
       availableTools: readTeamRuntimeAvailableTools(currentPluginConfig, config),
     },
@@ -257,7 +258,7 @@ export async function applyEnabledPluginIdsToOpenClawConfig(
       enabled: true,
     };
     nextEntries[pluginId] = pluginId === TEAM_RUNTIME_PLUGIN_ID
-      ? applyTeamRuntimePluginConfig(enabledEntry, config)
+      ? applyTeamRuntimePluginConfig(enabledEntry, config, configRepository.getConfigDir())
       : enabledEntry;
   }
 

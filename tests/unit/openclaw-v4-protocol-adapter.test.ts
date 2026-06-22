@@ -210,6 +210,97 @@ describe('OpenClawV4ProtocolAdapter', () => {
     });
   });
 
+  it('maps V4 chat states to canonical message status', () => {
+    const cases = [
+      { state: 'delta', expectedStatus: 'streaming' },
+      { state: 'final', expectedStatus: 'final' },
+      { state: 'error', expectedStatus: 'error' },
+      { state: 'aborted', expectedStatus: 'aborted' },
+    ] as const;
+
+    for (const { state, expectedStatus } of cases) {
+      const adapter = new OpenClawV4ProtocolAdapter();
+      const context = runtimeContext();
+      const [event] = adapter.eventAdapter.translate({
+        type: 'chat.message',
+        event: {
+          state,
+          sessionKey: 'session-1',
+          runId: `run-chat-${state}`,
+          seq: 1,
+          deltaText: state === 'delta' ? 'streaming text' : undefined,
+          message: {
+            role: 'assistant',
+            timestamp: 1_700_000_000_001,
+            content: [{ type: 'text', text: `${state} text` }],
+          },
+        },
+      }, context);
+
+      expect(event).toMatchObject({
+        type: 'message_part',
+        status: expectedStatus,
+      });
+    }
+  });
+
+  it('maps V4 tool lifecycle phases to canonical tool phases', () => {
+    const cases = [
+      { phase: 'start', expectedPhase: 'started', input: { args: { file_path: 'README.md' } } },
+      { phase: 'update', expectedPhase: 'updated', input: { partialResult: 'partial' } },
+      { phase: 'result', expectedPhase: 'completed', input: { result: 'done' } },
+      { phase: 'result', expectedPhase: 'failed', input: { result: 'failed', isError: true } },
+    ] as const;
+
+    for (const { phase, expectedPhase, input } of cases) {
+      const adapter = new OpenClawV4ProtocolAdapter();
+      const context = runtimeContext();
+      const [event] = adapter.eventAdapter.translate({
+        type: 'tool.lifecycle',
+        event: {
+          phase,
+          sessionKey: 'session-1',
+          runId: `run-tool-${expectedPhase}`,
+          seq: 1,
+          timestamp: 1_700_000_000_001,
+          toolCallId: `tool-${expectedPhase}`,
+          name: 'Read',
+          ...input,
+        },
+      }, context);
+
+      expect(event).toMatchObject({
+        type: 'tool',
+        phase: expectedPhase,
+      });
+    }
+  });
+
+  it('maps V4 lifecycle phases to canonical run phases', () => {
+    const cases = [
+      { phase: 'started', expectedLifecyclePhase: 'started', expectedRunPhase: 'submitted' },
+      { phase: 'completed', expectedLifecyclePhase: 'final', expectedRunPhase: 'done' },
+      { phase: 'error', expectedLifecyclePhase: 'error', expectedRunPhase: 'error' },
+      { phase: 'aborted', expectedLifecyclePhase: 'aborted', expectedRunPhase: 'aborted' },
+    ] as const;
+
+    for (const { phase, expectedLifecyclePhase, expectedRunPhase } of cases) {
+      const adapter = new OpenClawV4ProtocolAdapter();
+      const context = runtimeContext();
+      const [event] = adapter.eventAdapter.translate({
+        type: 'run.phase',
+        phase,
+        runId: `run-lifecycle-${phase}`,
+      }, context);
+
+      expect(event).toMatchObject({
+        type: 'lifecycle',
+        phase: expectedLifecyclePhase,
+        runPhase: expectedRunPhase,
+      });
+    }
+  });
+
   it('starts a new fallback chat turn after a terminal frame without provider messageId', () => {
     const adapter = new OpenClawV4ProtocolAdapter();
     const context = runtimeContext();
@@ -275,6 +366,71 @@ describe('OpenClawV4ProtocolAdapter', () => {
       type: 'message_part',
       status: 'streaming',
       messageId: 'openclaw-v4:chat:session-1:run-1:member:agent-1:1',
+      text: 'next',
+    });
+  });
+
+  it('finalizes the live assistant turn when a terminal chat frame has no message', () => {
+    const adapter = new OpenClawV4ProtocolAdapter();
+    const context = runtimeContext();
+
+    const [firstDelta] = adapter.eventAdapter.translate({
+      type: 'chat.message',
+      event: {
+        state: 'delta',
+        sessionKey: 'session-1',
+        runId: 'run-terminal-without-message',
+        seq: 1,
+        deltaText: 'first',
+        message: {
+          role: 'assistant',
+          timestamp: 1_700_000_000_001,
+          content: [],
+        },
+      },
+    }, context);
+    const [final] = adapter.eventAdapter.translate({
+      type: 'chat.message',
+      event: {
+        state: 'final',
+        sessionKey: 'session-1',
+        runId: 'run-terminal-without-message',
+        seq: 2,
+        timestamp: 1_700_000_000_002,
+      },
+    }, context);
+    const [nextDelta] = adapter.eventAdapter.translate({
+      type: 'chat.message',
+      event: {
+        state: 'delta',
+        sessionKey: 'session-1',
+        runId: 'run-terminal-without-message',
+        seq: 3,
+        deltaText: 'next',
+        message: {
+          role: 'assistant',
+          timestamp: 1_700_000_000_003,
+          content: [],
+        },
+      },
+    }, context);
+
+    expect(firstDelta).toMatchObject({
+      type: 'message_part',
+      status: 'streaming',
+      messageId: 'openclaw-v4:chat:session-1:run-terminal-without-message:member:agent-1:0',
+      text: 'first',
+    });
+    expect(final).toMatchObject({
+      type: 'message_part',
+      status: 'final',
+      messageId: 'openclaw-v4:chat:session-1:run-terminal-without-message:member:agent-1:0',
+      text: 'first',
+    });
+    expect(nextDelta).toMatchObject({
+      type: 'message_part',
+      status: 'streaming',
+      messageId: 'openclaw-v4:chat:session-1:run-terminal-without-message:member:agent-1:1',
       text: 'next',
     });
   });
@@ -824,6 +980,29 @@ describe('OpenClawV4ProtocolAdapter', () => {
     expect(final?.origin.raw).toMatchObject({
       agentId: 'payload-agent',
       message: { agentId: 'message-agent' },
+    });
+  });
+
+  it('uses the runtime session context when a lifecycle frame has no sessionKey', () => {
+    const adapter = new OpenClawV4ProtocolAdapter();
+    const context = runtimeContext('agent-1');
+
+    const [lifecycle] = adapter.eventAdapter.translate({
+      type: 'run.phase',
+      phase: 'completed',
+      runId: 'run-1',
+    }, context);
+
+    expect(lifecycle).toMatchObject({
+      eventId: 'openclaw-v4:lifecycle:session-1:run-1:final',
+      type: 'lifecycle',
+      sessionId: 'session-1',
+      runId: 'run-1',
+      laneKey: 'member:agent-1',
+      agentId: 'agent-1',
+      phase: 'final',
+      runPhase: 'done',
+      error: null,
     });
   });
 

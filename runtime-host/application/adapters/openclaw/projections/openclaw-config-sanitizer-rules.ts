@@ -334,6 +334,25 @@ function enforceBootstrapCharLimits(config: Record<string, unknown>, deps: OpenC
   return true;
 }
 
+function enforceAgentDefaultsSkipBootstrap(config: Record<string, unknown>, deps: OpenClawConfigSanitizerRulesDeps): boolean {
+  const agents = (config.agents && typeof config.agents === 'object' && !Array.isArray(config.agents)
+    ? config.agents
+    : {}) as Record<string, unknown>;
+  const defaults = (agents.defaults && typeof agents.defaults === 'object' && !Array.isArray(agents.defaults)
+    ? agents.defaults
+    : {}) as Record<string, unknown>;
+
+  if (defaults.skipBootstrap === true) {
+    return false;
+  }
+
+  defaults.skipBootstrap = true;
+  agents.defaults = defaults;
+  config.agents = agents;
+  deps.info('[sanitize] Enforced agents.defaults.skipBootstrap=true for R5 OpenClaw integration projection');
+  return true;
+}
+
 function sanitizeStrictSchemaChannels(config: Record<string, unknown>, deps: OpenClawConfigSanitizerRulesDeps): boolean {
   const channelsObj = (
     config.channels && typeof config.channels === 'object' && !Array.isArray(config.channels)
@@ -638,6 +657,7 @@ export async function applyOpenClawConfigSanitizerRules(
   modified = enforceToolDefaults(config, deps) || modified;
   modified = enforceOpenAiAgentRuntimePins(config, deps) || modified;
   modified = enforceBootstrapCharLimits(config, deps) || modified;
+  modified = enforceAgentDefaultsSkipBootstrap(config, deps) || modified;
   modified = await sanitizePluginsLoadPaths(config, deps) || modified;
   modified = sanitizeStrictSchemaChannels(config, deps) || modified;
   modified = sanitizeDiscordChannelConfig(config, deps) || modified;

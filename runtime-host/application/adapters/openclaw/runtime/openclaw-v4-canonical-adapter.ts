@@ -249,6 +249,10 @@ function messageStatus(state: string): CanonicalMessageStatus | null {
   }
 }
 
+function isTerminalMessageStatus(status: CanonicalMessageStatus): boolean {
+  return status === 'final' || status === 'error' || status === 'aborted';
+}
+
 function lifecyclePhase(phase: string): { phase: CanonicalLifecyclePhase; runPhase: 'done' | 'error' | 'aborted' | 'submitted' } | null {
   switch (phase) {
     case 'started':
@@ -269,7 +273,7 @@ export class OpenClawV4Adapter {
   private readonly liveAssistantTurns = new Map<string, LiveAssistantTurnState>();
   private readonly liveToolOwnerBindings = new Map<string, ToolOwnerBinding>();
 
-  translate(input: OpenClawV4ConversationEvent, context: Pick<RuntimeSessionContext, 'agentId'>): CanonicalSessionEvent[] {
+  translate(input: OpenClawV4ConversationEvent, context: Pick<RuntimeSessionContext, 'agentId' | 'sessionKey'>): CanonicalSessionEvent[] {
     switch (input.type) {
       case 'chat.message':
         return this.translateChat(input.event, context);
@@ -290,7 +294,7 @@ export class OpenClawV4Adapter {
       case 'run.activity':
         return this.translateRuntimeActivity(input, liveCanonicalLane(context));
       case 'run.phase':
-        return this.translateRunPhase(input, liveCanonicalLane(context));
+        return this.translateRunPhase(input, liveCanonicalLane(context), context);
       default:
         return [];
     }
@@ -633,19 +637,24 @@ export class OpenClawV4Adapter {
     const sessionKey = readString(payload.sessionKey);
     const runId = readString(payload.runId);
     const seq = readNumber(payload.seq);
-    const message = asRecord(payload.message);
-    const timestamp = readNumber(message?.timestamp ?? payload.timestamp ?? payload.ts);
+    const message = asRecord(payload.message) ?? {};
+    const timestamp = readNumber(message.timestamp ?? payload.timestamp ?? payload.ts);
     const snapshotUpdatedAt = timestamp ?? Date.now();
     this.pruneChatSnapshots(snapshotUpdatedAt);
-    if (!sessionKey || !runId || seq == null || !message) {
-      return [];
-    }
-    if (message.role !== 'assistant') {
+    if (!sessionKey || !runId || seq == null) {
       return [];
     }
     const lane = liveCanonicalLane(context);
-    const providerMessageId = readString(message.messageId ?? message.id ?? payload.messageId ?? payload.id);
     const previousLiveTurn = this.currentLiveAssistantTurn(sessionKey, runId, lane.laneKey);
+    const messageRole = readString(message.role);
+    const canUseTerminalFrameWithoutAssistantMessage = isTerminalMessageStatus(status) && !!previousLiveTurn && !messageRole;
+    if (messageRole && messageRole !== 'assistant') {
+      return [];
+    }
+    if (!messageRole && !canUseTerminalFrameWithoutAssistantMessage) {
+      return [];
+    }
+    const providerMessageId = readString(message.messageId ?? message.id ?? payload.messageId ?? payload.id);
     const previousMessageSnapshot = previousLiveTurn
       ? this.chatSnapshots.get(this.chatSnapshotKey(sessionKey, previousLiveTurn.fallbackMessageId))
       : undefined;
@@ -1159,8 +1168,12 @@ export class OpenClawV4Adapter {
     }];
   }
 
-  private translateRunPhase(payload: Extract<OpenClawV4ConversationEvent, { type: 'run.phase' }>, lane: CanonicalLane): CanonicalSessionEvent[] {
-    const sessionKey = readString(payload.sessionKey);
+  private translateRunPhase(
+    payload: Extract<OpenClawV4ConversationEvent, { type: 'run.phase' }>,
+    lane: CanonicalLane,
+    context: Pick<RuntimeSessionContext, 'sessionKey'>,
+  ): CanonicalSessionEvent[] {
+    const sessionKey = readString(payload.sessionKey) || readString(context.sessionKey);
     const runId = readString(payload.runId);
     const mapped = lifecyclePhase(payload.phase);
     if (!sessionKey || !mapped) {

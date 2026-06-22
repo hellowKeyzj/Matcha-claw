@@ -3,6 +3,7 @@ import {
   isGatewayEventFrame,
   isGatewayResponseFrame,
   type GatewayNotification,
+  type GatewayResponseFrame,
 } from './protocol';
 import { normalizeGatewayMethods, type GatewayCapabilitiesSnapshot } from './capabilities';
 import {
@@ -54,6 +55,14 @@ function parseGatewayFrame(rawData: unknown): unknown | null {
   } catch {
     return null;
   }
+}
+
+function isExpectedGatewayBusinessError(method: string, response: GatewayResponseFrame): boolean {
+  if (method !== 'agents.delete') {
+    return false;
+  }
+  const message = extractGatewayErrorMessageFromResponse(response);
+  return message.includes('agent "') && message.includes('" not found');
 }
 
 export class GatewayClientFrameHandler {
@@ -159,7 +168,9 @@ export class GatewayClientFrameHandler {
         retryable: extractGatewayErrorRetryable({ error: parsed.error }),
         retryAfterMs: extractGatewayErrorRetryAfterMs({ error: parsed.error }),
       });
-      this.deps.recordRpcFailure(pending.method, issue);
+      if (!isExpectedGatewayBusinessError(pending.method, parsed)) {
+        this.deps.recordRpcFailure(pending.method, issue);
+      }
       pending.reject(new Error(issue.message));
       return true;
     }

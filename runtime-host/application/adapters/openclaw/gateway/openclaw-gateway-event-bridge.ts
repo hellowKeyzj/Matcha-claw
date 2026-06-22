@@ -99,12 +99,18 @@ function toSessionIdentity(endpoint: RuntimeEndpointRef, sessionKey: string): Se
   };
 }
 
+function readTrimmedString(value: unknown): string {
+  return typeof value === 'string' ? value.trim() : '';
+}
+
 const MAX_PENDING_RUNTIME_EVENTS = 1000;
+const MAX_RUN_SESSION_INDEX_ENTRIES = 1000;
 
 export function createRuntimeHostGatewayClient(deps: RuntimeHostGatewayBridgeDeps) {
   let latestObservedTransportEpoch = 0;
   const conversationEventChains = new Map<string, Promise<void>>();
   const pendingConversationEventsBySessionKey = new Map<string, GatewayConversationEvent[]>();
+  const runSessionKeyByRunId = new Map<string, string>();
   const pendingNotifications: unknown[] = [];
   const runtimeHostEndpoint = deps.runtimeHostEndpoint;
   let pendingConversationEventCount = 0;
@@ -154,6 +160,32 @@ export function createRuntimeHostGatewayClient(deps: RuntimeHostGatewayBridgeDep
     pendingConversationEventCount += 1;
   };
 
+  const rememberRunSessionKey = (payload: GatewayConversationEvent, sessionKey: string): void => {
+    const event = 'event' in payload ? payload.event : payload;
+    const runId = readTrimmedString(event.runId);
+    if (!runId || !sessionKey || sessionKey === '__unknown_session__') {
+      return;
+    }
+    if (!runSessionKeyByRunId.has(runId) && runSessionKeyByRunId.size >= MAX_RUN_SESSION_INDEX_ENTRIES) {
+      const oldestRunId = runSessionKeyByRunId.keys().next().value;
+      if (typeof oldestRunId === 'string') {
+        runSessionKeyByRunId.delete(oldestRunId);
+      }
+    }
+    runSessionKeyByRunId.set(runId, sessionKey);
+  };
+
+  const resolveConversationEventSessionKey = (payload: GatewayConversationEvent): string => {
+    const explicitSessionKey = readConversationEventSessionKey(payload);
+    if (explicitSessionKey !== '__unknown_session__') {
+      rememberRunSessionKey(payload, explicitSessionKey);
+      return explicitSessionKey;
+    }
+    const event = 'event' in payload ? payload.event : payload;
+    const runId = readTrimmedString(event.runId);
+    return (runId ? runSessionKeyByRunId.get(runId) : undefined) ?? explicitSessionKey;
+  };
+
   const consumeConversationEvent = async (runtime: GatewaySessionRuntimePort, sessionKey: string, payload: GatewayConversationEvent): Promise<void> => {
     const sessionUpdates = await runtime.consumeEndpointConversationEvent(runtimeHostEndpoint, {
       ...payload,
@@ -201,7 +233,7 @@ export function createRuntimeHostGatewayClient(deps: RuntimeHostGatewayBridgeDep
   };
 
   const enqueueConversationEvent = (payload: GatewayConversationEvent): void => {
-    const sessionKey = readConversationEventSessionKey(payload);
+    const sessionKey = resolveConversationEventSessionKey(payload);
     const runtimeAtEnqueue = deps.getSessionRuntime();
     if (!runtimeAtEnqueue) {
       enqueuePendingConversationEvent(sessionKey, payload);

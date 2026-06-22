@@ -1,5 +1,5 @@
 import { homedir } from 'node:os';
-import { join, resolve as resolvePath } from 'node:path';
+import { isAbsolute as isAbsolutePath, join, relative as relativePath, resolve as resolvePath } from 'node:path';
 
 type JsonRecord = Record<string, unknown>;
 
@@ -23,6 +23,15 @@ function normalizeWorkspacePath(value: unknown): string | null {
     return null;
   }
   return resolvePath(expandHomePath(trimmed));
+}
+
+function isWorkspaceInsideTeamBuddyRoot(candidateDir: string, openclawConfigDir: string): boolean {
+  const resolvedCandidateDir = resolvePath(candidateDir);
+  const resolvedTeamBuddyRoot = resolvePath(openclawConfigDir, 'teambuddy');
+  const relativeCandidateDir = relativePath(resolvedTeamBuddyRoot, resolvedCandidateDir);
+
+  return relativeCandidateDir === ''
+    || (!relativeCandidateDir.startsWith('..') && !isAbsolutePath(relativeCandidateDir));
 }
 
 function resolveFallbackMainWorkspace(openclawConfigDir: string): string {
@@ -128,5 +137,5 @@ export function resolveTaskWorkspaceDirs(config: unknown, openclawConfigDir: str
     }
   }
 
-  return Array.from(dirs);
+  return Array.from(dirs).filter((dir) => !isWorkspaceInsideTeamBuddyRoot(dir, openclawConfigDir));
 }

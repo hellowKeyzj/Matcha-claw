@@ -237,6 +237,7 @@ describe('openclaw plugin config service', () => {
     expect(nextConfig.plugins.entries['team-runtime']).toMatchObject({
       enabled: true,
       config: {
+        storageRoot: configDir,
         availableSkills: [],
         availableTools: ['*'],
       },
@@ -250,7 +251,7 @@ describe('openclaw plugin config service', () => {
           'team-runtime': {
             enabled: false,
             config: {
-              storageRoot: '/tmp/team-runtime',
+              storageRoot: configDir,
               availableSkills: ['*'],
               availableTools: ['*'],
             },
@@ -278,7 +279,7 @@ describe('openclaw plugin config service', () => {
     expect(nextConfig.plugins.entries['team-runtime']).toMatchObject({
       enabled: true,
       config: {
-        storageRoot: '/tmp/team-runtime',
+        storageRoot: configDir,
         availableSkills: ['enabled-skill'],
         availableTools: ['*'],
       },
@@ -292,7 +293,7 @@ describe('openclaw plugin config service', () => {
           'team-runtime': {
             enabled: false,
             config: {
-              storageRoot: '/tmp/team-runtime',
+              storageRoot: configDir,
               availableSkills: ['stale-skill'],
               availableTools: ['tool-a'],
             },
@@ -319,7 +320,7 @@ describe('openclaw plugin config service', () => {
     expect(nextConfig.plugins.entries['team-runtime']).toMatchObject({
       enabled: true,
       config: {
-        storageRoot: '/tmp/team-runtime',
+        storageRoot: configDir,
         availableSkills: ['skill-a'],
         availableTools: ['tool-a'],
       },

@@ -17,6 +17,13 @@ const MAIN_AGENT_TEMPLATE_FILES = [
 const UPSTREAM_TEMPLATE_SNAPSHOT_DIRNAME = 'templates-upstream-openclaw';
 const DEFAULT_IDENTITY_FILE_NAME = 'IDENTITY.md';
 const LEGACY_BOOTSTRAP_FILE_NAME = 'BOOTSTRAP.md';
+export type AgentWorkspaceInitialization = 'mainAgentTemplate' | 'emptyWorkspace';
+export interface AgentWorkspaceInitializationResult {
+  readonly workspaceDir: string;
+  readonly initializedFiles: string[];
+  readonly replacedTemplateFiles: string[];
+  readonly removedBootstrapFiles: string[];
+}
 const FALLBACK_IDENTITY_CONTENT = [
   '# IDENTITY.md',
   '',
@@ -39,6 +46,36 @@ export interface OpenClawWorkspaceMaintenanceWorkflowDeps {
 
 export class OpenClawWorkspaceMaintenanceWorkflow {
   constructor(private readonly deps: OpenClawWorkspaceMaintenanceWorkflowDeps) {}
+
+  async initializeAgentWorkspace(
+    workspaceDir: string,
+    options: { createDir?: boolean; workspaceInitialization: AgentWorkspaceInitialization },
+  ): Promise<AgentWorkspaceInitializationResult> {
+    const emptyResult = (): AgentWorkspaceInitializationResult => ({
+      workspaceDir,
+      initializedFiles: [],
+      replacedTemplateFiles: [],
+      removedBootstrapFiles: [],
+    });
+
+    if (options.createDir) {
+      await this.deps.fileSystem.ensureDirectory(workspaceDir);
+    } else if (!(await this.deps.fileSystem.exists(workspaceDir))) {
+      return emptyResult();
+    }
+
+    if (options.workspaceInitialization === 'emptyWorkspace') {
+      return emptyResult();
+    }
+
+    const result = await this.ensureMainAgentTemplateFiles(workspaceDir);
+    const bootstrapPath = join(workspaceDir, LEGACY_BOOTSTRAP_FILE_NAME);
+    if (await this.deps.fileSystem.exists(bootstrapPath)) {
+      await this.deps.fileSystem.removeFile(bootstrapPath);
+      result.removedBootstrapFiles.push(bootstrapPath);
+    }
+    return result;
+  }
 
   async ensureIdentityFile(
     workspaceDir: string,
@@ -179,15 +216,86 @@ export class OpenClawWorkspaceMaintenanceWorkflow {
     return combined;
   }
 
+  private async ensureMainAgentTemplateFiles(workspaceDir: string): Promise<AgentWorkspaceInitializationResult> {
+    const result: AgentWorkspaceInitializationResult = {
+      workspaceDir,
+      initializedFiles: [],
+      replacedTemplateFiles: [],
+      removedBootstrapFiles: [],
+    };
+    const managedTemplateContentByFile = await this.readManagedTemplateContentByFile();
+    const upstreamTemplateContentByFile = await this.readUpstreamTemplateContentByFile();
+
+    for (const fileName of MAIN_AGENT_TEMPLATE_FILES) {
+      const managedContent = managedTemplateContentByFile.get(fileName);
+      if (managedContent === undefined) {
+        continue;
+      }
+      const workspacePath = join(workspaceDir, fileName);
+      const wroteTemplate = await this.deps.fileSystem.writeTextFileExclusive(workspacePath, managedContent);
+      if (wroteTemplate) {
+        result.initializedFiles.push(workspacePath);
+        continue;
+      }
+
+      const currentContent = await this.tryReadTextFile(workspacePath);
+      const upstreamContent = upstreamTemplateContentByFile.get(fileName);
+      if (
+        currentContent === null
+        || upstreamContent === undefined
+        || normalizeTemplateText(currentContent) !== normalizeTemplateText(upstreamContent)
+      ) {
+        continue;
+      }
+      await this.deps.fileSystem.writeTextFile(workspacePath, managedContent);
+      result.replacedTemplateFiles.push(workspacePath);
+    }
+
+    return result;
+  }
+
+  private async readManagedTemplateContentByFile(): Promise<Map<string, string>> {
+    const managedTemplateDir = await this.firstExistingTemplateDir(this.managedTemplateDirCandidates())
+      ?? this.resolveManagedTemplateDir();
+    const contentByFile = await this.readTemplateContentByFile(managedTemplateDir);
+    if (!contentByFile.has(DEFAULT_IDENTITY_FILE_NAME)) {
+      contentByFile.set(DEFAULT_IDENTITY_FILE_NAME, FALLBACK_IDENTITY_CONTENT);
+    }
+    return contentByFile;
+  }
+
+  private async readUpstreamTemplateContentByFile(): Promise<Map<string, string>> {
+    const upstreamTemplateDir = await this.firstExistingTemplateDir([
+      this.resolveUpstreamTemplateSnapshotDir(),
+      join(this.deps.environment.getOpenClawDirPath(), 'docs', 'reference', 'templates'),
+    ]) ?? this.resolveUpstreamTemplateSnapshotDir();
+    return await this.readTemplateContentByFile(upstreamTemplateDir);
+  }
+
+  private async readTemplateContentByFile(templateDir: string): Promise<Map<string, string>> {
+    const contentByFile = new Map<string, string>();
+    for (const fileName of MAIN_AGENT_TEMPLATE_FILES) {
+      const content = await this.tryReadTextFile(join(templateDir, fileName));
+      if (content !== null) {
+        contentByFile.set(fileName, content);
+      }
+    }
+    return contentByFile;
+  }
+
   private resolveManagedTemplateDir(): string {
+    return this.managedTemplateDirCandidates()[0]
+      ?? join(this.deps.environment.getWorkingDir(), 'resources', 'agent-workspace-templates', 'main-agent');
+  }
+
+  private managedTemplateDirCandidates(): string[] {
     const resourcesPath = this.deps.environment.getResourcesPath();
-    const candidates = [
+    return [
       resourcesPath ? join(resourcesPath, 'resources', 'agent-workspace-templates', 'main-agent') : '',
       resourcesPath ? join(resourcesPath, 'agent-workspace-templates', 'main-agent') : '',
       join(this.deps.environment.getWorkingDir(), 'resources', 'agent-workspace-templates', 'main-agent'),
       join(this.deps.environment.getOpenClawDirPath(), 'docs', 'reference', 'templates'),
     ].filter((item) => item.trim().length > 0);
-    return candidates[0] ?? join(this.deps.environment.getWorkingDir(), 'resources', 'agent-workspace-templates', 'main-agent');
   }
 
   private resolveUpstreamTemplateSnapshotDir(): string {

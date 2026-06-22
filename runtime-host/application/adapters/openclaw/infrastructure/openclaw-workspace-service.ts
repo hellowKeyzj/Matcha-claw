@@ -1,5 +1,5 @@
 import type { ContextMergeResult } from './openclaw-workspace-context-merge';
-import type { OpenClawWorkspaceMaintenanceWorkflow } from '../workflows/openclaw-workspace/openclaw-workspace-maintenance-workflow';
+import type { OpenClawWorkspaceMaintenanceWorkflow, AgentWorkspaceInitializationResult, AgentWorkspaceInitialization } from '../workflows/openclaw-workspace/openclaw-workspace-maintenance-workflow';
 import type { OpenClawWorkspaceQueryWorkflow } from '../workflows/openclaw-workspace/openclaw-workspace-query-workflow';
 
 export interface OpenClawWorkspacePort {
@@ -10,6 +10,7 @@ export interface OpenClawWorkspacePort {
   getMainWorkspaceDir(): Promise<string>;
   getWorkspaceDirForSession(sessionKey: string): Promise<string>;
   getTaskWorkspaceDirs(): Promise<string[]>;
+  initializeAgentWorkspace(workspaceDir: string, options: { createDir?: boolean; workspaceInitialization: AgentWorkspaceInitialization }): Promise<AgentWorkspaceInitializationResult>;
   ensureIdentityFile(workspaceDir: string, options?: { createDir?: boolean }): Promise<{ wroteIdentity: boolean; replacedTemplate: boolean; removedBootstrap: boolean }>;
   ensureDefaultIdentity(): Promise<{ workspaceDirs: string[]; seededFiles: string[]; replacedTemplateFiles: string[]; removedBootstrapFiles: string[] }>;
   migrateMainAgentTemplatesIfNeeded(): Promise<{ workspaceDir: string; migratedFiles: string[] }>;
@@ -28,6 +29,7 @@ export class OpenClawWorkspaceService implements OpenClawWorkspacePort {
       | 'getTaskWorkspaceDirs'
     >,
     private readonly maintenanceWorkflow: Pick<OpenClawWorkspaceMaintenanceWorkflow,
+      | 'initializeAgentWorkspace'
       | 'ensureIdentityFile'
       | 'ensureDefaultIdentity'
       | 'migrateMainAgentTemplatesIfNeeded'
@@ -61,6 +63,13 @@ export class OpenClawWorkspaceService implements OpenClawWorkspacePort {
 
   async getTaskWorkspaceDirs(): Promise<string[]> {
     return await this.queryWorkflow.getTaskWorkspaceDirs();
+  }
+
+  async initializeAgentWorkspace(
+    workspaceDir: string,
+    options: { createDir?: boolean; workspaceInitialization: AgentWorkspaceInitialization },
+  ): Promise<AgentWorkspaceInitializationResult> {
+    return await this.maintenanceWorkflow.initializeAgentWorkspace(workspaceDir, options);
   }
 
   async ensureIdentityFile(
