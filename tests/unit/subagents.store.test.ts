@@ -6,7 +6,10 @@ import {
   resetGatewayClientMocks,
 } from './helpers/mock-gateway-client';
 
-import { useSubagentsStore } from '@/stores/subagents';
+import {
+  __resetSubagentsStoreInternalCachesForTest,
+  useSubagentsStore,
+} from '@/stores/subagents';
 
 const AVATAR_STORAGE_KEY = 'matchaclaw-subagent-avatar-presentations';
 const runtimeEndpoint = {
@@ -19,9 +22,30 @@ const runtimeInstanceScope = {
   endpoint: runtimeEndpoint,
 };
 
+async function waitForExpect(assertion: () => void): Promise<void> {
+  const startedAt = Date.now();
+  let lastError: unknown;
+
+  while (Date.now() - startedAt < 1000) {
+    try {
+      assertion();
+      return;
+    } catch (error) {
+      lastError = error;
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+  }
+
+  if (lastError) {
+    throw lastError;
+  }
+  assertion();
+}
+
 describe('subagents store', () => {
   beforeEach(() => {
     resetGatewayClientMocks();
+    __resetSubagentsStoreInternalCachesForTest();
     window.localStorage.removeItem(AVATAR_STORAGE_KEY);
     useSubagentsStore.setState(useSubagentsStore.getInitialState(), true);
   });
@@ -188,6 +212,346 @@ describe('subagents store', () => {
       ([method]) => method === 'config.get'
     );
     expect(configGetCalls).toHaveLength(1);
+  });
+
+  it('loadAgents 使用 defaults.skills 作为未显式配置 agent 的展示默认值', async () => {
+    const rpc = gatewayClientRpcMock;
+    rpc
+      .mockResolvedValueOnce({
+        success: true,
+        result: {
+          agents: [
+            { id: 'main', name: 'Main', skills: ['runtime-shell'] },
+            { id: 'writer', name: 'Writer' },
+            { id: 'locked', name: 'Locked', skills: ['runtime-locked'] },
+          ],
+          defaultId: 'main',
+          mainKey: 'main',
+          scope: 'per-sender',
+        },
+      })
+      .mockResolvedValueOnce({
+        success: true,
+        result: {
+          config: {
+            agents: {
+              defaults: {
+                skills: ['web-search', 'repo-read'],
+              },
+              list: [
+                { id: 'main', skills: ['shell'] },
+                { id: 'writer' },
+                { id: 'locked', skills: [] },
+              ],
+            },
+          },
+        },
+      });
+
+    await useSubagentsStore.getState().loadAgents();
+
+    const skillsByAgentId = new Map(
+      useSubagentsStore.getState().agents.map((agent) => [agent.id, agent.skills]),
+    );
+    expect(skillsByAgentId.get('main')).toEqual(['shell']);
+    expect(skillsByAgentId.get('writer')).toEqual(['web-search', 'repo-read']);
+    expect(skillsByAgentId.get('locked')).toEqual([]);
+  });
+
+  it('updateAgent 会把 skill 请求写成显式 allowlist，即使当前有效 skills 看起来未变化', async () => {
+    const rpc = gatewayClientRpcMock;
+    let writtenAgentSkills: string[] | undefined;
+    let configSetBaseHash: unknown;
+
+    useSubagentsStore.setState({
+      agents: [
+        {
+          id: 'writer',
+          name: 'Writer',
+          workspace: '/workspace/writer',
+          skills: ['web-search'],
+          isDefault: true,
+        },
+      ],
+      selectedAgentId: 'writer',
+    });
+
+    rpc.mockImplementation(async (method, params) => {
+      if (method === 'config.get') {
+        return {
+          success: true,
+          result: {
+            hash: 'write-hash',
+            config: {
+              agents: {
+                defaults: { skills: ['web-search'] },
+                list: [{ id: 'writer', workspace: '/workspace/writer' }],
+              },
+            },
+          },
+        };
+      }
+      if (method === 'config.set') {
+        const payload = params as { raw?: string; baseHash?: string };
+        configSetBaseHash = payload.baseHash;
+        const parsed = JSON.parse(payload.raw || '{}') as {
+          agents?: { list?: Array<{ id?: string; skills?: string[] }> };
+        };
+        writtenAgentSkills = parsed.agents?.list?.find((entry) => entry.id === 'writer')?.skills;
+        return { success: true, result: {} };
+      }
+      if (method === 'agents.list') {
+        return {
+          success: true,
+          result: {
+            agents: [{ id: 'writer', name: 'Writer' }],
+            defaultId: 'writer',
+            mainKey: 'main',
+            scope: 'per-sender',
+          },
+        };
+      }
+      throw new Error(`Unexpected rpc method in test: ${String(method)}`);
+    });
+
+    await useSubagentsStore.getState().updateAgent({
+      agentId: 'writer',
+      name: 'Writer',
+      workspace: '/workspace/writer',
+      skills: ['web-search'],
+    });
+
+    expect(configSetBaseHash).toBe('write-hash');
+    expect(writtenAgentSkills).toEqual(['web-search']);
+    expect(rpc.mock.calls.some(([method]) => method === 'config.set')).toBe(true);
+  });
+
+  it('updateAgent 没有 skills 字段的普通更新不写 skill allowlist config', async () => {
+    const rpc = gatewayClientRpcMock;
+
+    useSubagentsStore.setState({
+      agents: [
+        {
+          id: 'writer',
+          name: 'Writer',
+          workspace: '/workspace/writer',
+          model: 'openai/gpt-4.1-mini',
+          skills: ['web-search'],
+          isDefault: true,
+        },
+      ],
+      selectedAgentId: 'writer',
+    });
+
+    rpc.mockImplementation(async (method, params) => {
+      if (method === 'agents.update') {
+        expect(params).toEqual({
+          agentId: 'writer',
+          name: 'Writer Renamed',
+          workspace: '/workspace/writer',
+        });
+        return { success: true, result: {} };
+      }
+      if (method === 'agents.list') {
+        return {
+          success: true,
+          result: {
+            agents: [{ id: 'writer', name: 'Writer Renamed' }],
+            defaultId: 'writer',
+            mainKey: 'main',
+            scope: 'per-sender',
+          },
+        };
+      }
+      if (method === 'config.get') {
+        return {
+          success: true,
+          result: {
+            config: {
+              agents: {
+                list: [{ id: 'writer', workspace: '/workspace/writer', skills: ['web-search'] }],
+              },
+            },
+          },
+        };
+      }
+      throw new Error(`Unexpected rpc method in test: ${String(method)}`);
+    });
+
+    await useSubagentsStore.getState().updateAgent({
+      agentId: 'writer',
+      name: 'Writer Renamed',
+      workspace: '/workspace/writer',
+      model: 'openai/gpt-4.1-mini',
+    });
+
+    expect(rpc.mock.calls.some(([method]) => method === 'config.set')).toBe(false);
+  });
+
+  it('updateAgent skill allowlist 写入失败时会 reject 并保留错误状态', async () => {
+    const rpc = gatewayClientRpcMock;
+
+    useSubagentsStore.setState({
+      agents: [
+        {
+          id: 'writer',
+          name: 'Writer',
+          workspace: '/workspace/writer',
+          skills: ['web-search'],
+          isDefault: true,
+        },
+      ],
+      selectedAgentId: 'writer',
+    });
+
+    rpc.mockImplementation(async (method) => {
+      if (method === 'config.get') {
+        return {
+          success: true,
+          result: {
+            hash: 'write-hash',
+            config: {
+              agents: {
+                list: [{ id: 'writer', workspace: '/workspace/writer' }],
+              },
+            },
+          },
+        };
+      }
+      if (method === 'config.set') {
+        throw new Error('skill config write failed');
+      }
+      throw new Error(`Unexpected rpc method in test: ${String(method)}`);
+    });
+
+    await expect(useSubagentsStore.getState().updateAgent({
+      agentId: 'writer',
+      name: 'Writer',
+      workspace: '/workspace/writer',
+      skills: [],
+    })).rejects.toThrow('skill config write failed');
+
+    expect(useSubagentsStore.getState().error).toBe('skill config write failed');
+  });
+
+  it('updateAgent 写入 skills 后忽略旧 in-flight config.get，并通过刷新显示新 skills', async () => {
+    const rpc = gatewayClientRpcMock;
+    let resolveStaleDisplayConfig: ((value: unknown) => void) | null = null;
+    const staleDisplayConfigTask = new Promise((resolve) => {
+      resolveStaleDisplayConfig = resolve;
+    });
+    let configGetCallCount = 0;
+    let writtenAgentSkills: string[] | undefined;
+    let configSetBaseHash: unknown;
+    let refreshConfigReadOccurred = false;
+
+    useSubagentsStore.setState({
+      agents: [
+        {
+          id: 'writer',
+          name: 'Writer',
+          workspace: '/workspace/writer',
+          skills: [],
+          isDefault: true,
+        },
+      ],
+      selectedAgentId: 'writer',
+    });
+
+    rpc.mockImplementation(async (method, params) => {
+      if (method === 'agents.list') {
+        return {
+          success: true,
+          result: {
+            agents: [{ id: 'writer', name: 'Writer' }],
+            defaultId: 'writer',
+            mainKey: 'main',
+            scope: 'per-sender',
+          },
+        };
+      }
+      if (method === 'config.get') {
+        configGetCallCount += 1;
+        if (configGetCallCount === 1) {
+          return staleDisplayConfigTask as Promise<unknown>;
+        }
+        if (configGetCallCount === 2) {
+          return {
+            success: true,
+            result: {
+              hash: 'write-hash',
+              config: {
+                agents: {
+                  list: [
+                    { id: 'writer', workspace: '/workspace/writer', skills: [] },
+                  ],
+                },
+              },
+            },
+          };
+        }
+        refreshConfigReadOccurred = true;
+        return {
+          success: true,
+          result: {
+            hash: 'refresh-hash',
+            config: {
+              agents: {
+                list: [
+                  { id: 'writer', workspace: '/workspace/writer', skills: ['web-search'] },
+                ],
+              },
+            },
+          },
+        };
+      }
+      if (method === 'config.set') {
+        const payload = params as { raw?: string; baseHash?: string };
+        configSetBaseHash = payload.baseHash;
+        const parsed = JSON.parse(payload.raw || '{}') as {
+          agents?: { list?: Array<{ id?: string; skills?: string[] }> };
+        };
+        writtenAgentSkills = parsed.agents?.list?.find((entry) => entry.id === 'writer')?.skills;
+        return { success: true, result: {} };
+      }
+      throw new Error(`Unexpected rpc method in test: ${String(method)}`);
+    });
+
+    const initialLoadTask = useSubagentsStore.getState().loadAgents();
+    await waitForExpect(() => {
+      expect(configGetCallCount).toBe(1);
+    });
+
+    const updateTask = useSubagentsStore.getState().updateAgent({
+      agentId: 'writer',
+      name: 'Writer',
+      workspace: '/workspace/writer',
+      skills: ['web-search'],
+    });
+    await waitForExpect(() => {
+      expect(configSetBaseHash).toBe('write-hash');
+      expect(writtenAgentSkills).toEqual(['web-search']);
+    });
+
+    resolveStaleDisplayConfig?.({
+      success: true,
+      result: {
+        hash: 'stale-display-hash',
+        config: {
+          agents: {
+            list: [
+              { id: 'writer', workspace: '/workspace/writer', skills: [] },
+            ],
+          },
+        },
+      },
+    });
+
+    await Promise.all([initialLoadTask, updateTask]);
+
+    const writer = useSubagentsStore.getState().agents.find((agent) => agent.id === 'writer');
+    expect(refreshConfigReadOccurred).toBe(true);
+    expect(writer?.skills).toEqual(['web-search']);
   });
 
   it('loadAgents 使用 config.get 补齐 workspace/model，且不使用旧 store 回填', async () => {
@@ -434,6 +798,7 @@ describe('subagents store', () => {
         expect(params).toEqual({
           name: 'Writer',
           workspace: '/home/dev/.openclaw/workspace-subagents/writer',
+          workspaceInitialization: 'mainAgentTemplate',
         });
         return { success: true, result: { agentId: 'writer' } };
       }

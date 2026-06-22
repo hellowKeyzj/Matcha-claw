@@ -1,12 +1,12 @@
 import { badRequest, type ApplicationResponseOf } from '../common/application-response';
-import type { SubagentRuntimeWorkflow } from '../workflows/subagent-runtime/subagent-runtime-workflow';
+import type { SubagentRuntimeWorkflow, SubagentWorkspaceInitialization } from '../workflows/subagent-runtime/subagent-runtime-workflow';
 import type { SkillRuntimeWorkflow } from '../workflows/skill-runtime/skill-runtime-workflow';
 
 const SUBAGENT_CONFIG_FILE_NAMES = new Set(['AGENTS.md', 'SOUL.md', 'TOOLS.md', 'IDENTITY.md', 'USER.md']);
 
 export class SubagentRuntimeService {
   constructor(private readonly deps: {
-    readonly runtimeWorkflow: Pick<SubagentRuntimeWorkflow, 'snapshot' | 'call' | 'seedWorkspaceIdentity'>;
+    readonly runtimeWorkflow: Pick<SubagentRuntimeWorkflow, 'snapshot' | 'call' | 'createAgent'>;
     readonly skillRuntimeWorkflow: Pick<SkillRuntimeWorkflow, 'resolveCanonicalSkillKeys' | 'resolveCanonicalSkillKeyMap' | 'validateCanonicalSkillKeys'>;
   }) {}
 
@@ -55,11 +55,17 @@ export class SubagentRuntimeService {
     if (!workspace) {
       return badRequest('workspace is required');
     }
-    await this.deps.runtimeWorkflow.seedWorkspaceIdentity(workspace);
-    return await this.deps.runtimeWorkflow.call('agents.create', {
+    const workspaceInitialization = this.readWorkspaceInitialization(body.workspaceInitialization);
+    if (!workspaceInitialization) {
+      return badRequest('workspaceInitialization is invalid');
+    }
+    return await this.deps.runtimeWorkflow.createAgent({
       name,
       workspace,
-    }, { invalidateSnapshots: true });
+    }, {
+      workspaceDir: workspace,
+      workspaceInitialization,
+    });
   }
 
   async updateAgent(payload: unknown): Promise<ApplicationResponseOf> {
@@ -147,6 +153,15 @@ export class SubagentRuntimeService {
     const record = this.readRecord(payload);
     const file = this.readRecord(record.file);
     return this.readString(file.content);
+  }
+
+  private readWorkspaceInitialization(value: unknown): SubagentWorkspaceInitialization | null {
+    if (value === undefined || value === null || value === '') {
+      return 'mainAgentTemplate';
+    }
+    return value === 'mainAgentTemplate' || value === 'emptyWorkspace'
+      ? value
+      : null;
   }
 
   private filterAgentFilesListPayload(payload: unknown): unknown {
@@ -304,7 +319,7 @@ export class SubagentRuntimeService {
 
     const validatedSkills = await this.deps.skillRuntimeWorkflow.validateCanonicalSkillKeys(skillIds);
     if (!validatedSkills.ok) {
-      return validatedSkills;
+      return { ok: false, error: this.formatInvalidSkillKeyError(validatedSkills) };
     }
 
     return {
@@ -319,6 +334,13 @@ export class SubagentRuntimeService {
         };
       }),
     };
+  }
+
+  private formatInvalidSkillKeyError(validation: { unknownSkillKeys: readonly string[]; nonCanonicalSkillKeys: readonly string[] }): string {
+    if (validation.unknownSkillKeys.length > 0) {
+      return `Unknown skillKey: ${validation.unknownSkillKeys.join(', ')}`;
+    }
+    return `skillKey must be canonical: ${validation.nonCanonicalSkillKeys.join(', ')}`;
   }
 
   private collectStringSkillIds(agents: unknown[]): string[] {

@@ -61,7 +61,11 @@ describe('subagents crud', () => {
 
     expect(rpc).toHaveBeenCalledWith(
       'agents.create',
-      { name: 'writer', workspace: '/tmp/writer' },
+      {
+        name: 'writer',
+        workspace: '/tmp/writer',
+        workspaceInitialization: 'mainAgentTemplate',
+      },
       undefined,
     );
     expect(rpc).toHaveBeenCalledWith(
@@ -122,7 +126,11 @@ describe('subagents crud', () => {
 
     expect(rpc).toHaveBeenCalledWith(
       'agents.create',
-      { name: 'writer', workspace: '/tmp/writer' },
+      {
+        name: 'writer',
+        workspace: '/tmp/writer',
+        workspaceInitialization: 'mainAgentTemplate',
+      },
       undefined,
     );
     expect(JSON.parse(window.localStorage.getItem(AVATAR_STORAGE_KEY) || '{}')).toEqual({
@@ -254,6 +262,64 @@ describe('subagents crud', () => {
     } finally {
       setItemSpy.mockRestore();
     }
+  });
+
+  it('createAgentFromTemplate uses empty workspace initialization and keeps template files on files.set', async () => {
+    const rpc = gatewayClientRpcMock;
+    rpc.mockImplementation(async (method, params) => {
+      if (method === 'agents.create') {
+        expect(params).toEqual({
+          name: 'Brand Guardian',
+          workspace: '/home/dev/.openclaw/workspace-subagents/brand-guardian',
+          workspaceInitialization: 'emptyWorkspace',
+        });
+        return { success: true, result: { agentId: 'brand-guardian' } };
+      }
+      if (method === 'agents.list') {
+        return {
+          success: true,
+          result: {
+            agents: [{ id: 'brand-guardian' }],
+          },
+        };
+      }
+      if (method === 'agents.update') {
+        expect(params).toEqual({
+          agentId: 'brand-guardian',
+          model: 'gpt-4.1-mini',
+        });
+        expect(params).not.toHaveProperty('workspaceInitialization');
+        return { success: true, result: {} };
+      }
+      if (method === 'agents.files.set') {
+        expect(params).toEqual({
+          agentId: 'brand-guardian',
+          name: 'AGENTS.md',
+          content: 'template agents content',
+        });
+        expect(params).not.toHaveProperty('workspaceInitialization');
+        return { success: true, result: {} };
+      }
+      if (method === 'agents.files.get') {
+        expect(params).not.toHaveProperty('workspaceInitialization');
+        return { success: true, result: { file: { content: '' } } };
+      }
+      throw new Error(`Unexpected rpc method in test: ${String(method)}`);
+    });
+
+    await expect(useSubagentsStore.getState().createAgentFromTemplate({
+      template: {
+        id: 'brand-guardian',
+        name: 'Brand Guardian',
+        files: ['AGENTS.md'],
+        fileContents: {
+          'AGENTS.md': 'template agents content',
+        },
+      },
+      model: 'gpt-4.1-mini',
+    })).resolves.toEqual({ agentId: 'brand-guardian' });
+
+    expect(rpc).not.toHaveBeenCalledWith('config.set', expect.anything(), undefined);
   });
 
   it('create 在 agents.create 未返回 agentId 时抛协议错误且不调用 agents.update', async () => {

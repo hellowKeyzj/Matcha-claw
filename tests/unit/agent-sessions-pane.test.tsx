@@ -5,6 +5,7 @@ import { AgentSessionsPane } from '@/components/layout/AgentSessionsPane';
 import { useChatStore } from '@/stores/chat';
 import { useGatewayStore } from '@/stores/gateway';
 import { useSubagentsStore } from '@/stores/subagents';
+import { useTeamsStore } from '@/stores/teams';
 import i18n from '@/i18n';
 import { createEmptySessionRecord } from '@/stores/chat/store-state-helpers';
 import { buildRenderItemsFromMessages } from './helpers/timeline-fixtures';
@@ -83,6 +84,19 @@ function createSessionRecord(input?: {
 }
 
 function setupBaseState() {
+  useTeamsStore.setState({
+    teams: [],
+    activeTeamId: null,
+    runIdsByTeamId: {},
+    runListByTeamId: {},
+    runsById: {},
+    runByTeamId: {},
+    rolesByTeamId: {},
+    setActiveRun: vi.fn(),
+    syncRunList: vi.fn().mockResolvedValue(undefined),
+    refreshSnapshot: vi.fn().mockResolvedValue(undefined),
+  } as never);
+
   useGatewayStore.setState({
     status: {
       processState: 'running',
@@ -126,6 +140,97 @@ describe('agent sessions pane', () => {
     window.localStorage.clear();
     i18n.changeLanguage('en');
     setupBaseState();
+  });
+
+  it('在 team tab 展示 Team → Run → leader/roles，点击 run 后选择并刷新 snapshot', async () => {
+    const leaderIdentity = createSessionIdentity('agent:leader-agent:main', 'leader-agent');
+    const roleIdentity = createSessionIdentity('agent:designer-agent:main', 'designer-agent');
+    const setActiveRun = vi.fn();
+    const createRun = vi.fn().mockResolvedValue(undefined);
+    const syncRunList = vi.fn().mockResolvedValue(undefined);
+    const refreshSnapshot = vi.fn().mockResolvedValue(undefined);
+    const openSessionIdentity = vi.fn();
+    useChatStore.setState({
+      openSessionIdentity,
+    } as never);
+    useTeamsStore.setState({
+      teams: [
+        {
+          id: 'team-1',
+          name: 'Team One',
+          teamSkillName: 'team-skill',
+          teamSkillVersion: '1.0.0',
+          teamSkillDescription: 'Team skill',
+          packagePath: '.tmp/team-skill',
+          sourcePath: '.tmp/team-skill/SKILL.md',
+          activeRunId: 'teamrun-new',
+          createdAt: 1,
+          updatedAt: 2,
+        },
+      ],
+      runIdsByTeamId: { 'team-1': ['teamrun-old', 'teamrun-new'] },
+      runListByTeamId: {
+        'team-1': [
+          {
+            runId: 'teamrun-old',
+            packageName: 'team-skill',
+            packageVersion: '1.0.0',
+            sourcePath: '.tmp/team-skill/SKILL.md',
+            status: 'completed',
+            currentStageId: 'stage-old',
+            revision: 1,
+            createdAt: 1,
+            updatedAt: 1,
+            sessions: [],
+          },
+          {
+            runId: 'teamrun-new',
+            packageName: 'team-skill',
+            packageVersion: '1.0.0',
+            sourcePath: '.tmp/team-skill/SKILL.md',
+            status: 'running',
+            currentStageId: 'stage-new',
+            revision: 2,
+            createdAt: 2,
+            updatedAt: 3,
+            sessions: [
+              { runId: 'teamrun-new', roleId: 'leader', agentId: 'leader-agent', sessionKey: 'agent:leader-agent:main', sessionIdentity: leaderIdentity },
+              { runId: 'teamrun-new', roleId: 'designer', agentId: 'designer-agent', sessionKey: 'agent:designer-agent:main', sessionIdentity: roleIdentity },
+            ],
+          },
+        ],
+      },
+      setActiveRun,
+      createRun,
+      syncRunList,
+      refreshSnapshot,
+    } as never);
+
+    renderPane();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Teams' }));
+    await waitFor(() => {
+      expect(syncRunList).toHaveBeenCalledWith('team-1');
+    });
+    fireEvent.click(screen.getByRole('button', { name: /New Run Team One/i }));
+    expect(createRun).toHaveBeenCalledWith('team-1');
+
+    fireEvent.click(screen.getByRole('button', { name: /^Team One$/i }));
+    expect(screen.getByRole('button', { name: /teamrun-new/i })).toBeTruthy();
+    expect(screen.getByRole('button', { name: /teamrun-old/i })).toBeTruthy();
+
+    fireEvent.click(screen.getByRole('button', { name: /teamrun-old/i }));
+    expect(setActiveRun).toHaveBeenCalledWith('team-1', 'teamrun-old');
+    expect(openSessionIdentity).not.toHaveBeenCalled();
+    expect(refreshSnapshot).toHaveBeenCalledWith('team-1', { force: true });
+
+    fireEvent.click(screen.getByRole('button', { name: /teamrun-new/i }));
+    expect(setActiveRun).toHaveBeenCalledWith('team-1', 'teamrun-new');
+    expect(openSessionIdentity).toHaveBeenCalledWith(leaderIdentity);
+
+    fireEvent.click(screen.getByRole('button', { name: /teamrun-new/i }).previousElementSibling as HTMLElement);
+    expect(screen.queryByRole('button', { name: /Leader session/i })).toBeNull();
+    expect(screen.getByRole('button', { name: /designer/i })).toBeTruthy();
   });
 
   it('将 agent 列表放在上方，会话历史在下方统一展示', async () => {
@@ -186,9 +291,9 @@ describe('agent sessions pane', () => {
       </MemoryRouter>,
     );
 
-    expect(screen.getByTestId('agent-sessions-collapsed-note')).toBeInTheDocument();
-    expect(screen.getByTestId('agent-sessions-collapsed-avatar')).toBeInTheDocument();
-    expect(screen.getByTestId('agent-sessions-collapsed-new-session')).toBeInTheDocument();
+    expect(screen.getByTestId('agent-sessions-collapsed-note')).toBeTruthy();
+    expect(screen.getByTestId('agent-sessions-collapsed-avatar')).toBeTruthy();
+    expect(screen.getByTestId('agent-sessions-collapsed-new-session')).toBeTruthy();
 
     fireEvent.click(screen.getByTestId('agent-sessions-collapsed-expand'));
     expect(onToggleCollapse).toHaveBeenCalledTimes(1);
@@ -249,7 +354,7 @@ describe('agent sessions pane', () => {
 
     renderPane();
 
-    expect(screen.getByText('catalog title from transcript')).toBeInTheDocument();
+    expect(screen.getByText('catalog title from transcript')).toBeTruthy();
     expect(screen.queryByText('New Session')).not.toBeInTheDocument();
     expect(screen.queryByText('Untitled Session')).not.toBeInTheDocument();
   });
@@ -328,8 +433,8 @@ describe('agent sessions pane', () => {
 
     renderPane();
 
-    expect(screen.getByText('缺少 agentId 的会话')).toBeInTheDocument();
-    expect(screen.getByTestId(`session-avatar-${recordKeyForSession('agent:test:session-2')}`)).toBeInTheDocument();
+    expect(screen.getByText('缺少 agentId 的会话')).toBeTruthy();
+    expect(screen.getByTestId(`session-avatar-${recordKeyForSession('agent:test:session-2')}`)).toBeTruthy();
   });
 
   it('点击无历史会话的 agent 行，应走 agent 打开动作而不是切到伪 main 会话', () => {
@@ -491,7 +596,7 @@ describe('agent sessions pane', () => {
     renderPane();
 
     fireEvent.click(screen.getByRole('button', { name: /Delete session .*需要删除的会话/i }));
-    expect(screen.getByRole('dialog', { name: /Delete .*需要删除的会话/i })).toBeInTheDocument();
+    expect(screen.getByRole('dialog', { name: /Delete .*需要删除的会话/i })).toBeTruthy();
     fireEvent.click(screen.getByRole('button', { name: /Confirm Delete/i }));
 
     await waitFor(() => {
@@ -580,8 +685,8 @@ describe('agent sessions pane', () => {
     const agentScrollArea = screen.getByTestId('agent-list-scroll-area');
     const sessionScrollArea = screen.getByTestId('session-list-scroll-area');
 
-    expect(agentScrollArea).toBeInTheDocument();
-    expect(sessionScrollArea).toBeInTheDocument();
+    expect(agentScrollArea).toBeTruthy();
+    expect(sessionScrollArea).toBeTruthy();
     expect(agentScrollArea).not.toBe(sessionScrollArea);
     expect(agentScrollArea.className).toContain('overflow-y-auto');
     expect(sessionScrollArea.className).toContain('overflow-y-auto');
@@ -619,7 +724,7 @@ describe('agent sessions pane', () => {
 
     expect(screen.queryByTestId('agent-item-main')).not.toBeInTheDocument();
     expect(screen.queryByTestId('agent-item-test')).not.toBeInTheDocument();
-    expect(screen.getByTestId('agent-list-loading')).toBeInTheDocument();
+    expect(screen.getByTestId('agent-list-loading')).toBeTruthy();
   });
 
   it('agent 资源失败时，不应阻塞会话列表渲染', () => {
@@ -657,7 +762,7 @@ describe('agent sessions pane', () => {
     renderPane();
 
     expect(screen.getByTestId('agent-list-error')).toHaveTextContent('agents failed');
-    expect(screen.getByText('测试Agent会话')).toBeInTheDocument();
+    expect(screen.getByText('测试Agent会话')).toBeTruthy();
   });
 
   it('会话标题消费本地 authoritative label，而不是回退旧值', () => {
@@ -705,7 +810,7 @@ describe('agent sessions pane', () => {
 
     renderPane();
 
-    expect(screen.getByText('最新输入标题')).toBeInTheDocument();
+    expect(screen.getByText('最新输入标题')).toBeTruthy();
     expect(screen.queryByText('旧标题')).not.toBeInTheDocument();
   });
 
@@ -742,7 +847,7 @@ describe('agent sessions pane', () => {
 
     renderPane();
 
-    expect(screen.getByText('正文里的新标题')).toBeInTheDocument();
+    expect(screen.getByText('正文里的新标题')).toBeTruthy();
     expect(screen.queryByText('旧标题')).not.toBeInTheDocument();
   });
 
@@ -797,7 +902,7 @@ describe('agent sessions pane', () => {
 
     renderPane();
 
-    expect(screen.getByText('真实历史会话')).toBeInTheDocument();
+    expect(screen.getByText('真实历史会话')).toBeTruthy();
   });
 
   it('没有当前 agent 和 agent 列表时，新建按钮不应伪造成 main agent', () => {
@@ -840,9 +945,9 @@ describe('agent sessions pane', () => {
 
     renderPane();
 
-    expect(screen.getByTestId('agent-item-main')).toBeInTheDocument();
-    expect(screen.getByTestId('agent-item-test')).toBeInTheDocument();
-    expect(screen.getByTestId('session-list-loading')).toBeInTheDocument();
+    expect(screen.getByTestId('agent-item-main')).toBeTruthy();
+    expect(screen.getByTestId('agent-item-test')).toBeTruthy();
+    expect(screen.getByTestId('session-list-loading')).toBeTruthy();
   });
 
   it('session 资源失败时，不应阻塞 agent 列表渲染', () => {
@@ -863,8 +968,8 @@ describe('agent sessions pane', () => {
 
     renderPane();
 
-    expect(screen.getByTestId('agent-item-main')).toBeInTheDocument();
-    expect(screen.getByTestId('agent-item-test')).toBeInTheDocument();
+    expect(screen.getByTestId('agent-item-main')).toBeTruthy();
+    expect(screen.getByTestId('agent-item-test')).toBeTruthy();
     expect(screen.getByTestId('session-list-error')).toHaveTextContent('sessions failed');
   });
 
@@ -897,7 +1002,7 @@ describe('agent sessions pane', () => {
 
     expect(screen.queryByTestId('session-list-loading')).not.toBeInTheDocument();
     expect(screen.queryByTestId('session-list-error')).not.toBeInTheDocument();
-    expect(screen.getByText('正文来源会话')).toBeInTheDocument();
+    expect(screen.getByText('正文来源会话')).toBeTruthy();
   });
 
   it('新建空会话应使用 session key 时间戳参与分桶，而不是被误归到很久以前', () => {

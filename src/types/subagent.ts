@@ -140,6 +140,7 @@ export interface ConfigGetResult {
         workspace?: string;
         model?: AgentModelValue;
         models?: Record<string, unknown>;
+        skills?: string[];
       };
       list?: AgentConfigEntry[];
     };

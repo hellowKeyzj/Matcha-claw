@@ -4,6 +4,7 @@ import { AgentAvatar } from '@/components/common/AgentAvatar';
 import type { AgentAvatarStyle } from '@/lib/agent-avatar';
 import { cn } from '@/lib/utils';
 import { useSubagentsStore } from '@/stores/subagents';
+import { useTeamsStore } from '@/stores/teams';
 import { useChatStore, type ChatSession } from '@/stores/chat';
 import { selectAgentSessionsPaneState } from '@/stores/chat/selectors';
 import { useTranslation } from 'react-i18next';
@@ -29,6 +30,8 @@ interface AgentSessionsPaneProps {
 }
 
 const SESSION_BUCKET_COLLAPSE_STORAGE_KEY = 'layout:session-time-bucket-collapsed';
+
+type SessionPaneTab = 'agent' | 'team';
 
 function createSessionBucketStateKey(bucketId: SessionBucketId): string {
   return bucketId;
@@ -292,6 +295,185 @@ interface AgentListSectionProps {
   onCreateSessionForAgent: (agentId: string) => void;
 }
 
+interface TeamRunSessionNode {
+  runId: string;
+  leader?: ChatSession['sessionIdentity'];
+  roles: Array<{
+    roleId: string;
+    agentId: string;
+    sessionIdentity: ChatSession['sessionIdentity'];
+  }>;
+}
+
+interface TeamSessionNode {
+  teamId: string;
+  teamName: string;
+  activeRunId?: string;
+  runs: TeamRunSessionNode[];
+}
+
+interface TeamListSectionProps {
+  nodes: TeamSessionNode[];
+  expandedTeamIds: Record<string, boolean>;
+  expandedTeamRunIds: Record<string, boolean>;
+  emptyLabel: string;
+  leaderLabel: string;
+  newRunLabel: string;
+  onToggleTeam: (teamId: string) => void;
+  onToggleRun: (runId: string) => void;
+  onSelectRun: (teamId: string, run: TeamRunSessionNode) => void;
+  onCreateRun: (teamId: string) => void;
+  onOpenSessionIdentity: (identity: ChatSession['sessionIdentity']) => void;
+}
+
+const TeamListSection = memo(function TeamListSection({
+  nodes,
+  expandedTeamIds,
+  expandedTeamRunIds,
+  emptyLabel,
+  leaderLabel,
+  newRunLabel,
+  onToggleTeam,
+  onToggleRun,
+  onSelectRun,
+  onCreateRun,
+  onOpenSessionIdentity,
+}: TeamListSectionProps) {
+  if (nodes.length === 0) {
+    return <p className="px-2 py-1 text-xs text-muted-foreground">{emptyLabel}</p>;
+  }
+  return (
+    <div className="space-y-1">
+      {nodes.map((node) => {
+        const expanded = expandedTeamIds[node.teamId] === true;
+        const previewAgents = node.runs[0]
+          ? [
+            ...(node.runs[0].leader ? [{ key: 'leader', agentId: node.runs[0].leader.agentId, agentName: leaderLabel }] : []),
+            ...node.runs[0].roles.map((role) => ({ key: role.roleId, agentId: role.agentId, agentName: role.roleId })),
+          ]
+          : [];
+        const visiblePreviewAgents = previewAgents.slice(0, 4);
+        const hiddenPreviewAgentCount = previewAgents.length - visiblePreviewAgents.length;
+        return (
+          <div key={node.teamId} className="space-y-1">
+            <div
+              className={cn(
+                'group flex items-center gap-1 rounded-[calc(var(--radius-interactive)+2px)] pr-1 transition-[background-color,color,box-shadow]',
+                expanded
+                  ? 'bg-secondary text-foreground'
+                  : 'text-muted-foreground hover:bg-secondary hover:text-foreground',
+              )}
+            >
+              <button
+                type="button"
+                className="flex h-8 w-7 shrink-0 items-center justify-center rounded-[calc(var(--radius-interactive)+2px)] text-current/80 transition hover:bg-card/15 hover:text-foreground"
+                aria-expanded={expanded}
+                onClick={(event) => {
+                  event.preventDefault();
+                  event.stopPropagation();
+                  onToggleTeam(node.teamId);
+                }}
+              >
+                {expanded ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
+              </button>
+              <button
+                type="button"
+                className="flex min-w-0 flex-1 items-center gap-2 px-1 py-2 text-left text-sm font-medium"
+                onClick={() => onToggleTeam(node.teamId)}
+              >
+                <span className="flex h-5 shrink-0 items-center -space-x-1">
+                  {visiblePreviewAgents.map((agent) => (
+                    <AgentAvatar
+                      key={`${node.teamId}:${agent.key}`}
+                      agentId={agent.agentId}
+                      agentName={agent.agentName}
+                      className="h-5 w-5 border border-card bg-background"
+                    />
+                  ))}
+                  {hiddenPreviewAgentCount > 0 ? (
+                    <span className="flex h-5 min-w-5 items-center justify-center rounded-full border border-card bg-muted px-1 text-[9px] font-semibold text-muted-foreground">
+                      +{hiddenPreviewAgentCount}
+                    </span>
+                  ) : null}
+                </span>
+                <span className="min-w-0 flex-1 truncate">{node.teamName}</span>
+              </button>
+              <button
+                type="button"
+                className="shrink-0 rounded-full p-1 text-current/80 transition hover:bg-card/15 hover:text-foreground"
+                aria-label={`${newRunLabel} ${node.teamName}`}
+                title={`${newRunLabel} ${node.teamName}`}
+                onClick={(event) => {
+                  event.preventDefault();
+                  event.stopPropagation();
+                  onCreateRun(node.teamId);
+                }}
+              >
+                <Plus className="h-3.5 w-3.5" />
+              </button>
+            </div>
+            {expanded && node.runs.length > 0 ? (
+              <div className="ml-7 space-y-1">
+                {node.runs.map((run) => {
+                  const runExpanded = expandedTeamRunIds[run.runId] === true;
+                  const isActiveRun = node.activeRunId === run.runId;
+                  return (
+                    <div key={`${node.teamId}:${run.runId}`} className="space-y-1">
+                      <div className={cn(
+                        'flex items-center gap-1 transition-colors',
+                        isActiveRun ? 'text-foreground' : 'text-muted-foreground',
+                      )}
+                      >
+                        <button
+                          type="button"
+                          className="flex h-7 w-6 shrink-0 items-center justify-center rounded-[calc(var(--radius-interactive)+2px)] text-current/80 transition hover:bg-card/15 hover:text-foreground"
+                          aria-expanded={runExpanded}
+                          onClick={(event) => {
+                            event.preventDefault();
+                            event.stopPropagation();
+                            onToggleRun(run.runId);
+                          }}
+                        >
+                          {runExpanded ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
+                        </button>
+                        <button
+                          type="button"
+                          className={cn(
+                            'min-w-0 flex-1 rounded-[calc(var(--radius-interactive)+2px)] px-1 py-1.5 text-left text-xs transition-colors',
+                            isActiveRun ? 'bg-secondary text-foreground' : 'hover:bg-secondary hover:text-foreground',
+                          )}
+                          onClick={() => onSelectRun(node.teamId, run)}
+                        >
+                          <span className="block truncate">{run.runId}</span>
+                        </button>
+                      </div>
+                      {runExpanded ? (
+                        <div className="ml-6 space-y-1">
+                          {run.roles.map((role) => (
+                            <button
+                              key={`${node.teamId}:${run.runId}:${role.roleId}`}
+                              type="button"
+                              className="flex w-full items-center gap-2 rounded-[calc(var(--radius-interactive)+2px)] px-2 py-1.5 text-left text-xs text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground"
+                              onClick={() => onOpenSessionIdentity(role.sessionIdentity)}
+                            >
+                              <AgentAvatar agentId={role.agentId} agentName={role.roleId} className="h-4 w-4" />
+                              <span className="min-w-0 flex-1 truncate">{role.roleId}</span>
+                            </button>
+                          ))}
+                        </div>
+                      ) : null}
+                    </div>
+                  );
+                })}
+              </div>
+            ) : null}
+          </div>
+        );
+      })}
+    </div>
+  );
+});
+
 const AgentListSection = memo(function AgentListSection({
   nodes,
   activeAgentId,
@@ -491,10 +673,20 @@ export const AgentSessionsPane = memo(function AgentSessionsPane({
     currentAgentId,
     switchSession,
     openAgentConversation,
+    openSessionIdentity,
     newSession,
     deleteSession,
     renameSession,
   } = useChatStore(useShallow(selectAgentSessionsPaneState));
+  const teams = useTeamsStore((state) => state.teams);
+  const runListByTeamId = useTeamsStore((state) => state.runListByTeamId);
+  const createRun = useTeamsStore((state) => state.createRun);
+  const setActiveRun = useTeamsStore((state) => state.setActiveRun);
+  const syncRunList = useTeamsStore((state) => state.syncRunList);
+  const refreshSnapshot = useTeamsStore((state) => state.refreshSnapshot);
+  const [activeTab, setActiveTab] = useState<SessionPaneTab>('agent');
+  const [expandedTeamIds, setExpandedTeamIds] = useState<Record<string, boolean>>({});
+  const [expandedTeamRunIds, setExpandedTeamRunIds] = useState<Record<string, boolean>>({});
   const [collapsedSessionBuckets, setCollapsedSessionBuckets] = useState<Record<string, boolean>>(
     () => loadCollapsedSessionBucketMap(),
   );
@@ -518,6 +710,36 @@ export const AgentSessionsPane = memo(function AgentSessionsPane({
     t,
   });
   const activeAgentNode = paneViewModel.agentNodes.find((node) => node.agentId === paneViewModel.activeAgentId);
+  const teamSyncKey = teams.map((team) => team.id).join('\n');
+  const teamNodes: TeamSessionNode[] = teams.map((team) => ({
+    teamId: team.id,
+    teamName: team.name,
+    activeRunId: team.activeRunId,
+    runs: (runListByTeamId[team.id] ?? []).map((run) => {
+      const leader = run.sessions.find((role) => role.roleId === 'leader')?.sessionIdentity;
+      return {
+        runId: run.runId,
+        leader,
+        roles: run.sessions
+          .filter((role) => role.roleId !== 'leader')
+          .map((role) => ({
+            roleId: role.roleId,
+            agentId: role.agentId,
+            sessionIdentity: role.sessionIdentity,
+          })),
+      };
+    }),
+  }));
+
+  useEffect(() => {
+    if (activeTab !== 'team') {
+      return;
+    }
+    const teamIds = teamSyncKey ? teamSyncKey.split('\n') : [];
+    for (const teamId of teamIds) {
+      void syncRunList(teamId);
+    }
+  }, [activeTab, syncRunList, teamSyncKey]);
 
   useEffect(() => {
     try {
@@ -544,6 +766,30 @@ export const AgentSessionsPane = memo(function AgentSessionsPane({
     }
     newSession(agentId);
   }, [newSession]);
+
+  const handleOpenSessionIdentity = useCallback((identity: ChatSession['sessionIdentity']) => {
+    openSessionIdentity(identity);
+  }, [openSessionIdentity]);
+
+  const toggleTeam = useCallback((teamId: string) => {
+    setExpandedTeamIds((current) => ({ ...current, [teamId]: current[teamId] !== true }));
+  }, []);
+
+  const toggleRun = useCallback((runId: string) => {
+    setExpandedTeamRunIds((current) => ({ ...current, [runId]: current[runId] !== true }));
+  }, []);
+
+  const selectTeamRun = useCallback((teamId: string, run: TeamRunSessionNode) => {
+    setActiveRun(teamId, run.runId);
+    if (run.leader) {
+      openSessionIdentity(run.leader);
+    }
+    void refreshSnapshot(teamId, { force: true });
+  }, [openSessionIdentity, refreshSnapshot, setActiveRun]);
+
+  const handleCreateRunForTeam = useCallback((teamId: string) => {
+    void createRun(teamId);
+  }, [createRun]);
 
   const toggleSessionBucket = useCallback((bucketId: SessionBucketId, defaultCollapsed: boolean) => {
     const stateKey = createSessionBucketStateKey(bucketId);
@@ -712,26 +958,56 @@ export const AgentSessionsPane = memo(function AgentSessionsPane({
             </div>
           </div>
           <div className="flex min-h-0 flex-1 flex-col gap-4 p-3">
-            <section className="flex min-h-0 max-h-[42%] flex-col space-y-1">
-              <p className="px-2 text-[11px] font-medium uppercase tracking-[0.08em] text-muted-foreground">
-                {t('sidebar.subagents')}
-              </p>
+            <section className="flex min-h-0 basis-[42%] shrink-0 flex-col space-y-2">
+              <div className="grid grid-cols-2 gap-1">
+                {(['agent', 'team'] as const).map((tab) => (
+                  <button
+                    key={tab}
+                    type="button"
+                    className={cn(
+                      'rounded-[calc(var(--radius-interactive)+2px)] px-2 py-1.5 text-xs font-medium transition-colors',
+                      activeTab === tab
+                        ? 'bg-secondary text-foreground'
+                        : 'text-muted-foreground hover:bg-secondary hover:text-foreground',
+                    )}
+                    onClick={() => setActiveTab(tab)}
+                  >
+                    {tab === 'agent' ? t('sidebar.subagents') : t('sidebar.teams')}
+                  </button>
+                ))}
+              </div>
               <div
-                data-testid="agent-list-scroll-area"
-                className="min-h-0 overflow-y-auto pr-1"
+                data-testid={activeTab === 'agent' ? 'agent-list-scroll-area' : 'team-list-scroll-area'}
+                className="min-h-0 flex-1 overflow-y-auto pr-1"
               >
-                <AgentListSection
-                  nodes={paneViewModel.agentNodes}
-                  activeAgentId={paneViewModel.activeAgentId}
-                  newSessionLabel={t('sidebar.newSession')}
-                  state={paneViewModel.agentListState}
-                  errorMessage={paneViewModel.agentErrorMessage}
-                  emptyLabel={t('sidebar.noSubagents')}
-                  loadingLabel={t('status.loading')}
-                  fallbackErrorLabel={t('status.error')}
-                  onOpenAgent={handleOpenAgent}
-                  onCreateSessionForAgent={handleCreateSessionForAgent}
-                />
+                {activeTab === 'agent' ? (
+                  <AgentListSection
+                    nodes={paneViewModel.agentNodes}
+                    activeAgentId={paneViewModel.activeAgentId}
+                    newSessionLabel={t('sidebar.newSession')}
+                    state={paneViewModel.agentListState}
+                    errorMessage={paneViewModel.agentErrorMessage}
+                    emptyLabel={t('sidebar.noSubagents')}
+                    loadingLabel={t('status.loading')}
+                    fallbackErrorLabel={t('status.error')}
+                    onOpenAgent={handleOpenAgent}
+                    onCreateSessionForAgent={handleCreateSessionForAgent}
+                  />
+                ) : (
+                  <TeamListSection
+                    nodes={teamNodes}
+                    expandedTeamIds={expandedTeamIds}
+                    expandedTeamRunIds={expandedTeamRunIds}
+                    emptyLabel={t('sidebar.noTeams')}
+                    leaderLabel={t('sidebar.teamLeader')}
+                    newRunLabel={t('teams:run.create')}
+                    onToggleTeam={toggleTeam}
+                    onToggleRun={toggleRun}
+                    onSelectRun={selectTeamRun}
+                    onCreateRun={handleCreateRunForTeam}
+                    onOpenSessionIdentity={handleOpenSessionIdentity}
+                  />
+                )}
               </div>
             </section>
 

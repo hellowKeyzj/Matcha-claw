@@ -8,9 +8,10 @@ import type { GatewayRpcPort } from '../../gateway/gateway-runtime-port';
 const SUBAGENT_RPC_TIMEOUT_MS = 60_000;
 const SUBAGENT_CAPABILITY_TIMEOUT_MS = 5_000;
 type SnapshotKind = 'agents.list' | 'config.get';
+export type SubagentWorkspaceInitialization = 'mainAgentTemplate' | 'emptyWorkspace';
 
 export interface SubagentWorkspacePort {
-  ensureIdentityFile(workspaceDir: string, options?: { createDir?: boolean }): Promise<{ wroteIdentity: boolean; replacedTemplate: boolean; removedBootstrap: boolean }>;
+  initializeAgentWorkspace(workspaceDir: string, options: { createDir?: boolean; workspaceInitialization: SubagentWorkspaceInitialization }): Promise<unknown>;
 }
 
 export interface SubagentRuntimeWorkflowDeps {
@@ -27,6 +28,7 @@ export class SubagentRuntimeWorkflow {
   }>();
   private refreshTaskByMethod = new Map<SnapshotKind, Promise<unknown>>();
   private errorByMethod = new Map<SnapshotKind, string>();
+  private snapshotGeneration = 0;
 
   constructor(private readonly deps: SubagentRuntimeWorkflowDeps) {}
 
@@ -81,8 +83,19 @@ export class SubagentRuntimeWorkflow {
     return ok(result);
   }
 
-  async seedWorkspaceIdentity(workspace: string): Promise<void> {
-    await this.deps.workspace.ensureIdentityFile(workspace, { createDir: true });
+  async createAgent(
+    params: Record<string, unknown>,
+    options: { workspaceDir: string; workspaceInitialization: SubagentWorkspaceInitialization },
+  ): Promise<ApplicationResponseOf> {
+    const response = await this.call('agents.create', params, { invalidateSnapshots: true });
+    if (response.status !== 200) {
+      return response;
+    }
+    await this.deps.workspace.initializeAgentWorkspace(options.workspaceDir, {
+      createDir: true,
+      workspaceInitialization: options.workspaceInitialization,
+    });
+    return response;
   }
 
   private refreshSnapshot(method: SnapshotKind): Promise<unknown> {
@@ -91,8 +104,12 @@ export class SubagentRuntimeWorkflow {
       return current;
     }
 
+    const generation = this.snapshotGeneration;
     const task = this.deps.gateway.gatewayRpc(method, {}, SUBAGENT_RPC_TIMEOUT_MS)
       .then((value) => {
+        if (generation !== this.snapshotGeneration) {
+          return value;
+        }
         this.snapshotByMethod.set(method, {
           value,
           updatedAt: this.deps.clock.nowMs(),
@@ -101,11 +118,13 @@ export class SubagentRuntimeWorkflow {
         return value;
       })
       .catch((error) => {
-        this.errorByMethod.set(method, error instanceof Error ? error.message : String(error));
+        if (generation === this.snapshotGeneration) {
+          this.errorByMethod.set(method, error instanceof Error ? error.message : String(error));
+        }
         return null;
       })
       .finally(() => {
-        if (this.refreshTaskByMethod.get(method) === task) {
+        if (generation === this.snapshotGeneration && this.refreshTaskByMethod.get(method) === task) {
           this.refreshTaskByMethod.delete(method);
         }
       });
@@ -126,8 +145,10 @@ export class SubagentRuntimeWorkflow {
   }
 
   private clearSnapshots(): void {
+    this.snapshotGeneration += 1;
     this.snapshotByMethod.clear();
     this.errorByMethod.clear();
+    this.refreshTaskByMethod.clear();
   }
 
   private readRecord(value: unknown): Record<string, unknown> {

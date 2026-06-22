@@ -71,6 +71,7 @@ let configDisplayCache:
 let configDisplayReadTask: Promise<ConfigDisplaySnapshot> | null = null;
 let configDisplayReadTaskSeq = 0;
 let configDisplayReadSeq = 0;
+let configDisplayGeneration = 0;
 let queuedLoadAgentsTask: Promise<void> | null = null;
 let agentsSnapshotRetryTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -139,6 +140,8 @@ interface AgentsCreateResult {
   workspace?: unknown;
 }
 
+type SubagentWorkspaceInitialization = 'mainAgentTemplate' | 'emptyWorkspace';
+
 interface SubagentCreateResult {
   agentId: string;
   warning?: string;
@@ -165,6 +168,7 @@ interface ConfigDisplaySnapshot {
   byAgentId: Map<string, ConfigAgentDisplaySnapshot>;
   defaultWorkspace?: string;
   defaultModel?: string;
+  defaultSkills?: string[];
 }
 
 interface ReadConfigForDisplayOptions {
@@ -231,6 +235,7 @@ interface SubagentsState {
     model?: string;
     avatarSeed?: string;
     avatarStyle?: AgentAvatarStyle;
+    workspaceInitialization?: SubagentWorkspaceInitialization;
   }) => Promise<SubagentCreateResult>;
   createAgentFromTemplate: (input: {
     template: SubagentTemplateDetail;
@@ -414,29 +419,6 @@ function normalizeSubagentConfigPackage(input: unknown): SubagentConfigPackage {
   };
 }
 
-function equalSkillAllowlist(
-  left: string[] | undefined,
-  right: string[] | undefined,
-): boolean {
-  if (!left && !right) {
-    return true;
-  }
-  if (!left || !right) {
-    return false;
-  }
-  if (left.length !== right.length) {
-    return false;
-  }
-  const sortedLeft = [...left].sort();
-  const sortedRight = [...right].sort();
-  for (let index = 0; index < sortedLeft.length; index += 1) {
-    if (sortedLeft[index] !== sortedRight[index]) {
-      return false;
-    }
-  }
-  return true;
-}
-
 function equalOptionalTrimmedString(a: unknown, b: unknown): boolean {
   return (getOptionalString(a) ?? '') === (getOptionalString(b) ?? '');
 }
@@ -489,6 +471,9 @@ function buildConfigDisplaySnapshot(configGetResult: ConfigGetResult | undefined
   const defaultWorkspace = defaults && typeof defaults === 'object'
     ? getOptionalString((defaults as { workspace?: unknown }).workspace)
     : undefined;
+  const defaultSkills = defaults && typeof defaults === 'object'
+    ? normalizeSkillAllowlist((defaults as { skills?: unknown }).skills)
+    : undefined;
 
   let defaultModel: string | undefined;
   if (defaults && typeof defaults === 'object') {
@@ -535,6 +520,7 @@ function buildConfigDisplaySnapshot(configGetResult: ConfigGetResult | undefined
     byAgentId,
     defaultWorkspace,
     defaultModel,
+    defaultSkills,
   };
 }
 
@@ -566,7 +552,10 @@ function isConfigDisplayCacheFresh(nowMs: number): boolean {
 }
 
 function invalidateConfigDisplayCache(): void {
+  configDisplayGeneration += 1;
   configDisplayCache = null;
+  configDisplayReadTask = null;
+  configDisplayReadTaskSeq = 0;
 }
 
 async function readConfigForDisplay(options?: ReadConfigForDisplayOptions): Promise<ConfigDisplaySnapshot> {
@@ -581,6 +570,7 @@ async function readConfigForDisplay(options?: ReadConfigForDisplayOptions): Prom
   }
 
   const requestSeq = ++configDisplayReadSeq;
+  const generation = configDisplayGeneration;
   const task = (async () => {
     try {
       const configGetResult = await rpc<ConfigGetResult>('config.get', {});
@@ -592,7 +582,7 @@ async function readConfigForDisplay(options?: ReadConfigForDisplayOptions): Prom
         return createEmptyConfigDisplaySnapshot();
       }
       const snapshot = buildConfigDisplaySnapshot(configGetResult);
-      if (!configDisplayCache || requestSeq >= configDisplayCache.requestSeq) {
+      if (generation === configDisplayGeneration && (!configDisplayCache || requestSeq >= configDisplayCache.requestSeq)) {
         configDisplayCache = {
           snapshot,
           cachedAt: Date.now(),
@@ -606,7 +596,7 @@ async function readConfigForDisplay(options?: ReadConfigForDisplayOptions): Prom
       }
       return createEmptyConfigDisplaySnapshot();
     } finally {
-      if (configDisplayReadTaskSeq === requestSeq) {
+      if (generation === configDisplayGeneration && configDisplayReadTaskSeq === requestSeq) {
         configDisplayReadTask = null;
       }
     }
@@ -765,6 +755,7 @@ function normalizeAgents(
       ?? extractModelId(runtimeAgent?.model)
       ?? configSnapshot?.defaultModel;
     const skills = configAgent?.skills
+      ?? configSnapshot?.defaultSkills
       ?? normalizeSkillAllowlist(runtimeAgent?.skills);
     const avatarPresentation = avatarPresentations?.[normalizeAgentIdForComparison(agentId) ?? ''];
     return {
@@ -1210,6 +1201,7 @@ export function __resetSubagentsStoreInternalCachesForTest(): void {
   configDisplayReadTask = null;
   configDisplayReadTaskSeq = 0;
   configDisplayReadSeq = 0;
+  configDisplayGeneration = 0;
   persistedFilesLoadTasks.clear();
   pendingDeletedAgentIds.clear();
   latestLoadAgentsRequestId = 0;
@@ -1559,7 +1551,14 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
     }
   },
 
-  createAgent: async ({ name, workspace, model, avatarSeed, avatarStyle }) => runSerializedAgentMutation(async () => {
+  createAgent: async ({
+    name,
+    workspace,
+    model,
+    avatarSeed,
+    avatarStyle,
+    workspaceInitialization = 'mainAgentTemplate',
+  }) => runSerializedAgentMutation(async () => {
     beginGlobalMutating(set);
     try {
       void workspace;
@@ -1591,6 +1590,7 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
       const createResult = await rpc<AgentsCreateResult>('agents.create', {
         name: trimmedName,
         workspace: resolvedWorkspace,
+        workspaceInitialization,
       }, {
         scope: managementScope,
         target: {
@@ -1662,6 +1662,7 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
       model: modelId,
       avatarSeed: buildTemplateAvatarSeed(template.id),
       avatarStyle: DEFAULT_AGENT_AVATAR_STYLE,
+      workspaceInitialization: 'emptyWorkspace',
     });
     const createdAgentId = createResult.agentId;
     const warnings = createResult.warning ? [createResult.warning] : [];
@@ -1808,12 +1809,10 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
   updateAgent: async ({ agentId, name, workspace, model, skills, avatarSeed, avatarStyle }) => runSerializedAgentMutation(async () => {
     const managementScope = await resolveSubagentManagementScope();
     const current = readAgentsFromState(get()).find((agent) => agent.id === agentId);
-    const skillChangeRequested = skills !== undefined;
-    const nextSkills = skills === null
+    const explicitSkillAllowlistRequested = skills !== undefined;
+    const nextExplicitSkillAllowlist = skills === null
       ? undefined
       : normalizeSkillAllowlist(skills);
-    const currentSkills = normalizeSkillAllowlist(current?.skills);
-    const skillsChanged = skillChangeRequested && !equalSkillAllowlist(currentSkills, nextSkills);
     const avatarSeedChangeRequested = avatarSeed !== undefined;
     const nextAvatarSeed = avatarSeed == null ? undefined : getOptionalString(avatarSeed);
     const avatarSeedChanged = avatarSeedChangeRequested && !equalOptionalTrimmedString(current?.avatarSeed, nextAvatarSeed);
@@ -1833,7 +1832,7 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
     if (
       !identityChanged
       && !modelChanged
-      && !skillsChanged
+      && !explicitSkillAllowlistRequested
       && !avatarSeedChanged
       && !avatarStyleChanged
     ) {
@@ -1865,8 +1864,8 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
       if (modelChanged && nextModel === undefined) {
         await updateAgentModelConfig(managementScope, agentId, undefined);
       }
-      if (skillsChanged) {
-        await updateAgentSkillsConfig(managementScope, agentId, nextSkills);
+      if (explicitSkillAllowlistRequested) {
+        await updateAgentSkillsConfig(managementScope, agentId, nextExplicitSkillAllowlist);
       }
       if (avatarSeedChanged || avatarStyleChanged) {
         persistAvatarPresentation(agentId, normalizeAvatarPresentation({
@@ -1877,9 +1876,12 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
       invalidateConfigDisplayCache();
       await get().loadAgents({ silent: true });
     } catch (error) {
-      set({
-        error: getErrorMessage(error) || 'Failed to update subagent',
-      });
+      const message = getErrorMessage(error) || 'Failed to update subagent';
+      set({ error: message });
+      if (error instanceof Error) {
+        throw error;
+      }
+      throw new Error(message, { cause: error });
     } finally {
       finishGlobalMutating(set);
     }

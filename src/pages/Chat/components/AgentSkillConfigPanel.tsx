@@ -7,6 +7,8 @@ export interface AgentSkillOption {
   name: string;
   description?: string;
   icon?: string;
+  selectable?: boolean;
+  unavailableReason?: string;
 }
 
 export function AgentSkillConfigPanel({
@@ -40,6 +42,7 @@ export function AgentSkillConfigPanel({
             <div className="min-w-0 divide-y divide-border/35">
               {skillOptions.map((skill) => {
                 const checked = selectedSkillIds.includes(skill.id);
+                const switchDisabled = skillsLoading || (skill.selectable === false && !checked);
                 return (
                   <div
                     key={skill.id}
@@ -69,11 +72,17 @@ export function AgentSkillConfigPanel({
                               {skill.description}
                             </p>
                           ) : null}
+                          {!skill.selectable && skill.unavailableReason ? (
+                            <p className="mt-1 line-clamp-2 text-xs leading-5 text-muted-foreground">
+                              {skill.unavailableReason}
+                            </p>
+                          ) : null}
                         </div>
                         <div className="shrink-0 flex items-center">
                           <Switch
                             aria-label={skill.name}
                             checked={checked}
+                            disabled={switchDisabled}
                             onCheckedChange={(nextChecked) => onToggleSkill(skill.id, nextChecked)}
                           />
                         </div>
