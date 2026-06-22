@@ -224,6 +224,36 @@ describe('Runtime Host canonical ACP projection', () => {
     }]);
   });
 
+  it('settles streaming assistant message turns when the run is no longer active', () => {
+    const state = createEmptyCanonicalSessionState('agent:main:main', createOpenClawTestRuntimeContext('agent:main:main'));
+    reduceCanonicalSessionEvents(state, [{
+      ...base('message-streaming-1'),
+      seq: 1,
+      type: 'message_part',
+      role: 'assistant',
+      messageId: 'assistant-streaming-1',
+      content: [{ type: 'text', text: '已经完成。' }],
+      text: '已经完成。',
+      status: 'streaming',
+    }, {
+      ...base('lifecycle-final-1'),
+      seq: 2,
+      type: 'lifecycle',
+      phase: 'final',
+      runPhase: 'done',
+      error: null,
+    }]);
+
+    const items = buildRenderItemsFromCanonicalState({ state, executionGraphItems: [] });
+    expect(items).toMatchObject([{
+      kind: 'assistant-turn',
+      runId: 'run-1',
+      status: 'final',
+      text: '已经完成。',
+      segments: [{ kind: 'message', text: '已经完成。' }],
+    }]);
+  });
+
   it('keeps final assistant tool-use turns active until tool results arrive', () => {
     const state = createEmptyCanonicalSessionState('agent:main:main', createOpenClawTestRuntimeContext('agent:main:main'));
     reduceCanonicalSessionEvents(state, [{
@@ -491,6 +521,157 @@ describe('Runtime Host canonical ACP projection', () => {
         { kind: 'message', text: '再总结' },
       ],
     });
+  });
+
+  it('keeps interleaved strongly bound turns and their segments ordered by seq', () => {
+    const state = createEmptyCanonicalSessionState('agent:main:main', createOpenClawTestRuntimeContext('agent:main:main'));
+    reduceCanonicalSessionEvents(state, [{
+      ...base('turn-a-message-before-tool'),
+      seq: 1,
+      timestamp: 1_700_000_000_000,
+      type: 'message_part',
+      role: 'assistant',
+      messageId: 'turn-a-before-tool',
+      ownerMessageKey: 'owner-message:turn-a',
+      ownerTurnKey: 'owner-turn:a',
+      turnBindingSource: 'adapter',
+      turnBindingConfidence: 'high',
+      messageBindingSource: 'adapter',
+      messageBindingConfidence: 'high',
+      content: [{ type: 'text', text: 'A 先读' }],
+      text: 'A 先读',
+      status: 'streaming',
+    }, {
+      ...base('turn-b-message-before-tool'),
+      seq: 2,
+      timestamp: 1_700_000_000_010,
+      type: 'message_part',
+      role: 'assistant',
+      messageId: 'turn-b-before-tool',
+      ownerMessageKey: 'owner-message:turn-b',
+      ownerTurnKey: 'owner-turn:b',
+      turnBindingSource: 'adapter',
+      turnBindingConfidence: 'high',
+      messageBindingSource: 'adapter',
+      messageBindingConfidence: 'high',
+      content: [{ type: 'text', text: 'B 先查' }],
+      text: 'B 先查',
+      status: 'streaming',
+    }, {
+      ...base('turn-a-tool-start'),
+      seq: 3,
+      timestamp: 1_700_000_000_020,
+      type: 'tool', phase: 'started',
+      ownerMessageKey: 'owner-message:turn-a',
+      ownerTurnKey: 'owner-turn:a',
+      turnBindingSource: 'adapter',
+      turnBindingConfidence: 'high',
+      messageBindingSource: 'adapter',
+      messageBindingConfidence: 'high',
+      toolCallId: 'tool-a',
+      name: 'Read',
+      input: { file_path: 'a.ts' },
+    }, {
+      ...base('turn-a-tool-result'),
+      seq: 4,
+      timestamp: 1_700_000_000_030,
+      type: 'tool', phase: 'completed',
+      ownerMessageKey: 'owner-message:turn-a',
+      ownerTurnKey: 'owner-turn:a',
+      turnBindingSource: 'adapter',
+      turnBindingConfidence: 'high',
+      messageBindingSource: 'adapter',
+      messageBindingConfidence: 'high',
+      toolCallId: 'tool-a',
+      name: 'Read',
+      output: 'A result',
+      outputText: 'A result',
+      isError: false,
+    }, {
+      ...base('turn-b-tool-start'),
+      seq: 5,
+      timestamp: 1_700_000_000_040,
+      type: 'tool', phase: 'started',
+      ownerMessageKey: 'owner-message:turn-b',
+      ownerTurnKey: 'owner-turn:b',
+      turnBindingSource: 'adapter',
+      turnBindingConfidence: 'high',
+      messageBindingSource: 'adapter',
+      messageBindingConfidence: 'high',
+      toolCallId: 'tool-b',
+      name: 'Grep',
+      input: { pattern: 'TODO' },
+    }, {
+      ...base('turn-b-tool-result'),
+      seq: 6,
+      timestamp: 1_700_000_000_050,
+      type: 'tool', phase: 'completed',
+      ownerMessageKey: 'owner-message:turn-b',
+      ownerTurnKey: 'owner-turn:b',
+      turnBindingSource: 'adapter',
+      turnBindingConfidence: 'high',
+      messageBindingSource: 'adapter',
+      messageBindingConfidence: 'high',
+      toolCallId: 'tool-b',
+      name: 'Grep',
+      output: 'B result',
+      outputText: 'B result',
+      isError: false,
+    }, {
+      ...base('turn-a-message-after-tool'),
+      seq: 7,
+      timestamp: 1_700_000_000_060,
+      type: 'message_part',
+      role: 'assistant',
+      messageId: 'turn-a-after-tool',
+      ownerMessageKey: 'owner-message:turn-a',
+      ownerTurnKey: 'owner-turn:a',
+      turnBindingSource: 'adapter',
+      turnBindingConfidence: 'high',
+      messageBindingSource: 'adapter',
+      messageBindingConfidence: 'high',
+      content: [{ type: 'text', text: 'A 总结' }],
+      text: 'A 总结',
+      status: 'final',
+    }, {
+      ...base('turn-b-message-after-tool'),
+      seq: 8,
+      timestamp: 1_700_000_000_070,
+      type: 'message_part',
+      role: 'assistant',
+      messageId: 'turn-b-after-tool',
+      ownerMessageKey: 'owner-message:turn-b',
+      ownerTurnKey: 'owner-turn:b',
+      turnBindingSource: 'adapter',
+      turnBindingConfidence: 'high',
+      messageBindingSource: 'adapter',
+      messageBindingConfidence: 'high',
+      content: [{ type: 'text', text: 'B 总结' }],
+      text: 'B 总结',
+      status: 'final',
+    }]);
+
+    const items = buildRenderItemsFromCanonicalState({ state, executionGraphItems: [] });
+    const assistantTurns = items.filter((item) => item.kind === 'assistant-turn');
+
+    expect(assistantTurns).toHaveLength(2);
+    expect(assistantTurns).toMatchObject([{
+      turnKey: 'owner-turn:a',
+      text: 'A 先读\nA 总结',
+      segments: [
+        { kind: 'message', text: 'A 先读' },
+        { kind: 'tool', tool: { toolCallId: 'tool-a', status: 'completed' } },
+        { kind: 'message', text: 'A 总结' },
+      ],
+    }, {
+      turnKey: 'owner-turn:b',
+      text: 'B 先查\nB 总结',
+      segments: [
+        { kind: 'message', text: 'B 先查' },
+        { kind: 'tool', tool: { toolCallId: 'tool-b', status: 'completed' } },
+        { kind: 'message', text: 'B 总结' },
+      ],
+    }]);
   });
 
   it('hydrates transcript tool runs into one ordered assistant turn', () => {

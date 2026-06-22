@@ -176,6 +176,112 @@ describe('session runtime ACP adapter service', () => {
     expect(final.snapshot.items).toHaveLength(1);
   });
 
+  it('finalizes V4 streaming chat when the terminal frame has no message payload', async () => {
+    const service = createService();
+
+    const [delta] = await consumeOpenClawTestGatewayEvent(service, {
+      type: 'chat.message',
+      event: {
+        state: 'delta',
+        sessionKey: 'agent:main:main',
+        runId: 'run-stream-terminal-only',
+        seq: 1,
+        deltaText: '主人，我先看看',
+        message: {
+          role: 'assistant',
+          content: [],
+        },
+      },
+    });
+    const [final] = await consumeOpenClawTestGatewayEvent(service, {
+      type: 'chat.message',
+      event: {
+        state: 'final',
+        sessionKey: 'agent:main:main',
+        runId: 'run-stream-terminal-only',
+        seq: 2,
+      },
+    });
+
+    const deltaItem = expectItemEvent(delta);
+    const finalItem = expectItemEvent(final);
+    expect(deltaItem.sessionUpdate).toBe('session_item_chunk');
+    expect(deltaItem.item).toMatchObject({
+      kind: 'assistant-turn',
+      runId: 'run-stream-terminal-only',
+      turnKey: 'openclaw-v4:turn:agent:main:main:run-stream-terminal-only:member:default:0',
+      text: '主人，我先看看',
+      status: 'streaming',
+    });
+    expect(finalItem.sessionUpdate).toBe('session_item');
+    expect(finalItem.item).toMatchObject({
+      kind: 'assistant-turn',
+      runId: 'run-stream-terminal-only',
+      turnKey: 'openclaw-v4:turn:agent:main:main:run-stream-terminal-only:member:default:0',
+      text: '主人，我先看看',
+      status: 'final',
+    });
+    expect(final.snapshot.runtime).toMatchObject({
+      activeRunId: null,
+      runPhase: 'done',
+      pendingTurnKey: null,
+    });
+  });
+
+  it('settles a V4 tool-call turn when lifecycle completion has no sessionKey', async () => {
+    const service = createService();
+
+    await consumeOpenClawTestGatewayEvent(service, {
+      type: 'chat.message',
+      event: {
+        state: 'final',
+        sessionKey: 'agent:main:main',
+        runId: 'run-lifecycle-context-session',
+        seq: 1,
+        message: {
+          role: 'assistant',
+          content: [{ type: 'toolCall', id: 'tool-context-1', name: 'Read', input: { file_path: 'package.json' } }],
+        },
+      },
+    });
+    await consumeOpenClawTestGatewayEvent(service, {
+      type: 'tool.lifecycle',
+      event: {
+        phase: 'result',
+        sessionKey: 'agent:main:main',
+        runId: 'run-lifecycle-context-session',
+        seq: 2,
+        timestamp: 1_700_000_000_010,
+        toolCallId: 'tool-context-1',
+        name: 'Read',
+        result: 'package content',
+      },
+    });
+    const [completed] = await consumeOpenClawTestGatewayEvent(service, {
+      type: 'run.phase',
+      phase: 'completed',
+      runId: 'run-lifecycle-context-session',
+    });
+
+    expect(completed).toMatchObject({
+      sessionUpdate: 'session_info_update',
+      sessionKey: 'agent:main:main',
+      runId: 'run-lifecycle-context-session',
+      phase: 'final',
+    });
+    expect(completed.snapshot.items).toContainEqual(expect.objectContaining({
+      kind: 'assistant-turn',
+      runId: 'run-lifecycle-context-session',
+      turnKey: 'openclaw-v4:turn:agent:main:main:run-lifecycle-context-session:member:default:0',
+      status: 'final',
+    }));
+    expect(completed.snapshot.runtime).toMatchObject({
+      activeRunId: null,
+      runPhase: 'done',
+      pendingTurnKey: null,
+    });
+  });
+
   it('does not duplicate V4 patch deltas when content carries the full snapshot', async () => {
     const service = createService();
 

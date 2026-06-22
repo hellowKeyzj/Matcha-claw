@@ -29,20 +29,20 @@ describe('ACP execution graph projection', () => {
     const state = createEmptyCanonicalSessionState('agent:main:main', createOpenClawTestRuntimeContext('agent:main:main'));
     reduceCanonicalSessionEvents(state, [{
       ...base('tool-read-start'),
-      type: 'tool_call',
+      type: 'tool', phase: 'started',
       toolCallId: 'tool-read',
       name: 'read',
       input: { filePath: '/tmp/a.md' },
     }, {
       ...base('tool-read-result'),
-      type: 'tool_result',
+      type: 'tool', phase: 'completed',
       toolCallId: 'tool-read',
       name: 'read',
       output: 'done',
       isError: false,
     }, {
       ...base('tool-grep-start'),
-      type: 'tool_call',
+      type: 'tool', phase: 'started',
       toolCallId: 'tool-grep',
       name: 'grep',
       input: { pattern: 'TODO' },
@@ -75,18 +75,17 @@ describe('ACP execution graph projection', () => {
     const state = createEmptyCanonicalSessionState('agent:main:main', createOpenClawTestRuntimeContext('agent:main:main'));
     reduceCanonicalSessionEvents(state, [{
       ...base('tool-read-start'),
-      type: 'tool_call',
+      type: 'tool', phase: 'started',
       toolCallId: 'tool-read',
       name: 'read',
       input: { filePath: '/tmp/a.md' },
     }, {
       ...base('tool-read-result'),
-      type: 'tool_result',
+      type: 'tool', phase: 'failed',
       toolCallId: 'tool-read',
       name: 'read',
       output: 'Permission denied',
       outputText: 'Permission denied',
-      isError: true,
     }, {
       ...base('team-1'),
       source: 'replay',
@@ -114,13 +113,13 @@ describe('ACP execution graph projection', () => {
     const state = createEmptyCanonicalSessionState('agent:main:main', createOpenClawTestRuntimeContext('agent:main:main'));
     reduceCanonicalSessionEvents(state, [{
       ...base('tool-read-start'),
-      type: 'tool_call',
+      type: 'tool', phase: 'started',
       toolCallId: 'tool-read',
       name: 'read',
       input: { filePath: '/tmp/a.md' },
     }, {
       ...base('tool-read-result'),
-      type: 'tool_result',
+      type: 'tool', phase: 'completed',
       toolCallId: 'tool-read',
       name: 'read',
       output: 'done',
@@ -153,7 +152,7 @@ describe('ACP execution graph projection', () => {
     const state = createEmptyCanonicalSessionState('agent:main:main', createOpenClawTestRuntimeContext('agent:main:main'));
     reduceCanonicalSessionEvents(state, [{
       ...base('assistant-message-1'),
-      type: 'message_snapshot',
+      type: 'message_part',
       role: 'assistant',
       ownerMessageKey: 'message:main:assistant-1',
       ownerTurnKey: 'message:main:assistant-1',
@@ -168,7 +167,7 @@ describe('ACP execution graph projection', () => {
     }, {
       ...base('tool-read-start'),
       seq: 2,
-      type: 'tool_call',
+      type: 'tool', phase: 'started',
       ownerMessageKey: 'message:main:assistant-1',
       ownerTurnKey: 'message:main:assistant-1',
       turnBindingSource: 'adapter',
@@ -181,7 +180,7 @@ describe('ACP execution graph projection', () => {
     }, {
       ...base('tool-read-result'),
       seq: 3,
-      type: 'tool_result',
+      type: 'tool', phase: 'completed',
       ownerMessageKey: 'message:main:assistant-1',
       ownerTurnKey: 'message:main:assistant-1',
       turnBindingSource: 'adapter',

@@ -90,6 +90,43 @@ export function resolveAssistantTurnItemKeyFromTimelineEntry(entry: SessionTimel
   return entry.key;
 }
 
+function isStreamingAssistantTurnEntry(entry: SessionTimelineAssistantTurnEntry): boolean {
+  return entry.status === 'streaming' || entry.isStreaming;
+}
+
+function isAssistantTurnEntryInActiveRun(
+  entry: SessionTimelineAssistantTurnEntry,
+  runtime: SessionRuntimeStateSnapshot,
+): boolean {
+  if (!entry.runId || !runtime.activeRunId) {
+    return true;
+  }
+  return entry.runId === runtime.activeRunId;
+}
+
+function resolveRuntimeSettledStatus(runtime: SessionRuntimeStateSnapshot): SessionAssistantTurnItem['status'] {
+  if (runtime.runPhase === 'error') {
+    return 'error';
+  }
+  if (runtime.runPhase === 'aborted') {
+    return 'aborted';
+  }
+  return 'final';
+}
+
+function shouldSettleAssistantTurnEntryFromRuntime(
+  entry: SessionTimelineAssistantTurnEntry,
+  runtime: SessionRuntimeStateSnapshot,
+): boolean {
+  if (!isStreamingAssistantTurnEntry(entry)) {
+    return false;
+  }
+  if (!isRunActive(runtime)) {
+    return true;
+  }
+  return !isAssistantTurnEntryInActiveRun(entry, runtime);
+}
+
 function resolveStatus(
   entry: SessionTimelineAssistantTurnEntry,
   runtime: SessionRuntimeStateSnapshot,
@@ -100,7 +137,10 @@ function resolveStatus(
   if (entry.status === 'aborted') {
     return 'aborted';
   }
-  if (entry.status === 'streaming' || entry.isStreaming) {
+  if (shouldSettleAssistantTurnEntryFromRuntime(entry, runtime)) {
+    return resolveRuntimeSettledStatus(runtime);
+  }
+  if (isStreamingAssistantTurnEntry(entry)) {
     return isWaitingTool(runtime) ? 'waiting_tool' : 'streaming';
   }
   return 'final';

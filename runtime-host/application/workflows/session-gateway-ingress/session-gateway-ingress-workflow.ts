@@ -176,7 +176,8 @@ export class SessionGatewayIngressWorkflow {
   private readEndpointEventSessionKey(payload: Record<string, unknown>): string {
     const event = isRecord(payload.event) ? payload.event : null;
     const params = isRecord(payload.params) ? payload.params : null;
-    const candidates = [payload.sessionKey, event?.sessionKey, params?.sessionKey];
+    const payloadIdentity = this.readEndpointEventSessionIdentity(payload);
+    const candidates = [payload.sessionKey, event?.sessionKey, params?.sessionKey, payloadIdentity?.sessionKey];
     for (const candidate of candidates) {
       if (typeof candidate === 'string' && candidate.trim().length > 0) {
         return candidate.trim();
