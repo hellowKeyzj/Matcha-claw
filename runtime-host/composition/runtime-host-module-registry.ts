@@ -276,6 +276,7 @@ const operationsModule: RuntimeHostApplicationModule = {
       'gateway.capabilities',
       'gateway.runtime',
       'license.service',
+      'logger',
       'openclaw.infrastructure',
       'openclaw.workspaceService',
       'operations.runtimeDataRoot',

@@ -1,3 +1,4 @@
+import path from 'node:path';
 import { CronService } from '../../application/cron/service';
 import type { CronDeliveryChannelProjectionPort } from '../../application/cron/cron-model';
 import {
@@ -18,6 +19,7 @@ import { FileService, type FileRuntimeDataStorePort } from '../../application/fi
 import type { OpenClawWorkspaceService } from '../../application/adapters/openclaw/infrastructure/openclaw-workspace-service';
 import { PlatformService } from '../../application/platform-runtime/service';
 import type { RuntimeHostPlatformFacade } from '../../application/platform-runtime';
+import type { RuntimeHostLogger } from '../../shared/logger';
 import {
   PLATFORM_INSTALL_NATIVE_TOOL_JOB,
   PLATFORM_RECONCILE_TOOLS_JOB,
@@ -43,11 +45,16 @@ import { SecurityRuntimeService } from '../../application/security/service';
 import { SecurityPluginConfigApplier, type SecurityPluginConfigProjectionPort } from '../../application/security/security-plugin-config-applier';
 import { SecurityPolicyRepository, type SecurityPolicyStoragePort } from '../../application/security/security-policy-store';
 import { SecurityPolicyStoreWorkflow } from '../../application/workflows/security-policy/security-policy-store-workflow';
-import { TeamSkillService } from '../../application/team-skill/team-skill-service';
-import type { RuntimePluginConfigProjectionPort, RuntimePluginConfigStorePort } from '../../application/plugins/runtime-plugin-service';
-import { TeamManagedAgentConfigWorkflow } from '../../application/team-skill/team-managed-agent-config-workflow';
-import { TeamSkillGatewayWorkflow } from '../../application/workflows/team-skill/team-skill-gateway-workflow';
-import { TeamRunTaskProjectionWorkflow } from '../../application/workflows/team-skill/team-run-task-projection-workflow';
+import { WorkerBackedTeamRuntimeService } from '../../application/team-runtime/team-runtime-worker-client';
+import type { TeamRuntimePort } from '../../application/team-runtime/team-runtime-port';
+import {
+  DELETE_TEAM_MANAGED_AGENTS_JOB,
+  createTeamRuntimeJobPort,
+  type TeamRuntimeJobPort,
+} from '../../application/team-runtime/team-runtime-jobs';
+import { OpenClawTeamAgentMaterializationAdapter } from '../../application/team-runtime/adapters/openclaw/openclaw-team-agent-materialization-adapter';
+import { SessionRuntimeTeamRoleSessionAdapter } from '../../application/team-runtime/adapters/session-runtime-team-role-session-adapter';
+import { SkillsService } from '../../application/skills/service';
 import { TaskManagerService } from '../../application/tasks/service';
 import type { SessionRuntimeService } from '../../application/sessions/service';
 import type { TaskWorkspacePort } from '../../application/workflows/task-runtime/task-runtime-workflow';
@@ -89,6 +96,8 @@ import { createWorkspaceFileCapabilityOperationRoutes } from '../../application/
 import { createLicenseRuntimeCapabilityOperationRoutes } from '../../application/capabilities/license/license-runtime-capability';
 import { createPlatformRuntimeCapabilityOperationRoutes } from '../../application/capabilities/platform/platform-runtime-capability';
 import type { CapabilityOperationRoute } from '../../application/capabilities/contracts/capability-router';
+import type { RuntimeEndpointRef } from '../../application/agent-runtime/contracts/runtime-address';
+import type { RemoveTeamAgentsInput } from '../../application/team-runtime/ports/team-agent-materialization-port';
 import {
   registerRuntimeJobDefinitions,
   type RuntimeJobDefinition,
@@ -109,6 +118,7 @@ import {
   LICENSE_SERVICE_TOKEN,
   PLATFORM_SERVICE_TOKEN,
   SECURITY_SERVICE_TOKEN,
+  SESSION_RUNTIME_TOKEN,
   TASK_SERVICE_TOKEN,
   TOOLCHAIN_UV_SERVICE_TOKEN,
 } from '../runtime-host-tokens';
@@ -244,26 +254,37 @@ export function registerOperationsApplicationServices(
   container.register('security.service', (scope) => new SecurityRuntimeService({
     operationsWorkflow: scope.resolve<SecurityOperationsWorkflow>('security.operationsWorkflow'),
   }));
-  container.register('teamSkill.gatewayWorkflow', (scope) => new TeamSkillGatewayWorkflow({
+  container.register('teamRuntime.openclawMaterialization', (scope) => new OpenClawTeamAgentMaterializationAdapter({
     gateway: scope.resolve<GatewayRuntimePort>('gateway.runtime'),
     capabilities: scope.resolve<GatewayPluginCapabilityPort>('gateway.capabilities'),
+    fileSystem: scope.resolve<RuntimeFileSystemPort>('runtime.fileSystem'),
+    openClawConfigDir: scope.resolve<CronRuntimeDataPort>('operations.runtimeDataRoot').getRuntimeDataRootDir(),
+    logger: scope.resolve<RuntimeHostLogger>('logger'),
   }));
-  container.register('teamSkill.taskProjectionWorkflow', (scope) => new TeamRunTaskProjectionWorkflow({
-    taskService: scope.resolve<TaskManagerService>('task.service'),
-    gatewayWorkflow: scope.resolve<TeamSkillGatewayWorkflow>('teamSkill.gatewayWorkflow'),
-  }));
-  container.register('teamSkill.managedAgentConfigWorkflow', (scope) => new TeamManagedAgentConfigWorkflow({
-    configRepository: scope.resolve<OpenClawConfigRepositoryPort>('openclaw.configRepository'),
-  }));
-  container.register('teamSkill.service', (scope) => new TeamSkillService(
-    scope.resolve<TeamSkillGatewayWorkflow>('teamSkill.gatewayWorkflow'),
-    scope.resolve<TeamRunTaskProjectionWorkflow>('teamSkill.taskProjectionWorkflow'),
-    scope.resolve<TeamManagedAgentConfigWorkflow>('teamSkill.managedAgentConfigWorkflow'),
-    {
-      pluginConfigStore: scope.resolve<RuntimePluginConfigStorePort>('plugins.configStore'),
-      pluginConfigProjection: scope.resolve<RuntimePluginConfigProjectionPort>('plugins.configProjection'),
-    },
+  container.register('teamRuntime.roleSessions', (scope) => {
+    const sessionService = scope.resolve<SessionRuntimeService>(SESSION_RUNTIME_TOKEN);
+    return new SessionRuntimeTeamRoleSessionAdapter({
+      createSession: (payload) => sessionService.createSession(payload),
+      promptSession: (payload) => sessionService.promptSession(payload),
+      abortSession: (payload) => sessionService.abortSession(payload),
+      deleteSession: (payload) => sessionService.deleteSession(payload),
+      getSessionWindow: (payload) => sessionService.getSessionWindow(payload),
+    });
+  });
+  container.register('teamRuntime.jobs', (scope): TeamRuntimeJobPort => createTeamRuntimeJobPort(
+    scope.resolve<RuntimeLongTaskSubmissionPort>('runtime.tasks'),
   ));
+  container.register('teamRuntime.service', (scope) => new WorkerBackedTeamRuntimeService({
+    workerScriptPath: path.join(__dirname, '../../application/team-runtime/infrastructure/worker/team-runtime-worker-entry.js'),
+    config: {
+      runtimeDataRootDir: scope.resolve<CronRuntimeDataPort>('operations.runtimeDataRoot').getRuntimeDataRootDir(),
+    },
+    agentMaterialization: scope.resolve<OpenClawTeamAgentMaterializationAdapter>('teamRuntime.openclawMaterialization'),
+    roleSessions: scope.resolve<SessionRuntimeTeamRoleSessionAdapter>('teamRuntime.roleSessions'),
+    jobs: scope.resolve<TeamRuntimeJobPort>('teamRuntime.jobs'),
+    skillsService: scope.resolve<SkillsService>('skills.service'),
+    logger: scope.resolve<RuntimeHostLogger>('logger'),
+  }));
   container.register('task.runtimeWorkflow', (scope) => new TaskRuntimeWorkflow({
     gateway: scope.resolve<GatewayRuntimePort>('gateway.runtime'),
     capabilities: scope.resolve<GatewayPluginCapabilityPort>('gateway.capabilities'),
@@ -313,7 +334,7 @@ function registerOperationsCapabilityOperationRoutes(container: RuntimeHostConta
       taskService: scope.resolve<TaskManagerService>('task.service'),
     }),
     ...createTeamRuntimeCapabilityOperationRoutes({
-      teamSkillService: scope.resolve<TeamSkillService>('teamSkill.service'),
+      teamRuntimeService: scope.resolve<TeamRuntimePort>('teamRuntime.service'),
     }),
     ...createToolInvokeCapabilityOperationRoutes({
       taskService: scope.resolve<TaskManagerService>('task.service'),
@@ -351,6 +372,32 @@ function createOperationsJobDefinitions(
       type: REFRESH_TOKEN_USAGE_HISTORY_JOB,
       handler: async () => {
         await container.resolve<TokenUsageHistoryRepository>('usage.tokenHistoryRepository').refreshCache();
+      },
+    },
+    {
+      type: DELETE_TEAM_MANAGED_AGENTS_JOB,
+      handler: async (payload) => {
+        const body = readJobPayloadRecord(payload);
+        const teamId = typeof body.teamId === 'string' ? body.teamId : '';
+        const agentIds = Array.isArray(body.agentIds) ? body.agentIds.filter((item): item is string => typeof item === 'string' && item.trim().length > 0) : [];
+        const endpoint = readJobPayloadRecord(body.endpoint) as RuntimeEndpointRef;
+        const workspacePaths = Array.isArray(body.workspacePaths) ? body.workspacePaths.filter((item): item is string => typeof item === 'string' && item.trim().length > 0) : [];
+        if (!teamId) {
+          throw new Error('teamId is required');
+        }
+        if (agentIds.length === 0) {
+          return { teamId, deletedAgentIds: [] };
+        }
+        if (!endpoint.kind) {
+          throw new Error('endpoint is required');
+        }
+        await container.resolve<OpenClawTeamAgentMaterializationAdapter>('teamRuntime.openclawMaterialization').removeTeamAgents({
+          teamId,
+          endpoint,
+          agentIds,
+          workspacePaths,
+        } satisfies RemoveTeamAgentsInput);
+        return { teamId, deletedAgentIds: agentIds };
       },
     },
     {
@@ -521,9 +568,21 @@ export function registerOperationsLifecycle(
         },
       },
     ],
+    cleanupTasks: [
+      {
+        name: 'team-runtime.worker',
+        run: () => {
+          closeTeamRuntimeWorker(container);
+        },
+      },
+    ],
   });
 }
 
 function startCronJobsRefresh(container: RuntimeHostContainer): void {
   void container.resolve<CronService>('cron.service').listJobs();
+}
+
+function closeTeamRuntimeWorker(container: RuntimeHostContainer): void {
+  void container.resolve<TeamRuntimePort>('teamRuntime.service').close?.();
 }

@@ -15,6 +15,7 @@ import { CapabilityRegistry } from '../../runtime-host/application/capabilities/
 import type { CapabilityOperationRoute } from '../../runtime-host/application/capabilities/contracts/capability-router';
 import type { CapabilityDescriptor, CapabilityOperationDescriptor } from '../../runtime-host/application/capabilities/contracts/capability-descriptor';
 import { createAgentRunCapabilityOperationRoutes } from '../../runtime-host/application/capabilities/agent/agent-run-capability';
+import { createAgentSkillConfigCapabilityOperationRoutes } from '../../runtime-host/application/capabilities/agent/agent-skill-config-capability';
 import { createSubagentManagementCapabilityOperationRoutes } from '../../runtime-host/application/capabilities/agent/subagent-management-capability';
 import { createSessionApprovalCapabilityOperationRoutes } from '../../runtime-host/application/capabilities/approval/session-approval-capability';
 import { createSessionModelSelectionCapabilityOperationRoutes } from '../../runtime-host/application/capabilities/model/session-model-capability';
@@ -261,6 +262,7 @@ function createOperationRoutes(): readonly CapabilityOperationRoute[] {
       clawHubService: empty,
     }),
     ...createSubagentManagementCapabilityOperationRoutes({ subagentService: empty }),
+    ...createAgentSkillConfigCapabilityOperationRoutes({ agentSkillConfigService: empty }),
     ...createTaskControlCapabilityOperationRoutes({ taskService: empty }),
     ...createTeamRuntimeCapabilityOperationRoutes({ teamSkillService: empty }),
     ...createToolInvokeCapabilityOperationRoutes({ taskService: empty }),
@@ -334,6 +336,7 @@ describe('capability registry', () => {
       expect.objectContaining({ id: 'integration.channel', scopeKind: 'runtime-instance', ownerModuleId: 'integration', routeOwnerId: 'openclaw' }),
       expect.objectContaining({ id: 'model.provider', scopeKind: 'runtime-instance', ownerModuleId: 'model', routeOwnerId: 'openclaw' }),
       expect.objectContaining({ id: 'settings.runtime', scopeKind: 'app', ownerModuleId: 'settings', routeOwnerId: 'openclaw' }),
+      expect.objectContaining({ id: 'agent.skill-config', scopeKind: 'agent', ownerModuleId: 'agent', routeOwnerId: 'openclaw' }),
       expect.objectContaining({ id: 'license.runtime', scopeKind: 'app', ownerModuleId: 'license', routeOwnerId: 'operations' }),
       expect.objectContaining({ id: 'scheduler.cron', scopeKind: 'runtime-instance', ownerModuleId: 'scheduler', routeOwnerId: 'operations' }),
       expect.objectContaining({ id: 'workspace.file', scopeKind: 'workspace', ownerModuleId: 'workspace', routeOwnerId: 'operations' }),

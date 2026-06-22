@@ -129,7 +129,7 @@ export class SkillsOperationsWorkflow {
     }
     const validatedSkillKeys = await this.deps.skillRuntimeWorkflow.validateCanonicalSkillKeys(skillKeys);
     if (!validatedSkillKeys.ok) {
-      return badRequest(validatedSkillKeys.error);
+      return badRequest(formatInvalidSkillKeyError(validatedSkillKeys));
     }
 
     const localResult = await this.deps.repository.setManyEnabled(validatedSkillKeys.skillKeys, body.enabled);
@@ -181,7 +181,7 @@ export class SkillsOperationsWorkflow {
   > {
     const validatedSkillKeys = await this.deps.skillRuntimeWorkflow.validateCanonicalSkillKeys([skillKey.trim()]);
     if (!validatedSkillKeys.ok) {
-      return validatedSkillKeys;
+      return { ok: false, error: formatInvalidSkillKeyError(validatedSkillKeys) };
     }
     const [validatedSkillKey] = validatedSkillKeys.skillKeys;
     if (!validatedSkillKey) {
@@ -221,6 +221,13 @@ export class SkillsOperationsWorkflow {
       return { result: undefined, changed: true };
     });
   }
+}
+
+function formatInvalidSkillKeyError(validation: { unknownSkillKeys: readonly string[]; nonCanonicalSkillKeys: readonly string[] }): string {
+  if (validation.unknownSkillKeys.length > 0) {
+    return `Unknown skillKey: ${validation.unknownSkillKeys.join(', ')}`;
+  }
+  return `skillKey must be canonical: ${validation.nonCanonicalSkillKeys.join(', ')}`;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

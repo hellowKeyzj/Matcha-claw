@@ -17,6 +17,6 @@
     "resolveJsonModule": true,
     "declaration": false
   },
-  "include": ["runtime-host/main.ts"],
+  "include": ["runtime-host/main.ts", "runtime-host/application/team-runtime/infrastructure/worker/team-runtime-worker-entry.ts"],
   "exclude": ["runtime-host/build/**"]
 }

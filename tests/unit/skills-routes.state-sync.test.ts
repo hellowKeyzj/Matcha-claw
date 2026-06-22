@@ -597,6 +597,59 @@ describe('skills route state sync', () => {
     }
   });
 
+  it('validateCanonicalSkillKeys 只接受 refreshStatus 中可展示的 installed skill', async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), 'matchaclaw-skills-validate-gateway-'));
+    try {
+      const skillsDir = join(tempRoot, 'skills');
+      const skillsService = createSkillsService({
+        skillsDir,
+        getAllSkillConfigs: async () => ({
+          'config-only': { enabled: true },
+        }),
+        gateway: {
+          isGatewayRunning: async () => true,
+          readGatewayConnectionState: async () => ({
+            state: 'connected',
+            gatewayReady: true,
+            portReachable: true,
+          }),
+          gatewayRpc: vi.fn(async () => ({
+            skills: [
+              {
+                skillKey: 'pdf',
+                name: 'PDF',
+                description: 'Read PDF files.',
+                disabled: false,
+                installed: true,
+                eligible: true,
+              },
+              {
+                skillKey: 'not-installed',
+                name: 'Not Installed',
+                description: 'Mentioned by Gateway only.',
+                disabled: false,
+                installed: false,
+                eligible: true,
+              },
+            ],
+          })),
+        },
+      });
+
+      await executeSkillsRefreshStatus(skillsService);
+      const workflow = (skillsService as any).deps.skillRuntimeWorkflow as SkillRuntimeWorkflow;
+
+      await expect(workflow.validateCanonicalSkillKeys(['pdf']))
+        .resolves.toEqual({ ok: true, skillKeys: ['pdf'] });
+      await expect(workflow.validateCanonicalSkillKeys(['not-installed']))
+        .resolves.toEqual({ ok: false, unknownSkillKeys: ['not-installed'], nonCanonicalSkillKeys: [] });
+      await expect(workflow.validateCanonicalSkillKeys(['config-only']))
+        .resolves.toEqual({ ok: false, unknownSkillKeys: ['config-only'], nonCanonicalSkillKeys: [] });
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
   it('skill.management refreshStatus capability 保留本地 manifest 展示信息，不被 Gateway 空字段覆盖', async () => {
     const tempRoot = await mkdtemp(join(tmpdir(), 'matchaclaw-skills-display-'));
     try {
@@ -798,248 +851,298 @@ describe('skills route state sync', () => {
   });
 
   it('skills.updateState capability 会先本地写 enabled，再提交 skills.update 后台同步任务', async () => {
-    const gatewayRpc = vi.fn(async () => ({}));
-    const setSkillEnabled = vi.fn(async () => ({ success: true }));
-    const skillsService = createSkillsService({
-      setSkillEnabled,
-      gateway: {
-        isGatewayRunning: async () => true,
-        gatewayRpc,
-      },
-    });
+    const tempRoot = await mkdtemp(join(tmpdir(), 'matchaclaw-skills-update-state-'));
+    try {
+      const skillsDir = join(tempRoot, 'skills');
+      await writeSkillManifest(skillsDir, 'multi-search-engine');
+      const gatewayRpc = vi.fn(async () => ({}));
+      const setSkillEnabled = vi.fn(async () => ({ success: true }));
+      const skillsService = createSkillsService({
+        skillsDir,
+        setSkillEnabled,
+        gateway: {
+          isGatewayRunning: async () => true,
+          gatewayRpc,
+        },
+      });
 
-    const result = await dispatchSkillManagementCapability(skillsService, 'skills.updateState', {
-      skillKey: 'multi-search-engine',
-      enabled: true,
-    });
+      const result = await dispatchSkillManagementCapability(skillsService, 'skills.updateState', {
+        skillKey: 'multi-search-engine',
+        enabled: true,
+      });
 
-    expect(result).toEqual({
-      status: 202,
-      data: {
-        success: true,
-        job: expect.objectContaining({ type: 'skills.syncGatewayUpdate' }),
-      },
-    });
-    expect(setSkillEnabled).toHaveBeenCalledWith('multi-search-engine', true);
-    expect(gatewayRpc).not.toHaveBeenCalled();
-    expect((skillsService as any).deps.operationsWorkflow.deps.jobs.submitGatewayUpdate).toHaveBeenCalledWith({
-      skillKey: 'multi-search-engine',
-      updates: {
-      enabled: true,
-      },
-    });
+      expect(result).toEqual({
+        status: 202,
+        data: {
+          success: true,
+          job: expect.objectContaining({ type: 'skills.syncGatewayUpdate' }),
+        },
+      });
+      expect(setSkillEnabled).toHaveBeenCalledWith('multi-search-engine', true);
+      expect(gatewayRpc).not.toHaveBeenCalled();
+      expect((skillsService as any).deps.operationsWorkflow.deps.jobs.submitGatewayUpdate).toHaveBeenCalledWith({
+        skillKey: 'multi-search-engine',
+        updates: {
+        enabled: true,
+        },
+      });
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
   });
 
   it('skills.updateState capability 会同步刷新 team-runtime 依赖可用清单', async () => {
-    const pluginConfig = {
-      plugins: {
-        allow: ['team-runtime'],
-        entries: {
-          'team-runtime': {
-            enabled: true,
-            config: {
-              availableSkills: ['*'],
-              availableTools: ['*'],
-            },
-          },
-        },
-      },
-      skills: {
-        entries: {
-          'multi-search-engine': { enabled: false },
-          'web-extract': { enabled: true },
-        },
-      },
-    } as Record<string, unknown>;
-    const pluginConfigStore = {
-      read: vi.fn(async () => pluginConfig),
-      updateDirty: vi.fn(async (mutate) => {
-        const update = await mutate(pluginConfig);
-        return update.result;
-      }),
-    };
-    const pluginConfigProjection = {
-      readManuallyManagedPluginIds: vi.fn(async () => ['team-runtime']),
-      applyManuallyManagedPluginIds: vi.fn(async (config: Record<string, any>) => {
-        const skills = config.skills?.entries ?? {};
-        return {
-          ...config,
-          plugins: {
-            ...config.plugins,
-            entries: {
-              ...config.plugins.entries,
-              'team-runtime': {
-                ...config.plugins.entries['team-runtime'],
-                config: {
-                  ...config.plugins.entries['team-runtime'].config,
-                  availableSkills: Object.entries(skills)
-                    .filter(([, entry]) => (entry as { enabled?: boolean }).enabled === true)
-                    .map(([skillKey]) => skillKey),
-                  availableTools: ['*'],
-                },
+    const tempRoot = await mkdtemp(join(tmpdir(), 'matchaclaw-skills-plugin-projection-'));
+    try {
+      const skillsDir = join(tempRoot, 'skills');
+      await writeSkillManifest(skillsDir, 'multi-search-engine');
+      await writeSkillManifest(skillsDir, 'web-extract');
+      const pluginConfig = {
+        plugins: {
+          allow: ['team-runtime'],
+          entries: {
+            'team-runtime': {
+              enabled: true,
+              config: {
+                availableSkills: ['*'],
+                availableTools: ['*'],
               },
             },
           },
-        };
-      }),
-    };
-    const setSkillEnabled = vi.fn(async (skillKey: string, enabled: boolean) => {
-      ((pluginConfig.skills as any).entries as Record<string, { enabled?: boolean }>)[skillKey] = { enabled };
-      return { success: true };
-    });
-    const skillsService = createSkillsService({
-      getAllSkillConfigs: async () => (pluginConfig.skills as any).entries,
-      setSkillEnabled,
-      pluginConfigStore,
-      pluginConfigProjection,
-      gateway: {
-        isGatewayRunning: async () => true,
-        gatewayRpc: vi.fn(async () => ({})),
-      },
-    });
+        },
+        skills: {
+          entries: {
+            'multi-search-engine': { enabled: false },
+            'web-extract': { enabled: true },
+          },
+        },
+      } as Record<string, unknown>;
+      const pluginConfigStore = {
+        read: vi.fn(async () => pluginConfig),
+        updateDirty: vi.fn(async (mutate) => {
+          const update = await mutate(pluginConfig);
+          return update.result;
+        }),
+      };
+      const pluginConfigProjection = {
+        readManuallyManagedPluginIds: vi.fn(async () => ['team-runtime']),
+        applyManuallyManagedPluginIds: vi.fn(async (config: Record<string, any>) => {
+          const skills = config.skills?.entries ?? {};
+          return {
+            ...config,
+            plugins: {
+              ...config.plugins,
+              entries: {
+                ...config.plugins.entries,
+                'team-runtime': {
+                  ...config.plugins.entries['team-runtime'],
+                  config: {
+                    ...config.plugins.entries['team-runtime'].config,
+                    availableSkills: Object.entries(skills)
+                      .filter(([, entry]) => (entry as { enabled?: boolean }).enabled === true)
+                      .map(([skillKey]) => skillKey),
+                    availableTools: ['*'],
+                  },
+                },
+              },
+            },
+          };
+        }),
+      };
+      const setSkillEnabled = vi.fn(async (skillKey: string, enabled: boolean) => {
+        ((pluginConfig.skills as any).entries as Record<string, { enabled?: boolean }>)[skillKey] = { enabled };
+        return { success: true };
+      });
+      const skillsService = createSkillsService({
+        skillsDir,
+        getAllSkillConfigs: async () => (pluginConfig.skills as any).entries,
+        setSkillEnabled,
+        pluginConfigStore,
+        pluginConfigProjection,
+        gateway: {
+          isGatewayRunning: async () => true,
+          gatewayRpc: vi.fn(async () => ({})),
+        },
+      });
 
-    await dispatchSkillManagementCapability(skillsService, 'skills.updateState', {
-      skillKey: 'multi-search-engine',
-      enabled: true,
-    });
+      await dispatchSkillManagementCapability(skillsService, 'skills.updateState', {
+        skillKey: 'multi-search-engine',
+        enabled: true,
+      });
 
-    expect(pluginConfigStore.updateDirty).toHaveBeenCalledTimes(1);
-    expect(pluginConfigProjection.readManuallyManagedPluginIds).toHaveBeenCalledWith(pluginConfig);
-    expect((pluginConfig.plugins as any).entries['team-runtime'].config.availableSkills).toEqual([
-      'multi-search-engine',
-      'web-extract',
-    ]);
+      expect(pluginConfigStore.updateDirty).toHaveBeenCalledTimes(1);
+      expect(pluginConfigProjection.readManuallyManagedPluginIds).toHaveBeenCalledWith(pluginConfig);
+      expect((pluginConfig.plugins as any).entries['team-runtime'].config.availableSkills).toEqual([
+        'multi-search-engine',
+        'web-extract',
+      ]);
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
   });
 
   it('skills.updateState capability 在 Gateway 未运行时仍只提交同一个后台同步任务', async () => {
-    const gatewayRpc = vi.fn(async () => ({}));
-    const setSkillEnabled = vi.fn(async () => ({ success: true }));
+    const tempRoot = await mkdtemp(join(tmpdir(), 'matchaclaw-skills-update-offline-'));
+    try {
+      const skillsDir = join(tempRoot, 'skills');
+      await writeSkillManifest(skillsDir, 'web-extract');
+      const gatewayRpc = vi.fn(async () => ({}));
+      const setSkillEnabled = vi.fn(async () => ({ success: true }));
 
-    const skillsService = createSkillsService({
-      setSkillEnabled,
-      gateway: {
-        isGatewayRunning: async () => false,
-        gatewayRpc,
-      },
-    });
-    const result = await dispatchSkillManagementCapability(skillsService, 'skills.updateState', {
-      skillKey: 'web-extract',
-      enabled: false,
-    });
+      const skillsService = createSkillsService({
+        skillsDir,
+        setSkillEnabled,
+        gateway: {
+          isGatewayRunning: async () => false,
+          gatewayRpc,
+        },
+      });
+      const result = await dispatchSkillManagementCapability(skillsService, 'skills.updateState', {
+        skillKey: 'web-extract',
+        enabled: false,
+      });
 
-    expect(result).toEqual({
-      status: 202,
-      data: {
-        success: true,
-        job: expect.objectContaining({ type: 'skills.syncGatewayUpdate' }),
-      },
-    });
-    expect(setSkillEnabled).toHaveBeenCalledWith('web-extract', false);
-    expect(gatewayRpc).not.toHaveBeenCalled();
+      expect(result).toEqual({
+        status: 202,
+        data: {
+          success: true,
+          job: expect.objectContaining({ type: 'skills.syncGatewayUpdate' }),
+        },
+      });
+      expect(setSkillEnabled).toHaveBeenCalledWith('web-extract', false);
+      expect(gatewayRpc).not.toHaveBeenCalled();
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
   });
 
   it('skills.updateState capability/batch 会一次本地写入，不再通过 Gateway 逐项写配置', async () => {
-    const gatewayRpc = vi.fn(async () => ({}));
-    const setManySkillsEnabled = vi.fn(async () => ({ success: true }));
-    const skillsService = createSkillsService({
-      setManySkillsEnabled,
-      gateway: {
-        isGatewayRunning: async () => true,
-        gatewayRpc,
-      },
-    });
+    const tempRoot = await mkdtemp(join(tmpdir(), 'matchaclaw-skills-update-batch-'));
+    try {
+      const skillsDir = join(tempRoot, 'skills');
+      await writeSkillManifest(skillsDir, 'multi-search-engine');
+      await writeSkillManifest(skillsDir, 'web-extract');
+      const gatewayRpc = vi.fn(async () => ({}));
+      const setManySkillsEnabled = vi.fn(async () => ({ success: true }));
+      const skillsService = createSkillsService({
+        skillsDir,
+        setManySkillsEnabled,
+        gateway: {
+          isGatewayRunning: async () => true,
+          gatewayRpc,
+        },
+      });
 
-    const result = await dispatchSkillManagementCapability(skillsService, 'skills.updateBatchState', {
-      skillKeys: ['multi-search-engine', 'web-extract', 'multi-search-engine'],
-      enabled: false,
-    });
-
-    expect(result).toEqual({
-      status: 200,
-      data: {
-        success: true,
-        updated: ['multi-search-engine', 'web-extract'],
+      const result = await dispatchSkillManagementCapability(skillsService, 'skills.updateBatchState', {
+        skillKeys: ['multi-search-engine', 'web-extract', 'multi-search-engine'],
         enabled: false,
-      },
-    });
-    expect(setManySkillsEnabled).toHaveBeenCalledTimes(1);
-    expect(setManySkillsEnabled).toHaveBeenCalledWith(['multi-search-engine', 'web-extract'], false);
-    expect(gatewayRpc).toHaveBeenCalledTimes(1);
-    expect(gatewayRpc).toHaveBeenCalledWith('skills.status');
-    expect((skillsService as any).deps.operationsWorkflow.deps.jobs.submitGatewayUpdate).not.toHaveBeenCalled();
+      });
+
+      expect(result).toEqual({
+        status: 200,
+        data: {
+          success: true,
+          updated: ['multi-search-engine', 'web-extract'],
+          enabled: false,
+        },
+      });
+      expect(setManySkillsEnabled).toHaveBeenCalledTimes(1);
+      expect(setManySkillsEnabled).toHaveBeenCalledWith(['multi-search-engine', 'web-extract'], false);
+      expect(gatewayRpc).toHaveBeenCalledTimes(1);
+      expect(gatewayRpc).toHaveBeenCalledWith('skills.status');
+      expect((skillsService as any).deps.operationsWorkflow.deps.jobs.submitGatewayUpdate).not.toHaveBeenCalled();
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
   });
 
   it('skills.updateConfig capability 会先本地写配置，再提交 skills.update 后台同步任务', async () => {
-    const gatewayRpc = vi.fn(async () => ({}));
-    const updateSkillConfig = vi.fn(async () => ({ success: true }));
-    const skillsService = createSkillsService({
-      updateSkillConfig,
-      gateway: {
-        isGatewayRunning: async () => true,
-        gatewayRpc,
-      },
-    });
+    const tempRoot = await mkdtemp(join(tmpdir(), 'matchaclaw-skills-update-config-'));
+    try {
+      const skillsDir = join(tempRoot, 'skills');
+      await writeSkillManifest(skillsDir, 'tavily-search');
+      const gatewayRpc = vi.fn(async () => ({}));
+      const updateSkillConfig = vi.fn(async () => ({ success: true }));
+      const skillsService = createSkillsService({
+        skillsDir,
+        updateSkillConfig,
+        gateway: {
+          isGatewayRunning: async () => true,
+          gatewayRpc,
+        },
+      });
 
-    const result = await dispatchSkillManagementCapability(skillsService, 'skills.updateConfig', {
-      skillKey: 'tavily-search',
-      apiKey: 'tv-key',
-      env: {
-        TAVILY_SEARCH_DEPTH: 'advanced',
-      },
-    });
+      const result = await dispatchSkillManagementCapability(skillsService, 'skills.updateConfig', {
+        skillKey: 'tavily-search',
+        apiKey: 'tv-key',
+        env: {
+          TAVILY_SEARCH_DEPTH: 'advanced',
+        },
+      });
 
-    expect(result).toEqual({
-      status: 202,
-      data: {
-        success: true,
-        job: expect.objectContaining({ type: 'skills.syncGatewayUpdate' }),
-      },
-    });
-    expect(updateSkillConfig).toHaveBeenCalledWith('tavily-search', {
-      apiKey: 'tv-key',
-      env: {
-        TAVILY_SEARCH_DEPTH: 'advanced',
-      },
-    });
-    expect(gatewayRpc).not.toHaveBeenCalled();
-    expect((skillsService as any).deps.operationsWorkflow.deps.jobs.submitGatewayUpdate).toHaveBeenCalledWith({
-      skillKey: 'tavily-search',
-      updates: {
-      apiKey: 'tv-key',
-      env: {
-        TAVILY_SEARCH_DEPTH: 'advanced',
-      },
-      },
-    });
+      expect(result).toEqual({
+        status: 202,
+        data: {
+          success: true,
+          job: expect.objectContaining({ type: 'skills.syncGatewayUpdate' }),
+        },
+      });
+      expect(updateSkillConfig).toHaveBeenCalledWith('tavily-search', {
+        apiKey: 'tv-key',
+        env: {
+          TAVILY_SEARCH_DEPTH: 'advanced',
+        },
+      });
+      expect(gatewayRpc).not.toHaveBeenCalled();
+      expect((skillsService as any).deps.operationsWorkflow.deps.jobs.submitGatewayUpdate).toHaveBeenCalledWith({
+        skillKey: 'tavily-search',
+        updates: {
+        apiKey: 'tv-key',
+        env: {
+          TAVILY_SEARCH_DEPTH: 'advanced',
+        },
+        },
+      });
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
   });
 
   it('skills.updateConfig capability 在 Gateway 未运行时会本地写配置', async () => {
-    const gatewayRpc = vi.fn(async () => ({}));
-    const updateSkillConfig = vi.fn(async () => ({ success: true }));
+    const tempRoot = await mkdtemp(join(tmpdir(), 'matchaclaw-skills-update-config-offline-'));
+    try {
+      const skillsDir = join(tempRoot, 'skills');
+      await writeSkillManifest(skillsDir, 'tavily-search');
+      const gatewayRpc = vi.fn(async () => ({}));
+      const updateSkillConfig = vi.fn(async () => ({ success: true }));
 
-    const skillsService = createSkillsService({
-      updateSkillConfig,
-      gateway: {
-        isGatewayRunning: async () => false,
-        gatewayRpc,
-      },
-    });
-    const result = await dispatchSkillManagementCapability(skillsService, 'skills.updateConfig', {
-      skillKey: 'tavily-search',
-      apiKey: 'tv-key',
-    });
+      const skillsService = createSkillsService({
+        skillsDir,
+        updateSkillConfig,
+        gateway: {
+          isGatewayRunning: async () => false,
+          gatewayRpc,
+        },
+      });
+      const result = await dispatchSkillManagementCapability(skillsService, 'skills.updateConfig', {
+        skillKey: 'tavily-search',
+        apiKey: 'tv-key',
+      });
 
-    expect(result).toEqual({
-      status: 202,
-      data: {
-        success: true,
-        job: expect.objectContaining({ type: 'skills.syncGatewayUpdate' }),
-      },
-    });
-    expect(updateSkillConfig).toHaveBeenCalledWith('tavily-search', {
-      apiKey: 'tv-key',
-    });
-    expect(gatewayRpc).not.toHaveBeenCalled();
+      expect(result).toEqual({
+        status: 202,
+        data: {
+          success: true,
+          job: expect.objectContaining({ type: 'skills.syncGatewayUpdate' }),
+        },
+      });
+      expect(updateSkillConfig).toHaveBeenCalledWith('tavily-search', {
+        apiKey: 'tv-key',
+      });
+      expect(gatewayRpc).not.toHaveBeenCalled();
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
   });
 
   it('skills.update* capability 拒绝 unknown/noncanonical skillKey 且不写入本地配置', async () => {

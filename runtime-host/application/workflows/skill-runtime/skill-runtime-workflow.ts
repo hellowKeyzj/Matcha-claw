@@ -38,6 +38,12 @@ function normalizeSkillIdentity(value: string): string {
   return value.trim().toLowerCase();
 }
 
+function pushUniqueString(values: string[], value: string): void {
+  if (!values.includes(value)) {
+    values.push(value);
+  }
+}
+
 export interface SkillRuntimeWorkflowDeps {
   gateway: GatewayRpcPort & GatewayReadinessPort;
   jobs: Pick<SkillsJobPort, 'submitRefreshStatus'>;
@@ -118,7 +124,7 @@ export class SkillRuntimeWorkflow {
 
   async validateCanonicalSkillKeys(skillIds: readonly string[]): Promise<
     { ok: true; skillKeys: string[] }
-    | { ok: false; error: string }
+    | { ok: false; unknownSkillKeys: string[]; nonCanonicalSkillKeys: string[] }
   > {
     if (skillIds.length === 0) {
       return { ok: true, skillKeys: [] };
@@ -126,18 +132,23 @@ export class SkillRuntimeWorkflow {
 
     const canonicalKeyByIdentity = await this.buildCanonicalSkillKeyByIdentity();
     const validatedSkillKeys: string[] = [];
+    const unknownSkillKeys: string[] = [];
+    const nonCanonicalSkillKeys: string[] = [];
     for (const skillId of skillIds) {
       const trimmedSkillId = skillId.trim();
       const canonicalKey = canonicalKeyByIdentity.get(normalizeSkillIdentity(trimmedSkillId));
       if (!canonicalKey) {
-        return { ok: false, error: `Unknown skillKey: ${trimmedSkillId}` };
+        pushUniqueString(unknownSkillKeys, trimmedSkillId);
+        continue;
       }
       if (trimmedSkillId !== canonicalKey) {
-        return { ok: false, error: `skillKey must be canonical: ${trimmedSkillId}` };
+        pushUniqueString(nonCanonicalSkillKeys, trimmedSkillId);
+        continue;
       }
-      if (!validatedSkillKeys.includes(canonicalKey)) {
-        validatedSkillKeys.push(canonicalKey);
-      }
+      pushUniqueString(validatedSkillKeys, canonicalKey);
+    }
+    if (unknownSkillKeys.length > 0 || nonCanonicalSkillKeys.length > 0) {
+      return { ok: false, unknownSkillKeys, nonCanonicalSkillKeys };
     }
     return { ok: true, skillKeys: validatedSkillKeys };
   }
@@ -169,16 +180,32 @@ export class SkillRuntimeWorkflow {
 
   private async buildCanonicalSkillKeyByIdentity(): Promise<Map<string, string>> {
     const canonicalKeyByIdentity = new Map<string, string>();
-    for (const skillKey of Object.keys(await this.deps.repository.getAllConfigs())) {
-      if (skillKey.trim()) {
-        canonicalKeyByIdentity.set(normalizeSkillIdentity(skillKey), skillKey);
-      }
-    }
     for (const entry of await this.listInstalledSkillInventory()) {
-      canonicalKeyByIdentity.set(normalizeSkillIdentity(entry.skillKey), entry.skillKey);
-      canonicalKeyByIdentity.set(normalizeSkillIdentity(entry.name), entry.skillKey);
+      this.addCanonicalSkillIdentity(canonicalKeyByIdentity, entry.skillKey, entry.name);
+    }
+    for (const skill of Object.values(this.normalizeGatewayStatusSkills(this.statusSnapshot))) {
+      this.addCanonicalSkillIdentity(
+        canonicalKeyByIdentity,
+        String(skill.skillKey),
+        normalizeOptionalString(skill.name),
+      );
     }
     return canonicalKeyByIdentity;
+  }
+
+  private addCanonicalSkillIdentity(
+    canonicalKeyByIdentity: Map<string, string>,
+    skillKey: string,
+    name?: string,
+  ): void {
+    const normalizedSkillKey = skillKey.trim();
+    if (!normalizedSkillKey) {
+      return;
+    }
+    canonicalKeyByIdentity.set(normalizeSkillIdentity(normalizedSkillKey), normalizedSkillKey);
+    if (name?.trim()) {
+      canonicalKeyByIdentity.set(normalizeSkillIdentity(name), normalizedSkillKey);
+    }
   }
 
   private async readSkillInventoryEntry(
@@ -387,7 +414,7 @@ export class SkillRuntimeWorkflow {
         ...gatewaySkill,
         name: normalizeOptionalString(gatewaySkill.name) ?? normalizeOptionalString(existing?.name) ?? skillKey,
         description: normalizeOptionalString(gatewaySkill.description) ?? normalizeOptionalString(existing?.description) ?? '',
-        installed: existing?.installed === true,
+        installed: existing?.installed === true || gatewaySkill.installed === true,
         eligible: typeof gatewaySkill.eligible === 'boolean'
           ? gatewaySkill.eligible
           : existing?.eligible,

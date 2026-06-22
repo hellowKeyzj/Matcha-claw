@@ -26,6 +26,10 @@ const RUNTIME_HOST_STORAGE_HOT_PATHS = [
 const RUNTIME_HOST_APPLICATION_ROOTS = [
   'runtime-host/application',
 ] as const;
+const TEAM_RUNTIME_WORKER_INFRASTRUCTURE_FILES = new Set([
+  'runtime-host/application/team-runtime/infrastructure/worker/local-sqlite/sqlite-team-outbox-store.ts',
+  'runtime-host/application/team-runtime/infrastructure/worker/team-runtime-worker-entry.ts',
+]);
 const RUNTIME_HOST_OPENCLAW_CORE_BOUNDARY_ROOTS = [
   'runtime-host/application/providers',
   'runtime-host/application/channels',
@@ -161,6 +165,9 @@ async function listSourceFiles(dir: string): Promise<string[]> {
   const entries = await readdir(dir, { withFileTypes: true });
   const files: string[] = [];
   for (const entry of entries) {
+    if (entry.name === 'build' || entry.name === 'node_modules') {
+      continue;
+    }
     const fullPath = path.join(dir, entry.name);
     if (entry.isDirectory()) {
       files.push(...await listSourceFiles(fullPath));
@@ -354,6 +361,10 @@ describe('runtime-host implementation boundary', () => {
     const violations: string[] = [];
 
     for (const file of checkedFiles) {
+      const relativeFile = path.relative(process.cwd(), file).replace(/\\/g, '/');
+      if (TEAM_RUNTIME_WORKER_INFRASTRUCTURE_FILES.has(relativeFile)) {
+        continue;
+      }
       const source = await readFile(file, 'utf8');
       for (const pattern of FORBIDDEN_APPLICATION_INFRASTRUCTURE_IMPORTS) {
         if (pattern.test(source)) {
@@ -618,6 +629,10 @@ describe('runtime-host implementation boundary', () => {
     const violations: string[] = [];
 
     for (const file of checkedFiles) {
+      const relativeFile = path.relative(process.cwd(), file).replace(/\\/g, '/');
+      if (TEAM_RUNTIME_WORKER_INFRASTRUCTURE_FILES.has(relativeFile)) {
+        continue;
+      }
       const source = await readFile(file, 'utf8');
       for (const pattern of FORBIDDEN_SYNC_IO_PATTERNS) {
         if (source.includes(pattern)) {
@@ -1600,37 +1615,18 @@ describe('runtime-host implementation boundary', () => {
     expect(runtimeModuleSource).toContain("readinessWorkflow: scope.resolve<GatewayReadinessWorkflow>('gateway.readinessWorkflow')");
   });
 
-  it('team runtime gateway 映射与任务投影留在 TeamSkill workflow 层，不回流到 service', async () => {
-    const serviceSource = await readFile(path.join(process.cwd(), 'runtime-host/application/team-skill/team-skill-service.ts'), 'utf8');
-    const gatewayWorkflowSource = await readFile(path.join(process.cwd(), 'runtime-host/application/workflows/team-skill/team-skill-gateway-workflow.ts'), 'utf8');
-    const taskProjectionWorkflowSource = await readFile(path.join(process.cwd(), 'runtime-host/application/workflows/team-skill/team-run-task-projection-workflow.ts'), 'utf8');
+  it('team runtime 主路径由 host service 承载，不保留旧 teamSkill gateway/service/task projection 接线', async () => {
     const operationsModuleSource = await readFile(path.join(process.cwd(), 'runtime-host/composition/modules/operations-application-module.ts'), 'utf8');
 
-    expect(gatewayWorkflowSource).toContain('export class TeamSkillGatewayWorkflow');
-    expect(gatewayWorkflowSource).toContain('TEAM_RUNTIME_OPERATION_METHODS');
-    expect(gatewayWorkflowSource).toContain('matchaclaw.team.run.snapshot');
-    expect(gatewayWorkflowSource).toContain('requirePluginMethod');
-    expect(gatewayWorkflowSource).toContain('gatewayRpc(method');
-    expect(taskProjectionWorkflowSource).toContain('export class TeamRunTaskProjectionWorkflow');
-    expect(taskProjectionWorkflowSource).toContain('projectAfterOperation');
-    expect(taskProjectionWorkflowSource).toContain("this.deps.gatewayWorkflow.invoke('team.runSnapshot'");
-    expect(taskProjectionWorkflowSource).toContain("method: 'TaskList'");
-    expect(taskProjectionWorkflowSource).toContain('selectProjectionTarget');
-    expect(taskProjectionWorkflowSource).toContain("target.action === 'update' ? 'TaskUpdate' : 'TaskCreate'");
-    expect(serviceSource).toContain('gatewayWorkflow.invoke(operationId, params)');
-    expect(serviceSource).toContain('taskProjectionWorkflow?.projectAfterOperation');
-    expect(serviceSource).not.toContain('TEAM_RUNTIME_OPERATION_METHODS');
-    expect(serviceSource).not.toContain('matchaclaw.team.run.snapshot');
-    expect(serviceSource).not.toContain('gatewayRpc(method');
-    expect(serviceSource).not.toContain("method: 'TaskList'");
-    expect(serviceSource).not.toContain("TaskCreate'");
-    expect(serviceSource).not.toContain("TaskUpdate'");
-    expect(operationsModuleSource).toContain("container.register('teamSkill.gatewayWorkflow'");
-    expect(operationsModuleSource).toContain("container.register('teamSkill.taskProjectionWorkflow'");
-    expect(operationsModuleSource).toContain("container.register('teamSkill.service'");
-    expect(operationsModuleSource).toContain("scope.resolve<TeamSkillGatewayWorkflow>('teamSkill.gatewayWorkflow')");
-    expect(operationsModuleSource).toContain("scope.resolve<TeamRunTaskProjectionWorkflow>('teamSkill.taskProjectionWorkflow')");
+    expect(operationsModuleSource).not.toContain("container.register('teamSkill.gatewayWorkflow'");
+    expect(operationsModuleSource).not.toContain("container.register('teamSkill.service'");
+    expect(operationsModuleSource).not.toContain("container.register('teamSkill.taskProjectionWorkflow'");
+    expect(operationsModuleSource).not.toContain("scope.resolve<TeamSkillGatewayWorkflow>('teamSkill.gatewayWorkflow')");
     expect(operationsModuleSource).toContain('createTeamRuntimeCapabilityOperationRoutes');
+    expect(operationsModuleSource).toContain("teamRuntimeService: scope.resolve<TeamRuntimePort>('teamRuntime.service')");
+    expect(operationsModuleSource).toContain('new WorkerBackedTeamRuntimeService');
+    expect(operationsModuleSource).not.toContain('startTeamRuntimeOutboxRecovery');
+    expect(operationsModuleSource).not.toContain("teamRuntime.outboxStore");
   });
 
   it('task runtime RPC 与 snapshot 编排留在 workflow 层，不回流到 task service', async () => {
@@ -1773,12 +1769,12 @@ describe('runtime-host implementation boundary', () => {
     expect(workflowSource).toContain('requirePluginMethod');
     expect(workflowSource).toContain('gatewayRpc');
     expect(workflowSource).toContain('snapshotByMethod');
-    expect(workflowSource).toContain('ensureIdentityFile');
+    expect(workflowSource).toContain('initializeAgentWorkspace');
     expect(serviceSource).toContain('runtimeWorkflow');
     expect(serviceSource).not.toContain('requirePluginMethod');
     expect(serviceSource).not.toContain('gatewayRpc');
     expect(serviceSource).not.toContain('snapshotByMethod');
-    expect(serviceSource).not.toContain('ensureIdentityFile');
+    expect(serviceSource).not.toContain('initializeAgentWorkspace');
     expect(serviceSource).not.toContain('new SubagentRuntimeWorkflow');
     expect(openClawModuleSource).toContain("container.register('subagents.runtimeWorkflow'");
     expect(openClawModuleSource).toContain("runtimeWorkflow: scope.resolve<SubagentRuntimeWorkflow>('subagents.runtimeWorkflow')");
