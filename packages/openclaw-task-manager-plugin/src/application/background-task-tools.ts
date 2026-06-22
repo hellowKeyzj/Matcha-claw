@@ -108,7 +108,7 @@ export function registerBackgroundTaskTools(api: OpenClawPluginApi): void {
     async execute(_toolCallId: string, params: ToolParams) {
       return await executeTaskOutput(api, toolCtx, params)
     },
-  }))
+  }), { name: 'TaskOutput' })
 
   api.registerTool((toolCtx: ToolContext) => ({
     name: 'TaskStop',
@@ -118,5 +118,5 @@ export function registerBackgroundTaskTools(api: OpenClawPluginApi): void {
     async execute(_toolCallId: string, params: ToolParams) {
       return await executeTaskStop(api, toolCtx, params)
     },
-  }))
+  }), { name: 'TaskStop' })
 }

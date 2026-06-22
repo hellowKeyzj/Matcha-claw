@@ -18,6 +18,10 @@ type ToolDefinition = {
 }
 
 type ToolFactory = (ctx: { workspaceDir?: string; sessionKey?: string }) => ToolDefinition
+type ToolRegistration = {
+  factory: ToolFactory
+  options?: { name?: string }
+}
 type HookHandler = (event: Record<string, unknown>, ctx: Record<string, unknown>) => unknown
 
 type GatewayHandler = (options: {
@@ -26,7 +30,7 @@ type GatewayHandler = (options: {
 }) => Promise<void> | void
 
 function createPluginHarness() {
-  const toolFactories: ToolFactory[] = []
+  const toolRegistrations: ToolRegistration[] = []
   const gatewayMethods = new Map<string, GatewayHandler>()
   const hooks = new Map<string, HookHandler>()
   const taskRuns = {
@@ -80,8 +84,8 @@ function createPluginHarness() {
       warn: () => {},
       error: () => {},
     },
-    registerTool: (factory: ToolFactory) => {
-      toolFactories.push(factory)
+    registerTool: (factory: ToolFactory, options?: { name?: string }) => {
+      toolRegistrations.push({ factory, options })
     },
     registerGatewayMethod: (name: string, handler: GatewayHandler) => {
       gatewayMethods.set(name, handler)
@@ -93,8 +97,8 @@ function createPluginHarness() {
   } as any)
 
   const getTool = (name: string, ctx: { workspaceDir?: string; sessionKey?: string }): ToolDefinition => {
-    for (const factory of toolFactories) {
-      const tool = factory(ctx)
+    for (const registration of toolRegistrations) {
+      const tool = registration.factory(ctx)
       if (tool.name === name) {
         return tool
       }
@@ -115,7 +119,9 @@ function createPluginHarness() {
     })
   }
 
-  return { getTool, callGateway, hooks }
+  const getRegisteredToolNames = () => toolRegistrations.map((registration) => registration.options?.name ?? null)
+
+  return { getTool, getRegisteredToolNames, callGateway, hooks }
 }
 
 describe('task-manager semantics', () => {
@@ -125,6 +131,21 @@ describe('task-manager semantics', () => {
     while (tempDirs.length > 0) {
       rmSync(tempDirs.pop() as string, { recursive: true, force: true })
     }
+  })
+
+  it('registers each factory tool with its explicit OpenClaw tool name', () => {
+    const harness = createPluginHarness()
+
+    expect(harness.getRegisteredToolNames()).toEqual([
+      'TaskCreate',
+      'TaskUpdate',
+      'TaskList',
+      'TaskGet',
+      'TodoWrite',
+      'TodoGet',
+      'TaskOutput',
+      'TaskStop',
+    ])
   })
 
   it('registers only final task tools and gateway methods', () => {

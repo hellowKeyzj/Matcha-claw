@@ -223,7 +223,7 @@ export function registerTaskTools(api: OpenClawPluginApi): void {
     async execute(_toolCallId: string, params: ToolParams) {
       return await executeTaskCreate(api, toolCtx, params)
     },
-  }))
+  }), { name: 'TaskCreate' })
 
   api.registerTool((toolCtx: ToolContext) => ({
     name: 'TaskUpdate',
@@ -233,7 +233,7 @@ export function registerTaskTools(api: OpenClawPluginApi): void {
     async execute(_toolCallId: string, params: ToolParams) {
       return await executeTaskUpdate(api, toolCtx, params)
     },
-  }))
+  }), { name: 'TaskUpdate' })
 
   api.registerTool((toolCtx: ToolContext) => ({
     name: 'TaskList',
@@ -243,7 +243,7 @@ export function registerTaskTools(api: OpenClawPluginApi): void {
     async execute(_toolCallId: string, params: ToolParams) {
       return await executeTaskList(api, toolCtx, params)
     },
-  }))
+  }), { name: 'TaskList' })
 
   api.registerTool((toolCtx: ToolContext) => ({
     name: 'TaskGet',
@@ -253,7 +253,7 @@ export function registerTaskTools(api: OpenClawPluginApi): void {
     async execute(_toolCallId: string, params: ToolParams) {
       return await executeTaskGet(api, toolCtx, params)
     },
-  }))
+  }), { name: 'TaskGet' })
 
   api.registerTool((toolCtx: ToolContext) => ({
     name: 'TodoWrite',
@@ -263,7 +263,7 @@ export function registerTaskTools(api: OpenClawPluginApi): void {
     async execute(_toolCallId: string, params: ToolParams) {
       return await executeTodoWrite(api, toolCtx, params)
     },
-  }))
+  }), { name: 'TodoWrite' })
 
   api.registerTool((toolCtx: ToolContext) => ({
     name: 'TodoGet',
@@ -273,5 +273,5 @@ export function registerTaskTools(api: OpenClawPluginApi): void {
     async execute(_toolCallId: string, params: ToolParams) {
       return await executeTodoGet(api, toolCtx, params)
     },
-  }))
+  }), { name: 'TodoGet' })
 }
