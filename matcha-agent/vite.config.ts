@@ -89,10 +89,7 @@ export default defineConfig({
     ssr: true,
 
     rollupOptions: {
-      input: {
-        cli: resolve(projectRoot, 'src/entrypoints/cli.tsx'),
-        sdk: resolve(projectRoot, 'src/entrypoints/agentSdkTypes.ts'),
-      },
+      input: resolve(projectRoot, 'src/entrypoints/cli.tsx'),
 
       output: {
         format: 'es',
@@ -100,7 +97,7 @@ export default defineConfig({
         // consuming ~1 GB RSS for a 17 MB output (vs ~220 MB on Node/V8 which
         // lazy-parses). Splitting into chunks allows Bun to load modules on demand,
         // bringing RSS down to ~300 MB.
-        entryFileNames: '[name].js',
+        entryFileNames: 'cli.js',
         chunkFileNames: 'chunks/[name]-[hash].js',
       },
 

@@ -10,15 +10,17 @@
 
 > Which Claude do you like? The open source one is the best.
 
-牢 A (Anthropic) 官方 [Claude Code](https://docs.anthropic.com/en/docs/claude-code) CLI 工具的源码反编译/逆向还原项目。目标是将 Claude Code 大部分功能及工程化能力复现 (问就是老佛爷已经付过钱了)。虽然很难绷, 但是它叫做 CCB(踩踩背)... 而且, 我们实现了企业版或者需要登陆 Claude 账号才能使用的特性, 实现技术普惠
+牢 A (Anthropic) 官方 [Claude Code](https://docs.anthropic.com/en/docs/claude-code) 完整复原的工程化项目。虽然很难绷, 但是它叫做 CCB(踩踩背)... 而且, 我们实现了企业版或者需要登陆 Claude 账号才能使用的特性, 并在此基础上扩展了更多好玩的特性。
 
-> 我们将会在五一期间进行整个代码仓库的 lint 规范化, 这个期间提交的 PR 可能会有非常多的冲突, 所以大的功能请尽量在这之前提交哈
+[Peri Code](https://github.com/KonghaYao/peri)：Claude Code 兼容的 Rust Agent，多年大模型经验匠心制作，国内大模型（DeepSeek/GLM）精调，CPU/内存极致优化，在开发版/树莓派上也能跑 CC 一样的体验。
 
-[文档在这里, 支持投稿 PR](https://ccb.agent-aura.top/) | [留影文档在这里](./Friends.md) | [Discord 群组](https://discord.gg/uApuzJWGKX)
-
+[文档在这里](https://ccb.agent-aura.top/) | [留影文档在这里](./Friends.md) | [Discord 群组，群主在线答疑](https://discord.gg/uApuzJWGKX)
 
 | 特性                        | 说明                                                                                                                         | 文档                                                                                                                                      |
 | --------------------------- | ---------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
+| **🎯 Goal 持续驱动**        | `/goal <objective>` 设定目标后，自动跨轮驱动 agent 直至完成；带 token budget、completion/blocked audit、`pause`/`resume`/`continue`/`clear` 子命令，网络中断自动暂停 | 源码 [`commands/goal/`](./src/commands/goal/) · [`services/goal/`](./src/services/goal/)                                                  |
+| **📦 Artifacts（HTML 上传）** | 复刻 Anthropic 官方 Artifacts：模型把 HTML/数据看板/报告上传到公开 URL（7d/30d 自动过期），`/artifacts` 命令集中管理，Cloudflare Worker + R2 完全开源、可自托管 | [8 小时复刻报告](./docs/blog/2026-06-20-cloud-artifacts-8h-recap.md) · [在线 demo](https://cloud-artifacts.claude-code-best.win/30d/c2jfwi3E-y3fTZ1ors-KE.html) |
+| **🧠 Ultracode 多 Agent 编排** | `/ultracode` 注入 workflow 编排手册 + `Workflow` 工具跑确定性 JS 脚本（`agent`/`pipeline`/`parallel`/`phase`）+ `/workflows` 双栏监控面板；支持 journal 重放、token budget、并发 cap | [文档](https://ccb.agent-aura.top/docs/features/workflow-scripts)                                                                         |
 | **Claude 群控技术**         | Pipe IPC 多实例协作：同机 main/sub 自动编排 + LAN 跨机器零配置发现与通讯，`/pipes` 选择面板 + `Shift+↓` 交互 + 消息广播路由 | [Pipe IPC](https://ccb.agent-aura.top/docs/features/uds-inbox) / [LAN](https://ccb.agent-aura.top/docs/features/lan-pipes)                |
 | **ACP 协议一等一支持**      | 支持接入 Zed、Cursor 等 IDE，支持会话恢复、Skills、权限桥接                                                                  | [文档](https://ccb.agent-aura.top/docs/features/acp-zed)                                                                                  |
 | **Remote Control 私有部署** | Docker 自托管远程界面, 可以手机上看 CC                                                                                       | [文档](https://ccb.agent-aura.top/docs/features/remote-control-self-hosting)                                                              |
@@ -149,7 +151,6 @@ bun run build
 选择 OpenAI 和 Gemini 对应的栏目都是支持相应协议的
 
 需要填写的字段：
-
 
 | 📌 字段      | 📝 说明       | 💡 示例                      |
 | ------------ | ------------- | ---------------------------- |

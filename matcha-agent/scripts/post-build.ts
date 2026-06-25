@@ -9,7 +9,6 @@
 import { readdir, readFile, writeFile, cp } from 'node:fs/promises'
 import { chmodSync } from 'node:fs'
 import { join } from 'node:path'
-import { $ } from 'bun'
 
 const outdir = 'dist'
 
@@ -69,18 +68,12 @@ async function postBuild() {
   await cp('src/utils/vendor/ripgrep', ripgrepDir, { recursive: true } as never)
   console.log(`Copied src/utils/vendor/ripgrep/ → ${ripgrepDir}/`)
 
-  // Step 3: Generate stable entry points and SDK declarations
+  // Step 3: Generate dual entry points
   const cliBun = join(outdir, 'cli-bun.js')
   const cliNode = join(outdir, 'cli-node.js')
 
   await writeFile(cliBun, '#!/usr/bin/env bun\nimport "./cli.js"\n')
   await writeFile(cliNode, '#!/usr/bin/env node\nimport "./cli.js"\n')
-
-  await $`bunx tsc -p tsconfig.sdk.json`
-  await writeFile(
-    join(outdir, 'sdk.d.ts'),
-    'export * from "./entrypoints/sdk/publicApi.js"\n',
-  )
 
   chmodSync(cliBun, 0o755)
   chmodSync(cliNode, 0o755)

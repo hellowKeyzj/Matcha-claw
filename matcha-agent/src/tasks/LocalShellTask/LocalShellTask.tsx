@@ -331,7 +331,7 @@ export function registerForeground(
  * Background a specific foreground task.
  * @returns true if backgrounded successfully, false otherwise
  */
-export function backgroundTask(taskId: string, getAppState: () => AppState, setAppState: SetAppState): boolean {
+function backgroundTask(taskId: string, getAppState: () => AppState, setAppState: SetAppState): boolean {
   // Step 1: Get the task and shell command from current state
   const state = getAppState();
   const task = state.tasks[taskId];

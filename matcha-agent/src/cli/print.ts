@@ -32,13 +32,7 @@ import {
   logForDiagnosticsNoPII,
   withDiagnosticsTiming,
 } from 'src/utils/diagLogs.js'
-import {
-  toolMatchesName,
-  type Tool,
-  type ToolResult,
-  type Tools,
-  type ToolUseContext,
-} from 'src/Tool.js'
+import { toolMatchesName, type Tool, type Tools } from 'src/Tool.js'
 import {
   type AgentDefinition,
   isBuiltInAgent,
@@ -103,7 +97,6 @@ import {
 } from 'src/utils/fileStateCache.js'
 import { expandPath } from 'src/utils/path.js'
 import { extractReadFilesFromMessages } from 'src/utils/queryHelpers.js'
-import { readFileInRange } from 'src/utils/readFileInRange.js'
 import { registerHookEventHandler } from 'src/utils/hooks/hookEvents.js'
 import { executeFilePersistence } from 'src/utils/filePersistence/filePersistence.js'
 import { finalizePendingAsyncHooks } from 'src/utils/hooks/AsyncHookRegistry.js'
@@ -128,16 +121,13 @@ import type {
   StdoutMessage,
   SDKControlInitializeRequest,
   SDKControlInitializeResponse,
-  SDKControlReadFileContentResponse,
   SDKControlRequest,
   SDKControlResponse,
   SDKControlMcpSetServersResponse,
   SDKControlReloadPluginsResponse,
 } from 'src/entrypoints/sdk/controlTypes.js'
-import type {
-  ExternalPermissionMode,
-  PermissionMode as InternalPermissionMode,
-} from 'src/types/permissions.js'
+import type { PermissionMode } from '@anthropic-ai/claude-agent-sdk'
+import type { PermissionMode as InternalPermissionMode } from 'src/types/permissions.js'
 import { cwd } from 'process'
 import { getCwd } from 'src/utils/cwd.js'
 import omit from 'lodash-es/omit.js'
@@ -209,10 +199,6 @@ import {
   getInitJsonSchema,
   setSdkAgentProgressSummariesEnabled,
 } from 'src/bootstrap/state.js'
-import {
-  FileReadTool,
-  type Output as FileReadOutput,
-} from '@claude-code-best/builtin-tools/tools/FileReadTool/FileReadTool.js'
 import { createSyntheticOutputTool } from '@claude-code-best/builtin-tools/tools/SyntheticOutputTool/SyntheticOutputTool.js'
 import { parseSessionIdentifier } from 'src/utils/sessionUrl.js'
 import {
@@ -270,10 +256,7 @@ import {
   toInternalMessages,
   toSDKRateLimitInfo,
 } from 'src/utils/messages/mappers.js'
-import {
-  createAssistantMessage,
-  createModelSwitchBreadcrumbs,
-} from 'src/utils/messages.js'
+import { createModelSwitchBreadcrumbs } from 'src/utils/messages.js'
 import { collectContextData } from 'src/commands/context/context-noninteractive.js'
 import { LOCAL_COMMAND_STDOUT_TAG } from 'src/constants/xml.js'
 import {
@@ -373,15 +356,6 @@ import { unassignTeammateTasks } from '../utils/tasks.js'
 import { getRunningTasks } from '../utils/task/framework.js'
 import { isBackgroundTask } from '../tasks/types.js'
 import { stopTask } from '../tasks/stopTask.js'
-import {
-  backgroundAll,
-  backgroundTask,
-} from '../tasks/LocalShellTask/LocalShellTask.js'
-import { isLocalShellTask } from '../tasks/LocalShellTask/guards.js'
-import {
-  backgroundAgentTask,
-  isLocalAgentTask,
-} from '../tasks/LocalAgentTask/LocalAgentTask.js'
 import { drainSdkEvents } from '../utils/sdkEventQueue.js'
 import { initializeGrowthBook } from '../services/analytics/growthbook.js'
 import { errorMessage, toError } from '../utils/errors.js'
@@ -1121,7 +1095,7 @@ function runHeadlessStreaming(
         type: 'system',
         subtype: 'status',
         status: null,
-        permissionMode: newMode as ExternalPermissionMode,
+        permissionMode: newMode as PermissionMode,
         uuid: randomUUID(),
         session_id: getSessionId(),
       })
@@ -3285,155 +3259,6 @@ function runHeadlessStreaming(
             // ENOENT etc — skip seeding but still succeed
           }
           sendControlResponseSuccess(msg)
-        } else if (msg.request.subtype === 'read_file') {
-          try {
-            const normalizedPath = expandPath(msg.request.path)
-            if (
-              msg.request.encoding !== undefined &&
-              !/^utf-?8$/i.test(msg.request.encoding)
-            ) {
-              throw new Error('read_file only supports utf-8 text decoding')
-            }
-            const maxBytes = msg.request.maxBytes
-            const readResult = await readFileInRange(
-              normalizedPath,
-              0,
-              undefined,
-              typeof maxBytes === 'number' &&
-                Number.isFinite(maxBytes) &&
-                maxBytes >= 0
-                ? maxBytes
-                : undefined,
-              abortController?.signal,
-              { truncateOnByteLimit: true },
-            )
-            const content = readResult.content
-            const diskMtime = Math.floor(readResult.mtimeMs)
-            const shouldTruncate = readResult.truncatedByBytes === true
-
-            readFileState.set(normalizedPath, {
-              content,
-              timestamp: diskMtime,
-              offset: 1,
-              limit: undefined,
-            })
-            pendingSeeds.delete(normalizedPath)
-
-            sendControlResponseSuccess(msg, {
-              contents: content,
-              absPath: normalizedPath,
-              truncated: shouldTruncate,
-              mtime: diskMtime,
-            })
-          } catch (error) {
-            sendControlResponseError(msg, errorMessage(error))
-          }
-        } else if (msg.request.subtype === 'read_file_content') {
-          try {
-            const toolUseId = randomUUID()
-            const toolInput = {
-              file_path: msg.request.path,
-              offset: msg.request.offset,
-              limit: msg.request.limit,
-              pages: msg.request.pages,
-            }
-            const currentAppState = getAppState()
-            const toolContext: ToolUseContext = {
-              abortController: abortController ?? createAbortController(),
-              options: {
-                commands: currentCommands,
-                debug: false,
-                mainLoopModel: getMainLoopModel(),
-                tools: buildAllTools(currentAppState),
-                verbose: options.verbose ?? false,
-                thinkingConfig: options.thinkingConfig ?? { type: 'disabled' },
-                mcpClients: [
-                  ...currentAppState.mcp.clients,
-                  ...sdkClients,
-                  ...dynamicMcpState.clients,
-                ],
-                mcpResources: {},
-                isNonInteractiveSession: true,
-                agentDefinitions: currentAppState.agentDefinitions,
-                maxBudgetUsd: options.maxBudgetUsd,
-                customSystemPrompt: options.systemPrompt,
-                appendSystemPrompt: options.appendSystemPrompt,
-              },
-              getAppState,
-              setAppState,
-              readFileState,
-              setInProgressToolUseIDs: () => {},
-              setResponseLength: () => {},
-              updateFileHistoryState: updater => {
-                setAppState(prev => ({
-                  ...prev,
-                  fileHistory: updater(prev.fileHistory),
-                }))
-              },
-              updateAttributionState: updater => {
-                setAppState(prev => ({
-                  ...prev,
-                  attribution: updater(prev.attribution),
-                }))
-              },
-              messages: mutableMessages,
-              fileReadingLimits:
-                msg.request.maxTokens !== undefined ||
-                msg.request.maxSizeBytes !== undefined
-                  ? {
-                      maxTokens: msg.request.maxTokens,
-                      maxSizeBytes: msg.request.maxSizeBytes,
-                    }
-                  : undefined,
-              toolUseId,
-            }
-            const validationResult = await FileReadTool.validateInput?.(
-              toolInput,
-              toolContext,
-            )
-            if (validationResult && !validationResult.result) {
-              throw new Error(validationResult.message ?? 'Invalid file path')
-            }
-            const permissionDecision = await hasPermissionsToUseTool(
-              FileReadTool,
-              toolInput,
-              toolContext,
-              createAssistantMessage({ content: [] }),
-              toolUseId,
-            )
-            if (permissionDecision.behavior !== 'allow') {
-              throw new Error(permissionDecision.message)
-            }
-            const readInput = FileReadTool.inputSchema.parse(
-              permissionDecision.updatedInput ?? toolInput,
-            )
-            const result = (await FileReadTool.call(
-              readInput,
-              toolContext,
-              hasPermissionsToUseTool,
-              createAssistantMessage({ content: [] }),
-            )) as ToolResult<FileReadOutput>
-            const mapped = FileReadTool.mapToolResultToToolResultBlockParam(
-              result.data,
-              toolUseId,
-            )
-            const supplementalContent = result.newMessages
-              ?.map(message => message.message?.content)
-              .filter(
-                (content): content is string | ContentBlockParam[] =>
-                  typeof content === 'string' || Array.isArray(content),
-              ) as SDKControlReadFileContentResponse['supplementalContent']
-            const response: SDKControlReadFileContentResponse = {
-              data: result.data,
-              content: (mapped.content ??
-                '') as SDKControlReadFileContentResponse['content'],
-              supplementalContent,
-              toolUseId,
-            }
-            sendControlResponseSuccess(msg, response)
-          } catch (error) {
-            sendControlResponseError(msg, errorMessage(error))
-          }
         } else if (msg.request.subtype === 'mcp_set_servers') {
           const { response, sdkServersChanged } = await applyMcpServerChanges(
             msg.request.servers as Record<
@@ -4165,46 +3990,6 @@ function runHeadlessStreaming(
               setAppState,
             })
             sendControlResponseSuccess(msg, {})
-          } catch (error) {
-            sendControlResponseError(msg, errorMessage(error))
-          }
-        } else if (msg.request.subtype === 'background_tasks') {
-          try {
-            const backgroundRequest = msg.request
-            const state = getAppState()
-            const taskIds = Object.keys(state.tasks).filter(taskId => {
-              const task = state.tasks[taskId]
-              if (
-                backgroundRequest.tool_use_id &&
-                task.toolUseId !== backgroundRequest.tool_use_id
-              ) {
-                return false
-              }
-              return (
-                (isLocalShellTask(task) &&
-                  !task.isBackgrounded &&
-                  task.shellCommand) ||
-                (isLocalAgentTask(task) && !task.isBackgrounded)
-              )
-            })
-
-            if (backgroundRequest.tool_use_id) {
-              for (const taskId of taskIds) {
-                const task = getAppState().tasks[taskId]
-                if (isLocalShellTask(task)) {
-                  backgroundTask(taskId, getAppState, setAppState)
-                } else if (isLocalAgentTask(task)) {
-                  backgroundAgentTask(taskId, getAppState, setAppState)
-                }
-              }
-            } else {
-              backgroundAll(getAppState, setAppState)
-            }
-
-            sendControlResponseSuccess(msg, {
-              backgrounded: taskIds.length > 0,
-              task_ids: taskIds,
-            })
           } catch (error) {
             sendControlResponseError(msg, errorMessage(error))
           }

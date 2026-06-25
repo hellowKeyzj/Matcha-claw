@@ -1,6 +1,6 @@
 {
   "name": "claude-code-best",
-  "version": "2.6.6",
+  "version": "2.8.1",
   "description": "Reverse-engineered Anthropic Claude Code CLI — interactive AI coding assistant in the terminal",
   "type": "module",
   "author": "claude-code-best <claude-code-best@proton.me>",
@@ -28,29 +28,6 @@
     "ccb": "dist/cli-node.js",
     "ccb-bun": "dist/cli-bun.js",
     "claude-code-best": "dist/cli-node.js"
-  },
-  "types": "./dist/sdk.d.ts",
-  "exports": {
-    ".": {
-      "types": "./dist/sdk.d.ts",
-      "import": "./dist/sdk.js",
-      "default": "./dist/sdk.js"
-    },
-    "./sdk": {
-      "types": "./dist/sdk.d.ts",
-      "import": "./dist/sdk.js",
-      "default": "./dist/sdk.js"
-    },
-    "./sdk/core": {
-      "types": "./dist/sdk.d.ts",
-      "import": "./dist/sdk.js",
-      "default": "./dist/sdk.js"
-    },
-    "./sdk/control": {
-      "types": "./dist/sdk.d.ts",
-      "import": "./dist/sdk.js",
-      "default": "./dist/sdk.js"
-    }
   },
   "workspaces": [
     "packages/*",
