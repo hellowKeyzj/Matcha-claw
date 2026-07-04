@@ -144,11 +144,23 @@
       "coreBadge": "Core",
       "pluginBadge": "Plugin",
       "toolCount": "{{count}} инструментов",
-      "defaultProfiles": "Профили по умолчанию: {{profiles}}",
+      "profileDefault": "По профилю",
+      "effectiveTools": "Активно сейчас",
+      "explicitRules": "Явные правила",
+      "policyDefault": "По умолчанию",
+      "inheritToolsHint": "Agent наследует инструменты по умолчанию. Переключитесь на явную настройку, чтобы менять отдельные инструменты или группы.",
+      "toolProfileSummary": "{{profile}}: активно {{enabled}}/{{total}}; по профилю {{defaultEnabled}}, явных правил {{overrides}}",
+      "groupSummary": "активно {{enabled}}/{{total}} · явных правил {{rules}}",
+      "toolStates": {
+        "enabledByProfile": "Профиль вкл.",
+        "disabledByProfile": "Профиль выкл.",
+        "allowedByOverride": "Разрешено",
+        "deniedByOverride": "Запрещено"
+      },
       "unsupported": {
         "runtimeDoesNotExposeAgentSkillConfig": "Текущий runtime не поддерживает настройку навыков Agent.",
         "runtimeDoesNotExposeAgentToolConfig": "Текущий runtime не поддерживает настройку инструментов Agent.",
-        "agentNotConfigured": "Этот Agent еще не записан в конфигурацию OpenClaw, поэтому здесь нельзя настроить возможности."
+        "agentNotConfigured": "Текущий runtime ещё не зарегистрировал настройки возможностей для этого Agent, поэтому здесь нельзя их настроить."
       }
     }
   },

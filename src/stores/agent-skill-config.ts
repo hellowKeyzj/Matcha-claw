@@ -219,7 +219,7 @@ function normalizeSetAgentSkillConfigCommand(command: SetAgentSkillConfigCommand
 async function resolveAgentSkillConfigScope(): Promise<AgentScope> {
   const scope = await resolveSingleCapabilityScope(AGENT_SKILL_CONFIG_CAPABILITY_ID);
   if (scope.kind !== 'agent') {
-    throw new Error(`agent.skill-config requires agent scope, got ${scope.kind}. Reconnect the OpenClaw runtime and try again.`);
+    throw new Error(`agent.skill-config requires agent scope, got ${scope.kind}. Reconnect the runtime and try again.`);
   }
   return scope;
 }
@@ -292,7 +292,7 @@ async function persistAgentSkillConfig(command: SetAgentSkillConfigCommand): Pro
     }
     case 'unsupported':
       if (result.reason === 'agentNotConfigured') {
-        throw new Error('This agent is not configured in OpenClaw, so its skills cannot be changed here. Add the agent to openclaw.json first, then refresh and try again.');
+        throw new Error('This runtime has not registered capability settings for this agent yet, so its skills cannot be changed here. Refresh the agent and try again.');
       }
       throw new Error('This runtime does not expose agent skill configuration. Reconnect to a runtime that supports agent.skill-config, then refresh the agent and try again.');
   }

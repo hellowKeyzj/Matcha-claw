@@ -144,11 +144,23 @@
       "coreBadge": "Core",
       "pluginBadge": "Plugin",
       "toolCount": "{{count}} tools",
-      "defaultProfiles": "Default profiles: {{profiles}}",
+      "profileDefault": "Profile default",
+      "effectiveTools": "Effective tools",
+      "explicitRules": "Explicit rules",
+      "policyDefault": "Default",
+      "inheritToolsHint": "This agent is inheriting default tools. Switch to explicit configuration to adjust individual tools or whole groups.",
+      "toolProfileSummary": "{{profile}}: {{enabled}}/{{total}} enabled now; {{defaultEnabled}} by profile, {{overrides}} explicit rules",
+      "groupSummary": "{{enabled}}/{{total}} enabled · {{rules}} explicit rules",
+      "toolStates": {
+        "enabledByProfile": "Profile on",
+        "disabledByProfile": "Profile off",
+        "allowedByOverride": "Allowed",
+        "deniedByOverride": "Denied"
+      },
       "unsupported": {
         "runtimeDoesNotExposeAgentSkillConfig": "This runtime does not support agent skill configuration.",
         "runtimeDoesNotExposeAgentToolConfig": "This runtime does not support agent tool configuration.",
-        "agentNotConfigured": "This agent is not in the OpenClaw config yet, so capabilities cannot be configured here."
+        "agentNotConfigured": "This runtime has not registered capability settings for this agent yet, so capabilities cannot be configured here."
       }
     }
   },

@@ -144,11 +144,23 @@
       "coreBadge": "内置",
       "pluginBadge": "插件",
       "toolCount": "{{count}} 个工具",
-      "defaultProfiles": "默认 Profile：{{profiles}}",
+      "profileDefault": "Profile 默认启用",
+      "effectiveTools": "当前生效",
+      "explicitRules": "显式规则",
+      "policyDefault": "默认",
+      "inheritToolsHint": "正在继承默认工具；切到显式配置后可调整单个工具或整组规则。",
+      "toolProfileSummary": "{{profile}}：当前启用 {{enabled}}/{{total}}；Profile 默认 {{defaultEnabled}}，显式规则 {{overrides}}",
+      "groupSummary": "启用 {{enabled}}/{{total}} · 显式规则 {{rules}}",
+      "toolStates": {
+        "enabledByProfile": "Profile 启用",
+        "disabledByProfile": "Profile 关闭",
+        "allowedByOverride": "已允许",
+        "deniedByOverride": "已拒绝"
+      },
       "unsupported": {
         "runtimeDoesNotExposeAgentSkillConfig": "当前运行时不支持 Agent 技能配置。",
         "runtimeDoesNotExposeAgentToolConfig": "当前运行时不支持 Agent 工具配置。",
-        "agentNotConfigured": "该 Agent 尚未写入 OpenClaw 配置，暂不能在这里配置能力。"
+        "agentNotConfigured": "当前运行时还没有这个 Agent 的能力配置，暂不能在这里配置。"
       }
     }
   },

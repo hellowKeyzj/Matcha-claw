@@ -141,11 +141,23 @@
       "coreBadge": "内蔵",
       "pluginBadge": "プラグイン",
       "toolCount": "{{count}} 個のツール",
-      "defaultProfiles": "既定 Profile: {{profiles}}",
+      "profileDefault": "Profile 既定",
+      "effectiveTools": "有効なツール",
+      "explicitRules": "明示ルール",
+      "policyDefault": "既定",
+      "inheritToolsHint": "既定ツールを継承中です。明示設定に切り替えると、個別ツールまたはグループ単位で調整できます。",
+      "toolProfileSummary": "{{profile}}: 現在 {{enabled}}/{{total}} 有効、Profile 既定 {{defaultEnabled}}、明示ルール {{overrides}}",
+      "groupSummary": "{{enabled}}/{{total}} 有効 · 明示ルール {{rules}}",
+      "toolStates": {
+        "enabledByProfile": "Profile 有効",
+        "disabledByProfile": "Profile 無効",
+        "allowedByOverride": "許可済み",
+        "deniedByOverride": "拒否済み"
+      },
       "unsupported": {
         "runtimeDoesNotExposeAgentSkillConfig": "現在のランタイムはAgentスキル設定に対応していません。",
         "runtimeDoesNotExposeAgentToolConfig": "現在のランタイムはAgentツール設定に対応していません。",
-        "agentNotConfigured": "このAgentはまだOpenClaw設定に存在しないため、ここでは能力を設定できません。"
+        "agentNotConfigured": "現在のランタイムにこのAgentの能力設定がまだ登録されていないため、ここでは設定できません。"
       }
     }
   },

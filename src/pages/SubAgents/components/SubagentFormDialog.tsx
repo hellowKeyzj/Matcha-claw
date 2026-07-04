@@ -20,7 +20,7 @@ import {
 import type { ModelCatalogEntry, DraftByFile, PreviewDiffByFile, SubagentSummary, SubagentTargetFile } from '@/types/subagent';
 import type { AgentSkillConfigView, SetAgentSkillConfigCommand } from '@/stores/agent-skill-config';
 import type { AgentToolConfigOption, AgentToolConfigView, SetAgentToolConfigCommand } from '@/stores/agent-tool-config';
-import { RefreshCw, X } from 'lucide-react';
+import { ChevronDown, RefreshCw, X } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { SubagentDiffPreview } from './SubagentDiffPreview';
@@ -99,17 +99,14 @@ const EMPTY_VALUES: SubagentFormValues = {
 const TOOL_PROFILE_OPTIONS = ['full', 'coding', 'minimal', 'messaging'] as const;
 const CREATE_AGENT_AVATAR_PICKER_OPTION_COUNT = 15;
 
+type ToolEffectiveState = 'enabledByProfile' | 'disabledByProfile' | 'allowedByOverride' | 'deniedByOverride';
+
 function formatToolProfileLabel(profileKey: string, displayName: string, t: (key: string, options?: Record<string, unknown>) => string): string {
   return t(`form.toolProfiles.${profileKey}`, { defaultValue: displayName || profileKey });
 }
 
-function renderToolMeta(tool: AgentToolConfigOption): string {
-  return [
-    tool.toolKey,
-    tool.source === 'plugin' && tool.pluginId ? tool.pluginId : '',
-    tool.risk ? `risk:${tool.risk}` : '',
-    tool.optional ? 'optional' : '',
-  ].filter(Boolean).join(' · ');
+function isEnabledByToolProfile(tool: AgentToolConfigOption, profileKey: string): boolean {
+  return profileKey === 'full' || Boolean(tool.defaultProfiles?.includes(profileKey));
 }
 
 function areStringSetsEqual(left: readonly string[], right: readonly string[]): boolean {
@@ -186,6 +183,7 @@ export function SubagentFormDialog({
   const [toolProfile, setToolProfile] = useState('full');
   const [allowedToolKeys, setAllowedToolKeys] = useState<string[]>([]);
   const [deniedToolKeys, setDeniedToolKeys] = useState<string[]>([]);
+  const [expandedToolGroupKeys, setExpandedToolGroupKeys] = useState<string[]>([]);
   const basicInfoLocked = mode === 'edit' && lockBasicInfo;
   const resolvedModelOptions = useMemo(() => {
     const byId = new Map<string, ModelCatalogEntry>();
@@ -330,6 +328,20 @@ export function SubagentFormDialog({
       ? [{ profileKey: toolProfile, displayName: toolProfile }, ...profiles]
       : profiles;
   }, [toolConfigView?.toolProfiles, toolProfile]);
+
+  useEffect(() => {
+    if (!open || mode !== 'edit' || activeTab !== 'tools') {
+      return;
+    }
+    const groupKeys = toolConfigView?.toolGroups.map((group) => group.groupKey) ?? [];
+    setExpandedToolGroupKeys((prev) => {
+      const retainedKeys = prev.filter((groupKey) => groupKeys.includes(groupKey));
+      if (retainedKeys.length > 0 || groupKeys.length === 0) {
+        return retainedKeys.length === prev.length ? prev : retainedKeys;
+      }
+      return [groupKeys[0]];
+    });
+  }, [activeTab, mode, open, toolConfigView?.toolGroups]);
 
   if (!open) {
     return null;
@@ -827,41 +839,119 @@ export function SubagentFormDialog({
   const renderToolConfig = () => {
     const toolGroups = toolConfigView?.toolGroups ?? [];
     const toolOptions = toolConfigView?.toolOptions ?? [];
+    const allTools = toolGroups.flatMap((group) => group.toolOptions);
     const unsupportedReason = toolConfigView?.support.supportType === 'unsupported'
       ? toolConfigView.support.reason
       : null;
-    const disabled = toolSelectionMode === 'inherit';
+    const controlsDisabled = toolSelectionMode === 'inherit';
     const findGroupPolicyOption = (groupKey: string) => toolOptions.find((option) => option.optionType === 'group' && option.groupKey === groupKey);
-    const renderPolicyToggles = (tool: AgentToolConfigOption) => {
-      const allowed = allowedToolKeys.includes(tool.toolKey);
-      const denied = deniedToolKeys.includes(tool.toolKey);
+    const readToolPolicySetting = (toolKey: string): 'default' | 'allow' | 'deny' => {
+      if (deniedToolKeys.includes(toolKey)) {
+        return 'deny';
+      }
+      return allowedToolKeys.includes(toolKey) ? 'allow' : 'default';
+    };
+    const setToolPolicySetting = (toolKey: string, nextSetting: 'default' | 'allow' | 'deny') => {
+      setAllowedToolKeys((prev) => nextSetting === 'allow' ? toggleStringKey(prev, toolKey, true) : toggleStringKey(prev, toolKey, false));
+      setDeniedToolKeys((prev) => nextSetting === 'deny' ? toggleStringKey(prev, toolKey, true) : toggleStringKey(prev, toolKey, false));
+    };
+    const readToolEffectiveState = (tool: AgentToolConfigOption, groupPolicyOption?: AgentToolConfigOption): ToolEffectiveState => {
+      const toolPolicySetting = readToolPolicySetting(tool.toolKey);
+      if (toolPolicySetting === 'deny') {
+        return 'deniedByOverride';
+      }
+      if (toolPolicySetting === 'allow') {
+        return 'allowedByOverride';
+      }
+      if (groupPolicyOption) {
+        const groupPolicySetting = readToolPolicySetting(groupPolicyOption.toolKey);
+        if (groupPolicySetting === 'deny') {
+          return 'deniedByOverride';
+        }
+        if (groupPolicySetting === 'allow') {
+          return 'allowedByOverride';
+        }
+      }
+      return isEnabledByToolProfile(tool, toolProfile) ? 'enabledByProfile' : 'disabledByProfile';
+    };
+    const isToolEffectivelyEnabled = (state: ToolEffectiveState) => state === 'enabledByProfile' || state === 'allowedByOverride';
+    const effectiveEnabledCount = toolGroups.reduce((count, group) => {
+      const groupPolicyOption = findGroupPolicyOption(group.groupKey);
+      return count + group.toolOptions.filter((tool) => isToolEffectivelyEnabled(readToolEffectiveState(tool, groupPolicyOption))).length;
+    }, 0);
+    const profileEnabledCount = allTools.filter((tool) => isEnabledByToolProfile(tool, toolProfile)).length;
+    const explicitRuleCount = allowedToolKeys.length + deniedToolKeys.length;
+    const selectedProfileLabel = toolProfileOptions.find((profile) => profile.profileKey === toolProfile)?.displayName ?? toolProfile;
+    const shouldShowToolSummary = toolGroups.length > 0 && !toolConfigLoading && !toolConfigError && !unsupportedReason;
+    const renderToolStateBadge = (state: ToolEffectiveState) => (
+      <span className={cn(
+        'inline-flex shrink-0 items-center rounded-full px-2 py-0.5 text-[11px] font-medium',
+        state === 'enabledByProfile' && 'bg-emerald-500/10 text-emerald-700',
+        state === 'allowedByOverride' && 'bg-blue-500/10 text-blue-700',
+        state === 'deniedByOverride' && 'bg-rose-500/10 text-rose-700',
+        state === 'disabledByProfile' && 'bg-muted text-muted-foreground',
+      )}
+      >
+        {t(`form.capabilities.toolStates.${state}`)}
+      </span>
+    );
+    const renderPolicyControl = (tool: AgentToolConfigOption) => {
+      const currentSetting = readToolPolicySetting(tool.toolKey);
+      const policyButtonClass = (setting: 'default' | 'allow' | 'deny') => cn(
+        'h-6 rounded-full px-2 text-[11px] shadow-none',
+        currentSetting === setting
+          ? 'bg-card text-foreground shadow-sm hover:bg-card'
+          : 'text-muted-foreground hover:bg-muted/70 hover:text-foreground',
+      );
       return (
-        <div className="mt-3 flex flex-wrap items-center gap-3 text-xs text-muted-foreground">
-          <label className="inline-flex items-center gap-2">
-            <Switch
-              aria-label={`${t('form.capabilities.allowTool')} ${tool.displayName}`}
-              checked={allowed}
-              disabled={disabled || denied}
-              onCheckedChange={(checked) => setAllowedToolKeys((prev) => toggleStringKey(prev, tool.toolKey, checked))}
-            />
-            <span>{t('form.capabilities.allow')}</span>
-          </label>
-          <label className="inline-flex items-center gap-2">
-            <Switch
-              aria-label={`${t('form.capabilities.denyTool')} ${tool.displayName}`}
-              checked={denied}
-              disabled={disabled || allowed}
-              onCheckedChange={(checked) => setDeniedToolKeys((prev) => toggleStringKey(prev, tool.toolKey, checked))}
-            />
-            <span>{t('form.capabilities.deny')}</span>
-          </label>
+        <div className="inline-flex items-center rounded-full border bg-muted/40 p-0.5">
+          <Button
+            type="button"
+            variant="ghost"
+            disabled={controlsDisabled}
+            className={policyButtonClass('default')}
+            onClick={() => setToolPolicySetting(tool.toolKey, 'default')}
+          >
+            {t('form.capabilities.policyDefault')}
+          </Button>
+          <Button
+            type="button"
+            variant="ghost"
+            disabled={controlsDisabled}
+            className={policyButtonClass('allow')}
+            onClick={() => setToolPolicySetting(tool.toolKey, 'allow')}
+          >
+            {t('form.capabilities.allow')}
+          </Button>
+          <Button
+            type="button"
+            variant="ghost"
+            disabled={controlsDisabled}
+            className={policyButtonClass('deny')}
+            onClick={() => setToolPolicySetting(tool.toolKey, 'deny')}
+          >
+            {t('form.capabilities.deny')}
+          </Button>
         </div>
       );
     };
     return (
-      <section className="space-y-3 rounded-xl border bg-background p-4">
-        <div className="flex flex-wrap items-start justify-between gap-3">
-          <h3 className="text-sm font-semibold text-foreground">{t('form.toolConfig')}</h3>
+      <section className="flex h-full min-h-0 flex-col rounded-xl border bg-background p-3">
+        <div className="flex shrink-0 flex-wrap items-center justify-between gap-3">
+          <div className="min-w-0">
+            <h3 className="text-sm font-semibold text-foreground">{t('form.toolConfig')}</h3>
+            {shouldShowToolSummary ? (
+              <p className="mt-0.5 text-xs text-muted-foreground">
+                {t('form.capabilities.toolProfileSummary', {
+                  profile: formatToolProfileLabel(toolProfile, selectedProfileLabel, t),
+                  enabled: effectiveEnabledCount,
+                  total: allTools.length,
+                  defaultEnabled: profileEnabledCount,
+                  overrides: explicitRuleCount,
+                })}
+              </p>
+            ) : null}
+          </div>
           <label className="inline-flex shrink-0 items-center gap-2 rounded-full border bg-card px-3 py-1.5 text-xs text-muted-foreground">
             <Switch
               aria-label={t('form.useAllTools')}
@@ -881,74 +971,106 @@ export function SubagentFormDialog({
         ) : toolGroups.length === 0 ? (
           <p className="text-sm text-muted-foreground">{t('form.noToolOptions')}</p>
         ) : (
-          <div className={cn('space-y-4', disabled && 'opacity-60')}>
-            <div className="max-w-xs space-y-1">
-              <Label htmlFor="subagent-tool-profile">{t('form.toolProfile')}</Label>
-              <Select
-                id="subagent-tool-profile"
-                value={toolProfile}
-                disabled={disabled}
-                onChange={(event) => setToolProfile(event.target.value)}
-              >
-                {toolProfileOptions.map((profile) => (
-                  <option key={profile.profileKey} value={profile.profileKey}>
-                    {formatToolProfileLabel(profile.profileKey, profile.displayName, t)}
-                  </option>
-                ))}
-              </Select>
+          <div className={cn('mt-3 flex min-h-0 flex-1 flex-col gap-3', controlsDisabled && 'opacity-65')}>
+            <div className="grid shrink-0 gap-3 rounded-xl border bg-muted/20 p-3 md:grid-cols-[minmax(220px,320px),minmax(0,1fr)] md:items-end">
+              <div className="space-y-1">
+                <Label htmlFor="subagent-tool-profile">{t('form.toolProfile')}</Label>
+                <Select
+                  id="subagent-tool-profile"
+                  value={toolProfile}
+                  disabled={controlsDisabled}
+                  onChange={(event) => setToolProfile(event.target.value)}
+                >
+                  {toolProfileOptions.map((profile) => (
+                    <option key={profile.profileKey} value={profile.profileKey}>
+                      {formatToolProfileLabel(profile.profileKey, profile.displayName, t)}
+                    </option>
+                  ))}
+                </Select>
+              </div>
+              <div className="grid gap-2 sm:grid-cols-3">
+                <div className="rounded-lg border bg-card px-3 py-2">
+                  <p className="text-[11px] text-muted-foreground">{t('form.capabilities.profileDefault')}</p>
+                  <p className="mt-1 text-sm font-medium text-foreground">{profileEnabledCount}/{allTools.length}</p>
+                </div>
+                <div className="rounded-lg border bg-card px-3 py-2">
+                  <p className="text-[11px] text-muted-foreground">{t('form.capabilities.effectiveTools')}</p>
+                  <p className="mt-1 text-sm font-medium text-foreground">{effectiveEnabledCount}/{allTools.length}</p>
+                </div>
+                <div className="rounded-lg border bg-card px-3 py-2">
+                  <p className="text-[11px] text-muted-foreground">{t('form.capabilities.explicitRules')}</p>
+                  <p className="mt-1 text-sm font-medium text-foreground">{explicitRuleCount}</p>
+                </div>
+              </div>
+              {controlsDisabled ? (
+                <p className="text-xs text-muted-foreground md:col-span-2">{t('form.capabilities.inheritToolsHint')}</p>
+              ) : null}
             </div>
-            <div className="space-y-3">
+            <div className="min-h-0 flex-1 space-y-2 overflow-y-auto pr-1">
               {toolGroups.map((group) => {
                 const groupPolicyOption = findGroupPolicyOption(group.groupKey);
+                const expanded = expandedToolGroupKeys.includes(group.groupKey);
+                const enabledInGroupCount = group.toolOptions.filter((tool) => isToolEffectivelyEnabled(readToolEffectiveState(tool, groupPolicyOption))).length;
+                const groupRuleCount = [
+                  groupPolicyOption && readToolPolicySetting(groupPolicyOption.toolKey) !== 'default',
+                  ...group.toolOptions.map((tool) => readToolPolicySetting(tool.toolKey) !== 'default'),
+                ].filter(Boolean).length;
                 return (
-                  <div key={group.groupKey} className="rounded-xl border bg-muted/20 p-3">
-                    <div className="flex flex-wrap items-start justify-between gap-3">
-                      <div className="min-w-0">
-                        <div className="flex flex-wrap items-center gap-2">
-                          <h4 className="text-sm font-semibold text-foreground">{group.displayName}</h4>
-                          <span className="rounded-full bg-secondary px-2 py-0.5 text-[10px] text-muted-foreground">
-                            {group.source === 'plugin'
-                              ? t('form.capabilities.pluginBadge', { defaultValue: 'Plugin' })
-                              : t('form.capabilities.coreBadge', { defaultValue: 'Core' })}
-                          </span>
-                          {group.pluginId ? (
-                            <span className="rounded-full border bg-card px-2 py-0.5 text-[10px] text-muted-foreground">{group.pluginId}</span>
-                          ) : null}
-                        </div>
-                        <p className="mt-1 text-xs text-muted-foreground">
-                          {t('form.capabilities.toolCount', { count: group.toolOptions.length, defaultValue: `${group.toolOptions.length} tools` })}
-                        </p>
-                      </div>
-                      {groupPolicyOption ? (
-                        <div className="min-w-[180px] rounded-lg border bg-card px-3 py-2">
-                          <p className="text-xs font-medium text-foreground">{t('form.capabilities.groupBadge')}</p>
-                          <p className="mt-0.5 text-[11px] text-muted-foreground">{groupPolicyOption.toolKey}</p>
-                          {renderPolicyToggles(groupPolicyOption)}
-                        </div>
-                      ) : null}
-                    </div>
-                    <div className="mt-3 grid gap-2 md:grid-cols-2">
-                      {group.toolOptions.map((tool) => (
-                        <div key={tool.toolKey} className="rounded-xl border bg-card p-3">
-                          <div className="flex items-start justify-between gap-3">
-                            <div className="min-w-0">
-                              <p className="truncate text-sm font-medium">{tool.displayName}</p>
-                              <p className="mt-1 text-xs text-muted-foreground">{renderToolMeta(tool)}</p>
-                            </div>
-                            <span className="shrink-0 rounded-full bg-secondary px-2 py-0.5 text-[10px] text-muted-foreground">
-                              {t('form.capabilities.toolBadge')}
+                  <div key={group.groupKey} className="overflow-hidden rounded-xl border bg-card">
+                    <div className="grid grid-cols-[minmax(0,1fr),auto] items-center gap-3 px-3 py-2">
+                      <button
+                        type="button"
+                        className="flex min-w-0 items-center gap-3 text-left"
+                        aria-expanded={expanded}
+                        onClick={() => setExpandedToolGroupKeys((prev) => toggleStringKey(prev, group.groupKey, !expanded))}
+                      >
+                        <ChevronDown className={cn('h-4 w-4 shrink-0 text-muted-foreground transition-transform', expanded ? 'rotate-0' : '-rotate-90')} />
+                        <span className="min-w-0 flex-1">
+                          <span className="flex flex-wrap items-center gap-2">
+                            <span className="text-sm font-semibold text-foreground">{group.displayName}</span>
+                            <span className="rounded-full bg-muted px-2 py-0.5 text-[10px] text-muted-foreground">
+                              {group.source === 'plugin'
+                                ? t('form.capabilities.pluginBadge')
+                                : t('form.capabilities.coreBadge')}
                             </span>
-                          </div>
-                          {tool.description ? <p className="mt-2 line-clamp-2 text-xs text-muted-foreground">{tool.description}</p> : null}
-                          {tool.defaultProfiles && tool.defaultProfiles.length > 0 ? (
-                            <p className="mt-2 text-[11px] text-muted-foreground">
-                              {t('form.capabilities.defaultProfiles', { profiles: tool.defaultProfiles.join(', '), defaultValue: `Profiles: ${tool.defaultProfiles.join(', ')}` })}
-                            </p>
-                          ) : null}
-                          {renderPolicyToggles(tool)}
-                        </div>
-                      ))}
+                            {group.pluginId ? <span className="text-[11px] text-muted-foreground">{group.pluginId}</span> : null}
+                          </span>
+                          <span className="mt-0.5 block text-xs text-muted-foreground">
+                            {t('form.capabilities.groupSummary', {
+                              enabled: enabledInGroupCount,
+                              total: group.toolOptions.length,
+                              rules: groupRuleCount,
+                            })}
+                          </span>
+                        </span>
+                      </button>
+                      {groupPolicyOption ? renderPolicyControl(groupPolicyOption) : null}
                     </div>
+                    {expanded ? (
+                      <div className="divide-y border-t bg-background/60">
+                        {group.toolOptions.map((tool) => {
+                          const effectiveState = readToolEffectiveState(tool, groupPolicyOption);
+                          return (
+                            <div key={tool.toolKey} className="grid gap-3 px-3 py-2.5 md:grid-cols-[minmax(0,1fr),auto] md:items-center">
+                              <div className="min-w-0">
+                                <div className="flex flex-wrap items-center gap-2">
+                                  {renderToolStateBadge(effectiveState)}
+                                  <p className="truncate text-sm font-medium text-foreground">{tool.displayName}</p>
+                                  <span className="truncate text-xs text-muted-foreground">{tool.toolKey}</span>
+                                </div>
+                                {tool.description ? <p className="mt-1 line-clamp-1 text-xs text-muted-foreground">{tool.description}</p> : null}
+                                {tool.source === 'plugin' && tool.pluginId ? (
+                                  <p className="mt-1 text-[11px] text-muted-foreground">{tool.pluginId}</p>
+                                ) : null}
+                              </div>
+                              <div className="flex justify-start md:justify-end">
+                                {renderPolicyControl(tool)}
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    ) : null}
                   </div>
                 );
               })}
@@ -971,11 +1093,11 @@ export function SubagentFormDialog({
         <TabsTrigger value="skills" onClick={() => setActiveTab('skills')}>{t('form.tabs.skills')}</TabsTrigger>
         <TabsTrigger value="tools" onClick={() => setActiveTab('tools')}>{t('form.tabs.tools')}</TabsTrigger>
       </TabsList>
-      <div className="min-h-0 flex-1 overflow-y-auto pr-1">
-        <TabsContent value="basic">{renderBasicInfo()}</TabsContent>
-        <TabsContent value="persona">{renderPersonaConfig()}</TabsContent>
-        <TabsContent value="skills">{renderSkillConfig()}</TabsContent>
-        <TabsContent value="tools">{renderToolConfig()}</TabsContent>
+      <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+        <TabsContent value="basic" className="min-h-0 flex-1 overflow-y-auto pr-1">{renderBasicInfo()}</TabsContent>
+        <TabsContent value="persona" className="min-h-0 flex-1 overflow-y-auto pr-1">{renderPersonaConfig()}</TabsContent>
+        <TabsContent value="skills" className="min-h-0 flex-1 overflow-y-auto pr-1">{renderSkillConfig()}</TabsContent>
+        <TabsContent value="tools" className="min-h-0 flex-1 overflow-hidden">{renderToolConfig()}</TabsContent>
       </div>
     </Tabs>
   ) : (

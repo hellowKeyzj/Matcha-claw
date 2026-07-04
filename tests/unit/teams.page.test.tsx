@@ -260,7 +260,7 @@ describe('teams page', () => {
     expect(screen.getByText('Team Overview')).toBeInTheDocument();
     expect(screen.getByText('TeamSkill-defined team')).toBeInTheDocument();
     expect(screen.getByText('Design Team')).toBeInTheDocument();
-    expect(screen.getByText('ascendc-team@1.0.0')).toBeInTheDocument();
+    expect(screen.queryByText('ascendc-team@1.0.0')).not.toBeInTheDocument();
     expect(screen.queryByText(`Package: ${TEAM_SKILL_PACKAGE_PATH}`)).not.toBeInTheDocument();
     expect(screen.getByText('Managed roles: 1')).toBeInTheDocument();
   });

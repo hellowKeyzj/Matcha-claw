@@ -317,7 +317,7 @@ function normalizeSetAgentToolConfigCommand(command: SetAgentToolConfigCommand):
 async function resolveAgentToolConfigScope(): Promise<AgentScope> {
   const scope = await resolveSingleCapabilityScope(AGENT_TOOL_CONFIG_CAPABILITY_ID);
   if (scope.kind !== 'agent') {
-    throw new Error(`agent.tool-config requires agent scope, got ${scope.kind}. Reconnect the OpenClaw runtime and try again.`);
+    throw new Error(`agent.tool-config requires agent scope, got ${scope.kind}. Reconnect the runtime and try again.`);
   }
   return scope;
 }
@@ -385,7 +385,7 @@ async function persistAgentToolConfig(command: SetAgentToolConfigCommand): Promi
       throw new Error(`Selected tools include keys this runtime cannot save${result.unknownToolKeys.length > 0 ? `: ${result.unknownToolKeys.join(', ')}` : ''}. Refresh the tool list, adjust the selected tools, and try again.`);
     case 'unsupported':
       if (result.reason === 'agentNotConfigured') {
-        throw new Error('This agent is not configured in OpenClaw, so its tools cannot be changed here. Add the agent to openclaw.json first, then refresh and try again.');
+        throw new Error('This runtime has not registered capability settings for this agent yet, so its tools cannot be changed here. Refresh the agent and try again.');
       }
       throw new Error('This runtime does not expose agent tool configuration. Reconnect to a runtime that supports agent.tool-config, then refresh the agent and try again.');
   }

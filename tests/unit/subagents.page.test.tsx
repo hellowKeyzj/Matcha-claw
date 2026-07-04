@@ -408,7 +408,8 @@ describe('subagents page', () => {
               displayName: 'Files',
               source: 'core',
               toolOptions: [
-                { toolKey: 'read', displayName: 'Read', optionType: 'tool', description: 'Read files', source: 'core', groupKey: 'fs', groupDisplayName: 'Files', defaultProfiles: ['coding'] },
+                { toolKey: 'read', displayName: 'Read', optionType: 'tool', description: 'Read files', source: 'core', groupKey: 'fs', groupDisplayName: 'Files', defaultProfiles: ['minimal', 'coding'] },
+                { toolKey: 'write', displayName: 'Write', optionType: 'tool', description: 'Write files', source: 'core', groupKey: 'fs', groupDisplayName: 'Files', defaultProfiles: ['coding'] },
               ],
             },
             {
@@ -422,7 +423,8 @@ describe('subagents page', () => {
           ],
           toolOptions: [
             { toolKey: 'group:fs', displayName: 'Files tools', optionType: 'group', source: 'core', groupKey: 'fs', groupDisplayName: 'Files' },
-            { toolKey: 'read', displayName: 'Read', optionType: 'tool', description: 'Read files', source: 'core', groupKey: 'fs', groupDisplayName: 'Files', defaultProfiles: ['coding'] },
+            { toolKey: 'read', displayName: 'Read', optionType: 'tool', description: 'Read files', source: 'core', groupKey: 'fs', groupDisplayName: 'Files', defaultProfiles: ['minimal', 'coding'] },
+            { toolKey: 'write', displayName: 'Write', optionType: 'tool', description: 'Write files', source: 'core', groupKey: 'fs', groupDisplayName: 'Files', defaultProfiles: ['coding'] },
             { toolKey: 'group:web', displayName: 'Web tools', optionType: 'group', source: 'core', groupKey: 'web', groupDisplayName: 'Web' },
             { toolKey: 'web_search', displayName: 'Web Search', optionType: 'tool', description: 'Search web content', source: 'core', groupKey: 'web', groupDisplayName: 'Web', defaultProfiles: ['coding'] },
           ],
@@ -981,11 +983,20 @@ describe('subagents page', () => {
 
     expect(screen.queryByText('Skill Configuration')).toBeNull();
     expect(screen.getByText('Tool Configuration')).toBeInTheDocument();
+    expect(screen.getByText(/Full.*enabled now/i)).toBeInTheDocument();
+    const toolPanel = screen.getByText('Tool Configuration').closest('section') as HTMLElement;
+    const toolListScrollRegion = toolPanel.querySelector('.min-h-0.flex-1.overflow-y-auto') as HTMLElement;
+    expect(toolPanel).toHaveClass('flex-col');
+    expect(toolListScrollRegion).toBeInTheDocument();
+    expect(toolListScrollRegion).not.toContainElement(screen.getByText('Tool Profile').closest('div'));
     expect(screen.getByText('Files')).toBeInTheDocument();
     expect(screen.getByText('Read')).toBeInTheDocument();
+    expect(screen.getByText('Write')).toBeInTheDocument();
     expect(screen.getByText('Web')).toBeInTheDocument();
+    expect(screen.queryByText('Web Search')).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: /Web.*enabled/i }));
     expect(screen.getByText('Web Search')).toBeInTheDocument();
-    expect(screen.queryByText(/Configure this agent.*OpenClaw tool profile/i)).toBeNull();
+    expect(screen.queryByText(/OpenClaw tool profile/i)).toBeNull();
   });
 
   it('编辑时不应把已删除模型补回下拉选项，并在单模型场景自动回填', async () => {
