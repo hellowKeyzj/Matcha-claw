@@ -7,10 +7,10 @@ import { randomUUID, randomBytes } from 'node:crypto';
 import { TeamRuntimeService } from '../../team-runtime-service';
 import { TeamRuntimePackageService } from '../../team-runtime-package-service';
 import { FileTeamRuntimeStateStore } from '../../team-runtime-state-store';
-import { SqliteTeamIngressAdapter, SqliteTeamOutboxStore } from './local-sqlite';
-import { TeamRuntimeMailDeliveryService } from '../../team-mail-delivery-service';
+import { SqliteTeamCommandLedger } from './local-sqlite';
+import { TeamRuntimeNodePromptDeliveryService } from '../../team-node-prompt-delivery-service';
 import { isTeamRuntimeDebugLoggingEnabled } from '../../team-runtime-debug-logging';
-import { TeamRuntimeOutboxPoller } from '../../team-runtime-outbox-poller';
+import { TeamRuntimeCronScheduler } from '../../team-runtime-cron-scheduler';
 import {
   TeamRuntimeWorkerHostRpc,
   WorkerProxyTeamAgentMaterializationPort,
@@ -187,9 +187,9 @@ if (!parentPort) {
 const config = workerData as TeamRuntimeWorkerConfig;
 const fileSystem = new WorkerRuntimeFileSystem();
 const hostRpc = new TeamRuntimeWorkerHostRpc((message) => parentPort!.postMessage(message satisfies TeamRuntimeWorkerToMainMessage));
-let outboxStore: SqliteTeamOutboxStore | null = null;
+let commandLedger: SqliteTeamCommandLedger | null = null;
 let teamRuntimeService: TeamRuntimeService | null = null;
-let outboxPoller: TeamRuntimeOutboxPoller | null = null;
+let cronScheduler: TeamRuntimeCronScheduler | null = null;
 let startupError: unknown = null;
 
 const startup = startWorkerRuntime().catch((error) => {
@@ -208,54 +208,50 @@ async function startWorkerRuntime(): Promise<void> {
   const agentMaterialization = new WorkerProxyTeamAgentMaterializationPort(hostRpc);
   const jobs = new WorkerProxyTeamRuntimeJobPort(hostRpc);
   const skillCatalog = new WorkerProxyTeamSkillCatalogPort(hostRpc);
-  const databasePath = path.join(config.runtimeDataRootDir, 'team-runtime', 'outbox.sqlite');
-  outboxStore = await SqliteTeamOutboxStore.open({
-    databasePath,
-    ensureDatabaseDirectory: () => mkdir(path.dirname(databasePath), { recursive: true }),
+  const ledgerDatabasePath = path.join(config.runtimeDataRootDir, 'team-runtime', 'command-ledger.sqlite');
+  commandLedger = await SqliteTeamCommandLedger.open({
+    databasePath: ledgerDatabasePath,
+    ensureDatabaseDirectory: () => mkdir(path.dirname(ledgerDatabasePath), { recursive: true }),
     nowMs: () => Date.now(),
     randomId: () => randomUUID(),
   });
-  const ingress = new SqliteTeamIngressAdapter(outboxStore);
   const stateStore = new FileTeamRuntimeStateStore({
     runtimeData: { getRuntimeDataRootDir: () => config.runtimeDataRootDir },
     fileSystem,
   });
   const packageService = new TeamRuntimePackageService({ fileSystem });
-  const mailDelivery = new TeamRuntimeMailDeliveryService({
+  const nodePromptDelivery = new TeamRuntimeNodePromptDeliveryService({
     roleSessions,
     nowMs: () => Date.now(),
   });
   teamRuntimeService = new TeamRuntimeService({
-    ingress,
+    commandLedger,
     stateStore,
     packageService,
     skillCatalog,
     agentMaterialization,
     roleSessions,
-    mailDelivery,
+    nodePromptDelivery,
     jobs,
     nowMs: () => Date.now(),
     randomId: () => randomBytes(16).toString('hex'),
     shardCount: config.shardCount,
   });
-  outboxPoller = new TeamRuntimeOutboxPoller({
+  cronScheduler = new TeamRuntimeCronScheduler({
     runRegistry: teamRuntimeService.runRegistry,
-    dirtyRunStore: outboxStore,
     teamRuntimeService,
     nowMs: () => Date.now(),
   });
-  await logDeferredDirtyRuns(outboxStore);
-  logWorkerInfo('startup ready', {
-    durationMs: Date.now() - startedAtMs,
+  const rehydrated = await teamRuntimeService.rehydrateActiveRuns();
+  cronScheduler.refresh();
+  logWorkerInfo('startup rehydrated runs', {
+    restoredRunCount: rehydrated.restoredRunIds.length,
+    activeRunCount: rehydrated.activeRunIds.length,
+    skippedTerminalRunCount: rehydrated.skippedTerminalRunIds.length,
     pendingHostRequestCount: hostRpc.pendingCount(),
   });
-}
-
-async function logDeferredDirtyRuns(store: SqliteTeamOutboxStore): Promise<void> {
-  if (!isTeamRuntimeDebugLoggingEnabled()) return;
-  const dirtyRuns = await store.listDirtyRuns();
-  logWorkerInfo('dirty run recovery deferred', {
-    count: dirtyRuns.length,
+  logWorkerInfo('startup ready', {
+    durationMs: Date.now() - startedAtMs,
     pendingHostRequestCount: hostRpc.pendingCount(),
   });
 }
@@ -278,7 +274,7 @@ async function handleInvoke(message: TeamRuntimeWorkerRequest): Promise<void> {
       throw new Error('TeamRuntime worker failed to initialize');
     }
     const response = await teamRuntimeService.invoke(message.operationId, message.params, message.scope);
-    outboxPoller?.refresh();
+    cronScheduler?.refresh();
     logWorkerInfo('invoke success', {
       requestId: message.requestId,
       operationId: message.operationId,
@@ -308,9 +304,9 @@ parentPort.on('message', (message: TeamRuntimeMainToWorkerMessage) => {
   if (message.type === 'team-runtime.close') {
     const startedAtMs = Date.now();
     logWorkerInfo('close receive', { requestId: message.requestId, pendingHostRequestCount: hostRpc.pendingCount() });
-    outboxPoller?.close();
-    outboxPoller = null;
-    outboxStore?.close();
+    cronScheduler?.close();
+    cronScheduler = null;
+    commandLedger?.close();
     logWorkerInfo('close success', {
       requestId: message.requestId,
       durationMs: Date.now() - startedAtMs,

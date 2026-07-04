@@ -14,11 +14,20 @@ export const teamRuntimeCapabilityOperations = [
   { id: 'team.delete', title: 'Delete Team', targetKind: 'team' },
   { id: 'team.runCreate', title: 'Create TeamRun', targetKind: 'team' },
   { id: 'team.runList', title: 'List TeamRuns', targetKind: 'team' },
+  { id: 'team.triggerList', title: 'List TeamRun armed triggers', targetKind: 'team' },
+  { id: 'team.webhookTriggerFire', title: 'Fire TeamRun webhook trigger by path', targetKind: 'team' },
   { id: 'team.runSnapshot', title: 'Read TeamRun snapshot', targetKind: 'team-run' },
+  { id: 'team.graphSave', title: 'Save TeamRun graph config', targetKind: 'team-run' },
+  { id: 'team.graphPatch', title: 'Submit TeamRun graph patch command', targetKind: 'team-run' },
+  { id: 'team.graphContext', title: 'Read compact TeamRun graph context', targetKind: 'team-run' },
+  { id: 'team.graphExportYaml', title: 'Export TeamRun graph YAML', targetKind: 'team-run' },
+  { id: 'team.graphImportYaml', title: 'Import TeamRun graph YAML', targetKind: 'team-run' },
+  { id: 'team.triggerFire', title: 'Fire TeamRun StartNode trigger', targetKind: 'team-run' },
+  { id: 'team.roleMessageSubmit', title: 'Submit Team role chat message', targetKind: 'team-run' },
+  { id: 'team.nodePromptRetryDue', title: 'Wake due TeamRun node prompt retries', targetKind: 'team-run' },
+  { id: 'team.nodeEvent', title: 'Submit TeamRun node event command', targetKind: 'team-run' },
   { id: 'team.runDiagnostics', title: 'Read TeamRun diagnostics', targetKind: 'team-run' },
   { id: 'team.runDecisionSubmit', title: 'Submit TeamRun decision', targetKind: 'team-run' },
-  { id: 'team.planWorkflow', title: 'Plan TeamRun workflow', targetKind: 'team-run' },
-  { id: 'team.runTick', title: 'Tick TeamRun', targetKind: 'team-run' },
   { id: 'team.resume', title: 'Resume Team', targetKind: 'team' },
   { id: 'team.approvalResolve', title: 'Resolve Team approval', targetKind: 'team-approval' },
   { id: 'team.runCancel', title: 'Cancel TeamRun', targetKind: 'team-run' },
@@ -59,7 +68,8 @@ function validateTeamRuntimeTargetInput(
     case 'team.provisionAgents':
       return validateMatchingRequiredString(target, 'packagePath', input, 'packagePath')
         ?? validateMatchingOptionalString(target, 'teamId', input, 'teamId')
-        ?? validateRequiredInputString(input, 'idempotencyKey');
+        ?? validateRequiredInputString(input, 'idempotencyKey')
+        ?? validateManualTeamInput(input);
     case 'team.delete':
       return validateMatchingRequiredString(target, 'teamId', input, 'teamId');
     case 'team.resume':
@@ -68,13 +78,61 @@ function validateTeamRuntimeTargetInput(
     case 'team.runCreate':
       return validateMatchingRequiredString(target, 'packagePath', input, 'packagePath')
         ?? validateMatchingOptionalString(target, 'teamId', input, 'teamId')
-        ?? validateRequiredInputString(input, 'idempotencyKey');
+        ?? validateRequiredInputString(input, 'idempotencyKey')
+        ?? validateSourceTypeInput(input);
     case 'team.runList':
       return validateMatchingRequiredString(target, 'teamId', input, 'teamId');
-    case 'team.runTick':
+    case 'team.triggerList':
+      // Internal runtime-host cron scheduler enumerates armed triggers across all
+      // non-terminal runs; this is not a renderer-targeted, per-team operation.
+      return null;
+    case 'team.webhookTriggerFire':
+      return validateRequiredInputString(input, 'webhookPath');
     case 'team.runCancel':
       return validateMatchingRequiredString(target, 'runId', input, 'runId')
         ?? validateMatchingOptionalString(target, 'teamId', input, 'teamId')
+        ?? validateRequiredInputString(input, 'idempotencyKey')
+        ?? validateTeamRunScope(target, scope);
+    case 'team.graphSave':
+      return validateMatchingRequiredString(target, 'runId', input, 'runId')
+        ?? validateMatchingOptionalString(target, 'teamId', input, 'teamId')
+        ?? validateRequiredInputString(input, 'idempotencyKey')
+        ?? validateRequiredInputObject(input, 'graph')
+        ?? validateTeamRunScope(target, scope);
+    case 'team.graphImportYaml':
+      return validateMatchingRequiredString(target, 'runId', input, 'runId')
+        ?? validateMatchingOptionalString(target, 'teamId', input, 'teamId')
+        ?? validateRequiredInputString(input, 'idempotencyKey')
+        ?? validateRequiredInputString(input, 'yaml')
+        ?? validateTeamRunScope(target, scope);
+    case 'team.graphPatch':
+      return validateMatchingRequiredString(target, 'runId', input, 'runId')
+        ?? validateMatchingOptionalString(target, 'teamId', input, 'teamId')
+        ?? validateRequiredInputString(input, 'summary')
+        ?? validateRequiredInputObject(input, 'patch')
+        ?? validateRequiredInputString(input, 'idempotencyKey')
+        ?? validateTeamRunScope(target, scope)
+        ?? validateRequiredGraphPatchOperations(input);
+    case 'team.triggerFire':
+      return validateMatchingRequiredString(target, 'runId', input, 'runId')
+        ?? validateMatchingOptionalString(target, 'teamId', input, 'teamId')
+        ?? validateRequiredInputString(input, 'startNodeId')
+        ?? validateRequiredInputString(input, 'triggerSource')
+        ?? validateRequiredInputString(input, 'idempotencyKey')
+        ?? validateTeamRunScope(target, scope);
+    case 'team.roleMessageSubmit':
+      return validateMatchingRequiredString(target, 'runId', input, 'runId')
+        ?? validateMatchingOptionalString(target, 'teamId', input, 'teamId')
+        ?? validateRequiredInputString(input, 'roleId')
+        ?? validateRequiredInputString(input, 'text')
+        ?? validateRequiredInputString(input, 'idempotencyKey')
+        ?? validateTeamRunScope(target, scope);
+    case 'team.nodeEvent':
+      return validateMatchingRequiredString(target, 'runId', input, 'runId')
+        ?? validateMatchingOptionalString(target, 'teamId', input, 'teamId')
+        ?? validateRequiredInputString(input, 'nodeExecutionId')
+        ?? validateRequiredInputString(input, 'event')
+        ?? validateRequiredInputString(input, 'summary')
         ?? validateRequiredInputString(input, 'idempotencyKey')
         ?? validateTeamRunScope(target, scope);
     case 'team.runDecisionSubmit':
@@ -84,17 +142,13 @@ function validateTeamRuntimeTargetInput(
         ?? validateRequiredInputString(input, 'idempotencyKey')
         ?? validateTeamRunScope(target, scope);
     case 'team.runSnapshot':
+    case 'team.graphContext':
+    case 'team.graphExportYaml':
     case 'team.runDiagnostics':
+    case 'team.nodePromptRetryDue':
     case 'team.runDelete':
       return validateMatchingRequiredString(target, 'runId', input, 'runId')
         ?? validateMatchingOptionalString(target, 'teamId', input, 'teamId')
-        ?? validateTeamRunScope(target, scope);
-    case 'team.planWorkflow':
-      return validateMatchingRequiredString(target, 'runId', input, 'runId')
-        ?? validateRequiredInputString(input, 'title')
-        ?? validateRequiredInputArray(input, 'groups')
-        ?? validateRequiredInputArray(input, 'tasks')
-        ?? validateRequiredInputString(input, 'idempotencyKey')
         ?? validateTeamRunScope(target, scope);
     case 'team.approvalResolve':
       return validateMatchingRequiredString(target, 'runId', input, 'runId')
@@ -139,9 +193,32 @@ function validateRequiredInputString(input: Record<string, unknown>, inputField:
   return readStringField(input, inputField) ? null : `Team runtime input ${inputField} is required`;
 }
 
-function validateRequiredInputArray(input: Record<string, unknown>, inputField: string): string | null {
+function validateRequiredInputObject(input: Record<string, unknown>, inputField: string): string | null {
   const value = input[inputField];
-  return Array.isArray(value) ? null : `Team runtime input ${inputField} is required`;
+  return value && typeof value === 'object' && !Array.isArray(value) ? null : `Team runtime input ${inputField} is required`;
+}
+
+function validateRequiredGraphPatchOperations(input: Record<string, unknown>): string | null {
+  const patch = input.patch;
+  if (!patch || typeof patch !== 'object' || Array.isArray(patch)) return 'Team runtime input patch is required';
+  const operations = (patch as Record<string, unknown>).operations;
+  return Array.isArray(operations) && operations.length > 0 ? null : 'Team runtime input patch.operations must be a non-empty array';
+}
+
+function validateManualTeamInput(input: Record<string, unknown>): string | null {
+  const sourceTypeError = validateSourceTypeInput(input);
+  if (sourceTypeError) return sourceTypeError;
+  if (readStringField(input, 'sourceType') !== 'manual') return null;
+  const manualTeam = input.manualTeam;
+  if (!manualTeam || typeof manualTeam !== 'object' || Array.isArray(manualTeam)) return 'Team runtime input manualTeam is required';
+  const members = (manualTeam as Record<string, unknown>).members;
+  return Array.isArray(members) && members.length > 0 ? null : 'Team runtime input manualTeam.members must be a non-empty array';
+}
+
+function validateSourceTypeInput(input: Record<string, unknown>): string | null {
+  const sourceType = readStringField(input, 'sourceType');
+  if (!sourceType || sourceType === 'teamskill' || sourceType === 'manual') return null;
+  return 'Team runtime input sourceType must be teamskill or manual';
 }
 
 function validateTeamRunScope(target: CapabilityTarget | null, scope: RuntimeScope): string | null {

@@ -1,7 +1,7 @@
 import type { ApplicationResponseOf } from '../common/application-response';
 import type { RuntimeScope } from '../agent-runtime/contracts/runtime-address';
 import type { TeamRuntimeOperationId } from './team-runtime-operation-id';
-import type { TeamAgentMaterializationSpec } from './ports/team-agent-materialization-port';
+import type { TeamAgentMaterializationSpec, RemoveTeamAgentsInput } from './ports/team-agent-materialization-port';
 import type {
   AbortTeamRoleSessionInput,
   DeleteTeamRoleSessionInput,
@@ -83,12 +83,7 @@ export type TeamRuntimeHostRequest =
   | {
       readonly type: 'host.agentMaterialization.remove';
       readonly requestId: string;
-      readonly input: {
-        readonly teamId: string;
-        readonly endpoint: DeleteTeamManagedAgentsJobPayload['endpoint'];
-        readonly agentIds: readonly string[];
-        readonly workspacePaths: readonly string[];
-      };
+      readonly input: RemoveTeamAgentsInput;
     }
   | {
       readonly type: 'host.job.deleteManagedAgents';

@@ -1,7 +1,2 @@
-export { SqliteTeamIngressAdapter } from './sqlite-team-ingress-adapter';
-export { SqliteTeamOutboxStore } from './sqlite-team-outbox-store';
-export type {
-  SqliteTeamOutboxPullInput,
-  SqliteTeamOutboxPullResult,
-  SqliteTeamOutboxStoreDeps,
-} from './sqlite-team-outbox-store';
+export { SqliteTeamCommandLedger } from './sqlite-team-command-ledger';
+export type { SqliteTeamCommandLedgerDeps } from './sqlite-team-command-ledger';

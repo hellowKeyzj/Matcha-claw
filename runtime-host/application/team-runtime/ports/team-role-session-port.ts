@@ -12,6 +12,7 @@ export interface EnsureTeamRoleSessionInput {
 export interface PromptTeamRoleSessionInput {
   readonly binding: TeamRoleSessionBinding;
   readonly message: string;
+  readonly displayMessage?: string;
   readonly idempotencyKey: string;
   readonly deliver?: boolean;
 }

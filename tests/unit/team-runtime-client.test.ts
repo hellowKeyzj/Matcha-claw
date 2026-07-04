@@ -10,9 +10,43 @@ const runtimeInstanceScope = {
   },
 };
 
+const manualTeam = {
+  name: 'Manual Ops Team',
+  description: 'Manual operators',
+  version: '2026.1',
+  members: [{
+    agentId: 'leader-agent',
+    agentName: 'Leader Agent',
+    workspace: '/work/manual-team',
+    roleId: 'leader',
+    skills: ['planning'],
+    tools: ['terminal'],
+    model: 'claude-sonnet-4-5',
+    isLeader: true,
+  }],
+};
+
 describe('team runtime client', () => {
   beforeEach(() => {
     resetGatewayClientMocks();
+  });
+
+  it('readTeamWebhookAuth reads the runtime-host webhook auth projection without plugin calls', async () => {
+    hostApiFetchMock.mockResolvedValueOnce({
+      success: true,
+      enabled: true,
+      source: 'settings',
+      headerName: 'x-matchaclaw-webhook-token',
+      authorizationScheme: 'Bearer',
+      maskedToken: 'mctwh_…oken',
+      copySupported: false,
+    });
+    const { readTeamWebhookAuth } = await import('@/services/openclaw/team-runtime-client');
+
+    await expect(readTeamWebhookAuth()).resolves.toMatchObject({ maskedToken: 'mctwh_…oken', source: 'settings', copySupported: false });
+
+    expect(hostApiFetchMock).toHaveBeenCalledWith('/api/runtime-host/team-webhook-auth', undefined);
+    expect(capabilityExecuteMock).not.toHaveBeenCalled();
   });
 
   it('createTeamRun executes typed team.runtime operation without enabling the plugin from the client', async () => {
@@ -45,6 +79,36 @@ describe('team runtime client', () => {
     );
   });
 
+  it('createTeamRun forwards manual source type through team.runtime', async () => {
+    capabilityExecuteMock.mockResolvedValueOnce({ runId: 'run-1', status: 'created', revision: 1 });
+    const { createTeamRun } = await import('@/services/openclaw/team-runtime-client');
+
+    await createTeamRun({
+      teamId: 'team-1',
+      packagePath: 'manual:team-1',
+      runId: 'run-1',
+      idempotencyKey: 'create-1',
+      sourceType: 'manual',
+    });
+
+    expect(capabilityExecuteMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: 'team.runtime',
+        operationId: 'team.runCreate',
+        scope: runtimeInstanceScope,
+        target: { kind: 'team', teamId: 'team-1', packagePath: 'manual:team-1' },
+        input: {
+          teamId: 'team-1',
+          packagePath: 'manual:team-1',
+          runId: 'run-1',
+          idempotencyKey: 'create-1',
+          sourceType: 'manual',
+        },
+      }),
+      { timeoutMs: 60_000 },
+    );
+  });
+
   it('provisionTeamAgents executes team-level managed agent provisioning through team.runtime', async () => {
     capabilityExecuteMock.mockResolvedValueOnce({ teamId: 'team-1', managedAgentCount: 2 });
     const { provisionTeamAgents } = await import('@/services/openclaw/team-runtime-client');
@@ -65,6 +129,36 @@ describe('team runtime client', () => {
           teamId: 'team-1',
           packagePath: '.tmp/team-skill',
           idempotencyKey: 'team-1:provision-agents:ascendc-team:1.0.0',
+        },
+      }),
+      { timeoutMs: 60_000 },
+    );
+  });
+
+  it('provisionTeamAgents forwards manual source payload through team.runtime', async () => {
+    capabilityExecuteMock.mockResolvedValueOnce({ teamId: 'team-1', managedAgentCount: 1 });
+    const { provisionTeamAgents } = await import('@/services/openclaw/team-runtime-client');
+
+    await provisionTeamAgents({
+      teamId: 'team-1',
+      packagePath: 'manual:team-1',
+      idempotencyKey: 'team-1:provision-agents:manual:2026.1',
+      sourceType: 'manual',
+      manualTeam,
+    });
+
+    expect(capabilityExecuteMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: 'team.runtime',
+        operationId: 'team.provisionAgents',
+        scope: runtimeInstanceScope,
+        target: { kind: 'team', teamId: 'team-1', packagePath: 'manual:team-1' },
+        input: {
+          teamId: 'team-1',
+          packagePath: 'manual:team-1',
+          idempotencyKey: 'team-1:provision-agents:manual:2026.1',
+          sourceType: 'manual',
+          manualTeam,
         },
       }),
       { timeoutMs: 60_000 },
@@ -179,24 +273,6 @@ describe('team runtime client', () => {
     );
   });
 
-  it('tickTeamRun executes tick operation through team.runtime', async () => {
-    capabilityExecuteMock.mockResolvedValueOnce({ success: true, runId: 'run-1', resultType: 'noop' });
-    const { tickTeamRun } = await import('@/services/openclaw/team-runtime-client');
-
-    await tickTeamRun({ runId: 'run-1', idempotencyKey: 'tick-1' });
-
-    expect(capabilityExecuteMock).toHaveBeenCalledWith(
-      expect.objectContaining({
-        id: 'team.runtime',
-        operationId: 'team.runTick',
-        scope: runtimeInstanceScope,
-        target: { kind: 'team-run', runId: 'run-1' },
-        input: { runId: 'run-1', idempotencyKey: 'tick-1' },
-      }),
-      { timeoutMs: 60_000 },
-    );
-  });
-
   it('resumeTeam executes team-level resume operation through team.runtime', async () => {
     capabilityExecuteMock.mockResolvedValueOnce({ success: true, teamId: 'team-1', restoredRunIds: [], activeRunIds: [], skippedTerminalRunIds: [] });
     const { resumeTeam } = await import('@/services/openclaw/team-runtime-client');
@@ -268,35 +344,116 @@ describe('team runtime client', () => {
     );
   });
 
-  it('planTeamWorkflow forwards workflow payload through team.runtime without synthetic status', async () => {
-    capabilityExecuteMock.mockResolvedValueOnce({ plan: { workflowPlanId: 'plan-1' }, created: true });
-    const { planTeamWorkflow } = await import('@/services/openclaw/team-runtime-client');
-
-    await planTeamWorkflow({
+  it('saveTeamRunGraphProjection saves graph config through team.runtime', async () => {
+    capabilityExecuteMock.mockResolvedValueOnce({ success: true, runId: 'run-1', saved: true });
+    const { saveTeamRunGraphProjection } = await import('@/services/openclaw/team-runtime-client');
+    const graph = {
       runId: 'run-1',
-      title: 'Workflow plan',
-      summary: 'Plan summary',
-      groups: [{ groupId: 'group-1', taskIds: ['task-1'] }],
-      tasks: [{ taskId: 'task-1', roleId: 'operator', title: 'Task 1' }],
-      idempotencyKey: 'plan-1',
+      nodes: [{ nodeId: 'node-1', kind: 'work', title: 'Task 1' }],
+      edges: [],
+      status: 'running',
+      updatedAt: 123,
+    };
+
+    await saveTeamRunGraphProjection({
+      runId: 'run-1',
+      graph,
+      idempotencyKey: 'graph-1',
     });
 
-    const payload = capabilityExecuteMock.mock.calls[0][0];
-    expect(payload).toMatchObject({
-      id: 'team.runtime',
-      operationId: 'team.planWorkflow',
-      scope: runtimeInstanceScope,
-      target: { kind: 'team-run', runId: 'run-1' },
-      input: {
-        runId: 'run-1',
-        title: 'Workflow plan',
-        summary: 'Plan summary',
-        groups: [{ groupId: 'group-1', taskIds: ['task-1'] }],
-        tasks: [{ taskId: 'task-1', roleId: 'operator', title: 'Task 1' }],
-        idempotencyKey: 'plan-1',
-      },
+    expect(capabilityExecuteMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: 'team.runtime',
+        operationId: 'team.graphSave',
+        scope: runtimeInstanceScope,
+        target: { kind: 'team-run', runId: 'run-1' },
+        input: { runId: 'run-1', graph, idempotencyKey: 'graph-1' },
+      }),
+      { timeoutMs: 60_000 },
+    );
+  });
+
+  it('exportTeamRunGraphYaml exports graph YAML through team.runtime', async () => {
+    capabilityExecuteMock.mockResolvedValueOnce({ runId: 'run-1', fileName: 'run-1.yaml', yaml: 'nodes: []\n' });
+    const { exportTeamRunGraphYaml } = await import('@/services/openclaw/team-runtime-client');
+
+    await expect(exportTeamRunGraphYaml({ runId: 'run-1' })).resolves.toEqual({ runId: 'run-1', fileName: 'run-1.yaml', yaml: 'nodes: []\n' });
+
+    expect(capabilityExecuteMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: 'team.runtime',
+        operationId: 'team.graphExportYaml',
+        scope: runtimeInstanceScope,
+        target: { kind: 'team-run', runId: 'run-1' },
+        input: { runId: 'run-1' },
+      }),
+      { timeoutMs: 60_000 },
+    );
+  });
+
+  it('importTeamRunGraphYaml imports graph YAML through team.runtime', async () => {
+    capabilityExecuteMock.mockResolvedValueOnce({ success: true, runId: 'run-1', imported: true });
+    const { importTeamRunGraphYaml } = await import('@/services/openclaw/team-runtime-client');
+
+    await expect(importTeamRunGraphYaml({ runId: 'run-1', yaml: 'nodes: []\n', idempotencyKey: 'import-1' })).resolves.toEqual({ success: true, runId: 'run-1', imported: true });
+
+    expect(capabilityExecuteMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: 'team.runtime',
+        operationId: 'team.graphImportYaml',
+        scope: runtimeInstanceScope,
+        target: { kind: 'team-run', runId: 'run-1' },
+        input: { runId: 'run-1', yaml: 'nodes: []\n', idempotencyKey: 'import-1' },
+      }),
+      { timeoutMs: 60_000 },
+    );
+  });
+
+  it('fireTeamRunTrigger executes trigger fire through team.runtime', async () => {
+    capabilityExecuteMock.mockResolvedValueOnce({ fired: true, snapshot: { run: null, graph: null, nodeExecutions: [] } });
+    const { fireTeamRunTrigger } = await import('@/services/openclaw/team-runtime-client');
+
+    await fireTeamRunTrigger({
+      runId: 'run-1',
+      startNodeId: 'start-1',
+      triggerSource: 'webhook',
+      payloadSummary: 'payload received',
+      idempotencyKey: 'trigger-1',
     });
-    expect(payload.input).not.toHaveProperty('status');
+
+    expect(capabilityExecuteMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: 'team.runtime',
+        operationId: 'team.triggerFire',
+        scope: runtimeInstanceScope,
+        target: { kind: 'team-run', runId: 'run-1' },
+        input: { runId: 'run-1', startNodeId: 'start-1', triggerSource: 'webhook', payloadSummary: 'payload received', idempotencyKey: 'trigger-1' },
+      }),
+      { timeoutMs: 60_000 },
+    );
+  });
+
+  it('submitTeamRunRoleMessage submits role chat text through team.runtime', async () => {
+    capabilityExecuteMock.mockResolvedValueOnce({ submitted: true, snapshot: { run: null, graph: null, nodeExecutions: [] } });
+    const { submitTeamRunRoleMessage } = await import('@/services/openclaw/team-runtime-client');
+
+    await submitTeamRunRoleMessage({
+      runId: 'run-1',
+      roleId: 'leader',
+      text: 'hello',
+      idempotencyKey: 'chat-1',
+    });
+
+    expect(capabilityExecuteMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: 'team.runtime',
+        operationId: 'team.roleMessageSubmit',
+        scope: runtimeInstanceScope,
+        target: { kind: 'team-run', runId: 'run-1' },
+        input: { runId: 'run-1', roleId: 'leader', text: 'hello', idempotencyKey: 'chat-1' },
+      }),
+      { timeoutMs: 60_000 },
+    );
   });
 
   it('cancelTeamRun executes cancel operation through team.runtime', async () => {

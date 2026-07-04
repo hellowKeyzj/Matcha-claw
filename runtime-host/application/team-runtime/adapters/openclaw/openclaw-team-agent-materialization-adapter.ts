@@ -1,6 +1,6 @@
 import path from 'node:path';
 import { buildTeamManagedAgentId, teamManagedAgentTeamPrefix } from '../../domain/team-managed-agent';
-import type { TeamManagedAgentRecord } from '../../domain/team-instance';
+import type { TeamManagedAgentConfigRestore, TeamManagedAgentRecord } from '../../domain/team-instance';
 import type { RuntimeFileSystemPort } from '../../../common/runtime-ports';
 import type { GatewayPluginCapabilityPort, GatewayPluginCapabilityDefinition } from '../../../gateway/gateway-capability-service';
 import type { GatewayRpcPort } from '../../../gateway/gateway-runtime-port';
@@ -13,6 +13,10 @@ import type {
   TeamAgentMaterializationSpec,
   TeamRoleAgentMaterializationSpec,
 } from '../../ports/team-agent-materialization-port';
+import {
+  OPENCLAW_TEAM_AGENT_SANDBOX,
+  projectTeamRoleToolPolicyToOpenClawTools,
+} from './openclaw-team-agent-policy-projection';
 
 const OPENCLAW_AGENT_MATERIALIZATION_RPC_TIMEOUT_MS = 60_000;
 const OPENCLAW_AGENT_MATERIALIZATION_CAPABILITY_TIMEOUT_MS = 5_000;
@@ -29,10 +33,6 @@ const OPENCLAW_AGENT_MATERIALIZATION_PLUGIN: GatewayPluginCapabilityDefinition =
 };
 const TEAMBUDDY_DIRECTORY_NAME = 'teambuddy';
 const OPENCLAW_GENERATED_AGENT_FILES = ['IDENTITY.md', 'SOUL.md', 'TOOLS.md', 'USER.md', 'HEARTBEAT.md', 'BOOTSTRAP.md'] as const;
-const TEAM_ROLE_REQUIRED_TOOLS = ['team_complete_task', 'team_request_approval', 'team_send_message'] as const;
-const TEAM_ROLE_DENIED_TOOLS = ['sessions_spawn', 'sessions_yield', 'subagents'] as const;
-const TEAM_AGENT_TOOLS_PROFILE = 'full';
-const TEAM_AGENT_SANDBOX = { mode: 'off' } as const;
 
 interface OpenClawTeamAgentMaterializationLogger {
   readonly debug: (message: string) => void;
@@ -42,7 +42,7 @@ interface OpenClawTeamAgentMaterializationLogger {
 interface OpenClawTeamAgentMaterializationAdapterDeps {
   readonly gateway: Pick<GatewayRpcPort, 'gatewayRpc'>;
   readonly capabilities: GatewayPluginCapabilityPort;
-  readonly fileSystem: Pick<RuntimeFileSystemPort, 'ensureDirectory' | 'writeTextFile' | 'removeFile' | 'removeDirectory'>;
+  readonly fileSystem: Pick<RuntimeFileSystemPort, 'exists' | 'ensureDirectory' | 'readTextFile' | 'writeTextFile' | 'removeFile' | 'removeDirectory'>;
   readonly openClawConfigDir: string;
   readonly logger?: OpenClawTeamAgentMaterializationLogger;
 }
@@ -54,9 +54,14 @@ interface TeamAgentMaterializationLogContext {
   readonly teamId: string;
 }
 
+type TeamAgentOwnership = 'team-owned' | 'external';
+
+type TeamBuddyProjectionWriteMode = 'replace' | 'append-teamrun-block';
+
 interface MaterializedRoleAgent {
   readonly role: TeamRoleAgentMaterializationSpec;
   readonly agentId: string;
+  readonly ownership: TeamAgentOwnership;
 }
 
 interface ExistingOpenClawAgentRecord {
@@ -72,6 +77,7 @@ interface MaterializedRoleAgentConfigPatch {
 interface TeamBuddyProjectionFile {
   readonly filePath: string;
   readonly content: string;
+  readonly writeMode: TeamBuddyProjectionWriteMode;
 }
 
 interface TeamBuddyRoleProjection {
@@ -88,6 +94,14 @@ interface TeamBuddyProjection {
   readonly roleProjections: readonly TeamBuddyRoleProjection[];
 }
 
+function replaceProjectionFile(filePath: string, content: string): TeamBuddyProjectionFile {
+  return { filePath, content, writeMode: 'replace' };
+}
+
+function appendTeamRunBlockProjectionFile(filePath: string, content: string): TeamBuddyProjectionFile {
+  return { filePath, content, writeMode: 'append-teamrun-block' };
+}
+
 export class OpenClawTeamAgentMaterializationAdapter implements TeamAgentMaterializationPort {
   constructor(private readonly deps: OpenClawTeamAgentMaterializationAdapterDeps) {}
 
@@ -96,6 +110,7 @@ export class OpenClawTeamAgentMaterializationAdapter implements TeamAgentMateria
     const logContext: TeamAgentMaterializationLogContext = { teamId: input.teamId };
     const leader = this.materializedRoleAgent(input.teamId, input.leader);
     const roles = input.roles.map((role) => this.materializedRoleAgent(input.teamId, role));
+    const roleAgents = [leader, ...roles];
     this.logDebug(logContext, {
       stage: 'materialize.start',
       method: 'materialize',
@@ -108,8 +123,10 @@ export class OpenClawTeamAgentMaterializationAdapter implements TeamAgentMateria
       await this.requireMethod('agents.list', logContext);
       const existingAgents = await this.readExistingAgents(logContext);
       const projection = this.buildTeamBuddyProjection(input, leader, roles);
-      await this.requireMethod('agents.create', logContext);
-      await this.requireMethod('agents.update', logContext);
+      if (roleAgents.some((roleAgent) => roleAgent.ownership === 'team-owned')) {
+        await this.requireMethod('agents.create', logContext);
+        await this.requireMethod('agents.update', logContext);
+      }
       await this.requireMethod('config.get', logContext);
       await this.requireMethod('config.set', logContext);
       await this.createOrUpdateAgent(leader, projection.leaderWorkspacePath, existingAgents, logContext);
@@ -122,10 +139,10 @@ export class OpenClawTeamAgentMaterializationAdapter implements TeamAgentMateria
         await this.createOrUpdateAgent(roleAgent, roleWorkspacePath, existingAgents, logContext);
         configPatches.push({ roleAgent, workspacePath: roleWorkspacePath });
       }
-      await this.writeTeamBuddyProjection(projection, logContext);
-      await this.writeTeamAgentConfigPatches(configPatches, roles, logContext);
+      await this.writeTeamBuddyProjection(input, projection, logContext);
+      const configRestores = await this.writeTeamAgentConfigPatches(configPatches, roleAgents, logContext);
 
-      const result = this.toMaterializationResult(input, leader, roles, projection);
+      const result = this.toMaterializationResult(input, leader, roles, projection, configRestores);
       this.logDebug(logContext, {
         stage: 'materialize.complete',
         method: 'materialize',
@@ -149,27 +166,37 @@ export class OpenClawTeamAgentMaterializationAdapter implements TeamAgentMateria
   }
 
   async removeTeamAgents(input: RemoveTeamAgentsInput): Promise<void> {
-    if (input.agentIds.length === 0) {
+    if (input.managedAgents.length === 0) {
+      return;
+    }
+    const externalAgents = input.managedAgents.filter((agent) => agent.lifecycle === 'external');
+    if (externalAgents.length > 0) {
+      await this.removeSelectedAgentProjectionBlocks(input.teamId, externalAgents);
+      await this.restoreExternalTeamAgentConfig(input.teamId, externalAgents);
+    }
+
+    const teamOwnedAgents = input.managedAgents.filter((agent) => agent.lifecycle !== 'external');
+    if (teamOwnedAgents.length === 0) {
       return;
     }
     await this.requireMethod('agents.delete');
     const managedTeamAgentIdPrefix = teamManagedAgentTeamPrefix(input.teamId);
-    for (const agentId of input.agentIds) {
-      if (!agentId.startsWith(managedTeamAgentIdPrefix)) {
-        throw new Error(`Refusing to remove non-Team OpenClaw agent for team ${input.teamId}: ${agentId}`);
+    for (const agent of teamOwnedAgents) {
+      if (!agent.agentId.startsWith(managedTeamAgentIdPrefix)) {
+        throw new Error(`Refusing to remove non-Team OpenClaw agent for team ${input.teamId}: ${agent.agentId}`);
       }
       try {
         await this.callGateway('agents.delete', {
-          agentId,
+          agentId: agent.agentId,
           deleteFiles: true,
         });
       } catch (error) {
-        if (!this.isAgentNotFoundError(error, agentId)) {
+        if (!this.isAgentNotFoundError(error, agent.agentId)) {
           throw error;
         }
       }
     }
-    await this.removeTeamBuddyWorkspaces(input.workspacePaths ?? []);
+    await this.removeTeamBuddyWorkspaces(teamOwnedAgents.map((agent) => agent.workspace));
   }
 
   private toMaterializationResult(
@@ -177,17 +204,18 @@ export class OpenClawTeamAgentMaterializationAdapter implements TeamAgentMateria
     leader: MaterializedRoleAgent,
     roles: readonly MaterializedRoleAgent[],
     projection: { readonly leaderWorkspacePath: string; readonly roleWorkspacePaths: ReadonlyMap<string, string> },
+    configRestores: ReadonlyMap<string, TeamManagedAgentConfigRestore>,
   ): TeamAgentMaterializationResult {
     return {
       teamId: input.teamId,
       managedAgents: [
-        this.toManagedAgentRecord(input.teamId, input.endpoint, leader, projection.leaderWorkspacePath),
+        this.toManagedAgentRecord(input.teamId, input.endpoint, leader, projection.leaderWorkspacePath, configRestores),
         ...roles.map((roleAgent) => {
           const workspace = projection.roleWorkspacePaths.get(roleAgent.role.roleId);
           if (!workspace) {
             throw new Error(`Team role workspace projection was not created for role ${roleAgent.role.roleId}`);
           }
-          return this.toManagedAgentRecord(input.teamId, input.endpoint, roleAgent, workspace);
+          return this.toManagedAgentRecord(input.teamId, input.endpoint, roleAgent, workspace, configRestores);
         }),
       ],
     };
@@ -201,14 +229,16 @@ export class OpenClawTeamAgentMaterializationAdapter implements TeamAgentMateria
   ): Promise<void> {
     const existingAgent = existingAgents.get(roleAgent.agentId);
     if (existingAgent) {
-      this.logDebug(logContext, {
-        stage: 'agent.existing',
-        method: 'agents.list',
-        roleId: roleAgent.role.roleId,
-        agentId: roleAgent.agentId,
-        workspacePath: existingAgent.workspace,
-      });
-      this.assertExistingAgentIsTeamManaged(roleAgent, existingAgent, logContext);
+      this.logExistingAgent(roleAgent, existingAgent, logContext);
+    }
+    if (roleAgent.ownership === 'external') {
+      if (!existingAgent) {
+        throw new Error(`Selected Team agent is not available: ${roleAgent.agentId}`);
+      }
+      return;
+    }
+    if (existingAgent) {
+      this.assertExistingTeamOwnedAgentCanBeMaterialized(roleAgent, existingAgent, logContext);
     } else {
       const createPayload = this.buildAgentCreatePayload(roleAgent, workspacePath);
       try {
@@ -248,7 +278,24 @@ export class OpenClawTeamAgentMaterializationAdapter implements TeamAgentMateria
     await this.removeGeneratedOpenClawFiles(workspacePath, roleAgent, logContext);
   }
 
+  private logExistingAgent(
+    roleAgent: MaterializedRoleAgent,
+    existingAgent: ExistingOpenClawAgentRecord,
+    logContext: TeamAgentMaterializationLogContext,
+  ): void {
+    this.logDebug(logContext, {
+      stage: 'agent.existing',
+      method: 'agents.list',
+      roleId: roleAgent.role.roleId,
+      agentId: roleAgent.agentId,
+      workspacePath: existingAgent.workspace,
+    });
+  }
+
   private buildAgentCreatePayload(roleAgent: MaterializedRoleAgent, workspacePath: string): Record<string, unknown> {
+    if (roleAgent.ownership !== 'team-owned') {
+      throw new Error(`Selected Team agent is not available: ${roleAgent.agentId}`);
+    }
     return {
       name: roleAgent.agentId,
       workspace: workspacePath,
@@ -264,22 +311,11 @@ export class OpenClawTeamAgentMaterializationAdapter implements TeamAgentMateria
     };
   }
 
-  private buildAgentTools(roleAgent: MaterializedRoleAgent): Record<string, unknown> {
-    if (roleAgent.role.roleId === 'leader') {
-      return { profile: TEAM_AGENT_TOOLS_PROFILE };
-    }
-    return {
-      profile: TEAM_AGENT_TOOLS_PROFILE,
-      allow: Array.from(new Set([...TEAM_ROLE_REQUIRED_TOOLS, ...(roleAgent.role.tools ?? [])])),
-      deny: [...TEAM_ROLE_DENIED_TOOLS],
-    };
-  }
-
   private async writeTeamAgentConfigPatches(
     patches: readonly MaterializedRoleAgentConfigPatch[],
     roleAgents: readonly MaterializedRoleAgent[],
     logContext: TeamAgentMaterializationLogContext,
-  ): Promise<void> {
+  ): Promise<ReadonlyMap<string, TeamManagedAgentConfigRestore>> {
     for (let attempt = 0; attempt < 2; attempt += 1) {
       const payload = await this.callGateway('config.get', {}, logContext, {
         stage: 'config.get',
@@ -291,10 +327,10 @@ export class OpenClawTeamAgentMaterializationAdapter implements TeamAgentMateria
       if (!configGetResult.hash) {
         throw new Error('OpenClaw config.get returned missing hash for Team agent configuration update');
       }
-      const nextConfig = this.patchTeamAgentsConfig(configGetResult.config, patches, roleAgents, logContext);
+      const patchResult = this.patchTeamAgentsConfig(configGetResult.config, patches, roleAgents, logContext);
       try {
         await this.callGateway('config.set', {
-          raw: JSON.stringify(nextConfig),
+          raw: JSON.stringify(patchResult.config),
           baseHash: configGetResult.hash,
         }, logContext, {
           stage: 'config.set',
@@ -302,7 +338,7 @@ export class OpenClawTeamAgentMaterializationAdapter implements TeamAgentMateria
           roleCount: roleAgents.length,
           attempt: attempt + 1,
         });
-        return;
+        return patchResult.configRestores;
       } catch (error) {
         if (attempt === 0 && this.isConfigChangedSinceLastLoadError(error)) {
           this.logDebug(logContext, {
@@ -317,6 +353,7 @@ export class OpenClawTeamAgentMaterializationAdapter implements TeamAgentMateria
         throw error;
       }
     }
+    throw new Error('OpenClaw config.set retry loop exhausted for Team agent configuration update');
   }
 
   private patchTeamAgentsConfig(
@@ -324,14 +361,16 @@ export class OpenClawTeamAgentMaterializationAdapter implements TeamAgentMateria
     patches: readonly MaterializedRoleAgentConfigPatch[],
     roleAgents: readonly MaterializedRoleAgent[],
     logContext: TeamAgentMaterializationLogContext,
-  ): Record<string, unknown> {
+  ): { readonly config: Record<string, unknown>; readonly configRestores: ReadonlyMap<string, TeamManagedAgentConfigRestore> } {
     const startedAt = Date.now();
     const nextConfig = this.readRecord(config);
     const agents = this.readRecord(nextConfig.agents);
     const list = Array.isArray(agents.list) ? [...agents.list] : [];
     const originalEntryCount = list.length;
+    const configRestores = new Map<string, TeamManagedAgentConfigRestore>();
     for (const patch of patches) {
-      this.upsertTeamAgentConfigEntry(list, patch, roleAgents, logContext);
+      const restore = this.upsertTeamAgentConfigEntry(list, patch, logContext);
+      configRestores.set(patch.roleAgent.agentId, restore);
     }
     nextConfig.agents = {
       ...agents,
@@ -346,26 +385,73 @@ export class OpenClawTeamAgentMaterializationAdapter implements TeamAgentMateria
       nextEntryCount: list.length,
       durationMs: Date.now() - startedAt,
     });
-    return nextConfig;
+    return { config: nextConfig, configRestores };
   }
 
   private upsertTeamAgentConfigEntry(
     list: unknown[],
     patch: MaterializedRoleAgentConfigPatch,
-    roleAgents: readonly MaterializedRoleAgent[],
     logContext: TeamAgentMaterializationLogContext,
-  ): void {
+  ): TeamManagedAgentConfigRestore {
     const targetIndex = list.findIndex((entry) => this.readString(this.readRecord(entry).id) === patch.roleAgent.agentId);
     const current = targetIndex >= 0 ? this.readRecord(list[targetIndex]) : {};
+    const restore: TeamManagedAgentConfigRestore = targetIndex >= 0
+      ? { entryExisted: true, entry: cloneRecord(current) }
+      : { entryExisted: false };
+    const nextEntry = this.buildTeamAgentConfigEntry(current, patch);
+    this.logDebug(logContext, {
+      stage: targetIndex >= 0 ? 'config.patch.update' : 'config.patch.create',
+      method: 'config.set',
+      roleId: patch.roleAgent.role.roleId,
+      agentId: patch.roleAgent.agentId,
+      workspacePath: patch.workspacePath,
+      toolAllowCount: Array.isArray(this.readRecord(nextEntry.tools).allow) ? (this.readRecord(nextEntry.tools).allow as unknown[]).length : 0,
+      skillCount: Array.isArray(nextEntry.skills) ? nextEntry.skills.length : 0,
+      subagentCount: Array.isArray(nextEntry.subagents) ? nextEntry.subagents.length : 0,
+    });
+    if (targetIndex >= 0) {
+      list[targetIndex] = nextEntry;
+      return restore;
+    }
+    list.push(nextEntry);
+    return restore;
+  }
+
+  private buildTeamAgentConfigEntry(
+    current: Readonly<Record<string, unknown>>,
+    patch: MaterializedRoleAgentConfigPatch,
+  ): Record<string, unknown> {
+    return patch.roleAgent.ownership === 'external'
+      ? this.buildExternalAgentConfigEntry(current, patch)
+      : this.buildTeamOwnedAgentConfigEntry(current, patch);
+  }
+
+  private buildExternalAgentConfigEntry(
+    current: Readonly<Record<string, unknown>>,
+    patch: MaterializedRoleAgentConfigPatch,
+  ): Record<string, unknown> {
+    return {
+      ...current,
+      id: patch.roleAgent.agentId,
+      tools: projectTeamRoleToolPolicyToOpenClawTools(patch.roleAgent.role),
+      sandbox: OPENCLAW_TEAM_AGENT_SANDBOX,
+    };
+  }
+
+  private buildTeamOwnedAgentConfigEntry(
+    current: Readonly<Record<string, unknown>>,
+    patch: MaterializedRoleAgentConfigPatch,
+  ): Record<string, unknown> {
     const nextEntry: Record<string, unknown> = {
       ...current,
       id: patch.roleAgent.agentId,
       name: patch.roleAgent.role.agentName,
       workspace: patch.workspacePath,
-      tools: this.buildAgentTools(patch.roleAgent),
-      sandbox: TEAM_AGENT_SANDBOX,
+      tools: projectTeamRoleToolPolicyToOpenClawTools(patch.roleAgent.role),
+      sandbox: OPENCLAW_TEAM_AGENT_SANDBOX,
     };
     delete nextEntry.skipBootstrap;
+    delete nextEntry.subagents;
     if (patch.roleAgent.role.model) {
       nextEntry.model = patch.roleAgent.role.model;
     } else {
@@ -376,32 +462,10 @@ export class OpenClawTeamAgentMaterializationAdapter implements TeamAgentMateria
     } else {
       delete nextEntry.skills;
     }
-    if (patch.roleAgent.role.roleId === 'leader') {
-      nextEntry.subagents = {
-        allowAgents: roleAgents.map((agent) => agent.agentId),
-        requireAgentId: true,
-      };
-    } else {
-      delete nextEntry.subagents;
-    }
-    this.logDebug(logContext, {
-      stage: targetIndex >= 0 ? 'config.patch.update' : 'config.patch.create',
-      method: 'config.set',
-      roleId: patch.roleAgent.role.roleId,
-      agentId: patch.roleAgent.agentId,
-      workspacePath: patch.workspacePath,
-      toolAllowCount: Array.isArray(this.readRecord(nextEntry.tools).allow) ? (this.readRecord(nextEntry.tools).allow as unknown[]).length : 0,
-      skillCount: Array.isArray(nextEntry.skills) ? nextEntry.skills.length : 0,
-      subagentCount: patch.roleAgent.role.roleId === 'leader' ? roleAgents.length : 0,
-    });
-    if (targetIndex >= 0) {
-      list[targetIndex] = nextEntry;
-      return;
-    }
-    list.push(nextEntry);
+    return nextEntry;
   }
 
-  private assertExistingAgentIsTeamManaged(
+  private assertExistingTeamOwnedAgentCanBeMaterialized(
     roleAgent: MaterializedRoleAgent,
     existingAgent: ExistingOpenClawAgentRecord,
     logContext: TeamAgentMaterializationLogContext,
@@ -448,39 +512,49 @@ export class OpenClawTeamAgentMaterializationAdapter implements TeamAgentMateria
     roles: readonly MaterializedRoleAgent[],
   ): TeamBuddyProjection {
     const teamSkillDirectoryName = sanitizePathSegment(input.teamSkill.name);
-    const leaderWorkspacePath = path.join(this.deps.openClawConfigDir, TEAMBUDDY_DIRECTORY_NAME, teamSkillDirectoryName);
+    const defaultLeaderWorkspacePath = path.join(this.deps.openClawConfigDir, TEAMBUDDY_DIRECTORY_NAME, teamSkillDirectoryName);
+    const leaderWorkspacePath = this.workspacePathForRole(input, leader, defaultLeaderWorkspacePath);
     const teamSkillPackagePath = path.join(leaderWorkspacePath, 'skills', teamSkillDirectoryName);
-    const leaderFiles: TeamBuddyProjectionFile[] = [
-      { filePath: path.join(leaderWorkspacePath, 'AGENTS.md'), content: this.buildLeaderAgentsMd(input, roles, teamSkillDirectoryName) },
-      { filePath: path.join(leaderWorkspacePath, 'TOOLS.md'), content: this.buildLeaderToolsMd() },
-      { filePath: path.join(leaderWorkspacePath, 'dependencies.json'), content: `${JSON.stringify(input.teamSkill.dependencies, null, 2)}\n` },
-      { filePath: path.join(teamSkillPackagePath, 'SKILL.md'), content: input.teamSkill.skillMarkdown },
-      { filePath: path.join(teamSkillPackagePath, 'workflow.md'), content: input.teamSkill.workflowMarkdown },
-      { filePath: path.join(teamSkillPackagePath, 'dependencies.yaml'), content: input.teamSkill.dependenciesYaml },
-      ...(input.teamSkill.bindMarkdown === undefined ? [] : [{ filePath: path.join(teamSkillPackagePath, 'bind.md'), content: input.teamSkill.bindMarkdown }]),
-    ];
+    const leaderFiles: TeamBuddyProjectionFile[] = leader.ownership === 'external'
+      ? [
+          appendTeamRunBlockProjectionFile(path.join(leaderWorkspacePath, 'AGENTS.md'), this.buildSelectedLeaderAgentsMd(input, roles)),
+          appendTeamRunBlockProjectionFile(path.join(leaderWorkspacePath, 'TOOLS.md'), this.buildSelectedLeaderToolsMd()),
+        ]
+      : [
+          replaceProjectionFile(path.join(leaderWorkspacePath, 'AGENTS.md'), this.buildLeaderAgentsMd(input, roles, teamSkillDirectoryName)),
+          replaceProjectionFile(path.join(leaderWorkspacePath, 'TOOLS.md'), this.buildLeaderToolsMd()),
+          replaceProjectionFile(path.join(leaderWorkspacePath, 'dependencies.json'), `${JSON.stringify(input.teamSkill.dependencies, null, 2)}\n`),
+          replaceProjectionFile(path.join(teamSkillPackagePath, 'SKILL.md'), input.teamSkill.skillMarkdown),
+          replaceProjectionFile(path.join(teamSkillPackagePath, 'workflow.md'), input.teamSkill.workflowMarkdown),
+          replaceProjectionFile(path.join(teamSkillPackagePath, 'dependencies.yaml'), input.teamSkill.dependenciesYaml),
+          ...(input.teamSkill.bindMarkdown === undefined ? [] : [replaceProjectionFile(path.join(teamSkillPackagePath, 'bind.md'), input.teamSkill.bindMarkdown)]),
+        ];
     const roleWorkspacePaths = new Map<string, string>();
     const roleProjections = roles.map((roleAgent): TeamBuddyRoleProjection => {
       const roleDirectoryName = sanitizePathSegment(roleAgent.role.roleId);
-      const roleWorkspacePath = path.join(leaderWorkspacePath, 'roles', roleDirectoryName);
-      const roleMarkdown = roleAgent.role.files.find((file) => file.path === `${roleAgent.role.roleId}.md`)?.content
-        ?? roleAgent.role.files.find((file) => file.path === 'AGENTS.md')?.content
-        ?? '';
+      const roleWorkspacePath = this.workspacePathForRole(input, roleAgent, path.join(leaderWorkspacePath, 'roles', roleDirectoryName));
+      const roleMarkdown = roleAgent.role.roleMarkdown ?? '';
       roleWorkspacePaths.set(roleAgent.role.roleId, roleWorkspacePath);
       return {
         roleAgent,
         roleWorkspacePath,
-        files: [
-          { filePath: path.join(teamSkillPackagePath, 'roles', `${roleDirectoryName}.md`), content: roleMarkdown },
-          { filePath: path.join(roleWorkspacePath, 'AGENTS.md'), content: removeInlinePersonaForTeammateSection(roleMarkdown) },
-          { filePath: path.join(roleWorkspacePath, 'TOOLS.md'), content: this.buildRoleToolsMd() },
-        ],
+        files: roleAgent.ownership === 'external'
+          ? [
+              appendTeamRunBlockProjectionFile(path.join(roleWorkspacePath, 'AGENTS.md'), this.buildSelectedRoleAgentsMd(roleMarkdown)),
+              appendTeamRunBlockProjectionFile(path.join(roleWorkspacePath, 'TOOLS.md'), this.buildSelectedRoleToolsMd()),
+            ]
+          : [
+              replaceProjectionFile(path.join(teamSkillPackagePath, 'roles', `${roleDirectoryName}.md`), roleMarkdown),
+              replaceProjectionFile(path.join(roleWorkspacePath, 'AGENTS.md'), this.buildRoleAgentsMd(roleMarkdown)),
+              replaceProjectionFile(path.join(roleWorkspacePath, 'TOOLS.md'), this.buildRoleToolsMd()),
+            ],
       };
     });
     return { leader, leaderWorkspacePath, roleWorkspacePaths, leaderFiles, roleProjections };
   }
 
   private async writeTeamBuddyProjection(
+    input: TeamAgentMaterializationSpec,
     projection: TeamBuddyProjection,
     logContext: TeamAgentMaterializationLogContext,
   ): Promise<void> {
@@ -498,14 +572,14 @@ export class OpenClawTeamAgentMaterializationAdapter implements TeamAgentMateria
     });
     await this.deps.fileSystem.ensureDirectory(projection.leaderWorkspacePath);
     for (const file of projection.leaderFiles) {
-      await this.writeProjectionFile(file.filePath, file.content);
+      await this.writeProjectionFile(input.teamId, file);
     }
 
     for (const roleProjection of projection.roleProjections) {
       const roleProjectionStartedAt = Date.now();
       await this.deps.fileSystem.ensureDirectory(roleProjection.roleWorkspacePath);
       for (const file of roleProjection.files) {
-        await this.writeProjectionFile(file.filePath, file.content);
+        await this.writeProjectionFile(input.teamId, file);
       }
       this.logDebug(logContext, {
         stage: 'projection.write.role',
@@ -530,9 +604,92 @@ export class OpenClawTeamAgentMaterializationAdapter implements TeamAgentMateria
     });
   }
 
-  private async writeProjectionFile(filePath: string, content: string): Promise<void> {
-    await this.deps.fileSystem.ensureDirectory(path.dirname(filePath));
-    await this.deps.fileSystem.writeTextFile(filePath, content);
+  private async writeProjectionFile(teamId: string, file: TeamBuddyProjectionFile): Promise<void> {
+    await this.deps.fileSystem.ensureDirectory(path.dirname(file.filePath));
+    if (file.writeMode === 'append-teamrun-block') {
+      const currentContent = await this.readTextFileIfExists(file.filePath) ?? '';
+      await this.deps.fileSystem.writeTextFile(file.filePath, appendTeamRunProjectionBlock(currentContent, teamId, file.content));
+      return;
+    }
+    await this.deps.fileSystem.writeTextFile(file.filePath, file.content);
+  }
+
+  private async readTextFileIfExists(filePath: string): Promise<string | null> {
+    if (!await this.deps.fileSystem.exists(filePath)) {
+      return null;
+    }
+    return await this.deps.fileSystem.readTextFile(filePath);
+  }
+
+  private async removeSelectedAgentProjectionBlocks(teamId: string, agents: readonly TeamManagedAgentRecord[]): Promise<void> {
+    for (const agent of agents) {
+      await this.removeProjectionBlockFromFile(path.join(agent.workspace, 'AGENTS.md'), teamId);
+      await this.removeProjectionBlockFromFile(path.join(agent.workspace, 'TOOLS.md'), teamId);
+    }
+  }
+
+  private async removeProjectionBlockFromFile(filePath: string, teamId: string): Promise<void> {
+    const currentContent = await this.readTextFileIfExists(filePath);
+    if (currentContent === null) {
+      return;
+    }
+    const nextContent = removeTeamRunProjectionBlock(currentContent, teamId);
+    if (nextContent !== currentContent) {
+      await this.deps.fileSystem.writeTextFile(filePath, nextContent);
+    }
+  }
+
+  private async restoreExternalTeamAgentConfig(teamId: string, agents: readonly TeamManagedAgentRecord[]): Promise<void> {
+    await this.requireMethod('config.get');
+    await this.requireMethod('config.set');
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const payload = await this.callGateway('config.get', {});
+      const configGetResult = this.readConfigGetResult(payload);
+      if (!configGetResult.hash) {
+        throw new Error('OpenClaw config.get returned missing hash for selected Team agent configuration restore');
+      }
+      const nextConfig = this.restoreExternalTeamAgentConfigEntries(teamId, configGetResult.config, agents);
+      try {
+        await this.callGateway('config.set', {
+          raw: JSON.stringify(nextConfig),
+          baseHash: configGetResult.hash,
+        });
+        return;
+      } catch (error) {
+        if (attempt === 0 && this.isConfigChangedSinceLastLoadError(error)) {
+          continue;
+        }
+        throw error;
+      }
+    }
+    throw new Error('OpenClaw config.set retry loop exhausted for selected Team agent configuration restore');
+  }
+
+  private restoreExternalTeamAgentConfigEntries(teamId: string, config: unknown, agentsToRestore: readonly TeamManagedAgentRecord[]): Record<string, unknown> {
+    const nextConfig = this.readRecord(config);
+    const agents = this.readRecord(nextConfig.agents);
+    const list = Array.isArray(agents.list) ? [...agents.list] : [];
+    for (const agent of agentsToRestore) {
+      if (!agent.configRestore) {
+        throw new Error(`Config restore snapshot is required before removing TeamRun projection from selected agent ${agent.agentId} for team ${teamId}`);
+      }
+      const targetIndex = list.findIndex((entry) => this.readString(this.readRecord(entry).id) === agent.agentId);
+      if (agent.configRestore.entryExisted) {
+        const restoredEntry = cloneRecord(agent.configRestore.entry ?? { id: agent.agentId });
+        if (targetIndex >= 0) {
+          list[targetIndex] = restoredEntry;
+        } else {
+          list.push(restoredEntry);
+        }
+      } else if (targetIndex >= 0) {
+        list.splice(targetIndex, 1);
+      }
+    }
+    nextConfig.agents = {
+      ...agents,
+      list,
+    };
+    return nextConfig;
   }
 
   private async removeGeneratedOpenClawFiles(
@@ -577,109 +734,124 @@ export class OpenClawTeamAgentMaterializationAdapter implements TeamAgentMateria
 
   private buildLeaderAgentsMd(input: TeamAgentMaterializationSpec, roles: readonly MaterializedRoleAgent[], teamSkillDirectoryName: string): string {
     return [
-      `# TeamSkill Leader`,
+      '# TeamSkill Leader',
       '',
-      '你是这个本地 TeamSkill 包的 leader。先判断用户消息应该直接回答、澄清，还是编排 TeamRun。',
+      '你是这个 Team 的 leader agent。你有两个工作模式：个人模式和团队模式。默认个人模式；只有收到明确 TeamRun node/graph 上下文时，才进入团队模式。',
       '',
       '## 事实来源',
       '',
-      `把 ${input.teamSkill.name} 当作一个普通本地 TeamSkill 使用。这个包是 workflow、roles、约束、依赖和输出形态的权威来源。`,
+      `这些文件用于理解 ${input.teamSkill.name} 的 Team 职责，不是 TeamRun 运行状态源。TeamRun 状态源是 runtime-host。`,
       '',
-      '- AGENTS.md — leader 长期操作规则',
-      '- TOOLS.md — TeamRun 工具契约和 payload 规则',
-      `- skills/${teamSkillDirectoryName}/SKILL.md — TeamSkill 入口`,
-      `- skills/${teamSkillDirectoryName}/workflow.md — workflow 阶段`,
-      `- skills/${teamSkillDirectoryName}/bind.md — role 绑定和约束；存在时必须参考`,
-      `- skills/${teamSkillDirectoryName}/dependencies.yaml — 原始依赖清单`,
-      '- dependencies.json — 解析后的依赖清单',
-      `- skills/${teamSkillDirectoryName}/roles/{roleId}.md — 原始 TeamSkill role 文件，供 leader 构造任务上下文`,
-      '- roles/{roleId}/AGENTS.md — 对应 role agent 运行时加载的人设',
+      '- AGENTS.md：leader 行为规则。',
+      '- TOOLS.md：TeamRun 工具 SOP。',
+      `- skills/${teamSkillDirectoryName}/SKILL.md：Team 能力入口和成功标准。`,
+      `- skills/${teamSkillDirectoryName}/workflow.md：Team workflow 设计依据。`,
+      `- skills/${teamSkillDirectoryName}/bind.md：role 绑定和约束；存在时必须参考。`,
+      `- skills/${teamSkillDirectoryName}/dependencies.yaml：原始依赖清单。`,
+      '- dependencies.json：解析后的依赖清单。',
+      `- skills/${teamSkillDirectoryName}/roles/{roleId}.md：role 职责和可嵌入 node prompt 的 teammate persona。`,
       '',
-      'TeamSkill 包已经定义的 workflow、roles、约束和输出格式，不要自行发明。',
+      '不要把本地文件当成 live graph。live graph 只能通过 runtime-host TeamRun tools 读取或修改。',
       '',
-      '## 首次判断',
+      '## 工作模式',
       '',
-      '每次行动前，把用户消息严格归为下面一种模式。',
+      '### 个人模式',
       '',
-      '### DIRECT',
+      '触发场景：用户只是问能力、解释 workflow/role、讨论输入输出、让你总结或给轻量建议；没有给出 TeamRun node/graph 上下文。',
       '',
-      '当单个 leader 回复就足够时使用 DIRECT。包括普通聊天、询问 TeamSkill 能做什么、解释 role、解释 workflow、依赖问题、适用性问题、轻量建议、简单总结和小型文本转换。',
+      '你应该：',
+      '- 直接用短句回答。',
+      '- 必要时读取 TeamSkill 文件确认事实。',
+      '- 不调用 TeamRun tools。',
+      '- 不声称 role agent、node 或 graph 已经运行。',
       '',
-      'DIRECT 模式：',
-      '- 直接回答。',
-      '- 可以查看 TeamSkill 包文件。',
-      '- 不要调用 Team Submit Workflow Plan。',
-      '- 不要声称 role agents 已经运行。',
+      '例子：',
+      '- “这个 team 能做什么？” -> 个人模式，直接说明。',
+      '- “有哪些 roles？” -> 个人模式，读取/总结 role。',
+      '- “Analyze Series B investment in Anthropic...” -> 个人模式，除非 prompt 另外给出 TeamRun 上下文。',
       '',
-      '### CLARIFY',
+      '### 团队模式',
       '',
-      '当请求可能需要执行，但目标、对象、约束或输出形态不清，无法可靠生成 workflow plan 时使用 CLARIFY。',
+      '触发场景：当前 prompt 提供 TeamRun 上下文字段：runId、runtimeKind/runtimeAdapterId/runtimeInstanceId 等扁平 endpoint 字段；执行某个 node 时还会提供 nodeExecutionId。不要用用户短语判定模式；是否进入团队模式只看当前 prompt 是否提供 TeamRun 上下文。',
       '',
-      'CLARIFY 模式：',
-      '- 只问最小必要澄清。',
-      '- 不要过度追问。',
-      '- 暂时不要调用 Team Submit Workflow Plan。',
+      'TeamRun 工具门槛：',
+      '- team_graph_context / team_graph_patch：需要 runId + 扁平 endpoint 字段。',
+      '- team_node_event / current_node 查询：还需要 nodeExecutionId。',
+      '- 缺少门槛字段时：停在个人模式，或说明缺少 TeamRun 上下文；不要探测 active run。',
+      '- 禁止占位值：current、default、猜测 ID；endpoint 必须用 runtimeKind/runtimeAdapterId/runtimeInstanceId 等顶层字段；保持为顶层字段。',
       '',
-      '### ORCHESTRATE',
+      '你应该：',
+      '- 修改 graph 前先用 team_graph_context 读取 compact graph context；不要盲改。',
+      '- 需要新增或调整 graph 时，用 team_graph_patch。',
+      '- 自己正在执行某个 nodeExecution 时，用 team_node_event 上报 progress/request/complete/reject。',
+      '- command 成功前，不把计划说成完成。',
       '',
-      '当用户要求团队执行工作、处理材料、产出交付物、分析、评估、审查、规划、推荐、诊断、生成内容，或运行 TeamSkill workflow 时使用 ORCHESTRATE。',
+      '例子：',
+      '- prompt 含 “TeamRun node”、runId、runtimeKind/runtimeAdapterId/runtimeInstanceId、nodeExecutionId -> 团队模式，完成当前 node 后调用 team_node_event。',
+      '- prompt 含 runId、runtimeKind/runtimeAdapterId/runtimeInstanceId，且用户要求“把这个 run 的 graph 调整成先审查再汇总” -> 团队模式，先 team_graph_context，再 team_graph_patch。',
+      '- 用户只给出投资分析任务 -> 个人模式，不调用 TeamRun tools，除非当前 prompt 另有 TeamRun 上下文。',
       '',
-      'ORCHESTRATE 模式：',
-      '- 使用本地 TeamSkill 作为控制规则。',
-      '- 分派前按顺序读取 SKILL.md、workflow.md、存在时的 bind.md、dependencies.yaml、dependencies.json，以及需要的 roles/*.md；不要并发读取多个 TeamSkill 文件。',
-      '- 根据 TeamSkill workflow 构造一个完整 workflow plan。',
-      '- 调用前按 TOOLS.md 做 schema 自检；尤其确认顶层 groups 存在，且每个 taskId 都被某个 group.taskIds 引用。',
-      '- 按 TOOLS.md 的契约调用 Team Submit Workflow Plan。',
-      '- 工具调用成功前，不要把团队工作说成已经完成。',
+      '## Team role 分派决策',
       '',
-      '默认使用 DIRECT。只有明确是可执行的团队工作才升级到 ORCHESTRATE。只有歧义会实质影响执行或输出质量时才使用 CLARIFY。',
+      '触发场景：当前 prompt 表明你正在处理 TeamRun 中的 leader/coordinator node，且用户要求“分派任务”“并行派发”“让各角色执行/准备 prompt”“把任务交给某些 role”。',
+      '',
+      '必须做：',
+      '1. 需要确认当前 node、输出端口或相邻下游边时，先用 team_graph_context view=current_node；只有设计或修改整体 graph topology/config 时才用 graph_summary。',
+      '2. 把分派写入当前 node 的 NodeResult：result.assignments 使用 Role roster 里的 roleId，text 写给该 role 的完整任务说明。',
+      '3. 用 team_node_event complete 提交当前 node result；outputPort 必须匹配 graph 里通向下游 role node 的 sourcePort。',
+      '4. runtime-host reducer 会根据 edge action 和 payload.includeUpstreamResult 激活下游 role node；不要自己创建 OpenClaw 子会话。',
+      '',
+      '不要做：',
+      '- 不调用 agents_list 查 agent id；Role roster 已经给出可用 roleId。',
+      '- 不调用 sessions_spawn、subagents 或另开新 session 分派 Team role。',
+      '- 不用 team_graph_patch 承载一次性分派内容；graph_patch 只改稳定 topology/config/template。',
+      '- 不把“为每个角色准备 prompt”解释成 OpenClaw 原生 spawn。',
+      '- 不把 managed agent id 当 roleId 写进 result.assignments。',
+      '',
+      '正例：用户说“并行派发给四个角色” -> team_graph_context current_node -> team_node_event complete，result.assignments 包含四个 roleId/text。',
+      '反例：用户说“并行派发给四个角色” -> agents_list -> sessions_spawn 创建四个子智能体。这个路径违反 TeamRun。',
+      '反例：用户说“并行派发给四个角色” -> team_graph_patch 临时新增四个任务节点来承载本次分派。这个路径把一次性分派错写成 graph topology。',
+      '',
+      '失败处理：team_graph_context 或 team_node_event 失败时，不要改用 OpenClaw spawn 或 graph_patch 兜底；按错误修正 TeamRun tool 参数，无法修正就说明失败边界。',
       '',
       '## TeamSkill preflight',
       '',
-      '调用 Team Submit Workflow Plan 前：',
+      '设计或修改 TeamRun graph 前，按顺序检查；读取 markdown 文件必须一次只发起一个 read，等上一个 read 返回后再读下一个，避免并发读取会话日志造成 file lock stale：',
       `1. 读取 skills/${teamSkillDirectoryName}/SKILL.md。`,
-      `2. 等上一步完成后，读取 skills/${teamSkillDirectoryName}/workflow.md。`,
-      `3. 等上一步完成后，存在时读取 skills/${teamSkillDirectoryName}/bind.md。`,
-      `4. 等上一步完成后，读取 skills/${teamSkillDirectoryName}/dependencies.yaml 和 dependencies.json。`,
-      `5. 等上一步完成后，逐个读取需要的 skills/${teamSkillDirectoryName}/roles/{roleId}.md 文件；不要一次并发读取多个 role 文件。`,
-      '6. 从 SKILL.md 提取 canonical role roster，并和下面的 Role roster 交叉核对。',
-      '7. 检查是否缺少必需上下文或必需依赖。',
-      '8. 提交前逐项核对工具入参：title、groups、tasks、idempotencyKey 都在顶层；summary 可选；没有 runId；没有额外字段。',
-      '9. 核对 groups：并行任务也必须有 group；每个 taskId 都出现在且只出现在一个 group.taskIds 中；join 三个字段齐全。',
+      `2. 读取 skills/${teamSkillDirectoryName}/workflow.md。`,
+      `3. 存在 bind.md 时读取 skills/${teamSkillDirectoryName}/bind.md。`,
+      '4. 读取 dependencies.yaml 和 dependencies.json。',
+      `5. 只读取本次需要的 skills/${teamSkillDirectoryName}/roles/{roleId}.md。`,
+      '6. 通过 TeamRun 工具门槛后，用 team_graph_context 确认 runtime-host graph context。',
+      '7. 提交 graph patch 前核对：patch.operations 非空；nodeId/edgeId 稳定；没有 workflowTaskId 字段。',
       '',
-      '如果缺少必需依赖或必需用户上下文，不要提交假的 workflow plan；直接索要缺失输入或说明阻塞原因。如果只缺少可选依赖，只有 TeamSkill 允许降级执行时才继续，并在相关 task prompt 或最终综合中说明限制。',
+      'OpenClaw read 工具参数字段是 path，不是 file_path。读取上述文件时使用 {"path":"..."}；如果误用 file_path 导致 schema 错误，改用 path 重试一次，不要把它当作文件不存在。',
+      '',
+      '缺少必要用户输入或必需依赖时，不提交假的 graph patch；直接说明缺什么。可选依赖缺失时，只有 TeamSkill 允许降级才继续，并在 node prompt 或最终输出中写明限制。',
       '',
       '## Role roster',
       '',
-      'Role roster 是封闭集合。下面这些值才是 tasks[].roleId 的唯一合法值。',
+      'work/review node 的 roleId 只能使用下面这些值：',
       '',
       ...roles.map((roleAgent) => `- ${roleAgent.role.roleId}`),
       '',
-      '不要使用 roleId "leader"、展示名、managed agent id、自造别名，或不存在的 helper/reviewer/integrator role。',
+      '不要使用 roleId "leader"、managed agent id、展示名、自造 helper/reviewer/integrator。',
       '',
-      '## Leader work is not workflow task work',
+      '## Node prompt 编写规则',
       '',
-      'Leader 可以分类请求、读取 TeamSkill 包、提取共享上下文、设计 workflow plan、处理 leader-only workflow 步骤，并综合最终输出。Leader 工作必须留在 tasks[] 之外，不要把 leader 工作提交成 workflow task。',
+      '给 role 的 work/review node prompt 必须包含：用户任务、共享上下文、role assignment、期望输出、依赖/限制、完成标准。role 文件里有 “Inline Persona for Teammate” 时，把该段内容写进 node prompt；不要假设 role agent 会自己读取原始 role 文件。',
       '',
-      '## Role task prompt construction',
+      '## 禁止行为',
       '',
-      '每个 role task prompt 必须包含用户任务上下文、leader 提取的共享上下文、role assignment、期望输出格式、依赖或限制说明，以及 role 文件中存在的 "Inline Persona for Teammate" 章节。不要假设 role agent 会自己读取原始 role 文件。',
-      '',
-      '## 示例',
-      '',
-      '- 用户问这个 team 能做什么 -> DIRECT。',
-      '- 用户问有哪些 roles -> DIRECT。',
-      '- 用户问需要什么输入 -> DIRECT。',
-      '- 用户只说“看看这个”，但没有目标或输出要求 -> CLARIFY。',
-      '- 用户说“用这个 team 跑一下这些材料” -> ORCHESTRATE。',
-      '- 用户要求完整审查、报告、计划、推荐或 workflow output -> ORCHESTRATE。',
-      '',
-      '错误行为：',
-      '- 不要为了普通解释调用 Team Submit Workflow Plan。',
-      '- 用户明确要求团队交付物时，不要只由 leader 直接回答。',
-      '- 不要提交 roleId "leader"。',
-      '- 不要把 managed agent id 当作 roleId。',
-      '- 不要创建 SKILL.md 未声明的 role。',
+      '- 不满足 TeamRun 工具门槛时，不调用 TeamRun tools。',
+      '- 不用普通聊天文本代替 team_node_event。',
+      '- 不用 team_node_event 修改稳定 graph topology/config；它只提交当前 node 的事件和 NodeResult。',
+      '- 不用 team_graph_patch 承载一次性分派/产出；分派内容属于 team_node_event 的 NodeResult。',
+      '- 不猜 runId、nodeExecutionId、roleId。',
+      '- 不把本地 TeamSkill 文件说成当前 live graph。',
+      '- 不创建 TeamSkill 未声明的 role。',
+      '- 不用 sessions_spawn、subagents 或另开新 session 分派 Team role。',
+      '- 满足成功标准后停止，不顺手扩展 graph。',
       '',
     ].join('\n');
   }
@@ -688,198 +860,406 @@ export class OpenClawTeamAgentMaterializationAdapter implements TeamAgentMateria
     return [
       '# TeamRun Tools',
       '',
-      '只在 ORCHESTRATE 模式使用 Team Submit Workflow Plan。它是 TeamSkill role work 唯一支持的分派机制。',
+      '这些工具只走 runtime-host TeamRun command/context 契约。',
       '',
-      '## Team Submit Workflow Plan',
+      '## 工具优先级',
       '',
-      '只提交 role-level workflow tasks。runtime 已经能从 leader session context 知道当前 TeamRun。',
+      '1. 当前 prompt 提供的 TeamRun 上下文字段。',
+      '2. team_graph_context 读取的 runtime-host graph context。',
+      '3. TeamSkill 文件中的 workflow/role 设计规则。',
+      '4. team_graph_patch / team_node_event 写入命令。',
       '',
-      '顶层字段规则：',
-      '- 必填：title、groups、tasks、idempotencyKey。',
-      '- title 是最外层 workflow plan 标题；group.title 和 task.title 不能替代顶层 title。',
-      '- 可选：summary。',
-      '- 必须一次性提交完整 JSON object；不要只提交 tasks，也不要省略 title 或 groups。',
-      '- 即使所有 tasks 都是并行执行，也必须创建至少一个 group，并把这些 taskId 全部放进该 group.taskIds。',
+      '## 本地文件工具',
       '',
-      '不要包含 runtime 字段，例如 runId、workflowPlanId、envelopeId、sessionKey、agentId、dispatchId、status、createdAt、sourceEndpoint、sourceAgentId、sourceSessionKey 或 sourceRoleId。',
+      '- OpenClaw read 工具读取文件时参数字段是 path，不是 file_path。',
+      '- TeamSkill preflight 读 markdown 时必须串行：等一个 read 返回后，再发起下一个 read。',
+      '- read 因参数字段错误失败时，改用 path 重试一次；不要把 schema 错误解释成文件不存在。',
       '',
-      'Payload 形态；照这个骨架填完整，顶层 title 和 groups 都不可省略：',
+      '## 共同调用前检查',
+      '',
+      '- team_graph_context / team_graph_patch：必须有 runId 和扁平 endpoint 字段。',
+      '- team_node_event / current_node 查询：必须再有 nodeExecutionId。',
+      '- native-runtime endpoint 使用 runtimeKind、runtimeAdapterId、runtimeInstanceId 三个顶层字段。',
+      '- protocol-connector endpoint 使用 runtimeKind、protocolId、connectorId、endpointId 四个顶层字段。',
+      '- 只复制上面的顶层 endpoint 字段，不要把 endpoint 字段合并成一个值。',
+      '- 不要使用 current、default、猜测 ID，或自造 endpoint。',
+      '- 缺少必填上下文时不要调用工具；回到个人模式，或说明缺少 TeamRun 上下文。',
+      '',
+      '正确参数片段：',
       '```json',
-      '{',
-      '  "title": "<简短 workflow 标题>",',
-      '  "summary": "<可选的简短 plan 摘要>",',
-      '  "idempotencyKey": "<本次 plan attempt 的稳定语义 key>",',
-      '  "groups": [',
-      '    {',
-      '      "groupId": "<稳定 group id>",',
-      '      "title": "<简短 group 标题>",',
-      '      "taskIds": ["<task id>"],',
-      '      "join": {',
-      '        "requireCompleted": true,',
-      '        "allowFailed": false,',
-      '        "retryLimit": 0',
-      '      }',
-      '    }',
-      '  ],',
-      '  "tasks": [',
-      '    {',
-      '      "taskId": "<稳定 task id>",',
-      '      "roleId": "<TeamSkill role id>",',
-      '      "title": "<简短 task 标题>",',
-      '      "dependsOnTaskIds": [],',
-      '      "prompt": "<完整 role task prompt>"',
-      '    }',
-      '  ]',
-      '}',
+      '"runtimeKind": "native-runtime",',
+      '"runtimeAdapterId": "openclaw",',
+      '"runtimeInstanceId": "local"',
       '```',
       '',
-      'Task 规则：',
-      '- tasks[].roleId 必须是 AGENTS.md Role roster 中列出的 TeamSkill role id。',
-      '- tasks[].roleId 不能是 "leader"、展示名、managed agent id 或自造别名。',
-      '- 每个 task 必须包含 taskId、roleId、title 和 prompt。',
-      '- dependsOnTaskIds 可选；没有依赖时使用 [] 或省略。',
-      '- outputArtifactKind 可选；只有 TeamSkill 指定期望 artifact kind 时才使用。',
-      '- 每个 taskId 应该只出现在一个 groups[].taskIds 列表中。',
-      '- dependsOnTaskIds 只能引用已声明的 taskId。',
+      '## team_graph_context',
       '',
-      'Group 规则：',
-      '- groups 是必填顶层数组，不是可选元数据。',
-      '- 每个 group 必须包含 groupId、title、taskIds 和 join。',
-      '- groups[].taskIds 必须列出该 group 内要分派的 taskId；每个 tasks[].taskId 都必须出现在且只出现在一个 group.taskIds 中。',
-      '- 并行任务使用同一个 group；串行阶段使用多个 group，并用 tasks[].dependsOnTaskIds 表达任务依赖。',
-      '- join 必须包含 requireCompleted、allowFailed 和 retryLimit。',
-      '- retryLimit 必须是非负整数。',
+      '何时使用：',
+      '- 准备修改 graph 前，需要读取当前 compact graph。',
+      '- 执行当前 node，且需要确认上下游 edge、状态、等待输入、审批或最近事件。',
+      '- 不确定 graph 是否已存在或已被其他命令推进。',
       '',
-      '正例：roleId 使用 Role roster 中列出的值',
-      '```json',
-      '{',
-      '  "tasks": [',
-      '    {',
-      '      "taskId": "financial-analyst-anthropic",',
-      '      "roleId": "financial-analyst",',
-      '      "title": "Financial Analysis",',
-      '      "prompt": "<role task prompt>"',
-      '    }',
-      '  ]',
-      '}',
-      '```',
+      '何时不要使用：',
+      '- 普通问答、解释 TeamSkill、讨论假设方案。',
+      '- 只需要读取本地 TeamSkill 文件。',
+      '- 只是想探测有没有 active run。',
       '',
-      '反例：roleId 使用 managed agent id',
-      '```json',
-      '{',
-      '  "tasks": [',
-      '    {',
-      '      "taskId": "financial-analyst-anthropic",',
-      '      "roleId": "mct-1t2fjjf-financial-analyst-03a712r",',
-      '      "title": "Financial Analysis",',
-      '      "prompt": "<role task prompt>"',
-      '    }',
-      '  ]',
-      '}',
-      '```',
-      '这个反例会被拒绝，因为 mct-* 是 managed agent id，不是 TeamSkill role id。',
+      '调用前检查：先通过共同调用前检查；view：设计/修改 graph 用 graph_summary；执行当前 node 用 current_node。',
+      '',
+      '调用后处理：',
+      '- 先看 fieldGuide 理解字段含义；fieldGuide 是字段说明，不是运行状态。',
+      '- 把返回值当作 runtime-host 当前状态。',
+      '- 只依据返回的 compact 信息改 graph；不要假设完整 config/prompt 已返回。',
+      '- 返回无 graph 时，先保存/创建 graph；不要 patch 不存在的 graph。',
+      '',
+      '失败处理：',
+      '- 参数校验失败时，先修正参数后重试同一个工具；不要改用其他 TeamRun tool 汇报这个失败。',
+      '- 如果错误提到 runtimeKind 或 endpoint 字段，按正确参数片段补齐顶层 endpoint 字段后重试。',
+      '- 读取 graph context 失败时，不要继续提交 graph patch；说明失败边界或按错误修正后重试。',
+      '',
+      '## team_graph_patch',
+      '',
+      '何时使用：需要创建或修改 TeamRun graph topology/config。',
+      '何时不要使用：上报当前 node 进度、请求输入、审批、完成或失败；或不满足共同调用前检查。',
+      '',
+      '调用前检查：',
+      '- 先用 team_graph_context 确认当前 graph；读失败不要盲改。',
+      '- summary 简短说明这次 graph 变化。',
+      '- idempotencyKey 对同一语义变更稳定。',
+      '- patch.operations 非空。',
+      '- work/review node 的 roleId 来自 AGENTS.md Role roster。',
+      '- node.config.prompt 放稳定执行说明；一次性分派/产出放 team_node_event 的 result。',
+      '- edge 用 action 表达 activate/rework/gate/finish，用 payload.includeUpstreamResult 控制是否把上游 NodeResult 拼进下游 prompt。',
+      '',
+      '失败处理：patch 失败时不要声称 graph 已更新；按错误修正后用同一 idempotencyKey 重试同一意图。',
       '',
       '常见错误：',
-      '- 错误：只传 groups、summary、idempotencyKey、tasks。原因：缺少顶层必填 title；task.title 和 group.title 不能替代 workflow title。',
-      '- 错误：只传 title、summary、idempotencyKey、tasks。原因：缺少必填 groups。',
-      '- 错误：把 group 信息写进 summary 或 prompt。原因：schema 只读取顶层 groups。',
-      '- 错误：把 roleId 写成 mct-* managed agent id。原因：runtime 只按 TeamSkill role id 绑定 role session。',
-      '- 错误：把 runId 放进参数。原因：runtime 会从当前 leader session context 绑定 TeamRun。',
+      '- 提交 workflowTaskId 或 tasks/groups 字段。',
+      '- 用 managed agent id / 展示名当 roleId。',
+      '- 盲改 graph，不先读 team_graph_context。',
       '',
-      '执行声明：',
-      '- Team Submit Workflow Plan 成功前，不要说 roles 已分派、工作正在运行，或正在等待 role 输出。',
-      '- 工具成功后，TeamRuntime 会自动分派 role agents。不要用 sessions_spawn、subagents、手动并行 sessions 或直接给 role-agent 发消息替代 workflow plan。',
+      '## team_node_event',
+      '',
+      '何时使用：leader 自己正在执行当前 nodeExecution，需要上报 progress、request_input、request_approval、reject 或 complete；分派角色任务时，用 complete 的 result.assignments 提交各 role 的任务说明。',
+      '何时不要使用：修改稳定 graph topology/config、直接回答用户、没有当前 nodeExecutionId、当前 nodeExecutionId 已经 terminal、或不满足共同调用前检查。',
+      '',
+      '必填字段：runId、runtimeKind、endpoint 标识字段、nodeExecutionId、event、idempotencyKey、顶层 summary。result.summary 不能替代顶层 summary。',
+      '',
+      '调用前检查：',
+      '- nodeExecutionId 必须从当前 node prompt 或 team_graph_context 复制；不要自造 attempt:2 或修改 attempt 后缀。',
+      '- complete/reject 会提交当前 node 的 NodeResult，下游边可按 payload.includeUpstreamResult 拼进 prompt。',
+      '- result.assignments 可承载本次分派给各 role 的任务文本；roleId 必须来自 AGENTS.md Role roster。',
+      '- complete 只在当前 node 真正完成时使用。',
+      '- reject 只在当前 node 应失败或走失败/返工边时使用。',
+      '- outputPort 必须和 graph edge sourcePort 对齐。',
+      '- evidenceRefs 只用 type=workspacePath、uri、artifact、inlineText；不要用 kind=file。',
+      '',
+      '调用后处理：',
+      '- progress / request_input / request_approval 成功后，按当前 node 状态继续或等待。',
+      '- complete / reject 返回 success=true 后，停止对这个 nodeExecutionId 调用 team_node_event；不要换新 idempotencyKey 再提交一次 terminal event。',
+      '- 如果 review 要求 rework，等待 runtime-host 投递新的 node prompt；新 prompt 会带新的 nodeExecutionId，再开始新的事件序列。',
+      '',
+      '失败处理：命令失败时不要说 node 已完成；如果只是传输结果不确定，复用同一 idempotencyKey 重试同一事件；如果参数被拒绝，按错误修正后再提交。',
+      '',
+      '常见错误：',
+      '- complete 已 success=true 后，又用 complete-003 这类新 idempotencyKey 重复提交。',
+      '- review rework 后自己把 attempt:1 改成 attempt:2。',
+      '- 只写 result.summary，不写顶层 summary。',
+      '- evidenceRefs 使用 { kind: "file" }。',
       '',
     ].join('\n');
   }
 
+  private buildRoleAgentsMd(roleMarkdown: string): string {
+    const base = removeInlinePersonaForTeammateSection(roleMarkdown).trimEnd();
+    const teamRunMode = [
+      '## TeamRun 模式',
+      '',
+      '默认按本文件职责独立工作。只有当前 prompt 明确包含 TeamRun node 上下文时，才进入 TeamRun 模式。',
+      '',
+      '进入 TeamRun 模式需要：runId、扁平 endpoint 字段、nodeExecutionId。缺少任一项，就不要调用 TeamRun tools。',
+      '',
+      'TeamRun 模式下：',
+      '- 你只负责当前 node，不设计或修改整个 graph。',
+      '- 工具参数从当前 prompt 复制；不要使用 current/default/猜测值。',
+      '- endpoint 作为 runtimeKind/runtimeAdapterId/runtimeInstanceId 等顶层字段传入；保持为顶层字段。',
+      '- 需要当前 node 的上下游、状态或等待信息时，按 TOOLS.md 调 team_graph_context view=current_node。',
+      '- 有进展、阻塞、审批需求、失败或完成时，按 TOOLS.md 调 team_node_event。普通 assistant 文本不会推进 graph。',
+      '- complete 只在当前 node 真正完成时使用；未验证就说明未验证。',
+    ].join('\n');
+    return [base, teamRunMode].filter(Boolean).join('\n\n');
+  }
+
   private buildRoleToolsMd(): string {
     return [
-      '# TeamRun Role Tools',
+      '# TeamRun Node Tools',
       '',
-      '## 何时使用工具',
+      '这些工具只用于 runtime-host TeamRun。',
       '',
-      '| 场景 | 使用工具 |',
-      '|---|---|',
-      '| 当前 task 已完成 | Team Complete Task |',
-      '| 继续执行前必须让用户确认高风险动作 | Team Request Approval |',
-      '| 需要向 leader 或其他 role 发送说明、问题或返工请求 | Team Send Message |',
+      '## 共同调用前检查',
       '',
-      '## Team Complete Task',
+      '- 当前 node prompt 必须提供 runId、扁平 endpoint 字段、nodeExecutionId。',
+      '- native-runtime endpoint 使用 runtimeKind、runtimeAdapterId、runtimeInstanceId 三个顶层字段。',
+      '- protocol-connector endpoint 使用 runtimeKind、protocolId、connectorId、endpointId 四个顶层字段。',
+      '- 不要使用 current、default、猜测 ID，或自造 endpoint。',
+      '- 只复制上面的顶层 endpoint 字段，不要把 endpoint 字段合并成一个值。',
+      '- 缺少必填上下文时不要调用工具；说明缺少 TeamRun node 上下文。',
       '',
-      '完成当前 task 时调用。不要在普通回复里假装完成；必须调用工具。',
-      '',
-      '必填字段：',
-      '- workflowTaskId：task assignment mail 里的 Task id。',
-      '- roleId：task assignment mail 里的 Role id，必须等于你自己的 role id。',
-      '- summary：简短完成摘要，不要放完整长文。',
-      '- idempotencyKey：稳定语义 key，重试同一次完成时保持不变。',
-      '',
-      '可选字段：',
-      '- evidenceRefs：证据引用数组。只在需要保留输出、来源或较长结果时提供。',
-      '',
-      'evidenceRefs 规则：',
-      '- inlineText.text 单条最多 20000 字符。',
-      '- 长输出不能塞进一条 inlineText；如果没有真实文件或 artifact，就拆成多条 inlineText，每条少于 20000 字符，并用 label 标明 part 1/3、part 2/3。',
-      '- workspacePath 只能引用当前 workspace 中真实存在或你实际创建的文件；没有写文件工具时不要编文件名。',
-      '- uri 只能引用真实外部地址。',
-      '- artifact 只能引用已存在 artifactId。',
-      '',
-      'Payload 形态：',
+      '正确参数片段：',
       '```json',
-      '{',
-      '  "workflowTaskId": "<Task id>",',
-      '  "roleId": "<Role id>",',
-      '  "summary": "<简短完成摘要>",',
-      '  "evidenceRefs": [',
-      '    {',
-      '      "type": "inlineText",',
-      '      "label": "<证据标签>",',
-      '      "text": "<最多 20000 字符>"',
-      '    }',
-      '  ],',
-      '  "idempotencyKey": "<稳定完成 key>"',
-      '}',
+      '"runtimeKind": "native-runtime",',
+      '"runtimeAdapterId": "openclaw",',
+      '"runtimeInstanceId": "local"',
       '```',
       '',
+      '## team_graph_context',
+      '',
+      '何时使用：',
+      '- 需要确认当前 node、上下游 edge、等待输入、审批或最近事件。',
+      '- 不确定 outputPort 应走哪条边。',
+      '',
+      '何时不要使用：',
+      '- 只是完成本地推理，不需要 runtime graph 状态。',
+      '- 想查看完整 prompt/config；该工具只返回关键摘要。',
+      '- 不满足共同调用前检查。',
+      '',
+      '调用前检查：先通过共同调用前检查；view 用 current_node。',
+      '调用后处理：先看 fieldGuide 理解字段含义；只把返回值用于理解当前 node 和邻接边；不要改 graph。',
+      '失败处理：',
+      '- 参数校验失败时，先修正参数后重试同一个工具；不要改用 team_node_event 汇报这个失败。',
+      '- 如果错误提到 runtimeKind 或 endpoint 字段，按正确参数片段补齐顶层 endpoint 字段后重试。',
+      '- 只有确实缺少业务输入，且共同调用前检查已通过时，才用 team_node_event request_input。',
+      '- 读取 graph context 失败但当前 prompt 足够执行时，可以继续本地工作；不要声称已经读取 graph context。',
+      '',
+      '## team_node_event',
+      '',
+      '何时使用：',
+      '| 场景 | event |',
+      '|---|---|',
+      '| 有阶段性进展但未完成 | progress |',
+      '| 继续执行前缺少用户/leader 输入 | request_input |',
+      '| 继续执行前必须让用户确认高风险动作 | request_approval |',
+      '| 当前 node 应失败或进入返工/失败边 | reject |',
+      '| 当前 node 已完成 | complete |',
+      '',
+      '何时不要使用：',
+      '- 只是聊天回答或草稿。',
+      '- 想修改 graph；role 不用 graph patch。',
+      '- 没有当前 nodeExecutionId，或当前 nodeExecutionId 已经 complete/reject 成功。',
+      '- 不满足共同调用前检查。',
+      '',
+      '必填字段：runId、runtimeKind、endpoint 标识字段、nodeExecutionId、event、idempotencyKey、顶层 summary。result.summary 不能替代顶层 summary。',
+      '',
+      '调用前检查：',
+      '- nodeExecutionId 必须从当前 node prompt 或 team_graph_context 复制；不要自造 attempt:2 或修改 attempt 后缀。',
+      '- idempotencyKey 对同一次上报稳定；重试同一事件不要换 key。',
+      '- summary 简短，不塞完整长文；完整产出放 result.content/metadata/evidenceRefs。',
+      '- complete/reject 会提交 NodeResult；outputPort 要匹配 graph edge；不确定先查 team_graph_context。',
+      '- request_approval 时填写 requestedAction 和 risk。',
+      '',
+      '调用后处理：',
+      '- progress / request_input / request_approval 成功后，按当前 node 状态继续或等待。',
+      '- complete / reject 返回 success=true 后，停止对这个 nodeExecutionId 调用 team_node_event；不要换新 idempotencyKey 再提交一次 terminal event。',
+      '- 如果 review 要求 rework，等待 runtime-host 投递新的 node prompt；新 prompt 会带新的 nodeExecutionId，再开始新的事件序列。',
+      '',
+      'evidenceRefs 规则：',
+      '- workspacePath 只能引用真实存在或你实际创建的文件：{ "type": "workspacePath", "path": "..." }。',
+      '- uri 只能引用真实外部地址：{ "type": "uri", "uri": "..." }。',
+      '- artifact 只能引用已存在 artifactId：{ "type": "artifact", "artifactId": "..." }。',
+      '- inlineText 只放必要证据：{ "type": "inlineText", "text": "..." }。',
+      '- 不要使用 { "kind": "file" }。',
+      '',
+      '失败处理：',
+      '- command 报错时，不要说 node 已完成、失败或等待。',
+      '- 如果只是传输结果不确定，复用同一 idempotencyKey 重试同一事件。',
+      '- 如果参数被拒绝，按错误修正后再提交；无法修正时，在普通回复里说明失败边界。',
+      '',
       '常见错误：',
-      '- 错误：把 20000 字符以上的报告放进单条 inlineText。修正：拆成多条 inlineText，或引用真实文件/artifact。',
-      '- 错误：工具失败后声称已经完成。修正：只有 Team Complete Task 成功后，task 才算完成。',
-      '- 错误：用不存在的 workspacePath。修正：只引用真实存在或实际创建的文件。',
-      '',
-      '## Team Request Approval',
-      '',
-      '只有当前 task 需要用户批准高风险动作时使用。',
-      '',
-      '必填字段：workflowTaskId、roleId、reason、requestedAction、risk、idempotencyKey。',
-      'reason 写为什么需要批准；requestedAction 写具体要做什么；risk 写不批准/批准的风险。',
-      '',
-      '## Team Send Message',
-      '',
-      '用于发送 audited team message，不用于完成 task。',
-      '',
-      '必填字段：kind、fromRoleId、toRoleId、summary、body、idempotencyKey。',
-      'kind 只能是 note、question 或 kickback。kickback 必须包含 failureItems，并关联 relatedTaskId、relatedArtifactId 或 relatedGateId 中至少一个。',
-      '',
-      '## Critical reminders',
-      '',
-      '- 不要调用 Team Submit Workflow Plan；那是 leader 的工具。',
-      '- 不要使用 sessions_spawn、subagents 或手动开新 session 替代 TeamRun。',
-      '- 不要把 roleId 写成 managed agent id。',
-      '- 不要把 runId、sessionKey、agentId 等 runtime 字段放进工具参数；runtime 会从当前 role session 绑定。',
-      '- 工具报错时，按错误修正后重试；不要把失败说成成功。',
+      '- 猜 runId 或 nodeExecutionId。',
+      '- complete 已 success=true 后，又用新的 idempotencyKey 重复 complete。',
+      '- review rework 后自己把 attempt:1 改成 attempt:2。',
+      '- 只写 result.summary，不写顶层 summary。',
+      '- 用 managed agent id 当 roleId。',
+      '- 把 endpoint 字段合并成一个对象或字符串。',
+      '- 只发 assistant 文本，以为 graph 会推进。',
+      '- 提交 workflowTaskId-based payload。',
+      '- 用 sessions_spawn、subagents 或另开新 session 替代 TeamRun。',
       '',
     ].join('\n');
+  }
+
+  private buildSelectedLeaderAgentsMd(input: TeamAgentMaterializationSpec, roles: readonly MaterializedRoleAgent[]): string {
+    return [
+      '# TeamRun Leader Mode',
+      '',
+      '你是这个 Team 的 leader。默认按当前 Agent 原有职责工作；只有当前 prompt 明确提供 TeamRun node/graph 上下文时，才进入团队模式。',
+      '',
+      '## 团队模式',
+      '',
+      '触发场景：当前 prompt 提供 TeamRun 上下文字段：runId、runtimeKind/runtimeAdapterId/runtimeInstanceId 等扁平 endpoint 字段；执行某个 node 时还会提供 nodeExecutionId。不要用用户短语判定模式；是否进入团队模式只看当前 prompt 是否提供 TeamRun 上下文。',
+      '',
+      'TeamRun 工具门槛：',
+      '- team_graph_context / team_graph_patch：需要 runId + 扁平 endpoint 字段。',
+      '- team_node_event / current_node 查询：还需要 nodeExecutionId。',
+      '- 缺少门槛字段时：停在当前 Agent 原有工作模式，或说明缺少 TeamRun 上下文；不要探测 active run。',
+      '- 禁止占位值：current、default、猜测 ID；endpoint 必须用 runtimeKind/runtimeAdapterId/runtimeInstanceId 等顶层字段；保持为顶层字段。',
+      '',
+      '你应该：',
+      '- 修改 graph 前先用 team_graph_context 读取 compact graph context；不要盲改。',
+      '- 需要新增或调整 graph 时，用 team_graph_patch。',
+      '- 自己正在执行某个 nodeExecution 时，用 team_node_event 上报 progress/request/complete/reject。',
+      '- command 成功前，不把计划说成完成。',
+      '',
+      '## Team role 分派决策',
+      '',
+      '触发场景：当前 prompt 表明你正在处理 TeamRun 中的 leader/coordinator node，且用户要求“分派任务”“并行派发”“让各角色执行/准备 prompt”“把任务交给某些 role”。',
+      '',
+      '必须做：',
+      '1. 需要确认当前 node、输出端口或相邻下游边时，先用 team_graph_context view=current_node；只有设计或修改整体 graph topology/config 时才用 graph_summary。',
+      '2. 把分派写入当前 node 的 NodeResult：result.assignments 使用 Role roster 里的 roleId，text 写给该 role 的完整任务说明。',
+      '3. 用 team_node_event complete 提交当前 node result；outputPort 必须匹配 graph 里通向下游 role node 的 sourcePort。',
+      '4. runtime-host reducer 会根据 edge action 和 payload.includeUpstreamResult 激活下游 role node；不要自己创建 OpenClaw 子会话。',
+      '',
+      '不要做：',
+      '- 不调用 agents_list 查 agent id；Role roster 已经给出可用 roleId。',
+      '- 不调用 sessions_spawn、subagents 或另开新 session 分派 Team role。',
+      '- 不用 team_graph_patch 承载一次性分派内容；graph_patch 只改稳定 topology/config/template。',
+      '- 不把 managed agent id 当 roleId 写进 result.assignments。',
+      '',
+      '## Role roster',
+      '',
+      'work/review node 的 roleId 只能使用下面这些值：',
+      '',
+      ...roles.map((roleAgent) => `- ${roleAgent.role.roleId}`),
+      '',
+      '不要使用 roleId "leader"、managed agent id、展示名、自造 helper/reviewer/integrator。',
+      '',
+      '## Node prompt 编写规则',
+      '',
+      '给 role 的 work/review node prompt 必须包含：用户任务、共享上下文、role assignment、期望输出、依赖/限制、完成标准。不要假设 role agent 会自己知道当前 node 未写明的任务。',
+      '',
+      '## 禁止行为',
+      '',
+      '- 不满足 TeamRun 工具门槛时，不调用 TeamRun tools。',
+      '- 不用普通聊天文本代替 team_node_event。',
+      '- 不用 team_node_event 修改稳定 graph topology/config；它只提交当前 node 的事件和 NodeResult。',
+      '- 不用 team_graph_patch 承载一次性分派/产出；分派内容属于 team_node_event 的 NodeResult。',
+      '- 不猜 runId、nodeExecutionId、roleId。',
+      '- 不用 sessions_spawn、subagents 或另开新 session 分派 Team role。',
+      '- 满足成功标准后停止，不顺手扩展 graph。',
+      '',
+      `Team name: ${input.teamSkill.name}`,
+      '',
+    ].join('\n');
+  }
+
+  private buildSelectedLeaderToolsMd(): string {
+    return [
+      '# TeamRun Tools',
+      '',
+      '这些工具只走 runtime-host TeamRun command/context 契约。',
+      '',
+      '## 工具优先级',
+      '',
+      '1. 当前 prompt 提供的 TeamRun 上下文字段。',
+      '2. team_graph_context 读取的 runtime-host graph context。',
+      '3. team_graph_patch / team_node_event 写入命令。',
+      '',
+      '## 共同调用前检查',
+      '',
+      '- team_graph_context / team_graph_patch：必须有 runId 和扁平 endpoint 字段。',
+      '- team_node_event / current_node 查询：必须再有 nodeExecutionId。',
+      '- native-runtime endpoint 使用 runtimeKind、runtimeAdapterId、runtimeInstanceId 三个顶层字段。',
+      '- protocol-connector endpoint 使用 runtimeKind、protocolId、connectorId、endpointId 四个顶层字段。',
+      '- 只复制上面的顶层 endpoint 字段，不要把 endpoint 字段合并成一个值。',
+      '- 不要使用 current、default、猜测 ID，或自造 endpoint。',
+      '- 缺少必填上下文时不要调用工具；回到当前 Agent 原有工作模式，或说明缺少 TeamRun 上下文。',
+      '',
+      '正确参数片段：',
+      '```json',
+      '"runtimeKind": "native-runtime",',
+      '"runtimeAdapterId": "openclaw",',
+      '"runtimeInstanceId": "local"',
+      '```',
+      '',
+      '## team_graph_context',
+      '',
+      '何时使用：',
+      '- 准备修改 graph 前，需要读取当前 compact graph。',
+      '- 执行当前 node，且需要确认上下游 edge、状态、等待输入、审批或最近事件。',
+      '- 不确定 graph 是否已存在或已被其他命令推进。',
+      '',
+      '何时不要使用：',
+      '- 普通问答、讨论假设方案。',
+      '- 只是想探测有没有 active run。',
+      '- 不满足共同调用前检查。',
+      '',
+      '调用前检查：先通过共同调用前检查；view：设计/修改 graph 用 graph_summary；执行当前 node 用 current_node。',
+      '调用后处理：把返回值当作 runtime-host 当前状态；只依据返回的 compact 信息改 graph。',
+      '失败处理：参数校验失败时，先修正参数后重试同一个工具；读取失败时不要继续提交 graph patch。',
+      '',
+      '## team_graph_patch',
+      '',
+      '何时使用：需要创建或修改 TeamRun graph topology/config。',
+      '何时不要使用：上报当前 node 进度、请求输入、审批、完成或失败；或不满足共同调用前检查。',
+      '调用前检查：先用 team_graph_context 确认当前 graph；patch.operations 非空；work/review node 的 roleId 来自 AGENTS.md Role roster。',
+      '失败处理：patch 失败时不要声称 graph 已更新；按错误修正后用同一 idempotencyKey 重试同一意图。',
+      '',
+      '## team_node_event',
+      '',
+      '何时使用：leader 自己正在执行当前 nodeExecution，需要上报 progress、request_input、request_approval、reject 或 complete；分派角色任务时，用 complete 的 result.assignments 提交各 role 的任务说明。',
+      '何时不要使用：修改稳定 graph topology/config、直接回答用户、没有当前 nodeExecutionId、当前 nodeExecutionId 已经 terminal、或不满足共同调用前检查。',
+      '必填字段：runId、runtimeKind、endpoint 标识字段、nodeExecutionId、event、idempotencyKey、顶层 summary。result.summary 不能替代顶层 summary。',
+      '调用后处理：complete / reject 返回 success=true 后，停止对这个 nodeExecutionId 调用 team_node_event；不要换新 idempotencyKey 再提交一次 terminal event。',
+      '失败处理：命令失败时不要说 node 已完成；如果只是传输结果不确定，复用同一 idempotencyKey 重试同一事件。',
+      '',
+    ].join('\n');
+  }
+
+  private buildSelectedRoleAgentsMd(roleMarkdown: string): string {
+    const base = roleMarkdown.trimEnd();
+    const teamRunMode = [
+      '## TeamRun 模式',
+      '',
+      '默认按当前 Agent 原有职责工作。只有当前 prompt 明确包含 TeamRun node 上下文时，才进入 TeamRun 模式。',
+      '',
+      '进入 TeamRun 模式需要：runId、扁平 endpoint 字段、nodeExecutionId。缺少任一项，就不要调用 TeamRun tools。',
+      '',
+      'TeamRun 模式下：',
+      '- 你只负责当前 node，不设计或修改整个 graph。',
+      '- 工具参数从当前 prompt 复制；不要使用 current/default/猜测值。',
+      '- endpoint 作为 runtimeKind/runtimeAdapterId/runtimeInstanceId 等顶层字段传入；保持为顶层字段。',
+      '- 需要当前 node 的上下游、状态或等待信息时，按 TOOLS.md 调 team_graph_context view=current_node。',
+      '- 有进展、阻塞、审批需求、失败或完成时，按 TOOLS.md 调 team_node_event。普通 assistant 文本不会推进 graph。',
+      '- complete 只在当前 node 真正完成时使用；未验证就说明未验证。',
+    ].join('\n');
+    return [base, teamRunMode].filter(Boolean).join('\n\n');
+  }
+
+  private buildSelectedRoleToolsMd(): string {
+    return this.buildRoleToolsMd();
   }
 
   private materializedRoleAgent(teamId: string, role: TeamRoleAgentMaterializationSpec): MaterializedRoleAgent {
     return {
       role,
-      agentId: buildTeamManagedAgentId(teamId, role.roleId),
+      agentId: role.sourceAgentId ?? buildTeamManagedAgentId(teamId, role.roleId),
+      ownership: role.sourceAgentId ? 'external' : 'team-owned',
     };
   }
 
-  private toManagedAgentRecord(teamId: string, endpoint: RuntimeEndpointRef, roleAgent: MaterializedRoleAgent, workspace: string): TeamManagedAgentRecord {
+  private workspacePathForRole(_input: TeamAgentMaterializationSpec, roleAgent: MaterializedRoleAgent, fallbackWorkspacePath: string): string {
+    return roleAgent.role.sourceWorkspace ?? fallbackWorkspacePath;
+  }
+
+  private toManagedAgentRecord(
+    teamId: string,
+    endpoint: RuntimeEndpointRef,
+    roleAgent: MaterializedRoleAgent,
+    workspace: string,
+    configRestores: ReadonlyMap<string, TeamManagedAgentConfigRestore>,
+  ): TeamManagedAgentRecord {
+    const configRestore = configRestores.get(roleAgent.agentId);
     return {
       teamId,
       roleId: roleAgent.role.roleId,
@@ -888,6 +1268,10 @@ export class OpenClawTeamAgentMaterializationAdapter implements TeamAgentMateria
       workspace,
       endpoint,
       ...(roleAgent.role.model ? { model: roleAgent.role.model } : {}),
+      ...(roleAgent.ownership === 'external' ? {
+        lifecycle: 'external' as const,
+        ...(configRestore ? { configRestore } : {}),
+      } : {}),
     };
   }
 
@@ -1015,6 +1399,60 @@ export class OpenClawTeamAgentMaterializationAdapter implements TeamAgentMateria
   private readString(value: unknown): string | null {
     return typeof value === 'string' && value.trim() ? value.trim() : null;
   }
+}
+
+const MATCHACLAW_CONTEXT_BEGIN_MARKER = '<!-- matchaclaw:begin -->';
+const MATCHACLAW_CONTEXT_END_MARKER = '<!-- matchaclaw:end -->';
+
+function appendTeamRunProjectionBlock(currentContent: string, teamId: string, blockContent: string): string {
+  const currentWithoutTeamRunBlock = removeTeamRunProjectionBlock(currentContent, teamId).trimEnd();
+  const block = [teamRunProjectionStartMarker(teamId), blockContent.trim(), teamRunProjectionEndMarker(teamId)].join('\n');
+  const contextMarkerIndex = findMatchaClawContextBlockStart(currentWithoutTeamRunBlock);
+  if (contextMarkerIndex < 0) {
+    return [currentWithoutTeamRunBlock, block, ''].filter((part, index) => index === 2 || part.length > 0).join('\n\n');
+  }
+  const beforeContext = currentWithoutTeamRunBlock.slice(0, contextMarkerIndex).trimEnd();
+  const contextBlockAndAfter = currentWithoutTeamRunBlock.slice(contextMarkerIndex).trimStart();
+  return [beforeContext, block, contextBlockAndAfter, ''].filter((part, index) => index === 3 || part.length > 0).join('\n\n');
+}
+
+function findMatchaClawContextBlockStart(content: string): number {
+  const beginIndex = content.indexOf(MATCHACLAW_CONTEXT_BEGIN_MARKER);
+  if (beginIndex < 0) {
+    return -1;
+  }
+  const endIndex = content.indexOf(MATCHACLAW_CONTEXT_END_MARKER, beginIndex + MATCHACLAW_CONTEXT_BEGIN_MARKER.length);
+  return endIndex >= 0 ? beginIndex : -1;
+}
+
+function removeTeamRunProjectionBlock(content: string, teamId: string): string {
+  const startMarker = teamRunProjectionStartMarker(teamId);
+  const endMarker = teamRunProjectionEndMarker(teamId);
+  let remaining = content;
+  while (true) {
+    const startIndex = remaining.indexOf(startMarker);
+    if (startIndex < 0) {
+      return remaining.replace(/\n{3,}/g, '\n\n').trimEnd() + (remaining.trimEnd() ? '\n' : '');
+    }
+    const endIndex = remaining.indexOf(endMarker, startIndex + startMarker.length);
+    if (endIndex < 0) {
+      return remaining;
+    }
+    const removeEndIndex = endIndex + endMarker.length;
+    remaining = `${remaining.slice(0, startIndex).trimEnd()}\n\n${remaining.slice(removeEndIndex).trimStart()}`;
+  }
+}
+
+function teamRunProjectionStartMarker(teamId: string): string {
+  return `<!-- matchaclaw-teamrun:start:${teamId} -->`;
+}
+
+function teamRunProjectionEndMarker(teamId: string): string {
+  return `<!-- matchaclaw-teamrun:end:${teamId} -->`;
+}
+
+function cloneRecord(record: Record<string, unknown>): Record<string, unknown> {
+  return JSON.parse(JSON.stringify(record)) as Record<string, unknown>;
 }
 
 function removeInlinePersonaForTeammateSection(markdown: string): string {

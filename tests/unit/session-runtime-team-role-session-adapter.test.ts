@@ -25,6 +25,9 @@ function createAdapter() {
         },
       },
     })),
+    endpointSessionMaterialization: {
+      materializeEndpointSession: vi.fn(async () => undefined),
+    },
   };
   return {
     calls,
@@ -62,6 +65,7 @@ describe('SessionRuntimeTeamRoleSessionAdapter', () => {
       endpoint: sessionIdentity.endpoint,
       agentId: 'reviewer',
     });
+    expect(calls.endpointSessionMaterialization.materializeEndpointSession).toHaveBeenCalledWith(binding);
     expect(calls.promptSession).toHaveBeenCalledWith({
       sessionKey: 'team:run-1:role:reviewer',
       sessionIdentity,
@@ -79,6 +83,51 @@ describe('SessionRuntimeTeamRoleSessionAdapter', () => {
       sessionKey: 'team:run-1:role:reviewer',
       promptRunId: 'prompt-run-1',
     });
+  });
+
+  it('passes displayMessage separately from the delivered TeamRun prompt', async () => {
+    const { adapter, calls } = createAdapter();
+    const sessionIdentity = createOpenClawTestSessionIdentity('agent:mct-team:team-role:run-1:leader', 'mct-team');
+
+    await adapter.promptRoleSession({
+      binding: {
+        runId: 'run-1',
+        roleId: 'leader',
+        agentId: 'mct-team',
+        sessionIdentity,
+        sessionKey: sessionIdentity.sessionKey,
+      },
+      message: '## TeamRun WorkNode\nfull prompt',
+      displayMessage: '用户原文',
+      idempotencyKey: 'prompt-run-1',
+    });
+
+    expect(calls.promptSession).toHaveBeenCalledWith({
+      sessionKey: 'agent:mct-team:team-role:run-1:leader',
+      sessionIdentity,
+      message: '## TeamRun WorkNode\nfull prompt',
+      displayMessage: '用户原文',
+      idempotencyKey: 'prompt-run-1',
+    });
+  });
+
+  it('fails ensure when endpoint session materialization fails after Matcha session creation', async () => {
+    const { adapter, calls } = createAdapter();
+    const sessionIdentity = createOpenClawTestSessionIdentity('agent:mct-team:team-role:run-1:reviewer', 'mct-team');
+    calls.endpointSessionMaterialization.materializeEndpointSession.mockRejectedValueOnce(new Error('sessions.create failed'));
+
+    await expect(adapter.ensureRoleSession({
+      runId: 'run-1',
+      roleId: 'reviewer',
+      agentId: 'mct-team',
+      sessionIdentity,
+    })).rejects.toThrow('sessions.create failed');
+    expect(calls.createSession).toHaveBeenCalledWith({
+      sessionKey: 'agent:mct-team:team-role:run-1:reviewer',
+      endpoint: sessionIdentity.endpoint,
+      agentId: 'mct-team',
+    });
+    expect(calls.endpointSessionMaterialization.materializeEndpointSession).toHaveBeenCalledTimes(1);
   });
 
   it('rejects a binding when the requested agentId differs from SessionIdentity.agentId', async () => {

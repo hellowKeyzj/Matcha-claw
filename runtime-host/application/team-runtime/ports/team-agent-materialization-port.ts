@@ -1,21 +1,18 @@
 import type { RuntimeEndpointRef } from '../../agent-runtime/contracts/runtime-address';
 import type { TeamManagedAgentRecord } from '../domain/team-instance';
 
-export interface TeamAgentFileSpec {
-  readonly path: string;
-  readonly content: string;
-}
+export type TeamAgentMaterializationSourceType = 'teamskill' | 'manual';
 
 export interface TeamRoleAgentMaterializationSpec {
   readonly roleId: string;
   readonly agentName: string;
   readonly purpose?: string;
-  readonly workspacePath: string;
-  readonly agentDir?: string;
-  readonly files: readonly TeamAgentFileSpec[];
+  readonly roleMarkdown?: string;
   readonly skills?: readonly string[];
   readonly tools?: readonly string[];
   readonly model?: string;
+  readonly sourceAgentId?: string;
+  readonly sourceWorkspace?: string;
 }
 
 export interface TeamSkillMaterializationSpec {
@@ -33,6 +30,7 @@ export interface TeamSkillMaterializationSpec {
 export interface TeamAgentMaterializationSpec {
   readonly teamId: string;
   readonly endpoint: RuntimeEndpointRef;
+  readonly sourceType: TeamAgentMaterializationSourceType;
   readonly teamSkill: TeamSkillMaterializationSpec;
   readonly leader: TeamRoleAgentMaterializationSpec;
   readonly roles: readonly TeamRoleAgentMaterializationSpec[];
@@ -46,8 +44,7 @@ export interface TeamAgentMaterializationResult {
 export interface RemoveTeamAgentsInput {
   readonly teamId: string;
   readonly endpoint: RuntimeEndpointRef;
-  readonly agentIds: readonly string[];
-  readonly workspacePaths?: readonly string[];
+  readonly managedAgents: readonly TeamManagedAgentRecord[];
 }
 
 export interface TeamAgentMaterializationPort {

@@ -10,6 +10,7 @@ export interface TeamRuntimeStateStore {
   writeRunState(runId: string, state: unknown): Promise<void>;
   deleteRunState(runId: string): Promise<void>;
   readTeamInstance(teamId: string): Promise<unknown | null>;
+  listTeamInstances(): Promise<unknown[]>;
   writeTeamInstance(teamId: string, instance: unknown): Promise<void>;
   deleteTeamInstance(teamId: string): Promise<void>;
 }
@@ -17,18 +18,11 @@ export interface TeamRuntimeStateStore {
 export class FileTeamRuntimeStateStore implements TeamRuntimeStateStore {
   constructor(private readonly deps: {
     readonly runtimeData: TeamRuntimeDataRootPort;
-    readonly fileSystem: Pick<RuntimeFileSystemPort, 'ensureDirectory' | 'readTextFile' | 'writeTextFile' | 'removeFile' | 'rename'>;
+    readonly fileSystem: Pick<RuntimeFileSystemPort, 'ensureDirectory' | 'listDirectory' | 'readTextFile' | 'writeTextFile' | 'removeFile' | 'rename'>;
   }) {}
 
   async readRunState(runId: string): Promise<unknown | null> {
-    try {
-      return JSON.parse(await this.deps.fileSystem.readTextFile(this.runStatePath(runId)));
-    } catch (error) {
-      if (isNotFoundError(error)) {
-        return null;
-      }
-      throw error;
-    }
+    return await this.readJsonFile(this.runStatePath(runId));
   }
 
   async writeRunState(runId: string, state: unknown): Promise<void> {
@@ -46,19 +40,28 @@ export class FileTeamRuntimeStateStore implements TeamRuntimeStateStore {
   }
 
   async readTeamInstance(teamId: string): Promise<unknown | null> {
+    return await this.readJsonFile(this.teamInstancePath(teamId));
+  }
+
+  async listTeamInstances(): Promise<unknown[]> {
+    let entries;
     try {
-      return JSON.parse(await this.deps.fileSystem.readTextFile(this.teamInstancePath(teamId)));
+      entries = await this.deps.fileSystem.listDirectory(this.teamInstancesDirectoryPath());
     } catch (error) {
-      if (isNotFoundError(error)) {
-        return null;
-      }
+      if (isNotFoundError(error)) return [];
       throw error;
     }
+
+    const instances: unknown[] = [];
+    for (const entry of entries) {
+      if (!entry.isFile || !entry.name.endsWith('.json')) continue;
+      instances.push(JSON.parse(await this.deps.fileSystem.readTextFile(path.join(this.teamInstancesDirectoryPath(), entry.name))));
+    }
+    return instances;
   }
 
   async writeTeamInstance(teamId: string, instance: unknown): Promise<void> {
-    const filePath = this.teamInstancePath(teamId);
-    await this.writeJsonFile(filePath, instance);
+    await this.writeJsonFile(this.teamInstancePath(teamId), instance);
   }
 
   async deleteTeamInstance(teamId: string): Promise<void> {
@@ -68,6 +71,15 @@ export class FileTeamRuntimeStateStore implements TeamRuntimeStateStore {
       if (!isNotFoundError(error)) {
         throw error;
       }
+    }
+  }
+
+  private async readJsonFile(filePath: string): Promise<unknown | null> {
+    try {
+      return JSON.parse(await this.deps.fileSystem.readTextFile(filePath));
+    } catch (error) {
+      if (isNotFoundError(error)) return null;
+      throw error;
     }
   }
 
@@ -97,8 +109,12 @@ export class FileTeamRuntimeStateStore implements TeamRuntimeStateStore {
     return path.join(this.deps.runtimeData.getRuntimeDataRootDir(), 'team-runtime', 'runs', `${sanitizePathSegment(runId)}.json`);
   }
 
+  private teamInstancesDirectoryPath(): string {
+    return path.join(this.deps.runtimeData.getRuntimeDataRootDir(), 'team-runtime', 'teams');
+  }
+
   private teamInstancePath(teamId: string): string {
-    return path.join(this.deps.runtimeData.getRuntimeDataRootDir(), 'team-runtime', 'teams', `${sanitizePathSegment(teamId)}.json`);
+    return path.join(this.teamInstancesDirectoryPath(), `${sanitizePathSegment(teamId)}.json`);
   }
 }
 

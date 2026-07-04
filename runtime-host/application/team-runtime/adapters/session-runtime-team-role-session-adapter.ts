@@ -1,6 +1,7 @@
 import type { SessionPromptResult } from '../../../shared/session-adapter-types';
 import type { ApplicationResponseOf } from '../../common/application-response';
 import type { TeamRoleSessionBinding } from '../domain/team-run';
+import type { TeamRoleEndpointSessionMaterializationPort } from '../ports/team-role-session-materialization-port';
 import type {
   AbortTeamRoleSessionInput,
   DeleteTeamRoleSessionInput,
@@ -18,6 +19,7 @@ interface SessionRuntimeRoleSessionAdapterDeps {
   readonly abortSession: (payload: unknown) => Promise<ApplicationResponseOf>;
   readonly deleteSession: (payload: unknown) => Promise<ApplicationResponseOf>;
   readonly getSessionWindow: (payload: unknown) => Promise<ApplicationResponseOf>;
+  readonly endpointSessionMaterialization?: TeamRoleEndpointSessionMaterializationPort;
 }
 
 export class SessionRuntimeTeamRoleSessionAdapter implements TeamRoleSessionPort {
@@ -31,6 +33,7 @@ export class SessionRuntimeTeamRoleSessionAdapter implements TeamRoleSessionPort
       agentId: binding.agentId,
     });
     assertSuccessfulSessionRuntimeResponse(response, `Unable to ensure Team role session ${binding.sessionKey}`);
+    await this.deps.endpointSessionMaterialization?.materializeEndpointSession(binding);
     return binding;
   }
 
@@ -39,6 +42,7 @@ export class SessionRuntimeTeamRoleSessionAdapter implements TeamRoleSessionPort
       sessionKey: input.binding.sessionKey,
       sessionIdentity: input.binding.sessionIdentity,
       message: input.message,
+      ...(typeof input.displayMessage === 'string' ? { displayMessage: input.displayMessage } : {}),
       idempotencyKey: input.idempotencyKey,
       ...(typeof input.deliver === 'boolean' ? { deliver: input.deliver } : {}),
     });

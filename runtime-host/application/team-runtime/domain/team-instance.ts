@@ -1,7 +1,11 @@
 import type { RuntimeEndpointRef, SessionIdentity } from '../../agent-runtime/contracts/runtime-address';
-import { buildTeamManagedAgentId } from './team-managed-agent';
+import type { TeamGraphDefinition } from '../graph';
 import type { TeamRoleSessionBinding, TeamRunStatus } from './team-run';
-import type { TeamRoleAgentMaterializationSpec } from '../ports/team-agent-materialization-port';
+
+export interface TeamManagedAgentConfigRestore {
+  readonly entryExisted: boolean;
+  readonly entry?: Record<string, unknown>;
+}
 
 export interface TeamManagedAgentRecord {
   readonly teamId: string;
@@ -11,6 +15,8 @@ export interface TeamManagedAgentRecord {
   readonly workspace: string;
   readonly endpoint: RuntimeEndpointRef;
   readonly model?: string;
+  readonly lifecycle?: 'team-owned' | 'external';
+  readonly configRestore?: TeamManagedAgentConfigRestore;
 }
 
 export interface TeamInstanceRunRecord {
@@ -32,7 +38,9 @@ export interface TeamInstance {
   readonly teamSkillVersion: string;
   readonly packagePath: string;
   readonly sourcePath: string;
+  readonly sourceType?: 'teamskill' | 'manual';
   readonly managedAgents: readonly TeamManagedAgentRecord[];
+  readonly graphTemplate?: TeamGraphDefinition | null;
   readonly runs: readonly TeamInstanceRunRecord[];
   readonly createdAt: number;
   readonly updatedAt: number;
@@ -64,37 +72,6 @@ export function buildTeamRoleSessionBinding(input: {
   };
 }
 
-export function buildTeamRoleSessionBindings(input: {
-  readonly teamId: string;
-  readonly runId: string;
-  readonly endpoint: RuntimeEndpointRef;
-  readonly roles: readonly TeamRoleAgentMaterializationSpec[];
-}): TeamRoleSessionBinding[] {
-  return input.roles.map((role) => buildTeamRoleSessionBinding({
-    teamId: input.teamId,
-    runId: input.runId,
-    roleId: role.roleId,
-    agentId: buildTeamManagedAgentId(input.teamId, role.roleId),
-    endpoint: input.endpoint,
-  }));
-}
-
-export function buildTeamManagedAgentRecords(input: {
-  readonly teamId: string;
-  readonly endpoint: RuntimeEndpointRef;
-  readonly roles: readonly TeamRoleAgentMaterializationSpec[];
-}): TeamManagedAgentRecord[] {
-  return input.roles.map((role) => ({
-    teamId: input.teamId,
-    roleId: role.roleId,
-    agentId: buildTeamManagedAgentId(input.teamId, role.roleId),
-    displayName: role.agentName,
-    workspace: role.workspacePath,
-    endpoint: input.endpoint,
-    ...(role.model ? { model: role.model } : {}),
-  }));
-}
-
 export function buildTeamRoleSessionBindingsFromManagedAgents(input: {
   readonly teamId: string;
   readonly runId: string;
@@ -110,5 +87,5 @@ export function buildTeamRoleSessionBindingsFromManagedAgents(input: {
 }
 
 export function collectTeamManagedAgentIds(managedAgents: readonly TeamManagedAgentRecord[]): string[] {
-  return Array.from(new Set(managedAgents.map((agent) => agent.agentId)));
+  return Array.from(new Set(managedAgents.filter((agent) => agent.lifecycle !== 'external').map((agent) => agent.agentId)));
 }

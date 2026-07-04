@@ -38,8 +38,6 @@ const MATCHACLAW_MANAGED_PLUGIN_IDS = new Set(
   CAPABILITY_OPENCLAW_PLUGIN_DEFINITIONS.map((definition) => definition.id),
 );
 const MATCHACLAW_MANAGED_LEGACY_PLUGIN_IDS = new Set(Object.keys(LEGACY_PLUGIN_ID_MAP));
-const TEAM_RUNTIME_PLUGIN_ID = 'team-runtime';
-const TEAM_RUNTIME_UNRESTRICTED_TOOL_MARKER = '*';
 
 function isMatchaClawManagedPluginId(pluginId: string): boolean {
   return MATCHACLAW_MANAGED_PLUGIN_IDS.has(pluginId) || MATCHACLAW_MANAGED_LEGACY_PLUGIN_IDS.has(pluginId);
@@ -196,42 +194,6 @@ function canWritePluginToTrustedAllowlist(pluginId: string, bundledPluginIds: Re
   return !isChannelDerivedPluginId(pluginId) || getExternalChannelTypeByPluginId(pluginId) !== undefined;
 }
 
-function applyTeamRuntimePluginConfig(entry: Record<string, unknown>, config: Record<string, unknown>, storageRoot: string): Record<string, unknown> {
-  const currentPluginConfig = isRecord(entry.config) ? entry.config : {};
-  return {
-    ...entry,
-    config: {
-      ...currentPluginConfig,
-      storageRoot,
-      availableSkills: readTeamRuntimeAvailableSkills(currentPluginConfig, config),
-      availableTools: readTeamRuntimeAvailableTools(currentPluginConfig, config),
-    },
-  };
-}
-
-function readTeamRuntimeAvailableSkills(pluginConfig: Record<string, unknown>, config: Record<string, unknown>): string[] {
-  const skills = isRecord(config.skills) ? config.skills : {};
-  const entries = isRecord(skills.entries) ? skills.entries : {};
-  const enabledSkills = normalizePluginIds(
-    Object.entries(entries)
-      .filter(([, entry]) => isRecord(entry) && entry.enabled === true)
-      .map(([skillKey]) => skillKey),
-  );
-  return enabledSkills;
-}
-
-function readTeamRuntimeAvailableTools(pluginConfig: Record<string, unknown>, _config: Record<string, unknown>): string[] {
-  const configured = readNonEmptyStringArray(pluginConfig.availableTools);
-  return configured.length > 0 ? configured : [TEAM_RUNTIME_UNRESTRICTED_TOOL_MARKER];
-}
-
-function readNonEmptyStringArray(value: unknown): string[] {
-  if (!Array.isArray(value)) {
-    return [];
-  }
-  return value.filter((item): item is string => typeof item === 'string' && item.trim().length > 0).map((item) => item.trim());
-}
-
 export async function applyEnabledPluginIdsToOpenClawConfig(
   configRepository: Pick<OpenClawConfigRepositoryPort, 'getConfigDir' | 'getOpenClawDirPath'>,
   pluginFileSystem: Pick<PluginFileSystemPort, 'pathExists' | 'readJsonRecord' | 'listDirectoryEntries'>,
@@ -257,9 +219,7 @@ export async function applyEnabledPluginIdsToOpenClawConfig(
       ...currentEntry,
       enabled: true,
     };
-    nextEntries[pluginId] = pluginId === TEAM_RUNTIME_PLUGIN_ID
-      ? applyTeamRuntimePluginConfig(enabledEntry, config, configRepository.getConfigDir())
-      : enabledEntry;
+    nextEntries[pluginId] = enabledEntry;
   }
 
   for (const [pluginId, rawEntry] of Object.entries(nextEntries)) {

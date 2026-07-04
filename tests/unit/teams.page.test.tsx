@@ -6,6 +6,7 @@ import { TeamChat } from '@/pages/Teams/TeamChat';
 import { useGatewayStore } from '@/stores/gateway';
 import { useTeamsStore, type TeamMeta } from '@/stores/teams';
 import { useSkillsStore } from '@/stores/skills';
+import { useSubagentsStore } from '@/stores/subagents';
 import { capabilityExecuteMock, hostApiFetchMock, resetGatewayClientMocks } from './helpers/mock-gateway-client';
 import i18n from '@/i18n';
 
@@ -215,6 +216,18 @@ describe('teams page', () => {
       importLocalSkill: vi.fn().mockResolvedValue('skill-key'),
       fetchSkills: vi.fn().mockResolvedValue(undefined),
     } as never);
+
+    useSubagentsStore.setState({
+      agentsResource: {
+        data: [],
+        status: 'ready',
+        error: null,
+        hasLoadedOnce: true,
+        lastLoadedAt: 1,
+      },
+      loadAgents: vi.fn().mockResolvedValue(undefined),
+      error: null,
+    } as never);
   });
 
   it('renders TeamSkill create controls and existing team list', async () => {
@@ -293,8 +306,83 @@ describe('teams page', () => {
     });
   });
 
+  it('creates a manual team from selected existing agents, provisions prompts, then creates its first run', async () => {
+    setGatewayRunning();
+    useSubagentsStore.setState({
+      agentsResource: {
+        data: [
+          { id: 'agent-lead', name: 'Lead Agent', workspace: '/agents/lead', skills: ['planning'], model: 'claude-opus-4-8' },
+          { id: 'agent-builder', name: 'Builder Agent', workspace: '/agents/builder', skills: ['coding'] },
+        ],
+        status: 'ready',
+        error: null,
+        hasLoadedOnce: true,
+        lastLoadedAt: 2,
+      },
+    } as never);
+
+    renderTeamsPage();
+
+    await openCreateDialog();
+    fireEvent.change(screen.getByLabelText('Team Name'), { target: { value: 'Manual Crew' } });
+    fireEvent.pointerDown(screen.getByRole('tab', { name: 'Select Agents' }));
+    fireEvent.click(screen.getByRole('tab', { name: 'Select Agents' }));
+    await screen.findByText('Selected agents');
+    fireEvent.click(await screen.findByLabelText('Select Lead Agent'));
+    fireEvent.click(await screen.findByLabelText('Select Builder Agent'));
+    expect(screen.queryByLabelText('Role')).not.toBeInTheDocument();
+    expect(screen.queryByLabelText('Purpose')).not.toBeInTheDocument();
+    expect(screen.queryByLabelText('Role prompt')).not.toBeInTheDocument();
+    fireEvent.click(screen.getAllByRole('button', { name: 'Create Team' }).at(-1)!);
+
+    await waitFor(() => {
+      const state = useTeamsStore.getState();
+      const team = state.teams[0];
+      expect(team).toEqual(expect.objectContaining({
+        name: 'Manual Crew',
+        teamSkillName: 'Manual Crew',
+        teamSkillVersion: 'manual',
+        packagePath: expect.stringMatching(/^manual:team-/),
+        sourcePath: expect.stringMatching(/^manual:team-/),
+        sourceType: 'manual',
+      }));
+      expect(team?.manualTeam).toEqual(expect.objectContaining({
+        name: 'Manual Crew',
+        version: 'manual',
+        members: [
+          expect.objectContaining({
+            agentId: 'agent-lead',
+            agentName: 'Lead Agent',
+            workspace: '/agents/lead',
+            roleId: 'leader',
+            isLeader: true,
+            skills: ['planning'],
+            tools: [],
+            model: 'claude-opus-4-8',
+          }),
+          expect.objectContaining({
+            agentId: 'agent-builder',
+            agentName: 'Builder Agent',
+            workspace: '/agents/builder',
+            roleId: 'agent-builder',
+            isLeader: false,
+            skills: ['coding'],
+            tools: [],
+          }),
+        ],
+      }));
+      expect(team?.manualTeam?.members[0]).not.toHaveProperty('purpose');
+      expect(team?.manualTeam?.members[0]).not.toHaveProperty('roleMarkdown');
+      expect(team?.manualTeam?.members[1]).not.toHaveProperty('purpose');
+      expect(team?.manualTeam?.members[1]).not.toHaveProperty('roleMarkdown');
+      expect(provisionTeamAgentsMock).toHaveBeenCalledWith(team?.id);
+      expect(createRunMock).toHaveBeenCalledWith(team?.id);
+      expect(screen.getByTestId('location-echo')).toHaveTextContent(`/teams/${team?.id}`);
+    });
+  });
+
   it('keeps the create dialog open and removes the local team when Team agent provisioning fails', async () => {
-    provisionTeamAgentsMock.mockRejectedValueOnce(new Error('team-runtime plugin is not enabled'));
+    provisionTeamAgentsMock.mockRejectedValueOnce(new Error('Team agent materialization is not configured'));
     setGatewayRunning();
     mockTeamRuntimeResponses([validationResult(), dependencyPlan(), { runId: 'team-174', deleted: false }]);
 
@@ -310,7 +398,7 @@ describe('teams page', () => {
       expect(createRunMock).not.toHaveBeenCalled();
       expect(useTeamsStore.getState().teams).toHaveLength(0);
       expect(screen.getByTestId('location-echo')).toHaveTextContent('/teams');
-      expect(screen.getByText('team-runtime plugin is not enabled')).toBeInTheDocument();
+      expect(screen.getByText('Team agent materialization is not configured')).toBeInTheDocument();
     });
   });
 
@@ -471,7 +559,7 @@ describe('teams page', () => {
       </MemoryRouter>,
     );
 
-    expect(await screen.findByText('Run status: created · rev 1')).toBeInTheDocument();
+    expect(await screen.findByTitle('Run status: Created')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Resume Run' })).toBeEnabled();
 
     fireEvent.click(screen.getByRole('button', { name: 'New Run' }));

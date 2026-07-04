@@ -12,8 +12,10 @@ const endpoint = {
 const deleteManagedAgentsPayload = {
   teamId: 'team-package',
   endpoint,
-  agentIds: ['agent-1', 'agent-2'],
-  workspacePaths: ['/openclaw/teambuddy/team-package'],
+  managedAgents: [
+    { teamId: 'team-package', roleId: 'leader', agentId: 'agent-1', displayName: 'leader', workspace: '/openclaw/teambuddy/team-package/leader', endpoint },
+    { teamId: 'team-package', roleId: 'researcher', agentId: 'agent-2', displayName: 'researcher', workspace: '/openclaw/teambuddy/team-package/researcher', endpoint },
+  ],
 } as const;
 
 describe('TeamRuntime worker host proxy', () => {

@@ -245,11 +245,18 @@ function enforceToolDefaults(config: Record<string, unknown>, deps: OpenClawConf
     modified = true;
   }
 
+  const agentToAgent = (toolsConfig.agentToAgent as Record<string, unknown> | undefined) || {};
+  if (agentToAgent.enabled !== true) {
+    agentToAgent.enabled = true;
+    toolsConfig.agentToAgent = agentToAgent;
+    modified = true;
+  }
+
   if (!modified) {
     return false;
   }
   config.tools = toolsConfig;
-  deps.info('[sanitize] Enforced tools.profile="full" and tools.sessions.visibility="all" for OpenClaw 3.8+');
+  deps.info('[sanitize] Enforced tools.profile="full", tools.sessions.visibility="all", and tools.agentToAgent.enabled=true for OpenClaw 3.8+');
   return true;
 }
 

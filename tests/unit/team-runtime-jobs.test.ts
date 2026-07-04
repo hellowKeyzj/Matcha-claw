@@ -22,20 +22,22 @@ describe('team runtime jobs', () => {
       },
     } as const));
     const jobs = createTeamRuntimeJobPort({ submit });
+    const managedAgents = [
+      { teamId: 'team-package', roleId: 'leader', agentId: 'agent-1', displayName: 'leader', workspace: '/openclaw/teambuddy/team-package/leader', endpoint },
+      { teamId: 'team-package', roleId: 'researcher', agentId: 'agent-2', displayName: 'researcher', workspace: '/openclaw/teambuddy/team-package/researcher', endpoint },
+    ] as const;
 
     const result = await jobs.submitDeleteManagedAgents({
       teamId: 'team-package',
       endpoint,
-      agentIds: ['agent-1', 'agent-2'],
-      workspacePaths: ['/openclaw/teambuddy/team-package'],
+      managedAgents,
     });
 
     expect(result.job.type).toBe(DELETE_TEAM_MANAGED_AGENTS_JOB);
     expect(submit).toHaveBeenCalledWith(DELETE_TEAM_MANAGED_AGENTS_JOB, {
       teamId: 'team-package',
       endpoint,
-      agentIds: ['agent-1', 'agent-2'],
-      workspacePaths: ['/openclaw/teambuddy/team-package'],
+      managedAgents,
     }, {
       queue: 'low',
       dedupeKey: `${DELETE_TEAM_MANAGED_AGENTS_JOB}:team-package`,

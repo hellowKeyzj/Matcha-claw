@@ -1,17 +1,20 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { X } from 'lucide-react';
+import { Check, Plus, RefreshCw, Search, X } from 'lucide-react';
+import { AgentAvatar } from '@/components/common/AgentAvatar';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { invokeIpc } from '@/lib/api-client';
 import { isGatewayOperational } from '@/lib/gateway-status';
 import { pickLocalArchive, pickLocalDirectory, pickLocalSkillSource } from '@/services/local-path-picker';
 import {
   planTeamDependencies,
   validateTeamSkillPackage,
+  type ManualTeamMemberProvisionRecord,
   type TeamDependencyPlanItem,
   type TeamDependencyPreparationPlan,
 } from '@/services/openclaw/team-runtime-client';
@@ -24,7 +27,9 @@ import {
 } from './dependency-source';
 import { useGatewayStore } from '@/stores/gateway';
 import { useSkillsStore } from '@/stores/skills';
-import { useTeamsStore, type TeamSkillCandidate, type TeamSkillCreationPlan } from '@/stores/teams';
+import { useSubagentsStore } from '@/stores/subagents';
+import { useTeamsStore, type ManualTeamCandidate, type TeamSkillCandidate, type TeamSkillCreationPlan } from '@/stores/teams';
+import type { SubagentSummary } from '@/types/subagent';
 import { useTranslation } from 'react-i18next';
 
 type TeamSkillReview = {
@@ -33,18 +38,55 @@ type TeamSkillReview = {
   dependencyPlan: TeamDependencyPreparationPlan;
 };
 
+type CreateSourceType = 'teamskill' | 'manual';
+
+type ManualMemberDraft = {
+  agentId: string;
+  isLeader: boolean;
+};
+
 type CreateDialogPhase =
   | { type: 'editing_source' }
   | { type: 'validating_package' }
   | { type: 'review_ready'; review: TeamSkillReview }
   | { type: 'installing_dependency'; review: TeamSkillReview; dependencyName: string }
   | { type: 'importing_dependency'; review: TeamSkillReview; dependencyName: string }
-  | { type: 'creating_run'; review: TeamSkillReview };
+  | { type: 'creating_run'; review: TeamSkillReview }
+  | { type: 'creating_manual' };
 
 function formatDependencyCount(plan: TeamDependencyPreparationPlan): string {
   const blockers = plan.items.filter((item) => item.severity === 'blocker').length;
   const warnings = plan.items.filter((item) => item.severity === 'warning').length;
   return `${blockers} blocker · ${warnings} warning`;
+}
+
+function sanitizeManualTeamName(value: string): string {
+  return value.trim().replace(/[^a-zA-Z0-9._-]+/g, '-').replace(/-+/g, '-').replace(/^-+|-+$/g, '') || 'manual-team';
+}
+
+function displayAgentName(agent: SubagentSummary): string {
+  return agent.name ?? agent.identity?.name ?? agent.id;
+}
+
+function sanitizeManualRoleId(value: string): string {
+  return sanitizeManualTeamName(value).toLocaleLowerCase();
+}
+
+function buildManualRoleId(agent: SubagentSummary, usedRoleIds: ReadonlySet<string>): string {
+  const agentIdRoleId = sanitizeManualRoleId(agent.id);
+  const agentNameRoleId = sanitizeManualRoleId(displayAgentName(agent));
+  const baseRoleId = agentIdRoleId && agentIdRoleId !== 'leader'
+    ? agentIdRoleId
+    : agentNameRoleId && agentNameRoleId !== 'leader'
+      ? agentNameRoleId
+      : 'member';
+  let roleId = baseRoleId;
+  let suffix = 2;
+  while (roleId === 'leader' || usedRoleIds.has(roleId)) {
+    roleId = `${baseRoleId}-${suffix}`;
+    suffix += 1;
+  }
+  return roleId;
 }
 
 export function TeamsPage() {
@@ -60,6 +102,7 @@ export function TeamsPage() {
   const errorByTeamId = useTeamsStore((state) => state.errorByTeamId);
   const planTeamSkillCreation = useTeamsStore((state) => state.planTeamSkillCreation);
   const createTeam = useTeamsStore((state) => state.createTeam);
+  const createManualTeam = useTeamsStore((state) => state.createManualTeam);
   const replaceTeamSkillVersion = useTeamsStore((state) => state.replaceTeamSkillVersion);
   const setActiveTeam = useTeamsStore((state) => state.setActiveTeam);
   const deleteTeam = useTeamsStore((state) => state.deleteTeam);
@@ -69,15 +112,40 @@ export function TeamsPage() {
   const installSkill = useSkillsStore((state) => state.installSkill);
   const importLocalSkill = useSkillsStore((state) => state.importLocalSkill);
   const fetchSkills = useSkillsStore((state) => state.fetchSkills);
+  const agentsResource = useSubagentsStore((state) => state.agentsResource);
+  const loadAgents = useSubagentsStore((state) => state.loadAgents);
 
   const [createDialogOpen, setCreateDialogOpen] = useState(false);
+  const [createSourceType, setCreateSourceType] = useState<CreateSourceType>('teamskill');
   const [teamName, setTeamName] = useState('');
   const [teamSkillPackagePath, setTeamSkillPackagePath] = useState('');
+  const [manualSearchQuery, setManualSearchQuery] = useState('');
+  const [manualMembers, setManualMembers] = useState<ManualMemberDraft[]>([]);
   const [createDialogPhase, setCreateDialogPhase] = useState<CreateDialogPhase>({ type: 'editing_source' });
   const [replacementConfirmed, setReplacementConfirmed] = useState(false);
   const [createError, setCreateError] = useState<string | null>(null);
 
   const packagePath = teamSkillPackagePath.trim();
+  const agents = Array.isArray(agentsResource.data) ? agentsResource.data : [];
+  const selectedAgentIds = new Set(manualMembers.map((member) => member.agentId));
+  const manualSearchText = manualSearchQuery.trim().toLocaleLowerCase();
+  const visibleAgents = manualSearchText
+    ? agents.filter((agent) => [agent.id, agent.name, agent.identity?.name, agent.workspace, ...(agent.skills ?? [])]
+      .filter((value): value is string => typeof value === 'string' && value.length > 0)
+      .some((value) => value.toLocaleLowerCase().includes(manualSearchText)))
+    : agents;
+  const selectedManualMembers = manualMembers.map((member) => ({
+    member,
+    agent: agents.find((agent) => agent.id === member.agentId) ?? null,
+  }));
+  const manualLeaderCount = manualMembers.filter((member) => member.isLeader).length;
+  const creatingManual = createDialogPhase.type === 'creating_manual';
+  const manualMembersHaveWorkspace = manualMembers.every((member) => agents.find((agent) => agent.id === member.agentId)?.workspace?.trim());
+  const canCreateManualTeam = gatewayOperational
+    && !creatingManual
+    && manualMembers.length > 0
+    && manualLeaderCount === 1
+    && manualMembersHaveWorkspace;
   const review = createDialogPhase.type === 'review_ready'
     || createDialogPhase.type === 'installing_dependency'
     || createDialogPhase.type === 'importing_dependency'
@@ -89,12 +157,102 @@ export function TeamsPage() {
   const installingDependency = createDialogPhase.type === 'installing_dependency' ? createDialogPhase.dependencyName : null;
   const importingDependency = createDialogPhase.type === 'importing_dependency' ? createDialogPhase.dependencyName : null;
   const mutatingDependency = installingDependency || importingDependency;
-  const canCheckPackage = gatewayOperational && Boolean(packagePath) && !checkingPackage && !creatingRun && !mutatingDependency;
+  const canCheckPackage = createSourceType === 'teamskill' && gatewayOperational && Boolean(packagePath) && !checkingPackage && !creatingRun && !mutatingDependency;
   const provisionedRoleCount = teams.reduce((count, team) => count + (rolesByTeamId[team.id]?.length ?? 0), 0);
 
   const resetPackageReview = () => {
     setCreateDialogPhase({ type: 'editing_source' });
     setReplacementConfirmed(false);
+  };
+
+  useEffect(() => {
+    if (!createDialogOpen || createSourceType !== 'manual' || !gatewayOperational || agentsResource.status === 'loading' || agentsResource.hasLoadedOnce) {
+      return;
+    }
+    void loadAgents({ silent: true });
+  }, [agentsResource.hasLoadedOnce, agentsResource.status, createDialogOpen, createSourceType, gatewayOperational, loadAgents]);
+
+  const handleCreateSourceTypeChange = (value: string) => {
+    const nextSourceType = value === 'manual' ? 'manual' : 'teamskill';
+    setCreateSourceType(nextSourceType);
+    setCreateError(null);
+    resetPackageReview();
+  };
+
+  const toggleManualMember = (agent: SubagentSummary, checked: boolean) => {
+    setCreateError(null);
+    setManualMembers((members) => {
+      if (!checked) {
+        const nextMembers = members.filter((member) => member.agentId !== agent.id);
+        if (members.some((member) => member.agentId === agent.id && member.isLeader) && nextMembers.length > 0) {
+          const first = nextMembers[0];
+          if (!first) return nextMembers;
+          return [{ ...first, isLeader: true }, ...nextMembers.slice(1)];
+        }
+        return nextMembers;
+      }
+      if (members.some((member) => member.agentId === agent.id)) {
+        return members;
+      }
+      const isLeader = members.length === 0;
+      return [
+        ...members,
+        {
+          agentId: agent.id,
+          isLeader,
+        },
+      ];
+    });
+  };
+
+  const selectManualLeader = (agentId: string) => {
+    setCreateError(null);
+    setManualMembers((members) => members.map((member) => ({
+      ...member,
+      isLeader: member.agentId === agentId,
+    })));
+  };
+
+  const buildManualCandidate = (): ManualTeamCandidate => {
+    const displayName = teamName.trim() || t('create.manualDefaultTeamName');
+    const usedRoleIds = new Set<string>();
+    const members = manualMembers.map((member): ManualTeamMemberProvisionRecord => {
+      const agent = agents.find((candidate) => candidate.id === member.agentId);
+      if (!agent) {
+        throw new Error(t('create.manualAgentMissing', { agentId: member.agentId }));
+      }
+      const workspace = agent.workspace?.trim();
+      if (!workspace) {
+        throw new Error(t('create.manualAgentWorkspaceRequired', { agentName: displayAgentName(agent) }));
+      }
+      const roleId = member.isLeader ? 'leader' : buildManualRoleId(agent, usedRoleIds);
+      if (usedRoleIds.has(roleId)) {
+        throw new Error(t('create.manualRoleDuplicate', { roleId }));
+      }
+      usedRoleIds.add(roleId);
+      return {
+        agentId: agent.id,
+        agentName: displayAgentName(agent),
+        workspace,
+        roleId,
+        skills: agent.skills ?? [],
+        tools: [],
+        ...(agent.model ? { model: agent.model } : {}),
+        isLeader: member.isLeader,
+      };
+    });
+    if (members.filter((member) => member.isLeader).length !== 1) {
+      throw new Error(t('create.manualLeaderRequired'));
+    }
+    return {
+      displayName,
+      manualTeam: {
+        name: displayName,
+        description: t('create.manualDescription', { teamName: displayName }),
+        version: 'manual',
+        members,
+      },
+    };
   };
 
   const buildReview = async (): Promise<TeamSkillReview> => {
@@ -213,7 +371,7 @@ export function TeamsPage() {
   };
 
   const handleCreateOrReplace = async () => {
-    if (!review || creatingRun || mutatingDependency || !review.dependencyPlan.canProceed) {
+    if (createSourceType !== 'teamskill' || !review || creatingRun || mutatingDependency || !review.dependencyPlan.canProceed) {
       return;
     }
     if (review.creationPlan.action === 'open_existing') {
@@ -264,6 +422,35 @@ export function TeamsPage() {
     }
   };
 
+  const handleCreateManualTeam = async () => {
+    if (!canCreateManualTeam) {
+      return;
+    }
+    setCreateDialogPhase({ type: 'creating_manual' });
+    setCreateError(null);
+    let teamId: string | null = null;
+    try {
+      const candidate = buildManualCandidate();
+      teamId = createManualTeam(candidate);
+      await provisionTeamAgents(teamId);
+      await createRun(teamId);
+      setActiveTeam(teamId);
+      setCreateDialogOpen(false);
+      navigate(`/teams/${teamId}`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (teamId) {
+        try {
+          await deleteTeam(teamId);
+        } catch {
+          // Store-level delete failure keeps the team and records its own per-team error.
+        }
+      }
+      setCreateDialogPhase({ type: 'editing_source' });
+      setCreateError(message);
+    }
+  };
+
   const handleBrowsePackageDirectory = async () => {
     setCreateError(null);
     const selectedPath = await pickLocalDirectory({
@@ -288,16 +475,20 @@ export function TeamsPage() {
     }
   };
 
-  const primaryButtonLabel = review?.creationPlan.action === 'open_existing'
-    ? t('create.openExistingButton')
-    : review?.creationPlan.action === 'replace_required'
-      ? creatingRun ? t('create.replacingButton') : t('create.replaceButton')
-      : creatingRun ? t('create.creatingButton') : t('create.createButton');
-  const primaryDisabled = !review
-    || creatingRun
-    || Boolean(mutatingDependency)
-    || !review.dependencyPlan.canProceed
-    || (review.creationPlan.action === 'replace_required' && !replacementConfirmed);
+  const primaryButtonLabel = createSourceType === 'manual'
+    ? creatingManual ? t('create.creatingButton') : t('create.createButton')
+    : review?.creationPlan.action === 'open_existing'
+      ? t('create.openExistingButton')
+      : review?.creationPlan.action === 'replace_required'
+        ? creatingRun ? t('create.replacingButton') : t('create.replaceButton')
+        : creatingRun ? t('create.creatingButton') : t('create.createButton');
+  const primaryDisabled = createSourceType === 'manual'
+    ? !canCreateManualTeam
+    : !review
+      || creatingRun
+      || Boolean(mutatingDependency)
+      || !review.dependencyPlan.canProceed
+      || (review.creationPlan.action === 'replace_required' && !replacementConfirmed);
 
   return (
     <section className="space-y-6">
@@ -341,7 +532,7 @@ export function TeamsPage() {
             role="dialog"
             aria-modal="true"
             aria-labelledby="team-create-title"
-            className="relative flex h-[min(720px,calc(100dvh-3rem))] w-full max-w-3xl flex-col overflow-hidden rounded-[1.25rem] border border-border bg-card text-card-foreground shadow-elevated"
+            className="relative flex h-[min(760px,calc(100dvh-3rem))] w-full max-w-5xl flex-col overflow-hidden rounded-[1.25rem] border border-border bg-card text-card-foreground shadow-elevated"
           >
             <Button
               type="button"
@@ -360,8 +551,8 @@ export function TeamsPage() {
               <p className="mt-2 text-sm leading-6 text-muted-foreground">{t('create.modalDescription')}</p>
             </div>
 
-            <div className="min-h-0 flex-1 space-y-5 overflow-y-auto p-6">
-              <div className="space-y-2">
+            <div className="flex min-h-0 flex-1 flex-col gap-5 overflow-hidden p-6">
+              <div className="shrink-0 space-y-2">
                 <Label htmlFor="team-name" className="text-foreground">{t('create.teamName')}</Label>
                 <Input
                   id="team-name"
@@ -375,152 +566,306 @@ export function TeamsPage() {
                 />
               </div>
 
-              <div className="space-y-2">
-                <Label htmlFor="team-skill-package-path" className="text-foreground">{t('create.packagePath')}</Label>
-                <Input
-                  id="team-skill-package-path"
-                  value={teamSkillPackagePath}
-                  onChange={(event) => {
-                    setCreateError(null);
-                    resetPackageReview();
-                    setTeamSkillPackagePath(event.target.value);
-                  }}
-                  placeholder={t('create.packagePathPlaceholder')}
-                  className="bg-background"
-                />
-                <div className="flex flex-wrap gap-2">
-                  <Button type="button" variant="outline" size="sm" onClick={() => void handleBrowsePackageDirectory()} className="border-border bg-card text-foreground hover:bg-secondary">
-                    {t('create.browsePackageDirectory')}
-                  </Button>
-                  <Button type="button" variant="outline" size="sm" onClick={() => void handleBrowsePackageArchive()} className="border-border bg-card text-foreground hover:bg-secondary">
-                    {t('create.browsePackageArchive')}
-                  </Button>
-                  <Button type="button" size="sm" onClick={() => void handleCheckPackage()} disabled={!canCheckPackage}>
-                    {checkingPackage ? t('create.checkingButton') : t('create.checkPackageButton')}
-                  </Button>
-                </div>
-              </div>
+              <Tabs value={createSourceType} onValueChange={handleCreateSourceTypeChange} className="flex min-h-0 flex-1 flex-col space-y-5">
+                <TabsList className="grid w-full grid-cols-2">
+                  <TabsTrigger value="teamskill" onClick={() => handleCreateSourceTypeChange('teamskill')}>{t('create.sourceTypes.teamskill')}</TabsTrigger>
+                  <TabsTrigger value="manual" onClick={() => handleCreateSourceTypeChange('manual')}>{t('create.sourceTypes.manual')}</TabsTrigger>
+                </TabsList>
 
-              <div className="rounded-2xl border border-border bg-muted/25 p-4">
-                <div className="text-sm font-medium text-foreground">{t('create.teamSkillDefinition')}</div>
-                <div className="mt-2 text-sm leading-6 text-muted-foreground">{t('create.teamSkillDefinitionDescription')}</div>
-              </div>
-
-              {review ? (
-                <div className="space-y-4 rounded-2xl border border-border bg-background p-4">
-                  <div>
-                    <div className="text-sm font-medium text-foreground">{review.candidate.teamSkillPackage.name}@{review.candidate.teamSkillPackage.version}</div>
-                    <div className="mt-1 text-sm text-muted-foreground">{review.candidate.teamSkillPackage.description}</div>
+                <TabsContent value="teamskill" className="min-h-0 flex-1 space-y-5 overflow-y-auto pr-1">
+                  <div className="space-y-2">
+                    <Label htmlFor="team-skill-package-path" className="text-foreground">{t('create.packagePath')}</Label>
+                    <Input
+                      id="team-skill-package-path"
+                      value={teamSkillPackagePath}
+                      onChange={(event) => {
+                        setCreateError(null);
+                        resetPackageReview();
+                        setTeamSkillPackagePath(event.target.value);
+                      }}
+                      placeholder={t('create.packagePathPlaceholder')}
+                      className="bg-background"
+                    />
+                    <div className="flex flex-wrap gap-2">
+                      <Button type="button" variant="outline" size="sm" onClick={() => void handleBrowsePackageDirectory()} className="border-border bg-card text-foreground hover:bg-secondary">
+                        {t('create.browsePackageDirectory')}
+                      </Button>
+                      <Button type="button" variant="outline" size="sm" onClick={() => void handleBrowsePackageArchive()} className="border-border bg-card text-foreground hover:bg-secondary">
+                        {t('create.browsePackageArchive')}
+                      </Button>
+                      <Button type="button" size="sm" onClick={() => void handleCheckPackage()} disabled={!canCheckPackage}>
+                        {checkingPackage ? t('create.checkingButton') : t('create.checkPackageButton')}
+                      </Button>
+                    </div>
                   </div>
 
-                  {review.creationPlan.action === 'open_existing' ? (
-                    <div className="rounded-xl border border-emerald-500/30 bg-emerald-500/10 p-3 text-sm text-emerald-700 dark:text-emerald-300">
-                      {t('create.existingTeamDetected')}
+                  <div className="rounded-2xl border border-border bg-muted/25 p-4">
+                    <div className="text-sm font-medium text-foreground">{t('create.teamSkillDefinition')}</div>
+                    <div className="mt-2 text-sm leading-6 text-muted-foreground">{t('create.teamSkillDefinitionDescription')}</div>
+                  </div>
+
+                  {review ? (
+                    <div className="space-y-4 rounded-2xl border border-border bg-background p-4">
+                      <div>
+                        <div className="text-sm font-medium text-foreground">{review.candidate.teamSkillPackage.name}@{review.candidate.teamSkillPackage.version}</div>
+                        <div className="mt-1 text-sm text-muted-foreground">{review.candidate.teamSkillPackage.description}</div>
+                      </div>
+
+                      {review.creationPlan.action === 'open_existing' ? (
+                        <div className="rounded-xl border border-emerald-500/30 bg-emerald-500/10 p-3 text-sm text-emerald-700 dark:text-emerald-300">
+                          {t('create.existingTeamDetected')}
+                        </div>
+                      ) : null}
+
+                      {review.creationPlan.action === 'replace_required' ? (
+                        <div className="space-y-3 rounded-xl border border-amber-500/30 bg-amber-500/10 p-3 text-sm">
+                          <div className="font-medium text-amber-800 dark:text-amber-200">{t('create.versionChangeDetected')}</div>
+                          <div className="text-muted-foreground">
+                            {t('create.versionChangeDescription', {
+                              currentVersion: review.creationPlan.currentVersion,
+                              incomingVersion: review.creationPlan.incomingVersion,
+                            })}
+                          </div>
+                          <label className="flex items-center gap-2 text-sm">
+                            <input
+                              type="checkbox"
+                              checked={replacementConfirmed}
+                              onChange={(event) => setReplacementConfirmed(event.target.checked)}
+                            />
+                            <span>{t('create.confirmReplacement')}</span>
+                          </label>
+                        </div>
+                      ) : null}
+
+                      <div className="space-y-3">
+                        <div className="flex items-center justify-between gap-3">
+                          <div className="text-sm font-medium">{t('create.dependenciesTitle')}</div>
+                          <div className="text-xs text-muted-foreground">{formatDependencyCount(review.dependencyPlan)}</div>
+                        </div>
+                        {review.dependencyPlan.items.length === 0 ? (
+                          <div className="rounded border p-3 text-xs text-muted-foreground">{t('create.noDependencies')}</div>
+                        ) : review.dependencyPlan.items.map((item) => {
+                          const canInstallFromClawHub = item.kind === 'skill' && item.installable && isClawHubDependencySource(item.source);
+                          const canImportFromDeclaredSource = item.kind === 'skill' && item.installable && isLocalDependencySource(item.source);
+                          const canImportFromPicker = item.kind === 'skill' && item.installable && !canImportFromDeclaredSource;
+                          const canOpenSource = isOpenableDependencySource(item.source);
+                          const isMutatingThisDependency = mutatingDependency === item.name;
+                          return (
+                            <div key={`${item.kind}:${item.name}`} className="flex items-start justify-between gap-3 rounded border p-3 text-sm">
+                              <div className="min-w-0">
+                                <div className="font-medium">
+                                  {item.name} · {t(`create.dependencyKind.${item.kind}`)} · {t(`create.dependencySeverity.${item.severity}`)}
+                                </div>
+                                <div className="mt-1 text-xs leading-5 text-muted-foreground">{item.purpose}</div>
+                                {item.source ? <div className="mt-1 truncate text-xs text-muted-foreground">{item.source}</div> : null}
+                                {item.kind === 'skill' && item.installable && !canInstallFromClawHub ? (
+                                  <div className="mt-1 text-xs text-muted-foreground">{t('create.noAutomaticInstallSource')}</div>
+                                ) : null}
+                              </div>
+                              <div className="flex shrink-0 flex-wrap justify-end gap-2">
+                                {canOpenSource ? (
+                                  <Button
+                                    type="button"
+                                    size="sm"
+                                    variant="outline"
+                                    onClick={() => void handleOpenDependencySource(item.source)}
+                                    disabled={creatingRun || Boolean(mutatingDependency)}
+                                  >
+                                    {t('create.openDependencySourceButton')}
+                                  </Button>
+                                ) : null}
+                                {canInstallFromClawHub ? (
+                                  <Button
+                                    type="button"
+                                    size="sm"
+                                    variant="outline"
+                                    onClick={() => void handleInstallDependency(item)}
+                                    disabled={Boolean(mutatingDependency) || creatingRun}
+                                  >
+                                    {installingDependency === item.name ? t('create.installingSkillButton') : t('create.installSkillButton')}
+                                  </Button>
+                                ) : null}
+                                {canImportFromDeclaredSource ? (
+                                  <Button
+                                    type="button"
+                                    size="sm"
+                                    variant="outline"
+                                    onClick={() => void handleImportDependencyFromDeclaredSource(item)}
+                                    disabled={Boolean(mutatingDependency) || creatingRun}
+                                  >
+                                    {isMutatingThisDependency ? t('create.importingLocalSkillButton') : t('create.importLocalSkillButton')}
+                                  </Button>
+                                ) : null}
+                                {canImportFromPicker ? (
+                                  <Button
+                                    type="button"
+                                    size="sm"
+                                    variant="outline"
+                                    onClick={() => void handleImportDependencyFromLocalPicker(item)}
+                                    disabled={Boolean(mutatingDependency) || creatingRun}
+                                  >
+                                    {isMutatingThisDependency ? t('create.importingLocalSkillButton') : t('create.importLocalSkillButton')}
+                                  </Button>
+                                ) : null}
+                              </div>
+                            </div>
+                          );
+                        })}
+                        {!review.dependencyPlan.canProceed ? (
+                          <div className="rounded-xl border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive">
+                            {t('create.requiredDependencyBlocker')}
+                          </div>
+                        ) : null}
+                      </div>
                     </div>
                   ) : null}
+                </TabsContent>
 
-                  {review.creationPlan.action === 'replace_required' ? (
-                    <div className="space-y-3 rounded-xl border border-amber-500/30 bg-amber-500/10 p-3 text-sm">
-                      <div className="font-medium text-amber-800 dark:text-amber-200">{t('create.versionChangeDetected')}</div>
-                      <div className="text-muted-foreground">
-                        {t('create.versionChangeDescription', {
-                          currentVersion: review.creationPlan.currentVersion,
-                          incomingVersion: review.creationPlan.incomingVersion,
+                <TabsContent value="manual" className="min-h-0 flex-1 space-y-4 overflow-hidden">
+                  <div className="grid h-full min-h-0 gap-4 lg:grid-cols-[0.95fr_1.05fr]">
+                    <div className="flex min-h-0 flex-col overflow-hidden rounded-2xl border border-border bg-background shadow-whisper">
+                      <div className="border-b border-border/80 p-3">
+                        <div className="relative">
+                          <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+                          <Input
+                            aria-label={t('create.manualSearch')}
+                            value={manualSearchQuery}
+                            onChange={(event) => setManualSearchQuery(event.target.value)}
+                            placeholder={t('create.manualSearchPlaceholder')}
+                            className="h-10 bg-card pl-9 text-sm"
+                          />
+                        </div>
+                      </div>
+                      <div className="flex items-center justify-between gap-3 px-4 py-3 text-xs text-muted-foreground">
+                        <span>{t('create.manualAgentsCount', { count: agents.length })}</span>
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="icon"
+                          onClick={() => void loadAgents({ silent: true })}
+                          disabled={!gatewayOperational || agentsResource.status === 'loading'}
+                          aria-label={agentsResource.status === 'loading' ? t('create.manualLoadingAgents') : t('create.manualRefreshAgents')}
+                          className="h-8 w-8 rounded-full text-muted-foreground hover:bg-secondary hover:text-foreground"
+                        >
+                          <RefreshCw className={agentsResource.status === 'loading' ? 'h-4 w-4 animate-spin' : 'h-4 w-4'} />
+                        </Button>
+                      </div>
+
+                      <div className="min-h-0 flex-1 space-y-2 overflow-y-auto px-3 pb-3">
+                        {agentsResource.status === 'error' && agentsResource.error ? (
+                          <div className="rounded-xl border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive">{agentsResource.error}</div>
+                        ) : null}
+
+                        {agentsResource.status === 'loading' && agents.length === 0 ? (
+                          <div className="rounded-xl border border-border bg-card p-4 text-sm text-muted-foreground">{t('create.manualLoadingAgents')}</div>
+                        ) : agents.length === 0 ? (
+                          <div className="rounded-xl border border-border bg-card p-4 text-sm text-muted-foreground">{t('create.manualNoAgents')}</div>
+                        ) : visibleAgents.length === 0 ? (
+                          <div className="rounded-xl border border-border bg-card p-4 text-sm text-muted-foreground">{t('create.manualNoMatchingAgents')}</div>
+                        ) : visibleAgents.map((agent) => {
+                          const selected = selectedAgentIds.has(agent.id);
+                          const agentName = displayAgentName(agent);
+                          const hasWorkspace = Boolean(agent.workspace?.trim());
+                          const description = agent.description?.trim();
+                          return (
+                            <div key={agent.id} className="flex items-center gap-3 rounded-2xl border border-border/80 bg-card p-3 transition-colors hover:bg-secondary/40">
+                              <AgentAvatar
+                                avatarSeed={agent.avatarSeed}
+                                avatarStyle={agent.avatarStyle}
+                                agentId={agent.id}
+                                agentName={agentName}
+                                className="h-10 w-10 border border-border"
+                                alt={`${agentName} avatar`}
+                              />
+                              <div className="min-w-0 flex-1">
+                                <div className="truncate text-sm font-medium text-foreground">{agentName}</div>
+                                {description ? <div className="mt-0.5 truncate text-xs text-muted-foreground">{description}</div> : null}
+                              </div>
+                              <Button
+                                type="button"
+                                size="icon"
+                                variant={selected ? 'outline' : 'secondary'}
+                                aria-label={t('create.manualSelectAgentAriaLabel', { agentName })}
+                                disabled={!hasWorkspace || creatingManual}
+                                onClick={() => toggleManualMember(agent, !selected)}
+                                className={selected ? 'h-9 w-9 rounded-full border-emerald-500/40 text-emerald-600' : 'h-9 w-9 rounded-full bg-emerald-500/10 text-emerald-600 hover:bg-emerald-500/15'}
+                              >
+                                {selected ? <Check className="h-4 w-4" /> : <Plus className="h-4 w-4" />}
+                              </Button>
+                            </div>
+                          );
                         })}
                       </div>
-                      <label className="flex items-center gap-2 text-sm">
-                        <input
-                          type="checkbox"
-                          checked={replacementConfirmed}
-                          onChange={(event) => setReplacementConfirmed(event.target.checked)}
-                        />
-                        <span>{t('create.confirmReplacement')}</span>
-                      </label>
+                    </div>
+
+                    <div className="flex min-h-0 flex-col overflow-hidden rounded-2xl border border-border bg-background shadow-whisper">
+                      <div className="border-b border-border/80 p-4">
+                        <div className="text-xs font-medium text-muted-foreground">{t('create.manualSelectedCount', { count: manualMembers.length })}</div>
+                        <div className="mt-3 text-sm font-semibold text-foreground">{t('create.manualDefinition')}</div>
+                        <div className="mt-2 text-sm leading-6 text-muted-foreground">{t('create.manualDefinitionDescription')}</div>
+                      </div>
+
+                      <div className="min-h-0 flex-1 space-y-3 overflow-y-auto p-3">
+                        {selectedManualMembers.length === 0 ? (
+                          <div className="rounded-xl border border-dashed border-border bg-muted/20 p-4 text-sm text-muted-foreground">{t('create.manualSelectedEmpty')}</div>
+                        ) : selectedManualMembers.map(({ member, agent }) => {
+                          const agentName = agent ? displayAgentName(agent) : member.agentId;
+                          const description = agent?.description?.trim();
+                          return (
+                            <div key={member.agentId} className="rounded-2xl border border-border/80 bg-card p-4">
+                              <div className="flex items-center justify-between gap-3">
+                                <div className="flex min-w-0 items-center gap-3">
+                                  <AgentAvatar
+                                    avatarSeed={agent?.avatarSeed}
+                                    avatarStyle={agent?.avatarStyle}
+                                    agentId={agent?.id ?? member.agentId}
+                                    agentName={agentName}
+                                    className="h-10 w-10 border border-border"
+                                    alt={`${agentName} avatar`}
+                                  />
+                                  <div className="min-w-0">
+                                    <div className="truncate text-sm font-medium text-foreground">{agentName}</div>
+                                    {description ? <div className="mt-1 truncate text-xs text-muted-foreground">{description}</div> : null}
+                                  </div>
+                                </div>
+                                <div className="flex shrink-0 items-center gap-3">
+                                  <label className="flex items-center gap-2 text-sm text-foreground">
+                                    <input
+                                      type="radio"
+                                      name="manual-team-leader"
+                                      checked={member.isLeader}
+                                      disabled={creatingManual}
+                                      onChange={() => selectManualLeader(member.agentId)}
+                                    />
+                                    <span>{t('create.manualLeader')}</span>
+                                  </label>
+                                  <Button
+                                    type="button"
+                                    variant="ghost"
+                                    size="icon"
+                                    aria-label={t('create.manualRemoveAgentAriaLabel', { agentName })}
+                                    disabled={creatingManual}
+                                    onClick={() => agent ? toggleManualMember(agent, false) : setManualMembers((members) => members.filter((candidate) => candidate.agentId !== member.agentId))}
+                                    className="h-8 w-8 text-muted-foreground"
+                                  >
+                                    <X className="h-4 w-4" />
+                                  </Button>
+                                </div>
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  </div>
+
+                  {manualMembers.length > 0 && manualLeaderCount !== 1 ? (
+                    <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm text-amber-800 dark:text-amber-200">
+                      {t('create.manualLeaderRequired')}
                     </div>
                   ) : null}
-
-                  <div className="space-y-3">
-                    <div className="flex items-center justify-between gap-3">
-                      <div className="text-sm font-medium">{t('create.dependenciesTitle')}</div>
-                      <div className="text-xs text-muted-foreground">{formatDependencyCount(review.dependencyPlan)}</div>
-                    </div>
-                    {review.dependencyPlan.items.length === 0 ? (
-                      <div className="rounded border p-3 text-xs text-muted-foreground">{t('create.noDependencies')}</div>
-                    ) : review.dependencyPlan.items.map((item) => {
-                      const canInstallFromClawHub = item.kind === 'skill' && item.installable && isClawHubDependencySource(item.source);
-                      const canImportFromDeclaredSource = item.kind === 'skill' && item.installable && isLocalDependencySource(item.source);
-                      const canImportFromPicker = item.kind === 'skill' && item.installable && !canImportFromDeclaredSource;
-                      const canOpenSource = isOpenableDependencySource(item.source);
-                      const isMutatingThisDependency = mutatingDependency === item.name;
-                      return (
-                        <div key={`${item.kind}:${item.name}`} className="flex items-start justify-between gap-3 rounded border p-3 text-sm">
-                          <div className="min-w-0">
-                            <div className="font-medium">
-                              {item.name} · {t(`create.dependencyKind.${item.kind}`)} · {t(`create.dependencySeverity.${item.severity}`)}
-                            </div>
-                            <div className="mt-1 text-xs leading-5 text-muted-foreground">{item.purpose}</div>
-                            {item.source ? <div className="mt-1 truncate text-xs text-muted-foreground">{item.source}</div> : null}
-                            {item.kind === 'skill' && item.installable && !canInstallFromClawHub ? (
-                              <div className="mt-1 text-xs text-muted-foreground">{t('create.noAutomaticInstallSource')}</div>
-                            ) : null}
-                          </div>
-                          <div className="flex shrink-0 flex-wrap justify-end gap-2">
-                            {canOpenSource ? (
-                              <Button
-                                type="button"
-                                size="sm"
-                                variant="outline"
-                                onClick={() => void handleOpenDependencySource(item.source)}
-                                disabled={creatingRun || Boolean(mutatingDependency)}
-                              >
-                                {t('create.openDependencySourceButton')}
-                              </Button>
-                            ) : null}
-                            {canInstallFromClawHub ? (
-                              <Button
-                                type="button"
-                                size="sm"
-                                variant="outline"
-                                onClick={() => void handleInstallDependency(item)}
-                                disabled={Boolean(mutatingDependency) || creatingRun}
-                              >
-                                {installingDependency === item.name ? t('create.installingSkillButton') : t('create.installSkillButton')}
-                              </Button>
-                            ) : null}
-                            {canImportFromDeclaredSource ? (
-                              <Button
-                                type="button"
-                                size="sm"
-                                variant="outline"
-                                onClick={() => void handleImportDependencyFromDeclaredSource(item)}
-                                disabled={Boolean(mutatingDependency) || creatingRun}
-                              >
-                                {isMutatingThisDependency ? t('create.importingLocalSkillButton') : t('create.importLocalSkillButton')}
-                              </Button>
-                            ) : null}
-                            {canImportFromPicker ? (
-                              <Button
-                                type="button"
-                                size="sm"
-                                variant="outline"
-                                onClick={() => void handleImportDependencyFromLocalPicker(item)}
-                                disabled={Boolean(mutatingDependency) || creatingRun}
-                              >
-                                {isMutatingThisDependency ? t('create.importingLocalSkillButton') : t('create.importLocalSkillButton')}
-                              </Button>
-                            ) : null}
-                          </div>
-                        </div>
-                      );
-                    })}
-                    {!review.dependencyPlan.canProceed ? (
-                      <div className="rounded-xl border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive">
-                        {t('create.requiredDependencyBlocker')}
-                      </div>
-                    ) : null}
-                  </div>
-                </div>
-              ) : null}
+                </TabsContent>
+              </Tabs>
             </div>
 
             {createError ? (
@@ -533,7 +878,7 @@ export function TeamsPage() {
               <Button type="button" variant="ghost" onClick={() => setCreateDialogOpen(false)} className="text-muted-foreground hover:bg-secondary hover:text-foreground">
                 {t('create.cancelButton')}
               </Button>
-              <Button type="button" onClick={() => void handleCreateOrReplace()} disabled={primaryDisabled}>
+              <Button type="button" onClick={() => void (createSourceType === 'manual' ? handleCreateManualTeam() : handleCreateOrReplace())} disabled={primaryDisabled}>
                 {primaryButtonLabel}
               </Button>
             </div>
