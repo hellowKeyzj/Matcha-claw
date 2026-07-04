@@ -38,6 +38,9 @@
     "/api/cron/session-history",
     "/api/diagnostics/gateway-snapshot",
     "/api/diagnostics/memory",
+    "/api/external-connectors",
+    "/api/external-connectors/mcp-server-programs",
+    "/api/external-connectors/status",
     "/api/gateway/control-ui",
     "/api/gateway/health",
     "/api/gateway/status",
@@ -52,6 +55,7 @@
     "/api/openclaw/ready",
     "/api/openclaw/skills-dir",
     "/api/openclaw/status",
+    "/api/openclaw/tool-permission-mode",
     "/api/openclaw/subagent-templates",
     "/api/openclaw/task-workspace-dirs",
     "/api/openclaw/workspace-dir",
@@ -71,6 +75,7 @@
     "/api/runtime-host/host-bootstrap-settings",
     "/api/runtime-host/jobs",
     "/api/runtime-host/provider-env-map",
+    "/api/runtime-host/team-webhook-auth",
     "/api/runtime-host/transport-stats",
     "/api/runtime-host/usage/recent",
     "/api/security",
@@ -91,5 +96,15 @@
   "hostapiProxyPublicValidationPostExactRoutes": [
     "/api/channels/credentials/validate",
     "/api/clawhub/search"
+  ],
+  "hostapiProxyPublicMutationPostExactRoutes": [
+    "/api/external-connectors/get",
+    "/api/external-connectors/probe",
+    "/api/external-connectors/session-status",
+    "/api/external-connectors/upsert",
+    "/api/external-connectors/remove"
+  ],
+  "hostapiProxyPublicMutationPutExactRoutes": [
+    "/api/openclaw/tool-permission-mode"
   ]
 }

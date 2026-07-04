@@ -7,6 +7,8 @@ import {
   HOSTAPI_PROXY_PUBLIC_READONLY_EXACT_ROUTES,
   HOSTAPI_PROXY_PUBLIC_READONLY_PREFIX_ROUTES,
   HOSTAPI_PROXY_PUBLIC_VALIDATION_POST_EXACT_ROUTES,
+  HOSTAPI_PROXY_PUBLIC_MUTATION_POST_EXACT_ROUTES,
+  HOSTAPI_PROXY_PUBLIC_MUTATION_PUT_EXACT_ROUTES,
   MAIN_API_ALLOWED_ROUTE_FILES,
   MAIN_OWNED_EXACT_ROUTES,
   MAIN_OWNED_PREFIX_ROUTES,
@@ -43,17 +45,31 @@ describe('main api boundary', () => {
     expect(snapshot.hostapiProxyPublicReadonlyExactRoutes.length).toBeGreaterThan(0);
   });
 
-  it('hostapi proxy 只允许 capabilities 与明确公开只读路由', () => {
+  it('hostapi proxy 只允许 capabilities 与明确公开 route', () => {
     expect(isHostApiProxyAllowedRoute('GET', '/api/capabilities/list')).toBe(true);
     expect(isHostApiProxyAllowedRoute('POST', '/api/capabilities/describe')).toBe(true);
     expect(isHostApiProxyAllowedRoute('POST', '/api/capabilities/execute')).toBe(true);
     expect(isHostApiProxyAllowedRoute('POST', '/api/channels/credentials/validate')).toBe(true);
     expect(isHostApiProxyAllowedRoute('POST', '/api/clawhub/search')).toBe(true);
+    expect(isHostApiProxyAllowedRoute('GET', '/api/external-connectors')).toBe(true);
+    expect(isHostApiProxyAllowedRoute('GET', '/api/external-connectors/mcp-server-programs')).toBe(true);
+    expect(isHostApiProxyAllowedRoute('GET', '/api/external-connectors/status')).toBe(true);
+    expect(isHostApiProxyAllowedRoute('POST', '/api/external-connectors/get')).toBe(true);
+    expect(isHostApiProxyAllowedRoute('POST', '/api/external-connectors/probe')).toBe(true);
+    expect(isHostApiProxyAllowedRoute('POST', '/api/external-connectors/session-status')).toBe(true);
+    expect(isHostApiProxyAllowedRoute('POST', '/api/external-connectors/upsert')).toBe(true);
+    expect(isHostApiProxyAllowedRoute('POST', '/api/external-connectors/remove')).toBe(true);
     expect(isHostApiProxyAllowedRoute('GET', '/api/openclaw/subagent-templates/brand-guardian')).toBe(true);
+    expect(isHostApiProxyAllowedRoute('GET', '/api/openclaw/tool-permission-mode')).toBe(true);
+    expect(isHostApiProxyAllowedRoute('PUT', '/api/openclaw/tool-permission-mode')).toBe(true);
     expect(isHostApiProxyAllowedRoute('GET', '/api/settings/model')).toBe(true);
+    expect(isHostApiProxyAllowedRoute('GET', '/api/runtime-host/team-webhook-auth')).toBe(true);
 
+    expect(isHostApiProxyAllowedRoute('POST', '/api/external-connectors')).toBe(false);
+    expect(isHostApiProxyAllowedRoute('GET', '/api/external-connectors/get')).toBe(false);
     expect(isHostApiProxyAllowedRoute('POST', '/api/channels/config/validate')).toBe(false);
     expect(isHostApiProxyAllowedRoute('POST', '/api/settings')).toBe(false);
+    expect(isHostApiProxyAllowedRoute('POST', '/api/openclaw/tool-permission-mode')).toBe(false);
     expect(isHostApiProxyAllowedRoute('POST', '/api/gateway/start')).toBe(false);
     expect(isHostApiProxyAllowedRoute('POST', '/api/runtime-host/restart')).toBe(false);
     expect(isHostApiProxyAllowedRoute('POST', '/api/files/read-text')).toBe(false);
@@ -70,6 +86,8 @@ describe('main api boundary', () => {
     expect([...HOSTAPI_PROXY_PUBLIC_READONLY_EXACT_ROUTES]).toEqual(boundarySpec.hostapiProxyPublicReadonlyExactRoutes);
     expect([...HOSTAPI_PROXY_PUBLIC_READONLY_PREFIX_ROUTES]).toEqual(boundarySpec.hostapiProxyPublicReadonlyPrefixRoutes);
     expect([...HOSTAPI_PROXY_PUBLIC_VALIDATION_POST_EXACT_ROUTES]).toEqual(boundarySpec.hostapiProxyPublicValidationPostExactRoutes);
+    expect([...HOSTAPI_PROXY_PUBLIC_MUTATION_POST_EXACT_ROUTES]).toEqual(boundarySpec.hostapiProxyPublicMutationPostExactRoutes);
+    expect([...HOSTAPI_PROXY_PUBLIC_MUTATION_PUT_EXACT_ROUTES]).toEqual(boundarySpec.hostapiProxyPublicMutationPutExactRoutes);
   });
 
   it('electron/api/routes 目录必须与边界清单一致', async () => {

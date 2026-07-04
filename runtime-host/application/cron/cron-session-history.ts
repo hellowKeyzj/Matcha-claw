@@ -1,6 +1,6 @@
 import { join } from 'node:path';
 import { badRequest, ok } from '../common/application-response';
-import type { RuntimeClockPort, RuntimeFileSystemPort } from '../common/runtime-ports';
+import type { RuntimeClockPort, RuntimeDataRootPort, RuntimeFileSystemPort } from '../common/runtime-ports';
 import { isRecord } from './cron-model';
 
 function parseCronSessionKey(sessionKey: string) {
@@ -81,12 +81,8 @@ function buildCronRunMessage(entry: Record<string, any>, index: number) {
   };
 }
 
-export interface CronRuntimeDataPort {
-  getRuntimeDataRootDir(): string;
-}
-
 export interface CronRunHistoryRepositoryDeps {
-  runtimeData: CronRuntimeDataPort;
+  runtimeData: RuntimeDataRootPort;
   fileSystem: RuntimeFileSystemPort;
 }
 

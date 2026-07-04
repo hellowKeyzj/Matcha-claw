@@ -64,6 +64,10 @@ export interface RuntimeSystemEnvironmentPort {
   getProcessEnv(): RuntimeProcessEnvironment;
 }
 
+export interface RuntimeDataRootPort {
+  getRuntimeDataRootDir(): string;
+}
+
 export interface RuntimeCommandResult {
   readonly stdout: string;
   readonly stderr: string;

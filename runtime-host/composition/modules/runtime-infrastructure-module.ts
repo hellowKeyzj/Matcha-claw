@@ -1,3 +1,4 @@
+import path from 'node:path';
 import {
   createTransportStats,
   type RuntimeHostTransportStats,
@@ -9,6 +10,7 @@ import {
 } from '../../core/lifecycle';
 import type {
   RuntimeCommandExecutorPort,
+  RuntimeDataRootPort,
   RuntimeFileSystemPort,
   RuntimeClockPort,
   RuntimeHttpClientPort,
@@ -53,6 +55,26 @@ import type {
   RuntimeLongTaskSubmissionPort,
 } from '../../application/runtime-host/runtime-task-ports';
 
+function createRuntimeHostRuntimeDataRootPort(environment: RuntimeSystemEnvironmentPort): RuntimeDataRootPort {
+  return {
+    getRuntimeDataRootDir: () => resolveRuntimeHostRuntimeDataRootDir(environment),
+  };
+}
+
+export function resolveRuntimeHostRuntimeDataRootDir(environment: Pick<RuntimeSystemEnvironmentPort, 'appName' | 'platform' | 'homeDir' | 'getEnv'>): string {
+  const explicit = environment.getEnv('MATCHACLAW_APP_USER_DATA_DIR');
+  if (explicit) return explicit;
+
+  const appName = environment.appName.trim() || 'MatchaClaw';
+  if (environment.platform === 'win32') {
+    return path.win32.join(environment.getEnv('APPDATA') || path.win32.join(environment.homeDir, 'AppData', 'Roaming'), appName);
+  }
+  if (environment.platform === 'darwin') {
+    return path.posix.join(environment.homeDir, 'Library', 'Application Support', appName);
+  }
+  return path.posix.join(environment.getEnv('XDG_CONFIG_HOME') || path.posix.join(environment.homeDir, '.config'), appName);
+}
+
 export interface RuntimeHostInfrastructure {
   readonly logger: RuntimeHostLogger;
   readonly lifecycle: RuntimeHostLifecycle;
@@ -79,6 +101,9 @@ export function registerRuntimeHostInfrastructure(container: RuntimeHostContaine
   container.register('runtime.processInfo', () => new NodeRuntimeProcessInfo());
   container.register('runtime.processControl', () => new NodeRuntimeProcessControl());
   container.register('runtime.systemEnvironment', () => new NodeRuntimeSystemEnvironment());
+  container.register('runtimeHost.runtimeDataRoot', (scope): RuntimeDataRootPort => createRuntimeHostRuntimeDataRootPort(
+    scope.resolve<RuntimeSystemEnvironmentPort>('runtime.systemEnvironment'),
+  ));
   container.register('runtime.commandExecutor', () => new NodeRuntimeCommandExecutor());
   container.register('runtime.fileSystem', () => new NodeRuntimeFileSystem());
   container.register('runtime.clock', () => new NodeRuntimeClock());

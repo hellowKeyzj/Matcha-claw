@@ -21,6 +21,9 @@ import type { PlatformService } from '../application/platform-runtime/service';
 import type { SecurityRuntimeService } from '../application/security/service';
 import type { TaskManagerService } from '../application/tasks/service';
 import type { ToolchainUvService } from '../application/toolchain/uv-service';
+import type { TeamRuntimePort } from '../application/team-runtime/team-runtime-port';
+import type { TeamRuntimeWebhookAuthService } from '../application/team-runtime/team-runtime-webhook-auth';
+import type { ExternalConnectorService } from '../application/external-connectors/external-connector-service';
 
 export type RuntimeHostToken<Value> = string & {
   readonly __runtimeHostTokenValue?: Value;
@@ -68,6 +71,9 @@ export const LICENSE_SERVICE_TOKEN = runtimeHostToken<LicenseService>('license.s
 export const PLATFORM_SERVICE_TOKEN = runtimeHostToken<PlatformService>('platform.service');
 export const SECURITY_SERVICE_TOKEN = runtimeHostToken<SecurityRuntimeService>('security.service');
 export const TASK_SERVICE_TOKEN = runtimeHostToken<TaskManagerService>('task.service');
+export const TEAM_RUNTIME_SERVICE_TOKEN = runtimeHostToken<TeamRuntimePort>('teamRuntime.service');
+export const TEAM_RUNTIME_WEBHOOK_AUTH_TOKEN = runtimeHostToken<TeamRuntimeWebhookAuthService>('teamRuntime.webhookAuth');
 export const TOOLCHAIN_UV_SERVICE_TOKEN = runtimeHostToken<ToolchainUvService>('toolchainUv.service');
+export const EXTERNAL_CONNECTOR_SERVICE_TOKEN = runtimeHostToken<ExternalConnectorService>('externalConnectors.service');
 export const AGENT_RUNTIME_APPLICATION_TOKEN = runtimeHostToken<AgentRuntimeApplicationService>('agentRuntime.application');
 export const SESSION_RUNTIME_TOKEN = runtimeHostToken<SessionRuntimeService>('session.runtime');

@@ -15,8 +15,6 @@ export const SUBAGENT_GATEWAY_PLUGIN = {
   pluginId: 'subagents',
   methods: [
     'agents.list',
-    'config.get',
-    'config.set',
     'agents.create',
     'agents.update',
     'agents.delete',

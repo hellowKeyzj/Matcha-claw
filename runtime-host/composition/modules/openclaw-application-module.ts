@@ -1,7 +1,8 @@
+import { createHash } from 'node:crypto';
 import type { ChannelConfigPort } from '../../application/channels/channel-runtime';
 import type { ChannelActivationStrategyPort } from '../../application/channels/channel-activation-strategy';
-import { ChannelLoginSessionService, type ChannelLoginRuntimePort } from '../../application/channels/channel-login-session-service';
-import { OpenClawChannelLoginSessionService } from '../../application/adapters/openclaw/projections/openclaw-channel-login-session-service';
+import { ChannelLoginSessionService } from '../../application/channels/channel-login-session-service';
+import { OpenClawChannelLoginSessionService, type ChannelLoginRuntimePort } from '../../application/adapters/openclaw/projections/openclaw-channel-login-session-service';
 import { ChannelPairingService, type ChannelPairingRuntimeEnvironmentPort } from '../../application/channels/channel-pairing-service';
 import {
   ACTIVATE_DIRECT_CHANNEL_JOB,
@@ -24,6 +25,7 @@ import {
   CAPABILITY_ROUTING_SERVICE_TOKEN,
   CHANNEL_SERVICE_TOKEN,
   CLAWHUB_SERVICE_TOKEN,
+  EXTERNAL_CONNECTOR_SERVICE_TOKEN,
   OPENCLAW_SERVICE_TOKEN,
   PROVIDER_ACCOUNTS_SERVICE_TOKEN,
   PROVIDER_MODELS_SERVICE_TOKEN,
@@ -32,11 +34,20 @@ import {
   SUBAGENT_SERVICE_TOKEN,
 } from '../runtime-host-tokens';
 import type { GatewayPluginCapabilityPort } from '../../application/gateway/gateway-capability-service';
-import type { GatewayChannelPort, GatewayChatPort, GatewayRuntimePort } from '../../application/gateway/gateway-runtime-port';
+import type { GatewayChannelPort, GatewayRpcPort, GatewayRuntimePort } from '../../application/gateway/gateway-runtime-port';
 import { OpenClawAgentSkillConfigProjection } from '../../application/adapters/openclaw/projections/openclaw-agent-skill-config-projection';
+import { OpenClawAgentToolConfigProjection } from '../../application/adapters/openclaw/projections/openclaw-agent-tool-config-projection';
+import { OpenClawSubagentConfigProjection } from '../../application/adapters/openclaw/projections/openclaw-subagent-config-projection';
 import { OpenClawRuntimeConfigService } from '../../application/adapters/openclaw/projections/openclaw-runtime-config-service';
+import { ExternalConnectorOpenClawMcpProjectionService } from '../../application/adapters/openclaw/projections/external-connector-openclaw-mcp-projection';
+import {
+  ExternalConnectorOpenClawMcpStatusProvider,
+  OPENCLAW_MCP_SERVER_STATUS_REFRESH_JOB,
+  type OpenClawMcpServerStatusRefreshJobPayload,
+} from '../../application/adapters/openclaw/projections/external-connector-openclaw-mcp-status';
 import { SubagentTemplateService } from '../../application/adapters/openclaw/infrastructure/openclaw-subagent-template-service';
 import { AgentSkillConfigService } from '../../application/subagents/agent-skill-config-service';
+import { AgentToolConfigService } from '../../application/subagents/agent-tool-config-service';
 import { SubagentRuntimeService } from '../../application/subagents/service';
 import { SubagentRuntimeWorkflow } from '../../application/workflows/subagent-runtime/subagent-runtime-workflow';
 import {
@@ -68,6 +79,7 @@ import {
   type SkillsJobPort,
 } from '../../application/skills/skills-jobs';
 import { SettingsService } from '../../application/settings/service';
+import { ExternalConnectorService } from '../../application/external-connectors/external-connector-service';
 import { SettingsRuntimeConfigSyncWorkflow } from '../../application/workflows/settings-runtime-config/settings-runtime-config-sync-workflow';
 import {
   SYNC_SETTINGS_RUNTIME_CONFIG_JOB,
@@ -126,6 +138,7 @@ import type { RuntimeLongTaskSubmissionPort } from '../../application/runtime-ho
 import type { SettingsRepository } from '../../application/settings/store';
 import type { SkillReadmePreviewRepository, SkillsConfigRepository } from '../../application/skills/store';
 import { createAgentSkillConfigCapabilityOperationRoutes } from '../../application/capabilities/agent/agent-skill-config-capability';
+import { createAgentToolConfigCapabilityOperationRoutes } from '../../application/capabilities/agent/agent-tool-config-capability';
 import { createSubagentManagementCapabilityOperationRoutes } from '../../application/capabilities/agent/subagent-management-capability';
 import { createChannelIntegrationCapabilityOperationRoutes } from '../../application/capabilities/integration/channel-integration-capability';
 import { createModelProviderCapabilityOperationRoutes } from '../../application/capabilities/model/model-provider-capability';
@@ -141,6 +154,21 @@ const openClawProviderModelNormalizer: ProviderModelsAgentModelProjectionNormali
       : model
   ),
 };
+
+function hashOpenClawConfig(config: Record<string, unknown>): string {
+  return createHash('sha256').update(stableStringify(config)).digest('hex');
+}
+
+function stableStringify(value: unknown): string {
+  if (Array.isArray(value)) {
+    return `[${value.map(stableStringify).join(',')}]`;
+  }
+  if (value && typeof value === 'object') {
+    const record = value as Record<string, unknown>;
+    return `{${Object.keys(record).sort().map((key) => `${JSON.stringify(key)}:${stableStringify(record[key])}`).join(',')}}`;
+  }
+  return JSON.stringify(value);
+}
 
 export function registerOpenClawApplicationServices(
   container: RuntimeHostContainer,
@@ -160,6 +188,7 @@ export function registerOpenClawApplicationServices(
       workspace: scope.resolve('openclaw.workspaceService'),
       subagentTemplates,
       providerSnapshot: scope.resolve('openclaw.providerSnapshotService'),
+      runtimeConfig: scope.resolve<OpenClawRuntimeConfigService>('openclaw.runtimeConfigService'),
     });
   });
   container.register('channels.configMutationWorkflow', (scope) => new ChannelConfigMutationWorkflow({
@@ -365,21 +394,34 @@ export function registerOpenClawApplicationServices(
     scope.resolve<RuntimeLongTaskSubmissionPort>('runtime.tasks'),
   ));
   container.register('subagents.runtimeWorkflow', (scope) => new SubagentRuntimeWorkflow({
-    gateway: scope.resolve<GatewayChatPort>('gateway.runtime'),
+    gateway: scope.resolve<GatewayRpcPort>('gateway.runtime'),
     capabilities: scope.resolve<GatewayPluginCapabilityPort>('gateway.capabilities'),
     workspace: scope.resolve('openclaw.workspaceService'),
+    clock: scope.resolve<RuntimeClockPort>('runtime.clock'),
+  }));
+  container.register('subagents.configProjection', (scope) => new OpenClawSubagentConfigProjection({
+    config: scope.resolve<OpenClawConfigRepositoryPort>('openclaw.configRepository'),
+    hashConfig: hashOpenClawConfig,
     clock: scope.resolve<RuntimeClockPort>('runtime.clock'),
   }));
   container.register('subagents.service', (scope) => new SubagentRuntimeService({
     runtimeWorkflow: scope.resolve<SubagentRuntimeWorkflow>('subagents.runtimeWorkflow'),
     skillRuntimeWorkflow: scope.resolve<SkillRuntimeWorkflow>('skills.runtimeWorkflow'),
+    subagentConfigProjection: scope.resolve<OpenClawSubagentConfigProjection>('subagents.configProjection'),
   }));
   container.register('subagents.agentSkillConfigProjection', (scope) => new OpenClawAgentSkillConfigProjection({
-    runtimeWorkflow: scope.resolve<SubagentRuntimeWorkflow>('subagents.runtimeWorkflow'),
+    subagentConfigProjection: scope.resolve<OpenClawSubagentConfigProjection>('subagents.configProjection'),
     skillRuntimeWorkflow: scope.resolve<SkillRuntimeWorkflow>('skills.runtimeWorkflow'),
   }));
   container.register('subagents.agentSkillConfigService', (scope) => new AgentSkillConfigService({
     projection: scope.resolve<OpenClawAgentSkillConfigProjection>('subagents.agentSkillConfigProjection'),
+  }));
+  container.register('subagents.agentToolConfigProjection', (scope) => new OpenClawAgentToolConfigProjection({
+    subagentConfigProjection: scope.resolve<OpenClawSubagentConfigProjection>('subagents.configProjection'),
+    gateway: scope.resolve<GatewayRpcPort>('gateway.runtime'),
+  }));
+  container.register('subagents.agentToolConfigService', (scope) => new AgentToolConfigService({
+    projection: scope.resolve<OpenClawAgentToolConfigProjection>('subagents.agentToolConfigProjection'),
   }));
   container.register('clawhub.skillInstallWorkflow', (scope) => new ClawHubSkillInstallWorkflow({
     cliRunner: scope.resolve<ClawHubCliRunner>('clawhub.cliRunner'),
@@ -400,6 +442,11 @@ export function registerOpenClawApplicationServices(
   container.register('clawhub.jobs', (scope): ClawHubJobPort => createClawHubJobPort(
     scope.resolve<RuntimeLongTaskSubmissionPort>('runtime.tasks'),
   ));
+  container.register('externalConnectors.openclawMcpStatusProvider', (scope) => new ExternalConnectorOpenClawMcpStatusProvider({
+    gateway: scope.resolve<GatewayRuntimePort>('gateway.runtime'),
+    clock: scope.resolve<RuntimeClockPort>('runtime.clock'),
+    jobs: scope.resolve<RuntimeLongTaskSubmissionPort>('runtime.tasks'),
+  }));
   registerOpenClawCapabilityOperationRoutes(container);
   facades.registerContainerFacade('openclaw', SETTINGS_SERVICE_TOKEN, container);
   facades.registerContainerFacade('openclaw', PROVIDER_ACCOUNTS_SERVICE_TOKEN, container);
@@ -410,6 +457,20 @@ export function registerOpenClawApplicationServices(
   facades.registerContainerFacade('openclaw', SKILLS_SERVICE_TOKEN, container);
   facades.registerContainerFacade('openclaw', SUBAGENT_SERVICE_TOKEN, container);
   facades.registerContainerFacade('openclaw', CLAWHUB_SERVICE_TOKEN, container);
+}
+
+export function connectOpenClawApplicationServices(context: {
+  readonly container: RuntimeHostContainer;
+  readonly facades: ApplicationServiceRegistry;
+}): void {
+  const externalConnectors = context.facades.resolve(EXTERNAL_CONNECTOR_SERVICE_TOKEN);
+  externalConnectors.registerProjection(new ExternalConnectorOpenClawMcpProjectionService({
+    connectors: externalConnectors,
+    configRepository: context.container.resolve<OpenClawConfigRepositoryPort>('openclaw.configRepository'),
+  }));
+  externalConnectors.registerDownstreamStatusProvider(
+    context.container.resolve<ExternalConnectorOpenClawMcpStatusProvider>('externalConnectors.openclawMcpStatusProvider'),
+  );
 }
 
 function registerOpenClawCapabilityOperationRoutes(container: RuntimeHostContainer): void {
@@ -434,6 +495,9 @@ function registerOpenClawCapabilityOperationRoutes(container: RuntimeHostContain
     }),
     ...createAgentSkillConfigCapabilityOperationRoutes({
       agentSkillConfigService: scope.resolve<AgentSkillConfigService>('subagents.agentSkillConfigService'),
+    }),
+    ...createAgentToolConfigCapabilityOperationRoutes({
+      agentToolConfigService: scope.resolve<AgentToolConfigService>('subagents.agentToolConfigService'),
     }),
   ]);
 }
@@ -467,6 +531,14 @@ function createOpenClawApplicationJobDefinitions(
       type: PROBE_CHANNEL_SNAPSHOT_JOB,
       handler: async () => {
         return await container.resolve<ChannelService>('channels.service').probeSnapshot();
+      },
+    },
+    {
+      type: OPENCLAW_MCP_SERVER_STATUS_REFRESH_JOB,
+      handler: async (payload) => {
+        return await container
+          .resolve<ExternalConnectorOpenClawMcpStatusProvider>('externalConnectors.openclawMcpStatusProvider')
+          .refreshOpenClawMcpServerStatusesForJob(readOpenClawMcpServerStatusRefreshJobPayload(payload));
       },
     },
     {
@@ -575,6 +647,15 @@ function createOpenClawApplicationJobDefinitions(
   ];
 }
 
+function readOpenClawMcpServerStatusRefreshJobPayload(payload: unknown): OpenClawMcpServerStatusRefreshJobPayload {
+  const body = readJobPayloadRecord(payload);
+  const sessionKey = typeof body.sessionKey === 'string' ? body.sessionKey.trim() : '';
+  if (!sessionKey) {
+    throw new Error('sessionKey is required');
+  }
+  return { sessionKey };
+}
+
 function readJobPayloadRecord(payload: unknown): Record<string, unknown> {
   return payload && typeof payload === 'object' && !Array.isArray(payload)
     ? payload as Record<string, unknown>
@@ -605,6 +686,12 @@ export function registerOpenClawApplicationLifecycle(
         name: 'skills.preinstalled-ensure',
         start: () => {
           container.resolve<SkillsJobPort>('skills.jobs').submitEnsurePreinstalled();
+        },
+      },
+      {
+        name: 'external-connectors.downstream-sync',
+        start: () => {
+          void container.resolve<ExternalConnectorService>('externalConnectors.service').syncDownstreamProjections();
         },
       },
     ],

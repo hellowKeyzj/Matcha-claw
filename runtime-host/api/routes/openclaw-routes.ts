@@ -1,8 +1,12 @@
 import {
+  badRequest,
   decodeRouteParam,
+  readRecord,
   routeResponder,
   type RuntimeRouteDefinition,
 } from './route-utils';
+
+type OpenClawToolPermissionMode = 'default' | 'fullAccess';
 
 interface OpenClawRouteDeps {
   openClawService: OpenClawRouteService;
@@ -19,6 +23,13 @@ interface OpenClawRouteService {
   taskWorkspaceDirs(): Promise<unknown>;
   skillsDir(): unknown;
   cliCommand(): Promise<unknown>;
+  toolPermissionMode(): Promise<unknown>;
+  setToolPermissionMode(mode: OpenClawToolPermissionMode): Promise<unknown>;
+}
+
+function readPermissionMode(payload: unknown): OpenClawToolPermissionMode | null {
+  const mode = readRecord(payload).mode;
+  return mode === 'default' || mode === 'fullAccess' ? mode : null;
 }
 
 export const openClawRoutes: readonly RuntimeRouteDefinition<OpenClawRouteDeps>[] = [
@@ -36,5 +47,16 @@ export const openClawRoutes: readonly RuntimeRouteDefinition<OpenClawRouteDeps>[
   { method: 'GET', path: '/api/openclaw/task-workspace-dirs', handle: (_context, deps) => routeResponder.value(() => deps.openClawService.taskWorkspaceDirs()) },
   { method: 'GET', path: '/api/openclaw/skills-dir', handle: (_context, deps) => routeResponder.ok(deps.openClawService.skillsDir()) },
   { method: 'GET', path: '/api/openclaw/cli-command', handle: (_context, deps) => routeResponder.value(() => deps.openClawService.cliCommand()) },
+  { method: 'GET', path: '/api/openclaw/tool-permission-mode', handle: (_context, deps) => routeResponder.value(() => deps.openClawService.toolPermissionMode()) },
+  {
+    method: 'PUT',
+    path: '/api/openclaw/tool-permission-mode',
+    handle: (context, deps) => {
+      const mode = readPermissionMode(context.payload);
+      return mode
+        ? routeResponder.value(() => deps.openClawService.setToolPermissionMode(mode))
+        : badRequest('permission mode must be "default" or "fullAccess"');
+    },
+  },
 ] as const;
 

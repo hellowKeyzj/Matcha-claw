@@ -40,6 +40,9 @@ export const HOSTAPI_PROXY_PUBLIC_READONLY_EXACT_ROUTES = Object.freeze([
   '/api/cron/session-history',
   '/api/diagnostics/gateway-snapshot',
   '/api/diagnostics/memory',
+  '/api/external-connectors',
+  '/api/external-connectors/mcp-server-programs',
+  '/api/external-connectors/status',
   '/api/gateway/control-ui',
   '/api/gateway/health',
   '/api/gateway/status',
@@ -54,6 +57,7 @@ export const HOSTAPI_PROXY_PUBLIC_READONLY_EXACT_ROUTES = Object.freeze([
   '/api/openclaw/ready',
   '/api/openclaw/skills-dir',
   '/api/openclaw/status',
+  '/api/openclaw/tool-permission-mode',
   '/api/openclaw/subagent-templates',
   '/api/openclaw/task-workspace-dirs',
   '/api/openclaw/workspace-dir',
@@ -73,6 +77,7 @@ export const HOSTAPI_PROXY_PUBLIC_READONLY_EXACT_ROUTES = Object.freeze([
   '/api/runtime-host/host-bootstrap-settings',
   '/api/runtime-host/jobs',
   '/api/runtime-host/provider-env-map',
+  '/api/runtime-host/team-webhook-auth',
   '/api/runtime-host/transport-stats',
   '/api/runtime-host/usage/recent',
   '/api/security',
@@ -97,6 +102,18 @@ export const HOSTAPI_PROXY_PUBLIC_VALIDATION_POST_EXACT_ROUTES = Object.freeze([
   '/api/clawhub/search',
 ]);
 
+export const HOSTAPI_PROXY_PUBLIC_MUTATION_POST_EXACT_ROUTES = Object.freeze([
+  '/api/external-connectors/get',
+  '/api/external-connectors/probe',
+  '/api/external-connectors/session-status',
+  '/api/external-connectors/upsert',
+  '/api/external-connectors/remove',
+]);
+
+export const HOSTAPI_PROXY_PUBLIC_MUTATION_PUT_EXACT_ROUTES = Object.freeze([
+  '/api/openclaw/tool-permission-mode',
+]);
+
 export function getMainApiBoundarySnapshot() {
   return {
     allowedRouteFiles: [...MAIN_API_ALLOWED_ROUTE_FILES],
@@ -105,6 +122,8 @@ export function getMainApiBoundarySnapshot() {
     hostapiProxyPublicReadonlyExactRoutes: [...HOSTAPI_PROXY_PUBLIC_READONLY_EXACT_ROUTES],
     hostapiProxyPublicReadonlyPrefixRoutes: [...HOSTAPI_PROXY_PUBLIC_READONLY_PREFIX_ROUTES],
     hostapiProxyPublicValidationPostExactRoutes: [...HOSTAPI_PROXY_PUBLIC_VALIDATION_POST_EXACT_ROUTES],
+    hostapiProxyPublicMutationPostExactRoutes: [...HOSTAPI_PROXY_PUBLIC_MUTATION_POST_EXACT_ROUTES],
+    hostapiProxyPublicMutationPutExactRoutes: [...HOSTAPI_PROXY_PUBLIC_MUTATION_PUT_EXACT_ROUTES],
   };
 }
 
@@ -134,6 +153,12 @@ export function isHostApiProxyAllowedRoute(method: string, pathname: string): bo
     return true;
   }
   if (normalizedMethod === 'POST' && HOSTAPI_PROXY_PUBLIC_VALIDATION_POST_EXACT_ROUTES.includes(pathname)) {
+    return true;
+  }
+  if (normalizedMethod === 'POST' && HOSTAPI_PROXY_PUBLIC_MUTATION_POST_EXACT_ROUTES.includes(pathname)) {
+    return true;
+  }
+  if (normalizedMethod === 'PUT' && HOSTAPI_PROXY_PUBLIC_MUTATION_PUT_EXACT_ROUTES.includes(pathname)) {
     return true;
   }
   if (normalizedMethod !== 'GET') {

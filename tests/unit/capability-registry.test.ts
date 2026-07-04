@@ -16,11 +16,13 @@ import type { CapabilityOperationRoute } from '../../runtime-host/application/ca
 import type { CapabilityDescriptor, CapabilityOperationDescriptor } from '../../runtime-host/application/capabilities/contracts/capability-descriptor';
 import { createAgentRunCapabilityOperationRoutes } from '../../runtime-host/application/capabilities/agent/agent-run-capability';
 import { createAgentSkillConfigCapabilityOperationRoutes } from '../../runtime-host/application/capabilities/agent/agent-skill-config-capability';
+import { createAgentToolConfigCapabilityOperationRoutes } from '../../runtime-host/application/capabilities/agent/agent-tool-config-capability';
 import { createSubagentManagementCapabilityOperationRoutes } from '../../runtime-host/application/capabilities/agent/subagent-management-capability';
 import { createSessionApprovalCapabilityOperationRoutes } from '../../runtime-host/application/capabilities/approval/session-approval-capability';
 import { createSessionModelSelectionCapabilityOperationRoutes } from '../../runtime-host/application/capabilities/model/session-model-capability';
 import { createModelProviderCapabilityOperationRoutes } from '../../runtime-host/application/capabilities/model/model-provider-capability';
 import { createChannelIntegrationCapabilityOperationRoutes } from '../../runtime-host/application/capabilities/integration/channel-integration-capability';
+import { createExternalConnectorCapabilityOperationRoutes } from '../../runtime-host/application/external-connectors/external-connector-capability';
 import { createLicenseRuntimeCapabilityOperationRoutes } from '../../runtime-host/application/capabilities/license/license-runtime-capability';
 import { createPlatformRuntimeCapabilityOperationRoutes } from '../../runtime-host/application/capabilities/platform/platform-runtime-capability';
 import { createPluginRuntimeCapabilityOperationRoutes } from '../../runtime-host/application/capabilities/plugin/plugin-runtime-capability';
@@ -242,6 +244,7 @@ function createOperationRoutes(): readonly CapabilityOperationRoute[] {
     ...createSessionManagementCapabilityOperationRoutes({ commandService: empty }),
     ...createSessionModelSelectionCapabilityOperationRoutes({ commandService: empty }),
     ...createChannelIntegrationCapabilityOperationRoutes({ channelService: empty }),
+    ...createExternalConnectorCapabilityOperationRoutes({ externalConnectorService: empty }),
     ...createPlatformRuntimeCapabilityOperationRoutes({
       platformService: empty,
       toolchainUvService: empty,
@@ -263,6 +266,7 @@ function createOperationRoutes(): readonly CapabilityOperationRoute[] {
     }),
     ...createSubagentManagementCapabilityOperationRoutes({ subagentService: empty }),
     ...createAgentSkillConfigCapabilityOperationRoutes({ agentSkillConfigService: empty }),
+    ...createAgentToolConfigCapabilityOperationRoutes({ agentToolConfigService: empty }),
     ...createTaskControlCapabilityOperationRoutes({ taskService: empty }),
     ...createTeamRuntimeCapabilityOperationRoutes({ teamSkillService: empty }),
     ...createToolInvokeCapabilityOperationRoutes({ taskService: empty }),
@@ -337,6 +341,7 @@ describe('capability registry', () => {
       expect.objectContaining({ id: 'model.provider', scopeKind: 'runtime-instance', ownerModuleId: 'model', routeOwnerId: 'openclaw' }),
       expect.objectContaining({ id: 'settings.runtime', scopeKind: 'app', ownerModuleId: 'settings', routeOwnerId: 'openclaw' }),
       expect.objectContaining({ id: 'agent.skill-config', scopeKind: 'agent', ownerModuleId: 'agent', routeOwnerId: 'openclaw' }),
+      expect.objectContaining({ id: 'agent.tool-config', scopeKind: 'agent', ownerModuleId: 'agent', routeOwnerId: 'openclaw' }),
       expect.objectContaining({ id: 'license.runtime', scopeKind: 'app', ownerModuleId: 'license', routeOwnerId: 'operations' }),
       expect.objectContaining({ id: 'scheduler.cron', scopeKind: 'runtime-instance', ownerModuleId: 'scheduler', routeOwnerId: 'operations' }),
       expect.objectContaining({ id: 'workspace.file', scopeKind: 'workspace', ownerModuleId: 'workspace', routeOwnerId: 'operations' }),

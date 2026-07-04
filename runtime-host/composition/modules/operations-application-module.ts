@@ -12,7 +12,7 @@ import {
   createCronRuntimeJobPort,
   type CronRuntimeJobPort,
 } from '../../application/cron/cron-jobs';
-import { CronRunHistoryRepository, CronSessionHistoryService, type CronRuntimeDataPort } from '../../application/cron/cron-session-history';
+import { CronRunHistoryRepository, CronSessionHistoryService } from '../../application/cron/cron-session-history';
 import { LicenseService } from '../../application/license/service';
 import { NodeLicenseRuntime } from '../license-node-runtime';
 import { FileService, type FileRuntimeDataStorePort } from '../../application/files/file-service';
@@ -47,13 +47,16 @@ import { SecurityPolicyRepository, type SecurityPolicyStoragePort } from '../../
 import { SecurityPolicyStoreWorkflow } from '../../application/workflows/security-policy/security-policy-store-workflow';
 import { WorkerBackedTeamRuntimeService } from '../../application/team-runtime/team-runtime-worker-client';
 import type { TeamRuntimePort } from '../../application/team-runtime/team-runtime-port';
+import { TeamRuntimeWebhookAuthService } from '../../application/team-runtime/team-runtime-webhook-auth';
 import {
   DELETE_TEAM_MANAGED_AGENTS_JOB,
   createTeamRuntimeJobPort,
   type TeamRuntimeJobPort,
 } from '../../application/team-runtime/team-runtime-jobs';
 import { OpenClawTeamAgentMaterializationAdapter } from '../../application/team-runtime/adapters/openclaw/openclaw-team-agent-materialization-adapter';
+import type { TeamAgentMaterializationPort } from '../../application/team-runtime/ports/team-agent-materialization-port';
 import { SessionRuntimeTeamRoleSessionAdapter } from '../../application/team-runtime/adapters/session-runtime-team-role-session-adapter';
+import { OpenClawTeamRoleSessionMaterializationAdapter } from '../../application/team-runtime/adapters/openclaw/openclaw-team-role-session-materialization-adapter';
 import { SkillsService } from '../../application/skills/service';
 import { TaskManagerService } from '../../application/tasks/service';
 import type { SessionRuntimeService } from '../../application/sessions/service';
@@ -120,11 +123,14 @@ import {
   SECURITY_SERVICE_TOKEN,
   SESSION_RUNTIME_TOKEN,
   TASK_SERVICE_TOKEN,
+  TEAM_RUNTIME_SERVICE_TOKEN,
+  TEAM_RUNTIME_WEBHOOK_AUTH_TOKEN,
   TOOLCHAIN_UV_SERVICE_TOKEN,
 } from '../runtime-host-tokens';
 import type {
   RuntimeClockPort,
   RuntimeCommandExecutorPort,
+  RuntimeDataRootPort,
   RuntimeFileSystemPort,
   RuntimeIdGeneratorPort,
   RuntimeSystemEnvironmentPort,
@@ -145,9 +151,9 @@ export function registerOperationsApplicationServices(
     container.register('license.service', (scope) => new LicenseService(scope.resolve('license.runtime')));
     return;
   }
-  container.register('cron.runtimeData', (scope): CronRuntimeDataPort => scope.resolve<CronRuntimeDataPort>('operations.runtimeDataRoot'));
+  container.register('cron.runtimeData', (scope): RuntimeDataRootPort => scope.resolve<RuntimeDataRootPort>('runtimeHost.runtimeDataRoot'));
   container.register('cron.runHistoryRepository', (scope) => new CronRunHistoryRepository({
-    runtimeData: scope.resolve<CronRuntimeDataPort>('cron.runtimeData'),
+    runtimeData: scope.resolve<RuntimeDataRootPort>('cron.runtimeData'),
     fileSystem: scope.resolve<RuntimeFileSystemPort>('runtime.fileSystem'),
   }));
   container.register('cron.sessionHistoryService', (scope) => new CronSessionHistoryService(
@@ -258,28 +264,37 @@ export function registerOperationsApplicationServices(
     gateway: scope.resolve<GatewayRuntimePort>('gateway.runtime'),
     capabilities: scope.resolve<GatewayPluginCapabilityPort>('gateway.capabilities'),
     fileSystem: scope.resolve<RuntimeFileSystemPort>('runtime.fileSystem'),
-    openClawConfigDir: scope.resolve<CronRuntimeDataPort>('operations.runtimeDataRoot').getRuntimeDataRootDir(),
+    openClawConfigDir: scope.resolve<OpenClawWorkspaceService>('openclaw.workspaceService').getConfigDir(),
     logger: scope.resolve<RuntimeHostLogger>('logger'),
   }));
   container.register('teamRuntime.roleSessions', (scope) => {
     const sessionService = scope.resolve<SessionRuntimeService>(SESSION_RUNTIME_TOKEN);
+    const endpointSessionMaterialization = new OpenClawTeamRoleSessionMaterializationAdapter({
+      gateway: scope.resolve<GatewayRuntimePort>('gateway.runtime'),
+    });
     return new SessionRuntimeTeamRoleSessionAdapter({
       createSession: (payload) => sessionService.createSession(payload),
       promptSession: (payload) => sessionService.promptSession(payload),
       abortSession: (payload) => sessionService.abortSession(payload),
       deleteSession: (payload) => sessionService.deleteSession(payload),
       getSessionWindow: (payload) => sessionService.getSessionWindow(payload),
+      endpointSessionMaterialization,
     });
   });
   container.register('teamRuntime.jobs', (scope): TeamRuntimeJobPort => createTeamRuntimeJobPort(
     scope.resolve<RuntimeLongTaskSubmissionPort>('runtime.tasks'),
   ));
+  container.register('teamRuntime.webhookAuth', (scope) => new TeamRuntimeWebhookAuthService({
+    environment: scope.resolve<RuntimeSystemEnvironmentPort>('runtime.systemEnvironment'),
+    settingsRepository: scope.resolve('settings.repository'),
+    idGenerator: scope.resolve<RuntimeIdGeneratorPort>('runtime.idGenerator'),
+  }));
   container.register('teamRuntime.service', (scope) => new WorkerBackedTeamRuntimeService({
     workerScriptPath: path.join(__dirname, '../../application/team-runtime/infrastructure/worker/team-runtime-worker-entry.js'),
     config: {
-      runtimeDataRootDir: scope.resolve<CronRuntimeDataPort>('operations.runtimeDataRoot').getRuntimeDataRootDir(),
+      runtimeDataRootDir: scope.resolve<RuntimeDataRootPort>('runtimeHost.runtimeDataRoot').getRuntimeDataRootDir(),
     },
-    agentMaterialization: scope.resolve<OpenClawTeamAgentMaterializationAdapter>('teamRuntime.openclawMaterialization'),
+    agentMaterialization: scope.resolve<TeamAgentMaterializationPort>('teamRuntime.openclawMaterialization'),
     roleSessions: scope.resolve<SessionRuntimeTeamRoleSessionAdapter>('teamRuntime.roleSessions'),
     jobs: scope.resolve<TeamRuntimeJobPort>('teamRuntime.jobs'),
     skillsService: scope.resolve<SkillsService>('skills.service'),
@@ -319,6 +334,8 @@ export function registerOperationsApplicationServices(
   facades.registerContainerFacade('operations', TOOLCHAIN_UV_SERVICE_TOKEN, container);
   facades.registerContainerFacade('operations', SECURITY_SERVICE_TOKEN, container);
   facades.registerContainerFacade('operations', TASK_SERVICE_TOKEN, container);
+  facades.registerContainerFacade('operations', TEAM_RUNTIME_SERVICE_TOKEN, container);
+  facades.registerContainerFacade('operations', TEAM_RUNTIME_WEBHOOK_AUTH_TOKEN, container);
   facades.registerContainerFacade('operations', PLATFORM_SERVICE_TOKEN, container);
 }
 
@@ -379,25 +396,23 @@ function createOperationsJobDefinitions(
       handler: async (payload) => {
         const body = readJobPayloadRecord(payload);
         const teamId = typeof body.teamId === 'string' ? body.teamId : '';
-        const agentIds = Array.isArray(body.agentIds) ? body.agentIds.filter((item): item is string => typeof item === 'string' && item.trim().length > 0) : [];
         const endpoint = readJobPayloadRecord(body.endpoint) as RuntimeEndpointRef;
-        const workspacePaths = Array.isArray(body.workspacePaths) ? body.workspacePaths.filter((item): item is string => typeof item === 'string' && item.trim().length > 0) : [];
+        const managedAgents = Array.isArray(body.managedAgents) ? body.managedAgents.map(readJobPayloadRecord) as RemoveTeamAgentsInput['managedAgents'] : [];
         if (!teamId) {
           throw new Error('teamId is required');
         }
-        if (agentIds.length === 0) {
+        if (managedAgents.length === 0) {
           return { teamId, deletedAgentIds: [] };
         }
         if (!endpoint.kind) {
           throw new Error('endpoint is required');
         }
-        await container.resolve<OpenClawTeamAgentMaterializationAdapter>('teamRuntime.openclawMaterialization').removeTeamAgents({
+        await container.resolve<TeamAgentMaterializationPort>('teamRuntime.openclawMaterialization').removeTeamAgents({
           teamId,
           endpoint,
-          agentIds,
-          workspacePaths,
+          managedAgents,
         } satisfies RemoveTeamAgentsInput);
-        return { teamId, deletedAgentIds: agentIds };
+        return { teamId, deletedAgentIds: managedAgents.filter((agent) => agent.lifecycle !== 'external').map((agent) => agent.agentId) };
       },
     },
     {

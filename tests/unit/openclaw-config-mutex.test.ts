@@ -19,7 +19,11 @@ import { OpenClawManagedPluginCatalog } from '../../runtime-host/application/ada
 import { OpenClawManagedPluginInstaller } from '../../runtime-host/application/adapters/openclaw/projections/openclaw-managed-plugin-installer';
 import { PluginCompanionSkillService } from '../../runtime-host/application/plugins/plugin-companion-skill-service';
 import { PluginCompanionSkillWorkflow } from '../../runtime-host/application/workflows/plugin-lifecycle/plugin-companion-skill-workflow';
-import { syncGatewayTokenToConfig } from '../../runtime-host/application/adapters/openclaw/projections/openclaw-runtime-config-sync';
+import {
+  readOpenClawToolPermissionMode,
+  syncGatewayTokenToConfig,
+  syncToolPermissionModeToOpenClaw,
+} from '../../runtime-host/application/adapters/openclaw/projections/openclaw-runtime-config-sync';
 import { createTestPluginFileSystem } from './helpers/plugin-file-system';
 import { createTestRuntimeFileSystem } from './helpers/runtime-file-system';
 
@@ -218,6 +222,57 @@ describe('openclaw-config-mutex', () => {
     expect(finalConfig.plugins).toEqual({ entries: { external: { enabled: true, config: { keep: true } } } });
     expect(finalConfig.unknownTopLevel).toEqual({ keep: true });
     expect(finalConfig.commands.restart).toBe(true);
+  });
+
+  it('同步 OpenClaw 工具权限模式时只改 tools.fs 和 tools.exec', async () => {
+    const configRepository = new OpenClawConfigRepository(createTestOpenClawEnvironmentRepository());
+
+    await writeFile(
+      join(tempDir, 'openclaw.json'),
+      `${JSON.stringify({
+        tools: {
+          profile: 'coding',
+          fs: { workspaceOnly: false, keepFs: true },
+          exec: { security: 'full', ask: 'off', keepExec: true },
+          customToolConfig: true,
+        },
+        agents: { defaults: { model: { primary: 'anthropic/claude-opus-4-8' } } },
+      }, null, 2)}\n`,
+      'utf8',
+    );
+
+    await expect(syncToolPermissionModeToOpenClaw(configRepository, 'default')).resolves.toEqual({ mode: 'default' });
+    await expect(readOpenClawToolPermissionMode(configRepository)).resolves.toEqual({ mode: 'default' });
+
+    const defaultConfig = JSON.parse(await readFile(join(tempDir, 'openclaw.json'), 'utf8')) as Record<string, any>;
+    expect(defaultConfig.tools).toEqual({
+      profile: 'coding',
+      fs: { workspaceOnly: true, keepFs: true },
+      exec: { keepExec: true },
+      customToolConfig: true,
+    });
+    expect(defaultConfig.agents).toEqual({ defaults: { model: { primary: 'anthropic/claude-opus-4-8' } } });
+    expect(defaultConfig.commands.restart).toBe(true);
+
+    await expect(syncToolPermissionModeToOpenClaw(configRepository, 'fullAccess')).resolves.toEqual({ mode: 'fullAccess' });
+    const fullAccessConfig = JSON.parse(await readFile(join(tempDir, 'openclaw.json'), 'utf8')) as Record<string, any>;
+    expect(fullAccessConfig.tools.fs.workspaceOnly).toBe(false);
+    expect(fullAccessConfig.tools.exec).toEqual({ keepExec: true });
+
+    await writeFile(
+      join(tempDir, 'openclaw.json'),
+      `${JSON.stringify({
+        tools: {
+          fs: { workspaceOnly: false },
+          exec: { security: 'full', ask: 'off' },
+        },
+      }, null, 2)}\n`,
+      'utf8',
+    );
+
+    await expect(syncToolPermissionModeToOpenClaw(configRepository, 'default')).resolves.toEqual({ mode: 'default' });
+    const omittedExecConfig = JSON.parse(await readFile(join(tempDir, 'openclaw.json'), 'utf8')) as Record<string, any>;
+    expect(omittedExecConfig.tools).toEqual({ fs: { workspaceOnly: true } });
   });
 
   it('会串行化跨模块的 openclaw.json 写入，避免并发覆盖', async () => {

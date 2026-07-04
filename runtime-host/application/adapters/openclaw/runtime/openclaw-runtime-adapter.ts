@@ -15,8 +15,10 @@ import {
 import { OPENCLAW_RUNTIME_ADAPTER_ID, OPENCLAW_RUNTIME_INSTANCE_ID } from './openclaw-runtime-identity';
 import { buildRuntimeEndpointCapabilityDescriptors } from '../../../agent-runtime/contracts/runtime-capability-descriptors';
 import { AGENT_SKILL_CONFIG_CAPABILITY_ID, agentSkillConfigCapabilityOperations } from '../../../capabilities/agent/agent-skill-config-capability';
+import { AGENT_TOOL_CONFIG_CAPABILITY_ID, agentToolConfigCapabilityOperations } from '../../../capabilities/agent/agent-tool-config-capability';
 import { SUBAGENT_MANAGEMENT_CAPABILITY_ID, subagentManagementCapabilityOperations } from '../../../capabilities/agent/subagent-management-capability';
 import { CHANNEL_INTEGRATION_CAPABILITY_ID, channelIntegrationCapabilityOperations } from '../../../capabilities/integration/channel-integration-capability';
+import { EXTERNAL_CONNECTOR_CAPABILITY_ID, externalConnectorCapabilityOperations } from '../../../external-connectors/external-connector-capability';
 import { LICENSE_RUNTIME_CAPABILITY_ID, licenseRuntimeCapabilityOperations } from '../../../capabilities/license/license-runtime-capability';
 import { MODEL_PROVIDER_CAPABILITY_ID, modelProviderCapabilityOperations } from '../../../capabilities/model/model-provider-capability';
 import { PLATFORM_RUNTIME_CAPABILITY_ID, platformRuntimeCapabilityOperations } from '../../../capabilities/platform/platform-runtime-capability';
@@ -36,11 +38,13 @@ import { OpenClawApprovalAdapter } from './openclaw-approval-adapter';
 
 const CAPABILITY_OWNERS: Record<string, { ownerModuleId: string; routeOwnerId: string }> = {
   [CHANNEL_INTEGRATION_CAPABILITY_ID]: { ownerModuleId: 'integration', routeOwnerId: 'openclaw' },
+  [EXTERNAL_CONNECTOR_CAPABILITY_ID]: { ownerModuleId: 'external-connectors', routeOwnerId: 'operations' },
   [PLATFORM_RUNTIME_CAPABILITY_ID]: { ownerModuleId: 'platform', routeOwnerId: 'operations' },
   [MODEL_PROVIDER_CAPABILITY_ID]: { ownerModuleId: 'model', routeOwnerId: 'openclaw' },
   [LICENSE_RUNTIME_CAPABILITY_ID]: { ownerModuleId: 'license', routeOwnerId: 'operations' },
   [RUNTIME_HOST_CAPABILITY_ID]: { ownerModuleId: 'runtime', routeOwnerId: 'runtime' },
   [AGENT_SKILL_CONFIG_CAPABILITY_ID]: { ownerModuleId: 'agent', routeOwnerId: 'openclaw' },
+  [AGENT_TOOL_CONFIG_CAPABILITY_ID]: { ownerModuleId: 'agent', routeOwnerId: 'openclaw' },
   [SUBAGENT_MANAGEMENT_CAPABILITY_ID]: { ownerModuleId: 'agent', routeOwnerId: 'openclaw' },
   [PLUGIN_RUNTIME_CAPABILITY_ID]: { ownerModuleId: 'plugin', routeOwnerId: 'runtime' },
   [SCHEDULER_CRON_CAPABILITY_ID]: { ownerModuleId: 'scheduler', routeOwnerId: 'operations' },
@@ -157,6 +161,12 @@ function buildRuntimeInstanceCapabilities(endpoint: RuntimeEndpointProfile, endp
       operations: platformRuntimeCapabilityOperations,
     }),
     createScopedCapabilityDescriptor({
+      id: EXTERNAL_CONNECTOR_CAPABILITY_ID,
+      kind: 'external-connector',
+      scope: runtimeScope,
+      operations: externalConnectorCapabilityOperations,
+    }),
+    createScopedCapabilityDescriptor({
       id: MODEL_PROVIDER_CAPABILITY_ID,
       kind: 'model-provider',
       scope: runtimeScope,
@@ -230,6 +240,12 @@ function buildAgentScopedCapabilities(endpoint: RuntimeEndpointProfile, endpoint
         kind: 'agent-skill-config',
         scope: { kind: 'agent', endpoint: endpointRef, agentId },
         operations: agentSkillConfigCapabilityOperations,
+      }),
+      createScopedCapabilityDescriptor({
+        id: AGENT_TOOL_CONFIG_CAPABILITY_ID,
+        kind: 'agent-tool-config',
+        scope: { kind: 'agent', endpoint: endpointRef, agentId },
+        operations: agentToolConfigCapabilityOperations,
       }),
       createScopedCapabilityDescriptor({
         id: SUBAGENT_MANAGEMENT_CAPABILITY_ID,

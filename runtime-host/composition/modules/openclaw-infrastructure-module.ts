@@ -57,7 +57,7 @@ import type { ChannelPairingRuntimeEnvironmentPort } from '../../application/cha
 import { SettingsRepository, type SettingsStoreEnvironmentPort } from '../../application/settings/store';
 import { SettingsStoreWorkflow } from '../../application/workflows/settings-store/settings-store-workflow';
 import type { CronDeliveryChannelProjectionPort } from '../../application/cron/cron-model';
-import type { CronRuntimeDataPort } from '../../application/cron/cron-session-history';
+import type { RuntimeDataRootPort } from '../../application/common/runtime-ports';
 import type { FileRuntimeDataStorePort } from '../../application/files/file-service';
 import type { SecurityPluginConfigProjectionPort } from '../../application/security/security-plugin-config-applier';
 import type { SecurityPolicyStoragePort } from '../../application/security/security-policy-store';
@@ -187,19 +187,13 @@ function createSessionConfigDirectoryPort(workspace: OpenClawWorkspaceService): 
   };
 }
 
-function createOperationsRuntimeDataRootPort(workspace: OpenClawWorkspaceService): CronRuntimeDataPort {
-  return {
-    getRuntimeDataRootDir: () => workspace.getConfigDir(),
-  };
-}
-
 function createOperationsTaskWorkspacePort(workspace: OpenClawWorkspaceService): TaskWorkspacePort {
   return {
     getWorkspaceDirForSession: (sessionKey) => workspace.getWorkspaceDirForSession(sessionKey),
   };
 }
 
-function createOpenClawConfigRuntimeDataPort(configRepository: OpenClawConfigRepositoryPort): CronRuntimeDataPort {
+function createOpenClawConfigRuntimeDataPort(configRepository: OpenClawConfigRepositoryPort): RuntimeDataRootPort {
   return {
     getRuntimeDataRootDir: () => configRepository.getConfigDir(),
   };
@@ -570,9 +564,6 @@ export function registerOpenClawInfrastructure(container: RuntimeHostContainer):
   ));
   container.register('runtimeHost.prelaunchPluginMaintenanceRuntime', (scope): PrelaunchPluginMaintenanceRuntimePort => createPrelaunchPluginMaintenanceRuntimePort(
     scope.resolve<OpenClawEnvironmentRepository>('openclaw.environmentRepository'),
-  ));
-  container.register('operations.runtimeDataRoot', (scope): CronRuntimeDataPort => createOperationsRuntimeDataRootPort(
-    scope.resolve<OpenClawWorkspaceService>('openclaw.workspaceService'),
   ));
   container.register('operations.taskWorkspace', (scope): TaskWorkspacePort => createOperationsTaskWorkspacePort(
     scope.resolve<OpenClawWorkspaceService>('openclaw.workspaceService'),

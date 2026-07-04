@@ -116,8 +116,38 @@ describe('runtime-host service-injected routes', () => {
         taskWorkspaceDirs: vi.fn(),
         skillsDir: vi.fn(),
         cliCommand: vi.fn(),
+        toolPermissionMode: vi.fn(),
+        setToolPermissionMode: vi.fn(),
       },
     })).resolves.toEqual({ status: 200, data: { ready: true } });
+
+    const openClawPermissionService = {
+      status: vi.fn(),
+      ready: vi.fn(),
+      dir: vi.fn(),
+      configDir: vi.fn(),
+      subagentTemplates: vi.fn(),
+      subagentTemplate: vi.fn(),
+      workspaceDir: vi.fn(),
+      taskWorkspaceDirs: vi.fn(),
+      skillsDir: vi.fn(),
+      cliCommand: vi.fn(),
+      toolPermissionMode: vi.fn(async () => ({ mode: 'default' })),
+      setToolPermissionMode: vi.fn(async (mode: string) => ({ mode })),
+    };
+    await expect(dispatchRuntimeRouteDefinition(openClawRoutes, 'GET', '/api/openclaw/tool-permission-mode', undefined, {
+      openClawService: openClawPermissionService,
+    })).resolves.toEqual({ status: 200, data: { mode: 'default' } });
+    await expect(dispatchRuntimeRouteDefinition(openClawRoutes, 'PUT', '/api/openclaw/tool-permission-mode', { mode: 'fullAccess' }, {
+      openClawService: openClawPermissionService,
+    })).resolves.toEqual({ status: 200, data: { mode: 'fullAccess' } });
+    expect(openClawPermissionService.setToolPermissionMode).toHaveBeenCalledWith('fullAccess');
+    await expect(dispatchRuntimeRouteDefinition(openClawRoutes, 'PUT', '/api/openclaw/tool-permission-mode', { mode: 'readOnly' }, {
+      openClawService: openClawPermissionService,
+    })).resolves.toEqual({
+      status: 400,
+      data: { success: false, error: 'permission mode must be "default" or "fullAccess"' },
+    });
 
     const gatewayService = {
       rpc: vi.fn(),

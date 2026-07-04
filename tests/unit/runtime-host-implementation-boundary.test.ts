@@ -27,7 +27,7 @@ const RUNTIME_HOST_APPLICATION_ROOTS = [
   'runtime-host/application',
 ] as const;
 const TEAM_RUNTIME_WORKER_INFRASTRUCTURE_FILES = new Set([
-  'runtime-host/application/team-runtime/infrastructure/worker/local-sqlite/sqlite-team-outbox-store.ts',
+  'runtime-host/application/team-runtime/infrastructure/worker/local-sqlite/sqlite-team-command-ledger.ts',
   'runtime-host/application/team-runtime/infrastructure/worker/team-runtime-worker-entry.ts',
 ]);
 const RUNTIME_HOST_OPENCLAW_CORE_BOUNDARY_ROOTS = [
@@ -89,6 +89,7 @@ const RUNTIME_HOST_LAZY_MODULE_REGISTRATION_FILES = [
   'runtime-host/composition/modules/gateway-bridge-module.ts',
   'runtime-host/composition/modules/openclaw-infrastructure-module.ts',
   'runtime-host/composition/modules/openclaw-application-module.ts',
+  'runtime-host/composition/modules/external-connectors-application-module.ts',
   'runtime-host/composition/modules/operations-application-module.ts',
   'runtime-host/composition/modules/platform-runtime-module.ts',
   'runtime-host/composition/modules/plugin-runtime-module.ts',
@@ -798,6 +799,7 @@ describe('runtime-host implementation boundary', () => {
     const moduleFiles = [
       'runtime-host/composition/modules/openclaw-application-module.ts',
       'runtime-host/composition/modules/runtime-application-module.ts',
+      'runtime-host/composition/modules/external-connectors-application-module.ts',
       'runtime-host/composition/modules/operations-application-module.ts',
     ];
 
@@ -950,6 +952,7 @@ describe('runtime-host implementation boundary', () => {
     const openClawModuleSource = await readFile(path.join(process.cwd(), RUNTIME_HOST_OPENCLAW_APPLICATION_MODULE_FILE), 'utf8');
     const runtimeModuleSource = await readFile(path.join(process.cwd(), 'runtime-host/composition/modules/runtime-application-module.ts'), 'utf8');
     const operationsModuleSource = await readFile(path.join(process.cwd(), 'runtime-host/composition/modules/operations-application-module.ts'), 'utf8');
+    const externalConnectorModuleSource = await readFile(path.join(process.cwd(), 'runtime-host/composition/modules/external-connectors-application-module.ts'), 'utf8');
     const registrySource = await readFile(path.join(process.cwd(), 'runtime-host/composition/runtime-host-module-registry.ts'), 'utf8');
     const tokensSource = await readFile(path.join(process.cwd(), 'runtime-host/composition/runtime-host-tokens.ts'), 'utf8');
 
@@ -976,9 +979,35 @@ describe('runtime-host implementation boundary', () => {
     expect(operationsModuleSource).not.toContain('OperationsApplicationFacade');
     expect(operationsModuleSource).not.toContain("container.register('operations.facade'");
     expect(operationsModuleSource).toContain("facades.registerContainerFacade('operations', CRON_SERVICE_TOKEN, container)");
+    expect(externalConnectorModuleSource).toContain("facades.registerContainerFacade('external-connectors', EXTERNAL_CONNECTOR_SERVICE_TOKEN, container)");
     expect(tokensSource).not.toContain('OPENCLAW_FACADE_TOKEN');
     expect(tokensSource).not.toContain('RUNTIME_FACADE_TOKEN');
     expect(tokensSource).not.toContain('OPERATIONS_FACADE_TOKEN');
+  });
+
+  it('external connector core 独立于 operations 与 OpenClaw，OpenClaw 只作为 downstream projection 接入', async () => {
+    const operationsModuleSource = await readFile(path.join(process.cwd(), 'runtime-host/composition/modules/operations-application-module.ts'), 'utf8');
+    const externalConnectorModuleSource = await readFile(path.join(process.cwd(), 'runtime-host/composition/modules/external-connectors-application-module.ts'), 'utf8');
+    const externalConnectorServiceSource = await readFile(path.join(process.cwd(), 'runtime-host/application/external-connectors/external-connector-service.ts'), 'utf8');
+    const openClawModuleSource = await readFile(path.join(process.cwd(), RUNTIME_HOST_OPENCLAW_APPLICATION_MODULE_FILE), 'utf8');
+    const registrySource = await readFile(path.join(process.cwd(), RUNTIME_HOST_APPLICATION_MODULE_REGISTRY_FILE), 'utf8');
+
+    expect(operationsModuleSource).not.toContain('ExternalConnector');
+    expect(operationsModuleSource).not.toContain('externalConnectors');
+    expect(operationsModuleSource).not.toContain('external-connector');
+    expect(externalConnectorModuleSource).not.toContain('OpenClaw');
+    expect(externalConnectorModuleSource).not.toContain('openclaw.configRepository');
+    expect(externalConnectorServiceSource).not.toContain('OpenClaw');
+    expect(externalConnectorServiceSource).toContain('ExternalConnectorProjectionSourcePort');
+    expect(externalConnectorServiceSource).toContain('listConnectorSpecs()');
+    expect(openClawModuleSource).toContain('connectOpenClawApplicationServices');
+    expect(openClawModuleSource).toContain('ExternalConnectorOpenClawMcpProjectionService');
+    expect(openClawModuleSource).toContain('externalConnectors.registerProjection');
+    expect(registrySource).toContain("name: 'external-connectors'");
+    expect(registrySource).toContain("connectImports: ['external-connectors']");
+    expect(registrySource).toContain("'runtimeHost.runtimeDataRoot'");
+    expect(externalConnectorModuleSource).toContain("scope.resolve<RuntimeDataRootPort>('runtimeHost.runtimeDataRoot')");
+    expect(operationsModuleSource).not.toContain("container.register('externalConnectors.");
   });
 
   it('gateway control 属于系统模块能力，不允许藏在 openclaw application service 注册里', async () => {

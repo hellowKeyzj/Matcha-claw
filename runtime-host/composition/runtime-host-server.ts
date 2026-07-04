@@ -1,12 +1,15 @@
+import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
 import { createServer } from 'node:http';
 import type { IncomingMessage, Server, ServerResponse } from 'node:http';
 import { handleDispatchRoute } from '../api/dispatch/dispatch-route-handler';
 import type { RuntimeRouteResponse } from '../api/dispatch/runtime-route-dispatcher-types';
 import { sendJson } from '../api/common/http';
+import { createTeamRuntimeWebhookHandler, isTeamRuntimeWebhookPath } from '../api/routes/team-runtime-webhook-routes';
 import {
   TRANSPORT_VERSION,
 } from '../shared/runtime-host-constants';
 import type { RuntimeLifecycleState } from '../application/common/runtime-contracts';
+import type { TeamRuntimePort } from '../application/team-runtime/team-runtime-port';
 import type { RuntimeHostLogger } from '../shared/logger';
 
 export interface RuntimeHostTransportStats {
@@ -25,6 +28,9 @@ export interface RuntimeHostHttpServerDeps {
   readonly createHealthPayload: (lifecycle: RuntimeLifecycleState, startedAtMs: number) => unknown;
   readonly transportStats: RuntimeHostTransportStats;
   readonly logger?: RuntimeHostLogger;
+  readonly teamWebhookToken: string | (() => string | Promise<string>);
+  readonly teamRuntimeService: TeamRuntimePort;
+  readonly nowMs: () => number;
   readonly dispatchRuntimeRoute: (
     method: string,
     route: string,
@@ -43,7 +49,33 @@ export function createTransportStats(): RuntimeHostTransportStats {
   };
 }
 
+function isWebhookTokenAuthorized(actualToken: string, expectedToken: string): boolean {
+  if (!actualToken || !expectedToken) return false;
+  const actualDigest = createHash('sha256').update(actualToken).digest();
+  const expectedDigest = createHash('sha256').update(expectedToken).digest();
+  return timingSafeEqual(actualDigest, expectedDigest);
+}
+
+function createWebhookBodyHasher(): { update: (chunk: Uint8Array) => void; digest: () => string } {
+  const hash = createHash('sha256');
+  return {
+    update: (chunk) => { hash.update(chunk); },
+    digest: () => hash.digest('hex'),
+  };
+}
+
+function createWebhookRequestId(): string {
+  return `team-webhook-request:${randomUUID()}`;
+}
+
 export function createRuntimeHostHttpServer(deps: RuntimeHostHttpServerDeps): Server {
+  const handleTeamRuntimeWebhook = createTeamRuntimeWebhookHandler({
+    token: deps.teamWebhookToken,
+    teamRuntimeService: deps.teamRuntimeService,
+    isWebhookTokenAuthorized,
+    createWebhookBodyHasher,
+    createWebhookRequestId,
+  });
   return createServer((req: IncomingMessage, res: ServerResponse) => {
     const method = req.method || 'GET';
     const url = new URL(req.url || '/', `http://127.0.0.1:${deps.port}`);
@@ -62,6 +94,14 @@ export function createRuntimeHostHttpServer(deps: RuntimeHostHttpServerDeps): Se
     if (method === 'POST' && url.pathname === '/lifecycle/stop') {
       sendJson(res, 200, { version: TRANSPORT_VERSION, success: true, lifecycle: 'stopped' });
       void deps.shutdown(0);
+      return;
+    }
+
+    if (isTeamRuntimeWebhookPath(url.pathname)) {
+      void handleTeamRuntimeWebhook(req, res).catch((error) => {
+        deps.logger?.warn('[team-webhook] request failed', { error: String(error) });
+        sendJson(res, 500, { success: false, error: 'TeamRun webhook failed.' });
+      });
       return;
     }
 

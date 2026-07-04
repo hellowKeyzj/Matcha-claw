@@ -251,6 +251,9 @@ export function registerSessionRuntimeModule(
     agentRuntimeRegistry: scope.resolve('sessionAgentRuntimeRegistry'),
     operationCoordinator: scope.resolve('sessionOperationCoordinator'),
     clock: scope.resolve<RuntimeClockPort>('runtime.clock'),
+    emitSessionUpdate: (event) => {
+      void parentGatewayEvents?.emit('session:update', event).catch(() => undefined);
+    },
   }));
   container.register('sessionModelSelectionWorkflow', (scope) => new SessionModelSelectionWorkflow({
     stateStore: scope.resolve('sessionRuntimeStateStore'),

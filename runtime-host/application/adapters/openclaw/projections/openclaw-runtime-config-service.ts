@@ -1,9 +1,12 @@
 import { sanitizeOpenClawConfig } from './openclaw-config-sanitizer';
 import { syncProxyConfigToOpenClaw, type ProxySettings, type SyncProxyOptions } from './openclaw-proxy-sync';
 import {
+  readOpenClawToolPermissionMode,
   syncBrowserModeToOpenClaw,
   syncGatewayTokenToConfig,
   syncSessionIdleMinutesToOpenClaw,
+  syncToolPermissionModeToOpenClaw,
+  type OpenClawToolPermissionMode,
 } from './openclaw-runtime-config-sync';
 import type { OpenClawConfigRepositoryPort } from '../infrastructure/openclaw-config-repository';
 import type { OpenClawOAuthPluginRegistrationService } from './openclaw-oauth-plugin-registration';
@@ -38,5 +41,13 @@ export class OpenClawRuntimeConfigService {
 
   async syncSessionIdleMinutes(): Promise<void> {
     await syncSessionIdleMinutesToOpenClaw(this.configRepository, this.logger);
+  }
+
+  async readToolPermissionMode(): Promise<{ mode: OpenClawToolPermissionMode }> {
+    return await readOpenClawToolPermissionMode(this.configRepository);
+  }
+
+  async syncToolPermissionMode(mode: OpenClawToolPermissionMode): Promise<{ mode: OpenClawToolPermissionMode }> {
+    return await syncToolPermissionModeToOpenClaw(this.configRepository, mode);
   }
 }

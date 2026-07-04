@@ -12,8 +12,10 @@ import {
   registerRuntimeHostApplicationServices,
 } from './application-services';
 import type { RuntimeHostStatePort } from '../application/runtime-host/runtime-state';
+import type { TeamRuntimePort } from '../application/team-runtime/team-runtime-port';
+import type { TeamRuntimeWebhookAuthService } from '../application/team-runtime/team-runtime-webhook-auth';
 import { RuntimeHostContainer } from './container';
-import { RUNTIME_DISPATCH_ROUTE_TOKEN } from './runtime-host-tokens';
+import { RUNTIME_DISPATCH_ROUTE_TOKEN, TEAM_RUNTIME_SERVICE_TOKEN, TEAM_RUNTIME_WEBHOOK_AUTH_TOKEN } from './runtime-host-tokens';
 import {
   registerRuntimeHostInfrastructure,
   resolveRuntimeHostInfrastructure,
@@ -126,6 +128,8 @@ export function createRuntimeHostProcess(): RuntimeHostProcess {
   registerRuntimeHostApplicationServices(applicationContext);
   const routeRegistry = createRuntimeHostRouteRegistry(applicationContext);
   const dispatchRuntimeRoute = routeRegistry.dispatcher();
+  const teamRuntimeService = applicationContext.facades.resolve<TeamRuntimePort>(TEAM_RUNTIME_SERVICE_TOKEN);
+  const teamRuntimeWebhookAuth = applicationContext.facades.resolve<TeamRuntimeWebhookAuthService>(TEAM_RUNTIME_WEBHOOK_AUTH_TOKEN);
   container.registerValue(RUNTIME_DISPATCH_ROUTE_TOKEN, dispatchRuntimeRoute);
   registerRuntimeHostSystemModuleJobs(systemModuleContext, systemModules);
   registerRuntimeHostModuleJobs(container, {
@@ -156,6 +160,9 @@ export function createRuntimeHostProcess(): RuntimeHostProcess {
     createHealthPayload: (state, startedAt) => createHealthPayload(state, startedAt, processInfo, clock),
     transportStats,
     logger,
+    teamWebhookToken: () => teamRuntimeWebhookAuth.getToken(),
+    teamRuntimeService,
+    nowMs: () => clock.nowMs(),
     dispatchRuntimeRoute,
     shutdown: (exitCode) => runner.shutdown(exitCode),
   });

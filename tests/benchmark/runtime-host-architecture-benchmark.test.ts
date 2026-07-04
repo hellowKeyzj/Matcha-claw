@@ -82,10 +82,10 @@ function runtimeHostCapabilityPayload(input: Record<string, unknown> = {}) {
   const runId = typeof input.runId === 'string' ? input.runId : 'team-run-main';
   return {
     id: 'team.runtime',
-    operationId: 'team.runTick',
+    operationId: 'team.graphPatch',
     scope: teamRunScope(runId),
     target: teamRunTarget(runId),
-    input: { runId, ...input },
+    input: { runId, summary: 'Benchmark graph patch', patch: { operations: [] }, idempotencyKey: 'bench-graph-patch-' + runId, ...input },
   };
 }
 
@@ -117,7 +117,7 @@ function runtimeHostTopology(runId = 'team-run-main'): RuntimeTopologySnapshot {
         scopeKind: 'team-run',
         scope,
         targetKinds: ['team-run'],
-        operations: [{ id: 'team.runTick', targetKind: 'team-run', targetRequired: true }],
+        operations: [{ id: 'team.graphPatch', targetKind: 'team-run', targetRequired: true }],
         availability: 'available',
       }],
       controlState: {

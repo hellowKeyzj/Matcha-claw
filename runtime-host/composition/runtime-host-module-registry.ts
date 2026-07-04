@@ -25,8 +25,11 @@ import {
   SETTINGS_SERVICE_TOKEN,
   SKILLS_SERVICE_TOKEN,
   SUBAGENT_SERVICE_TOKEN,
+  TEAM_RUNTIME_SERVICE_TOKEN,
+  TEAM_RUNTIME_WEBHOOK_AUTH_TOKEN,
   TOOLCHAIN_UV_SERVICE_TOKEN,
   WORKBENCH_SERVICE_TOKEN,
+  EXTERNAL_CONNECTOR_SERVICE_TOKEN,
 } from './runtime-host-tokens';
 import type { GatewayConnectionPort } from '../application/gateway/gateway-runtime-port';
 import {
@@ -35,6 +38,11 @@ import {
   type RuntimeHostNamedModule,
 } from '../core/registry';
 import {
+  registerExternalConnectorApplicationServices,
+  registerExternalConnectorRoutes,
+} from './modules/external-connectors-application-module';
+import {
+  connectOpenClawApplicationServices,
   registerOpenClawApplicationServices,
   registerOpenClawApplicationLifecycle,
   registerOpenClawApplicationJobs,
@@ -102,6 +110,7 @@ const openClawModule: RuntimeHostApplicationModule = {
       'clawhub.registryClient',
       'clawhub.runtime',
       'clawhub.skillInventory',
+      'externalConnectors.service',
       'gateway.capabilities',
       'gateway.control',
       'gateway.runtime',
@@ -159,10 +168,13 @@ const openClawModule: RuntimeHostApplicationModule = {
       'runtimeHost.runtimeConfig',
       'runtimeHost.workspaceBootstrap',
     ],
+    connect: true,
+    connectImports: ['external-connectors'],
   },
   registerServices: (context) => registerOpenClawApplicationServices(context.container, context.facades),
   registerJobs: registerOpenClawApplicationJobs,
   registerLifecycle: registerOpenClawApplicationLifecycle,
+  connect: connectOpenClawApplicationServices,
   registerRoutes: (routes, context) => registerOpenClawRoutes(routes, {
     settingsService: context.facades.resolve(SETTINGS_SERVICE_TOKEN),
     providerAccountsService: context.facades.resolve(PROVIDER_ACCOUNTS_SERVICE_TOKEN),
@@ -232,6 +244,7 @@ const runtimeModule: RuntimeHostApplicationModule = {
       'runtimeHost.workspaceBootstrap',
       'security.pluginConfigApplier',
       'settings.repository',
+      'teamRuntime.webhookAuth',
     ],
     exports: [
       'workbench.service',
@@ -248,6 +261,7 @@ const runtimeModule: RuntimeHostApplicationModule = {
     runtimeHostService: context.facades.resolve(RUNTIME_HOST_SERVICE_TOKEN),
     pluginRuntimeService: context.facades.resolve(PLUGIN_RUNTIME_SERVICE_TOKEN),
     gatewayService: context.facades.resolve(GATEWAY_SERVICE_TOKEN),
+    teamRuntimeWebhookAuth: context.facades.resolve(TEAM_RUNTIME_WEBHOOK_AUTH_TOKEN),
   }),
 };
 
@@ -260,6 +274,27 @@ const licenseModule: RuntimeHostApplicationModule = {
     exports: ['license.service'],
   },
   registerServices: (context) => registerOperationsApplicationServices(context.container, context.facades, { only: 'license' }),
+};
+
+const externalConnectorModule: RuntimeHostApplicationModule = {
+  name: 'external-connectors',
+  manifest: {
+    id: 'external-connectors',
+    registerProviders: true,
+    registerRoutes: true,
+    imports: [
+      'runtimeHost.runtimeDataRoot',
+      'runtime.fileSystem',
+      'runtime.systemEnvironment',
+      'runtime.httpClient',
+      'runtime.clock',
+    ],
+    exports: ['externalConnectors.service'],
+  },
+  registerServices: (context) => registerExternalConnectorApplicationServices(context.container, context.facades),
+  registerRoutes: (routes, context) => registerExternalConnectorRoutes(routes, {
+    externalConnectorService: context.facades.resolve(EXTERNAL_CONNECTOR_SERVICE_TOKEN),
+  }),
 };
 
 const operationsModule: RuntimeHostApplicationModule = {
@@ -277,9 +312,10 @@ const operationsModule: RuntimeHostApplicationModule = {
       'gateway.runtime',
       'license.service',
       'logger',
+      'openclaw.configRepository',
       'openclaw.infrastructure',
       'openclaw.workspaceService',
-      'operations.runtimeDataRoot',
+      'runtimeHost.runtimeDataRoot',
       'operations.taskWorkspace',
       'platform.facade',
       'runtime.backgroundTasks',
@@ -290,10 +326,12 @@ const operationsModule: RuntimeHostApplicationModule = {
       'runtime.systemEnvironment',
       'runtime.tasks',
       'runtime.timer',
+      'settings.repository',
       'runtimeHost.parentGatewayEvents',
       'security.pluginConfigProjection',
       'security.policyStorage',
       'session.runtime',
+      'skills.service',
       'toolchainUv.runtime',
       'usage.runtimeData',
       'usage.transcriptLayout',
@@ -305,6 +343,8 @@ const operationsModule: RuntimeHostApplicationModule = {
       'toolchainUv.service',
       'security.service',
       'task.service',
+      'teamRuntime.service',
+      'teamRuntime.webhookAuth',
       'platform.service',
       'security.pluginConfigApplier',
     ],
@@ -343,6 +383,7 @@ const sessionsModule: RuntimeHostApplicationModule = {
 
 export const RUNTIME_HOST_APPLICATION_MODULES: readonly RuntimeHostApplicationModule[] = [
   applicationFoundationModule,
+  externalConnectorModule,
   openClawModule,
   licenseModule,
   runtimeModule,
@@ -355,6 +396,7 @@ const RUNTIME_HOST_ROUTE_MODULES: readonly RuntimeHostApplicationModule[] = [
   licenseModule,
   runtimeModule,
   operationsModule,
+  externalConnectorModule,
   openClawModule,
   sessionsModule,
 ] as const;
@@ -395,7 +437,7 @@ function createRuntimeHostApplicationModuleRegistry(
       'openclaw.providerSnapshotService',
       'openclaw.subagentTemplateService',
       'openclaw.workspaceService',
-      'operations.runtimeDataRoot',
+      'runtimeHost.runtimeDataRoot',
       'operations.taskWorkspace',
       'platform.facade',
       'plugins.catalogProjection',

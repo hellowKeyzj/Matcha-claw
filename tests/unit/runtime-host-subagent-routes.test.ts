@@ -78,6 +78,60 @@ function nextRevision(revision: string): string {
   return `${match[1]}${Number(match[2]) + 1}`;
 }
 
+function createToolsCatalogResult(agentId = 'writer') {
+  return {
+    agentId,
+    profiles: [
+      { id: 'minimal', label: 'Minimal' },
+      { id: 'coding', label: 'Coding' },
+      { id: 'messaging', label: 'Messaging' },
+      { id: 'full', label: 'Full' },
+    ],
+    groups: [
+      {
+        id: 'fs',
+        label: 'Files',
+        source: 'core',
+        tools: [
+          { id: 'read', label: 'Read', description: 'Read files', source: 'core', defaultProfiles: ['coding'] },
+          { id: 'write', label: 'Write', description: 'Write files', source: 'core', defaultProfiles: ['coding'] },
+        ],
+      },
+      {
+        id: 'runtime',
+        label: 'Runtime',
+        source: 'core',
+        tools: [
+          { id: 'exec', label: 'Exec', description: 'Run commands', source: 'core', defaultProfiles: ['coding'] },
+        ],
+      },
+      {
+        id: 'web',
+        label: 'Web',
+        source: 'core',
+        tools: [
+          { id: 'web_search', label: 'Web Search', description: 'Search the web', source: 'core', defaultProfiles: ['coding'] },
+        ],
+      },
+      {
+        id: 'plugin:bundle-mcp',
+        label: 'bundle-mcp',
+        source: 'plugin',
+        pluginId: 'bundle-mcp',
+        tools: [
+          { id: 'outlook__send_mail', label: 'Send Mail', description: 'Send email', source: 'plugin', pluginId: 'bundle-mcp', optional: true, risk: 'medium', tags: ['mail'], defaultProfiles: [] },
+        ],
+      },
+    ],
+  };
+}
+
+function readCatalogAgentId(params: unknown): string {
+  return params && typeof params === 'object' && !Array.isArray(params) && typeof (params as { agentId?: unknown }).agentId === 'string'
+    ? (params as { agentId: string }).agentId
+    : 'writer';
+}
+
 function createSubagentService(
   deps: {
     gatewayRpc: (method: string, params?: unknown, timeoutMs?: number) => Promise<unknown>;
@@ -147,10 +201,14 @@ function agentSkillConfigOperationRoute(agentSkillConfigService: AgentSkillConfi
 
 function createAgentToolConfigService(deps: {
   subagentConfigProjection?: SubagentConfigProjectionPort;
+  gatewayRpc?: (method: string, params?: unknown, timeoutMs?: number) => Promise<unknown>;
 }): AgentToolConfigService {
   return new AgentToolConfigService({
     projection: new OpenClawAgentToolConfigProjection({
       subagentConfigProjection: deps.subagentConfigProjection ?? createTestSubagentConfigProjection(),
+      gateway: {
+        gatewayRpc: deps.gatewayRpc ?? vi.fn(async (_method, params) => createToolsCatalogResult(readCatalogAgentId(params))),
+      },
     }),
   });
 }
@@ -893,7 +951,8 @@ describe('runtime-host subagent routes', () => {
       revision: 'hash-tools',
       updatedAt: 4000,
     });
-    const service = createAgentToolConfigService({ subagentConfigProjection });
+    const gatewayRpc = vi.fn(async (_method: string, params?: unknown) => createToolsCatalogResult(readCatalogAgentId(params)));
+    const service = createAgentToolConfigService({ subagentConfigProjection, gatewayRpc });
     const getRoute = agentToolConfigOperationRoute(service, 'agentToolConfig.get');
 
     await expect(getRoute.handle({
@@ -906,19 +965,46 @@ describe('runtime-host subagent routes', () => {
         support: { supportType: 'supported' },
         selectionMode: 'usesAgentToolPolicy',
         toolPolicy: { profile: 'custom', allow: ['read', 'group:web'], deny: ['exec'] },
+        toolProfiles: [
+          { profileKey: 'minimal', displayName: 'Minimal' },
+          { profileKey: 'coding', displayName: 'Coding' },
+          { profileKey: 'messaging', displayName: 'Messaging' },
+          { profileKey: 'full', displayName: 'Full' },
+        ],
+        toolGroups: expect.arrayContaining([
+          expect.objectContaining({
+            groupKey: 'fs',
+            displayName: 'Files',
+            source: 'core',
+            toolOptions: expect.arrayContaining([
+              expect.objectContaining({ toolKey: 'read', displayName: 'Read', optionType: 'tool', description: 'Read files', groupKey: 'fs', defaultProfiles: ['coding'] }),
+            ]),
+          }),
+          expect.objectContaining({
+            groupKey: 'plugin:bundle-mcp',
+            displayName: 'bundle-mcp',
+            source: 'plugin',
+            pluginId: 'bundle-mcp',
+            toolOptions: expect.arrayContaining([
+              expect.objectContaining({ toolKey: 'outlook__send_mail', displayName: 'Send Mail', source: 'plugin', pluginId: 'bundle-mcp', optional: true, risk: 'medium', tags: ['mail'] }),
+            ]),
+          }),
+        ]),
         toolOptions: expect.arrayContaining([
-          { toolKey: 'read', displayName: 'Read', optionType: 'tool' },
-          { toolKey: 'exec', displayName: 'Exec', optionType: 'tool' },
-          { toolKey: 'web_search', displayName: 'Web Search', optionType: 'tool' },
-          { toolKey: 'sessions_spawn', displayName: 'Sessions Spawn', optionType: 'tool' },
-          { toolKey: 'group:*', displayName: 'All tool groups', optionType: 'group' },
-          { toolKey: 'group:web', displayName: 'Web tools', optionType: 'group' },
+          expect.objectContaining({ toolKey: 'group:openclaw', displayName: 'OpenClaw built-in tools', optionType: 'group' }),
+          expect.objectContaining({ toolKey: 'group:web', displayName: 'Web tools', optionType: 'group' }),
+          expect.objectContaining({ toolKey: 'group:plugins', displayName: 'Plugin tools', optionType: 'group' }),
+          expect.objectContaining({ toolKey: 'bundle-mcp', displayName: 'bundle-mcp tools', optionType: 'group' }),
+          expect.objectContaining({ toolKey: 'read', displayName: 'Read', optionType: 'tool' }),
+          expect.objectContaining({ toolKey: 'exec', displayName: 'Exec', optionType: 'tool' }),
+          expect.objectContaining({ toolKey: 'web_search', displayName: 'Web Search', optionType: 'tool' }),
         ]),
         revision: 'hash-tools',
         updatedAt: 4000,
       },
     });
     expect(subagentConfigProjection.readConfig).toHaveBeenCalledTimes(1);
+    expect(gatewayRpc).toHaveBeenCalledWith('tools.catalog', { agentId: 'writer' }, 60000);
   });
 
   it('writes and inherits agent tool config through OpenClaw agents list tools', async () => {

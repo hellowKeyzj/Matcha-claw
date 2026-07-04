@@ -113,6 +113,7 @@ describe('runtime-host route composition', () => {
       'cron_usage',
       'files',
       'license',
+      'external_connectors',
       'toolchain_uv',
       'security',
       'platform',

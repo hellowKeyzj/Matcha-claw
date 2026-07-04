@@ -4,6 +4,8 @@ import type { OpenClawConfigRepositoryPort } from './infrastructure/openclaw-con
 import type { OpenClawWorkspacePort } from './infrastructure/openclaw-workspace-service';
 import type { SubagentTemplateService } from './infrastructure/openclaw-subagent-template-service';
 import type { OpenClawCliCommandWorkflow } from './workflows/openclaw-workspace/openclaw-cli-command-workflow';
+import type { OpenClawRuntimeConfigService } from './projections/openclaw-runtime-config-service';
+import type { OpenClawToolPermissionMode } from './projections/openclaw-runtime-config-sync';
 
 export interface OpenClawServiceDeps {
   readonly config: Pick<OpenClawConfigRepositoryPort, 'getOpenClawDirPath'>;
@@ -12,6 +14,7 @@ export interface OpenClawServiceDeps {
   readonly workspace: OpenClawWorkspacePort;
   readonly subagentTemplates: Pick<SubagentTemplateService, 'listCatalog' | 'getTemplate'>;
   readonly providerSnapshot: Pick<OpenClawProviderSnapshotService, 'getActiveProviders' | 'getProvidersConfig'>;
+  readonly runtimeConfig: Pick<OpenClawRuntimeConfigService, 'readToolPermissionMode' | 'syncToolPermissionMode'>;
 }
 
 export class OpenClawService {
@@ -69,5 +72,13 @@ export class OpenClawService {
 
   async cliCommand() {
     return await this.deps.cliCommandWorkflow.cliCommand();
+  }
+
+  async toolPermissionMode() {
+    return await this.deps.runtimeConfig.readToolPermissionMode();
+  }
+
+  async setToolPermissionMode(mode: OpenClawToolPermissionMode) {
+    return await this.deps.runtimeConfig.syncToolPermissionMode(mode);
   }
 }

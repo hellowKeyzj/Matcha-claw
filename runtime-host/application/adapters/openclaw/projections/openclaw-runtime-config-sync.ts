@@ -10,6 +10,86 @@ import { normalizeBrowserMode } from '../../../../shared/browser-mode';
 
 const PACKAGED_CONTROL_UI_ALLOWED_ORIGINS = ['file://', 'null'] as const;
 
+export type OpenClawToolPermissionMode = 'default' | 'fullAccess';
+
+export interface OpenClawToolPermissionModeResult {
+  readonly mode: OpenClawToolPermissionMode;
+}
+
+const TOOL_PERMISSION_MODE_CONFIG = {
+  default: {
+    fsWorkspaceOnly: true,
+  },
+  fullAccess: {
+    fsWorkspaceOnly: false,
+  },
+} as const;
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+function readRecordSection(value: unknown): Record<string, unknown> {
+  return isRecord(value) ? value : {};
+}
+
+function cloneRecordSection(value: unknown): Record<string, unknown> {
+  return isRecord(value) ? { ...value } : {};
+}
+
+export function resolveOpenClawToolPermissionMode(config: Record<string, unknown>): OpenClawToolPermissionMode {
+  const tools = readRecordSection(config.tools);
+  const fs = readRecordSection(tools.fs);
+  const defaultMode = TOOL_PERMISSION_MODE_CONFIG.default;
+
+  return fs.workspaceOnly === defaultMode.fsWorkspaceOnly ? 'default' : 'fullAccess';
+}
+
+export async function readOpenClawToolPermissionMode(
+  configRepository: Pick<OpenClawConfigRepositoryPort, 'read'>,
+): Promise<OpenClawToolPermissionModeResult> {
+  const config = await configRepository.read();
+  return { mode: resolveOpenClawToolPermissionMode(config) };
+}
+
+export async function syncToolPermissionModeToOpenClaw(
+  configRepository: Pick<OpenClawConfigRepositoryPort, 'patchSection'>,
+  mode: OpenClawToolPermissionMode,
+): Promise<OpenClawToolPermissionModeResult> {
+  const target = TOOL_PERMISSION_MODE_CONFIG[mode];
+  return await configRepository.patchSection<OpenClawToolPermissionModeResult>('tools', (toolsValue, config) => {
+    const tools = cloneRecordSection(toolsValue);
+    const fs = cloneRecordSection(tools.fs);
+    const exec = cloneRecordSection(tools.exec);
+    let changed = false;
+
+    if (fs.workspaceOnly !== target.fsWorkspaceOnly) {
+      fs.workspaceOnly = target.fsWorkspaceOnly;
+      changed = true;
+    }
+    if (exec.security !== undefined) {
+      delete exec.security;
+      changed = true;
+    }
+    if (exec.ask !== undefined) {
+      delete exec.ask;
+      changed = true;
+    }
+
+    if (changed) {
+      tools.fs = fs;
+      if (Object.keys(exec).length > 0) {
+        tools.exec = exec;
+      } else {
+        delete tools.exec;
+      }
+      markRestartCommand(config);
+    }
+
+    return { result: { mode }, value: tools, changed };
+  });
+}
+
 function ensurePackagedControlUiAllowedOrigins(
   controlUi: Record<string, unknown>,
 ): Record<string, unknown> {

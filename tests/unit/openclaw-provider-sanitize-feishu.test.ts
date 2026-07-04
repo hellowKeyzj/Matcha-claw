@@ -142,6 +142,9 @@ function createSanitizeNeutralConfig(): Record<string, unknown> {
       sessions: {
         visibility: 'all',
       },
+      agentToAgent: {
+        enabled: true,
+      },
     },
     agents: {
       defaults: {
@@ -240,6 +243,23 @@ describe('sanitizeOpenClawConfig feishu plugin migration', () => {
     await sanitizeMockConfig();
 
     expect(writeOpenClawJsonMock).not.toHaveBeenCalled();
+  });
+
+  it('tools.sessions.visibility 为 all 时会配套启用 agentToAgent', async () => {
+    readOpenClawJsonMock.mockResolvedValue({
+      ...createSanitizeNeutralConfig(),
+      tools: {
+        profile: 'full',
+        sessions: { visibility: 'all' },
+        agentToAgent: { enabled: false, allow: ['main', 'worker'] },
+      },
+    });
+
+    await sanitizeMockConfig();
+
+    expect(writeOpenClawJsonMock).toHaveBeenCalledTimes(1);
+    const nextConfig = writeOpenClawJsonMock.mock.calls[0][0] as Record<string, any>;
+    expect(nextConfig.tools.agentToAgent).toEqual({ enabled: true, allow: ['main', 'worker'] });
   });
 
   it('只强制 agents.defaults.skipBootstrap，不向 agents.list 条目补 skipBootstrap', async () => {
