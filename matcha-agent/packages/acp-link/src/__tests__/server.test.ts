@@ -1,3 +1,6 @@
+import { mkdtemp, readFile, rm } from 'node:fs/promises'
+import { join } from 'node:path'
+import { tmpdir } from 'node:os'
 import { describe, test, expect, mock } from 'bun:test'
 import {
   __testing,
@@ -13,6 +16,9 @@ import {
   extractWebSocketAuthToken,
 } from '../ws-auth.js'
 import { buildRcsWsUrl } from '../rcs-upstream.js'
+import { createClient } from '../server/acp-client.js'
+import { setServerConfig } from '../server/runtime-state.js'
+import { createClientState } from '../server/types.js'
 
 function makeTestWs(sent: unknown[]) {
   type TestWs = Parameters<typeof __testing.dispatchClientMessage>[0]
@@ -490,13 +496,61 @@ describe('Capability and protocolVersion transparency (audit §8.6, §8.7, §8.1
           clientCapabilities: { terminal: { create: true } },
         },
       })
-      // The handler invocation will fail (no agent process) but clientInfo was
-      // captured before the call. We verify by checking that no -32602 invalid
-      // params error is raised about clientInfo.
-      expect(sent.length).toBeGreaterThan(0)
+      expect(sent).toContainEqual({
+        jsonrpc: '2.0',
+        id: 'init-1',
+        error: {
+          code: -32603,
+          message: expect.stringContaining('Failed to connect:'),
+        },
+      })
     } finally {
       unregister()
       delete process.env.ACP_LINK_TEST_INTERNALS
+    }
+  })
+})
+
+describe('ACP client filesystem bridge', () => {
+  test('readTextFile and writeTextFile operate inside the configured workspace', async () => {
+    const workspace = await mkdtemp(join(tmpdir(), 'acp-link-'))
+    const sent: unknown[] = []
+    const ws = makeTestWs(sent)
+    try {
+      setServerConfig({
+        command: 'agent',
+        args: [],
+        cwd: workspace,
+        port: 9315,
+        host: 'localhost',
+      })
+      const client = createClient(ws, createClientState())
+      if (!client.writeTextFile || !client.readTextFile) {
+        throw new Error('ACP filesystem callbacks are required')
+      }
+
+      await client.writeTextFile({
+        sessionId: 'sess-1',
+        path: 'notes/out.txt',
+        content: 'hello',
+      })
+      await expect(
+        readFile(join(workspace, 'notes/out.txt'), 'utf8'),
+      ).resolves.toBe('hello')
+      await expect(
+        client.readTextFile({ sessionId: 'sess-1', path: 'notes/out.txt' }),
+      ).resolves.toEqual({
+        content: 'hello',
+      })
+      await expect(
+        client.writeTextFile({
+          sessionId: 'sess-1',
+          path: '../escape.txt',
+          content: 'nope',
+        }),
+      ).rejects.toThrow('File path escapes ACP workspace')
+    } finally {
+      await rm(workspace, { recursive: true, force: true })
     }
   })
 })
