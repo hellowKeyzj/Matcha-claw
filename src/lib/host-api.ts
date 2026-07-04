@@ -167,6 +167,12 @@ export interface OpenClawCliCommandPayload {
   error?: string;
 }
 
+export type OpenClawToolPermissionMode = 'default' | 'fullAccess';
+
+export interface OpenClawToolPermissionModePayload {
+  mode: OpenClawToolPermissionMode;
+}
+
 export type HostSessionCatalogItem = SessionCatalogItem;
 
 export type HostSessionLoadResult = Partial<SessionLoadResult> & {
@@ -400,6 +406,19 @@ export async function hostOpenClawGetSkillsDir(): Promise<string> {
 
 export async function hostOpenClawGetCliCommand(): Promise<OpenClawCliCommandPayload> {
   return hostApiFetch('/api/openclaw/cli-command');
+}
+
+export async function hostOpenClawGetToolPermissionMode(): Promise<OpenClawToolPermissionModePayload> {
+  return hostApiFetch('/api/openclaw/tool-permission-mode');
+}
+
+export async function hostOpenClawSetToolPermissionMode(
+  mode: OpenClawToolPermissionMode,
+): Promise<OpenClawToolPermissionModePayload> {
+  return hostApiFetch('/api/openclaw/tool-permission-mode', {
+    method: 'PUT',
+    body: JSON.stringify({ mode }),
+  });
 }
 
 export async function hostUvCheck(): Promise<boolean> {

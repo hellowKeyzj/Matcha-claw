@@ -20,6 +20,12 @@
         "approvalWaitingPlaceholder": "等待审批中...",
         "pickModel": "选择模型",
         "modelPickerTitle": "切换当前 Agent 模型",
+        "pickPermissionMode": "选择权限模式",
+        "permissionPickerTitle": "切换 OpenClaw 工具权限",
+        "permissionDefault": "默认权限",
+        "permissionFullAccess": "完全访问权限",
+        "permissionLoadFailed": "权限加载失败：{{error}}",
+        "permissionSwitchFailed": "权限切换失败：{{error}}",
         "modelSwitchFailed": "模型切换失败：{{error}}",
         "skillActive": "已启用 {{count}} 个技能",
         "skillsActive": "已启用 {{count}} 个技能",
@@ -36,7 +42,8 @@
         "skillConfig": "技能配置",
         "skillShortLabel": "技能",
         "showThinking": "显示思考过程",
-        "hideThinking": "隐藏思考过程"
+        "hideThinking": "隐藏思考过程",
+        "exportMarkdown": "导出 Markdown"
     },
     "liveThread": {
         "loadOlder": "加载更早消息",
@@ -69,7 +76,9 @@
         "gatewayHeartbeatTimeout": "与 OpenClaw 网关的连接已超时，正在等待恢复。",
         "gatewaySocketClosed": "与 OpenClaw 网关的连接已断开（代码 {{code}}，原因：{{reason}}）。",
         "gatewayRpcTimeout": "调用 OpenClaw 网关超时：{{method}}",
-        "gatewayRpcFailed": "调用 OpenClaw 网关失败：{{method}}，原因：{{reason}}"
+        "gatewayRpcFailed": "调用 OpenClaw 网关失败：{{method}}，原因：{{reason}}",
+        "teamRoleNodePromptActive": "该角色正在执行节点，完成后再发送。",
+        "exportMarkdownFailed": "导出 Markdown 失败：{{error}}"
     },
     "taskPanel": {
         "stepStatus": {

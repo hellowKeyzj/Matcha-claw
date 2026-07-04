@@ -43,6 +43,7 @@ export interface SessionRunWorkflowInput {
   } | null;
   sessionId: string;
   message: string;
+  displayMessage: string;
   runId: string;
   sessionIdentity: SessionIdentity;
 }
@@ -119,8 +120,8 @@ export class SessionRunWorkflow {
       kind: 'text',
       mode: 'final',
       messageId: input.runId,
-      content: input.message,
-      text: input.message,
+      content: input.displayMessage,
+      text: input.displayMessage,
       status: 'final',
       attachedFiles: this.buildAttachedFiles(input),
     }, {

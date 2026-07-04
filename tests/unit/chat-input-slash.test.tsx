@@ -1,5 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { MemoryRouter } from 'react-router-dom';
+import type { ReactElement } from 'react';
 import { ChatInput } from '@/pages/Chat/ChatInput';
 
 vi.mock('react-i18next', () => ({
@@ -40,6 +42,14 @@ vi.mock('@/stores/skills', () => ({
   useSkillsStore: (selector: (state: typeof skillsStoreState) => unknown) => selector(skillsStoreState),
 }));
 
+function renderWithRouter(element: ReactElement) {
+  return render(
+    <MemoryRouter>
+      {element}
+    </MemoryRouter>,
+  );
+}
+
 describe('chat input slash skills', () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -56,7 +66,7 @@ describe('chat input slash skills', () => {
       { id: 'unknown-skill', name: 'Unknown Skill', description: '', enabled: true, installed: true, icon: '❓' },
     ];
 
-    render(<ChatInput onSend={vi.fn()} />);
+    renderWithRouter(<ChatInput onSend={vi.fn()} />);
 
     const textarea = screen.getByRole('textbox') as HTMLTextAreaElement;
     fireEvent.change(textarea, { target: { value: '/', selectionStart: 1 } });
@@ -73,7 +83,7 @@ describe('chat input slash skills', () => {
       { id: 'feishu-doc', name: 'Feishu Doc', description: '', enabled: true, installed: true, eligible: true, icon: '📄' },
     ];
 
-    render(<ChatInput onSend={vi.fn()} allowedSkillIds={['feishu-doc']} />);
+    renderWithRouter(<ChatInput onSend={vi.fn()} allowedSkillIds={['feishu-doc']} />);
 
     const textarea = screen.getByRole('textbox') as HTMLTextAreaElement;
     fireEvent.change(textarea, { target: { value: '/', selectionStart: 1 } });
@@ -96,7 +106,7 @@ describe('chat input slash skills', () => {
       value: scrollMock,
     });
 
-    render(<ChatInput onSend={vi.fn()} />);
+    renderWithRouter(<ChatInput onSend={vi.fn()} />);
 
     const textarea = screen.getByRole('textbox') as HTMLTextAreaElement;
     fireEvent.change(textarea, { target: { value: '/', selectionStart: 1 } });
@@ -114,7 +124,7 @@ describe('chat input slash skills', () => {
   it('renders model picker and forwards selection', () => {
     const onSelect = vi.fn();
 
-    render(
+    renderWithRouter(
       <ChatInput
         onSend={vi.fn()}
         modelPicker={{

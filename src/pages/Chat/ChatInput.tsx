@@ -8,7 +8,7 @@
  */
 import { memo, useState, useRef, useEffect, useCallback, useMemo, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
-import { Send, Square, X, Paperclip, FileText, Film, Music, FileArchive, File, Loader2, ImageIcon, AlertCircle, Check, ChevronDown, MessageSquare } from 'lucide-react';
+import { Send, Square, X, Paperclip, FileText, Film, Music, FileArchive, File, Loader2, ImageIcon, AlertCircle, Check, ChevronDown, MessageSquare, ShieldCheck } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
 import { hostFileStageBuffer, hostFileStagePaths, type WorkspaceFileContext } from '@/lib/host-api';
@@ -19,6 +19,7 @@ import { cn } from '@/lib/utils';
 import { useTranslation } from 'react-i18next';
 import { CHAT_LAYOUT_TOKENS } from './chat-layout-tokens';
 import { ChatImageLightbox } from './components/ChatImageLightbox';
+import { ChatSessionConnectorStatus } from './components/ChatSessionConnectorStatus';
 import { collectDroppedFiles } from '@/lib/collect-dropped-files';
 import type { ChatSendResult } from '@/stores/chat';
 import type { ChatContextUsageViewModel } from './context-usage';
@@ -84,6 +85,21 @@ interface ModelPickerState {
   onSelect: (modelId: string) => void;
 }
 
+type PermissionMode = 'default' | 'fullAccess';
+
+interface PermissionPickerState {
+  currentMode: PermissionMode;
+  loading: boolean;
+  switching: boolean;
+  disabled?: boolean;
+  onSelect: (mode: PermissionMode) => void;
+}
+
+const PERMISSION_PICKER_OPTIONS: Array<{ mode: PermissionMode; labelKey: string }> = [
+  { mode: 'default', labelKey: 'input.permissionDefault' },
+  { mode: 'fullAccess', labelKey: 'input.permissionFullAccess' },
+];
+
 const STAGE_BUFFER_CONCURRENCY = 3;
 const STAGE_BUFFER_MAX_BYTES = 50 * 1024 * 1024;
 const QUICK_PHRASE_STORAGE_KEY = 'matchaclaw:chat:quick-phrases';
@@ -101,6 +117,7 @@ interface ChatInputProps {
   stopping?: boolean;
   onPreviewSkill?: (skill: SelectedSkill) => void;
   modelPicker?: ModelPickerState | null;
+  permissionPicker?: PermissionPickerState | null;
   contextUsage?: ChatContextUsageViewModel | null;
   disabled?: boolean;
   reconnecting?: boolean;
@@ -355,6 +372,7 @@ export const ChatInput = memo(function ChatInput({
   stopping = false,
   onPreviewSkill,
   modelPicker = null,
+  permissionPicker = null,
   contextUsage = null,
   disabled = false,
   reconnecting = false,
@@ -384,6 +402,7 @@ export const ChatInput = memo(function ChatInput({
   const [quickPhraseAddOpen, setQuickPhraseAddOpen] = useState(false);
   const [quickPhraseDraft, setQuickPhraseDraft] = useState('');
   const [modelPickerOpen, setModelPickerOpen] = useState(false);
+  const [permissionPickerOpen, setPermissionPickerOpen] = useState(false);
   const [lightboxAttachment, setLightboxAttachment] = useState<{
     src: string;
     fileName: string;
@@ -391,6 +410,7 @@ export const ChatInput = memo(function ChatInput({
   } | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const modelPickerRef = useRef<HTMLDivElement>(null);
+  const permissionPickerRef = useRef<HTMLDivElement>(null);
   const slashItemRefs = useRef<Array<HTMLButtonElement | null>>([]);
   const isComposingRef = useRef(false);
   const skills = useSkillsStore((state) => state.skills);
@@ -456,7 +476,13 @@ export const ChatInput = memo(function ChatInput({
   }, [modelPicker]);
 
   useEffect(() => {
-    if (!modelPickerOpen) {
+    if (!permissionPicker || permissionPicker.disabled || permissionPicker.loading || permissionPicker.switching) {
+      setPermissionPickerOpen(false);
+    }
+  }, [permissionPicker]);
+
+  useEffect(() => {
+    if (!modelPickerOpen && !permissionPickerOpen) {
       return;
     }
 
@@ -465,15 +491,17 @@ export const ChatInput = memo(function ChatInput({
       if (!(target instanceof Node)) {
         return;
       }
-      if (modelPickerRef.current?.contains(target)) {
+      if (modelPickerRef.current?.contains(target) || permissionPickerRef.current?.contains(target)) {
         return;
       }
       setModelPickerOpen(false);
+      setPermissionPickerOpen(false);
     };
 
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key === 'Escape') {
         setModelPickerOpen(false);
+        setPermissionPickerOpen(false);
       }
     };
 
@@ -483,7 +511,7 @@ export const ChatInput = memo(function ChatInput({
       window.removeEventListener('mousedown', handlePointerDown);
       window.removeEventListener('keydown', handleKeyDown);
     };
-  }, [modelPickerOpen]);
+  }, [modelPickerOpen, permissionPickerOpen]);
 
   const closeMention = useCallback(() => {
     setMentionOpen(false);
@@ -865,6 +893,13 @@ export const ChatInput = memo(function ChatInput({
     || modelPicker.loading
     || modelPicker.switching
     || modelPicker.options.length === 0;
+  const permissionPickerDisabled = !permissionPicker
+    || permissionPicker.disabled
+    || permissionPicker.loading
+    || permissionPicker.switching;
+  const permissionPickerLabel = permissionPicker
+    ? t(PERMISSION_PICKER_OPTIONS.find((option) => option.mode === permissionPicker.currentMode)?.labelKey ?? 'input.permissionFullAccess')
+    : '';
 
   const handleSend = useCallback(async () => {
     if (!canSend) return;
@@ -1217,6 +1252,86 @@ export const ChatInput = memo(function ChatInput({
               'flex w-full min-w-0 items-end gap-1.5',
               'justify-end',
             )}>
+              <ChatSessionConnectorStatus
+                sessionIdentity={sessionIdentity}
+                disabled={disabled}
+              />
+              {permissionPicker ? (
+                <div ref={permissionPickerRef} className="relative shrink-0">
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon"
+                    aria-label={t('input.pickPermissionMode')}
+                    aria-haspopup="listbox"
+                    aria-expanded={permissionPickerOpen}
+                    title={`${t('input.permissionPickerTitle')} · ${permissionPickerLabel}`}
+                    data-testid="chat-permission-picker"
+                    data-state={permissionPickerOpen ? 'open' : 'closed'}
+                    disabled={permissionPickerDisabled}
+                    className={cn(
+                      CHAT_LAYOUT_TOKENS.inputAttachButton,
+                      'rounded-full border border-border/45 bg-background/74 text-muted-foreground shadow-sm hover:bg-background/88 hover:text-foreground',
+                      permissionPicker.currentMode === 'default' && 'text-emerald-700 dark:text-emerald-300',
+                      permissionPicker.currentMode === 'fullAccess' && 'text-amber-700 dark:text-amber-300',
+                      permissionPickerOpen && 'bg-background/90 text-foreground',
+                      permissionPickerDisabled && 'cursor-not-allowed opacity-55',
+                    )}
+                    onClick={() => {
+                      if (permissionPickerDisabled) {
+                        return;
+                      }
+                      setModelPickerOpen(false);
+                      setPermissionPickerOpen((open) => !open);
+                    }}
+                  >
+                    {permissionPicker.switching ? (
+                      <Loader2 className="h-4 w-4 animate-spin" />
+                    ) : (
+                      <ShieldCheck className="h-4 w-4" />
+                    )}
+                  </Button>
+                  {permissionPickerOpen ? (
+                    <div
+                      role="listbox"
+                      aria-label={t('input.pickPermissionMode')}
+                      className="absolute bottom-full left-0 z-50 mb-2 w-32 translate-x-0 overflow-hidden rounded-[1rem] border border-border/60 bg-popover/95 p-1.5 text-sm text-popover-foreground shadow-[0_18px_50px_rgba(0,0,0,0.20)] backdrop-blur-xl"
+                    >
+                      {PERMISSION_PICKER_OPTIONS.map((option) => {
+                        const selected = option.mode === permissionPicker.currentMode;
+                        return (
+                          <button
+                            key={option.mode}
+                            type="button"
+                            role="option"
+                            aria-selected={selected}
+                            className={cn(
+                              'flex w-full items-center gap-1.5 rounded-[0.75rem] px-2 py-1.5 text-left transition-colors',
+                              selected
+                                ? 'bg-secondary text-foreground'
+                                : 'text-foreground/88 hover:bg-muted/70',
+                            )}
+                            onClick={() => {
+                              setPermissionPickerOpen(false);
+                              if (!selected) {
+                                permissionPicker.onSelect(option.mode);
+                              }
+                            }}
+                          >
+                            <div className="min-w-0 flex-1">
+                              <div className="truncate text-[12px] font-medium leading-5">{t(option.labelKey)}</div>
+                            </div>
+                            <span className="flex h-4 w-4 shrink-0 items-center justify-center">
+                              {selected ? <Check className="h-3.5 w-3.5" /> : null}
+                            </span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  ) : null}
+                </div>
+              ) : null}
+              <div className="min-w-0 flex-1" />
               {contextUsage && (
                 <div className="group relative shrink-0" role="status" aria-label={t('input.contextUsageTitle', { detail: contextUsage.detail, pct: contextUsage.pct })}>
                   <div
@@ -1252,7 +1367,7 @@ export const ChatInput = memo(function ChatInput({
                 </div>
               )}
               {modelPicker ? (
-                <div ref={modelPickerRef} className="relative min-w-0 flex-none w-[clamp(0px,calc(100%-7.5rem),148px)] max-sm:w-[clamp(0px,calc(100%-7.5rem),132px)]">
+                <div ref={modelPickerRef} className="relative min-w-0 flex-none w-[clamp(0px,calc(100%-16rem),148px)] max-sm:w-[clamp(0px,calc(100%-14.75rem),132px)]">
                   <button
                     type="button"
                     aria-label={t('input.pickModel')}
@@ -1271,6 +1386,7 @@ export const ChatInput = memo(function ChatInput({
                       if (modelPickerDisabled) {
                         return;
                       }
+                      setPermissionPickerOpen(false);
                       setModelPickerOpen((open) => !open);
                     }}
                   >

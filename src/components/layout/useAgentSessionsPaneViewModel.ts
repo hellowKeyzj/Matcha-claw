@@ -391,8 +391,8 @@ export function useAgentSessionsPaneViewModel(
   }, [agentNodes]);
 
   const activeAgentId = useMemo(() => {
-    return input.currentAgentId || agentNodes[0]?.agentId || '';
-  }, [agentNodes, input.currentAgentId]);
+    return input.currentAgentId;
+  }, [input.currentAgentId]);
 
   const globalSessionNodes = useMemo<SessionListNode[]>(() => {
     const nodes: SessionListNode[] = [];

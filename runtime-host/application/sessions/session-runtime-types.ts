@@ -45,6 +45,7 @@ export interface SessionWindowPayload {
 export interface SessionPromptPayload {
   sessionKey?: unknown;
   message?: unknown;
+  displayMessage?: unknown;
   deliver?: unknown;
   runId?: unknown;
   idempotencyKey?: unknown;

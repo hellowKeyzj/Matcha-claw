@@ -237,6 +237,7 @@ export function createTestSessionRuntimeService(deps: TestSessionRuntimeServiceD
     agentRuntimeRegistry,
     operationCoordinator,
     clock,
+    emitSessionUpdate: deps.emitSessionUpdate,
   });
   const sessionModelSelectionWorkflow = new SessionModelSelectionWorkflow({
     stateStore,

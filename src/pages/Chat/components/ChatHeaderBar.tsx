@@ -1,4 +1,4 @@
-import { Brain, PanelRightClose, PanelRightOpen, RefreshCw } from 'lucide-react';
+import { Brain, Download, PanelRightClose, PanelRightOpen, RefreshCw } from 'lucide-react';
 import { memo } from 'react';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -18,6 +18,8 @@ export const ChatHeaderBar = memo(function ChatHeaderBar({
   refreshBusy,
   showThinking,
   onToggleThinking,
+  exportDisabled = false,
+  onExportMarkdown,
   sidePanelOpen,
   unfinishedTaskCount,
   onToggleSidePanel,
@@ -26,6 +28,8 @@ export const ChatHeaderBar = memo(function ChatHeaderBar({
   refreshBusy: boolean;
   showThinking: boolean;
   onToggleThinking: () => void;
+  exportDisabled?: boolean;
+  onExportMarkdown: () => void;
   sidePanelOpen: boolean;
   unfinishedTaskCount: number;
   onToggleSidePanel: () => void;
@@ -71,6 +75,24 @@ export const ChatHeaderBar = memo(function ChatHeaderBar({
           </TooltipTrigger>
           <TooltipContent {...HEADER_TOOLTIP_PROPS}>
             <p>{showThinking ? t('toolbar.hideThinking') : t('toolbar.showThinking')}</p>
+          </TooltipContent>
+        </Tooltip>
+
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Button
+              variant="ghost"
+              size="icon"
+              aria-label={t('toolbar.exportMarkdown')}
+              className={HEADER_BUTTON_CLASSNAME}
+              onClick={onExportMarkdown}
+              disabled={exportDisabled}
+            >
+              <Download className="h-4 w-4" />
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent {...HEADER_TOOLTIP_PROPS}>
+            <p>{t('toolbar.exportMarkdown')}</p>
           </TooltipContent>
         </Tooltip>
 

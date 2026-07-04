@@ -19,6 +19,12 @@
         "approvalWaitingPlaceholder": "承認待ちです...",
         "pickModel": "モデルを選択",
         "modelPickerTitle": "モデルを切り替え",
+        "pickPermissionMode": "権限モードを選択",
+        "permissionPickerTitle": "OpenClaw ツール権限を切り替え",
+        "permissionDefault": "デフォルト権限",
+        "permissionFullAccess": "フルアクセス",
+        "permissionLoadFailed": "権限の読み込みに失敗しました: {{error}}",
+        "permissionSwitchFailed": "権限の切り替えに失敗しました: {{error}}",
         "modelSwitchFailed": "モデルの切り替えに失敗しました: {{error}}",
         "skillActive": "スキル {{count}} 件を使用中",
         "skillsActive": "スキル {{count}} 件を使用中",
@@ -35,7 +41,8 @@
         "skillConfig": "スキル設定",
         "skillShortLabel": "スキル",
         "showThinking": "思考を表示",
-        "hideThinking": "思考を非表示"
+        "hideThinking": "思考を非表示",
+        "exportMarkdown": "Markdown をエクスポート"
     },
     "liveThread": {
         "loadOlder": "以前のメッセージを読み込む",
@@ -68,7 +75,9 @@
         "gatewayHeartbeatTimeout": "OpenClaw ゲートウェイとの接続がタイムアウトし、復旧待ちです。",
         "gatewaySocketClosed": "OpenClaw ゲートウェイとの接続が切断されました（コード {{code}}、理由: {{reason}}）。",
         "gatewayRpcTimeout": "OpenClaw ゲートウェイ呼び出しがタイムアウトしました: {{method}}",
-        "gatewayRpcFailed": "OpenClaw ゲートウェイ呼び出しに失敗しました: {{method}}、理由: {{reason}}"
+        "gatewayRpcFailed": "OpenClaw ゲートウェイ呼び出しに失敗しました: {{method}}、理由: {{reason}}",
+        "teamRoleNodePromptActive": "このロールはノードを実行中です。完了後に送信してください。",
+        "exportMarkdownFailed": "Markdown のエクスポートに失敗しました: {{error}}"
     },
     "taskPanel": {
         "stepStatus": {

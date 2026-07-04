@@ -27,7 +27,8 @@ vi.mock('@/components/ui/tooltip', () => ({
 }));
 
 describe('chat header bar task panel toggle', () => {
-  it('shows unfinished task count and uses one header button to toggle the shared side panel', () => {
+  it('shows unfinished task count and uses header buttons for export and the shared side panel', () => {
+    const onExportMarkdown = vi.fn();
     const onToggleSidePanel = vi.fn();
 
     render(
@@ -36,6 +37,7 @@ describe('chat header bar task panel toggle', () => {
         refreshBusy={false}
         showThinking={false}
         onToggleThinking={vi.fn()}
+        onExportMarkdown={onExportMarkdown}
         sidePanelOpen={false}
         unfinishedTaskCount={7}
         onToggleSidePanel={onToggleSidePanel}
@@ -43,11 +45,13 @@ describe('chat header bar task panel toggle', () => {
     );
 
     expect(screen.getByText('7')).toBeInTheDocument();
-    expect(screen.getAllByTestId('tooltip-content')).toHaveLength(3);
+    expect(screen.getAllByTestId('tooltip-content')).toHaveLength(4);
     for (const tooltip of screen.getAllByTestId('tooltip-content')) {
       expect(tooltip).toHaveAttribute('data-side', 'bottom');
       expect(tooltip).toHaveAttribute('data-align', 'end');
     }
+    fireEvent.click(screen.getByRole('button', { name: 'toolbar.exportMarkdown' }));
+    expect(onExportMarkdown).toHaveBeenCalledTimes(1);
     fireEvent.click(screen.getByRole('button', { name: 'toolbar.openSidePanel' }));
     expect(onToggleSidePanel).toHaveBeenCalledTimes(1);
   });

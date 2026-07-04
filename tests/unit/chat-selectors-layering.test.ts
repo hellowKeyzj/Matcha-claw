@@ -176,6 +176,26 @@ describe('chat selectors layering', () => {
     expect(selectAgentSessionsPaneState(state).sessionEntries).toHaveLength(0);
   });
 
+  it('session pane selector excludes TeamRun role sessions from ordinary agent history', () => {
+    const state = makeState({
+      loadedSessions: {
+        'agent:leader-agent:main': createSessionRecord({
+          sessionKey: 'agent:leader-agent:main',
+          label: 'Leader normal chat',
+        }),
+        'agent:leader-agent:team-role:run-1:leader': createSessionRecord({
+          sessionKey: 'agent:leader-agent:team-role:run-1:leader',
+          label: 'TeamRun leader role',
+          lastActivityAt: 1_900_000_000_000,
+        }),
+      },
+    });
+
+    const entries = selectAgentSessionsPaneState(state).sessionEntries;
+
+    expect(entries.map((entry) => entry.session.key)).toEqual(['agent:leader-agent:main']);
+  });
+
   it('session pane selector keeps stable session entry references when only assistant transcript changes', () => {
     const baseState = makeState({
       loadedSessions: {

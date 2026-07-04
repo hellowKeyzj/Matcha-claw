@@ -230,6 +230,46 @@ describe('useChatInit', () => {
     }
   });
 
+  it('没有当前会话时，启动只加载目录，不自动加载默认历史', async () => {
+    const loadAgents = vi.fn().mockResolvedValue(undefined);
+    const loadSessions = vi.fn().mockImplementation(async () => {
+      useChatStore.setState({
+        sessionCatalogStatus: readyResource,
+      } as never);
+    });
+    const loadHistory = vi.fn().mockResolvedValue(undefined);
+    useChatStore.setState({
+      currentSessionKey: '',
+      loadedSessions: {},
+      sessionCatalogStatus: idleResource,
+    } as never);
+
+    renderHook(() => useChatInit({
+      isActive: true,
+      isGatewayRunning: true,
+      locationSearch: '',
+      navigate: vi.fn(),
+      switchSession: vi.fn(),
+      openAgentConversation: vi.fn(),
+      bootstrapSessionRuntime: vi.fn().mockImplementation(async () => {
+        markSessionRuntimeReady();
+      }),
+      loadAgents,
+      loadSessions,
+      loadHistory,
+      cleanupEmptySession: vi.fn(),
+    }));
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(loadAgents).toHaveBeenCalledTimes(1);
+    expect(loadSessions).toHaveBeenCalledTimes(1);
+    expect(loadHistory).not.toHaveBeenCalled();
+    expect(useChatStore.getState().currentSessionKey).toBe('');
+  });
+
   it('bootstrap 未得到 ready runtime 时，不加载会话目录或历史', async () => {
     const loadAgents = vi.fn().mockResolvedValue(undefined);
     const loadSessions = vi.fn().mockResolvedValue(undefined);

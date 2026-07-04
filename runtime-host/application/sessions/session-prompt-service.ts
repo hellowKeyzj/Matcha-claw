@@ -28,6 +28,7 @@ export class SessionPromptService {
       mediaBody,
       sessionKey,
       message,
+      displayMessage,
       requestedRunId,
       sessionIdentity,
       sessionIdentityError,
@@ -48,6 +49,7 @@ export class SessionPromptService {
       mediaBody,
       sessionId,
       message,
+      displayMessage,
       runId: requestedRunId || this.deps.idGenerator.randomId(),
       sessionIdentity,
     }));

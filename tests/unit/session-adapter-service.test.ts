@@ -1407,6 +1407,52 @@ describe('session runtime ACP adapter service', () => {
     ]));
   });
 
+  it('uses displayMessage only for the local submitted user item while sending the full prompt to the runtime', async () => {
+    const chatSend = vi.fn(async (params: Record<string, unknown>) => ({
+      runId: params.idempotencyKey,
+      status: 'started',
+    }));
+    const service = createService({
+      openclawBridge: {
+        chatSend,
+        gatewayRpc: async () => ({}),
+      },
+    });
+
+    const response = await service.promptSession({
+      sessionKey: 'agent:main:team-role:run-1:leader',
+      sessionIdentity: createOpenClawTestSessionIdentity('agent:main:team-role:run-1:leader'),
+      message: '## TeamRun WorkNode\nfull prompt',
+      displayMessage: '用户原文',
+      idempotencyKey: 'client-run-display',
+    });
+    await vi.waitFor(() => expect(chatSend).toHaveBeenCalledTimes(1));
+
+    expect(chatSend.mock.calls[0][0]).toMatchObject({
+      sessionKey: 'agent:main:team-role:run-1:leader',
+      message: '## TeamRun WorkNode\nfull prompt',
+      idempotencyKey: 'client-run-display',
+    });
+    expect(response.status).toBe(200);
+    if (!('snapshot' in response.data)) {
+      throw new Error('Expected prompt snapshot');
+    }
+    expect(response.data.snapshot.items).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        kind: 'user-message',
+        text: '用户原文',
+        messageId: 'client-run-display',
+        runId: 'client-run-display',
+      }),
+    ]));
+    expect(response.data.snapshot.items).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        kind: 'user-message',
+        text: '## TeamRun WorkNode\nfull prompt',
+      }),
+    ]));
+  });
+
   it('accepts endpoint events after the session context has been bound by prompt submission', async () => {
     const chatSend = vi.fn(async (params: Record<string, unknown>) => ({
       runId: params.idempotencyKey,
@@ -1785,6 +1831,67 @@ describe('session runtime ACP adapter service', () => {
     expect(gatewayRpc).toHaveBeenNthCalledWith(2, 'exec.approval.resolve', { id: 'approval-1', decision: 'deny' }, 5000);
     expect(gatewayRpc).toHaveBeenNthCalledWith(3, 'chat.abort', { sessionKey: 'agent:main:main' }, 5000);
     expect(response.status).toBe(200);
+    expect(response.data).toMatchObject({
+      success: true,
+      snapshot: {
+        runtime: {
+          activeRunId: null,
+          runPhase: 'idle',
+          pendingTurnKey: null,
+        },
+      },
+    });
+  });
+
+  it('settles an active submitted session to aborted after abort returns', async () => {
+    const gatewayRpc = vi.fn(async () => ({}));
+    const emitSessionUpdate = vi.fn();
+    const service = createService({
+      emitSessionUpdate,
+      openclawBridge: {
+        chatSend: async () => ({ runId: 'client-run-abort' }),
+        gatewayRpc,
+      },
+    });
+    const sessionIdentity = createOpenClawTestSessionIdentity('agent:main:main');
+
+    await service.promptSession({
+      sessionKey: 'agent:main:main',
+      sessionIdentity,
+      message: 'start then abort',
+      idempotencyKey: 'client-run-abort',
+    });
+
+    const response = await service.abortSession({
+      sessionKey: 'agent:main:main',
+      sessionIdentity,
+      approvalIds: [],
+    });
+
+    expect(gatewayRpc).toHaveBeenCalledWith('chat.abort', { sessionKey: 'agent:main:main', runId: 'client-run-abort' }, 5000);
+    expect(response.status).toBe(200);
+    expect(response.data).toMatchObject({
+      success: true,
+      snapshot: {
+        runtime: {
+          activeRunId: null,
+          runPhase: 'aborted',
+          pendingTurnKey: null,
+        },
+      },
+    });
+    expect(emitSessionUpdate).toHaveBeenCalledWith(expect.objectContaining({
+      sessionUpdate: 'session_info_update',
+      sessionKey: 'agent:main:main',
+      runId: 'client-run-abort',
+      phase: 'aborted',
+      snapshot: expect.objectContaining({
+        runtime: expect.objectContaining({
+          activeRunId: null,
+          runPhase: 'aborted',
+        }),
+      }),
+    }));
   });
 
   it('returns empty events for unsupported provider payloads', async () => {

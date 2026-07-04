@@ -151,6 +151,9 @@ export function useChatInit(input: UseChatInitInput): void {
         return;
       }
       const currentChatState = useChatStore.getState();
+      if (!currentChatState.currentSessionKey) {
+        return;
+      }
       const currentSessionRecord = currentChatState.loadedSessions[currentChatState.currentSessionKey];
       const hasCurrentViewportSnapshot = (
         currentSessionRecord?.meta.historyStatus === 'ready'

@@ -343,7 +343,6 @@ async function executeLoadSessionsNow(input: CreateStoreSessionActionsInput): Pr
   const {
     set,
     get,
-    defaultSessionKey,
   } = input;
   const stateBeforeLoad = get();
   const previousResource = stateBeforeLoad.sessionCatalogStatus;
@@ -391,10 +390,10 @@ async function executeLoadSessionsNow(input: CreateStoreSessionActionsInput): Pr
 
   const stateSnapshot = get();
   const { currentSessionKey } = stateSnapshot;
-  let nextSessionKey = currentSessionKey || defaultSessionKey;
-  const hasSessionInBackend = (sessionKey: string): boolean => mergedSessions.has(sessionKey);
+  const hasSessionInBackend = (sessionKey: string): boolean => Boolean(sessionKey) && mergedSessions.has(sessionKey);
+  let nextSessionKey = currentSessionKey;
   let shouldKeepMissingCurrent = false;
-  if (!hasSessionInBackend(nextSessionKey)) {
+  if (nextSessionKey && !hasSessionInBackend(nextSessionKey)) {
     shouldKeepMissingCurrent = shouldKeepMissingCurrentSession(
       nextSessionKey,
       stateSnapshot,

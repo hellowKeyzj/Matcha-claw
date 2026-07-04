@@ -264,12 +264,18 @@ export function resolveSessionActivityMs(
   return parseSessionCreatedAtMs(session.backendSessionKey) ?? 0;
 }
 
+export function isTeamRunRoleSession(session: Pick<ChatSession, 'key' | 'backendSessionKey'>): boolean {
+  const sessionKey = session.backendSessionKey || session.key;
+  const parts = sessionKey.split(':');
+  return parts.length === 5 && parts[0] === 'agent' && parts[2] === 'team-role';
+}
+
 export function resolvePreferredSessionKeyForAgent(
   agentId: string,
   sessions: ChatSession[],
   loadedSessions: ChatStoreState['loadedSessions'],
 ): string | null {
-  const owned = sessions.filter((session) => session.agentId === agentId);
+  const owned = sessions.filter((session) => session.agentId === agentId && !isTeamRunRoleSession(session));
   if (owned.length === 0) {
     return null;
   }

@@ -413,20 +413,20 @@ const TeamListSection = memo(function TeamListSection({
               </button>
             </div>
             {expanded && node.runs.length > 0 ? (
-              <div className="ml-7 space-y-1">
+              <div className="ml-3 border-l border-border/60 pl-2 space-y-0.5">
                 {node.runs.map((run) => {
                   const runExpanded = expandedTeamRunIds[run.runId] === true;
                   const isActiveRun = node.activeRunId === run.runId;
                   return (
-                    <div key={`${node.teamId}:${run.runId}`} className="space-y-1">
+                    <div key={`${node.teamId}:${run.runId}`} className="space-y-0.5">
                       <div className={cn(
-                        'flex items-center gap-1 transition-colors',
+                        'flex items-center gap-0.5 transition-colors',
                         isActiveRun ? 'text-foreground' : 'text-muted-foreground',
                       )}
                       >
                         <button
                           type="button"
-                          className="flex h-7 w-6 shrink-0 items-center justify-center rounded-[calc(var(--radius-interactive)+2px)] text-current/80 transition hover:bg-card/15 hover:text-foreground"
+                          className="flex h-6 w-5 shrink-0 items-center justify-center rounded-[calc(var(--radius-interactive)+2px)] text-current/80 transition hover:bg-card/15 hover:text-foreground"
                           aria-expanded={runExpanded}
                           onClick={(event) => {
                             event.preventDefault();
@@ -439,7 +439,7 @@ const TeamListSection = memo(function TeamListSection({
                         <button
                           type="button"
                           className={cn(
-                            'min-w-0 flex-1 rounded-[calc(var(--radius-interactive)+2px)] px-1 py-1.5 text-left text-xs transition-colors',
+                            'min-w-0 flex-1 rounded-[calc(var(--radius-interactive)+2px)] px-1 py-1 text-left text-xs transition-colors',
                             isActiveRun ? 'bg-secondary text-foreground' : 'hover:bg-secondary hover:text-foreground',
                           )}
                           onClick={() => onSelectRun(node.teamId, run)}
@@ -448,12 +448,12 @@ const TeamListSection = memo(function TeamListSection({
                         </button>
                       </div>
                       {runExpanded ? (
-                        <div className="ml-6 space-y-1">
+                        <div className="ml-3 border-l border-border/50 pl-2 space-y-0.5">
                           {run.roles.map((role) => (
                             <button
                               key={`${node.teamId}:${run.runId}:${role.roleId}`}
                               type="button"
-                              className="flex w-full items-center gap-2 rounded-[calc(var(--radius-interactive)+2px)] px-2 py-1.5 text-left text-xs text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground"
+                              className="flex w-full items-center gap-1.5 rounded-[calc(var(--radius-interactive)+2px)] px-1.5 py-1 text-left text-xs text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground"
                               onClick={() => onOpenSessionIdentity(role.sessionIdentity)}
                             >
                               <AgentAvatar agentId={role.agentId} agentName={role.roleId} className="h-4 w-4" />

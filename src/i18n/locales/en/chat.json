@@ -20,6 +20,12 @@
         "approvalWaitingPlaceholder": "Waiting for approval...",
         "pickModel": "Choose model",
         "modelPickerTitle": "Switch model for this chat",
+        "pickPermissionMode": "Choose permission mode",
+        "permissionPickerTitle": "Switch OpenClaw tool permissions",
+        "permissionDefault": "Default permissions",
+        "permissionFullAccess": "Full access",
+        "permissionLoadFailed": "Failed to load permissions: {{error}}",
+        "permissionSwitchFailed": "Failed to switch permissions: {{error}}",
         "modelSwitchFailed": "Failed to switch model: {{error}}",
         "skillActive": "{{count}} skill active",
         "skillsActive": "{{count}} skills active",
@@ -36,7 +42,8 @@
         "skillConfig": "Skill Configuration",
         "skillShortLabel": "Skills",
         "showThinking": "Show thinking",
-        "hideThinking": "Hide thinking"
+        "hideThinking": "Hide thinking",
+        "exportMarkdown": "Export Markdown"
     },
     "liveThread": {
         "loadOlder": "Load older messages",
@@ -69,7 +76,9 @@
         "gatewayHeartbeatTimeout": "The connection to the OpenClaw Gateway timed out and is waiting to recover.",
         "gatewaySocketClosed": "The connection to the OpenClaw Gateway was closed (code {{code}}, reason: {{reason}}).",
         "gatewayRpcTimeout": "OpenClaw Gateway call timed out: {{method}}",
-        "gatewayRpcFailed": "OpenClaw Gateway call failed: {{method}}, reason: {{reason}}"
+        "gatewayRpcFailed": "OpenClaw Gateway call failed: {{method}}, reason: {{reason}}",
+        "teamRoleNodePromptActive": "This role is running a node. Send after it finishes.",
+        "exportMarkdownFailed": "Failed to export Markdown: {{error}}"
     },
     "taskPanel": {
         "stepStatus": {

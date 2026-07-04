@@ -51,6 +51,234 @@ describe('OpenClawV4ProtocolAdapter', () => {
     ]);
   });
 
+  it('strips TeamRun role prompt envelopes while replaying OpenClaw transcript user messages', async () => {
+    const adapter = new OpenClawV4ProtocolAdapter();
+    const replay = adapter.replayAdapter.replayTranscript('agent:leader:team-role:run-1:leader', [
+      JSON.stringify({
+        id: 'user-1',
+        message: {
+          role: 'user',
+          content: [
+            {
+              type: 'text',
+              text: [
+                '# TeamRun node prompt',
+                '',
+                '## Delivery envelope',
+                '',
+                '- Role ID: leader',
+                '',
+                '## TeamRun WorkNode: Lead',
+                '',
+                '## Team chat message',
+                '',
+                'Use this user message as the latest input for this TeamRun node.',
+                '',
+                '只显示这句用户原文',
+              ].join('\n'),
+            },
+          ],
+        },
+      }),
+    ], runtimeContext('leader'));
+
+    const events = [];
+    for await (const event of replay) {
+      events.push(event);
+    }
+
+    expect(events).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        type: 'message_part',
+        role: 'user',
+        text: '只显示这句用户原文',
+        content: [{ type: 'text', text: '只显示这句用户原文' }],
+      }),
+    ]));
+    expect(JSON.stringify(events)).not.toContain('TeamRun node prompt');
+    expect(JSON.stringify(events)).not.toContain('Delivery envelope');
+  });
+
+  it('strips TeamRun v2 Attempt user message envelopes while replaying OpenClaw transcript user messages', async () => {
+    const adapter = new OpenClawV4ProtocolAdapter();
+    const replay = adapter.replayAdapter.replayTranscript('agent:leader:team-role:run-1:leader', [
+      JSON.stringify({
+        id: 'user-1',
+        message: {
+          role: 'user',
+          content: [
+            {
+              type: 'text',
+              text: [
+                '# TeamRun node prompt',
+                '',
+                '## Delivery envelope',
+                '',
+                '- Role ID: leader',
+                '',
+                '## TeamRun WorkNode: WorkNode',
+                '',
+                '### Node context',
+                '',
+                '- runId: run-1',
+                '',
+                '### Attempt user message',
+                '',
+                'This user message started this entry WorkNode attempt. Treat it as the attempt input, not as generic chat history.',
+                '',
+                '使用team_graph_context 查看下graph状况',
+                '',
+                '### Node work',
+                '',
+                'This is the work instruction from the node config, workflow task, or node title. Do this work; do not treat it as tool documentation.',
+                '',
+                'WorkNode',
+              ].join('\n'),
+            },
+          ],
+        },
+      }),
+    ], runtimeContext('leader'));
+
+    const events = [];
+    for await (const event of replay) {
+      events.push(event);
+    }
+
+    expect(events).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        type: 'message_part',
+        role: 'user',
+        text: '使用team_graph_context 查看下graph状况',
+        content: [{ type: 'text', text: '使用team_graph_context 查看下graph状况' }],
+      }),
+    ]));
+    expect(JSON.stringify(events)).not.toContain('TeamRun node prompt');
+    expect(JSON.stringify(events)).not.toContain('Node context');
+    expect(JSON.stringify(events)).not.toContain('Node work');
+  });
+
+  it('strips TeamRun v2 Attempt user message envelopes from live session.message events', () => {
+    const adapter = new OpenClawV4ProtocolAdapter();
+    const [event] = adapter.eventAdapter.translate({
+      type: 'session.message',
+      event: {
+        sessionKey: 'agent:leader:team-role:run-1:leader',
+        message: {
+          role: 'user',
+          content: [{
+            type: 'text',
+            text: [
+              '# TeamRun node prompt',
+              '',
+              '## Delivery envelope',
+              '',
+              '- Role ID: leader',
+              '',
+              '## TeamRun WorkNode: WorkNode',
+              '',
+              '### Node context',
+              '',
+              '- runId: run-1',
+              '',
+              '### Attempt user message',
+              '',
+              'This user message started this entry WorkNode attempt. Treat it as the attempt input, not as generic chat history.',
+              '',
+              '使用team_graph_context 查看下graph状况',
+              '',
+              '### Node work',
+              '',
+              'This is the work instruction from the node config, workflow task, or node title. Do this work; do not treat it as tool documentation.',
+              '',
+              'WorkNode',
+            ].join('\n'),
+          }],
+        },
+      },
+    }, runtimeContext('leader'));
+
+    expect(event).toEqual(expect.objectContaining({
+      type: 'message_part',
+      role: 'user',
+      text: '使用team_graph_context 查看下graph状况',
+      content: [{ type: 'text', text: '使用team_graph_context 查看下graph状况' }],
+    }));
+  });
+
+  it('strips TeamRun workspace context while replaying OpenClaw transcript user messages', async () => {
+    const adapter = new OpenClawV4ProtocolAdapter();
+    const replay = adapter.replayAdapter.replayTranscript('agent:operator:team-role:run-1:operator', [
+      JSON.stringify({
+        id: 'user-1',
+        message: {
+          role: 'user',
+          content: [{
+            type: 'text',
+            text: [
+              'hello operator',
+              '',
+              '### TeamRun workspace context',
+              '',
+              'This message is for the long-lived Team role workspace session. It is not a WorkNode attempt prompt and does not claim a nodeExecutionId.',
+              '',
+              '- runId: run-1',
+              '- roleId: operator',
+            ].join('\n'),
+          }],
+        },
+      }),
+    ], runtimeContext('operator'));
+
+    const events = [];
+    for await (const event of replay) {
+      events.push(event);
+    }
+
+    expect(events).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        type: 'message_part',
+        role: 'user',
+        text: 'hello operator',
+        content: [{ type: 'text', text: 'hello operator' }],
+      }),
+    ]));
+    expect(JSON.stringify(events)).not.toContain('TeamRun workspace context');
+  });
+
+  it('strips TeamRun workspace context from live session.message events', () => {
+    const adapter = new OpenClawV4ProtocolAdapter();
+    const [event] = adapter.eventAdapter.translate({
+      type: 'session.message',
+      event: {
+        sessionKey: 'agent:operator:team-role:run-1:operator',
+        message: {
+          role: 'user',
+          content: [{
+            type: 'text',
+            text: [
+              'hello operator',
+              '',
+              '### TeamRun workspace context',
+              '',
+              'This message is for the long-lived Team role workspace session. It is not a WorkNode attempt prompt and does not claim a nodeExecutionId.',
+              '',
+              '- runId: run-1',
+              '- roleId: operator',
+            ].join('\n'),
+          }],
+        },
+      },
+    }, runtimeContext('operator'));
+
+    expect(event).toEqual(expect.objectContaining({
+      type: 'message_part',
+      role: 'user',
+      text: 'hello operator',
+      content: [{ type: 'text', text: 'hello operator' }],
+    }));
+  });
+
   it('keeps realtime chat deltas without provider messageId on the same fallback turn', () => {
     const adapter = new OpenClawV4ProtocolAdapter();
     const context = runtimeContext();

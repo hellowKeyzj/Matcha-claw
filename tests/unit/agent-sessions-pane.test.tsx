@@ -905,6 +905,23 @@ describe('agent sessions pane', () => {
     expect(screen.getByText('真实历史会话')).toBeTruthy();
   });
 
+  it('没有当前 agent 时不应高亮第一条 agent', () => {
+    useChatStore.setState({
+      currentSessionKey: '',
+      loadedSessions: {},
+      sessionCatalogStatus: buildReadySessionCatalogStatus([]),
+      switchSession: vi.fn(),
+      newSession: vi.fn(),
+      deleteSession: vi.fn().mockResolvedValue(undefined),
+      loadSessions: vi.fn().mockResolvedValue(undefined),
+    } as never);
+
+    renderPane();
+
+    expect(screen.getByTestId('agent-item-main').parentElement?.className).toContain('text-muted-foreground');
+    expect(screen.getByTestId('agent-item-test').parentElement?.className).toContain('text-muted-foreground');
+  });
+
   it('没有当前 agent 和 agent 列表时，新建按钮不应伪造成 main agent', () => {
     const newSession = vi.fn();
     useSubagentsStore.setState({

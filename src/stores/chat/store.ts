@@ -39,7 +39,7 @@ import {
   type ChatStoreState,
 } from './types';
 import { getSessionMeta, getSessionRuntime, patchSessionMeta } from './store-state-helpers';
-import { buildRuntimeScopeKey, buildSessionIdentityRecordIndex, buildSessionRecordKey, findSessionRecordKey, resolveSessionOperationTarget, sameRuntimeEndpointScope, sessionIdentityForAgentScope } from './session-identity';
+import { buildRuntimeScopeKey, buildSessionIdentityRecordIndex, findSessionRecordKey, resolveSessionOperationTarget, sameRuntimeEndpointScope } from './session-identity';
 import { buildSessionIdentityKey, type AgentScope } from '../../../runtime-host/shared/runtime-address';
 import type { RuntimeEndpointSummary } from '../../../runtime-host/shared/runtime-topology';
 import { finishChatRunTelemetry } from './telemetry';
@@ -126,7 +126,7 @@ export const useChatStore = create<ChatStoreState>((set, get) => {
   } as const;
 
   return {
-    currentSessionKey: DEFAULT_SESSION_KEY,
+    currentSessionKey: '',
     sessionRuntimeCatalog: {
       status: 'idle',
       error: null,
@@ -157,48 +157,13 @@ export const useChatStore = create<ChatStoreState>((set, get) => {
         if (!defaultSessionPromptScope) {
           throw new Error('No session runtime endpoint is available');
         }
-        set((state) => {
-          const currentMeta = getSessionMeta(state, state.currentSessionKey);
-          if (currentMeta.sessionIdentity) {
-            return {
-              sessionRuntimeCatalog: {
-                status: 'ready',
-                error: null,
-                endpoints: targets,
-                defaultSessionPromptScope,
-              },
-            };
-          }
-          const sessionIdentity = sessionIdentityForAgentScope(defaultSessionPromptScope, DEFAULT_SESSION_KEY);
-          const recordKey = buildSessionRecordKey(sessionIdentity);
-          const loadedSessions = patchSessionMeta(
-            { loadedSessions: state.loadedSessions },
-            recordKey,
-            {
-              backendSessionKey: DEFAULT_SESSION_KEY,
-              runtimeScopeKey: buildRuntimeScopeKey(sessionIdentity.endpoint),
-              agentId: sessionIdentity.agentId,
-              protocolId: defaultSessionPromptScope.endpoint.kind === 'protocol-connector' ? defaultSessionPromptScope.endpoint.protocolId : null,
-              runtimeEndpointId: defaultSessionPromptScope.endpoint.kind === 'native-runtime'
-                ? defaultSessionPromptScope.endpoint.runtimeInstanceId
-                : defaultSessionPromptScope.endpoint.endpointId,
-              sessionIdentity,
-              kind: 'main',
-              preferred: true,
-              displayName: 'Main',
-            },
-          );
-          return {
-            sessionRuntimeCatalog: {
-              status: 'ready',
-              error: null,
-              endpoints: targets,
-              defaultSessionPromptScope,
-            },
-            currentSessionKey: recordKey,
-            loadedSessions,
-            sessionRecordKeyByIdentityKey: buildSessionIdentityRecordIndex(loadedSessions),
-          };
+        set({
+          sessionRuntimeCatalog: {
+            status: 'ready',
+            error: null,
+            endpoints: targets,
+            defaultSessionPromptScope,
+          },
         });
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
@@ -263,15 +228,24 @@ export const useChatStore = create<ChatStoreState>((set, get) => {
     setViewportAnchorItemKey: (itemKey, sessionKey) => {
       executeSetViewportAnchorItemKey(sessionInput, itemKey, sessionKey);
     },
-    sendMessage: (text, attachments) => executeStoreSend({
-      set,
-      get,
-      sessionRunCache,
-      beginMutating,
-      finishMutating,
-      text,
-      attachments,
-    }),
+    sendMessage: async (text, attachments) => {
+      if (!get().currentSessionKey) {
+        await executeNewSession(sessionInput);
+        if (!get().currentSessionKey) {
+          const error = get().error ?? 'Session runtime is not ready';
+          return { accepted: false, reason: 'missing-session', error };
+        }
+      }
+      return executeStoreSend({
+        set,
+        get,
+        sessionRunCache,
+        beginMutating,
+        finishMutating,
+        text,
+        attachments,
+      });
+    },
     abortRun: async () => {
       await executeStoreAbortRun({
         set,

@@ -6,11 +6,15 @@ import Chat from '@/pages/Chat';
 import { useChatStore as realUseChatStore } from '@/stores/chat';
 import { useGatewayStore } from '@/stores/gateway';
 import { useSubagentsStore } from '@/stores/subagents';
+import { useTeamsStore } from '@/stores/teams';
+import { toast } from 'sonner';
 import { createEmptySessionRecord } from '@/stores/chat/store-state-helpers';
 import { createViewportWindowState } from '@/stores/chat/viewport-state';
 import { buildRenderItemsFromMessages } from './helpers/timeline-fixtures';
+import { createOpenClawTestSessionIdentity } from './helpers/runtime-address-fixtures';
 
 const chatViewportPaneRenderSpy = vi.fn();
+const chatInputSendResultSpy = vi.fn();
 const useChatStore = realUseChatStore;
 
 vi.mock('react-i18next', async (importOriginal) => {
@@ -22,6 +26,12 @@ vi.mock('react-i18next', async (importOriginal) => {
     }),
   };
 });
+
+vi.mock('sonner', () => ({
+  toast: {
+    error: vi.fn(),
+  },
+}));
 
 vi.mock('@/pages/Chat/useChatInit', () => ({
   useChatInit: () => {},
@@ -106,15 +116,21 @@ vi.mock('@/pages/Chat/ChatInput', () => ({
   ChatInput: ({
     disabled,
     reconnecting,
+    onSend,
   }: {
     disabled?: boolean;
     reconnecting?: boolean;
+    onSend: (text: string) => Promise<unknown>;
   }) => (
-    <div
+    <button
+      type="button"
       data-testid="chat-input"
       data-disabled={disabled ? 'true' : 'false'}
       data-reconnecting={reconnecting ? 'true' : 'false'}
-    />
+      onClick={() => { void onSend('hello from test').then(chatInputSendResultSpy); }}
+    >
+      send
+    </button>
   ),
 }));
 
@@ -160,9 +176,13 @@ function buildSessionRecord(overrides?: Partial<ReturnType<typeof createEmptySes
 }) {
   const base = createEmptySessionRecord();
   const sessionKey = overrides?.sessionKey ?? 'agent:main:main';
+  const sessionIdentity = createOpenClawTestSessionIdentity(sessionKey);
   return {
     meta: {
       ...base.meta,
+      backendSessionKey: sessionKey,
+      agentId: sessionKey.split(':')[1] ?? null,
+      sessionIdentity,
       ...overrides?.meta,
     },
     runtime: {
@@ -180,7 +200,9 @@ describe('chat 顶层订阅收口', () => {
   const activeRunDisconnectedError = 'The active run disconnected before a terminal event was received.';
 
   beforeEach(() => {
+    vi.clearAllMocks();
     chatViewportPaneRenderSpy.mockClear();
+    chatInputSendResultSpy.mockClear();
 
     useGatewayStore.setState({
       status: {
@@ -212,6 +234,17 @@ describe('chat 顶层订阅收口', () => {
       },
       loadAgents: vi.fn().mockResolvedValue(undefined),
       updateAgent: vi.fn().mockResolvedValue(undefined),
+    } as never);
+
+    useTeamsStore.setState({
+      teams: [],
+      activeTeamId: null,
+      runIdsByTeamId: {},
+      runListByTeamId: {},
+      rolesByTeamId: {},
+      nodeExecutionsByTeamId: {},
+      nodePromptDeliveryAttemptsByTeamId: {},
+      submitTeamRoleMessageFromChat: vi.fn().mockResolvedValue(undefined),
     } as never);
 
     useChatStore.setState({
@@ -264,6 +297,278 @@ describe('chat 顶层订阅收口', () => {
       refresh: vi.fn().mockResolvedValue(undefined),
       toggleThinking: vi.fn(),
     } as never);
+  });
+
+  it('Team role 会话发送时提交 Team role chat message，不走普通 Agent chat send', async () => {
+    const leaderIdentity = createOpenClawTestSessionIdentity('agent:leader:team-run-1', 'leader-agent');
+    const submitTeamRoleMessageFromChat = vi.fn().mockResolvedValue(undefined);
+    const sendMessage = vi.fn().mockResolvedValue(undefined);
+    useTeamsStore.setState({
+      teams: [{
+        id: 'team-1',
+        name: 'Team 1',
+        teamSkillName: 'team-skill',
+        teamSkillVersion: '1.0.0',
+        teamSkillDescription: 'Team skill',
+        packagePath: '.tmp/team-skill',
+        sourcePath: '.tmp/team-skill/SKILL.md',
+        activeRunId: 'run-1',
+        createdAt: 1,
+        updatedAt: 1,
+      }],
+      runListByTeamId: {
+        'team-1': [{
+          runId: 'run-1',
+          packageName: 'team-skill',
+          packageVersion: '1.0.0',
+          sourcePath: '.tmp/team-skill',
+          status: 'running',
+          revision: 1,
+          createdAt: 1,
+          updatedAt: 1,
+          sessions: [{ runId: 'run-1', roleId: 'leader', agentId: 'leader-agent', sessionKey: 'agent:leader:team-run-1', sessionIdentity: leaderIdentity }],
+        }],
+      },
+      submitTeamRoleMessageFromChat,
+    } as never);
+    useChatStore.setState((state) => ({
+      currentSessionKey: 'agent:leader:team-run-1',
+      loadedSessions: {
+        ...state.loadedSessions,
+        'agent:leader:team-run-1': buildSessionRecord({
+          sessionKey: 'agent:leader:team-run-1',
+          meta: { sessionIdentity: leaderIdentity, agentId: 'leader-agent' },
+        }),
+      },
+      sendMessage,
+    } as never));
+
+    render(
+      <MemoryRouter>
+        <Chat isActive={false} />
+      </MemoryRouter>,
+    );
+
+    fireEvent.click(screen.getByTestId('chat-input'));
+
+    await waitFor(() => expect(submitTeamRoleMessageFromChat).toHaveBeenCalledWith('team-1', 'leader', 'hello from test'));
+    await waitFor(() => expect(chatInputSendResultSpy).toHaveBeenCalledWith({ accepted: true }));
+    expect(sendMessage).not.toHaveBeenCalled();
+  });
+
+  it('重启后 TeamRun run list sessions 尚未恢复时，仍可从 Team role sessionKey 发送', async () => {
+    const sessionKey = 'agent:leader-agent:team-role:run-1:leader';
+    const leaderIdentity = createOpenClawTestSessionIdentity(sessionKey, 'leader-agent');
+    const submitTeamRoleMessageFromChat = vi.fn().mockResolvedValue(undefined);
+    const sendMessage = vi.fn().mockResolvedValue(undefined);
+    useTeamsStore.setState({
+      teams: [{
+        id: 'team-1',
+        name: 'Team 1',
+        teamSkillName: 'team-skill',
+        teamSkillVersion: '1.0.0',
+        teamSkillDescription: 'Team skill',
+        packagePath: '.tmp/team-skill',
+        sourcePath: '.tmp/team-skill/SKILL.md',
+        activeRunId: 'run-1',
+        createdAt: 1,
+        updatedAt: 1,
+      }],
+      runListByTeamId: { 'team-1': [] },
+      rolesByTeamId: { 'team-1': [] },
+      submitTeamRoleMessageFromChat,
+    } as never);
+    useChatStore.setState((state) => ({
+      currentSessionKey: sessionKey,
+      loadedSessions: {
+        ...state.loadedSessions,
+        [sessionKey]: buildSessionRecord({
+          sessionKey,
+          meta: { backendSessionKey: sessionKey, sessionIdentity: leaderIdentity, agentId: 'leader-agent' },
+        }),
+      },
+      sendMessage,
+    } as never));
+
+    render(
+      <MemoryRouter>
+        <Chat isActive={false} />
+      </MemoryRouter>,
+    );
+
+    fireEvent.click(screen.getByTestId('chat-input'));
+
+    await waitFor(() => expect(submitTeamRoleMessageFromChat).toHaveBeenCalledWith('team-1', 'leader', 'hello from test'));
+    await waitFor(() => expect(chatInputSendResultSpy).toHaveBeenCalledWith({ accepted: true }));
+    expect(sendMessage).not.toHaveBeenCalled();
+  });
+
+  it('Team role 正在执行 node prompt 时拒绝会话发送并显示 i18n 提示', async () => {
+    const leaderIdentity = createOpenClawTestSessionIdentity('agent:leader:team-run-1', 'leader-agent');
+    const submitTeamRoleMessageFromChat = vi.fn().mockResolvedValue(undefined);
+    const sendMessage = vi.fn().mockResolvedValue(undefined);
+    useTeamsStore.setState({
+      teams: [{
+        id: 'team-1',
+        name: 'Team 1',
+        teamSkillName: 'team-skill',
+        teamSkillVersion: '1.0.0',
+        teamSkillDescription: 'Team skill',
+        packagePath: '.tmp/team-skill',
+        sourcePath: '.tmp/team-skill/SKILL.md',
+        activeRunId: 'run-1',
+        createdAt: 1,
+        updatedAt: 1,
+      }],
+      runListByTeamId: {
+        'team-1': [{
+          runId: 'run-1',
+          packageName: 'team-skill',
+          packageVersion: '1.0.0',
+          sourcePath: '.tmp/team-skill',
+          status: 'running',
+          revision: 1,
+          createdAt: 1,
+          updatedAt: 1,
+          sessions: [{ runId: 'run-1', roleId: 'leader', agentId: 'leader-agent', sessionKey: 'agent:leader:team-run-1', sessionIdentity: leaderIdentity }],
+        }],
+      },
+      nodeExecutionsByTeamId: {
+        'team-1': [{ runId: 'run-1', nodeId: 'leader-plan', nodeExecutionId: 'node-exec-1', roleId: 'leader', status: 'running' }],
+      },
+      nodePromptDeliveryAttemptsByTeamId: {
+        'team-1': [{
+          deliveryRecordId: 'delivery-1',
+          runId: 'run-1',
+          nodeId: 'leader-plan',
+          nodeExecutionId: 'node-exec-1',
+          taskId: 'leader-plan',
+          roleId: 'leader',
+          toAgentId: 'leader-agent',
+          sessionKey: 'agent:leader:team-run-1',
+          kind: 'node.prompt',
+          title: 'Plan',
+          prompt: 'Plan',
+          status: 'delivered',
+          idempotencyKey: 'delivery-1',
+          causationId: 'trigger-1',
+          createdAt: 1,
+        }],
+      },
+      submitTeamRoleMessageFromChat,
+    } as never);
+    useChatStore.setState((state) => ({
+      currentSessionKey: 'agent:leader:team-run-1',
+      loadedSessions: {
+        ...state.loadedSessions,
+        'agent:leader:team-run-1': buildSessionRecord({
+          sessionKey: 'agent:leader:team-run-1',
+          meta: { sessionIdentity: leaderIdentity, agentId: 'leader-agent' },
+        }),
+      },
+      sendMessage,
+    } as never));
+
+    render(
+      <MemoryRouter>
+        <Chat isActive={false} />
+      </MemoryRouter>,
+    );
+
+    fireEvent.click(screen.getByTestId('chat-input'));
+
+    await waitFor(() => expect(chatInputSendResultSpy).toHaveBeenCalledWith({ accepted: false, reason: 'active' }));
+    expect(toast.error).toHaveBeenCalledWith('errors.teamRoleNodePromptActive');
+    expect(submitTeamRoleMessageFromChat).not.toHaveBeenCalled();
+    expect(sendMessage).not.toHaveBeenCalled();
+  });
+
+  it('Team 会话发送不等待 TeamRun 提交完成即可 accepted', async () => {
+    const leaderIdentity = createOpenClawTestSessionIdentity('agent:leader:team-run-1', 'leader-agent');
+    let releaseSubmit!: () => void;
+    const submitTeamRoleMessageFromChat = vi.fn().mockReturnValue(new Promise<void>((resolve) => {
+      releaseSubmit = resolve;
+    }));
+    const sendMessage = vi.fn().mockResolvedValue(undefined);
+    useTeamsStore.setState({
+      teams: [{
+        id: 'team-1',
+        name: 'Team 1',
+        teamSkillName: 'team-skill',
+        teamSkillVersion: '1.0.0',
+        teamSkillDescription: 'Team skill',
+        packagePath: '.tmp/team-skill',
+        sourcePath: '.tmp/team-skill/SKILL.md',
+        activeRunId: 'run-1',
+        createdAt: 1,
+        updatedAt: 1,
+      }],
+      runListByTeamId: {
+        'team-1': [{
+          runId: 'run-1',
+          packageName: 'team-skill',
+          packageVersion: '1.0.0',
+          sourcePath: '.tmp/team-skill',
+          status: 'running',
+          revision: 1,
+          createdAt: 1,
+          updatedAt: 1,
+          sessions: [{ runId: 'run-1', roleId: 'leader', agentId: 'leader-agent', sessionKey: 'agent:leader:team-run-1', sessionIdentity: leaderIdentity }],
+        }],
+      },
+      submitTeamRoleMessageFromChat,
+    } as never);
+    useChatStore.setState((state) => ({
+      currentSessionKey: 'agent:leader:team-run-1',
+      loadedSessions: {
+        ...state.loadedSessions,
+        'agent:leader:team-run-1': buildSessionRecord({
+          sessionKey: 'agent:leader:team-run-1',
+          meta: { sessionIdentity: leaderIdentity, agentId: 'leader-agent' },
+        }),
+      },
+      sendMessage,
+    } as never));
+
+    render(
+      <MemoryRouter>
+        <Chat isActive={false} />
+      </MemoryRouter>,
+    );
+
+    fireEvent.click(screen.getByTestId('chat-input'));
+
+    await waitFor(() => expect(submitTeamRoleMessageFromChat).toHaveBeenCalledWith('team-1', 'leader', 'hello from test'));
+    await waitFor(() => expect(chatInputSendResultSpy).toHaveBeenCalledWith({ accepted: true }));
+    expect(sendMessage).not.toHaveBeenCalled();
+
+    releaseSubmit();
+  });
+
+  it('普通 Agent 会话发送仍走普通 chat send，即使 agent 名叫 leader', async () => {
+    const sendMessage = vi.fn().mockResolvedValue(undefined);
+    useChatStore.setState((state) => ({
+      currentSessionKey: 'agent:leader:main',
+      loadedSessions: {
+        ...state.loadedSessions,
+        'agent:leader:main': buildSessionRecord({
+          sessionKey: 'agent:leader:main',
+          meta: { agentId: 'leader' },
+        }),
+      },
+      sendMessage,
+    } as never));
+
+    render(
+      <MemoryRouter>
+        <Chat isActive={false} />
+      </MemoryRouter>,
+    );
+
+    fireEvent.click(screen.getByTestId('chat-input'));
+
+    await waitFor(() => expect(sendMessage).toHaveBeenCalledWith('hello from test', undefined));
+    expect(useTeamsStore.getState().submitTeamRoleMessageFromChat).not.toHaveBeenCalled();
   });
 
   it('流式消息增长时，应继续通过当前页面壳把最新 viewport 内容渲染出来', () => {

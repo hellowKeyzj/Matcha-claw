@@ -253,6 +253,7 @@ export function readPromptSessionRequest(payload: unknown): {
   mediaBody: ReturnType<typeof normalizeSendWithMediaInput>;
   sessionKey: string;
   message: string;
+  displayMessage: string;
   requestedRunId: string;
   sessionIdentity: SessionIdentity | null;
   sessionIdentityError: string | null;
@@ -262,12 +263,16 @@ export function readPromptSessionRequest(payload: unknown): {
   const message = typeof directBody.message === 'string'
     ? directBody.message
     : (mediaBody?.message ?? '');
+  const displayMessage = typeof directBody.displayMessage === 'string'
+    ? directBody.displayMessage
+    : message;
   const sessionKey = normalizeString(directBody.sessionKey ?? mediaBody?.sessionKey);
   return {
     directBody,
     mediaBody,
     sessionKey,
     message,
+    displayMessage,
     requestedRunId: normalizeString(
       directBody.runId
       ?? directBody.idempotencyKey

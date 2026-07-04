@@ -1,5 +1,6 @@
 import type {
   SessionApprovalDecision,
+  SessionInfoUpdateEvent,
   SessionLoadResult,
 } from '../../../shared/session-adapter-types';
 import { createLatestWindowState } from '../../sessions/session-window-model';
@@ -25,6 +26,7 @@ export interface SessionApprovalWorkflowDeps {
   agentRuntimeRegistry: AgentRuntimeRegistry;
   operationCoordinator: SessionOperationCoordinator;
   clock: RuntimeClockPort;
+  emitSessionUpdate?: (event: SessionInfoUpdateEvent) => void;
 }
 
 export class SessionApprovalWorkflow {
@@ -78,7 +80,7 @@ export class SessionApprovalWorkflow {
     const sessionKey = sessionIdentity.sessionKey;
     return await this.deps.operationCoordinator.run(sessionIdentity, 'abort', async () => {
       const committed = this.deps.timelineRuntime.appendCanonicalEvents(sessionKey, [{
-        eventId: `local:lifecycle:${sessionKey}:${runId ?? 'active'}:stopping`,
+        eventId: `local:lifecycle:${sessionKey}:${runId ?? 'active'}:aborted`,
         type: 'lifecycle',
         protocolId: context.protocolId,
         runtimeEndpointId: context.runtimeEndpointId,
@@ -95,20 +97,29 @@ export class SessionApprovalWorkflow {
           },
         },
         phase: 'aborted',
-        runPhase: 'stopping',
+        runPhase: 'aborted',
         error: null,
       }], context);
       committed.state.window = createLatestWindowState(committed.state.renderItems.length);
+      const snapshot = {
+        ...await this.deps.snapshotService.buildLatestSnapshotAsync(sessionKey, committed.state, {
+          replayComplete: committed.state.hydrated,
+        }),
+        runtime: committed.runtime,
+      };
       const result: SessionLoadResult & { success: boolean } = {
         success: true,
-        snapshot: {
-          ...await this.deps.snapshotService.buildLatestSnapshotAsync(sessionKey, committed.state, {
-            replayComplete: committed.state.hydrated,
-          }),
-          runtime: committed.runtime,
-        },
+        snapshot,
       };
       await this.deps.stateStore.flushPersistedStore();
+      this.deps.emitSessionUpdate?.({
+        sessionUpdate: 'session_info_update',
+        sessionKey,
+        runId: runId ?? null,
+        phase: 'aborted',
+        snapshot,
+        error: null,
+      });
       return ok(result);
     });
   }

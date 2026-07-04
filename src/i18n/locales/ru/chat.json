@@ -19,6 +19,12 @@
     "approvalWaitingPlaceholder": "Waiting for approval...",
     "pickModel": "Выбрать модель",
     "modelPickerTitle": "Переключить модель",
+    "pickPermissionMode": "Выбрать режим доступа",
+    "permissionPickerTitle": "Переключить разрешения инструментов OpenClaw",
+    "permissionDefault": "Разрешения по умолчанию",
+    "permissionFullAccess": "Полный доступ",
+    "permissionLoadFailed": "Не удалось загрузить разрешения: {{error}}",
+    "permissionSwitchFailed": "Не удалось переключить разрешения: {{error}}",
     "modelSwitchFailed": "Не удалось переключить модель: {{error}}",
     "skillActive": "{{count}} skill active",
     "skillsActive": "{{count}} skills active",
@@ -35,7 +41,8 @@
     "skillConfig": "Skill Configuration",
     "skillShortLabel": "Навыки",
     "showThinking": "Показать размышления",
-    "hideThinking": "Скрыть размышления"
+    "hideThinking": "Скрыть размышления",
+    "exportMarkdown": "Export Markdown"
   },
   "liveThread": {
     "loadOlder": "Load older messages",
@@ -68,7 +75,9 @@
     "gatewayHeartbeatTimeout": "The connection to the OpenClaw Gateway timed out and is waiting to recover.",
     "gatewaySocketClosed": "The connection to the OpenClaw Gateway was closed (code {{code}}, reason: {{reason}}).",
     "gatewayRpcTimeout": "OpenClaw Gateway call timed out: {{method}}",
-    "gatewayRpcFailed": "OpenClaw Gateway call failed: {{method}}, reason: {{reason}}"
+    "gatewayRpcFailed": "OpenClaw Gateway call failed: {{method}}, reason: {{reason}}",
+    "teamRoleNodePromptActive": "This role is running a node. Send after it finishes.",
+    "exportMarkdownFailed": "Failed to export Markdown: {{error}}"
   },
   "taskPanel": {
     "stepStatus": {

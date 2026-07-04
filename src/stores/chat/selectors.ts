@@ -1,5 +1,6 @@
 import type { ChatSession, ChatStoreState } from './types';
 import {
+  isTeamRunRoleSession,
   readSessionCatalogStatusShell,
   readSessionsFromState,
   resolveSessionListLabel,
@@ -59,6 +60,9 @@ function buildAgentPaneSessionEntries(state: ChatStoreState): AgentSessionsPaneS
   const nextEntryByKey = new Map<string, AgentSessionsPaneSessionEntry>();
 
   for (const session of sessions) {
+    if (isTeamRunRoleSession(session)) {
+      continue;
+    }
     const record = state.loadedSessions[session.key];
     const meta = record?.meta;
     const title = normalizeAgentPaneSessionLabel(resolveSessionListLabel(state, session.key, session.label ?? null));
