@@ -1,0 +1,240 @@
+# Debugging Playbook
+
+本文是 MatchaClaw 定位类任务的团队规范。它服务于问题定位、故障修复、异常行为分析和回归排查：先帮助工程师建立正确归因顺序，再决定修复落点。
+
+它不是事故流水账，也不是替代 [CODING_CONSTITUTION.md](../../CODING_CONSTITUTION.md) 或 [layered-architecture.md](../architecture/layered-architecture.md) 的新架构事实来源。编码原则仍以 `CODING_CONSTITUTION.md` 为准；分层和依赖方向仍以 `docs/architecture/layered-architecture.md` 为准。
+
+## 1. 使用规则
+
+定位类任务开始规划前必须先读本文。
+
+开始前判断中必须体现：
+
+- 本次命中的 debugging principle / diagnostic pattern。
+- 本次定位的最小复现边界或真实最小闭环。
+- 第一轮验证如何证明问题归属。
+- 哪些外层表象链路暂不作为第一优先级。
+
+如果本文没有覆盖当前问题，不要强套旧 pattern；先按总原则定义最小闭环和归属验证，完成后再判断是否需要沉淀新 pattern。
+
+## 2. 总原则
+
+### P1. 真实闭环优先
+
+不要先沿用户可见表象逐层猜。先定义真实调用方、真实协议、真实服务和真实结果。
+
+推荐格式：
+
+```text
+真实调用方 X 通过协议 Y 调用服务 Z，并拿到结果 R。
+```
+
+### P2. 生产同款优先
+
+优先使用生产同款 SDK、runtime、config、command、env 和 identity 复现问题。手写 probe 只能作为辅助，不能替代真实调用方验证。
+
+### P3. 先证明归属，再改代码
+
+每个发现必须先分类，再决定是否修：
+
+- 诊断增强
+- 外围症状
+- 必要前置条件
+- 稳定性修复
+- 最终根因
+
+发现一个真实问题不等于已经找到最终根因。
+
+### P4. 协议问题读双方实现
+
+遇到跨进程、跨 runtime 或跨协议问题时，必须同时读 client serialize / send / timeout 逻辑和 server parse / handle / response 逻辑。
+
+适用协议包括但不限于 stdio、JSON-RPC、MCP、WebSocket、SSE、HTTP streaming、IPC、gateway RPC 和 provider SDK transport。
+
+### P5. 修复落到真实失败边界
+
+修复点必须落在真实失败边界。不要因为 UI、route 或 status projection 暴露了错误，就把协议、进程、identity 或 config 问题修到表象层。
+
+### P6. 验证闭环必须证明行为恢复
+
+验证不能只证明“没有报错”。必须证明真实调用方完成原本失败的业务闭环，并覆盖曾经走偏的关键假设。
+
+## 3. Diagnostic Patterns
+
+### DP-001 Integration status failure / unavailable result
+
+#### Trigger
+
+用户或系统看到某个能力不可用、状态未知、等待中、调用失败、超时、返回空结果或无法证明下游连通，但该能力背后依赖 runtime、connector、provider、gateway、子进程或外部协议。
+
+#### First principle
+
+先验证真实下游闭环，不先相信 UI/status/API 表象。
+
+#### Real minimum loop
+
+用一句话写清：
+
+```text
+真实调用方 X 通过协议 Y 调用服务 Z，并拿到结果 R。
+```
+
+如果写不出来，说明还没准备好改代码。
+
+#### First-round probes
+
+1. 用生产同款 SDK/runtime/config/command/env/identity 直接调用真实最小闭环。
+2. 验证子进程或外部 runtime 是否按同一 command/env 启动。
+3. 验证协议握手是否完成。
+4. 验证业务结果是否正确。
+5. 再回头解释 UI/API/status 为什么表现为失败。
+
+#### Attribution rule
+
+只有当真实最小闭环失败，且能定位到进程启动、协议握手、身份/config、业务处理或响应解析中的具体边界时，才开始修代码。
+
+如果真实最小闭环成功，再查外层 route、store、projection、缓存或渲染。
+
+#### Fix boundary rule
+
+修复应落在失败边界：
+
+- 协议不匹配：修 protocol boundary。
+- 进程启动错误：修 command/env/runtime resolver。
+- config 陈旧：修 config projection / invalidation。
+- identity 错配：修 identity mapping。
+- 业务结果错误：修 owning workflow/capability。
+
+不得因为外层状态失败而优先修改 Renderer、route 或泛化 timeout。
+
+#### Verification closure
+
+至少包含一个真实调用方闭环验证，以及必要的单元测试或边界测试。验证描述必须说明它证明了哪一个曾失败的环节。
+
+#### Common wrong paths
+
+- 先改 timeout。
+- 先加大量 UI/route 日志。
+- 只测试我方 server 已知支持的 happy path。
+- 把第一个真实问题当成最终根因。
+- 没读真实 SDK/runtime 的 serialize、spawn 或 timeout 实现。
+
+#### Applies to
+
+runtime integration、connector status、provider SDK、gateway RPC、MCP/stdin-stdout server、外部进程、worker、daemon、跨进程 IPC、session/runtime projection。
+
+#### Does not apply to
+
+纯 UI 排版、纯文案、已由单元测试最小复现的纯函数错误、无下游依赖的静态数据展示问题。
+
+## 4. Case Cards
+
+默认定位顺序由 Diagnostic Patterns 承载。完整案例只在仍会改变默认第一轮定位顺序时保留在本文主体；已被 pattern 覆盖的案例迁移到 [debugging-case-archive.md](./debugging-case-archive.md)。
+
+### Promoted case index
+
+- [OpenClaw MCP status timeout](./debugging-case-archive.md#case-openclaw-mcp-status-timeout) — DP-001 来源案例；关键教训是集成类状态失败先验证真实协议闭环，手写 probe 必须模拟真实调用方 SDK。
+
+## 5. 新增 Diagnostic Pattern 模板
+
+新增 pattern 必须使用以下字段，不得自由追加散文式复盘。
+
+```md
+### DP-xxx <Pattern name>
+
+#### Trigger
+
+#### First principle
+
+#### Real minimum loop
+
+#### First-round probes
+
+#### Attribution rule
+
+#### Fix boundary rule
+
+#### Verification closure
+
+#### Common wrong paths
+
+#### Applies to
+
+#### Does not apply to
+```
+
+## 6. 新增 Case Card 模板
+
+真实案例只能作为 Case Card 进入本文；不得粘贴聊天记录、命令流水或长篇事故报告。
+
+```md
+### Case: <short name>
+
+#### Status
+
+active | promoted | archived
+
+#### Source incident
+
+#### Symptom
+
+#### Surface path
+
+#### Real minimum loop
+
+#### Wrong path taken
+
+#### Missed first probe
+
+#### Root cause
+
+#### Root cause boundary
+
+#### Correct first-round plan
+
+#### Fix boundary
+
+#### Verification closure
+
+#### Reusable rule
+
+#### Applies to
+
+#### Does not apply to
+```
+
+## 7. 迭代学习与规则沉淀
+
+每次完成问题定位或故障修复后，必须判断本次是否暴露出可复用经验。
+
+### 写入位置判断
+
+- 如果是新的定位方法、归因顺序、probe 策略、复现策略或验证闭环，写入本文。
+- 如果是已有 pattern 的补充，不新增案例，优先更新已有 Diagnostic Pattern。
+- 如果是一次性项目细节，不写入长期文档。
+- 如果是已被 pattern 覆盖但仍有追溯价值的案例，迁移到 [debugging-case-archive.md](./debugging-case-archive.md)，不留在本文主体。
+- 如果是项目架构事实变化，更新 `docs/architecture/layered-architecture.md` 和相关 SVG。
+- 如果是稳定编码原则变化，且不属于定位方法，建议沉淀到 `CODING_CONSTITUTION.md`。
+- 如果是 `/code` 命令自身的流程缺口，建议更新 `.claude/commands/code.md`。
+- 不得把聊天复盘、流水账、临时命令输出直接追加到本文。
+
+### 新增经验门槛
+
+新增经验必须满足至少一个条件：
+
+1. 能改变下一次定位问题的第一轮排查顺序。
+2. 能减少误判或无效修改。
+3. 能明确某类问题的最小复现边界。
+4. 能定义新的验证闭环。
+5. 能防止把修复落到错误架构层。
+
+不满足这些条件的内容，不进入本文。
+
+### 收敛规则
+
+- 能并入已有 pattern 的，不新增 pattern。
+- 第二个相似 case 出现时，必须抽象或更新 Diagnostic Pattern。
+- 被 pattern 覆盖的 case 应标记为 `promoted`，只保留短摘要；如果不再需要默认读取，迁移到 [debugging-case-archive.md](./debugging-case-archive.md)。
+- 过期或一次性的 case 应标记为 `archived` 并迁移到 [debugging-case-archive.md](./debugging-case-archive.md)，不作为默认定位依据。
+- 本文主体应以 principles 和 Diagnostic Patterns 为主，Case Cards 只保留能改变未来定位顺序的证据。
+- 归档案例不能改变默认第一轮定位顺序；如果能改变，必须先回写本文的 Diagnostic Pattern。
