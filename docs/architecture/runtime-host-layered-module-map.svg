@@ -80,53 +80,59 @@
   <text class="box-title" x="398" y="627">Gateway Bridge substrate</text>
   <rect class="box r2" x="674" y="602" width="250" height="42" />
   <text class="box-title" x="692" y="627">Platform Runtime</text>
-  <rect class="box r2" x="948" y="602" width="330" height="42" />
-  <text class="box-title" x="966" y="627">Tool registry / policy / ledger / audit</text>
+  <rect class="box r2" x="948" y="602" width="250" height="42" />
+  <text class="box-title" x="966" y="627">Tool registry / policy / ledger</text>
+  <rect class="box r2" x="1222" y="602" width="275" height="42" />
+  <text class="box-title" x="1240" y="627">External Connector / MCP catalog / downstream status</text>
 
   <rect class="layer r3" x="60" y="690" width="1480" height="170" />
   <text class="layer-title" x="86" y="725">R3 Application workflows / facades / orchestration runtimes</text>
   <text class="layer-note" x="86" y="750">推进具体流程；多数 workflow 在 application/workflows/**，但 TeamRun 是长生命周期 orchestration runtime。</text>
-  <rect class="box r3" x="86" y="770" width="235" height="42" />
+  <rect class="box r3" x="86" y="770" width="205" height="42" />
   <text class="box-title" x="104" y="795">Session workflows</text>
-  <rect class="box r3" x="345" y="770" width="320" height="42" />
-  <text class="box-title" x="363" y="795">TeamRuntimeService / router / worker</text>
-  <rect class="box r3" x="689" y="770" width="265" height="42" />
-  <text class="box-title" x="707" y="795">Provider/config workflows</text>
-  <rect class="box r3" x="978" y="770" width="285" height="42" />
-  <text class="box-title" x="996" y="795">Plugin lifecycle workflows</text>
-  <rect class="box r3" x="1287" y="770" width="210" height="42" />
-  <text class="box-title" x="1305" y="795">Runtime ops</text>
+  <rect class="box r3" x="315" y="770" width="255" height="42" />
+  <text class="box-title" x="333" y="795">TeamRun runtime</text>
+  <rect class="box r3" x="594" y="770" width="220" height="42" />
+  <text class="box-title" x="612" y="795">Provider/config workflows</text>
+  <rect class="box r3" x="838" y="770" width="220" height="42" />
+  <text class="box-title" x="856" y="795">Plugin lifecycle workflows</text>
+  <rect class="box r3" x="1082" y="770" width="180" height="42" />
+  <text class="box-title" x="1100" y="795">Runtime ops</text>
+  <rect class="box r3" x="1286" y="770" width="211" height="42" />
+  <text class="box-title" x="1304" y="795">Registry / status / sync ports</text>
   <text class="warn" x="86" y="836">注意：service.ts 有薄 facade、聚合 facade、实际编排核心三种语义；不能按文件名判断层级。</text>
 
   <rect class="layer r4" x="60" y="895" width="1480" height="135" />
   <text class="layer-title" x="86" y="930">R4 Inbound dispatch / outbound parent bridge boundaries</text>
-  <text class="layer-note" x="86" y="955">入站 routes 与出站 parent bridge 都是 boundary，但方向相反，不能混成同一种 adapter。</text>
+  <text class="layer-note" x="86" y="955">入站 routes、CLI/MCP shell 与出站 parent bridge 都是 boundary，但方向相反，不能混成同一种 adapter。</text>
   <rect class="box r4" x="86" y="972" width="310" height="38" />
   <text class="box-title" x="104" y="996">api/dispatch/**</text>
   <rect class="box r4" x="420" y="972" width="310" height="38" />
   <text class="box-title" x="438" y="996">api/routes/**</text>
   <rect class="box r4" x="754" y="972" width="330" height="38" />
-  <text class="box-title" x="772" y="996">route-registry / route-composition</text>
+  <text class="box-title" x="772" y="996">route-registry / CLI program shell</text>
   <rect class="box r4" x="1108" y="972" width="330" height="38" />
   <text class="box-title" x="1126" y="996">parent-transport-client.ts</text>
 
   <rect class="layer r5" x="60" y="1065" width="1480" height="145" />
   <text class="layer-title" x="86" y="1100">R5 OpenClaw integration surface</text>
-  <text class="layer-note" x="86" y="1125">不是单一薄 adapter；内部混有 runtime adapter、gateway bridge、config projection、workflow facade、managed plugin install/config。</text>
+  <text class="layer-note" x="86" y="1125">不是 TeamRun 事实源；只把 runtime-host 状态接到 OpenClaw runtime、gateway、config projection 与 native subagent materialization。</text>
   <rect class="box r5" x="86" y="1145" width="260" height="42" />
   <text class="box-title" x="104" y="1170">runtime adapter / driver</text>
   <rect class="box r5" x="370" y="1145" width="245" height="42" />
   <text class="box-title" x="388" y="1170">V4 canonical adapter</text>
-  <rect class="box r5" x="639" y="1145" width="255" height="42" />
+  <rect class="box r5" x="639" y="1145" width="220" height="42" />
   <text class="box-title" x="657" y="1170">config/state projections</text>
-  <rect class="box r5" x="918" y="1145" width="250" height="42" />
-  <text class="box-title" x="936" y="1170">OpenClaw gateway bridge</text>
-  <rect class="box r5" x="1192" y="1145" width="285" height="42" />
-  <text class="box-title" x="1210" y="1170">managed plugin install/config</text>
+  <rect class="box r5" x="883" y="1145" width="220" height="42" />
+  <text class="box-title" x="901" y="1170">MCP projection/status adapter</text>
+  <rect class="box r5" x="1127" y="1145" width="180" height="42" />
+  <text class="box-title" x="1145" y="1170">gateway bridge</text>
+  <rect class="box r5" x="1331" y="1145" width="166" height="42" />
+  <text class="box-title" x="1349" y="1170">subagent materialization</text>
 
   <rect class="layer r6" x="60" y="1240" width="1480" height="60" />
   <text class="layer-title" x="86" y="1276">R6 OpenClaw plugin extension edge</text>
-  <text class="layer-note" x="455" y="1276">packages/openclaw-* / tools / hooks / outbox / provider implementations；不是 runtime-host core。</text>
+  <text class="layer-note" x="455" y="1276">packages/openclaw-* / tools / hooks / provider implementations；不是 runtime-host core。</text>
 
   <path class="arrow" d="M800 260 L800 292" />
   <path class="arrow" d="M800 430 L800 462" />

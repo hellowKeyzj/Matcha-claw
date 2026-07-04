@@ -1,5 +1,5 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="2400" height="1700" viewBox="0 0 2400 1700">
-<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#64748b"/></marker><filter id="shadow" x="-20%" y="-20%" width="140%" height="140%"><feDropShadow dx="0" dy="8" stdDeviation="8" flood-color="#0f172a" flood-opacity="0.12"/></filter></defs><rect width="2400" height="1700" fill="#fff"/>
+<svg xmlns="http://www.w3.org/2000/svg" width="2400" height="1800" viewBox="0 0 2400 1800">
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#64748b"/></marker><filter id="shadow" x="-20%" y="-20%" width="140%" height="140%"><feDropShadow dx="0" dy="8" stdDeviation="8" flood-color="#0f172a" flood-opacity="0.12"/></filter></defs><rect width="2400" height="1800" fill="#fff"/>
 <text x="90" y="58" font-family="Inter, Segoe UI, Microsoft YaHei, Arial, sans-serif" font-size="34" font-weight="800" fill="#0f172a" text-anchor="start">MatchaClaw 当前实际实现分层架构</text>
 <text x="90" y="92" font-family="Inter, Segoe UI, Microsoft YaHei, Arial, sans-serif" font-size="18" font-weight="500" fill="#475569" text-anchor="start">按当前代码真实落地的层次绘制；不是理想四类分层，也不是传统后端分层。</text>
 <text x="2310" y="58" font-family="Inter, Segoe UI, Microsoft YaHei, Arial, sans-serif" font-size="18" font-weight="500" fill="#64748b" text-anchor="end">可缩放 SVG</text>
@@ -15,7 +15,7 @@
 <path d="M1200,930 C1200,955.0 1200,955.0 1200,980" fill="none" stroke="#64748b" stroke-width="3" marker-end="url(#arrow)" opacity=".75"/>
 <rect x="1030.0" y="929.0" width="340" height="28" rx="14" fill="#fff" stroke="#e2e8f0"/>
 <text x="1200.0" y="948.0" font-family="Inter, Segoe UI, Microsoft YaHei, Arial, sans-serif" font-size="14" font-weight="600" fill="#475569" text-anchor="middle">composition 装配 substrate</text>
-<path d="M840,1210 C840,1235.0 640,1235.0 640,1260" fill="none" stroke="#64748b" stroke-width="3" marker-end="url(#arrow)" opacity=".75"/>
+<path d="M840,1230 C840,1245.0 640,1245.0 640,1260" fill="none" stroke="#64748b" stroke-width="3" marker-end="url(#arrow)" opacity=".75"/>
 <rect x="570.0" y="1209.0" width="340" height="28" rx="14" fill="#fff" stroke="#e2e8f0"/>
 <text x="740.0" y="1228.0" font-family="Inter, Segoe UI, Microsoft YaHei, Arial, sans-serif" font-size="14" font-weight="600" fill="#475569" text-anchor="middle">workflows 使用 substrate</text>
 <path d="M1560,1210 C1560,1235.0 1770,1235.0 1770,1260" fill="none" stroke="#64748b" stroke-width="3" marker-end="url(#arrow)" opacity=".75"/>
@@ -98,13 +98,13 @@
 <text x="1768.0" y="855" font-family="Inter, Segoe UI, Microsoft YaHei, Arial, sans-serif" font-size="11" font-weight="500" fill="#64748b" text-anchor="start">runtime-host-runtime-module-registry.ts</text>
 <rect x="116.0" y="878" width="530.0" height="54" rx="12" fill="#fff" stroke="#e2e8f0"/>
 <text x="130.0" y="901" font-family="Inter, Segoe UI, Microsoft YaHei, Arial, sans-serif" font-size="14" font-weight="700" fill="#0f172a" text-anchor="start">Application module registry</text>
-<text x="130.0" y="921" font-family="Inter, Segoe UI, Microsoft YaHei, Arial, sans-serif" font-size="11" font-weight="500" fill="#64748b" text-anchor="start">runtime-host-module-registry.ts</text>
+<text x="130.0" y="921" font-family="Inter, Segoe UI, Microsoft YaHei, Arial, sans-serif" font-size="11" font-weight="500" fill="#64748b" text-anchor="start">external-connectors / openclaw / operations</text>
 <rect x="662.0" y="878" width="530.0" height="54" rx="12" fill="#fff" stroke="#e2e8f0"/>
 <text x="676.0" y="901" font-family="Inter, Segoe UI, Microsoft YaHei, Arial, sans-serif" font-size="14" font-weight="700" fill="#0f172a" text-anchor="start">Route composition</text>
 <text x="676.0" y="921" font-family="Inter, Segoe UI, Microsoft YaHei, Arial, sans-serif" font-size="11" font-weight="500" fill="#64748b" text-anchor="start">runtime-route-composition.ts</text>
 </g>
 <g filter="url(#shadow)">
-<rect x="90" y="980" width="2220" height="230" rx="22" fill="#f0fdfa" stroke="#0d9488" stroke-width="3"/>
+<rect x="90" y="980" width="2220" height="250" rx="22" fill="#f0fdfa" stroke="#0d9488" stroke-width="3"/>
 <text x="116" y="1020" font-family="Inter, Segoe UI, Microsoft YaHei, Arial, sans-serif" font-size="24" font-weight="800" fill="#0f172a" text-anchor="start">第 5 层：runtime-host runtime substrate modules</text>
 <rect x="116.0" y="1042" width="530.0" height="54" rx="12" fill="#fff" stroke="#e2e8f0"/>
 <text x="130.0" y="1065" font-family="Inter, Segoe UI, Microsoft YaHei, Arial, sans-serif" font-size="14" font-weight="700" fill="#0f172a" text-anchor="start">Runtime address model</text>
@@ -130,6 +130,9 @@
 <rect x="1754.0" y="1108" width="530.0" height="54" rx="12" fill="#fff" stroke="#e2e8f0"/>
 <text x="1768.0" y="1131" font-family="Inter, Segoe UI, Microsoft YaHei, Arial, sans-serif" font-size="14" font-weight="700" fill="#0f172a" text-anchor="start">Job runtime</text>
 <text x="1768.0" y="1151" font-family="Inter, Segoe UI, Microsoft YaHei, Arial, sans-serif" font-size="11" font-weight="500" fill="#64748b" text-anchor="start">background jobs / long tasks</text>
+<rect x="116.0" y="1174" width="530.0" height="54" rx="12" fill="#fff" stroke="#e2e8f0"/>
+<text x="130.0" y="1197" font-family="Inter, Segoe UI, Microsoft YaHei, Arial, sans-serif" font-size="14" font-weight="700" fill="#0f172a" text-anchor="start">External connector platform</text>
+<text x="130.0" y="1217" font-family="Inter, Segoe UI, Microsoft YaHei, Arial, sans-serif" font-size="11" font-weight="500" fill="#64748b" text-anchor="start">connector registry / MCP catalog / downstream status / validation</text>
 </g>
 <g filter="url(#shadow)">
 <rect x="90" y="1260" width="1080" height="260" rx="22" fill="#fef3c7" stroke="#d97706" stroke-width="3"/>
@@ -139,7 +142,7 @@
 <text x="130.0" y="1365" font-family="Inter, Segoe UI, Microsoft YaHei, Arial, sans-serif" font-size="11" font-weight="500" fill="#64748b" text-anchor="start">run / ingress / hydration / approval / command</text>
 <rect x="638.0" y="1322" width="506.0" height="54" rx="12" fill="#fff" stroke="#e2e8f0"/>
 <text x="652.0" y="1345" font-family="Inter, Segoe UI, Microsoft YaHei, Arial, sans-serif" font-size="14" font-weight="700" fill="#0f172a" text-anchor="start">TeamRun runtime</text>
-<text x="652.0" y="1365" font-family="Inter, Segoe UI, Microsoft YaHei, Arial, sans-serif" font-size="11" font-weight="500" fill="#64748b" text-anchor="start">TeamRuntimeService / team capability / worker</text>
+<text x="652.0" y="1365" font-family="Inter, Segoe UI, Microsoft YaHei, Arial, sans-serif" font-size="11" font-weight="500" fill="#64748b" text-anchor="start">TeamRuntimeService / graph core / command ledger</text>
 <rect x="116.0" y="1388" width="506.0" height="54" rx="12" fill="#fff" stroke="#e2e8f0"/>
 <text x="130.0" y="1411" font-family="Inter, Segoe UI, Microsoft YaHei, Arial, sans-serif" font-size="14" font-weight="700" fill="#0f172a" text-anchor="start">Provider/config workflows</text>
 <text x="130.0" y="1431" font-family="Inter, Segoe UI, Microsoft YaHei, Arial, sans-serif" font-size="11" font-weight="500" fill="#64748b" text-anchor="start">accounts / models / routing / auth</text>
@@ -155,9 +158,12 @@
 <rect x="116.0" y="1520" width="506.0" height="54" rx="12" fill="#fff" stroke="#e2e8f0"/>
 <text x="130.0" y="1543" font-family="Inter, Segoe UI, Microsoft YaHei, Arial, sans-serif" font-size="14" font-weight="700" fill="#0f172a" text-anchor="start">Application facades</text>
 <text x="130.0" y="1563" font-family="Inter, Segoe UI, Microsoft YaHei, Arial, sans-serif" font-size="11" font-weight="500" fill="#64748b" text-anchor="start">application/*/service.ts</text>
+<rect x="638.0" y="1520" width="506.0" height="54" rx="12" fill="#fff" stroke="#e2e8f0"/>
+<text x="652.0" y="1543" font-family="Inter, Segoe UI, Microsoft YaHei, Arial, sans-serif" font-size="14" font-weight="700" fill="#0f172a" text-anchor="start">External connector workflows</text>
+<text x="652.0" y="1563" font-family="Inter, Segoe UI, Microsoft YaHei, Arial, sans-serif" font-size="11" font-weight="500" fill="#64748b" text-anchor="start">registry facade / status / sync ports</text>
 </g>
 <g filter="url(#shadow)">
-<rect x="1230" y="1260" width="1080" height="260" rx="22" fill="#faf5ff" stroke="#9333ea" stroke-width="3"/>
+<rect x="1230" y="1260" width="1080" height="390" rx="22" fill="#faf5ff" stroke="#9333ea" stroke-width="3"/>
 <text x="1256" y="1300" font-family="Inter, Segoe UI, Microsoft YaHei, Arial, sans-serif" font-size="24" font-weight="800" fill="#0f172a" text-anchor="start">第 7 层：OpenClaw adapters / projections / bridge</text>
 <rect x="1256.0" y="1322" width="506.0" height="54" rx="12" fill="#fff" stroke="#e2e8f0"/>
 <text x="1270.0" y="1345" font-family="Inter, Segoe UI, Microsoft YaHei, Arial, sans-serif" font-size="14" font-weight="700" fill="#0f172a" text-anchor="start">OpenClaw runtime adapter</text>
@@ -178,26 +184,29 @@
 <text x="1792.0" y="1477" font-family="Inter, Segoe UI, Microsoft YaHei, Arial, sans-serif" font-size="14" font-weight="700" fill="#0f172a" text-anchor="start">Plugin discovery / manifest loader</text>
 <text x="1792.0" y="1497" font-family="Inter, Segoe UI, Microsoft YaHei, Arial, sans-serif" font-size="11" font-weight="500" fill="#64748b" text-anchor="start">runtime-host/plugin-engine/**</text>
 <rect x="1256.0" y="1520" width="506.0" height="54" rx="12" fill="#fff" stroke="#e2e8f0"/>
-<text x="1270.0" y="1543" font-family="Inter, Segoe UI, Microsoft YaHei, Arial, sans-serif" font-size="14" font-weight="700" fill="#0f172a" text-anchor="start">runtime-host HTTP routes</text>
-<text x="1270.0" y="1563" font-family="Inter, Segoe UI, Microsoft YaHei, Arial, sans-serif" font-size="11" font-weight="500" fill="#64748b" text-anchor="start">runtime-host/api/routes/**</text>
+<text x="1270.0" y="1543" font-family="Inter, Segoe UI, Microsoft YaHei, Arial, sans-serif" font-size="14" font-weight="700" fill="#0f172a" text-anchor="start">runtime-host inbound routes / CLI shells</text>
+<text x="1270.0" y="1563" font-family="Inter, Segoe UI, Microsoft YaHei, Arial, sans-serif" font-size="11" font-weight="500" fill="#64748b" text-anchor="start">api/routes/** · application/runtime-cli/**</text>
 <rect x="1778.0" y="1520" width="506.0" height="54" rx="12" fill="#fff" stroke="#e2e8f0"/>
-<text x="1792.0" y="1543" font-family="Inter, Segoe UI, Microsoft YaHei, Arial, sans-serif" font-size="14" font-weight="700" fill="#0f172a" text-anchor="start">Parent transport</text>
-<text x="1792.0" y="1563" font-family="Inter, Segoe UI, Microsoft YaHei, Arial, sans-serif" font-size="11" font-weight="500" fill="#64748b" text-anchor="start">parent-transport-client.ts</text>
+<text x="1792.0" y="1543" font-family="Inter, Segoe UI, Microsoft YaHei, Arial, sans-serif" font-size="14" font-weight="700" fill="#0f172a" text-anchor="start">OpenClaw MCP projection/status</text>
+<text x="1792.0" y="1563" font-family="Inter, Segoe UI, Microsoft YaHei, Arial, sans-serif" font-size="11" font-weight="500" fill="#64748b" text-anchor="start">downstream adapter via connect port</text>
+<rect x="1256.0" y="1586" width="506.0" height="54" rx="12" fill="#fff" stroke="#e2e8f0"/>
+<text x="1270.0" y="1609" font-family="Inter, Segoe UI, Microsoft YaHei, Arial, sans-serif" font-size="14" font-weight="700" fill="#0f172a" text-anchor="start">Parent transport</text>
+<text x="1270.0" y="1629" font-family="Inter, Segoe UI, Microsoft YaHei, Arial, sans-serif" font-size="11" font-weight="500" fill="#64748b" text-anchor="start">parent-transport-client.ts</text>
 </g>
 <g filter="url(#shadow)">
-<rect x="90" y="1570" width="2220" height="100" rx="22" fill="#fdf2f8" stroke="#db2777" stroke-width="3"/>
-<text x="116" y="1610" font-family="Inter, Segoe UI, Microsoft YaHei, Arial, sans-serif" font-size="24" font-weight="800" fill="#0f172a" text-anchor="start">第 8 层：OpenClaw plugin packages / extension seam</text>
-<rect x="116.0" y="1632" width="530.0" height="54" rx="12" fill="#fff" stroke="#e2e8f0"/>
-<text x="130.0" y="1655" font-family="Inter, Segoe UI, Microsoft YaHei, Arial, sans-serif" font-size="14" font-weight="700" fill="#0f172a" text-anchor="start">Plugin manifests</text>
-<text x="130.0" y="1675" font-family="Inter, Segoe UI, Microsoft YaHei, Arial, sans-serif" font-size="11" font-weight="500" fill="#64748b" text-anchor="start">packages/*/openclaw.plugin.json</text>
-<rect x="662.0" y="1632" width="530.0" height="54" rx="12" fill="#fff" stroke="#e2e8f0"/>
-<text x="676.0" y="1655" font-family="Inter, Segoe UI, Microsoft YaHei, Arial, sans-serif" font-size="14" font-weight="700" fill="#0f172a" text-anchor="start">Plugin SDK entries</text>
-<text x="676.0" y="1675" font-family="Inter, Segoe UI, Microsoft YaHei, Arial, sans-serif" font-size="11" font-weight="500" fill="#64748b" text-anchor="start">packages/*/src/index.ts</text>
-<rect x="1208.0" y="1632" width="530.0" height="54" rx="12" fill="#fff" stroke="#e2e8f0"/>
-<text x="1222.0" y="1655" font-family="Inter, Segoe UI, Microsoft YaHei, Arial, sans-serif" font-size="14" font-weight="700" fill="#0f172a" text-anchor="start">Team / Task / Browser / Security / Media / Memory plugins</text>
-<text x="1222.0" y="1675" font-family="Inter, Segoe UI, Microsoft YaHei, Arial, sans-serif" font-size="11" font-weight="500" fill="#64748b" text-anchor="start">packages/**</text>
-<rect x="1754.0" y="1632" width="530.0" height="54" rx="12" fill="#fff" stroke="#e2e8f0"/>
-<text x="1768.0" y="1655" font-family="Inter, Segoe UI, Microsoft YaHei, Arial, sans-serif" font-size="14" font-weight="700" fill="#0f172a" text-anchor="start">Hook extension seam</text>
-<text x="1768.0" y="1675" font-family="Inter, Segoe UI, Microsoft YaHei, Arial, sans-serif" font-size="11" font-weight="500" fill="#64748b" text-anchor="start">api.on(...) / tools / outbox</text>
+<rect x="90" y="1660" width="2220" height="100" rx="22" fill="#fdf2f8" stroke="#db2777" stroke-width="3"/>
+<text x="116" y="1700" font-family="Inter, Segoe UI, Microsoft YaHei, Arial, sans-serif" font-size="24" font-weight="800" fill="#0f172a" text-anchor="start">第 8 层：OpenClaw plugin packages / extension seam</text>
+<rect x="116.0" y="1722" width="530.0" height="54" rx="12" fill="#fff" stroke="#e2e8f0"/>
+<text x="130.0" y="1745" font-family="Inter, Segoe UI, Microsoft YaHei, Arial, sans-serif" font-size="14" font-weight="700" fill="#0f172a" text-anchor="start">Plugin manifests</text>
+<text x="130.0" y="1765" font-family="Inter, Segoe UI, Microsoft YaHei, Arial, sans-serif" font-size="11" font-weight="500" fill="#64748b" text-anchor="start">packages/*/openclaw.plugin.json</text>
+<rect x="662.0" y="1722" width="530.0" height="54" rx="12" fill="#fff" stroke="#e2e8f0"/>
+<text x="676.0" y="1745" font-family="Inter, Segoe UI, Microsoft YaHei, Arial, sans-serif" font-size="14" font-weight="700" fill="#0f172a" text-anchor="start">Plugin SDK entries</text>
+<text x="676.0" y="1765" font-family="Inter, Segoe UI, Microsoft YaHei, Arial, sans-serif" font-size="11" font-weight="500" fill="#64748b" text-anchor="start">packages/*/src/index.ts</text>
+<rect x="1208.0" y="1722" width="530.0" height="54" rx="12" fill="#fff" stroke="#e2e8f0"/>
+<text x="1222.0" y="1745" font-family="Inter, Segoe UI, Microsoft YaHei, Arial, sans-serif" font-size="14" font-weight="700" fill="#0f172a" text-anchor="start">Provider / Task / Browser / Security / Media / Memory plugins</text>
+<text x="1222.0" y="1765" font-family="Inter, Segoe UI, Microsoft YaHei, Arial, sans-serif" font-size="11" font-weight="500" fill="#64748b" text-anchor="start">packages/**</text>
+<rect x="1754.0" y="1722" width="530.0" height="54" rx="12" fill="#fff" stroke="#e2e8f0"/>
+<text x="1768.0" y="1745" font-family="Inter, Segoe UI, Microsoft YaHei, Arial, sans-serif" font-size="14" font-weight="700" fill="#0f172a" text-anchor="start">Hook extension seam</text>
+<text x="1768.0" y="1765" font-family="Inter, Segoe UI, Microsoft YaHei, Arial, sans-serif" font-size="11" font-weight="500" fill="#64748b" text-anchor="start">api.on(...) / tools / hooks</text>
 </g>
 </svg>
