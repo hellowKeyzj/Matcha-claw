@@ -9,6 +9,7 @@
         "tasks": "Task Center",
         "teams": "Teams",
         "plugins": "Plugin Center",
+        "connectors": "Connectors",
         "security": "Security",
         "agentSessions": "Agent Sessions",
         "collapseAgentSessions": "Collapse agent sessions",

@@ -141,7 +141,6 @@ function setupSidebarState() {
     createRun: vi.fn().mockResolvedValue(undefined),
     deleteRun: vi.fn().mockResolvedValue(undefined),
     refreshSnapshot: vi.fn().mockResolvedValue(undefined),
-    tickRun: vi.fn().mockResolvedValue(undefined),
     cancelRun: vi.fn().mockResolvedValue(undefined),
     resolveApproval: vi.fn().mockResolvedValue(undefined),
     submitDecision: vi.fn().mockResolvedValue(undefined),

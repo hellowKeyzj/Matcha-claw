@@ -31,6 +31,7 @@ import {
   SubAgentsRoute,
   TasksRoute,
   PluginsRoute,
+  ExternalConnectorsRoute,
 } from './lib/route-preload';
 
 function RouteLoadingFallback() {
@@ -218,7 +219,12 @@ function App() {
       }
     };
 
-    const unsubscribe = window.electron.ipcRenderer.on('navigate', handleNavigate);
+    const ipcRenderer = window.electron?.ipcRenderer;
+    if (typeof ipcRenderer?.on !== 'function') {
+      return undefined;
+    }
+
+    const unsubscribe = ipcRenderer.on('navigate', handleNavigate);
 
     return () => {
       if (typeof unsubscribe === 'function') {
@@ -332,6 +338,14 @@ function App() {
               element={(
                 <Suspense fallback={<RouteLoadingFallback />}>
                   <PluginsRoute />
+                </Suspense>
+              )}
+            />
+            <Route
+              path="/connectors"
+              element={(
+                <Suspense fallback={<RouteLoadingFallback />}>
+                  <ExternalConnectorsRoute />
                 </Suspense>
               )}
             />

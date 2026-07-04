@@ -22,6 +22,7 @@ export const ChannelsRoute = lazyWithPreload(() => import('../pages/Channels'));
 export const SubAgentsRoute = lazyWithPreload(() => import('../pages/SubAgents'));
 export const TasksRoute = lazyWithPreload(() => import('../pages/Tasks'));
 export const PluginsRoute = lazyWithPreload(() => import('../pages/Plugins'));
+export const ExternalConnectorsRoute = lazyWithPreload(() => import('../pages/ExternalConnectors'));
 export const ProvidersRoute = lazyWithPreload(() =>
   import('../pages/Providers').then((module) => ({ default: module.ProvidersPage })),
 );
@@ -68,6 +69,9 @@ function resolveRoutePreloader(path: string): (() => Promise<unknown>) | null {
   }
   if (normalizedPath.startsWith('/plugins')) {
     return () => PluginsRoute.preload();
+  }
+  if (normalizedPath.startsWith('/connectors')) {
+    return () => ExternalConnectorsRoute.preload();
   }
   if (TEAMS_FEATURE_ENABLED && normalizedPath.startsWith('/teams/')) {
     return () => TeamChatRoute.preload();

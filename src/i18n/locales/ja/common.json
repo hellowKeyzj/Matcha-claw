@@ -9,6 +9,7 @@
         "tasks": "タスクセンター",
         "teams": "チーム",
         "plugins": "プラグインセンター",
+        "connectors": "コネクタ",
         "security": "セキュリティ",
         "agentSessions": "Agentセッション",
         "collapseAgentSessions": "Agentセッションを折りたたむ",
