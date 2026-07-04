@@ -141,6 +141,10 @@
       "deny": "拒绝",
       "groupBadge": "分组",
       "toolBadge": "工具",
+      "coreBadge": "内置",
+      "pluginBadge": "插件",
+      "toolCount": "{{count}} 个工具",
+      "defaultProfiles": "默认 Profile：{{profiles}}",
       "unsupported": {
         "runtimeDoesNotExposeAgentSkillConfig": "当前运行时不支持 Agent 技能配置。",
         "runtimeDoesNotExposeAgentToolConfig": "当前运行时不支持 Agent 工具配置。",

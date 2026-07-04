@@ -141,6 +141,10 @@
       "deny": "Deny",
       "groupBadge": "Group",
       "toolBadge": "Tool",
+      "coreBadge": "Core",
+      "pluginBadge": "Plugin",
+      "toolCount": "{{count}} tools",
+      "defaultProfiles": "Default profiles: {{profiles}}",
       "unsupported": {
         "runtimeDoesNotExposeAgentSkillConfig": "This runtime does not support agent skill configuration.",
         "runtimeDoesNotExposeAgentToolConfig": "This runtime does not support agent tool configuration.",

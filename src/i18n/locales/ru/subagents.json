@@ -141,6 +141,10 @@
       "deny": "Запретить",
       "groupBadge": "Группа",
       "toolBadge": "Инструмент",
+      "coreBadge": "Core",
+      "pluginBadge": "Plugin",
+      "toolCount": "{{count}} инструментов",
+      "defaultProfiles": "Профили по умолчанию: {{profiles}}",
       "unsupported": {
         "runtimeDoesNotExposeAgentSkillConfig": "Текущий runtime не поддерживает настройку навыков Agent.",
         "runtimeDoesNotExposeAgentToolConfig": "Текущий runtime не поддерживает настройку инструментов Agent.",

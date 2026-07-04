@@ -387,6 +387,8 @@ describe('subagents page', () => {
           support: { supportType: 'supported' },
           selectionMode: 'inheritsDefaultTools',
           toolPolicy: null,
+          toolProfiles: [],
+          toolGroups: [],
           toolOptions: [],
           revision: 'tool-main',
           updatedAt: null,
@@ -396,7 +398,34 @@ describe('subagents page', () => {
           support: { supportType: 'supported' },
           selectionMode: 'inheritsDefaultTools',
           toolPolicy: null,
-          toolOptions: [],
+          toolProfiles: [
+            { profileKey: 'coding', displayName: 'Coding' },
+            { profileKey: 'full', displayName: 'Full' },
+          ],
+          toolGroups: [
+            {
+              groupKey: 'fs',
+              displayName: 'Files',
+              source: 'core',
+              toolOptions: [
+                { toolKey: 'read', displayName: 'Read', optionType: 'tool', description: 'Read files', source: 'core', groupKey: 'fs', groupDisplayName: 'Files', defaultProfiles: ['coding'] },
+              ],
+            },
+            {
+              groupKey: 'web',
+              displayName: 'Web',
+              source: 'core',
+              toolOptions: [
+                { toolKey: 'web_search', displayName: 'Web Search', optionType: 'tool', description: 'Search web content', source: 'core', groupKey: 'web', groupDisplayName: 'Web', defaultProfiles: ['coding'] },
+              ],
+            },
+          ],
+          toolOptions: [
+            { toolKey: 'group:fs', displayName: 'Files tools', optionType: 'group', source: 'core', groupKey: 'fs', groupDisplayName: 'Files' },
+            { toolKey: 'read', displayName: 'Read', optionType: 'tool', description: 'Read files', source: 'core', groupKey: 'fs', groupDisplayName: 'Files', defaultProfiles: ['coding'] },
+            { toolKey: 'group:web', displayName: 'Web tools', optionType: 'group', source: 'core', groupKey: 'web', groupDisplayName: 'Web' },
+            { toolKey: 'web_search', displayName: 'Web Search', optionType: 'tool', description: 'Search web content', source: 'core', groupKey: 'web', groupDisplayName: 'Web', defaultProfiles: ['coding'] },
+          ],
           revision: 'tool-alpha',
           updatedAt: null,
         },
@@ -405,6 +434,8 @@ describe('subagents page', () => {
           support: { supportType: 'supported' },
           selectionMode: 'inheritsDefaultTools',
           toolPolicy: null,
+          toolProfiles: [],
+          toolGroups: [],
           toolOptions: [],
           revision: 'tool-writer',
           updatedAt: null,
@@ -950,6 +981,10 @@ describe('subagents page', () => {
 
     expect(screen.queryByText('Skill Configuration')).toBeNull();
     expect(screen.getByText('Tool Configuration')).toBeInTheDocument();
+    expect(screen.getByText('Files')).toBeInTheDocument();
+    expect(screen.getByText('Read')).toBeInTheDocument();
+    expect(screen.getByText('Web')).toBeInTheDocument();
+    expect(screen.getByText('Web Search')).toBeInTheDocument();
     expect(screen.queryByText(/Configure this agent.*OpenClaw tool profile/i)).toBeNull();
   });
 

@@ -52,9 +52,10 @@ type MockSession = {
 type MockSubagent = {
   id: string;
   name: string;
+  description?: string;
   workspace: string;
-  model: string;
-  skills: string[];
+  model?: string;
+  skills?: string[];
   isDefault: boolean;
 };
 
@@ -96,6 +97,8 @@ interface E2EChatMockState {
   activeTeamRunId: string;
   counter: number;
   subagents: MockSubagent[];
+  subagentConfigRevision: number;
+  subagentConfigUpdatedAt: number | null;
 }
 
 const isE2EMode = process.env.MATCHACLAW_E2E === '1';
@@ -111,6 +114,8 @@ const state: E2EChatMockState = {
   activeTeamRunId: 'team-run-main',
   counter: 0,
   subagents: [],
+  subagentConfigRevision: 0,
+  subagentConfigUpdatedAt: null,
 };
 
 const ARTIFACT_WORKSPACE_ROOT = '/workspace';
@@ -263,6 +268,7 @@ function buildCapabilitySummary(
 
 function buildRuntimeEndpointCapabilitySummaries() {
   const runtimeScope = runtimeInstanceScope();
+  const subagentScope: RuntimeScope = { kind: 'agent', endpoint: OPENCLAW_ENDPOINT, agentId: 'main' };
   const teamRuntimeScope = teamRunScope(state.activeTeamRunId ?? 'team-run-main');
   const workspaceScope: RuntimeScope = { kind: 'workspace', endpoint: OPENCLAW_ENDPOINT };
   return [
@@ -286,12 +292,25 @@ function buildRuntimeEndpointCapabilitySummaries() {
       { id: 'approvals.list', targetKind: 'session' },
       { id: 'approvals.resolve', targetKind: 'approval' },
     ]),
+    buildCapabilitySummary('subagent.management', subagentScope, ['agent', 'subagent'], [
+      { id: 'subagents.list', targetKind: 'agent' },
+      { id: 'subagents.displayConfig.get', targetKind: 'agent' },
+      { id: 'subagents.description.set', targetKind: 'subagent' },
+      { id: 'subagents.model.set', targetKind: 'subagent' },
+      { id: 'subagents.skills.set', targetKind: 'subagent' },
+      { id: 'subagents.create', targetKind: 'subagent' },
+      { id: 'subagents.update', targetKind: 'subagent' },
+      { id: 'subagents.delete', targetKind: 'subagent' },
+      { id: 'subagents.files.get', targetKind: 'subagent' },
+      { id: 'subagents.files.set', targetKind: 'subagent' },
+      { id: 'subagents.files.list', targetKind: 'subagent' },
+    ]),
     buildCapabilitySummary('team.runtime', runtimeScope, ['team', 'team-run', 'team-approval'], [
       { id: 'team.runCreate', targetKind: 'team' },
     ]),
     buildCapabilitySummary('team.runtime', teamRuntimeScope, ['team-run', 'team-approval'], [
       { id: 'team.runSnapshot', targetKind: 'team-run' },
-      { id: 'team.planWorkflow', targetKind: 'team-run' },
+      { id: 'team.graphPatch', targetKind: 'team-run' },
       { id: 'team.approvalResolve', targetKind: 'team-approval' },
       { id: 'team.runDelete', targetKind: 'team-run' },
     ]),
@@ -395,6 +414,52 @@ function buildMockWorkbookBase64(): string {
 
 function clone<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;
+}
+
+function subagentConfigRevision(): string {
+  return `e2e-subagent-config-${state.subagentConfigRevision}`;
+}
+
+function buildSubagentDisplayConfigSnapshot() {
+  return {
+    agents: state.subagents.map((agent) => ({
+      id: agent.id,
+      ...(agent.description ? { description: agent.description } : {}),
+      workspace: agent.workspace,
+      ...(agent.model ? { model: agent.model } : {}),
+      ...(agent.skills ? { skills: agent.skills } : {}),
+    })),
+    defaults: {
+      workspace: ARTIFACT_WORKSPACE_ROOT,
+      model: 'mock/default',
+      skills: [],
+    },
+    revision: subagentConfigRevision(),
+    ready: true,
+    refreshing: false,
+    updatedAt: state.subagentConfigUpdatedAt,
+    error: null,
+  };
+}
+
+function buildSubagentConfigMutationSnapshot() {
+  return {
+    config: {
+      agents: clone(state.subagents),
+      defaults: {
+        workspace: ARTIFACT_WORKSPACE_ROOT,
+        model: 'mock/default',
+        skills: [],
+      },
+    },
+    revision: subagentConfigRevision(),
+    updatedAt: state.subagentConfigUpdatedAt,
+  };
+}
+
+function touchSubagentConfigState(): void {
+  state.subagentConfigRevision += 1;
+  state.subagentConfigUpdatedAt = Date.now();
 }
 
 function nowSeconds(): number {
@@ -973,6 +1038,8 @@ function seedState(): void {
   state.artifactSessionKey = 'agent:main:artifact';
   state.activeTeamRunId = 'team-run-main';
   state.counter = 0;
+  state.subagentConfigRevision = 0;
+  state.subagentConfigUpdatedAt = null;
   state.runsById = {};
   state.approvals = [];
   state.subagents = [
@@ -1197,27 +1264,87 @@ export function handleE2EHostApiFetch(request: HostApiFetchRequest): HostApiProx
       });
     }
 
-    if (payload.id === 'subagent.management' && payload.operationId === 'subagents.config.get') {
-      const requestPayload = requireCapabilityExecutePayload(payload, 'subagent.management', 'subagents.config.get');
+    if (payload.id === 'subagent.management' && payload.operationId === 'subagents.displayConfig.get') {
+      const requestPayload = requireCapabilityExecutePayload(payload, 'subagent.management', 'subagents.displayConfig.get');
       if ('ok' in requestPayload) {
         return requestPayload;
       }
-      return toSuccessEnvelope({
-        ready: true,
-        config: {
-          defaultModel: 'mock/default',
-          defaultWorkspace: ARTIFACT_WORKSPACE_ROOT,
-          agents: {
-            list: state.subagents.map((agent) => ({
-              id: agent.id,
-              default: agent.isDefault,
-              model: agent.model,
-              workspace: agent.workspace,
-              skills: agent.skills,
-            })),
-          },
-        },
+      return toSuccessEnvelope(buildSubagentDisplayConfigSnapshot());
+    }
+
+    if (payload.id === 'subagent.management' && payload.operationId === 'subagents.description.set') {
+      const requestPayload = requireCapabilityExecutePayload(payload, 'subagent.management', 'subagents.description.set');
+      if ('ok' in requestPayload) {
+        return requestPayload;
+      }
+      const agentId = typeof requestPayload.input.agentId === 'string' ? requestPayload.input.agentId : '';
+      const description = typeof requestPayload.input.description === 'string' && requestPayload.input.description.trim()
+        ? requestPayload.input.description.trim()
+        : undefined;
+      state.subagents = state.subagents.map((agent) => {
+        if (agent.id !== agentId) {
+          return agent;
+        }
+        const nextAgent = { ...agent };
+        if (description === undefined) {
+          delete nextAgent.description;
+        } else {
+          nextAgent.description = description;
+        }
+        return nextAgent;
       });
+      touchSubagentConfigState();
+      return toSuccessEnvelope(buildSubagentConfigMutationSnapshot());
+    }
+
+    if (payload.id === 'subagent.management' && payload.operationId === 'subagents.model.set') {
+      const requestPayload = requireCapabilityExecutePayload(payload, 'subagent.management', 'subagents.model.set');
+      if ('ok' in requestPayload) {
+        return requestPayload;
+      }
+      const agentId = typeof requestPayload.input.agentId === 'string' ? requestPayload.input.agentId : '';
+      const model = typeof requestPayload.input.model === 'string' && requestPayload.input.model.trim()
+        ? requestPayload.input.model.trim()
+        : undefined;
+      state.subagents = state.subagents.map((agent) => {
+        if (agent.id !== agentId) {
+          return agent;
+        }
+        const nextAgent = { ...agent };
+        if (model === undefined) {
+          delete nextAgent.model;
+        } else {
+          nextAgent.model = model;
+        }
+        return nextAgent;
+      });
+      touchSubagentConfigState();
+      return toSuccessEnvelope(buildSubagentConfigMutationSnapshot());
+    }
+
+    if (payload.id === 'subagent.management' && payload.operationId === 'subagents.skills.set') {
+      const requestPayload = requireCapabilityExecutePayload(payload, 'subagent.management', 'subagents.skills.set');
+      if ('ok' in requestPayload) {
+        return requestPayload;
+      }
+      const agentId = typeof requestPayload.input.agentId === 'string' ? requestPayload.input.agentId : '';
+      const skills = Array.isArray(requestPayload.input.skills)
+        ? requestPayload.input.skills.filter((skill): skill is string => typeof skill === 'string' && skill.trim()).map((skill) => skill.trim())
+        : undefined;
+      state.subagents = state.subagents.map((agent) => {
+        if (agent.id !== agentId) {
+          return agent;
+        }
+        const nextAgent = { ...agent };
+        if (skills === undefined) {
+          delete nextAgent.skills;
+        } else {
+          nextAgent.skills = skills;
+        }
+        return nextAgent;
+      });
+      touchSubagentConfigState();
+      return toSuccessEnvelope(buildSubagentConfigMutationSnapshot());
     }
 
     if (payload.id === 'runtime.host' && payload.operationId === 'runtimeHost.gatewayReady') {

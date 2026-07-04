@@ -138,6 +138,10 @@
       "deny": "拒否",
       "groupBadge": "グループ",
       "toolBadge": "ツール",
+      "coreBadge": "内蔵",
+      "pluginBadge": "プラグイン",
+      "toolCount": "{{count}} 個のツール",
+      "defaultProfiles": "既定 Profile: {{profiles}}",
       "unsupported": {
         "runtimeDoesNotExposeAgentSkillConfig": "現在のランタイムはAgentスキル設定に対応していません。",
         "runtimeDoesNotExposeAgentToolConfig": "現在のランタイムはAgentツール設定に対応していません。",
