@@ -1,11 +1,11 @@
 {
-  "title": "插件中心",
+  "title": "插件",
   "description": "统一管理插件",
   "runtime": {
     "title": "运行时状态",
     "description": "查看 Runtime Host 生命周期与健康状态。",
     "refresh": "刷新状态",
-    "restart": "重启宿主",
+    "restart": "重启",
     "busy": "处理中...",
     "recoveredNotice": "Runtime Host 已自动恢复 {{count}} 次",
     "recoveredAt": "最近恢复时间：{{time}}"
@@ -32,7 +32,7 @@
     }
   },
   "state": {
-    "hostRunning": "宿主运行中",
+    "hostRunning": "running",
     "hostStopped": "宿主未运行",
     "hostStarting": "宿主启动中",
     "hostRestarting": "宿主重启中",

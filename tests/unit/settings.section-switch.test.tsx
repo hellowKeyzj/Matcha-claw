@@ -30,6 +30,41 @@ vi.mock('@/lib/host-api', () => ({
     if (path === '/api/license/stored-key') {
       return { key: null };
     }
+    if (path === '/api/gateway/status') {
+      return {
+        processState: 'running',
+        port: 18789,
+        gatewayReady: true,
+        healthSummary: 'healthy',
+        transportState: 'connected',
+        portReachable: true,
+        diagnostics: {
+          consecutiveHeartbeatMisses: 0,
+          consecutiveRpcFailures: 0,
+        },
+        updatedAt: 1,
+      };
+    }
+    if (path === '/api/plugins/runtime') {
+      return {
+        success: true,
+        state: {
+          lifecycle: 'running',
+          runtimeLifecycle: 'running',
+          activePluginCount: 0,
+          enabledPluginIds: [],
+        },
+        health: {
+          ok: true,
+          lifecycle: 'running',
+          activePluginCount: 0,
+          degradedPlugins: [],
+        },
+        execution: {
+          enabledPluginIds: [],
+        },
+      };
+    }
     throw new Error(`unhandled hostApiFetch path: ${path}`);
   }),
 }));
@@ -87,17 +122,17 @@ describe('settings page section switch', () => {
       renderWithRouter('/settings?section=gateway');
     });
 
-    expect(screen.getByRole('button', { name: 'Gateway' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Runtime Status' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'General' })).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'AI Providers' })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Task Plugin' })).not.toBeInTheDocument();
 
-    expect(screen.getByText('Status')).toBeInTheDocument();
+    expect(screen.getByText('OpenClaw Status')).toBeInTheDocument();
     await act(async () => {
       fireEvent.click(screen.getByRole('button', { name: 'Updates' }));
     });
     expect(screen.getByTestId('update-settings-panel')).toBeInTheDocument();
-    expect(screen.queryByText('Gateway process status and controls')).not.toBeInTheDocument();
+    expect(screen.queryByText('OpenClaw Status')).not.toBeInTheDocument();
   });
 
   it('URL section=license 时默认落在授权分栏', async () => {
@@ -114,8 +149,8 @@ describe('settings page section switch', () => {
       renderWithRouter('/settings?section=aiProviders');
     });
 
-    expect(screen.getByRole('button', { name: 'Gateway' })).toBeInTheDocument();
-    expect(screen.getByText('Status')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Runtime Status' })).toBeInTheDocument();
+    expect(screen.getByText('OpenClaw Status')).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'AI Providers' })).not.toBeInTheDocument();
   });
 });

@@ -172,8 +172,14 @@
     }
   },
   "gateway": {
-    "title": "ゲートウェイ",
-    "description": "OpenClaw ゲートウェイ設定",
+    "title": "ランタイム",
+    "description": "OpenClaw と Runtime Host の状態を管理します",
+    "runtimeTitle": "ランタイム状態",
+    "runtimeDescription": "OpenClaw と Runtime Host のライフサイクルとヘルスを確認します。",
+    "openclawStatus": "OpenClaw 状態",
+    "openclawDescription": "OpenClaw プロセス、ポート、ログを確認します。",
+    "runtimeHostStatus": "Runtime Host 状態",
+    "runtimeHostDescription": "Runtime Host のライフサイクルとヘルスを確認します。",
     "tabs": {
       "general": "一般",
       "browser": "ブラウザ"
@@ -183,8 +189,8 @@
     "logs": "ログ",
     "appLogs": "アプリケーションログ",
     "openFolder": "フォルダーを開く",
-    "autoStart": "ゲートウェイ自動起動",
-    "autoStartDesc": "MatchaClaw 起動時にゲートウェイを自動起動",
+    "autoStart": "OpenClaw 自動起動",
+    "autoStartDesc": "MatchaClaw 起動時に OpenClaw を自動起動",
     "proxyTitle": "プロキシ",
     "proxyDesc": "Electron と Gateway の通信をローカルプロキシ経由にします。",
     "proxyServer": "プロキシサーバー",

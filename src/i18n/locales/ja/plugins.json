@@ -5,7 +5,7 @@
     "title": "ランタイム状態",
     "description": "Runtime Host のライフサイクルとヘルスを確認します。",
     "refresh": "更新",
-    "restart": "ホストを再起動",
+    "restart": "再起動",
     "busy": "処理中...",
     "recoveredNotice": "Runtime Host は {{count}} 回自動復旧しました",
     "recoveredAt": "最終復旧時刻: {{time}}"
@@ -32,7 +32,7 @@
     }
   },
   "state": {
-    "hostRunning": "ホスト稼働中",
+    "hostRunning": "running",
     "hostStopped": "ホスト停止中",
     "hostStarting": "ホスト起動中",
     "hostRestarting": "ホスト再起動中",

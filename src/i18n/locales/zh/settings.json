@@ -173,8 +173,14 @@
     }
   },
   "gateway": {
-    "title": "网关",
-    "description": "OpenClaw 网关设置",
+    "title": "运行时",
+    "description": "管理 OpenClaw 与 Runtime Host 运行状态",
+    "runtimeTitle": "运行状态",
+    "runtimeDescription": "查看 OpenClaw 与 Runtime Host 生命周期和健康状态。",
+    "openclawStatus": "OpenClaw 运行状态",
+    "openclawDescription": "查看 OpenClaw 进程、端口与日志。",
+    "runtimeHostStatus": "Runtime Host 运行状态",
+    "runtimeHostDescription": "查看 Runtime Host 生命周期与健康状态。",
     "tabs": {
       "general": "通用",
       "browser": "浏览器"
@@ -184,8 +190,8 @@
     "logs": "日志",
     "appLogs": "应用日志",
     "openFolder": "打开文件夹",
-    "autoStart": "自动启动网关",
-    "autoStartDesc": "MatchaClaw 启动时自动启动网关",
+    "autoStart": "自动启动 OpenClaw",
+    "autoStartDesc": "MatchaClaw 启动时自动启动 OpenClaw",
     "proxyTitle": "代理",
     "proxyDesc": "让 Electron 和 Gateway 的网络请求都走本地代理客户端。",
     "proxyServer": "代理服务器",

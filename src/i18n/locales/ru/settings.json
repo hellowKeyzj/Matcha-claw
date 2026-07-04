@@ -173,8 +173,14 @@
     }
   },
   "gateway": {
-    "title": "Шлюз",
-    "description": "Настройки шлюза OpenClaw",
+    "title": "Runtime",
+    "description": "Manage OpenClaw and Runtime Host status",
+    "runtimeTitle": "Runtime Status",
+    "runtimeDescription": "Inspect OpenClaw and Runtime Host lifecycle and health.",
+    "openclawStatus": "OpenClaw Status",
+    "openclawDescription": "Inspect the OpenClaw process, port, and logs.",
+    "runtimeHostStatus": "Runtime Host Status",
+    "runtimeHostDescription": "Inspect Runtime Host lifecycle and health.",
     "tabs": {
       "general": "General",
       "browser": "Browser"
@@ -184,8 +190,8 @@
     "logs": "Журналы",
     "appLogs": "Журналы приложения",
     "openFolder": "Открыть папку",
-    "autoStart": "Автозапуск шлюза",
-    "autoStartDesc": "Запускать шлюз при старте MatchaClaw",
+    "autoStart": "Auto-start OpenClaw",
+    "autoStartDesc": "Start OpenClaw when MatchaClaw launches",
     "proxyTitle": "Прокси",
     "proxyDesc": "Направлять трафик Electron и шлюза через локальный прокси-клиент.",
     "proxyServer": "Прокси-сервер",

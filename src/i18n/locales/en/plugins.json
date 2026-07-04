@@ -5,7 +5,7 @@
     "title": "Runtime Status",
     "description": "Inspect Runtime Host lifecycle and health.",
     "refresh": "Refresh",
-    "restart": "Restart Host",
+    "restart": "Restart",
     "busy": "Processing...",
     "recoveredNotice": "Runtime Host auto-recovered {{count}} times",
     "recoveredAt": "Last recovered at: {{time}}"
@@ -32,7 +32,7 @@
     }
   },
   "state": {
-    "hostRunning": "Host running",
+    "hostRunning": "running",
     "hostStopped": "Host not running",
     "hostStarting": "Host starting",
     "hostRestarting": "Host restarting",

@@ -173,8 +173,14 @@
     }
   },
   "gateway": {
-    "title": "Gateway",
-    "description": "OpenClaw Gateway settings",
+    "title": "Runtime",
+    "description": "Manage OpenClaw and Runtime Host status",
+    "runtimeTitle": "Runtime Status",
+    "runtimeDescription": "Inspect OpenClaw and Runtime Host lifecycle and health.",
+    "openclawStatus": "OpenClaw Status",
+    "openclawDescription": "Inspect the OpenClaw process, port, and logs.",
+    "runtimeHostStatus": "Runtime Host Status",
+    "runtimeHostDescription": "Inspect Runtime Host lifecycle and health.",
     "tabs": {
       "general": "General",
       "browser": "Browser"
@@ -184,8 +190,8 @@
     "logs": "Logs",
     "appLogs": "Application Logs",
     "openFolder": "Open Folder",
-    "autoStart": "Auto-start Gateway",
-    "autoStartDesc": "Start Gateway when MatchaClaw launches",
+    "autoStart": "Auto-start OpenClaw",
+    "autoStartDesc": "Start OpenClaw when MatchaClaw launches",
     "proxyTitle": "Proxy",
     "proxyDesc": "Route Electron and Gateway traffic through your local proxy client.",
     "proxyServer": "Proxy Server",

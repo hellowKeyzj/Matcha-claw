@@ -2,7 +2,7 @@
  * Settings Page
  * Application configuration
  */
-import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, type ReactNode } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import {
   Sun,
@@ -34,6 +34,7 @@ import { Input } from '@/components/ui/input';
 import { toast } from 'sonner';
 import { useSettingsStore } from '@/stores/settings';
 import { useGatewayStore } from '@/stores/gateway';
+import { usePluginsStore } from '@/stores/plugins-store';
 import { UpdateSettings } from '@/components/settings/UpdateSettings';
 import {
   invokeIpc,
@@ -142,6 +143,42 @@ const HISTORY_STRATEGY_SORT_LABEL_KEY: Record<HistoryStrategySortKey, string> = 
   p99Ms: 'developer.telemetrySortP99',
 };
 
+type RuntimeStatusPanelProps = {
+  title: string;
+  description: string;
+  badges: ReactNode;
+  actions: ReactNode;
+  details?: ReactNode;
+};
+
+function RuntimeStatusPanel({ title, description, badges, actions, details }: RuntimeStatusPanelProps) {
+  return (
+    <div className="space-y-3 rounded-lg border border-border/60 bg-background/40 p-4">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <Label>{title}</Label>
+          <p className="text-sm text-muted-foreground">{description}</p>
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
+          {actions}
+        </div>
+      </div>
+      <div className="flex flex-wrap items-center gap-2">
+        {badges}
+      </div>
+      {details ? <div className="space-y-2">{details}</div> : null}
+    </div>
+  );
+}
+
+function formatIsoTime(timestamp: number): string {
+  const date = new Date(timestamp);
+  if (Number.isNaN(date.getTime())) {
+    return '';
+  }
+  return date.toISOString().replace('T', ' ').replace('.000Z', 'Z');
+}
+
 function computePercentile(values: number[], percentile: number): number {
   if (values.length === 0) {
     return 0;
@@ -225,7 +262,7 @@ async function cropImageToSquareDataUrl(src: string, size = 128): Promise<string
 }
 
 export function Settings() {
-  const { t } = useTranslation('settings');
+  const { t } = useTranslation(['settings', 'plugins', 'common']);
   const location = useLocation();
   const navigate = useNavigate();
   const theme = useSettingsStore((state) => state.theme);
@@ -250,7 +287,19 @@ export function Settings() {
 
   const gatewayStatus = useGatewayStore((state) => state.status);
   const gatewayOperational = isGatewayOperational(gatewayStatus);
+  const runtimeHostEventState = useGatewayStore((state) => state.runtimeHost);
+  const initGatewayEvents = useGatewayStore((state) => state.init);
   const restartGateway = useGatewayStore((state) => state.restart);
+  const runtime = usePluginsStore((state) => state.runtime);
+  const runtimeReady = usePluginsStore((state) => state.runtimeReady);
+  const runtimePending = usePluginsStore((state) => state.runtimePending);
+  const refreshing = usePluginsStore((state) => state.refreshing);
+  const refreshReason = usePluginsStore((state) => state.refreshReason);
+  const mutating = usePluginsStore((state) => state.mutating);
+  const mutatingAction = usePluginsStore((state) => state.mutatingAction);
+  const refreshRuntime = usePluginsStore((state) => state.refreshRuntime);
+  const refreshSnapshot = usePluginsStore((state) => state.refreshSnapshot);
+  const restartHostAction = usePluginsStore((state) => state.restartHost);
   const [controlUiInfo, setControlUiInfo] = useState<ControlUiInfo | null>(null);
   const [openclawCliCommand, setOpenclawCliCommand] = useState('');
   const [openclawCliError, setOpenclawCliError] = useState<string | null>(null);
@@ -299,6 +348,16 @@ export function Settings() {
     renewalAlert: null,
   });
   const [runtimeHostEndpoint, setRuntimeHostEndpoint] = useState<RuntimeEndpointRef | null>(null);
+
+  useEffect(() => {
+    void initGatewayEvents();
+    const hadRuntime = usePluginsStore.getState().runtimeReady;
+    void refreshRuntime({ reason: 'initial' }).catch(() => {
+      if (!hadRuntime) {
+        toast.error(t('plugins:errors.loadFailed'));
+      }
+    });
+  }, [initGatewayEvents, refreshRuntime, t]);
 
   useEffect(() => {
     if (!gatewayOperational) {
@@ -1002,8 +1061,38 @@ export function Settings() {
     setHistoryStrategySampleMinDraft(String(historyStrategySampleMin));
   }, [historyStrategySampleMin]);
 
+  const observedRuntimeHostStatus = runtimeHostEventState.lifecycle;
+  const effectiveRuntimeHostStatus = observedRuntimeHostStatus !== 'unknown'
+    ? observedRuntimeHostStatus
+    : (runtime?.health.ok ? 'running' : 'stopped');
+  const showRuntimeHostError = effectiveRuntimeHostStatus === 'degraded'
+    || effectiveRuntimeHostStatus === 'error'
+    || effectiveRuntimeHostStatus === 'stopped';
+  const showRuntimeHealthError = showRuntimeHostError || runtime?.health.lifecycle === 'error';
+  const runtimeHostRecoveredAt = runtimeHostEventState.lastRestartAt
+    ? formatIsoTime(runtimeHostEventState.lastRestartAt)
+    : '';
+  const manualRuntimeRefreshing = refreshing && refreshReason === 'manual';
+  const showRuntimeLoading = !runtimeReady && runtimePending;
+
+  const refreshRuntimeHostStatus = useCallback(async () => {
+    try {
+      await refreshSnapshot({ reason: 'manual', force: true });
+    } catch {
+      toast.error(t('plugins:errors.loadFailed'));
+    }
+  }, [refreshSnapshot, t]);
+
+  const restartRuntimeHost = useCallback(async () => {
+    try {
+      await restartHostAction();
+    } catch {
+      toast.error(t('plugins:errors.restartFailed'));
+    }
+  }, [restartHostAction, t]);
+
   const sectionItems: Array<{ key: SettingsSectionKey; label: string }> = [
-    { key: 'gateway', label: t('gateway.title') },
+    { key: 'gateway', label: t('gateway.runtimeTitle') },
     { key: 'appearance', label: t('appearance.title') },
     { key: 'browser', label: t('gateway.browser.title') },
     { key: 'updates', label: t('updates.title') },
@@ -1461,38 +1550,132 @@ export function Settings() {
       {activeSection === 'gateway' && (
       <Card className="order-1">
         <CardHeader>
-          <CardTitle>{t('gateway.title')}</CardTitle>
-          <CardDescription>{t('gateway.description')}</CardDescription>
+          <CardTitle>{t('gateway.runtimeTitle')}</CardTitle>
+          <CardDescription>{t('gateway.runtimeDescription')}</CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
-          <div className="flex items-center justify-between">
-            <div>
-              <Label>{t('gateway.status')}</Label>
-              <p className="text-sm text-muted-foreground">
-                {t('gateway.port')}: {gatewayStatus.port}
-              </p>
-            </div>
-            <div className="flex items-center gap-2">
-              <Badge
-                variant={
-                  gatewayStatus.processState === 'running'
-                    ? 'success'
-                    : gatewayStatus.processState === 'error'
-                      ? 'destructive'
-                      : 'secondary'
-                }
-              >
-                {gatewayStatus.processState}
-              </Badge>
-              <Button variant="outline" size="sm" onClick={restartGateway}>
-                <RefreshCw className="h-4 w-4 mr-2" />
-                {t('common:actions.restart')}
-              </Button>
-              <Button variant="outline" size="sm" onClick={handleShowLogs}>
-                <FileText className="h-4 w-4 mr-2" />
-                {t('gateway.logs')}
-              </Button>
-            </div>
+          <div className="space-y-3">
+            <RuntimeStatusPanel
+              title={t('gateway.openclawStatus')}
+              description={t('gateway.openclawDescription')}
+              badges={(
+                <>
+                  <Badge
+                    variant={
+                      gatewayStatus.processState === 'running'
+                        ? 'success'
+                        : gatewayStatus.processState === 'error'
+                          ? 'destructive'
+                          : 'secondary'
+                    }
+                  >
+                    {gatewayStatus.processState}
+                  </Badge>
+                  <Badge variant="outline">{t('gateway.port')}: {gatewayStatus.port}</Badge>
+                </>
+              )}
+              actions={(
+                <>
+                  <Button variant="outline" size="sm" className="w-24 justify-center" onClick={restartGateway}>
+                    <RefreshCw className="h-4 w-4 mr-2" />
+                    {t('common:actions.restart')}
+                  </Button>
+                  <Button variant="outline" size="sm" className="w-24 justify-center" onClick={handleShowLogs}>
+                    <FileText className="h-4 w-4 mr-2" />
+                    {t('gateway.logs')}
+                  </Button>
+                </>
+              )}
+            />
+
+            <RuntimeStatusPanel
+              title={t('gateway.runtimeHostStatus')}
+              description={t('gateway.runtimeHostDescription')}
+              badges={showRuntimeLoading ? (
+                <>
+                  <div className="h-5 w-48 animate-pulse rounded bg-muted" />
+                  <div className="h-5 w-24 animate-pulse rounded bg-muted" />
+                </>
+              ) : (
+                <>
+                  {effectiveRuntimeHostStatus === 'running' && (
+                    <Badge variant="success">{t('plugins:state.hostRunning')}</Badge>
+                  )}
+                  {effectiveRuntimeHostStatus === 'starting' && (
+                    <Badge variant="outline">{t('plugins:state.hostStarting')}</Badge>
+                  )}
+                  {effectiveRuntimeHostStatus === 'restarting' && (
+                    <Badge variant="outline">{t('plugins:state.hostRestarting')}</Badge>
+                  )}
+                  {effectiveRuntimeHostStatus === 'degraded' && (
+                    <Badge variant="secondary">{t('plugins:state.hostDegraded')}</Badge>
+                  )}
+                  {(effectiveRuntimeHostStatus === 'stopped' || effectiveRuntimeHostStatus === 'error') && (
+                    <Badge variant="destructive">{t('plugins:state.hostStopped')}</Badge>
+                  )}
+                </>
+              )}
+              actions={(
+                <>
+                  {refreshing && !manualRuntimeRefreshing ? (
+                    <span className="inline-flex items-center gap-1 text-xs text-muted-foreground">
+                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                      {t('common:status.loading')}
+                    </span>
+                  ) : null}
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    className="w-24 justify-center"
+                    onClick={() => void restartRuntimeHost()}
+                    disabled={manualRuntimeRefreshing || mutating}
+                  >
+                    <RefreshCw className="h-4 w-4 mr-2" />
+                    {mutatingAction === 'restart' ? t('plugins:runtime.busy') : t('plugins:runtime.restart')}
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    className="w-24 justify-center"
+                    onClick={() => void refreshRuntimeHostStatus()}
+                    disabled={manualRuntimeRefreshing || mutating}
+                  >
+                    {manualRuntimeRefreshing ? t('plugins:runtime.busy') : t('plugins:runtime.refresh')}
+                  </Button>
+                </>
+              )}
+              details={showRuntimeLoading ? null : (
+                <>
+                  {runtime?.state.lastError && (
+                    <p className="rounded-md border border-destructive/50 bg-destructive/10 p-2 text-xs text-destructive">
+                      {runtime.state.lastError}
+                    </p>
+                  )}
+                  {showRuntimeHostError && runtimeHostEventState.error && (
+                    <p className="rounded-md border border-destructive/50 bg-destructive/10 p-2 text-xs text-destructive">
+                      {runtimeHostEventState.error}
+                    </p>
+                  )}
+                  {showRuntimeHealthError && runtime?.health.error && (
+                    <p className="rounded-md border border-destructive/50 bg-destructive/10 p-2 text-xs text-destructive">
+                      {runtime.health.error}
+                    </p>
+                  )}
+                  {runtimeHostEventState.restartCount > 0 && (
+                    <p className="rounded-md border border-emerald-500/40 bg-emerald-500/10 p-2 text-xs text-emerald-700">
+                      {t('plugins:runtime.recoveredNotice', { count: runtimeHostEventState.restartCount })}
+                    </p>
+                  )}
+                  {runtimeHostRecoveredAt && (
+                    <p className="rounded-md border border-emerald-500/40 bg-emerald-500/10 p-2 text-xs text-emerald-700">
+                      {t('plugins:runtime.recoveredAt', { time: runtimeHostRecoveredAt })}
+                    </p>
+                  )}
+                </>
+              )}
+            />
           </div>
 
           {showLogs && (

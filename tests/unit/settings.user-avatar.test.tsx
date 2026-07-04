@@ -37,6 +37,41 @@ vi.mock('@/lib/host-api', () => ({
     if (path === '/api/capabilities/execute') {
       return { success: true };
     }
+    if (path === '/api/gateway/status') {
+      return {
+        processState: 'running',
+        port: 18789,
+        gatewayReady: true,
+        healthSummary: 'healthy',
+        transportState: 'connected',
+        portReachable: true,
+        diagnostics: {
+          consecutiveHeartbeatMisses: 0,
+          consecutiveRpcFailures: 0,
+        },
+        updatedAt: 1,
+      };
+    }
+    if (path === '/api/plugins/runtime') {
+      return {
+        success: true,
+        state: {
+          lifecycle: 'running',
+          runtimeLifecycle: 'running',
+          activePluginCount: 0,
+          enabledPluginIds: [],
+        },
+        health: {
+          ok: true,
+          lifecycle: 'running',
+          activePluginCount: 0,
+          degradedPlugins: [],
+        },
+        execution: {
+          enabledPluginIds: [],
+        },
+      };
+    }
     throw new Error(`unhandled hostApiFetch path: ${path}`);
   }),
 }));

@@ -2,48 +2,27 @@ import { useCallback, useEffect, useMemo } from 'react';
 import { toast } from 'sonner';
 import { Loader2 } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
-import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Switch } from '@/components/ui/switch';
-import { useGatewayStore } from '@/stores/gateway';
 import { usePluginsStore } from '@/stores/plugins-store';
-import { useDelayedFlag } from '@/lib/use-delayed-flag';
 import { useTranslation } from 'react-i18next';
-
-function formatIsoTime(timestamp: number): string {
-  const date = new Date(timestamp);
-  if (Number.isNaN(date.getTime())) {
-    return '';
-  }
-  return date.toISOString().replace('T', ' ').replace('.000Z', 'Z');
-}
 
 export function PluginsPage() {
   const { t } = useTranslation(['plugins', 'common']);
-  const runtimeHostEventState = useGatewayStore((state) => state.runtimeHost);
-  const initGatewayEvents = useGatewayStore((state) => state.init);
   const runtime = usePluginsStore((state) => state.runtime);
   const catalog = usePluginsStore((state) => state.catalog);
   const runtimeReady = usePluginsStore((state) => state.runtimeReady);
   const catalogReady = usePluginsStore((state) => state.catalogReady);
   const runtimePending = usePluginsStore((state) => state.runtimePending);
   const catalogPending = usePluginsStore((state) => state.catalogPending);
-  const refreshing = usePluginsStore((state) => state.refreshing);
-  const refreshReason = usePluginsStore((state) => state.refreshReason);
-  const mutating = usePluginsStore((state) => state.mutating);
   const mutatingAction = usePluginsStore((state) => state.mutatingAction);
   const mutatingPluginId = usePluginsStore((state) => state.mutatingPluginId);
   const error = usePluginsStore((state) => state.error);
   const refreshRuntime = usePluginsStore((state) => state.refreshRuntime);
   const refreshCatalog = usePluginsStore((state) => state.refreshCatalog);
-  const refreshSnapshot = usePluginsStore((state) => state.refreshSnapshot);
-  const restartHostAction = usePluginsStore((state) => state.restartHost);
   const togglePluginEnabledAction = usePluginsStore((state) => state.togglePluginEnabled);
-  const manualRefreshing = refreshing && refreshReason === 'manual';
-  const showRefreshingHint = useDelayedFlag(refreshing && !manualRefreshing, 180);
 
   useEffect(() => {
-    void initGatewayEvents();
     const hadRuntime = usePluginsStore.getState().runtimeReady;
     void refreshRuntime({ reason: 'initial' }).catch(() => {
       if (!hadRuntime) {
@@ -51,7 +30,7 @@ export function PluginsPage() {
       }
     });
     void refreshCatalog({ reason: 'initial' }).catch(() => {});
-  }, [initGatewayEvents, refreshCatalog, refreshRuntime, t]);
+  }, [refreshCatalog, refreshRuntime, t]);
 
   const enabledPluginIds = useMemo(
     () => runtime?.execution.enabledPluginIds ?? [],
@@ -61,50 +40,6 @@ export function PluginsPage() {
     () => new Set(enabledPluginIds),
     [enabledPluginIds],
   );
-  const lifecycleTags = useMemo(() => {
-    if (!runtime) {
-      return [];
-    }
-    return [
-      {
-        id: 'host',
-        label: t(`plugins:lifecycle.host.${runtime.state.lifecycle}`),
-      },
-      {
-        id: 'runtime',
-        label: t(`plugins:lifecycle.runtime.${runtime.state.runtimeLifecycle}`),
-      },
-    ];
-  }, [runtime, t]);
-
-  const observedRuntimeHostStatus = runtimeHostEventState.lifecycle;
-  const effectiveRuntimeHostStatus = observedRuntimeHostStatus !== 'unknown'
-    ? observedRuntimeHostStatus
-    : (runtime?.health.ok ? 'running' : 'stopped');
-  const showRuntimeHostError = effectiveRuntimeHostStatus === 'degraded'
-    || effectiveRuntimeHostStatus === 'error'
-    || effectiveRuntimeHostStatus === 'stopped';
-  const showRuntimeHealthError = showRuntimeHostError || runtime?.health.lifecycle === 'error';
-  const recoveredAt = runtimeHostEventState.lastRestartAt
-    ? formatIsoTime(runtimeHostEventState.lastRestartAt)
-    : '';
-
-  const refresh = useCallback(async () => {
-    try {
-      await refreshSnapshot({ reason: 'manual', force: true });
-    } catch {
-      toast.error(t('plugins:errors.loadFailed'));
-    }
-  }, [refreshSnapshot, t]);
-
-  const restartHost = useCallback(async () => {
-    try {
-      await restartHostAction();
-    } catch {
-      toast.error(t('plugins:errors.restartFailed'));
-    }
-  }, [restartHostAction, t]);
-
   const togglePluginEnabled = useCallback(async (pluginId: string, nextEnabled: boolean) => {
     try {
       await togglePluginEnabledAction(pluginId, nextEnabled);
@@ -112,7 +47,6 @@ export function PluginsPage() {
       toast.error(t('plugins:errors.togglePluginFailed'));
     }
   }, [togglePluginEnabledAction, t]);
-  const showRuntimeLoading = !runtimeReady && runtimePending;
   const showCatalogLoading = !catalogReady && catalogPending;
 
   return (
@@ -126,86 +60,6 @@ export function PluginsPage() {
           {t(error)}
         </p>
       )}
-
-      <Card>
-        <CardHeader className="flex flex-row items-start justify-between gap-4">
-          <div>
-            <CardTitle>{t('plugins:runtime.title')}</CardTitle>
-            <CardDescription>{t('plugins:runtime.description')}</CardDescription>
-          </div>
-          <div className="flex items-center gap-2">
-            {showRefreshingHint && (
-              <span className="inline-flex items-center gap-1 text-xs text-muted-foreground">
-                <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                {t('common:status.loading')}
-              </span>
-            )}
-            <Button variant="outline" onClick={() => void refresh()} disabled={manualRefreshing || mutating}>
-              {manualRefreshing ? t('plugins:runtime.busy') : t('plugins:runtime.refresh')}
-            </Button>
-            <Button onClick={() => void restartHost()} disabled={manualRefreshing || mutating}>
-              {mutatingAction === 'restart' ? t('plugins:runtime.busy') : t('plugins:runtime.restart')}
-            </Button>
-          </div>
-        </CardHeader>
-        <CardContent className="space-y-3">
-          {showRuntimeLoading ? (
-            <div className="space-y-2">
-              <div className="h-5 w-48 animate-pulse rounded bg-muted" />
-              <div className="h-3 w-full animate-pulse rounded bg-muted" />
-              <div className="h-3 w-3/4 animate-pulse rounded bg-muted" />
-            </div>
-          ) : (
-            <>
-              <div className="flex flex-wrap items-center gap-2">
-                {effectiveRuntimeHostStatus === 'running' && (
-                  <Badge variant="default">{t('plugins:state.hostRunning')}</Badge>
-                )}
-                {effectiveRuntimeHostStatus === 'starting' && (
-                  <Badge variant="outline">{t('plugins:state.hostStarting')}</Badge>
-                )}
-                {effectiveRuntimeHostStatus === 'restarting' && (
-                  <Badge variant="outline">{t('plugins:state.hostRestarting')}</Badge>
-                )}
-                {effectiveRuntimeHostStatus === 'degraded' && (
-                  <Badge variant="secondary">{t('plugins:state.hostDegraded')}</Badge>
-                )}
-                {(effectiveRuntimeHostStatus === 'stopped' || effectiveRuntimeHostStatus === 'error') && (
-                  <Badge variant="destructive">{t('plugins:state.hostStopped')}</Badge>
-                )}
-                {lifecycleTags.map((tag) => (
-                  <Badge key={tag.id} variant="outline">{tag.label}</Badge>
-                ))}
-              </div>
-              {runtime?.state.lastError && (
-                <p className="rounded-md border border-destructive/50 bg-destructive/10 p-2 text-xs text-destructive">
-                  {runtime.state.lastError}
-                </p>
-              )}
-              {showRuntimeHostError && runtimeHostEventState.error && (
-                <p className="rounded-md border border-destructive/50 bg-destructive/10 p-2 text-xs text-destructive">
-                  {runtimeHostEventState.error}
-                </p>
-              )}
-              {showRuntimeHealthError && runtime?.health.error && (
-                <p className="rounded-md border border-destructive/50 bg-destructive/10 p-2 text-xs text-destructive">
-                  {runtime.health.error}
-                </p>
-              )}
-              {runtimeHostEventState.restartCount > 0 && (
-                <p className="rounded-md border border-emerald-500/40 bg-emerald-500/10 p-2 text-xs text-emerald-700">
-                  {t('plugins:runtime.recoveredNotice', { count: runtimeHostEventState.restartCount })}
-                </p>
-              )}
-              {recoveredAt && (
-                <p className="rounded-md border border-emerald-500/40 bg-emerald-500/10 p-2 text-xs text-emerald-700">
-                  {t('plugins:runtime.recoveredAt', { time: recoveredAt })}
-                </p>
-              )}
-            </>
-          )}
-        </CardContent>
-      </Card>
 
       <Card>
         <CardHeader>
@@ -271,7 +125,6 @@ export function PluginsPage() {
                           disabled={
                             !runtimeReady
                             || runtimePending
-                            || manualRefreshing
                             || mutatingAction !== null
                             || mutatingPluginId !== null
                           }

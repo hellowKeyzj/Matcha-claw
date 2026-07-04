@@ -111,15 +111,18 @@ export const useUpdateStore = create<UpdateState>((set, get) => ({
         console.error('Failed to get update status:', error);
       }
 
-      window.electron.ipcRenderer.on('update:status-changed', (data) => {
-        const status = data as {
-          status: UpdateStatus;
-          info?: UpdateInfo;
-          progress?: ProgressInfo;
-          error?: string;
-        };
-        set(normalizeUpdateStatus(get().currentVersion, status));
-      });
+      const ipcRenderer = window.electron?.ipcRenderer;
+      if (typeof ipcRenderer?.on === 'function') {
+        ipcRenderer.on('update:status-changed', (data) => {
+          const status = data as {
+            status: UpdateStatus;
+            info?: UpdateInfo;
+            progress?: ProgressInfo;
+            error?: string;
+          };
+          set(normalizeUpdateStatus(get().currentVersion, status));
+        });
+      }
 
       set({ isInitialized: true });
 
