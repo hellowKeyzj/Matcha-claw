@@ -64,8 +64,10 @@ export const hostRuntimeEndpointsListMock = vi.fn();
 
 const subagentCapabilityOperations: Record<string, string> = {
   'subagents.list': 'agents.list',
-  'subagents.config.get': 'config.get',
-  'subagents.config.set': 'config.set',
+  'subagents.displayConfig.get': 'displayConfig.get',
+  'subagents.description.set': 'description.set',
+  'subagents.model.set': 'model.set',
+  'subagents.skills.set': 'skills.set',
   'subagents.create': 'agents.create',
   'subagents.update': 'agents.update',
   'subagents.delete': 'agents.delete',
