@@ -7,7 +7,6 @@ import { useChatStore as realUseChatStore } from '@/stores/chat';
 import { useGatewayStore } from '@/stores/gateway';
 import { useSubagentsStore } from '@/stores/subagents';
 import { useTeamsStore } from '@/stores/teams';
-import { toast } from 'sonner';
 import { createEmptySessionRecord } from '@/stores/chat/store-state-helpers';
 import { createViewportWindowState } from '@/stores/chat/viewport-state';
 import { buildRenderItemsFromMessages } from './helpers/timeline-fixtures';
@@ -403,7 +402,7 @@ describe('chat 顶层订阅收口', () => {
     expect(sendMessage).not.toHaveBeenCalled();
   });
 
-  it('Team role 正在执行 node prompt 时拒绝会话发送并显示 i18n 提示', async () => {
+  it('Team role 正在执行 node prompt 时仍提交普通 Team role message', async () => {
     const leaderIdentity = createOpenClawTestSessionIdentity('agent:leader:team-run-1', 'leader-agent');
     const submitTeamRoleMessageFromChat = vi.fn().mockResolvedValue(undefined);
     const sendMessage = vi.fn().mockResolvedValue(undefined);
@@ -477,9 +476,8 @@ describe('chat 顶层订阅收口', () => {
 
     fireEvent.click(screen.getByTestId('chat-input'));
 
-    await waitFor(() => expect(chatInputSendResultSpy).toHaveBeenCalledWith({ accepted: false, reason: 'active' }));
-    expect(toast.error).toHaveBeenCalledWith('errors.teamRoleNodePromptActive');
-    expect(submitTeamRoleMessageFromChat).not.toHaveBeenCalled();
+    await waitFor(() => expect(submitTeamRoleMessageFromChat).toHaveBeenCalledWith('team-1', 'leader', 'hello from test'));
+    await waitFor(() => expect(chatInputSendResultSpy).toHaveBeenCalledWith({ accepted: true }));
     expect(sendMessage).not.toHaveBeenCalled();
   });
 

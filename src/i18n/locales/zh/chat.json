@@ -77,7 +77,6 @@
         "gatewaySocketClosed": "与 OpenClaw 网关的连接已断开（代码 {{code}}，原因：{{reason}}）。",
         "gatewayRpcTimeout": "调用 OpenClaw 网关超时：{{method}}",
         "gatewayRpcFailed": "调用 OpenClaw 网关失败：{{method}}，原因：{{reason}}",
-        "teamRoleNodePromptActive": "该角色正在执行节点，完成后再发送。",
         "exportMarkdownFailed": "导出 Markdown 失败：{{error}}"
     },
     "taskPanel": {

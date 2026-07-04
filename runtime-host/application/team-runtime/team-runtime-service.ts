@@ -1212,10 +1212,6 @@ class RunActor {
       if (!binding) {
         throw new Error(`TeamRun ${this.deps.runId} has no role session binding for role "${roleId}".`);
       }
-      if (this.collectActiveRoleSessionKeys().includes(binding.sessionKey)) {
-        throw new Error('TEAM_ROLE_NODE_PROMPT_ACTIVE');
-      }
-
       const entryDelivery = this.claimEntryReadyWorkNodeForRole({ roleId, attemptUserMessage: text });
       if (entryDelivery) {
         await this.dispatchWorkNodeDeliveries([entryDelivery]);

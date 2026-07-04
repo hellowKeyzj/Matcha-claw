@@ -77,7 +77,6 @@
         "gatewaySocketClosed": "The connection to the OpenClaw Gateway was closed (code {{code}}, reason: {{reason}}).",
         "gatewayRpcTimeout": "OpenClaw Gateway call timed out: {{method}}",
         "gatewayRpcFailed": "OpenClaw Gateway call failed: {{method}}, reason: {{reason}}",
-        "teamRoleNodePromptActive": "This role is running a node. Send after it finishes.",
         "exportMarkdownFailed": "Failed to export Markdown: {{error}}"
     },
     "taskPanel": {

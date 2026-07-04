@@ -76,7 +76,6 @@
         "gatewaySocketClosed": "OpenClaw ゲートウェイとの接続が切断されました（コード {{code}}、理由: {{reason}}）。",
         "gatewayRpcTimeout": "OpenClaw ゲートウェイ呼び出しがタイムアウトしました: {{method}}",
         "gatewayRpcFailed": "OpenClaw ゲートウェイ呼び出しに失敗しました: {{method}}、理由: {{reason}}",
-        "teamRoleNodePromptActive": "このロールはノードを実行中です。完了後に送信してください。",
         "exportMarkdownFailed": "Markdown のエクスポートに失敗しました: {{error}}"
     },
     "taskPanel": {

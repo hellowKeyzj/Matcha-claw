@@ -104,8 +104,6 @@ const CHAT_MARKDOWN_EXPORT_WINDOW_LIMIT = 200;
 const ACTIVE_RUN_DISCONNECTED_ERROR = 'The active run disconnected before a terminal event was received.';
 const GATEWAY_CONNECT_FAILED_PREFIX = 'Gateway connect failed: ';
 const GATEWAY_RPC_TIMEOUT_PREFIX = 'Gateway RPC timeout: ';
-const ACTIVE_TEAM_NODE_EXECUTION_STATUSES = new Set(['ready', 'running', 'waiting']);
-const ACTIVE_TEAM_NODE_PROMPT_DELIVERY_STATUSES = new Set(['pending', 'delivering', 'retry_scheduled']);
 
 function parseRpcFailedMessage(message: string): { method: string; reason: string } | null {
   const matched = /^Gateway RPC failed \((.+?)\):\s*(.+)$/.exec(message.trim());
@@ -432,8 +430,6 @@ export function Chat({ isActive = true }: ChatProps) {
   const teams = useTeamsStore((state) => state.teams);
   const runListByTeamId = useTeamsStore((state) => state.runListByTeamId);
   const rolesByTeamId = useTeamsStore((state) => state.rolesByTeamId);
-  const nodeExecutionsByTeamId = useTeamsStore((state) => state.nodeExecutionsByTeamId);
-  const nodePromptDeliveryAttemptsByTeamId = useTeamsStore((state) => state.nodePromptDeliveryAttemptsByTeamId);
   const submitTeamRoleMessageFromChat = useTeamsStore((state) => state.submitTeamRoleMessageFromChat);
   const currentTeamChatTarget = useMemo(() => {
     const identity = currentSession.meta.sessionIdentity;
@@ -464,27 +460,6 @@ export function Chat({ isActive = true }: ChatProps) {
     }
     return null;
   }, [currentSession.meta.backendSessionKey, currentSession.meta.sessionIdentity, currentSessionKey, rolesByTeamId, runListByTeamId, teams]);
-  const currentTeamRoleHasActiveNodePrompt = useMemo(() => {
-    if (!currentTeamChatTarget) return false;
-    const activeNodeExecutionIds = new Set(
-      (nodeExecutionsByTeamId[currentTeamChatTarget.teamId] ?? [])
-        .filter((execution) => (
-          execution.runId === currentTeamChatTarget.runId
-          && execution.roleId === currentTeamChatTarget.roleId
-          && typeof execution.nodeExecutionId === 'string'
-          && ACTIVE_TEAM_NODE_EXECUTION_STATUSES.has(execution.status)
-        ))
-        .map((execution) => execution.nodeExecutionId!),
-    );
-    return (nodePromptDeliveryAttemptsByTeamId[currentTeamChatTarget.teamId] ?? []).some((delivery) => (
-      delivery.runId === currentTeamChatTarget.runId
-      && delivery.roleId === currentTeamChatTarget.roleId
-      && (
-        ACTIVE_TEAM_NODE_PROMPT_DELIVERY_STATUSES.has(delivery.status)
-        || (delivery.status === 'delivered' && activeNodeExecutionIds.has(delivery.nodeExecutionId))
-      )
-    ));
-  }, [currentTeamChatTarget, nodeExecutionsByTeamId, nodePromptDeliveryAttemptsByTeamId]);
   const agents = useSubagentsStore((state) => (
     Array.isArray(state.agentsResource.data) ? state.agentsResource.data : EMPTY_AGENTS
   ));
@@ -909,16 +884,12 @@ export function Chat({ isActive = true }: ChatProps) {
   ) => {
     viewportPaneRef.current?.prepareCurrentLatestBottomAlign();
     if (currentTeamChatTarget && (!attachments || attachments.length === 0)) {
-      if (currentTeamRoleHasActiveNodePrompt) {
-        toast.error(t('errors.teamRoleNodePromptActive'));
-        return { accepted: false, reason: 'active' } as const;
-      }
       void submitTeamRoleMessageFromChat(currentTeamChatTarget.teamId, currentTeamChatTarget.roleId, text)
         .catch(() => undefined);
       return { accepted: true } as const;
     }
     return sendMessage(text, attachments);
-  }, [currentTeamChatTarget, currentTeamRoleHasActiveNodePrompt, sendMessage, submitTeamRoleMessageFromChat, t]);
+  }, [currentTeamChatTarget, sendMessage, submitTeamRoleMessageFromChat]);
   const handleExportMarkdown = useCallback(() => {
     if (exportingMarkdown) {
       return;

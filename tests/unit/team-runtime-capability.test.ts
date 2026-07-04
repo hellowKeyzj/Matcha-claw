@@ -1690,14 +1690,27 @@ describe('team runtime capability', () => {
       expect.objectContaining({ type: 'dispatch.task_prompted' }),
     ]));
 
-    await expect(service.invoke('team.roleMessageSubmit', {
+    const followUpResponse = await service.invoke('team.roleMessageSubmit', {
       runId: 'run-role-message',
       roleId: 'leader',
-      text: 'Do not steer into the active node run',
+      text: 'Clarify the valuation sensitivity',
       idempotencyKey: 'chat-leader-2',
-    }, runtimeScope)).rejects.toThrow('TEAM_ROLE_NODE_PROMPT_ACTIVE');
-    expect(promptRoleSession).not.toHaveBeenCalled();
+    }, runtimeScope);
+
+    expect(followUpResponse.data).toEqual(expect.objectContaining({ submitted: true }));
     expect(nodePromptDelivery.deliveries).toHaveLength(1);
+    expect(promptRoleSession).toHaveBeenCalledWith(expect.objectContaining({
+      binding: expect.objectContaining({ roleId: 'leader', agentId: 'leader-agent' }),
+      message: expect.stringContaining('### TeamRun workspace context'),
+      displayMessage: 'Clarify the valuation sensitivity',
+      idempotencyKey: 'chat-leader-2',
+    }));
+    const followUpMessage = promptRoleSession.mock.calls[0]![0].message;
+    expect(followUpMessage).toContain('Clarify the valuation sensitivity');
+    expect(followUpMessage).toContain('- runId: run-role-message');
+    expect(followUpMessage).toContain('- roleId: leader');
+    expect(followUpMessage).not.toContain('- nodeExecutionId:');
+    expect(followUpMessage).not.toContain('### Attempt user message');
   });
 
   it('cancels active TeamRun graph work and releases role prompt occupancy', async () => {
