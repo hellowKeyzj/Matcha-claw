@@ -11,6 +11,8 @@ export type AgentToolConfigSupport =
   | { supportType: 'unsupported'; reason: AgentToolConfigUnsupportedReason };
 
 export type AgentToolSelectionMode = 'inheritsDefaultTools' | 'usesAgentToolPolicy';
+export type AgentToolCatalogSource = 'core' | 'plugin';
+export type AgentToolCatalogRisk = 'low' | 'medium' | 'high';
 
 export interface AgentToolPolicy {
   profile: string;
@@ -18,10 +20,32 @@ export interface AgentToolPolicy {
   deny: string[];
 }
 
+export interface AgentToolCatalogProfile {
+  profileKey: string;
+  displayName: string;
+}
+
 export interface AgentToolConfigOption {
   toolKey: string;
   displayName: string;
   optionType: 'tool' | 'group';
+  description?: string;
+  source?: AgentToolCatalogSource;
+  pluginId?: string;
+  optional?: boolean;
+  risk?: AgentToolCatalogRisk;
+  tags?: string[];
+  defaultProfiles?: string[];
+  groupKey?: string;
+  groupDisplayName?: string;
+}
+
+export interface AgentToolConfigGroup {
+  groupKey: string;
+  displayName: string;
+  source: AgentToolCatalogSource;
+  pluginId?: string;
+  toolOptions: AgentToolConfigOption[];
 }
 
 export interface AgentToolConfigView {
@@ -29,6 +53,8 @@ export interface AgentToolConfigView {
   support: AgentToolConfigSupport;
   selectionMode: AgentToolSelectionMode;
   toolPolicy: AgentToolPolicy | null;
+  toolProfiles: AgentToolCatalogProfile[];
+  toolGroups: AgentToolConfigGroup[];
   toolOptions: AgentToolConfigOption[];
   revision: string;
   updatedAt: number | null;
@@ -132,7 +158,32 @@ function normalizeToolPolicy(value: unknown): AgentToolPolicy | null {
   };
 }
 
-function normalizeToolConfigOption(value: unknown): AgentToolConfigOption | null {
+function normalizeCatalogSource(value: unknown, fallback: AgentToolCatalogSource = 'core'): AgentToolCatalogSource {
+  return value === 'plugin' || value === 'core' ? value : fallback;
+}
+
+function normalizeCatalogRisk(value: unknown): AgentToolCatalogRisk | undefined {
+  return value === 'low' || value === 'medium' || value === 'high' ? value : undefined;
+}
+
+function normalizeToolCatalogProfile(value: unknown): AgentToolCatalogProfile | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return null;
+  }
+  const record = value as Record<string, unknown>;
+  const profileKey = typeof record.profileKey === 'string' && record.profileKey.trim()
+    ? record.profileKey.trim()
+    : '';
+  if (!profileKey) {
+    return null;
+  }
+  const displayName = typeof record.displayName === 'string' && record.displayName.trim()
+    ? record.displayName.trim()
+    : profileKey;
+  return { profileKey, displayName };
+}
+
+function normalizeToolConfigOption(value: unknown, group?: { groupKey: string; groupDisplayName: string; source: AgentToolCatalogSource; pluginId?: string }): AgentToolConfigOption | null {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     return null;
   }
@@ -142,10 +193,67 @@ function normalizeToolConfigOption(value: unknown): AgentToolConfigOption | null
     return null;
   }
   const optionType = record.optionType === 'group' ? 'group' : 'tool';
+  const displayName = typeof record.displayName === 'string' && record.displayName.trim() ? record.displayName.trim() : toolKey;
+  const description = typeof record.description === 'string' && record.description.trim() ? record.description.trim() : '';
+  const source = normalizeCatalogSource(record.source, group?.source ?? 'core');
+  const pluginId = typeof record.pluginId === 'string' && record.pluginId.trim()
+    ? record.pluginId.trim()
+    : group?.pluginId;
+  const optional = typeof record.optional === 'boolean' ? record.optional : undefined;
+  const risk = normalizeCatalogRisk(record.risk);
+  const tags = normalizeStringArray(record.tags);
+  const defaultProfiles = normalizeStringArray(record.defaultProfiles);
+  const groupKey = typeof record.groupKey === 'string' && record.groupKey.trim()
+    ? record.groupKey.trim()
+    : group?.groupKey;
+  const groupDisplayName = typeof record.groupDisplayName === 'string' && record.groupDisplayName.trim()
+    ? record.groupDisplayName.trim()
+    : group?.groupDisplayName;
   return {
     toolKey,
-    displayName: typeof record.displayName === 'string' && record.displayName.trim() ? record.displayName : toolKey,
+    displayName,
     optionType,
+    ...(description ? { description } : {}),
+    source,
+    ...(pluginId ? { pluginId } : {}),
+    ...(optional !== undefined ? { optional } : {}),
+    ...(risk ? { risk } : {}),
+    ...(tags.length > 0 ? { tags } : {}),
+    ...(defaultProfiles.length > 0 ? { defaultProfiles } : {}),
+    ...(groupKey ? { groupKey } : {}),
+    ...(groupDisplayName ? { groupDisplayName } : {}),
+  };
+}
+
+function normalizeToolConfigGroup(value: unknown): AgentToolConfigGroup | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return null;
+  }
+  const record = value as Record<string, unknown>;
+  const groupKey = typeof record.groupKey === 'string' && record.groupKey.trim() ? record.groupKey.trim() : '';
+  if (!groupKey) {
+    return null;
+  }
+  const source = normalizeCatalogSource(record.source);
+  const pluginId = typeof record.pluginId === 'string' && record.pluginId.trim() ? record.pluginId.trim() : undefined;
+  const displayName = typeof record.displayName === 'string' && record.displayName.trim()
+    ? record.displayName.trim()
+    : groupKey;
+  const groupContext = {
+    groupKey,
+    groupDisplayName: displayName,
+    source,
+    ...(pluginId ? { pluginId } : {}),
+  };
+  const toolOptions = Array.isArray(record.toolOptions)
+    ? record.toolOptions.map((option) => normalizeToolConfigOption(option, groupContext)).filter((option): option is AgentToolConfigOption => option !== null)
+    : [];
+  return {
+    groupKey,
+    displayName,
+    source,
+    ...(pluginId ? { pluginId } : {}),
+    toolOptions,
   };
 }
 
@@ -160,15 +268,23 @@ function normalizeAgentToolConfigView(payload: unknown, requestedAgentId: string
   const selectionMode = record.selectionMode === 'usesAgentToolPolicy'
     ? 'usesAgentToolPolicy'
     : 'inheritsDefaultTools';
-  const toolOptions = Array.isArray(record.toolOptions)
-    ? record.toolOptions.map(normalizeToolConfigOption).filter((option): option is AgentToolConfigOption => option !== null)
+  const toolProfiles = Array.isArray(record.toolProfiles)
+    ? record.toolProfiles.map(normalizeToolCatalogProfile).filter((profile): profile is AgentToolCatalogProfile => profile !== null)
     : [];
+  const toolGroups = Array.isArray(record.toolGroups)
+    ? record.toolGroups.map(normalizeToolConfigGroup).filter((group): group is AgentToolConfigGroup => group !== null)
+    : [];
+  const toolOptions = Array.isArray(record.toolOptions)
+    ? record.toolOptions.map((option) => normalizeToolConfigOption(option)).filter((option): option is AgentToolConfigOption => option !== null)
+    : toolGroups.flatMap((group) => group.toolOptions);
 
   return {
     agentId,
     support: normalizeSupport(record.support),
     selectionMode,
     toolPolicy: normalizeToolPolicy(record.toolPolicy),
+    toolProfiles,
+    toolGroups,
     toolOptions,
     revision: typeof record.revision === 'string' ? record.revision.trim() : '',
     updatedAt: typeof record.updatedAt === 'number' || record.updatedAt === null ? record.updatedAt : null,

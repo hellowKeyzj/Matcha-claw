@@ -1,4 +1,9 @@
+import type { GatewayRpcPort } from '../../../gateway/gateway-runtime-port';
 import type {
+  AgentToolCatalogProfile,
+  AgentToolCatalogRisk,
+  AgentToolCatalogSource,
+  AgentToolConfigGroup,
   AgentToolConfigOption,
   AgentToolConfigProjectionPort,
   AgentToolConfigView,
@@ -10,68 +15,33 @@ import type { SubagentConfigProjectionPort, SubagentConfigSnapshot } from '../..
 
 interface OpenClawAgentToolConfigProjectionDeps {
   readonly subagentConfigProjection: SubagentConfigProjectionPort;
+  readonly gateway: Pick<GatewayRpcPort, 'gatewayRpc'>;
 }
 
-const BUILT_IN_TOOL_OPTIONS: readonly AgentToolConfigOption[] = [
-  { toolKey: 'read', displayName: 'Read', optionType: 'tool' },
-  { toolKey: 'write', displayName: 'Write', optionType: 'tool' },
-  { toolKey: 'edit', displayName: 'Edit', optionType: 'tool' },
-  { toolKey: 'apply_patch', displayName: 'Apply Patch', optionType: 'tool' },
-  { toolKey: 'exec', displayName: 'Exec', optionType: 'tool' },
-  { toolKey: 'process', displayName: 'Process', optionType: 'tool' },
-  { toolKey: 'code_execution', displayName: 'Code Execution', optionType: 'tool' },
-  { toolKey: 'sessions_list', displayName: 'Sessions List', optionType: 'tool' },
-  { toolKey: 'sessions_history', displayName: 'Sessions History', optionType: 'tool' },
-  { toolKey: 'sessions_send', displayName: 'Sessions Send', optionType: 'tool' },
-  { toolKey: 'sessions_spawn', displayName: 'Sessions Spawn', optionType: 'tool' },
-  { toolKey: 'sessions_yield', displayName: 'Sessions Yield', optionType: 'tool' },
-  { toolKey: 'subagents', displayName: 'Subagents', optionType: 'tool' },
-  { toolKey: 'session_status', displayName: 'Session Status', optionType: 'tool' },
-  { toolKey: 'memory_search', displayName: 'Memory Search', optionType: 'tool' },
-  { toolKey: 'memory_get', displayName: 'Memory Get', optionType: 'tool' },
-  { toolKey: 'web_search', displayName: 'Web Search', optionType: 'tool' },
-  { toolKey: 'x_search', displayName: 'X Search', optionType: 'tool' },
-  { toolKey: 'web_fetch', displayName: 'Web Fetch', optionType: 'tool' },
-  { toolKey: 'browser', displayName: 'Browser', optionType: 'tool' },
-  { toolKey: 'canvas', displayName: 'Canvas', optionType: 'tool' },
-  { toolKey: 'heartbeat_respond', displayName: 'Heartbeat Respond', optionType: 'tool' },
-  { toolKey: 'cron', displayName: 'Cron', optionType: 'tool' },
-  { toolKey: 'gateway', displayName: 'Gateway', optionType: 'tool' },
-  { toolKey: 'message', displayName: 'Message', optionType: 'tool' },
-  { toolKey: 'nodes', displayName: 'Nodes', optionType: 'tool' },
-  { toolKey: 'agents_list', displayName: 'Agents List', optionType: 'tool' },
-  { toolKey: 'update_plan', displayName: 'Update Plan', optionType: 'tool' },
-  { toolKey: 'image', displayName: 'Image', optionType: 'tool' },
-  { toolKey: 'image_generate', displayName: 'Image Generate', optionType: 'tool' },
-  { toolKey: 'music_generate', displayName: 'Music Generate', optionType: 'tool' },
-  { toolKey: 'video_generate', displayName: 'Video Generate', optionType: 'tool' },
-  { toolKey: 'tts', displayName: 'Text to Speech', optionType: 'tool' },
-  { toolKey: 'group:*', displayName: 'All tool groups', optionType: 'group' },
-  { toolKey: 'group:runtime', displayName: 'Runtime tools', optionType: 'group' },
-  { toolKey: 'group:fs', displayName: 'Filesystem tools', optionType: 'group' },
-  { toolKey: 'group:sessions', displayName: 'Session tools', optionType: 'group' },
-  { toolKey: 'group:memory', displayName: 'Memory tools', optionType: 'group' },
-  { toolKey: 'group:web', displayName: 'Web tools', optionType: 'group' },
-  { toolKey: 'group:ui', displayName: 'UI tools', optionType: 'group' },
-  { toolKey: 'group:automation', displayName: 'Automation tools', optionType: 'group' },
-  { toolKey: 'group:messaging', displayName: 'Messaging tools', optionType: 'group' },
-  { toolKey: 'group:nodes', displayName: 'Node tools', optionType: 'group' },
-  { toolKey: 'group:agents', displayName: 'Agent tools', optionType: 'group' },
-  { toolKey: 'group:media', displayName: 'Media tools', optionType: 'group' },
-  { toolKey: 'group:openclaw', displayName: 'OpenClaw built-in tools', optionType: 'group' },
-] as const;
+interface AgentToolCatalog {
+  readonly agentId: string;
+  readonly profiles: readonly AgentToolCatalogProfile[];
+  readonly groups: readonly AgentToolConfigGroup[];
+  readonly toolOptions: readonly AgentToolConfigOption[];
+  readonly policyKeys: ReadonlySet<string>;
+}
 
-const BUILT_IN_TOOL_KEYS = new Set(BUILT_IN_TOOL_OPTIONS.map((option) => option.toolKey));
+const TOOL_CATALOG_RPC_TIMEOUT_MS = 60000;
+const ALL_OPENCLAW_TOOLS_POLICY_KEY = 'group:openclaw';
+const ALL_PLUGIN_TOOLS_POLICY_KEY = 'group:plugins';
+const ALL_TOOLS_POLICY_KEY = '*';
 
 export class OpenClawAgentToolConfigProjection implements AgentToolConfigProjectionPort {
   constructor(private readonly deps: OpenClawAgentToolConfigProjectionDeps) {}
 
   async readAgentToolConfig(agentId: string): Promise<AgentToolConfigView> {
     const snapshot = await this.deps.subagentConfigProjection.readConfig();
+    const payload = toConfigPayload(snapshot);
     if (!hasConfiguredAgent(snapshot.config, agentId)) {
-      return agentNotConfiguredToolConfigView(agentId, toConfigPayload(snapshot));
+      return agentNotConfiguredToolConfigView(agentId, payload);
     }
-    return buildView(agentId, toConfigPayload(snapshot));
+    const catalog = await this.readToolCatalog(agentId);
+    return buildView(agentId, payload, catalog);
   }
 
   async setAgentToolConfig(command: SetAgentToolConfigCommand): Promise<SetAgentToolConfigResult> {
@@ -86,9 +56,10 @@ export class OpenClawAgentToolConfigProjection implements AgentToolConfigProject
           latestView: agentNotConfiguredToolConfigView(command.agentId, payload),
         };
       }
+      const latestCatalog = await this.readToolCatalog(command.agentId);
       return {
         resultType: 'staleRevision',
-        latestView: buildView(command.agentId, payload),
+        latestView: buildView(command.agentId, payload, latestCatalog),
       };
     }
 
@@ -96,7 +67,8 @@ export class OpenClawAgentToolConfigProjection implements AgentToolConfigProject
       return { resultType: 'unsupported', reason: 'agentNotConfigured' };
     }
 
-    const invalidToolKeys = validateToolPolicySelection(command);
+    const catalog = await this.readToolCatalog(command.agentId);
+    const invalidToolKeys = validateToolPolicySelection(command, catalog.policyKeys);
     if (invalidToolKeys.length > 0) {
       return { resultType: 'invalidToolKeys', unknownToolKeys: invalidToolKeys };
     }
@@ -114,17 +86,23 @@ export class OpenClawAgentToolConfigProjection implements AgentToolConfigProject
           latestView: agentNotConfiguredToolConfigView(command.agentId, latestPayload),
         };
       }
+      const latestCatalog = await this.readToolCatalog(command.agentId);
       return {
         resultType: 'staleRevision',
-        latestView: buildView(command.agentId, latestPayload),
+        latestView: buildView(command.agentId, latestPayload, latestCatalog),
       };
     }
 
     const nextPayload = toConfigPayload(replaceResult.snapshot);
     return {
       resultType: 'updated',
-      view: buildView(command.agentId, nextPayload),
+      view: buildView(command.agentId, nextPayload, catalog),
     };
+  }
+
+  private async readToolCatalog(agentId: string): Promise<AgentToolCatalog> {
+    const catalog = await this.deps.gateway.gatewayRpc('tools.catalog', { agentId }, TOOL_CATALOG_RPC_TIMEOUT_MS);
+    return normalizeToolsCatalogResult(catalog, agentId);
   }
 }
 
@@ -145,13 +123,15 @@ function agentNotConfiguredToolConfigView(agentId: string, payload: Record<strin
     support: { supportType: 'unsupported', reason: 'agentNotConfigured' },
     selectionMode: 'inheritsDefaultTools',
     toolPolicy: null,
+    toolProfiles: [],
+    toolGroups: [],
     toolOptions: [],
     revision: readConfigRevision(payload) ?? '',
     updatedAt: readOptionalNumberOrNull(payload.updatedAt) ?? null,
   };
 }
 
-function buildView(agentId: string, payload: Record<string, unknown>): AgentToolConfigView {
+function buildView(agentId: string, payload: Record<string, unknown>, catalog: AgentToolCatalog): AgentToolConfigView {
   const config = readRecord(payload.config);
   const agentToolEntry = readAgentToolEntry(config, agentId);
   if (agentToolEntry.entryType === 'agentNotConfigured') {
@@ -163,7 +143,9 @@ function buildView(agentId: string, payload: Record<string, unknown>): AgentTool
     support: { supportType: 'supported' },
     selectionMode: agentToolEntry.entryType === 'inheritsDefaultTools' ? 'inheritsDefaultTools' : 'usesAgentToolPolicy',
     toolPolicy: agentToolEntry.entryType === 'usesAgentToolPolicy' ? agentToolEntry.toolPolicy : null,
-    toolOptions: [...BUILT_IN_TOOL_OPTIONS],
+    toolProfiles: catalog.profiles,
+    toolGroups: catalog.groups,
+    toolOptions: catalog.toolOptions,
     revision: readConfigRevision(payload) ?? '',
     updatedAt: readOptionalNumberOrNull(payload.updatedAt) ?? null,
   };
@@ -207,12 +189,12 @@ function applyAgentToolConfig(
   };
 }
 
-function validateToolPolicySelection(command: SetAgentToolConfigCommand): string[] {
+function validateToolPolicySelection(command: SetAgentToolConfigCommand, policyKeys: ReadonlySet<string>): string[] {
   if (command.selection.selectionType === 'inheritDefaultTools') {
     return [];
   }
   return dedupeStrings([...command.selection.allow, ...command.selection.deny]
-    .filter((toolKey) => !BUILT_IN_TOOL_KEYS.has(toolKey)));
+    .filter((toolKey) => !policyKeys.has(toolKey)));
 }
 
 type AgentToolEntry =
@@ -255,6 +237,204 @@ function hasConfiguredAgent(config: Record<string, unknown>, agentId: string): b
     return false;
   }
   return agentsSection.list.some((agent) => readString(readRecord(agent).id) === agentId);
+}
+
+function normalizeToolsCatalogResult(value: unknown, requestedAgentId: string): AgentToolCatalog {
+  const catalog = readRecord(value);
+  const groups = normalizeToolCatalogGroups(catalog.groups);
+  if (groups.length === 0) {
+    throw new Error(`tools.catalog returned no tool groups for agent "${requestedAgentId}". Reconnect the OpenClaw runtime and try again.`);
+  }
+  const toolOptions = buildToolOptions(groups);
+  return {
+    agentId: readString(catalog.agentId) || requestedAgentId,
+    profiles: normalizeToolCatalogProfiles(catalog.profiles),
+    groups,
+    toolOptions,
+    policyKeys: buildKnownToolPolicyKeys(toolOptions, groups),
+  };
+}
+
+function normalizeToolCatalogProfiles(value: unknown): AgentToolCatalogProfile[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value.flatMap((item): AgentToolCatalogProfile[] => {
+    const profile = readRecord(item);
+    const profileKey = readString(profile.id);
+    if (!profileKey) {
+      return [];
+    }
+    const displayName = readString(profile.label) || profileKey;
+    return [{ profileKey, displayName }];
+  });
+}
+
+function normalizeToolCatalogGroups(value: unknown): AgentToolConfigGroup[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value.flatMap((item): AgentToolConfigGroup[] => {
+    const group = readRecord(item);
+    const groupKey = readString(group.id);
+    if (!groupKey) {
+      return [];
+    }
+    const source = readCatalogSource(group.source);
+    const pluginId = readString(group.pluginId);
+    const displayName = readString(group.label) || pluginId || groupKey;
+    const toolOptions = normalizeToolCatalogEntries(group.tools, {
+      groupKey,
+      groupDisplayName: displayName,
+      groupSource: source,
+      pluginId,
+    });
+    return [{
+      groupKey,
+      displayName,
+      source,
+      ...(pluginId ? { pluginId } : {}),
+      toolOptions,
+    }];
+  });
+}
+
+function normalizeToolCatalogEntries(
+  value: unknown,
+  group: {
+    readonly groupKey: string;
+    readonly groupDisplayName: string;
+    readonly groupSource: AgentToolCatalogSource;
+    readonly pluginId: string;
+  },
+): AgentToolConfigOption[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value.flatMap((item): AgentToolConfigOption[] => {
+    const tool = readRecord(item);
+    const toolKey = readString(tool.id);
+    if (!toolKey) {
+      return [];
+    }
+    const source = readCatalogSource(tool.source, group.groupSource);
+    const pluginId = readString(tool.pluginId) || group.pluginId;
+    const optional = typeof tool.optional === 'boolean' ? tool.optional : undefined;
+    const risk = readCatalogRisk(tool.risk);
+    const tags = readStringArray(tool.tags);
+    const defaultProfiles = readStringArray(tool.defaultProfiles);
+    const description = readString(tool.description);
+    return [{
+      toolKey,
+      displayName: readString(tool.label) || toolKey,
+      optionType: 'tool',
+      ...(description ? { description } : {}),
+      source,
+      ...(pluginId ? { pluginId } : {}),
+      ...(optional !== undefined ? { optional } : {}),
+      ...(risk ? { risk } : {}),
+      ...(tags.length > 0 ? { tags } : {}),
+      ...(defaultProfiles.length > 0 ? { defaultProfiles } : {}),
+      groupKey: group.groupKey,
+      groupDisplayName: group.groupDisplayName,
+    }];
+  });
+}
+
+function buildToolOptions(groups: readonly AgentToolConfigGroup[]): AgentToolConfigOption[] {
+  const options: AgentToolConfigOption[] = [];
+  const hasCoreTools = groups.some((group) => group.source === 'core' && group.toolOptions.length > 0);
+  const hasPluginTools = groups.some((group) => group.source === 'plugin' && group.toolOptions.length > 0);
+  if (hasCoreTools) {
+    options.push({
+      toolKey: ALL_OPENCLAW_TOOLS_POLICY_KEY,
+      displayName: 'OpenClaw built-in tools',
+      optionType: 'group',
+      source: 'core',
+    });
+  }
+  if (hasPluginTools) {
+    options.push({
+      toolKey: ALL_PLUGIN_TOOLS_POLICY_KEY,
+      displayName: 'Plugin tools',
+      optionType: 'group',
+      source: 'plugin',
+    });
+  }
+  for (const group of groups) {
+    const policyKey = resolveGroupPolicyKey(group);
+    if (policyKey) {
+      options.push({
+        toolKey: policyKey,
+        displayName: `${group.displayName} tools`,
+        optionType: 'group',
+        source: group.source,
+        ...(group.pluginId ? { pluginId: group.pluginId } : {}),
+        groupKey: group.groupKey,
+        groupDisplayName: group.displayName,
+      });
+    }
+    options.push(...group.toolOptions);
+  }
+  return dedupeToolOptions(options);
+}
+
+function resolveGroupPolicyKey(group: AgentToolConfigGroup): string {
+  if (group.source === 'core') {
+    return `group:${group.groupKey}`;
+  }
+  return group.pluginId ?? '';
+}
+
+function buildKnownToolPolicyKeys(
+  toolOptions: readonly AgentToolConfigOption[],
+  groups: readonly AgentToolConfigGroup[],
+): ReadonlySet<string> {
+  const keys = new Set<string>([ALL_TOOLS_POLICY_KEY]);
+  for (const option of toolOptions) {
+    keys.add(option.toolKey);
+  }
+  for (const group of groups) {
+    if (group.source === 'plugin' && group.toolOptions.length > 0) {
+      keys.add(ALL_PLUGIN_TOOLS_POLICY_KEY);
+    }
+    for (const tool of group.toolOptions) {
+      if (tool.pluginId) {
+        keys.add(tool.pluginId);
+      }
+      const mcpServerPrefix = readMcpServerPrefix(tool.toolKey);
+      if (mcpServerPrefix) {
+        keys.add(`${mcpServerPrefix}__*`);
+      }
+    }
+  }
+  return keys;
+}
+
+function readMcpServerPrefix(toolKey: string): string {
+  const separatorIndex = toolKey.indexOf('__');
+  return separatorIndex > 0 ? toolKey.slice(0, separatorIndex) : '';
+}
+
+function dedupeToolOptions(options: readonly AgentToolConfigOption[]): AgentToolConfigOption[] {
+  const result: AgentToolConfigOption[] = [];
+  const seen = new Set<string>();
+  for (const option of options) {
+    if (seen.has(option.toolKey)) {
+      continue;
+    }
+    seen.add(option.toolKey);
+    result.push(option);
+  }
+  return result;
+}
+
+function readCatalogSource(value: unknown, fallback: AgentToolCatalogSource = 'core'): AgentToolCatalogSource {
+  return value === 'plugin' || value === 'core' ? value : fallback;
+}
+
+function readCatalogRisk(value: unknown): AgentToolCatalogRisk | undefined {
+  return value === 'low' || value === 'medium' || value === 'high' ? value : undefined;
 }
 
 function readConfigRevision(payload: Record<string, unknown>): string | null {

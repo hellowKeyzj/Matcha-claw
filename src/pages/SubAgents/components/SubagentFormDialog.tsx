@@ -19,7 +19,7 @@ import {
 } from '@/features/subagents/domain/workspace';
 import type { ModelCatalogEntry, DraftByFile, PreviewDiffByFile, SubagentSummary, SubagentTargetFile } from '@/types/subagent';
 import type { AgentSkillConfigView, SetAgentSkillConfigCommand } from '@/stores/agent-skill-config';
-import type { AgentToolConfigView, SetAgentToolConfigCommand } from '@/stores/agent-tool-config';
+import type { AgentToolConfigOption, AgentToolConfigView, SetAgentToolConfigCommand } from '@/stores/agent-tool-config';
 import { RefreshCw, X } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
@@ -98,6 +98,19 @@ const EMPTY_VALUES: SubagentFormValues = {
 
 const TOOL_PROFILE_OPTIONS = ['full', 'coding', 'minimal', 'messaging'] as const;
 const CREATE_AGENT_AVATAR_PICKER_OPTION_COUNT = 15;
+
+function formatToolProfileLabel(profileKey: string, displayName: string, t: (key: string, options?: Record<string, unknown>) => string): string {
+  return t(`form.toolProfiles.${profileKey}`, { defaultValue: displayName || profileKey });
+}
+
+function renderToolMeta(tool: AgentToolConfigOption): string {
+  return [
+    tool.toolKey,
+    tool.source === 'plugin' && tool.pluginId ? tool.pluginId : '',
+    tool.risk ? `risk:${tool.risk}` : '',
+    tool.optional ? 'optional' : '',
+  ].filter(Boolean).join(' · ');
+}
 
 function areStringSetsEqual(left: readonly string[], right: readonly string[]): boolean {
   const normalizedLeft = [...left].sort();
@@ -309,11 +322,14 @@ export function SubagentFormDialog({
   }, [modelOptions, open, resolvedModelOptions, values.model]);
 
   const toolProfileOptions = useMemo(() => {
-    const predefinedProfiles = [...TOOL_PROFILE_OPTIONS];
-    return toolProfile && !predefinedProfiles.includes(toolProfile as (typeof TOOL_PROFILE_OPTIONS)[number])
-      ? [toolProfile, ...predefinedProfiles]
-      : predefinedProfiles;
-  }, [toolProfile]);
+    const catalogProfiles = toolConfigView?.toolProfiles ?? [];
+    const profiles = catalogProfiles.length > 0
+      ? catalogProfiles
+      : TOOL_PROFILE_OPTIONS.map((profile) => ({ profileKey: profile, displayName: profile }));
+    return toolProfile && !profiles.some((profile) => profile.profileKey === toolProfile)
+      ? [{ profileKey: toolProfile, displayName: toolProfile }, ...profiles]
+      : profiles;
+  }, [toolConfigView?.toolProfiles, toolProfile]);
 
   if (!open) {
     return null;
@@ -809,10 +825,39 @@ export function SubagentFormDialog({
   };
 
   const renderToolConfig = () => {
+    const toolGroups = toolConfigView?.toolGroups ?? [];
     const toolOptions = toolConfigView?.toolOptions ?? [];
     const unsupportedReason = toolConfigView?.support.supportType === 'unsupported'
       ? toolConfigView.support.reason
       : null;
+    const disabled = toolSelectionMode === 'inherit';
+    const findGroupPolicyOption = (groupKey: string) => toolOptions.find((option) => option.optionType === 'group' && option.groupKey === groupKey);
+    const renderPolicyToggles = (tool: AgentToolConfigOption) => {
+      const allowed = allowedToolKeys.includes(tool.toolKey);
+      const denied = deniedToolKeys.includes(tool.toolKey);
+      return (
+        <div className="mt-3 flex flex-wrap items-center gap-3 text-xs text-muted-foreground">
+          <label className="inline-flex items-center gap-2">
+            <Switch
+              aria-label={`${t('form.capabilities.allowTool')} ${tool.displayName}`}
+              checked={allowed}
+              disabled={disabled || denied}
+              onCheckedChange={(checked) => setAllowedToolKeys((prev) => toggleStringKey(prev, tool.toolKey, checked))}
+            />
+            <span>{t('form.capabilities.allow')}</span>
+          </label>
+          <label className="inline-flex items-center gap-2">
+            <Switch
+              aria-label={`${t('form.capabilities.denyTool')} ${tool.displayName}`}
+              checked={denied}
+              disabled={disabled || allowed}
+              onCheckedChange={(checked) => setDeniedToolKeys((prev) => toggleStringKey(prev, tool.toolKey, checked))}
+            />
+            <span>{t('form.capabilities.deny')}</span>
+          </label>
+        </div>
+      );
+    };
     return (
       <section className="space-y-3 rounded-xl border bg-background p-4">
         <div className="flex flex-wrap items-start justify-between gap-3">
@@ -833,58 +878,76 @@ export function SubagentFormDialog({
           <p className="text-sm text-destructive">{toolConfigError}</p>
         ) : unsupportedReason ? (
           <p className="text-sm text-muted-foreground">{t(`form.capabilities.unsupported.${unsupportedReason}`)}</p>
-        ) : toolOptions.length === 0 ? (
+        ) : toolGroups.length === 0 ? (
           <p className="text-sm text-muted-foreground">{t('form.noToolOptions')}</p>
         ) : (
-          <div className={cn('space-y-3', toolSelectionMode === 'inherit' && 'opacity-60')}>
+          <div className={cn('space-y-4', disabled && 'opacity-60')}>
             <div className="max-w-xs space-y-1">
               <Label htmlFor="subagent-tool-profile">{t('form.toolProfile')}</Label>
               <Select
                 id="subagent-tool-profile"
                 value={toolProfile}
-                disabled={toolSelectionMode === 'inherit'}
+                disabled={disabled}
                 onChange={(event) => setToolProfile(event.target.value)}
               >
                 {toolProfileOptions.map((profile) => (
-                  <option key={profile} value={profile}>{t(`form.toolProfiles.${profile}`, { defaultValue: profile })}</option>
+                  <option key={profile.profileKey} value={profile.profileKey}>
+                    {formatToolProfileLabel(profile.profileKey, profile.displayName, t)}
+                  </option>
                 ))}
               </Select>
             </div>
-            <div className="grid gap-2 md:grid-cols-2">
-              {toolOptions.map((tool) => {
-                const allowed = allowedToolKeys.includes(tool.toolKey);
-                const denied = deniedToolKeys.includes(tool.toolKey);
-                const disabled = toolSelectionMode === 'inherit';
+            <div className="space-y-3">
+              {toolGroups.map((group) => {
+                const groupPolicyOption = findGroupPolicyOption(group.groupKey);
                 return (
-                  <div key={tool.toolKey} className="rounded-xl border bg-card p-3">
-                    <div className="flex items-start justify-between gap-3">
+                  <div key={group.groupKey} className="rounded-xl border bg-muted/20 p-3">
+                    <div className="flex flex-wrap items-start justify-between gap-3">
                       <div className="min-w-0">
-                        <p className="truncate text-sm font-medium">{tool.displayName}</p>
-                        <p className="mt-1 text-xs text-muted-foreground">{tool.toolKey}</p>
+                        <div className="flex flex-wrap items-center gap-2">
+                          <h4 className="text-sm font-semibold text-foreground">{group.displayName}</h4>
+                          <span className="rounded-full bg-secondary px-2 py-0.5 text-[10px] text-muted-foreground">
+                            {group.source === 'plugin'
+                              ? t('form.capabilities.pluginBadge', { defaultValue: 'Plugin' })
+                              : t('form.capabilities.coreBadge', { defaultValue: 'Core' })}
+                          </span>
+                          {group.pluginId ? (
+                            <span className="rounded-full border bg-card px-2 py-0.5 text-[10px] text-muted-foreground">{group.pluginId}</span>
+                          ) : null}
+                        </div>
+                        <p className="mt-1 text-xs text-muted-foreground">
+                          {t('form.capabilities.toolCount', { count: group.toolOptions.length, defaultValue: `${group.toolOptions.length} tools` })}
+                        </p>
                       </div>
-                      <span className="shrink-0 rounded-full bg-secondary px-2 py-0.5 text-[10px] text-muted-foreground">
-                        {tool.optionType === 'group' ? t('form.capabilities.groupBadge') : t('form.capabilities.toolBadge')}
-                      </span>
+                      {groupPolicyOption ? (
+                        <div className="min-w-[180px] rounded-lg border bg-card px-3 py-2">
+                          <p className="text-xs font-medium text-foreground">{t('form.capabilities.groupBadge')}</p>
+                          <p className="mt-0.5 text-[11px] text-muted-foreground">{groupPolicyOption.toolKey}</p>
+                          {renderPolicyToggles(groupPolicyOption)}
+                        </div>
+                      ) : null}
                     </div>
-                    <div className="mt-3 flex flex-wrap items-center gap-3 text-xs text-muted-foreground">
-                      <label className="inline-flex items-center gap-2">
-                        <Switch
-                          aria-label={`${t('form.capabilities.allowTool')} ${tool.displayName}`}
-                          checked={allowed}
-                          disabled={disabled || denied}
-                          onCheckedChange={(checked) => setAllowedToolKeys((prev) => toggleStringKey(prev, tool.toolKey, checked))}
-                        />
-                        <span>{t('form.capabilities.allow')}</span>
-                      </label>
-                      <label className="inline-flex items-center gap-2">
-                        <Switch
-                          aria-label={`${t('form.capabilities.denyTool')} ${tool.displayName}`}
-                          checked={denied}
-                          disabled={disabled || allowed}
-                          onCheckedChange={(checked) => setDeniedToolKeys((prev) => toggleStringKey(prev, tool.toolKey, checked))}
-                        />
-                        <span>{t('form.capabilities.deny')}</span>
-                      </label>
+                    <div className="mt-3 grid gap-2 md:grid-cols-2">
+                      {group.toolOptions.map((tool) => (
+                        <div key={tool.toolKey} className="rounded-xl border bg-card p-3">
+                          <div className="flex items-start justify-between gap-3">
+                            <div className="min-w-0">
+                              <p className="truncate text-sm font-medium">{tool.displayName}</p>
+                              <p className="mt-1 text-xs text-muted-foreground">{renderToolMeta(tool)}</p>
+                            </div>
+                            <span className="shrink-0 rounded-full bg-secondary px-2 py-0.5 text-[10px] text-muted-foreground">
+                              {t('form.capabilities.toolBadge')}
+                            </span>
+                          </div>
+                          {tool.description ? <p className="mt-2 line-clamp-2 text-xs text-muted-foreground">{tool.description}</p> : null}
+                          {tool.defaultProfiles && tool.defaultProfiles.length > 0 ? (
+                            <p className="mt-2 text-[11px] text-muted-foreground">
+                              {t('form.capabilities.defaultProfiles', { profiles: tool.defaultProfiles.join(', '), defaultValue: `Profiles: ${tool.defaultProfiles.join(', ')}` })}
+                            </p>
+                          ) : null}
+                          {renderPolicyToggles(tool)}
+                        </div>
+                      ))}
                     </div>
                   </div>
                 );
