@@ -120,6 +120,12 @@ export class GatewayRpcSender {
     }
 
     const requestId = `req-${this.deps.idGenerator.randomId()}`;
+    this.deps.logger?.traceDebug?.(3, '[gateway-rpc] register', {
+      requestId,
+      method,
+      timeoutMs,
+      ...this.rpcTelemetry(),
+    });
     const rpcPromise = this.deps.pendingRpcRequests.register({
       requestId,
       method,

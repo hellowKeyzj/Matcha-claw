@@ -144,6 +144,7 @@ export function connectGatewaySocketSession(deps: GatewaySocketSessionDeps): Pro
       pendingRpcRequests: deps.pendingRpcRequests,
       idGenerator: deps.idGenerator,
       clock: deps.clock,
+      logger: deps.logger,
       authService: deps.authService,
       onGatewayNotification: deps.onGatewayNotification,
       onGatewayConversationEvent: deps.onGatewayConversationEvent,

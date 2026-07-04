@@ -379,7 +379,7 @@ describe('runtime host gateway event bridge', () => {
     });
   });
 
-  it('treats OpenClaw team outbox notifications as ordinary gateway notifications', async () => {
+  it('treats unrelated OpenClaw gateway notifications as ordinary notifications', async () => {
     createGatewayClientMock.mockReturnValue(gatewayClient);
     const emitParentGatewayEvent = vi.fn(async () => undefined);
     const dispatchRoute = vi.fn(async () => ({ status: 200, data: { success: true } }));
@@ -391,7 +391,7 @@ describe('runtime host gateway event bridge', () => {
         updatedAt: null,
       })),
     };
-    const sessionUpdate = { type: 'team-outbox-notification' };
+    const sessionUpdate = { type: 'generic-gateway-notification' };
     const runtime = {
       consumeEndpointConversationEvent: vi.fn(async () => []),
       consumeEndpointNotification: vi.fn(() => [sessionUpdate]),
@@ -427,13 +427,12 @@ describe('runtime host gateway event bridge', () => {
     const notification = {
       method: 'agent',
       params: {
-        runId: 'teamrun-1',
-        stream: 'team-runtime.outbox',
+        runId: 'run-1',
+        stream: 'runtime.notification',
         data: {
           phase: 'changed',
-          runId: 'teamrun-1',
-          latestSequence: 3,
-          recordId: 'team-outbox-1',
+          runId: 'run-1',
+          recordId: 'notification-1',
         },
       },
     };

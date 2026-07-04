@@ -23,6 +23,7 @@ import {
 import type { GatewayPendingRpcRequests } from './client-pending-rpc';
 import type { GatewayTransportIssue } from '../shared/gateway-error';
 import type { RuntimeClockPort, RuntimeIdGeneratorPort } from '../application/common/runtime-ports';
+import type { RuntimeHostLogger } from '../shared/logger';
 
 export interface GatewayClientFrameHandlerDeps {
   isConnected(): boolean;
@@ -43,6 +44,7 @@ export interface GatewayClientFrameHandlerDeps {
   pendingRpcRequests: GatewayPendingRpcRequests;
   idGenerator: RuntimeIdGeneratorPort;
   clock: RuntimeClockPort;
+  logger?: RuntimeHostLogger;
   authService: Pick<GatewayAuthService, 'buildGatewayConnectRequest'>;
   onGatewayNotification?: (notification: GatewayNotification) => void;
   onGatewayConversationEvent?: (payload: GatewayConversationEvent) => void;
@@ -103,11 +105,22 @@ export class GatewayClientFrameHandler {
     }
 
     const requestId = `connect-${this.deps.idGenerator.randomId()}`;
+    this.deps.logger?.traceDebug?.(3, '[gateway-ws] connect-challenge', {
+      requestId,
+      noncePresent: challengeNonce.length > 0,
+    });
     this.deps.setConnectRequestId(requestId);
     void (async () => {
       try {
         this.deps.sendRaw(JSON.stringify(await this.deps.authService.buildGatewayConnectRequest(requestId, challengeNonce)));
+        this.deps.logger?.traceDebug?.(3, '[gateway-ws] connect-request-sent', {
+          requestId,
+        });
       } catch (error) {
+        this.deps.logger?.warn('[gateway-ws] connect-request-send-failed', {
+          requestId,
+          message: error instanceof Error ? error.message : String(error),
+        });
         this.deps.settleConnectFailure(error);
       }
     })();
@@ -122,6 +135,11 @@ export class GatewayClientFrameHandler {
     ) {
       return false;
     }
+
+    this.deps.logger?.traceDebug?.(3, '[gateway-ws] connect-response', {
+      requestId: parsed.id,
+      ok: parsed.ok !== false && !parsed.error,
+    });
 
     if (parsed.ok === false || parsed.error) {
       this.deps.settleConnectFailure(
@@ -156,8 +174,16 @@ export class GatewayClientFrameHandler {
     this.deps.markAlive('rpc');
     const pending = this.deps.pendingRpcRequests.take(parsed.id);
     if (!pending) {
+      this.deps.logger?.warn('[gateway-rpc] response-without-pending', {
+        requestId: parsed.id,
+      });
       return true;
     }
+    this.deps.logger?.traceDebug?.(3, '[gateway-rpc] response', {
+      requestId: parsed.id,
+      method: pending.method,
+      ok: parsed.ok !== false && !parsed.error,
+    });
     if (parsed.ok === false || parsed.error) {
       const issue = createGatewayTransportIssue({
         message: `Gateway RPC failed (${pending.method}): ${extractGatewayErrorMessageFromResponse(parsed)}`,

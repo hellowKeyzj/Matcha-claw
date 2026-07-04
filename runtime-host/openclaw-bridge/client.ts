@@ -513,6 +513,7 @@ export function createGatewayClient(options: GatewayClientOptions) {
       reportGatewayError,
       scheduleReconnect,
       pendingRpcRequests,
+      logger: options.logger,
       authService,
       onGatewayNotification: options.onGatewayNotification,
       onGatewayConversationEvent: options.onGatewayConversationEvent,
