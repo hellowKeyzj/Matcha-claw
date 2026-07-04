@@ -25,12 +25,6 @@ const REQUIRED_LOCAL_PLUGINS = [
     sourceEntries: ['./src/index.ts'],
   },
   {
-    pluginId: 'team-runtime',
-    sourceDir: 'packages/openclaw-team-runtime-plugin',
-    expectedExtensions: ['./dist/index.js'],
-    sourceEntries: ['./src/index.ts'],
-  },
-  {
     pluginId: 'memory-lancedb-pro',
     sourceDir: 'packages/memory-lancedb-pro',
     expectedExtensions: ['./dist/index.js'],

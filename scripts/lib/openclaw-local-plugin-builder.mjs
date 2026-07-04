@@ -23,12 +23,6 @@ const BUILD_TARGETS = [
     runtimeFiles: ['package.json', 'openclaw.plugin.json', 'dist'],
   },
   {
-    pluginId: 'team-runtime',
-    packageDir: 'packages/openclaw-team-runtime-plugin',
-    compileDirs: ['src'],
-    runtimeFiles: ['package.json', 'openclaw.plugin.json', 'dist'],
-  },
-  {
     pluginId: 'memory-lancedb-pro',
     packageDir: 'packages/memory-lancedb-pro',
     compileDirs: ['src'],
