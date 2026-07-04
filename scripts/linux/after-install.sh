@@ -19,11 +19,17 @@ if [ -x /opt/MatchaClaw/MatchaClaw ]; then
     ln -sf /opt/MatchaClaw/MatchaClaw /usr/local/bin/MatchaClaw 2>/dev/null || true
 fi
 
-# Create symbolic link for openclaw CLI
+# Create symbolic links for bundled CLIs
 OPENCLAW_WRAPPER="/opt/MatchaClaw/resources/cli/openclaw"
 if [ -f "$OPENCLAW_WRAPPER" ]; then
     chmod +x "$OPENCLAW_WRAPPER" 2>/dev/null || true
     ln -sf "$OPENCLAW_WRAPPER" /usr/local/bin/openclaw 2>/dev/null || true
+fi
+
+MATCHA_WRAPPER="/opt/MatchaClaw/resources/cli/matcha"
+if [ -f "$MATCHA_WRAPPER" ]; then
+    chmod +x "$MATCHA_WRAPPER" 2>/dev/null || true
+    ln -sf "$MATCHA_WRAPPER" /usr/local/bin/matcha 2>/dev/null || true
 fi
 
 # Set chrome-sandbox permissions.

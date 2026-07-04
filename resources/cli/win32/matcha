@@ -1,0 +1,8 @@
+#!/bin/sh
+# Matcha CLI wrapper for Git Bash / MSYS2 on Windows
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+INSTALL_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
+
+MATCHA_ENTRY="$INSTALL_DIR/resources/app.asar/runtime-host/build/main-cli.js"
+
+ELECTRON_RUN_AS_NODE=1 exec "$INSTALL_DIR/MatchaClaw.exe" "$MATCHA_ENTRY" "$@"

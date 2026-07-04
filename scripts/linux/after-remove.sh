@@ -7,6 +7,7 @@ set -e
 # Remove symbolic links
 rm -f /usr/local/bin/MatchaClaw 2>/dev/null || true
 rm -f /usr/local/bin/openclaw 2>/dev/null || true
+rm -f /usr/local/bin/matcha 2>/dev/null || true
 
 # Update desktop database
 if command -v update-desktop-database &> /dev/null; then

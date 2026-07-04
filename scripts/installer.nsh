@@ -1,6 +1,6 @@
 ; MatchaClaw Custom NSIS Installer/Uninstaller Script
 ;
-; Install: enables long paths, adds resources\cli to user PATH for openclaw CLI.
+; Install: enables long paths, adds resources\cli to user PATH for bundled CLIs.
 ; Uninstall: removes the PATH entry and optionally deletes user data.
 
 !ifndef nsProcess::FindProcess
@@ -206,7 +206,7 @@
 
   ; Use PowerShell to update the current user's PATH.
   ; This avoids NSIS string-buffer limits and preserves long PATH values.
-  DetailPrint "Updating user PATH for the OpenClaw CLI..."
+  DetailPrint "Updating user PATH for bundled CLIs..."
   InitPluginsDir
   ClearErrors
   File "/oname=$PLUGINSDIR\update-user-path.ps1" "${PROJECT_DIR}\resources\cli\win32\update-user-path.ps1"

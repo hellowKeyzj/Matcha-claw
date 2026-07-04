@@ -39,6 +39,9 @@
   },
   "description": "MatchaClaw - Graphical AI Assistant based on OpenClaw",
   "main": "dist-electron/main/index.js",
+  "bin": {
+    "matcha": "runtime-host/build/main-cli.js"
+  },
   "author": "MatchaClaw Team",
   "license": "MIT",
   "private": true,
@@ -99,6 +102,7 @@
     "@slack/bolt": "^4.6.0",
     "@whiskeysockets/baileys": "7.0.0-rc.9",
     "clawhub": "^0.5.0",
+    "croner": "^10.0.1",
     "electron-store": "^11.0.2",
     "electron-updater": "^6.8.3",
     "fflate": "^0.8.3",

@@ -1,0 +1,29 @@
+#!/bin/sh
+# Matcha CLI — managed by MatchaClaw
+# Do not edit manually. Regenerated on MatchaClaw updates.
+
+SCRIPT="$0"
+while [ -L "$SCRIPT" ]; do
+  SCRIPT_DIR="$(cd -P "$(dirname "$SCRIPT")" && pwd)"
+  SCRIPT="$(readlink "$SCRIPT")"
+  [ "${SCRIPT#/}" = "$SCRIPT" ] && SCRIPT="$SCRIPT_DIR/$SCRIPT"
+done
+SCRIPT_DIR="$(cd -P "$(dirname "$SCRIPT")" && pwd)"
+
+if [ "$(uname)" = "Darwin" ]; then
+  CONTENTS_DIR="$(dirname "$(dirname "$SCRIPT_DIR")")"
+  ELECTRON="$CONTENTS_DIR/MacOS/MatchaClaw"
+  CLI="$CONTENTS_DIR/Resources/app.asar/runtime-host/build/main-cli.js"
+else
+  INSTALL_DIR="$(dirname "$(dirname "$SCRIPT_DIR")")"
+  ELECTRON="$INSTALL_DIR/MatchaClaw"
+  CLI="$INSTALL_DIR/resources/app.asar/runtime-host/build/main-cli.js"
+fi
+
+if [ ! -f "$ELECTRON" ]; then
+  echo "Error: MatchaClaw executable not found at $ELECTRON" >&2
+  echo "Please reinstall MatchaClaw or remove this script: $0" >&2
+  exit 1
+fi
+
+ELECTRON_RUN_AS_NODE=1 exec "$ELECTRON" "$CLI" "$@"
