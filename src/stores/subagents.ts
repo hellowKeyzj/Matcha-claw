@@ -39,7 +39,6 @@ import {
 } from '@/features/subagents/domain/prompt';
 import type {
   AgentsListResult,
-  ConfigGetResult,
   DraftByFile,
   ModelCatalogEntry,
   PreviewDiffByFile,
@@ -148,6 +147,7 @@ interface SubagentCreateResult {
 }
 
 interface ConfigAgentDisplaySnapshot {
+  description?: string;
   workspace?: string;
   model?: string;
   skills?: string[];
@@ -169,6 +169,15 @@ interface ConfigDisplaySnapshot {
   defaultWorkspace?: string;
   defaultModel?: string;
   defaultSkills?: string[];
+}
+
+interface SubagentDisplayConfigResult {
+  agents?: unknown;
+  defaults?: unknown;
+  ready?: boolean;
+  refreshing?: boolean;
+  updatedAt?: number | null;
+  error?: string | null;
 }
 
 interface ReadConfigForDisplayOptions {
@@ -231,6 +240,7 @@ interface SubagentsState {
   cancelDraft: (agentId: string) => Promise<void>;
   createAgent: (input: {
     name: string;
+    description?: string | null;
     workspace: string;
     model?: string;
     avatarSeed?: string;
@@ -247,6 +257,7 @@ interface SubagentsState {
   updateAgent: (input: {
     agentId: string;
     name: string;
+    description?: string | null;
     workspace: string;
     model?: string;
     skills?: string[] | null;
@@ -282,10 +293,14 @@ function resolveSubagentCapabilityOperation(method: string): string | null {
   switch (method) {
     case 'agents.list':
       return 'subagents.list';
-    case 'config.get':
-      return 'subagents.config.get';
-    case 'config.set':
-      return 'subagents.config.set';
+    case 'displayConfig.get':
+      return 'subagents.displayConfig.get';
+    case 'description.set':
+      return 'subagents.description.set';
+    case 'model.set':
+      return 'subagents.model.set';
+    case 'skills.set':
+      return 'subagents.skills.set';
     case 'agents.create':
       return 'subagents.create';
     case 'agents.update':
@@ -412,6 +427,7 @@ function normalizeSubagentConfigPackage(input: unknown): SubagentConfigPackage {
     version: SUBAGENT_CONFIG_PACKAGE_VERSION,
     agent: {
       name: getRequiredString(agentRecord.name, 'Agent name is required'),
+      ...(getOptionalString(agentRecord.description) ? { description: getOptionalString(agentRecord.description) } : {}),
       ...(normalizeSkillAllowlist(agentRecord.skills) ? { skills: normalizeSkillAllowlist(agentRecord.skills) } : {}),
       ...(normalizeImportedSkillBundles(agentRecord.skillBundles) ? { skillBundles: normalizeImportedSkillBundles(agentRecord.skillBundles) } : {}),
       files: normalizeImportedFiles(agentRecord.files),
@@ -459,14 +475,10 @@ function collectModelIdsFromAgentModelValue(value: unknown): string[] {
   return ids;
 }
 
-function buildConfigDisplaySnapshot(configGetResult: ConfigGetResult | undefined): ConfigDisplaySnapshot {
+function buildConfigDisplaySnapshot(displayConfig: SubagentDisplayConfigResult | undefined): ConfigDisplaySnapshot {
   const byAgentId = new Map<string, ConfigAgentDisplaySnapshot>();
-  const config = configGetResult?.config;
-  const agents = (config && typeof config === 'object')
-    ? (config as { agents?: unknown }).agents
-    : undefined;
-  const defaults = (agents && typeof agents === 'object')
-    ? (agents as { defaults?: unknown }).defaults
+  const defaults = (displayConfig?.defaults && typeof displayConfig.defaults === 'object')
+    ? displayConfig.defaults
     : undefined;
   const defaultWorkspace = defaults && typeof defaults === 'object'
     ? getOptionalString((defaults as { workspace?: unknown }).workspace)
@@ -484,9 +496,7 @@ function buildConfigDisplaySnapshot(configGetResult: ConfigGetResult | undefined
     }
   }
 
-  const agentsList = (agents && typeof agents === 'object')
-    ? (agents as { list?: unknown }).list
-    : undefined;
+  const agentsList = displayConfig?.agents;
   if (Array.isArray(agentsList)) {
     for (const item of agentsList) {
       if (!item || typeof item !== 'object') {
@@ -500,6 +510,7 @@ function buildConfigDisplaySnapshot(configGetResult: ConfigGetResult | undefined
       if (!normalizedAgentId) {
         continue;
       }
+      const description = getOptionalString((item as { description?: unknown }).description);
       const workspace = getOptionalString((item as { workspace?: unknown }).workspace);
       const skills = normalizeSkillAllowlist((item as { skills?: unknown }).skills);
       let model: string | undefined;
@@ -509,6 +520,7 @@ function buildConfigDisplaySnapshot(configGetResult: ConfigGetResult | undefined
         }
       }
       byAgentId.set(normalizedAgentId, {
+        description,
         workspace,
         model,
         skills,
@@ -573,7 +585,7 @@ async function readConfigForDisplay(options?: ReadConfigForDisplayOptions): Prom
   const generation = configDisplayGeneration;
   const task = (async () => {
     try {
-      const configGetResult = await rpc<ConfigGetResult>('config.get', {});
+      const configGetResult = await rpc<SubagentDisplayConfigResult>('displayConfig.get', {});
       if (!isSnapshotReady(configGetResult)) {
         scheduleAgentsSnapshotRetry(() => useSubagentsStore.getState().loadAgents({ silent: true }));
         if (configDisplayCache) {
@@ -748,6 +760,8 @@ function normalizeAgents(
     const runtimeName = getOptionalString(runtimeAgent?.name);
     const fallbackName = agentId;
     const configAgent = configSnapshot?.byAgentId.get(normalizeAgentIdForComparison(agentId));
+    const description = configAgent?.description
+      ?? getOptionalString(runtimeAgent?.description);
     const workspace = configAgent?.workspace
       ?? getOptionalString(runtimeAgent?.workspace)
       ?? (agentId === defaultId ? configSnapshot?.defaultWorkspace : undefined);
@@ -762,6 +776,7 @@ function normalizeAgents(
       ...(runtimeAgent ?? { id: agentId }),
       id: agentId,
       name: runtimeName ?? fallbackName,
+      description,
       workspace,
       model,
       skills,
@@ -792,127 +807,11 @@ function assertDeletableAgent(agentId: string, agents: SubagentSummary[]): void 
   }
 }
 
-function cloneConfigForWrite(config: ConfigGetResult['config'] | undefined): ConfigGetResult['config'] {
-  if (!config || typeof config !== 'object') {
-    return {};
-  }
-  try {
-    return JSON.parse(JSON.stringify(config)) as ConfigGetResult['config'];
-  } catch {
-    return {};
-  }
-}
-
-function upsertAgentSkillsInConfig(params: {
-  config: ConfigGetResult['config'];
-  agentId: string;
-  skills: string[] | undefined;
-}): ConfigGetResult['config'] {
-  const nextConfig = cloneConfigForWrite(params.config);
-  const nextAgents = (nextConfig.agents && typeof nextConfig.agents === 'object')
-    ? { ...nextConfig.agents }
-    : {};
-  const list = Array.isArray(nextAgents.list) ? [...nextAgents.list] : [];
-  const normalizedTargetId = normalizeAgentIdForComparison(params.agentId);
-  if (!normalizedTargetId) {
-    return nextConfig;
-  }
-
-  const targetIndex = list.findIndex((entry) => {
-    if (!entry || typeof entry !== 'object') {
-      return false;
-    }
-    const id = getOptionalString((entry as { id?: unknown }).id);
-    if (!id) {
-      return false;
-    }
-    return normalizeAgentIdForComparison(id) === normalizedTargetId;
-  });
-
-  const current = targetIndex >= 0
-    ? list[targetIndex]
-    : { id: normalizedTargetId };
-  const nextEntry = (current && typeof current === 'object')
-    ? { ...current } as Record<string, unknown>
-    : ({ id: normalizedTargetId } as Record<string, unknown>);
-
-  if (params.skills === undefined) {
-    delete nextEntry.skills;
-  } else {
-    nextEntry.skills = params.skills;
-  }
-
-  if (targetIndex >= 0) {
-    list[targetIndex] = nextEntry as typeof list[number];
-  } else {
-    list.push(nextEntry as typeof list[number]);
-  }
-
-  nextAgents.list = list;
-  nextConfig.agents = nextAgents;
-  return nextConfig;
-}
-
-function upsertAgentModelInConfig(params: {
-  config: ConfigGetResult['config'];
-  agentId: string;
-  model: string | undefined;
-}): ConfigGetResult['config'] {
-  const nextConfig = cloneConfigForWrite(params.config);
-  const nextAgents = (nextConfig.agents && typeof nextConfig.agents === 'object')
-    ? { ...nextConfig.agents }
-    : {};
-  const list = Array.isArray(nextAgents.list) ? [...nextAgents.list] : [];
-  const normalizedTargetId = normalizeAgentIdForComparison(params.agentId);
-  if (!normalizedTargetId) {
-    return nextConfig;
-  }
-
-  const targetIndex = list.findIndex((entry) => {
-    if (!entry || typeof entry !== 'object') {
-      return false;
-    }
-    const id = getOptionalString((entry as { id?: unknown }).id);
-    if (!id) {
-      return false;
-    }
-    return normalizeAgentIdForComparison(id) === normalizedTargetId;
-  });
-
-  const current = targetIndex >= 0
-    ? list[targetIndex]
-    : { id: normalizedTargetId };
-  const nextEntry = (current && typeof current === 'object')
-    ? { ...current } as Record<string, unknown>
-    : ({ id: normalizedTargetId } as Record<string, unknown>);
-
-  if (params.model === undefined) {
-    delete nextEntry.model;
-  } else {
-    nextEntry.model = params.model;
-  }
-
-  if (targetIndex >= 0) {
-    list[targetIndex] = nextEntry as typeof list[number];
-  } else {
-    list.push(nextEntry as typeof list[number]);
-  }
-
-  nextAgents.list = list;
-  nextConfig.agents = nextAgents;
-  return nextConfig;
-}
-
 async function updateAgentSkillsConfig(scope: AgentScope, agentId: string, skills: string[] | undefined): Promise<void> {
-  await writeConfigWithRetry(
+  await rpc('skills.set', { agentId, skills }, {
     scope,
-    (config) => upsertAgentSkillsInConfig({
-      config,
-      agentId,
-      skills,
-    }),
-    'Missing config hash for skills update',
-  );
+    target: buildSubagentTarget(scope, agentId),
+  });
 }
 
 async function exportSkillBundles(
@@ -927,54 +826,22 @@ async function importSkillBundles(
   return await skillManagementCapabilityExecute('skills.importBundles', { skillBundles }, { kind: 'skill-bundle' });
 }
 
-async function updateAgentModelConfig(scope: AgentScope, agentId: string, model: string | undefined): Promise<void> {
-  await writeConfigWithRetry(
+async function updateAgentDescriptionConfig(scope: AgentScope, agentId: string, description: string | undefined): Promise<void> {
+  await rpc('description.set', { agentId, description }, {
     scope,
-    (config) => upsertAgentModelInConfig({
-      config,
-      agentId,
-      model,
-    }),
-    'Missing config hash for model update',
-  );
+    target: buildSubagentTarget(scope, agentId),
+  });
+}
+
+async function updateAgentModelConfig(scope: AgentScope, agentId: string, model: string | undefined): Promise<void> {
+  await rpc('model.set', { agentId, model }, {
+    scope,
+    target: buildSubagentTarget(scope, agentId),
+  });
 }
 
 function getErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
-}
-
-function isConfigChangedSinceLastLoadError(error: unknown): boolean {
-  return getErrorMessage(error).toLowerCase().includes('config changed since last load');
-}
-
-async function writeConfigWithRetry(
-  scope: AgentScope,
-  buildNextConfig: (config: ConfigGetResult['config']) => unknown,
-  missingHashMessage: string,
-): Promise<void> {
-  for (let attempt = 0; attempt < 2; attempt += 1) {
-    const configGetResult = await rpc<ConfigGetResult>('config.get', {});
-    const hash = getOptionalString(configGetResult.hash) ?? getOptionalString(configGetResult.baseHash);
-    if (!hash) {
-      throw new Error(missingHashMessage);
-    }
-    const nextConfig = buildNextConfig(configGetResult.config);
-    try {
-      await rpc('config.set', {
-        raw: JSON.stringify(nextConfig),
-        baseHash: hash,
-      }, {
-        scope,
-        target: { kind: 'agent', agentId: scope.agentId },
-      });
-      return;
-    } catch (error) {
-      if (attempt === 0 && isConfigChangedSinceLastLoadError(error)) {
-        continue;
-      }
-      throw error;
-    }
-  }
 }
 
 function buildCreateWarning(agentId: string, message: string): string {
@@ -987,6 +854,10 @@ function buildCreateModelWarning(agentId: string, error: unknown): string {
 
 function buildCreateAvatarWarning(agentId: string, error: unknown): string {
   return buildCreateWarning(agentId, `头像展示配置写入失败：${getErrorMessage(error)}`);
+}
+
+function buildCreateDescriptionWarning(agentId: string, error: unknown): string {
+  return buildCreateWarning(agentId, `简介配置写入失败：${getErrorMessage(error)}`);
 }
 
 function buildCreateRefreshWarning(agentId: string, error: unknown): string {
@@ -1299,6 +1170,7 @@ function areSubagentSummariesEqual(left: SubagentSummary, right: SubagentSummary
   return (
     left.id === right.id
     && (left.name ?? '') === (right.name ?? '')
+    && (left.description ?? '') === (right.description ?? '')
     && (left.workspace ?? '') === (right.workspace ?? '')
     && (left.model ?? '') === (right.model ?? '')
     && (left.avatarSeed ?? '') === (right.avatarSeed ?? '')
@@ -1553,6 +1425,7 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
 
   createAgent: async ({
     name,
+    description,
     workspace,
     model,
     avatarSeed,
@@ -1608,6 +1481,14 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
         pendingDeletedAgentIds.delete(normalizedCreatedAgentId);
       }
       const warnings: string[] = [];
+      const nextDescription = getOptionalString(description);
+      if (nextDescription !== undefined) {
+        try {
+          await updateAgentDescriptionConfig(managementScope, createdAgentId, nextDescription);
+        } catch (error) {
+          warnings.push(buildCreateDescriptionWarning(createdAgentId, error));
+        }
+      }
       if (modelId) {
         try {
           await updateAgentWithCreateBarrier({
@@ -1734,6 +1615,7 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
       version: SUBAGENT_CONFIG_PACKAGE_VERSION,
       agent: {
         name: getOptionalString(agent.name) ?? agent.id,
+        ...(getOptionalString(agent.description) ? { description: getOptionalString(agent.description) } : {}),
         ...(skills ? { skills } : {}),
         ...(skillBundles && skillBundles.length > 0 ? { skillBundles } : {}),
         files,
@@ -1746,6 +1628,7 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
     const packageData = normalizeSubagentConfigPackage(input);
     const createResult = await get().createAgent({
       name: packageData.agent.name,
+      description: packageData.agent.description,
       workspace: '',
     });
     const createdAgentId = createResult.agentId;
@@ -1806,7 +1689,7 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
     return toSubagentCreateResult(createdAgentId, warnings);
   },
 
-  updateAgent: async ({ agentId, name, workspace, model, skills, avatarSeed, avatarStyle }) => runSerializedAgentMutation(async () => {
+  updateAgent: async ({ agentId, name, description, workspace, model, skills, avatarSeed, avatarStyle }) => runSerializedAgentMutation(async () => {
     const managementScope = await resolveSubagentManagementScope();
     const current = readAgentsFromState(get()).find((agent) => agent.id === agentId);
     const explicitSkillAllowlistRequested = skills !== undefined;
@@ -1828,10 +1711,14 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
       current
       && equalOptionalTrimmedString(current.model, model)
     );
+    const descriptionChangeRequested = description !== undefined;
+    const nextDescription = description == null ? undefined : getOptionalString(description);
+    const descriptionChanged = descriptionChangeRequested && !equalOptionalTrimmedString(current?.description, nextDescription);
 
     if (
       !identityChanged
       && !modelChanged
+      && !descriptionChanged
       && !explicitSkillAllowlistRequested
       && !avatarSeedChanged
       && !avatarStyleChanged
@@ -1863,6 +1750,9 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
       }
       if (modelChanged && nextModel === undefined) {
         await updateAgentModelConfig(managementScope, agentId, undefined);
+      }
+      if (descriptionChanged) {
+        await updateAgentDescriptionConfig(managementScope, agentId, nextDescription);
       }
       if (explicitSkillAllowlistRequested) {
         await updateAgentSkillsConfig(managementScope, agentId, nextExplicitSkillAllowlist);

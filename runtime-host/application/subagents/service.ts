@@ -1,13 +1,15 @@
-import { badRequest, type ApplicationResponseOf } from '../common/application-response';
+import { badRequest, ok, type ApplicationResponseOf } from '../common/application-response';
 import type { SubagentRuntimeWorkflow, SubagentWorkspaceInitialization } from '../workflows/subagent-runtime/subagent-runtime-workflow';
 import type { SkillRuntimeWorkflow } from '../workflows/skill-runtime/skill-runtime-workflow';
+import type { SubagentConfigDisplayView, SubagentConfigProjectionPort } from './subagent-config-contracts';
 
 const SUBAGENT_CONFIG_FILE_NAMES = new Set(['AGENTS.md', 'SOUL.md', 'TOOLS.md', 'IDENTITY.md', 'USER.md']);
 
 export class SubagentRuntimeService {
   constructor(private readonly deps: {
     readonly runtimeWorkflow: Pick<SubagentRuntimeWorkflow, 'snapshot' | 'call' | 'createAgent'>;
-    readonly skillRuntimeWorkflow: Pick<SkillRuntimeWorkflow, 'resolveCanonicalSkillKeys' | 'resolveCanonicalSkillKeyMap' | 'validateCanonicalSkillKeys'>;
+    readonly skillRuntimeWorkflow: Pick<SkillRuntimeWorkflow, 'resolveCanonicalSkillKeyMap' | 'validateCanonicalSkillKeys'>;
+    readonly subagentConfigProjection: SubagentConfigProjectionPort;
   }) {}
 
   async listAgents(): Promise<ApplicationResponseOf> {
@@ -18,31 +20,44 @@ export class SubagentRuntimeService {
     };
   }
 
-  async getConfig(): Promise<ApplicationResponseOf> {
-    const response = await this.deps.runtimeWorkflow.snapshot('config.get', { config: undefined });
-    return {
-      ...response,
-      data: await this.canonicalizeConfigPayload(response.data),
-    };
+  async getDisplayConfig(): Promise<ApplicationResponseOf<SubagentConfigDisplayView>> {
+    return ok(await this.canonicalizeDisplayConfig(await this.deps.subagentConfigProjection.readDisplayConfig()));
   }
 
-  async setConfig(payload: unknown): Promise<ApplicationResponseOf> {
+  async setAgentDescription(payload: unknown): Promise<ApplicationResponseOf> {
     const body = this.readRecord(payload);
-    if (typeof body.raw !== 'string' || !body.raw.trim()) {
-      return badRequest('raw is required');
+    const agentId = this.readString(body.agentId);
+    if (!agentId) {
+      return badRequest('agentId is required');
     }
-    const baseHash = this.readString(body.baseHash);
-    if (!baseHash) {
-      return badRequest('baseHash is required');
+    const description = this.readString(body.description) || undefined;
+    return ok(await this.deps.subagentConfigProjection.setAgentDescription({ agentId, description }));
+  }
+
+  async setAgentModel(payload: unknown): Promise<ApplicationResponseOf> {
+    const body = this.readRecord(payload);
+    const agentId = this.readString(body.agentId);
+    if (!agentId) {
+      return badRequest('agentId is required');
     }
-    const canonicalRaw = await this.validateConfigRaw(body.raw);
-    if (!canonicalRaw.ok) {
-      return badRequest(canonicalRaw.error);
+    const model = this.readString(body.model) || undefined;
+    return ok(await this.deps.subagentConfigProjection.setAgentModel({ agentId, model }));
+  }
+
+  async setAgentSkills(payload: unknown): Promise<ApplicationResponseOf> {
+    const body = this.readRecord(payload);
+    const agentId = this.readString(body.agentId);
+    if (!agentId) {
+      return badRequest('agentId is required');
     }
-    return await this.deps.runtimeWorkflow.call('config.set', {
-      raw: canonicalRaw.raw,
-      baseHash,
-    }, { invalidateSnapshots: true });
+    const skills = await this.readOptionalSkillKeys(body.skills);
+    if (!skills.ok) {
+      return badRequest(skills.error);
+    }
+    return ok(await this.deps.subagentConfigProjection.setAgentSkills({
+      agentId,
+      ...(skills.skillKeys === undefined ? {} : { skills: skills.skillKeys }),
+    }));
   }
 
   async createAgent(payload: unknown): Promise<ApplicationResponseOf> {
@@ -177,23 +192,27 @@ export class SubagentRuntimeService {
     return 'result' in payload ? this.filterAgentFilesListPayload(payload.result) : { files: [] };
   }
 
-  private filterAgentFilesList(files: unknown): unknown[] {
+  private filterAgentFilesList(files: unknown): Array<string | { name: string }> {
     if (!Array.isArray(files)) {
       return [];
     }
-    return files.flatMap((file) => {
+    const result: Array<string | { name: string }> = [];
+    for (const file of files) {
       if (typeof file === 'string') {
-        return SUBAGENT_CONFIG_FILE_NAMES.has(file) ? [file] : [];
+        if (SUBAGENT_CONFIG_FILE_NAMES.has(file)) {
+          result.push(file);
+        }
+        continue;
       }
       if (!this.isRecord(file)) {
-        return [];
+        continue;
       }
       const name = this.readString(file.name) || this.readString(file.path);
-      if (!SUBAGENT_CONFIG_FILE_NAMES.has(name)) {
-        return [];
+      if (SUBAGENT_CONFIG_FILE_NAMES.has(name)) {
+        result.push({ name });
       }
-      return [{ name }];
-    });
+    }
+    return result;
   }
 
   private async canonicalizeAgentsPayload(payload: unknown): Promise<unknown> {
@@ -207,75 +226,26 @@ export class SubagentRuntimeService {
     };
   }
 
-  private async canonicalizeConfigPayload(payload: unknown): Promise<unknown> {
-    const record = this.readRecord(payload);
-    if (!('config' in record)) {
-      return payload;
+  private async canonicalizeDisplayConfig(view: SubagentConfigDisplayView): Promise<SubagentConfigDisplayView> {
+    const skillIds = this.collectDisplaySkillIds(view);
+    if (skillIds.length === 0) {
+      return view;
     }
+    const canonicalKeyBySkillId = await this.deps.skillRuntimeWorkflow.resolveCanonicalSkillKeyMap(skillIds);
     return {
-      ...record,
-      config: await this.canonicalizeConfig(record.config),
-    };
-  }
-
-  private async validateConfigRaw(raw: string): Promise<{ ok: true; raw: string } | { ok: false; error: string }> {
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(raw);
-    } catch {
-      return { ok: false, error: 'raw must be valid JSON' };
-    }
-    const validatedConfig = await this.validateConfig(parsed);
-    if (!validatedConfig.ok) {
-      return { ok: false, error: validatedConfig.error };
-    }
-    return {
-      ok: true,
-      raw: JSON.stringify(validatedConfig.config),
-    };
-  }
-
-  private async canonicalizeConfig(config: unknown): Promise<unknown> {
-    if (!this.isRecord(config)) {
-      return config;
-    }
-    const agents = this.isRecord(config.agents) ? config.agents : null;
-    if (!agents || !Array.isArray(agents.list)) {
-      return config;
-    }
-    return {
-      ...config,
-      agents: {
-        ...agents,
-        list: await this.canonicalizeAgentList(agents.list),
-      },
-    };
-  }
-
-  private async validateConfig(config: unknown): Promise<
-    { ok: true; config: unknown }
-    | { ok: false; error: string }
-  > {
-    if (!this.isRecord(config)) {
-      return { ok: true, config };
-    }
-    const agents = this.isRecord(config.agents) ? config.agents : null;
-    if (!agents || !Array.isArray(agents.list)) {
-      return { ok: true, config };
-    }
-    const validatedAgents = await this.validateAgentList(agents.list);
-    if (!validatedAgents.ok) {
-      return validatedAgents;
-    }
-    return {
-      ok: true,
-      config: {
-        ...config,
-        agents: {
-          ...agents,
-          list: validatedAgents.agents,
-        },
-      },
+      ...view,
+      agents: view.agents.map((agent) => (
+        agent.skills === undefined
+          ? agent
+          : { ...agent, skills: this.canonicalizeSkillKeys(agent.skills, canonicalKeyBySkillId) }
+      )),
+      ...(view.defaults
+        ? {
+            defaults: view.defaults.skills === undefined
+              ? view.defaults
+              : { ...view.defaults, skills: this.canonicalizeSkillKeys(view.defaults.skills, canonicalKeyBySkillId) },
+          }
+        : {}),
     };
   }
 
@@ -296,44 +266,32 @@ export class SubagentRuntimeService {
     });
   }
 
-  private async validateAgentList(agents: unknown[]): Promise<
-    { ok: true; agents: unknown[] }
+  private async readOptionalSkillKeys(value: unknown): Promise<
+    { ok: true; skillKeys?: string[] }
     | { ok: false; error: string }
   > {
-    const skillIds: string[] = [];
-    for (const agent of agents) {
-      if (!this.isRecord(agent) || !Array.isArray(agent.skills)) {
-        continue;
-      }
-      for (const skill of agent.skills) {
-        if (typeof skill !== 'string') {
-          return { ok: false, error: 'skillKey must be a string' };
-        }
-        const trimmedSkill = skill.trim();
-        if (!trimmedSkill) {
-          return { ok: false, error: 'skillKey is required' };
-        }
-        skillIds.push(trimmedSkill);
-      }
+    if (value === undefined || value === null) {
+      return { ok: true };
     }
-
+    if (!Array.isArray(value)) {
+      return { ok: false, error: 'skills must be an array' };
+    }
+    const skillIds: string[] = [];
+    for (const skill of value) {
+      if (typeof skill !== 'string') {
+        return { ok: false, error: 'skillKey must be a string' };
+      }
+      const trimmedSkill = skill.trim();
+      if (!trimmedSkill) {
+        return { ok: false, error: 'skillKey is required' };
+      }
+      skillIds.push(trimmedSkill);
+    }
     const validatedSkills = await this.deps.skillRuntimeWorkflow.validateCanonicalSkillKeys(skillIds);
     if (!validatedSkills.ok) {
       return { ok: false, error: this.formatInvalidSkillKeyError(validatedSkills) };
     }
-
-    return {
-      ok: true,
-      agents: agents.map((agent) => {
-        if (!this.isRecord(agent) || !Array.isArray(agent.skills)) {
-          return agent;
-        }
-        return {
-          ...agent,
-          skills: this.dedupeStrings(agent.skills.map((skill) => (skill as string).trim())),
-        };
-      }),
-    };
+    return { ok: true, skillKeys: this.dedupeStrings(validatedSkills.skillKeys) };
   }
 
   private formatInvalidSkillKeyError(validation: { unknownSkillKeys: readonly string[]; nonCanonicalSkillKeys: readonly string[] }): string {
@@ -341,6 +299,19 @@ export class SubagentRuntimeService {
       return `Unknown skillKey: ${validation.unknownSkillKeys.join(', ')}`;
     }
     return `skillKey must be canonical: ${validation.nonCanonicalSkillKeys.join(', ')}`;
+  }
+
+  private collectDisplaySkillIds(view: SubagentConfigDisplayView): string[] {
+    const skillIds: string[] = [];
+    if (view.defaults?.skills) {
+      skillIds.push(...view.defaults.skills);
+    }
+    for (const agent of view.agents) {
+      if (agent.skills) {
+        skillIds.push(...agent.skills);
+      }
+    }
+    return this.dedupeStrings(skillIds);
   }
 
   private collectStringSkillIds(agents: unknown[]): string[] {
@@ -356,6 +327,24 @@ export class SubagentRuntimeService {
       }
     }
     return skillIds;
+  }
+
+  private canonicalizeSkillKeys(skills: readonly string[], canonicalKeyBySkillId: Record<string, string>): string[] {
+    const canonicalSkills: string[] = [];
+    const seenStringSkills = new Set<string>();
+    for (const skill of skills) {
+      const trimmedSkill = skill.trim();
+      if (!trimmedSkill) {
+        continue;
+      }
+      const canonicalSkill = canonicalKeyBySkillId[trimmedSkill] ?? trimmedSkill;
+      if (seenStringSkills.has(canonicalSkill)) {
+        continue;
+      }
+      seenStringSkills.add(canonicalSkill);
+      canonicalSkills.push(canonicalSkill);
+    }
+    return canonicalSkills;
   }
 
   private canonicalizeAgentSkills(skills: unknown[], canonicalKeyBySkillId: Record<string, string>): unknown[] {

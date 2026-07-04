@@ -73,7 +73,8 @@
     "confirmApplyDraft": "下書きを反映",
     "cancelDraft": "下書きをキャンセル",
     "applyDraftSuccess": "下書きを適用しました。",
-    "rawOutputTitle": "モデル生出力"
+    "rawOutputTitle": "モデル生出力",
+    "noAgentSelected": "Agentを選択してからペルソナを設定してください。"
   },
   "deleteDialog": {
     "title": "{{agentId}} を削除",
@@ -91,6 +92,8 @@
     "skillsLoading": "スキルを読み込み中...",
     "noSkillOptions": "利用可能なスキルがありません。",
     "name": "名前",
+    "description": "説明",
+    "descriptionPlaceholder": "このAgentの得意分野や使いどころを短く説明します",
     "workspace": "ワークスペース",
     "model": "モデル",
     "avatar": "アバター",
@@ -108,7 +111,39 @@
     "useDefaultModel": "グローバル既定モデルを継承",
     "modelUnavailable": "利用可能な設定済みモデルがありません。",
     "initialPrompt": "システムプロンプト",
-    "initialPromptPlaceholder": "任意: このサブAgentのシステムプロンプトを入力"
+    "initialPromptPlaceholder": "任意: このサブAgentのシステムプロンプトを入力",
+    "tabs": {
+      "basic": "基本情報",
+      "persona": "ペルソナ設定",
+      "skills": "スキル設定",
+      "tools": "ツール設定"
+    },
+    "cancel": "キャンセル",
+    "toolConfig": "ツール設定",
+    "useAllTools": "既定ツールを継承",
+    "toolsLoading": "ツールを読み込み中...",
+    "noToolOptions": "利用可能なツールがありません。",
+    "toolProfile": "ツール Profile",
+    "toolProfiles": {
+      "full": "Full（制限なし）",
+      "coding": "Coding",
+      "minimal": "Minimal",
+      "messaging": "Messaging"
+    },
+    "capabilities": {
+      "toggleSkill": "スキルを切り替え",
+      "allowTool": "ツールを許可",
+      "denyTool": "ツールを拒否",
+      "allow": "許可",
+      "deny": "拒否",
+      "groupBadge": "グループ",
+      "toolBadge": "ツール",
+      "unsupported": {
+        "runtimeDoesNotExposeAgentSkillConfig": "現在のランタイムはAgentスキル設定に対応していません。",
+        "runtimeDoesNotExposeAgentToolConfig": "現在のランタイムはAgentツール設定に対応していません。",
+        "agentNotConfigured": "このAgentはまだOpenClaw設定に存在しないため、ここでは能力を設定できません。"
+      }
+    }
   },
   "card": {
     "default": "デフォルト",

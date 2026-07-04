@@ -28,19 +28,19 @@ describe('subagents default agent', () => {
           },
         };
       }
-      if (method === 'config.get') {
+      if (method === 'displayConfig.get') {
         return {
           success: true,
           result: {
-            hash: 'hash-default',
-            config: {
-              agents: {
-                list: [
-                  { id: 'main', name: 'Main', default: false },
-                  { id: 'writer', name: 'Writer', default: true },
-                ],
-              },
-            },
+            agents: [
+              { id: 'main' },
+              { id: 'writer' },
+            ],
+            revision: 'hash-default',
+            ready: true,
+            refreshing: false,
+            updatedAt: 0,
+            error: null,
           },
         };
       }

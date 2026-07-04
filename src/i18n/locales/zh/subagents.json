@@ -76,7 +76,8 @@
     "confirmApplyDraft": "确认应用草稿",
     "cancelDraft": "取消草稿",
     "applyDraftSuccess": "草稿已成功应用。",
-    "rawOutputTitle": "模型原始输出"
+    "rawOutputTitle": "模型原始输出",
+    "noAgentSelected": "请选择一个 Agent 后再配置人设。"
   },
   "deleteDialog": {
     "title": "删除 {{agentId}}",
@@ -94,6 +95,8 @@
     "skillsLoading": "技能加载中...",
     "noSkillOptions": "暂无可选技能。",
     "name": "名称",
+    "description": "简介",
+    "descriptionPlaceholder": "简要说明这个 Agent 擅长什么、适合处理哪些任务",
     "workspace": "工作区",
     "model": "模型",
     "create": "创建",
@@ -111,7 +114,39 @@
       "bottts": "Bottts",
       "botttsNeutral": "Bottts Neutral"
     },
-    "avatarRefresh": "换一批"
+    "avatarRefresh": "换一批",
+    "cancel": "取消",
+    "tabs": {
+      "basic": "基本信息",
+      "persona": "人设",
+      "skills": "技能",
+      "tools": "Tool"
+    },
+    "toolConfig": "工具配置",
+    "useAllTools": "继承默认工具",
+    "toolsLoading": "工具加载中...",
+    "noToolOptions": "暂无可选工具。",
+    "toolProfile": "工具 Profile",
+    "toolProfiles": {
+      "full": "Full（无限制）",
+      "coding": "Coding",
+      "minimal": "Minimal",
+      "messaging": "Messaging"
+    },
+    "capabilities": {
+      "toggleSkill": "切换技能",
+      "allowTool": "允许工具",
+      "denyTool": "拒绝工具",
+      "allow": "允许",
+      "deny": "拒绝",
+      "groupBadge": "分组",
+      "toolBadge": "工具",
+      "unsupported": {
+        "runtimeDoesNotExposeAgentSkillConfig": "当前运行时不支持 Agent 技能配置。",
+        "runtimeDoesNotExposeAgentToolConfig": "当前运行时不支持 Agent 工具配置。",
+        "agentNotConfigured": "该 Agent 尚未写入 OpenClaw 配置，暂不能在这里配置能力。"
+      }
+    }
   },
   "card": {
     "default": "默认",

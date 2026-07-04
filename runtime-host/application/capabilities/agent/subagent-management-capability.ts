@@ -7,8 +7,10 @@ export const SUBAGENT_MANAGEMENT_CAPABILITY_ID = 'subagent.management';
 
 export const subagentManagementCapabilityOperations: readonly CapabilityOperationDescriptor[] = [
   { id: 'subagents.list', title: 'List subagents', targetKind: 'agent' },
-  { id: 'subagents.config.get', title: 'Get subagent configuration', targetKind: 'agent' },
-  { id: 'subagents.config.set', title: 'Set subagent configuration', targetKind: 'agent' },
+  { id: 'subagents.displayConfig.get', title: 'Get subagent display configuration', targetKind: 'agent' },
+  { id: 'subagents.description.set', title: 'Set subagent description', targetKind: 'subagent' },
+  { id: 'subagents.model.set', title: 'Set subagent model', targetKind: 'subagent' },
+  { id: 'subagents.skills.set', title: 'Set subagent skills', targetKind: 'subagent' },
   { id: 'subagents.create', title: 'Create subagent', targetKind: 'subagent' },
   { id: 'subagents.update', title: 'Update subagent', targetKind: 'subagent' },
   { id: 'subagents.delete', title: 'Delete subagent', targetKind: 'subagent' },
@@ -70,8 +72,10 @@ function handleSubagentTarget(
 export function createSubagentManagementCapabilityOperationRoutes(deps: {
   subagentService: Pick<SubagentRuntimeService,
     | 'listAgents'
-    | 'getConfig'
-    | 'setConfig'
+    | 'getDisplayConfig'
+    | 'setAgentDescription'
+    | 'setAgentModel'
+    | 'setAgentSkills'
     | 'createAgent'
     | 'updateAgent'
     | 'deleteAgent'
@@ -88,13 +92,23 @@ export function createSubagentManagementCapabilityOperationRoutes(deps: {
     },
     {
       capabilityId: SUBAGENT_MANAGEMENT_CAPABILITY_ID,
-      operationId: 'subagents.config.get',
-      handle: (context) => handleAgentTarget(context, () => deps.subagentService.getConfig()),
+      operationId: 'subagents.displayConfig.get',
+      handle: (context) => handleAgentTarget(context, () => deps.subagentService.getDisplayConfig()),
     },
     {
       capabilityId: SUBAGENT_MANAGEMENT_CAPABILITY_ID,
-      operationId: 'subagents.config.set',
-      handle: (context) => handleAgentTarget(context, (input) => deps.subagentService.setConfig(input)),
+      operationId: 'subagents.description.set',
+      handle: (context) => handleSubagentTarget(context, (input) => deps.subagentService.setAgentDescription(input), { requireSubagentId: true }),
+    },
+    {
+      capabilityId: SUBAGENT_MANAGEMENT_CAPABILITY_ID,
+      operationId: 'subagents.model.set',
+      handle: (context) => handleSubagentTarget(context, (input) => deps.subagentService.setAgentModel(input), { requireSubagentId: true }),
+    },
+    {
+      capabilityId: SUBAGENT_MANAGEMENT_CAPABILITY_ID,
+      operationId: 'subagents.skills.set',
+      handle: (context) => handleSubagentTarget(context, (input) => deps.subagentService.setAgentSkills(input), { requireSubagentId: true }),
     },
     {
       capabilityId: SUBAGENT_MANAGEMENT_CAPABILITY_ID,

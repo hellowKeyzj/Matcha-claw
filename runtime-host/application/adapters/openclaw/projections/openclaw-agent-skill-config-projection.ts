@@ -6,11 +6,11 @@ import type {
   SetAgentSkillConfigCommand,
   SetAgentSkillConfigResult,
 } from '../../../subagents/agent-skill-config-contracts';
-import type { SubagentRuntimeWorkflow } from '../../../workflows/subagent-runtime/subagent-runtime-workflow';
 import type { SkillRuntimeWorkflow } from '../../../workflows/skill-runtime/skill-runtime-workflow';
+import type { SubagentConfigProjectionPort, SubagentConfigSnapshot } from '../../../subagents/subagent-config-contracts';
 
 interface OpenClawAgentSkillConfigProjectionDeps {
-  readonly runtimeWorkflow: Pick<SubagentRuntimeWorkflow, 'call'>;
+  readonly subagentConfigProjection: SubagentConfigProjectionPort;
   readonly skillRuntimeWorkflow: Pick<SkillRuntimeWorkflow, 'refreshStatus' | 'resolveCanonicalSkillKeyMap' | 'validateCanonicalSkillKeys'>;
 }
 
@@ -18,28 +18,19 @@ export class OpenClawAgentSkillConfigProjection implements AgentSkillConfigProje
   constructor(private readonly deps: OpenClawAgentSkillConfigProjectionDeps) {}
 
   async readAgentSkillConfig(agentId: string): Promise<AgentSkillConfigView> {
-    const configResponse = await this.deps.runtimeWorkflow.call('config.get', {});
-    if (configResponse.status !== 200) {
-      return unsupportedAgentSkillConfigView(agentId);
-    }
-    const payload = readRecord(configResponse.data);
-    const config = readRecord(payload.config);
-    if (!hasConfiguredAgent(config, agentId)) {
-      return agentNotConfiguredSkillConfigView(agentId, payload);
+    const snapshot = await this.deps.subagentConfigProjection.readConfig();
+    if (!hasConfiguredAgent(snapshot.config, agentId)) {
+      return agentNotConfiguredSkillConfigView(agentId, toConfigPayload(snapshot));
     }
     const skillStatus = await this.deps.skillRuntimeWorkflow.refreshStatus();
-    return await this.buildView(agentId, payload, skillStatus);
+    return await this.buildView(agentId, toConfigPayload(snapshot), skillStatus);
   }
 
   async setAgentSkillConfig(command: SetAgentSkillConfigCommand): Promise<SetAgentSkillConfigResult> {
-    const configResponse = await this.deps.runtimeWorkflow.call('config.get', {});
-    if (configResponse.status !== 200) {
-      return { resultType: 'unsupported', reason: 'runtimeDoesNotExposeAgentSkillConfig' };
-    }
-
-    const payload = readRecord(configResponse.data);
-    const currentConfig = readRecord(payload.config);
-    const currentRevision = readConfigRevision(payload);
+    const snapshot = await this.deps.subagentConfigProjection.readConfig();
+    const payload = toConfigPayload(snapshot);
+    const currentConfig = snapshot.config;
+    const currentRevision = snapshot.revision;
     if (!currentRevision || currentRevision !== command.revision) {
       if (!hasConfiguredAgent(currentConfig, command.agentId)) {
         return {
@@ -73,20 +64,25 @@ export class OpenClawAgentSkillConfigProjection implements AgentSkillConfigProje
     }
 
     const nextConfig = applyAgentSkillConfig(currentConfig, validation.command);
-    const setResponse = await this.deps.runtimeWorkflow.call('config.set', {
-      raw: JSON.stringify(nextConfig),
-      baseHash: command.revision,
-    }, { invalidateSnapshots: true });
-    if (setResponse.status !== 200) {
-      return { resultType: 'unsupported', reason: 'runtimeDoesNotExposeAgentSkillConfig' };
+    const replaceResult = await this.deps.subagentConfigProjection.replaceConfig({
+      revision: command.revision,
+      config: nextConfig,
+    });
+    if (replaceResult.resultType === 'staleRevision') {
+      const latestPayload = toConfigPayload(replaceResult.latestSnapshot);
+      if (!hasConfiguredAgent(replaceResult.latestSnapshot.config, command.agentId)) {
+        return {
+          resultType: 'staleRevision',
+          latestView: agentNotConfiguredSkillConfigView(command.agentId, latestPayload),
+        };
+      }
+      return {
+        resultType: 'staleRevision',
+        latestView: await this.buildView(command.agentId, latestPayload, skillStatus ?? await this.deps.skillRuntimeWorkflow.refreshStatus()),
+      };
     }
 
-    const setPayload = readRecord(setResponse.data);
-    const nextPayload = {
-      ...payload,
-      ...setPayload,
-      config: Object.hasOwn(setPayload, 'config') ? readRecord(setPayload.config) : nextConfig,
-    };
+    const nextPayload = toConfigPayload(replaceResult.snapshot);
     return {
       resultType: 'updated',
       view: await this.buildView(command.agentId, nextPayload, skillStatus ?? await this.deps.skillRuntimeWorkflow.refreshStatus()),
@@ -169,17 +165,14 @@ export class OpenClawAgentSkillConfigProjection implements AgentSkillConfigProje
   }
 }
 
-function unsupportedAgentSkillConfigView(agentId: string): AgentSkillConfigView {
+function toConfigPayload(snapshot: SubagentConfigSnapshot): Record<string, unknown> {
   return {
-    agentId,
-    support: { supportType: 'unsupported', reason: 'runtimeDoesNotExposeAgentSkillConfig' },
-    selectionMode: 'inheritsDefaultSkills',
-    explicitSkillKeys: [],
-    inheritedDefaultSkillKeys: [],
-    effectiveSkillKeys: [],
-    options: [],
-    revision: '',
-    updatedAt: null,
+    config: snapshot.config,
+    revision: snapshot.revision,
+    hash: snapshot.revision,
+    baseHash: snapshot.revision,
+    ...(snapshot.path ? { path: snapshot.path } : {}),
+    updatedAt: snapshot.updatedAt,
   };
 }
 

@@ -1,14 +1,19 @@
 import { describe, expect, it, vi } from 'vitest';
 import { subagentRoutes } from '../../runtime-host/api/routes/subagent-routes';
 import { OpenClawAgentSkillConfigProjection } from '../../runtime-host/application/adapters/openclaw/projections/openclaw-agent-skill-config-projection';
+import { OpenClawAgentToolConfigProjection } from '../../runtime-host/application/adapters/openclaw/projections/openclaw-agent-tool-config-projection';
+import { OpenClawSubagentConfigProjection } from '../../runtime-host/application/adapters/openclaw/projections/openclaw-subagent-config-projection';
 import { createAgentSkillConfigCapabilityOperationRoutes } from '../../runtime-host/application/capabilities/agent/agent-skill-config-capability';
+import { createAgentToolConfigCapabilityOperationRoutes } from '../../runtime-host/application/capabilities/agent/agent-tool-config-capability';
 import { createSubagentManagementCapabilityOperationRoutes } from '../../runtime-host/application/capabilities/agent/subagent-management-capability';
 import { GatewayCapabilityService } from '../../runtime-host/application/gateway/gateway-capability-service';
 import { AgentSkillConfigService } from '../../runtime-host/application/subagents/agent-skill-config-service';
+import { AgentToolConfigService } from '../../runtime-host/application/subagents/agent-tool-config-service';
 import { SubagentRuntimeService } from '../../runtime-host/application/subagents/service';
 import { SubagentRuntimeWorkflow } from '../../runtime-host/application/workflows/subagent-runtime/subagent-runtime-workflow';
 import { dispatchRuntimeRouteDefinition } from './helpers/runtime-route';
 import type { RuntimeClockPort } from '../../runtime-host/application/common/runtime-ports';
+import type { SubagentConfigProjectionPort, SubagentConfigSnapshot } from '../../runtime-host/application/subagents/subagent-config-contracts';
 
 function clock(nowMs: number): RuntimeClockPort {
   return {
@@ -16,6 +21,61 @@ function clock(nowMs: number): RuntimeClockPort {
     nowIso: () => new Date(nowMs).toISOString(),
     toIsoString: (ms) => new Date(ms).toISOString(),
   };
+}
+
+function createTestSubagentConfigProjection(options?: {
+  config?: Record<string, unknown>;
+  revision?: string;
+  updatedAt?: number | null;
+}): SubagentConfigProjectionPort & {
+  readDisplayConfig: ReturnType<typeof vi.fn>;
+  setAgentDescription: ReturnType<typeof vi.fn>;
+  setAgentModel: ReturnType<typeof vi.fn>;
+  setAgentSkills: ReturnType<typeof vi.fn>;
+  readConfig: ReturnType<typeof vi.fn>;
+  replaceConfig: ReturnType<typeof vi.fn>;
+} {
+  let snapshot: SubagentConfigSnapshot = {
+    config: options?.config ?? {},
+    revision: options?.revision ?? 'hash-1',
+    updatedAt: options?.updatedAt ?? null,
+  };
+  const makeSnapshot = () => snapshot;
+  return {
+    readDisplayConfig: vi.fn(async () => {
+      const agents = snapshot.config.agents && typeof snapshot.config.agents === 'object' && !Array.isArray(snapshot.config.agents)
+        ? snapshot.config.agents as { defaults?: unknown; list?: unknown }
+        : {};
+      return {
+        agents: Array.isArray(agents.list) ? agents.list as never : [],
+        ...(agents.defaults && typeof agents.defaults === 'object' && !Array.isArray(agents.defaults) ? { defaults: agents.defaults as never } : {}),
+        revision: snapshot.revision,
+        ready: true,
+        refreshing: false,
+        updatedAt: snapshot.updatedAt,
+        error: null,
+      };
+    }),
+    setAgentDescription: vi.fn(async () => makeSnapshot()),
+    setAgentModel: vi.fn(async () => makeSnapshot()),
+    setAgentSkills: vi.fn(async () => makeSnapshot()),
+    readConfig: vi.fn(async () => makeSnapshot()),
+    replaceConfig: vi.fn(async (command: { readonly revision: string; readonly config: Record<string, unknown> }) => {
+      if (command.revision !== snapshot.revision) {
+        return { resultType: 'staleRevision' as const, latestSnapshot: snapshot };
+      }
+      snapshot = { config: command.config, revision: nextRevision(snapshot.revision), updatedAt: snapshot.updatedAt };
+      return { resultType: 'updated' as const, snapshot };
+    }),
+  };
+}
+
+function nextRevision(revision: string): string {
+  const match = /^(.*?)(\d+)$/.exec(revision);
+  if (!match) {
+    return `${revision}-next`;
+  }
+  return `${match[1]}${Number(match[2]) + 1}`;
 }
 
 function createSubagentService(
@@ -26,6 +86,7 @@ function createSubagentService(
     resolveCanonicalSkillKeys?: (skillIds: readonly string[]) => Promise<string[]>;
     resolveCanonicalSkillKeyMap?: (skillIds: readonly string[]) => Promise<Record<string, string>>;
     validateCanonicalSkillKeys?: (skillIds: readonly string[]) => Promise<{ ok: true; skillKeys: string[] } | { ok: false; unknownSkillKeys: string[]; nonCanonicalSkillKeys: string[] }>;
+    subagentConfigProjection?: SubagentConfigProjectionPort;
     nowMs?: number;
   },
 ): SubagentRuntimeService {
@@ -44,6 +105,7 @@ function createSubagentService(
       resolveCanonicalSkillKeyMap: deps.resolveCanonicalSkillKeyMap ?? (async (skillIds) => Object.fromEntries(skillIds.map((skillId) => [skillId.trim(), skillId.trim()]))),
       validateCanonicalSkillKeys: deps.validateCanonicalSkillKeys ?? (async (skillIds) => ({ ok: true, skillKeys: [...skillIds] })),
     },
+    subagentConfigProjection: deps.subagentConfigProjection ?? createTestSubagentConfigProjection(),
   });
 }
 
@@ -57,19 +119,14 @@ function subagentOperationRoute(subagentService: SubagentRuntimeService, operati
 }
 
 function createAgentSkillConfigService(deps: {
-  snapshot?: (method: 'config.get', emptyPayload: Record<string, unknown>) => Promise<{ status: number; data: unknown }>;
-  call?: (method: string, params: Record<string, unknown>, options?: { invalidateSnapshots?: boolean }) => Promise<{ status: number; data: unknown }>;
+  subagentConfigProjection?: SubagentConfigProjectionPort;
   status?: () => Promise<unknown>;
   resolveCanonicalSkillKeyMap?: (skillIds: readonly string[]) => Promise<Record<string, string>>;
   validateCanonicalSkillKeys?: (skillIds: readonly string[]) => Promise<{ ok: true; skillKeys: string[] } | { ok: false; unknownSkillKeys: string[]; nonCanonicalSkillKeys: string[] }>;
 }): AgentSkillConfigService {
-  const runtimeWorkflow = {
-    snapshot: deps.snapshot ?? vi.fn(async () => ({ status: 200, data: { success: true, config: undefined } })),
-    call: deps.call ?? vi.fn(async () => ({ status: 200, data: {} })),
-  };
   return new AgentSkillConfigService({
     projection: new OpenClawAgentSkillConfigProjection({
-      runtimeWorkflow,
+      subagentConfigProjection: deps.subagentConfigProjection ?? createTestSubagentConfigProjection(),
       skillRuntimeWorkflow: {
         refreshStatus: deps.status ?? vi.fn(async () => ({ success: true, skills: [] })),
         resolveCanonicalSkillKeyMap: deps.resolveCanonicalSkillKeyMap ?? vi.fn(async (skillIds) => Object.fromEntries(skillIds.map((skillId) => [skillId.trim(), skillId.trim()]))),
@@ -81,6 +138,25 @@ function createAgentSkillConfigService(deps: {
 
 function agentSkillConfigOperationRoute(agentSkillConfigService: AgentSkillConfigService, operationId: string) {
   const route = createAgentSkillConfigCapabilityOperationRoutes({ agentSkillConfigService })
+    .find((candidate) => candidate.operationId === operationId);
+  if (!route) {
+    throw new Error(`Expected ${operationId} operation route`);
+  }
+  return route;
+}
+
+function createAgentToolConfigService(deps: {
+  subagentConfigProjection?: SubagentConfigProjectionPort;
+}): AgentToolConfigService {
+  return new AgentToolConfigService({
+    projection: new OpenClawAgentToolConfigProjection({
+      subagentConfigProjection: deps.subagentConfigProjection ?? createTestSubagentConfigProjection(),
+    }),
+  });
+}
+
+function agentToolConfigOperationRoute(agentToolConfigService: AgentToolConfigService, operationId: string) {
+  const route = createAgentToolConfigCapabilityOperationRoutes({ agentToolConfigService })
     .find((candidate) => candidate.operationId === operationId);
   if (!route) {
     throw new Error(`Expected ${operationId} operation route`);
@@ -119,22 +195,25 @@ describe('runtime-host subagent routes', () => {
     expect(inspectGatewayMethodReadiness).toHaveBeenCalledWith(['agents.list'], 5000);
   });
 
-  it('validates config.set before calling gateway', async () => {
+  it('validates semantic config writes before touching gateway', async () => {
     const gatewayRpc = vi.fn(async () => ({ ok: true }));
     const inspectGatewayMethodReadiness = vi.fn();
     const subagentService = createSubagentService({ gatewayRpc, inspectGatewayMethodReadiness });
 
-    const configSetRoute = subagentOperationRoute(subagentService, 'subagents.config.set');
+    const skillsSetRoute = subagentOperationRoute(subagentService, 'subagents.skills.set');
 
-    await expect(configSetRoute.handle({ target: { kind: 'agent', agentId: 'default' }, domainInput: { raw: '{} ' } } as never)).resolves.toEqual({
+    await expect(skillsSetRoute.handle({
+      target: { kind: 'subagent', agentId: 'default', subagentId: 'writer' },
+      domainInput: { skills: 'web-search' },
+    } as never)).resolves.toEqual({
       status: 400,
-      data: { success: false, error: 'baseHash is required' },
+      data: { success: false, error: 'skills must be an array' },
     });
     expect(gatewayRpc).not.toHaveBeenCalled();
     expect(inspectGatewayMethodReadiness).not.toHaveBeenCalled();
   });
 
-  it('returns canonical skill ids from config and agent snapshots', async () => {
+  it('returns canonical skill ids from agent snapshots and display config', async () => {
     const pending = new Map<string, (value: unknown) => void>();
     const gatewayRpc = vi.fn((method: string) => new Promise<unknown>((resolve) => {
       pending.set(method, resolve);
@@ -151,16 +230,19 @@ describe('runtime-host subagent routes', () => {
       gatewayRpc,
       inspectGatewayMethodReadiness,
       resolveCanonicalSkillKeyMap,
+      subagentConfigProjection: createTestSubagentConfigProjection({
+        config: { agents: { list: [{ id: 'main', skills: ['Web Search', 'missing'] }] } },
+        revision: 'hash-config',
+        updatedAt: 2000,
+      }),
       nowMs: 2000,
     });
 
     const listRoute = subagentOperationRoute(subagentService, 'subagents.list');
-    const configGetRoute = subagentOperationRoute(subagentService, 'subagents.config.get');
+    const displayConfigRoute = subagentOperationRoute(subagentService, 'subagents.displayConfig.get');
 
     await listRoute.handle({ target: { kind: 'agent', agentId: 'default' }, domainInput: {} } as never);
-    await configGetRoute.handle({ target: { kind: 'agent', agentId: 'default' }, domainInput: {} } as never);
     pending.get('agents.list')?.({ agents: [{ id: 'main', name: 'Main', skills: ['Web Search', 'missing'] }] });
-    pending.get('config.get')?.({ config: { agents: { list: [{ id: 'main', skills: ['Web Search', 'missing'] }] } } });
     await Promise.resolve();
 
     await expect(listRoute.handle({ target: { kind: 'agent', agentId: 'default' }, domainInput: {} } as never))
@@ -170,11 +252,13 @@ describe('runtime-host subagent routes', () => {
           agents: [{ id: 'main', name: 'Main', skills: ['web-search', 'missing'] }],
         },
       });
-    await expect(configGetRoute.handle({ target: { kind: 'agent', agentId: 'default' }, domainInput: {} } as never))
+    await expect(displayConfigRoute.handle({ target: { kind: 'agent', agentId: 'default' }, domainInput: {} } as never))
       .resolves.toMatchObject({
         status: 200,
         data: {
-          config: { agents: { list: [{ id: 'main', skills: ['web-search', 'missing'] }] } },
+          agents: [{ id: 'main', skills: ['web-search', 'missing'] }],
+          revision: 'hash-config',
+          updatedAt: 2000,
         },
       });
     expect(resolveCanonicalSkillKeyMap).toHaveBeenCalledWith(['Web Search', 'missing']);
@@ -182,42 +266,62 @@ describe('runtime-host subagent routes', () => {
     expect(resolveCanonicalSkillKeyMap).not.toHaveBeenCalledWith(['missing']);
   });
 
-  it('forwards canonical skill ids in config.set to gateway', async () => {
+  it('writes canonical skill ids through semantic projection without gateway config rpc', async () => {
     const gatewayRpc = vi.fn(async () => ({ ok: true }));
-    const inspectGatewayMethodReadiness = vi.fn(async (methods: string[]) => ({
-      ready: true,
-      methods,
-      missingMethods: [],
-    }));
+    const inspectGatewayMethodReadiness = vi.fn();
     const validateCanonicalSkillKeys = vi.fn(async (skillIds: readonly string[]) => ({ ok: true as const, skillKeys: [...skillIds] }));
-    const subagentService = createSubagentService({ gatewayRpc, inspectGatewayMethodReadiness, validateCanonicalSkillKeys });
-    const configSetRoute = subagentOperationRoute(subagentService, 'subagents.config.set');
+    const subagentConfigProjection = createTestSubagentConfigProjection({ revision: 'hash-1' });
+    const subagentService = createSubagentService({
+      gatewayRpc,
+      inspectGatewayMethodReadiness,
+      validateCanonicalSkillKeys,
+      subagentConfigProjection,
+    });
+    const skillsSetRoute = subagentOperationRoute(subagentService, 'subagents.skills.set');
 
-    await expect(configSetRoute.handle({
-      target: { kind: 'agent', agentId: 'default' },
-      domainInput: {
-        raw: JSON.stringify({ agents: { list: [{ id: 'main', skills: ['web-search'] }] } }),
-        baseHash: 'hash-1',
-      },
-    })).resolves.toEqual({ status: 200, data: { ok: true } });
+    await expect(skillsSetRoute.handle({
+      target: { kind: 'subagent', agentId: 'default', subagentId: 'writer' },
+      domainInput: { skills: ['web-search'] },
+    } as never)).resolves.toEqual({
+      status: 200,
+      data: { config: {}, revision: 'hash-1', updatedAt: null },
+    });
 
-    expect(gatewayRpc).toHaveBeenCalledWith(
-      'config.set',
-      {
-        raw: JSON.stringify({ agents: { list: [{ id: 'main', skills: ['web-search'] }] } }),
-        baseHash: 'hash-1',
-      },
-      60000,
-    );
+    expect(subagentConfigProjection.setAgentSkills).toHaveBeenCalledWith({ agentId: 'writer', skills: ['web-search'] });
+    expect(gatewayRpc).not.toHaveBeenCalled();
+    expect(inspectGatewayMethodReadiness).not.toHaveBeenCalled();
   });
 
-  it('rejects unknown and noncanonical skill ids in config.set without calling gateway', async () => {
+  it('writes description through semantic projection without validating unrelated agent skills', async () => {
     const gatewayRpc = vi.fn(async () => ({ ok: true }));
-    const inspectGatewayMethodReadiness = vi.fn(async () => ({
-      ready: true,
-      methods: ['config.set'],
-      missingMethods: [],
-    }));
+    const inspectGatewayMethodReadiness = vi.fn();
+    const validateCanonicalSkillKeys = vi.fn(async (skillIds: readonly string[]) => ({ ok: true as const, skillKeys: [...skillIds] }));
+    const subagentConfigProjection = createTestSubagentConfigProjection({ revision: 'hash-1' });
+    const subagentService = createSubagentService({
+      gatewayRpc,
+      inspectGatewayMethodReadiness,
+      validateCanonicalSkillKeys,
+      subagentConfigProjection,
+    });
+    const descriptionSetRoute = subagentOperationRoute(subagentService, 'subagents.description.set');
+
+    await expect(descriptionSetRoute.handle({
+      target: { kind: 'subagent', agentId: 'default', subagentId: 'writer' },
+      domainInput: { description: 'Draft docs' },
+    } as never)).resolves.toEqual({
+      status: 200,
+      data: { config: {}, revision: 'hash-1', updatedAt: null },
+    });
+
+    expect(subagentConfigProjection.setAgentDescription).toHaveBeenCalledWith({ agentId: 'writer', description: 'Draft docs' });
+    expect(validateCanonicalSkillKeys).not.toHaveBeenCalled();
+    expect(gatewayRpc).not.toHaveBeenCalled();
+  });
+
+  it('rejects unknown and noncanonical skill ids in semantic skills write without calling projection', async () => {
+    const gatewayRpc = vi.fn(async () => ({ ok: true }));
+    const inspectGatewayMethodReadiness = vi.fn();
+    const subagentConfigProjection = createTestSubagentConfigProjection({ revision: 'hash-1' });
     const validateCanonicalSkillKeys = vi.fn(async (skillIds: readonly string[]) => {
       const unknownSkillKeys = skillIds.filter((skillId) => skillId === 'missing');
       const nonCanonicalSkillKeys = skillIds.filter((skillId) => skillId === 'Web Search');
@@ -226,31 +330,23 @@ describe('runtime-host subagent routes', () => {
       }
       return { ok: true as const, skillKeys: [...skillIds] };
     });
-    const subagentService = createSubagentService({ gatewayRpc, inspectGatewayMethodReadiness, validateCanonicalSkillKeys });
-    const configSetRoute = subagentOperationRoute(subagentService, 'subagents.config.set');
+    const subagentService = createSubagentService({
+      gatewayRpc,
+      inspectGatewayMethodReadiness,
+      validateCanonicalSkillKeys,
+      subagentConfigProjection,
+    });
+    const skillsSetRoute = subagentOperationRoute(subagentService, 'subagents.skills.set');
+    const target = { kind: 'subagent' as const, agentId: 'default', subagentId: 'writer' };
 
-    await expect(configSetRoute.handle({
-      target: { kind: 'agent', agentId: 'default' },
-      domainInput: {
-        raw: JSON.stringify({ agents: { list: [{ id: 'main', skills: ['web-search', 'missing'] }] } }),
-        baseHash: 'hash-1',
-      },
-    })).resolves.toEqual({ status: 400, data: { success: false, error: 'Unknown skillKey: missing' } });
-    await expect(configSetRoute.handle({
-      target: { kind: 'agent', agentId: 'default' },
-      domainInput: {
-        raw: JSON.stringify({ agents: { list: [{ id: 'main', skills: ['Web Search'] }] } }),
-        baseHash: 'hash-1',
-      },
-    })).resolves.toEqual({ status: 400, data: { success: false, error: 'skillKey must be canonical: Web Search' } });
-    await expect(configSetRoute.handle({
-      target: { kind: 'agent', agentId: 'default' },
-      domainInput: {
-        raw: JSON.stringify({ agents: { list: [{ id: 'main', skills: ['web-search', 123] }] } }),
-        baseHash: 'hash-1',
-      },
-    })).resolves.toEqual({ status: 400, data: { success: false, error: 'skillKey must be a string' } });
+    await expect(skillsSetRoute.handle({ target, domainInput: { skills: ['web-search', 'missing'] } } as never))
+      .resolves.toEqual({ status: 400, data: { success: false, error: 'Unknown skillKey: missing' } });
+    await expect(skillsSetRoute.handle({ target, domainInput: { skills: ['Web Search'] } } as never))
+      .resolves.toEqual({ status: 400, data: { success: false, error: 'skillKey must be canonical: Web Search' } });
+    await expect(skillsSetRoute.handle({ target, domainInput: { skills: ['web-search', 123] } } as never))
+      .resolves.toEqual({ status: 400, data: { success: false, error: 'skillKey must be a string' } });
 
+    expect(subagentConfigProjection.setAgentSkills).not.toHaveBeenCalled();
     expect(gatewayRpc).not.toHaveBeenCalled();
   });
 
@@ -398,32 +494,32 @@ describe('runtime-host subagent routes', () => {
     );
   });
 
-  it('returns structured 503 when subagent gateway method is absent', async () => {
+  it('returns structured 503 when subagent list gateway method is absent', async () => {
     const gatewayRpc = vi.fn(async () => ({}));
     const inspectGatewayMethodReadiness = vi.fn(async () => ({
       ready: false,
-      methods: ['config.get'],
-      missingMethods: ['config.get'],
+      methods: ['agents.list'],
+      missingMethods: ['agents.list'],
     }));
     const subagentService = createSubagentService({ gatewayRpc, inspectGatewayMethodReadiness });
 
-    const configGetRoute = subagentOperationRoute(subagentService, 'subagents.config.get');
+    const listRoute = subagentOperationRoute(subagentService, 'subagents.list');
 
-    await expect(configGetRoute.handle({ target: { kind: 'agent', agentId: 'default' }, domainInput: {} } as never))
+    await expect(listRoute.handle({ target: { kind: 'agent', agentId: 'default' }, domainInput: {} } as never))
       .resolves.toEqual({
         status: 503,
         data: {
           success: false,
           code: 'PLUGIN_CAPABILITY_UNAVAILABLE',
           pluginId: 'subagents',
-          missingMethods: ['config.get'],
+          missingMethods: ['agents.list'],
           message: 'subagents plugin is not enabled or did not register required Gateway methods.',
         },
       });
     expect(gatewayRpc).not.toHaveBeenCalled();
   });
 
-  it('subagent list and config cold reads return not-ready while one background rpc refreshes each snapshot', async () => {
+  it('subagent list cold reads return not-ready while one background rpc refreshes the snapshot', async () => {
     const pending = new Map<string, (value: unknown) => void>();
     const gatewayRpc = vi.fn((method: string) => new Promise<unknown>((resolve) => {
       pending.set(method, resolve);
@@ -433,9 +529,14 @@ describe('runtime-host subagent routes', () => {
       methods,
       missingMethods: [],
     }));
-    const subagentService = createSubagentService({ gatewayRpc, inspectGatewayMethodReadiness, nowMs: 2000 });
+    const subagentConfigProjection = createTestSubagentConfigProjection({
+      config: { agents: { defaults: { workspace: 'E:/workspace/main' } } },
+      revision: 'hash-config',
+      updatedAt: 2000,
+    });
+    const subagentService = createSubagentService({ gatewayRpc, inspectGatewayMethodReadiness, subagentConfigProjection, nowMs: 2000 });
     const listRoute = subagentOperationRoute(subagentService, 'subagents.list');
-    const configGetRoute = subagentOperationRoute(subagentService, 'subagents.config.get');
+    const displayConfigRoute = subagentOperationRoute(subagentService, 'subagents.displayConfig.get');
 
     await expect(listRoute.handle({ target: { kind: 'agent', agentId: 'default' }, domainInput: {} } as never))
       .resolves.toEqual({
@@ -449,23 +550,24 @@ describe('runtime-host subagent routes', () => {
           error: null,
         },
       });
-    await expect(configGetRoute.handle({ target: { kind: 'agent', agentId: 'default' }, domainInput: {} } as never))
+    await expect(displayConfigRoute.handle({ target: { kind: 'agent', agentId: 'default' }, domainInput: {} } as never))
       .resolves.toEqual({
         status: 200,
         data: {
-          success: true,
-          config: undefined,
-          ready: false,
-          refreshing: true,
-          updatedAt: null,
+          agents: [],
+          defaults: { workspace: 'E:/workspace/main' },
+          revision: 'hash-config',
+          ready: true,
+          refreshing: false,
+          updatedAt: 2000,
           error: null,
         },
       });
     await listRoute.handle({ target: { kind: 'agent', agentId: 'default' }, domainInput: {} } as never);
 
-    expect(gatewayRpc).toHaveBeenCalledTimes(2);
+    expect(gatewayRpc).toHaveBeenCalledTimes(1);
+    expect(subagentConfigProjection.readDisplayConfig).toHaveBeenCalledTimes(1);
     pending.get('agents.list')?.({ agents: [{ id: 'main', name: 'Main' }], defaultId: 'main' });
-    pending.get('config.get')?.({ config: { agents: { defaults: { workspace: 'E:/workspace/main' } } } });
     await Promise.resolve();
 
     await expect(listRoute.handle({ target: { kind: 'agent', agentId: 'default' }, domainInput: {} } as never))
@@ -483,104 +585,65 @@ describe('runtime-host subagent routes', () => {
       });
   });
 
-  it('invalidates pending config snapshots after config.set', async () => {
-    const pendingConfigGets: Array<(value: unknown) => void> = [];
-    const gatewayRpc = vi.fn((method: string) => {
-      if (method === 'config.get') {
-        return new Promise<unknown>((resolve) => {
-          pendingConfigGets.push(resolve);
-        });
-      }
-      if (method === 'config.set') {
-        return Promise.resolve({ ok: true });
-      }
-      return Promise.resolve({});
-    });
+  it('semantic config writes use projection and do not invalidate gateway snapshots', async () => {
+    const pending = new Map<string, (value: unknown) => void>();
+    const gatewayRpc = vi.fn((method: string) => new Promise<unknown>((resolve) => {
+      pending.set(method, resolve);
+    }));
     const inspectGatewayMethodReadiness = vi.fn(async (methods: string[]) => ({
       ready: true,
       methods,
       missingMethods: [],
     }));
-    const subagentService = createSubagentService({ gatewayRpc, inspectGatewayMethodReadiness, nowMs: 3000 });
-    const configGetRoute = subagentOperationRoute(subagentService, 'subagents.config.get');
-    const configSetRoute = subagentOperationRoute(subagentService, 'subagents.config.set');
+    const subagentConfigProjection = createTestSubagentConfigProjection({ revision: 'hash-1' });
+    const subagentService = createSubagentService({ gatewayRpc, inspectGatewayMethodReadiness, subagentConfigProjection, nowMs: 3000 });
+    const listRoute = subagentOperationRoute(subagentService, 'subagents.list');
+    const modelSetRoute = subagentOperationRoute(subagentService, 'subagents.model.set');
 
-    await expect(configGetRoute.handle({ target: { kind: 'agent', agentId: 'default' }, domainInput: {} } as never))
+    await expect(listRoute.handle({ target: { kind: 'agent', agentId: 'default' }, domainInput: {} } as never))
       .resolves.toEqual({
         status: 200,
         data: {
           success: true,
-          config: undefined,
+          agents: [],
           ready: false,
           refreshing: true,
           updatedAt: null,
           error: null,
         },
       });
-    await expect(configSetRoute.handle({
-      target: { kind: 'agent', agentId: 'default' },
-      domainInput: {
-        raw: JSON.stringify({ agents: { list: [] } }),
-        baseHash: 'hash-1',
-      },
-    } as never)).resolves.toEqual({ status: 200, data: { ok: true } });
+    await expect(modelSetRoute.handle({
+      target: { kind: 'subagent', agentId: 'default', subagentId: 'writer' },
+      domainInput: { model: undefined },
+    } as never)).resolves.toEqual({ status: 200, data: { config: {}, revision: 'hash-1', updatedAt: null } });
 
-    pendingConfigGets[0]?.({ config: { agents: { defaults: { workspace: 'E:/workspace/old' } } } });
+    pending.get('agents.list')?.({ agents: [{ id: 'main', name: 'Main' }] });
     await Promise.resolve();
 
-    await expect(configGetRoute.handle({ target: { kind: 'agent', agentId: 'default' }, domainInput: {} } as never))
-      .resolves.toEqual({
+    await expect(listRoute.handle({ target: { kind: 'agent', agentId: 'default' }, domainInput: {} } as never))
+      .resolves.toMatchObject({
         status: 200,
         data: {
-          success: true,
-          config: undefined,
-          ready: false,
-          refreshing: true,
-          updatedAt: null,
-          error: null,
-        },
-      });
-    expect(gatewayRpc).toHaveBeenNthCalledWith(1, 'config.get', {}, 60000);
-    expect(gatewayRpc).toHaveBeenNthCalledWith(2, 'config.set', {
-      raw: JSON.stringify({ agents: { list: [] } }),
-      baseHash: 'hash-1',
-    }, 60000);
-    expect(gatewayRpc).toHaveBeenNthCalledWith(3, 'config.get', {}, 60000);
-
-    pendingConfigGets[1]?.({ config: { agents: { defaults: { workspace: 'E:/workspace/new' } } } });
-    await Promise.resolve();
-
-    await expect(configGetRoute.handle({ target: { kind: 'agent', agentId: 'default' }, domainInput: {} } as never))
-      .resolves.toEqual({
-        status: 200,
-        data: {
-          success: true,
-          config: { agents: { defaults: { workspace: 'E:/workspace/new' } } },
+          agents: [{ id: 'main', name: 'Main' }],
           ready: true,
-          refreshing: true,
           updatedAt: 3000,
-          error: null,
         },
       });
-    expect(gatewayRpc).toHaveBeenNthCalledWith(4, 'config.get', {}, 60000);
+    expect(subagentConfigProjection.setAgentModel).toHaveBeenCalledWith({ agentId: 'writer', model: undefined });
+    expect(gatewayRpc.mock.calls.map(([method]) => method)).toEqual(['agents.list', 'agents.list']);
   });
 
   it('projects agent skill config through subagent target without exposing raw config', async () => {
-    const snapshot = vi.fn(async () => ({ status: 200, data: { success: true, config: undefined, ready: false } }));
-    const call = vi.fn(async () => ({
-      status: 200,
-      data: {
-        success: true,
-        hash: 'hash-1',
-        config: {
-          agents: {
-            defaults: { skills: ['Web Search'] },
-            list: [{ id: 'writer', skills: ['browser-flow'] }],
-          },
+    const subagentConfigProjection = createTestSubagentConfigProjection({
+      config: {
+        agents: {
+          defaults: { skills: ['Web Search'] },
+          list: [{ id: 'writer', skills: ['browser-flow'] }],
         },
-        updatedAt: 2000,
       },
-    }));
+      revision: 'hash-1',
+      updatedAt: 2000,
+    });
     const status = vi.fn(async () => ({
       success: true,
       skills: [
@@ -589,7 +652,7 @@ describe('runtime-host subagent routes', () => {
       ],
     }));
     const resolveCanonicalSkillKeyMap = vi.fn(async () => ({ 'Web Search': 'web-search', 'browser-flow': 'browser-flow' }));
-    const service = createAgentSkillConfigService({ snapshot, call, status, resolveCanonicalSkillKeyMap });
+    const service = createAgentSkillConfigService({ subagentConfigProjection, status, resolveCanonicalSkillKeyMap });
     const getRoute = agentSkillConfigOperationRoute(service, 'agentSkillConfig.get');
 
     await expect(getRoute.handle({
@@ -612,23 +675,18 @@ describe('runtime-host subagent routes', () => {
         updatedAt: 2000,
       },
     });
-    expect(call).toHaveBeenCalledWith('config.get', {});
-    expect(snapshot).not.toHaveBeenCalled();
+    expect(subagentConfigProjection.readConfig).toHaveBeenCalledTimes(1);
   });
 
   it('treats missing agent skill allowlist as all selectable OpenClaw skills enabled', async () => {
-    const call = vi.fn(async () => ({
-      status: 200,
-      data: {
-        success: true,
-        hash: 'hash-all-skills',
-        config: {
-          agents: {
-            list: [{ id: 'writer', name: 'Writer' }],
-          },
+    const subagentConfigProjection = createTestSubagentConfigProjection({
+      config: {
+        agents: {
+          list: [{ id: 'writer', name: 'Writer' }],
         },
       },
-    }));
+      revision: 'hash-all-skills',
+    });
     const status = vi.fn(async () => ({
       success: true,
       skills: [
@@ -637,7 +695,7 @@ describe('runtime-host subagent routes', () => {
         { skillKey: 'disabled-skill', name: 'Disabled Skill', description: 'Disabled', installed: true, disabled: true },
       ],
     }));
-    const service = createAgentSkillConfigService({ call, status });
+    const service = createAgentSkillConfigService({ subagentConfigProjection, status });
     const getRoute = agentSkillConfigOperationRoute(service, 'agentSkillConfig.get');
 
     await expect(getRoute.handle({
@@ -655,21 +713,13 @@ describe('runtime-host subagent routes', () => {
   });
 
   it('returns an empty unsupported skill config view and rejects writes when the OpenClaw agent is not configured', async () => {
-    const call = vi.fn(async (method: string) => {
-      if (method === 'config.get') {
-        return {
-          status: 200,
-          data: {
-            hash: 'hash-missing-agent',
-            config: {
-              agents: {
-                list: [{ id: 'writer', name: 'Writer' }],
-              },
-            },
-          },
-        };
-      }
-      return { status: 200, data: {} };
+    const subagentConfigProjection = createTestSubagentConfigProjection({
+      config: {
+        agents: {
+          list: [{ id: 'writer', name: 'Writer' }],
+        },
+      },
+      revision: 'hash-missing-agent',
     });
     const status = vi.fn(async () => ({
       success: true,
@@ -678,7 +728,7 @@ describe('runtime-host subagent routes', () => {
         { skillKey: 'browser-flow', name: 'Browser Flow', description: 'Run browser flows', installed: true, disabled: false },
       ],
     }));
-    const service = createAgentSkillConfigService({ call, status });
+    const service = createAgentSkillConfigService({ subagentConfigProjection, status });
     const getRoute = agentSkillConfigOperationRoute(service, 'agentSkillConfig.get');
     const setRoute = agentSkillConfigOperationRoute(service, 'agentSkillConfig.set');
     const target = { kind: 'subagent' as const, agentId: 'default', subagentId: 'ghost' };
@@ -713,30 +763,19 @@ describe('runtime-host subagent routes', () => {
     });
 
     expect(status).not.toHaveBeenCalled();
-    expect(call).not.toHaveBeenCalledWith('config.set', expect.anything(), expect.anything());
+    expect(subagentConfigProjection.replaceConfig).not.toHaveBeenCalled();
   });
 
   it('writes agent skill config through canonical projection and rejects stale revisions', async () => {
-    const call = vi.fn(async (method: string, params: Record<string, unknown>) => {
-      if (method === 'config.get') {
-        return {
-          status: 200,
-          data: {
-            hash: 'hash-2',
-            config: {
-              other: true,
-              agents: {
-                defaults: { workspace: 'E:/workspace/main', skills: ['web-search'] },
-                list: [{ id: 'writer', name: 'Writer', skills: ['browser-flow'] }],
-              },
-            },
-          },
-        };
-      }
-      if (method === 'config.set') {
-        return { status: 200, data: { hash: 'hash-3', params } };
-      }
-      return { status: 200, data: {} };
+    const subagentConfigProjection = createTestSubagentConfigProjection({
+      config: {
+        other: true,
+        agents: {
+          defaults: { workspace: 'E:/workspace/main', skills: ['web-search'] },
+          list: [{ id: 'writer', name: 'Writer', skills: ['browser-flow'] }],
+        },
+      },
+      revision: 'hash-2',
     });
     const validateCanonicalSkillKeys = vi.fn(async (skillIds: readonly string[]) => {
       const unknownSkillKeys = skillIds.filter((skillId) => skillId === 'missing');
@@ -753,7 +792,7 @@ describe('runtime-host subagent routes', () => {
         { skillKey: 'browser-flow', name: 'Browser Flow', description: 'Run browser flows', installed: true, disabled: false },
       ],
     }));
-    const service = createAgentSkillConfigService({ call, status, validateCanonicalSkillKeys });
+    const service = createAgentSkillConfigService({ subagentConfigProjection, status, validateCanonicalSkillKeys });
     const setRoute = agentSkillConfigOperationRoute(service, 'agentSkillConfig.set');
     const target = { kind: 'subagent' as const, agentId: 'default', subagentId: 'writer' };
 
@@ -811,20 +850,20 @@ describe('runtime-host subagent routes', () => {
       },
     });
 
-    expect(call).toHaveBeenLastCalledWith('config.set', {
-      raw: JSON.stringify({
+    expect(subagentConfigProjection.replaceConfig).toHaveBeenLastCalledWith({
+      revision: 'hash-2',
+      config: {
         other: true,
         agents: {
           defaults: { workspace: 'E:/workspace/main', skills: ['web-search'] },
           list: [{ id: 'writer', name: 'Writer', skills: ['browser-flow'] }],
         },
-      }),
-      baseHash: 'hash-2',
-    }, { invalidateSnapshots: true });
+      },
+    });
     await expect(setRoute.handle({
       target,
       domainInput: {
-        revision: 'hash-2',
+        revision: 'hash-3',
         selection: { selectionType: 'setExplicitSkillAllowlist', skillKeys: ['missing', 'Web Search'] },
       },
     } as never)).resolves.toEqual({
@@ -838,6 +877,164 @@ describe('runtime-host subagent routes', () => {
 
     expect(validateCanonicalSkillKeys).toHaveBeenCalledWith(['browser-flow']);
     expect(validateCanonicalSkillKeys).toHaveBeenCalledWith(['missing', 'Web Search']);
+  });
+
+  it('projects agent tool config from OpenClaw agents list tools', async () => {
+    const subagentConfigProjection = createTestSubagentConfigProjection({
+      config: {
+        agents: {
+          list: [{
+            id: 'writer',
+            name: 'Writer',
+            tools: { profile: 'custom', allow: ['read', 'group:web'], deny: ['exec'] },
+          }],
+        },
+      },
+      revision: 'hash-tools',
+      updatedAt: 4000,
+    });
+    const service = createAgentToolConfigService({ subagentConfigProjection });
+    const getRoute = agentToolConfigOperationRoute(service, 'agentToolConfig.get');
+
+    await expect(getRoute.handle({
+      target: { kind: 'subagent', agentId: 'default', subagentId: 'writer' },
+      domainInput: {},
+    } as never)).resolves.toEqual({
+      status: 200,
+      data: {
+        agentId: 'writer',
+        support: { supportType: 'supported' },
+        selectionMode: 'usesAgentToolPolicy',
+        toolPolicy: { profile: 'custom', allow: ['read', 'group:web'], deny: ['exec'] },
+        toolOptions: expect.arrayContaining([
+          { toolKey: 'read', displayName: 'Read', optionType: 'tool' },
+          { toolKey: 'exec', displayName: 'Exec', optionType: 'tool' },
+          { toolKey: 'web_search', displayName: 'Web Search', optionType: 'tool' },
+          { toolKey: 'sessions_spawn', displayName: 'Sessions Spawn', optionType: 'tool' },
+          { toolKey: 'group:*', displayName: 'All tool groups', optionType: 'group' },
+          { toolKey: 'group:web', displayName: 'Web tools', optionType: 'group' },
+        ]),
+        revision: 'hash-tools',
+        updatedAt: 4000,
+      },
+    });
+    expect(subagentConfigProjection.readConfig).toHaveBeenCalledTimes(1);
+  });
+
+  it('writes and inherits agent tool config through OpenClaw agents list tools', async () => {
+    const subagentConfigProjection = createTestSubagentConfigProjection({
+      config: {
+        other: true,
+        agents: {
+          defaults: { workspace: 'E:/workspace/main' },
+          list: [{ id: 'writer', name: 'Writer', tools: { profile: 'custom', allow: ['read'], deny: [] } }],
+        },
+      },
+      revision: 'hash-tools-1',
+    });
+    const service = createAgentToolConfigService({ subagentConfigProjection });
+    const setRoute = agentToolConfigOperationRoute(service, 'agentToolConfig.set');
+    const target = { kind: 'subagent' as const, agentId: 'default', subagentId: 'writer' };
+
+    await expect(setRoute.handle({
+      target,
+      domainInput: {
+        revision: 'stale-tools',
+        selection: { selectionType: 'setAgentToolPolicy', profile: 'custom', allow: ['read'], deny: ['exec'] },
+      },
+    } as never)).resolves.toEqual({
+      status: 200,
+      data: {
+        resultType: 'staleRevision',
+        latestView: expect.objectContaining({
+          agentId: 'writer',
+          selectionMode: 'usesAgentToolPolicy',
+          revision: 'hash-tools-1',
+        }),
+      },
+    });
+
+    await expect(setRoute.handle({
+      target,
+      domainInput: {
+        revision: 'hash-tools-1',
+        selection: { selectionType: 'setAgentToolPolicy', profile: 'custom', allow: ['read', 'group:web'], deny: ['exec'] },
+      },
+    } as never)).resolves.toEqual({
+      status: 200,
+      data: {
+        resultType: 'updated',
+        view: expect.objectContaining({
+          agentId: 'writer',
+          selectionMode: 'usesAgentToolPolicy',
+          toolPolicy: { profile: 'custom', allow: ['read', 'group:web'], deny: ['exec'] },
+          revision: 'hash-tools-2',
+        }),
+      },
+    });
+    expect(subagentConfigProjection.replaceConfig).toHaveBeenLastCalledWith({
+      revision: 'hash-tools-1',
+      config: {
+        other: true,
+        agents: {
+          defaults: { workspace: 'E:/workspace/main' },
+          list: [{ id: 'writer', name: 'Writer', tools: { profile: 'custom', allow: ['read', 'group:web'], deny: ['exec'] } }],
+        },
+      },
+    });
+
+    await expect(setRoute.handle({
+      target,
+      domainInput: {
+        revision: 'hash-tools-2',
+        selection: { selectionType: 'inheritDefaultTools' },
+      },
+    } as never)).resolves.toEqual({
+      status: 200,
+      data: {
+        resultType: 'updated',
+        view: expect.objectContaining({
+          agentId: 'writer',
+          selectionMode: 'inheritsDefaultTools',
+          toolPolicy: null,
+          revision: 'hash-tools-3',
+        }),
+      },
+    });
+    expect(subagentConfigProjection.replaceConfig).toHaveBeenLastCalledWith({
+      revision: 'hash-tools-2',
+      config: {
+        other: true,
+        agents: {
+          defaults: { workspace: 'E:/workspace/main' },
+          list: [{ id: 'writer', name: 'Writer' }],
+        },
+      },
+    });
+  });
+
+  it('rejects unknown agent tool policy keys before writing OpenClaw config', async () => {
+    const subagentConfigProjection = createTestSubagentConfigProjection({
+      config: { agents: { list: [{ id: 'writer', name: 'Writer' }] } },
+      revision: 'hash-tools',
+    });
+    const service = createAgentToolConfigService({ subagentConfigProjection });
+    const setRoute = agentToolConfigOperationRoute(service, 'agentToolConfig.set');
+
+    await expect(setRoute.handle({
+      target: { kind: 'subagent', agentId: 'default', subagentId: 'writer' },
+      domainInput: {
+        revision: 'hash-tools',
+        selection: { selectionType: 'setAgentToolPolicy', profile: 'custom', allow: ['read', 'unknown_tool'], deny: ['another_unknown'] },
+      },
+    } as never)).resolves.toEqual({
+      status: 200,
+      data: {
+        resultType: 'invalidToolKeys',
+        unknownToolKeys: ['unknown_tool', 'another_unknown'],
+      },
+    });
+    expect(subagentConfigProjection.replaceConfig).not.toHaveBeenCalled();
   });
 
   it('initializes the target workspace only after creating a subagent through Gateway', async () => {

@@ -7,7 +7,7 @@ import {
 import type { GatewayRpcPort } from '../../gateway/gateway-runtime-port';
 const SUBAGENT_RPC_TIMEOUT_MS = 60_000;
 const SUBAGENT_CAPABILITY_TIMEOUT_MS = 5_000;
-type SnapshotKind = 'agents.list' | 'config.get';
+type SnapshotKind = 'agents.list';
 export type SubagentWorkspaceInitialization = 'mainAgentTemplate' | 'emptyWorkspace';
 
 export interface SubagentWorkspacePort {

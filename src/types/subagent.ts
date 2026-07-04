@@ -14,6 +14,7 @@ export interface AgentIdentitySummary {
 export interface SubagentSummary {
   id: string;
   name?: string;
+  description?: string;
   workspace?: string;
   model?: string;
   skills?: string[];
@@ -33,6 +34,7 @@ export interface SubagentConfigPackage {
   version: 1;
   agent: {
     name: string;
+    description?: string;
     skills?: string[];
     skillBundles?: SubagentSkillBundle[];
     files: Partial<Record<SubagentTargetFile, string>>;
@@ -99,56 +101,6 @@ export interface ModelCatalogEntry {
   displayLabel: string;
   contextWindow?: number;
   maxTokens?: number;
-}
-
-export interface AgentModelObject {
-  primary?: string;
-  fallbacks?: string[];
-}
-
-export type AgentModelValue = string | AgentModelObject;
-
-export interface AgentConfigEntry {
-  id: string;
-  default?: boolean;
-  model?: AgentModelValue;
-  skills?: string[];
-  [key: string]: unknown;
-}
-
-export interface ConfigProviderModelEntry {
-  id?: string;
-  [key: string]: unknown;
-}
-
-export interface ConfigProviderEntry {
-  models?: Array<string | ConfigProviderModelEntry>;
-  [key: string]: unknown;
-}
-
-export interface ConfigGetResult {
-  baseHash?: string;
-  hash?: string;
-  path?: string;
-  ready?: boolean;
-  refreshing?: boolean;
-  updatedAt?: number | null;
-  error?: string | null;
-  config: {
-    agents?: {
-      defaults?: {
-        workspace?: string;
-        model?: AgentModelValue;
-        models?: Record<string, unknown>;
-        skills?: string[];
-      };
-      list?: AgentConfigEntry[];
-    };
-    models?: {
-      providers?: Record<string, ConfigProviderEntry>;
-    };
-    [key: string]: unknown;
-  };
 }
 
 export interface SubagentDraftFile {

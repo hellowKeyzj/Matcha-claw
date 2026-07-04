@@ -75,7 +75,9 @@
     "confirmApplyDraft": "Confirm Apply Draft",
     "cancelDraft": "Cancel Draft",
     "applyDraftSuccess": "Draft applied successfully.",
-    "rawOutputTitle": "Raw model output"
+    "rawOutputTitle": "Raw model output",
+    "includeCurrentFilesLabel": "Use current files",
+    "noAgentSelected": "Выберите Agent перед настройкой персоны."
   },
   "deleteDialog": {
     "title": "Delete {{agentId}}",
@@ -93,6 +95,8 @@
     "skillsLoading": "Loading skills...",
     "noSkillOptions": "No available skills.",
     "name": "Name",
+    "description": "Description",
+    "descriptionPlaceholder": "Briefly describe what this Agent is good at and when to use it",
     "workspace": "Workspace",
     "model": "Model",
     "avatar": "Avatar",
@@ -110,7 +114,39 @@
     "modelsLoading": "Loading models...",
     "selectModel": "Select a configured model",
     "useDefaultModel": "Inherit global default model",
-    "modelUnavailable": "No configured models found."
+    "modelUnavailable": "No configured models found.",
+    "tabs": {
+      "basic": "Основное",
+      "persona": "Персона",
+      "skills": "Навыки",
+      "tools": "Инструменты"
+    },
+    "cancel": "Отмена",
+    "toolConfig": "Настройка инструментов",
+    "useAllTools": "Наследовать инструменты по умолчанию",
+    "toolsLoading": "Загрузка инструментов...",
+    "noToolOptions": "Нет доступных инструментов.",
+    "toolProfile": "Tool Profile",
+    "toolProfiles": {
+      "full": "Full (без ограничений)",
+      "coding": "Coding",
+      "minimal": "Minimal",
+      "messaging": "Messaging"
+    },
+    "capabilities": {
+      "toggleSkill": "Переключить навык",
+      "allowTool": "Разрешить инструмент",
+      "denyTool": "Запретить инструмент",
+      "allow": "Разрешить",
+      "deny": "Запретить",
+      "groupBadge": "Группа",
+      "toolBadge": "Инструмент",
+      "unsupported": {
+        "runtimeDoesNotExposeAgentSkillConfig": "Текущий runtime не поддерживает настройку навыков Agent.",
+        "runtimeDoesNotExposeAgentToolConfig": "Текущий runtime не поддерживает настройку инструментов Agent.",
+        "agentNotConfigured": "Этот Agent еще не записан в конфигурацию OpenClaw, поэтому здесь нельзя настроить возможности."
+      }
+    }
   },
   "card": {
     "default": "Default",

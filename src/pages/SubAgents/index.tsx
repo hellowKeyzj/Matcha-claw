@@ -14,6 +14,8 @@ import {
   prefetchSubagentTemplateById,
 } from '@/services/openclaw/subagent-template-catalog';
 import { useGatewayStore } from '@/stores/gateway';
+import { useAgentSkillConfigStore } from '@/stores/agent-skill-config';
+import { useAgentToolConfigStore } from '@/stores/agent-tool-config';
 import { useSubagentsStore } from '@/stores/subagents';
 import type { SubagentSummary, SubagentTemplateCatalogResult, SubagentTemplateDetail } from '@/types/subagent';
 import { useTranslation } from 'react-i18next';
@@ -21,10 +23,10 @@ import { isGatewayOperational, isGatewayRecovering } from '@/lib/gateway-status'
 import { SubagentCard } from './components/SubagentCard';
 import { SubagentDeleteDialog } from './components/SubagentDeleteDialog';
 import { SubagentFormDialog } from './components/SubagentFormDialog';
-import { SubagentManageDialog } from './components/SubagentManageDialog';
 import { SubagentTemplateLoadDialog } from './components/SubagentTemplateLoadDialog';
 
 type DialogMode = 'create' | 'edit';
+type SubagentEditorTab = 'basic' | 'persona' | 'skills' | 'tools';
 type TemplateListItem = SubagentTemplateCatalogResult['templates'][number];
 const SUBAGENTS_HEAVY_CONTENT_IDLE_TIMEOUT_MS = 320;
 const INITIAL_TEMPLATE_CARD_BATCH = 9;
@@ -147,8 +149,19 @@ export function SubAgents() {
   const generateDraftFromPrompt = useSubagentsStore((state) => state.generateDraftFromPrompt);
   const generatePreviewDiffByFile = useSubagentsStore((state) => state.generatePreviewDiffByFile);
   const applyDraft = useSubagentsStore((state) => state.applyDraft);
+  const skillConfigViewByAgentId = useAgentSkillConfigStore((state) => state.viewByAgentId);
+  const skillConfigLoadingByAgentId = useAgentSkillConfigStore((state) => state.loadingByAgentId);
+  const skillConfigErrorByAgentId = useAgentSkillConfigStore((state) => state.errorByAgentId);
+  const loadAgentSkillConfig = useAgentSkillConfigStore((state) => state.loadAgentSkillConfig);
+  const setAgentSkillConfig = useAgentSkillConfigStore((state) => state.setAgentSkillConfig);
+  const toolConfigViewByAgentId = useAgentToolConfigStore((state) => state.viewByAgentId);
+  const toolConfigLoadingByAgentId = useAgentToolConfigStore((state) => state.loadingByAgentId);
+  const toolConfigErrorByAgentId = useAgentToolConfigStore((state) => state.errorByAgentId);
+  const loadAgentToolConfig = useAgentToolConfigStore((state) => state.loadAgentToolConfig);
+  const setAgentToolConfig = useAgentToolConfigStore((state) => state.setAgentToolConfig);
   const [dialogOpen, setDialogOpen] = useState(false);
   const [dialogMode, setDialogMode] = useState<DialogMode>('create');
+  const [dialogInitialTab, setDialogInitialTab] = useState<SubagentEditorTab>('basic');
   const [editingAgentId, setEditingAgentId] = useState<string | null>(null);
   const [deletingAgentId, setDeletingAgentId] = useState<string | null>(null);
   const [deleting, setDeleting] = useState(false);
@@ -182,6 +195,12 @@ export function SubAgents() {
   const applySucceeded = managedAgentId ? Boolean(draftApplySuccessByAgent[managedAgentId]) : false;
   const applyingDraft = managedAgentId ? Boolean(draftApplyingByAgent[managedAgentId]) : false;
   const draftRawOutput = managedAgentId ? (draftRawOutputByAgent[managedAgentId] ?? '') : '';
+  const editingSkillConfigView = editingAgentId ? (skillConfigViewByAgentId[editingAgentId] ?? null) : null;
+  const editingSkillConfigLoading = editingAgentId ? Boolean(skillConfigLoadingByAgentId[editingAgentId]) : false;
+  const editingSkillConfigError = editingAgentId ? (skillConfigErrorByAgentId[editingAgentId] ?? null) : null;
+  const editingToolConfigView = editingAgentId ? (toolConfigViewByAgentId[editingAgentId] ?? null) : null;
+  const editingToolConfigLoading = editingAgentId ? Boolean(toolConfigLoadingByAgentId[editingAgentId]) : false;
+  const editingToolConfigError = editingAgentId ? (toolConfigErrorByAgentId[editingAgentId] ?? null) : null;
   const hasAvailableModels = availableModels.length > 0;
   const modelDisplayLabelById = useMemo(() => {
     const labels = new Map<string, string>();
@@ -233,6 +252,28 @@ export function SubAgents() {
     }
     void loadPersistedFilesForAgent(managedAgentId);
   }, [managedAgentId, loadPersistedFilesForAgent]);
+
+  useEffect(() => {
+    if (!managedAgentId || dialogOpen || editingAgentId) {
+      return;
+    }
+    setDialogMode('edit');
+    setDialogInitialTab('persona');
+    setEditingAgentId(managedAgentId);
+    setDialogOpen(true);
+  }, [dialogOpen, editingAgentId, managedAgentId]);
+
+  useEffect(() => {
+    if (!editingAgentId || !dialogOpen || dialogMode !== 'edit') {
+      return;
+    }
+    void loadAgentSkillConfig(editingAgentId).catch(() => {
+      // Error state is already set by the skill config store.
+    });
+    void loadAgentToolConfig(editingAgentId).catch(() => {
+      // Error state is already set by the tool config store.
+    });
+  }, [dialogMode, dialogOpen, editingAgentId, loadAgentSkillConfig, loadAgentToolConfig]);
 
   useEffect(() => {
     let cancelled = false;
@@ -490,18 +531,22 @@ export function SubAgents() {
   }, [deferredFilteredTemplates, tTemplate]);
 
   const editingAgent: SubagentSummary | undefined = editingAgentId
-    ? agents.find((agent) => agent.id === editingAgentId)
+    ? (agents.find((agent) => agent.id === editingAgentId) ?? (editingAgentId === managedAgentId ? { id: editingAgentId, name: editingAgentId } : undefined))
     : undefined;
 
   const openCreateDialog = () => {
     setDialogMode('create');
+    setDialogInitialTab('basic');
     setEditingAgentId(null);
+    setManagedAgentId(null);
     setDialogOpen(true);
   };
 
-  const openEditDialog = (agentId: string) => {
+  const openEditDialog = (agentId: string, initialTab: SubagentEditorTab = 'basic') => {
     setDialogMode('edit');
+    setDialogInitialTab(initialTab);
     setEditingAgentId(agentId);
+    setManagedAgentId(agentId);
     setDialogOpen(true);
   };
 
@@ -537,18 +582,18 @@ export function SubAgents() {
     void handleLoadTemplate(templateId);
   }, [handleLoadTemplate]);
 
-  const closeManageDialog = async () => {
+  const closeFormDialog = async () => {
     const agentId = managedAgentId;
+    setDialogOpen(false);
+    setEditingAgentId(null);
+    setManagedAgentId(null);
     if (!agentId) {
-      setManagedAgentId(null);
       return;
     }
     try {
       await cancelDraft(agentId);
     } catch {
       // Error state is already set by store.
-    } finally {
-      setManagedAgentId(null);
     }
   };
 
@@ -753,8 +798,8 @@ export function SubAgents() {
       </section>
 
       {showSubagentGridSkeleton ? (
-        <div data-testid="subagent-card-grid" className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
-          {Array.from({ length: 6 }).map((_, index) => (
+        <div data-testid="subagent-card-grid" className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
+          {Array.from({ length: 8 }).map((_, index) => (
             <div key={`subagents-card-placeholder-${index}`} className="rounded-lg border bg-card p-4">
               <div className="h-5 w-2/5 animate-pulse rounded bg-muted" />
               <div className="mt-3 h-3 w-4/5 animate-pulse rounded bg-muted" />
@@ -764,7 +809,7 @@ export function SubAgents() {
           ))}
         </div>
       ) : (
-        <div data-testid="subagent-card-grid" className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
+        <div data-testid="subagent-card-grid" className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
           {agents.map((agent) => (
             <SubagentCard
               key={agent.id}
@@ -772,7 +817,6 @@ export function SubAgents() {
               modelLabel={agent.model?.trim() ? (modelDisplayLabelById.get(agent.model.trim()) ?? agent.model.trim()) : undefined}
               editLocked={false}
               deleteLocked={Boolean(agent.isDefault)}
-              manageLocked={false}
               exportLocked={false}
               modelReady={Boolean(agent.model?.trim())}
               onEdit={() => openEditDialog(agent.id)}
@@ -781,9 +825,6 @@ export function SubAgents() {
               }}
               onExport={() => {
                 void handleExportAgentConfig(agent);
-              }}
-              onManage={() => {
-                setManagedAgentId(agent.id);
               }}
               onChat={() => {
                 const query = new URLSearchParams({ agent: agent.id }).toString();
@@ -815,13 +856,26 @@ export function SubAgents() {
         }}
         onClose={() => setDeletingAgentId(null)}
       />
-      <SubagentManageDialog
-        open={Boolean(managedAgentId)}
-        agentId={managedAgentId}
+      <SubagentFormDialog
+        open={dialogOpen}
+        mode={dialogMode}
+        agentId={editingAgentId}
+        initialTab={dialogInitialTab}
+        lockBasicInfo={Boolean(dialogMode === 'edit' && editingAgent?.isDefault)}
+        title={dialogMode === 'create' ? t('createDialogTitle') : t('editDialogTitle')}
+        existingAgents={agents}
+        modelOptions={availableModels}
+        modelsLoading={modelsLoading}
+        initialValues={editingAgent}
+        skillConfigView={editingSkillConfigView}
+        skillConfigLoading={editingSkillConfigLoading}
+        skillConfigError={editingSkillConfigError}
+        toolConfigView={editingToolConfigView}
+        toolConfigLoading={editingToolConfigLoading}
+        toolConfigError={editingToolConfigError}
         draftPrompt={draftPrompt}
         generatingDraft={generatingDraft}
         applyingDraft={applyingDraft}
-        canGenerateDraft={true}
         includeCurrentFiles={includeCurrentFiles}
         hasAnyDraft={hasAnyDraft}
         hasApprovedDraft={hasApprovedDraft}
@@ -868,35 +922,30 @@ export function SubAgents() {
             // Error state is already set by store.
           }
         }}
-        onClose={() => {
-          void closeManageDialog();
-        }}
-      />
-
-      <SubagentFormDialog
-        open={dialogOpen}
-        mode={dialogMode}
-        lockBasicInfo={Boolean(dialogMode === 'edit' && editingAgent?.isDefault)}
-        title={dialogMode === 'create' ? t('createDialogTitle') : t('editDialogTitle')}
-        existingAgents={agents}
-        modelOptions={availableModels}
-        modelsLoading={modelsLoading}
-        initialValues={editingAgent}
         onSubmit={async (values) => {
           if (dialogMode === 'create') {
             try {
               const createResult = await createAgent({
                 name: values.name,
+                description: values.description,
                 workspace: values.workspace,
                 model: values.model,
                 avatarSeed: values.avatarSeed,
                 avatarStyle: values.avatarStyle,
               });
               const resolvedAgentId = createResult.agentId || normalizeSubagentNameToSlug(values.name);
-              setManagedAgentId(resolvedAgentId);
-              void loadPersistedFilesForAgent(resolvedAgentId);
               setDraftPromptForAgent(resolvedAgentId, values.prompt);
-              setDialogOpen(false);
+              setEditingAgentId(resolvedAgentId);
+              setManagedAgentId(resolvedAgentId);
+              setDialogMode('edit');
+              setDialogInitialTab('persona');
+              void loadPersistedFilesForAgent(resolvedAgentId);
+              void loadAgentSkillConfig(resolvedAgentId).catch(() => {
+                // Error state is already set by the skill config store.
+              });
+              void loadAgentToolConfig(resolvedAgentId).catch(() => {
+                // Error state is already set by the tool config store.
+              });
               if (createResult.warning) {
                 toast.warning(createResult.warning);
               }
@@ -918,12 +967,33 @@ export function SubAgents() {
           await updateAgent({
             agentId: editingAgentId,
             name: resolvedName,
+            description: values.description,
             workspace: resolvedWorkspace,
             model: values.model || undefined,
+            avatarSeed: values.avatarSeed,
+            avatarStyle: values.avatarStyle,
           });
-          setDialogOpen(false);
+          if (values.skillConfig) {
+            const latestSkillConfig = await loadAgentSkillConfig(editingAgentId, { force: true, silent: true });
+            await setAgentSkillConfig({
+              agentId: editingAgentId,
+              revision: latestSkillConfig.revision,
+              selection: values.skillConfig.selection,
+            });
+          }
+          if (values.toolConfig) {
+            const latestToolConfig = await loadAgentToolConfig(editingAgentId, { force: true, silent: true });
+            await setAgentToolConfig({
+              agentId: editingAgentId,
+              revision: latestToolConfig.revision,
+              selection: values.toolConfig.selection,
+            });
+          }
+          await closeFormDialog();
         }}
-        onClose={() => setDialogOpen(false)}
+        onClose={() => {
+          void closeFormDialog();
+        }}
       />
 
       <SubagentTemplateLoadDialog

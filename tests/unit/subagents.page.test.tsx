@@ -4,6 +4,8 @@ import { MemoryRouter, useLocation } from 'react-router-dom';
 import { toast } from 'sonner';
 import { SubAgents } from '@/pages/SubAgents';
 import { useGatewayStore } from '@/stores/gateway';
+import { useAgentSkillConfigStore, __resetAgentSkillConfigStoreInternalCachesForTest } from '@/stores/agent-skill-config';
+import { useAgentToolConfigStore, __resetAgentToolConfigStoreInternalCachesForTest } from '@/stores/agent-tool-config';
 import { useSubagentsStore } from '@/stores/subagents';
 import i18n from '@/i18n';
 import { __resetSubagentTemplateCatalogCacheForTest } from '@/services/openclaw/subagent-template-catalog';
@@ -93,6 +95,38 @@ function buildCapabilitiesListEnvelope() {
             ownerModuleId: 'openclaw',
             routeOwnerId: 'openclaw',
           },
+          {
+            id: 'agent.skill-config',
+            kind: 'agent.skill-config',
+            scopeKind: 'agent',
+            scope: defaultAgentScope,
+            targetKinds: ['subagent'],
+            runtimeAdapterId: 'openclaw',
+            runtimeInstanceId: 'local',
+            targetAgentIds: ['default'],
+            supportLevel: 'native',
+            availability: 'available',
+            operations: [],
+            policyScope: 'agent.skill-config',
+            ownerModuleId: 'openclaw',
+            routeOwnerId: 'openclaw',
+          },
+          {
+            id: 'agent.tool-config',
+            kind: 'agent.tool-config',
+            scopeKind: 'agent',
+            scope: defaultAgentScope,
+            targetKinds: ['subagent'],
+            runtimeAdapterId: 'openclaw',
+            runtimeInstanceId: 'local',
+            targetAgentIds: ['default'],
+            supportLevel: 'native',
+            availability: 'available',
+            operations: [],
+            policyScope: 'agent.tool-config',
+            ownerModuleId: 'openclaw',
+            routeOwnerId: 'openclaw',
+          },
         ],
       },
     },
@@ -118,6 +152,7 @@ async function openEditDialog(agentId: string): Promise<void> {
   const button = await screen.findByRole('button', { name: `Edit ${agentId}` });
   await waitFor(() => expect(button).toBeEnabled());
   fireEvent.click(button);
+  await screen.findByRole('dialog', { name: 'Edit Subagent' });
 }
 
 describe('subagents page', () => {
@@ -196,6 +231,8 @@ describe('subagents page', () => {
     updateAgent.mockClear();
     deleteAgent.mockClear();
     exportAgentConfig.mockClear();
+    __resetAgentSkillConfigStoreInternalCachesForTest();
+    __resetAgentToolConfigStoreInternalCachesForTest();
     importAgentConfig.mockClear();
     loadAgents.mockClear();
     loadAvailableModels.mockClear();
@@ -239,6 +276,7 @@ describe('subagents page', () => {
         {
           id: 'agent-alpha',
           name: 'Alpha',
+          description: 'Handles supplier research and sourcing workflows.',
           workspace: '/home/dev/.openclaw/workspace-subagents/alpha',
           model: 'gpt-4o-mini',
           avatarSeed: 'agent:agent-alpha',
@@ -303,6 +341,78 @@ describe('subagents page', () => {
       generateDraftFromPrompt,
       cancelDraft,
     });
+    useAgentSkillConfigStore.setState({
+      viewByAgentId: {
+        main: {
+          agentId: 'main',
+          support: { supportType: 'supported' },
+          selectionMode: 'inheritsDefaultSkills',
+          explicitSkillKeys: [],
+          inheritedDefaultSkillKeys: [],
+          effectiveSkillKeys: [],
+          options: [],
+          revision: 'skill-main',
+          updatedAt: null,
+        },
+        'agent-alpha': {
+          agentId: 'agent-alpha',
+          support: { supportType: 'supported' },
+          selectionMode: 'inheritsDefaultSkills',
+          explicitSkillKeys: [],
+          inheritedDefaultSkillKeys: [],
+          effectiveSkillKeys: [],
+          options: [],
+          revision: 'skill-alpha',
+          updatedAt: null,
+        },
+        writer: {
+          agentId: 'writer',
+          support: { supportType: 'supported' },
+          selectionMode: 'inheritsDefaultSkills',
+          explicitSkillKeys: [],
+          inheritedDefaultSkillKeys: [],
+          effectiveSkillKeys: [],
+          options: [],
+          revision: 'skill-writer',
+          updatedAt: null,
+        },
+      },
+      loadingByAgentId: {},
+      errorByAgentId: {},
+    });
+    useAgentToolConfigStore.setState({
+      viewByAgentId: {
+        main: {
+          agentId: 'main',
+          support: { supportType: 'supported' },
+          selectionMode: 'inheritsDefaultTools',
+          toolPolicy: null,
+          toolOptions: [],
+          revision: 'tool-main',
+          updatedAt: null,
+        },
+        'agent-alpha': {
+          agentId: 'agent-alpha',
+          support: { supportType: 'supported' },
+          selectionMode: 'inheritsDefaultTools',
+          toolPolicy: null,
+          toolOptions: [],
+          revision: 'tool-alpha',
+          updatedAt: null,
+        },
+        writer: {
+          agentId: 'writer',
+          support: { supportType: 'supported' },
+          selectionMode: 'inheritsDefaultTools',
+          toolPolicy: null,
+          toolOptions: [],
+          revision: 'tool-writer',
+          updatedAt: null,
+        },
+      },
+      loadingByAgentId: {},
+      errorByAgentId: {},
+    });
   });
 
   it('renders agents in a card grid', () => {
@@ -310,9 +420,11 @@ describe('subagents page', () => {
 
     expect(screen.getByTestId('subagent-card-grid')).toBeInTheDocument();
     expect(screen.getByText('Alpha')).toBeInTheDocument();
-    expect(screen.getByText('agent-alpha')).toBeInTheDocument();
+    expect(screen.queryByText('agent-alpha')).toBeNull();
     expect(screen.getByText('gpt-main')).toBeInTheDocument();
     expect(screen.getByText('gpt-4o-mini')).toBeInTheDocument();
+    expect(screen.getByText('Handles supplier research and sourcing workflows.')).toBeInTheDocument();
+    expect(screen.queryByText('Open edit to configure basic info, persona, and capabilities.')).toBeNull();
     expect(screen.getByTestId('agent-avatar-main')).toBeInTheDocument();
     expect(screen.getByTestId('agent-avatar-agent-alpha')).toBeInTheDocument();
   });
@@ -412,6 +524,7 @@ describe('subagents page', () => {
 
     await openCreateDialog();
     fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'writer' } });
+    fireEvent.change(screen.getByLabelText('Description'), { target: { value: 'Writes vendor briefs.' } });
     expect(screen.getByLabelText('Workspace')).toHaveValue(
       '/home/dev/.openclaw/workspace-subagents/writer'
     );
@@ -421,6 +534,7 @@ describe('subagents page', () => {
     await waitFor(() => {
       expect(createAgent).toHaveBeenCalledWith(expect.objectContaining({
         name: 'writer',
+        description: 'Writes vendor briefs.',
         workspace: '/home/dev/.openclaw/workspace-subagents/writer',
         model: 'gpt-4.1-mini',
         avatarSeed: expect.any(String),
@@ -462,6 +576,7 @@ describe('subagents page', () => {
     expect(screen.getByRole('button', { name: 'avatar-style-bottts' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'avatar-style-botttsNeutral' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Refresh' })).toBeInTheDocument();
+    expect(screen.getAllByRole('button', { name: /pick-avatar-/ })).toHaveLength(15);
   });
 
   it('supports selecting an avatar option and avatar style when creating subagent', async () => {
@@ -505,7 +620,7 @@ describe('subagents page', () => {
       }));
     });
 
-    expect(screen.getByText('Managing: writer')).toBeInTheDocument();
+    expect(screen.getByRole('dialog', { name: 'Edit Subagent' })).toBeInTheDocument();
     expect(screen.getByLabelText('Prompt')).toHaveValue('act as a finance analyst');
   });
 
@@ -533,16 +648,18 @@ describe('subagents page', () => {
       '智能体 "writer" 已创建，但模型配置写入失败：RPC timeout: agents.update。请在编辑中重新确认',
     );
     });
-    expect(screen.getByText('Managing: writer')).toBeInTheDocument();
+    expect(screen.getByRole('dialog', { name: 'Edit Subagent' })).toBeInTheDocument();
   });
 
-  it('opens detail view when clicking manage button', () => {
+  it('opens persona tab through edit dialog', async () => {
     renderSubagentsPage();
 
-    fireEvent.click(screen.getByRole('button', { name: 'Manage agent-alpha' }));
+    await openEditDialog('agent-alpha');
+    fireEvent.click(screen.getByRole('tab', { name: 'Persona' }));
 
     expect(loadPersistedFilesForAgent).toHaveBeenCalledWith('agent-alpha');
-    expect(screen.getByText('Managing: agent-alpha')).toBeInTheDocument();
+    expect(screen.getByRole('dialog', { name: 'Edit Subagent' })).toBeInTheDocument();
+    expect(screen.getByLabelText('Prompt')).toBeInTheDocument();
   });
 
   it('submits prompt to generate subagent draft', async () => {
@@ -563,7 +680,8 @@ describe('subagents page', () => {
     });
     renderSubagentsPage();
 
-    fireEvent.click(screen.getByRole('button', { name: 'Manage agent-alpha' }));
+    await openEditDialog('agent-alpha');
+    fireEvent.click(screen.getByRole('tab', { name: 'Persona' }));
     fireEvent.change(screen.getByLabelText('Prompt'), { target: { value: 'draft policy docs' } });
     await waitFor(() => {
       expect(screen.getByRole('button', { name: 'Generate Draft' })).toBeEnabled();
@@ -597,7 +715,8 @@ describe('subagents page', () => {
     });
     renderSubagentsPage();
 
-    fireEvent.click(screen.getByRole('button', { name: 'Manage agent-alpha' }));
+    await openEditDialog('agent-alpha');
+    fireEvent.click(screen.getByRole('tab', { name: 'Persona' }));
     fireEvent.change(screen.getByLabelText('Prompt'), { target: { value: 'draft policy docs' } });
     fireEvent.click(screen.getByRole('switch', { name: /Use current files/i }));
     await waitFor(() => {
@@ -614,7 +733,7 @@ describe('subagents page', () => {
     });
   });
 
-  it('does not show applying label while only generating draft', () => {
+  it('does not show applying label while only generating draft', async () => {
     useSubagentsStore.setState({
       managedAgentId: 'agent-alpha',
       draftGeneratingByAgent: { 'agent-alpha': true },
@@ -633,6 +752,8 @@ describe('subagents page', () => {
     });
 
     renderSubagentsPage();
+    await openEditDialog('agent-alpha');
+    fireEvent.click(screen.getByRole('tab', { name: 'Persona' }));
 
     expect(screen.getByRole('button', { name: 'Generating...' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Confirm Apply Draft' })).toBeInTheDocument();
@@ -643,7 +764,11 @@ describe('subagents page', () => {
     renderSubagentsPage();
 
     await openEditDialog('agent-alpha');
+    expect(screen.getByText('Avatar')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'avatar-style-botttsNeutral' }));
+    fireEvent.click(screen.getAllByRole('button', { name: /pick-avatar-/ })[2]);
     fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'Alpha v2' } });
+    fireEvent.change(screen.getByLabelText('Description'), { target: { value: 'Handles international sourcing.' } });
     fireEvent.change(screen.getByLabelText('Model'), { target: { value: 'claude-3-7-sonnet' } });
     fireEvent.click(screen.getByRole('button', { name: 'Save' }));
 
@@ -655,8 +780,11 @@ describe('subagents page', () => {
       expect(updateAgent).toHaveBeenCalledWith({
         agentId: 'agent-alpha',
         name: 'Alpha v2',
+        description: 'Handles international sourcing.',
         workspace: '/home/dev/.openclaw/workspace-subagents/alpha',
         model: 'claude-3-7-sonnet',
+        avatarSeed: expect.stringContaining('picker:alpha'),
+        avatarStyle: 'botttsNeutral',
       });
     });
     expect(deleteAgent).toHaveBeenCalledWith('agent-alpha');
@@ -808,13 +936,21 @@ describe('subagents page', () => {
     });
   });
 
-  it('edit dialog no longer renders skill configuration section', async () => {
+  it('renders skill and tool configuration in separate edit dialog tabs', async () => {
     renderSubagentsPage();
 
     await openEditDialog('agent-alpha');
     expect(screen.queryByText('Skill Configuration')).toBeNull();
-    expect(screen.queryByText('Web Search')).toBeNull();
-    expect(screen.queryByText('Feishu Doc')).toBeNull();
+    fireEvent.click(screen.getByRole('tab', { name: 'Skills' }));
+
+    expect(screen.getByText('Skill Configuration')).toBeInTheDocument();
+    expect(screen.queryByText(/Choose the skills visible to this agent/i)).toBeNull();
+    expect(screen.queryByText('Tool Configuration')).toBeNull();
+    fireEvent.click(screen.getByRole('tab', { name: 'Tools' }));
+
+    expect(screen.queryByText('Skill Configuration')).toBeNull();
+    expect(screen.getByText('Tool Configuration')).toBeInTheDocument();
+    expect(screen.queryByText(/Configure this agent.*OpenClaw tool profile/i)).toBeNull();
   });
 
   it('编辑时不应把已删除模型补回下拉选项，并在单模型场景自动回填', async () => {
@@ -1042,16 +1178,16 @@ describe('subagents page', () => {
     expect(screen.getByRole('button', { name: 'Create' })).toBeDisabled();
   });
 
-  it('keeps main manageable but blocks delete for protected default agent', () => {
+  it('keeps main editable but blocks delete for protected default agent', () => {
     renderSubagentsPage();
 
     expect(screen.getByRole('button', { name: 'Edit main' })).toBeEnabled();
     expect(screen.getByRole('button', { name: 'Delete main' })).toBeDisabled();
-    expect(screen.getByRole('button', { name: 'Manage main' })).toBeEnabled();
+    expect(screen.queryByRole('button', { name: 'Manage main' })).toBeNull();
     expect(screen.getByRole('button', { name: 'Chat main' })).toBeEnabled();
   });
 
-  it('keeps manage available and disables chat when model is missing', () => {
+  it('keeps edit available and disables chat when model is missing', async () => {
     useSubagentsStore.setState({
       agents: [
         {
@@ -1077,28 +1213,30 @@ describe('subagents page', () => {
 
     renderSubagentsPage();
 
-    const manageButton = screen.getByRole('button', { name: 'Manage agent-no-model' });
-    expect(manageButton).toBeEnabled();
+    const editButton = screen.getByRole('button', { name: 'Edit agent-no-model' });
+    expect(editButton).toBeEnabled();
     expect(screen.getByRole('button', { name: 'Chat agent-no-model' })).toBeDisabled();
 
-    fireEvent.click(manageButton);
+    fireEvent.click(editButton);
+    fireEvent.click(screen.getByRole('tab', { name: 'Persona' }));
     expect(loadPersistedFilesForAgent).toHaveBeenCalledWith('agent-no-model');
-    expect(screen.getByText('Managing: agent-no-model')).toBeInTheDocument();
+    expect(screen.getByRole('dialog', { name: 'Edit Subagent' })).toBeInTheDocument();
   });
 
-  it('keeps managed panel visible after page remount', () => {
+  it('keeps persona tab visible after page remount', async () => {
     const { unmount } = renderSubagentsPage();
 
-    fireEvent.click(screen.getByRole('button', { name: 'Manage agent-alpha' }));
-    expect(screen.getByText('Managing: agent-alpha')).toBeInTheDocument();
+    await openEditDialog('agent-alpha');
+    fireEvent.click(screen.getByRole('tab', { name: 'Persona' }));
+    expect(screen.getByLabelText('Prompt')).toBeInTheDocument();
 
     unmount();
     renderSubagentsPage();
 
-    expect(screen.getByText('Managing: agent-alpha')).toBeInTheDocument();
+    expect(screen.getByLabelText('Prompt')).toBeInTheDocument();
   });
 
-  it('shows apply success feedback and hides apply buttons when draft is cleared', () => {
+  it('shows apply success feedback and hides apply buttons when draft is cleared', async () => {
     useSubagentsStore.setState({
       managedAgentId: 'agent-alpha',
       draftApplySuccessByAgent: { 'agent-alpha': true },
@@ -1108,13 +1246,15 @@ describe('subagents page', () => {
     });
 
     renderSubagentsPage();
+    await openEditDialog('agent-alpha');
+    fireEvent.click(screen.getByRole('tab', { name: 'Persona' }));
 
     expect(screen.getByText('Draft applied successfully.')).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Generate Diff Preview' })).toBeNull();
     expect(screen.queryByRole('button', { name: 'Confirm Apply Draft' })).toBeNull();
   });
 
-  it('closes manage dialog via top-right close button and triggers cancel action', async () => {
+  it('closes edit dialog via top-right close button and triggers cancel action', async () => {
     useGatewayStore.setState({
       status: {
         processState: 'running',
@@ -1146,12 +1286,12 @@ describe('subagents page', () => {
 
     renderSubagentsPage();
 
-    expect(await screen.findByRole('dialog', { name: 'Managing: agent-alpha' })).toBeInTheDocument();
+    expect(await screen.findByRole('dialog', { name: 'Edit Subagent' })).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'Close' }));
     await waitFor(() => {
       expect(cancelDraft).toHaveBeenCalledWith('agent-alpha');
     });
-    expect(screen.queryByRole('dialog', { name: 'Managing: agent-alpha' })).toBeNull();
+    expect(screen.queryByRole('dialog', { name: 'Edit Subagent' })).toBeNull();
   });
 
   it('navigates to chat with selected agent when clicking chat button', () => {

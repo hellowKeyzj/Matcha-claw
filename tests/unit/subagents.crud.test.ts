@@ -32,11 +32,14 @@ describe('subagents crud', () => {
     });
   });
 
-  it('calls agents.create and agents.update without writing avatar into openclaw config', async () => {
+  it('calls agents.create, writes description through description.set, and updates model separately', async () => {
     const rpc = gatewayClientRpcMock;
     rpc.mockImplementation(async (method) => {
       if (method === 'agents.create') {
         return { success: true, result: { agentId: 'writer-v2' } };
+      }
+      if (method === 'description.set') {
+        return { success: true, result: { revision: 'cfg-revision-description', updatedAt: Date.now(), config: {} } };
       }
       if (method === 'agents.list') {
         return {
@@ -54,6 +57,7 @@ describe('subagents crud', () => {
 
     const createResult = await useSubagentsStore.getState().createAgent({
       name: 'writer',
+      description: 'Writes vendor briefs',
       workspace: '/tmp/writer',
       model: 'gpt-4.1-mini',
     });
@@ -69,11 +73,27 @@ describe('subagents crud', () => {
       undefined,
     );
     expect(rpc).toHaveBeenCalledWith(
-      'agents.update',
-      { agentId: 'writer-v2', model: 'gpt-4.1-mini' },
+      'description.set',
+      {
+        agentId: 'writer-v2',
+        description: 'Writes vendor briefs',
+      },
       undefined,
     );
-    expect(rpc).not.toHaveBeenCalledWith('config.get', {}, undefined);
+    expect(rpc).toHaveBeenCalledWith(
+      'agents.update',
+      expect.objectContaining({ agentId: 'writer-v2', model: 'gpt-4.1-mini' }),
+      undefined,
+    );
+    expect(rpc.mock.calls.some(([method]) => method === 'config.get')).toBe(false);
+    expect(rpc.mock.calls.some(([method]) => method === 'config.patch')).toBe(false);
+    expect(rpc.mock.calls.some(([method]) => method === 'config.set')).toBe(false);
+    expect(rpc.mock.calls.some(([method, params]) => (
+      method === 'agents.update'
+      && typeof params === 'object'
+      && params !== null
+      && 'description' in params
+    ))).toBe(false);
     expect(window.localStorage.getItem(AVATAR_STORAGE_KEY)).toBeNull();
   });
 
@@ -406,7 +426,7 @@ describe('subagents crud', () => {
     expect(loadAgents).toHaveBeenCalledTimes(1);
   });
 
-  it('updateAgent 选择默认模型时会通过 config.set 清理 agents.list[].model', async () => {
+  it('updateAgent 选择默认模型时会通过 model.set 清理 agent model', async () => {
     const rpc = gatewayClientRpcMock;
     const loadAgents = vi.fn().mockResolvedValue(undefined);
     useSubagentsStore.setState({
@@ -423,36 +443,9 @@ describe('subagents crud', () => {
       loadAgents,
     });
 
-    rpc.mockImplementation(async (method, params) => {
-      if (method === 'config.get') {
-        return {
-          success: true,
-          result: {
-            hash: 'cfg-hash-model-reset',
-            config: {
-              agents: {
-                list: [
-                  {
-                    id: 'writer',
-                    name: 'writer-v2',
-                    workspace: '/tmp/writer-v2',
-                    model: 'gpt-4.1-mini',
-                  },
-                ],
-              },
-            },
-          },
-        };
-      }
-      if (method === 'config.set') {
-        const payload = params as { raw?: string; baseHash?: string };
-        expect(payload.baseHash).toBe('cfg-hash-model-reset');
-        const parsed = JSON.parse(payload.raw || '{}') as {
-          agents?: { list?: Array<{ id?: string; model?: unknown }> };
-        };
-        const writer = parsed.agents?.list?.find((entry) => entry.id === 'writer');
-        expect(writer?.model).toBeUndefined();
-        return { success: true, result: { ok: true } };
+    rpc.mockImplementation(async (method) => {
+      if (method === 'model.set') {
+        return { success: true, result: { revision: 'cfg-revision-model-reset', updatedAt: Date.now(), config: {} } };
       }
       if (method === 'agents.update') {
         return { success: true, result: {} };
@@ -467,20 +460,15 @@ describe('subagents crud', () => {
       model: undefined,
     });
 
-    expect(rpc).toHaveBeenCalledWith('config.get', {}, undefined);
-    expect(rpc).toHaveBeenCalledWith(
-      'config.set',
-      expect.objectContaining({
-        baseHash: 'cfg-hash-model-reset',
-      }),
-      undefined,
-    );
+    expect(rpc).toHaveBeenCalledWith('model.set', { agentId: 'writer' }, undefined);
+    expect(rpc.mock.calls.some(([method]) => method === 'config.get')).toBe(false);
+    expect(rpc.mock.calls.some(([method]) => method === 'config.set')).toBe(false);
     const updateCalls = rpc.mock.calls.filter(([method]) => method === 'agents.update');
     expect(updateCalls).toHaveLength(0);
     expect(loadAgents).toHaveBeenCalledTimes(1);
   });
 
-  it('updateAgent 传入 skills allowlist 时应写入 agents.list[].skills', async () => {
+  it('updateAgent 传入 skills allowlist 时应通过 skills.set 写入', async () => {
     const rpc = gatewayClientRpcMock;
     const loadAgents = vi.fn().mockResolvedValue(undefined);
     useSubagentsStore.setState({
@@ -497,37 +485,9 @@ describe('subagents crud', () => {
       loadAgents,
     });
 
-    rpc.mockImplementation(async (method, params) => {
-      if (method === 'config.get') {
-        return {
-          success: true,
-          result: {
-            hash: 'cfg-hash-1',
-            config: {
-              agents: {
-                list: [
-                  {
-                    id: 'writer',
-                    name: 'writer-v2',
-                    workspace: '/tmp/writer-v2',
-                    model: 'gpt-4.1-mini',
-                  },
-                ],
-              },
-            },
-          },
-        };
-      }
-      if (method === 'config.set') {
-        const payload = params as { raw?: string; baseHash?: string };
-        expect(payload.baseHash).toBe('cfg-hash-1');
-        expect(typeof payload.raw).toBe('string');
-        const parsed = JSON.parse(payload.raw || '{}') as {
-          agents?: { list?: Array<{ id?: string; skills?: string[] }> };
-        };
-        const writer = parsed.agents?.list?.find((entry) => entry.id === 'writer');
-        expect(writer?.skills).toEqual(['web-search', 'feishu-doc']);
-        return { success: true, result: { ok: true } };
+    rpc.mockImplementation(async (method) => {
+      if (method === 'skills.set') {
+        return { success: true, result: { revision: 'cfg-revision-skills', updatedAt: Date.now(), config: {} } };
       }
       if (method === 'agents.update') {
         return { success: true, result: {} };
@@ -543,14 +503,16 @@ describe('subagents crud', () => {
       skills: ['web-search', 'feishu-doc'],
     });
 
-    expect(rpc).toHaveBeenCalledWith('config.get', {}, undefined);
     expect(rpc).toHaveBeenCalledWith(
-      'config.set',
-      expect.objectContaining({
-        baseHash: 'cfg-hash-1',
-      }),
+      'skills.set',
+      {
+        agentId: 'writer',
+        skills: ['web-search', 'feishu-doc'],
+      },
       undefined,
     );
+    expect(rpc.mock.calls.some(([method]) => method === 'config.get')).toBe(false);
+    expect(rpc.mock.calls.some(([method]) => method === 'config.set')).toBe(false);
     expect(loadAgents).toHaveBeenCalledTimes(1);
   });
 
