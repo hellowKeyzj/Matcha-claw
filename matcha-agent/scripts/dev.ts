@@ -8,6 +8,24 @@ import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { getMacroDefines, DEFAULT_BUILD_FEATURES } from './defines.ts'
 
+type DevLaunchEnv = Record<string, string | undefined>
+
+export type DevLaunchSpec = {
+  command: string
+  args: string[]
+  env: DevLaunchEnv
+}
+
+type DevLaunchInput = {
+  argv: string[]
+  env: DevLaunchEnv
+  bunExecutable: string
+  cliPath: string
+  defineArgs: string[]
+  featureArgs: string[]
+  inspectPort?: string
+}
+
 // Resolve project root from this script's location
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = dirname(__filename)
@@ -39,22 +57,70 @@ const envFeatures = Object.entries(process.env)
 const allFeatures = [...new Set([...DEFAULT_BUILD_FEATURES, ...envFeatures])]
 const featureArgs = allFeatures.flatMap(name => ['--feature', name])
 
-// If BUN_INSPECT is set, pass --inspect-wait to the child process
-const inspectArgs = process.env.BUN_INSPECT
-  ? ['--inspect-wait=' + process.env.BUN_INSPECT]
-  : []
+export function createDevLaunchSpec(input: DevLaunchInput): DevLaunchSpec {
+  return {
+    command: input.bunExecutable,
+    args: [
+      ...inspectArgs(input.inspectPort),
+      'run',
+      ...input.defineArgs,
+      ...input.featureArgs,
+      input.cliPath,
+      ...argvWithAppServerWorkerArgs(input),
+    ],
+    env: { ...input.env },
+  }
+}
 
-const result = Bun.spawnSync(
-  [
-    'bun',
-    ...inspectArgs,
+function argvWithAppServerWorkerArgs(input: DevLaunchInput): string[] {
+  if (!isAppServerDevCommand(input.argv)) return input.argv
+  if (hasExplicitWorkerArgs(input.argv, input.env)) return input.argv
+
+  return [
+    ...input.argv,
+    '--',
     'run',
-    ...defineArgs,
-    ...featureArgs,
-    cliPath,
-    ...process.argv.slice(2),
-  ],
-  { stdio: ['inherit', 'inherit', 'inherit'], cwd: projectRoot },
-)
+    ...input.defineArgs,
+    ...input.featureArgs,
+    input.cliPath,
+    '--matcha-agent-worker-entry',
+  ]
+}
 
-process.exit(result.exitCode ?? 0)
+function isAppServerDevCommand(argv: string[]): boolean {
+  return argv[0] === 'app-server'
+}
+
+function hasExplicitWorkerArgs(argv: string[], env: DevLaunchEnv): boolean {
+  if (env.MATCHA_AGENT_APP_SERVER_WORKER_ARGS !== undefined) return true
+
+  return argv.includes('--')
+}
+
+function inspectArgs(inspectPort: string | undefined): string[] {
+  return inspectPort ? [`--inspect-wait=${inspectPort}`] : []
+}
+
+function main(): void {
+  const launch = createDevLaunchSpec({
+    argv: process.argv.slice(2),
+    env: process.env,
+    bunExecutable: process.execPath,
+    cliPath,
+    defineArgs,
+    featureArgs,
+    inspectPort: process.env.BUN_INSPECT,
+  })
+
+  const result = Bun.spawnSync([launch.command, ...launch.args], {
+    stdio: ['inherit', 'inherit', 'inherit'],
+    cwd: projectRoot,
+    env: launch.env,
+  })
+
+  process.exit(result.exitCode ?? 0)
+}
+
+if (import.meta.main) {
+  main()
+}

@@ -128,6 +128,27 @@ async function main(): Promise<void> {
     return;
   }
 
+  // Fast-path for app-server worker entry. stdout is reserved for worker protocol frames.
+  if (feature('APP_SERVER') && process.argv[2] === '--matcha-agent-worker-entry') {
+    profileCheckpoint('cli_app_server_worker_path');
+    const { runWorkerEntry } = await import('../app-server/workers/workerEntry.js');
+    await runWorkerEntry();
+    return;
+  }
+
+  // Fast-path for `claude app-server`: WS + JSON-RPC protocol gateway.
+  if (feature('APP_SERVER') && args[0] === 'app-server') {
+    profileCheckpoint('cli_app_server_path');
+    const { enableConfigs } = await import('../utils/config.js');
+    enableConfigs();
+    const { setShellIfWindows } = await import('../utils/windowsPaths.js');
+    setShellIfWindows();
+    const { runAppServer } = await import('../app-server/main.js');
+    runAppServer(args.slice(1));
+    process.stdin.resume();
+    return;
+  }
+
   if (args[0] === 'weixin') {
     profileCheckpoint('cli_weixin_path');
     const { handleWeixinCli } = await import('@claude-code-best/weixin');
