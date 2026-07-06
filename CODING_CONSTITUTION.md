@@ -1300,6 +1300,90 @@ class MatchaQuery {
 
 ---
 
+## 26. 【Final-form 最小改动】：最小必要改动不是局部补丁
+
+【原则名称】：Final-form 最小改动：在当前语义的最终形态上做最窄改动，不用补丁层掩盖低级实现。
+
+【深层动机】：
+该代码库更重视“改完后的结构是否像本来就应该这样”，而不是“这次 diff 是否看起来最少”。局部最小 diff 很容易把错误藏进 guard、fallback、过滤、兼容分支、`delete` 字段或重复 helper：短期少改几行，长期让真实语义散落在多个补丁层里。final-form 的最小必要改动要求先判断当前需求真正改变哪条语义，再把实现放回现有模块、类型和边界；新抽象必须由当前复用需求或测试清晰性证明，性能路径也不能因为“顺手补一下”引入重复扫描、重复订阅、重复 materialization 或无界异步积压。
+
+【规范要求】：
+- 触发语境：修 bug、新增字段、补 guard/fallback、加 helper/config/抽象/过滤、处理旧数据、改热路径或修测试时，必须先判断 final-form 形态。
+- final-form 不能只从当前文件或报错行判断；必须知道目标语义、直接调用方/被调用方、状态事实源和验证入口。
+- 最小改动指“命中当前语义的最窄正确边界”，不是只在当前文件上叠条件。
+- 优先复用现有模块、类型、builder、parser、store、schema、capability 和测试夹具；禁止平行造一套相似 helper。
+- 新 helper、config、抽象、过滤或默认值必须能由当前需求、已有复用边界或测试清晰性证明。
+- 没有明确兼容要求时，禁止 compatibility layer、legacy alias、双读双写、临时 bridge、silent fallback 和过度防御分支。
+- 项目尚未要求支持的旧协议、未来协议、影子字段和过渡格式，不得提前建模。
+- 每个 coherent block 必须以最终保留的单一路径收口；实现、旧路径清理、验证和残留检查不能拆到“后续再做”。
+- 性能路径不得引入明显重复扫描、重复订阅、重复 materialization、无界 queue、无界 retry 或不必要跨进程往返。
+- 如果最终 diff 出现补丁式 `delete` 字段、silent fallback、临时 filter、多处分散 guard、硬编码捷径或重复映射，默认视为违宪，除非有明确的当前语义证明。
+
+【宪法判例】：
+
+❌ 违宪写法
+
+```ts
+async function buildRuntimeConfig(raw: RawConfig) {
+  const config = buildOwnedRuntimeConfig(raw)
+
+  // 外部导入的配置暂时不支持这些字段，先删掉避免报错
+  if (raw.sourceType === 'external' || raw.externalId) {
+    delete config.model
+    delete config.skills
+    delete config.tools
+  }
+
+  // 兼容未来可能出现的 provider 字段
+  if ((raw as any).providerConfig) {
+    config.provider = normalizeProvider((raw as any).providerConfig)
+  }
+
+  // 上游偶尔会重复，先过滤一下
+  config.tools = config.tools?.filter((tool, index, tools) => {
+    return tools.findIndex(item => item.name === tool.name) === index
+  })
+
+  return config
+}
+```
+
+✅ 宪法写法
+
+```ts
+type RuntimeConfigSource =
+  | { ownership: 'owned'; definition: OwnedRuntimeDefinition }
+  | { ownership: 'external'; reference: ExternalRuntimeReference }
+
+function buildRuntimeConfig(source: RuntimeConfigSource): RuntimeConfigEntry {
+  switch (source.ownership) {
+    case 'owned':
+      return buildOwnedRuntimeConfigEntry(source.definition)
+
+    case 'external':
+      return buildExternalRuntimeConfigEntry(source.reference)
+  }
+}
+
+function buildOwnedRuntimeConfigEntry(definition: OwnedRuntimeDefinition): RuntimeConfigEntry {
+  return {
+    id: definition.id,
+    model: definition.model,
+    skills: resolveSkillRefs(definition.skillRefs),
+    tools: resolveToolRefs(definition.toolRefs),
+  }
+}
+
+function buildExternalRuntimeConfigEntry(reference: ExternalRuntimeReference): RuntimeConfigEntry {
+  return {
+    id: reference.id,
+    externalRef: reference.externalRef,
+  }
+}
+```
+
+---
+
 ## 总纲
 
 matcha-agent 的编码宪法可以压缩为一句话：

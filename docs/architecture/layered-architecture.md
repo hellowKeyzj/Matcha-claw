@@ -29,7 +29,7 @@ Renderer 产品入口与 UI 投影
 - Renderer 层负责产品入口、UI 状态和 view projection。
 - Electron main 层负责桌面壳、安全 IPC、host API boundary 和 runtime-host 进程管理。
 - runtime-host composition 层负责把宿主进程、container、system modules、application modules、routes 接起来。
-- runtime-host substrate 层提供 capability、agent runtime、session runtime、plugin runtime、gateway bridge、platform runtime 等稳定 runtime 能力。
+- runtime-host substrate 层提供 capability、Agent Runtime Directory、session runtime、plugin runtime、gateway bridge、platform runtime 等稳定 runtime 能力。
 - application workflows / facades 层推进具体流程，例如 session run、TeamRun、provider sync、plugin lifecycle、runtime operations。
 - OpenClaw adapter/projection 层把 runtime-host 的稳定 interface 投影到 OpenClaw config、gateway、workspace、provider 与 native subagent materialization；不拥有 TeamRun 事实源。
 - OpenClaw plugins 层是最终 extension seam，提供非 TeamRun 的 tools、hooks、provider implementation 等扩展能力。
@@ -80,7 +80,7 @@ flowchart TB
   subgraph L5 ["第 5 层：runtime-host runtime substrate modules"]
     RuntimeAddress["Runtime address / scope / target\nruntime-host/application/agent-runtime/contracts/runtime-address.ts"]
     CapabilityPlatform["Capability platform\nCapabilityRegistry / CapabilityRouter"]
-    AgentRuntime["Agent runtime registry\nruntime adapters / protocol connectors"]
+    AgentRuntime["Agent Runtime Directory\nendpoint identity / profiles / instances"]
     SessionRuntime["Canonical session runtime\ncanonical events / reducer / projection / timeline"]
     PluginRuntime["Plugin runtime\ncatalog / enabled ids / runtime registry"]
     PluginEngine["Plugin discovery substrate\nruntime-host/plugin-engine/**"]
@@ -288,7 +288,7 @@ flowchart TB
 |---|---|---|
 | Runtime address model | 定义 endpoint、scope、target、session identity、capability target | `runtime-host/application/agent-runtime/contracts/runtime-address.ts`, `runtime-host/shared/runtime-address.ts` |
 | Capability platform | 以 capability descriptor / scope / target / operation 表达可执行能力 | `runtime-host/application/capabilities/contracts/capability-registry.ts`, `runtime-host/application/capabilities/contracts/capability-router.ts` |
-| Agent runtime registry | 注册 runtime adapters 与 protocol connectors，维护 runtime topology | `runtime-host/application/agent-runtime/**`, `runtime-host/composition/modules/agent-runtime-module.ts` |
+| Agent Runtime Directory | 拥有 endpoint identity、agent profiles、runtime instances、session binding 与 topology projection；`RuntimeSessionBinding` 是 local session ↔ endpoint session 的唯一契约，`SessionIdentity.sessionKey`/`localSessionId` 只表示 Matcha 本地会话，endpoint runtime 调用必须使用显式 `endpointSessionId`，不得把本地 key 隐式当 endpoint key | `runtime-host/application/agent-runtime/**`, `runtime-host/composition/modules/agent-runtime-module.ts` |
 | Canonical session runtime | 统一 session events、canonical reducer、projection、timeline、snapshot、execution graph | `runtime-host/application/sessions/canonical/**`, `runtime-host/application/sessions/session-timeline-runtime.ts`, `runtime-host/composition/modules/session-runtime-module.ts` |
 | Plugin runtime | 管理 plugin catalog、enabled ids、runtime snapshot、refresh jobs | `runtime-host/application/plugins/runtime-plugin-registry.ts`, `runtime-host/application/plugins/plugin-runtime-service.ts`, `runtime-host/composition/modules/plugin-runtime-module.ts` |
 | Gateway bridge substrate | 维护 gateway readiness、connection state、endpoint control、events | `runtime-host/application/gateway/**`, `runtime-host/composition/modules/gateway-bridge-module.ts` |
@@ -303,7 +303,7 @@ flowchart TB
 | Module group | 职责 | 关键文件 |
 |---|---|---|
 | Session workflows | 编排 create/prompt/run/ingress/hydration/approval/abort/window/timeline | `runtime-host/application/workflows/session-*`, `runtime-host/application/sessions/session-command-service.ts`, `runtime-host/application/sessions/session-gateway-ingress-service.ts` |
-| TeamRun runtime | 编排 Team graph template、TeamRun graph instance / run state / scheduler / projection；新 Run 从 Team template 实例化拓扑/提示词/rules，但 role sessions 与执行态按 run 隔离；StartNode trigger 语义属于 graph/runtime，cron 由 worker-local scheduler 触发，webhook 由 runtime-host HTTP boundary 鉴权后调用 `team.triggerFire`；Renderer 的 Team role 会话发送入口提交长期 role session message，不 claim WorkNode、不启动 node attempt | `runtime-host/application/team-runtime/**`, `runtime-host/application/team-runtime/graph/**`, `runtime-host/application/capabilities/team/team-runtime-capability.ts` |
+| TeamRun runtime | 编排 Team graph template、TeamRun graph instance / run state / scheduler / projection；新 Run 从 Team template 实例化拓扑/提示词/rules，但 role sessions 与执行态按 run 隔离；Team role session 固定绑定贯穿 create / prompt / event ingress / status / run restore / UI index：TeamRuntime 只持久化 opaque `team-endpoint-session-*`，OpenClaw `agent:<id>:` key 只在 R5 materialization/transport/projection 边界生成；StartNode trigger 语义属于 graph/runtime，cron 由 worker-local scheduler 触发，webhook 由 runtime-host HTTP boundary 鉴权后调用 `team.triggerFire`；Renderer 的 Team role 会话发送入口提交长期 role session message，不 claim WorkNode、不启动 node attempt | `runtime-host/application/team-runtime/**`, `runtime-host/application/team-runtime/graph/**`, `runtime-host/application/capabilities/team/team-runtime-capability.ts` |
 | Provider/config workflows | 编排 provider accounts、models、routing、auth profile、restart signal、projection sync | `runtime-host/application/workflows/provider-projection-sync/**`, `runtime-host/application/adapters/openclaw/workflows/openclaw-provider/**` |
 | Plugin lifecycle workflows | 编排 plugin enable/disable/install/refresh/reconcile 与 gateway restart | `runtime-host/application/workflows/plugin-lifecycle/**`, `runtime-host/application/workflows/plugin-runtime/**` |
 | Runtime operations | 编排 bootstrap settings、gateway launch/recovery、diagnostics、runtime jobs、maintenance | `runtime-host/application/runtime-host/**`, `runtime-host/application/workflows/runtime-host/**`, `runtime-host/application/workflows/runtime-bootstrap/**` |
@@ -320,13 +320,13 @@ flowchart TB
 
 | Module group | 职责 | 关键文件 |
 |---|---|---|
-| OpenClaw runtime adapter | 将 OpenClaw 注册成 agent runtime adapter | `runtime-host/application/adapters/openclaw/runtime/openclaw-runtime-adapter.ts` |
+| OpenClaw runtime adapter | 将 OpenClaw 注册成 agent runtime adapter；只消费 `RuntimeSessionContext.endpointSessionId` 作为 OpenClaw 会话 key，不从 Team role local key 推导 endpoint key | `runtime-host/application/adapters/openclaw/runtime/openclaw-runtime-adapter.ts` |
 | OpenClaw V4 canonical adapter | 将 OpenClaw V4 live/replay events 转换成 canonical session events | `runtime-host/application/adapters/openclaw/runtime/openclaw-v4-canonical-adapter.ts` |
 | OpenClaw projections | 将 provider/plugin/workspace/auth/channel 状态投影到 OpenClaw config/workspace/gateway | `runtime-host/application/adapters/openclaw/projections/**`, `runtime-host/application/adapters/openclaw/workflows/**` |
 | SubAgent OpenClaw config projection | 作为 R5 adapter 承担 OpenClaw `agents` config shape、revision/hash 与实际读写；向 R3/R4 只暴露 SubAgent display/description/model/skills 与 skill/tool config projection 所需的端口 | `runtime-host/application/adapters/openclaw/projections/openclaw-subagent-config-projection.ts`, `runtime-host/application/adapters/openclaw/projections/openclaw-agent-skill-config-projection.ts`, `runtime-host/application/adapters/openclaw/projections/openclaw-agent-tool-config-projection.ts` |
 | OpenClaw MCP projection/status adapter | 作为 R5 downstream adapter 由 OpenClaw application module 在 connect 阶段接入 External Connector source/status ports；只将可投影的 MCP connector 写入 OpenClaw `mcp.servers`，并把 OpenClaw 会话级 MCP 状态映射为统一 downstream status；会话级 MCP status 查询的异步刷新走 runtime-host Runtime Job，完成事件由 renderer 侧复拉状态，CLI/SDK/HTTP connector 保持 Matcha-owned | `runtime-host/application/adapters/openclaw/projections/external-connector-openclaw-mcp-projection.ts`, `runtime-host/application/adapters/openclaw/projections/external-connector-openclaw-mcp-status.ts`, `runtime-host/composition/modules/openclaw-application-module.ts` |
 | OpenClaw gateway bridge | 接入 OpenClaw gateway 协议、auth、heartbeat、reconnect、event bridge | `runtime-host/openclaw-bridge/**`, `runtime-host/application/adapters/openclaw/gateway/**` |
-| Native subagent materialization | 将 Team role / managed agent 投影为 OpenClaw native subagent | `runtime-host/application/team-runtime/adapters/openclaw/openclaw-team-agent-materialization-adapter.ts` |
+| Native subagent materialization | 将 Team role / managed agent 投影为 OpenClaw native subagent；Team role endpoint session materialization 在此边界把 opaque endpoint id 转成 OpenClaw `agent:<agentId>:<endpointSessionId>` gateway key，R3 持久化状态不得保存该 grammar | `runtime-host/application/team-runtime/adapters/openclaw/openclaw-team-agent-materialization-adapter.ts`, `runtime-host/application/team-runtime/adapters/openclaw/openclaw-team-role-session-materialization-adapter.ts` |
 | Plugin discovery / manifest loader | 从 filesystem roots 发现 plugin，读取 manifest，归一化 catalog 输入 | `runtime-host/plugin-engine/plugin-discovery.ts`, `runtime-host/plugin-engine/plugin-manifest-loader.ts`, `runtime-host/plugin-engine/plugin-location-rules.ts` |
 | runtime-host HTTP routes | 将 HTTP/dispatch 请求解析并转发到 service/capability/workflow | `runtime-host/api/routes/**` |
 | Parent transport | runtime-host 与 Electron main 内部 API 通信 | `runtime-host/composition/parent-transport-client.ts`, `runtime-host/shared/parent-transport-contracts.ts` |
@@ -370,11 +370,11 @@ R0 Process bootstrap / composition root
 |---|---|---|---|
 | R0 Process bootstrap / composition root | 创建 container，读取环境，创建 parent transport，装配 system/application modules，组合 routes，启动 HTTP server / runner，并提供 runtime-host CLI/MCP 进程入口 | `runtime-host/main.ts`, `runtime-host/main-cli.ts`, `runtime-host/composition/runtime-host-composition.ts`, `runtime-host/composition/runtime-host-runner.ts`, `runtime-host/composition/runtime-host-server.ts` | 接近目标 Composition Root，但现在它在代码启动链里更靠底，不是“业务最外层”的 L7；它是进程装配根 |
 | R1 Infrastructure base / process services | 注册 fs/http/process/env/clock/timer/scheduler/tcp/logger/lifecycle/jobs 等底层端口和 adapters | `runtime-host/composition/modules/runtime-infrastructure-module.ts`, `runtime-host/composition/runtime-host-infrastructure-adapters.ts`, `runtime-host/composition/container.ts` | 接近 Shared Kernel / Host Infrastructure；但 shared vocabulary 与 infra adapters 还没有完全物理分层 |
-| R2 Runtime substrate / kernel / platform | 提供 runtime address、agent runtime registry、capability platform、canonical session runtime、plugin runtime、gateway bridge、platform runtime | `runtime-host/application/agent-runtime/**`, `runtime-host/application/capabilities/contracts/**`, `runtime-host/application/sessions/canonical/**`, `runtime-host/application/plugins/**`, `runtime-host/application/gateway/**`, `runtime-host/application/platform-runtime/**`, `runtime-host/plugin-engine/**` | 已明显接近 Agent Runtime Kernel / Capability Platform；最大偏差是这些 substrate 仍放在 `application/**` 中 |
-| R3 Application workflows / facades / orchestration runtimes | 推进 session、TeamRun graph、Team agent command ledger、provider/config、plugin lifecycle、runtime operations、workbench/skills 等流程 | `runtime-host/application/workflows/**`, `runtime-host/application/*/service.ts`, `runtime-host/application/team-runtime/**`, `runtime-host/application/team-runtime/graph/**`, `runtime-host/application/team-runtime/domain/team-command-ledger.ts`, `runtime-host/application/team-runtime/ports/team-command-ledger-port.ts`, `runtime-host/composition/application-services.ts` | 对应 Workflow / Orchestration；但 `service.ts` 语义不统一，TeamRun 是长生命周期 graph orchestration runtime，不是薄 facade |
-| R4 Inbound dispatch / outbound parent bridge boundaries | 入站 dispatch 解析、route matching、route adapter、provider-neutral CLI/MCP command shell；出站调用 Electron main parent API | `runtime-host/api/dispatch/**`, `runtime-host/api/routes/**`, `runtime-host/application/runtime-cli/**`, `runtime-host/composition/route-registry.ts`, `runtime-host/composition/runtime-route-composition.ts`, `runtime-host/composition/parent-transport-client.ts`, `runtime-host/shared/parent-transport-contracts.ts` | 对应 API Boundary / transport seam；但 inbound routes、CLI/MCP shell 与 outbound parent bridge 是不同方向的 adapter，不应承载业务规则 |
-| R5 OpenClaw integration surface | 把 runtime-host substrate/workflows 接到 OpenClaw runtime、gateway、config、workspace、managed plugins、provider/channel/security projections | `runtime-host/application/adapters/openclaw/**`, `runtime-host/openclaw-bridge/**`, `runtime-host/application/team-runtime/adapters/openclaw/**` | 对应 Adapter / Projection，但当前不是薄层；里面混有 bridge substrate、projection、workflow facade、managed plugin install/config |
-| R6 OpenClaw plugin extension edge | 通过 plugin manifests、tools、hooks、provider implementation 扩展非 TeamRun runtime 行为；不再有 team-runtime plugin tools/outbox 作为 TeamRun ingress | `packages/openclaw-*`, `packages/memory-lancedb-pro/**` | 对应 plugin extension seam；它不是 runtime-host core，但 runtime-host 会通过 plugin-engine / managed plugin config 主导发现、安装、启用和配置 |
+| R2 Runtime substrate / kernel / platform | 提供 runtime address、Agent Runtime Directory、capability platform、canonical session runtime、plugin runtime、gateway bridge、platform runtime；Directory 拥有 endpoint identity、agent profiles、runtime instances、session binding、topology projection | `runtime-host/application/agent-runtime/**`, `runtime-host/application/capabilities/contracts/**`, `runtime-host/application/sessions/canonical/**`, `runtime-host/application/plugins/**`, `runtime-host/application/gateway/**`, `runtime-host/application/platform-runtime/**`, `runtime-host/plugin-engine/**` | 已明显接近 Agent Runtime Kernel / Capability Platform；最大偏差是这些 substrate 仍放在 `application/**` 中 |
+| R3 Application workflows / facades / orchestration runtimes | 推进 session、TeamRun graph、Team agent command ledger、provider/config、plugin lifecycle、runtime operations、workbench/skills 等流程；session 与 TeamRun consume R2 Directory，不拥有 endpoint identity/topology | `runtime-host/application/workflows/**`, `runtime-host/application/*/service.ts`, `runtime-host/application/team-runtime/**`, `runtime-host/application/team-runtime/graph/**`, `runtime-host/application/team-runtime/domain/team-command-ledger.ts`, `runtime-host/application/team-runtime/ports/team-command-ledger-port.ts`, `runtime-host/composition/application-services.ts` | 对应 Workflow / Orchestration；但 `service.ts` 语义不统一，TeamRun 是长生命周期 graph orchestration runtime，不是薄 facade |
+| R4 Inbound dispatch / outbound parent bridge boundaries | 入站 dispatch 解析、route matching、route adapter、provider-neutral CLI/MCP command shell；出站调用 Electron main parent API；routes 只暴露 R2/R3 projection | `runtime-host/api/dispatch/**`, `runtime-host/api/routes/**`, `runtime-host/application/runtime-cli/**`, `runtime-host/composition/route-registry.ts`, `runtime-host/composition/runtime-route-composition.ts`, `runtime-host/composition/parent-transport-client.ts`, `runtime-host/shared/parent-transport-contracts.ts` | 对应 API Boundary / transport seam；但 inbound routes、CLI/MCP shell 与 outbound parent bridge 是不同方向的 adapter，不应承载业务规则 |
+| R5 OpenClaw integration surface | 把 runtime-host substrate/workflows 接到 OpenClaw runtime、gateway、ACP、config、workspace、managed plugins、provider/channel/security projections，并填充 R2 Directory | `runtime-host/application/adapters/openclaw/**`, `runtime-host/openclaw-bridge/**`, `runtime-host/application/team-runtime/adapters/openclaw/**` | 对应 Adapter / Projection，但当前不是薄层；里面混有 bridge substrate、projection、workflow facade、managed plugin install/config |
+| R6 OpenClaw plugin extension edge | 通过 plugin manifests、tools、hooks、provider implementation 扩展非 TeamRun runtime 行为；不再有 team-runtime plugin tools/outbox 作为 TeamRun ingress，也不承载 MatchaClaw runtime policy | `packages/openclaw-*`, `packages/memory-lancedb-pro/**` | 对应 plugin extension seam；它不是 runtime-host core，但 runtime-host 会通过 plugin-engine / managed plugin config 主导发现、安装、启用和配置 |
 
 ### 4.2 哪些已经接近 L0-L7，哪些仍有偏差
 
@@ -554,7 +554,52 @@ flowchart LR
 9. OpenClaw plugins 是 extension seam，不是 MatchaClaw core。
 10. Hook 具体语义由 `docs/hook-extension-points.md` 维护；本文只记录其在代码架构中的位置。
 
-## 8. 维护规则
+## 8. 责任归属判断规则
+
+本节记录判断改动落点时使用的架构规则。它描述的是当前代码的职责归属，不是 `/code` 的执行流程；目录名只能作为线索，不能替代职责、调用方向和事实源判断。
+
+### 8.1 判断顺序
+
+1. 先命名本次改动改变的语义：输入输出转换、状态转移、生命周期策略、长期事实、同步副作用、外部 runtime 适配，还是 UI 展示投影。
+2. 再沿调用方向找事实源：谁创建或持久化状态，谁推进 reducer / scheduler / lifecycle，谁执行副作用，谁只消费并投影结果。
+3. 最后按本文的层级归属落点；如果目录位置和职责冲突，以职责为准。
+
+### 8.2 责任归属表
+
+| 语义 | 通常责任层 | 不应落到 |
+|---|---|---|
+| UI 展示、用户入口、view projection | L1 Renderer 产品入口与 UI 投影 | runtime-host workflow / OpenClaw config projection |
+| Renderer/Main 安全通信 | L2 Renderer/Main transport seam | 页面、store 或 runtime-host workflow |
+| 桌面壳、IPC、host API、runtime-host 进程管理 | L3 Electron main host boundary | Renderer UI 或 OpenClaw adapter |
+| 进程装配、module registry、route composition | R0 / L4 composition root | workflow policy 或 provider/runtime 协议细节 |
+| 底层 fs/http/process/env/clock/timer 等基础能力 | R1 infrastructure base | application workflow |
+| endpoint identity、capability、canonical session、plugin/gateway/platform substrate | R2 runtime substrate | route、UI store、R5 projection |
+| session、TeamRun、provider、plugin lifecycle、runtime operations 等流程推进 | R3 workflows / facades / orchestration runtimes | route、UI、OpenClaw plugin package |
+| HTTP route、CLI/MCP shell、parent bridge | R4 inbound/outbound boundary | 生命周期策略、长期状态语义、业务责任判断 |
+| OpenClaw runtime/config/gateway/workspace/materialization 适配 | R5 OpenClaw integration surface | runtime-host core 事实源、TeamRun command ledger、session policy |
+| OpenClaw plugin tools/hooks/provider implementation | R6 plugin extension edge | MatchaClaw runtime policy、session identity、TeamRun graph 调度 |
+
+### 8.3 常见误落点
+
+| 误落点 | 正确判断 |
+|---|---|
+| 代码在 `runtime-host/application/**`，所以一定是业务 workflow | `application/**` 同时包含 R2 substrate、R3 workflow、R5 projection 和 facade；必须看职责 |
+| route 返回了错误，所以在 route 修策略 | R4 route 只解析 target、auth、输入输出 envelope；策略回到 R2/R3 |
+| UI 暴露了状态，所以在 UI store 修生命周期 | UI store 是 view projection；长期状态和生命周期回到 runtime-host owning layer |
+| projection 缺字段，所以在 R5 过滤、补写或删除字段 | R5 只投影 runtime-host 稳定 interface；事实错误回到 R2/R3 来源 |
+| OpenClaw config 有形状差异，所以让 OpenClaw config object graph 反向定义 core model | OpenClaw config 是 R5 目标形状，不是 runtime-host core 事实源 |
+
+### 8.4 保护判断的责任位置
+
+`guard`、`lock`、`active`、`in-flight`、`already-running` 等判断属于具体副作用的所有者，不属于离用户最近的入口。判断位置应跟随被保护的操作，例如 dispatch、claim、write、delete、send、resume、materialize。
+
+典型例子：为防止 WorkNode / ReviewNode prompt 串发，应在 TeamRun claim / scheduler dispatch 边界保护 prompt delivery；普通 role chat message 仍走 role session message path，不应被 UI send gate、route gate 或 session-level active gate 禁掉。
+
+### 8.5 更新本文的条件
+
+当改动改变稳定架构事实、依赖方向、module group、route ownership、runtime role/session model、extension seam 或责任归属时，更新本文和必要 module map。仅目录移动、局部重命名或实现细节变化，不应被写成新的架构事实。
+
+## 9. 维护规则
 
 - 新增稳定 module group 或 seam 时，按实际代码职责归入本文，不按目录名机械归档。
 - 不要把本文变成文件树索引；只记录有架构意义的 module group。

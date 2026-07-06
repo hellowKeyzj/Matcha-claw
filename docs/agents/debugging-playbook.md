@@ -21,7 +21,7 @@
 
 ### P1. 真实闭环优先
 
-不要先沿用户可见表象逐层猜。先定义真实调用方、真实协议、真实服务和真实结果。
+不要先沿用户可见表象逐层猜。先定义真实调用方、真实协议、真实服务和真实结果。具体失败现象不能停留在 discussion；一旦进入 diagnosis 或 bugfix，必须先写出真实最小闭环。
 
 推荐格式：
 
@@ -59,65 +59,91 @@
 
 验证不能只证明“没有报错”。必须证明真实调用方完成原本失败的业务闭环，并覆盖曾经走偏的关键假设。
 
+### P7. 修复前读完整失败链路
+
+进入 bugfix 前，必须读完当前失败边界涉及的真实入口、调用方、协议 / transport、owning workflow、状态事实源、下游返回和验证入口。不要只读报错行、UI 表象、单个 projection 或用户给出的修法就开始改。
+
 ## 3. Diagnostic Patterns
 
 ### DP-001 Integration status failure / unavailable result
 
 #### Trigger
 
-用户或系统看到某个能力不可用、状态未知、等待中、调用失败、超时、返回空结果或无法证明下游连通，但该能力背后依赖 runtime、connector、provider、gateway、子进程或外部协议。
+用户或系统看到某个具体失败现象：能力不可用、状态未知、等待中、调用失败、超时、返回空结果、结果被投影成失败，或无法证明下游连通；且该能力背后依赖 runtime、connector、provider、gateway、子进程或外部协议。
+
+如果用户已经指定症状修法，例如去重、过滤、fallback、吞错、延长 timeout、替换 status 或 UI 掩盖，也仍然命中本 pattern。用户给出的修法只能作为假设，不能绕过归因。
 
 #### First principle
 
-先验证真实下游闭环，不先相信 UI/status/API 表象。
+bugfix 先归因，不修表象。先验证真实下游闭环，不先相信 UI/status/API/projection 表象，也不把用户指定的症状修法当成根因。
 
 #### Real minimum loop
 
-用一句话写清：
+进入 diagnosis 或 bugfix 后，先用一句话写清真实最小闭环：
 
 ```text
 真实调用方 X 通过协议 Y 调用服务 Z，并拿到结果 R。
 ```
 
-如果写不出来，说明还没准备好改代码。
+其中 X 必须是真实入口或生产同款调用方，不是方便手写的 probe；Y 必须是实际协议、transport、SDK 或 IPC 边界；Z 必须是真实服务、runtime、connector、provider、gateway 或 owning workflow；R 必须是业务结果，不是 UI 文案、status 字符串或 projection 形状。
+
+如果写不出来，说明还没准备好讨论修法，更没准备好改代码。
 
 #### First-round probes
 
+第一轮验证必须落在最接近失败边界的一跳，目标是判断失败发生在调用前、传输中、服务侧、返回映射侧，还是表象投影侧。
+
 1. 用生产同款 SDK/runtime/config/command/env/identity 直接调用真实最小闭环。
-2. 验证子进程或外部 runtime 是否按同一 command/env 启动。
-3. 验证协议握手是否完成。
-4. 验证业务结果是否正确。
-5. 再回头解释 UI/API/status 为什么表现为失败。
+2. 如果真实调用方到服务之间有协议边界，读取并验证双方实现：client serialize/send/timeout 与 server parse/handle/response。
+3. 验证子进程或外部 runtime 是否按同一 command/env/identity 启动。
+4. 验证协议握手、请求 payload、响应 payload 和错误映射是否与真实调用方一致。
+5. 验证业务结果 R 是否正确返回给真实调用方。
+6. 如果问题涉及队列、串行资源、agent session、worker job 或跨 runtime turn，分别写清 owning workflow 生命周期和下游 runtime/session 生命周期，并找出真正释放同一资源的 terminal signal。
+7. 只有完成上述归属后，才回头解释 UI/API/status/projection 为什么表现为失败。
 
 #### Attribution rule
 
-只有当真实最小闭环失败，且能定位到进程启动、协议握手、身份/config、业务处理或响应解析中的具体边界时，才开始修代码。
+只有当真实最小闭环失败，且能定位到调用前置条件、进程启动、协议握手、身份/config、业务处理、响应解析、返回映射或表象投影中的具体边界时，才开始修代码。
 
-如果真实最小闭环成功，再查外层 route、store、projection、缓存或渲染。
+发现一个外围症状不等于完成归因。以下结论都不足以开修：UI 显示 unknown、status 变成 unavailable、projection 少字段、route 返回空、timeout 变长、日志里有 warning、用户提出“过滤一下”。
+
+如果真实最小闭环成功，再查外层 route、store、projection、缓存或渲染；此时修复也必须落在被证明失败的外层边界，而不是倒回下游服务侧猜测。
 
 #### Fix boundary rule
 
-修复应落在失败边界：
+修复应落在已证明的失败边界：
 
+- 调用前置条件缺失：修真实调用方或 owning workflow 的输入准备。
 - 协议不匹配：修 protocol boundary。
 - 进程启动错误：修 command/env/runtime resolver。
 - config 陈旧：修 config projection / invalidation。
 - identity 错配：修 identity mapping。
-- 业务结果错误：修 owning workflow/capability。
+- 生命周期边界错配：修拥有调度、队列或资源占用事实的 workflow；不要把 tool call complete、submitted、delivered 当成下游 runtime/session turn 的 final/error/aborted。
+- 服务侧业务结果错误：修 owning workflow/capability。
+- 响应解析或返回映射错误：修 adapter/client mapping。
+- 表象投影错误：修 route/store/projection/rendering 中被证明失败的一跳。
 
-不得因为外层状态失败而优先修改 Renderer、route 或泛化 timeout。
+不得因为外层状态失败而优先修改 Renderer、route 或泛化 timeout。去重、过滤、fallback、吞错、延长 timeout、替换 status 和 UI 掩盖只有在它们本身就是被证明的真实失败边界时才允许作为修复；否则都属于绕过归因。
 
 #### Verification closure
 
 至少包含一个真实调用方闭环验证，以及必要的单元测试或边界测试。验证描述必须说明它证明了哪一个曾失败的环节。
 
+验证必须证明真实闭环恢复：真实调用方 X 通过协议 Y 调用服务 Z，并拿到业务结果 R。只证明 UI 不再报错、status 变了、projection 字段存在、warning 消失或 timeout 变长，都不能作为 bugfix 完成证据。
+
+如果修复涉及串行资源、队列调度、agent session、worker job 或跨 runtime turn，验证必须覆盖同一资源连续排队和不同资源可并发两个方向：上游业务事件 complete/submitted/delivered 不应释放同一资源；只有下游 terminal signal 才能释放。
+
 #### Common wrong paths
 
+- 把具体失败现象停留在 discussion，只讨论 UI/status 表象，不写真实最小闭环。
 - 先改 timeout。
-- 先加大量 UI/route 日志。
+- 先去重、过滤、fallback、吞错、替换 status 或用 UI 掩盖。
+- 先加大量 UI/route 日志，却不验证最接近失败边界的一跳。
 - 只测试我方 server 已知支持的 happy path。
+- 只证明 status/projection/UI 变化，没有证明真实调用方拿到业务结果。
 - 把第一个真实问题当成最终根因。
-- 没读真实 SDK/runtime 的 serialize、spawn 或 timeout 实现。
+- 把 owning workflow 的 complete/submitted/delivered 当成下游 runtime/session turn 的结束信号。
+- 没读真实 SDK/runtime 的 serialize、spawn、timeout、parse 或 response mapping 实现。
 
 #### Applies to
 
