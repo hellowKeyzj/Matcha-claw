@@ -60,6 +60,7 @@ function runtimeContext(sessionKey: string): RuntimeSessionContext {
     identity: sessionIdentity(sessionKey),
     protocolId: 'bench-protocol',
     runtimeEndpointId: 'bench-endpoint',
+    endpointSessionId: sessionKey,
   });
 }
 

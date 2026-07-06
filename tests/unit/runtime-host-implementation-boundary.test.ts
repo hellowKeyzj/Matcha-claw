@@ -1539,8 +1539,8 @@ describe('runtime-host implementation boundary', () => {
     expect(workflowSource).toContain('appendCanonicalEvents');
     expect(workflowSource).toContain('buildSnapshot');
     expect(workflowSource).toContain('resolveEndpointForRef(endpointRef)');
-    expect(workflowSource).toContain('rememberSessionIdentity(identity)');
-    expect(workflowSource).toContain('translate(payload, context)');
+    expect(workflowSource).toContain('rememberSessionIdentity(identity, endpointSessionId)');
+    expect(workflowSource).toContain('translate(canonicalPayload, context)');
     expect(serviceSource).toContain('ingressWorkflow');
     expect(serviceSource).not.toContain('appendCanonicalEvents');
     expect(serviceSource).not.toContain('buildSnapshot');

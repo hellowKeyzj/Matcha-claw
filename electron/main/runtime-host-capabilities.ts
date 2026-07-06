@@ -12,6 +12,7 @@ interface RuntimeHostCapabilityClient {
 }
 
 interface RuntimeEndpointSummaryLike {
+  readonly endpointRef?: RuntimeEndpointRef;
   readonly capabilitySummaries?: readonly {
     readonly id?: string;
     readonly availability?: string;
@@ -128,6 +129,9 @@ function runtimeHostOperationTarget(operationId: string, input: Record<string, u
 }
 
 function runtimeEndpointFromSummary(endpoint: RuntimeEndpointSummaryLike): RuntimeEndpointRef | null {
+  if (endpoint.endpointRef) {
+    return endpoint.endpointRef;
+  }
   const runtimeAdapterId = typeof endpoint.runtimeAdapterId === 'string' ? endpoint.runtimeAdapterId.trim() : '';
   const runtimeInstanceId = typeof endpoint.runtimeInstanceId === 'string' ? endpoint.runtimeInstanceId.trim() : '';
   if (runtimeAdapterId && runtimeInstanceId) {

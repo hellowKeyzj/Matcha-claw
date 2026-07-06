@@ -1,5 +1,5 @@
 import type { GatewayCapabilitiesSnapshot, GatewayConnectionStatePayload, GatewayControlReadiness } from '../application/gateway/gateway-runtime-port';
-import type { CapabilityTargetKind, RuntimeScope, RuntimeScopeKind } from './runtime-address';
+import type { CapabilityTargetKind, RuntimeEndpointRef, RuntimeScope, RuntimeScopeKind } from './runtime-address';
 
 export interface RuntimeProtocolSummary {
   protocolId: string;
@@ -17,10 +17,50 @@ export interface RuntimeConnectorSummary {
   endpointIds: string[];
 }
 
+export interface RuntimeEndpointSourceSummary {
+  kind: 'runtime-adapter' | 'protocol-connector';
+  runtimeAdapterId?: string;
+  runtimeInstanceId?: string;
+  protocolId?: string;
+  connectorId?: string;
+  endpointId?: string;
+}
+
+export interface RuntimeEndpointLocationSummary {
+  kind: 'local' | 'remote';
+  nodeId?: string;
+}
+
+export interface RuntimeEndpointLifecycleSummary {
+  phase: 'declared' | 'connecting' | 'ready' | 'unavailable' | 'disconnected';
+  connected: boolean;
+  ready: boolean;
+  updatedAt: number | null;
+  error?: string;
+}
+
+export interface RuntimeAgentProfileSummary {
+  agentId: string;
+  displayName?: string;
+  source: 'declared' | 'discovered' | 'dynamic';
+  capabilities: {
+    chat: boolean;
+    streaming: boolean;
+    tools: boolean;
+    approvals: boolean;
+    replay: boolean;
+    modelSelection: boolean;
+  };
+}
+
 export interface RuntimeAdapterInstanceSummary {
   runtimeAdapterId: string;
   runtimeInstanceId: string;
   endpointId: string;
+  endpointRef: RuntimeEndpointRef;
+  source: RuntimeEndpointSourceSummary;
+  location: RuntimeEndpointLocationSummary;
+  lifecycle: RuntimeEndpointLifecycleSummary;
   agentIds: string[];
 }
 
@@ -52,8 +92,13 @@ export interface RuntimeEndpointSummary {
   connectorId?: string;
   runtimeAdapterId?: string;
   runtimeInstanceId?: string;
+  endpointRef: RuntimeEndpointRef;
+  source: RuntimeEndpointSourceSummary;
+  location: RuntimeEndpointLocationSummary;
+  lifecycle: RuntimeEndpointLifecycleSummary;
   displayName: string;
   agentIds: string[];
+  agents: RuntimeAgentProfileSummary[];
   acceptsDynamicAgents: boolean;
   capabilities: {
     chat: boolean;
@@ -65,6 +110,37 @@ export interface RuntimeEndpointSummary {
   };
   capabilitySummaries: RuntimeEndpointCapabilitySummary[];
   controlState: RuntimeEndpointControlStateSummary;
+}
+
+export interface RuntimeEndpointProfileSummary {
+  id: string;
+  protocolId: string;
+  connectorId?: string;
+  runtimeAdapterId?: string;
+  runtimeInstanceId?: string;
+  endpointRef: RuntimeEndpointRef;
+  source: RuntimeEndpointSourceSummary;
+  location: RuntimeEndpointLocationSummary;
+  lifecycle: RuntimeEndpointLifecycleSummary;
+  displayName: string;
+  agentIds: string[];
+  agents: RuntimeAgentProfileSummary[];
+  acceptsDynamicAgents: boolean;
+  capabilities: RuntimeEndpointSummary['capabilities'];
+}
+
+export interface RuntimeInstanceSummary {
+  endpointRef: RuntimeEndpointRef;
+  source: RuntimeEndpointSourceSummary;
+  location: RuntimeEndpointLocationSummary;
+  lifecycle: RuntimeEndpointLifecycleSummary;
+  endpointId: string;
+  agentIds: string[];
+}
+
+export interface RuntimeDirectorySnapshot {
+  endpointProfiles: RuntimeEndpointProfileSummary[];
+  runtimeInstances: RuntimeInstanceSummary[];
 }
 
 export interface RuntimeEndpointReadinessSummary {
@@ -84,5 +160,7 @@ export interface RuntimeTopologySnapshot {
   adapters: RuntimeAdapterSummary[];
   connectors: RuntimeConnectorSummary[];
   adapterInstances: RuntimeAdapterInstanceSummary[];
+  runtimeInstances: RuntimeInstanceSummary[];
+  directory: RuntimeDirectorySnapshot;
   endpoints: RuntimeEndpointSummary[];
 }

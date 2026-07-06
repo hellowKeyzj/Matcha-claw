@@ -18,11 +18,18 @@ import type { GatewayCapabilitiesSnapshot, GatewayConnectionStatePayload, Gatewa
 import type {
   RuntimeAdapterInstanceSummary,
   RuntimeAdapterSummary,
+  RuntimeAgentProfileSummary,
   RuntimeConnectorSummary,
+  RuntimeDirectorySnapshot,
   RuntimeEndpointCapabilitySummary,
   RuntimeEndpointControlStateSummary,
+  RuntimeEndpointLifecycleSummary,
+  RuntimeEndpointLocationSummary,
+  RuntimeEndpointProfileSummary,
   RuntimeEndpointReadinessSummary,
+  RuntimeEndpointSourceSummary,
   RuntimeEndpointSummary,
+  RuntimeInstanceSummary,
   RuntimeProtocolSummary,
   RuntimeTopologySnapshot,
 } from '../../../shared/runtime-topology';
@@ -33,11 +40,15 @@ import type {
   RuntimeConnectorId,
   RuntimeEndpointDiscovery,
   RuntimeEndpointId,
+  RuntimeEndpointLifecycle,
+  RuntimeEndpointLocation,
   RuntimeEndpointProfile,
   RuntimeEndpointRegistration,
+  RuntimeEndpointSource,
   RuntimeProtocolAdapter,
   RuntimeProtocolConnector,
   RuntimeProtocolId,
+  RuntimeSessionBinding,
   RuntimeSessionContext,
   RuntimeSessionTransport,
 } from './runtime-endpoint-types';
@@ -274,6 +285,104 @@ function applyEndpointDiscovery(
   };
 }
 
+function endpointSourceForProfile(endpoint: RuntimeEndpointProfile): RuntimeEndpointSource {
+  if (endpoint.runtimeAdapterId && endpoint.runtimeInstanceId) {
+    return {
+      kind: 'runtime-adapter',
+      runtimeAdapterId: endpoint.runtimeAdapterId,
+      runtimeInstanceId: endpoint.runtimeInstanceId,
+    };
+  }
+  if (endpoint.connectorId) {
+    return {
+      kind: 'protocol-connector',
+      protocolId: endpoint.protocolId,
+      connectorId: endpoint.connectorId,
+      endpointId: endpoint.id,
+    };
+  }
+  throw new Error(`Runtime endpoint source cannot be derived: ${endpoint.id}`);
+}
+
+function localRuntimeEndpointLocation(): RuntimeEndpointLocation {
+  return { kind: 'local' };
+}
+
+function declaredRuntimeEndpointLifecycle(): RuntimeEndpointLifecycle {
+  return {
+    phase: 'declared',
+    connected: false,
+    ready: false,
+    updatedAt: null,
+  };
+}
+
+function connectingRuntimeEndpointLifecycle(updatedAt: number): RuntimeEndpointLifecycle {
+  return {
+    phase: 'connecting',
+    connected: false,
+    ready: false,
+    updatedAt,
+  };
+}
+
+function readyRuntimeEndpointLifecycle(updatedAt: number | null): RuntimeEndpointLifecycle {
+  return {
+    phase: 'ready',
+    connected: true,
+    ready: true,
+    updatedAt,
+  };
+}
+
+function unavailableRuntimeEndpointLifecycle(error: string | undefined, updatedAt: number | null): RuntimeEndpointLifecycle {
+  return {
+    phase: 'unavailable',
+    connected: false,
+    ready: false,
+    updatedAt,
+    ...(error ? { error } : {}),
+  };
+}
+
+function disconnectedRuntimeEndpointLifecycle(updatedAt: number | null): RuntimeEndpointLifecycle {
+  return {
+    phase: 'disconnected',
+    connected: false,
+    ready: false,
+    updatedAt,
+  };
+}
+
+function lifecycleFromConnectorReadiness(readiness: RuntimeEndpointReadinessSummary, updatedAt: number): RuntimeEndpointLifecycle {
+  return readiness.ready
+    ? readyRuntimeEndpointLifecycle(updatedAt)
+    : unavailableRuntimeEndpointLifecycle(readiness.error, updatedAt);
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function runtimeEndpointLifecycleFromControlState(controlState: RuntimeEndpointControlStateSummary): RuntimeEndpointLifecycle | null {
+  if (controlState.readiness?.ready === false) {
+    return unavailableRuntimeEndpointLifecycle(controlState.readiness.error, controlState.updatedAt);
+  }
+  if (controlState.connection?.state === 'disconnected') {
+    return {
+      ...disconnectedRuntimeEndpointLifecycle(controlState.updatedAt ?? controlState.connection.updatedAt),
+      ...(controlState.connection.lastError ? { error: controlState.connection.lastError } : {}),
+    };
+  }
+  if (controlState.readiness?.ready || controlState.connection?.state === 'connected') {
+    return readyRuntimeEndpointLifecycle(controlState.updatedAt);
+  }
+  if (controlState.connection?.state === 'reconnecting') {
+    return connectingRuntimeEndpointLifecycle(controlState.updatedAt ?? controlState.connection.updatedAt);
+  }
+  return null;
+}
+
 function connectorEndpointRef(input: {
   protocolId: RuntimeProtocolId;
   connectorId: RuntimeConnectorId;
@@ -284,6 +393,14 @@ function connectorEndpointRef(input: {
     connectorId: input.connectorId,
     endpointId: input.endpointId,
   });
+}
+
+function connectorEndpointProfile(connector: RuntimeProtocolConnector, endpoint: RuntimeEndpointProfile): RuntimeEndpointProfile {
+  return {
+    ...endpoint,
+    protocolId: connector.protocol.protocolId,
+    connectorId: connector.connectorId,
+  };
 }
 
 function endpointRefForProfile(endpoint: RuntimeEndpointProfile): RuntimeEndpointRef {
@@ -318,10 +435,91 @@ function scopeBelongsToEndpoint(scope: RuntimeScope, endpoint: RuntimeEndpointPr
   return scopedEndpoint ? buildRuntimeEndpointKey(scopedEndpoint) === buildRuntimeEndpointKey(endpointRefForProfile(endpoint)) : false;
 }
 
+function summarizeRuntimeEndpointSource(source: RuntimeEndpointSource): RuntimeEndpointSourceSummary {
+  return source.kind === 'runtime-adapter'
+    ? {
+      kind: source.kind,
+      runtimeAdapterId: source.runtimeAdapterId,
+      runtimeInstanceId: source.runtimeInstanceId,
+    }
+    : {
+      kind: source.kind,
+      protocolId: source.protocolId,
+      connectorId: source.connectorId,
+      endpointId: source.endpointId,
+    };
+}
+
+function summarizeRuntimeEndpointLocation(location: RuntimeEndpointLocation): RuntimeEndpointLocationSummary {
+  return location.kind === 'remote'
+    ? { kind: location.kind, ...(location.nodeId ? { nodeId: location.nodeId } : {}) }
+    : { kind: location.kind };
+}
+
+function summarizeRuntimeEndpointLifecycle(lifecycle: RuntimeEndpointLifecycle): RuntimeEndpointLifecycleSummary {
+  return {
+    phase: lifecycle.phase,
+    connected: lifecycle.connected,
+    ready: lifecycle.ready,
+    updatedAt: lifecycle.updatedAt,
+    ...(lifecycle.error ? { error: lifecycle.error } : {}),
+  };
+}
+
+function summarizeRuntimeAgents(endpoint: RuntimeEndpointProfile, source: RuntimeAgentProfileSummary['source']): RuntimeAgentProfileSummary[] {
+  return endpoint.agentIds.map((agentId) => ({
+    agentId,
+    source,
+    capabilities: { ...endpoint.capabilities },
+  }));
+}
+
+function summarizeRuntimeEndpointProfile(
+  endpoint: RuntimeEndpointProfile,
+  lifecycle: RuntimeEndpointLifecycle,
+  agentSource: RuntimeAgentProfileSummary['source'],
+): RuntimeEndpointProfileSummary {
+  const endpointRef = endpointRefForProfile(endpoint);
+  const source = endpointSourceForProfile(endpoint);
+  const location = localRuntimeEndpointLocation();
+  return {
+    id: endpoint.id,
+    protocolId: endpoint.protocolId,
+    ...(endpoint.connectorId ? { connectorId: endpoint.connectorId } : {}),
+    ...(endpoint.runtimeAdapterId ? { runtimeAdapterId: endpoint.runtimeAdapterId } : {}),
+    ...(endpoint.runtimeInstanceId ? { runtimeInstanceId: endpoint.runtimeInstanceId } : {}),
+    endpointRef,
+    source: summarizeRuntimeEndpointSource(source),
+    location: summarizeRuntimeEndpointLocation(location),
+    lifecycle: summarizeRuntimeEndpointLifecycle(lifecycle),
+    displayName: endpoint.displayName,
+    agentIds: [...endpoint.agentIds],
+    agents: summarizeRuntimeAgents(endpoint, agentSource),
+    acceptsDynamicAgents: endpoint.acceptsDynamicAgents === true,
+    capabilities: { ...endpoint.capabilities },
+  };
+}
+
+function summarizeRuntimeInstance(
+  endpoint: RuntimeEndpointProfile,
+  lifecycle: RuntimeEndpointLifecycle,
+): RuntimeInstanceSummary {
+  const endpointRef = endpointRefForProfile(endpoint);
+  return {
+    endpointRef,
+    source: summarizeRuntimeEndpointSource(endpointSourceForProfile(endpoint)),
+    location: summarizeRuntimeEndpointLocation(localRuntimeEndpointLocation()),
+    lifecycle: summarizeRuntimeEndpointLifecycle(lifecycle),
+    endpointId: endpoint.id,
+    agentIds: [...endpoint.agentIds],
+  };
+}
+
 function summarizeRuntimeEndpoint(
   endpoint: RuntimeEndpointProfile,
   capabilities: CapabilityRegistry,
   controlState: RuntimeEndpointControlStateSummary,
+  lifecycle: RuntimeEndpointLifecycle,
 ): RuntimeEndpointSummary {
   const capabilitySummaries = capabilities.list()
     .filter((descriptor) => scopeBelongsToEndpoint(descriptor.scope, endpoint))
@@ -338,15 +536,7 @@ function summarizeRuntimeEndpoint(
       availability: descriptor.availability,
     }));
   return {
-    id: endpoint.id,
-    protocolId: endpoint.protocolId,
-    ...(endpoint.connectorId ? { connectorId: endpoint.connectorId } : {}),
-    ...(endpoint.runtimeAdapterId ? { runtimeAdapterId: endpoint.runtimeAdapterId } : {}),
-    ...(endpoint.runtimeInstanceId ? { runtimeInstanceId: endpoint.runtimeInstanceId } : {}),
-    displayName: endpoint.displayName,
-    agentIds: [...endpoint.agentIds],
-    acceptsDynamicAgents: endpoint.acceptsDynamicAgents === true,
-    capabilities: { ...endpoint.capabilities },
+    ...summarizeRuntimeEndpointProfile(endpoint, lifecycle, lifecycle.phase === 'ready' ? 'discovered' : 'declared'),
     capabilitySummaries,
     controlState,
   };
@@ -426,16 +616,57 @@ class RuntimeEndpointControlStateStore {
   }
 }
 
+function buildEndpointSessionContextKey(endpointRef: RuntimeEndpointRef, endpointSessionId: string): string {
+  return JSON.stringify({
+    type: 'runtime-endpoint-session',
+    endpoint: JSON.parse(buildRuntimeEndpointKey(endpointRef)),
+    endpointSessionId: endpointSessionId.trim(),
+  });
+}
+
+function isEndpointKeyedSessionId(endpoint: RuntimeEndpointProfile, sessionId: string): boolean {
+  const namespace = endpoint.keying?.namespace.trim();
+  return !!namespace && sessionId.startsWith(`${namespace}:`);
+}
+
 class RuntimeSessionContextStore {
   private readonly sessionContexts = new Map<string, RuntimeSessionContext>();
+  private readonly identityKeysByEndpointSessionKey = new Map<string, string>();
 
   remember(context: RuntimeSessionContext): RuntimeSessionContext {
-    this.sessionContexts.set(buildSessionIdentityKey(context.identity), context);
+    const identityKey = buildSessionIdentityKey(context.identity);
+    const previous = this.sessionContexts.get(identityKey);
+    if (previous) {
+      this.forgetEndpointSessionContext(previous, identityKey);
+    }
+    this.sessionContexts.set(identityKey, context);
+    this.identityKeysByEndpointSessionKey.set(
+      buildEndpointSessionContextKey(context.endpointRef, context.endpointSessionId),
+      identityKey,
+    );
     return context;
   }
 
+  find(identity: SessionIdentity): RuntimeSessionContext | null {
+    return this.sessionContexts.get(buildSessionIdentityKey(identity)) ?? null;
+  }
+
+  findByEndpointSessionId(endpointRef: RuntimeEndpointRef, endpointSessionId: string): RuntimeSessionContext | null {
+    const normalizedEndpointSessionId = endpointSessionId.trim();
+    if (!normalizedEndpointSessionId) {
+      return null;
+    }
+    const identityKey = this.identityKeysByEndpointSessionKey.get(buildEndpointSessionContextKey(endpointRef, normalizedEndpointSessionId));
+    return identityKey ? this.sessionContexts.get(identityKey) ?? null : null;
+  }
+
   forget(identity: SessionIdentity): void {
-    this.sessionContexts.delete(buildSessionIdentityKey(identity));
+    const identityKey = buildSessionIdentityKey(identity);
+    const cached = this.sessionContexts.get(identityKey);
+    this.sessionContexts.delete(identityKey);
+    if (cached) {
+      this.forgetEndpointSessionContext(cached, identityKey);
+    }
   }
 
   resolve(identity: SessionIdentity): RuntimeSessionContext {
@@ -444,6 +675,13 @@ class RuntimeSessionContextStore {
       throw new Error(`Runtime session context requires explicit session identity metadata: ${identity.sessionKey}`);
     }
     return cached;
+  }
+
+  private forgetEndpointSessionContext(context: RuntimeSessionContext, identityKey: string): void {
+    const endpointSessionKey = buildEndpointSessionContextKey(context.endpointRef, context.endpointSessionId);
+    if (this.identityKeysByEndpointSessionKey.get(endpointSessionKey) === identityKey) {
+      this.identityKeysByEndpointSessionKey.delete(endpointSessionKey);
+    }
   }
 }
 
@@ -482,6 +720,7 @@ export class AgentRuntimeRegistry {
   private readonly endpoints = new RuntimeEndpointCatalog();
   private readonly contexts = new RuntimeSessionContextStore();
   private readonly endpointControlStates = new RuntimeEndpointControlStateStore();
+  private readonly connectorEndpointLifecycles = new Map<string, RuntimeEndpointLifecycle>();
   private readonly capabilities = new CapabilityRegistry();
   private readonly transports: RuntimeTransportRouter;
 
@@ -535,11 +774,26 @@ export class AgentRuntimeRegistry {
     return this.endpoints.list();
   }
 
+  listRuntimeEndpointProfiles(): RuntimeEndpointProfileSummary[] {
+    return this.snapshotRuntimeEndpointProfiles();
+  }
+
+  listRuntimeInstances(): RuntimeInstanceSummary[] {
+    return this.listEndpoints().map((endpoint) => summarizeRuntimeInstance(endpoint, this.resolveEndpointLifecycle(endpoint)));
+  }
+
   listCapabilities(): CapabilityDescriptor[] {
     return this.capabilities.list();
   }
 
   snapshotTopology(): RuntimeTopologySnapshot {
+    const endpoints = this.listEndpoints();
+    const endpointLifecycles = new Map(endpoints.map((endpoint) => [endpoint, this.resolveEndpointLifecycle(endpoint)] as const));
+    const runtimeInstances = endpoints.map((endpoint) => summarizeRuntimeInstance(endpoint, endpointLifecycles.get(endpoint)!));
+    const directory: RuntimeDirectorySnapshot = {
+      endpointProfiles: this.snapshotRuntimeEndpointProfiles(),
+      runtimeInstances,
+    };
     return {
       protocols: this.listProtocols().map((protocol): RuntimeProtocolSummary => ({
         protocolId: protocol.protocolId,
@@ -554,18 +808,28 @@ export class AgentRuntimeRegistry {
         connectorId: connector.connectorId,
         endpointIds: connector.endpoints.map((endpoint) => endpoint.id),
       })),
-      adapterInstances: this.listEndpoints()
+      adapterInstances: endpoints
         .filter((endpoint) => endpoint.runtimeAdapterId && endpoint.runtimeInstanceId)
-        .map((endpoint): RuntimeAdapterInstanceSummary => ({
-          runtimeAdapterId: endpoint.runtimeAdapterId!,
-          runtimeInstanceId: endpoint.runtimeInstanceId!,
-          endpointId: endpoint.id,
-          agentIds: [...endpoint.agentIds],
-        })),
-      endpoints: this.listEndpoints().map((endpoint) => summarizeRuntimeEndpoint(
+        .map((endpoint): RuntimeAdapterInstanceSummary => {
+          const lifecycle = endpointLifecycles.get(endpoint)!;
+          return {
+            runtimeAdapterId: endpoint.runtimeAdapterId!,
+            runtimeInstanceId: endpoint.runtimeInstanceId!,
+            endpointId: endpoint.id,
+            endpointRef: endpointRefForProfile(endpoint),
+            source: summarizeRuntimeEndpointSource(endpointSourceForProfile(endpoint)),
+            location: summarizeRuntimeEndpointLocation(localRuntimeEndpointLocation()),
+            lifecycle: summarizeRuntimeEndpointLifecycle(lifecycle),
+            agentIds: [...endpoint.agentIds],
+          };
+        }),
+      runtimeInstances,
+      directory,
+      endpoints: endpoints.map((endpoint) => summarizeRuntimeEndpoint(
         endpoint,
         this.capabilities,
         this.endpointControlStates.get(endpoint),
+        endpointLifecycles.get(endpoint)!,
       )),
     };
   }
@@ -617,13 +881,35 @@ export class AgentRuntimeRegistry {
     return this.endpointControlStates.update(endpoint, input, input.updatedAt);
   }
 
-  rememberSessionIdentity(identity: SessionIdentity): RuntimeSessionContext {
+  rememberSessionIdentity(identity: SessionIdentity, endpointSessionId?: string | null): RuntimeSessionContext {
     const endpoint = this.resolveEndpointForRef(identity.endpoint, identity.agentId);
+    const cached = this.contexts.find(identity);
+    const normalizedEndpointSessionId = endpointSessionId?.trim() || undefined;
+    let endpointSessionIdForBinding: string;
+    if (normalizedEndpointSessionId) {
+      endpointSessionIdForBinding = normalizedEndpointSessionId;
+    } else if (cached?.endpointSessionId) {
+      endpointSessionIdForBinding = cached.endpointSessionId;
+    } else if (isEndpointKeyedSessionId(endpoint, identity.sessionKey)) {
+      endpointSessionIdForBinding = identity.sessionKey;
+    } else {
+      throw new Error('Runtime session binding requires an explicit endpointSessionId when the local session id is outside the endpoint keying namespace.');
+    }
+    const sessionBinding: RuntimeSessionBinding = {
+      identity,
+      localSessionId: identity.sessionKey,
+      protocolId: endpoint.protocolId,
+      runtimeEndpointId: endpoint.id,
+      endpointRef: identity.endpoint,
+      endpointSessionId: endpointSessionIdForBinding,
+      agentId: identity.agentId,
+    };
     return this.contexts.remember(createRuntimeSessionContext({
       identity,
       protocolId: endpoint.protocolId,
       runtimeEndpointId: endpoint.id,
-      endpointSessionId: identity.sessionKey,
+      endpointSessionId: endpointSessionIdForBinding,
+      sessionBinding,
     }));
   }
 
@@ -643,20 +929,69 @@ export class AgentRuntimeRegistry {
     return this.transports.resolveEndpoint(endpointRef, agentId);
   }
 
+  resolveSessionContextByEndpointSessionId(endpointRef: RuntimeEndpointRef, endpointSessionId: string): RuntimeSessionContext | null {
+    this.resolveEndpointForRef(endpointRef);
+    return this.contexts.findByEndpointSessionId(endpointRef, endpointSessionId);
+  }
+
+  private snapshotRuntimeEndpointProfiles(): RuntimeEndpointProfileSummary[] {
+    const connectedEndpointRefs = new Set(this.listEndpoints().map((endpoint) => buildRuntimeEndpointKey(endpointRefForProfile(endpoint))));
+    const adapterProfiles = this.listEndpoints().map((endpoint) => {
+      const lifecycle = this.resolveEndpointLifecycle(endpoint);
+      return summarizeRuntimeEndpointProfile(
+        endpoint,
+        lifecycle,
+        lifecycle.phase === 'ready' ? 'discovered' : 'declared',
+      );
+    });
+    const declaredConnectorProfiles = this.listProtocolConnectors()
+      .flatMap((connector) => connector.endpoints.map((endpoint) => connectorEndpointProfile(connector, endpoint)))
+      .filter((endpoint) => !connectedEndpointRefs.has(buildRuntimeEndpointKey(endpointRefForProfile(endpoint))))
+      .map((endpoint) => summarizeRuntimeEndpointProfile(
+        endpoint,
+        this.connectorEndpointLifecycles.get(buildRuntimeEndpointKey(endpointRefForProfile(endpoint))) ?? declaredRuntimeEndpointLifecycle(),
+        'declared',
+      ));
+    return [...adapterProfiles, ...declaredConnectorProfiles];
+  }
+
+  private resolveEndpointLifecycle(endpoint: RuntimeEndpointProfile): RuntimeEndpointLifecycle {
+    const controlState = this.endpointControlStates.get(endpoint);
+    return runtimeEndpointLifecycleFromControlState(controlState)
+      ?? this.connectorEndpointLifecycles.get(buildRuntimeEndpointKey(endpointRefForProfile(endpoint)))
+      ?? (endpoint.runtimeAdapterId ? readyRuntimeEndpointLifecycle(null) : readyRuntimeEndpointLifecycle(controlState.updatedAt));
+  }
+
+  private setConnectorEndpointLifecycle(
+    input: { protocolId: RuntimeProtocolId; connectorId: RuntimeConnectorId; endpointId: RuntimeEndpointId },
+    lifecycle: RuntimeEndpointLifecycle,
+  ): void {
+    this.connectorEndpointLifecycles.set(buildRuntimeEndpointKey(connectorEndpointRef(input)), lifecycle);
+  }
+
   async connectRuntimeEndpoint(input: { protocolId: RuntimeProtocolId; connectorId: RuntimeConnectorId; endpointId: RuntimeEndpointId }): Promise<RuntimeEndpointReadinessSummary> {
     const connector = this.connectors.get(input.protocolId, input.connectorId);
     const endpointTemplate = resolveConnectorEndpointProfile(connector, input.endpointId);
-    const transport = connector.connect(endpointTemplate);
-    const discovery = await transport.discoverEndpoint?.();
-    const connectedEndpoint = applyEndpointDiscovery(endpointTemplate, discovery ?? null);
-    const readiness = await connector.inspectEndpointReadiness?.(input.endpointId) ?? { ready: true, phase: 'connected' };
-    if (!readiness.ready) {
+    this.setConnectorEndpointLifecycle(input, connectingRuntimeEndpointLifecycle(Date.now()));
+    try {
+      const transport = connector.connect(endpointTemplate);
+      const discovery = await transport.discoverEndpoint?.();
+      const connectedEndpoint = applyEndpointDiscovery(endpointTemplate, discovery ?? null);
+      const readiness = await connector.inspectEndpointReadiness?.(input.endpointId) ?? { ready: true, phase: 'connected' };
+      if (!readiness.ready) {
+        connector.disconnect?.(input.endpointId);
+        this.unregisterConnectorRuntimeEndpoint(input);
+        this.setConnectorEndpointLifecycle(input, lifecycleFromConnectorReadiness(readiness, Date.now()));
+        return readiness;
+      }
+      this.registerConnectorRuntimeEndpoint(input, connectedEndpoint, readiness);
+      return readiness;
+    } catch (error) {
       connector.disconnect?.(input.endpointId);
       this.unregisterConnectorRuntimeEndpoint(input);
-      return readiness;
+      this.setConnectorEndpointLifecycle(input, unavailableRuntimeEndpointLifecycle(errorMessage(error), Date.now()));
+      throw error;
     }
-    this.registerConnectorRuntimeEndpoint(input, connectedEndpoint, readiness);
-    return readiness;
   }
 
   disconnectRuntimeEndpoint(input: { protocolId: RuntimeProtocolId; connectorId: RuntimeConnectorId; endpointId: RuntimeEndpointId }): RuntimeEndpointReadinessSummary {
@@ -664,6 +999,7 @@ export class AgentRuntimeRegistry {
     resolveConnectorEndpointProfile(connector, input.endpointId);
     connector.disconnect?.(input.endpointId);
     this.unregisterConnectorRuntimeEndpoint(input);
+    this.setConnectorEndpointLifecycle(input, disconnectedRuntimeEndpointLifecycle(Date.now()));
     return { ready: false, phase: 'disconnected' };
   }
 
@@ -696,9 +1032,11 @@ export class AgentRuntimeRegistry {
       }));
     }
     this.capabilities.replaceForRuntimeEndpointScope(runtimeInstanceScope(endpointRef), descriptors);
+    const updatedAt = Date.now();
     this.endpointControlStates.update(endpoint, {
       readiness: toGatewayControlReadiness(readiness),
-    }, Date.now());
+    }, updatedAt);
+    this.setConnectorEndpointLifecycle(input, lifecycleFromConnectorReadiness(readiness, updatedAt));
   }
 
   private unregisterConnectorRuntimeEndpoint(input: { protocolId: RuntimeProtocolId; connectorId: RuntimeConnectorId; endpointId: RuntimeEndpointId }): void {
@@ -715,6 +1053,10 @@ export class AgentRuntimeRegistry {
 
   forgetSessionContext(identity: SessionIdentity): void {
     this.contexts.forget(identity);
+  }
+
+  findSessionContext(identity: SessionIdentity): RuntimeSessionContext | null {
+    return this.contexts.find(identity);
   }
 
   resolveSessionContext(identity: SessionIdentity): RuntimeSessionContext {

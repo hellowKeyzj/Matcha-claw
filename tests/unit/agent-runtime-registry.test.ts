@@ -391,4 +391,211 @@ describe('runtime adapter and connector registry', () => {
       },
     });
   });
+
+  it('projects runtime directory endpoint profiles and runtime instances across ACP connector lifecycle', async () => {
+    const registry = new AgentRuntimeRegistry();
+    const acpTransport = {
+      sendPrompt: vi.fn(),
+      abortSession: vi.fn(),
+      resolveApproval: vi.fn(),
+      stop: vi.fn(),
+    };
+    registry.register({
+      runtimeAdapters: [new OpenClawRuntimeAdapter()],
+      protocolConnectors: [createTestAcpClientConnector({ createTransport: () => acpTransport })],
+    });
+
+    const openClawRef = openClawEndpointRef();
+    const openClawSource = {
+      kind: 'runtime-adapter',
+      runtimeAdapterId: 'openclaw',
+      runtimeInstanceId: 'local',
+    };
+    const claudeCodeRef = connectorRuntimeEndpoint({
+      protocolId: 'acp',
+      connectorId: 'acp',
+      endpointId: 'claude-code',
+    });
+    const hermesRef = connectorRuntimeEndpoint({
+      protocolId: 'acp',
+      connectorId: 'acp',
+      endpointId: 'hermes',
+    });
+    const claudeCodeSource = {
+      kind: 'protocol-connector',
+      protocolId: 'acp',
+      connectorId: 'acp',
+      endpointId: 'claude-code',
+    };
+    const hermesSource = {
+      kind: 'protocol-connector',
+      protocolId: 'acp',
+      connectorId: 'acp',
+      endpointId: 'hermes',
+    };
+    const localLocation = { kind: 'local' };
+    const readyLifecycle = {
+      phase: 'ready',
+      connected: true,
+      ready: true,
+    };
+    const declaredLifecycle = {
+      phase: 'declared',
+      connected: false,
+      ready: false,
+      updatedAt: null,
+    };
+
+    const declaredTopology = registry.snapshotTopology();
+
+    expect(declaredTopology.directory.endpointProfiles.map((endpoint) => endpoint.id).sort()).toEqual([
+      'claude-code',
+      'hermes',
+      'openclaw-local',
+    ]);
+    expect(declaredTopology.directory.endpointProfiles).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        id: 'openclaw-local',
+        endpointRef: openClawRef,
+        source: openClawSource,
+        location: localLocation,
+        lifecycle: { ...readyLifecycle, updatedAt: null },
+        agents: [expect.objectContaining({ agentId: 'default', source: 'discovered' })],
+      }),
+      expect.objectContaining({
+        id: 'claude-code',
+        endpointRef: claudeCodeRef,
+        source: claudeCodeSource,
+        location: localLocation,
+        lifecycle: declaredLifecycle,
+        agents: [expect.objectContaining({ agentId: 'default', source: 'declared' })],
+      }),
+      expect.objectContaining({
+        id: 'hermes',
+        endpointRef: hermesRef,
+        source: hermesSource,
+        location: localLocation,
+        lifecycle: declaredLifecycle,
+        agents: [expect.objectContaining({ agentId: 'default', source: 'declared' })],
+      }),
+    ]));
+    expect(declaredTopology.endpoints).toEqual([
+      expect.objectContaining({
+        id: 'openclaw-local',
+        endpointRef: openClawRef,
+        source: openClawSource,
+        location: localLocation,
+        lifecycle: { ...readyLifecycle, updatedAt: null },
+        agents: [expect.objectContaining({ agentId: 'default', source: 'discovered' })],
+      }),
+    ]);
+    expect(declaredTopology.adapterInstances).toEqual([
+      expect.objectContaining({
+        runtimeAdapterId: 'openclaw',
+        runtimeInstanceId: 'local',
+        endpointId: 'openclaw-local',
+        endpointRef: openClawRef,
+        source: openClawSource,
+        location: localLocation,
+        lifecycle: { ...readyLifecycle, updatedAt: null },
+      }),
+    ]);
+    expect(declaredTopology.runtimeInstances).toEqual([
+      expect.objectContaining({
+        endpointId: 'openclaw-local',
+        endpointRef: openClawRef,
+        source: openClawSource,
+        location: localLocation,
+        lifecycle: { ...readyLifecycle, updatedAt: null },
+        agentIds: ['default'],
+      }),
+    ]);
+    expect(declaredTopology.directory.runtimeInstances).toEqual(declaredTopology.runtimeInstances);
+
+    await connectAcpEndpoint(registry, 'claude-code');
+
+    const connectedTopology = registry.snapshotTopology();
+
+    expect(connectedTopology.endpoints.map((endpoint) => endpoint.id).sort()).toEqual([
+      'claude-code',
+      'openclaw-local',
+    ]);
+    expect(connectedTopology.endpoints.find((endpoint) => endpoint.id === 'claude-code')).toMatchObject({
+      id: 'claude-code',
+      endpointRef: claudeCodeRef,
+      source: claudeCodeSource,
+      location: localLocation,
+      lifecycle: {
+        ...readyLifecycle,
+        updatedAt: expect.any(Number),
+      },
+      agents: [expect.objectContaining({ agentId: 'default', source: 'discovered' })],
+    });
+    expect(connectedTopology.directory.endpointProfiles.map((endpoint) => endpoint.id).sort()).toEqual([
+      'claude-code',
+      'hermes',
+      'openclaw-local',
+    ]);
+    expect(connectedTopology.directory.endpointProfiles).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        id: 'claude-code',
+        endpointRef: claudeCodeRef,
+        source: claudeCodeSource,
+        location: localLocation,
+        lifecycle: {
+          ...readyLifecycle,
+          updatedAt: expect.any(Number),
+        },
+        agents: [expect.objectContaining({ agentId: 'default', source: 'discovered' })],
+      }),
+      expect.objectContaining({
+        id: 'hermes',
+        endpointRef: hermesRef,
+        source: hermesSource,
+        location: localLocation,
+        lifecycle: declaredLifecycle,
+        agents: [expect.objectContaining({ agentId: 'default', source: 'declared' })],
+      }),
+    ]));
+    expect(connectedTopology.runtimeInstances).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        endpointId: 'claude-code',
+        endpointRef: claudeCodeRef,
+        source: claudeCodeSource,
+        location: localLocation,
+        lifecycle: {
+          ...readyLifecycle,
+          updatedAt: expect.any(Number),
+        },
+        agentIds: ['default'],
+      }),
+    ]));
+    expect(connectedTopology.directory.runtimeInstances).toEqual(connectedTopology.runtimeInstances);
+
+    registry.disconnectRuntimeEndpoint({
+      protocolId: 'acp',
+      connectorId: 'acp',
+      endpointId: 'claude-code',
+    });
+
+    const disconnectedTopology = registry.snapshotTopology();
+
+    expect(acpTransport.stop).toHaveBeenCalledTimes(1);
+    expect(disconnectedTopology.endpoints.map((endpoint) => endpoint.id)).toEqual(['openclaw-local']);
+    expect(disconnectedTopology.runtimeInstances.map((instance) => instance.endpointId)).toEqual(['openclaw-local']);
+    expect(disconnectedTopology.directory.runtimeInstances).toEqual(disconnectedTopology.runtimeInstances);
+    expect(disconnectedTopology.directory.endpointProfiles.find((endpoint) => endpoint.id === 'claude-code')).toMatchObject({
+      id: 'claude-code',
+      endpointRef: claudeCodeRef,
+      source: claudeCodeSource,
+      location: localLocation,
+      lifecycle: {
+        phase: 'disconnected',
+        connected: false,
+        ready: false,
+        updatedAt: expect.any(Number),
+      },
+      agents: [expect.objectContaining({ agentId: 'default', source: 'declared' })],
+    });
+  });
 });

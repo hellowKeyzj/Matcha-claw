@@ -130,6 +130,56 @@ describe('runtime identity contract', () => {
     });
   });
 
+  it('resolves a remembered local identity by endpoint session id', () => {
+    const registry = createRegistry();
+    const localIdentity: SessionIdentity = {
+      endpoint: openClawEndpoint,
+      agentId: 'leader',
+      sessionKey: 'team-role-session-1',
+    };
+
+    const rememberedContext = registry.rememberSessionIdentity(localIdentity, 'team-endpoint-session-1');
+    const registryWithEndpointSessionLookup = registry as AgentRuntimeRegistry & {
+      resolveSessionContextByEndpointSessionId: (
+        endpointRef: RuntimeEndpointRef,
+        endpointSessionId: string,
+      ) => ReturnType<AgentRuntimeRegistry['rememberSessionIdentity']> | null;
+    };
+
+    expect(registryWithEndpointSessionLookup.resolveSessionContextByEndpointSessionId(openClawEndpoint, 'team-endpoint-session-1')).toBe(rememberedContext);
+    expect(registryWithEndpointSessionLookup.resolveSessionContextByEndpointSessionId(openClawEndpoint, 'missing-endpoint-session')).toBeNull();
+  });
+
+  it('reuses cached endpoint session id for remembered local identities', () => {
+    const registry = createRegistry();
+    const localIdentity: SessionIdentity = {
+      endpoint: openClawEndpoint,
+      agentId: 'leader',
+      sessionKey: 'team-role-session-1',
+    };
+
+    registry.rememberSessionIdentity(localIdentity, 'team-endpoint-session-1');
+
+    expect(registry.rememberSessionIdentity(localIdentity)).toMatchObject({
+      identity: localIdentity,
+      localSessionId: 'team-role-session-1',
+      endpointSessionId: 'team-endpoint-session-1',
+    });
+  });
+
+  it('requires an explicit endpoint session id when the local key is outside the endpoint keying namespace', () => {
+    const registry = createRegistry();
+    const localIdentity: SessionIdentity = {
+      endpoint: openClawEndpoint,
+      agentId: 'leader',
+      sessionKey: 'team-role-session-1',
+    };
+
+    expect(() => registry.rememberSessionIdentity(localIdentity)).toThrow(
+      'Runtime session binding requires an explicit endpointSessionId when the local session id is outside the endpoint keying namespace.',
+    );
+  });
+
   it('requires registered endpoint metadata for native runtime endpoints', () => {
     const registry = new AgentRuntimeRegistry();
     expect(() => registry.rememberSessionIdentity(openClawSessionIdentity)).toThrow(

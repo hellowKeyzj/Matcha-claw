@@ -12,6 +12,50 @@ export type RuntimeEndpointId = string;
 export type RuntimeAdapterId = string;
 export type RuntimeConnectorId = string;
 
+export type RuntimeEndpointSource =
+  | {
+    kind: 'runtime-adapter';
+    runtimeAdapterId: RuntimeAdapterId;
+    runtimeInstanceId: string;
+  }
+  | {
+    kind: 'protocol-connector';
+    protocolId: RuntimeProtocolId;
+    connectorId: RuntimeConnectorId;
+    endpointId: RuntimeEndpointId;
+  };
+
+export type RuntimeEndpointLocation =
+  | { kind: 'local' }
+  | { kind: 'remote'; nodeId?: string };
+
+export type RuntimeEndpointLifecyclePhase = 'declared' | 'connecting' | 'ready' | 'unavailable' | 'disconnected';
+
+export interface RuntimeEndpointLifecycle {
+  phase: RuntimeEndpointLifecyclePhase;
+  connected: boolean;
+  ready: boolean;
+  updatedAt: number | null;
+  error?: string;
+}
+
+export type RuntimeAgentProfileSource = 'declared' | 'discovered' | 'dynamic';
+
+export interface RuntimeAgentProfile {
+  agentId: string;
+  displayName?: string;
+  source: RuntimeAgentProfileSource;
+  capabilities: RuntimeEndpointCapabilities;
+}
+
+export interface RuntimeInstanceProfile {
+  endpointRef: RuntimeEndpointRef;
+  source: RuntimeEndpointSource;
+  location: RuntimeEndpointLocation;
+  lifecycle: RuntimeEndpointLifecycle;
+  agentIds: readonly string[];
+}
+
 export interface RuntimeEndpointIdentity {
   scopeKey: string;
   protocolId?: string;
@@ -21,15 +65,27 @@ export interface RuntimeEndpointIdentity {
   runtimeInstanceId?: string;
 }
 
+export interface RuntimeSessionBinding {
+  identity: SessionIdentity;
+  localSessionId: string;
+  protocolId: RuntimeProtocolId;
+  runtimeEndpointId: RuntimeEndpointId;
+  endpointRef: RuntimeEndpointRef;
+  endpointSessionId: string;
+  agentId: string;
+}
+
 export interface RuntimeSessionContext {
   identity: SessionIdentity;
+  localSessionId: string;
   sessionKey: string;
   protocolId: RuntimeProtocolId;
   runtimeEndpointId: RuntimeEndpointId;
   endpoint: RuntimeEndpointIdentity;
   endpointRef: RuntimeEndpointRef;
-  endpointSessionId?: string;
+  endpointSessionId: string;
   agentId: string;
+  sessionBinding: RuntimeSessionBinding;
 }
 
 export interface RuntimeEndpointCapabilities {

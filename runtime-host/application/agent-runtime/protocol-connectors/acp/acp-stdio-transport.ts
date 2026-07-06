@@ -25,7 +25,7 @@ export class AcpStdioTransport implements RuntimeSessionTransport {
   async sendPrompt(input: RuntimePromptRequest): Promise<RuntimePromptResult> {
     try {
       const payload = await this.client.request('session/prompt', {
-        sessionId: input.context.endpointSessionId ?? input.context.sessionKey,
+        sessionId: input.context.endpointSessionId,
         runId: input.runId,
         message: input.message,
         payload: input.payload,
@@ -38,14 +38,14 @@ export class AcpStdioTransport implements RuntimeSessionTransport {
 
   async abortSession(input: RuntimeAbortRequest): Promise<void> {
     await this.client.request('session/cancel', {
-      sessionId: input.context.endpointSessionId ?? input.context.sessionKey,
+      sessionId: input.context.endpointSessionId,
       approvalIds: input.approvalIds ?? [],
     }, 5_000);
   }
 
   async resolveApproval(input: RuntimeResolveApprovalRequest): Promise<unknown> {
     return await this.client.request('approval/resolve', {
-      sessionId: input.context.endpointSessionId ?? input.context.sessionKey,
+      sessionId: input.context.endpointSessionId,
       id: input.id,
       decision: input.decision,
     });

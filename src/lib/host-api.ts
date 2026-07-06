@@ -839,6 +839,7 @@ export async function resolveHydratedSessionSnapshot(input: {
 export async function hostSessionWindowFetch(
   payload: {
     sessionKey: string;
+    endpointSessionId?: string;
     sessionIdentity: SessionIdentity;
     mode?: 'latest' | 'older' | 'newer';
     limit?: number;
@@ -856,6 +857,7 @@ export async function hostSessionWindowFetch(
 export async function hostSessionNew(
   payload: {
     sessionKey?: string;
+    endpointSessionId?: string;
     endpoint: RuntimeEndpointRef;
     agentId: string;
   },
@@ -939,6 +941,7 @@ export async function hostSessionUpdateStatus(
 export async function hostSessionLoad(
   payload: {
     sessionKey: string;
+    endpointSessionId?: string;
     sessionIdentity: SessionIdentity;
     limit?: number;
   },
@@ -956,6 +959,7 @@ export async function hostSessionLoad(
 export async function hostSessionSwitch(
   payload: {
     sessionKey: string;
+    endpointSessionId?: string;
     sessionIdentity: SessionIdentity;
     limit?: number;
   },
@@ -970,6 +974,7 @@ export async function hostSessionSwitch(
 export async function hostSessionResume(
   payload: {
     sessionKey: string;
+    endpointSessionId?: string;
     sessionIdentity: SessionIdentity;
   },
 ): Promise<HostSessionLoadResult> {
@@ -983,6 +988,7 @@ export async function hostSessionResume(
 export async function hostSessionState(
   payload: {
     sessionKey: string;
+    endpointSessionId?: string;
     sessionIdentity: SessionIdentity;
   },
 ): Promise<HostSessionLoadResult> {
@@ -996,6 +1002,7 @@ export async function hostSessionState(
 export async function hostSessionAbort(
   payload: {
     sessionKey: string;
+    endpointSessionId?: string;
     sessionIdentity: SessionIdentity;
     approvalIds?: string[];
   },
@@ -1021,6 +1028,7 @@ export async function hostSessionResolveApproval(
   payload: {
     id: string;
     sessionKey: string;
+    endpointSessionId?: string;
     sessionIdentity: SessionIdentity;
     decision: string;
   },
@@ -1036,6 +1044,7 @@ export async function hostSessionResolveApproval(
 export async function hostSessionPatch(
   payload: {
     sessionKey: string;
+    endpointSessionId?: string;
     sessionIdentity: SessionIdentity;
     runtimeModelRef: string;
   },
@@ -1051,6 +1060,7 @@ export async function hostSessionPatch(
 export async function hostSessionPrompt(
   payload: {
     sessionKey: string;
+    endpointSessionId?: string;
     sessionIdentity: SessionIdentity;
     message: string;
     idempotencyKey?: string;

@@ -104,6 +104,9 @@ describe('runtime endpoint registry', () => {
 
     expect(openClawEndpoint?.capabilitySummaries.map((summary) => summary.id).sort()).toEqual([
       'agent.run',
+      'agent.skill-config',
+      'agent.tool-config',
+      'external.connector',
       'integration.channel',
       'model.provider',
       'platform.runtime',
@@ -210,8 +213,8 @@ describe('runtime endpoint registry', () => {
       sessionKey: 'claude-code:session:1',
     };
 
-    const mainContext = registry.rememberSessionIdentity(mainIdentity);
-    const browserContext = registry.rememberSessionIdentity(browserIdentity);
+    const mainContext = registry.rememberSessionIdentity(mainIdentity, 'agent:main:main');
+    const browserContext = registry.rememberSessionIdentity(browserIdentity, 'agent:browser:main');
     const claudeCodeContext = registry.rememberSessionIdentity(claudeCodeIdentity);
 
     expect(mainContext).toMatchObject({
@@ -219,7 +222,7 @@ describe('runtime endpoint registry', () => {
       sessionKey: 'main',
       protocolId: 'openclaw-v4',
       runtimeEndpointId: 'openclaw-local',
-      endpointSessionId: 'main',
+      endpointSessionId: 'agent:main:main',
       agentId: 'main',
       endpoint: {
         scopeKey: buildRuntimeEndpointKey(mainIdentity.endpoint),
