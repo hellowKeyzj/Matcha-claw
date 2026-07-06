@@ -83,6 +83,7 @@ function readRuntimeEndpoint(value: unknown): {
 
 export function readCreateSessionRequest(payload: unknown): {
   explicitSessionKey: string;
+  endpointSessionId: string;
   endpoint: RuntimeEndpointRef | null;
   endpointError: string | null;
   agentId: string;
@@ -90,6 +91,7 @@ export function readCreateSessionRequest(payload: unknown): {
   const body = isRecord(payload) ? payload as SessionNewPayload : {};
   return {
     explicitSessionKey: normalizeString(body.sessionKey),
+    endpointSessionId: normalizeString(body.endpointSessionId),
     agentId: normalizeString(body.agentId),
     ...readRuntimeEndpoint(body.endpoint),
   };
@@ -123,6 +125,7 @@ export function readSessionListRequest(payload: unknown): {
 
 export function readSessionLoadRequest(payload: unknown): {
   sessionKey: string;
+  endpointSessionId: string;
   limit: number;
   sessionIdentity: SessionIdentity | null;
   sessionIdentityError: string | null;
@@ -131,6 +134,7 @@ export function readSessionLoadRequest(payload: unknown): {
   const sessionKey = normalizeString(body.sessionKey);
   return {
     sessionKey,
+    endpointSessionId: normalizeString(body.endpointSessionId),
     limit: normalizeWindowLimit(body.limit),
     ...readSessionIdentity(body.sessionIdentity, sessionKey),
   };
@@ -138,6 +142,7 @@ export function readSessionLoadRequest(payload: unknown): {
 
 export function readAbortSessionRequest(payload: unknown): {
   sessionKey: string;
+  endpointSessionId: string;
   approvalIds: string[];
   sessionIdentity: SessionIdentity | null;
   sessionIdentityError: string | null;
@@ -147,6 +152,7 @@ export function readAbortSessionRequest(payload: unknown): {
   const sessionKey = normalizeString(body.sessionKey);
   return {
     sessionKey,
+    endpointSessionId: normalizeString(body.endpointSessionId),
     approvalIds: rawApprovalIds.flatMap((rawApprovalId) => {
       const approvalId = typeof rawApprovalId === 'string' ? rawApprovalId.trim() : '';
       return approvalId ? [approvalId] : [];
@@ -159,6 +165,7 @@ export function readResolveApprovalRequest(payload: unknown): {
   id: string;
   decision: '' | 'allow-once' | 'allow-always' | 'deny';
   sessionKey: string;
+  endpointSessionId: string;
   sessionIdentity: SessionIdentity | null;
   sessionIdentityError: string | null;
 } {
@@ -172,12 +179,14 @@ export function readResolveApprovalRequest(payload: unknown): {
     id: normalizeString(body.id),
     decision,
     sessionKey,
+    endpointSessionId: normalizeString(body.endpointSessionId),
     ...readSessionIdentity(body.sessionIdentity, sessionKey),
   };
 }
 
 export function readPatchSessionRequest(payload: unknown): {
   sessionKey: string;
+  endpointSessionId: string;
   sessionIdentity: SessionIdentity | null;
   sessionIdentityError: string | null;
   runtimeModelRef: string;
@@ -186,6 +195,7 @@ export function readPatchSessionRequest(payload: unknown): {
   const sessionKey = normalizeString(body.sessionKey);
   return {
     sessionKey,
+    endpointSessionId: normalizeString(body.endpointSessionId),
     ...readSessionIdentity(body.sessionIdentity, sessionKey),
     runtimeModelRef: normalizeString(body.runtimeModelRef),
   };
@@ -229,6 +239,7 @@ export function readSessionStatusRequest(payload: unknown): {
 
 export function readSessionWindowRequest(payload: unknown): {
   sessionKey: string;
+  endpointSessionId: string;
   mode: ReturnType<typeof normalizeWindowMode>;
   limit: number;
   offset: number | null;
@@ -240,6 +251,7 @@ export function readSessionWindowRequest(payload: unknown): {
   const sessionKey = normalizeString(body.sessionKey);
   return {
     sessionKey,
+    endpointSessionId: normalizeString(body.endpointSessionId),
     mode: normalizeWindowMode(body.mode),
     limit: normalizeWindowLimit(body.limit),
     offset: normalizeWindowOffset(body.offset),
@@ -252,6 +264,7 @@ export function readPromptSessionRequest(payload: unknown): {
   directBody: SessionPromptPayload;
   mediaBody: ReturnType<typeof normalizeSendWithMediaInput>;
   sessionKey: string;
+  endpointSessionId: string;
   message: string;
   displayMessage: string;
   requestedRunId: string;
@@ -271,6 +284,7 @@ export function readPromptSessionRequest(payload: unknown): {
     directBody,
     mediaBody,
     sessionKey,
+    endpointSessionId: normalizeString(directBody.endpointSessionId),
     message,
     displayMessage,
     requestedRunId: normalizeString(

@@ -1,7 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
   buildTaskBridgeState,
-  isTeamRunRoleSession,
   normalizeTaskSessionKey,
   parseSessionUpdatedAtMs,
   readSessionsFromState,
@@ -165,10 +164,10 @@ describe('chat session helpers', () => {
     expect(preferredByRecency).toBe('agent:foo:session-1700000000100');
   });
 
-  it('excludes TeamRun role sessions from ordinary agent preferred session resolution', () => {
+  it('chooses preferred agent sessions without inferring TeamRun role ownership from local id shape', () => {
     const sessions = [
       createChatSession({
-        key: 'agent:leader-agent:team-role:run-1:leader',
+        key: 'team-role-session-run-1-leader',
         agentId: 'leader-agent',
         updatedAt: 1_900_000_000_000,
       }),
@@ -180,9 +179,8 @@ describe('chat session helpers', () => {
       }),
     ];
 
-    expect(isTeamRunRoleSession(sessions[0]!)).toBe(true);
     expect(resolvePreferredSessionKeyForAgent('leader-agent', sessions, {})).toBe('agent:leader-agent:main');
-    expect(resolvePreferredSessionKeyForAgent('leader-agent', [sessions[0]!], {})).toBeNull();
+    expect(resolvePreferredSessionKeyForAgent('leader-agent', [sessions[0]!], {})).toBe('team-role-session-run-1-leader');
   });
 
   it('keeps missing current session only when it has meaningful local state', () => {

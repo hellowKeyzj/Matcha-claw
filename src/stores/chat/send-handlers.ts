@@ -261,6 +261,7 @@ export async function executeStoreSend(params: ExecuteStoreSendParams): Promise<
 
     const sendResult = await sendChatTransport({
       sessionKey: target.sessionKey,
+      endpointSessionId: target.endpointSessionId,
       sessionIdentity: target.sessionIdentity,
       message: trimmed,
       idempotencyKey: clientMessageId,

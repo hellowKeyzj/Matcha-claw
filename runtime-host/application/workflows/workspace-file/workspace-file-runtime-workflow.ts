@@ -104,10 +104,17 @@ function sessionIdentitiesMatch(left: SessionIdentity, right: SessionIdentity): 
 }
 
 function sessionIdentityOwnerKeys(identity: SessionIdentity): string[] {
+  if (isTeamRoleLocalSessionKey(identity.sessionKey)) {
+    return [identity.sessionKey];
+  }
   return [
     identity.sessionKey,
     `agent:${identity.agentId}:${identity.sessionKey}`,
   ];
+}
+
+function isTeamRoleLocalSessionKey(sessionKey: string): boolean {
+  return sessionKey.startsWith('team-role-session-');
 }
 
 function normalizePathForCompare(pathname: string): string {

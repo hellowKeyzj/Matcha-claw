@@ -80,11 +80,14 @@ export class SessionCatalogWorkflow {
     endpoint: RuntimeEndpointRef;
     runtimeOverlays?: readonly SessionCatalogRuntimeOverlay[];
   }): Promise<SessionListResult> {
-    const sessionsByKey = new Map(
-      this.cachedSessions
-        .filter((session) => isSameRuntimeEndpoint(session.sessionIdentity.endpoint, input.endpoint))
-        .map((session) => [buildSessionIdentityKey(session.sessionIdentity), session]),
-    );
+    const sessionsByKey = new Map<string, SessionCatalogItem>();
+    for (const session of this.cachedSessions) {
+      if (!isSameRuntimeEndpoint(session.sessionIdentity.endpoint, input.endpoint)) {
+        continue;
+      }
+      const canonicalSession = this.resolveBoundSessionCatalogItem(session);
+      sessionsByKey.set(buildSessionIdentityKey(canonicalSession.sessionIdentity), canonicalSession);
+    }
 
     for (const overlay of input.runtimeOverlays ?? []) {
       if (!isSameRuntimeEndpoint(overlay.sessionIdentity.endpoint, input.endpoint)) {
@@ -147,6 +150,25 @@ export class SessionCatalogWorkflow {
     };
   }
 
+  private resolveBoundSessionCatalogItem(session: SessionCatalogItem): SessionCatalogItem {
+    const context = this.deps.agentRuntimeRegistry.resolveSessionContextByEndpointSessionId(
+      session.sessionIdentity.endpoint,
+      session.key,
+    );
+    if (!context || buildSessionIdentityKey(context.identity) === buildSessionIdentityKey(session.sessionIdentity)) {
+      return session;
+    }
+    return {
+      ...session,
+      key: context.localSessionId,
+      endpointSessionId: context.endpointSessionId,
+      sessionIdentity: context.identity,
+      kind: resolveSessionCatalogKind(context.localSessionId),
+      preferred: false,
+      displayName: session.displayName ?? context.localSessionId,
+    };
+  }
+
   private async buildOverlayCatalogItem(
     overlay: SessionCatalogRuntimeOverlay,
     cached: SessionCatalogItem | undefined,
@@ -161,15 +183,17 @@ export class SessionCatalogWorkflow {
     const kind = resolveSessionCatalogKind(overlay.sessionKey);
     const contextTokens = readSessionContextTokenSnapshot(storageDescriptor?.sessionStoreEntry);
     const endpoint = this.deps.agentRuntimeRegistry.resolveEndpointForRef(overlay.sessionIdentity.endpoint, overlay.sessionIdentity.agentId);
+    const context = this.deps.agentRuntimeRegistry.findSessionContext(overlay.sessionIdentity);
     return {
+      ...(cached ?? {}),
       key: overlay.sessionKey,
       agentId,
       protocolId: endpoint.protocolId,
       runtimeEndpointId: endpoint.id,
+      ...(context ? { endpointSessionId: context.endpointSessionId } : {}),
       sessionIdentity: overlay.sessionIdentity,
       kind,
       preferred: kind === 'main',
-      ...(cached ?? {}),
       status: cached?.status ?? 'completed',
       ...(label ? { label } : {}),
       ...(titleSource !== 'none' ? { titleSource } : {}),
@@ -299,11 +323,13 @@ async function buildSessionCatalogItem(input: {
   });
   const contextTokens = readSessionContextTokenSnapshot(input.storageDescriptor.sessionStoreEntry);
   const endpoint = input.agentRuntimeRegistry.resolveEndpointForRef(sessionIdentity.endpoint, sessionIdentity.agentId);
+  const context = input.agentRuntimeRegistry.findSessionContext(sessionIdentity);
   return {
     key: input.sessionKey,
     agentId,
     protocolId: endpoint.protocolId,
     runtimeEndpointId: endpoint.id,
+    ...(context ? { endpointSessionId: context.endpointSessionId } : {}),
     sessionIdentity,
     kind,
     preferred: kind === 'main',

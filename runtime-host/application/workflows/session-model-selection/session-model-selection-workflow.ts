@@ -26,11 +26,12 @@ export class SessionModelSelectionWorkflow {
 
   async patch(input: {
     sessionKey: string;
+    endpointSessionId?: string;
     sessionIdentity: SessionIdentity;
     runtimeModelRef: string;
   }): Promise<ApplicationResponseOf> {
     return await this.deps.operationCoordinator.run(input.sessionIdentity, 'patch-model', async () => {
-      const context = this.deps.agentRuntimeRegistry.rememberSessionIdentity(input.sessionIdentity);
+      const context = this.deps.agentRuntimeRegistry.rememberSessionIdentity(input.sessionIdentity, input.endpointSessionId);
       const current = this.deps.stateStore.getSessionState(input.sessionKey, context).runtime;
       if (isRunActive(current) || current.activeRunId) {
         const state = await this.deps.timelineRuntime.activateSession(input.sessionKey, {

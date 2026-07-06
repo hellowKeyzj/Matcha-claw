@@ -36,6 +36,7 @@ export class SessionLifecycleWorkflow {
 
   async create(input: {
     explicitSessionKey: string | null;
+    endpointSessionId?: string | null;
     endpoint: RuntimeEndpointRef;
     agentId: string;
   }): Promise<ApplicationResponseOf<SessionNewResult>> {
@@ -45,7 +46,7 @@ export class SessionLifecycleWorkflow {
       return conflict(`Runtime endpoint session keying is not configured: ${endpoint.id}`);
     }
     const identity: SessionIdentity = { endpoint: input.endpoint, agentId: input.agentId, sessionKey };
-    const context = this.rememberSessionIdentityContext(identity);
+    const context = this.rememberSessionIdentityContext(identity, input.endpointSessionId ?? undefined);
     const state = await this.deps.timelineRuntime.activateSession(sessionKey, {
       resetWindowToLatest: true,
       context,
@@ -153,8 +154,8 @@ export class SessionLifecycleWorkflow {
     return buildSessionIdentityKey(stored) === buildSessionIdentityKey(requested);
   }
 
-  private rememberSessionIdentityContext(identity: SessionIdentity): RuntimeSessionContext {
-    return this.deps.agentRuntimeRegistry.rememberSessionIdentity(identity);
+  private rememberSessionIdentityContext(identity: SessionIdentity, endpointSessionId?: string): RuntimeSessionContext {
+    return this.deps.agentRuntimeRegistry.rememberSessionIdentity(identity, endpointSessionId);
   }
 
   private buildSessionKey(endpoint: RuntimeEndpointProfile, agentId: string): string | null {

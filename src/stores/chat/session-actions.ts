@@ -172,13 +172,12 @@ function normalizeCatalogSession(session: ChatSession): ChatSession | null {
   if (!session.key || !session.agentId || !session.sessionIdentity) {
     return null;
   }
-  const identity = { ...session.sessionIdentity, sessionKey: session.key };
-  const recordKey = buildSessionRecordKey(identity);
+  const recordKey = buildSessionRecordKey(session.sessionIdentity);
   return {
     ...session,
-    sessionIdentity: identity,
     key: recordKey,
     backendSessionKey: session.key,
+    endpointSessionId: normalizeCatalogString(session.endpointSessionId) ?? undefined,
   };
 }
 
@@ -194,6 +193,7 @@ async function loadEndpointSessionCatalog(target: ChatSessionRuntimeEndpointTarg
         agentId: typeof session.agentId === 'string' ? session.agentId : '',
         protocolId: typeof session.protocolId === 'string' ? session.protocolId : undefined,
         runtimeEndpointId: typeof session.runtimeEndpointId === 'string' ? session.runtimeEndpointId : undefined,
+        endpointSessionId: typeof session.endpointSessionId === 'string' ? session.endpointSessionId : undefined,
         sessionIdentity: session.sessionIdentity,
         kind: session.kind === 'main' || session.kind === 'subsession' || session.kind === 'session' || session.kind === 'named'
           ? session.kind
@@ -265,15 +265,25 @@ function resolveNewSessionAgentScope(state: ChatStoreState, agentId?: string): A
 
 async function requestSessionLifecycleSnapshot(
   action: 'switch' | 'resume',
-  target: { sessionKey: string; sessionIdentity: SessionIdentity },
+  target: { sessionKey: string; endpointSessionId?: string; sessionIdentity: SessionIdentity },
 ): Promise<SessionLoadResult> {
   const result = action === 'switch'
-    ? await hostSessionSwitch({ sessionKey: target.sessionKey, sessionIdentity: target.sessionIdentity, limit: 200 })
-    : await hostSessionResume({ sessionKey: target.sessionKey, sessionIdentity: target.sessionIdentity });
+    ? await hostSessionSwitch({
+        sessionKey: target.sessionKey,
+        ...(target.endpointSessionId ? { endpointSessionId: target.endpointSessionId } : {}),
+        sessionIdentity: target.sessionIdentity,
+        limit: 200,
+      })
+    : await hostSessionResume({
+        sessionKey: target.sessionKey,
+        ...(target.endpointSessionId ? { endpointSessionId: target.endpointSessionId } : {}),
+        sessionIdentity: target.sessionIdentity,
+      });
   const snapshot = await resolveHydratedSessionSnapshot({
     initial: result,
     refetch: async () => await hostSessionWindowFetch({
       sessionKey: target.sessionKey,
+      ...(target.endpointSessionId ? { endpointSessionId: target.endpointSessionId } : {}),
       sessionIdentity: target.sessionIdentity,
       mode: 'latest',
       limit: 200,
@@ -439,6 +449,7 @@ async function executeLoadSessionsNow(input: CreateStoreSessionActionsInput): Pr
       const explicitLabel = normalizeCatalogString(session.label);
       loadedSessions = patchSessionMeta({ loadedSessions }, session.key, {
         backendSessionKey: session.backendSessionKey,
+        endpointSessionId: session.endpointSessionId ?? currentMeta.endpointSessionId,
         runtimeScopeKey: buildRuntimeScopeKey(session.sessionIdentity.endpoint),
         agentId: normalizeCatalogString(session.agentId) ?? currentMeta.agentId,
         protocolId: normalizeCatalogString(session.protocolId) ?? currentMeta.protocolId,
@@ -498,32 +509,40 @@ export function executeOpenAgentConversation(input: CreateStoreSessionActionsInp
   get().newSession(normalized);
 }
 
-export function executeOpenSessionIdentity(input: CreateStoreSessionActionsInput, identity: SessionIdentity): void {
+export function executeOpenSessionIdentity(
+  input: CreateStoreSessionActionsInput,
+  target: { sessionIdentity: SessionIdentity; endpointSessionId?: string | null },
+): void {
   const { get, set } = input;
+  const identity = target.sessionIdentity;
+  const endpointSessionId = normalizeCatalogString(target.endpointSessionId ?? undefined);
   const recordKey = findSessionRecordKey(get(), identity) ?? buildSessionRecordKey(identity);
-  if (get().loadedSessions[recordKey]) {
-    get().switchSession(recordKey);
-    return;
-  }
+  const existing = get().loadedSessions[recordKey];
   set((state) => {
+    const currentMeta = getSessionMeta(state, recordKey);
     const loadedSessions = patchSessionMeta({
       loadedSessions: ensureSessionRecordMap(state.loadedSessions, recordKey),
     }, recordKey, {
       backendSessionKey: identity.sessionKey,
+      endpointSessionId: endpointSessionId ?? currentMeta.endpointSessionId,
       runtimeScopeKey: buildRuntimeScopeKey(identity.endpoint),
       agentId: identity.agentId,
       sessionIdentity: identity,
-      kind: 'session',
-      preferred: false,
-      historyStatus: 'loading',
+      kind: currentMeta.kind ?? 'session',
+      preferred: currentMeta.preferred,
+      historyStatus: existing ? currentMeta.historyStatus : 'loading',
     });
     return {
       loadedSessions,
       sessionRecordKeyByIdentityKey: buildSessionIdentityRecordIndex(loadedSessions),
-      currentSessionKey: recordKey,
+      currentSessionKey: existing ? state.currentSessionKey : recordKey,
       error: null,
     };
   });
+  if (existing) {
+    get().switchSession(recordKey);
+    return;
+  }
   void get().loadHistory({
     sessionKey: recordKey,
     mode: 'active',

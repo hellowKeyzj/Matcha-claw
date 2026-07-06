@@ -2,6 +2,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import { OpenClawV4Adapter } from '../../runtime-host/application/adapters/openclaw/runtime/openclaw-v4-canonical-adapter';
+import { OpenClawRuntimeAdapter } from '../../runtime-host/application/adapters/openclaw/runtime/openclaw-runtime-adapter';
 import { createOpenClawTestSessionIdentity, createOpenClawTestRuntimeContext, createTestSessionRuntimeService, openClawTestRuntimeIdentity } from './helpers/session-runtime-fixture';
 import { buildCanonicalReplayEventsFromTranscriptMessages } from '../../runtime-host/application/sessions/canonical/canonical-transcript-replay';
 import { parseTranscriptMessages } from '../../runtime-host/application/sessions/transcript-parser';
@@ -228,7 +229,7 @@ describe('session runtime ACP adapter service', () => {
     });
   });
 
-  it('settles a V4 tool-call turn when lifecycle completion has no sessionKey', async () => {
+  it('settles a V4 tool-call turn when lifecycle completion has no nested event sessionKey', async () => {
     const service = createService();
 
     await consumeOpenClawTestGatewayEvent(service, {
@@ -259,6 +260,7 @@ describe('session runtime ACP adapter service', () => {
     });
     const [completed] = await consumeOpenClawTestGatewayEvent(service, {
       type: 'run.phase',
+      sessionKey: 'agent:main:main',
       phase: 'completed',
       runId: 'run-lifecycle-context-session',
     });
@@ -1420,8 +1422,9 @@ describe('session runtime ACP adapter service', () => {
     });
 
     const response = await service.promptSession({
-      sessionKey: 'agent:main:team-role:run-1:leader',
-      sessionIdentity: createOpenClawTestSessionIdentity('agent:main:team-role:run-1:leader'),
+      sessionKey: 'team-role-session-run-1-leader',
+      endpointSessionId: 'agent:default:team-endpoint-session-run-1-leader',
+      sessionIdentity: createOpenClawTestSessionIdentity('team-role-session-run-1-leader'),
       message: '## TeamRun WorkNode\nfull prompt',
       displayMessage: '用户原文',
       idempotencyKey: 'client-run-display',
@@ -1429,7 +1432,7 @@ describe('session runtime ACP adapter service', () => {
     await vi.waitFor(() => expect(chatSend).toHaveBeenCalledTimes(1));
 
     expect(chatSend.mock.calls[0][0]).toMatchObject({
-      sessionKey: 'agent:main:team-role:run-1:leader',
+      sessionKey: 'agent:default:team-endpoint-session-run-1-leader',
       message: '## TeamRun WorkNode\nfull prompt',
       idempotencyKey: 'client-run-display',
     });
@@ -1496,6 +1499,291 @@ describe('session runtime ACP adapter service', () => {
         },
       },
     });
+  });
+
+  it('normalizes Team role endpoint session events back to the local role session', async () => {
+    const chatSend = vi.fn(async (params: Record<string, unknown>) => ({
+      runId: params.idempotencyKey,
+      status: 'started',
+    }));
+    const service = createService({
+      openclawBridge: {
+        chatSend,
+        gatewayRpc: async () => ({}),
+      },
+    });
+    const localSessionIdentity = createOpenClawTestSessionIdentity('team-role-session-1', 'leader');
+
+    await service.promptSession({
+      sessionKey: 'team-role-session-1',
+      endpointSessionId: 'agent:leader:team-endpoint-session-1',
+      sessionIdentity: localSessionIdentity,
+      message: 'Team role prompt',
+      idempotencyKey: 'team-run-1-leader',
+    });
+    await vi.waitFor(() => expect(chatSend).toHaveBeenCalledTimes(1));
+    expect(chatSend).toHaveBeenCalledWith(expect.objectContaining({
+      sessionKey: 'agent:leader:team-endpoint-session-1',
+    }));
+
+    const [message] = await service.consumeEndpointConversationEvent(localSessionIdentity.endpoint, {
+      type: 'chat.message',
+      event: {
+        state: 'final',
+        sessionKey: 'agent:leader:team-endpoint-session-1',
+        runId: 'team-run-1-leader',
+        seq: 1,
+        message: { role: 'assistant', content: [{ type: 'text', text: 'leader done' }] },
+      },
+    });
+
+    expect(message).toMatchObject({
+      sessionUpdate: 'session_item',
+      sessionKey: 'team-role-session-1',
+      item: {
+        kind: 'assistant-turn',
+        runId: 'team-run-1-leader',
+        text: 'leader done',
+      },
+      snapshot: {
+        sessionKey: 'team-role-session-1',
+        catalog: {
+          sessionIdentity: localSessionIdentity,
+        },
+      },
+    });
+    expect(message?.sessionKey).not.toBe('agent:leader:team-endpoint-session-1');
+    expect(message?.sessionKey?.startsWith('agent:main:')).toBe(false);
+    expect(message?.snapshot.sessionKey).not.toBe('agent:leader:team-endpoint-session-1');
+    expect(message?.snapshot.sessionKey?.startsWith('agent:main:')).toBe(false);
+    expect(message?.snapshot.items).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        kind: 'assistant-turn',
+        turnKey: 'openclaw-v4:turn:team-role-session-1:team-run-1-leader:member:leader:0',
+        text: 'leader done',
+      }),
+    ]));
+  });
+
+  it('normalizes Team role endpoint session events after create-only binding registration', async () => {
+    const service = createService();
+    const localSessionIdentity = createOpenClawTestSessionIdentity('team-role-session-create-only', 'leader');
+
+    const createResponse = await service.createSession({
+      sessionKey: 'team-role-session-create-only',
+      endpointSessionId: 'agent:leader:team-endpoint-session-create-only',
+      endpoint: localSessionIdentity.endpoint,
+      agentId: 'leader',
+    });
+    const [message] = await service.consumeEndpointConversationEvent(localSessionIdentity.endpoint, {
+      type: 'chat.message',
+      event: {
+        state: 'final',
+        sessionKey: 'agent:leader:team-endpoint-session-create-only',
+        runId: 'team-run-create-only-leader',
+        seq: 1,
+        message: { role: 'assistant', content: [{ type: 'text', text: 'created binding event' }] },
+      },
+    });
+
+    expect(createResponse.status).toBe(200);
+    expect(message).toMatchObject({
+      sessionUpdate: 'session_item',
+      sessionKey: 'team-role-session-create-only',
+      item: { kind: 'assistant-turn', text: 'created binding event' },
+      snapshot: {
+        sessionKey: 'team-role-session-create-only',
+        catalog: {
+          sessionIdentity: localSessionIdentity,
+        },
+      },
+    });
+  });
+
+  it('patches a Team role runtime model through the endpoint session id', async () => {
+    const gatewayRpc = vi.fn(async () => ({ model: 'anthropic/claude-opus-4-8' }));
+    const service = createService({
+      openclawBridge: {
+        chatSend: async () => ({ runId: 'run-sent' }),
+        gatewayRpc,
+      },
+    });
+    const localSessionIdentity = createOpenClawTestSessionIdentity('team-role-session-model', 'leader');
+
+    await service.createSession({
+      sessionKey: 'team-role-session-model',
+      endpointSessionId: 'agent:leader:team-endpoint-session-model',
+      endpoint: localSessionIdentity.endpoint,
+      agentId: 'leader',
+    });
+    const response = await service.patchSession({
+      sessionKey: 'team-role-session-model',
+      endpointSessionId: 'agent:leader:team-endpoint-session-model',
+      sessionIdentity: localSessionIdentity,
+      runtimeModelRef: 'anthropic/claude-opus-4-8',
+    });
+
+    expect(gatewayRpc).toHaveBeenCalledWith('sessions.patch', {
+      key: 'agent:leader:team-endpoint-session-model',
+      model: 'anthropic/claude-opus-4-8',
+    }, 10_000);
+    expect(response.status).toBe(200);
+  });
+
+  it('binds endpoint ingress from explicit local SessionIdentity without using the local key as the endpoint session id', async () => {
+    const service = createService();
+    const localSessionIdentity = createOpenClawTestSessionIdentity('team-role-session-direct-identity', 'leader');
+
+    const [message] = await service.consumeEndpointConversationEvent(localSessionIdentity.endpoint, {
+      type: 'chat.message',
+      event: {
+        state: 'final',
+        sessionKey: 'agent:leader:team-endpoint-session-direct-identity',
+        sessionIdentity: localSessionIdentity,
+        runId: 'team-run-direct-identity',
+        seq: 1,
+        message: { role: 'assistant', content: [{ type: 'text', text: 'direct identity event' }] },
+      },
+    });
+    const [followup] = await service.consumeEndpointConversationEvent(localSessionIdentity.endpoint, {
+      type: 'chat.message',
+      event: {
+        state: 'final',
+        sessionKey: 'agent:leader:team-endpoint-session-direct-identity',
+        runId: 'team-run-direct-identity-followup',
+        seq: 2,
+        message: { role: 'assistant', content: [{ type: 'text', text: 'direct identity followup' }] },
+      },
+    });
+
+    expect(message).toMatchObject({
+      sessionUpdate: 'session_item',
+      sessionKey: 'team-role-session-direct-identity',
+      item: { kind: 'assistant-turn', text: 'direct identity event' },
+      snapshot: {
+        sessionKey: 'team-role-session-direct-identity',
+        catalog: { sessionIdentity: localSessionIdentity },
+      },
+    });
+    expect(followup).toMatchObject({
+      sessionUpdate: 'session_item',
+      sessionKey: 'team-role-session-direct-identity',
+      item: { kind: 'assistant-turn', text: 'direct identity followup' },
+    });
+  });
+
+  it('fails closed when endpoint events only carry a local Team role SessionIdentity', async () => {
+    const agentRuntimeRegistry = new AgentRuntimeRegistry({
+      gateway: () => ({
+        chatSend: async () => ({ runId: 'run-sent' }),
+        gatewayRpc: async () => ({}),
+      }),
+    });
+    agentRuntimeRegistry.register({ runtimeAdapters: [new OpenClawRuntimeAdapter()] });
+    const rememberSessionIdentity = vi.spyOn(agentRuntimeRegistry, 'rememberSessionIdentity');
+    const service = createService({ agentRuntimeRegistry });
+    const localSessionIdentity = createOpenClawTestSessionIdentity('team-role-session-missing-endpoint-key', 'leader');
+
+    const updates = await service.consumeEndpointConversationEvent(localSessionIdentity.endpoint, {
+      type: 'chat.message',
+      sessionIdentity: localSessionIdentity,
+      event: {
+        state: 'final',
+        sessionIdentity: localSessionIdentity,
+        runId: 'team-run-missing-endpoint-key',
+        seq: 1,
+        message: { role: 'assistant', content: [{ type: 'text', text: 'must not bind' }] },
+      },
+    });
+
+    expect(updates).toEqual([]);
+    expect(rememberSessionIdentity).not.toHaveBeenCalled();
+    expect(agentRuntimeRegistry.resolveSessionContextByEndpointSessionId(
+      localSessionIdentity.endpoint,
+      localSessionIdentity.sessionKey,
+    )).toBeNull();
+  });
+
+  it('aborts Team role sessions through the endpoint session id', async () => {
+    const gatewayRpc = vi.fn(async () => ({}));
+    const emitSessionUpdate = vi.fn();
+    const service = createService({
+      emitSessionUpdate,
+      openclawBridge: {
+        chatSend: async () => ({ runId: 'team-role-active-run' }),
+        gatewayRpc,
+      },
+    });
+    const localSessionIdentity = createOpenClawTestSessionIdentity('team-role-session-abort', 'leader');
+
+    await service.promptSession({
+      sessionKey: 'team-role-session-abort',
+      endpointSessionId: 'agent:leader:team-endpoint-session-abort',
+      sessionIdentity: localSessionIdentity,
+      message: 'start then abort team role',
+      idempotencyKey: 'team-role-active-run',
+    });
+    const response = await service.abortSession({
+      sessionKey: 'team-role-session-abort',
+      endpointSessionId: 'agent:leader:team-endpoint-session-abort',
+      sessionIdentity: localSessionIdentity,
+      approvalIds: [],
+    });
+
+    expect(gatewayRpc).toHaveBeenCalledWith('chat.abort', {
+      sessionKey: 'agent:leader:team-endpoint-session-abort',
+      runId: 'team-role-active-run',
+    }, 5000);
+    expect(response.status).toBe(200);
+  });
+
+  it('normalizes Team role approval notifications from endpoint session id back to the local role session', async () => {
+    const gatewayRpc = vi.fn(async () => ({ ok: true }));
+    const service = createService({
+      openclawBridge: {
+        chatSend: async () => ({ runId: 'run-sent' }),
+        gatewayRpc,
+      },
+    });
+    const localSessionIdentity = createOpenClawTestSessionIdentity('team-role-session-approval', 'leader');
+
+    await service.createSession({
+      sessionKey: 'team-role-session-approval',
+      endpointSessionId: 'agent:leader:team-endpoint-session-approval',
+      endpoint: localSessionIdentity.endpoint,
+      agentId: 'leader',
+    });
+    const [pending] = service.consumeEndpointNotification(localSessionIdentity.endpoint, {
+      method: 'exec.approval.requested',
+      params: {
+        id: 'approval-team-role',
+        sessionKey: 'agent:leader:team-endpoint-session-approval',
+        runId: 'team-run-approval',
+        title: 'Run command',
+        allowedDecisions: ['allow-once', 'deny'],
+        createdAtMs: 1_700_000_000_060,
+      },
+    });
+    const response = await service.resolveApproval({
+      id: 'approval-team-role',
+      sessionKey: 'team-role-session-approval',
+      endpointSessionId: 'agent:leader:team-endpoint-session-approval',
+      sessionIdentity: localSessionIdentity,
+      decision: 'allow-once',
+    });
+    const list = await service.listPendingApprovals({ sessionIdentity: localSessionIdentity });
+
+    expect(pending).toMatchObject({
+      sessionUpdate: 'session_info_update',
+      sessionKey: 'team-role-session-approval',
+      snapshot: {
+        catalog: { sessionIdentity: localSessionIdentity },
+        approvals: [expect.objectContaining({ id: 'approval-team-role', sessionKey: 'team-role-session-approval' })],
+      },
+    });
+    expect(gatewayRpc).toHaveBeenCalledWith('exec.approval.resolve', { id: 'approval-team-role', decision: 'allow-once' });
+    expect(response.status).toBe(200);
+    expect(list.data).toEqual({ approvals: [] });
   });
 
   it('marks the submitted ACP lifecycle as error when gateway send fails', async () => {

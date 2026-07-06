@@ -34,10 +34,11 @@ export class SessionApprovalWorkflow {
 
   async abort(input: {
     sessionKey: string;
+    endpointSessionId?: string;
     approvalIds: string[];
     sessionIdentity: SessionIdentity;
   }): Promise<ApplicationResponseOf<SessionLoadResult & { success: boolean } | { success: false; error: string }>> {
-    const context = this.deps.agentRuntimeRegistry.rememberSessionIdentity(input.sessionIdentity);
+    const context = this.deps.agentRuntimeRegistry.rememberSessionIdentity(input.sessionIdentity, input.endpointSessionId);
     const currentRunId = this.deps.stateStore.getSessionState(input.sessionKey, context).runtime.activeRunId ?? undefined;
     try {
       await this.deps.agentRuntimeRegistry.resolveTransport(context).abortSession({
@@ -55,9 +56,10 @@ export class SessionApprovalWorkflow {
     id: string;
     decision: SessionApprovalDecision;
     sessionKey: string;
+    endpointSessionId?: string;
     sessionIdentity: SessionIdentity;
   }): Promise<ApplicationResponseOf> {
-    const context = this.deps.agentRuntimeRegistry.rememberSessionIdentity(input.sessionIdentity);
+    const context = this.deps.agentRuntimeRegistry.rememberSessionIdentity(input.sessionIdentity, input.endpointSessionId);
     const pendingApproval = this.findPendingApproval(input.sessionIdentity, input.id);
     const result = await this.deps.agentRuntimeRegistry.resolveTransport(context).resolveApproval({
       context,

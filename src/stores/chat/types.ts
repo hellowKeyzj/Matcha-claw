@@ -45,6 +45,7 @@ export interface ContentBlock {
 export interface ChatSession {
   key: string;
   backendSessionKey: string;
+  endpointSessionId?: string;
   agentId: string;
   protocolId?: string;
   runtimeEndpointId?: string;
@@ -108,6 +109,7 @@ export interface ApprovalItem {
   id: string;
   sessionKey: string;
   backendSessionKey: string;
+  endpointSessionId?: string;
   sessionIdentity: SessionIdentity;
   runId?: string;
   title: string;
@@ -145,6 +147,7 @@ export interface ChatRuntimeErrorDismissMarker {
 
 export interface ChatSessionMetaState {
   backendSessionKey: string;
+  endpointSessionId: string | null;
   runtimeScopeKey: string | null;
   agentId: string | null;
   protocolId: string | null;
@@ -256,7 +259,7 @@ export interface ChatStoreActions {
   bootstrapSessionRuntime: () => Promise<void>;
   loadSessions: () => Promise<void>;
   openAgentConversation: (agentId: string) => void;
-  openSessionIdentity: (identity: SessionIdentity) => void;
+  openSessionIdentity: (target: { sessionIdentity: SessionIdentity; endpointSessionId?: string | null }) => void;
   switchSession: (key: string) => void;
   newSession: (agentId?: string) => Promise<void>;
   deleteSession: (key: string) => Promise<void>;

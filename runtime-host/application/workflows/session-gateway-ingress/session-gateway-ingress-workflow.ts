@@ -49,21 +49,16 @@ export class SessionGatewayIngressWorkflow {
     const registry = this.deps.agentRuntimeRegistry;
     const endpoint = registry.resolveEndpointForRef(endpointRef);
     const protocol = registry.getProtocol(endpoint.protocolId);
-    const sessionKey = this.readEndpointEventSessionKey(payload);
-    if (!sessionKey) {
+    const endpointSessionId = this.readEndpointEventSessionKey(payload);
+    if (!endpointSessionId) {
       return [];
     }
-    const identity = this.resolveEventSessionIdentity(endpointRef, sessionKey, payload);
-    const payloadSessionIdentity = this.readEndpointEventSessionIdentity(payload);
-    if (payloadSessionIdentity && buildSessionIdentityKey(payloadSessionIdentity) !== buildSessionIdentityKey(identity)) {
-      throw new Error('SessionIdentity payload does not match endpoint ingress identity');
-    }
-    const context = registry.rememberSessionIdentity(identity);
-    if (!protocol.eventAdapter.canTranslate(payload, context)) {
+    const { context, payload: canonicalPayload } = this.resolveEndpointEventContext(endpointRef, endpointSessionId, payload);
+    if (!protocol.eventAdapter.canTranslate(canonicalPayload, context)) {
       return [];
     }
-    const canonicalEvents = protocol.eventAdapter.translate(payload, context);
-    if (containsTodoToolDebugSignal(payload) || containsTodoToolDebugSignal(canonicalEvents)) {
+    const canonicalEvents = protocol.eventAdapter.translate(canonicalPayload, context);
+    if (containsTodoToolDebugSignal(canonicalPayload) || containsTodoToolDebugSignal(canonicalEvents)) {
       logTodoToolDebug(this.deps.logger, 'runtime-host.ingress.canonical-events', canonicalEvents);
     }
     return this.commitCanonicalEvents(canonicalEvents, context);
@@ -74,14 +69,27 @@ export class SessionGatewayIngressWorkflow {
     if (!adapter) {
       return [];
     }
-    const canonicalEvents = adapter.translateNotification(notification, this.deps.clock.nowMs());
+    const endpointSessionId = this.readEndpointNotificationSessionKey(notification);
+    const aliasedContext = endpointSessionId
+      ? this.deps.agentRuntimeRegistry.resolveSessionContextByEndpointSessionId(endpoint, endpointSessionId)
+      : null;
+    const canonicalEvents = adapter.translateNotification(
+      aliasedContext ? this.withEndpointNotificationSessionIdentity(notification, aliasedContext.identity) : notification,
+      this.deps.clock.nowMs(),
+    );
     const sessionKey = canonicalEvents[0]?.sessionId;
+    if (aliasedContext) {
+      return this.commitCanonicalEvents(canonicalEvents, aliasedContext);
+    }
     const agentId = sessionKey ? this.readAgentIdFromSessionKey(sessionKey) : '';
     if (sessionKey && !agentId) {
       throw new Error('Session approval notification requires agentId metadata');
     }
     const context = sessionKey
-      ? this.deps.agentRuntimeRegistry.rememberSessionIdentity(this.buildSessionIdentity(endpoint, sessionKey, agentId))
+      ? this.deps.agentRuntimeRegistry.rememberSessionIdentity(
+        this.buildSessionIdentity(endpoint, sessionKey, agentId),
+        endpointSessionId,
+      )
       : undefined;
     return this.commitCanonicalEvents(canonicalEvents, context);
   }
@@ -173,11 +181,91 @@ export class SessionGatewayIngressWorkflow {
     return state.renderItems[state.renderItems.length - 1] ?? null;
   }
 
+  private resolveEndpointEventContext(
+    endpointRef: RuntimeEndpointRef,
+    endpointSessionId: string,
+    payload: Record<string, unknown>,
+  ): { context: RuntimeSessionContext; payload: Record<string, unknown> } {
+    const aliasedContext = this.deps.agentRuntimeRegistry.resolveSessionContextByEndpointSessionId(endpointRef, endpointSessionId);
+    if (aliasedContext) {
+      return {
+        context: aliasedContext,
+        payload: this.withEndpointEventSessionIdentity(payload, aliasedContext.identity),
+      };
+    }
+    const identity = this.resolveEventSessionIdentity(endpointRef, endpointSessionId, payload);
+    const payloadSessionIdentity = this.readEndpointEventSessionIdentity(payload);
+    if (payloadSessionIdentity && buildSessionIdentityKey(payloadSessionIdentity) !== buildSessionIdentityKey(identity)) {
+      throw new Error('SessionIdentity payload does not match endpoint ingress identity');
+    }
+    return {
+      context: this.deps.agentRuntimeRegistry.rememberSessionIdentity(identity, endpointSessionId),
+      payload: this.withEndpointEventSessionIdentity(payload, identity),
+    };
+  }
+
+  private withEndpointEventSessionIdentity(payload: Record<string, unknown>, identity: SessionIdentity): Record<string, unknown> {
+    const event = isRecord(payload.event) ? payload.event : null;
+    const params = isRecord(payload.params) ? payload.params : null;
+    return {
+      ...payload,
+      sessionKey: identity.sessionKey,
+      sessionIdentity: identity,
+      ...(event ? { event: { ...event, sessionKey: identity.sessionKey, sessionIdentity: identity } } : {}),
+      ...(params ? { params: { ...params, sessionKey: identity.sessionKey, sessionIdentity: identity } } : {}),
+    };
+  }
+
+  private withEndpointNotificationSessionIdentity(notification: CanonicalApprovalNotification, identity: SessionIdentity): CanonicalApprovalNotification {
+    const params = isRecord(notification.params) ? notification.params : null;
+    const data = isRecord(params?.data) ? params.data : null;
+    const request = isRecord(params?.request) ? params.request : (isRecord(data?.request) ? data.request : null);
+    return {
+      ...notification,
+      ...(params
+        ? {
+            params: {
+              ...params,
+              sessionKey: identity.sessionKey,
+              sessionIdentity: identity,
+              ...(data ? { data: { ...data, sessionKey: identity.sessionKey, sessionIdentity: identity } } : {}),
+              ...(request ? { request: { ...request, sessionKey: identity.sessionKey, sessionIdentity: identity } } : {}),
+            },
+          }
+        : {}),
+    };
+  }
+
+  private readEndpointNotificationSessionKey(notification: CanonicalApprovalNotification): string {
+    const params = isRecord(notification.params) ? notification.params : null;
+    const data = isRecord(params?.data) ? params.data : null;
+    const request = isRecord(params?.request) ? params.request : (isRecord(data?.request) ? data.request : null);
+    const candidates = [
+      params?.sessionKey,
+      data?.sessionKey,
+      request?.sessionKey,
+      this.readSessionIdentityKey(params?.sessionIdentity),
+      this.readSessionIdentityKey(data?.sessionIdentity),
+      this.readSessionIdentityKey(request?.sessionIdentity),
+    ];
+    for (const candidate of candidates) {
+      if (typeof candidate === 'string' && candidate.trim()) {
+        return candidate.trim();
+      }
+    }
+    return '';
+  }
+
+  private readSessionIdentityKey(value: unknown): string {
+    return isRecord(value) && typeof value.sessionKey === 'string' && value.sessionKey.trim()
+      ? value.sessionKey.trim()
+      : '';
+  }
+
   private readEndpointEventSessionKey(payload: Record<string, unknown>): string {
     const event = isRecord(payload.event) ? payload.event : null;
     const params = isRecord(payload.params) ? payload.params : null;
-    const payloadIdentity = this.readEndpointEventSessionIdentity(payload);
-    const candidates = [payload.sessionKey, event?.sessionKey, params?.sessionKey, payloadIdentity?.sessionKey];
+    const candidates = [payload.sessionKey, event?.sessionKey, params?.sessionKey];
     for (const candidate of candidates) {
       if (typeof candidate === 'string' && candidate.trim().length > 0) {
         return candidate.trim();

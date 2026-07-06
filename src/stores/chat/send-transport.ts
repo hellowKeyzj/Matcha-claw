@@ -9,6 +9,7 @@ const CHAT_SEND_DEFAULT_ERROR = 'Failed to send message';
 
 export interface SendChatTransportParams {
   sessionKey: string;
+  endpointSessionId?: string;
   sessionIdentity: SessionIdentity;
   message: string;
   idempotencyKey: string;
@@ -26,6 +27,7 @@ export async function sendChatTransport(
   const attachments = params.attachments ?? [];
   const response = await hostSessionPrompt({
     sessionKey: params.sessionKey,
+    ...(params.endpointSessionId ? { endpointSessionId: params.endpointSessionId } : {}),
     sessionIdentity: params.sessionIdentity,
     message: params.message || (attachments.length > 0 ? CHAT_SEND_WITH_MEDIA_FALLBACK_PROMPT : ''),
     idempotencyKey: params.idempotencyKey,

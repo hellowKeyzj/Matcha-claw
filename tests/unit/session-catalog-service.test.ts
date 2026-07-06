@@ -12,7 +12,11 @@ import {
   createTestSessionRuntimeService,
 } from './helpers/session-runtime-fixture';
 import { createTestRuntimeFileSystem } from './helpers/runtime-file-system';
+import { AgentRuntimeRegistry } from '../../runtime-host/application/agent-runtime/contracts/agent-runtime-registry';
 import { validateSessionIdentity, type SessionIdentity } from '../../runtime-host/application/agent-runtime/contracts/runtime-address';
+import { OpenClawRuntimeAdapter } from '../../runtime-host/application/adapters/openclaw/runtime/openclaw-runtime-adapter';
+import type { SessionStorageDescriptor } from '../../runtime-host/application/sessions/session-storage-repository';
+import type { SessionRuntimeStateSnapshot } from '../../runtime-host/shared/session-adapter-types';
 import { createOpenClawTestSessionIdentity } from './helpers/runtime-address-fixtures';
 
 function buildTranscriptLine(input: {
@@ -58,6 +62,21 @@ function sessionListPayload(sessionIdentity: SessionIdentity) {
   return {
     endpoint: sessionIdentity.endpoint,
     sessionIdentity,
+  };
+}
+
+function idleRuntimeSnapshot(updatedAt: number | null): SessionRuntimeStateSnapshot {
+  return {
+    activeRunId: null,
+    runPhase: 'idle',
+    activeTurnItemKey: null,
+    pendingTurnKey: null,
+    pendingTurnLaneKey: null,
+    runtimeActivity: null,
+    lastUserMessageAt: null,
+    lastError: null,
+    lastIssue: null,
+    updatedAt,
   };
 }
 
@@ -262,6 +281,31 @@ describe('session adapter service catalog', () => {
         label: 'legacy title',
       }),
     ]);
+  });
+
+  it('does not wrap unindexed Team role local transcripts in OpenClaw agent session grammar', async () => {
+    const configDir = mkdtempSync(join(tmpdir(), 'matchaclaw-session-catalog-'));
+    tempDirs.push(configDir);
+
+    const sessionsDir = join(configDir, 'agents', 'leader', 'sessions');
+    mkdirSync(sessionsDir, { recursive: true });
+    writeFileSync(join(sessionsDir, 'team-role-session-1.jsonl'), [
+      buildTranscriptLine({
+        timestamp: '2026-04-10T10:00:00.000Z',
+        role: 'user',
+        content: 'team role transcript',
+        id: 'message-1',
+      }),
+    ].join('\n'));
+
+    const service = createTestSessionCatalogService({
+      workspace: { getConfigDir: () => configDir },
+    });
+
+    await service.refreshCache();
+    const response = await service.listSessions(sessionListPayload(createOpenClawTestSessionIdentity('agent:leader:main', 'leader')));
+
+    expect(response.sessions).toEqual([]);
   });
 
   it('uses the shared session metadata repository for catalog model resolution', async () => {
@@ -667,6 +711,83 @@ describe('session adapter service catalog', () => {
         agentId: 'identity-agent',
       },
     });
+  });
+
+  it('canonicalizes cached Team role endpoint sessions back to local sessions and preserves live overlay binding', async () => {
+    const localSessionIdentity = createOpenClawTestSessionIdentity('team-role-session-run-1-leader', 'leader-agent');
+    const opaqueEndpointSessionId = 'team-endpoint-session-run-1-leader';
+    const materializedEndpointSessionId = `agent:leader-agent:${opaqueEndpointSessionId}`;
+    const agentRuntimeRegistry = new AgentRuntimeRegistry({
+      gateway: () => ({
+        chatSend: async () => ({ success: true }),
+        gatewayRpc: async () => ({}),
+      }),
+    });
+    agentRuntimeRegistry.register({ runtimeAdapters: [new OpenClawRuntimeAdapter()] });
+    agentRuntimeRegistry.rememberSessionIdentity(localSessionIdentity, materializedEndpointSessionId);
+    const descriptor: SessionStorageDescriptor = {
+      sessionKey: materializedEndpointSessionId,
+      agentId: 'leader-agent',
+      sessionsDir: '',
+      sessionsJsonPath: null,
+      sessionsJson: null,
+      sessionStoreEntry: { label: 'cached Team role title' },
+      sessionIdentity: localSessionIdentity,
+      transcriptPath: '/tmp/agent-leader-agent-team-endpoint-session-run-1-leader.jsonl',
+    };
+
+    const service = createTestSessionCatalogService({
+      workspace: { getConfigDir: () => '' },
+      agentRuntimeRegistry,
+      storageRepository: {
+        listStorageDescriptors: async () => [descriptor],
+        findStorageDescriptor: async (identity) => (identity.sessionKey === localSessionIdentity.sessionKey ? descriptor : null),
+        getTranscriptFingerprint: async (pathname) => ({ path: pathname, size: 1, mtimeMs: 1 }),
+        readTranscriptContent: async () => null,
+        readTranscriptDescriptorContent: async () => null,
+        readTranscriptLines: async function* () {},
+        readTranscriptDescriptorLines: async function* () {
+          yield buildTranscriptLine({
+            timestamp: '2026-04-10T10:00:00.000Z',
+            role: 'user',
+            content: 'cached Team role transcript',
+            id: 'message-1',
+          });
+        },
+        deleteSession: async () => false,
+        renameSession: async () => false,
+        updateSessionStatus: async () => false,
+        upsertSessionIdentity: async () => true,
+      },
+      metadataRepository: {
+        resolveSessionModel: async () => null,
+        readSessionMetadata: async () => null,
+        writeSessionMetadata: async () => undefined,
+      },
+    });
+
+    await service.refreshCache();
+    const response = await service.listSessions({
+      ...sessionListPayload(localSessionIdentity),
+      runtimeOverlays: [{
+        sessionKey: localSessionIdentity.sessionKey,
+        sessionIdentity: localSessionIdentity,
+        timelineEntries: [],
+        runtime: idleRuntimeSnapshot(Date.parse('2026-04-10T10:05:00.000Z')),
+      }],
+    });
+
+    expect(response.sessions).toEqual([
+      expect.objectContaining({
+        key: localSessionIdentity.sessionKey,
+        endpointSessionId: materializedEndpointSessionId,
+        sessionIdentity: localSessionIdentity,
+        label: 'cached Team role title',
+        displayName: 'cached Team role title',
+        updatedAt: Date.parse('2026-04-10T10:05:00.000Z'),
+      }),
+    ]);
+    expect(response.sessions[0]?.key).not.toBe(materializedEndpointSessionId);
   });
 
   it('listSessions reads the cached catalog snapshot without rescanning transcripts', async () => {

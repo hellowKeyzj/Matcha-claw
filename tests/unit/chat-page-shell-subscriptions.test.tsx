@@ -10,7 +10,7 @@ import { useTeamsStore } from '@/stores/teams';
 import { createEmptySessionRecord } from '@/stores/chat/store-state-helpers';
 import { createViewportWindowState } from '@/stores/chat/viewport-state';
 import { buildRenderItemsFromMessages } from './helpers/timeline-fixtures';
-import { createOpenClawTestSessionIdentity } from './helpers/runtime-address-fixtures';
+import { createOpenClawTestSessionIdentity, openClawTestRuntimeEndpoint } from './helpers/runtime-address-fixtures';
 
 const chatViewportPaneRenderSpy = vi.fn();
 const chatInputSendResultSpy = vi.fn();
@@ -119,17 +119,36 @@ vi.mock('@/pages/Chat/ChatInput', () => ({
   }: {
     disabled?: boolean;
     reconnecting?: boolean;
-    onSend: (text: string) => Promise<unknown>;
+    onSend: (text: string, attachments?: unknown[]) => Promise<unknown>;
   }) => (
-    <button
-      type="button"
-      data-testid="chat-input"
-      data-disabled={disabled ? 'true' : 'false'}
-      data-reconnecting={reconnecting ? 'true' : 'false'}
-      onClick={() => { void onSend('hello from test').then(chatInputSendResultSpy); }}
-    >
-      send
-    </button>
+    <>
+      <button
+        type="button"
+        data-testid="chat-input"
+        data-disabled={disabled ? 'true' : 'false'}
+        data-reconnecting={reconnecting ? 'true' : 'false'}
+        onClick={() => { void onSend('hello from test').then(chatInputSendResultSpy); }}
+      >
+        send
+      </button>
+      <button
+        type="button"
+        data-testid="chat-input-with-attachment"
+        onClick={() => {
+          void onSend('hello from test', [{
+            id: 'file-1',
+            fileName: 'brief.txt',
+            mimeType: 'text/plain',
+            fileSize: 12,
+            stagedPath: '/tmp/brief.txt',
+            preview: null,
+            status: 'ready',
+          }]).then(chatInputSendResultSpy);
+        }}
+      >
+        send attachment
+      </button>
+    </>
   ),
 }));
 
@@ -168,6 +187,18 @@ vi.mock('@/pages/Chat/components/ChatList', () => ({
     );
   }),
 }));
+
+function buildTeamRoleBinding(input: { runId: string; roleId: string; agentId: string; localSessionId: string; endpointSessionId?: string }) {
+  return {
+    runId: input.runId,
+    roleId: input.roleId,
+    agentId: input.agentId,
+    endpointRef: openClawTestRuntimeEndpoint,
+    localSessionId: input.localSessionId,
+    endpointSessionId: input.endpointSessionId ?? `endpoint:${input.runId}:${input.roleId}`,
+    sessionIdentity: createOpenClawTestSessionIdentity(input.localSessionId, input.agentId),
+  };
+}
 
 function buildSessionRecord(overrides?: Partial<ReturnType<typeof createEmptySessionRecord>> & {
   sessionKey?: string;
@@ -298,8 +329,9 @@ describe('chat 顶层订阅收口', () => {
     } as never);
   });
 
-  it('Team role 会话发送时提交 Team role chat message，不走普通 Agent chat send', async () => {
-    const leaderIdentity = createOpenClawTestSessionIdentity('agent:leader:team-run-1', 'leader-agent');
+  it('Team role 会话发送时提交当前 session identity 对应 run 的 Team role chat message，不走普通 Agent chat send', async () => {
+    const leaderBinding = buildTeamRoleBinding({ runId: 'run-1', roleId: 'leader', agentId: 'leader-agent', localSessionId: 'team-role-session-run-1-leader' });
+    const leaderIdentity = leaderBinding.sessionIdentity;
     const submitTeamRoleMessageFromChat = vi.fn().mockResolvedValue(undefined);
     const sendMessage = vi.fn().mockResolvedValue(undefined);
     useTeamsStore.setState({
@@ -311,7 +343,7 @@ describe('chat 顶层订阅收口', () => {
         teamSkillDescription: 'Team skill',
         packagePath: '.tmp/team-skill',
         sourcePath: '.tmp/team-skill/SKILL.md',
-        activeRunId: 'run-1',
+        activeRunId: 'run-2',
         createdAt: 1,
         updatedAt: 1,
       }],
@@ -325,17 +357,27 @@ describe('chat 顶层订阅收口', () => {
           revision: 1,
           createdAt: 1,
           updatedAt: 1,
-          sessions: [{ runId: 'run-1', roleId: 'leader', agentId: 'leader-agent', sessionKey: 'agent:leader:team-run-1', sessionIdentity: leaderIdentity }],
+          sessions: [leaderBinding],
+        }, {
+          runId: 'run-2',
+          packageName: 'team-skill',
+          packageVersion: '1.0.0',
+          sourcePath: '.tmp/team-skill',
+          status: 'running',
+          revision: 2,
+          createdAt: 2,
+          updatedAt: 2,
+          sessions: [],
         }],
       },
       submitTeamRoleMessageFromChat,
     } as never);
     useChatStore.setState((state) => ({
-      currentSessionKey: 'agent:leader:team-run-1',
+      currentSessionKey: leaderBinding.localSessionId,
       loadedSessions: {
         ...state.loadedSessions,
-        'agent:leader:team-run-1': buildSessionRecord({
-          sessionKey: 'agent:leader:team-run-1',
+        [leaderBinding.localSessionId]: buildSessionRecord({
+          sessionKey: leaderBinding.localSessionId,
           meta: { sessionIdentity: leaderIdentity, agentId: 'leader-agent' },
         }),
       },
@@ -350,13 +392,13 @@ describe('chat 顶层订阅收口', () => {
 
     fireEvent.click(screen.getByTestId('chat-input'));
 
-    await waitFor(() => expect(submitTeamRoleMessageFromChat).toHaveBeenCalledWith('team-1', 'leader', 'hello from test'));
+    await waitFor(() => expect(submitTeamRoleMessageFromChat).toHaveBeenCalledWith('team-1', 'leader', 'hello from test', 'run-1'));
     await waitFor(() => expect(chatInputSendResultSpy).toHaveBeenCalledWith({ accepted: true }));
     expect(sendMessage).not.toHaveBeenCalled();
   });
 
-  it('重启后 TeamRun run list sessions 尚未恢复时，仍可从 Team role sessionKey 发送', async () => {
-    const sessionKey = 'agent:leader-agent:team-role:run-1:leader';
+  it('Team role binding 尚未恢复时拒绝发送，不 fallback 到普通 Agent chat', async () => {
+    const sessionKey = 'team-role-session-run-1-leader';
     const leaderIdentity = createOpenClawTestSessionIdentity(sessionKey, 'leader-agent');
     const submitTeamRoleMessageFromChat = vi.fn().mockResolvedValue(undefined);
     const sendMessage = vi.fn().mockResolvedValue(undefined);
@@ -397,13 +439,18 @@ describe('chat 顶层订阅收口', () => {
 
     fireEvent.click(screen.getByTestId('chat-input'));
 
-    await waitFor(() => expect(submitTeamRoleMessageFromChat).toHaveBeenCalledWith('team-1', 'leader', 'hello from test'));
-    await waitFor(() => expect(chatInputSendResultSpy).toHaveBeenCalledWith({ accepted: true }));
+    await waitFor(() => expect(chatInputSendResultSpy).toHaveBeenCalledWith({
+      accepted: false,
+      reason: 'error',
+      error: 'Team role session is not ready yet.',
+    }));
     expect(sendMessage).not.toHaveBeenCalled();
+    expect(submitTeamRoleMessageFromChat).not.toHaveBeenCalled();
   });
 
-  it('Team role 正在执行 node prompt 时仍提交普通 Team role message', async () => {
-    const leaderIdentity = createOpenClawTestSessionIdentity('agent:leader:team-run-1', 'leader-agent');
+  it('Team role 会话带附件时明确拒绝，不 fallback 到普通 Agent chat', async () => {
+    const leaderBinding = buildTeamRoleBinding({ runId: 'run-1', roleId: 'leader', agentId: 'leader-agent', localSessionId: 'team-role-session-run-1-leader' });
+    const leaderIdentity = leaderBinding.sessionIdentity;
     const submitTeamRoleMessageFromChat = vi.fn().mockResolvedValue(undefined);
     const sendMessage = vi.fn().mockResolvedValue(undefined);
     useTeamsStore.setState({
@@ -429,7 +476,69 @@ describe('chat 顶层订阅收口', () => {
           revision: 1,
           createdAt: 1,
           updatedAt: 1,
-          sessions: [{ runId: 'run-1', roleId: 'leader', agentId: 'leader-agent', sessionKey: 'agent:leader:team-run-1', sessionIdentity: leaderIdentity }],
+          sessions: [leaderBinding],
+        }],
+      },
+      submitTeamRoleMessageFromChat,
+    } as never);
+    useChatStore.setState((state) => ({
+      currentSessionKey: leaderBinding.localSessionId,
+      loadedSessions: {
+        ...state.loadedSessions,
+        [leaderBinding.localSessionId]: buildSessionRecord({
+          sessionKey: leaderBinding.localSessionId,
+          meta: { sessionIdentity: leaderIdentity, agentId: 'leader-agent' },
+        }),
+      },
+      sendMessage,
+    } as never));
+
+    render(
+      <MemoryRouter>
+        <Chat isActive={false} />
+      </MemoryRouter>,
+    );
+
+    fireEvent.click(screen.getByTestId('chat-input-with-attachment'));
+
+    await waitFor(() => expect(chatInputSendResultSpy).toHaveBeenCalledWith({
+      accepted: false,
+      reason: 'error',
+      error: 'Team role chat does not support attachments yet.',
+    }));
+    expect(sendMessage).not.toHaveBeenCalled();
+    expect(submitTeamRoleMessageFromChat).not.toHaveBeenCalled();
+  });
+
+  it('Team role 正在执行 node prompt 时仍提交普通 Team role message', async () => {
+    const leaderBinding = buildTeamRoleBinding({ runId: 'run-1', roleId: 'leader', agentId: 'leader-agent', localSessionId: 'team-role-session-run-1-leader' });
+    const leaderIdentity = leaderBinding.sessionIdentity;
+    const submitTeamRoleMessageFromChat = vi.fn().mockResolvedValue(undefined);
+    const sendMessage = vi.fn().mockResolvedValue(undefined);
+    useTeamsStore.setState({
+      teams: [{
+        id: 'team-1',
+        name: 'Team 1',
+        teamSkillName: 'team-skill',
+        teamSkillVersion: '1.0.0',
+        teamSkillDescription: 'Team skill',
+        packagePath: '.tmp/team-skill',
+        sourcePath: '.tmp/team-skill/SKILL.md',
+        activeRunId: 'run-1',
+        createdAt: 1,
+        updatedAt: 1,
+      }],
+      runListByTeamId: {
+        'team-1': [{
+          runId: 'run-1',
+          packageName: 'team-skill',
+          packageVersion: '1.0.0',
+          sourcePath: '.tmp/team-skill',
+          status: 'running',
+          revision: 1,
+          createdAt: 1,
+          updatedAt: 1,
+          sessions: [leaderBinding],
         }],
       },
       nodeExecutionsByTeamId: {
@@ -444,7 +553,7 @@ describe('chat 顶层订阅收口', () => {
           taskId: 'leader-plan',
           roleId: 'leader',
           toAgentId: 'leader-agent',
-          sessionKey: 'agent:leader:team-run-1',
+          localSessionId: leaderBinding.localSessionId,
           kind: 'node.prompt',
           title: 'Plan',
           prompt: 'Plan',
@@ -457,11 +566,11 @@ describe('chat 顶层订阅收口', () => {
       submitTeamRoleMessageFromChat,
     } as never);
     useChatStore.setState((state) => ({
-      currentSessionKey: 'agent:leader:team-run-1',
+      currentSessionKey: leaderBinding.localSessionId,
       loadedSessions: {
         ...state.loadedSessions,
-        'agent:leader:team-run-1': buildSessionRecord({
-          sessionKey: 'agent:leader:team-run-1',
+        [leaderBinding.localSessionId]: buildSessionRecord({
+          sessionKey: leaderBinding.localSessionId,
           meta: { sessionIdentity: leaderIdentity, agentId: 'leader-agent' },
         }),
       },
@@ -476,13 +585,14 @@ describe('chat 顶层订阅收口', () => {
 
     fireEvent.click(screen.getByTestId('chat-input'));
 
-    await waitFor(() => expect(submitTeamRoleMessageFromChat).toHaveBeenCalledWith('team-1', 'leader', 'hello from test'));
+    await waitFor(() => expect(submitTeamRoleMessageFromChat).toHaveBeenCalledWith('team-1', 'leader', 'hello from test', 'run-1'));
     await waitFor(() => expect(chatInputSendResultSpy).toHaveBeenCalledWith({ accepted: true }));
     expect(sendMessage).not.toHaveBeenCalled();
   });
 
   it('Team 会话发送不等待 TeamRun 提交完成即可 accepted', async () => {
-    const leaderIdentity = createOpenClawTestSessionIdentity('agent:leader:team-run-1', 'leader-agent');
+    const leaderBinding = buildTeamRoleBinding({ runId: 'run-1', roleId: 'leader', agentId: 'leader-agent', localSessionId: 'team-role-session-run-1-leader' });
+    const leaderIdentity = leaderBinding.sessionIdentity;
     let releaseSubmit!: () => void;
     const submitTeamRoleMessageFromChat = vi.fn().mockReturnValue(new Promise<void>((resolve) => {
       releaseSubmit = resolve;
@@ -511,17 +621,17 @@ describe('chat 顶层订阅收口', () => {
           revision: 1,
           createdAt: 1,
           updatedAt: 1,
-          sessions: [{ runId: 'run-1', roleId: 'leader', agentId: 'leader-agent', sessionKey: 'agent:leader:team-run-1', sessionIdentity: leaderIdentity }],
+          sessions: [leaderBinding],
         }],
       },
       submitTeamRoleMessageFromChat,
     } as never);
     useChatStore.setState((state) => ({
-      currentSessionKey: 'agent:leader:team-run-1',
+      currentSessionKey: leaderBinding.localSessionId,
       loadedSessions: {
         ...state.loadedSessions,
-        'agent:leader:team-run-1': buildSessionRecord({
-          sessionKey: 'agent:leader:team-run-1',
+        [leaderBinding.localSessionId]: buildSessionRecord({
+          sessionKey: leaderBinding.localSessionId,
           meta: { sessionIdentity: leaderIdentity, agentId: 'leader-agent' },
         }),
       },
@@ -536,7 +646,7 @@ describe('chat 顶层订阅收口', () => {
 
     fireEvent.click(screen.getByTestId('chat-input'));
 
-    await waitFor(() => expect(submitTeamRoleMessageFromChat).toHaveBeenCalledWith('team-1', 'leader', 'hello from test'));
+    await waitFor(() => expect(submitTeamRoleMessageFromChat).toHaveBeenCalledWith('team-1', 'leader', 'hello from test', 'run-1'));
     await waitFor(() => expect(chatInputSendResultSpy).toHaveBeenCalledWith({ accepted: true }));
     expect(sendMessage).not.toHaveBeenCalled();
 

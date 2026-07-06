@@ -55,6 +55,7 @@ export function createSessionCatalogItem(input: {
     agentId,
     protocolId: input.context.protocolId,
     runtimeEndpointId: input.context.runtimeEndpointId,
+    endpointSessionId: input.context.endpointSessionId,
     sessionIdentity: input.context.identity,
     kind,
     preferred: kind === 'main',

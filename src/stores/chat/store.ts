@@ -79,7 +79,7 @@ function buildSessionRuntimeEndpointTargets(endpoints: RuntimeEndpointSummary[])
       return {
         endpointId: endpoint.id,
         protocolId: endpoint.protocolId,
-        endpoint: defaultSessionPromptScope.endpoint,
+        endpoint: endpoint.endpointRef,
         runtimeAdapterId: endpoint.runtimeAdapterId,
         runtimeInstanceId: endpoint.runtimeInstanceId,
         connectorId: endpoint.connectorId,
@@ -184,8 +184,8 @@ export const useChatStore = create<ChatStoreState>((set, get) => {
     openAgentConversation: (agentId) => {
       executeOpenAgentConversation(sessionInput, agentId);
     },
-    openSessionIdentity: (identity) => {
-      executeOpenSessionIdentity(sessionInput, identity);
+    openSessionIdentity: (target) => {
+      executeOpenSessionIdentity(sessionInput, target);
     },
     switchSession: (key) => {
       executeSwitchSession(sessionInput, key);
@@ -272,10 +272,12 @@ export const useChatStore = create<ChatStoreState>((set, get) => {
           if (!recordKey) {
             return [];
           }
+          const meta = getSessionMeta(stateAfterFetch, recordKey);
           return [{
             ...approval,
             sessionKey: recordKey,
             backendSessionKey: approval.sessionKey,
+            endpointSessionId: meta.endpointSessionId ?? undefined,
             allowedDecisions: [...approval.allowedDecisions],
           }];
         }));
@@ -302,6 +304,7 @@ export const useChatStore = create<ChatStoreState>((set, get) => {
         await hostSessionResolveApproval({
           id: approvalId,
           sessionKey: pendingApproval.backendSessionKey,
+          ...(pendingApproval.endpointSessionId ? { endpointSessionId: pendingApproval.endpointSessionId } : {}),
           sessionIdentity: pendingApproval.sessionIdentity,
           decision,
         });

@@ -14,6 +14,7 @@ export interface SessionNewPayload {
   sessionKey?: unknown;
   endpoint?: unknown;
   agentId?: unknown;
+  endpointSessionId?: unknown;
 }
 
 export interface SessionIdentityRequest {
@@ -29,12 +30,14 @@ export interface SessionCreateTargetRequest {
 
 export interface SessionLoadPayload {
   sessionKey?: unknown;
+  endpointSessionId?: unknown;
   limit?: unknown;
   sessionIdentity?: unknown;
 }
 
 export interface SessionWindowPayload {
   sessionKey?: unknown;
+  endpointSessionId?: unknown;
   mode?: unknown;
   limit?: unknown;
   offset?: unknown;
@@ -44,6 +47,7 @@ export interface SessionWindowPayload {
 
 export interface SessionPromptPayload {
   sessionKey?: unknown;
+  endpointSessionId?: unknown;
   message?: unknown;
   displayMessage?: unknown;
   deliver?: unknown;
@@ -55,6 +59,7 @@ export interface SessionPromptPayload {
 
 export interface SessionAbortRuntimePayload {
   sessionKey?: unknown;
+  endpointSessionId?: unknown;
   approvalIds?: unknown;
   sessionIdentity?: unknown;
 }
@@ -63,11 +68,13 @@ export interface SessionResolveApprovalPayload {
   id?: unknown;
   decision?: unknown;
   sessionKey?: unknown;
+  endpointSessionId?: unknown;
   sessionIdentity?: unknown;
 }
 
 export interface SessionPatchPayload {
   sessionKey?: unknown;
+  endpointSessionId?: unknown;
   sessionIdentity?: unknown;
   runtimeModelRef?: unknown;
 }

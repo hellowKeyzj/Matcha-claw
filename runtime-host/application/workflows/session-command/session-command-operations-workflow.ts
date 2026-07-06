@@ -49,6 +49,7 @@ export class SessionCommandOperationsWorkflow {
   async createSession(payload: unknown): Promise<ApplicationResponseOf<SessionNewResult>> {
     const {
       explicitSessionKey,
+      endpointSessionId,
       endpoint,
       endpointError,
       agentId,
@@ -61,6 +62,7 @@ export class SessionCommandOperationsWorkflow {
     }
     return await this.deps.sessionLifecycleWorkflow.create({
       explicitSessionKey,
+      endpointSessionId,
       endpoint,
       agentId,
     });
@@ -125,6 +127,7 @@ export class SessionCommandOperationsWorkflow {
   async loadSession(payload: unknown): Promise<ApplicationResponseOf<SessionLoadResult | SessionHydratingLoadResult | { success: false; error: string }>> {
     const {
       sessionKey,
+      endpointSessionId,
       limit,
       sessionIdentity,
       sessionIdentityError,
@@ -137,6 +140,7 @@ export class SessionCommandOperationsWorkflow {
     }
     return this.deps.sessionHydrationWorkflow.load({
       sessionKey,
+      endpointSessionId,
       sessionIdentity,
       limit,
     });
@@ -145,6 +149,7 @@ export class SessionCommandOperationsWorkflow {
   async resumeSession(payload: unknown): Promise<ApplicationResponseOf<SessionLoadResult | SessionHydratingLoadResult | { success: false; error: string }>> {
     const {
       sessionKey,
+      endpointSessionId,
       sessionIdentity,
       sessionIdentityError,
     } = readSessionLoadRequest(payload);
@@ -156,6 +161,7 @@ export class SessionCommandOperationsWorkflow {
     }
     return this.deps.sessionHydrationWorkflow.resume({
       sessionKey,
+      endpointSessionId,
       sessionIdentity,
     });
   }
@@ -163,6 +169,7 @@ export class SessionCommandOperationsWorkflow {
   async patchSession(payload: unknown): Promise<ApplicationResponseOf> {
     const {
       sessionKey,
+      endpointSessionId,
       sessionIdentity,
       sessionIdentityError,
       runtimeModelRef,
@@ -181,6 +188,7 @@ export class SessionCommandOperationsWorkflow {
     }
     return await this.deps.sessionModelSelectionWorkflow.patch({
       sessionKey,
+      endpointSessionId,
       sessionIdentity,
       runtimeModelRef,
     });
@@ -210,6 +218,7 @@ export class SessionCommandOperationsWorkflow {
   async getSessionStateSnapshot(payload: unknown): Promise<ApplicationResponseOf<SessionLoadResult | SessionHydratingLoadResult | { success: false; error: string }>> {
     const {
       sessionKey: requestedSessionKey,
+      endpointSessionId,
       sessionIdentity,
       sessionIdentityError,
     } = readSessionLoadRequest(payload);
@@ -222,6 +231,7 @@ export class SessionCommandOperationsWorkflow {
     }
     return this.deps.sessionHydrationWorkflow.state({
       sessionKey,
+      endpointSessionId,
       sessionIdentity,
     });
   }
@@ -229,6 +239,7 @@ export class SessionCommandOperationsWorkflow {
   async getSessionWindow(payload: unknown): Promise<ApplicationResponseOf<SessionWindowResult | SessionHydratingWindowResult | { success: false; error: string }>> {
     const {
       sessionKey,
+      endpointSessionId,
       mode,
       limit,
       offset,
@@ -248,6 +259,7 @@ export class SessionCommandOperationsWorkflow {
 
     return await this.deps.sessionHydrationWorkflow.window({
       sessionKey,
+      endpointSessionId,
       sessionIdentity,
       mode,
       limit,
@@ -258,6 +270,7 @@ export class SessionCommandOperationsWorkflow {
   async abortSession(payload: unknown): Promise<ApplicationResponseOf<SessionLoadResult & { success: boolean } | { success: false; error: string }>> {
     const {
       sessionKey,
+      endpointSessionId,
       approvalIds,
       sessionIdentity,
       sessionIdentityError,
@@ -271,6 +284,7 @@ export class SessionCommandOperationsWorkflow {
 
     return await this.deps.sessionApprovalWorkflow.abort({
       sessionKey,
+      endpointSessionId,
       approvalIds,
       sessionIdentity,
     });
@@ -296,6 +310,7 @@ export class SessionCommandOperationsWorkflow {
       id,
       decision,
       sessionKey,
+      endpointSessionId,
       sessionIdentity,
       sessionIdentityError,
     } = readResolveApprovalRequest(payload);
@@ -319,6 +334,7 @@ export class SessionCommandOperationsWorkflow {
       id,
       decision,
       sessionKey,
+      endpointSessionId,
       sessionIdentity,
     });
   }

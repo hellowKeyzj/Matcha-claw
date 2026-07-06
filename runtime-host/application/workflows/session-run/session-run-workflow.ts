@@ -46,6 +46,7 @@ export interface SessionRunWorkflowInput {
   displayMessage: string;
   runId: string;
   sessionIdentity: SessionIdentity;
+  endpointSessionId?: string;
 }
 
 interface SubmittedPromptSnapshot {
@@ -64,7 +65,7 @@ export class SessionRunWorkflow {
   }
 
   private rememberSessionIdentity(input: SessionRunWorkflowInput): RuntimeSessionContext {
-    return this.deps.agentRuntimeRegistry.rememberSessionIdentity(input.sessionIdentity);
+    return this.deps.agentRuntimeRegistry.rememberSessionIdentity(input.sessionIdentity, input.endpointSessionId);
   }
 
   private async commitSubmittedPrompt(

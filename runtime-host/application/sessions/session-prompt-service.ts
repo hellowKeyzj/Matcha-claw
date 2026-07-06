@@ -27,6 +27,7 @@ export class SessionPromptService {
       directBody,
       mediaBody,
       sessionKey,
+      endpointSessionId,
       message,
       displayMessage,
       requestedRunId,
@@ -52,6 +53,7 @@ export class SessionPromptService {
       displayMessage,
       runId: requestedRunId || this.deps.idGenerator.randomId(),
       sessionIdentity,
+      endpointSessionId,
     }));
   }
 }

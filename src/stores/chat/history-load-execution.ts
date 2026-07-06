@@ -204,6 +204,7 @@ async function fetchHistoryWindowWithStartupRetry(input: {
       return await fetchHistoryWindow({
         recordKey: requestedSessionKey,
         backendSessionKey: target.sessionKey,
+        endpointSessionId: target.endpointSessionId,
         sessionIdentity: target.sessionIdentity,
         sessions: readSessionsFromState(get()),
         limit: CHAT_HISTORY_FULL_LIMIT,
@@ -325,6 +326,7 @@ export async function executeViewportWindowLoad(
     const currentItems = getSessionItems(currentState, sessionKey);
     const initialPayload = await hostSessionWindowFetch({
       sessionKey: target.sessionKey,
+      ...(target.endpointSessionId ? { endpointSessionId: target.endpointSessionId } : {}),
       sessionIdentity: target.sessionIdentity,
       mode: request.mode,
       limit: resolveViewportFetchLimit(currentItems.length),
@@ -344,6 +346,7 @@ export async function executeViewportWindowLoad(
         }
         return await hostSessionWindowFetch({
           sessionKey: target.sessionKey,
+          ...(target.endpointSessionId ? { endpointSessionId: target.endpointSessionId } : {}),
           sessionIdentity: target.sessionIdentity,
           mode: request.mode,
           limit: resolveViewportFetchLimit(currentItems.length),

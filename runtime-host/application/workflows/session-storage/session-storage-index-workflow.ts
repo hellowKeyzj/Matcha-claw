@@ -318,9 +318,16 @@ function normalizeTranscriptFileName(fileName: string): string | null {
   return normalized;
 }
 
-function buildFallbackSessionKey(agentId: string, transcriptFileName: string): string {
+function buildFallbackSessionKey(agentId: string, transcriptFileName: string): string | null {
   const suffix = transcriptFileName.slice(0, -'.jsonl'.length);
+  if (isTeamRoleLocalSessionKey(suffix)) {
+    return null;
+  }
   return `agent:${agentId}:${suffix}`;
+}
+
+function isTeamRoleLocalSessionKey(sessionKey: string): boolean {
+  return sessionKey.startsWith('team-role-session-');
 }
 
 function listTranscriptStorageDescriptors(input: {
@@ -348,8 +355,12 @@ function listTranscriptStorageDescriptors(input: {
     if (indexedTranscriptPaths.has(transcriptPath)) {
       continue;
     }
+    const fallbackSessionKey = buildFallbackSessionKey(input.agentId, transcriptFileName);
+    if (!fallbackSessionKey) {
+      continue;
+    }
     const descriptor = createStorageDescriptor(input.sessionIdentityResolver, {
-      sessionKey: buildFallbackSessionKey(input.agentId, transcriptFileName),
+      sessionKey: fallbackSessionKey,
       agentId: input.agentId,
       sessionsDir: input.sessionsDir,
       sessionsJsonPath: input.sessionsJsonPath,

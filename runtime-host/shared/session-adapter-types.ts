@@ -442,6 +442,7 @@ export interface SessionCatalogItem {
   agentId: string;
   protocolId: string;
   runtimeEndpointId: string;
+  endpointSessionId?: string;
   sessionIdentity: SessionIdentity;
   kind: SessionCatalogKind;
   preferred: boolean;

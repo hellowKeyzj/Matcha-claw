@@ -475,6 +475,7 @@ export function createEmptySessionRuntime(): ChatSessionRuntimeState {
 export function createEmptySessionMeta(): ChatSessionMetaState {
   return {
     backendSessionKey: '',
+    endpointSessionId: null,
     runtimeScopeKey: null,
     agentId: null,
     protocolId: null,
@@ -512,6 +513,7 @@ export function createEmptySessionViewportState(): ChatSessionViewportState {
 
 function areSessionMetaEquivalent(left: ChatSessionMetaState, right: ChatSessionMetaState): boolean {
   return left.backendSessionKey === right.backendSessionKey
+    && left.endpointSessionId === right.endpointSessionId
     && left.runtimeScopeKey === right.runtimeScopeKey
     && left.agentId === right.agentId
     && (left.protocolId ?? null) === (right.protocolId ?? null)
@@ -848,6 +850,7 @@ export function patchSessionSnapshot(
   const nextMeta = {
     ...current.meta,
     backendSessionKey: snapshot.sessionKey,
+    endpointSessionId: catalog.endpointSessionId ?? current.meta.endpointSessionId,
     runtimeScopeKey: buildRuntimeScopeKey(catalog.sessionIdentity.endpoint),
     agentId: catalog.agentId,
     protocolId: catalog.protocolId ?? null,
@@ -903,15 +906,17 @@ export function patchSessionSnapshot(
 }
 
 export function patchPendingApprovalsFromSnapshot(
-  state: Pick<ChatStoreState, 'pendingApprovalsBySession'>,
+  state: Pick<ChatStoreState, 'pendingApprovalsBySession' | 'loadedSessions'>,
   sessionKey: string,
   snapshot: SessionStateSnapshot,
 ): Record<string, ApprovalItem[]> {
   const current = state.pendingApprovalsBySession[sessionKey] ?? EMPTY_APPROVALS;
+  const sessionEndpointId = getSessionMeta(state, sessionKey).endpointSessionId;
   const nextApprovals = snapshot.approvals.map((approval) => ({
     ...approval,
     sessionKey,
     backendSessionKey: approval.sessionKey,
+    endpointSessionId: state.pendingApprovalsBySession[sessionKey]?.find((currentApproval) => currentApproval.id === approval.id)?.endpointSessionId ?? sessionEndpointId ?? undefined,
     allowedDecisions: [...approval.allowedDecisions],
   }));
   if (areApprovalListsEquivalent(current, nextApprovals)) {

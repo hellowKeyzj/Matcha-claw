@@ -13,6 +13,7 @@ import { getSessionMeta } from './store-state-helpers';
 
 export interface SessionOperationTarget {
   sessionKey: string;
+  endpointSessionId?: string;
   sessionIdentity: SessionIdentity;
 }
 
@@ -89,6 +90,7 @@ export function resolveSessionOperationTarget(state: ChatStoreState, recordKey: 
   }
   return {
     sessionKey: meta.backendSessionKey,
+    ...(meta.endpointSessionId ? { endpointSessionId: meta.endpointSessionId } : {}),
     sessionIdentity: meta.sessionIdentity,
   };
 }

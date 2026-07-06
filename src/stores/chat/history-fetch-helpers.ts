@@ -20,6 +20,7 @@ export interface HistoryWindowResult {
 interface FetchHistoryWindowInput {
   recordKey: string;
   backendSessionKey: string;
+  endpointSessionId?: string;
   sessionIdentity: SessionIdentity;
   sessions: ChatSession[];
   limit: number;
@@ -32,6 +33,7 @@ export async function fetchHistoryWindow(
   const {
     recordKey,
     backendSessionKey,
+    endpointSessionId,
     sessionIdentity,
     sessions,
     limit,
@@ -42,6 +44,7 @@ export async function fetchHistoryWindow(
 
   const initial = await hostSessionLoad({
     sessionKey: backendSessionKey,
+    ...(endpointSessionId ? { endpointSessionId } : {}),
     sessionIdentity,
     limit,
   }, {
@@ -52,6 +55,7 @@ export async function fetchHistoryWindow(
     timeoutMs,
     refetch: async () => await hostSessionWindowFetch({
       sessionKey: backendSessionKey,
+      ...(endpointSessionId ? { endpointSessionId } : {}),
       sessionIdentity,
       mode: 'latest',
       limit,

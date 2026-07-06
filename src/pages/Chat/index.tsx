@@ -14,7 +14,7 @@ import { useGatewayStore } from '@/stores/gateway';
 import { useSubagentsStore } from '@/stores/subagents';
 import { useSettingsStore } from '@/stores/settings';
 import type { GatewayTransportIssue } from '../../../runtime-host/shared/gateway-error';
-import { buildSessionIdentityKey, type SessionIdentity } from '../../../runtime-host/shared/runtime-address';
+import type { SessionIdentity } from '../../../runtime-host/shared/runtime-address';
 import type { SessionRenderItem, SessionWindowStateSnapshot } from '../../../runtime-host/shared/session-adapter-types';
 import { isGatewayOperational, isGatewayPreparing as resolveGatewayPreparing } from '@/lib/gateway-status';
 import {
@@ -168,16 +168,6 @@ function localizeGatewayIssueByCode(
     default:
       return null;
   }
-}
-
-function parseTeamRoleSessionKey(sessionKey: string): { runId: string; roleId: string } | null {
-  const parts = sessionKey.split(':');
-  if (parts.length !== 5 || parts[0] !== 'agent' || parts[2] !== 'team-role') {
-    return null;
-  }
-  const runId = parts[3]?.trim();
-  const roleId = parts[4]?.trim();
-  return runId && roleId ? { runId, roleId } : null;
 }
 
 function localizeGatewayIssue(
@@ -427,39 +417,17 @@ export function Chat({ isActive = true }: ChatProps) {
     cleanupEmptySession,
   } = useChatStore(useShallow(selectChatPageState));
   const currentAgentId = currentSession.meta.agentId ?? currentSession.meta.sessionIdentity?.agentId ?? '';
-  const teams = useTeamsStore((state) => state.teams);
-  const runListByTeamId = useTeamsStore((state) => state.runListByTeamId);
-  const rolesByTeamId = useTeamsStore((state) => state.rolesByTeamId);
   const submitTeamRoleMessageFromChat = useTeamsStore((state) => state.submitTeamRoleMessageFromChat);
-  const currentTeamChatTarget = useMemo(() => {
-    const identity = currentSession.meta.sessionIdentity;
-    if (!identity) return null;
-    const identityKey = buildSessionIdentityKey(identity);
-    const sessionKey = currentSession.meta.backendSessionKey || currentSessionKey;
-    const parsedTeamRoleSession = parseTeamRoleSessionKey(sessionKey);
-    for (const team of teams) {
-      if (!team.activeRunId) continue;
-      const run = (runListByTeamId[team.id] ?? []).find((candidate) => candidate.runId === team.activeRunId);
-      const roleSession = run?.sessions.find((session) => buildSessionIdentityKey(session.sessionIdentity) === identityKey);
-      if (roleSession) {
-        return { teamId: team.id, runId: team.activeRunId, roleId: roleSession.roleId };
-      }
-      const roleBinding = (rolesByTeamId[team.id] ?? []).find((role) => (
-        role.runId === team.activeRunId
-        && (
-          buildSessionIdentityKey(role.sessionIdentity) === identityKey
-          || role.sessionKey === sessionKey
-        )
-      ));
-      if (roleBinding) {
-        return { teamId: team.id, runId: team.activeRunId, roleId: roleBinding.roleId };
-      }
-      if (parsedTeamRoleSession?.runId === team.activeRunId) {
-        return { teamId: team.id, runId: team.activeRunId, roleId: parsedTeamRoleSession.roleId };
-      }
-    }
-    return null;
-  }, [currentSession.meta.backendSessionKey, currentSession.meta.sessionIdentity, currentSessionKey, rolesByTeamId, runListByTeamId, teams]);
+  const resolveTeamRoleChatTargetBySession = useTeamsStore((state) => state.resolveTeamRoleChatTargetBySession);
+  const isTeamRoleSession = useTeamsStore((state) => state.isTeamRoleSession);
+  const currentTeamRoleSessionProbe = {
+    sessionIdentity: currentSession.meta.sessionIdentity,
+    sessionKey: currentSessionKey,
+    backendSessionKey: currentSession.meta.backendSessionKey,
+    endpointSessionId: currentSession.meta.endpointSessionId,
+  };
+  const currentTeamChatTarget = resolveTeamRoleChatTargetBySession(currentTeamRoleSessionProbe);
+  const isCurrentTeamRoleSession = isTeamRoleSession(currentTeamRoleSessionProbe);
   const agents = useSubagentsStore((state) => (
     Array.isArray(state.agentsResource.data) ? state.agentsResource.data : EMPTY_AGENTS
   ));
@@ -883,13 +851,19 @@ export function Chat({ isActive = true }: ChatProps) {
     attachments?: Parameters<typeof sendMessage>[1],
   ) => {
     viewportPaneRef.current?.prepareCurrentLatestBottomAlign();
-    if (currentTeamChatTarget && (!attachments || attachments.length === 0)) {
-      void submitTeamRoleMessageFromChat(currentTeamChatTarget.teamId, currentTeamChatTarget.roleId, text)
+    if (isCurrentTeamRoleSession) {
+      if (!currentTeamChatTarget) {
+        return { accepted: false, reason: 'error', error: 'Team role session is not ready yet.' } as const;
+      }
+      if (attachments && attachments.length > 0) {
+        return { accepted: false, reason: 'error', error: 'Team role chat does not support attachments yet.' } as const;
+      }
+      void submitTeamRoleMessageFromChat(currentTeamChatTarget.teamId, currentTeamChatTarget.roleId, text, currentTeamChatTarget.runId)
         .catch(() => undefined);
       return { accepted: true } as const;
     }
     return sendMessage(text, attachments);
-  }, [currentTeamChatTarget, sendMessage, submitTeamRoleMessageFromChat]);
+  }, [currentTeamChatTarget, isCurrentTeamRoleSession, sendMessage, submitTeamRoleMessageFromChat]);
   const handleExportMarkdown = useCallback(() => {
     if (exportingMarkdown) {
       return;
@@ -961,6 +935,7 @@ export function Chat({ isActive = true }: ChatProps) {
       const target = resolveSessionOperationTarget(useChatStore.getState(), currentSessionKey);
       const result = await hostSessionPatch({
         sessionKey: target.sessionKey,
+        ...(target.endpointSessionId ? { endpointSessionId: target.endpointSessionId } : {}),
         sessionIdentity: target.sessionIdentity,
         runtimeModelRef: normalizedNextModelId,
       });

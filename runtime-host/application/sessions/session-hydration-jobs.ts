@@ -6,6 +6,7 @@ export const HYDRATE_SESSION_TIMELINE_JOB = 'sessions.hydrateTimeline';
 
 export interface SessionHydrationJobPayload {
   readonly sessionKey: string;
+  readonly endpointSessionId?: string;
   readonly sessionIdentity: SessionIdentity;
   readonly snapshot:
     | { readonly kind: 'latest' }
@@ -29,10 +30,11 @@ export interface SessionHydrationJobPort {
 function buildSessionHydrationDedupeKey(payload: SessionHydrationJobPayload): string {
   const { snapshot } = payload;
   const identityKey = buildSessionIdentityKey(payload.sessionIdentity);
+  const endpointSessionKey = payload.endpointSessionId ? `:${payload.endpointSessionId}` : '';
   if (snapshot.kind === 'window') {
-    return `${HYDRATE_SESSION_TIMELINE_JOB}:${identityKey}:window:${snapshot.mode}:${snapshot.limit}:${snapshot.offset ?? ''}`;
+    return `${HYDRATE_SESSION_TIMELINE_JOB}:${identityKey}${endpointSessionKey}:window:${snapshot.mode}:${snapshot.limit}:${snapshot.offset ?? ''}`;
   }
-  return `${HYDRATE_SESSION_TIMELINE_JOB}:${identityKey}:${snapshot.kind}`;
+  return `${HYDRATE_SESSION_TIMELINE_JOB}:${identityKey}${endpointSessionKey}:${snapshot.kind}`;
 }
 
 export function createSessionHydrationJobPort(tasks: RuntimeLongTaskSubmissionPort): SessionHydrationJobPort {

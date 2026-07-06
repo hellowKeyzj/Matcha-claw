@@ -131,7 +131,7 @@ describe('session runtime service window', () => {
     });
     expect(response.data.snapshot.items.map((item) => item.key)).toEqual([
       'session:agent:main:session-a|user:message:user:main:message-3',
-      'session:agent:main:session-a|assistant-turn:main:message-4',
+      'session:agent:main:session-a|assistant-turn:main:message:assistant:main:message-4',
       'session:agent:main:session-a|user:message:user:main:message-5',
     ]);
   });
@@ -183,9 +183,9 @@ describe('session runtime service window', () => {
     });
     expect(older.data.snapshot.items.map((item) => item.key)).toEqual([
       'session:agent:main:session-a|user:message:user:main:message-3',
-      'session:agent:main:session-a|assistant-turn:main:message-4',
+      'session:agent:main:session-a|assistant-turn:main:message:assistant:main:message-4',
       'session:agent:main:session-a|user:message:user:main:message-5',
-      'session:agent:main:session-a|assistant-turn:main:message-6',
+      'session:agent:main:session-a|assistant-turn:main:message:assistant:main:message-6',
     ]);
 
     const newer = await hydrateSessionWindow(service, {
@@ -208,7 +208,7 @@ describe('session runtime service window', () => {
     });
     expect(newer.data.snapshot.items.map((item) => item.key)).toEqual([
       'session:agent:main:session-a|user:message:user:main:message-5',
-      'session:agent:main:session-a|assistant-turn:main:message-6',
+      'session:agent:main:session-a|assistant-turn:main:message:assistant:main:message-6',
     ]);
   });
 
@@ -246,7 +246,7 @@ describe('session runtime service window', () => {
     expect(response.status).toBe(200);
     expect(response.data.snapshot.items.map((item) => item.key)).toEqual([
       'session:agent:main:session-a|user:message:user:main:message-3',
-      'session:agent:main:session-a|assistant-turn:main:message-4',
+      'session:agent:main:session-a|assistant-turn:main:message:assistant:main:message-4',
     ]);
   });
 

@@ -75,6 +75,7 @@ function areChatSessionsEqual(left: ChatSession | undefined, right: ChatSession)
   }
   return (
     left.key === right.key
+    && (left.endpointSessionId ?? null) === (right.endpointSessionId ?? null)
     && (left.agentId ?? null) === (right.agentId ?? null)
     && (left.protocolId ?? null) === (right.protocolId ?? null)
     && (left.runtimeEndpointId ?? null) === (right.runtimeEndpointId ?? null)
@@ -121,6 +122,7 @@ export function readSessionsFromState(
     const nextSession = {
       key: sessionKey,
       backendSessionKey: meta.backendSessionKey,
+      ...(meta.endpointSessionId ? { endpointSessionId: meta.endpointSessionId } : {}),
       agentId,
       protocolId: meta.protocolId ?? undefined,
       runtimeEndpointId: meta.runtimeEndpointId ?? undefined,
@@ -264,18 +266,12 @@ export function resolveSessionActivityMs(
   return parseSessionCreatedAtMs(session.backendSessionKey) ?? 0;
 }
 
-export function isTeamRunRoleSession(session: Pick<ChatSession, 'key' | 'backendSessionKey'>): boolean {
-  const sessionKey = session.backendSessionKey || session.key;
-  const parts = sessionKey.split(':');
-  return parts.length === 5 && parts[0] === 'agent' && parts[2] === 'team-role';
-}
-
 export function resolvePreferredSessionKeyForAgent(
   agentId: string,
   sessions: ChatSession[],
   loadedSessions: ChatStoreState['loadedSessions'],
 ): string | null {
-  const owned = sessions.filter((session) => session.agentId === agentId && !isTeamRunRoleSession(session));
+  const owned = sessions.filter((session) => session.agentId === agentId);
   if (owned.length === 0) {
     return null;
   }
