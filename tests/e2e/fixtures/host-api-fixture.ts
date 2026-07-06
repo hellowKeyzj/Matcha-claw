@@ -1702,21 +1702,47 @@ export function handleE2EHostApiFetch(request: HostApiFetchRequest): HostApiProx
 
   const path = normalizePath(request.path);
   const method = (request.method || 'GET').toUpperCase();
+  const forceSetupIncomplete = process.env.MATCHACLAW_E2E_SETUP_INCOMPLETE === '1';
 
   if (path === '/api/gateway/status') {
     return toSuccessEnvelope(buildMockGatewayStatus());
   }
 
+  if (path === '/api/settings' && method === 'GET') {
+    return toSuccessEnvelope({
+      setupComplete: !forceSetupIncomplete,
+      theme: 'light',
+      language: 'zh-CN',
+      gatewayAutoStart: true,
+      browserMode: 'relay',
+      proxyEnabled: false,
+    });
+  }
+
   if (path === '/api/settings/setupComplete') {
     if (method === 'GET') {
-      return toSuccessEnvelope({ value: true });
+      return toSuccessEnvelope({ value: !forceSetupIncomplete });
     }
     if (method === 'PUT') {
       return toSuccessEnvelope({ success: true });
     }
   }
 
+  if (path === '/api/license/stored-key' && method === 'GET') {
+    return toSuccessEnvelope({ masked: forceSetupIncomplete ? null : 'MATC******-****-****-****-EP86' });
+  }
+
   if (path === '/api/license/gate' && method === 'GET') {
+    if (forceSetupIncomplete) {
+      return toSuccessEnvelope({
+        state: 'blocked',
+        reason: 'e2e-setup',
+        checkedAtMs: Date.now(),
+        hasStoredKey: false,
+        hasUsableCache: false,
+        nextRevalidateAtMs: null,
+      });
+    }
     return toSuccessEnvelope({
       state: 'granted',
       reason: 'e2e',
