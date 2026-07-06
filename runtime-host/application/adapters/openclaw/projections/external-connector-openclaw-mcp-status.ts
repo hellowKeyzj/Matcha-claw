@@ -1,8 +1,6 @@
 import type { RuntimeJobSnapshot } from '../../../common/runtime-contracts';
-import { RUNTIME_REFRESH_JOB_COOLDOWN_MS } from '../../../common/runtime-job-throttle';
 import type { RuntimeClockPort } from '../../../common/runtime-ports';
 import type { GatewayConnectionPort, GatewayRpcPort } from '../../../gateway/gateway-runtime-port';
-import type { RuntimeLongTaskSubmissionPort } from '../../../runtime-host/runtime-task-ports';
 import type { ExternalConnectorSpec } from '../../../external-connectors/external-connector-model';
 import type {
   ExternalConnectorDownstreamStatus,
@@ -13,8 +11,10 @@ import {
   buildOpenClawMcpServerId,
   projectExternalConnectorToOpenClawMcpServer,
 } from './external-connector-openclaw-mcp-projection';
-
-export const OPENCLAW_MCP_SERVER_STATUS_REFRESH_JOB = 'externalConnectors.openclawMcpStatusRefresh';
+import type {
+  OpenClawMcpServerStatusRefreshJobPayload,
+  OpenClawMcpServerStatusRefreshJobPort,
+} from './external-connector-openclaw-mcp-status-jobs';
 
 const OPENCLAW_STATUS_METHOD = 'mcpServerStatus/list';
 const OPENCLAW_STATUS_TIMEOUT_MS = 30000;
@@ -26,10 +26,6 @@ interface OpenClawMcpServerStatusEntry {
   readonly launchSummary?: string;
   readonly available?: boolean;
 }
-
-export type OpenClawMcpServerStatusRefreshJobPayload = {
-  readonly sessionKey: string;
-};
 
 type OpenClawMcpServerStatusRefreshJobResult =
   | { readonly resultType: 'available'; readonly servers: readonly OpenClawMcpServerStatusEntry[] }
@@ -45,7 +41,7 @@ export class ExternalConnectorOpenClawMcpStatusProvider implements ExternalConne
   constructor(private readonly deps: {
     readonly gateway: Pick<GatewayRpcPort, 'gatewayRpc'> & Pick<GatewayConnectionPort, 'readGatewayCapabilities'>;
     readonly clock: Pick<RuntimeClockPort, 'nowMs' | 'toIsoString'>;
-    readonly jobs: Pick<RuntimeLongTaskSubmissionPort, 'submit'>;
+    readonly jobs: Pick<OpenClawMcpServerStatusRefreshJobPort, 'submitMcpServerStatusRefresh'>;
   }) {}
 
   async listStatuses(
@@ -165,12 +161,12 @@ export class ExternalConnectorOpenClawMcpStatusProvider implements ExternalConne
   }
 
   private readCachedOpenClawMcpServerStatuses(context: ExternalConnectorDownstreamStatusContext): OpenClawMcpServerStatusResult | { readonly resultType: 'unavailable'; readonly reason: 'refreshing'; readonly jobId: string } {
-    const sessionKey = context.sessionIdentity.sessionKey;
-    const submitted = this.deps.jobs.submit(OPENCLAW_MCP_SERVER_STATUS_REFRESH_JOB, { sessionKey }, {
-      queue: 'low',
-      dedupeKey: buildOpenClawMcpStatusRefreshDedupeKey(sessionKey),
-      dedupeCooldownMs: RUNTIME_REFRESH_JOB_COOLDOWN_MS,
-    });
+    const resolvedSessionKey = resolveOpenClawMcpStatusSessionKey(context);
+    if (resolvedSessionKey.resultType === 'unavailable') {
+      return resolvedSessionKey;
+    }
+    const sessionKey = resolvedSessionKey.sessionKey;
+    const submitted = this.deps.jobs.submitMcpServerStatusRefresh({ sessionKey });
     const submittedResult = readRefreshJobResult(submitted.job);
     return submittedResult ?? { resultType: 'unavailable', reason: 'refreshing', jobId: submitted.job.id };
   }
@@ -225,8 +221,23 @@ export class ExternalConnectorOpenClawMcpStatusProvider implements ExternalConne
   }
 }
 
-function buildOpenClawMcpStatusRefreshDedupeKey(sessionKey: string): string {
-  return `${OPENCLAW_MCP_SERVER_STATUS_REFRESH_JOB}:${sessionKey}`;
+function resolveOpenClawMcpStatusSessionKey(context: ExternalConnectorDownstreamStatusContext):
+  | { readonly resultType: 'available'; readonly sessionKey: string }
+  | { readonly resultType: 'unavailable'; readonly reason: string } {
+  if (context.endpointSessionId?.trim()) {
+    return { resultType: 'available', sessionKey: context.endpointSessionId.trim() };
+  }
+  if (isTeamRoleLocalSessionKey(context.sessionIdentity.sessionKey)) {
+    return {
+      resultType: 'unavailable',
+      reason: 'OpenClaw MCP status requires an endpoint session id for Team role sessions',
+    };
+  }
+  return { resultType: 'available', sessionKey: context.sessionIdentity.sessionKey };
+}
+
+function isTeamRoleLocalSessionKey(sessionKey: string): boolean {
+  return sessionKey.startsWith('team-role-session-');
 }
 
 function readRefreshJobResult(job: RuntimeJobSnapshot): OpenClawMcpServerStatusResult | null {

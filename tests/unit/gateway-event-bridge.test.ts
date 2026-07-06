@@ -120,6 +120,78 @@ describe('runtime host gateway event bridge', () => {
     expect(emitParentGatewayEvent).toHaveBeenCalledWith('session:update', { type: 'approval' });
   });
 
+  it('wakes TeamRuntime when a session turn settles', async () => {
+    createGatewayClientMock.mockReturnValue(gatewayClient);
+    const endpoint = {
+      kind: 'native-runtime' as const,
+      runtimeAdapterId: 'test-runtime',
+      runtimeInstanceId: 'local',
+    };
+    const sessionUpdate = {
+      sessionUpdate: 'session_info_update',
+      sessionKey: 'team-role-session-1',
+      runId: 'prompt-run-1',
+      phase: 'final',
+      snapshot: {},
+      error: null,
+    };
+    const emitParentGatewayEvent = vi.fn(async () => undefined);
+    const dispatchRoute = vi.fn(async () => ({ status: 200, data: {} }));
+    const endpointControlState = {
+      updateRuntimeEndpointControlState: vi.fn(() => ({
+        connection: null,
+        readiness: null,
+        capabilities: null,
+        updatedAt: null,
+      })),
+    };
+    const runtime = {
+      consumeEndpointConversationEvent: vi.fn(async () => [sessionUpdate]),
+      consumeEndpointNotification: vi.fn(() => []),
+    };
+    const { createRuntimeHostGatewayClient } = await import('../../runtime-host/application/adapters/openclaw/gateway/openclaw-gateway-event-bridge');
+
+    createRuntimeHostGatewayClient({
+      parentTransport: {
+        requestParentShellAction: vi.fn(async () => ({ success: true, status: 200, data: {} })),
+        emitParentGatewayEvent,
+      },
+      dispatchRoute,
+      getSessionRuntime: () => runtime,
+      endpointControlState,
+      runtimeHostEndpoint: endpoint,
+      runtimeHostDataDir: process.cwd(),
+      gatewayPort: 12345,
+      readGatewayToken: vi.fn(async () => 'token'),
+      platform: process.platform,
+      clock: { nowMs: () => 123 },
+      idGenerator: { randomId: () => 'id-1', randomHex: () => '00' },
+      identityRepository: {} as never,
+      deviceCrypto: {} as never,
+      scheduler: { schedule: vi.fn(() => ({ cancel: vi.fn() })) },
+      tcpProbe: {} as never,
+    });
+
+    const options = createGatewayClientMock.mock.calls[0]?.[0];
+    options.onGatewayConversationEvent({ type: 'usage', event: { sessionKey: 'team-role-session-1', runId: 'prompt-run-1' } });
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(dispatchRoute).toHaveBeenCalledWith('POST', '/api/capabilities/execute', {
+      id: 'team.runtime',
+      operationId: 'team.nodePromptSettled',
+      scope: { kind: 'runtime-instance', endpoint },
+      input: {
+        sessionKey: 'team-role-session-1',
+        promptRunId: 'prompt-run-1',
+        phase: 'final',
+        settledAt: 123,
+      },
+    });
+    expect(emitParentGatewayEvent).toHaveBeenCalledWith('session:update', sessionUpdate);
+  });
+
   it('flushes pending conversation events in session order when the session runtime becomes available', async () => {
     createGatewayClientMock.mockReturnValue(gatewayClient);
     const emitParentGatewayEvent = vi.fn(async () => undefined);

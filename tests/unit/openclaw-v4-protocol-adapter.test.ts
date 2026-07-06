@@ -53,7 +53,7 @@ describe('OpenClawV4ProtocolAdapter', () => {
 
   it('strips TeamRun role prompt envelopes while replaying OpenClaw transcript user messages', async () => {
     const adapter = new OpenClawV4ProtocolAdapter();
-    const replay = adapter.replayAdapter.replayTranscript('agent:leader:team-role:run-1:leader', [
+    const replay = adapter.replayAdapter.replayTranscript('team-role-session-run-1-leader', [
       JSON.stringify({
         id: 'user-1',
         message: {
@@ -101,7 +101,7 @@ describe('OpenClawV4ProtocolAdapter', () => {
 
   it('strips TeamRun v2 Attempt user message envelopes while replaying OpenClaw transcript user messages', async () => {
     const adapter = new OpenClawV4ProtocolAdapter();
-    const replay = adapter.replayAdapter.replayTranscript('agent:leader:team-role:run-1:leader', [
+    const replay = adapter.replayAdapter.replayTranscript('team-role-session-run-1-leader', [
       JSON.stringify({
         id: 'user-1',
         message: {
@@ -163,7 +163,7 @@ describe('OpenClawV4ProtocolAdapter', () => {
     const [event] = adapter.eventAdapter.translate({
       type: 'session.message',
       event: {
-        sessionKey: 'agent:leader:team-role:run-1:leader',
+        sessionKey: 'team-role-session-run-1-leader',
         message: {
           role: 'user',
           content: [{
@@ -208,7 +208,7 @@ describe('OpenClawV4ProtocolAdapter', () => {
 
   it('strips TeamRun workspace context while replaying OpenClaw transcript user messages', async () => {
     const adapter = new OpenClawV4ProtocolAdapter();
-    const replay = adapter.replayAdapter.replayTranscript('agent:operator:team-role:run-1:operator', [
+    const replay = adapter.replayAdapter.replayTranscript('team-role-session-run-1-operator', [
       JSON.stringify({
         id: 'user-1',
         message: {
@@ -251,7 +251,7 @@ describe('OpenClawV4ProtocolAdapter', () => {
     const [event] = adapter.eventAdapter.translate({
       type: 'session.message',
       event: {
-        sessionKey: 'agent:operator:team-role:run-1:operator',
+        sessionKey: 'team-role-session-run-1-operator',
         message: {
           role: 'user',
           content: [{

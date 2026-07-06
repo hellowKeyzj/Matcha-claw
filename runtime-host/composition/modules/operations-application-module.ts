@@ -99,6 +99,7 @@ import { createWorkspaceFileCapabilityOperationRoutes } from '../../application/
 import { createLicenseRuntimeCapabilityOperationRoutes } from '../../application/capabilities/license/license-runtime-capability';
 import { createPlatformRuntimeCapabilityOperationRoutes } from '../../application/capabilities/platform/platform-runtime-capability';
 import type { CapabilityOperationRoute } from '../../application/capabilities/contracts/capability-router';
+import type { AgentRuntimeRegistry } from '../../application/agent-runtime/contracts/agent-runtime-registry';
 import type { RuntimeEndpointRef } from '../../application/agent-runtime/contracts/runtime-address';
 import type { RemoveTeamAgentsInput } from '../../application/team-runtime/ports/team-agent-materialization-port';
 import {
@@ -278,6 +279,7 @@ export function registerOperationsApplicationServices(
       abortSession: (payload) => sessionService.abortSession(payload),
       deleteSession: (payload) => sessionService.deleteSession(payload),
       getSessionWindow: (payload) => sessionService.getSessionWindow(payload),
+      agentRuntimeRegistry: scope.resolve<AgentRuntimeRegistry>('agentRuntime.registry'),
       endpointSessionMaterialization,
     });
   });

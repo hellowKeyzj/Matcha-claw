@@ -5,6 +5,7 @@ import { ExternalConnectorRepository } from '../../application/external-connecto
 import { ExternalConnectorService } from '../../application/external-connectors/external-connector-service';
 import { ExternalMcpServerProgramCatalog } from '../../application/external-connectors/external-mcp-server-program-catalog';
 import { createExternalConnectorCapabilityOperationRoutes } from '../../application/external-connectors/external-connector-capability';
+import type { AgentRuntimeRegistry } from '../../application/agent-runtime/contracts/agent-runtime-registry';
 import type {
   RuntimeClockPort,
   RuntimeDataRootPort,
@@ -42,6 +43,7 @@ export function registerExternalConnectorApplicationServices(
     scope.resolve<ExternalConnectorRepository>('externalConnectors.repository'),
     scope.resolve<ExternalMcpServerProgramCatalog>('externalConnectors.mcpServerProgramCatalog'),
     scope.resolve<ExternalConnectorConnectionProbeService>('externalConnectors.connectionProbe'),
+    scope.resolve<AgentRuntimeRegistry>('agentRuntime.registry'),
   ));
   container.contribute('agentRuntime.capabilityOperationRoutes', (scope): readonly CapabilityOperationRoute[] => (
     createExternalConnectorCapabilityOperationRoutes({

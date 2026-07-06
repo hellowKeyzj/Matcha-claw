@@ -40,11 +40,13 @@ import { OpenClawAgentToolConfigProjection } from '../../application/adapters/op
 import { OpenClawSubagentConfigProjection } from '../../application/adapters/openclaw/projections/openclaw-subagent-config-projection';
 import { OpenClawRuntimeConfigService } from '../../application/adapters/openclaw/projections/openclaw-runtime-config-service';
 import { ExternalConnectorOpenClawMcpProjectionService } from '../../application/adapters/openclaw/projections/external-connector-openclaw-mcp-projection';
+import { ExternalConnectorOpenClawMcpStatusProvider } from '../../application/adapters/openclaw/projections/external-connector-openclaw-mcp-status';
 import {
-  ExternalConnectorOpenClawMcpStatusProvider,
   OPENCLAW_MCP_SERVER_STATUS_REFRESH_JOB,
+  createOpenClawMcpServerStatusRefreshJobPort,
   type OpenClawMcpServerStatusRefreshJobPayload,
-} from '../../application/adapters/openclaw/projections/external-connector-openclaw-mcp-status';
+  type OpenClawMcpServerStatusRefreshJobPort,
+} from '../../application/adapters/openclaw/projections/external-connector-openclaw-mcp-status-jobs';
 import { SubagentTemplateService } from '../../application/adapters/openclaw/infrastructure/openclaw-subagent-template-service';
 import { AgentSkillConfigService } from '../../application/subagents/agent-skill-config-service';
 import { AgentToolConfigService } from '../../application/subagents/agent-tool-config-service';
@@ -442,10 +444,13 @@ export function registerOpenClawApplicationServices(
   container.register('clawhub.jobs', (scope): ClawHubJobPort => createClawHubJobPort(
     scope.resolve<RuntimeLongTaskSubmissionPort>('runtime.tasks'),
   ));
+  container.register('externalConnectors.openclawMcpStatusJobs', (scope): OpenClawMcpServerStatusRefreshJobPort => createOpenClawMcpServerStatusRefreshJobPort(
+    scope.resolve<RuntimeLongTaskSubmissionPort>('runtime.tasks'),
+  ));
   container.register('externalConnectors.openclawMcpStatusProvider', (scope) => new ExternalConnectorOpenClawMcpStatusProvider({
     gateway: scope.resolve<GatewayRuntimePort>('gateway.runtime'),
     clock: scope.resolve<RuntimeClockPort>('runtime.clock'),
-    jobs: scope.resolve<RuntimeLongTaskSubmissionPort>('runtime.tasks'),
+    jobs: scope.resolve<OpenClawMcpServerStatusRefreshJobPort>('externalConnectors.openclawMcpStatusJobs'),
   }));
   registerOpenClawCapabilityOperationRoutes(container);
   facades.registerContainerFacade('openclaw', SETTINGS_SERVICE_TOKEN, container);

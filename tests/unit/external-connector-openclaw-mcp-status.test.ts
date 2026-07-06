@@ -1,8 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import {
-  ExternalConnectorOpenClawMcpStatusProvider,
-  OPENCLAW_MCP_SERVER_STATUS_REFRESH_JOB,
-} from '../../runtime-host/application/adapters/openclaw/projections/external-connector-openclaw-mcp-status';
+import { ExternalConnectorOpenClawMcpStatusProvider } from '../../runtime-host/application/adapters/openclaw/projections/external-connector-openclaw-mcp-status';
+import { OPENCLAW_MCP_SERVER_STATUS_REFRESH_JOB } from '../../runtime-host/application/adapters/openclaw/projections/external-connector-openclaw-mcp-status-jobs';
 import type { RuntimeJobSnapshot } from '../../runtime-host/application/common/runtime-contracts';
 import type { ExternalConnectorSpec } from '../../runtime-host/application/external-connectors/external-connector-model';
 
@@ -32,9 +30,11 @@ function createJobPort() {
   const jobsByDedupeKey = new Map<string, SubmittedJob>();
   return {
     submitCalls: [] as Array<{ type: string; payload: unknown; options: unknown }>,
-    submit(type: string, payload: unknown, options: { dedupeKey?: string } = {}) {
+    submitMcpServerStatusRefresh(payload: { sessionKey: string }) {
+      const type = OPENCLAW_MCP_SERVER_STATUS_REFRESH_JOB;
+      const options = { dedupeKey: `${type}:${payload.sessionKey}` };
       this.submitCalls.push({ type, payload, options });
-      const dedupeKey = options.dedupeKey ?? `${type}:${nextId}`;
+      const dedupeKey = options.dedupeKey;
       const existing = jobsByDedupeKey.get(dedupeKey);
       if (existing && (existing.status === 'queued' || existing.status === 'running' || existing.status === 'succeeded')) {
         return { success: true as const, job: existing };
@@ -139,6 +139,108 @@ describe('ExternalConnectorOpenClawMcpStatusProvider', () => {
         details: { sessionKey: 'session-1' },
       },
     ]);
+  });
+
+  it('uses the runtime endpoint session id for OpenClaw MCP status while preserving the local session identity in UI details', async () => {
+    const jobs = createJobPort();
+    const gatewayRpcCalls: unknown[] = [];
+    const teamSessionIdentity = {
+      endpoint: { kind: 'native-runtime' as const, runtimeAdapterId: 'openclaw', runtimeInstanceId: 'local' },
+      agentId: 'leader',
+      sessionKey: 'team-role-session-1',
+    };
+    const provider = new ExternalConnectorOpenClawMcpStatusProvider({
+      clock,
+      jobs,
+      gateway: {
+        readGatewayCapabilities: async () => gatewayCapabilities,
+        gatewayRpc: async (_method, params) => {
+          gatewayRpcCalls.push(params);
+          return { data: [{ name: 'docs', tools: [{ name: 'search' }] }] };
+        },
+      },
+    });
+
+    await expect(provider.listStatuses([
+      { id: 'docs', kind: 'mcp-http', url: 'https://mcp.example.com' },
+    ], {
+      sessionIdentity: teamSessionIdentity,
+      endpointSessionId: 'team-endpoint-session-1',
+    })).resolves.toMatchObject([
+      {
+        connectorId: 'docs',
+        resultType: 'pending',
+        details: {
+          sessionKey: 'team-role-session-1',
+          refreshJobId: 'job-1',
+        },
+      },
+    ]);
+    expect(jobs.submitCalls[0]).toMatchObject({
+      type: OPENCLAW_MCP_SERVER_STATUS_REFRESH_JOB,
+      payload: { sessionKey: 'team-endpoint-session-1' },
+    });
+
+    jobs.complete('job-1', await provider.refreshOpenClawMcpServerStatusesForJob({ sessionKey: 'team-endpoint-session-1' }));
+    expect(gatewayRpcCalls[0]).toMatchObject({ sessionKey: 'team-endpoint-session-1' });
+
+    await expect(provider.listStatuses([
+      { id: 'docs', kind: 'mcp-http', url: 'https://mcp.example.com' },
+    ], {
+      sessionIdentity: teamSessionIdentity,
+      endpointSessionId: 'team-endpoint-session-1',
+    })).resolves.toMatchObject([
+      {
+        connectorId: 'docs',
+        resultType: 'connected',
+        details: {
+          serverId: 'docs',
+          sessionKey: 'team-role-session-1',
+          toolCount: 1,
+        },
+      },
+    ]);
+  });
+
+  it('does not submit OpenClaw MCP status refresh jobs for Team role local sessions without endpoint ids', async () => {
+    const jobs = createJobPort();
+    const gatewayRpcCalls: unknown[] = [];
+    const provider = new ExternalConnectorOpenClawMcpStatusProvider({
+      clock,
+      jobs,
+      gateway: {
+        readGatewayCapabilities: async () => gatewayCapabilities,
+        gatewayRpc: async (_method, params) => {
+          gatewayRpcCalls.push(params);
+          return { data: [{ name: 'docs', tools: [{ name: 'search' }] }] };
+        },
+      },
+    });
+
+    await expect(provider.listStatuses([
+      { id: 'docs', kind: 'mcp-http', url: 'https://mcp.example.com' },
+    ], {
+      sessionIdentity: {
+        endpoint: { kind: 'native-runtime' as const, runtimeAdapterId: 'openclaw', runtimeInstanceId: 'local' },
+        agentId: 'leader',
+        sessionKey: 'team-role-session-1',
+      },
+    })).resolves.toEqual([
+      {
+        connectorId: 'docs',
+        adapterId: 'openclaw',
+        targetKind: 'session',
+        resultType: 'unknown',
+        checkedAt: '2026-06-26T00:00:00.000Z',
+        reason: 'OpenClaw MCP status requires an endpoint session id for Team role sessions',
+        details: {
+          serverId: 'docs',
+          sessionKey: 'team-role-session-1',
+        },
+      },
+    ]);
+    expect(jobs.submitCalls).toHaveLength(0);
+    expect(gatewayRpcCalls).toHaveLength(0);
   });
 
   it('marks projected MCP connectors disconnected after the refresh runtime job omits the projected server', async () => {

@@ -31,6 +31,7 @@ export interface ExternalConnectorDownstreamStatus {
 
 export interface ExternalConnectorDownstreamStatusContext {
   readonly sessionIdentity: SessionIdentity;
+  readonly endpointSessionId?: string;
 }
 
 export interface ExternalConnectorDownstreamStatusProvider {

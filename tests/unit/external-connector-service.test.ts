@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { ExternalConnectorService } from '../../runtime-host/application/external-connectors/external-connector-service';
+import type { RuntimeSessionContext } from '../../runtime-host/application/agent-runtime/contracts/runtime-endpoint-types';
+import { ExternalConnectorService, type ExternalConnectorSessionContextResolverPort } from '../../runtime-host/application/external-connectors/external-connector-service';
 import { ExternalConnectorRepository, type ExternalConnectorStorePort } from '../../runtime-host/application/external-connectors/external-connector-store';
 import type { ExternalConnectorSpec } from '../../runtime-host/application/external-connectors/external-connector-model';
 
@@ -15,7 +16,10 @@ class MemoryExternalConnectorStore implements ExternalConnectorStorePort {
   }
 }
 
-function createService(connectors: readonly ExternalConnectorSpec[] = []) {
+function createService(
+  connectors: readonly ExternalConnectorSpec[] = [],
+  sessionContexts?: ExternalConnectorSessionContextResolverPort,
+) {
   return new ExternalConnectorService(
     new ExternalConnectorRepository(new MemoryExternalConnectorStore(connectors)),
     { snapshot: async () => ({ programs: [], issues: [] }) },
@@ -23,6 +27,7 @@ function createService(connectors: readonly ExternalConnectorSpec[] = []) {
       probe: async (connector) => ({ connectorId: connector.id, resultType: 'unknown', safeProbe: false }),
       unknown: (connectorId) => ({ connectorId, resultType: 'unknown', safeProbe: false }),
     },
+    sessionContexts,
   );
 }
 
@@ -131,6 +136,49 @@ describe('ExternalConnectorService', () => {
     await expect(service.listSessionDownstreamStatuses({})).resolves.toEqual({
       status: 400,
       data: { success: false, error: 'sessionIdentity is required' },
+    });
+  });
+
+  it('passes resolved runtime session context to downstream status providers', async () => {
+    const sessionIdentity = {
+      endpoint: { kind: 'native-runtime' as const, runtimeAdapterId: 'openclaw', runtimeInstanceId: 'local' },
+      agentId: 'leader',
+      sessionKey: 'team-role-session-1',
+    };
+    const runtimeSessionContext = {
+      identity: sessionIdentity,
+      endpointSessionId: 'team-endpoint-session-1',
+    } as RuntimeSessionContext;
+    const service = createService([], {
+      findSessionContext: (identity) => {
+        expect(identity).toEqual(sessionIdentity);
+        return runtimeSessionContext;
+      },
+    });
+    service.registerDownstreamStatusProvider({
+      adapterId: 'test-adapter',
+      listStatuses: async (_connectors, context) => [{
+        connectorId: 'matcha',
+        adapterId: 'test-adapter',
+        targetKind: 'session',
+        resultType: context.endpointSessionId === runtimeSessionContext.endpointSessionId ? 'connected' : 'unknown',
+        details: { sessionKey: context.sessionIdentity.sessionKey },
+        reason: context.endpointSessionId,
+      }],
+    });
+
+    await expect(service.listSessionDownstreamStatuses({ sessionIdentity })).resolves.toEqual({
+      status: 200,
+      data: {
+        statuses: [{
+          connectorId: 'matcha',
+          adapterId: 'test-adapter',
+          targetKind: 'session',
+          resultType: 'connected',
+          reason: 'team-endpoint-session-1',
+          details: { sessionKey: 'team-role-session-1' },
+        }],
+      },
     });
   });
 

@@ -42,6 +42,15 @@ function createRuntimeHostCapabilityPayload(endpoint: RuntimeEndpointRef, operat
   };
 }
 
+function createTeamRuntimeCapabilityPayload(endpoint: RuntimeEndpointRef, operationId: string, input: Record<string, unknown> = {}) {
+  return {
+    id: 'team.runtime',
+    operationId,
+    scope: { kind: 'runtime-instance' as const, endpoint },
+    input,
+  };
+}
+
 export interface GatewaySessionRuntimePort {
   consumeEndpointConversationEvent(endpoint: RuntimeEndpointRef, payload: GatewayConversationEvent & { sessionIdentity: SessionIdentity }): Promise<unknown[]>;
   consumeEndpointNotification(endpoint: RuntimeEndpointRef, payload: unknown): unknown[];
@@ -103,6 +112,23 @@ function readTrimmedString(value: unknown): string {
   return typeof value === 'string' ? value.trim() : '';
 }
 
+type SettledSessionInfoUpdate = {
+  readonly sessionKey: string;
+  readonly promptRunId: string;
+  readonly phase: 'final' | 'error' | 'aborted';
+};
+
+function readSettledSessionInfoUpdate(value: unknown): SettledSessionInfoUpdate | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const record = value as Record<string, unknown>;
+  if (record.sessionUpdate !== 'session_info_update') return null;
+  const phase = record.phase;
+  if (phase !== 'final' && phase !== 'error' && phase !== 'aborted') return null;
+  const sessionKey = readTrimmedString(record.sessionKey);
+  const promptRunId = readTrimmedString(record.runId);
+  return sessionKey && promptRunId ? { sessionKey, promptRunId, phase } : null;
+}
+
 const MAX_PENDING_RUNTIME_EVENTS = 1000;
 const MAX_RUN_SESSION_INDEX_ENTRIES = 1000;
 
@@ -116,9 +142,32 @@ export function createRuntimeHostGatewayClient(deps: RuntimeHostGatewayBridgeDep
   let pendingConversationEventCount = 0;
   let pendingNotificationHead = 0;
 
+  const settleNodePromptSessionTurn = (sessionUpdate: unknown): void => {
+    const settled = readSettledSessionInfoUpdate(sessionUpdate);
+    if (!settled) return;
+    void deps.dispatchRoute(
+      'POST',
+      '/api/capabilities/execute',
+      createTeamRuntimeCapabilityPayload(runtimeHostEndpoint, 'team.nodePromptSettled', {
+        sessionKey: settled.sessionKey,
+        promptRunId: settled.promptRunId,
+        phase: settled.phase,
+        settledAt: deps.clock.nowMs(),
+      }),
+    ).catch((error) => {
+      deps.logger?.warn('[gateway-event-bridge] Team node prompt settle wake failed', {
+        sessionKey: settled.sessionKey,
+        promptRunId: settled.promptRunId,
+        phase: settled.phase,
+        error: String(error),
+      });
+    });
+  };
+
   const emitSessionUpdates = (sessionUpdates: unknown[]): void => {
     for (const sessionUpdate of sessionUpdates) {
       autoRecovery.observe(sessionUpdate as SessionUpdateEvent);
+      settleNodePromptSessionTurn(sessionUpdate);
       void deps.parentTransport.emitParentGatewayEvent('session:update', sessionUpdate).catch(() => undefined);
     }
   };

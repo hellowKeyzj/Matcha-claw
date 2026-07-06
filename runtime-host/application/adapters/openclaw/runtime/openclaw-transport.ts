@@ -23,7 +23,7 @@ export class OpenClawRuntimeTransport implements RuntimeSessionTransport {
         : {};
       const result = await this.gateway.chatSend({
         ...payload,
-        sessionKey: input.context.endpointSessionId ?? input.context.sessionKey,
+        sessionKey: input.context.endpointSessionId,
         message: input.message,
         idempotencyKey: input.runId,
       });
@@ -49,7 +49,7 @@ export class OpenClawRuntimeTransport implements RuntimeSessionTransport {
       id,
       decision: 'deny',
     }, 5000).catch(() => undefined)));
-    const sessionKey = input.context.endpointSessionId ?? input.context.sessionKey;
+    const sessionKey = input.context.endpointSessionId;
     await this.gateway.gatewayRpc('chat.abort', input.runId ? { sessionKey, runId: input.runId } : { sessionKey }, 5000);
   }
 
@@ -62,7 +62,7 @@ export class OpenClawRuntimeTransport implements RuntimeSessionTransport {
 
   async patchSessionModel(input: RuntimePatchModelRequest): Promise<RuntimePatchModelResult> {
     const payload = await this.gateway.gatewayRpc('sessions.patch', {
-      key: input.context.endpointSessionId ?? input.context.sessionKey,
+      key: input.context.endpointSessionId,
       model: input.runtimeModelRef,
     }, 10000);
     return {

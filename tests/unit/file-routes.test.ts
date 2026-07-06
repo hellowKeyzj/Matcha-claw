@@ -91,6 +91,36 @@ describe('file routes', () => {
     });
   });
 
+  it('does not resolve Team role outgoing-media thumbnails through OpenClaw agent-prefixed owner fallback', async () => {
+    const attachmentId = `test-${randomUUID()}`;
+    const originalPath = join(workspaceRoot, 'team-artifact.png');
+    const teamRoleIdentity = {
+      endpoint: { kind: 'native-runtime' as const, runtimeAdapterId: 'openclaw', runtimeInstanceId: 'local' },
+      agentId: 'leader',
+      sessionKey: 'team-role-session-1',
+    };
+    const gatewayUrl = `/api/chat/media/outgoing/${encodeURIComponent(`agent:${teamRoleIdentity.agentId}:${teamRoleIdentity.sessionKey}`)}/${attachmentId}/full`;
+    const recordsDir = join(configDir, 'media', 'outgoing', 'records');
+    await createTestRuntimeFileSystem().ensureDirectory(recordsDir);
+    await writeFile(originalPath, Buffer.from('png-bytes'));
+    await writeFile(join(recordsDir, `${attachmentId}.json`), JSON.stringify({
+      owner: teamRoleIdentity.sessionKey,
+      original: {
+        path: originalPath,
+        contentType: 'image/png',
+      },
+    }));
+
+    const result = await fileService.thumbnail({
+      path: gatewayUrl,
+      mimeType: 'image/png',
+      scope: { kind: 'workspace', endpoint: teamRoleIdentity.endpoint },
+      target: { kind: 'workspace-file', path: gatewayUrl, identity: teamRoleIdentity },
+    });
+
+    expect(result).toEqual({ preview: null, fileSize: 0 });
+  });
+
   it('does not resolve gateway outgoing-media thumbnails for a mismatched owner session', async () => {
     const attachmentId = `test-${randomUUID()}`;
     const originalPath = join(workspaceRoot, 'artifact.png');

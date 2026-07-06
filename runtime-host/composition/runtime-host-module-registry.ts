@@ -288,6 +288,7 @@ const externalConnectorModule: RuntimeHostApplicationModule = {
       'runtime.systemEnvironment',
       'runtime.httpClient',
       'runtime.clock',
+      'agentRuntime.registry',
     ],
     exports: ['externalConnectors.service'],
   },
@@ -308,6 +309,7 @@ const operationsModule: RuntimeHostApplicationModule = {
     imports: [
       'channels.deliveryProjection',
       'file.runtimeDataStore',
+      'agentRuntime.registry',
       'gateway.capabilities',
       'gateway.runtime',
       'license.service',
@@ -487,6 +489,7 @@ function createRuntimeHostApplicationModuleRegistry(
       'usage.runtimeData',
       'usage.transcriptLayout',
       'agentRuntime.application',
+      'agentRuntime.registry',
     ],
   });
 }

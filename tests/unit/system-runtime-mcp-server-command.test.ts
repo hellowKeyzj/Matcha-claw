@@ -89,6 +89,10 @@ describe('system runtime MCP server command', () => {
     expect(nodeEventTool.inputSchema.required).toEqual(expect.arrayContaining(['summary']));
     expect(nodeEventTool.inputSchema.properties.summary.description).toContain('Required top-level concise factual summary');
     expect(nodeEventTool.inputSchema.properties.evidenceRefs.description).toContain('do not use kind:file');
+    expect(nodeEventTool.inputSchema.properties).not.toHaveProperty('sourceSessionKey');
+    expect(nodeEventTool.inputSchema.properties).not.toHaveProperty('sourceRoleId');
+    expect(nodeEventTool.inputSchema.properties).not.toHaveProperty('sourceLocalSessionId');
+    expect(nodeEventTool.inputSchema.properties).not.toHaveProperty('sourceEndpointSessionId');
     for (const propertyName of ['kind', 'summary', 'content', 'decision', 'assignments', 'evidenceRefs', 'artifactIds', 'metadata']) {
       expect(nodeEventTool.inputSchema.properties.result.properties[propertyName].description).toEqual(expect.any(String));
     }

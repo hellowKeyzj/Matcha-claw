@@ -6,6 +6,8 @@ import {
   type ApplicationResponse,
 } from '../common/application-response';
 import type { ExternalConnectorConnectionProbeService } from './external-connector-connection-status';
+import type { RuntimeSessionContext } from '../agent-runtime/contracts/runtime-endpoint-types';
+import type { SessionIdentity } from '../../shared/runtime-address';
 import {
   readSessionIdentityPayload,
   type ExternalConnectorDownstreamStatus,
@@ -31,6 +33,10 @@ export interface ExternalConnectorProjectionSourcePort {
   listConnectorSpecs(): Promise<readonly ExternalConnectorSpec[]>;
 }
 
+export interface ExternalConnectorSessionContextResolverPort {
+  findSessionContext(identity: SessionIdentity): RuntimeSessionContext | null;
+}
+
 const MATCHA_SYSTEM_RUNTIME_CONNECTOR: ExternalConnectorSpec = {
   id: MATCHA_SYSTEM_RUNTIME_CONNECTOR_ID,
   kind: 'mcp-stdio',
@@ -54,6 +60,7 @@ export class ExternalConnectorService {
     private readonly repository: Pick<ExternalConnectorRepository, 'list' | 'get' | 'upsert' | 'remove'>,
     private readonly mcpServerPrograms: Pick<ExternalMcpServerProgramCatalog, 'snapshot'>,
     private readonly connectionProbe: Pick<ExternalConnectorConnectionProbeService, 'probe' | 'unknown'>,
+    private readonly sessionContexts?: ExternalConnectorSessionContextResolverPort,
   ) {}
 
   registerProjection(projection: ExternalConnectorProjectionPort): void {
@@ -92,9 +99,13 @@ export class ExternalConnectorService {
       return badRequest('sessionIdentity is required');
     }
     const connectors = await this.listConnectorSpecs();
+    const runtimeSessionContext = this.sessionContexts?.findSessionContext(sessionIdentity) ?? null;
     const statuses: ExternalConnectorDownstreamStatus[] = [];
     for (const provider of this.downstreamStatusProviders) {
-      statuses.push(...await provider.listStatuses(connectors, { sessionIdentity }));
+      statuses.push(...await provider.listStatuses(connectors, {
+        sessionIdentity,
+        ...(runtimeSessionContext ? { endpointSessionId: runtimeSessionContext.endpointSessionId } : {}),
+      }));
     }
     return ok({ statuses });
   }
