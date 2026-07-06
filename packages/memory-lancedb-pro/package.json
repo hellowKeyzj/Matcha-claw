@@ -34,7 +34,7 @@
     "skills/**/*.md"
   ],
   "scripts": {
-"test": "node scripts/verify-ci-test-manifest.mjs && node scripts/run-ci-tests.mjs --all",
+    "test": "node scripts/verify-ci-test-manifest.mjs && node scripts/run-ci-tests.mjs --all",
     "test:cli-smoke": "node scripts/run-ci-tests.mjs --group cli-smoke",
     "test:core-regression": "node scripts/run-ci-tests.mjs --group core-regression",
     "test:storage-and-schema": "node scripts/run-ci-tests.mjs --group storage-and-schema",
@@ -66,11 +66,10 @@
   },
   "optionalDependencies": {
     "@lancedb/lancedb-darwin-arm64": "^0.26.2",
-    "@lancedb/lancedb-darwin-x64": "^0.26.2",
     "@lancedb/lancedb-linux-arm64-gnu": "^0.26.2",
     "@lancedb/lancedb-linux-x64-gnu": "^0.26.2",
     "@lancedb/lancedb-win32-x64-msvc": "^0.26.2",
-    "@matchaclaw/lancedb-darwin-x64-compat": "^0.26.2"
+    "@matchaclaw/lancedb-darwin-x64-compat": "npm:@lancedb/lancedb@0.22.3"
   },
   "devDependencies": {
     "commander": "^14.0.0",

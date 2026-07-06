@@ -49,12 +49,6 @@
       "autoEnable": true
     },
     {
-      "slug": "TuanziGuardianClaw",
-      "sourceUrl": "https://claw.mytuanzi.com/SKILL.md",
-      "version": "2026-03-15",
-      "autoEnable": true
-    },
-    {
       "slug": "multi-search-engine",
       "localDir": "resources/skills/preinstalled-skill-sources/multi-search-engine",
       "version": "2026-05-01",
