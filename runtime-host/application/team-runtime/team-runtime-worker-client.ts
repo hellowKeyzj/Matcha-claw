@@ -210,6 +210,9 @@ export class WorkerBackedTeamRuntimeService implements TeamRuntimePort {
     switch (message.type) {
       case 'host.roleSession.ensure':
         return await this.deps.roleSessions.ensureRoleSession(message.input);
+      case 'host.roleSession.remember':
+        await this.deps.roleSessions.rememberRoleSessionBinding(message.input);
+        return { success: true };
       case 'host.roleSession.prompt':
         return await this.deps.roleSessions.promptRoleSession(message.input);
       case 'host.roleSession.abort':

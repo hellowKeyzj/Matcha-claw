@@ -380,6 +380,54 @@ describe('team chat', () => {
     expect(screen.queryByText('Need decision')).not.toBeInTheDocument();
   });
 
+  it('renders a normalized graph with kindless nodes visible', async () => {
+    useTeamsStore.setState({
+      graphByTeamId: {
+        'team-1': {
+          runId: 'team-1',
+          workflowPlanId: 'workflow-plan-1',
+          status: 'running',
+          nodes: [
+            {
+              nodeId: 'analysis-work-node',
+              title: 'Work node without kind',
+              roleId: 'operator-designer',
+              status: 'running',
+              config: { prompt: 'Continue the work' },
+            },
+            {
+              nodeId: 'review-node',
+              kind: 'review',
+              title: 'Review work',
+              roleId: 'reviewer',
+              status: 'pending',
+            },
+          ],
+          edges: [
+            {
+              edgeId: 'review-edge',
+              sourceNodeId: 'analysis-work-node',
+              targetNodeId: 'review-node',
+              sourcePort: 'completed',
+              label: 'ready for review',
+              status: 'running',
+            },
+          ],
+          updatedAt: 3,
+        },
+      },
+    } as never);
+
+    render(
+      <MemoryRouter>
+        <TeamChat teamId="team-1" />
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByText('Work node without kind')).toBeInTheDocument();
+    expect(screen.getByText('2 nodes · 1 edges')).toBeInTheDocument();
+  });
+
   it('opens edge configuration from the canvas edge and saves port settings without local scheduling', async () => {
     render(
       <MemoryRouter>

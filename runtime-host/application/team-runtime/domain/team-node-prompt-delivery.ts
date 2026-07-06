@@ -10,7 +10,7 @@ export interface TeamNodePromptDeliveryRecord {
   readonly taskId: string;
   readonly roleId: string;
   readonly toAgentId: string;
-  readonly sessionKey: string;
+  readonly localSessionId: string;
   readonly kind: TeamNodePromptDeliveryKind;
   readonly title: string;
   readonly prompt: string;
@@ -26,4 +26,7 @@ export interface TeamNodePromptDeliveryRecord {
   readonly lastError?: string;
   readonly deliveringAt?: number;
   readonly deliveredAt?: number;
+  readonly promptRunId?: string;
+  readonly settledAt?: number;
+  readonly settledPhase?: 'final' | 'error' | 'aborted';
 }

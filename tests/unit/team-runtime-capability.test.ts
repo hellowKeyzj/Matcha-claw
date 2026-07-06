@@ -64,8 +64,43 @@ class FakeTeamNodePromptDeliveryPort implements TeamNodePromptDeliveryPort {
   async deliver(input: Parameters<TeamNodePromptDeliveryPort['deliver']>[0]) {
     this.deliveries.push(input);
     await this.onDeliver?.(input);
-    return { deliveryRecordId: input.delivery.deliveryRecordId, status: 'delivered', deliveredAt: 1000 } as const;
+    return {
+      deliveryRecordId: input.delivery.deliveryRecordId,
+      status: 'delivered',
+      deliveredAt: 1000,
+      promptRunId: `prompt-run:${input.delivery.deliveryRecordId}`,
+    } as const;
   }
+}
+
+function createFakeEnsureRoleSession() {
+  return vi.fn(async (input: Parameters<TeamRoleSessionPort['ensureRoleSession']>[0]) => ({
+    teamId: input.teamId,
+    runId: input.runId,
+    roleId: input.roleId,
+    agentId: input.agentId,
+    endpointRef: input.endpointRef,
+    localSessionId: input.localSessionId,
+    endpointSessionId: input.endpointSessionId,
+    sessionIdentity: input.sessionIdentity ?? { endpoint: input.endpointRef, agentId: input.agentId, sessionKey: input.localSessionId },
+  }));
+}
+
+function createFakeTeamRoleSessions(overrides: Partial<TeamRoleSessionPort> = {}): TeamRoleSessionPort {
+  return {
+    ensureRoleSession: createFakeEnsureRoleSession(),
+    promptRoleSession: vi.fn(async (input: Parameters<TeamRoleSessionPort['promptRoleSession']>[0]) => ({
+      runId: input.binding.runId,
+      roleId: input.binding.roleId,
+      localSessionId: input.binding.localSessionId,
+      promptRunId: input.idempotencyKey,
+    })),
+    rememberRoleSessionBinding: vi.fn(),
+    abortRoleSession: vi.fn(),
+    deleteRoleSession: vi.fn(),
+    readRoleSessionWindow: vi.fn(),
+    ...overrides,
+  };
 }
 
 class FakeTeamCommandLedgerPort implements TeamCommandLedgerPort {
@@ -211,6 +246,7 @@ describe('team runtime capability', () => {
       expect.objectContaining({ id: 'team.triggerFire', targetKind: 'team-run' }),
       expect.objectContaining({ id: 'team.roleMessageSubmit', targetKind: 'team-run' }),
       expect.objectContaining({ id: 'team.nodePromptRetryDue', targetKind: 'team-run' }),
+      expect.objectContaining({ id: 'team.nodePromptSettled', targetKind: 'none' }),
       expect.objectContaining({ id: 'team.nodeEvent', targetKind: 'team-run' }),
       expect.objectContaining({ id: 'team.runDiagnostics', targetKind: 'team-run' }),
       expect.objectContaining({ id: 'team.runDecisionSubmit', targetKind: 'team-run' }),
@@ -373,6 +409,28 @@ describe('team runtime capability', () => {
     });
   });
 
+  it.each([
+    [{ promptRunId: 'prompt-run:review-a', phase: 'final' }, 'Team runtime input sessionKey is required'],
+    [{ sessionKey: 'team-role-session-leader', phase: 'final' }, 'Team runtime input promptRunId is required'],
+    [{ sessionKey: 'team-role-session-leader', promptRunId: 'prompt-run:review-a' }, 'Team runtime input phase must be final, error, or aborted'],
+  ] as const)('rejects nodePromptSettled missing runtime-wide input before invoking the service', async (domainInput, error) => {
+    const { route, invoke } = createRouteFor('team.nodePromptSettled');
+    const result = await Promise.resolve(route.handle({
+      capabilityId: TEAM_RUNTIME_CAPABILITY_ID,
+      operationId: 'team.nodePromptSettled',
+      scope: runtimeScope,
+      target: null,
+      input: domainInput,
+      domainInput,
+    }));
+
+    expect(result).toEqual(expect.objectContaining({
+      status: 400,
+      data: expect.objectContaining({ error }),
+    }));
+    expect(invoke).not.toHaveBeenCalled();
+  });
+
   it('rejects approvalResolve missing idempotencyKey before invoking the service', async () => {
     await expectRouteDeniedBeforeInvoke({
       operationId: 'team.approvalResolve',
@@ -439,7 +497,7 @@ describe('team runtime capability', () => {
         kind: TEAM_RUNTIME_CAPABILITY_ID,
         scopeKind: 'runtime-instance',
         scope: runtimeScope,
-        targetKinds: ['team', 'team-run', 'team-approval'],
+        targetKinds: ['team', 'team-run', 'team-approval', 'none'],
         runtimeAdapterId: 'openclaw',
         runtimeInstanceId: 'local',
         supportLevel: 'native',
@@ -468,6 +526,45 @@ describe('team runtime capability', () => {
     );
   });
 
+  it('invokes nodePromptSettled as a runtime-wide internal operation without a target', async () => {
+    const response = { status: 200, data: { settled: true, runId: 'run-1' } };
+    const invoke = vi.fn(async () => response);
+    const router = new CapabilityRouter({
+      getCapability: () => ({
+        id: TEAM_RUNTIME_CAPABILITY_ID,
+        kind: TEAM_RUNTIME_CAPABILITY_ID,
+        scopeKind: 'runtime-instance',
+        scope: runtimeScope,
+        targetKinds: ['team', 'team-run', 'team-approval', 'none'],
+        runtimeAdapterId: 'openclaw',
+        runtimeInstanceId: 'local',
+        supportLevel: 'native',
+        availability: 'available',
+        operations: teamRuntimeCapabilityOperations,
+        policyScope: TEAM_RUNTIME_CAPABILITY_ID,
+        ownerModuleId: 'test',
+        routeOwnerId: 'test',
+      }),
+      operations: createTeamRuntimeCapabilityOperationRoutes({
+        teamRuntimeService: { invoke } as never,
+      }),
+    });
+    const input = { sessionKey: 'team-role-session-leader', promptRunId: 'prompt-run:review-a', phase: 'final' };
+
+    await expect(router.execute({
+      id: TEAM_RUNTIME_CAPABILITY_ID,
+      operationId: 'team.nodePromptSettled',
+      scope: runtimeScope,
+      target: null,
+      input,
+    })).resolves.toBe(response);
+    expect(invoke).toHaveBeenCalledWith(
+      'team.nodePromptSettled',
+      input,
+      runtimeScope,
+    );
+  });
+
   it('allows packageValidate team targets under the runtime-instance scope without teamId binding', async () => {
     const invoke = vi.fn(async () => ({ status: 200, data: { success: true, valid: true } }));
     const router = new CapabilityRouter({
@@ -476,7 +573,7 @@ describe('team runtime capability', () => {
         kind: TEAM_RUNTIME_CAPABILITY_ID,
         scopeKind: 'runtime-instance',
         scope: runtimeScope,
-        targetKinds: ['team', 'team-run', 'team-approval'],
+        targetKinds: ['team', 'team-run', 'team-approval', 'none'],
         runtimeAdapterId: 'openclaw',
         runtimeInstanceId: 'local',
         supportLevel: 'native',
@@ -513,7 +610,7 @@ describe('team runtime capability', () => {
         kind: TEAM_RUNTIME_CAPABILITY_ID,
         scopeKind: 'runtime-instance',
         scope: runtimeScope,
-        targetKinds: ['team', 'team-run', 'team-approval'],
+        targetKinds: ['team', 'team-run', 'team-approval', 'none'],
         runtimeAdapterId: 'openclaw',
         runtimeInstanceId: 'local',
         supportLevel: 'native',
@@ -599,6 +696,7 @@ describe('team runtime capability', () => {
     const removeTeamAgents = vi.fn();
     const service = new TeamRuntimeService({
       stateStore,
+      roleSessions: createFakeTeamRoleSessions(),
       packageService: {
         validate: async () => ({
           valid: true,
@@ -710,6 +808,7 @@ describe('team runtime capability', () => {
         materialize,
         removeTeamAgents: vi.fn(),
       },
+      roleSessions: createFakeTeamRoleSessions(),
       nowMs: () => 1000,
       randomId: () => 'id',
     });
@@ -836,6 +935,115 @@ describe('team runtime capability', () => {
     expect(stateStore.writeTeamInstanceCount).toBe(0);
   });
 
+  it('lists restored TeamRun role session bindings from persisted run state', async () => {
+    const operations: TeamDrainOperation[] = [];
+    const stateStore = new FakeTeamRuntimeStateStore(operations);
+    const leaderBinding = {
+      teamId: 'team-package',
+      runId: 'run-restored',
+      roleId: 'leader',
+      agentId: 'leader-agent',
+      endpointRef: runtimeScope.endpoint,
+      localSessionId: 'team-role-session-leader',
+      endpointSessionId: 'team-endpoint-session-leader',
+      sessionIdentity: { endpoint: runtimeScope.endpoint, agentId: 'leader-agent', sessionKey: 'team-role-session-leader' },
+    };
+    stateStore.teamInstances['team-package'] = {
+      teamId: 'team-package',
+      teamSkillName: 'team-package',
+      teamSkillVersion: '1.0.0',
+      packagePath: '/pkg',
+      sourcePath: '/pkg',
+      managedAgents: [],
+      runs: [
+        { teamId: 'team-package', runId: 'run-restored', status: 'running', revision: 2, packageName: 'team-package', packageVersion: '1.0.0', sourcePath: '/pkg', sessions: [], createdAt: 900, updatedAt: 1000 },
+      ],
+      createdAt: 900,
+      updatedAt: 1000,
+    };
+    stateStore.runStates['run-restored'] = {
+      run: { teamId: 'team-package', runId: 'run-restored', status: 'running', revision: 3, packageName: 'team-package', packageVersion: '1.0.0', sourcePath: '/pkg', createdAt: 900, updatedAt: 1200 },
+      roleBindings: [
+        leaderBinding,
+        { ...leaderBinding, roleId: 'legacy', localSessionId: 'legacy-local', endpointSessionId: 'agent:legacy-agent:team-role:legacy', sessionIdentity: { endpoint: runtimeScope.endpoint, agentId: 'leader-agent', sessionKey: 'legacy-local' } },
+        { ...leaderBinding, roleId: 'incomplete', localSessionId: '', endpointSessionId: 'team-endpoint-session-incomplete', sessionIdentity: { endpoint: runtimeScope.endpoint, agentId: 'leader-agent', sessionKey: '' } },
+      ],
+      processedIdempotencyKeys: [],
+    };
+    const roleSessions = createFakeTeamRoleSessions();
+    const service = new TeamRuntimeService({
+      stateStore,
+      roleSessions,
+      nowMs: () => 1000,
+      randomId: () => 'id',
+    });
+
+    await expect(service.invoke('team.runList', { teamId: 'team-package' }, runtimeScope)).resolves.toEqual(expect.objectContaining({
+      status: 200,
+      data: {
+        teamId: 'team-package',
+        runs: [expect.objectContaining({
+          runId: 'run-restored',
+          updatedAt: 1200,
+          sessions: [expect.objectContaining({ roleId: 'leader', localSessionId: 'team-role-session-leader' })],
+        })],
+      },
+    }));
+    expect(roleSessions.rememberRoleSessionBinding).toHaveBeenCalledTimes(1);
+    expect(roleSessions.rememberRoleSessionBinding).toHaveBeenCalledWith({ binding: leaderBinding });
+  });
+
+  it('lists TeamRun role session bindings from TeamInstance data when persisted run state is missing', async () => {
+    const operations: TeamDrainOperation[] = [];
+    const stateStore = new FakeTeamRuntimeStateStore(operations);
+    const leaderBinding = {
+      teamId: 'team-package',
+      runId: 'run-restored',
+      roleId: 'leader',
+      agentId: 'leader-agent',
+      endpointRef: runtimeScope.endpoint,
+      localSessionId: 'team-role-session-leader',
+      endpointSessionId: 'team-endpoint-session-leader',
+      sessionIdentity: { endpoint: runtimeScope.endpoint, agentId: 'leader-agent', sessionKey: 'team-role-session-leader' },
+    };
+    stateStore.teamInstances['team-package'] = {
+      teamId: 'team-package',
+      teamSkillName: 'team-package',
+      teamSkillVersion: '1.0.0',
+      packagePath: '/pkg',
+      sourcePath: '/pkg',
+      managedAgents: [],
+      runs: [
+        { teamId: 'team-package', runId: 'run-restored', status: 'running', revision: 2, packageName: 'team-package', packageVersion: '1.0.0', sourcePath: '/pkg', sessions: [leaderBinding], createdAt: 900, updatedAt: 1000 },
+      ],
+      createdAt: 900,
+      updatedAt: 1000,
+    };
+    const roleSessions = createFakeTeamRoleSessions();
+    const service = new TeamRuntimeService({
+      stateStore,
+      roleSessions,
+      nowMs: () => 1000,
+      randomId: () => 'id',
+    });
+
+    await expect(service.invoke('team.runList', { teamId: 'team-package' }, runtimeScope)).resolves.toEqual(expect.objectContaining({
+      status: 200,
+      data: {
+        teamId: 'team-package',
+        runs: [expect.objectContaining({
+          runId: 'run-restored',
+          updatedAt: 1000,
+          sessions: [expect.objectContaining({ roleId: 'leader', localSessionId: 'team-role-session-leader' })],
+        })],
+      },
+    }));
+    expect(roleSessions.rememberRoleSessionBinding).toHaveBeenCalledTimes(1);
+    expect(roleSessions.rememberRoleSessionBinding).toHaveBeenCalledWith({ binding: leaderBinding });
+    expect(stateStore.writes).toHaveLength(0);
+    expect(stateStore.writeTeamInstanceCount).toBe(0);
+  });
+
   it('creates run role session bindings from TeamInstance agents when reusing existing Team agents', async () => {
     const operations: TeamDrainOperation[] = [];
     const stateStore = new FakeTeamRuntimeStateStore(operations);
@@ -854,14 +1062,7 @@ describe('team runtime capability', () => {
       updatedAt: 900,
     };
     const materialize = vi.fn();
-    const ensureRoleSession = vi.fn(async (input) => ({
-      teamId: input.teamId,
-      runId: input.runId,
-      roleId: input.roleId,
-      agentId: input.agentId,
-      sessionIdentity: input.sessionIdentity,
-      sessionKey: input.sessionIdentity.sessionKey,
-    }));
+    const ensureRoleSession = createFakeEnsureRoleSession();
     const service = new TeamRuntimeService({
       stateStore,
       packageService: {
@@ -905,7 +1106,21 @@ describe('team runtime capability', () => {
     await service.invoke('team.runCreate', { packagePath: '/pkg', runId: 'run-2', idempotencyKey: 'create-2' }, runtimeScope);
 
     expect(materialize).not.toHaveBeenCalled();
-    expect(ensureRoleSession).not.toHaveBeenCalled();
+    expect(ensureRoleSession).toHaveBeenCalledTimes(2);
+    expect(ensureRoleSession).toHaveBeenCalledWith(expect.objectContaining({
+      teamId: 'team-package',
+      runId: 'run-2',
+      roleId: 'leader',
+      agentId: 'existing-leader-agent',
+      endpointRef: runtimeScope.endpoint,
+    }));
+    expect(ensureRoleSession).toHaveBeenCalledWith(expect.objectContaining({
+      teamId: 'team-package',
+      runId: 'run-2',
+      roleId: 'financial-analyst',
+      agentId: 'existing-analyst-agent',
+      endpointRef: runtimeScope.endpoint,
+    }));
     expect(stateStore.teamInstances['team-package']).toEqual(expect.objectContaining({
       runs: [expect.objectContaining({
         runId: 'run-2',
@@ -1160,7 +1375,7 @@ describe('team runtime capability', () => {
     const jobs = new FakeTeamRuntimeJobPort();
     const removeTeamAgents = vi.fn();
     const roleSessions = {
-      ensureRoleSession: vi.fn(),
+      ensureRoleSession: createFakeEnsureRoleSession(),
       promptRoleSession: vi.fn(),
       abortRoleSession: vi.fn(),
       deleteRoleSession: vi.fn(),
@@ -1171,11 +1386,29 @@ describe('team runtime capability', () => {
       runs: [
         {
           ...stateStore.teamInstances['team-package']!.runs[0]!,
-          sessions: [{ teamId: 'team-package', runId: 'run-1', roleId: 'leader', agentId: 'shared-agent', sessionKey: 'agent:shared-agent:team-role:run-1:leader', sessionIdentity: { endpoint: runtimeScope.endpoint, agentId: 'shared-agent', sessionKey: 'agent:shared-agent:team-role:run-1:leader' } }],
+          sessions: [{
+            teamId: 'team-package',
+            runId: 'run-1',
+            roleId: 'leader',
+            agentId: 'shared-agent',
+            endpointRef: runtimeScope.endpoint,
+            localSessionId: 'local:run-1:leader',
+            endpointSessionId: 'local-run-1-leader',
+            sessionIdentity: { endpoint: runtimeScope.endpoint, agentId: 'shared-agent', sessionKey: 'local:run-1:leader' },
+          }],
         },
         {
           ...stateStore.teamInstances['team-package']!.runs[1]!,
-          sessions: [{ teamId: 'team-package', runId: 'run-2', roleId: 'financial-analyst', agentId: 'shared-agent', sessionKey: 'agent:shared-agent:team-role:run-2:financial-analyst', sessionIdentity: { endpoint: runtimeScope.endpoint, agentId: 'shared-agent', sessionKey: 'agent:shared-agent:team-role:run-2:financial-analyst' } }],
+          sessions: [{
+            teamId: 'team-package',
+            runId: 'run-2',
+            roleId: 'financial-analyst',
+            agentId: 'shared-agent',
+            endpointRef: runtimeScope.endpoint,
+            localSessionId: 'local:run-2:financial-analyst',
+            endpointSessionId: 'local-run-2-financial-analyst',
+            sessionIdentity: { endpoint: runtimeScope.endpoint, agentId: 'shared-agent', sessionKey: 'local:run-2:financial-analyst' },
+          }],
         },
       ],
     };
@@ -1203,10 +1436,20 @@ describe('team runtime capability', () => {
     expect(stateStore.deletedRunIds).toEqual(['run-1', 'run-2']);
     expect(roleSessions.deleteRoleSession).toHaveBeenCalledTimes(2);
     expect(roleSessions.deleteRoleSession).toHaveBeenCalledWith(expect.objectContaining({
-      binding: expect.objectContaining({ sessionKey: 'agent:shared-agent:team-role:run-1:leader' }),
+      binding: expect.objectContaining({
+        runId: 'run-1',
+        roleId: 'leader',
+        agentId: 'shared-agent',
+        localSessionId: 'local:run-1:leader',
+      }),
     }));
     expect(roleSessions.deleteRoleSession).toHaveBeenCalledWith(expect.objectContaining({
-      binding: expect.objectContaining({ sessionKey: 'agent:shared-agent:team-role:run-2:financial-analyst' }),
+      binding: expect.objectContaining({
+        runId: 'run-2',
+        roleId: 'financial-analyst',
+        agentId: 'shared-agent',
+        localSessionId: 'local:run-2:financial-analyst',
+      }),
     }));
     expect(removeTeamAgents).not.toHaveBeenCalled();
     expect(jobs.deleteManagedAgentsSubmissions).toEqual([{
@@ -1297,6 +1540,7 @@ describe('team runtime capability', () => {
     };
     const service = new TeamRuntimeService({
       stateStore,
+      roleSessions: createFakeTeamRoleSessions(),
       packageService: {
         validate: async () => ({
           valid: true,
@@ -1455,6 +1699,7 @@ describe('team runtime capability', () => {
     const service = new TeamRuntimeService({
       commandLedger,
       stateStore,
+      roleSessions: createFakeTeamRoleSessions(),
       packageService: {
         validate: async () => buildTeamPackageValidation({
           name: 'team-package',
@@ -1564,6 +1809,7 @@ describe('team runtime capability', () => {
     };
     const service = new TeamRuntimeService({
       stateStore,
+      roleSessions: createFakeTeamRoleSessions(),
       nowMs: () => 2000,
       randomId: () => 'id',
     });
@@ -1603,7 +1849,7 @@ describe('team runtime capability', () => {
     const promptRoleSession = vi.fn(async (input: Parameters<TeamRoleSessionPort['promptRoleSession']>[0]) => ({
       runId: input.binding.runId,
       roleId: input.binding.roleId,
-      sessionKey: input.binding.sessionKey,
+      localSessionId: input.binding.localSessionId,
       promptRunId: 'role-chat-run-1',
     }));
     stateStore.teamInstances['team-package'] = {
@@ -1639,7 +1885,7 @@ describe('team runtime capability', () => {
         }),
       },
       roleSessions: {
-        ensureRoleSession: vi.fn(),
+        ensureRoleSession: createFakeEnsureRoleSession(),
         promptRoleSession,
         abortRoleSession: vi.fn(),
         deleteRoleSession: vi.fn(),
@@ -1750,11 +1996,11 @@ describe('team runtime capability', () => {
         }),
       },
       roleSessions: {
-        ensureRoleSession: vi.fn(),
+        ensureRoleSession: createFakeEnsureRoleSession(),
         promptRoleSession: vi.fn(async (input: Parameters<TeamRoleSessionPort['promptRoleSession']>[0]) => ({
           runId: input.binding.runId,
           roleId: input.binding.roleId,
-          sessionKey: input.binding.sessionKey,
+          localSessionId: input.binding.localSessionId,
           promptRunId: 'role-chat-after-cancel',
         })),
         abortRoleSession: vi.fn(),
@@ -1843,11 +2089,11 @@ describe('team runtime capability', () => {
         }),
       },
       roleSessions: {
-        ensureRoleSession: vi.fn(),
+        ensureRoleSession: createFakeEnsureRoleSession(),
         promptRoleSession: vi.fn(async (input: Parameters<TeamRoleSessionPort['promptRoleSession']>[0]) => ({
           runId: input.binding.runId,
           roleId: input.binding.roleId,
-          sessionKey: input.binding.sessionKey,
+          localSessionId: input.binding.localSessionId,
           promptRunId: 'role-chat-start-only',
         })),
         abortRoleSession: vi.fn(),
@@ -1888,7 +2134,7 @@ describe('team runtime capability', () => {
     const promptRoleSession = vi.fn(async (input: Parameters<TeamRoleSessionPort['promptRoleSession']>[0]) => ({
       runId: input.binding.runId,
       roleId: input.binding.roleId,
-      sessionKey: input.binding.sessionKey,
+      localSessionId: input.binding.localSessionId,
       promptRunId: 'role-chat-non-entry',
     }));
     stateStore.teamInstances['team-package'] = {
@@ -1911,7 +2157,7 @@ describe('team runtime capability', () => {
         validate: async () => buildTeamPackageValidation({ name: 'team-package', sourcePath: '/pkg', roles: [{ id: 'operator', purpose: 'Operate', agentsMd: '# operator', skills: [], tools: [] }] }),
       },
       roleSessions: {
-        ensureRoleSession: vi.fn(),
+        ensureRoleSession: createFakeEnsureRoleSession(),
         promptRoleSession,
         abortRoleSession: vi.fn(),
         deleteRoleSession: vi.fn(),
@@ -1982,6 +2228,7 @@ describe('team runtime capability', () => {
     const service = new TeamRuntimeService({
       commandLedger,
       stateStore,
+      roleSessions: createFakeTeamRoleSessions(),
       packageService: {
         validate: async () => ({
           valid: true,
@@ -2103,6 +2350,7 @@ describe('team runtime capability', () => {
     const service = new TeamRuntimeService({
       commandLedger,
       stateStore,
+      roleSessions: createFakeTeamRoleSessions(),
       nodePromptDelivery: new FakeTeamNodePromptDeliveryPort(),
       packageService: {
         validate: async () => buildTeamPackageValidation({
@@ -2201,6 +2449,7 @@ describe('team runtime capability', () => {
     const service = new TeamRuntimeService({
       commandLedger,
       stateStore,
+      roleSessions: createFakeTeamRoleSessions(),
       nodePromptDelivery,
       packageService: {
         validate: async () => buildTeamPackageValidation({
@@ -2255,6 +2504,11 @@ describe('team runtime capability', () => {
       },
       idempotencyKey: 'leader-assign-roles',
     }, runtimeScope);
+    await service.invoke('team.nodePromptSettled', {
+      sessionKey: nodePromptDelivery.deliveries[0]!.delivery.localSessionId,
+      promptRunId: `prompt-run:${nodePromptDelivery.deliveries[0]!.delivery.deliveryRecordId}`,
+      phase: 'final',
+    }, runtimeScope);
 
     const completedRoleNodeIds = new Set<string>();
     const completeDeliveredRoleNodes = async (): Promise<void> => {
@@ -2271,6 +2525,11 @@ describe('team runtime capability', () => {
           roleId: delivery.delivery.roleId,
           summary: `${delivery.delivery.roleId} done`,
           idempotencyKey: `${delivery.delivery.roleId}-done`,
+        }, runtimeScope);
+        await service.invoke('team.nodePromptSettled', {
+          sessionKey: delivery.delivery.localSessionId,
+          promptRunId: `prompt-run:${delivery.delivery.deliveryRecordId}`,
+          phase: 'final',
         }, runtimeScope);
       }
     };
@@ -2316,6 +2575,7 @@ describe('team runtime capability', () => {
     const nodePromptDelivery = new FakeTeamNodePromptDeliveryPort();
     const service = new TeamRuntimeService({
       stateStore,
+      roleSessions: createFakeTeamRoleSessions(),
       nodePromptDelivery,
       packageService: {
         validate: async () => ({
@@ -2371,6 +2631,122 @@ describe('team runtime capability', () => {
     ]));
   });
 
+  it('does not deliver the next same-session ReviewNode prompt in the completing node event dispatch chain', async () => {
+    const operations: TeamDrainOperation[] = [];
+    const stateStore = new FakeTeamRuntimeStateStore(operations);
+    stateStore.teamInstances['team-package'] = {
+      teamId: 'team-package',
+      teamSkillName: 'team-package',
+      teamSkillVersion: '1.0.0',
+      packagePath: '/pkg',
+      sourcePath: '/pkg',
+      managedAgents: [
+        { teamId: 'team-package', roleId: 'leader', agentId: 'leader-agent', displayName: 'leader', workspace: '/team/leader', endpoint: runtimeScope.endpoint },
+      ],
+      runs: [],
+      createdAt: 900,
+      updatedAt: 900,
+    };
+    const nodePromptDelivery = new FakeTeamNodePromptDeliveryPort();
+    const commandLedger = new FakeTeamCommandLedgerPort();
+    const service = new TeamRuntimeService({
+      commandLedger,
+      stateStore,
+      roleSessions: createFakeTeamRoleSessions(),
+      nodePromptDelivery,
+      packageService: {
+        validate: async () => buildTeamPackageValidation({ name: 'team-package', sourcePath: '/pkg', roles: [] }),
+      },
+      nowMs: () => 1000,
+      randomId: () => 'id',
+    });
+
+    await service.invoke('team.runCreate', { packagePath: '/pkg', runId: 'run-review-cooldown', idempotencyKey: 'create-review-cooldown' }, runtimeScope);
+    await service.invoke('team.graphSave', {
+      runId: 'run-review-cooldown',
+      idempotencyKey: 'graph-save-review-cooldown',
+      graph: {
+        nodes: [
+          { nodeId: 'start', kind: 'start', title: 'Start', config: { trigger: { mode: 'webhook', path: '/review-cooldown' } } },
+          { nodeId: 'review-a', kind: 'review', roleId: 'leader', title: 'Review A', executor: { kind: 'team-role', roleId: 'leader' }, config: { prompt: 'Review A' } },
+          { nodeId: 'review-b', kind: 'review', roleId: 'leader', title: 'Review B', executor: { kind: 'team-role', roleId: 'leader' }, config: { prompt: 'Review B' } },
+          { nodeId: 'review-c', kind: 'review', roleId: 'leader', title: 'Review C', executor: { kind: 'team-role', roleId: 'leader' }, config: { prompt: 'Review C' } },
+          { nodeId: 'review-d', kind: 'review', roleId: 'leader', title: 'Review D', executor: { kind: 'team-role', roleId: 'leader' }, config: { prompt: 'Review D' } },
+        ],
+        edges: [
+          { edgeId: 'start-review-a', sourceNodeId: 'start', targetNodeId: 'review-a', sourcePort: 'completed', action: 'activate', payload: { includeUpstreamResult: true } },
+          { edgeId: 'start-review-b', sourceNodeId: 'start', targetNodeId: 'review-b', sourcePort: 'completed', action: 'activate', payload: { includeUpstreamResult: true } },
+          { edgeId: 'start-review-c', sourceNodeId: 'start', targetNodeId: 'review-c', sourcePort: 'completed', action: 'activate', payload: { includeUpstreamResult: true } },
+          { edgeId: 'start-review-d', sourceNodeId: 'start', targetNodeId: 'review-d', sourcePort: 'completed', action: 'activate', payload: { includeUpstreamResult: true } },
+        ],
+        status: 'draft',
+      },
+    }, runtimeScope);
+    const triggerResponse = await service.invoke('team.triggerFire', {
+      runId: 'run-review-cooldown',
+      startNodeId: 'start',
+      triggerSource: 'webhook',
+      idempotencyKey: 'trigger-review-cooldown',
+    }, runtimeScope);
+    const triggerSnapshot = triggerResponse.data as { snapshot: { nodeExecutions: Array<{ nodeId: string; nodeExecutionId?: string; status: string }> } };
+    const firstReviewExecution = triggerSnapshot.snapshot.nodeExecutions.find((execution) => execution.nodeId === 'review-a');
+
+    expect(nodePromptDelivery.deliveries.map((delivery) => delivery.delivery.nodeId)).toEqual(['review-a']);
+    expect(firstReviewExecution).toEqual(expect.objectContaining({ status: 'running', nodeExecutionId: expect.any(String) }));
+
+    const completeResponse = await service.invoke('team.nodeEvent', {
+      runId: 'run-review-cooldown',
+      nodeExecutionId: firstReviewExecution?.nodeExecutionId,
+      event: 'complete',
+      roleId: 'leader',
+      outputPort: 'completed',
+      summary: 'Review A complete',
+      idempotencyKey: 'node-event-review-a-complete',
+    }, runtimeScope);
+    const completeData = completeResponse.data as { snapshot: { run: { status: string }; nodeExecutions: Array<{ nodeId: string; status: string }>; nodePromptDeliveries: Array<{ nodeId: string; status: string; promptRunId?: string }> } };
+    const reviewAPromptRunId = completeData.snapshot.nodePromptDeliveries.find((delivery) => delivery.nodeId === 'review-a')?.promptRunId;
+
+    expect(completeData.snapshot.run.status).toBe('running');
+    expect(reviewAPromptRunId).toBe(`prompt-run:${nodePromptDelivery.deliveries[0]!.delivery.deliveryRecordId}`);
+    expect(nodePromptDelivery.deliveries.map((delivery) => delivery.delivery.nodeId)).toEqual(['review-a']);
+    expect(completeData.snapshot.nodePromptDeliveries.map((delivery) => delivery.nodeId)).toEqual(['review-a']);
+    expect(completeData.snapshot.nodeExecutions).toEqual(expect.arrayContaining([
+      expect.objectContaining({ nodeId: 'review-a', status: 'completed' }),
+      expect.objectContaining({ nodeId: 'review-b', status: 'ready' }),
+      expect.objectContaining({ nodeId: 'review-c', status: 'ready' }),
+      expect.objectContaining({ nodeId: 'review-d', status: 'ready' }),
+    ]));
+    expect(completeData.snapshot.nodeExecutions).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ nodeId: 'review-b', status: 'running' }),
+      expect.objectContaining({ nodeId: 'review-c', status: 'running' }),
+      expect.objectContaining({ nodeId: 'review-d', status: 'running' }),
+    ]));
+
+    const settledResponse = await service.invoke('team.nodePromptSettled', {
+      sessionKey: nodePromptDelivery.deliveries[0]!.delivery.localSessionId,
+      promptRunId: reviewAPromptRunId,
+      phase: 'final',
+    }, runtimeScope);
+    const settledData = settledResponse.data as { settled: boolean; runId: string; snapshot: { nodeExecutions: Array<{ nodeId: string; status: string }>; nodePromptDeliveries: Array<{ nodeId: string; status: string; settledPhase?: string }> } };
+
+    expect(settledData.settled).toBe(true);
+    expect(settledData.runId).toBe('run-review-cooldown');
+    expect(nodePromptDelivery.deliveries.map((delivery) => delivery.delivery.nodeId)).toEqual(['review-a', 'review-b']);
+    expect(settledData.snapshot.nodePromptDeliveries).toEqual(expect.arrayContaining([
+      expect.objectContaining({ nodeId: 'review-a', status: 'delivered', settledPhase: 'final' }),
+      expect.objectContaining({ nodeId: 'review-b', status: 'delivered' }),
+    ]));
+    expect(settledData.snapshot.nodeExecutions).toEqual(expect.arrayContaining([
+      expect.objectContaining({ nodeId: 'review-b', status: 'running' }),
+      expect.objectContaining({ nodeId: 'review-c', status: 'ready' }),
+      expect.objectContaining({ nodeId: 'review-d', status: 'ready' }),
+    ]));
+    expect(settledData.snapshot.nodeExecutions).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ nodeId: 'review-c', status: 'running' }),
+      expect.objectContaining({ nodeId: 'review-d', status: 'running' }),
+    ]));
+  });
+
   it('delivers ready node prompts concurrently and applies projections in scheduler order', async () => {
     const operations: TeamDrainOperation[] = [];
     const stateStore = new FakeTeamRuntimeStateStore(operations);
@@ -2389,6 +2765,7 @@ describe('team runtime capability', () => {
       createdAt: 900,
       updatedAt: 900,
     };
+    let roleSessionIdSequence = 0;
     let activeDeliveries = 0;
     let overlappedDeliveries = false;
     const nodePromptDelivery = new FakeTeamNodePromptDeliveryPort(async () => {
@@ -2399,6 +2776,7 @@ describe('team runtime capability', () => {
     });
     const service = new TeamRuntimeService({
       stateStore,
+      roleSessions: createFakeTeamRoleSessions(),
       nodePromptDelivery,
       packageService: {
         validate: async () => ({
@@ -2421,7 +2799,7 @@ describe('team runtime capability', () => {
         }),
       },
       nowMs: () => 1000,
-      randomId: () => 'id',
+      randomId: () => `id-${roleSessionIdSequence += 1}`,
     });
 
     await service.invoke('team.runCreate', { packagePath: '/pkg', runId: 'run-parallel-prompts', idempotencyKey: 'create-parallel-prompts' }, runtimeScope);
@@ -2519,6 +2897,7 @@ describe('team runtime capability', () => {
     const service = new TeamRuntimeService({
       commandLedger,
       stateStore,
+      roleSessions: createFakeTeamRoleSessions(),
       packageService: {
         validate: async () => ({
           valid: true,
@@ -2615,9 +2994,10 @@ describe('team runtime capability', () => {
     );
   });
 
-  it('does not ensure or prompt role sessions when creating a run', async () => {
+  it('ensures role session bindings without prompting role sessions when creating a run', async () => {
     const nodePromptDelivery = new FakeTeamNodePromptDeliveryPort();
-    const ensureRoleSession = vi.fn(async (input) => ({ ...input, sessionKey: input.sessionIdentity.sessionKey }));
+    const ensureRoleSession = createFakeEnsureRoleSession();
+    const promptRoleSession = vi.fn();
     const operations: TeamDrainOperation[] = [];
     const stateStore = new FakeTeamRuntimeStateStore(operations);
     stateStore.teamInstances['team-package'] = {
@@ -2666,7 +3046,7 @@ describe('team runtime capability', () => {
       },
       roleSessions: {
         ensureRoleSession,
-        promptRoleSession: vi.fn(),
+        promptRoleSession,
         abortRoleSession: vi.fn(),
         deleteRoleSession: vi.fn(),
         readRoleSessionWindow: vi.fn(),
@@ -2677,7 +3057,25 @@ describe('team runtime capability', () => {
 
     await service.invoke('team.runCreate', { packagePath: '/pkg', runId: 'run-1', idempotencyKey: 'create-1' }, runtimeScope);
 
-    expect(ensureRoleSession).not.toHaveBeenCalled();
+    expect(ensureRoleSession).toHaveBeenCalledTimes(2);
+    expect(ensureRoleSession).toHaveBeenCalledWith(expect.objectContaining({
+      teamId: 'team-package',
+      runId: 'run-1',
+      roleId: 'leader',
+      agentId: 'leader-agent',
+      endpointRef: runtimeScope.endpoint,
+      endpointSessionId: 'team-endpoint-session-id',
+    }));
+    expect(ensureRoleSession).toHaveBeenCalledWith(expect.objectContaining({
+      teamId: 'team-package',
+      runId: 'run-1',
+      roleId: 'operator',
+      agentId: 'operator-agent',
+      endpointRef: runtimeScope.endpoint,
+      localSessionId: 'team-role-session-id-2',
+      endpointSessionId: 'team-endpoint-session-id-2',
+    }));
+    expect(promptRoleSession).not.toHaveBeenCalled();
     expect(nodePromptDelivery.deliveries).toHaveLength(0);
     const snapshotResponse = await service.invoke('team.runSnapshot', { runId: 'run-1' }, runtimeScope);
     const snapshot = snapshotResponse.data as { run: { status: string }; events: Array<{ type: string }>; nodePromptDeliveries: Array<{ kind: string; status: string }> };

@@ -5,6 +5,7 @@ import type {
   EnsureTeamRoleSessionInput,
   PromptTeamRoleSessionInput,
   ReadTeamRoleSessionWindowInput,
+  RememberTeamRoleSessionBindingInput,
   TeamRolePromptResult,
   TeamRoleSessionPort,
   TeamRoleSessionWindow,
@@ -146,6 +147,10 @@ export class WorkerProxyTeamRoleSessionPort implements TeamRoleSessionPort {
 
   async ensureRoleSession(input: EnsureTeamRoleSessionInput): Promise<TeamRoleSessionBinding> {
     return await this.rpc.request('host.roleSession.ensure', input) as TeamRoleSessionBinding;
+  }
+
+  async rememberRoleSessionBinding(input: RememberTeamRoleSessionBindingInput): Promise<void> {
+    await this.rpc.request('host.roleSession.remember', input);
   }
 
   async promptRoleSession(input: PromptTeamRoleSessionInput): Promise<TeamRolePromptResult> {

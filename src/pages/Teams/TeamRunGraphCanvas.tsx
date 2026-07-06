@@ -422,6 +422,12 @@ function hasRecordEntries(value: Record<string, unknown>): boolean {
   return Object.keys(value).length > 0;
 }
 
+const EMPTY_TEAM_GRAPH: TeamGraphSnapshotRecord = {
+  nodes: [],
+  edges: [],
+  status: 'draft',
+};
+
 type CanvasViewport = {
   scrollLeft: number;
   scrollTop: number;
@@ -739,11 +745,7 @@ export function TeamRunGraphCanvas({
   const nodeElementsRef = useRef<Record<string, HTMLDivElement | null>>({});
   const suppressClickNodeIdRef = useRef<string | null>(null);
 
-  const effectiveGraph = useMemo<TeamGraphSnapshotRecord>(() => graph ?? {
-    nodes: [],
-    edges: [],
-    status: 'draft',
-  }, [graph]);
+  const effectiveGraph = useMemo<TeamGraphSnapshotRecord>(() => graph ?? EMPTY_TEAM_GRAPH, [graph]);
   const positionedNodes = useMemo(() => positionNodes(effectiveGraph.nodes, draftPositions), [effectiveGraph.nodes, draftPositions]);
   const nodeById = useMemo(
     () => new Map(positionedNodes.map((node) => [node.nodeId, node])),

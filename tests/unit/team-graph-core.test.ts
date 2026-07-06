@@ -189,6 +189,17 @@ function buildParallelAgentReviewDefinition(): TeamGraphDefinition {
         executor: { kind: 'team-role', roleId: 'reviewer' },
         metadata: { workflowPlanId: 'plan-parallel-review', runId: 'run-1', title: 'Review B' },
       },
+      {
+        nodeId: 'operator-work',
+        nodeKind: 'work',
+        kind: 'work',
+        taskId: 'operator-work',
+        roleId: 'operator',
+        title: 'Operator Work',
+        executor: { kind: 'team-role', roleId: 'operator' },
+        config: { prompt: 'Operator Work' },
+        metadata: { workflowPlanId: 'plan-parallel-review', runId: 'run-1', taskId: 'operator-work', roleId: 'operator', title: 'Operator Work' },
+      },
     ],
     edges: [],
   };
@@ -338,13 +349,31 @@ describe('TeamRun graph core', () => {
     const scheduled = scheduleReadyWorkNodeDeliveries(createInitialTeamGraphRunState({ definition, nowMs: 100 }), {
       maxDeliveries: 3,
       maxActiveRoleSessions: 3,
-      roleSessionKeyByRoleId: { operator: 'session:operator', reviewer: 'session:reviewer' },
+      localSessionIdByRoleId: { operator: 'session:operator', reviewer: 'session:reviewer' },
       nowMs: 200,
     });
 
     expect(scheduled.deliveries.map((delivery) => delivery.nodeId)).toEqual(['a', 'c']);
     expect(scheduled.state.readyQueue).toEqual(['b']);
     expect(scheduled.state.nodeExecutionsByNodeId.a?.attempts.at(-1)?.status).toBe('running');
+    expect(scheduled.state.nodeExecutionsByNodeId.b?.attempts.at(-1)?.status).toBe('ready');
+    expect(scheduled.state.nodeExecutionsByNodeId.c?.attempts.at(-1)?.status).toBe('running');
+  });
+
+  it('keeps blocked local session WorkNodes queued without blocking other sessions', () => {
+    const definition = buildParallelWorkDefinition();
+    const scheduled = scheduleReadyWorkNodeDeliveries(createInitialTeamGraphRunState({ definition, nowMs: 100 }), {
+      maxDeliveries: 3,
+      maxActiveRoleSessions: 3,
+      blockedLocalSessionIds: ['session:operator'],
+      localSessionIdByRoleId: { operator: 'session:operator', reviewer: 'session:reviewer' },
+      nowMs: 200,
+    });
+
+    expect(scheduled.deliveries.map((delivery) => delivery.nodeId)).toEqual(['c']);
+    expect(scheduled.controlEffects).toEqual([]);
+    expect(scheduled.state.readyQueue).toEqual(['a', 'b']);
+    expect(scheduled.state.nodeExecutionsByNodeId.a?.attempts.at(-1)?.status).toBe('ready');
     expect(scheduled.state.nodeExecutionsByNodeId.b?.attempts.at(-1)?.status).toBe('ready');
     expect(scheduled.state.nodeExecutionsByNodeId.c?.attempts.at(-1)?.status).toBe('running');
   });
@@ -361,7 +390,7 @@ describe('TeamRun graph core', () => {
     }, {
       maxDeliveries: 1,
       maxActiveRoleSessions: 1,
-      roleSessionKeyByRoleId: { operator: 'session:operator', reviewer: 'session:reviewer' },
+      localSessionIdByRoleId: { operator: 'session:operator', reviewer: 'session:reviewer' },
       nowMs: 200,
     });
 
@@ -374,16 +403,35 @@ describe('TeamRun graph core', () => {
     const scheduled = scheduleReadyWorkNodeDeliveries(createInitialTeamGraphRunState({ definition, nowMs: 100 }), {
       maxDeliveries: 3,
       maxActiveRoleSessions: 3,
-      activeRoleSessionKeys: ['session:reviewer'],
-      roleSessionKeyByRoleId: { reviewer: 'session:reviewer' },
+      activeLocalSessionIds: ['session:reviewer'],
+      localSessionIdByRoleId: { reviewer: 'session:reviewer' },
       nowMs: 200,
     });
 
-    expect(scheduled.deliveries).toEqual([]);
+    expect(scheduled.deliveries.map((delivery) => delivery.nodeId)).toEqual(['operator-work']);
     expect(scheduled.controlEffects).toEqual([]);
     expect(scheduled.state.readyQueue).toEqual(['review-a', 'review-b']);
     expect(scheduled.state.nodeExecutionsByNodeId['review-a']?.attempts.at(-1)?.status).toBe('ready');
     expect(scheduled.state.nodeExecutionsByNodeId['review-b']?.attempts.at(-1)?.status).toBe('ready');
+    expect(scheduled.state.nodeExecutionsByNodeId['operator-work']?.attempts.at(-1)?.status).toBe('running');
+  });
+
+  it('keeps blocked local session ReviewNodes and WorkNodes queued without blocking other sessions', () => {
+    const definition = buildParallelAgentReviewDefinition();
+    const scheduled = scheduleReadyWorkNodeDeliveries(createInitialTeamGraphRunState({ definition, nowMs: 100 }), {
+      maxDeliveries: 3,
+      maxActiveRoleSessions: 3,
+      blockedLocalSessionIds: ['session:reviewer'],
+      localSessionIdByRoleId: { reviewer: 'session:reviewer', operator: 'session:operator' },
+      nowMs: 200,
+    });
+
+    expect(scheduled.deliveries.map((delivery) => delivery.nodeId)).toEqual(['operator-work']);
+    expect(scheduled.controlEffects).toEqual([]);
+    expect(scheduled.state.readyQueue).toEqual(['review-a', 'review-b']);
+    expect(scheduled.state.nodeExecutionsByNodeId['review-a']?.attempts.at(-1)?.status).toBe('ready');
+    expect(scheduled.state.nodeExecutionsByNodeId['review-b']?.attempts.at(-1)?.status).toBe('ready');
+    expect(scheduled.state.nodeExecutionsByNodeId['operator-work']?.attempts.at(-1)?.status).toBe('running');
   });
 
   it('waits for all gate inputs before readying a join node', () => {

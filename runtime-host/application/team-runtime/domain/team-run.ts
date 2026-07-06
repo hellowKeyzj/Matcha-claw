@@ -36,6 +36,8 @@ export interface TeamRoleSessionBinding {
   readonly runId: string;
   readonly roleId: string;
   readonly agentId: string;
+  readonly endpointRef: RuntimeEndpointRef;
+  readonly localSessionId: string;
+  readonly endpointSessionId: string;
   readonly sessionIdentity: SessionIdentity;
-  readonly sessionKey: string;
 }

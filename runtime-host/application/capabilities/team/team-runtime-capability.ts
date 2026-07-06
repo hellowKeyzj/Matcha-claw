@@ -25,6 +25,7 @@ export const teamRuntimeCapabilityOperations = [
   { id: 'team.triggerFire', title: 'Fire TeamRun StartNode trigger', targetKind: 'team-run' },
   { id: 'team.roleMessageSubmit', title: 'Submit Team role chat message', targetKind: 'team-run' },
   { id: 'team.nodePromptRetryDue', title: 'Wake due TeamRun node prompt retries', targetKind: 'team-run' },
+  { id: 'team.nodePromptSettled', title: 'Wake TeamRun after a node prompt session turn settles', targetKind: 'none' },
   { id: 'team.nodeEvent', title: 'Submit TeamRun node event command', targetKind: 'team-run' },
   { id: 'team.runDiagnostics', title: 'Read TeamRun diagnostics', targetKind: 'team-run' },
   { id: 'team.runDecisionSubmit', title: 'Submit TeamRun decision', targetKind: 'team-run' },
@@ -141,6 +142,10 @@ function validateTeamRuntimeTargetInput(
         ?? validateRequiredInputString(input, 'decision')
         ?? validateRequiredInputString(input, 'idempotencyKey')
         ?? validateTeamRunScope(target, scope);
+    case 'team.nodePromptSettled':
+      return validateRequiredInputString(input, 'sessionKey')
+        ?? validateRequiredInputString(input, 'promptRunId')
+        ?? validateRequiredSettledPhase(input);
     case 'team.runSnapshot':
     case 'team.graphContext':
     case 'team.graphExportYaml':
@@ -196,6 +201,13 @@ function validateRequiredInputString(input: Record<string, unknown>, inputField:
 function validateRequiredInputObject(input: Record<string, unknown>, inputField: string): string | null {
   const value = input[inputField];
   return value && typeof value === 'object' && !Array.isArray(value) ? null : `Team runtime input ${inputField} is required`;
+}
+
+function validateRequiredSettledPhase(input: Record<string, unknown>): string | null {
+  const phase = readStringField(input, 'phase');
+  return phase === 'final' || phase === 'error' || phase === 'aborted'
+    ? null
+    : 'Team runtime input phase must be final, error, or aborted';
 }
 
 function validateRequiredGraphPatchOperations(input: Record<string, unknown>): string | null {

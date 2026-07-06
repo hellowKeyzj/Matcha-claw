@@ -8,6 +8,7 @@ import type {
   EnsureTeamRoleSessionInput,
   PromptTeamRoleSessionInput,
   ReadTeamRoleSessionWindowInput,
+  RememberTeamRoleSessionBindingInput,
 } from './ports/team-role-session-port';
 import type { DeleteTeamManagedAgentsJobPayload } from './team-runtime-jobs';
 
@@ -54,6 +55,11 @@ export type TeamRuntimeHostRequest =
       readonly type: 'host.roleSession.ensure';
       readonly requestId: string;
       readonly input: EnsureTeamRoleSessionInput;
+    }
+  | {
+      readonly type: 'host.roleSession.remember';
+      readonly requestId: string;
+      readonly input: RememberTeamRoleSessionBindingInput;
     }
   | {
       readonly type: 'host.roleSession.prompt';

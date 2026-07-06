@@ -14,6 +14,7 @@ export interface TeamNodePromptDeliveryResult {
   readonly status: TeamNodePromptDeliveryStatus;
   readonly reason?: string;
   readonly deliveredAt?: number;
+  readonly promptRunId?: string;
 }
 
 export interface TeamNodePromptDeliveryPort {

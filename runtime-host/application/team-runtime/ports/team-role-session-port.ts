@@ -1,4 +1,4 @@
-import type { SessionIdentity } from '../../agent-runtime/contracts/runtime-address';
+import type { RuntimeEndpointRef, SessionIdentity } from '../../agent-runtime/contracts/runtime-address';
 import type { TeamRoleSessionBinding } from '../domain/team-run';
 
 export interface EnsureTeamRoleSessionInput {
@@ -6,7 +6,10 @@ export interface EnsureTeamRoleSessionInput {
   readonly runId: string;
   readonly roleId: string;
   readonly agentId: string;
-  readonly sessionIdentity: SessionIdentity;
+  readonly endpointRef: RuntimeEndpointRef;
+  readonly localSessionId: string;
+  readonly endpointSessionId: string;
+  readonly sessionIdentity?: SessionIdentity;
 }
 
 export interface PromptTeamRoleSessionInput {
@@ -20,7 +23,7 @@ export interface PromptTeamRoleSessionInput {
 export interface TeamRolePromptResult {
   readonly runId: string;
   readonly roleId: string;
-  readonly sessionKey: string;
+  readonly localSessionId: string;
   readonly promptRunId: string;
 }
 
@@ -33,6 +36,10 @@ export interface DeleteTeamRoleSessionInput {
   readonly binding: TeamRoleSessionBinding;
 }
 
+export interface RememberTeamRoleSessionBindingInput {
+  readonly binding: TeamRoleSessionBinding;
+}
+
 export interface ReadTeamRoleSessionWindowInput {
   readonly binding: TeamRoleSessionBinding;
   readonly limit?: number;
@@ -41,22 +48,23 @@ export interface ReadTeamRoleSessionWindowInput {
 export type TeamRoleSessionWindow =
   | {
       readonly resultType: 'available';
-      readonly sessionKey: string;
+      readonly localSessionId: string;
       readonly items: readonly unknown[];
     }
   | {
       readonly resultType: 'pending_hydration';
-      readonly sessionKey: string;
+      readonly localSessionId: string;
       readonly message: string;
     }
   | {
       readonly resultType: 'unavailable';
-      readonly sessionKey: string;
+      readonly localSessionId: string;
       readonly message: string;
     };
 
 export interface TeamRoleSessionPort {
   ensureRoleSession(input: EnsureTeamRoleSessionInput): Promise<TeamRoleSessionBinding>;
+  rememberRoleSessionBinding(input: RememberTeamRoleSessionBindingInput): Promise<void>;
   promptRoleSession(input: PromptTeamRoleSessionInput): Promise<TeamRolePromptResult>;
   abortRoleSession(input: AbortTeamRoleSessionInput): Promise<void>;
   deleteRoleSession(input: DeleteTeamRoleSessionInput): Promise<void>;

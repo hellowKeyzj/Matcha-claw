@@ -33,8 +33,9 @@ export type ScheduleReadyWorkNodeDeliveriesOptions = {
   readonly maxDeliveries?: number;
   readonly maxActiveRoleSessions?: number;
   readonly activeRoleSessionCount?: number;
-  readonly activeRoleSessionKeys?: readonly string[];
-  readonly roleSessionKeyByRoleId?: Readonly<Record<string, string>>;
+  readonly activeLocalSessionIds?: readonly string[];
+  readonly blockedLocalSessionIds?: readonly string[];
+  readonly localSessionIdByRoleId?: Readonly<Record<string, string>>;
   readonly nowMs?: number;
 };
 
@@ -48,7 +49,7 @@ type ReadyWorkNodeDispatch = {
   readonly nodeId: string;
   readonly taskId: string;
   readonly roleId: string;
-  readonly roleSessionKey: string;
+  readonly localSessionId: string;
   readonly attempt: TeamGraphNodeExecutionAttempt;
   readonly queueItem: TeamGraphReadyQueueItem;
 };
@@ -57,7 +58,7 @@ type ReadyControlNodeDispatch = {
   readonly nodeId: string;
   readonly nodeKind: TeamGraphControlNodeEffect['nodeKind'];
   readonly effectType: TeamGraphControlNodeEffect['effectType'];
-  readonly roleSessionKey?: string;
+  readonly localSessionId?: string;
   readonly attempt: TeamGraphNodeExecutionAttempt;
   readonly queueItem: TeamGraphReadyQueueItem;
 };
@@ -85,7 +86,10 @@ export function scheduleReadyWorkNodeDeliveries(
   const dispatches: ReadyWorkNodeDispatch[] = [];
   const controlDispatches: ReadyControlNodeDispatch[] = [];
   const scheduledNodeIds = new Set<string>();
-  const reservedRoleSessionKeys = new Set(options.activeRoleSessionKeys ?? []);
+  const reservedLocalSessionIds = new Set([
+    ...(options.activeLocalSessionIds ?? []),
+    ...(options.blockedLocalSessionIds ?? []),
+  ]);
   const retainedQueueItems: TeamGraphReadyQueueItem[] = [];
   let scheduledRoleSessionCount = 0;
 
@@ -100,31 +104,31 @@ export function scheduleReadyWorkNodeDeliveries(
     if (!node) throw new Error(`Ready queue references missing node "${nodeId}".`);
     const attempt = requireCurrentReadyAttempt(state, nodeId, queueItem);
     if (node.kind === 'work') {
-      const roleSessionKey = options.roleSessionKeyByRoleId?.[node.roleId] ?? node.roleId;
+      const localSessionId = options.localSessionIdByRoleId?.[node.roleId] ?? node.roleId;
       if (dispatches.length >= maxDeliveries || scheduledRoleSessionCount >= sessionSlots) {
         retainedQueueItems.push(...activeWindowItems.slice(index));
         break;
       }
-      if (reservedRoleSessionKeys.has(roleSessionKey)) {
+      if (reservedLocalSessionIds.has(localSessionId)) {
         retainedQueueItems.push(queueItem);
         continue;
       }
-      dispatches.push({ nodeId, taskId: node.taskId, roleId: node.roleId, roleSessionKey, attempt, queueItem });
-      reservedRoleSessionKeys.add(roleSessionKey);
+      dispatches.push({ nodeId, taskId: node.taskId, roleId: node.roleId, localSessionId, attempt, queueItem });
+      reservedLocalSessionIds.add(localSessionId);
       scheduledRoleSessionCount += 1;
     } else {
-      const roleSessionKey = readRoleSessionKeyForControlNode(node, options.roleSessionKeyByRoleId);
-      if (roleSessionKey && scheduledRoleSessionCount >= sessionSlots) {
+      const localSessionId = readLocalSessionIdForControlNode(node, options.localSessionIdByRoleId);
+      if (localSessionId && scheduledRoleSessionCount >= sessionSlots) {
         retainedQueueItems.push(...activeWindowItems.slice(index));
         break;
       }
-      if (roleSessionKey && reservedRoleSessionKeys.has(roleSessionKey)) {
+      if (localSessionId && reservedLocalSessionIds.has(localSessionId)) {
         retainedQueueItems.push(queueItem);
         continue;
       }
-      controlDispatches.push({ nodeId, nodeKind: node.kind, effectType: effectTypeForControlNode(node.kind, node.executor), ...(roleSessionKey ? { roleSessionKey } : {}), attempt, queueItem });
-      if (roleSessionKey) {
-        reservedRoleSessionKeys.add(roleSessionKey);
+      controlDispatches.push({ nodeId, nodeKind: node.kind, effectType: effectTypeForControlNode(node.kind, node.executor), ...(localSessionId ? { localSessionId } : {}), attempt, queueItem });
+      if (localSessionId) {
+        reservedLocalSessionIds.add(localSessionId);
         scheduledRoleSessionCount += 1;
       }
     }
@@ -209,11 +213,11 @@ function effectTypeForControlNode(kind: TeamGraphControlNodeEffect['nodeKind'], 
   }
 }
 
-function readRoleSessionKeyForControlNode(node: TeamGraphNodeDefinition, roleSessionKeyByRoleId: Readonly<Record<string, string>> | undefined): string | undefined {
+function readLocalSessionIdForControlNode(node: TeamGraphNodeDefinition, localSessionIdByRoleId: Readonly<Record<string, string>> | undefined): string | undefined {
   if (node.kind !== 'review' || node.executor?.kind !== 'team-role') return undefined;
   const roleId = typeof node.executor.roleId === 'string' && node.executor.roleId.trim() ? node.executor.roleId : node.roleId;
   if (!roleId) return undefined;
-  return roleSessionKeyByRoleId?.[roleId] ?? roleId;
+  return localSessionIdByRoleId?.[roleId] ?? roleId;
 }
 
 function activeReadyQueueItems(state: TeamGraphRunState): TeamGraphReadyQueueItem[] {

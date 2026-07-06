@@ -1,5 +1,5 @@
 import { hostApiFetch, resolveSingleCapabilityScope } from '@/lib/host-api';
-import type { CapabilityTarget, SessionIdentity } from '../../../runtime-host/shared/runtime-address';
+import type { CapabilityTarget, RuntimeEndpointRef, SessionIdentity } from '../../../runtime-host/shared/runtime-address';
 
 export type TeamRunStatus = 'created' | 'provisioning' | 'waiting_for_user' | 'running' | 'paused' | 'cancelling' | 'completed' | 'failed' | 'cancelled';
 
@@ -25,6 +25,7 @@ export type TeamRuntimeOperationId =
   | 'team.triggerFire'
   | 'team.roleMessageSubmit'
   | 'team.nodePromptRetryDue'
+  | 'team.nodePromptSettled'
   | 'team.nodeEvent'
   | 'team.runCancel'
   | 'team.runDelete';
@@ -214,7 +215,9 @@ export interface TeamRoleBindingRecord {
   runId: string;
   roleId: string;
   agentId: string;
-  sessionKey: string;
+  endpointRef: RuntimeEndpointRef;
+  localSessionId: string;
+  endpointSessionId: string;
   sessionIdentity: SessionIdentity;
 }
 
@@ -291,7 +294,7 @@ export interface TeamNodePromptDeliveryAttemptRecord {
   taskId: string;
   roleId: string;
   toAgentId: string;
-  sessionKey: string;
+  localSessionId: string;
   kind: 'node.prompt';
   title: string;
   prompt: string;
@@ -330,7 +333,7 @@ export interface TeamDispatchExecutionRecord {
   stageId: string;
   roleId: string;
   executionId?: string;
-  childSessionKey?: string;
+  childLocalSessionId?: string;
   spawnMode?: 'run' | 'session';
   status: 'claimed' | 'queued' | 'completed' | 'failed' | 'stale' | 'cancelled';
   statusReason?: string;

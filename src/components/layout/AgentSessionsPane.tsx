@@ -4,7 +4,12 @@ import { AgentAvatar } from '@/components/common/AgentAvatar';
 import type { AgentAvatarStyle } from '@/lib/agent-avatar';
 import { cn } from '@/lib/utils';
 import { useSubagentsStore } from '@/stores/subagents';
-import { useTeamsStore } from '@/stores/teams';
+import {
+  isKnownTeamRoleSession,
+  resolveTeamRoleChatTargetFromProbe,
+  selectTeamRoleChatTargetIndex,
+  useTeamsStore,
+} from '@/stores/teams';
 import { useChatStore, type ChatSession } from '@/stores/chat';
 import { selectAgentSessionsPaneState } from '@/stores/chat/selectors';
 import { useTranslation } from 'react-i18next';
@@ -295,14 +300,17 @@ interface AgentListSectionProps {
   onCreateSessionForAgent: (agentId: string) => void;
 }
 
+interface TeamRoleSessionNode {
+  roleId: string;
+  agentId: string;
+  sessionIdentity: ChatSession['sessionIdentity'];
+  endpointSessionId: string;
+}
+
 interface TeamRunSessionNode {
   runId: string;
-  leader?: ChatSession['sessionIdentity'];
-  roles: Array<{
-    roleId: string;
-    agentId: string;
-    sessionIdentity: ChatSession['sessionIdentity'];
-  }>;
+  leader?: TeamRoleSessionNode;
+  roles: TeamRoleSessionNode[];
 }
 
 interface TeamSessionNode {
@@ -323,7 +331,7 @@ interface TeamListSectionProps {
   onToggleRun: (runId: string) => void;
   onSelectRun: (teamId: string, run: TeamRunSessionNode) => void;
   onCreateRun: (teamId: string) => void;
-  onOpenSessionIdentity: (identity: ChatSession['sessionIdentity']) => void;
+  onSelectRole: (teamId: string, runId: string, role: TeamRoleSessionNode) => void;
 }
 
 const TeamListSection = memo(function TeamListSection({
@@ -337,7 +345,7 @@ const TeamListSection = memo(function TeamListSection({
   onToggleRun,
   onSelectRun,
   onCreateRun,
-  onOpenSessionIdentity,
+  onSelectRole,
 }: TeamListSectionProps) {
   if (nodes.length === 0) {
     return <p className="px-2 py-1 text-xs text-muted-foreground">{emptyLabel}</p>;
@@ -454,7 +462,7 @@ const TeamListSection = memo(function TeamListSection({
                               key={`${node.teamId}:${run.runId}:${role.roleId}`}
                               type="button"
                               className="flex w-full items-center gap-1.5 rounded-[calc(var(--radius-interactive)+2px)] px-1.5 py-1 text-left text-xs text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground"
-                              onClick={() => onOpenSessionIdentity(role.sessionIdentity)}
+                              onClick={() => onSelectRole(node.teamId, run.runId, role)}
                             >
                               <AgentAvatar agentId={role.agentId} agentName={role.roleId} className="h-4 w-4" />
                               <span className="min-w-0 flex-1 truncate">{role.roleId}</span>
@@ -680,6 +688,7 @@ export const AgentSessionsPane = memo(function AgentSessionsPane({
   } = useChatStore(useShallow(selectAgentSessionsPaneState));
   const teams = useTeamsStore((state) => state.teams);
   const runListByTeamId = useTeamsStore((state) => state.runListByTeamId);
+  const teamRoleChatTargetIndex = useTeamsStore(selectTeamRoleChatTargetIndex);
   const createRun = useTeamsStore((state) => state.createRun);
   const setActiveRun = useTeamsStore((state) => state.setActiveRun);
   const syncRunList = useTeamsStore((state) => state.syncRunList);
@@ -698,10 +707,16 @@ export const AgentSessionsPane = memo(function AgentSessionsPane({
     title: string;
   } | null>(null);
 
+  const agentPaneSessionEntries = sessionEntries.filter((entry) => !isKnownTeamRoleSession(teamRoleChatTargetIndex, {
+    sessionIdentity: entry.session.sessionIdentity,
+    sessionKey: entry.session.key,
+    backendSessionKey: entry.session.backendSessionKey,
+    endpointSessionId: entry.session.endpointSessionId,
+  }));
   const paneViewModel = useAgentSessionsPaneViewModel({
     agents,
     agentsResource,
-    sessionEntries,
+    sessionEntries: agentPaneSessionEntries,
     sessionsLoading,
     sessionsLoadedOnce,
     sessionsError,
@@ -716,17 +731,23 @@ export const AgentSessionsPane = memo(function AgentSessionsPane({
     teamName: team.name,
     activeRunId: team.activeRunId,
     runs: (runListByTeamId[team.id] ?? []).map((run) => {
-      const leader = run.sessions.find((role) => role.roleId === 'leader')?.sessionIdentity;
+      const toRoleNode = (role: (typeof run.sessions)[number]): TeamRoleSessionNode => ({
+        roleId: role.roleId,
+        agentId: role.agentId,
+        sessionIdentity: role.sessionIdentity,
+        endpointSessionId: resolveTeamRoleChatTargetFromProbe(teamRoleChatTargetIndex, {
+          sessionIdentity: role.sessionIdentity,
+          sessionKey: role.localSessionId,
+          endpointSessionId: role.endpointSessionId,
+        })?.endpointSessionId ?? role.endpointSessionId,
+      });
+      const leader = run.sessions.find((role) => role.roleId === 'leader');
       return {
         runId: run.runId,
-        leader,
+        ...(leader ? { leader: toRoleNode(leader) } : {}),
         roles: run.sessions
           .filter((role) => role.roleId !== 'leader')
-          .map((role) => ({
-            roleId: role.roleId,
-            agentId: role.agentId,
-            sessionIdentity: role.sessionIdentity,
-          })),
+          .map(toRoleNode),
       };
     }),
   }));
@@ -767,9 +788,11 @@ export const AgentSessionsPane = memo(function AgentSessionsPane({
     newSession(agentId);
   }, [newSession]);
 
-  const handleOpenSessionIdentity = useCallback((identity: ChatSession['sessionIdentity']) => {
-    openSessionIdentity(identity);
-  }, [openSessionIdentity]);
+  const selectTeamRole = useCallback((teamId: string, runId: string, role: TeamRoleSessionNode) => {
+    setActiveRun(teamId, runId);
+    openSessionIdentity({ sessionIdentity: role.sessionIdentity, endpointSessionId: role.endpointSessionId });
+    void refreshSnapshot(teamId, { force: true });
+  }, [openSessionIdentity, refreshSnapshot, setActiveRun]);
 
   const toggleTeam = useCallback((teamId: string) => {
     setExpandedTeamIds((current) => ({ ...current, [teamId]: current[teamId] !== true }));
@@ -782,7 +805,7 @@ export const AgentSessionsPane = memo(function AgentSessionsPane({
   const selectTeamRun = useCallback((teamId: string, run: TeamRunSessionNode) => {
     setActiveRun(teamId, run.runId);
     if (run.leader) {
-      openSessionIdentity(run.leader);
+      openSessionIdentity({ sessionIdentity: run.leader.sessionIdentity, endpointSessionId: run.leader.endpointSessionId });
     }
     void refreshSnapshot(teamId, { force: true });
   }, [openSessionIdentity, refreshSnapshot, setActiveRun]);
@@ -1005,7 +1028,7 @@ export const AgentSessionsPane = memo(function AgentSessionsPane({
                     onToggleRun={toggleRun}
                     onSelectRun={selectTeamRun}
                     onCreateRun={handleCreateRunForTeam}
-                    onOpenSessionIdentity={handleOpenSessionIdentity}
+                    onSelectRole={selectTeamRole}
                   />
                 )}
               </div>

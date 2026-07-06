@@ -9,7 +9,7 @@ export class TeamRuntimeNodePromptDeliveryService implements TeamNodePromptDeliv
   }) {}
 
   async deliver(input: TeamNodePromptDeliveryInput): Promise<TeamNodePromptDeliveryResult> {
-    await this.deps.roleSessions.promptRoleSession({
+    const prompt = await this.deps.roleSessions.promptRoleSession({
       binding: input.binding,
       message: formatTeamNodePrompt(input.delivery),
       displayMessage: input.delivery.displayMessage,
@@ -19,6 +19,7 @@ export class TeamRuntimeNodePromptDeliveryService implements TeamNodePromptDeliv
       deliveryRecordId: input.delivery.deliveryRecordId,
       status: 'delivered',
       deliveredAt: this.deps.nowMs(),
+      promptRunId: prompt.promptRunId,
     };
   }
 }

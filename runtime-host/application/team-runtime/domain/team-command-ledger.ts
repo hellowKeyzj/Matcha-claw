@@ -21,7 +21,9 @@ export interface TeamAgentCommandBase {
   readonly sourceEndpoint: RuntimeEndpointRef;
   readonly sourceAgentId: string;
   readonly sourceRuntimeAdapterId?: string;
-  readonly sourceSessionKey?: string;
+  readonly sourceRoleId?: string;
+  readonly sourceLocalSessionId?: string;
+  readonly sourceEndpointSessionId?: string;
   readonly createdAt: number;
 }
 

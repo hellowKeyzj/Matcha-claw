@@ -20,7 +20,17 @@ vi.mock('@/services/openclaw/team-runtime-client', () => ({
 import { useChatStore } from '@/stores/chat';
 import { buildSessionIdentityRecordIndex, buildSessionRecordKey } from '@/stores/chat/session-identity';
 import { createEmptySessionRecord } from '@/stores/chat/store-state-helpers';
-import { useTeamsStore, type TeamMeta, type TeamSkillCandidate } from '@/stores/teams';
+import {
+  buildTeamRoleChatTargetByIdentityKey,
+  buildTeamRoleChatTargetIndex,
+  isKnownTeamRoleSession,
+  resolveTeamRoleChatTarget,
+  resolveTeamRoleChatTargetFromProbe,
+  selectTeamRoleChatTargetIndex,
+  useTeamsStore,
+  type TeamMeta,
+  type TeamSkillCandidate,
+} from '@/stores/teams';
 import {
   createTeamRun,
   deleteTeamInstance,
@@ -35,11 +45,12 @@ import {
   saveTeamRunGraphProjection,
   submitTeamRunDecision,
   type ManualTeamProvisionRecord,
+  type TeamGraphSnapshotRecord,
   type TeamRunSnapshot,
   type TeamRunStatus,
   type TeamSkillPackage,
 } from '@/services/openclaw/team-runtime-client';
-import { createOpenClawTestSessionIdentity } from './helpers/runtime-address-fixtures';
+import { createOpenClawTestSessionIdentity, openClawTestRuntimeEndpoint } from './helpers/runtime-address-fixtures';
 
 const basePackage: TeamSkillPackage = {
   name: 'ascendc-team',
@@ -163,8 +174,12 @@ function seedTeam(input: Partial<TeamMeta> = {}) {
   });
 }
 
-function sessionRecord(sessionKey: string, agentId: string, runPhase: 'idle' | 'streaming' = 'idle') {
-  const identity = createOpenClawTestSessionIdentity(sessionKey, agentId);
+function sessionRecord(
+  backendSessionKey: string,
+  agentId: string,
+  runPhase: 'idle' | 'streaming' = 'idle',
+  identity = createOpenClawTestSessionIdentity(backendSessionKey, agentId),
+) {
   const recordKey = buildSessionRecordKey(identity);
   return {
     recordKey,
@@ -172,7 +187,7 @@ function sessionRecord(sessionKey: string, agentId: string, runPhase: 'idle' | '
       ...createEmptySessionRecord(),
       meta: {
         ...createEmptySessionRecord().meta,
-        backendSessionKey: sessionKey,
+        backendSessionKey,
         agentId,
         sessionIdentity: identity,
         historyStatus: 'ready' as const,
@@ -182,6 +197,26 @@ function sessionRecord(sessionKey: string, agentId: string, runPhase: 'idle' | '
         runPhase,
       },
     },
+  };
+}
+
+function teamRoleSessionBinding(input: {
+  runId: string;
+  roleId: string;
+  agentId: string;
+  localSessionId?: string;
+  endpointSessionId?: string;
+}) {
+  const localSessionId = input.localSessionId ?? `local:${input.runId}:${input.roleId}`;
+  const endpointSessionId = input.endpointSessionId ?? `endpoint:${input.runId}:${input.roleId}`;
+  return {
+    runId: input.runId,
+    roleId: input.roleId,
+    agentId: input.agentId,
+    endpointRef: openClawTestRuntimeEndpoint,
+    localSessionId,
+    endpointSessionId,
+    sessionIdentity: createOpenClawTestSessionIdentity(localSessionId, input.agentId),
   };
 }
 
@@ -331,7 +366,7 @@ describe('teams store', () => {
       runIdsByTeamId: { 'team-1': ['team-1-run-1.0.0-1000'] },
       runsById: { 'team-1-run-1.0.0-1000': buildSnapshot().run ?? undefined },
       runByTeamId: { 'team-1': buildSnapshot().run ?? undefined },
-      rolesByTeamId: { 'team-1': [{ runId: 'old-run', roleId: 'leader', agentId: 'agent-1', agentName: 'Leader', workspaceDir: '/w', agentDir: '/a', skills: [], tools: [], status: 'idle' }] },
+      rolesByTeamId: { 'team-1': [teamRoleSessionBinding({ runId: 'old-run', roleId: 'leader', agentId: 'agent-1' })] },
       eventCursorByTeamId: { 'team-1': 8 },
       eventCursorByRunId: { 'team-1-run-1.0.0-1000': 8 },
     });
@@ -457,9 +492,12 @@ describe('teams store', () => {
   });
 
   it('removes deleted TeamRun role sessions from the chat catalog when deleting a team', async () => {
-    const leader = sessionRecord('agent:leader-agent:team-role:local-run:leader', 'leader-agent', 'streaming');
-    const analyst = sessionRecord('agent:analyst-agent:team-role:backend-run:analyst', 'analyst-agent');
-    const otherTeamRole = sessionRecord('agent:other-agent:team-role:other-run:leader', 'other-agent');
+    const leaderBinding = teamRoleSessionBinding({ runId: 'local-run', roleId: 'leader', agentId: 'leader-agent' });
+    const analystBinding = teamRoleSessionBinding({ runId: 'backend-run', roleId: 'analyst', agentId: 'analyst-agent' });
+    const otherTeamRoleBinding = teamRoleSessionBinding({ runId: 'other-run', roleId: 'leader', agentId: 'other-agent' });
+    const leader = sessionRecord(leaderBinding.localSessionId, 'leader-agent', 'streaming', leaderBinding.sessionIdentity);
+    const analyst = sessionRecord(analystBinding.localSessionId, 'analyst-agent', 'idle', analystBinding.sessionIdentity);
+    const otherTeamRole = sessionRecord(otherTeamRoleBinding.localSessionId, 'other-agent', 'idle', otherTeamRoleBinding.sessionIdentity);
     const normalSession = sessionRecord('agent:main:main', 'main');
     const loadedSessions = {
       [leader.recordKey]: leader.record,
@@ -482,7 +520,10 @@ describe('teams store', () => {
         'local-run': buildSnapshot('running', [{ eventId: 'local-event', runId: 'local-run', revision: 2, type: 'run:started', payload: {}, createdAt: 2 }]).run ?? undefined,
         'backend-run': buildSnapshot('running', [{ eventId: 'backend-event', runId: 'backend-run', revision: 3, type: 'run:started', payload: {}, createdAt: 3 }]).run ?? undefined,
       },
-    });
+      rolesByTeamId: {
+        'team-1': [leaderBinding, analystBinding, otherTeamRoleBinding],
+      },
+    } as never);
     vi.mocked(deleteTeamInstance).mockResolvedValueOnce({ teamId: 'team-1', deleted: true, deletedRunIds: ['backend-run'], deletedAgentIds: [] });
 
     await useTeamsStore.getState().deleteTeam('team-1');
@@ -705,9 +746,9 @@ describe('teams store', () => {
       teamId: 'team-1',
       runs: [
         { ...newerRun, sessions: [] },
-        { ...olderRun, sessions: [{ runId: 'teamrun-old', roleId: 'leader', agentId: 'agent-1', sessionKey: 'agent:agent-1:main', sessionIdentity: { endpoint: { kind: 'native-runtime', runtimeAdapterId: 'openclaw', runtimeInstanceId: 'local' }, agentId: 'agent-1', sessionKey: 'agent:agent-1:main' } }] },
+        { ...olderRun, sessions: [teamRoleSessionBinding({ runId: 'teamrun-old', roleId: 'leader', agentId: 'agent-1', localSessionId: 'local:teamrun-old:leader', endpointSessionId: 'endpoint-teamrun-old-leader' })] },
       ],
-    });
+    } as never);
 
     await useTeamsStore.getState().syncRunList('team-1');
 
@@ -739,7 +780,7 @@ describe('teams store', () => {
           taskId: 'task-old',
           roleId: 'operator',
           toAgentId: 'agent-2',
-          sessionKey: 'session:operator',
+          localSessionId: 'local:teamrun-missing:operator',
           kind: 'node.prompt',
           title: 'Old node prompt',
           prompt: 'Prompt',
@@ -751,7 +792,7 @@ describe('teams store', () => {
       },
       eventsByTeamId: { 'team-1': [{ eventId: 'old-event', runId: 'teamrun-missing', revision: 1, type: 'run:created', payload: {}, createdAt: 1 }] },
       eventCursorByTeamId: { 'team-1': 1 },
-    });
+    } as never);
     vi.mocked(listTeamRuns).mockResolvedValueOnce({
       teamId: 'team-1',
       runs: [
@@ -769,6 +810,33 @@ describe('teams store', () => {
     expect(state.nodePromptDeliveryAttemptsByTeamId['team-1']).toEqual([]);
     expect(state.eventsByTeamId['team-1']).toEqual([]);
     expect(state.eventCursorByTeamId['team-1']).toBeUndefined();
+  });
+
+  it('switches active run projection with the run list role session bindings', () => {
+    const olderRun = buildSnapshot('completed', [{ eventId: 'e1', runId: 'teamrun-old', revision: 1, type: 'run:created', payload: {}, createdAt: 1 }]).run!;
+    const newerRun = buildSnapshot('running', [{ eventId: 'e2', runId: 'teamrun-new', revision: 2, type: 'run:created', payload: {}, createdAt: 2 }]).run!;
+    const oldLeader = teamRoleSessionBinding({ runId: 'teamrun-old', roleId: 'leader', agentId: 'leader-agent', localSessionId: 'team-role-session-old-leader' });
+    const newLeader = teamRoleSessionBinding({ runId: 'teamrun-new', roleId: 'leader', agentId: 'leader-agent', localSessionId: 'team-role-session-new-leader' });
+    useTeamsStore.setState({
+      teams: [teamMeta({ activeRunId: 'teamrun-new' })],
+      runIdsByTeamId: { 'team-1': ['teamrun-old', 'teamrun-new'] },
+      runListByTeamId: {
+        'team-1': [
+          { ...olderRun, sessions: [oldLeader] },
+          { ...newerRun, sessions: [newLeader] },
+        ],
+      },
+      runsById: { 'teamrun-old': olderRun, 'teamrun-new': newerRun },
+      runByTeamId: { 'team-1': newerRun },
+      rolesByTeamId: { 'team-1': [newLeader] },
+    });
+
+    useTeamsStore.getState().setActiveRun('team-1', 'teamrun-old');
+
+    const state = useTeamsStore.getState();
+    expect(state.teams[0]?.activeRunId).toBe('teamrun-old');
+    expect(state.runByTeamId['team-1']?.runId).toBe('teamrun-old');
+    expect(state.rolesByTeamId['team-1']).toEqual([oldLeader]);
   });
 
   it('switches active run projection before refreshing that run snapshot', async () => {
@@ -849,7 +917,7 @@ describe('teams store', () => {
           taskId: 'task-old',
           roleId: 'operator',
           toAgentId: 'agent-2',
-          sessionKey: 'session:operator',
+          localSessionId: 'local:teamrun-missing:operator',
           kind: 'node.prompt',
           title: 'Old node prompt',
           prompt: 'Prompt',
@@ -858,7 +926,7 @@ describe('teams store', () => {
           causationId: 'old-completed',
           createdAt: 2,
         }],
-      });
+      } as never);
     }));
 
     const refresh = useTeamsStore.getState().refreshSnapshot('team-1');
@@ -922,6 +990,50 @@ describe('teams store', () => {
       ...graph,
       runId: 'team-1-run-1.0.0-1000',
       updatedAt: 222,
+    });
+  });
+
+  it('normalizes malformed graph entries when patching a TeamRun snapshot', async () => {
+    const snapshot = buildSnapshot('running');
+    snapshot.graph = {
+      runId: 'team-1-run-1.0.0-1000',
+      status: 'running',
+      nodes: [
+        undefined,
+        { title: 'Malformed node without id' },
+        { nodeId: 'analysis-work-node', title: 'Work node without kind', status: 'running' },
+        { nodeId: 'review-node', kind: 'review', title: 'Review work', status: 'pending' },
+      ],
+      edges: [
+        undefined,
+        { edgeId: 'malformed-edge-without-endpoints' },
+        { edgeId: 'missing-target-edge', sourceNodeId: 'analysis-work-node', targetNodeId: 'missing-node' },
+        { edgeId: 'review-edge', sourceNodeId: 'analysis-work-node', targetNodeId: 'review-node', sourcePort: 'completed' },
+      ],
+      updatedAt: 300,
+    } as unknown as TeamGraphSnapshotRecord;
+    useTeamsStore.setState({
+      teams: [teamMeta()],
+      runIdsByTeamId: { 'team-1': ['team-1-run-1.0.0-1000'] },
+      runsById: { 'team-1-run-1.0.0-1000': snapshot.run ?? undefined },
+      runByTeamId: { 'team-1': snapshot.run ?? undefined },
+    } as never);
+    vi.mocked(readTeamRunSnapshot).mockResolvedValueOnce(snapshot);
+
+    await useTeamsStore.getState().refreshSnapshot('team-1', { force: true });
+
+    expect(useTeamsStore.getState().graphByTeamId['team-1']).toEqual({
+      runId: 'team-1-run-1.0.0-1000',
+      status: 'running',
+      nodes: [
+        { nodeId: 'analysis-work-node', title: 'Work node without kind', status: 'running' },
+        { nodeId: 'review-node', kind: 'review', title: 'Review work', status: 'pending' },
+      ],
+      edges: [
+        { edgeId: 'missing-target-edge', sourceNodeId: 'analysis-work-node', targetNodeId: 'missing-node' },
+        { edgeId: 'review-edge', sourceNodeId: 'analysis-work-node', targetNodeId: 'review-node', sourcePort: 'completed' },
+      ],
+      updatedAt: 300,
     });
   });
 
@@ -990,7 +1102,8 @@ describe('teams store', () => {
   });
 
   it('shows TeamRun role chat user messages optimistically before runtime-host returns', async () => {
-    const leader = sessionRecord('agent:leader-agent:team-role:team-1-run-1.0.0-1000:leader', 'leader-agent');
+    const leaderBinding = teamRoleSessionBinding({ runId: 'team-1-run-1.0.0-1000', roleId: 'leader', agentId: 'leader-agent' });
+    const leader = sessionRecord(leaderBinding.localSessionId, 'leader-agent', 'idle', leaderBinding.sessionIdentity);
     const loadedSessions = { [leader.recordKey]: leader.record };
     useChatStore.setState({
       currentSessionKey: leader.recordKey,
@@ -1007,8 +1120,10 @@ describe('teams store', () => {
           runId: 'team-1-run-1.0.0-1000',
           roleId: 'leader',
           agentId: 'leader-agent',
-          sessionKey: leader.record.meta.backendSessionKey,
-          sessionIdentity: leader.record.meta.sessionIdentity!,
+          endpointRef: leaderBinding.endpointRef,
+          localSessionId: leaderBinding.localSessionId,
+          endpointSessionId: leaderBinding.endpointSessionId,
+          sessionIdentity: leaderBinding.sessionIdentity,
         }],
       },
     });
@@ -1050,71 +1165,158 @@ describe('teams store', () => {
     await submit;
   });
 
-  it('uses the Team role sessionKey for optimistic display when role projection is missing after restart', async () => {
-    const leader = sessionRecord('agent:leader-agent:team-role:team-1-run-1.0.0-1000:leader', 'leader-agent');
-    const loadedSessions = { [leader.recordKey]: leader.record };
-    useChatStore.setState({
-      currentSessionKey: leader.recordKey,
-      loadedSessions,
-      sessionRecordKeyByIdentityKey: buildSessionIdentityRecordIndex(loadedSessions),
-    } as never);
+  it('submits a Team role chat message to the requested run instead of the active run', async () => {
     useTeamsStore.setState({
-      teams: [teamMeta()],
-      runIdsByTeamId: { 'team-1': ['team-1-run-1.0.0-1000'] },
-      runsById: { 'team-1-run-1.0.0-1000': buildSnapshot().run ?? undefined },
-      runByTeamId: { 'team-1': buildSnapshot().run ?? undefined },
-      rolesByTeamId: { 'team-1': [] },
-    });
-    let releaseSubmit!: () => void;
-    vi.mocked(submitTeamRunRoleMessage).mockReturnValueOnce(new Promise((resolve) => {
-      releaseSubmit = () => resolve({ success: true, submitted: true, snapshot: buildSnapshot() });
-    }));
-
-    const submit = useTeamsStore.getState().submitTeamRoleMessageFromChat('team-1', 'leader', '投影缺失也要显示');
-
-    expect(useChatStore.getState().loadedSessions[leader.recordKey]?.items).toEqual([
-      expect.objectContaining({
-        kind: 'user-message',
-        text: '投影缺失也要显示',
-        status: 'sending',
-      }),
-      expect.objectContaining({
-        kind: 'assistant-turn',
-        pendingState: 'typing',
-      }),
-    ]);
-    expect(submitTeamRunRoleMessage).toHaveBeenCalledWith(expect.objectContaining({
-      runId: 'team-1-run-1.0.0-1000',
-      roleId: 'leader',
-      text: '投影缺失也要显示',
-    }));
-
-    releaseSubmit();
-    await submit;
-  });
-
-  it('submits a Team role chat message and applies the returned snapshot', async () => {
-    useTeamsStore.setState({
-      teams: [teamMeta()],
-      runIdsByTeamId: { 'team-1': ['team-1-run-1.0.0-1000'] },
-      runsById: { 'team-1-run-1.0.0-1000': buildSnapshot().run ?? undefined },
-      runByTeamId: { 'team-1': buildSnapshot().run ?? undefined },
+      teams: [teamMeta({ activeRunId: 'team-1-run-active' })],
+      runIdsByTeamId: { 'team-1': ['team-1-run-active', 'team-1-run-requested'] },
+      runsById: {
+        'team-1-run-active': buildSnapshot('running', [{ eventId: 'active-event', runId: 'team-1-run-active', revision: 2, type: 'run:started', payload: {}, createdAt: 2 }]).run ?? undefined,
+        'team-1-run-requested': buildSnapshot('running', [{ eventId: 'requested-event', runId: 'team-1-run-requested', revision: 2, type: 'run:started', payload: {}, createdAt: 2 }]).run ?? undefined,
+      },
+      runByTeamId: { 'team-1': buildSnapshot('running', [{ eventId: 'active-event', runId: 'team-1-run-active', revision: 2, type: 'run:started', payload: {}, createdAt: 2 }]).run ?? undefined },
     });
     const snapshot = buildSnapshot('running', [
-      { eventId: 'role-message-1', runId: 'team-1-run-1.0.0-1000', revision: 3, type: 'role_message.submitted', payload: {}, createdAt: 3 },
+      { eventId: 'role-message-1', runId: 'team-1-run-requested', revision: 3, type: 'role_message.submitted', payload: {}, createdAt: 3 },
     ]);
     vi.mocked(submitTeamRunRoleMessage).mockResolvedValueOnce({ success: true, submitted: true, snapshot });
 
-    await useTeamsStore.getState().submitTeamRoleMessageFromChat('team-1', 'leader', '  Analyze Anthropic Series B  ');
+    await useTeamsStore.getState().submitTeamRoleMessageFromChat('team-1', 'leader', '  Analyze Anthropic Series B  ', 'team-1-run-requested');
 
     expect(submitTeamRunRoleMessage).toHaveBeenCalledWith({
-      runId: 'team-1-run-1.0.0-1000',
+      runId: 'team-1-run-requested',
       roleId: 'leader',
       text: '  Analyze Anthropic Series B  ',
-      idempotencyKey: expect.stringMatching(/^team-1:role-message:team-1-run-1\.0\.0-1000:leader:message:/),
+      idempotencyKey: expect.stringMatching(/^team-1:role-message:team-1-run-requested:leader:message:/),
     });
     expect(useTeamsStore.getState().eventsByTeamId['team-1']?.map((event) => event.eventId)).toEqual(['role-message-1']);
     expect(useTeamsStore.getState().loadingByTeamId['team-1']).toBe(false);
+  });
+
+  it('resolves Team role chat targets from canonical role identities across run list and binding projections', () => {
+    const runListLeader = teamRoleSessionBinding({ runId: 'run-from-list', roleId: 'leader', agentId: 'leader-agent' });
+    const bindingAnalyst = teamRoleSessionBinding({ runId: 'run-from-bindings', roleId: 'analyst', agentId: 'analyst-agent' });
+    const runFromList = buildSnapshot('running', [
+      { eventId: 'run-list-event', runId: 'run-from-list', revision: 1, type: 'run:started', payload: {}, createdAt: 1 },
+    ]).run!;
+    const targetsByIdentityKey = buildTeamRoleChatTargetByIdentityKey({
+      teams: [teamMeta({ activeRunId: 'different-active-run' })],
+      runListByTeamId: {
+        'team-1': [{
+          ...runFromList,
+          sessions: [runListLeader],
+        }],
+      },
+      rolesByTeamId: { 'team-1': [bindingAnalyst] },
+    });
+
+    expect(resolveTeamRoleChatTarget(targetsByIdentityKey, runListLeader.sessionIdentity)).toMatchObject({
+      teamId: 'team-1',
+      runId: 'run-from-list',
+      roleId: 'leader',
+      agentId: 'leader-agent',
+      localSessionId: runListLeader.localSessionId,
+      endpointSessionId: `agent:leader-agent:${runListLeader.endpointSessionId}`,
+      sessionIdentity: runListLeader.sessionIdentity,
+    });
+    expect(resolveTeamRoleChatTarget(targetsByIdentityKey, bindingAnalyst.sessionIdentity)).toMatchObject({
+      teamId: 'team-1',
+      runId: 'run-from-bindings',
+      roleId: 'analyst',
+      agentId: 'analyst-agent',
+      localSessionId: bindingAnalyst.localSessionId,
+      endpointSessionId: `agent:analyst-agent:${bindingAnalyst.endpointSessionId}`,
+      sessionIdentity: bindingAnalyst.sessionIdentity,
+    });
+    expect(resolveTeamRoleChatTarget(targetsByIdentityKey, createOpenClawTestSessionIdentity('ordinary-session', 'ordinary-agent'))).toBeNull();
+  });
+
+  it('exposes Team role chat target resolution through the Teams store contract', () => {
+    const runListLeader = teamRoleSessionBinding({ runId: 'run-from-list', roleId: 'leader', agentId: 'leader-agent' });
+    const bindingAnalyst = teamRoleSessionBinding({ runId: 'run-from-bindings', roleId: 'analyst', agentId: 'analyst-agent' });
+    const runFromList = buildSnapshot('running', [
+      { eventId: 'run-list-event', runId: 'run-from-list', revision: 1, type: 'run:started', payload: {}, createdAt: 1 },
+    ]).run!;
+    useTeamsStore.setState({
+      teams: [teamMeta({ activeRunId: 'different-active-run' })],
+      runListByTeamId: {
+        'team-1': [{ ...runFromList, sessions: [runListLeader] }],
+      },
+      rolesByTeamId: { 'team-1': [bindingAnalyst] },
+    } as never);
+
+    expect(useTeamsStore.getState().resolveTeamRoleChatTargetBySession({ sessionIdentity: runListLeader.sessionIdentity })).toMatchObject({
+      teamId: 'team-1',
+      runId: 'run-from-list',
+      roleId: 'leader',
+      endpointSessionId: `agent:leader-agent:${runListLeader.endpointSessionId}`,
+    });
+    expect(useTeamsStore.getState().resolveTeamRoleChatTargetBySession({ sessionIdentity: bindingAnalyst.sessionIdentity })).toMatchObject({
+      teamId: 'team-1',
+      runId: 'run-from-bindings',
+      roleId: 'analyst',
+      endpointSessionId: `agent:analyst-agent:${bindingAnalyst.endpointSessionId}`,
+    });
+    expect(useTeamsStore.getState().isTeamRoleSession({ sessionIdentity: bindingAnalyst.sessionIdentity })).toBe(true);
+    expect(useTeamsStore.getState().resolveTeamRoleChatTargetBySession({ sessionIdentity: createOpenClawTestSessionIdentity('ordinary-session', 'ordinary-agent') })).toBeNull();
+  });
+
+  it('resolves Team role probes by local, endpoint, and materialized session keys', () => {
+    const leader = teamRoleSessionBinding({
+      runId: 'run-1',
+      roleId: 'leader',
+      agentId: 'leader-agent',
+      localSessionId: 'team-role-session-run-1-leader',
+      endpointSessionId: 'team-endpoint-session-run-1-leader',
+    });
+    const index = buildTeamRoleChatTargetIndex({
+      teams: [teamMeta()],
+      runListByTeamId: {},
+      rolesByTeamId: { 'team-1': [leader] },
+    });
+    const materializedSessionKey = `agent:leader-agent:${leader.endpointSessionId}`;
+
+    expect(resolveTeamRoleChatTargetFromProbe(index, { sessionKey: leader.localSessionId })).toMatchObject({
+      teamId: 'team-1',
+      runId: 'run-1',
+      roleId: 'leader',
+      endpointSessionId: materializedSessionKey,
+    });
+    expect(resolveTeamRoleChatTargetFromProbe(index, { endpointSessionId: leader.endpointSessionId })).toMatchObject({
+      endpointSessionId: materializedSessionKey,
+    });
+    expect(resolveTeamRoleChatTargetFromProbe(index, { backendSessionKey: materializedSessionKey })).toMatchObject({
+      endpointSessionId: materializedSessionKey,
+    });
+    expect(isKnownTeamRoleSession(index, { backendSessionKey: materializedSessionKey })).toBe(true);
+    expect(isKnownTeamRoleSession(index, { backendSessionKey: 'agent:leader-agent:ordinary-session' })).toBe(false);
+  });
+
+  it('keeps the Teams store role index stable and reserves Team role local session keys', () => {
+    const leader = teamRoleSessionBinding({ runId: 'run-1', roleId: 'leader', agentId: 'leader-agent', localSessionId: 'team-role-session-run-1-leader' });
+    const input = {
+      teams: [teamMeta()],
+      runListByTeamId: {},
+      rolesByTeamId: { 'team-1': [leader] },
+    };
+    const firstIndex = selectTeamRoleChatTargetIndex(input);
+    const secondIndex = selectTeamRoleChatTargetIndex(input);
+    const emptyIndex = buildTeamRoleChatTargetIndex({ teams: [], runListByTeamId: {}, rolesByTeamId: {} });
+
+    expect(secondIndex).toBe(firstIndex);
+    expect(isKnownTeamRoleSession(firstIndex, { sessionIdentity: leader.sessionIdentity })).toBe(true);
+    expect(isKnownTeamRoleSession(emptyIndex, {
+      sessionIdentity: createOpenClawTestSessionIdentity('team-role-session-run-1-leader', 'leader-agent'),
+      backendSessionKey: 'agent:leader-agent:main',
+    })).toBe(true);
+    expect(isKnownTeamRoleSession(firstIndex, {
+      sessionIdentity: createOpenClawTestSessionIdentity('team-role-session-orphan-leader', 'leader-agent'),
+      sessionKey: 'team-role-session-orphan-leader',
+      backendSessionKey: 'agent:leader-agent:main',
+    })).toBe(true);
+    expect(isKnownTeamRoleSession(firstIndex, {
+      sessionIdentity: createOpenClawTestSessionIdentity('agent:leader-agent:main', 'leader-agent'),
+      backendSessionKey: 'agent:leader-agent:main',
+    })).toBe(false);
   });
 
   it('stores team role message submit errors from runtime-host', async () => {
@@ -1126,7 +1328,8 @@ describe('teams store', () => {
     });
     vi.mocked(submitTeamRunRoleMessage).mockRejectedValueOnce(new Error('Team role session runtime is unavailable'));
 
-    const leader = sessionRecord('agent:leader-agent:team-role:team-1-run-1.0.0-1000:leader', 'leader-agent');
+    const leaderBinding = teamRoleSessionBinding({ runId: 'team-1-run-1.0.0-1000', roleId: 'leader', agentId: 'leader-agent' });
+    const leader = sessionRecord(leaderBinding.localSessionId, 'leader-agent', 'idle', leaderBinding.sessionIdentity);
     const loadedSessions = { [leader.recordKey]: leader.record };
     useChatStore.setState({
       currentSessionKey: leader.recordKey,

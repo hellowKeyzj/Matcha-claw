@@ -1,12 +1,11 @@
 import { accepted, badRequest, ok, type ApplicationResponseOf } from '../common/application-response';
-import type { RuntimeEndpointRef, RuntimeScope } from '../agent-runtime/contracts/runtime-address';
+import { buildRuntimeEndpointKey, validateRuntimeEndpointRef, validateSessionIdentity, type RuntimeEndpointRef, type RuntimeScope, type SessionIdentity } from '../agent-runtime/contracts/runtime-address';
 import type { TeamRuntimeOperationId } from './team-runtime-operation-id';
 import type { TeamEvidenceRef } from './domain/team-evidence';
 import type { TeamNodePromptDeliveryRecord } from './domain/team-node-prompt-delivery';
 import type { TeamAgentCommand, TeamAgentCommandLedgerRecord, TeamGraphPatchCommand, TeamGraphPatchOperation, TeamNodeEventCommand, TeamNodeEventKind } from './domain/team-command-ledger';
 import type { TeamRoleSessionBinding, TeamRunStatus } from './domain/team-run';
 import {
-  buildTeamRoleSessionBindingsFromManagedAgents,
   collectTeamManagedAgentIds,
   type TeamInstance,
   type TeamInstanceRunRecord,
@@ -295,7 +294,7 @@ type TeamDispatchExecutionProjection = {
   stageId: string;
   roleId: string;
   executionId?: string;
-  childSessionKey?: string;
+  childLocalSessionId?: string;
   spawnMode?: 'session';
   status: 'claimed' | 'queued' | 'completed' | 'failed' | 'stale' | 'cancelled';
   statusReason?: string;
@@ -445,7 +444,11 @@ type RunActorState = {
   processedIdempotencyKeys: Set<string>;
 };
 
-type NodePromptDeliveryResult = { status: 'delivered' | 'failed' | 'retry_scheduled'; reason?: string; deliveredAt?: number };
+type NodePromptDeliveryResult = { status: 'delivered' | 'failed' | 'retry_scheduled'; reason?: string; deliveredAt?: number; promptRunId?: string };
+
+type DispatchReadyTasksOptions = {
+  readonly blockedLocalSessionIds?: readonly string[];
+};
 
 type TeamNodePromptDispatchRequest = {
   readonly graphDelivery: TeamWorkNodeDelivery;
@@ -548,6 +551,8 @@ export class TeamRuntimeService implements TeamRuntimePort {
         return ok(await this.router.forInput(params).submitRoleMessage(params));
       case 'team.nodePromptRetryDue':
         return ok(await this.router.forInput(params).retryDueNodePrompts(params));
+      case 'team.nodePromptSettled':
+        return ok(await this.router.settleNodePromptSessionTurn(params));
       case 'team.nodeEvent':
         return ok(await this.router.forInput(params).submitNodeEvent(params, scope));
       case 'team.runDiagnostics':
@@ -710,12 +715,24 @@ class TeamRuntimeRouter {
     }
   }
 
+  private async rememberTeamInstanceRunRoleSessionBindings(run: TeamInstanceRunRecord): Promise<void> {
+    if (!this.deps.roleSessions) return;
+    for (const binding of run.sessions) {
+      await this.deps.roleSessions.rememberRoleSessionBinding({ binding });
+    }
+  }
+
   async listRuns(params: unknown): Promise<{ teamId: string; runs: TeamInstanceRunRecord[] }> {
     const teamId = requireString(readRecord(params), 'teamId');
     const teamInstance = await this.teamInstances.readTeamInstance(teamId);
-    const runs = await Promise.all((teamInstance?.runs ?? []).map(async (runRecord) => (
-      toTeamInstanceRunRecord(await this.forRun(runRecord.runId).loadRunState() ?? runRecord, runRecord.sessions)
-    )));
+    const runs = await Promise.all((teamInstance?.runs ?? []).map(async (runRecord) => {
+      const restoredRunRecord = await this.forRun(runRecord.runId).loadRunRecord();
+      const effectiveRunRecord = restoredRunRecord ?? toTeamInstanceRunRecord(runRecord, runRecord.sessions);
+      if (!restoredRunRecord) {
+        await this.rememberTeamInstanceRunRoleSessionBindings(effectiveRunRecord);
+      }
+      return effectiveRunRecord;
+    }));
     return {
       teamId,
       runs: runs.sort(compareTeamInstanceRunsByRecentUpdate),
@@ -766,18 +783,39 @@ class TeamRuntimeRouter {
     const instances = await this.teamInstances.listTeamInstances();
     for (const teamInstance of instances) {
       for (const runRecord of teamInstance.runs) {
-        const run = await this.forRun(runRecord.runId).loadRunState();
-        const effectiveRun = run ?? runRecord;
+        const restoredRunRecord = await this.forRun(runRecord.runId).loadRunRecord();
+        const effectiveRunRecord = restoredRunRecord ?? runRecord;
+        if (!restoredRunRecord) {
+          await this.rememberTeamInstanceRunRoleSessionBindings(effectiveRunRecord);
+        }
         restoredRunIds.push(runRecord.runId);
-        if (isTerminalTeamRunStatus(effectiveRun.status)) {
+        if (isTerminalTeamRunStatus(effectiveRunRecord.status)) {
           skippedTerminalRunIds.push(runRecord.runId);
         } else {
-          this.runRegistry.upsert(toTeamRunRegistryRecord(effectiveRun));
+          this.runRegistry.upsert(toTeamRunRegistryRecord(effectiveRunRecord));
           activeRunIds.push(runRecord.runId);
         }
       }
     }
     return { success: true, restoredRunIds, activeRunIds, skippedTerminalRunIds };
+  }
+
+  async settleNodePromptSessionTurn(params: unknown): Promise<{ settled: boolean; runId: string | null; snapshot: TeamRunSnapshot | null }> {
+    const input = readRecord(params);
+    const sessionKey = requireString(input, 'sessionKey');
+    const promptRunId = requireString(input, 'promptRunId');
+    const settledPhase = readNodePromptSettledPhase(input.phase);
+    const settledAt = readNumber(input.settledAt) ?? (this.deps.nowMs ?? Date.now)();
+    for (const runId of this.runRegistry.listNonTerminalRunIds()) {
+      const actor = this.forRun(runId);
+      if (!(await actor.hasDeliveredNodePromptSessionTurn({ sessionKey, promptRunId }))) continue;
+      return {
+        settled: true,
+        runId,
+        snapshot: await actor.settleDeliveredNodePromptSessionTurn({ sessionKey, promptRunId, settledPhase, settledAt }),
+      };
+    }
+    return { settled: false, runId: null, snapshot: null };
   }
 
   async resumeTeam(params: unknown): Promise<{ success: true; teamId: string; restoredRunIds: string[]; activeRunIds: string[]; skippedTerminalRunIds: string[]; runs: TeamInstanceRunRecord[] }> {
@@ -790,13 +828,15 @@ class TeamRuntimeRouter {
     const skippedTerminalRunIds: string[] = [];
     const runs: TeamInstanceRunRecord[] = [];
     for (const runRecord of teamInstance?.runs ?? []) {
-      const run = await this.forRun(runRecord.runId).loadRunState();
-      const effectiveRun = run ?? runRecord;
-      const effectiveRunRecord = toTeamInstanceRunRecord(effectiveRun, runRecord.sessions);
+      const restoredRunRecord = await this.forRun(runRecord.runId).loadRunRecord();
+      const effectiveRunRecord = restoredRunRecord ?? runRecord;
+      if (!restoredRunRecord) {
+        await this.rememberTeamInstanceRunRoleSessionBindings(effectiveRunRecord);
+      }
       runs.push(effectiveRunRecord);
-      this.runRegistry.upsert(toTeamRunRegistryRecord(effectiveRun));
+      this.runRegistry.upsert(toTeamRunRegistryRecord(effectiveRunRecord));
       restoredRunIds.push(runRecord.runId);
-      if (isTerminalTeamRunStatus(effectiveRun.status)) {
+      if (isTerminalTeamRunStatus(effectiveRunRecord.status)) {
         skippedTerminalRunIds.push(runRecord.runId);
       } else {
         activeRunIds.push(runRecord.runId);
@@ -936,7 +976,7 @@ class TeamInstanceRegistry {
       packageName: input.run.packageName,
       packageVersion: input.run.packageVersion,
       sourcePath: input.run.sourcePath,
-      sessions: input.sessions.map((session) => ({ ...session })),
+      sessions: this.sanitizeRunSessions(input.run.runId, input.sessions),
       createdAt: input.run.createdAt,
       updatedAt: input.run.updatedAt,
     };
@@ -955,6 +995,10 @@ class TeamInstanceRegistry {
     };
     this.memoryTeamInstances.set(teamId, instance);
     await this.deps.stateStore?.writeTeamInstance(teamId, instance);
+  }
+
+  private sanitizeRunSessions(runId: string, sessions: readonly TeamRoleSessionBinding[]): TeamRoleSessionBinding[] {
+    return assertTeamRoleSessionBindings(sessions, { expectedRunId: runId });
   }
 
   async saveGraphTemplate(input: {
@@ -1113,8 +1157,8 @@ class RunActor {
         managedAgentsForRun = teamInstance?.managedAgents ?? [];
       }
       const graphTemplate = teamInstance ? await this.deps.teamInstances.resolveGraphTemplate(teamInstance) : null;
-      if (managedAgentsForRun.length > 0) {
-        this.state.roleBindings = buildTeamRoleSessionBindingsFromManagedAgents({ teamId: runTeamId, runId, managedAgents: managedAgentsForRun });
+      if (managedAgentsForRun.length > 0 && this.state.roleBindings.length === 0) {
+        this.state.roleBindings = await this.ensureRoleSessionsForManagedAgents({ teamId: runTeamId, runId, managedAgents: managedAgentsForRun });
       }
       if (!this.state.graphRunState && graphTemplate) {
         this.state.graphRunState = createInitialTeamGraphRunState({
@@ -1130,6 +1174,63 @@ class RunActor {
       await this.flushState();
       return this.runSummary();
     });
+  }
+
+  private async ensureRoleSessionsForManagedAgents(input: {
+    readonly teamId: string;
+    readonly runId: string;
+    readonly managedAgents: readonly TeamManagedAgentRecord[];
+  }): Promise<TeamRoleSessionBinding[]> {
+    if (!this.deps.roleSessions) {
+      throw new Error('Team role session runtime is required to create Team role sessions.');
+    }
+    const bindings: TeamRoleSessionBinding[] = [];
+    const generatedLocalSessionIds = new Set<string>();
+    const generatedEndpointSessionIds = new Set<string>();
+    try {
+      for (const agent of input.managedAgents) {
+        const localSessionId = this.nextUniqueTeamRoleSessionId('team-role-session', generatedLocalSessionIds);
+        const endpointSessionId = this.nextUniqueTeamRoleSessionId('team-endpoint-session', generatedEndpointSessionIds);
+        const verifiedBinding = assertTeamRoleSessionBinding(await this.deps.roleSessions.ensureRoleSession({
+          teamId: input.teamId,
+          runId: input.runId,
+          roleId: agent.roleId,
+          agentId: agent.agentId,
+          endpointRef: agent.endpoint,
+          localSessionId,
+          endpointSessionId,
+        }), { expectedRunId: input.runId });
+        if (bindings.some((candidate) => candidate.localSessionId === verifiedBinding.localSessionId || candidate.endpointSessionId === verifiedBinding.endpointSessionId)) {
+          throw new Error(`TeamRun ${input.runId} role sessions must have unique localSessionId and endpointSessionId values.`);
+        }
+        bindings.push(verifiedBinding);
+      }
+      return bindings;
+    } catch (error) {
+      try {
+        await this.rollbackCreatedRoleSessions(bindings);
+      } catch (rollbackError) {
+        throw new Error(`Unable to roll back TeamRun ${input.runId} role sessions after creation failed: ${safeErrorMessage(rollbackError)}. Original failure: ${safeErrorMessage(error)}`);
+      }
+      throw error;
+    }
+  }
+
+  private nextUniqueTeamRoleSessionId(prefix: 'team-role-session' | 'team-endpoint-session', usedIds: Set<string>): string {
+    const randomPart = readString(this.deps.randomId()) ?? String(usedIds.size + 1);
+    const base = `${prefix}-${randomPart}`;
+    let candidate = base;
+    for (let suffix = 2; usedIds.has(candidate); suffix += 1) {
+      candidate = `${base}-${suffix}`;
+    }
+    usedIds.add(candidate);
+    return candidate;
+  }
+
+  private async rollbackCreatedRoleSessions(bindings: readonly TeamRoleSessionBinding[]): Promise<void> {
+    for (const binding of bindings.slice().reverse()) {
+      await this.deps.roleSessions!.deleteRoleSession({ binding });
+    }
   }
 
   cancelRun(params: unknown): Promise<{ runId: string; status: TeamRunStatus; revision: number }> {
@@ -1217,7 +1318,7 @@ class RunActor {
         await this.dispatchWorkNodeDeliveries([entryDelivery]);
         this.appendEvent('entry_message.submitted', {
           roleId,
-          sessionKey: binding.sessionKey,
+          localSessionId: binding.localSessionId,
           nodeId: entryDelivery.nodeId,
           nodeExecutionId: entryDelivery.nodeExecutionId,
           attemptNumber: entryDelivery.attemptNumber,
@@ -1235,7 +1336,7 @@ class RunActor {
       });
       this.appendEvent('role_message.submitted', {
         roleId,
-        sessionKey: prompt.sessionKey,
+        localSessionId: prompt.localSessionId,
         promptRunId: prompt.promptRunId,
         textLength: text.length,
       }, idempotencyKey);
@@ -1326,12 +1427,12 @@ class RunActor {
 
   submitGraphPatch(params: unknown, scope?: RuntimeScope): Promise<TeamAgentCommandReceipt> {
     return this.enqueue(async () => {
-      const command = readTeamGraphPatchCommand(readRecord(params), {
+      const command = this.deriveCommandSourceFromScope(readTeamGraphPatchCommand(readRecord(params), {
         runId: this.deps.runId,
         sourceEndpoint: scope && 'endpoint' in scope ? scope.endpoint : { kind: 'native-runtime', runtimeAdapterId: 'runtime-host', runtimeInstanceId: 'local' },
         nowMs: this.deps.nowMs(),
         commandId: `team-command-${this.deps.randomId()}`,
-      });
+      }));
       const existing = this.state.processedIdempotencyKeys.has(command.idempotencyKey);
       if (!existing) {
         try {
@@ -1353,12 +1454,12 @@ class RunActor {
 
   submitNodeEvent(params: unknown, scope?: RuntimeScope): Promise<TeamAgentCommandReceipt> {
     return this.enqueue(async () => {
-      const command = readTeamNodeEventCommand(readRecord(params), {
+      const command = this.deriveNodeEventCommandSource(readTeamNodeEventCommand(readRecord(params), {
         runId: this.deps.runId,
         sourceEndpoint: scope && 'endpoint' in scope ? scope.endpoint : { kind: 'native-runtime', runtimeAdapterId: 'runtime-host', runtimeInstanceId: 'local' },
         nowMs: this.deps.nowMs(),
         commandId: `team-command-${this.deps.randomId()}`,
-      });
+      }));
       const existing = this.state.processedIdempotencyKeys.has(command.idempotencyKey);
       if (!existing) {
         try {
@@ -1369,7 +1470,9 @@ class RunActor {
         }
         const record = await this.appendAcceptedCommand(command);
         rejectIfExistingCommandWasRejected(record);
-        await this.dispatchReadyTasks();
+        await this.dispatchReadyTasks({
+          blockedLocalSessionIds: command.sourceLocalSessionId ? [command.sourceLocalSessionId] : [],
+        });
         this.updateRunCompletionState();
         await this.flushState();
         return { success: true, runId: this.deps.runId, accepted: true, record, snapshot: this.buildSnapshot() };
@@ -1466,6 +1569,10 @@ class RunActor {
     return this.enqueue(() => (this.state.run ? { ...this.state.run } : null));
   }
 
+  loadRunRecord(): Promise<TeamInstanceRunRecord | null> {
+    return this.enqueue(() => (this.state.run ? toTeamInstanceRunRecord(this.state.run, this.state.roleBindings) : null));
+  }
+
   listArmedTriggers(): Promise<TeamArmedTriggerDescriptor[]> {
     return this.enqueue(() => {
       const definition = this.state.graphRunState?.definition;
@@ -1527,6 +1634,82 @@ class RunActor {
         snapshot: this.buildSnapshot(),
       };
     });
+  }
+
+  hasDeliveredNodePromptSessionTurn(input: { readonly sessionKey: string; readonly promptRunId: string }): Promise<boolean> {
+    return this.enqueue(() => this.state.nodePromptDeliveries.some((delivery) => (
+      delivery.status === 'delivered'
+      && delivery.settledAt === undefined
+      && delivery.localSessionId === input.sessionKey
+      && delivery.promptRunId === input.promptRunId
+    )));
+  }
+
+  settleDeliveredNodePromptSessionTurn(input: {
+    readonly sessionKey: string;
+    readonly promptRunId: string;
+    readonly settledPhase: 'final' | 'error' | 'aborted';
+    readonly settledAt: number;
+  }): Promise<TeamRunSnapshot> {
+    return this.enqueue(async () => {
+      const index = this.state.nodePromptDeliveries.findIndex((delivery) => (
+        delivery.status === 'delivered'
+        && delivery.settledAt === undefined
+        && delivery.localSessionId === input.sessionKey
+        && delivery.promptRunId === input.promptRunId
+      ));
+      if (index < 0) return this.buildSnapshot();
+      const delivery = this.state.nodePromptDeliveries[index]!;
+      this.state.nodePromptDeliveries[index] = {
+        ...delivery,
+        settledAt: input.settledAt,
+        settledPhase: input.settledPhase,
+        updatedAt: input.settledAt,
+      };
+      this.appendEvent('node_prompt.turn_settled', {
+        deliveryRecordId: delivery.deliveryRecordId,
+        nodeId: delivery.nodeId,
+        nodeExecutionId: delivery.nodeExecutionId,
+        localSessionId: delivery.localSessionId,
+        promptRunId: input.promptRunId,
+        phase: input.settledPhase,
+      }, `node-prompt-settled:${input.promptRunId}`, input.settledAt);
+      await this.dispatchReadyTasks();
+      this.updateRunCompletionState();
+      await this.flushState();
+      return this.buildSnapshot();
+    });
+  }
+
+  private deriveNodeEventCommandSource(command: TeamNodeEventCommand): TeamNodeEventCommand {
+    const graphRunState = this.state.graphRunState;
+    if (!graphRunState) return this.deriveCommandSourceFromScope(command);
+    const nodeExecution = findCurrentNodeExecutionById(graphRunState, command.nodeExecutionId);
+    const node = nodeExecution ? graphRunState.definition.nodes.find((candidate) => candidate.nodeId === nodeExecution.nodeId) : undefined;
+    const roleId = node?.roleId ?? command.roleId;
+    if (!roleId) return this.deriveCommandSourceFromScope(command);
+    return this.deriveCommandSourceFromRole(command, roleId);
+  }
+
+  private deriveCommandSourceFromScope<T extends TeamAgentCommand>(command: T): T {
+    const endpointKey = buildRuntimeEndpointKey(command.sourceEndpoint);
+    const bindings = this.state.roleBindings.filter((candidate) => buildRuntimeEndpointKey(candidate.endpointRef) === endpointKey);
+    const sourceAgentBinding = bindings.find((candidate) => candidate.agentId === command.sourceAgentId);
+    const binding = sourceAgentBinding ?? (bindings.length === 1 ? bindings[0] : undefined);
+    return binding ? this.deriveCommandSourceFromRole(command, binding.roleId) : command;
+  }
+
+  private deriveCommandSourceFromRole<T extends TeamAgentCommand>(command: T, roleId: string): T {
+    const binding = this.state.roleBindings.find((candidate) => candidate.roleId === roleId);
+    if (!binding) return command;
+    return {
+      ...command,
+      sourceEndpoint: binding.endpointRef,
+      sourceAgentId: binding.agentId,
+      sourceRoleId: binding.roleId,
+      sourceLocalSessionId: binding.localSessionId,
+      sourceEndpointSessionId: binding.endpointSessionId,
+    };
   }
 
   private applyGraphPatchCommand(command: TeamGraphPatchCommand): void {
@@ -1694,13 +1877,13 @@ class RunActor {
     if (!this.state.graphRunState || !this.deps.nodePromptDelivery) return null;
     const graphRunState = this.state.graphRunState;
     const nodesById = new Map(graphRunState.definition.nodes.map((node) => [node.nodeId, node]));
-    const activeRoleSessionKeys = new Set(this.collectActiveRoleSessionKeys());
+    const activeLocalSessionIds = new Set(this.collectActiveLocalSessionIds());
     for (const queueItem of graphRunState.readyQueueItems) {
       const node = nodesById.get(queueItem.nodeId);
       if (!node || node.kind !== 'work' || node.roleId !== input.roleId) continue;
       if (!isEntryWorkNode(graphRunState.definition, node.nodeId)) continue;
       const binding = this.state.roleBindings.find((candidate) => candidate.roleId === input.roleId);
-      if (!binding || activeRoleSessionKeys.has(binding.sessionKey)) continue;
+      if (!binding || activeLocalSessionIds.has(binding.localSessionId)) continue;
       const currentAttempt = graphRunState.nodeExecutionsByNodeId[node.nodeId]?.attempts.at(-1);
       if (!currentAttempt || currentAttempt.status !== 'ready') continue;
       if (currentAttempt.attemptId !== queueItem.attemptId || currentAttempt.startedAt !== undefined || currentAttempt.attemptNumber !== 1) continue;
@@ -1730,23 +1913,30 @@ class RunActor {
   private hasActiveNodePromptDeliveryForExecution(nodeExecutionId: string): boolean {
     return this.state.nodePromptDeliveries.some((delivery) => (
       delivery.nodeExecutionId === nodeExecutionId
-      && (delivery.status === 'pending' || delivery.status === 'delivering' || delivery.status === 'retry_scheduled' || delivery.status === 'delivered')
+      && (
+        delivery.status === 'pending'
+        || delivery.status === 'delivering'
+        || delivery.status === 'retry_scheduled'
+        || (delivery.status === 'delivered' && (!delivery.promptRunId || delivery.settledAt === undefined))
+      )
     ));
   }
 
-  private async dispatchReadyGraphNodes(): Promise<void> {
+  private async dispatchReadyGraphNodes(options: DispatchReadyTasksOptions = {}): Promise<void> {
     await this.deliverRetryableNodePrompts();
     if (!this.state.graphRunState) return;
-    const roleSessionKeyByRoleId = Object.fromEntries(this.state.roleBindings.map((binding) => [binding.roleId, binding.sessionKey]));
-    let activeRoleSessionKeys = this.collectActiveRoleSessionKeys();
+    const blockedLocalSessionIds = Array.from(new Set(options.blockedLocalSessionIds ?? []));
+    const localSessionIdByRoleId = Object.fromEntries(this.state.roleBindings.map((binding) => [binding.roleId, binding.localSessionId]));
+    let activeLocalSessionIds = this.collectActiveLocalSessionIds();
     const maxIterations = Math.max(1, this.state.graphRunState.definition.nodes.length * 2);
     for (let iteration = 0; iteration < maxIterations; iteration += 1) {
       const scheduled = scheduleReadyWorkNodeDeliveries(this.state.graphRunState, {
         maxDeliveries: TEAM_DISPATCH_MAX_ACTIVE_ROLE_PROMPTS,
         maxActiveRoleSessions: TEAM_DISPATCH_MAX_ACTIVE_ROLE_PROMPTS,
-        activeRoleSessionCount: activeRoleSessionKeys.length,
-        activeRoleSessionKeys,
-        roleSessionKeyByRoleId,
+        activeRoleSessionCount: activeLocalSessionIds.length,
+        activeLocalSessionIds,
+        blockedLocalSessionIds,
+        localSessionIdByRoleId,
         nowMs: this.deps.nowMs(),
       });
       this.state.graphRunState = scheduled.state;
@@ -1761,24 +1951,27 @@ class RunActor {
       }
       if (scheduled.deliveries.length > 0) return;
       if (!progressed) return;
-      activeRoleSessionKeys = this.collectActiveRoleSessionKeys();
+      activeLocalSessionIds = this.collectActiveLocalSessionIds();
     }
   }
 
-  private collectActiveRoleSessionKeys(): string[] {
+  private collectActiveLocalSessionIds(): string[] {
     const activeNodeExecutionIds = this.collectActiveNodeExecutionIds();
     return Array.from(new Set([
       ...this.state.dispatchExecutions
         .filter((execution) => execution.status === 'queued' || execution.status === 'claimed')
-        .map((execution) => execution.childSessionKey ?? `${execution.roleId}:${execution.dispatchId}`),
+        .map((execution) => execution.childLocalSessionId ?? `${execution.roleId}:${execution.dispatchId}`),
       ...this.state.nodePromptDeliveries
         .filter((delivery) => (
           delivery.status === 'pending'
           || delivery.status === 'delivering'
           || delivery.status === 'retry_scheduled'
-          || (delivery.status === 'delivered' && activeNodeExecutionIds.has(delivery.nodeExecutionId))
+          || (delivery.status === 'delivered' && (
+            activeNodeExecutionIds.has(delivery.nodeExecutionId)
+            || (!!delivery.promptRunId && delivery.settledAt === undefined)
+          ))
         ))
-        .map((delivery) => delivery.sessionKey),
+        .map((delivery) => delivery.localSessionId),
     ]));
   }
 
@@ -1830,7 +2023,7 @@ class RunActor {
         node: graphNode,
         delivery: graphDelivery,
         runId: this.deps.runId,
-        runtimeEndpoint: binding.sessionIdentity.endpoint,
+        runtimeEndpoint: binding.endpointRef,
         plannedTask,
       }), upstreamContext);
       requests.push({
@@ -1898,7 +2091,7 @@ class RunActor {
         task,
         effect,
         runId: this.deps.runId,
-        runtimeEndpoint: binding.sessionIdentity.endpoint,
+        runtimeEndpoint: binding.endpointRef,
       }), upstreamContext),
       createdAt: effect.createdAt,
     });
@@ -1978,8 +2171,8 @@ class RunActor {
     });
   }
 
-  private async dispatchReadyTasks(): Promise<void> {
-    await this.dispatchReadyGraphNodes();
+  private async dispatchReadyTasks(options: DispatchReadyTasksOptions = {}): Promise<void> {
+    await this.dispatchReadyGraphNodes(options);
   }
 
   private applyDeliveredNodePrompt(request: TeamNodePromptDispatchRequest, createdAt: number, eventType: 'dispatch.task_prompted' | 'dispatch.review_prompted' = 'dispatch.task_prompted'): void {
@@ -2006,13 +2199,13 @@ class RunActor {
       stageId: task.taskId,
       roleId: task.roleId,
       executionId: nodePromptDelivery.deliveryRecordId,
-      childSessionKey: binding.sessionKey,
+      childLocalSessionId: binding.localSessionId,
       spawnMode: 'session',
       status: 'queued',
       idempotencyKey: attemptKey,
       createdAt,
     });
-    this.appendEvent(eventType, { taskId: task.taskId, roleId: task.roleId, sessionKey: binding.sessionKey, deliveryRecordId: nodePromptDelivery.deliveryRecordId, nodeId: graphDelivery.nodeId, attemptNumber: graphDelivery.attemptNumber }, attemptKey);
+    this.appendEvent(eventType, { taskId: task.taskId, roleId: task.roleId, localSessionId: binding.localSessionId, deliveryRecordId: nodePromptDelivery.deliveryRecordId, nodeId: graphDelivery.nodeId, attemptNumber: graphDelivery.attemptNumber }, attemptKey);
   }
 
   private async deliverRetryableNodePrompts(): Promise<void> {
@@ -2037,7 +2230,13 @@ class RunActor {
     const existingIndex = nodePromptDeliveryIndexById.get(nodePromptDelivery.deliveryRecordId);
     const existing = existingIndex === undefined ? undefined : this.state.nodePromptDeliveries[existingIndex];
     const now = this.deps.nowMs();
-    if (existing?.status === 'delivered') return { status: 'delivered', deliveredAt: existing.deliveredAt };
+    if (existing?.status === 'delivered') {
+      return {
+        status: 'delivered',
+        deliveredAt: existing.deliveredAt,
+        ...(existing.promptRunId ? { promptRunId: existing.promptRunId } : {}),
+      };
+    }
     if (existing?.status === 'retry_scheduled' && (existing.nextRetryAt ?? 0) > now) {
       return { status: 'retry_scheduled', reason: existing.lastError };
     }
@@ -2056,8 +2255,19 @@ class RunActor {
       const delivery = await this.deps.nodePromptDelivery!.deliver({ delivery: queuedDelivery, binding, idempotencyKey });
       if (delivery.status === 'delivered') {
         const deliveredAt = delivery.deliveredAt ?? this.deps.nowMs();
-        upsertNodePromptDelivery(this.state.nodePromptDeliveries, { ...queuedDelivery, status: 'delivered', deliveredAt, updatedAt: deliveredAt }, nodePromptDeliveryIndexById);
-        return { status: 'delivered', deliveredAt };
+        const promptRunId = readString(delivery.promptRunId) ?? undefined;
+        upsertNodePromptDelivery(this.state.nodePromptDeliveries, {
+          ...queuedDelivery,
+          status: 'delivered',
+          deliveredAt,
+          updatedAt: deliveredAt,
+          ...(promptRunId ? { promptRunId } : {}),
+        }, nodePromptDeliveryIndexById);
+        return {
+          status: 'delivered',
+          deliveredAt,
+          ...(promptRunId ? { promptRunId } : {}),
+        };
       }
       return this.scheduleNodePromptRetry(queuedDelivery, delivery.reason ?? delivery.status, nodePromptDeliveryIndexById);
     } catch (error) {
@@ -2129,10 +2339,11 @@ class RunActor {
     if (!this.state.run || this.state.run.status === 'cancelled' || this.state.run.status === 'failed') return;
     const hasTasks = this.state.dispatchTasks.length > 0;
     const tasksCompleted = hasTasks && this.state.dispatchTasks.every((task) => task.status === 'completed');
+    const workComplete = this.state.graphRunState ? this.isGraphComplete() : tasksCompleted;
     const hasPendingApproval = this.state.approvals.some((approval) => approval.status === 'pending');
     const hasBlockingGate = this.state.gates.some((gate) => gate.blocking && gate.status === 'open');
     const hasOpenKickback = this.state.kickbacks.some((kickback) => !kickback.resolvedAt);
-    if ((this.isGraphComplete() || tasksCompleted) && !hasPendingApproval && !hasBlockingGate && !hasOpenKickback) {
+    if (workComplete && !hasPendingApproval && !hasBlockingGate && !hasOpenKickback) {
       if (this.state.run.status !== 'completed') this.updateRun({ status: 'completed' });
       return;
     }
@@ -2140,7 +2351,7 @@ class RunActor {
       if (this.state.run.status !== 'waiting_for_user') this.updateRun({ status: 'waiting_for_user' });
       return;
     }
-    if ((this.state.run.status === 'completed' || this.state.run.status === 'waiting_for_user') && !tasksCompleted) this.updateRun({ status: 'running' });
+    if ((this.state.run.status === 'completed' || this.state.run.status === 'waiting_for_user') && !workComplete) this.updateRun({ status: 'running' });
   }
 
   private isGraphComplete(): boolean {
@@ -2276,7 +2487,15 @@ class RunActor {
     const stored = await this.deps.stateStore?.readRunState(this.deps.runId);
     if (!stored) return;
     Object.assign(this.state, deserializeRunActorState(stored));
+    await this.rememberRestoredRoleSessionBindings();
     this.syncRunRegistry();
+  }
+
+  private async rememberRestoredRoleSessionBindings(): Promise<void> {
+    if (!this.deps.roleSessions) return;
+    for (const binding of this.state.roleBindings) {
+      await this.deps.roleSessions.rememberRoleSessionBinding({ binding });
+    }
   }
 
   private async flushState(): Promise<void> {
@@ -2318,7 +2537,6 @@ function readTeamNodeEventCommand(input: Record<string, unknown>, context: { rea
     sourceEndpoint: context.sourceEndpoint,
     sourceAgentId: readString(input.sourceAgentId) ?? 'agent',
     ...optionalStringProperty(input, 'sourceRuntimeAdapterId'),
-    ...optionalStringProperty(input, 'sourceSessionKey'),
     createdAt: context.nowMs,
     nodeExecutionId: requireString(input, 'nodeExecutionId'),
     event,
@@ -2382,7 +2600,6 @@ function readTeamGraphPatchCommand(input: Record<string, unknown>, context: { re
     sourceEndpoint: context.sourceEndpoint,
     sourceAgentId: readString(input.sourceAgentId) ?? 'agent',
     ...optionalStringProperty(input, 'sourceRuntimeAdapterId'),
-    ...optionalStringProperty(input, 'sourceSessionKey'),
     createdAt: context.nowMs,
     summary: requireString(input, 'summary'),
     patch: {
@@ -2397,6 +2614,11 @@ function readTeamGraphPatchCommand(input: Record<string, unknown>, context: { re
 function readTeamNodeEventKind(value: unknown): TeamNodeEventKind {
   if (value === 'progress' || value === 'request_input' || value === 'request_approval' || value === 'reject' || value === 'complete') return value;
   throw new Error('event must be progress, request_input, request_approval, reject, or complete');
+}
+
+function readNodePromptSettledPhase(value: unknown): 'final' | 'error' | 'aborted' {
+  if (value === 'final' || value === 'error' || value === 'aborted') return value;
+  throw new Error('phase must be final, error, or aborted');
 }
 
 function readTeamGraphPatchOperation(value: unknown): TeamGraphPatchOperation {
@@ -2627,7 +2849,83 @@ function emptyRunActorState(): RunActorState {
 }
 
 function serializeRunActorState(state: RunActorState): Record<string, unknown> {
-  return { ...state, processedIdempotencyKeys: Array.from(state.processedIdempotencyKeys) };
+  return {
+    ...state,
+    roleBindings: assertTeamRoleSessionBindings(state.roleBindings, { expectedRunId: state.run?.runId }),
+    processedIdempotencyKeys: Array.from(state.processedIdempotencyKeys),
+  };
+}
+
+function readPersistedTeamRoleSessionBindings(value: unknown, context: { readonly expectedRunId?: string }): TeamRoleSessionBinding[] {
+  const bindings = readArray(value).flatMap((item) => {
+    const binding = readTeamRoleSessionBinding(item, context);
+    return binding ? [binding] : [];
+  });
+  const localSessionIds = new Set<string>();
+  const endpointSessionIds = new Set<string>();
+  return bindings.filter((binding) => {
+    if (localSessionIds.has(binding.localSessionId) || endpointSessionIds.has(binding.endpointSessionId)) {
+      return false;
+    }
+    localSessionIds.add(binding.localSessionId);
+    endpointSessionIds.add(binding.endpointSessionId);
+    return true;
+  });
+}
+
+function assertTeamRoleSessionBindings(values: readonly unknown[], context: { readonly expectedRunId?: string }): TeamRoleSessionBinding[] {
+  const bindings = values.map((value) => assertTeamRoleSessionBinding(value, context));
+  const localSessionIds = new Set<string>();
+  const endpointSessionIds = new Set<string>();
+  for (const binding of bindings) {
+    if (localSessionIds.has(binding.localSessionId) || endpointSessionIds.has(binding.endpointSessionId)) {
+      throw new Error(`TeamRun ${context.expectedRunId ?? binding.runId} role sessions must have unique localSessionId and endpointSessionId values.`);
+    }
+    localSessionIds.add(binding.localSessionId);
+    endpointSessionIds.add(binding.endpointSessionId);
+  }
+  return bindings;
+}
+
+function assertTeamRoleSessionBinding(value: unknown, context: { readonly expectedRunId?: string } = {}): TeamRoleSessionBinding {
+  const binding = readTeamRoleSessionBinding(value, context);
+  if (binding) return binding;
+  const record = readRecordOrNull(value);
+  const endpointSessionId = record ? readString(record.endpointSessionId) : null;
+  if (endpointSessionId?.startsWith('agent:')) {
+    throw new Error('Team role endpointSessionId must be opaque and must not contain OpenClaw agent-prefixed grammar.');
+  }
+  throw new Error('Team role session binding must include runId, roleId, agentId, endpointRef, localSessionId, endpointSessionId, and matching sessionIdentity.');
+}
+
+function readTeamRoleSessionBinding(value: unknown, context: { readonly expectedRunId?: string }): TeamRoleSessionBinding | null {
+  const record = readRecordOrNull(value);
+  if (!record) return null;
+  const runId = readString(record.runId);
+  const roleId = readString(record.roleId);
+  const agentId = readString(record.agentId);
+  const localSessionId = readString(record.localSessionId);
+  const endpointSessionId = readString(record.endpointSessionId);
+  if (!runId || !roleId || !agentId || !localSessionId || !endpointSessionId) return null;
+  if (context.expectedRunId && runId !== context.expectedRunId) return null;
+  if (endpointSessionId.startsWith('agent:')) return null;
+  const endpointRef = readRecordOrNull(record.endpointRef);
+  const sessionIdentity = readRecordOrNull(record.sessionIdentity);
+  if (validateRuntimeEndpointRef(endpointRef) || validateSessionIdentity(sessionIdentity)) return null;
+  const identity = sessionIdentity as unknown as SessionIdentity;
+  const endpoint = endpointRef as unknown as RuntimeEndpointRef;
+  if (identity.sessionKey !== localSessionId || identity.agentId !== agentId) return null;
+  if (buildRuntimeEndpointKey(identity.endpoint) !== buildRuntimeEndpointKey(endpoint)) return null;
+  return {
+    ...(readString(record.teamId) ? { teamId: readString(record.teamId)! } : {}),
+    runId,
+    roleId,
+    agentId,
+    endpointRef: endpoint,
+    localSessionId,
+    endpointSessionId,
+    sessionIdentity: identity,
+  };
 }
 
 function cloneTeamInstance(instance: TeamInstance): TeamInstance {
@@ -2654,10 +2952,47 @@ function deserializeTeamInstance(value: unknown): TeamInstance {
     ...(readTeamInstanceSourceType(record.sourceType) ? { sourceType: readTeamInstanceSourceType(record.sourceType)! } : {}),
     managedAgents: readArray(record.managedAgents) as TeamManagedAgentRecord[],
     graphTemplate: readRecordOrNull(record.graphTemplate) as TeamGraphDefinition | null,
-    runs: readArray(record.runs) as TeamInstanceRunRecord[],
+    runs: readArray(record.runs).flatMap(readTeamInstanceRunRecord),
     createdAt: readNumber(record.createdAt) ?? 0,
     updatedAt: readNumber(record.updatedAt) ?? 0,
   };
+}
+
+function readTeamInstanceRunRecord(value: unknown): TeamInstanceRunRecord[] {
+  const record = readRecordOrNull(value);
+  if (!record) return [];
+  const runId = readString(record.runId);
+  if (!runId) return [];
+  return [{
+    teamId: readString(record.teamId) ?? readString(record.packageName) ?? '',
+    runId,
+    status: readTeamRunStatus(record.status),
+    revision: readNumber(record.revision) ?? 0,
+    packageName: readString(record.packageName) ?? 'team-skill',
+    packageVersion: readString(record.packageVersion) ?? '0.0.0',
+    sourcePath: readString(record.sourcePath) ?? '',
+    sessions: readPersistedTeamRoleSessionBindings(record.sessions, { expectedRunId: runId }),
+    createdAt: readNumber(record.createdAt) ?? 0,
+    updatedAt: readNumber(record.updatedAt) ?? 0,
+  }];
+}
+
+function readTeamRunStatus(value: unknown): TeamRunStatus {
+  const status = readString(value);
+  if (
+    status === 'created'
+    || status === 'provisioning'
+    || status === 'waiting_for_user'
+    || status === 'running'
+    || status === 'paused'
+    || status === 'cancelling'
+    || status === 'completed'
+    || status === 'failed'
+    || status === 'cancelled'
+  ) {
+    return status;
+  }
+  return 'created';
 }
 
 function instantiateTeamGraphTemplateForRun(template: TeamGraphDefinition, context: {
@@ -2673,15 +3008,9 @@ function instantiateTeamGraphTemplateForRun(template: TeamGraphDefinition, conte
     runId: context.runId,
     idempotencyKey: context.idempotencyKey,
     createdAt: context.nowMs,
-    nodes: template.nodes.map((node) => ({
-      ...node,
-      executor: { ...node.executor },
-      config: { ...node.config },
-      metadata: {
-        ...node.metadata,
-        workflowPlanId,
-        runId: context.runId,
-      },
+    nodes: template.nodes.map((node) => instantiateTeamGraphNodeTemplateForRun(node, {
+      workflowPlanId,
+      runId: context.runId,
     })),
     edges: template.edges.map((edge) => ({
       ...edge,
@@ -2690,6 +3019,34 @@ function instantiateTeamGraphTemplateForRun(template: TeamGraphDefinition, conte
     })),
     groups: cloneTeamGraphWorkflowGroups(template.groups),
     metadata: template.metadata ? { ...template.metadata, workflowPlanId, runId: context.runId } : undefined,
+  };
+}
+
+function instantiateTeamGraphNodeTemplateForRun(node: TeamGraphNodeDefinition, context: {
+  readonly workflowPlanId: string;
+  readonly runId: string;
+}): TeamGraphNodeDefinition {
+  if (node.kind === 'work') {
+    return {
+      ...node,
+      executor: { ...node.executor },
+      config: { ...node.config },
+      metadata: {
+        ...node.metadata,
+        workflowPlanId: context.workflowPlanId,
+        runId: context.runId,
+      },
+    };
+  }
+  return {
+    ...node,
+    ...(node.executor ? { executor: { ...node.executor } } : {}),
+    ...(node.config ? { config: { ...node.config } } : {}),
+    metadata: {
+      ...node.metadata,
+      workflowPlanId: context.workflowPlanId,
+      runId: context.runId,
+    },
   };
 }
 
@@ -2953,11 +3310,12 @@ function upsertTeamInstanceRun(existing: readonly TeamInstanceRunRecord[], incom
 
 function deserializeRunActorState(value: unknown): RunActorState {
   const record = readRecord(value);
+  const run = readRecordOrNull(record.run) as TeamRunRecord | null;
   return {
-    run: readRecordOrNull(record.run) as TeamRunRecord | null,
+    run,
     graphRunState: readRecordOrNull(record.graphRunState) as TeamGraphRunState | null,
     nodeDeliveries: readArray(record.nodeDeliveries) as TeamWorkNodeDelivery[],
-    roleBindings: readArray(record.roleBindings) as TeamRoleSessionBinding[],
+    roleBindings: readPersistedTeamRoleSessionBindings(record.roleBindings, { expectedRunId: run?.runId }),
     workflowPlan: readRecordOrNull(record.workflowPlan) as TeamWorkflowPlanProjection | null,
     dispatchGroups: readArray(record.dispatchGroups) as TeamDispatchGroupProjection[],
     dispatchTasks: readArray(record.dispatchTasks) as TeamDispatchTaskProjection[],
@@ -3116,7 +3474,7 @@ function appendTeamRunWorkspaceContext(message: string, input: { readonly run: T
     `- teamId: ${input.run.teamId ?? ''}`,
     `- runId: ${input.run.runId}`,
     `- roleId: ${input.binding.roleId}`,
-    ...formatRuntimeEndpointPromptSection(input.binding.sessionIdentity.endpoint),
+    ...formatRuntimeEndpointPromptSection(input.binding.endpointRef),
     '',
   ].join('\n');
 }
@@ -3385,7 +3743,7 @@ function buildNodePromptDeliveryRecord(input: {
     taskId: input.task.taskId,
     roleId: input.task.roleId,
     toAgentId: input.binding.agentId,
-    sessionKey: input.binding.sessionKey,
+    localSessionId: input.binding.localSessionId,
     kind: 'node.prompt',
     title: input.plannedTask?.title ?? input.task.taskId,
     prompt: input.prompt,

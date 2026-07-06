@@ -12,6 +12,7 @@ import { buildRenderItemsFromMessages } from './helpers/timeline-fixtures';
 import type { RawMessage } from './helpers/timeline-fixtures';
 import { createViewportWindowState } from '@/stores/chat/viewport-state';
 import { buildRuntimeEndpointKey, buildSessionIdentityKey, type SessionIdentity } from '../../runtime-host/shared/runtime-address';
+import type { TeamRoleBindingRecord } from '@/services/openclaw/team-runtime-client';
 import { createOpenClawTestSessionIdentity } from './helpers/runtime-address-fixtures';
 
 const readyResource = {
@@ -37,6 +38,25 @@ function createSessionIdentity(sessionKey: string, agentId = readAgentIdFromSess
 
 function recordKeyForSession(sessionKey: string, identity = createSessionIdentity(sessionKey)): string {
   return buildSessionIdentityKey(identity);
+}
+
+function createTeamRoleBindingRecord(input: {
+  runId: string;
+  roleId: string;
+  agentId: string;
+  sessionIdentity: SessionIdentity;
+  localSessionId?: string;
+  endpointSessionId?: string;
+}): TeamRoleBindingRecord {
+  return {
+    runId: input.runId,
+    roleId: input.roleId,
+    agentId: input.agentId,
+    endpointRef: input.sessionIdentity.endpoint,
+    localSessionId: input.localSessionId ?? `${input.runId}:${input.roleId}:local`,
+    endpointSessionId: input.endpointSessionId ?? `${input.runId}:${input.roleId}:endpoint`,
+    sessionIdentity: input.sessionIdentity,
+  };
 }
 
 function createSessionRecord(input?: {
@@ -194,8 +214,8 @@ describe('agent sessions pane', () => {
             createdAt: 2,
             updatedAt: 3,
             sessions: [
-              { runId: 'teamrun-new', roleId: 'leader', agentId: 'leader-agent', sessionKey: 'agent:leader-agent:main', sessionIdentity: leaderIdentity },
-              { runId: 'teamrun-new', roleId: 'designer', agentId: 'designer-agent', sessionKey: 'agent:designer-agent:main', sessionIdentity: roleIdentity },
+              createTeamRoleBindingRecord({ runId: 'teamrun-new', roleId: 'leader', agentId: 'leader-agent', sessionIdentity: leaderIdentity }),
+              createTeamRoleBindingRecord({ runId: 'teamrun-new', roleId: 'designer', agentId: 'designer-agent', sessionIdentity: roleIdentity }),
             ],
           },
         ],
@@ -226,11 +246,26 @@ describe('agent sessions pane', () => {
 
     fireEvent.click(screen.getByRole('button', { name: /teamrun-new/i }));
     expect(setActiveRun).toHaveBeenCalledWith('team-1', 'teamrun-new');
-    expect(openSessionIdentity).toHaveBeenCalledWith(leaderIdentity);
+    expect(openSessionIdentity).toHaveBeenCalledWith({
+      sessionIdentity: leaderIdentity,
+      endpointSessionId: 'agent:leader-agent:teamrun-new:leader:endpoint',
+    });
 
     fireEvent.click(screen.getByRole('button', { name: /teamrun-new/i }).previousElementSibling as HTMLElement);
     expect(screen.queryByRole('button', { name: /Leader session/i })).toBeNull();
-    expect(screen.getByRole('button', { name: /designer/i })).toBeTruthy();
+    const designerRoleButton = screen.getByRole('button', { name: /designer/i });
+    expect(designerRoleButton).toBeTruthy();
+
+    setActiveRun.mockClear();
+    openSessionIdentity.mockClear();
+    refreshSnapshot.mockClear();
+    fireEvent.click(designerRoleButton);
+    expect(setActiveRun).toHaveBeenCalledWith('team-1', 'teamrun-new');
+    expect(openSessionIdentity).toHaveBeenCalledWith({
+      sessionIdentity: roleIdentity,
+      endpointSessionId: 'agent:designer-agent:teamrun-new:designer:endpoint',
+    });
+    expect(refreshSnapshot).toHaveBeenCalledWith('team-1', { force: true });
   });
 
   it('将 agent 列表放在上方，会话历史在下方统一展示', async () => {
@@ -264,6 +299,141 @@ describe('agent sessions pane', () => {
     expect(screen.getByTestId('agent-session-avatar-test')).toBeInTheDocument();
     expect(screen.getByText('主Agent会话')).toBeInTheDocument();
     expect(screen.getByText('测试Agent会话')).toBeInTheDocument();
+  });
+
+  it('普通历史列表依赖 Teams store role index 过滤 Team role session，并保留普通 agent session', () => {
+    const now = Date.now();
+    const bindingRoleIdentity = createSessionIdentity('agent:test:session-canonical-binding-role', 'test');
+    const runListRoleIdentity = createSessionIdentity('agent:test:session-canonical-run-list-role', 'test');
+    const ordinaryAgentIdentity = createSessionIdentity('agent:test:session-ordinary-agent', 'test');
+    useTeamsStore.setState({
+      teams: [
+        {
+          id: 'team-1',
+          name: 'Team One',
+          teamSkillName: 'team-skill',
+          teamSkillVersion: '1.0.0',
+          teamSkillDescription: 'Team skill',
+          packagePath: '.tmp/team-skill',
+          sourcePath: '.tmp/team-skill/SKILL.md',
+          activeRunId: 'teamrun-run-list',
+          createdAt: 1,
+          updatedAt: 2,
+        },
+      ],
+      rolesByTeamId: {
+        'team-1': [
+          createTeamRoleBindingRecord({
+            runId: 'teamrun-binding',
+            roleId: 'researcher',
+            agentId: 'test',
+            sessionIdentity: bindingRoleIdentity,
+          }),
+        ],
+      },
+      runListByTeamId: {
+        'team-1': [
+          {
+            runId: 'teamrun-run-list',
+            packageName: 'team-skill',
+            packageVersion: '1.0.0',
+            sourcePath: '.tmp/team-skill/SKILL.md',
+            status: 'running',
+            currentStageId: 'stage-new',
+            revision: 1,
+            createdAt: 1,
+            updatedAt: 2,
+            sessions: [
+              createTeamRoleBindingRecord({
+                runId: 'teamrun-run-list',
+                roleId: 'designer',
+                agentId: 'test',
+                sessionIdentity: runListRoleIdentity,
+              }),
+            ],
+          },
+        ],
+      },
+    } as never);
+    useChatStore.setState({
+      currentSessionKey: recordKeyForSession('agent:test:session-ordinary-agent', ordinaryAgentIdentity),
+      sessionCatalogStatus: buildReadySessionCatalogStatus([
+        { key: 'agent:test:session-canonical-binding-role', displayName: 'Team binding role history' },
+        { key: 'agent:test:session-canonical-run-list-role', displayName: 'Team run list role history' },
+        { key: 'agent:test:session-ordinary-agent', displayName: '普通 Agent 历史会话' },
+      ]),
+      loadedSessions: {
+        [recordKeyForSession('agent:test:session-canonical-binding-role', bindingRoleIdentity)]: createSessionRecord({
+          sessionKey: 'agent:test:session-canonical-binding-role',
+          sessionIdentity: bindingRoleIdentity,
+          historyStatus: 'ready',
+          label: 'Team binding role history',
+          lastActivityAt: now,
+        }),
+        [recordKeyForSession('agent:test:session-canonical-run-list-role', runListRoleIdentity)]: createSessionRecord({
+          sessionKey: 'agent:test:session-canonical-run-list-role',
+          sessionIdentity: runListRoleIdentity,
+          historyStatus: 'ready',
+          label: 'Team run list role history',
+          lastActivityAt: now - 60_000,
+        }),
+        [recordKeyForSession('agent:test:session-ordinary-agent', ordinaryAgentIdentity)]: createSessionRecord({
+          sessionKey: 'agent:test:session-ordinary-agent',
+          sessionIdentity: ordinaryAgentIdentity,
+          historyStatus: 'ready',
+          label: '普通 Agent 历史会话',
+          lastActivityAt: now - 120_000,
+        }),
+      },
+      switchSession: vi.fn(),
+      newSession: vi.fn(),
+      deleteSession: vi.fn().mockResolvedValue(undefined),
+      loadSessions: vi.fn().mockResolvedValue(undefined),
+    } as never);
+
+    renderPane();
+
+    expect(screen.queryByText('Team binding role history')).not.toBeInTheDocument();
+    expect(screen.queryByText('Team run list role history')).not.toBeInTheDocument();
+    expect(screen.getByText('普通 Agent 历史会话')).toBeInTheDocument();
+  });
+
+  it('冷启动 index 未 hydrate 时不把明显 Team role local session 泄漏到普通历史', () => {
+    const now = Date.now();
+    const teamRoleIdentity = createSessionIdentity('team-role-session-cold-start-leader', 'leader-agent');
+    const ordinaryAgentIdentity = createSessionIdentity('agent:leader-agent:session-ordinary', 'leader-agent');
+    useChatStore.setState({
+      currentSessionKey: recordKeyForSession('agent:leader-agent:session-ordinary', ordinaryAgentIdentity),
+      sessionCatalogStatus: buildReadySessionCatalogStatus([
+        { key: 'team-role-session-cold-start-leader', displayName: 'Cold start team role history' },
+        { key: 'agent:leader-agent:session-ordinary', displayName: '普通 Leader Agent 历史' },
+      ]),
+      loadedSessions: {
+        [recordKeyForSession('team-role-session-cold-start-leader', teamRoleIdentity)]: createSessionRecord({
+          sessionKey: 'team-role-session-cold-start-leader',
+          sessionIdentity: teamRoleIdentity,
+          historyStatus: 'ready',
+          label: 'Cold start team role history',
+          lastActivityAt: now,
+        }),
+        [recordKeyForSession('agent:leader-agent:session-ordinary', ordinaryAgentIdentity)]: createSessionRecord({
+          sessionKey: 'agent:leader-agent:session-ordinary',
+          sessionIdentity: ordinaryAgentIdentity,
+          historyStatus: 'ready',
+          label: '普通 Leader Agent 历史',
+          lastActivityAt: now - 60_000,
+        }),
+      },
+      switchSession: vi.fn(),
+      newSession: vi.fn(),
+      deleteSession: vi.fn().mockResolvedValue(undefined),
+      loadSessions: vi.fn().mockResolvedValue(undefined),
+    } as never);
+
+    renderPane();
+
+    expect(screen.queryByText('Cold start team role history')).not.toBeInTheDocument();
+    expect(screen.getByText('普通 Leader Agent 历史')).toBeInTheDocument();
   });
 
   it('收缩态头像区应负责展开，下半部应给当前 agent 新建会话', () => {

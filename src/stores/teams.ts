@@ -5,6 +5,7 @@ import { buildSessionIdentityRecordIndex, findSessionRecordKey } from '@/stores/
 import { patchSessionItemsAndViewport, patchSessionRecord } from '@/stores/chat/store-state-helpers';
 import { DEFAULT_SESSION_KEY, type ChatSessionRecord } from '@/stores/chat/types';
 import type { SessionRenderItem } from '../../runtime-host/shared/session-adapter-types';
+import { buildSessionIdentityKey, type SessionIdentity } from '../../runtime-host/shared/runtime-address';
 import {
   cancelTeamRun,
   createTeamRun,
@@ -67,6 +68,37 @@ export interface TeamSkillCandidate {
   displayName: string;
   packagePath: string;
   teamSkillPackage: TeamSkillPackage;
+}
+
+export interface TeamRoleChatTarget {
+  teamId: string;
+  runId: string;
+  roleId: string;
+  agentId: string;
+  localSessionId: string;
+  endpointSessionId: string;
+  sessionIdentity: SessionIdentity;
+}
+
+export interface TeamRoleChatTargetIndex {
+  readonly byIdentityKey: ReadonlyMap<string, TeamRoleChatTarget>;
+  readonly bySessionKey: ReadonlyMap<string, TeamRoleChatTarget>;
+  readonly localSessionKeys: ReadonlySet<string>;
+  readonly endpointSessionIds: ReadonlySet<string>;
+  readonly materializedSessionKeys: ReadonlySet<string>;
+}
+
+export interface TeamRoleSessionProbe {
+  readonly sessionIdentity?: SessionIdentity | null;
+  readonly sessionKey?: string | null;
+  readonly backendSessionKey?: string | null;
+  readonly endpointSessionId?: string | null;
+}
+
+export interface TeamRoleChatTargetIndexInput {
+  readonly teams: readonly TeamMeta[];
+  readonly runListByTeamId: Record<string, readonly TeamRunListItem[]>;
+  readonly rolesByTeamId: Record<string, readonly TeamRoleBindingRecord[]>;
 }
 
 export interface ManualTeamCandidate {
@@ -132,7 +164,9 @@ interface TeamsState {
     note?: string,
   ) => Promise<void>;
   submitDecision: (teamId: string, decision: TeamDecisionType, note?: string) => Promise<void>;
-  submitTeamRoleMessageFromChat: (teamId: string, roleId: string, message: string) => Promise<void>;
+  resolveTeamRoleChatTargetBySession: (probe: TeamRoleSessionProbe) => TeamRoleChatTarget | null;
+  isTeamRoleSession: (probe: TeamRoleSessionProbe) => boolean;
+  submitTeamRoleMessageFromChat: (teamId: string, roleId: string, message: string, runId?: string) => Promise<void>;
 }
 
 const snapshotInFlightByTeamId = new Map<string, Promise<void>>();
@@ -155,6 +189,175 @@ export function planTeamSkillCreation(teams: TeamMeta[], candidate: TeamSkillCan
     };
   }
   return { action: 'create' };
+}
+
+interface TeamRoleChatTargetIndexEntry {
+  readonly identityKey: string;
+  readonly localSessionKey: string;
+  readonly endpointSessionId: string;
+  readonly materializedSessionKey: string | null;
+  readonly target: TeamRoleChatTarget;
+}
+
+function normalizeTeamRoleSessionKey(value: string | null | undefined): string | null {
+  const normalized = typeof value === 'string' ? value.trim() : '';
+  return normalized.length > 0 ? normalized : null;
+}
+
+function isOpenClawNativeEndpoint(identity: SessionIdentity): boolean {
+  return identity.endpoint.kind === 'native-runtime' && identity.endpoint.runtimeAdapterId === 'openclaw';
+}
+
+function resolveTeamRoleMaterializedSessionKey(role: TeamRoleBindingRecord): string | null {
+  const endpointSessionId = normalizeTeamRoleSessionKey(role.endpointSessionId);
+  if (!endpointSessionId || !isOpenClawNativeEndpoint(role.sessionIdentity)) {
+    return null;
+  }
+  return `agent:${role.agentId}:${endpointSessionId}`;
+}
+
+function teamRoleTargetFromBinding(teamId: string, role: TeamRoleBindingRecord): TeamRoleChatTargetIndexEntry {
+  const identityKey = buildSessionIdentityKey(role.sessionIdentity);
+  const localSessionKey = normalizeTeamRoleSessionKey(role.localSessionId)
+    ?? normalizeTeamRoleSessionKey(role.sessionIdentity.sessionKey)
+    ?? '';
+  const endpointSessionId = normalizeTeamRoleSessionKey(role.endpointSessionId) ?? '';
+  const materializedSessionKey = resolveTeamRoleMaterializedSessionKey(role);
+  return {
+    identityKey,
+    localSessionKey,
+    endpointSessionId,
+    materializedSessionKey,
+    target: {
+      teamId,
+      runId: role.runId,
+      roleId: role.roleId,
+      agentId: role.agentId,
+      localSessionId: localSessionKey,
+      endpointSessionId: materializedSessionKey ?? endpointSessionId,
+      sessionIdentity: role.sessionIdentity,
+    },
+  };
+}
+
+function teamRoleTargetsFromRun(teamId: string, run: TeamRunListItem): TeamRoleChatTargetIndexEntry[] {
+  return run.sessions.map((role) => teamRoleTargetFromBinding(teamId, role));
+}
+
+function teamRoleTargetsFromBindings(teamId: string, roles: readonly TeamRoleBindingRecord[]): TeamRoleChatTargetIndexEntry[] {
+  return roles.map((role) => teamRoleTargetFromBinding(teamId, role));
+}
+
+function collectTeamRoleChatTargetIndexEntries(input: TeamRoleChatTargetIndexInput): TeamRoleChatTargetIndexEntry[] {
+  return input.teams.flatMap((team) => [
+    ...teamRoleTargetsFromBindings(team.id, input.rolesByTeamId[team.id] ?? []),
+    ...(input.runListByTeamId[team.id] ?? []).flatMap((run) => teamRoleTargetsFromRun(team.id, run)),
+  ]);
+}
+
+export function buildTeamRoleChatTargetByIdentityKey(input: TeamRoleChatTargetIndexInput): Map<string, TeamRoleChatTarget> {
+  return new Map(collectTeamRoleChatTargetIndexEntries(input).map((entry) => [entry.identityKey, entry.target] as const));
+}
+
+export function buildTeamRoleChatTargetIndex(input: TeamRoleChatTargetIndexInput): TeamRoleChatTargetIndex {
+  const entries = collectTeamRoleChatTargetIndexEntries(input);
+  const bySessionKey = new Map<string, TeamRoleChatTarget>();
+  const localSessionKeys = new Set<string>();
+  const endpointSessionIds = new Set<string>();
+  const materializedSessionKeys = new Set<string>();
+  for (const entry of entries) {
+    if (entry.localSessionKey) {
+      localSessionKeys.add(entry.localSessionKey);
+      bySessionKey.set(entry.localSessionKey, entry.target);
+    }
+    if (entry.endpointSessionId) {
+      endpointSessionIds.add(entry.endpointSessionId);
+      bySessionKey.set(entry.endpointSessionId, entry.target);
+    }
+    if (entry.materializedSessionKey) {
+      materializedSessionKeys.add(entry.materializedSessionKey);
+      bySessionKey.set(entry.materializedSessionKey, entry.target);
+    }
+  }
+  return {
+    byIdentityKey: new Map(entries.map((entry) => [entry.identityKey, entry.target] as const)),
+    bySessionKey,
+    localSessionKeys,
+    endpointSessionIds,
+    materializedSessionKeys,
+  };
+}
+
+export function resolveTeamRoleChatTarget(targetsByIdentityKey: ReadonlyMap<string, TeamRoleChatTarget>, identity: SessionIdentity | null | undefined): TeamRoleChatTarget | null {
+  if (!identity) {
+    return null;
+  }
+  return targetsByIdentityKey.get(buildSessionIdentityKey(identity)) ?? null;
+}
+
+export function resolveTeamRoleChatTargetFromProbe(index: TeamRoleChatTargetIndex, probe: TeamRoleSessionProbe): TeamRoleChatTarget | null {
+  const identityTarget = resolveTeamRoleChatTarget(index.byIdentityKey, probe.sessionIdentity);
+  if (identityTarget) {
+    return identityTarget;
+  }
+  const candidates = [
+    probe.endpointSessionId,
+    probe.sessionIdentity?.sessionKey,
+    probe.sessionKey,
+    probe.backendSessionKey,
+  ];
+  for (const candidate of candidates) {
+    const key = normalizeTeamRoleSessionKey(candidate);
+    if (!key) {
+      continue;
+    }
+    const target = index.bySessionKey.get(key);
+    if (target) {
+      return target;
+    }
+  }
+  return null;
+}
+
+export function isTeamRoleSessionLocalKey(index: TeamRoleChatTargetIndex, value: string | null | undefined): boolean {
+  const key = normalizeTeamRoleSessionKey(value);
+  return Boolean(key && index.localSessionKeys.has(key));
+}
+
+export function isTeamRoleReservedLocalSessionKey(value: string | null | undefined): boolean {
+  return typeof value === 'string' && value.startsWith('team-role-session-');
+}
+
+export function isKnownTeamRoleSession(index: TeamRoleChatTargetIndex, probe: TeamRoleSessionProbe): boolean {
+  return resolveTeamRoleChatTargetFromProbe(index, probe) !== null
+    || isTeamRoleReservedLocalSessionKey(probe.sessionIdentity?.sessionKey)
+    || isTeamRoleReservedLocalSessionKey(probe.sessionKey)
+    || isTeamRoleReservedLocalSessionKey(probe.backendSessionKey);
+}
+
+let cachedTeamRoleChatTargetIndexInput: TeamRoleChatTargetIndexInput | null = null;
+let cachedTeamRoleChatTargetIndex: TeamRoleChatTargetIndex = buildTeamRoleChatTargetIndex({
+  teams: [],
+  runListByTeamId: {},
+  rolesByTeamId: {},
+});
+
+export function selectTeamRoleChatTargetIndex(state: TeamRoleChatTargetIndexInput): TeamRoleChatTargetIndex {
+  if (
+    cachedTeamRoleChatTargetIndexInput
+    && cachedTeamRoleChatTargetIndexInput.teams === state.teams
+    && cachedTeamRoleChatTargetIndexInput.runListByTeamId === state.runListByTeamId
+    && cachedTeamRoleChatTargetIndexInput.rolesByTeamId === state.rolesByTeamId
+  ) {
+    return cachedTeamRoleChatTargetIndex;
+  }
+  cachedTeamRoleChatTargetIndexInput = {
+    teams: state.teams,
+    runListByTeamId: state.runListByTeamId,
+    rolesByTeamId: state.rolesByTeamId,
+  };
+  cachedTeamRoleChatTargetIndex = buildTeamRoleChatTargetIndex(cachedTeamRoleChatTargetIndexInput);
+  return cachedTeamRoleChatTargetIndex;
 }
 
 function sanitizeRunIdSegment(value: string): string {
@@ -298,29 +501,34 @@ function removeRunIdsFromRecord(runsById: Record<string, TeamRunRecord | undefin
   return runIds.reduce((nextRunsById, runId) => withoutKey(nextRunsById, runId), runsById);
 }
 
-function parseTeamRunRoleSessionKey(sessionKey: string): { runId: string; roleId: string } | null {
-  const parts = sessionKey.split(':');
-  if (parts.length !== 5 || parts[0] !== 'agent' || parts[2] !== 'team-role') {
-    return null;
+function collectTeamRunRoleSessionBindings(
+  state: Pick<TeamsState, 'runListByTeamId' | 'rolesByTeamId'>,
+  teamId: string,
+  runIds: readonly string[],
+): TeamRoleBindingRecord[] {
+  const runIdSet = new Set(runIds);
+  const bindings = [
+    ...(state.runListByTeamId[teamId] ?? [])
+      .filter((run) => runIdSet.has(run.runId))
+      .flatMap((run) => run.sessions),
+    ...(state.rolesByTeamId[teamId] ?? [])
+      .filter((binding) => runIdSet.has(binding.runId)),
+  ];
+  const bindingsByIdentity = new Map<string, TeamRoleBindingRecord>();
+  for (const binding of bindings) {
+    bindingsByIdentity.set(`${binding.runId}:${binding.roleId}:${binding.localSessionId}`, binding);
   }
-  const runId = parts[3]?.trim();
-  const roleId = parts[4]?.trim();
-  return runId && roleId ? { runId, roleId } : null;
+  return Array.from(bindingsByIdentity.values());
 }
 
-function isTeamRunRoleSessionKey(sessionKey: string, runIds: ReadonlySet<string>): boolean {
-  const parsed = parseTeamRunRoleSessionKey(sessionKey);
-  return Boolean(parsed && runIds.has(parsed.runId));
-}
-
-function removeTeamRunRoleSessions(runIds: string[]): void {
-  if (runIds.length === 0) {
+function removeTeamRunRoleSessions(bindings: readonly TeamRoleBindingRecord[]): void {
+  if (bindings.length === 0) {
     return;
   }
-  const runIdSet = new Set(runIds);
+  const identityKeys = new Set(bindings.map((binding) => buildSessionIdentityKey(binding.sessionIdentity)));
   useChatStore.setState((state) => {
     const sessionKeysToDelete = Object.entries(state.loadedSessions)
-      .filter(([, record]) => isTeamRunRoleSessionKey(record.meta.backendSessionKey, runIdSet))
+      .filter(([, record]) => record.meta.sessionIdentity && identityKeys.has(buildSessionIdentityKey(record.meta.sessionIdentity)))
       .map(([sessionKey]) => sessionKey);
     if (sessionKeysToDelete.length === 0) {
       return state;
@@ -354,10 +562,7 @@ function resolveTeamRoleChatSessionRecordKey(
   state: ReturnType<typeof useChatStore.getState>,
   binding: TeamRoleBindingRecord,
 ): string | null {
-  return findSessionRecordKey(state, binding.sessionIdentity)
-    ?? Object.entries(state.loadedSessions)
-      .find(([, record]) => record.meta.backendSessionKey === binding.sessionKey)?.[0]
-    ?? null;
+  return findSessionRecordKey(state, binding.sessionIdentity);
 }
 
 function appendOptimisticTeamRoleUserMessage(input: {
@@ -372,13 +577,7 @@ function appendOptimisticTeamRoleUserMessage(input: {
   let appended: { sessionRecordKey: string; itemKey: string } | null = null;
   useChatStore.setState((state) => {
     const binding = input.binding;
-    const sessionRecordKey = binding
-      ? resolveTeamRoleChatSessionRecordKey(state, binding)
-      : Object.entries(state.loadedSessions)
-        .find(([, record]) => {
-          const parsed = parseTeamRunRoleSessionKey(record.meta.backendSessionKey);
-          return parsed?.runId === input.runId && parsed.roleId === input.roleId;
-        })?.[0] ?? null;
+    const sessionRecordKey = binding ? resolveTeamRoleChatSessionRecordKey(state, binding) : null;
     if (!sessionRecordKey) {
       return state;
     }
@@ -549,6 +748,47 @@ function isTeamRunRecord(value: unknown): value is TeamRunRecord {
     && typeof record.updatedAt === 'number';
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value && typeof value === 'object' && !Array.isArray(value));
+}
+
+function readNonEmptyString(value: unknown): string | null {
+  return typeof value === 'string' && value.trim() ? value.trim() : null;
+}
+
+function normalizeTeamGraphNodes(nodes: unknown): TeamGraphSnapshotRecord['nodes'] {
+  if (!Array.isArray(nodes)) return [];
+  return nodes.flatMap((node) => {
+    if (!isRecord(node)) return [];
+    const nodeId = readNonEmptyString(node.nodeId);
+    if (!nodeId) return [];
+    return [{ ...node, nodeId } satisfies TeamGraphSnapshotRecord['nodes'][number]];
+  });
+}
+
+function normalizeTeamGraphEdges(edges: unknown): TeamGraphSnapshotRecord['edges'] {
+  if (!Array.isArray(edges)) return [];
+  return edges.flatMap((edge) => {
+    if (!isRecord(edge)) return [];
+    const edgeId = readNonEmptyString(edge.edgeId);
+    const sourceNodeId = readNonEmptyString(edge.sourceNodeId) ?? readNonEmptyString(edge.fromNodeId);
+    const targetNodeId = readNonEmptyString(edge.targetNodeId) ?? readNonEmptyString(edge.toNodeId);
+    if (!edgeId || !sourceNodeId || !targetNodeId) return [];
+    return [{ ...edge, edgeId, sourceNodeId, targetNodeId } satisfies TeamGraphSnapshotRecord['edges'][number]];
+  });
+}
+
+function normalizeTeamGraphProjection(graph: TeamGraphSnapshotRecord | null | undefined, runId: string): TeamGraphSnapshotRecord | null {
+  if (!graph) return null;
+  return {
+    ...graph,
+    runId: graph.runId ?? runId,
+    status: readNonEmptyString(graph.status) ?? 'draft',
+    nodes: normalizeTeamGraphNodes((graph as { nodes?: unknown }).nodes),
+    edges: normalizeTeamGraphEdges((graph as { edges?: unknown }).edges),
+  };
+}
+
 type TeamRunSnapshotRecord = Awaited<ReturnType<typeof readTeamRunSnapshot>>;
 
 function teamRunSnapshotPatch(teamId: string, runId: string, snapshot: TeamRunSnapshotRecord, state: TeamsState) {
@@ -573,7 +813,7 @@ function teamRunSnapshotPatch(teamId: string, runId: string, snapshot: TeamRunSn
     runByTeamId: { ...state.runByTeamId, [teamId]: snapshot.run ?? state.runsById[runId] },
     rolesByTeamId: { ...state.rolesByTeamId, [teamId]: snapshot.roles },
     stagesByTeamId: { ...state.stagesByTeamId, [teamId]: snapshot.stages },
-    graphByTeamId: { ...state.graphByTeamId, [teamId]: snapshot.graph },
+    graphByTeamId: { ...state.graphByTeamId, [teamId]: normalizeTeamGraphProjection(snapshot.graph, runId) },
     workflowPlanByTeamId: { ...state.workflowPlanByTeamId, [teamId]: snapshot.workflowPlan },
     dispatchGroupsByTeamId: { ...state.dispatchGroupsByTeamId, [teamId]: snapshot.dispatchGroups },
     dispatchTasksByTeamId: { ...state.dispatchTasksByTeamId, [teamId]: snapshot.dispatchTasks },
@@ -758,13 +998,17 @@ export const useTeamsStore = create<TeamsState>()(
         if (runId && !(state.runIdsByTeamId[teamId] ?? []).includes(runId)) {
           throw new Error(`Team run does not belong to team: ${teamId}`);
         }
-        set((state) => ({
-          teams: state.teams.map((team) => team.id === teamId ? { ...team, activeRunId: runId ?? undefined, updatedAt: Date.now() } : team),
-          ...emptyTeamRunProjection(teamId, state),
-          runByTeamId: { ...state.runByTeamId, [teamId]: runId ? state.runsById[runId] : undefined },
-          eventsByTeamId: { ...state.eventsByTeamId, [teamId]: runId ? state.eventsByRunId[runId] ?? [] : [] },
-          eventCursorByTeamId: { ...state.eventCursorByTeamId, [teamId]: runId ? state.eventCursorByRunId[runId] : undefined },
-        }));
+        set((state) => {
+          const selectedRun = runId ? state.runListByTeamId[teamId]?.find((run) => run.runId === runId) : undefined;
+          return {
+            teams: state.teams.map((team) => team.id === teamId ? { ...team, activeRunId: runId ?? undefined, updatedAt: Date.now() } : team),
+            ...emptyTeamRunProjection(teamId, state),
+            runByTeamId: { ...state.runByTeamId, [teamId]: selectedRun ?? (runId ? state.runsById[runId] : undefined) },
+            rolesByTeamId: { ...state.rolesByTeamId, [teamId]: selectedRun?.sessions ?? [] },
+            eventsByTeamId: { ...state.eventsByTeamId, [teamId]: runId ? state.eventsByRunId[runId] ?? [] : [] },
+            eventCursorByTeamId: { ...state.eventCursorByTeamId, [teamId]: runId ? state.eventCursorByRunId[runId] : undefined },
+          };
+        });
       },
       deleteTeam: async (teamId) => {
         const state = get();
@@ -786,7 +1030,7 @@ export const useTeamsStore = create<TeamsState>()(
         try {
           const result = await deleteTeamInstance({ teamId });
           const runIdsToDelete = mergeRunIds(runIds, result.deletedRunIds ?? []);
-          removeTeamRunRoleSessions(runIdsToDelete);
+          removeTeamRunRoleSessions(collectTeamRunRoleSessionBindings(get(), teamId, runIdsToDelete));
           set((state) => ({
             teams: state.teams.filter((team) => team.id !== teamId),
             activeTeamId: state.activeTeamId === teamId ? null : state.activeTeamId,
@@ -938,6 +1182,7 @@ export const useTeamsStore = create<TeamsState>()(
         }));
         try {
           await deleteTeamRun({ runId });
+          removeTeamRunRoleSessions(collectTeamRunRoleSessionBindings(get(), teamId, [runId]));
           set((state) => {
             const remainingRunIds = (state.runIdsByTeamId[teamId] ?? []).filter((candidate) => candidate !== runId);
             const nextRunId = selectMostRecentRunId(remainingRunIds, state.runsById);
@@ -1033,7 +1278,7 @@ export const useTeamsStore = create<TeamsState>()(
           set((state) => ({
             graphByTeamId: {
               ...state.graphByTeamId,
-              [teamId]: { ...graph, runId, updatedAt: graph.updatedAt ?? Date.now() },
+              [teamId]: normalizeTeamGraphProjection({ ...graph, runId, updatedAt: graph.updatedAt ?? Date.now() }, runId),
             },
           }));
         } catch (error) {
@@ -1157,7 +1402,11 @@ export const useTeamsStore = create<TeamsState>()(
           await get().refreshSnapshot(teamId, { force: true });
         });
       },
-      submitTeamRoleMessageFromChat: async (teamId, roleId, message) => {
+      resolveTeamRoleChatTargetBySession: (probe) => (
+        resolveTeamRoleChatTargetFromProbe(selectTeamRoleChatTargetIndex(get()), probe)
+      ),
+      isTeamRoleSession: (probe) => isKnownTeamRoleSession(selectTeamRoleChatTargetIndex(get()), probe),
+      submitTeamRoleMessageFromChat: async (teamId, roleId, message, requestedRunId) => {
         let optimistic: { sessionRecordKey: string; itemKey: string } | null = null;
         set((state) => ({
           loadingByTeamId: { ...state.loadingByTeamId, [teamId]: true },
@@ -1165,10 +1414,10 @@ export const useTeamsStore = create<TeamsState>()(
         }));
         try {
           const state = get();
-          const runId = resolveActiveRunId(state, teamId);
+          const runId = requestedRunId ?? resolveActiveRunId(state, teamId);
           const actionKey = idempotencyKey(teamId, `role-message:${runId}:${roleId}:${createRequestId('message')}`);
           optimistic = appendOptimisticTeamRoleUserMessage({
-            binding: state.rolesByTeamId[teamId]?.find((role) => role.runId === runId && role.roleId === roleId),
+            binding: collectTeamRunRoleSessionBindings(state, teamId, [runId]).find((role) => role.runId === runId && role.roleId === roleId),
             runId,
             roleId,
             message,

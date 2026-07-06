@@ -16,6 +16,7 @@ export type TeamRuntimeOperationId =
   | 'team.triggerFire'
   | 'team.roleMessageSubmit'
   | 'team.nodePromptRetryDue'
+  | 'team.nodePromptSettled'
   | 'team.nodeEvent'
   | 'team.runDiagnostics'
   | 'team.runDecisionSubmit'
