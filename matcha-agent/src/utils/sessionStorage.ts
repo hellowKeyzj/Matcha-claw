@@ -81,6 +81,10 @@ import { gracefulShutdownSync, isShuttingDown } from './gracefulShutdown.js'
 import { parseJSONL } from './json.js'
 import { logError } from './log.js'
 import { extractTag, isCompactBoundaryMessage } from './messages.js'
+import {
+  hasRealUserMessage,
+  hasRealUserMessageRecord,
+} from './sessionConversationEligibility.js'
 import { sanitizePath } from './path.js'
 import {
   extractJsonStringField,
@@ -2540,6 +2544,7 @@ function convertToLogOption(
   return {
     date: lastMessage.timestamp,
     messages: removeExtraFields(transcript),
+    ...(transcript.some(hasRealUserMessage) ? { hasRealUserMessage: true } : {}),
     fullPath,
     value,
     created,
@@ -4693,6 +4698,7 @@ const INITIAL_ENRICH_COUNT = 50
 
 type LiteMetadata = {
   firstPrompt: string
+  hasRealUserMessage?: boolean
   gitBranch?: string
   isSidechain: boolean
   projectPath?: string
@@ -4883,6 +4889,8 @@ async function readLiteMetadata(
   // User titles (customTitle field, from custom-title entries) win over
   // AI titles (aiTitle field, from ai-title entries). The distinct field
   // names mean extractLastJsonStringField naturally disambiguates.
+  const hasRealUserMessage =
+    hasRealUserMessageInChunk(head) || hasRealUserMessageInChunk(tail)
   const customTitle =
     extractLastJsonStringField(tail, 'customTitle') ??
     extractLastJsonStringField(head, 'customTitle') ??
@@ -4913,6 +4921,7 @@ async function readLiteMetadata(
 
   return {
     firstPrompt,
+    ...(hasRealUserMessage ? { hasRealUserMessage: true } : {}),
     gitBranch,
     isSidechain,
     projectPath,
@@ -4928,8 +4937,23 @@ async function readLiteMetadata(
 }
 
 /**
- * Scans a chunk of text for the first meaningful user prompt.
+ * Checks whether a chunk contains a real user message.
  */
+function hasRealUserMessageInChunk(chunk: string): boolean {
+  let start = 0
+  while (start < chunk.length) {
+    const newlineIdx = chunk.indexOf('\n', start)
+    const line =
+      newlineIdx >= 0 ? chunk.slice(start, newlineIdx) : chunk.slice(start)
+    start = newlineIdx >= 0 ? newlineIdx + 1 : chunk.length
+
+    try {
+      if (hasRealUserMessageRecord(jsonParse(line))) return true
+    } catch {}
+  }
+  return false
+}
+
 function extractFirstPromptFromChunk(chunk: string): string {
   let start = 0
   let hasTickMessages = false
@@ -5145,6 +5169,7 @@ async function enrichLog(
     ...log,
     isLite: false,
     firstPrompt: meta.firstPrompt,
+    hasRealUserMessage: meta.hasRealUserMessage,
     gitBranch: meta.gitBranch,
     isSidechain: meta.isSidechain,
     teamName: meta.teamName,

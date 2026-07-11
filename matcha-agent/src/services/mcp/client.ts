@@ -41,6 +41,7 @@ import memoize from 'lodash-es/memoize.js'
 import zipObject from 'lodash-es/zipObject.js'
 import pMap from 'p-map'
 import { getOriginalCwd, getSessionId } from '../../bootstrap/state.js'
+import { getCwd } from '../../utils/cwd.js'
 import type { Command } from '../../commands.js'
 import { getOauthConfig } from '../../constants/oauth.js'
 import { PRODUCT_URL } from '../../constants/product.js'
@@ -963,6 +964,7 @@ export const connectToServer = memoize(
             ...subprocessEnv(),
             ...stdioRef.env,
           } as Record<string, string>,
+          cwd: getCwd(),
           stderr: 'pipe', // prevents error output from the MCP server from printing to the UI
         })
       } else {

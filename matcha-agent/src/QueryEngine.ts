@@ -34,6 +34,7 @@ import type { CanUseToolFn } from './hooks/useCanUseTool.js'
 import { loadMemoryPrompt } from './memdir/memdir.js'
 import { hasAutoMemPathOverride } from './memdir/paths.js'
 import { query } from './query.js'
+import type { RunTraceSink } from './query/runTrace.js'
 import { categorizeRetryableAPIError } from './services/api/errors.js'
 import type { MCPServerConnection } from './services/mcp/types.js'
 import type { AppState } from './state/AppState.js'
@@ -161,6 +162,7 @@ export type QueryEngineConfig = {
   handleElicitation?: ToolUseContext['handleElicitation']
   includePartialMessages?: boolean
   setSDKStatus?: (status: SDKStatus) => void
+  runTrace?: RunTraceSink
   abortController?: AbortController
   orphanedPermission?: OrphanedPermission
   /**
@@ -240,6 +242,7 @@ export class QueryEngine {
       includePartialMessages = false,
       agents = [],
       setSDKStatus,
+      runTrace,
       orphanedPermission,
     } = this.config
 
@@ -291,6 +294,7 @@ export class QueryEngine {
         ? { type: 'adaptive' }
         : { type: 'disabled' }
 
+    runTrace?.('query_engine.system_prompt.start')
     headlessProfilerCheckpoint('before_getSystemPrompt')
     // Narrow once so TS tracks the type through the conditionals below.
     const customPrompt =
@@ -309,6 +313,7 @@ export class QueryEngine {
       customSystemPrompt: customPrompt,
     })
     headlessProfilerCheckpoint('after_getSystemPrompt')
+    runTrace?.('query_engine.system_prompt.end')
     const userContext = {
       ...baseUserContext,
       ...getCoordinatorUserContext(
@@ -417,6 +422,7 @@ export class QueryEngine {
       }
     }
 
+    runTrace?.('query_engine.process_user_input.start')
     const {
       messages: messagesFromUserInput,
       shouldQuery,
@@ -435,6 +441,10 @@ export class QueryEngine {
       uuid: options?.uuid,
       isMeta: options?.isMeta,
       querySource: 'sdk',
+    })
+    runTrace?.('query_engine.process_user_input.end', {
+      shouldQuery,
+      messagesFromUserInput: messagesFromUserInput.length,
     })
 
     // Push new messages, including user input and any attachments
@@ -458,6 +468,7 @@ export class QueryEngine {
     // — the single largest controllable critical-path cost after module eval.
     // Transcript is still written (for post-hoc debugging); just not blocking.
     if (persistSession && messagesFromUserInput.length > 0) {
+      runTrace?.('query_engine.transcript.start')
       const transcriptPromise = recordTranscript(messages)
       if (isBareMode()) {
         void transcriptPromise
@@ -470,6 +481,7 @@ export class QueryEngine {
           await flushSessionStorage()
         }
       }
+      runTrace?.('query_engine.transcript.end')
     }
 
     // Filter messages that should be acknowledged after transcript
@@ -537,6 +549,7 @@ export class QueryEngine {
       setSDKStatus,
     }
 
+    runTrace?.('query_engine.skills_plugins.start')
     headlessProfilerCheckpoint('before_skills_plugins')
     // Cache-only: headless/SDK/CCR startup must not block on network for
     // ref-tracked plugins. CCR populates the cache via CLAUDE_CODE_SYNC_PLUGIN_INSTALL
@@ -547,6 +560,10 @@ export class QueryEngine {
       loadAllPluginsCacheOnly(),
     ])
     headlessProfilerCheckpoint('after_skills_plugins')
+    runTrace?.('query_engine.skills_plugins.end', {
+      skills: skills.length,
+      plugins: enabledPlugins.length,
+    })
 
     yield buildSystemInitMessage({
       tools,
@@ -685,6 +702,7 @@ export class QueryEngine {
       ? countToolCalls(this.mutableMessages, SYNTHETIC_OUTPUT_TOOL_NAME)
       : 0
 
+    runTrace?.('query_engine.query_loop.start')
     for await (const message of query({
       messages,
       systemPrompt,
@@ -696,6 +714,7 @@ export class QueryEngine {
       querySource: 'sdk',
       maxTurns,
       taskBudget,
+      runTrace,
     })) {
       // Record assistant, user, and compact boundary messages
       if (
@@ -1100,6 +1119,11 @@ export class QueryEngine {
         }
       }
     }
+
+    runTrace?.('query_engine.query_loop.end', {
+      turnCount,
+      stopReason: lastStopReason,
+    })
 
     // Stop hooks yield progress/attachment messages AFTER the assistant
     // response (via yield* handleStopHooks in query.ts). Since #23537 pushes

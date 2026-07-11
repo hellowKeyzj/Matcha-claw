@@ -24,6 +24,7 @@ export type LogOption = {
   created: Date
   modified: Date
   firstPrompt: string
+  hasRealUserMessage?: boolean
   messageCount: number
   fileSize?: number // File size in bytes (for display)
   isSidechain: boolean

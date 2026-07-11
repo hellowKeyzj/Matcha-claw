@@ -182,6 +182,7 @@ import { headlessProfilerCheckpoint } from 'src/utils/headlessProfiler.js'
 import { isMcpInstructionsDeltaEnabled } from 'src/utils/mcpInstructionsDelta.js'
 import { calculateUSDCost } from 'src/utils/modelCost.js'
 import { endQueryProfile, queryCheckpoint } from 'src/utils/queryProfiler.js'
+import type { RunTraceSink } from 'src/query/runTrace.js'
 import {
   modelSupportsAdaptiveThinking,
   modelSupportsThinking,
@@ -727,6 +728,7 @@ export type Options = {
   taskBudget?: { total: number; remaining?: number }
   /** Langfuse root trace span for observability. No-op if null/undefined. */
   langfuseTrace?: LangfuseSpan | null
+  runTrace?: RunTraceSink
 }
 
 export async function queryModelWithoutStreaming({
@@ -1877,6 +1879,9 @@ async function* queryModel(
 
   try {
     queryCheckpoint('query_client_creation_start')
+    options.runTrace?.('api.client.creation.start', {
+      queryDepth: options.queryTracking?.depth,
+    })
     const generator = withRetry(
       () =>
         getAnthropicClient({
@@ -1895,6 +1900,10 @@ async function* queryModel(
         // only calls getClient() again after auth errors), so the delta from
         // client_creation_start is meaningful on attempt 1.
         queryCheckpoint('query_client_creation_end')
+        options.runTrace?.('api.client.creation.end', {
+          queryDepth: options.queryTracking?.depth,
+          attempt,
+        })
 
         const params = paramsFromContext(context)
         captureAPIRequest(params, options.querySource) // Capture for bug reports
@@ -1905,6 +1914,11 @@ async function* queryModel(
         // awaits until response headers arrive, so this MUST be before the await
         // or the "Network TTFB" phase measurement is wrong.
         queryCheckpoint('query_api_request_sent')
+        options.runTrace?.('api.request.sent', {
+          queryDepth: options.queryTracking?.depth,
+          attempt,
+          model: options.model,
+        })
         if (!options.agentId) {
           headlessProfilerCheckpoint('api_request_sent')
         }
@@ -1934,6 +1948,11 @@ async function* queryModel(
         queryCheckpoint('query_response_headers_received')
         streamRequestId = result.request_id
         streamResponse = result.response
+        options.runTrace?.('api.response.headers', {
+          queryDepth: options.queryTracking?.depth,
+          attempt,
+          requestId: streamRequestId,
+        })
         return result.data
       },
       {
@@ -1979,6 +1998,12 @@ async function* queryModel(
     const STREAM_IDLE_TIMEOUT_MS =
       parseInt(process.env.CLAUDE_STREAM_IDLE_TIMEOUT_MS || '', 10) || 90_000
     const STREAM_IDLE_WARNING_MS = STREAM_IDLE_TIMEOUT_MS / 2
+    options.runTrace?.('api.stream.watchdog.configured', {
+      queryDepth: options.queryTracking?.depth,
+      requestId: streamRequestId,
+      enabled: streamWatchdogEnabled,
+      timeoutMs: STREAM_IDLE_TIMEOUT_MS,
+    })
     let streamIdleAborted = false
     // performance.now() snapshot when watchdog fires, for measuring abort propagation delay
     let streamWatchdogFiredAt: number | null = null
@@ -2018,6 +2043,11 @@ async function* queryModel(
           { level: 'error' },
         )
         logForDiagnosticsNoPII('error', 'cli_streaming_idle_timeout')
+        options.runTrace?.('api.stream.watchdog.timeout', {
+          queryDepth: options.queryTracking?.depth,
+          requestId: streamRequestId,
+          timeoutMs: STREAM_IDLE_TIMEOUT_MS,
+        })
         logEvent('tengu_streaming_idle_timeout', {
           model:
             options.model as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
@@ -2070,6 +2100,11 @@ async function* queryModel(
 
         if (isFirstChunk) {
           logForDebugging('Stream started - received first chunk')
+          options.runTrace?.('api.stream.first_chunk', {
+            queryDepth: options.queryTracking?.depth,
+            requestId: streamRequestId,
+            eventType: part.type,
+          })
           queryCheckpoint('query_first_chunk_received')
           if (!options.agentId) {
             headlessProfilerCheckpoint('first_chunk')
@@ -2082,6 +2117,11 @@ async function* queryModel(
           case 'message_start': {
             partialMessage = part.message
             ttftMs = Date.now() - start
+            options.runTrace?.('api.stream.message_start', {
+              queryDepth: options.queryTracking?.depth,
+              requestId: streamRequestId,
+              messageId: part.message.id,
+            })
             usage = updateUsage(usage, part.message?.usage)
             // Capture research from message_start if available (internal only).
             // Always overwrite with the latest value.
@@ -2352,6 +2392,13 @@ async function* queryModel(
             // the queued reference; direct mutation ensures the transcript
             // captures the final values.
             stopReason = part.delta.stop_reason
+            if (stopReason) {
+              options.runTrace?.('api.stream.message_delta.stop_reason', {
+                queryDepth: options.queryTracking?.depth,
+                requestId: streamRequestId,
+                stopReason,
+              })
+            }
 
             const lastMsg = newMessages.at(-1)
             if (lastMsg) {
@@ -2408,6 +2455,10 @@ async function* queryModel(
             break
           }
           case 'message_stop':
+            options.runTrace?.('api.stream.message_stop', {
+              queryDepth: options.queryTracking?.depth,
+              requestId: streamRequestId,
+            })
             break
         }
 
@@ -2419,6 +2470,13 @@ async function* queryModel(
       }
       // Clear the idle timeout watchdog now that the stream loop has exited
       clearStreamIdleTimers()
+      options.runTrace?.('api.stream.loop.end', {
+        queryDepth: options.queryTracking?.depth,
+        requestId: streamRequestId,
+        stopReason,
+        assistantMessages: newMessages.length,
+        streamIdleAborted,
+      })
 
       // If the stream was aborted by our idle timeout watchdog, fall back to
       // non-streaming retry rather than treating it as a completed stream.
@@ -2442,6 +2500,12 @@ async function* queryModel(
             'clean' as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
           model:
             options.model as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
+        })
+        options.runTrace?.('api.stream.loop.exited_after_watchdog', {
+          queryDepth: options.queryTracking?.depth,
+          requestId: streamRequestId,
+          exitDelayMs,
+          exitPath: 'clean',
         })
         // Prevent double-emit: this throw lands in the catch block below,
         // whose exit_path='error' probe guards on streamWatchdogFiredAt.
@@ -2529,6 +2593,13 @@ async function* queryModel(
     } catch (streamingError) {
       // Clear the idle timeout watchdog on error path too
       clearStreamIdleTimers()
+      options.runTrace?.('api.stream.error', {
+        queryDepth: options.queryTracking?.depth,
+        requestId: streamRequestId,
+        errorName:
+          streamingError instanceof Error ? streamingError.name : 'unknown',
+        streamIdleAborted,
+      })
 
       // Instrumentation: if the watchdog had already fired and the for-await
       // threw (rather than exiting cleanly), record that the loop DID exit and
@@ -2553,6 +2624,14 @@ async function* queryModel(
               : ('unknown' as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS),
           model:
             options.model as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
+        })
+        options.runTrace?.('api.stream.loop.exited_after_watchdog', {
+          queryDepth: options.queryTracking?.depth,
+          requestId: streamRequestId,
+          exitDelayMs,
+          exitPath: 'error',
+          errorName:
+            streamingError instanceof Error ? streamingError.name : 'unknown',
         })
       }
 
@@ -2727,6 +2806,12 @@ async function* queryModel(
       clearStreamIdleTimers()
     }
   } catch (errorFromRetry) {
+    options.runTrace?.('api.stream.error', {
+      queryDepth: options.queryTracking?.depth,
+      requestId: streamRequestId,
+      errorName:
+        errorFromRetry instanceof Error ? errorFromRetry.name : 'unknown',
+    })
     // FallbackTriggeredError must propagate to query.ts, which performs the
     // actual model switch. Swallowing it here would turn the fallback into a
     // no-op — the user would just see "Model fallback triggered: X -> Y" as
