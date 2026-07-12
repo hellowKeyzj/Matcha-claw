@@ -86,8 +86,14 @@ patches/
 spec/
 clawsuite-main/
 .planning/
-.claude/
+.claude/*
+!.claude/commands/
+!.claude/commands/*.md
 .tmp/
 identity/
 matcha-agent/spec
 third_party/
+软件著作权申请资料/
+.claude/
+matcha-agent/.matcha-agent-app-server/
+resources/skills/plugin-companion-skills/browser-flow-create/runtime/__pycache__/
