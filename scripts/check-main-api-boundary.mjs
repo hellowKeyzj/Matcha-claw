@@ -95,7 +95,8 @@ async function checkServerImports() {
     );
   }
 
-  if (!source.includes("import { isMainOwnedRoute } from './route-boundary';")) {
+  const importsMainOwnedRoute = /import\s+\{[^}]*\bisMainOwnedRoute\b[^}]*\}\s+from\s+['"]\.\/route-boundary['"];?/m.test(source);
+  if (!importsMainOwnedRoute) {
     fail(
       'Main API boundary check failed: electron/api/server.ts 未导入主进程边界守卫。',
       ['缺少 import: isMainOwnedRoute'],
