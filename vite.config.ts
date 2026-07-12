@@ -123,7 +123,7 @@ function resolveManualChunk(id: string): string | undefined {
 }
 
 // https://vitejs.dev/config/
-export default defineConfig({
+export default defineConfig(({ mode }) => ({
   // Required for Electron: all asset URLs must be relative because the renderer
   // loads via file:// in production. vite-plugin-electron-renderer sets this
   // automatically, but we declare it explicitly so the intent is clear and the
@@ -139,6 +139,16 @@ export default defineConfig({
           options.startup();
         },
         vite: {
+          resolve: {
+            alias: {
+              '@electron/e2e-fixture-loader': resolve(
+                __dirname,
+                mode === 'e2e'
+                  ? 'electron/main/e2e-fixture-loader.ts'
+                  : 'electron/main/e2e-fixture-loader.noop.ts',
+              ),
+            },
+          },
           server: {
             watch: {
               ignored: ignoredWorkspaceDirs,
@@ -206,4 +216,4 @@ export default defineConfig({
       ],
     },
   },
-});
+}));

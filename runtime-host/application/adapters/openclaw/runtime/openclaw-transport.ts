@@ -21,10 +21,11 @@ export class OpenClawRuntimeTransport implements RuntimeSessionTransport {
       const payload = input.payload && typeof input.payload === 'object' && !Array.isArray(input.payload)
         ? input.payload as Record<string, unknown>
         : {};
+      const message = typeof payload.message === 'string' ? payload.message : input.message;
       const result = await this.gateway.chatSend({
         ...payload,
         sessionKey: input.context.endpointSessionId,
-        message: input.message,
+        message,
         idempotencyKey: input.runId,
       });
       const record = result && typeof result === 'object' && !Array.isArray(result)

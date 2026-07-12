@@ -18,6 +18,7 @@ export default defineConfig({
   resolve: {
     alias: {
       '@': resolve(__dirname, 'src'),
+      '@electron/e2e-fixture-loader': resolve(__dirname, 'electron/main/e2e-fixture-loader.noop.ts'),
       '@electron': resolve(__dirname, 'electron'),
       'openclaw/plugin-sdk/browser-support': resolve(__dirname, 'build/openclaw/dist/plugin-sdk/browser-support.js'),
     },

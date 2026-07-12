@@ -21,9 +21,19 @@ type HostApiProxyEnvelope =
     error: { message: string };
   };
 
+export type E2EDialogStagedAttachmentPayload = {
+  id: string;
+  fileName: string;
+  mimeType: string;
+  fileSize: number;
+  stagedPath: string;
+  preview: string | null;
+};
+
 type E2EFixtureModule = {
   handleE2EHostApiFetch: (request: HostApiFetchRequest) => HostApiProxyEnvelope | null;
   getE2EDialogOpenResult: () => { canceled: boolean; filePaths: string[] } | null;
+  getE2EDialogStagedAttachments: () => E2EDialogStagedAttachmentPayload[] | null;
   getE2EGatewayStatus: () => unknown | null;
 };
 
@@ -51,6 +61,10 @@ export async function handleE2EHostApiFetch(
 
 export async function getE2EDialogOpenResult(): Promise<{ canceled: boolean; filePaths: string[] } | null> {
   return (await loadFixtureModule())?.getE2EDialogOpenResult() ?? null;
+}
+
+export async function getE2EDialogStagedAttachments(): Promise<E2EDialogStagedAttachmentPayload[] | null> {
+  return (await loadFixtureModule())?.getE2EDialogStagedAttachments() ?? null;
 }
 
 export async function getE2EGatewayStatus<TStatus>(): Promise<TStatus | null> {

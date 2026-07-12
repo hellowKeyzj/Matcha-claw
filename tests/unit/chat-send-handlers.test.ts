@@ -128,7 +128,13 @@ describe('chat send handlers', () => {
           role: 'user',
           text: 'latest reply',
           images: [],
-          attachedFiles: [],
+          attachedFiles: [{
+            fileName: 'attachment.txt',
+            mimeType: 'text/plain',
+            fileSize: 16,
+            preview: null,
+            source: 'user-upload',
+          }],
           createdAt: 1,
           updatedAt: 1,
           messageId: 'user-local-1',
@@ -180,14 +186,25 @@ describe('chat send handlers', () => {
       beginMutating: vi.fn(),
       finishMutating: vi.fn(),
       text: 'latest reply',
+      attachments: [{
+        fileName: 'attachment.txt',
+        mimeType: 'text/plain',
+        fileSize: 16,
+        stagedPath: 'C:\\tmp\\attachment.txt',
+        preview: null,
+      }],
     });
 
+    expect(sendChatTransportMock).toHaveBeenCalledWith(expect.objectContaining({
+      attachments: [expect.objectContaining({ fileName: 'attachment.txt' })],
+    }));
     const record = state.loadedSessions[sessionKey]!;
     expect(record.runtime.activeRunId).toBeNull();
     expect(record.runtime.pendingTurnKey).toBe('main:run-1');
     expect(getSessionItems(state, sessionKey).map((item) => item.messageId)).toEqual(['user-local-1']);
     expect(getSessionItems(state, sessionKey)[0]).toMatchObject({
       messageId: 'user-local-1',
+      attachedFiles: [expect.objectContaining({ fileName: 'attachment.txt' })],
     });
   });
 
@@ -454,6 +471,54 @@ describe('chat send handlers', () => {
     expect(beginMutating).not.toHaveBeenCalled();
     expect(finishMutating).not.toHaveBeenCalled();
     expect(getSessionItems(state, sessionKey).map((item) => item.messageId)).toEqual(['user-local-1']);
+  });
+
+  it('keeps the composer draft when runtime-host rejects an attachment send', async () => {
+    const sessionKey = 'agent:main:session-1';
+    sendChatTransportMock.mockResolvedValueOnce({
+      ok: false,
+      error: 'Attachment staging expired',
+    });
+
+    let state = {
+      currentSessionKey: sessionKey,
+      loadedSessions: {
+        [sessionKey]: createSessionRecord({ sessionKey }),
+      },
+      pendingApprovalsBySession: {},
+      error: null,
+      mutating: false,
+      syncPendingApprovals: vi.fn().mockResolvedValue(undefined),
+    } as unknown as ChatStoreState;
+    const set = (
+      partial: Partial<ChatStoreState> | ((current: ChatStoreState) => Partial<ChatStoreState> | ChatStoreState),
+    ) => {
+      const patch = typeof partial === 'function' ? partial(state) : partial;
+      state = { ...state, ...patch } as ChatStoreState;
+    };
+
+    const result = await executeStoreSend({
+      set,
+      get: () => state,
+      sessionRunCache: createStoreSessionRunCache(),
+      beginMutating: vi.fn(),
+      finishMutating: vi.fn(),
+      text: 'retry this attachment',
+      attachments: [{
+        fileName: 'report.txt',
+        mimeType: 'text/plain',
+        fileSize: 42,
+        stagedPath: 'C:\\tmp\\report.txt',
+        preview: null,
+      }],
+    });
+
+    expect(result).toEqual({
+      accepted: false,
+      reason: 'error',
+      error: 'Attachment staging expired',
+    });
+    expect(state.error).toBe('Attachment staging expired');
   });
 
   it('recoverable chat.send timeout leaves runtime unchanged while runtime-host remains authoritative', async () => {

@@ -1,6 +1,5 @@
 import { buildGatewayChatSendParams } from '../../shared/gateway-chat-send-params';
 import type { RuntimeFileSystemPort } from '../common/runtime-ports';
-import type { GatewayChatPort } from '../gateway/gateway-runtime-port';
 
 const VISION_MIME_TYPES = new Set([
   'image/png',
@@ -102,24 +101,4 @@ export async function buildSendWithMediaGatewayParams(
     idempotencyKey: input.idempotencyKey,
     attachments: imageAttachments.length > 0 ? imageAttachments : undefined,
   });
-}
-
-export async function sendWithMediaViaGateway(
-  fileSystem: RuntimeFileSystemPort,
-  gateway: GatewayChatPort,
-  input: SendWithMediaInput,
-): Promise<{ success: boolean; result?: unknown; error?: string }> {
-  try {
-    const rpcParams = await buildSendWithMediaGatewayParams(fileSystem, input);
-    const result = await gateway.chatSend(rpcParams);
-    return {
-      success: true,
-      result,
-    };
-  } catch (error) {
-    return {
-      success: false,
-      error: String(error),
-    };
-  }
 }

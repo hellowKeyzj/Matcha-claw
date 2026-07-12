@@ -2720,7 +2720,7 @@ describe('runtime-host process manager', () => {
     }
   });
 
-  it('chat/send-with-media 在子进程直连 gateway chat.send，不走 parent dispatch', async () => {
+  it('chat/send-with-media 通过 canonical prompt workflow 提交并在子进程直连 gateway chat.send，不走 parent dispatch', async () => {
     const port = createPort(18);
     const parentApiPort = createPort(47);
     const gatewayPort = createPort(48);
@@ -2768,6 +2768,13 @@ describe('runtime-host process manager', () => {
               message: 'hello',
               idempotencyKey: 'idem-1',
               deliver: true,
+              media: [{
+                filePath: join(openClawConfigDir, 'media', 'outbound', 'report.txt'),
+                fileName: 'report.txt',
+                mimeType: 'text/plain',
+                fileSize: 42,
+                preview: null,
+              }],
             },
             { kind: 'session', identity: sessionIdentity },
             { kind: 'session', identity: sessionIdentity },
@@ -2779,16 +2786,32 @@ describe('runtime-host process manager', () => {
         status: number;
         data?: {
           success?: boolean;
-          result?: {
-            ok?: boolean;
-            echo?: {
-              sessionKey?: string;
-              message?: string;
-              idempotencyKey?: string;
-              uniqueId?: string;
-              requestId?: string;
-              deliver?: boolean;
+          sessionKey?: string;
+          runId?: string;
+          item?: {
+            kind?: string;
+            runId?: string;
+            attachedFiles?: Array<{
+              fileName?: string;
+              mimeType?: string;
+              fileSize?: number;
+            }>;
+          } | null;
+          snapshot?: {
+            runtime?: {
+              activeRunId?: string | null;
+              runPhase?: string;
             };
+            items?: Array<{
+              kind?: string;
+              text?: string;
+              runId?: string;
+              attachedFiles?: Array<{
+                fileName?: string;
+                mimeType?: string;
+                fileSize?: number;
+              }>;
+            }>;
           };
         };
       };
@@ -2799,26 +2822,52 @@ describe('runtime-host process manager', () => {
         status: 200,
         data: {
           success: true,
-          result: {
-            ok: true,
-            echo: {
-              sessionKey: 'agent:main:session-1',
-              message: 'hello',
-              idempotencyKey: 'idem-1',
-              deliver: true,
+          sessionKey: 'agent:main:session-1',
+          runId: 'idem-1',
+          item: {
+            kind: 'user-message',
+            runId: 'idem-1',
+            attachedFiles: [expect.objectContaining({
+              fileName: 'report.txt',
+              mimeType: 'text/plain',
+              fileSize: 42,
+            })],
+          },
+          snapshot: {
+            runtime: {
+              activeRunId: 'idem-1',
+              runPhase: 'submitted',
             },
+            items: expect.arrayContaining([expect.objectContaining({
+              kind: 'user-message',
+              text: 'hello',
+              runId: 'idem-1',
+              attachedFiles: [expect.objectContaining({
+                fileName: 'report.txt',
+                mimeType: 'text/plain',
+                fileSize: 42,
+              })],
+            })]),
           },
         },
       });
       expect(parentDispatchServer.getDispatchRequestCount()).toBe(0);
       expect(parentDispatchServer.getExecutionSyncRequestCount()).toBe(0);
-      expect(gatewayServer.getRequests().some((item) => item.method === 'chat.send')).toBe(true);
+      await waitForCondition(() => gatewayServer.getRequests().some((item) => item.method === 'chat.send'));
+      const gatewayRequest = gatewayServer.getRequests().find((item) => item.method === 'chat.send');
+      expect(gatewayRequest?.params).toMatchObject({
+        sessionKey: 'agent:main:session-1',
+        idempotencyKey: 'idem-1',
+        deliver: true,
+        message: expect.stringContaining('[media attached:'),
+      });
+      expect((gatewayRequest?.params as { attachments?: unknown }).attachments).toBeUndefined();
     } finally {
       await manager.stop();
       await gatewayServer.close();
       await parentDispatchServer.close();
     }
-  });
+  }, 15_000);
 
   it('cron/jobs 在子进程直连 gateway，不走 parent dispatch', async () => {
     const port = createPort(19);

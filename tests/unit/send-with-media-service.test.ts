@@ -1,8 +1,8 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { sendWithMediaViaGateway } from '../../runtime-host/application/chat/send-media';
+import { buildSendWithMediaGatewayParams } from '../../runtime-host/application/chat/send-media';
 import { createTestRuntimeFileSystem } from './helpers/runtime-file-system';
 
 describe('chat send-media', () => {
@@ -22,19 +22,13 @@ describe('chat send-media', () => {
     const filePath = join(dir, 'notes.txt');
     await writeFile(filePath, 'hello text', 'utf8');
 
-    const chatSend = vi.fn(async () => ({ runId: 'run-text' }));
-    const result = await sendWithMediaViaGateway(fileSystem, { chatSend }, {
+    const rpcParams = await buildSendWithMediaGatewayParams(fileSystem, {
       sessionKey: 'agent:main:session-1',
       message: 'process this',
       idempotencyKey: 'id-text',
-      uniqueId: 'id-text',
-      requestId: 'id-text',
       media: [{ filePath, mimeType: 'text/plain', fileName: 'notes.txt' }],
     });
 
-    expect(result.success).toBe(true);
-    expect(chatSend).toHaveBeenCalledTimes(1);
-    const [rpcParams] = chatSend.mock.calls[0];
     expect(rpcParams).toMatchObject({
       sessionKey: 'agent:main:session-1',
       deliver: false,
@@ -52,19 +46,13 @@ describe('chat send-media', () => {
     const filePath = join(dir, 'image.png');
     await writeFile(filePath, Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x00, 0x01]));
 
-    const chatSend = vi.fn(async () => ({ runId: 'run-image' }));
-    const result = await sendWithMediaViaGateway(fileSystem, { chatSend }, {
+    const rpcParams = await buildSendWithMediaGatewayParams(fileSystem, {
       sessionKey: 'agent:main:session-2',
       message: 'process image',
       idempotencyKey: 'id-image',
-      uniqueId: 'id-image',
-      requestId: 'id-image',
       media: [{ filePath, mimeType: 'image/png', fileName: 'image.png' }],
     });
 
-    expect(result.success).toBe(true);
-    expect(chatSend).toHaveBeenCalledTimes(1);
-    const [rpcParams] = chatSend.mock.calls[0];
     const payload = rpcParams as {
       message: string;
       idempotencyKey?: string;

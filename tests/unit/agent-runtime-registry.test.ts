@@ -1,8 +1,10 @@
 import { describe, expect, it, vi } from 'vitest';
 import { AgentRuntimeRegistry } from '../../runtime-host/application/agent-runtime/contracts/agent-runtime-registry';
 import { OpenClawRuntimeAdapter } from '../../runtime-host/application/adapters/openclaw/runtime/openclaw-runtime-adapter';
+import { OpenClawRuntimeTransport } from '../../runtime-host/application/adapters/openclaw/runtime/openclaw-transport';
 import { createTestAcpClientConnector } from './helpers/acp-test-connector';
 import { agentScope, connectorRuntimeEndpoint, nativeRuntimeEndpoint, runtimeInstanceScope } from '../../runtime-host/application/agent-runtime/contracts/runtime-address';
+import { createRuntimeSessionContext } from '../../runtime-host/application/agent-runtime/contracts/runtime-session-context';
 import type { RuntimeProtocolConnector, RuntimeSessionTransport } from '../../runtime-host/application/agent-runtime/contracts/runtime-endpoint-types';
 
 const testProtocol: RuntimeProtocolConnector['protocol'] = {
@@ -93,6 +95,51 @@ describe('runtime adapter and connector registry', () => {
       runtimeInstanceId: 'local',
     }), { gateway: nativeGateway });
     expect(registry.getProtocol('openclaw-v4')).toBe(adapter.protocol);
+  });
+
+  it('preserves the R3 gateway payload while overriding OpenClaw endpoint identity', async () => {
+    const chatSend = vi.fn(async () => ({ success: true }));
+    const transport = new OpenClawRuntimeTransport({
+      chatSend,
+      gatewayRpc: async () => ({}),
+    });
+    const attachments = [{
+      content: 'cmVwb3J0',
+      mimeType: 'text/plain',
+      fileName: 'report.txt',
+    }];
+    const context = createRuntimeSessionContext({
+      identity: {
+        endpoint: openClawEndpointRef(),
+        agentId: 'main',
+        sessionKey: 'local',
+      },
+      protocolId: 'openclaw-v4',
+      runtimeEndpointId: 'openclaw-local',
+      endpointSessionId: 'endpoint-session',
+    });
+
+    const result = await transport.sendPrompt({
+      context,
+      message: 'hello',
+      runId: 'run-1',
+      payload: {
+        sessionKey: 'local',
+        message: 'hello\n\n[media attached: /tmp/report.txt (text/plain) | /tmp/report.txt]',
+        deliver: true,
+        idempotencyKey: 'stale',
+        attachments,
+      },
+    });
+
+    expect(result).toMatchObject({ success: true });
+    expect(chatSend).toHaveBeenCalledWith({
+      sessionKey: 'endpoint-session',
+      message: 'hello\n\n[media attached: /tmp/report.txt (text/plain) | /tmp/report.txt]',
+      deliver: true,
+      idempotencyKey: 'run-1',
+      attachments,
+    });
   });
 
   it('routes connector runtime transport through the protocol connector', async () => {

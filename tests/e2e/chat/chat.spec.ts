@@ -102,6 +102,10 @@ test.describe('Chat e2e', () => {
     await input.fill('send with attachment');
     await page.getByTitle('Send').click();
 
+    const sentUserTurn = page.getByTestId('chat-message-stack')
+      .locator('[data-chat-item-kind="user-message"]')
+      .filter({ has: page.getByText('send with attachment', { exact: true }) });
+    await expect(sentUserTurn.getByTestId('chat-attached-file-card').filter({ hasText: 'notes.txt' })).toBeVisible();
     await expect(page.getByText('Mock reply: send with attachment')).toBeVisible();
   });
 

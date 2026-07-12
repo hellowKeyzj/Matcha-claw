@@ -44,7 +44,7 @@ import { createSessionApprovalCapabilityOperationRoutes } from '../../applicatio
 import type { CapabilityOperationRoute } from '../../application/capabilities/contracts/capability-router';
 import { createSessionModelSelectionCapabilityOperationRoutes } from '../../application/capabilities/model/session-model-capability';
 import { createSessionManagementCapabilityOperationRoutes } from '../../application/capabilities/session/session-management-capability';
-import { createSessionPromptCapabilityOperationRoutes, SESSION_PROMPT_CAPABILITY_ID } from '../../application/capabilities/session/session-prompt-capability';
+import { createSessionPromptCapabilityOperationRoutes } from '../../application/capabilities/session/session-prompt-capability';
 import type { SessionConfigDirectoryPort, SessionExternalArtefactResolverPort } from '../../application/sessions/session-storage-repository';
 import type { SessionDefaultModelResolverPort } from '../../application/sessions/session-metadata-repository';
 import type { RuntimeClockPort, RuntimeFileSystemPort, RuntimeIdGeneratorPort } from '../../application/common/runtime-ports';
@@ -67,7 +67,6 @@ import type {
 import type { AgentRuntimeRegistry } from '../../application/agent-runtime/contracts/agent-runtime-registry';
 import type { RuntimeEndpointProfile } from '../../application/agent-runtime/contracts/runtime-endpoint-types';
 import { nativeRuntimeEndpoint, connectorRuntimeEndpoint, validateSessionIdentity, type SessionIdentity } from '../../application/agent-runtime/contracts/runtime-address';
-import type { GatewayChatPort } from '../../application/gateway/gateway-runtime-port';
 
 export interface SessionRuntimeModule {
   readonly sessionRuntime: SessionRuntimeService;
@@ -325,8 +324,6 @@ function registerSessionRuntimeCapabilityOperationRoutes(container: RuntimeHostC
     ...createSessionPromptCapabilityOperationRoutes({
       commandService: scope.resolve('sessionCommandService'),
       promptService: scope.resolve('sessionPromptService'),
-      fileSystem: scope.resolve<RuntimeFileSystemPort>('runtime.fileSystem'),
-      gateway: scope.resolve<GatewayChatPort>('gateway.runtime'),
     }),
     ...createSessionApprovalCapabilityOperationRoutes({
       commandService: scope.resolve('sessionCommandService'),

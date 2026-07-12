@@ -64,6 +64,12 @@ type MockMessage = {
   id: string;
   content: string;
   timestamp: number;
+  attachedFiles?: Array<{
+    fileName: string;
+    mimeType: string;
+    fileSize: number;
+    preview: string | null;
+  }>;
 };
 
 type MockApproval = {
@@ -1167,12 +1173,13 @@ function touchSession(sessionKey: string): void {
 
 function appendMessage(
   sessionKey: string,
-  message: Pick<MockMessage, 'role' | 'content'>,
+  message: Pick<MockMessage, 'role' | 'content' | 'attachedFiles'>,
 ): MockMessage {
   ensureSession(sessionKey);
   const nextMessage: MockMessage = {
     role: message.role,
     content: message.content,
+    ...(message.attachedFiles ? { attachedFiles: message.attachedFiles } : {}),
     id: `msg-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`,
     timestamp: nowSeconds(),
   };
@@ -1512,7 +1519,7 @@ function buildSnapshotForSession(sessionKey: string): SessionStateSnapshot {
             text: message.content,
             createdAt: message.timestamp,
             images: [],
-            attachedFiles: [],
+            attachedFiles: message.attachedFiles ?? [],
             messageId: message.id,
           };
         }
@@ -2428,10 +2435,35 @@ export function handleE2EHostApiFetch(request: HostApiFetchRequest): HostApiProx
       }
       const sessionKey = typeof requestPayload.input.sessionKey === 'string' ? requestPayload.input.sessionKey : (getSessionKeyFromScope(requestPayload.scope) ?? state.mainSessionKey);
       const message = typeof requestPayload.input.message === 'string' ? requestPayload.input.message : 'Process attachment';
-      const result = createRun(sessionKey, message, 'default');
+      const attachedFiles = Array.isArray(requestPayload.input.media)
+        ? requestPayload.input.media.flatMap((media) => {
+            if (!isRecord(media)
+              || typeof media.fileName !== 'string'
+              || typeof media.mimeType !== 'string'
+              || typeof media.fileSize !== 'number') {
+              return [];
+            }
+            return [{
+              fileName: media.fileName,
+              mimeType: media.mimeType,
+              fileSize: media.fileSize,
+              preview: typeof media.preview === 'string' ? media.preview : null,
+            }];
+          })
+        : [];
+      const userMessage = appendMessage(sessionKey, { role: 'user', content: message, attachedFiles });
+      const runId = `run-${Date.now()}-${++state.counter}`;
+      state.runsById[runId] = { runId, sessionKey, userText: message, mode: 'default', status: 'running' };
+      setTimeout(() => emitRunStarted(runId, sessionKey), 10);
+      setTimeout(() => emitDelta(runId, sessionKey, 'Mock streaming...'), 40);
+      setTimeout(() => emitFinal(runId, sessionKey, `Mock reply: ${message}`), 900);
+      const snapshot = buildSnapshotForSession(sessionKey);
       return toSuccessEnvelope({
         success: true,
-        result,
+        runId,
+        sessionKey,
+        item: snapshot.items.find((item) => item.kind === 'user-message' && item.messageId === userMessage.id) ?? null,
+        snapshot,
       });
     }
 
@@ -2577,6 +2609,28 @@ export function getE2EDialogOpenResult(): { canceled: boolean; filePaths: string
     canceled: false,
     filePaths: ['C:\\mock\\notes.txt'],
   };
+}
+
+
+export function getE2EDialogStagedAttachments(): Array<{
+  id: string;
+  fileName: string;
+  mimeType: string;
+  fileSize: number;
+  stagedPath: string;
+  preview: string | null;
+}> | null {
+  if (!isE2EMode) {
+    return null;
+  }
+  return [{
+    id: 'e2e-notes-txt',
+    fileName: 'notes.txt',
+    mimeType: 'text/plain',
+    fileSize: 18,
+    stagedPath: 'e2e://attachments/notes.txt',
+    preview: null,
+  }];
 }
 
 export function getE2EGatewayStatus(): MockGatewayStatus | null {

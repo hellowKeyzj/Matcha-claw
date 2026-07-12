@@ -294,7 +294,7 @@ export async function executeStoreSend(params: ExecuteStoreSendParams): Promise<
         set,
         error: errorMsg,
       });
-      return { accepted: true };
+      return { accepted: false, reason: 'error', error: errorMsg };
     }
 
     set((state) => {
@@ -331,7 +331,7 @@ export async function executeStoreSend(params: ExecuteStoreSendParams): Promise<
       set,
       error: errorMsg,
     });
-    return { accepted: true };
+    return { accepted: false, reason: 'error', error: errorMsg };
   } finally {
     finishMutating();
   }

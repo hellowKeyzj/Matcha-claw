@@ -1,7 +1,4 @@
-import { normalizeSendWithMediaInput, sendWithMediaViaGateway } from '../../chat/send-media';
-import { badRequest, ok, serverError } from '../../common/application-response';
-import type { RuntimeFileSystemPort } from '../../common/runtime-ports';
-import type { GatewayChatPort } from '../../gateway/gateway-runtime-port';
+import { badRequest } from '../../common/application-response';
 import type { CapabilityOperationDescriptor } from '../contracts/capability-descriptor';
 import type { CapabilityOperationContext, CapabilityOperationRoute } from '../contracts/capability-router';
 import type { SessionCommandService } from '../../sessions/session-command-service';
@@ -55,8 +52,6 @@ function withSessionTargetValidation(
 export function createSessionPromptCapabilityOperationRoutes(deps: {
   commandService: SessionCommandService;
   promptService: SessionPromptService;
-  fileSystem?: RuntimeFileSystemPort;
-  gateway?: GatewayChatPort;
 }): readonly CapabilityOperationRoute[] {
   return [
     {
@@ -77,20 +72,7 @@ export function createSessionPromptCapabilityOperationRoutes(deps: {
     {
       capabilityId: SESSION_PROMPT_CAPABILITY_ID,
       operationId: 'sessions.sendWithMedia',
-      handle: withSessionTargetValidation(async (context) => {
-        if (!deps.fileSystem || !deps.gateway) {
-          return badRequest('sessions.sendWithMedia is not supported by this runtime');
-        }
-        const input = normalizeSendWithMediaInput(context.input);
-        if (!input) {
-          return badRequest('Invalid send-with-media payload');
-        }
-        const result = await sendWithMediaViaGateway(deps.fileSystem, deps.gateway, input);
-        if (!result.success) {
-          return serverError(result.error ?? 'Send-with-media failed');
-        }
-        return ok({ success: true, result: result.result });
-      }),
+      handle: withSessionTargetValidation((context) => deps.promptService.promptSession(context.input)),
     },
     {
       capabilityId: SESSION_PROMPT_CAPABILITY_ID,

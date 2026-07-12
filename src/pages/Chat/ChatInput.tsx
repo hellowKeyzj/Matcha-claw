@@ -1056,11 +1056,30 @@ export const ChatInput = memo(function ChatInput({
         return;
       }
       const { pathFiles, bufferFiles } = collectDroppedFiles(e.dataTransfer);
-      if (pathFiles.length > 0) {
-        void stageDroppedPathFiles(pathFiles);
+      const filesByPath = new Map(
+        Array.from(e.dataTransfer.items ?? []).flatMap((item) => {
+          if (item.kind !== 'file' || item.webkitGetAsEntry?.()?.isDirectory) {
+            return [];
+          }
+          const file = item.getAsFile();
+          const filePath = file ? window.electron?.getPathForFile?.(file) : '';
+          return filePath ? [[filePath, file] as const] : [];
+        }),
+      );
+      const filesToStage = [...bufferFiles];
+      const pathFilesToStage = pathFiles.filter((filePath) => {
+        const file = filesByPath.get(filePath);
+        if (!file) {
+          return true;
+        }
+        filesToStage.push(file);
+        return false;
+      });
+      if (pathFilesToStage.length > 0) {
+        void stageDroppedPathFiles(pathFilesToStage);
       }
-      if (bufferFiles.length > 0) {
-        stageBufferFiles(bufferFiles);
+      if (filesToStage.length > 0) {
+        stageBufferFiles(filesToStage);
       }
     },
     [stageBufferFiles, stageDroppedPathFiles],

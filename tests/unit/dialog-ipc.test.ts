@@ -49,8 +49,12 @@ vi.mock('node:crypto', () => {
   };
 });
 
-vi.mock('../../electron/main/e2e-fixture-loader', () => ({
-  getE2EDialogOpenResult: vi.fn(async () => null),
+const getE2EDialogOpenResultMock = vi.fn(async () => null);
+const getE2EDialogStagedAttachmentsMock = vi.fn(async () => null);
+
+vi.mock('@electron/e2e-fixture-loader', () => ({
+  getE2EDialogOpenResult: getE2EDialogOpenResultMock,
+  getE2EDialogStagedAttachments: getE2EDialogStagedAttachmentsMock,
 }));
 
 describe('dialog ipc', () => {
@@ -65,6 +69,10 @@ describe('dialog ipc', () => {
     statMock.mockReset();
     copyFileMock.mockReset();
     mkdirMock.mockReset();
+    getE2EDialogOpenResultMock.mockReset();
+    getE2EDialogOpenResultMock.mockResolvedValue(null);
+    getE2EDialogStagedAttachmentsMock.mockReset();
+    getE2EDialogStagedAttachmentsMock.mockResolvedValue(null);
   });
 
   it('does not register arbitrary path text file read/write channels', async () => {
@@ -83,6 +91,51 @@ describe('dialog ipc', () => {
 
     expect(registeredHandlers.has('dialog:stageOpenAttachments')).toBe(true);
     expect(registeredHandlers.has('files:stagePaths')).toBe(false);
+  });
+
+  it('opens the native dialog for general file selection', async () => {
+    const result = { canceled: false, filePaths: ['/tmp/selected.txt'] };
+    showOpenDialogMock.mockResolvedValue(result);
+    const { registerDialogHandlers } = await import('../../electron/main/ipc/dialog-ipc');
+    registerDialogHandlers();
+
+    const handler = registeredHandlers.get('dialog:open');
+
+    await expect(handler?.({}, { title: 'Select file' })).resolves.toEqual(result);
+    expect(showOpenDialogMock).toHaveBeenCalledWith({ title: 'Select file' });
+  });
+
+  it('uses the E2E open-dialog result without opening a native dialog', async () => {
+    const result = { canceled: false, filePaths: ['C:\\mock\\notes.txt'] };
+    getE2EDialogOpenResultMock.mockResolvedValue(result);
+    const { registerDialogHandlers } = await import('../../electron/main/ipc/dialog-ipc');
+    registerDialogHandlers();
+
+    const handler = registeredHandlers.get('dialog:open');
+
+    await expect(handler?.({}, { title: 'Select file' })).resolves.toEqual(result);
+    expect(showOpenDialogMock).not.toHaveBeenCalled();
+  });
+
+  it('returns E2E staged attachments without opening a native dialog', async () => {
+    const attachments = [{
+      id: 'e2e-notes-txt',
+      fileName: 'notes.txt',
+      mimeType: 'text/plain',
+      fileSize: 18,
+      stagedPath: 'e2e://attachments/notes.txt',
+      preview: null,
+    }];
+    getE2EDialogStagedAttachmentsMock.mockResolvedValue(attachments);
+    const { registerDialogHandlers } = await import('../../electron/main/ipc/dialog-ipc');
+    registerDialogHandlers();
+
+    const handler = registeredHandlers.get('dialog:stageOpenAttachments');
+
+    await expect(handler?.({}, { title: 'Attach' })).resolves.toEqual({ canceled: false, attachments });
+    expect(showOpenDialogMock).not.toHaveBeenCalled();
+    expect(mkdirMock).not.toHaveBeenCalled();
+    expect(copyFileMock).not.toHaveBeenCalled();
   });
 
   it('stages files selected in the same open dialog call into outbound media', async () => {

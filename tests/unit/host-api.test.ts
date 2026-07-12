@@ -1,5 +1,6 @@
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import type { SessionPromptResult, SessionRenderUserMessageItem } from '../../runtime-host/shared/session-adapter-types';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const invokeIpcMock = vi.fn();
@@ -951,18 +952,113 @@ describe('host-api', () => {
     );
   });
 
-  it('hostSessionPrompt executes the session prompt capability', async () => {
-    invokeIpcMock.mockResolvedValueOnce(proxyEnvelope({ success: true, snapshot: { sessionKey: 'agent:main:main' } }));
+  it('hostSessionPrompt preserves the complete media SessionPromptResult', async () => {
+    const media = [{
+      filePath: '/workspace/report.pdf',
+      fileName: 'report.pdf',
+      mimeType: 'application/pdf',
+      fileSize: 2048,
+      preview: 'data:application/pdf;base64,cmVwb3J0',
+    }];
+    const item: SessionRenderUserMessageItem = {
+      key: 'item-user-1',
+      kind: 'user-message',
+      role: 'user',
+      sessionKey: 'agent:main:main',
+      runId: 'run-media-1',
+      text: 'Review the attached report',
+      images: [],
+      attachedFiles: [{
+        fileName: 'report.pdf',
+        mimeType: 'application/pdf',
+        fileSize: 2048,
+        preview: 'data:application/pdf;base64,cmVwb3J0',
+        filePath: '/workspace/report.pdf',
+        source: 'user-upload',
+      }],
+    };
+    const mediaPromptResult: SessionPromptResult = {
+      success: true,
+      sessionKey: 'agent:main:main',
+      runId: 'run-media-1',
+      item,
+      snapshot: {
+        sessionKey: 'agent:main:main',
+        catalog: {
+          key: 'agent:main:main',
+          agentId: 'default',
+          protocolId: 'openclaw',
+          runtimeEndpointId: 'openclaw:local',
+          sessionIdentity: testSessionIdentity,
+          kind: 'main',
+          preferred: true,
+        },
+        items: [item],
+        approvals: [],
+        usage: [],
+        artifacts: [],
+        replayComplete: true,
+        runtime: {
+          activeRunId: 'run-media-1',
+          runPhase: 'submitted',
+          activeTurnItemKey: null,
+          pendingTurnKey: 'item-user-1',
+          pendingTurnLaneKey: null,
+          runtimeActivity: null,
+          lastUserMessageAt: 1,
+          lastError: null,
+          lastIssue: null,
+          updatedAt: 1,
+        },
+        window: {
+          totalItemCount: 1,
+          windowStartOffset: 0,
+          windowEndOffset: 1,
+          hasMore: false,
+          hasNewer: false,
+          isAtLatest: true,
+        },
+      },
+    };
+    invokeIpcMock.mockResolvedValueOnce(proxyEnvelope(mediaPromptResult));
 
     const { hostSessionPrompt } = await import('@/lib/host-api');
-    await hostSessionPrompt({
+    const result = await hostSessionPrompt({
       sessionKey: 'agent:main:main',
       sessionIdentity: testSessionIdentity,
-      message: 'hello',
-      idempotencyKey: 'user-local-1',
-      deliver: false,
+      message: 'Review the attached report',
+      media,
     });
 
+    expect(result).toBe(mediaPromptResult);
+    expect(result).toMatchObject({
+      success: true,
+      sessionKey: 'agent:main:main',
+      runId: 'run-media-1',
+      item: {
+        kind: 'user-message',
+        attachedFiles: [{
+          fileName: 'report.pdf',
+          filePath: '/workspace/report.pdf',
+          mimeType: 'application/pdf',
+          fileSize: 2048,
+          preview: 'data:application/pdf;base64,cmVwb3J0',
+        }],
+      },
+      snapshot: {
+        runtime: { runPhase: 'submitted', activeRunId: 'run-media-1' },
+        items: [{
+          kind: 'user-message',
+          attachedFiles: [{
+            fileName: 'report.pdf',
+            filePath: '/workspace/report.pdf',
+            mimeType: 'application/pdf',
+            fileSize: 2048,
+            preview: 'data:application/pdf;base64,cmVwb3J0',
+          }],
+        }],
+      },
+    });
     expect(invokeIpcMock).toHaveBeenCalledWith(
       'hostapi:fetch',
       expect.objectContaining({
