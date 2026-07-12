@@ -152,7 +152,7 @@ export function registerOperationsApplicationServices(
     container.register('license.service', (scope) => new LicenseService(scope.resolve('license.runtime')));
     return;
   }
-  container.register('cron.runtimeData', (scope): RuntimeDataRootPort => scope.resolve<RuntimeDataRootPort>('runtimeHost.runtimeDataRoot'));
+  container.register('cron.runtimeData', (scope): RuntimeDataRootPort => scope.resolve<RuntimeDataRootPort>('usage.runtimeData'));
   container.register('cron.runHistoryRepository', (scope) => new CronRunHistoryRepository({
     runtimeData: scope.resolve<RuntimeDataRootPort>('cron.runtimeData'),
     fileSystem: scope.resolve<RuntimeFileSystemPort>('runtime.fileSystem'),
