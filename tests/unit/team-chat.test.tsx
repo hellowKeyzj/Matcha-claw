@@ -630,6 +630,66 @@ describe('team chat', () => {
     });
   });
 
+  it('configures a StartNode cron trigger every 15 minutes through the custom schedule form', async () => {
+    useTeamsStore.setState({
+      graphByTeamId: {
+        'team-1': {
+          runId: 'team-1',
+          status: 'running',
+          nodes: [
+            {
+              nodeId: 'start-1',
+              kind: 'start',
+              title: 'Schedule start',
+              status: 'pending',
+              config: { trigger: { mode: 'webhook', path: '' } },
+            },
+          ],
+          edges: [],
+          updatedAt: 2,
+        },
+      },
+    } as never);
+
+    render(
+      <MemoryRouter>
+        <TeamChat teamId="team-1" />
+      </MemoryRouter>,
+    );
+
+    const nodeCard = (await screen.findAllByText('Schedule start'))[0]!.closest('[role="button"]');
+    expect(nodeCard).not.toBeNull();
+    fireEvent.click(nodeCard!);
+    const dialog = await screen.findByRole('dialog');
+    fireEvent.change(within(dialog).getByLabelText('Trigger'), { target: { value: 'cron' } });
+
+    expect(within(dialog).getByLabelText('Schedule')).toHaveValue('every10Minutes');
+
+    fireEvent.change(within(dialog).getByLabelText('Schedule'), { target: { value: 'custom' } });
+    expect(within(dialog).queryByLabelText('Cron expression')).not.toBeInTheDocument();
+    expect(within(dialog).getByLabelText('Custom schedule')).toHaveValue('intervalMinutes');
+
+    fireEvent.change(within(dialog).getByLabelText('Custom schedule'), { target: { value: 'intervalMinutes' } });
+    fireEvent.change(within(dialog).getByLabelText('Every N minutes'), { target: { value: '15' } });
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Save node' }));
+
+    await waitFor(() => {
+      expect(useTeamsStore.getState().saveGraph).toHaveBeenCalledWith(
+        'team-1',
+        expect.objectContaining({
+          nodes: expect.arrayContaining([
+            expect.objectContaining({
+              nodeId: 'start-1',
+              config: expect.objectContaining({
+                trigger: { mode: 'cron', cron: '*/15 * * * *' },
+              }),
+            }),
+          ]),
+        }),
+      );
+    });
+  });
+
   it('configures a StartNode webhook path, previews the runtime-host route, and keeps the token masked', async () => {
     const writeText = vi.fn().mockResolvedValue(undefined);
     Object.defineProperty(navigator, 'clipboard', {

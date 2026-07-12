@@ -222,8 +222,25 @@
       "copiedWebhookPublicUrl": "Скопировано",
       "startWebhookPathRequired": "Путь Webhook обязателен.",
       "startWebhookPathInvalid": "Путь Webhook не должен содержать '..'.",
-      "startCronExpression": "Выражение Cron",
-      "startTriggerHint": "Стартовый узел задаёт внешнюю точку запуска workflow; webhook-запросы принимает runtime-host.",
+      "startCronSchedule": "Расписание",
+      "startCronSchedules": {
+        "every10Minutes": "Каждые 10 минут",
+        "every30Minutes": "Каждые 30 минут",
+        "hourly": "Каждый час",
+        "dailyAt9": "Каждый день в 09:00",
+        "custom": "Свое"
+      },
+      "startCronCustomKind": "Пользовательское расписание",
+      "startCronCustomKinds": {
+        "intervalMinutes": "Каждые N минут",
+        "intervalHours": "Каждые N часов",
+        "dailyAt": "Ежедневное время"
+      },
+      "startCronCustomIntervalMinutes": "Каждые N минут",
+      "startCronCustomIntervalHours": "Каждые N часов",
+      "startCronCustomTime": "Ежедневное время",
+      "startCronCustomValueRequired": "Введите корректное значение расписания.",
+      "startTriggerHint": "Стартовый узел задаёт внешнюю точку запуска workflow; webhook-запросы принимает runtime-host, а расписания локально выполняет runtime-host.",
       "defaultOutputPort": "выход",
       "edges": "Связи",
       "noEdges": "0 связей",

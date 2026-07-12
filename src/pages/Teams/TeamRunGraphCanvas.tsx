@@ -13,6 +13,8 @@ import type {
 type TeamGraphCanvasNodeKind = 'start' | 'work' | 'review' | 'human_decision' | 'script_review' | 'join' | 'end';
 
 type TeamGraphStartTriggerMode = 'webhook' | 'cron';
+type TeamGraphCronPresetId = 'every10Minutes' | 'every30Minutes' | 'hourly' | 'dailyAt9' | 'custom';
+type TeamGraphCronCustomKind = 'intervalMinutes' | 'intervalHours' | 'dailyAt';
 type TeamGraphReviewExecutorKind = 'team-role' | 'human';
 type TeamGraphScriptReviewRuleId = 'passThrough' | 'assertAllUpstreamCompleted' | 'assertNoBlockingGate' | 'assertArtifactExists';
 
@@ -100,7 +102,14 @@ type TeamRunGraphCanvasLabels = {
   copiedWebhookPublicUrl: string;
   startWebhookPathRequired: string;
   startWebhookPathInvalid: string;
-  startCronExpression: string;
+  startCronSchedule: string;
+  startCronSchedules: Record<TeamGraphCronPresetId, string>;
+  startCronCustomKind: string;
+  startCronCustomKinds: Record<TeamGraphCronCustomKind, string>;
+  startCronCustomIntervalMinutes: string;
+  startCronCustomIntervalHours: string;
+  startCronCustomTime: string;
+  startCronCustomValueRequired: string;
   startTriggerHint: string;
   nodePaletteDescriptions: Record<TeamGraphCanvasNodeKind, string>;
   defaultOutputPort: string;
@@ -171,6 +180,19 @@ const COLUMN_GAP = 280;
 const ROW_GAP = 190;
 const CANVAS_PADDING = 72;
 const DRAG_THRESHOLD = 3;
+const START_CRON_PRESETS: Array<{ presetId: Exclude<TeamGraphCronPresetId, 'custom'>; cron: string }> = [
+  { presetId: 'every10Minutes', cron: '*/10 * * * *' },
+  { presetId: 'every30Minutes', cron: '*/30 * * * *' },
+  { presetId: 'hourly', cron: '0 * * * *' },
+  { presetId: 'dailyAt9', cron: '0 9 * * *' },
+];
+const START_CRON_CUSTOM_KIND_IDS: TeamGraphCronCustomKind[] = ['intervalMinutes', 'intervalHours', 'dailyAt'];
+const DEFAULT_START_CRON_PRESET_ID: TeamGraphCronPresetId = 'every10Minutes';
+const DEFAULT_START_CRON_EXPRESSION = START_CRON_PRESETS.find((preset) => preset.presetId === DEFAULT_START_CRON_PRESET_ID)!.cron;
+const DEFAULT_START_CRON_CUSTOM_KIND: TeamGraphCronCustomKind = 'intervalMinutes';
+const DEFAULT_START_CRON_CUSTOM_INTERVAL_MINUTES = '10';
+const DEFAULT_START_CRON_CUSTOM_INTERVAL_HOURS = '1';
+const DEFAULT_START_CRON_CUSTOM_TIME = '09:00';
 const NODE_PALETTE: Array<{ kind: TeamGraphCanvasNodeKind; title: string; sourcePort: string }> = [
   { kind: 'start', title: 'Trigger', sourcePort: 'completed' },
   { kind: 'work', title: 'Role step', sourcePort: 'completed' },
@@ -537,7 +559,7 @@ function defaultConfigForNode(kind: TeamGraphCanvasNodeKind, title: string): Rec
 }
 
 function defaultStartTrigger(mode: TeamGraphStartTriggerMode): Record<string, unknown> {
-  if (mode === 'cron') return { mode: 'cron', cron: '0 9 * * *' };
+  if (mode === 'cron') return { mode: 'cron', cron: DEFAULT_START_CRON_EXPRESSION };
   return { mode: 'webhook', path: '' };
 }
 
@@ -570,13 +592,63 @@ function isValidWebhookPublicBaseUrl(value: string): boolean {
   }
 }
 
-function readStartTrigger(node: TeamGraphNodeRecord | null): { mode: TeamGraphStartTriggerMode; cron: string; path: string; publicBaseUrl: string } {
+function cronPresetIdForExpression(cronExpression: string): TeamGraphCronPresetId {
+  return START_CRON_PRESETS.find((preset) => preset.cron === cronExpression)?.presetId ?? 'custom';
+}
+
+function readCustomCronSchedule(cronExpression: string): { kind: TeamGraphCronCustomKind; intervalMinutes: string; intervalHours: string; time: string } {
+  const everyMinutesMatch = /^\*\/(\d+) \* \* \* \*$/.exec(cronExpression);
+  if (everyMinutesMatch?.[1]) {
+    return { kind: 'intervalMinutes', intervalMinutes: everyMinutesMatch[1], intervalHours: DEFAULT_START_CRON_CUSTOM_INTERVAL_HOURS, time: DEFAULT_START_CRON_CUSTOM_TIME };
+  }
+  const everyHoursMatch = /^0 \*\/(\d+) \* \* \*$/.exec(cronExpression);
+  if (everyHoursMatch?.[1]) {
+    return { kind: 'intervalHours', intervalMinutes: DEFAULT_START_CRON_CUSTOM_INTERVAL_MINUTES, intervalHours: everyHoursMatch[1], time: DEFAULT_START_CRON_CUSTOM_TIME };
+  }
+  const dailyAtMatch = /^(\d{1,2}) (\d{1,2}) \* \* \*$/.exec(cronExpression);
+  if (dailyAtMatch?.[1] && dailyAtMatch[2]) {
+    return { kind: 'dailyAt', intervalMinutes: DEFAULT_START_CRON_CUSTOM_INTERVAL_MINUTES, intervalHours: DEFAULT_START_CRON_CUSTOM_INTERVAL_HOURS, time: `${dailyAtMatch[2].padStart(2, '0')}:${dailyAtMatch[1].padStart(2, '0')}` };
+  }
+  return { kind: DEFAULT_START_CRON_CUSTOM_KIND, intervalMinutes: DEFAULT_START_CRON_CUSTOM_INTERVAL_MINUTES, intervalHours: DEFAULT_START_CRON_CUSTOM_INTERVAL_HOURS, time: DEFAULT_START_CRON_CUSTOM_TIME };
+}
+
+function readPositiveIntegerInRange(value: string, min: number, max: number): number | null {
+  const trimmedValue = value.trim();
+  if (!/^\d+$/.test(trimmedValue)) return null;
+  const parsed = Number.parseInt(trimmedValue, 10);
+  if (!Number.isInteger(parsed) || parsed < min || parsed > max) return null;
+  return parsed;
+}
+
+function buildCustomCronExpression(input: { kind: TeamGraphCronCustomKind; intervalMinutes: string; intervalHours: string; time: string }): string | null {
+  if (input.kind === 'intervalMinutes') {
+    const minutes = readPositiveIntegerInRange(input.intervalMinutes, 1, 59);
+    return minutes === null ? null : `*/${minutes} * * * *`;
+  }
+  if (input.kind === 'intervalHours') {
+    const hours = readPositiveIntegerInRange(input.intervalHours, 1, 23);
+    return hours === null ? null : `0 */${hours} * * *`;
+  }
+  const timeMatch = /^(\d{2}):(\d{2})$/.exec(input.time.trim());
+  if (!timeMatch?.[1] || !timeMatch[2]) return null;
+  const hours = readPositiveIntegerInRange(timeMatch[1], 0, 23);
+  const minutes = readPositiveIntegerInRange(timeMatch[2], 0, 59);
+  return hours === null || minutes === null ? null : `${minutes} ${hours} * * *`;
+}
+
+function readStartTrigger(node: TeamGraphNodeRecord | null): { mode: TeamGraphStartTriggerMode; cronPresetId: TeamGraphCronPresetId; customKind: TeamGraphCronCustomKind; customIntervalMinutes: string; customIntervalHours: string; customTime: string; path: string; publicBaseUrl: string } {
   const trigger = node?.config?.trigger;
   const record = trigger && typeof trigger === 'object' && !Array.isArray(trigger) ? (trigger as Record<string, unknown>) : {};
   const mode: TeamGraphStartTriggerMode = record.mode === 'cron' ? 'cron' : 'webhook';
+  const cron = typeof record.cron === 'string' ? record.cron : '';
+  const customSchedule = readCustomCronSchedule(cron);
   return {
     mode,
-    cron: typeof record.cron === 'string' ? record.cron : '',
+    cronPresetId: cronPresetIdForExpression(cron),
+    customKind: customSchedule.kind,
+    customIntervalMinutes: customSchedule.intervalMinutes,
+    customIntervalHours: customSchedule.intervalHours,
+    customTime: customSchedule.time,
     path: typeof record.path === 'string' ? record.path : '',
     publicBaseUrl: typeof record.publicBaseUrl === 'string' ? record.publicBaseUrl : '',
   };
@@ -725,7 +797,11 @@ export function TeamRunGraphCanvas({
   const [startTriggerMode, setStartTriggerMode] = useState<TeamGraphStartTriggerMode>('webhook');
   const [startWebhookPath, setStartWebhookPath] = useState('');
   const [startWebhookPublicBaseUrl, setStartWebhookPublicBaseUrl] = useState('');
-  const [startCronExpression, setStartCronExpression] = useState('');
+  const [startCronPresetId, setStartCronPresetId] = useState<TeamGraphCronPresetId>(DEFAULT_START_CRON_PRESET_ID);
+  const [startCronCustomKind, setStartCronCustomKind] = useState<TeamGraphCronCustomKind>(DEFAULT_START_CRON_CUSTOM_KIND);
+  const [startCronCustomIntervalMinutes, setStartCronCustomIntervalMinutes] = useState(DEFAULT_START_CRON_CUSTOM_INTERVAL_MINUTES);
+  const [startCronCustomIntervalHours, setStartCronCustomIntervalHours] = useState(DEFAULT_START_CRON_CUSTOM_INTERVAL_HOURS);
+  const [startCronCustomTime, setStartCronCustomTime] = useState(DEFAULT_START_CRON_CUSTOM_TIME);
   const [selectedEdgeId, setSelectedEdgeId] = useState<string | null>(null);
   const [hoveredEdgeId, setHoveredEdgeId] = useState<string | null>(null);
   const [edgeSourcePort, setEdgeSourcePort] = useState('completed');
@@ -858,7 +934,11 @@ export function TeamRunGraphCanvas({
     setStartTriggerMode(trigger.mode);
     setStartWebhookPath(trigger.path);
     setStartWebhookPublicBaseUrl(trigger.publicBaseUrl);
-    setStartCronExpression(trigger.cron);
+    setStartCronPresetId(trigger.cronPresetId);
+    setStartCronCustomKind(trigger.customKind);
+    setStartCronCustomIntervalMinutes(trigger.customIntervalMinutes);
+    setStartCronCustomIntervalHours(trigger.customIntervalHours);
+    setStartCronCustomTime(trigger.customTime);
     setFormError(null);
   }, [selectedNode]);
 
@@ -952,8 +1032,20 @@ export function TeamRunGraphCanvas({
       setFormError(labels.startWebhookPublicBaseUrlInvalid);
       return;
     }
+    const presetCronExpression = START_CRON_PRESETS.find((preset) => preset.presetId === startCronPresetId)?.cron ?? null;
+    const customCronExpression = buildCustomCronExpression({
+      kind: startCronCustomKind,
+      intervalMinutes: startCronCustomIntervalMinutes,
+      intervalHours: startCronCustomIntervalHours,
+      time: startCronCustomTime,
+    });
+    const cronExpression = startCronPresetId === 'custom' ? customCronExpression : presetCronExpression;
+    if (startTriggerMode === 'cron' && !cronExpression) {
+      setFormError(labels.startCronCustomValueRequired);
+      return;
+    }
     const trigger: Record<string, unknown> = startTriggerMode === 'cron'
-      ? { mode: 'cron', cron: startCronExpression.trim() }
+      ? { mode: 'cron', cron: cronExpression }
       : {
         mode: 'webhook',
         path: normalizedWebhookPath,
@@ -1454,7 +1546,17 @@ export function TeamRunGraphCanvas({
               </label>
               <label className="grid gap-1 text-xs text-muted-foreground">
                 {labels.startTriggerMode}
-                <select className="rounded border bg-background px-2 py-1 text-sm text-foreground" value={startTriggerMode} onChange={(event) => setStartTriggerMode(event.target.value === 'cron' ? 'cron' : 'webhook')}>
+                <select
+                  className="rounded border bg-background px-2 py-1 text-sm text-foreground"
+                  value={startTriggerMode}
+                  onChange={(event) => {
+                    const nextMode = event.target.value === 'cron' ? 'cron' : 'webhook';
+                    if (nextMode === 'cron' && startTriggerMode !== 'cron') {
+                      setStartCronPresetId(DEFAULT_START_CRON_PRESET_ID);
+                    }
+                    setStartTriggerMode(nextMode);
+                  }}
+                >
                   <option value="webhook">{labels.startTriggerWebhook}</option>
                   <option value="cron">{labels.startTriggerCron}</option>
                 </select>
@@ -1472,10 +1574,74 @@ export function TeamRunGraphCanvas({
                   <div className="rounded border border-amber-500/30 bg-amber-500/10 p-2 text-[11px] text-amber-700 dark:text-amber-300">{labels.startWebhookPublicBaseUrlHint}</div>
                 </div>
               ) : (
-                <label className="grid gap-1 text-xs text-muted-foreground">
-                  {labels.startCronExpression}
-                  <input className="rounded border bg-background px-2 py-1 font-mono text-xs text-foreground" value={startCronExpression} onChange={(event) => setStartCronExpression(event.target.value)} />
-                </label>
+                <div className="space-y-2">
+                  <label className="grid gap-1 text-xs text-muted-foreground">
+                    {labels.startCronSchedule}
+                    <select
+                      className="rounded border bg-background px-2 py-1 text-sm text-foreground"
+                      value={startCronPresetId}
+                      onChange={(event) => setStartCronPresetId(event.target.value as TeamGraphCronPresetId)}
+                    >
+                      {START_CRON_PRESETS.map((preset) => (
+                        <option key={preset.presetId} value={preset.presetId}>{labels.startCronSchedules[preset.presetId]}</option>
+                      ))}
+                      <option value="custom">{labels.startCronSchedules.custom}</option>
+                    </select>
+                  </label>
+                  {startCronPresetId === 'custom' ? (
+                    <div className="space-y-2">
+                      <label className="grid gap-1 text-xs text-muted-foreground">
+                        {labels.startCronCustomKind}
+                        <select
+                          className="rounded border bg-background px-2 py-1 text-sm text-foreground"
+                          value={startCronCustomKind}
+                          onChange={(event) => setStartCronCustomKind(event.target.value as TeamGraphCronCustomKind)}
+                        >
+                          {START_CRON_CUSTOM_KIND_IDS.map((kind) => (
+                            <option key={kind} value={kind}>{labels.startCronCustomKinds[kind]}</option>
+                          ))}
+                        </select>
+                      </label>
+                      {startCronCustomKind === 'intervalMinutes' ? (
+                        <label className="grid gap-1 text-xs text-muted-foreground">
+                          {labels.startCronCustomIntervalMinutes}
+                          <input
+                            className="rounded border bg-background px-2 py-1 text-sm text-foreground"
+                            type="number"
+                            min={1}
+                            max={59}
+                            value={startCronCustomIntervalMinutes}
+                            onChange={(event) => setStartCronCustomIntervalMinutes(event.target.value)}
+                          />
+                        </label>
+                      ) : null}
+                      {startCronCustomKind === 'intervalHours' ? (
+                        <label className="grid gap-1 text-xs text-muted-foreground">
+                          {labels.startCronCustomIntervalHours}
+                          <input
+                            className="rounded border bg-background px-2 py-1 text-sm text-foreground"
+                            type="number"
+                            min={1}
+                            max={23}
+                            value={startCronCustomIntervalHours}
+                            onChange={(event) => setStartCronCustomIntervalHours(event.target.value)}
+                          />
+                        </label>
+                      ) : null}
+                      {startCronCustomKind === 'dailyAt' ? (
+                        <label className="grid gap-1 text-xs text-muted-foreground">
+                          {labels.startCronCustomTime}
+                          <input
+                            className="rounded border bg-background px-2 py-1 text-sm text-foreground"
+                            type="time"
+                            value={startCronCustomTime}
+                            onChange={(event) => setStartCronCustomTime(event.target.value)}
+                          />
+                        </label>
+                      ) : null}
+                    </div>
+                  ) : null}
+                </div>
               )}
               {startTriggerMode === 'webhook' ? (
                 <div className="rounded border border-border/60 bg-muted/30 p-2 text-[11px] text-muted-foreground">

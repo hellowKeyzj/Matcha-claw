@@ -222,8 +222,25 @@
       "copiedWebhookPublicUrl": "コピー済み",
       "startWebhookPathRequired": "Webhook パスは必須です。",
       "startWebhookPathInvalid": "Webhook パスに「..」を含めることはできません。",
-      "startCronExpression": "Cron 式",
-      "startTriggerHint": "開始ノードはこのワークフローの外部トリガー入口を定義します。Webhook リクエストは runtime-host が受信します。",
+      "startCronSchedule": "スケジュール",
+      "startCronSchedules": {
+        "every10Minutes": "10 分ごと",
+        "every30Minutes": "30 分ごと",
+        "hourly": "毎時",
+        "dailyAt9": "毎日 09:00",
+        "custom": "カスタム"
+      },
+      "startCronCustomKind": "カスタムスケジュール",
+      "startCronCustomKinds": {
+        "intervalMinutes": "N 分ごと",
+        "intervalHours": "N 時間ごと",
+        "dailyAt": "毎日の時刻"
+      },
+      "startCronCustomIntervalMinutes": "何分ごと",
+      "startCronCustomIntervalHours": "何時間ごと",
+      "startCronCustomTime": "毎日の時刻",
+      "startCronCustomValueRequired": "有効なスケジュール値を入力してください。",
+      "startTriggerHint": "開始ノードはこのワークフローの外部トリガー入口を定義します。Webhook リクエストは runtime-host が受信し、スケジュールは runtime-host がローカルで実行します。",
       "defaultOutputPort": "出力",
       "edges": "接続",
       "noEdges": "0 接続",

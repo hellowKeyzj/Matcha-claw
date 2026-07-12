@@ -229,8 +229,25 @@
       "copiedWebhookPublicUrl": "Copied",
       "startWebhookPathRequired": "Webhook path is required.",
       "startWebhookPathInvalid": "Webhook path must not contain '..'.",
-      "startCronExpression": "Cron expression",
-      "startTriggerHint": "The start node defines this workflow's external trigger entry; webhook requests are received by runtime-host.",
+      "startCronSchedule": "Schedule",
+      "startCronSchedules": {
+        "every10Minutes": "Every 10 minutes",
+        "every30Minutes": "Every 30 minutes",
+        "hourly": "Hourly",
+        "dailyAt9": "Daily at 09:00",
+        "custom": "Custom"
+      },
+      "startCronCustomKind": "Custom schedule",
+      "startCronCustomKinds": {
+        "intervalMinutes": "Every N minutes",
+        "intervalHours": "Every N hours",
+        "dailyAt": "Daily time"
+      },
+      "startCronCustomIntervalMinutes": "Every N minutes",
+      "startCronCustomIntervalHours": "Every N hours",
+      "startCronCustomTime": "Daily time",
+      "startCronCustomValueRequired": "Enter a valid schedule value.",
+      "startTriggerHint": "The start node defines this workflow's external trigger entry; webhook requests are received by runtime-host, and schedules are run locally by runtime-host.",
       "defaultOutputPort": "out",
       "edges": "Edges",
       "noEdges": "0 edges",
