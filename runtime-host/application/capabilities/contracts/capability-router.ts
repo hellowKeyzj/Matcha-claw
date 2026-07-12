@@ -44,9 +44,9 @@ export class CapabilityRouter {
   private readonly descriptorOperationIndexes = new WeakMap<CapabilityDescriptor, Map<string, CapabilityOperationDescriptor>>();
 
   constructor(private readonly deps: CapabilityRouterDeps) {
-    this.operationMap = Array.isArray(deps.operations)
-      ? this.buildOperationMap(deps.operations)
-      : null;
+    this.operationMap = typeof deps.operations === 'function'
+      ? null
+      : this.buildOperationMap(deps.operations);
   }
 
   async execute(request: CapabilityExecuteRequest): Promise<ApplicationResponse> {
@@ -159,7 +159,8 @@ export class CapabilityRouter {
 
   private resolveOperations(): Map<string, CapabilityOperationHandler> {
     if (!this.operationMap) {
-      this.operationMap = this.buildOperationMap(this.deps.operations());
+      const operations = this.deps.operations;
+      this.operationMap = this.buildOperationMap(typeof operations === 'function' ? operations() : operations);
     }
     return this.operationMap;
   }
