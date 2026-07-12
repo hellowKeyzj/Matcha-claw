@@ -49,7 +49,7 @@
     "init": "pnpm install && pnpm run uv:download && pnpm run bun:download",
     "postinstall": "node scripts/strip-openclaw-bundled-channels.mjs",
     "strip:openclaw-bundled-channels": "node scripts/strip-openclaw-bundled-channels.mjs",
-    "dev": "node scripts/dev-with-run-trace.mjs",
+    "dev": "pnpm run build:runtime-host-process && vite",
     "build": "pnpm run build:runtime-host-process && pnpm run build:vite && pnpm run build:matcha-agent && zx scripts/bundle-openclaw.mjs && zx scripts/bundle-openclaw-plugins.mjs && zx scripts/bundle-preinstalled-skills.mjs && node scripts/run-electron-builder.mjs",
     "build:vite": "node --max-old-space-size=6144 ./node_modules/vite/bin/vite.js build",
     "build:runtime-host-process": "node scripts/build-runtime-host-process.mjs",
