@@ -36,6 +36,7 @@
     "hostStopped": "ホスト停止中",
     "hostStarting": "ホスト起動中",
     "hostRestarting": "ホスト再起動中",
+    "hostStopping": "ホストを停止中",
     "hostDegraded": "ホスト劣化状態"
   },
   "lifecycle": {

@@ -36,6 +36,7 @@
     "hostStopped": "Host not running",
     "hostStarting": "Host starting",
     "hostRestarting": "Host restarting",
+    "hostStopping": "Runtime Host stopping",
     "hostDegraded": "Host degraded"
   },
   "lifecycle": {

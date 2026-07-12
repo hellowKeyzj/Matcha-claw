@@ -80,6 +80,15 @@ type ControlUiInfo = {
   port: number;
 };
 
+type MatchaAgentAppServerStatus = {
+  processState: string;
+  port: number | null;
+  pid: number | null;
+  ready: boolean;
+  lastError: string | null;
+  updatedAt: number | string;
+};
+
 type BrowserRelayInfo = {
   relativeDir: string;
   extensionDir: string;
@@ -321,8 +330,8 @@ export function Settings() {
 
   const isWindows = window.electron.platform === 'win32';
   const showCliTools = true;
-  const [showLogs, setShowLogs] = useState(false);
-  const [logContent, setLogContent] = useState('');
+  const [showOpenClawLogs, setShowOpenClawLogs] = useState(false);
+  const [openClawLogContent, setOpenClawLogContent] = useState('');
   const [collectingDiagnostics, setCollectingDiagnostics] = useState(false);
   const [lastDiagnosticsZipPath, setLastDiagnosticsZipPath] = useState('');
   const [lastDiagnosticsGeneratedAt, setLastDiagnosticsGeneratedAt] = useState('');
@@ -348,6 +357,11 @@ export function Settings() {
     renewalAlert: null,
   });
   const [runtimeHostEndpoint, setRuntimeHostEndpoint] = useState<RuntimeEndpointRef | null>(null);
+  const [matchaAgentAppServerStatus, setMatchaAgentAppServerStatus] = useState<MatchaAgentAppServerStatus | null>(null);
+  const [matchaAgentAppServerLoading, setMatchaAgentAppServerLoading] = useState(false);
+  const [matchaAgentAppServerRestarting, setMatchaAgentAppServerRestarting] = useState(false);
+  const [matchaAgentAppServerError, setMatchaAgentAppServerError] = useState('');
+  const matchaAgentAppServerStatusRequestSequenceRef = useRef(0);
 
   useEffect(() => {
     void initGatewayEvents();
@@ -394,20 +408,20 @@ export function Settings() {
     };
   }, [gatewayOperational]);
 
-  const handleShowLogs = async () => {
+  const handleShowOpenClawLogs = async () => {
     try {
-      const logs = await hostApiFetch<{ content: string }>('/api/logs?tailLines=100');
-      setLogContent(logs.content);
-      setShowLogs(true);
+      const logs = await hostApiFetch<{ content: string }>('/api/openclaw/logs?tailLines=100');
+      setOpenClawLogContent(logs.content);
+      setShowOpenClawLogs(true);
     } catch {
-      setLogContent('(Failed to load logs)');
-      setShowLogs(true);
+      setOpenClawLogContent('(Failed to load logs)');
+      setShowOpenClawLogs(true);
     }
   };
 
-  const handleOpenLogDir = async () => {
+  const handleOpenOpenClawLogDir = async () => {
     try {
-      const { dir: logDir } = await hostApiFetch<{ dir: string | null }>('/api/logs/dir');
+      const { dir: logDir } = await hostApiFetch<{ dir: string | null }>('/api/openclaw/logs/dir');
       if (logDir) {
         await invokeIpc('shell:showItemInFolder', logDir);
       }
@@ -1083,6 +1097,65 @@ export function Settings() {
     }
   }, [refreshSnapshot, t]);
 
+  const loadMatchaAgentAppServerStatus = useCallback(async () => {
+    const ownedRequestSequence = matchaAgentAppServerStatusRequestSequenceRef.current + 1;
+    matchaAgentAppServerStatusRequestSequenceRef.current = ownedRequestSequence;
+    const isOwnedStatusRequest = () => matchaAgentAppServerStatusRequestSequenceRef.current === ownedRequestSequence;
+
+    setMatchaAgentAppServerLoading(true);
+    setMatchaAgentAppServerError('');
+    try {
+      const status = await hostApiFetch<MatchaAgentAppServerStatus>('/api/matcha-agent/app-server/status');
+      if (isOwnedStatusRequest()) {
+        setMatchaAgentAppServerStatus(status);
+      }
+    } catch (error) {
+      if (isOwnedStatusRequest()) {
+        setMatchaAgentAppServerError(toUserMessage(error));
+      }
+    } finally {
+      if (isOwnedStatusRequest()) {
+        setMatchaAgentAppServerLoading(false);
+      }
+    }
+  }, []);
+
+  const restartMatchaAgentAppServer = useCallback(async () => {
+    setMatchaAgentAppServerRestarting(true);
+    setMatchaAgentAppServerError('');
+    try {
+      await hostApiFetch<{ success: true }>('/api/matcha-agent/app-server/restart', { method: 'POST' });
+      await loadMatchaAgentAppServerStatus();
+    } catch (error) {
+      const message = toUserMessage(error);
+      setMatchaAgentAppServerError(message);
+      toast.error(t('gateway.matchaAgentAppServerRestartFailed', { error: message }));
+    } finally {
+      setMatchaAgentAppServerRestarting(false);
+    }
+  }, [loadMatchaAgentAppServerStatus, t]);
+
+  const matchaAgentAppServerState = matchaAgentAppServerStatus?.processState ?? 'unknown';
+  const matchaAgentAppServerBadgeVariant = matchaAgentAppServerState === 'running'
+    ? 'success'
+    : matchaAgentAppServerState === 'error'
+      ? 'destructive'
+      : matchaAgentAppServerState === 'starting' || matchaAgentAppServerState === 'restarting'
+        ? 'outline'
+        : matchaAgentAppServerState === 'stopping'
+          ? 'destructive'
+          : 'secondary';
+  const matchaAgentAppServerPort = matchaAgentAppServerStatus?.port ?? t('gateway.unknown');
+  const matchaAgentAppServerPid = matchaAgentAppServerStatus?.pid ?? t('gateway.unknown');
+  const matchaAgentAppServerStatusError = matchaAgentAppServerStatus?.lastError || matchaAgentAppServerError;
+
+  useEffect(() => {
+    if (activeSection !== 'gateway') {
+      return;
+    }
+    void loadMatchaAgentAppServerStatus();
+  }, [activeSection, loadMatchaAgentAppServerStatus]);
+
   const restartRuntimeHost = useCallback(async () => {
     try {
       await restartHostAction();
@@ -1580,12 +1653,31 @@ export function Settings() {
                     <RefreshCw className="h-4 w-4 mr-2" />
                     {t('common:actions.restart')}
                   </Button>
-                  <Button variant="outline" size="sm" className="w-24 justify-center" onClick={handleShowLogs}>
+                  <Button variant="outline" size="sm" className="w-24 justify-center" onClick={handleShowOpenClawLogs}>
                     <FileText className="h-4 w-4 mr-2" />
                     {t('gateway.logs')}
                   </Button>
                 </>
               )}
+              details={showOpenClawLogs ? (
+                <div className="p-4 rounded-lg bg-black/10 dark:bg-black/40 border border-border">
+                  <div className="flex items-center justify-between mb-2">
+                    <p className="font-medium text-sm">{t('gateway.openclawLogs')}</p>
+                    <div className="flex gap-2">
+                      <Button variant="ghost" size="sm" className="h-7 text-xs" onClick={handleOpenOpenClawLogDir}>
+                        <ExternalLink className="h-3 w-3 mr-1" />
+                        {t('gateway.openFolder')}
+                      </Button>
+                      <Button variant="ghost" size="sm" className="h-7 text-xs" onClick={() => setShowOpenClawLogs(false)}>
+                        {t('common:actions.close')}
+                      </Button>
+                    </div>
+                  </div>
+                  <pre className="text-xs text-muted-foreground bg-background/50 p-3 rounded max-h-60 overflow-auto whitespace-pre-wrap font-mono">
+                    {openClawLogContent || t('chat:noLogs')}
+                  </pre>
+                </div>
+              ) : null}
             />
 
             <RuntimeStatusPanel
@@ -1606,6 +1698,9 @@ export function Settings() {
                   )}
                   {effectiveRuntimeHostStatus === 'restarting' && (
                     <Badge variant="outline">{t('plugins:state.hostRestarting')}</Badge>
+                  )}
+                  {effectiveRuntimeHostStatus === 'stopping' && (
+                    <Badge variant="outline">{t('plugins:state.hostStopping')}</Badge>
                   )}
                   {effectiveRuntimeHostStatus === 'degraded' && (
                     <Badge variant="secondary">{t('plugins:state.hostDegraded')}</Badge>
@@ -1676,27 +1771,60 @@ export function Settings() {
                 </>
               )}
             />
-          </div>
 
-          {showLogs && (
-            <div className="mt-4 p-4 rounded-lg bg-black/10 dark:bg-black/40 border border-border">
-              <div className="flex items-center justify-between mb-2">
-                <p className="font-medium text-sm">{t('gateway.appLogs')}</p>
-                <div className="flex gap-2">
-                  <Button variant="ghost" size="sm" className="h-7 text-xs" onClick={handleOpenLogDir}>
-                    <ExternalLink className="h-3 w-3 mr-1" />
-                    {t('gateway.openFolder')}
+            <RuntimeStatusPanel
+              title={t('gateway.matchaAgentAppServerStatus')}
+              description={t('gateway.matchaAgentAppServerDescription')}
+              badges={(
+                <>
+                  <Badge variant={matchaAgentAppServerBadgeVariant}>
+                    {matchaAgentAppServerState}
+                  </Badge>
+                  <Badge variant="outline">{t('gateway.port')}: {matchaAgentAppServerPort}</Badge>
+                  <Badge variant="outline">{t('gateway.pid')}: {matchaAgentAppServerPid}</Badge>
+                </>
+              )}
+              actions={(
+                <>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    className="w-24 justify-center"
+                    onClick={() => void restartMatchaAgentAppServer()}
+                    disabled={matchaAgentAppServerLoading || matchaAgentAppServerRestarting}
+                  >
+                    {matchaAgentAppServerRestarting ? (
+                      <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                    ) : (
+                      <RefreshCw className="h-4 w-4 mr-2" />
+                    )}
+                    {t('common:actions.restart')}
                   </Button>
-                  <Button variant="ghost" size="sm" className="h-7 text-xs" onClick={() => setShowLogs(false)}>
-                    {t('common:actions.close')}
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    className="w-24 justify-center"
+                    onClick={() => void loadMatchaAgentAppServerStatus()}
+                    disabled={matchaAgentAppServerLoading || matchaAgentAppServerRestarting}
+                  >
+                    {matchaAgentAppServerLoading ? (
+                      <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                    ) : (
+                      <RefreshCw className="h-4 w-4 mr-2" />
+                    )}
+                    {t('common:actions.refresh')}
                   </Button>
-                </div>
-              </div>
-              <pre className="text-xs text-muted-foreground bg-background/50 p-3 rounded max-h-60 overflow-auto whitespace-pre-wrap font-mono">
-                {logContent || t('chat:noLogs')}
-              </pre>
-            </div>
-          )}
+                </>
+              )}
+              details={matchaAgentAppServerStatusError ? (
+                <p className="rounded-md border border-destructive/50 bg-destructive/10 p-2 text-xs text-destructive">
+                  {matchaAgentAppServerStatusError}
+                </p>
+              ) : null}
+            />
+          </div>
 
           <Separator />
 

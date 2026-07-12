@@ -36,6 +36,7 @@
     "hostStopped": "宿主未运行",
     "hostStarting": "宿主启动中",
     "hostRestarting": "宿主重启中",
+    "hostStopping": "宿主停止中",
     "hostDegraded": "宿主降级运行"
   },
   "lifecycle": {
