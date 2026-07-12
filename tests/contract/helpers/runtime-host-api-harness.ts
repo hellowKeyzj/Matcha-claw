@@ -4,7 +4,7 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { createRuntimeHostProcessManager } from '../../../electron/main/runtime-host-process-manager';
+import { createRuntimeHostProcessManager } from '../../../electron/main/process-runtime/runtime-host-process-manager';
 import {
   RUNTIME_HOST_TRANSPORT_VERSION,
   type RuntimeHostRequestMethod,

@@ -18,6 +18,7 @@ const hoisted = vi.hoisted(() => ({
     start: vi.fn(async () => {}),
     stop: vi.fn(async () => {}),
     restart: vi.fn(async () => {}),
+    forceTerminate: vi.fn(async () => {}),
     checkHealth: vi.fn(async () => ({ ok: true, lifecycle: 'running' })),
     getState: vi.fn(() => ({
       lifecycle: 'running',
@@ -37,7 +38,7 @@ vi.mock('../../electron/main/runtime-host-client', () => ({
   createRuntimeHostHttpClient: hoisted.createRuntimeHostHttpClientMock,
 }));
 
-vi.mock('../../electron/main/runtime-host-process-manager', () => ({
+vi.mock('../../electron/main/process-runtime/runtime-host-process-manager', () => ({
   createRuntimeHostProcessManager: hoisted.createRuntimeHostProcessManagerMock,
 }));
 

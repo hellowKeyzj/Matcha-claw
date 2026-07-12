@@ -18,6 +18,7 @@ const APP_SERVER_HOST = '127.0.0.1';
 const READINESS_TIMEOUT_MS = 800;
 const HEALTH_PATH = '/health';
 const TOKEN_BYTE_LENGTH = 32;
+const APP_SERVER_SHUTDOWN_GRACE_MS = 3_000;
 const APP_SERVER_WORKER_ENV_PREFIX = 'MATCHA_AGENT_APP_SERVER_WORKER_';
 
 type LaunchMode = 'dev' | 'packaged';
@@ -90,6 +91,8 @@ export class MatchaAgentAppServerProcessAdapter implements LocalProcessAdapter {
       cwd: entry.cwd,
       env: buildAppServerEnv(process.env, this.token),
       stdio: 'pipe',
+      gracefulShutdownStdin: true,
+      gracefulShutdownGraceMs: APP_SERVER_SHUTDOWN_GRACE_MS,
       terminateProcessTree: true,
       port: this.port,
       metadata: {

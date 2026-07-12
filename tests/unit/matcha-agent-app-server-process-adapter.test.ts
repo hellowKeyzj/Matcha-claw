@@ -102,6 +102,9 @@ describe('matcha-agent app-server process adapter', () => {
     };
 
     expect(plan.kind).toBe('spawn');
+    expect(plan.gracefulShutdownStdin).toBe(true);
+    expect(plan.gracefulShutdownGraceMs).toBe(3_000);
+    expect(plan.terminateProcessTree).toBe(true);
     expect(plan.port).toBe(45678);
     expect(portArg(plan.args)).toBe('45678');
     expect(plan.args).toContain(join(process.cwd(), 'matcha-agent', 'scripts', 'dev.ts'));

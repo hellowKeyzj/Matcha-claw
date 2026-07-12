@@ -80,6 +80,7 @@ export type WorkerSupervisorPorts = {
 export type WorkerSupervisorOptions = WorkerProcessSpawnOptions & {
   requestTimeoutMs: number
   heartbeatTimeoutMs?: number
+  shutdownTimeoutMs?: number
   stderrTailBytes?: number
   ports?: WorkerSupervisorPorts
   spawnWorker?: WorkerProcessSpawn
@@ -97,6 +98,7 @@ export class WorkerSupervisor {
   private readonly spawnOptions: WorkerProcessSpawnOptions
   private readonly requestTimeoutMs: number
   private readonly heartbeatTimeoutMs?: number
+  private readonly shutdownTimeoutMs: number
   private readonly stderrTailBytes?: number
   private readonly ports: WorkerSupervisorPorts
   private readonly spawnWorker?: WorkerProcessSpawn
@@ -112,6 +114,7 @@ export class WorkerSupervisor {
     }
     this.requestTimeoutMs = options.requestTimeoutMs
     this.heartbeatTimeoutMs = options.heartbeatTimeoutMs
+    this.shutdownTimeoutMs = options.shutdownTimeoutMs ?? options.requestTimeoutMs
     this.stderrTailBytes = options.stderrTailBytes
     this.ports = options.ports ?? {}
     this.spawnWorker = options.spawnWorker
@@ -213,17 +216,19 @@ export class WorkerSupervisor {
     if (!slot) return
 
     try {
-      await slot.process.send({
-        id: this.createRequestId(),
-        type: 'worker.shutdown',
+      const shutdownResponse = await this.waitForWorkerShutdownResponse(
+        slot.process,
+        sessionId,
         reason,
-      })
+      )
+      if (!shutdownResponse.ok) {
+        throw new Error(`worker shutdown rejected for session ${sessionId}`)
+      }
+      await this.closeWorkerProcess(slot.process, sessionId)
     } catch {
       slot.process.kill(`worker shutdown failed for session ${sessionId}`)
-      return
+      await slot.process.waitForExit()
     }
-
-    await slot.process.close(`worker shutdown for session ${sessionId}`)
   }
 
   async shutdownAll(
@@ -233,6 +238,49 @@ export class WorkerSupervisor {
     await Promise.all(
       sessionIds.map(sessionId => this.shutdownSession(sessionId, reason)),
     )
+  }
+
+  private async waitForWorkerShutdownResponse(
+    process: WorkerProcess,
+    sessionId: string,
+    reason: 'serverShutdown' | 'idleTimeout' | 'restart',
+  ): Promise<WorkerResponse> {
+    let timeout: ReturnType<typeof setTimeout> | undefined
+    const result = await Promise.race([
+      process.send({
+        id: this.createRequestId(),
+        type: 'worker.shutdown',
+        reason,
+      }).then(response => ({ resultType: 'response' as const, response })),
+      new Promise<{ resultType: 'timedOut' }>(resolve => {
+        timeout = setTimeout(
+          () => resolve({ resultType: 'timedOut' }),
+          this.shutdownTimeoutMs,
+        )
+      }),
+    ])
+    if (timeout) clearTimeout(timeout)
+    if (result.resultType === 'response') return result.response
+
+    throw new Error(`worker shutdown timed out for session ${sessionId}`)
+  }
+
+  private async closeWorkerProcess(
+    process: WorkerProcess,
+    sessionId: string,
+  ): Promise<void> {
+    let timeout: ReturnType<typeof setTimeout> | undefined
+    const exitedGracefully = await Promise.race([
+      process.close(`worker shutdown for session ${sessionId}`).then(() => true),
+      new Promise<false>(resolve => {
+        timeout = setTimeout(() => resolve(false), this.shutdownTimeoutMs)
+      }),
+    ])
+    if (timeout) clearTimeout(timeout)
+    if (exitedGracefully) return
+
+    process.kill(`worker shutdown timed out for session ${sessionId}`)
+    await process.waitForExit()
   }
 
   private createWorkerProcess(

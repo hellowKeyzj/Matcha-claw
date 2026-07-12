@@ -49,6 +49,7 @@ import {
 
 const SESSION_HISTORY_LIST_LIMIT = 200
 const SESSION_TRANSCRIPT_MAX_LINES = 10_000
+const WORKER_SHUTDOWN_TIMEOUT_MS = 2_000
 
 export type AppServerPortContext = {
   clientHub: ClientHub
@@ -57,7 +58,7 @@ export type AppServerPortContext = {
 
 export type AppServerDeps = {
   config: AppServerConfig
-  createPorts: (context: AppServerPortContext) => AppServerPorts
+  createServices: (context: AppServerPortContext) => AppServerServices
   serverVersion: string
 }
 
@@ -66,12 +67,13 @@ export type AppServerRuntime = {
   clientHub: ClientHub
   wsServer: WsServer
   start(): Bun.Server<unknown>
-  stop(closeActiveConnections?: boolean): void
+  stop(closeActiveConnections?: boolean): Promise<void>
 }
 
 export type AppServerServices = {
   ports: AppServerPorts
   workerSupervisor: WorkerSupervisor
+  shutdown(): Promise<void>
 }
 
 export type AppServerSessionHistoryStore = {
@@ -88,24 +90,33 @@ export function createAppServerRuntime(deps: AppServerDeps): AppServerRuntime {
       wsServer?.closeClient(clientId, reason)
     },
   })
-  const ports = deps.createPorts({
+  const services = deps.createServices({
     clientHub,
     serverVersion: deps.serverVersion,
   })
 
   wsServer = new WsServer({
     config: deps.config,
-    ports,
+    ports: services.ports,
     serverVersion: deps.serverVersion,
     clientHub,
   })
+
+  let stopPromise: Promise<void> | undefined
+  const stop = (closeActiveConnections = true): Promise<void> => {
+    if (!stopPromise) {
+      wsServer.stop(closeActiveConnections)
+      stopPromise = services.shutdown()
+    }
+    return stopPromise
+  }
 
   return {
     config: deps.config,
     clientHub,
     wsServer,
     start: () => wsServer.start(),
-    stop: closeActiveConnections => wsServer.stop(closeActiveConnections),
+    stop,
   }
 }
 
@@ -176,6 +187,7 @@ export function createDefaultAppServerServices(options: {
     args: options.config.workerArgs,
     requestTimeoutMs: options.config.workerReadyTimeoutMs,
     heartbeatTimeoutMs: options.config.workerHeartbeatTimeoutMs,
+    shutdownTimeoutMs: WORKER_SHUTDOWN_TIMEOUT_MS,
     ...(options.spawnWorker !== undefined
       ? { spawnWorker: options.spawnWorker }
       : {}),
@@ -1064,7 +1076,11 @@ export function createDefaultAppServerServices(options: {
     return snapshot
   }
 
-  return { ports, workerSupervisor }
+  return {
+    ports,
+    workerSupervisor,
+    shutdown: () => workerSupervisor.shutdownAll('serverShutdown'),
+  }
 }
 
 export function runAppServer(
@@ -1079,17 +1095,32 @@ export function runAppServer(
   const serverVersion = env.npm_package_version ?? MACRO.VERSION ?? '0.0.0'
   const runtime = createAppServerRuntime({
     config: parsedConfig.config,
-    createPorts: context =>
+    createServices: context =>
       createDefaultAppServerServices({
         config: parsedConfig.config,
         clientHub: context.clientHub,
         serverVersion,
         sessionHistoryStore: createMatchaAgentSessionHistoryStore(),
-      }).ports,
+      }),
     serverVersion,
   })
   runtime.start()
+  registerAppServerShutdownTriggers(runtime)
   return runtime
+}
+
+function registerAppServerShutdownTriggers(runtime: AppServerRuntime): void {
+  let shutdownPromise: Promise<void> | undefined
+  const shutdown = () => {
+    shutdownPromise ??= runtime.stop(true)
+    void shutdownPromise.finally(() => {
+      process.exitCode = 0
+    })
+  }
+
+  process.once('SIGINT', shutdown)
+  process.once('SIGTERM', shutdown)
+  process.stdin.once('end', shutdown)
 }
 
 async function updateSnapshotAfterEnvelope(

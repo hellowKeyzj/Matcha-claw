@@ -1,7 +1,7 @@
 import { beforeAll, afterAll, describe, expect, it } from 'vitest';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { join } from 'node:path';
-import { createRuntimeHostProcessManager, type RuntimeHostProcessManager } from '../../electron/main/runtime-host-process-manager';
+import { createRuntimeHostProcessManager, type RuntimeHostProcessManager } from '../../electron/main/process-runtime/runtime-host-process-manager';
 import { RUNTIME_HOST_TRANSPORT_VERSION } from '../../electron/main/runtime-host-contract';
 
 const scriptPath = join(process.cwd(), 'runtime-host', 'host-process.cjs');

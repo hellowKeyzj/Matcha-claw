@@ -40,6 +40,7 @@ type FakeWorkerChild = WorkerChildProcess & {
   readonly assignedWorkerId: string
   killCount: number
   emitFrame(frame: WorkerFrame): void
+  emitExit(exitCode: number | null, signal: NodeJS.Signals | null): void
   writtenCommands(): WorkerCommand[]
 }
 
@@ -73,6 +74,9 @@ function createFakeWorkerChild(assignedWorkerId: string): FakeWorkerChild {
     kill: () => true,
     emitFrame: (frame: WorkerFrame) => {
       stdout.emit('data', Buffer.from(encodeWorkerFrame(frame), 'utf8'))
+    },
+    emitExit: (exitCode: number | null, signal: NodeJS.Signals | null) => {
+      emitter.emit('exit', exitCode, signal)
     },
     writtenCommands: () =>
       stdin.chunks
@@ -1813,6 +1817,69 @@ describe('createDefaultAppServerServices', () => {
     )
   })
 
+  test('shuts down all warm workers when the app-server runtime stops', async () => {
+    const storageRoot = await createTempRoot()
+    const workerChildren: FakeWorkerChild[] = []
+    const services = createDefaultAppServerServices({
+      config: createTestConfig(storageRoot),
+      clientHub: new ClientHub({ maxClientQueueSize: 16 }),
+      serverVersion: 'test-server',
+      spawnWorker: ((_command, _args, options: SpawnOptionsWithoutStdio) => {
+        const child = createFakeWorkerChild(
+          String(options.env?.MATCHA_AGENT_WORKER_ID ?? ''),
+        )
+        workerChildren.push(child)
+        return child
+      }) as WorkerProcessSpawn,
+      createWorkerRequestId: sequentialIds('worker-request'),
+    })
+
+    for (const sessionId of ['session-1', 'session-2']) {
+      await services.ports.session.create({ cwd: storageRoot, sessionId })
+      await services.ports.session.prompt({ sessionId, prompt: 'warm worker' })
+    }
+
+    const firstWorker = await waitFor(() => workerChildren[0])
+    const secondWorker = await waitFor(() => workerChildren[1])
+    for (const worker of [firstWorker, secondWorker]) {
+      const initialize = await waitForWorkerCommand(worker, 'worker.initialize')
+      worker.emitFrame({ id: initialize.id, ok: true })
+      worker.emitFrame({
+        type: 'worker.ready',
+        workerId: worker.assignedWorkerId,
+        pid: 12345,
+      })
+      const prompt = (await waitForWorkerCommand(
+        worker,
+        'session.prompt',
+      )) as Extract<WorkerCommand, { type: 'session.prompt' }>
+      worker.emitFrame({ id: prompt.id, ok: true })
+      worker.emitFrame({
+        type: 'run.completed',
+        runId: prompt.runId,
+        stopReason: 'end_turn',
+      })
+    }
+
+    const shutdownPromise = services.shutdown()
+    const firstShutdown = (await waitForWorkerCommand(
+      firstWorker,
+      'worker.shutdown',
+    )) as Extract<WorkerCommand, { type: 'worker.shutdown' }>
+    const secondShutdown = (await waitForWorkerCommand(
+      secondWorker,
+      'worker.shutdown',
+    )) as Extract<WorkerCommand, { type: 'worker.shutdown' }>
+    expect(firstShutdown.reason).toBe('serverShutdown')
+    expect(secondShutdown.reason).toBe('serverShutdown')
+
+    firstWorker.emitFrame({ id: firstShutdown.id, ok: true })
+    secondWorker.emitFrame({ id: secondShutdown.id, ok: true })
+    firstWorker.emitExit(0, null)
+    secondWorker.emitExit(0, null)
+    await shutdownPromise
+  })
+
   test('closes sessions without resurrecting them in registry or index', async () => {
     const storageRoot = await createTempRoot()
     const services = createDefaultAppServerServices({
@@ -1991,6 +2058,7 @@ describe('createDefaultAppServerServices', () => {
     )) as Extract<WorkerCommand, { type: 'worker.shutdown' }>
     expect(shutdownCommand.reason).toBe('restart')
     firstWorker.emitFrame({ id: shutdownCommand.id, ok: true })
+    firstWorker.emitExit(0, null)
     const updated = await setModelPromise
     expect(updated.model).toBe('opus')
 

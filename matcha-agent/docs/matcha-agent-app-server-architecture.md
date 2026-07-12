@@ -79,6 +79,7 @@ Rules:
 - Session content recovery uses the existing matcha-agent transcript JSONL/recovery path.
 - `setModel` / `setMode` updates app-server session metadata and restarts warm worker so next prompt initializes with new settings; active runs reject settings changes.
 - Worker crash interrupts active worker-owned runs and cancels pending approvals owned by that worker.
+- App-server shutdown first closes ingress, then sends `worker.shutdown` to every managed worker, waits for each OS child exit within a bounded grace period, and kills only workers that miss that deadline. Electron's process-tree termination is an outer fallback, not normal worker lifecycle.
 - App-server restart does not persist raw queued prompt text. Recovered nonterminal runs become `run.interrupted(serverShutdown)` and recovered pending approvals become cancelled.
 
 ## Protocol surface

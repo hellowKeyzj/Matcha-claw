@@ -12,6 +12,29 @@ import type {
 
 class WritableSink extends Writable {
   readonly chunks: string[] = []
+  endCount = 0
+
+  override end(cb?: () => void): this
+  override end(chunk: unknown, cb?: () => void): this
+  override end(
+    chunk: unknown,
+    encoding: BufferEncoding,
+    cb?: () => void,
+  ): this
+  override end(
+    chunk?: unknown,
+    encodingOrCallback?: BufferEncoding | (() => void),
+    callback?: () => void,
+  ): this {
+    this.endCount += 1
+    if (typeof encodingOrCallback === 'function') {
+      return super.end(chunk, encodingOrCallback)
+    }
+    if (encodingOrCallback) {
+      return super.end(chunk, encodingOrCallback, callback)
+    }
+    return chunk === undefined ? super.end(callback) : super.end(chunk, callback)
+  }
 
   _write(
     chunk: string | Buffer,
@@ -25,6 +48,7 @@ class WritableSink extends Writable {
 
 type FakeChild = WorkerChildProcess & {
   killCount: number
+  stdinEndCount(): number
   emitStdout(chunk: string): void
   emitStderr(chunk: string): void
   emitExit(exitCode: number | null, signal: NodeJS.Signals | null): void
@@ -52,6 +76,7 @@ function createFakeChild(): FakeChild {
     emitExit: (exitCode: number | null, signal: NodeJS.Signals | null) => {
       emitter.emit('exit', exitCode, signal)
     },
+    stdinEndCount: () => stdin.endCount,
     writtenInput: () => stdin.chunks.join(''),
   })
   child.kill = () => {
@@ -213,8 +238,49 @@ describe('WorkerProcess', () => {
     )
 
     const closePromise = worker.send(flushCommand('close'))
-    await worker.close('closing worker')
+    const workerClosePromise = worker.close('closing worker')
+    children[0]?.emitExit(0, null)
+    await workerClosePromise
     await expect(closePromise).rejects.toThrow('closing worker')
+  })
+
+  test('waits for child exit after closing stdin', async () => {
+    const worker = new WorkerProcess({
+      workerId: 'worker-1',
+      command: 'fake-worker',
+      requestTimeoutMs: 100,
+      spawnWorker: spawnFakeChild as WorkerProcessSpawn,
+    })
+
+    let closed = false
+    const closePromise = worker.close().then(() => {
+      closed = true
+    })
+    await flushMicrotasks()
+
+    expect(children[0]?.stdinEndCount()).toBe(1)
+    expect(closed).toBe(false)
+
+    children[0]?.emitExit(0, null)
+    await closePromise
+
+    expect(closed).toBe(true)
+  })
+
+  test('kills a closing worker that has not exited yet', async () => {
+    const worker = new WorkerProcess({
+      workerId: 'worker-1',
+      command: 'fake-worker',
+      requestTimeoutMs: 100,
+      spawnWorker: spawnFakeChild as WorkerProcessSpawn,
+    })
+
+    const closePromise = worker.close()
+    worker.kill()
+
+    expect(children[0]?.killCount).toBe(1)
+    children[0]?.emitExit(null, 'SIGTERM')
+    await closePromise
   })
 
   test('keeps stderr tail bounded', () => {

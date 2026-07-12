@@ -16,6 +16,29 @@ import type {
 
 class WritableSink extends Writable {
   readonly chunks: string[] = []
+  endCount = 0
+
+  override end(cb?: () => void): this
+  override end(chunk: unknown, cb?: () => void): this
+  override end(
+    chunk: unknown,
+    encoding: BufferEncoding,
+    cb?: () => void,
+  ): this
+  override end(
+    chunk?: unknown,
+    encodingOrCallback?: BufferEncoding | (() => void),
+    callback?: () => void,
+  ): this {
+    this.endCount += 1
+    if (typeof encodingOrCallback === 'function') {
+      return super.end(chunk, encodingOrCallback)
+    }
+    if (encodingOrCallback) {
+      return super.end(chunk, encodingOrCallback, callback)
+    }
+    return chunk === undefined ? super.end(callback) : super.end(chunk, callback)
+  }
 
   _write(
     chunk: string | Buffer,
@@ -30,6 +53,7 @@ class WritableSink extends Writable {
 type FakeChild = WorkerChildProcess & {
   readonly assignedWorkerId: string
   killCount: number
+  stdinEndCount(): number
   emitFrame(frame: WorkerFrame): void
   emitStderr(chunk: string): void
   emitExit(exitCode: number | null, signal: NodeJS.Signals | null): void
@@ -58,6 +82,7 @@ function createFakeChild(assignedWorkerId: string): FakeChild {
     emitExit: (exitCode: number | null, signal: NodeJS.Signals | null) => {
       emitter.emit('exit', exitCode, signal)
     },
+    stdinEndCount: () => stdin.endCount,
     writtenInput: () => stdin.chunks.join(''),
   })
   child.kill = () => {
@@ -208,6 +233,57 @@ describe('WorkerSupervisor', () => {
 
     expect(crashes).toHaveLength(0)
     expect(children[0]?.killCount).toBe(0)
+  })
+
+  test('waits for worker exit after its shutdown response', async () => {
+    const supervisor = new WorkerSupervisor({
+      command: 'fake-worker',
+      requestTimeoutMs: 100,
+      shutdownTimeoutMs: 100,
+      spawnWorker: spawnFakeChild,
+      createRequestId: createRequestIdFactory(),
+    })
+
+    const ensurePromise = supervisor.ensureWorker(testSession())
+    emitInitializedWorker(children[0]!)
+    await ensurePromise
+
+    let shutdownComplete = false
+    const shutdownPromise = supervisor.shutdownSession('session-1').then(() => {
+      shutdownComplete = true
+    })
+    children[0]?.emitFrame({ id: 'request-2', ok: true })
+    await sleep(0)
+
+    expect(children[0]?.stdinEndCount()).toBe(1)
+    expect(shutdownComplete).toBe(false)
+
+    children[0]?.emitExit(0, null)
+    await shutdownPromise
+
+    expect(shutdownComplete).toBe(true)
+  })
+
+  test('kills a worker that does not exit before the shutdown deadline', async () => {
+    const supervisor = new WorkerSupervisor({
+      command: 'fake-worker',
+      requestTimeoutMs: 100,
+      shutdownTimeoutMs: 5,
+      spawnWorker: spawnFakeChild,
+      createRequestId: createRequestIdFactory(),
+    })
+
+    const ensurePromise = supervisor.ensureWorker(testSession())
+    emitInitializedWorker(children[0]!)
+    await ensurePromise
+
+    const shutdownPromise = supervisor.shutdownSession('session-1')
+    children[0]?.emitFrame({ id: 'request-2', ok: true })
+    await sleep(10)
+
+    expect(children[0]?.killCount).toBe(1)
+    children[0]?.emitExit(null, 'SIGTERM')
+    await shutdownPromise
   })
 
   test('ignores late worker frames after shutdown removes the session worker', async () => {

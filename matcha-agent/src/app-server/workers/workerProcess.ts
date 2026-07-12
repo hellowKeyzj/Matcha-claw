@@ -79,8 +79,11 @@ export class WorkerProcess {
   private readonly parser = new NdjsonFrameParser<WorkerFrame>()
   private readonly pendingRequests = new Map<string, PendingRequest>()
   private readonly child: WorkerChildProcess
+  private readonly exited: Promise<void>
+  private resolveExited: () => void = () => {}
   private stderrTail = ''
   private closed = false
+  private exitedProcess = false
 
   constructor(options: WorkerProcessOptions) {
     this.workerId = options.workerId
@@ -91,6 +94,9 @@ export class WorkerProcess {
     this.onFrame = options.onFrame
     this.onParseError = options.onParseError
     this.onExit = options.onExit
+    this.exited = new Promise(resolve => {
+      this.resolveExited = resolve
+    })
 
     const spawnWorker = options.spawnWorker ?? spawnWorkerProcess
     this.child = spawnWorker(options.command, options.args ?? [], {
@@ -153,14 +159,20 @@ export class WorkerProcess {
   }
 
   async close(reason = 'worker process closed'): Promise<void> {
-    if (this.closed) return
-    this.closed = true
-    this.rejectAllPending(new Error(reason))
-    this.child.stdin.end()
+    if (!this.closed) {
+      this.closed = true
+      this.rejectAllPending(new Error(reason))
+      this.child.stdin.end()
+    }
+    await this.waitForExit()
+  }
+
+  async waitForExit(): Promise<void> {
+    await this.exited
   }
 
   kill(reason = 'worker process killed'): void {
-    if (this.closed) return
+    if (this.exitedProcess) return
     this.closed = true
     this.rejectAllPending(new Error(reason))
     this.child.kill()
@@ -310,6 +322,8 @@ export class WorkerProcess {
     exitCode: number | null,
     signal: NodeJS.Signals | null,
   ): void {
+    if (this.exitedProcess) return
+    this.exitedProcess = true
     this.flushStdoutParser()
     if (!this.closed) {
       this.closed = true
@@ -325,6 +339,7 @@ export class WorkerProcess {
       signal: signal ?? undefined,
       stderrTail: this.stderrTail,
     })
+    this.resolveExited()
   }
 }
 

@@ -39,6 +39,8 @@ export type LocalProcessLaunchPlan = {
   readonly serviceName?: string;
   readonly ipc?: boolean;
   readonly gracefulShutdownMessage?: unknown;
+  readonly gracefulShutdownStdin?: boolean;
+  readonly gracefulShutdownGraceMs?: number;
   readonly terminateProcessTree?: boolean;
   readonly port?: number;
   readonly pid?: number;

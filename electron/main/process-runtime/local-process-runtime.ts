@@ -41,6 +41,7 @@ type LocalProcessHandle = {
   readonly pid?: number;
   readonly stdout?: NodeJS.ReadableStream | null;
   readonly stderr?: NodeJS.ReadableStream | null;
+  readonly stdin?: NodeJS.WritableStream | null;
   readonly send?: (message: unknown) => boolean;
   readonly kill: (signal?: NodeJS.Signals) => boolean;
   readonly onceExit: (listener: (event: LocalProcessExitEvent) => void) => void;
@@ -939,6 +940,9 @@ function createChildProcessHandle(child: ChildProcess): LocalProcessHandle {
     get stderr() {
       return child.stderr;
     },
+    get stdin() {
+      return child.stdin;
+    },
     send: child.send ? (message) => child.send?.(message) === true : undefined,
     kill: (signal) => child.kill(signal),
     onceExit: (listener) => {
@@ -962,6 +966,9 @@ function createUtilityProcessHandle(child: LocalProcessUtilityProcess): LocalPro
     },
     get stderr() {
       return child.stderr;
+    },
+    get stdin() {
+      return null;
     },
     kill: () => child.kill(),
     onceExit: (listener) => {
@@ -1004,6 +1011,8 @@ async function terminateChildProcess(
       if (!child.send(plan.gracefulShutdownMessage) && child.isAlive()) {
         throw new Error('graceful shutdown message was not delivered');
       }
+    } else if (plan?.gracefulShutdownStdin === true && child.stdin) {
+      child.stdin.end();
     } else if (plan?.terminateProcessTree === true && typeof pid === 'number') {
       await terminateProcessTreeGracefully(pid, child);
     } else if (!child.kill('SIGTERM') && child.isAlive()) {
@@ -1016,9 +1025,10 @@ async function terminateChildProcess(
     throw new Error('Failed to terminate child process gracefully', { cause: error });
   }
 
+  const gracefulShutdownTimeoutMs = plan?.gracefulShutdownGraceMs ?? timeoutMs;
   await Promise.race([
     exitPromise,
-    new Promise<void>((resolveTimeout) => setTimeout(resolveTimeout, timeoutMs)),
+    new Promise<void>((resolveTimeout) => setTimeout(resolveTimeout, gracefulShutdownTimeoutMs)),
   ]);
 
   const processStillAlive = child.isAlive()
