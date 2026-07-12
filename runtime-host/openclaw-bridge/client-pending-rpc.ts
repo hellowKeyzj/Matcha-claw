@@ -1,8 +1,13 @@
 import type { RuntimeScheduledTask, RuntimeSchedulerPort } from '../application/common/runtime-ports';
+import type { GatewayTransportIssue } from '../shared/gateway-error';
+
+export type GatewayRpcTelemetryPolicy = 'normal' | 'readiness-probe';
 
 export interface PendingGatewayRpcRequest {
   readonly method: string;
   readonly timeoutAtMs: number;
+  readonly telemetryPolicy: GatewayRpcTelemetryPolicy;
+  readonly onFailure?: (issue: GatewayTransportIssue) => void;
   resolve(value: unknown): void;
   reject(error: Error): void;
 }
@@ -12,6 +17,8 @@ interface RegisterPendingGatewayRpcRequestInput {
   method: string;
   timeoutMs: number;
   nowMs: number;
+  telemetryPolicy?: GatewayRpcTelemetryPolicy;
+  onFailure?: (issue: GatewayTransportIssue) => void;
   onTimeout: (pending: PendingGatewayRpcRequest, error: Error) => void;
 }
 
@@ -38,6 +45,8 @@ export class GatewayPendingRpcRequests {
       this.pendingRequests.set(input.requestId, {
         method: input.method,
         timeoutAtMs,
+        telemetryPolicy: input.telemetryPolicy ?? 'normal',
+        ...(input.onFailure ? { onFailure: input.onFailure } : {}),
         resolve: (value) => resolveRpc(value),
         reject: (error) => rejectRpc(error),
       });

@@ -12,12 +12,16 @@ vi.mock('../../runtime-host/openclaw-bridge', () => ({
   createGatewayClient: createGatewayClientMock,
 }));
 
-function connected(transportEpoch: number): GatewayConnectionStatePayload {
+function connected(
+  transportEpoch: number,
+  input: Pick<GatewayConnectionStatePayload, 'gatewayReady' | 'lastIssue'> = { gatewayReady: false },
+): GatewayConnectionStatePayload {
   return {
     state: 'connected',
     portReachable: true,
-    gatewayReady: false,
+    gatewayReady: input.gatewayReady,
     transportEpoch,
+    ...(input.lastIssue ? { lastIssue: input.lastIssue, lastError: input.lastIssue.message } : {}),
     diagnostics: {
       consecutiveHeartbeatMisses: 0,
       consecutiveRpcFailures: 0,
@@ -677,6 +681,174 @@ describe('runtime host gateway event bridge', () => {
       readiness: expect.objectContaining({ capabilities: { methods: ['status'], updatedAt: 2 } }),
       capabilities: { methods: ['status'], updatedAt: 2 },
     });
+  });
+
+  it('rechecks same-epoch readiness after control liveness becomes ready', async () => {
+    gatewayClient.inspectGatewayControlReadiness
+      .mockResolvedValueOnce({
+        ready: false,
+        phase: 'starting',
+        requiredMethods: ['status'],
+        missingMethods: [],
+        retryable: true,
+      })
+      .mockResolvedValueOnce({
+        ready: true,
+        phase: 'ready',
+        requiredMethods: ['status'],
+        missingMethods: [],
+        retryable: false,
+        capabilities: { methods: ['status'], updatedAt: 2 },
+      });
+    createGatewayClientMock.mockReturnValue(gatewayClient);
+    const dispatchRoute = vi.fn(async () => ({ status: 200, data: {} }));
+    const endpointControlState = {
+      updateRuntimeEndpointControlState: vi.fn(() => ({
+        connection: null,
+        readiness: null,
+        capabilities: null,
+        updatedAt: null,
+      })),
+    };
+    const runtime = {
+      consumeEndpointConversationEvent: vi.fn(async () => []),
+      consumeEndpointNotification: vi.fn(() => []),
+    };
+    const { createRuntimeHostGatewayClient } = await import('../../runtime-host/application/adapters/openclaw/gateway/openclaw-gateway-event-bridge');
+
+    createRuntimeHostGatewayClient({
+      parentTransport: {
+        requestParentShellAction: vi.fn(async () => ({ success: true, status: 200, data: {} })),
+        emitParentGatewayEvent: vi.fn(async () => undefined),
+      },
+      dispatchRoute,
+      getSessionRuntime: () => runtime,
+      endpointControlState,
+      runtimeHostEndpoint: {
+        kind: 'native-runtime',
+        runtimeAdapterId: 'test-runtime',
+        runtimeInstanceId: 'local',
+      },
+      runtimeHostDataDir: process.cwd(),
+      gatewayPort: 12345,
+      readGatewayToken: vi.fn(async () => 'token'),
+      platform: process.platform,
+      clock: { nowMs: () => 1 },
+      idGenerator: { randomId: () => 'id-1', randomHex: () => '00' },
+      identityRepository: {} as never,
+      deviceCrypto: {} as never,
+      scheduler: { schedule: vi.fn(() => ({ cancel: vi.fn() })) },
+      tcpProbe: {} as never,
+    });
+
+    const onGatewayConnectionState = createGatewayClientMock.mock.calls[0]?.[0].onGatewayConnectionState;
+    onGatewayConnectionState(connected(7));
+    await vi.waitFor(() => {
+      expect(endpointControlState.updateRuntimeEndpointControlState).toHaveBeenCalledWith(expect.objectContaining({
+        readiness: expect.objectContaining({ phase: 'starting' }),
+      }));
+    });
+
+    onGatewayConnectionState(connected(7, { gatewayReady: true }));
+    await vi.waitFor(() => {
+      expect(endpointControlState.updateRuntimeEndpointControlState).toHaveBeenCalledWith(expect.objectContaining({
+        readiness: expect.objectContaining({ phase: 'ready' }),
+        capabilities: { methods: ['status'], updatedAt: 2 },
+      }));
+    });
+
+    expect(gatewayClient.inspectGatewayControlReadiness).toHaveBeenCalledTimes(2);
+    expect(dispatchRoute).toHaveBeenCalledTimes(1);
+  });
+
+  it('rechecks same-epoch readiness after a terminal control failure', async () => {
+    gatewayClient.inspectGatewayControlReadiness
+      .mockResolvedValueOnce({
+        ready: false,
+        phase: 'starting',
+        requiredMethods: ['status'],
+        missingMethods: [],
+        retryable: true,
+      })
+      .mockResolvedValueOnce({
+        ready: false,
+        phase: 'unavailable',
+        requiredMethods: ['status'],
+        missingMethods: [],
+        retryable: false,
+        code: 'FORBIDDEN',
+        error: 'Gateway RPC failed (system-presence): control plane disabled',
+      });
+    createGatewayClientMock.mockReturnValue(gatewayClient);
+    const dispatchRoute = vi.fn(async () => ({ status: 200, data: {} }));
+    const endpointControlState = {
+      updateRuntimeEndpointControlState: vi.fn(() => ({
+        connection: null,
+        readiness: null,
+        capabilities: null,
+        updatedAt: null,
+      })),
+    };
+    const runtime = {
+      consumeEndpointConversationEvent: vi.fn(async () => []),
+      consumeEndpointNotification: vi.fn(() => []),
+    };
+    const { createRuntimeHostGatewayClient } = await import('../../runtime-host/application/adapters/openclaw/gateway/openclaw-gateway-event-bridge');
+
+    createRuntimeHostGatewayClient({
+      parentTransport: {
+        requestParentShellAction: vi.fn(async () => ({ success: true, status: 200, data: {} })),
+        emitParentGatewayEvent: vi.fn(async () => undefined),
+      },
+      dispatchRoute,
+      getSessionRuntime: () => runtime,
+      endpointControlState,
+      runtimeHostEndpoint: {
+        kind: 'native-runtime',
+        runtimeAdapterId: 'test-runtime',
+        runtimeInstanceId: 'local',
+      },
+      runtimeHostDataDir: process.cwd(),
+      gatewayPort: 12345,
+      readGatewayToken: vi.fn(async () => 'token'),
+      platform: process.platform,
+      clock: { nowMs: () => 1 },
+      idGenerator: { randomId: () => 'id-1', randomHex: () => '00' },
+      identityRepository: {} as never,
+      deviceCrypto: {} as never,
+      scheduler: { schedule: vi.fn(() => ({ cancel: vi.fn() })) },
+      tcpProbe: {} as never,
+    });
+
+    const onGatewayConnectionState = createGatewayClientMock.mock.calls[0]?.[0].onGatewayConnectionState;
+    onGatewayConnectionState(connected(7));
+    await vi.waitFor(() => {
+      expect(endpointControlState.updateRuntimeEndpointControlState).toHaveBeenCalledWith(expect.objectContaining({
+        readiness: expect.objectContaining({ phase: 'starting' }),
+      }));
+    });
+
+    onGatewayConnectionState(connected(7, {
+      gatewayReady: false,
+      lastIssue: {
+        message: 'Gateway RPC failed (system-presence): control plane disabled',
+        source: 'rpc',
+        at: 2,
+        code: 'FORBIDDEN',
+        retryable: false,
+      },
+    }));
+    await vi.waitFor(() => {
+      expect(endpointControlState.updateRuntimeEndpointControlState).toHaveBeenCalledWith(expect.objectContaining({
+        readiness: expect.objectContaining({
+          phase: 'unavailable',
+          code: 'FORBIDDEN',
+        }),
+      }));
+    });
+
+    expect(gatewayClient.inspectGatewayControlReadiness).toHaveBeenCalledTimes(2);
+    expect(dispatchRoute).toHaveBeenCalledTimes(1);
   });
 
   it('stores readiness capabilities on the runtime endpoint instead of emitting session updates', async () => {

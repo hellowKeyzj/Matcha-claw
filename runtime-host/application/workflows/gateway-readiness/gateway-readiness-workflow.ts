@@ -3,6 +3,7 @@ import {
   DEFAULT_GATEWAY_BASE_METHODS,
   normalizeGatewayMethods,
   type GatewayConnectionPort,
+  type GatewayControlReadinessOptions,
   type GatewayRpcPort,
 } from '../../gateway/gateway-runtime-port';
 
@@ -43,13 +44,11 @@ export class GatewayReadinessWorkflow {
 
   async ready(payload: unknown) {
     const body = isRecord(payload) ? payload : {};
-    const timeoutMs = typeof body.timeoutMs === 'number' && body.timeoutMs > 0
-      ? body.timeoutMs
-      : undefined;
+    const readinessOptions = toGatewayControlReadinessOptions(body);
     const requiredMethods = normalizeGatewayMethods(body.requiredMethods);
     const readiness = await this.deps.gateway.inspectGatewayControlReadiness(
       requiredMethods.length > 0 ? requiredMethods : DEFAULT_GATEWAY_BASE_METHODS,
-      timeoutMs,
+      readinessOptions,
     );
     return ok({
       success: readiness.ready,
@@ -84,6 +83,28 @@ export class GatewayReadinessWorkflow {
 
     return ok({ success: true, approvedRequestIds });
   }
+}
+
+function toGatewayControlReadinessOptions(
+  body: Record<string, unknown>,
+): GatewayControlReadinessOptions | undefined {
+  const handshakeTimeoutMs = isPositiveFiniteNumber(body.handshakeTimeoutMs)
+    ? body.handshakeTimeoutMs
+    : undefined;
+  const livenessProbeTimeoutMs = isPositiveFiniteNumber(body.livenessProbeTimeoutMs)
+    ? body.livenessProbeTimeoutMs
+    : undefined;
+  if (handshakeTimeoutMs === undefined && livenessProbeTimeoutMs === undefined) {
+    return undefined;
+  }
+  return {
+    ...(handshakeTimeoutMs !== undefined ? { handshakeTimeoutMs } : {}),
+    ...(livenessProbeTimeoutMs !== undefined ? { livenessProbeTimeoutMs } : {}),
+  };
+}
+
+function isPositiveFiniteNumber(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

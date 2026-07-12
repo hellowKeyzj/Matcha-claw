@@ -171,9 +171,9 @@ export class GatewayClientFrameHandler {
       return false;
     }
 
-    this.deps.markAlive('rpc');
     const pending = this.deps.pendingRpcRequests.take(parsed.id);
     if (!pending) {
+      this.deps.markAlive('rpc');
       this.deps.logger?.warn('[gateway-rpc] response-without-pending', {
         requestId: parsed.id,
       });
@@ -184,6 +184,9 @@ export class GatewayClientFrameHandler {
       method: pending.method,
       ok: parsed.ok !== false && !parsed.error,
     });
+    if (pending.telemetryPolicy !== 'readiness-probe') {
+      this.deps.markAlive('rpc');
+    }
     if (parsed.ok === false || parsed.error) {
       const issue = createGatewayTransportIssue({
         message: `Gateway RPC failed (${pending.method}): ${extractGatewayErrorMessageFromResponse(parsed)}`,
@@ -194,14 +197,18 @@ export class GatewayClientFrameHandler {
         retryable: extractGatewayErrorRetryable({ error: parsed.error }),
         retryAfterMs: extractGatewayErrorRetryAfterMs({ error: parsed.error }),
       });
-      if (!isExpectedGatewayBusinessError(pending.method, parsed)) {
+      if (pending.telemetryPolicy === 'readiness-probe') {
+        pending.onFailure?.(issue);
+      } else if (!isExpectedGatewayBusinessError(pending.method, parsed)) {
         this.deps.recordRpcFailure(pending.method, issue);
       }
       pending.reject(new Error(issue.message));
       return true;
     }
 
-    this.deps.recordRpcSuccess();
+    if (pending.telemetryPolicy !== 'readiness-probe') {
+      this.deps.recordRpcSuccess();
+    }
     pending.resolve(parsed.payload ?? {});
     return true;
   }

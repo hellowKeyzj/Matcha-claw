@@ -33,6 +33,7 @@ export interface GatewayHeartbeatCallbacks {
 export class GatewayHeartbeatScheduler {
   private heartbeatTimer: RuntimeScheduledTask | null = null;
   private heartbeatTimeoutTimer: RuntimeScheduledTask | null = null;
+  private heartbeatTimeoutGeneration = 0;
   private gatewayReadyFallbackTimer: RuntimeScheduledTask | null = null;
   private initialReadyHeartbeatRecoveryTimer: RuntimeScheduledTask | null = null;
   private gatewayReadyFallbackAttempt = 0;
@@ -44,15 +45,20 @@ export class GatewayHeartbeatScheduler {
     private readonly clock: RuntimeClockPort,
   ) {}
 
+  clearHeartbeatTimeout(): void {
+    this.heartbeatTimeoutGeneration += 1;
+    if (this.heartbeatTimeoutTimer) {
+      this.heartbeatTimeoutTimer.cancel();
+      this.heartbeatTimeoutTimer = null;
+    }
+  }
+
   clearHeartbeatTimers(): void {
     if (this.heartbeatTimer) {
       this.heartbeatTimer.cancel();
       this.heartbeatTimer = null;
     }
-    if (this.heartbeatTimeoutTimer) {
-      this.heartbeatTimeoutTimer.cancel();
-      this.heartbeatTimeoutTimer = null;
-    }
+    this.clearHeartbeatTimeout();
   }
 
   clearRecoveryTimers(): void {
@@ -120,13 +126,22 @@ export class GatewayHeartbeatScheduler {
       ) {
         return;
       }
+      const missesAtPing = this.callbacks.getConsecutiveHeartbeatMisses();
       this.callbacks.ping();
+      const timeoutGeneration = this.heartbeatTimeoutGeneration;
       this.heartbeatTimeoutTimer = this.scheduler.schedule(this.options.timeoutMs, () => {
+        if (timeoutGeneration !== this.heartbeatTimeoutGeneration) {
+          return;
+        }
         this.heartbeatTimeoutTimer = null;
         if (!this.callbacks.isActive(expectedEpoch) || !this.callbacks.isConnected()) {
           return;
         }
-        const nextMisses = this.callbacks.getConsecutiveHeartbeatMisses() + 1;
+        const currentMisses = this.callbacks.getConsecutiveHeartbeatMisses();
+        if (currentMisses < missesAtPing) {
+          return;
+        }
+        const nextMisses = currentMisses + 1;
         this.callbacks.recordHeartbeatTimeout(nextMisses);
         if (nextMisses >= this.options.maxMisses) {
           const withinInitialReadyGrace = !this.callbacks.isGatewayReady()

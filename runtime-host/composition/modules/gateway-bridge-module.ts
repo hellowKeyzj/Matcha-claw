@@ -1,5 +1,8 @@
 import type { OpenClawGatewayClient } from '../../openclaw-bridge';
-import type { GatewayRuntimePort } from '../../application/gateway/gateway-runtime-port';
+import type {
+  GatewayControlReadinessOptions,
+  GatewayRuntimePort,
+} from '../../application/gateway/gateway-runtime-port';
 import {
   registerRuntimeLifecycleDefinitions,
   type RuntimeHostLifecycle,
@@ -83,7 +86,7 @@ function createUnavailableGatewayClient(reason: string, clock: RuntimeClockPort)
   });
 
   return {
-    inspectGatewayControlReadiness: async (methods) => ({
+    inspectGatewayControlReadiness: async (methods, _options?: GatewayControlReadinessOptions) => ({
       ready: false,
       phase: 'unavailable',
       requiredMethods: methods,

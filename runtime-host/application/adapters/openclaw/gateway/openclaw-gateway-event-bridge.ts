@@ -134,6 +134,9 @@ const MAX_RUN_SESSION_INDEX_ENTRIES = 1000;
 
 export function createRuntimeHostGatewayClient(deps: RuntimeHostGatewayBridgeDeps) {
   let latestObservedTransportEpoch = 0;
+  let activeReadinessTransportEpoch: number | null = null;
+  let readinessObservationRevision = 0;
+  let observedReadinessPhase: GatewayControlReadiness['phase'] | null = null;
   const conversationEventChains = new Map<string, Promise<void>>();
   const pendingConversationEventsBySessionKey = new Map<string, GatewayConversationEvent[]>();
   const runSessionKeyByRunId = new Map<string, string>();
@@ -372,6 +375,10 @@ export function createRuntimeHostGatewayClient(deps: RuntimeHostGatewayBridgeDep
       }).catch(() => undefined);
     },
     onGatewayConnectionState: (payload: GatewayConnectionStatePayload) => {
+      if (payload.transportEpoch < latestObservedTransportEpoch) {
+        return;
+      }
+
       // 任何状态变化都向 main push，让 host-event-bridge 重新组装完整 PublicGatewayStatus 推到 renderer，
       // 替代 renderer 30s 轮询 /api/gateway/status 的盲区兜底。
       void deps.parentTransport.emitParentGatewayEvent('gateway:lifecycle', payload).catch(() => undefined);
@@ -383,27 +390,55 @@ export function createRuntimeHostGatewayClient(deps: RuntimeHostGatewayBridgeDep
       });
 
       if (payload.state !== 'connected') {
+        if (activeReadinessTransportEpoch === payload.transportEpoch) {
+          activeReadinessTransportEpoch = null;
+          observedReadinessPhase = null;
+          readinessObservationRevision += 1;
+        }
         return;
       }
-      if (payload.transportEpoch <= latestObservedTransportEpoch) {
+
+      const isNewTransportEpoch = payload.transportEpoch > latestObservedTransportEpoch;
+      if (isNewTransportEpoch) {
+        latestObservedTransportEpoch = payload.transportEpoch;
+        activeReadinessTransportEpoch = payload.transportEpoch;
+        observedReadinessPhase = null;
+        readinessObservationRevision += 1;
+        autoRecovery.reset();
+        void deps.dispatchRoute(
+          'POST',
+          '/api/capabilities/execute',
+          createRuntimeHostCapabilityPayload(deps.runtimeHostEndpoint, 'runtimeHost.gatewayLifecycle', {
+            state: 'running',
+            transportEpoch: payload.transportEpoch,
+            updatedAt: deps.clock.nowMs(),
+          }),
+        ).catch(() => undefined);
+      }
+
+      const canObserveReadiness = activeReadinessTransportEpoch === payload.transportEpoch
+        && (
+          observedReadinessPhase === null
+          || (
+            observedReadinessPhase === 'starting'
+            && (payload.gatewayReady || payload.lastIssue?.retryable === false)
+          )
+        );
+      if (!canObserveReadiness) {
         return;
       }
-      latestObservedTransportEpoch = payload.transportEpoch;
-      autoRecovery.reset();
-      void deps.dispatchRoute(
-        'POST',
-        '/api/capabilities/execute',
-        createRuntimeHostCapabilityPayload(deps.runtimeHostEndpoint, 'runtimeHost.gatewayLifecycle', {
-          state: 'running',
-          transportEpoch: payload.transportEpoch,
-          updatedAt: deps.clock.nowMs(),
-        }),
-      ).catch(() => undefined);
+
+      const observationRevision = readinessObservationRevision + 1;
+      readinessObservationRevision = observationRevision;
       const observedTransportEpoch = payload.transportEpoch;
       void gatewayClient.inspectGatewayControlReadiness(DEFAULT_GATEWAY_BASE_METHODS).then((readiness) => {
-        if (observedTransportEpoch !== latestObservedTransportEpoch) {
+        if (
+          activeReadinessTransportEpoch !== observedTransportEpoch
+          || readinessObservationRevision !== observationRevision
+        ) {
           return;
         }
+        observedReadinessPhase = readiness.phase;
         deps.endpointControlState.updateRuntimeEndpointControlState({
           endpoint: deps.runtimeHostEndpoint,
           readiness,

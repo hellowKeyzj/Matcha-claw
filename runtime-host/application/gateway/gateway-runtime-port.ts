@@ -54,6 +54,11 @@ export interface GatewayControlReadiness {
   readonly capabilities?: GatewayCapabilitiesSnapshot;
 }
 
+export interface GatewayControlReadinessOptions {
+  readonly handshakeTimeoutMs?: number;
+  readonly livenessProbeTimeoutMs?: number;
+}
+
 export const DEFAULT_GATEWAY_BASE_METHODS = [
   'status',
   'config.get',
@@ -97,7 +102,10 @@ export interface GatewayRpcPort {
 }
 
 export interface GatewayConnectionPort {
-  inspectGatewayControlReadiness(methods: readonly string[], timeoutMs?: number): Promise<GatewayControlReadiness>;
+  inspectGatewayControlReadiness(
+    methods: readonly string[],
+    options?: GatewayControlReadinessOptions,
+  ): Promise<GatewayControlReadiness>;
   ensureGatewayReady(timeoutMs?: number): Promise<void>;
   ensureGatewayMethods(methods: readonly string[], timeoutMs?: number): Promise<GatewayMethodReadiness>;
   inspectGatewayMethodReadiness(methods: readonly string[], timeoutMs?: number): Promise<GatewayMethodReadiness>;

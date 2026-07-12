@@ -31,6 +31,14 @@ class ManualScheduler implements RuntimeSchedulerPort {
     }
     entry.task();
   }
+
+  runFirstTaskWithDelay(delayMs: number): void {
+    const entry = this.tasks.find((task) => task.delayMs === delayMs);
+    if (!entry || entry.cancelled) {
+      return;
+    }
+    entry.task();
+  }
 }
 
 function createClock(): RuntimeClockPort {
@@ -108,5 +116,33 @@ describe('GatewayHeartbeatScheduler gateway ready fallback', () => {
     heartbeat.scheduleGatewayReadyFallback(2);
 
     expect(scheduler.tasks.at(-1)?.delayMs).toBe(GATEWAY_READY_FALLBACK_PROBE_DELAYS_MS[0]);
+  });
+});
+
+describe('GatewayHeartbeatScheduler heartbeat timeout', () => {
+  it('ignores a stale heartbeat timeout after transport activity resets missed heartbeats', () => {
+    const scheduler = new ManualScheduler();
+    let consecutiveHeartbeatMisses = 2;
+    const recordHeartbeatTimeout = vi.fn((nextMisses: number) => {
+      consecutiveHeartbeatMisses = nextMisses;
+    });
+    const heartbeat = new GatewayHeartbeatScheduler(
+      createCallbacks({
+        getConsecutiveHeartbeatMisses: () => consecutiveHeartbeatMisses,
+        recordHeartbeatTimeout,
+      }),
+      getGatewayHeartbeatOptions('linux'),
+      scheduler,
+      createClock(),
+    );
+
+    heartbeat.scheduleHeartbeat(1);
+    scheduler.runFirstTaskWithDelay(getGatewayHeartbeatOptions('linux').intervalMs);
+
+    consecutiveHeartbeatMisses = 0;
+    scheduler.runFirstTaskWithDelay(getGatewayHeartbeatOptions('linux').timeoutMs);
+
+    expect(recordHeartbeatTimeout).not.toHaveBeenCalled();
+    expect(consecutiveHeartbeatMisses).toBe(0);
   });
 });

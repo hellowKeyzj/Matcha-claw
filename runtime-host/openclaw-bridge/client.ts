@@ -9,7 +9,6 @@ import type { GatewayConversationEvent } from './events';
 import {
   DEFAULT_GATEWAY_OPERATOR_SCOPES,
   GatewayAuthService,
-  parseGatewayPort,
 } from './client-auth';
 import {
   ensureError,
@@ -49,6 +48,7 @@ import {
   inspectGatewayMethods,
   type GatewayCapabilitiesSnapshot,
   type GatewayControlReadiness,
+  type GatewayControlReadinessOptions,
   type GatewayMethodReadiness,
 } from './capabilities';
 import type { RuntimeHostLogger } from '../shared/logger';
@@ -87,6 +87,25 @@ const GATEWAY_RPC_RECOVERY_FAST_ATTEMPTS = 3;
 const GATEWAY_RPC_RECOVERY_FAST_DELAY_MS = 1_000;
 const GATEWAY_RPC_RECOVERY_BACKOFF_DELAYS_MS = [10_000, 30_000, 60_000] as const;
 const GATEWAY_RPC_RECOVERY_RESTART_PROBE_TIMEOUT_MS = 1_000;
+const GATEWAY_CONTROL_READINESS_HANDSHAKE_TIMEOUT_MS = 15_000;
+const GATEWAY_CONTROL_READINESS_PROBE_TIMEOUT_MS = 2_000;
+const GATEWAY_CONTROL_READINESS_RETRY_AFTER_MS = 2_000;
+
+type GatewayControlReadinessState =
+  | { phase: 'handshake-pending'; handshakePromise: Promise<void>; issue?: GatewayTransportIssue }
+  | {
+    phase: 'control-probe-pending';
+    transportEpoch: number;
+    capabilities: GatewayCapabilitiesSnapshot;
+    issue?: GatewayTransportIssue;
+  }
+  | { phase: 'ready'; transportEpoch: number; capabilities: GatewayCapabilitiesSnapshot }
+  | {
+    phase: 'unavailable';
+    issue: GatewayTransportIssue;
+    scope: 'connection' | 'required-methods';
+    requiredMethods?: readonly string[];
+  };
 
 export function createGatewayClient(options: GatewayClientOptions) {
   let socket: WebSocket | null = null;
@@ -98,6 +117,9 @@ export function createGatewayClient(options: GatewayClientOptions) {
   let lifecycleEpoch = 0;
   let transportEpoch = 0;
   let gatewayCapabilities: GatewayCapabilitiesSnapshot | null = null;
+  let controlReadinessState: GatewayControlReadinessState | null = null;
+  let controlProbePromise: Promise<void> | null = null;
+  let controlProbeTransportEpoch: number | null = null;
   let reconnectTimer: RuntimeScheduledTask | null = null;
   let reconnectAttempts = 0;
   let restartRequestedForTransportEpoch: number | null = null;
@@ -171,7 +193,7 @@ export function createGatewayClient(options: GatewayClientOptions) {
       });
     },
     requestRestart: () => {
-      void requestGatewayRestart();
+      void requestGatewayRestart('heartbeat-timeout');
     },
     scheduleReconnect: (reason) => {
       scheduleReconnect(reason);
@@ -190,6 +212,12 @@ export function createGatewayClient(options: GatewayClientOptions) {
     return connectionTracker.updateSnapshot(patch);
   }
 
+  function resetControlReadinessState(): void {
+    controlReadinessState = null;
+    controlProbePromise = null;
+    controlProbeTransportEpoch = null;
+  }
+
   function clearConnectionState(): void {
     connectPromise = null;
     isConnected = false;
@@ -197,6 +225,7 @@ export function createGatewayClient(options: GatewayClientOptions) {
     connectedAt = 0;
     socket = null;
     gatewayCapabilities = null;
+    resetControlReadinessState();
   }
 
   function resetConnectionHandshakeState(): void {
@@ -253,6 +282,7 @@ export function createGatewayClient(options: GatewayClientOptions) {
   }
 
   function markAlive(source: 'message' | 'pong' | 'rpc') {
+    heartbeat.clearHeartbeatTimeout();
     const now = options.clock.nowMs();
     updateDiagnostics({
       lastAliveAt: now,
@@ -278,6 +308,20 @@ export function createGatewayClient(options: GatewayClientOptions) {
     gatewayReady = true;
     updateConnectionSnapshot({
       gatewayReady: true,
+      diagnostics: connectionTracker.diagnostics,
+    });
+  }
+
+  function markControlReadinessLive(): void {
+    heartbeat.clearHeartbeatTimeout();
+    updateDiagnostics({
+      lastAliveAt: options.clock.nowMs(),
+      consecutiveHeartbeatMisses: 0,
+    });
+    gatewayReady = true;
+    updateConnectionSnapshot({
+      gatewayReady: true,
+      lastError: '',
       diagnostics: connectionTracker.diagnostics,
     });
   }
@@ -346,14 +390,14 @@ export function createGatewayClient(options: GatewayClientOptions) {
         source: 'runtime',
         clock: options.clock,
       }));
-      await maybeRestartAfterRpcRecoveryFailure();
+      await maybeRestartAfterRpcRecoveryFailure(reason);
       scheduleRpcRecovery(reason, nextRpcRecoveryDelayMs(attempt));
     }
   }
 
-  async function maybeRestartAfterRpcRecoveryFailure(): Promise<void> {
+  async function maybeRestartAfterRpcRecoveryFailure(reason: string): Promise<void> {
     if (connectionTracker.diagnostics.consecutiveHeartbeatMisses > 0) {
-      await requestGatewayRestart();
+      await requestGatewayRestart(reason);
       return;
     }
     const gatewayPort = options.gatewayPort;
@@ -367,7 +411,7 @@ export function createGatewayClient(options: GatewayClientOptions) {
       diagnostics: connectionTracker.diagnostics,
     });
     if (!portReachable) {
-      await requestGatewayRestart();
+      await requestGatewayRestart(reason);
     }
   }
 
@@ -383,6 +427,7 @@ export function createGatewayClient(options: GatewayClientOptions) {
     reconnectAttempts = 0;
     clearRpcRecoveryTimer();
     connectedAt = options.clock.nowMs();
+    resetControlReadinessState();
     transportEpoch += 1;
     restartRequestedForTransportEpoch = null;
     gatewayReady = false;
@@ -412,7 +457,7 @@ export function createGatewayClient(options: GatewayClientOptions) {
     return closedByClient;
   }
 
-  async function requestGatewayRestart(): Promise<void> {
+  async function requestGatewayRestart(reason: string): Promise<void> {
     if (typeof options.requestGatewayRestart !== 'function') {
       return;
     }
@@ -421,8 +466,11 @@ export function createGatewayClient(options: GatewayClientOptions) {
     }
     restartRequestedForTransportEpoch = transportEpoch;
     try {
-      await options.requestGatewayRestart('transport-unresponsive');
+      await options.requestGatewayRestart(reason);
     } catch (error) {
+      if (restartRequestedForTransportEpoch === transportEpoch) {
+        restartRequestedForTransportEpoch = null;
+      }
       reportGatewayError(error, createGatewayTransportIssue({
         message: ensureError(error, 'Gateway restart request failed').message,
         source: 'runtime',
@@ -586,7 +634,6 @@ export function createGatewayClient(options: GatewayClientOptions) {
         reconnectTimer = null;
       }
       reconnectAttempts = 0;
-      restartRequestedForTransportEpoch = null;
       clearSocketTimers();
       rejectAllPending(new Error(`Gateway connection recovery started: ${reason || 'manual'}`));
       const currentSocket = socket;
@@ -621,59 +668,276 @@ export function createGatewayClient(options: GatewayClientOptions) {
     return snapshot.portReachable;
   }
 
+  function buildStartingControlReadiness(
+    requiredMethods: readonly string[],
+    capabilities?: GatewayCapabilitiesSnapshot,
+    issue?: GatewayTransportIssue,
+  ): GatewayControlReadiness {
+    return {
+      ready: false,
+      phase: 'starting',
+      requiredMethods,
+      missingMethods: [],
+      retryable: true,
+      ...(issue?.code ? { code: issue.code } : {}),
+      ...(issue ? { error: issue.message } : {}),
+      ...(issue?.details !== undefined ? { details: issue.details } : {}),
+      retryAfterMs: issue?.retryAfterMs ?? GATEWAY_CONTROL_READINESS_RETRY_AFTER_MS,
+      ...(capabilities ? { capabilities } : {}),
+    };
+  }
+
+  function isGlobalControlReadinessUnavailable(
+    state: Extract<GatewayControlReadinessState, { phase: 'unavailable' }>,
+  ): boolean {
+    return state.scope === 'connection';
+  }
+
+  function haveSameRequiredMethods(
+    left: readonly string[],
+    right: readonly string[],
+  ): boolean {
+    return left.length === right.length && left.every((method, index) => method === right[index]);
+  }
+
+  function buildUnavailableControlReadiness(
+    requiredMethods: readonly string[],
+    issue: GatewayTransportIssue,
+  ): GatewayControlReadiness {
+    return {
+      ready: false,
+      phase: 'unavailable',
+      requiredMethods,
+      missingMethods: [],
+      retryable: false,
+      ...(issue.code ? { code: issue.code } : {}),
+      error: issue.message,
+      ...(issue.details !== undefined ? { details: issue.details } : {}),
+    };
+  }
+
+  function isCurrentControlReadinessTransport(expectedTransportEpoch: number): boolean {
+    return socket !== null
+      && socket.readyState === WebSocket.OPEN
+      && isConnected
+      && transportEpoch === expectedTransportEpoch;
+  }
+
+  function isGlobalControlReadinessIssue(issue: GatewayTransportIssue): boolean {
+    return issue.code === 'UNAUTHORIZED'
+      || issue.code === 'AUTH_UNAUTHORIZED'
+      || issue.code === 'FORBIDDEN'
+      || issue.code === 'PROTOCOL_MISMATCH'
+      || issue.code === 'UNSUPPORTED_PROTOCOL';
+  }
+
+  function recordControlProbeFailure(
+    issue: GatewayTransportIssue,
+    expectedTransportEpoch: number,
+    requiredMethods: readonly string[],
+  ): void {
+    if (!isCurrentControlReadinessTransport(expectedTransportEpoch)) {
+      return;
+    }
+    controlReadinessState = issue.retryable === false
+      ? {
+        phase: 'unavailable',
+        issue,
+        scope: isGlobalControlReadinessIssue(issue) ? 'connection' : 'required-methods',
+        ...(isGlobalControlReadinessIssue(issue) ? {} : { requiredMethods }),
+      }
+      : {
+        phase: 'control-probe-pending',
+        transportEpoch: expectedTransportEpoch,
+        capabilities: gatewayCapabilities ?? { methods: [], updatedAt: options.clock.nowMs() },
+        issue,
+      };
+    if (issue.retryable === false) {
+      updateConnectionSnapshot({
+        lastError: issue.message,
+        lastIssue: issue,
+        diagnostics: connectionTracker.diagnostics,
+      });
+    }
+  }
+
+  function startControlProbe(
+    capabilities: GatewayCapabilitiesSnapshot,
+    requiredMethods: readonly string[],
+    livenessProbeTimeoutMs: number,
+  ): void {
+    if (
+      controlProbePromise
+      && controlProbeTransportEpoch === transportEpoch
+    ) {
+      return;
+    }
+    const expectedTransportEpoch = transportEpoch;
+    let probeFailureReported = false;
+    controlProbeTransportEpoch = expectedTransportEpoch;
+    controlReadinessState = {
+      phase: 'control-probe-pending',
+      transportEpoch: expectedTransportEpoch,
+      capabilities,
+    };
+    controlProbePromise = gatewayReadinessProbe(livenessProbeTimeoutMs, (issue) => {
+      probeFailureReported = true;
+      recordControlProbeFailure(issue, expectedTransportEpoch, requiredMethods);
+    });
+    void controlProbePromise.then(() => {
+      if (!isCurrentControlReadinessTransport(expectedTransportEpoch)) {
+        return;
+      }
+      markControlReadinessLive();
+      controlReadinessState = {
+        phase: 'ready',
+        transportEpoch: expectedTransportEpoch,
+        capabilities,
+      };
+    }).catch((error) => {
+      if (probeFailureReported || !isCurrentControlReadinessTransport(expectedTransportEpoch)) {
+        return;
+      }
+      const fallbackIssue = createGatewayTransportIssue({
+        message: ensureError(error, 'Gateway control liveness probe failed').message,
+        source: 'rpc',
+        clock: options.clock,
+        retryable: true,
+        retryAfterMs: GATEWAY_CONTROL_READINESS_RETRY_AFTER_MS,
+      });
+      recordControlProbeFailure(fallbackIssue, expectedTransportEpoch, requiredMethods);
+    }).finally(() => {
+      if (controlProbeTransportEpoch === expectedTransportEpoch) {
+        controlProbePromise = null;
+        controlProbeTransportEpoch = null;
+      }
+    });
+  }
+
+  function startControlHandshake(handshakeTimeoutMs: number): void {
+    if (connectPromise && controlReadinessState?.phase === 'handshake-pending') {
+      return;
+    }
+    const handshakePromise = (connectPromise ?? ensureConnected(handshakeTimeoutMs)).catch((error) => {
+      const stateIssue = connectionTracker.snapshot.lastIssue;
+      const issue = stateIssue ?? createGatewayTransportIssue({
+        message: ensureError(error, 'Gateway control handshake failed').message,
+        source: 'connect',
+        clock: options.clock,
+      });
+      controlReadinessState = issue.retryable === true
+        ? { phase: 'handshake-pending', handshakePromise: Promise.resolve(), issue }
+        : { phase: 'unavailable', issue, scope: 'connection' };
+    });
+    controlReadinessState = { phase: 'handshake-pending', handshakePromise };
+    void handshakePromise;
+  }
+
   async function inspectGatewayControlReadiness(
     methods: readonly string[],
-    timeoutMs = GATEWAY_CONNECT_TIMEOUT_MS,
+    readinessOptions: GatewayControlReadinessOptions = {},
   ): Promise<GatewayControlReadiness> {
     const requiredMethods = methods.length > 0 ? methods : DEFAULT_GATEWAY_BASE_METHODS;
-    try {
-      const capabilities = await readGatewayCapabilities(timeoutMs);
-      const readiness = inspectGatewayMethods(capabilities, requiredMethods);
-      if (!readiness.ready) {
-        return {
-          ready: false,
-          phase: 'unavailable',
-          requiredMethods: readiness.methods,
-          missingMethods: readiness.missingMethods,
-          retryable: false,
-          code: 'GATEWAY_METHODS_UNAVAILABLE',
-          ...(capabilities ? { capabilities } : {}),
-        };
+    const handshakeTimeoutMs = readinessOptions.handshakeTimeoutMs ?? GATEWAY_CONTROL_READINESS_HANDSHAKE_TIMEOUT_MS;
+    const livenessProbeTimeoutMs = readinessOptions.livenessProbeTimeoutMs ?? GATEWAY_CONTROL_READINESS_PROBE_TIMEOUT_MS;
+    const currentState = controlReadinessState;
+
+    if (
+      currentState?.phase === 'unavailable'
+      && (
+        isGlobalControlReadinessUnavailable(currentState)
+        || (
+          currentState.requiredMethods !== undefined
+          && haveSameRequiredMethods(currentState.requiredMethods, requiredMethods)
+        )
+      )
+    ) {
+      return buildUnavailableControlReadiness(requiredMethods, currentState.issue);
+    }
+
+    if (!isConnected || !gatewayCapabilities) {
+      const priorHandshakeIssue = currentState?.phase === 'handshake-pending'
+        ? currentState.issue
+        : undefined;
+      startControlHandshake(handshakeTimeoutMs);
+      const handshakeState = controlReadinessState;
+      if (handshakeState?.phase === 'unavailable') {
+        return buildUnavailableControlReadiness(requiredMethods, handshakeState.issue);
       }
-      await gatewayRpc('system-presence', {}, Math.max(1000, Math.min(timeoutMs, 5000)));
+      return buildStartingControlReadiness(requiredMethods, undefined, priorHandshakeIssue);
+    }
+
+    const readiness = inspectGatewayMethods(gatewayCapabilities, requiredMethods);
+    if (!readiness.ready) {
+      const issue = createGatewayTransportIssue({
+        message: `Gateway methods unavailable: ${readiness.missingMethods.join(', ')}`,
+        source: 'connect',
+        clock: options.clock,
+        code: 'GATEWAY_METHODS_UNAVAILABLE',
+        details: { missingMethods: readiness.missingMethods },
+        retryable: false,
+      });
+      controlReadinessState = {
+        phase: 'unavailable',
+        issue,
+        scope: 'required-methods',
+        requiredMethods: readiness.methods,
+      };
+      return {
+        ready: false,
+        phase: 'unavailable',
+        requiredMethods: readiness.methods,
+        missingMethods: readiness.missingMethods,
+        retryable: false,
+        code: issue.code,
+        ...(gatewayCapabilities ? { capabilities: gatewayCapabilities } : {}),
+      };
+    }
+
+    if (
+      currentState?.phase === 'ready'
+      && currentState.transportEpoch === transportEpoch
+    ) {
       return {
         ready: true,
         phase: 'ready',
         requiredMethods: readiness.methods,
         missingMethods: [],
         retryable: false,
-        ...(capabilities ? { capabilities } : {}),
-      };
-    } catch (error) {
-      const state = connectionTracker.snapshot.lastIssue
-        ? connectionTracker.snapshot
-        : await readGatewayConnectionState(250);
-      const issue = state.lastIssue;
-      const retryable = issue?.retryable === true;
-      return {
-        ready: false,
-        phase: retryable ? 'starting' : 'unavailable',
-        requiredMethods,
-        missingMethods: [],
-        retryable,
-        ...(issue?.code ? { code: issue.code } : {}),
-        error: issue?.message ?? (error instanceof Error ? error.message : String(error)),
-        ...(issue?.details !== undefined ? { details: issue.details } : {}),
-        ...(issue?.retryAfterMs !== undefined ? { retryAfterMs: issue.retryAfterMs } : {}),
+        capabilities: currentState.capabilities,
       };
     }
+
+    if (
+      currentState?.phase === 'control-probe-pending'
+      && currentState.transportEpoch === transportEpoch
+      && controlProbePromise
+    ) {
+      return buildStartingControlReadiness(
+        requiredMethods,
+        currentState.capabilities,
+        currentState.issue,
+      );
+    }
+
+    const priorProbeIssue = currentState?.phase === 'control-probe-pending'
+      ? currentState.issue
+      : undefined;
+    startControlProbe(gatewayCapabilities, readiness.methods, livenessProbeTimeoutMs);
+    const probeState = controlReadinessState;
+    if (probeState?.phase === 'unavailable') {
+      return buildUnavailableControlReadiness(requiredMethods, probeState.issue);
+    }
+    return buildStartingControlReadiness(requiredMethods, gatewayCapabilities, priorProbeIssue);
   }
 
   async function ensureGatewayReady(timeoutMs = GATEWAY_CONNECT_TIMEOUT_MS): Promise<void> {
-    const readiness = await inspectGatewayControlReadiness(DEFAULT_GATEWAY_BASE_METHODS, timeoutMs);
+    const capabilities = await readGatewayCapabilities(timeoutMs);
+    const readiness = inspectGatewayMethods(capabilities, DEFAULT_GATEWAY_BASE_METHODS);
     if (!readiness.ready) {
-      throw new Error(readiness.error ?? readiness.code ?? 'Gateway control plane unavailable');
+      throw new Error(`Gateway methods unavailable: ${readiness.missingMethods.join(', ')}`);
     }
+    await gatewayRpc('system-presence', {}, timeoutMs);
   }
 
   async function readGatewayCapabilities(
@@ -703,7 +967,18 @@ export function createGatewayClient(options: GatewayClientOptions) {
   }
 
   async function gatewayRpc(method: string, params: unknown, timeoutMs?: number) {
-    return await rpcSender.call(method, params, timeoutMs);
+    return await rpcSender.call(method, params, { timeoutMs });
+  }
+
+  async function gatewayReadinessProbe(
+    timeoutMs: number,
+    onFailure: (issue: GatewayTransportIssue) => void,
+  ): Promise<unknown> {
+    return await rpcSender.call('system-presence', {}, {
+      timeoutMs,
+      telemetryPolicy: 'readiness-probe',
+      onFailure,
+    });
   }
 
   function close() {

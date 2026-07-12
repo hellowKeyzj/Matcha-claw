@@ -1,8 +1,11 @@
 import net from 'node:net';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 import { WebSocketServer } from 'ws';
 import { DEFAULT_GATEWAY_BASE_METHODS } from '../../runtime-host/application/gateway/gateway-runtime-port';
-import { createGatewayClient } from '../../runtime-host/openclaw-bridge';
+import {
+  createGatewayClient,
+  type GatewayConnectionStatePayload,
+} from '../../runtime-host/openclaw-bridge';
 import { parseGatewayPort } from '../../runtime-host/openclaw-bridge/client-auth';
 import {
   NodeGatewayDeviceCrypto,
@@ -15,6 +18,35 @@ import { createTestRuntimeTcpProbe } from './helpers/runtime-tcp-probe';
 
 const originalGatewayPort = process.env.MATCHACLAW_RUNTIME_HOST_GATEWAY_PORT;
 let gatewayToken = '';
+
+function waitForGatewayClientStateToSettle(): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, 20));
+}
+
+async function waitForGatewayReadiness(
+  predicate: () => boolean,
+  timeoutMs = 1_000,
+): Promise<void> {
+  const startedAt = Date.now();
+  while (!predicate()) {
+    if (Date.now() - startedAt >= timeoutMs) {
+      throw new Error('Timed out waiting for gateway readiness state');
+    }
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+}
+
+function closeGatewayServer(wss: WebSocketServer): Promise<void> {
+  return new Promise((resolve, reject) => {
+    wss.close((error) => {
+      if (error) {
+        reject(error);
+        return;
+      }
+      resolve();
+    });
+  });
+}
 
 function createTestGatewayClient(options: Partial<Parameters<typeof createGatewayClient>[0]> = {}) {
   const rawPort = process.env.MATCHACLAW_RUNTIME_HOST_GATEWAY_PORT;
@@ -310,6 +342,7 @@ describe('runtime-host process gateway rpc client', () => {
     process.env.MATCHACLAW_RUNTIME_HOST_GATEWAY_PORT = String(port);
     gatewayToken = 'gateway-starting-token';
 
+    let rejectedHandshake = false;
     const wss = new WebSocketServer({ host: '127.0.0.1', port });
     wss.on('connection', (socket) => {
       socket.send(JSON.stringify({
@@ -323,6 +356,7 @@ describe('runtime-host process gateway rpc client', () => {
         if (message.type !== 'req' || message.method !== 'connect' || typeof message.id !== 'string') {
           return;
         }
+        rejectedHandshake = true;
         socket.send(JSON.stringify({
           type: 'res',
           id: message.id,
@@ -342,7 +376,19 @@ describe('runtime-host process gateway rpc client', () => {
     let client: ReturnType<typeof createTestGatewayClient> | null = null;
     try {
       client = createTestGatewayClient();
-      await expect(client.inspectGatewayControlReadiness(['status'], 3000)).resolves.toMatchObject({
+      await expect(client.inspectGatewayControlReadiness(['status'], {
+        handshakeTimeoutMs: 3_000,
+      })).resolves.toMatchObject({
+        ready: false,
+        phase: 'starting',
+        retryable: true,
+      });
+      await waitForGatewayReadiness(() => rejectedHandshake);
+      await waitForGatewayClientStateToSettle();
+
+      await expect(client.inspectGatewayControlReadiness(['status'], {
+        handshakeTimeoutMs: 3_000,
+      })).resolves.toMatchObject({
         ready: false,
         phase: 'starting',
         retryable: true,
@@ -350,18 +396,107 @@ describe('runtime-host process gateway rpc client', () => {
         code: 'UNAVAILABLE',
         error: 'Gateway connect failed: gateway starting; retry shortly',
       });
-      client.close();
     } finally {
       client?.close();
-      await new Promise<void>((resolve, reject) => {
-        wss.close((error) => {
-          if (error) {
-            reject(error);
-            return;
-          }
-          resolve();
-        });
+      await closeGatewayServer(wss);
+    }
+  });
+
+  it('inspectGatewayControlReadiness 在延迟 handshake 时立即返回 starting，并复用单一连接完成 presence 后变为 ready', async () => {
+    const port = 48500 + Math.floor(Math.random() * 300);
+    process.env.MATCHACLAW_RUNTIME_HOST_GATEWAY_PORT = String(port);
+    gatewayToken = 'gateway-delayed-handshake-token';
+
+    let connectionCount = 0;
+    const methods: string[] = [];
+    const wss = new WebSocketServer({ host: '127.0.0.1', port });
+    await new Promise<void>((resolve, reject) => {
+      wss.once('listening', resolve);
+      wss.once('error', reject);
+    });
+    wss.on('connection', (socket) => {
+      connectionCount += 1;
+      setTimeout(() => {
+        socket.send(JSON.stringify({
+          type: 'event',
+          event: 'connect.challenge',
+          payload: { nonce: `nonce-${Date.now()}` },
+        }));
+      }, 3_200);
+
+      socket.on('message', (rawData) => {
+        const message = JSON.parse(rawData.toString()) as Record<string, unknown>;
+        if (message.type !== 'req' || typeof message.id !== 'string') {
+          return;
+        }
+        methods.push(String(message.method));
+        if (message.method === 'connect') {
+          socket.send(JSON.stringify({
+            type: 'res',
+            id: message.id,
+            ok: true,
+            payload: {
+              features: {
+                methods: ['status', 'system-presence'],
+              },
+            },
+          }));
+          return;
+        }
+        if (message.method === 'system-presence') {
+          socket.send(JSON.stringify({
+            type: 'res',
+            id: message.id,
+            ok: true,
+            payload: { present: true },
+          }));
+        }
       });
+    });
+
+    let client: ReturnType<typeof createTestGatewayClient> | null = null;
+    try {
+      client = createTestGatewayClient();
+      const inspectStartedAt = performance.now();
+      const firstReadiness = await client.inspectGatewayControlReadiness(['status']);
+      const firstInspectElapsedMs = performance.now() - inspectStartedAt;
+
+      expect(firstReadiness).toMatchObject({
+        ready: false,
+        phase: 'starting',
+        retryable: true,
+      });
+      expect(firstInspectElapsedMs).toBeLessThan(500);
+
+      await waitForGatewayReadiness(() => methods.includes('connect'), 5_000);
+      await waitForGatewayClientStateToSettle();
+      expect(methods).toEqual(['connect']);
+
+      await expect(client.inspectGatewayControlReadiness(['status'])).resolves.toMatchObject({
+        ready: false,
+        phase: 'starting',
+        retryable: true,
+      });
+      await waitForGatewayReadiness(() => methods.includes('system-presence'));
+      await waitForGatewayClientStateToSettle();
+
+      await expect(client.inspectGatewayControlReadiness(['status'])).resolves.toMatchObject({
+        ready: true,
+        phase: 'ready',
+        retryable: false,
+      });
+      await expect(client.readGatewayConnectionState()).resolves.toMatchObject({
+        gatewayReady: true,
+        diagnostics: {
+          lastAliveAt: expect.any(Number),
+          consecutiveRpcFailures: 0,
+        },
+      });
+      expect(methods).toEqual(['connect', 'system-presence']);
+      expect(connectionCount).toBe(1);
+    } finally {
+      client?.close();
+      await closeGatewayServer(wss);
     }
   });
 
@@ -433,6 +568,7 @@ describe('runtime-host process gateway rpc client', () => {
     process.env.MATCHACLAW_RUNTIME_HOST_GATEWAY_PORT = String(port);
     gatewayToken = 'gateway-liveness-failure-token';
 
+    const methods: string[] = [];
     const wss = new WebSocketServer({ host: '127.0.0.1', port });
     wss.on('connection', (socket) => {
       socket.send(JSON.stringify({
@@ -446,6 +582,7 @@ describe('runtime-host process gateway rpc client', () => {
         if (message.type !== 'req' || typeof message.id !== 'string') {
           return;
         }
+        methods.push(String(message.method));
         if (message.method === 'connect') {
           socket.send(JSON.stringify({
             type: 'res',
@@ -473,7 +610,24 @@ describe('runtime-host process gateway rpc client', () => {
     let client: ReturnType<typeof createTestGatewayClient> | null = null;
     try {
       client = createTestGatewayClient();
-      await expect(client.inspectGatewayControlReadiness(DEFAULT_GATEWAY_BASE_METHODS, 3000)).resolves.toMatchObject({
+      await expect(client.inspectGatewayControlReadiness(DEFAULT_GATEWAY_BASE_METHODS)).resolves.toMatchObject({
+        ready: false,
+        phase: 'starting',
+        retryable: true,
+      });
+      await waitForGatewayReadiness(() => methods.includes('connect'));
+      await waitForGatewayClientStateToSettle();
+      expect(methods).toEqual(['connect']);
+
+      await expect(client.inspectGatewayControlReadiness(DEFAULT_GATEWAY_BASE_METHODS)).resolves.toMatchObject({
+        ready: false,
+        phase: 'starting',
+        retryable: true,
+      });
+      await waitForGatewayReadiness(() => methods.includes('system-presence'));
+      await waitForGatewayClientStateToSettle();
+
+      await expect(client.inspectGatewayControlReadiness(DEFAULT_GATEWAY_BASE_METHODS)).resolves.toMatchObject({
         ready: false,
         phase: 'starting',
         retryable: true,
@@ -482,18 +636,174 @@ describe('runtime-host process gateway rpc client', () => {
       });
     } finally {
       client?.close();
-      await new Promise<void>((resolve, reject) => {
-        wss.close((error) => {
-          if (error) {
-            reject(error);
-            return;
-          }
-          resolve();
-        });
-      });
+      await closeGatewayServer(wss);
     }
   });
 
+
+  it('inspectGatewayControlReadiness 将已确认 methods 后的 system-presence 超时投影为 starting', async () => {
+    const port = 48700 + Math.floor(Math.random() * 300);
+    process.env.MATCHACLAW_RUNTIME_HOST_GATEWAY_PORT = String(port);
+    gatewayToken = 'gateway-liveness-timeout-token';
+
+    const methods: string[] = [];
+    const wss = new WebSocketServer({ host: '127.0.0.1', port });
+    wss.on('connection', (socket) => {
+      socket.send(JSON.stringify({
+        type: 'event',
+        event: 'connect.challenge',
+        payload: { nonce: `nonce-${Date.now()}` },
+      }));
+
+      socket.on('message', (rawData) => {
+        const message = JSON.parse(rawData.toString()) as Record<string, unknown>;
+        if (message.type !== 'req' || typeof message.id !== 'string') {
+          return;
+        }
+        methods.push(String(message.method));
+        if (message.method === 'connect') {
+          socket.send(JSON.stringify({
+            type: 'res',
+            id: message.id,
+            ok: true,
+            payload: {
+              features: {
+                methods: ['status', 'config.get', 'agents.list', 'skills.status', 'system-presence'],
+              },
+            },
+          }));
+        }
+      });
+    });
+
+    let client: ReturnType<typeof createTestGatewayClient> | null = null;
+    try {
+      client = createTestGatewayClient();
+      await expect(client.inspectGatewayControlReadiness(DEFAULT_GATEWAY_BASE_METHODS, {
+        livenessProbeTimeoutMs: 1_000,
+      })).resolves.toMatchObject({
+        ready: false,
+        phase: 'starting',
+        retryable: true,
+      });
+      await waitForGatewayReadiness(() => methods.includes('connect'));
+      await waitForGatewayClientStateToSettle();
+      expect(methods).toEqual(['connect']);
+
+      await expect(client.inspectGatewayControlReadiness(DEFAULT_GATEWAY_BASE_METHODS, {
+        livenessProbeTimeoutMs: 1_000,
+      })).resolves.toMatchObject({
+        ready: false,
+        phase: 'starting',
+        retryable: true,
+      });
+      await waitForGatewayReadiness(() => methods.includes('system-presence'));
+      await new Promise((resolve) => setTimeout(resolve, 2_100));
+
+      await expect(client.inspectGatewayControlReadiness(DEFAULT_GATEWAY_BASE_METHODS, {
+        livenessProbeTimeoutMs: 1_000,
+      })).resolves.toMatchObject({
+        ready: false,
+        phase: 'starting',
+        retryable: true,
+        retryAfterMs: 2000,
+        error: 'Gateway RPC timeout: system-presence',
+      });
+    } finally {
+      client?.close();
+      await closeGatewayServer(wss);
+    }
+  });
+
+  it('inspectGatewayControlReadiness 不会将 non-retryable system-presence failure 误报为 starting', async () => {
+    const port = 48800 + Math.floor(Math.random() * 300);
+    process.env.MATCHACLAW_RUNTIME_HOST_GATEWAY_PORT = String(port);
+    gatewayToken = 'gateway-liveness-unavailable-token';
+
+    const methods: string[] = [];
+    const connectionSnapshots: GatewayConnectionStatePayload[] = [];
+    const wss = new WebSocketServer({ host: '127.0.0.1', port });
+    wss.on('connection', (socket) => {
+      socket.send(JSON.stringify({
+        type: 'event',
+        event: 'connect.challenge',
+        payload: { nonce: `nonce-${Date.now()}` },
+      }));
+
+      socket.on('message', (rawData) => {
+        const message = JSON.parse(rawData.toString()) as Record<string, unknown>;
+        if (message.type !== 'req' || typeof message.id !== 'string') {
+          return;
+        }
+        methods.push(String(message.method));
+        if (message.method === 'connect') {
+          socket.send(JSON.stringify({
+            type: 'res',
+            id: message.id,
+            ok: true,
+            payload: {
+              features: {
+                methods: ['status', 'config.get', 'agents.list', 'skills.status', 'system-presence'],
+              },
+            },
+          }));
+          return;
+        }
+        if (message.method === 'system-presence') {
+          socket.send(JSON.stringify({
+            type: 'res',
+            id: message.id,
+            ok: false,
+            error: {
+              code: 'FORBIDDEN',
+              message: 'control plane disabled',
+              retryable: false,
+            },
+          }));
+        }
+      });
+    });
+
+    let client: ReturnType<typeof createTestGatewayClient> | null = null;
+    try {
+      client = createTestGatewayClient({
+        onGatewayConnectionState: (payload) => connectionSnapshots.push(payload),
+      });
+      await expect(client.inspectGatewayControlReadiness(DEFAULT_GATEWAY_BASE_METHODS)).resolves.toMatchObject({
+        ready: false,
+        phase: 'starting',
+        retryable: true,
+      });
+      await waitForGatewayReadiness(() => methods.includes('connect'));
+      await waitForGatewayClientStateToSettle();
+      expect(methods).toEqual(['connect']);
+
+      await expect(client.inspectGatewayControlReadiness(DEFAULT_GATEWAY_BASE_METHODS)).resolves.toMatchObject({
+        ready: false,
+        phase: 'starting',
+        retryable: true,
+      });
+      await waitForGatewayReadiness(() => methods.includes('system-presence'));
+      await waitForGatewayClientStateToSettle();
+
+      await expect(client.inspectGatewayControlReadiness(DEFAULT_GATEWAY_BASE_METHODS)).resolves.toMatchObject({
+        ready: false,
+        phase: 'unavailable',
+        retryable: false,
+        code: 'FORBIDDEN',
+        error: 'Gateway RPC failed (system-presence): control plane disabled',
+      });
+      expect(connectionSnapshots).toContainEqual(expect.objectContaining({
+        state: 'connected',
+        lastIssue: expect.objectContaining({
+          code: 'FORBIDDEN',
+          retryable: false,
+        }),
+      }));    } finally {
+      client?.close();
+      await closeGatewayServer(wss);
+    }
+  });
 
   it('诊断快照变化会继续透传，不会被状态相同误吞', async () => {
     const port = 48400 + Math.floor(Math.random() * 300);

@@ -151,14 +151,25 @@ describe('runtime-host openclaw bridge', () => {
     expect(client.readGatewayConnectionState).toHaveBeenCalledTimes(1);
   });
 
-  it('gateway ready 探测走统一客户端结构化接口', async () => {
+  it('gateway ready 探测按原样透传结构化选项', async () => {
     const client = createGatewayClientStub();
     const bridge = createOpenClawBridge(client);
+    const methods = ['status'];
+    const options = {
+      handshakeTimeoutMs: 8000,
+      livenessProbeTimeoutMs: 3000,
+    };
 
-    await expect(bridge.inspectGatewayControlReadiness(['status'], 8000)).resolves.toMatchObject({
+    await expect(bridge.inspectGatewayControlReadiness(methods, options)).resolves.toMatchObject({
       ready: true,
       phase: 'ready',
     });
-    expect(client.inspectGatewayControlReadiness).toHaveBeenCalledWith(['status'], 8000);
+    expect(client.inspectGatewayControlReadiness).toHaveBeenCalledTimes(1);
+    expect(client.inspectGatewayControlReadiness.mock.calls[0]?.[0]).toBe(methods);
+    expect(client.inspectGatewayControlReadiness.mock.calls[0]?.[1]).toBe(options);
+
+    await bridge.inspectGatewayControlReadiness(methods);
+
+    expect(client.inspectGatewayControlReadiness).toHaveBeenNthCalledWith(2, methods, undefined);
   });
 });

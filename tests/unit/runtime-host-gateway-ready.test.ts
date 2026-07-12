@@ -8,7 +8,7 @@ describe('runtime-host gateway ready service', () => {
     return {} as ConstructorParameters<typeof GatewayService>[0]['fileSystem'];
   }
 
-  it('checks explicit required methods against gateway capabilities', async () => {
+  it('forwards explicit named readiness windows to gateway capability checks', async () => {
     const gateway = {
       gatewayRpc: vi.fn(),
       inspectGatewayControlReadiness: vi.fn(async (methods: readonly string[]) => ({
@@ -26,7 +26,8 @@ describe('runtime-host gateway ready service', () => {
     const service = new GatewayService({ readinessWorkflow: new GatewayReadinessWorkflow({ gateway }) });
 
     await expect(service.ready({
-      timeoutMs: 3000,
+      handshakeTimeoutMs: 3_000,
+      livenessProbeTimeoutMs: 1_200,
       requiredMethods: ['TaskList'],
     })).resolves.toEqual({
       status: 200,
@@ -39,10 +40,13 @@ describe('runtime-host gateway ready service', () => {
         missingMethods: ['TaskList'],
       },
     });
-    expect(gateway.inspectGatewayControlReadiness).toHaveBeenCalledWith(['TaskList'], 3000);
+    expect(gateway.inspectGatewayControlReadiness).toHaveBeenCalledWith(['TaskList'], {
+      handshakeTimeoutMs: 3_000,
+      livenessProbeTimeoutMs: 1_200,
+    });
   });
 
-  it('uses base gateway readiness when no required methods are provided', async () => {
+  it('passes undefined when no named readiness windows are provided', async () => {
     const gateway = {
       gatewayRpc: vi.fn(),
       inspectGatewayControlReadiness: vi.fn(async (methods: readonly string[]) => ({
@@ -58,7 +62,7 @@ describe('runtime-host gateway ready service', () => {
     };
     const service = new GatewayService({ readinessWorkflow: new GatewayReadinessWorkflow({ gateway }) });
 
-    await expect(service.ready({ timeoutMs: 3000 })).resolves.toMatchObject({
+    await expect(service.ready({})).resolves.toMatchObject({
       status: 200,
       data: {
         success: true,
@@ -66,10 +70,80 @@ describe('runtime-host gateway ready service', () => {
         retryable: false,
       },
     });
-    expect(gateway.inspectGatewayControlReadiness).toHaveBeenCalledWith(DEFAULT_GATEWAY_BASE_METHODS, 3000);
+    expect(gateway.inspectGatewayControlReadiness).toHaveBeenCalledWith(
+      DEFAULT_GATEWAY_BASE_METHODS,
+      undefined,
+    );
   });
 
-  it('returns retryable starting readiness from OpenClaw V4 unavailable response', async () => {
+  it('ignores the legacy timeoutMs field', async () => {
+    const gateway = {
+      gatewayRpc: vi.fn(),
+      inspectGatewayControlReadiness: vi.fn(async (methods: readonly string[]) => ({
+        ready: true,
+        phase: 'ready' as const,
+        requiredMethods: methods,
+        missingMethods: [],
+        retryable: false,
+      })),
+      readGatewayConnectionState: vi.fn(),
+      recoverGatewayConnection: vi.fn(),
+      chatSend: vi.fn(),
+    };
+    const service = new GatewayService({ readinessWorkflow: new GatewayReadinessWorkflow({ gateway }) });
+
+    await service.ready({ timeoutMs: 3_000 });
+
+    expect(gateway.inspectGatewayControlReadiness).toHaveBeenCalledWith(
+      DEFAULT_GATEWAY_BASE_METHODS,
+      undefined,
+    );
+  });
+
+  it('drops invalid named readiness windows while retaining valid fields', async () => {
+    const gateway = {
+      gatewayRpc: vi.fn(),
+      inspectGatewayControlReadiness: vi.fn(async (methods: readonly string[]) => ({
+        ready: true,
+        phase: 'ready' as const,
+        requiredMethods: methods,
+        missingMethods: [],
+        retryable: false,
+      })),
+      readGatewayConnectionState: vi.fn(),
+      recoverGatewayConnection: vi.fn(),
+      chatSend: vi.fn(),
+    };
+    const service = new GatewayService({ readinessWorkflow: new GatewayReadinessWorkflow({ gateway }) });
+
+    await service.ready({ handshakeTimeoutMs: 0, livenessProbeTimeoutMs: -1 });
+    await service.ready({ handshakeTimeoutMs: Number.NaN, livenessProbeTimeoutMs: '1_200' });
+    await service.ready({ handshakeTimeoutMs: Infinity, livenessProbeTimeoutMs: null });
+    await service.ready({ handshakeTimeoutMs: 1_500, livenessProbeTimeoutMs: 'invalid' });
+
+    expect(gateway.inspectGatewayControlReadiness).toHaveBeenNthCalledWith(
+      1,
+      DEFAULT_GATEWAY_BASE_METHODS,
+      undefined,
+    );
+    expect(gateway.inspectGatewayControlReadiness).toHaveBeenNthCalledWith(
+      2,
+      DEFAULT_GATEWAY_BASE_METHODS,
+      undefined,
+    );
+    expect(gateway.inspectGatewayControlReadiness).toHaveBeenNthCalledWith(
+      3,
+      DEFAULT_GATEWAY_BASE_METHODS,
+      undefined,
+    );
+    expect(gateway.inspectGatewayControlReadiness).toHaveBeenNthCalledWith(
+      4,
+      DEFAULT_GATEWAY_BASE_METHODS,
+      { handshakeTimeoutMs: 1_500 },
+    );
+  });
+
+  it('returns structured retryable starting readiness from OpenClaw V4 unavailable response', async () => {
     const gateway = {
       gatewayRpc: vi.fn(),
       inspectGatewayControlReadiness: vi.fn(async (methods: readonly string[]) => ({
@@ -89,7 +163,7 @@ describe('runtime-host gateway ready service', () => {
     };
     const service = new GatewayService({ readinessWorkflow: new GatewayReadinessWorkflow({ gateway }) });
 
-    await expect(service.ready({ timeoutMs: 3000 })).resolves.toEqual({
+    await expect(service.ready({ handshakeTimeoutMs: 3_000 })).resolves.toEqual({
       status: 200,
       data: {
         success: false,
@@ -103,6 +177,10 @@ describe('runtime-host gateway ready service', () => {
         details: { reason: 'startup-sidecars-pending' },
       },
     });
+    expect(gateway.inspectGatewayControlReadiness).toHaveBeenCalledWith(
+      DEFAULT_GATEWAY_BASE_METHODS,
+      { handshakeTimeoutMs: 3_000 },
+    );
   });
 
   it('auto-approves only OpenClaw Control UI browser pairing requests', async () => {

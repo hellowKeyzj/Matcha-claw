@@ -39,7 +39,9 @@ export function sameDiagnosticsSnapshot(
   left: GatewayDiagnosticsSnapshot,
   right: GatewayDiagnosticsSnapshot,
 ): boolean {
-  return left.lastRpcFailureAt === right.lastRpcFailureAt
+  return left.lastAliveAt === right.lastAliveAt
+    && left.lastRpcSuccessAt === right.lastRpcSuccessAt
+    && left.lastRpcFailureAt === right.lastRpcFailureAt
     && left.lastRpcFailureMethod === right.lastRpcFailureMethod
     && left.lastHeartbeatTimeoutAt === right.lastHeartbeatTimeoutAt
     && left.consecutiveHeartbeatMisses === right.consecutiveHeartbeatMisses

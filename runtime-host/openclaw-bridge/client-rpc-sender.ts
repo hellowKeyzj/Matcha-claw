@@ -1,6 +1,6 @@
 import { DEFAULT_GATEWAY_RPC_TIMEOUT_MS } from '../shared/runtime-host-constants';
 import { ensureError } from './client-errors';
-import type { GatewayPendingRpcRequests } from './client-pending-rpc';
+import type { GatewayPendingRpcRequests, GatewayRpcTelemetryPolicy } from './client-pending-rpc';
 import { createGatewayTransportIssue } from './client-state';
 import type { GatewayTransportIssue } from '../shared/gateway-error';
 import type { RuntimeClockPort, RuntimeIdGeneratorPort } from '../application/common/runtime-ports';
@@ -8,6 +8,12 @@ import type { RuntimeHostLogger } from '../shared/logger';
 
 export const GATEWAY_RPC_CONCURRENCY_LIMIT = 16;
 export const GATEWAY_RPC_QUEUE_LIMIT = 64;
+
+export interface GatewayRpcCallOptions {
+  readonly timeoutMs?: number;
+  readonly telemetryPolicy?: GatewayRpcTelemetryPolicy;
+  readonly onFailure?: (issue: GatewayTransportIssue) => void;
+}
 
 export interface GatewayRpcSenderDeps {
   ensureConnected(timeoutMs: number): Promise<void>;
@@ -75,7 +81,7 @@ export class GatewayRpcSender {
   call(
     method: string,
     params: unknown,
-    timeoutMs = DEFAULT_GATEWAY_RPC_TIMEOUT_MS,
+    options: GatewayRpcCallOptions = {},
   ): Promise<unknown> {
     let queued: Promise<void> | null;
     try {
@@ -85,7 +91,7 @@ export class GatewayRpcSender {
     }
     const run = async () => {
       try {
-        return await this.callWithSlot(method, params, timeoutMs);
+        return await this.callWithSlot(method, params, options);
       } finally {
         this.releaseCallSlot();
       }
@@ -93,15 +99,31 @@ export class GatewayRpcSender {
     return queued ? queued.then(run) : run();
   }
 
+  private reportRpcFailure(
+    method: string,
+    telemetryPolicy: GatewayRpcTelemetryPolicy,
+    issue: GatewayTransportIssue,
+    onFailure?: (issue: GatewayTransportIssue) => void,
+  ): void {
+    if (telemetryPolicy === 'normal') {
+      this.deps.recordRpcFailure(method, issue);
+      return;
+    }
+    onFailure?.(issue);
+  }
+
   private async callWithSlot(
     method: string,
     params: unknown,
-    timeoutMs: number,
+    options: GatewayRpcCallOptions,
   ): Promise<unknown> {
+    const timeoutMs = options.timeoutMs ?? DEFAULT_GATEWAY_RPC_TIMEOUT_MS;
+    const telemetryPolicy = options.telemetryPolicy ?? 'normal';
     const startedAt = this.deps.clock.nowMs();
     this.deps.logger?.traceDebug?.(3, '[gateway-rpc] start', {
       method,
       timeoutMs,
+      telemetryPolicy,
       ...this.rpcTelemetry(),
     });
     await this.deps.ensureConnected(Math.max(2000, timeoutMs));
@@ -110,10 +132,12 @@ export class GatewayRpcSender {
       method,
       connectElapsedMs: connectedAt - startedAt,
       timeoutMs,
+      telemetryPolicy,
     });
     if (!this.deps.isSocketOpen()) {
       this.deps.logger?.warn('[gateway-rpc] socket-unavailable', {
         method,
+        telemetryPolicy,
         elapsedMs: this.deps.clock.nowMs() - startedAt,
       });
       throw new Error('Gateway socket unavailable');
@@ -124,25 +148,32 @@ export class GatewayRpcSender {
       requestId,
       method,
       timeoutMs,
+      telemetryPolicy,
       ...this.rpcTelemetry(),
     });
     const rpcPromise = this.deps.pendingRpcRequests.register({
       requestId,
       method,
       timeoutMs,
+      telemetryPolicy,
+      ...(options.onFailure ? { onFailure: options.onFailure } : {}),
       nowMs: this.deps.clock.nowMs(),
-      onTimeout: (_pending, timeoutError) => {
+      onTimeout: (pending, timeoutError) => {
         this.deps.logger?.warn('[gateway-rpc] timeout', {
           requestId,
           method,
           timeoutMs,
+          telemetryPolicy,
           elapsedMs: this.deps.clock.nowMs() - startedAt,
         });
-        this.deps.recordRpcFailure(method, createGatewayTransportIssue({
+        const issue = createGatewayTransportIssue({
           message: timeoutError.message,
           source: 'rpc',
           clock: this.deps.clock,
-        }));
+          code: telemetryPolicy === 'readiness-probe' ? 'GATEWAY_LIVENESS_PROBE_TIMEOUT' : undefined,
+          retryable: telemetryPolicy === 'readiness-probe' ? true : undefined,
+        });
+        this.reportRpcFailure(pending.method, pending.telemetryPolicy, issue, pending.onFailure);
       },
     });
 
@@ -156,6 +187,7 @@ export class GatewayRpcSender {
       this.deps.logger?.traceDebug?.(3, '[gateway-rpc] sent', {
         requestId,
         method,
+        telemetryPolicy,
         elapsedMs: this.deps.clock.nowMs() - startedAt,
         ...this.rpcTelemetry(),
       });
@@ -165,14 +197,16 @@ export class GatewayRpcSender {
       this.deps.logger?.warn('[gateway-rpc] send-error', {
         requestId,
         method,
+        telemetryPolicy,
         message: sendError.message,
         elapsedMs: this.deps.clock.nowMs() - startedAt,
       });
-      this.deps.recordRpcFailure(method, createGatewayTransportIssue({
+      const issue = createGatewayTransportIssue({
         message: sendError.message,
         source: 'rpc',
         clock: this.deps.clock,
-      }));
+      });
+      this.reportRpcFailure(method, telemetryPolicy, issue, options.onFailure);
       throw sendError;
     }
 
@@ -181,6 +215,7 @@ export class GatewayRpcSender {
       this.deps.logger?.traceDebug?.(3, '[gateway-rpc] success', {
         requestId,
         method,
+        telemetryPolicy,
         elapsedMs: this.deps.clock.nowMs() - startedAt,
         ...this.rpcTelemetry(),
       });
@@ -189,6 +224,7 @@ export class GatewayRpcSender {
       this.deps.logger?.warn('[gateway-rpc] failed', {
         requestId,
         method,
+        telemetryPolicy,
         message: error instanceof Error ? error.message : String(error),
         elapsedMs: this.deps.clock.nowMs() - startedAt,
         ...this.rpcTelemetry(),

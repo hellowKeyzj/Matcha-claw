@@ -4,5 +4,6 @@ export {
   normalizeGatewayMethods,
   type GatewayCapabilitiesSnapshot,
   type GatewayControlReadiness,
+  type GatewayControlReadinessOptions,
   type GatewayMethodReadiness,
 } from '../application/gateway/gateway-runtime-port';

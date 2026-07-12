@@ -68,6 +68,9 @@ export function connectGatewaySocketSession(deps: GatewaySocketSessionDeps): Pro
           message: timeoutError.message,
           source: 'connect',
           clock: deps.clock,
+          code: 'GATEWAY_HANDSHAKE_TIMEOUT',
+          retryable: true,
+          retryAfterMs: 2_000,
         }),
         diagnostics: deps.getDiagnostics(),
       });
