@@ -194,6 +194,7 @@ export class SessionTimelineRuntime {
         state,
         runtime: cloneSessionRuntimeState(state.runtime),
         mergedEntries: state.timelineEntries,
+        committedEventCount: 0,
       };
     }
     this.deps.stateStore.syncTransportIssueIndex(sessionKey, state);
@@ -206,6 +207,7 @@ export class SessionTimelineRuntime {
       state,
       runtime: cloneSessionRuntimeState(state.runtime),
       mergedEntries: state.timelineEntries,
+      committedEventCount: committedEvents.length,
     };
   }
 

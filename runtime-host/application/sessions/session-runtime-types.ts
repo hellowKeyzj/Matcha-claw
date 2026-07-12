@@ -119,4 +119,5 @@ export interface CommittedSessionTransition {
   state: SessionRuntimeTimelineState;
   runtime: SessionRuntimeStateSnapshot;
   mergedEntries: SessionTimelineEntry[];
+  committedEventCount: number;
 }

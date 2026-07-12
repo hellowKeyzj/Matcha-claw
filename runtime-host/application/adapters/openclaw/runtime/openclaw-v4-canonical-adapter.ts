@@ -737,41 +737,66 @@ export class OpenClawV4Adapter {
     if (planEvents.length > 0 && !visibleText.trim()) {
       return planEvents;
     }
-    return [
-      {
-        ...openClawBase({
-          eventId: eventId(['openclaw-v4', 'chat', sessionKey, runId, seq, state, stableEventFingerprint(visibleContent)]),
-          runtimeEventType: 'chat.message',
-          sessionKey,
-          runId,
-          seq,
-          timestamp,
-          laneKey: lane.laneKey,
-          ...(lane.agentId ? { agentId: lane.agentId } : {}),
-          raw: payload,
-        }),
-        type: 'message_part',
-        partId: resolvedMessageId,
-        role: 'assistant',
-        kind: 'text',
-        mode: status === 'final' ? 'final' : readString(payload.textMode) === 'replace' ? 'replace' : hasDeltaText ? 'delta' : 'snapshot',
-        messageId: resolvedMessageId,
-        ownerMessageKey: activeLiveTurn.ownerMessageKey,
-        ownerTurnKey: activeLiveTurn.ownerTurnKey,
-        turnBindingSource: 'synthetic',
-        turnBindingConfidence: 'medium',
-        messageBindingSource: 'synthetic',
-        messageBindingConfidence: 'medium',
-        ...(readString(message.originMessageId ?? payload.originMessageId) || providerMessageId
-          ? { originMessageId: readString(message.originMessageId ?? payload.originMessageId) || providerMessageId }
-          : {}),
-        ...(readString(message.clientId ?? payload.clientId) ? { clientId: readString(message.clientId ?? payload.clientId) } : {}),
-        content: structuredClone(visibleContent),
-        text: visibleText,
-        status,
-      },
-      ...planEvents,
-    ];
+    const messageEvent: CanonicalSessionEvent = {
+      ...openClawBase({
+        eventId: eventId(['openclaw-v4', 'chat', sessionKey, runId, seq, state, stableEventFingerprint(visibleContent)]),
+        runtimeEventType: 'chat.message',
+        sessionKey,
+        runId,
+        seq,
+        timestamp,
+        laneKey: lane.laneKey,
+        ...(lane.agentId ? { agentId: lane.agentId } : {}),
+        raw: payload,
+      }),
+      type: 'message_part',
+      partId: resolvedMessageId,
+      role: 'assistant',
+      kind: 'text',
+      mode: status === 'final' ? 'final' : readString(payload.textMode) === 'replace' ? 'replace' : hasDeltaText ? 'delta' : 'snapshot',
+      messageId: resolvedMessageId,
+      ownerMessageKey: activeLiveTurn.ownerMessageKey,
+      ownerTurnKey: activeLiveTurn.ownerTurnKey,
+      turnBindingSource: 'synthetic',
+      turnBindingConfidence: 'medium',
+      messageBindingSource: 'synthetic',
+      messageBindingConfidence: 'medium',
+      ...(readString(message.originMessageId ?? payload.originMessageId) || providerMessageId
+        ? { originMessageId: readString(message.originMessageId ?? payload.originMessageId) || providerMessageId }
+        : {}),
+      ...(readString(message.clientId ?? payload.clientId) ? { clientId: readString(message.clientId ?? payload.clientId) } : {}),
+      content: structuredClone(visibleContent),
+      text: visibleText,
+      status,
+    };
+    const hasToolCall = Array.isArray(content) && content.some((block) => {
+      const record = asRecord(block);
+      return record !== null
+        && isToolCallContentType(record.type)
+        && !isStateOnlyToolContentBlock(record);
+    });
+    const lifecycleEvent: CanonicalSessionEvent | null = status === 'final' && !hasToolCall
+      ? {
+          ...openClawBase({
+            eventId: eventId(['openclaw-v4', 'chat-lifecycle', sessionKey, runId, seq, 'completed']),
+            runtimeEventType: 'chat.message.completed',
+            sessionKey,
+            runId,
+            seq,
+            timestamp,
+            laneKey: lane.laneKey,
+            ...(lane.agentId ? { agentId: lane.agentId } : {}),
+            raw: payload,
+          }),
+          type: 'lifecycle',
+          phase: 'final',
+          runPhase: 'done',
+          error: null,
+        }
+      : null;
+    return lifecycleEvent
+      ? [messageEvent, ...planEvents, lifecycleEvent]
+      : [messageEvent, ...planEvents];
   }
 
   private buildDerivedPlanEvent(input: {

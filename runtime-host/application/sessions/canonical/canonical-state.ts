@@ -110,6 +110,7 @@ export interface CanonicalSessionState {
   toolKeysByOwnerTurnKey: Map<string, string[]>;
   thoughtKeysByOwnerTurnKey: Map<string, string[]>;
   approvalIndexById: Map<string, number>;
+  terminalRunIds: Set<string>;
   messages: CanonicalMessageState[];
   thoughts: CanonicalThoughtState[];
   tools: CanonicalToolState[];
@@ -159,6 +160,7 @@ export function rebuildCanonicalSessionIndexes(state: CanonicalSessionState): vo
     appendOwnerKey(state.thoughtKeysByOwnerTurnKey, thought.ownerTurnKey, thought.key);
   }
   state.approvalIndexById = new Map(state.approvals.map((approval, index) => [approval.id, index]));
+  state.terminalRunIds = new Set(state.terminalRunIds ?? []);
 }
 
 export function cloneCanonicalSessionState(state: CanonicalSessionState): CanonicalSessionState {

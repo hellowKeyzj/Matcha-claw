@@ -254,6 +254,49 @@ describe('Runtime Host canonical ACP projection', () => {
     }]);
   });
 
+  it('keeps final assistant text active until lifecycle final settles the run', () => {
+    const state = createEmptyCanonicalSessionState('agent:main:main', createOpenClawTestRuntimeContext('agent:main:main'));
+    reduceCanonicalSessionEvents(state, [{
+      ...base('run-1-started'),
+      type: 'lifecycle',
+      phase: 'started',
+      runPhase: 'submitted',
+      error: null,
+    }, {
+      ...base('message-final-1'),
+      seq: 2,
+      type: 'message_part',
+      role: 'assistant',
+      messageId: 'assistant-final-1',
+      content: [{ type: 'text', text: '第一段完成。' }],
+      text: '第一段完成。',
+      status: 'final',
+    }]);
+
+    expect(state.runtime).toMatchObject({
+      activeRunId: 'run-1',
+      runPhase: 'finalizing',
+      pendingTurnKey: 'message:assistant:main:assistant-final-1',
+      pendingTurnLaneKey: 'main',
+    });
+
+    reduceCanonicalSessionEvents(state, [{
+      ...base('lifecycle-final-1'),
+      seq: 3,
+      type: 'lifecycle',
+      phase: 'final',
+      runPhase: 'done',
+      error: null,
+    }]);
+
+    expect(state.runtime).toMatchObject({
+      activeRunId: null,
+      runPhase: 'done',
+      pendingTurnKey: null,
+      pendingTurnLaneKey: null,
+    });
+  });
+
   it('keeps final assistant tool-use turns active until tool results arrive', () => {
     const state = createEmptyCanonicalSessionState('agent:main:main', createOpenClawTestRuntimeContext('agent:main:main'));
     reduceCanonicalSessionEvents(state, [{
@@ -311,6 +354,75 @@ describe('Runtime Host canonical ACP projection', () => {
     });
   });
 
+  it('does not let a delayed runtime start overwrite local prompt ownership', () => {
+    const state = createEmptyCanonicalSessionState('agent:main:main', createOpenClawTestRuntimeContext('agent:main:main'));
+    reduceCanonicalSessionEvents(state, [{
+      ...base('run-2-local-started'),
+      eventId: 'run-2-local-started',
+      runId: 'run-2',
+      type: 'lifecycle',
+      origin: {
+        runtimeEventType: 'local.prompt.started',
+        runtimeIds: { sessionKey: 'agent:main:main', runId: 'run-2' },
+      },
+      phase: 'started',
+      runPhase: 'submitted',
+      error: null,
+    }, {
+      ...base('run-1-late-started'),
+      eventId: 'run-1-late-started',
+      type: 'lifecycle',
+      phase: 'started',
+      runPhase: 'submitted',
+      error: null,
+    }]);
+
+    expect(state.runtime).toMatchObject({
+      activeRunId: 'run-2',
+      runPhase: 'submitted',
+      pendingTurnKey: 'run-2',
+    });
+  });
+
+  it('does not let an old terminal message clear a newer active run', () => {
+    const state = createEmptyCanonicalSessionState('agent:main:main', createOpenClawTestRuntimeContext('agent:main:main'));
+    reduceCanonicalSessionEvents(state, [{
+      ...base('run-1-started'),
+      type: 'lifecycle',
+      phase: 'started',
+      runPhase: 'submitted',
+      error: null,
+    }, {
+      ...base('run-2-started'),
+      eventId: 'run-2-started',
+      runId: 'run-2',
+      type: 'lifecycle',
+      origin: {
+        runtimeEventType: 'local.prompt.started',
+        runtimeIds: { sessionKey: 'agent:main:main', runId: 'run-2' },
+      },
+      phase: 'started',
+      runPhase: 'submitted',
+      error: null,
+    }, {
+      ...base('run-1-error-message'),
+      seq: 3,
+      type: 'message_part',
+      role: 'assistant',
+      messageId: 'old-run-error',
+      content: [{ type: 'text', text: '旧 run 失败' }],
+      text: '旧 run 失败',
+      status: 'error',
+    }]);
+
+    expect(state.runtime).toMatchObject({
+      activeRunId: 'run-2',
+      runPhase: 'submitted',
+      pendingTurnKey: 'run-2',
+    });
+    expect(state.terminalRunIds).toEqual(new Set(['run-1']));
+  });
+
   it('does not let an old run final clear a newer active run', () => {
     const state = createEmptyCanonicalSessionState('agent:main:main', createOpenClawTestRuntimeContext('agent:main:main'));
     reduceCanonicalSessionEvents(state, [{
@@ -323,8 +435,11 @@ describe('Runtime Host canonical ACP projection', () => {
       ...base('run-2-started'),
       eventId: 'run-2-started',
       runId: 'run-2',
-      seq: 2,
       type: 'lifecycle',
+      origin: {
+        runtimeEventType: 'local.prompt.started',
+        runtimeIds: { sessionKey: 'agent:main:main', runId: 'run-2' },
+      },
       phase: 'started',
       runPhase: 'submitted',
       error: null,
@@ -438,6 +553,79 @@ describe('Runtime Host canonical ACP projection', () => {
       activeRunId: null,
       runPhase: 'aborted',
       pendingTurnKey: null,
+    });
+  });
+
+  it('clears run-scoped approvals and running tools on terminal lifecycle, then ignores late same-run progress for runtime state', () => {
+    const state = createEmptyCanonicalSessionState('agent:main:main', createOpenClawTestRuntimeContext('agent:main:main'));
+    reduceCanonicalSessionEvents(state, [{
+      ...base('run-1-started'),
+      type: 'lifecycle',
+      phase: 'started',
+      runPhase: 'submitted',
+      error: null,
+    }, {
+      ...base('run-1-tool-start'),
+      seq: 2,
+      type: 'tool',
+      phase: 'started',
+      toolCallId: 'tool-read-1',
+      name: 'Read',
+      input: { file_path: 'package.json' },
+    }, {
+      ...base('run-1-approval-pending'),
+      seq: 3,
+      type: 'approval',
+      approvalId: 'approval-write-1',
+      status: 'pending',
+      title: 'Write file',
+      allowedDecisions: ['allow-once', 'deny'],
+      request: { toolCallId: 'tool-write-1', toolName: 'Write' },
+      createdAtMs: 1_700_000_000_020,
+    }]);
+
+    expect(state.approvals).toHaveLength(1);
+    expect(state.tools).toContainEqual(expect.objectContaining({
+      toolCallId: 'tool-read-1',
+      status: 'running',
+    }));
+
+    reduceCanonicalSessionEvents(state, [{
+      ...base('run-1-cancelled'),
+      seq: 4,
+      type: 'lifecycle',
+      phase: 'aborted',
+      runPhase: 'aborted',
+      error: null,
+    }, {
+      ...base('run-1-late-tool-start'),
+      seq: 5,
+      type: 'tool',
+      phase: 'started',
+      toolCallId: 'tool-late-1',
+      name: 'Read',
+      input: { file_path: 'late.ts' },
+    }, {
+      ...base('run-1-late-message'),
+      seq: 6,
+      type: 'message_part',
+      role: 'assistant',
+      messageId: 'late-message',
+      content: 'late delta',
+      text: 'late delta',
+      status: 'streaming',
+    }]);
+
+    expect(state.approvals).toEqual([]);
+    expect(state.tools).toEqual(expect.arrayContaining([
+      expect.objectContaining({ toolCallId: 'tool-read-1', status: 'error' }),
+      expect.objectContaining({ toolCallId: 'tool-late-1', status: 'error' }),
+    ]));
+    expect(state.runtime).toMatchObject({
+      activeRunId: null,
+      runPhase: 'aborted',
+      pendingTurnKey: null,
+      pendingTurnLaneKey: null,
     });
   });
 
@@ -1086,6 +1274,36 @@ describe('Runtime Host canonical ACP projection', () => {
     expect(state.renderItemIndexByKey).not.toBe(renderItemIndexByKey);
     expect(state.runtime.runPhase).toBe('idle');
     expect(state.runEpoch).toBe(1);
+  });
+
+  it('does not let stale runtime activity override the active run', () => {
+    const state = createEmptyCanonicalSessionState('agent:main:main', createOpenClawTestRuntimeContext('agent:main:main'));
+    reduceCanonicalSessionEvents(state, [{
+      ...base('run-2-started'),
+      eventId: 'run-2-started',
+      runId: 'run-2',
+      type: 'lifecycle',
+      origin: {
+        runtimeEventType: 'local.prompt.started',
+        runtimeIds: { sessionKey: 'agent:main:main', runId: 'run-2' },
+      },
+      phase: 'started',
+      runPhase: 'submitted',
+      error: null,
+    }, {
+      ...base('run-1-activity'),
+      eventId: 'run-1-activity',
+      seq: 3,
+      type: 'runtime_activity',
+      activity: 'compacting',
+      phase: 'started',
+    }]);
+
+    expect(state.runtime).toMatchObject({
+      activeRunId: 'run-2',
+      pendingTurnKey: 'run-2',
+      runtimeActivity: null,
+    });
   });
 
   it('reprojects control and runtime activity events through the canonical render path', () => {

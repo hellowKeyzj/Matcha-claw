@@ -261,7 +261,12 @@ export class AcpCanonicalAdapter implements RuntimeEventAdapter {
       role,
       text,
     }));
-    return [{
+    const status = payload.status === 'final' || payload.done === true
+      ? 'final'
+      : payload.status === 'error'
+        ? 'error'
+        : 'streaming';
+    const messageEvent: CanonicalSessionEvent = {
       ...base({
         eventId: `acp:${eventScope(context)}:message:${context.sessionKey}:${runId ?? 'run'}:${messagePartKey}`,
         runtimeEventType: method,
@@ -277,7 +282,7 @@ export class AcpCanonicalAdapter implements RuntimeEventAdapter {
       partId: messageId ?? `${runId ?? 'run'}:${messagePartKey}`,
       role,
       kind: 'text',
-      mode: payload.status === 'final' || payload.done === true ? 'final' : 'snapshot',
+      mode: status === 'final' ? 'final' : 'snapshot',
       ...(ownerTurnKey ? {
         ownerTurnKey,
         turnBindingSource: turnId ? 'runtime' : 'synthetic',
@@ -291,7 +296,27 @@ export class AcpCanonicalAdapter implements RuntimeEventAdapter {
       ...(messageId ? { messageId } : {}),
       content: payload.content ?? text,
       text,
-      status: payload.status === 'final' || payload.done === true ? 'final' : payload.status === 'error' ? 'error' : 'streaming',
+      status,
+    };
+    if (status !== 'final' || role !== 'assistant' || !runId) {
+      return [messageEvent];
+    }
+    return [messageEvent, {
+      ...base({
+        eventId: `acp:${eventScope(context)}:lifecycle:${context.sessionKey}:${runId}:completed`,
+        runtimeEventType: `${method}.completed`,
+        context,
+        runId,
+        ...(turnId ? { turnId } : {}),
+        ...(timestamp != null ? { timestamp } : {}),
+        laneKey,
+        ...(seq != null ? { seq } : {}),
+        raw: input,
+      }),
+      type: 'lifecycle',
+      phase: 'final',
+      runPhase: 'done',
+      error: null,
     }];
   }
 }

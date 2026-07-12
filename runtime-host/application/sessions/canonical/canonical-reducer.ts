@@ -199,6 +199,26 @@ function setOwnerKeys(map: Map<string, string[]>, previousOwnerKey: string | und
   }
 }
 
+function resolveToolStatus(
+  previousStatus: CanonicalToolState['status'] | undefined,
+  phase: CanonicalToolEvent['phase'],
+  terminalRunAlreadySeen: boolean,
+): CanonicalToolState['status'] {
+  if (previousStatus && previousStatus !== 'running' && (phase === 'started' || phase === 'updated')) {
+    return previousStatus;
+  }
+  if (terminalRunAlreadySeen && (phase === 'started' || phase === 'updated')) {
+    return previousStatus ?? 'error';
+  }
+  if (phase === 'failed') {
+    return 'error';
+  }
+  if (phase === 'completed') {
+    return 'completed';
+  }
+  return 'running';
+}
+
 function upsertMessage(state: CanonicalSessionState, event: CanonicalMessagePartEvent): void {
   const messageIdentity = resolveCanonicalMessageIdentity(event);
   const turnBinding = resolveCanonicalTurnBinding(event);
@@ -283,11 +303,7 @@ function upsertTool(state: CanonicalSessionState, event: CanonicalToolEvent): vo
   const index = state.toolIndexByKey.get(key) ?? -1;
   const previous = index >= 0 ? state.tools[index] : null;
   const now = eventTime(event);
-  const status = event.phase === 'failed'
-    ? 'error'
-    : event.phase === 'completed'
-      ? 'completed'
-      : 'running';
+  const status = resolveToolStatus(previous?.status, event.phase, state.terminalRunIds.has(event.runId ?? ''));
   const next: CanonicalToolState = {
     key,
     toolCallId: event.toolCallId,
@@ -334,6 +350,38 @@ function terminalRuntimePatch(runPhase: SessionRunPhase, lastError: string | nul
   };
 }
 
+function clearRunApprovals(state: CanonicalSessionState, runId: string | undefined): void {
+  if (!runId || state.approvals.length === 0) {
+    return;
+  }
+  const previousCount = state.approvals.length;
+  state.approvals = state.approvals.filter((approval) => approval.runId !== runId);
+  if (state.approvals.length !== previousCount) {
+    rebuildApprovalIndex(state);
+  }
+}
+
+function settleRunningToolsForRun(
+  state: CanonicalSessionState,
+  runId: string | undefined,
+  runPhase: SessionRunPhase,
+  timestamp: number | undefined,
+): void {
+  if (!runId || runPhase === 'done' || runPhase === 'idle') {
+    return;
+  }
+  state.tools = state.tools.map((tool) => {
+    if (tool.runId !== runId || tool.status !== 'running') {
+      return tool;
+    }
+    return {
+      ...tool,
+      status: 'error',
+      ...(timestamp != null ? { updatedAt: timestamp } : {}),
+    };
+  });
+}
+
 function cloneIssue(issue: GatewayTransportIssue | null | undefined): GatewayTransportIssue | null {
   return issue ? structuredClone(issue) : null;
 }
@@ -342,8 +390,37 @@ function eventMatchesActiveRun(state: CanonicalSessionState, event: { runId?: st
   return !!event.runId && event.runId === state.runtime.activeRunId;
 }
 
+function isLocalPromptStart(event: CanonicalLifecycleEvent): boolean {
+  return event.origin.runtimeEventType === 'local.prompt.started';
+}
+
+function canStartRunRuntime(state: CanonicalSessionState, event: CanonicalLifecycleEvent): boolean {
+  return !!event.runId
+    && !state.terminalRunIds.has(event.runId)
+    && (
+      state.runtime.activeRunId == null
+      || eventMatchesActiveRun(state, event)
+      || isLocalPromptStart(event)
+    );
+}
+
+function isTerminalRunEvent(event: { runPhase?: SessionRunPhase; runId?: string }): boolean {
+  return !!event.runId && (
+    event.runPhase === 'done'
+    || event.runPhase === 'error'
+    || event.runPhase === 'aborted'
+    || event.runPhase === 'idle'
+  );
+}
+
+function rememberTerminalRun(state: CanonicalSessionState, event: { runPhase?: SessionRunPhase; runId?: string }): void {
+  if (isTerminalRunEvent(event)) {
+    state.terminalRunIds.add(event.runId!);
+  }
+}
+
 function canClaimIdleRuntime(state: CanonicalSessionState, event: { runId?: string }): boolean {
-  return state.runtime.activeRunId == null && !!event.runId;
+  return state.runtime.activeRunId == null && !!event.runId && !state.terminalRunIds.has(event.runId);
 }
 
 function canMutateRuntimeForRun(state: CanonicalSessionState, event: { runId?: string }): boolean {
@@ -389,11 +466,14 @@ function applyLifecycle(state: CanonicalSessionState, event: CanonicalLifecycleE
     return;
   }
   if (event.phase === 'started') {
+    if (!canStartRunRuntime(state, event)) {
+      return;
+    }
     state.runtime = {
       ...state.runtime,
-      activeRunId: event.runId ?? null,
+      activeRunId: event.runId,
       runPhase: 'submitted',
-      pendingTurnKey: event.runId ?? state.runtime.pendingTurnKey,
+      pendingTurnKey: event.runId,
       pendingTurnLaneKey: laneKeyOf(event),
       lastError: null,
       lastIssue: null,
@@ -401,7 +481,11 @@ function applyLifecycle(state: CanonicalSessionState, event: CanonicalLifecycleE
     };
     return;
   }
-  if (!canMutateRuntimeForRun(state, event)) {
+  const shouldMutateRuntime = canMutateRuntimeForRun(state, event);
+  rememberTerminalRun(state, event);
+  clearRunApprovals(state, event.runId);
+  settleRunningToolsForRun(state, event.runId, event.runPhase, eventTime(event));
+  if (!shouldMutateRuntime) {
     return;
   }
   state.runtime = {
@@ -424,20 +508,53 @@ function messageHasToolCall(content: unknown): boolean {
 }
 
 function applyMessageRuntime(state: CanonicalSessionState, event: CanonicalMessagePartEvent): void {
-  if (event.source === 'replay' || !canMutateRuntimeForRun(state, event)) {
+  if (event.source === 'replay') {
     return;
   }
   if (event.role === 'user') {
+    if (!canMutateRuntimeForRun(state, event)) {
+      return;
+    }
     state.runtime = {
       ...state.runtime,
       lastUserMessageAt: eventTime(event) ?? state.runtime.lastUserMessageAt,
     };
     return;
   }
-  if (event.role !== 'assistant' || !canMutateRuntimeForRun(state, event)) {
+  if (event.role !== 'assistant') {
+    return;
+  }
+  if (event.status === 'error') {
+    rememberTerminalRun(state, { runId: event.runId, runPhase: 'error' });
+    clearRunApprovals(state, event.runId);
+    settleRunningToolsForRun(state, event.runId, 'error', eventTime(event));
+    if (eventMatchesActiveRun(state, event)) {
+      state.runtime = {
+        ...state.runtime,
+        ...terminalRuntimePatch('error', event.text || state.runtime.lastError, state.runtime.lastIssue),
+      };
+    }
+    return;
+  }
+  if (event.status === 'aborted') {
+    rememberTerminalRun(state, { runId: event.runId, runPhase: 'aborted' });
+    clearRunApprovals(state, event.runId);
+    settleRunningToolsForRun(state, event.runId, 'aborted', eventTime(event));
+    if (eventMatchesActiveRun(state, event)) {
+      state.runtime = {
+        ...state.runtime,
+        ...terminalRuntimePatch('aborted', state.runtime.lastError, state.runtime.lastIssue),
+      };
+    }
+    return;
+  }
+  if (!canMutateRuntimeForRun(state, event)) {
     return;
   }
   if (event.status === 'streaming') {
+    if (state.terminalRunIds.has(event.runId ?? '')) {
+      return;
+    }
     if (isStoppingActiveRunEvent(state, event)) {
       return;
     }
@@ -455,6 +572,9 @@ function applyMessageRuntime(state: CanonicalSessionState, event: CanonicalMessa
     return;
   }
   if (event.status === 'final') {
+    if (state.terminalRunIds.has(event.runId ?? '')) {
+      return;
+    }
     if (messageHasToolCall(event.content)) {
       if (isStoppingActiveRunEvent(state, event)) {
         return;
@@ -471,23 +591,21 @@ function applyMessageRuntime(state: CanonicalSessionState, event: CanonicalMessa
       };
       return;
     }
+    if (isStoppingActiveRunEvent(state, event)) {
+      return;
+    }
     state.runtime = {
       ...state.runtime,
-      ...terminalRuntimePatch('done', null, null),
+      activeRunId: event.runId ?? state.runtime.activeRunId,
+      runPhase: 'finalizing',
+      pendingTurnKey: resolveRuntimePendingTurnKeyForMessage(event, state.runtime.pendingTurnKey),
+      pendingTurnLaneKey: laneKeyOf(event),
+      lastError: null,
+      lastIssue: null,
+      runtimeActivity: null,
     };
     return;
   }
-  if (event.status === 'error') {
-    state.runtime = {
-      ...state.runtime,
-      ...terminalRuntimePatch('error', event.text || state.runtime.lastError, state.runtime.lastIssue),
-    };
-    return;
-  }
-  state.runtime = {
-    ...state.runtime,
-    ...terminalRuntimePatch('aborted', state.runtime.lastError, state.runtime.lastIssue),
-  };
 }
 
 function rebuildApprovalIndex(state: CanonicalSessionState): void {
@@ -501,6 +619,9 @@ function applyApproval(state: CanonicalSessionState, event: CanonicalApprovalEve
       state.approvals.splice(index, 1);
       rebuildApprovalIndex(state);
     }
+    return;
+  }
+  if (event.runId && state.terminalRunIds.has(event.runId)) {
     return;
   }
   const approval = {
@@ -539,6 +660,9 @@ function applyToolRuntime(state: CanonicalSessionState, event: CanonicalToolEven
     return;
   }
   if (event.phase === 'started' || event.phase === 'updated') {
+    if (state.terminalRunIds.has(event.runId ?? '')) {
+      return;
+    }
     if (isStoppingActiveRunEvent(state, event)) {
       return;
     }
@@ -583,6 +707,7 @@ export function createEmptyCanonicalSessionState(
     toolKeysByOwnerTurnKey: new Map<string, string[]>(),
     thoughtKeysByOwnerTurnKey: new Map<string, string[]>(),
     approvalIndexById: new Map<string, number>(),
+    terminalRunIds: new Set<string>(),
     messages: [],
     thoughts: [],
     tools: [],
@@ -641,10 +766,13 @@ export function reduceCanonicalSessionEvent(state: CanonicalSessionState, event:
       applyLifecycle(state, event);
       break;
     case 'runtime_activity':
-      if (event.source !== 'replay') {
+      if (
+        event.source !== 'replay'
+        && (!event.runId || !state.terminalRunIds.has(event.runId))
+        && (eventMatchesActiveRun(state, event) || state.runtime.activeRunId == null || !event.runId)
+      ) {
         state.runtime = {
           ...state.runtime,
-          activeRunId: event.runId ?? state.runtime.activeRunId,
           pendingTurnKey: event.runId ?? state.runtime.pendingTurnKey,
           pendingTurnLaneKey: event.laneKey ?? state.runtime.pendingTurnLaneKey,
           runtimeActivity: event.phase === 'started' ? event.activity : null,
