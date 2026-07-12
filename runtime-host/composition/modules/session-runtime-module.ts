@@ -49,6 +49,11 @@ import type { SessionConfigDirectoryPort, SessionExternalArtefactResolverPort } 
 import type { SessionDefaultModelResolverPort } from '../../application/sessions/session-metadata-repository';
 import type { RuntimeClockPort, RuntimeFileSystemPort, RuntimeIdGeneratorPort } from '../../application/common/runtime-ports';
 import type { RuntimeHostLogger } from '../../shared/logger';
+import type { SessionUpdateEvent } from '../../shared/session-adapter-types';
+import {
+  createMatchaTerminalDeliveryTraceLogger,
+  readMatchaTerminalDeliveryTraceContext,
+} from '../../shared/matcha-terminal-delivery-trace';
 import type { ParentGatewayForwardEventName } from '../../shared/parent-transport-contracts';
 import {
   registerRuntimeJobDefinitions,
@@ -71,6 +76,33 @@ import { nativeRuntimeEndpoint, connectorRuntimeEndpoint, validateSessionIdentit
 export interface SessionRuntimeModule {
   readonly sessionRuntime: SessionRuntimeService;
   readonly sessionCatalog: SessionCatalogService;
+}
+
+function emitSessionUpdateWithTerminalTrace(
+  parentGatewayEvents: { emit: (eventName: ParentGatewayForwardEventName, payload: unknown) => Promise<void> } | undefined,
+  terminalDeliveryTrace: ReturnType<typeof createMatchaTerminalDeliveryTraceLogger>,
+  event: SessionUpdateEvent,
+): void {
+  const terminalTrace = readMatchaTerminalDeliveryTraceContext(event);
+  if (!terminalTrace) {
+    void parentGatewayEvents?.emit('session:update', event).catch(() => undefined);
+    return;
+  }
+  terminalDeliveryTrace({
+    stage: 'session_update_emit_started',
+    ...terminalTrace,
+  });
+  void parentGatewayEvents?.emit('session:update', event).then(
+    () => terminalDeliveryTrace({
+      stage: 'session_update_emit_resolved',
+      ...terminalTrace,
+    }),
+    (error) => terminalDeliveryTrace({
+      stage: 'session_update_emit_rejected',
+      ...terminalTrace,
+      errorCategory: error instanceof Error ? 'error' : 'non_error',
+    }),
+  );
 }
 
 class AgentNamespaceSessionStorageIdentityResolver implements SessionStorageSessionIdentityResolverPort {
@@ -218,20 +250,27 @@ export function registerSessionRuntimeModule(
   container.register('sessionSnapshotService', (scope) => new SessionSnapshotService({
     snapshotWorkflow: scope.resolve<SessionSnapshotWorkflow>('sessionSnapshotWorkflow'),
   }));
-  container.register('sessionGatewayIngressWorkflow', (scope) => new SessionGatewayIngressWorkflow({
-    stateStore: scope.resolve('sessionRuntimeStateStore'),
-    timelineRuntime: scope.resolve('sessionTimelineRuntime'),
-    snapshotService: scope.resolve('sessionSnapshotService'),
-    clock: scope.resolve<RuntimeClockPort>('runtime.clock'),
-    logger: scope.resolve<RuntimeHostLogger>('logger'),
-    agentRuntimeRegistry: scope.resolve('sessionAgentRuntimeRegistry'),
-  }));
-  container.register('sessionGatewayIngressService', (scope) => new SessionGatewayIngressService({
-    ingressWorkflow: scope.resolve<SessionGatewayIngressWorkflow>('sessionGatewayIngressWorkflow'),
-    emitSessionUpdate: (event) => {
-      void parentGatewayEvents?.emit('session:update', event).catch(() => undefined);
-    },
-  }));
+  container.register('sessionGatewayIngressWorkflow', (scope) => {
+    const logger = scope.resolve<RuntimeHostLogger>('logger');
+    return new SessionGatewayIngressWorkflow({
+      stateStore: scope.resolve('sessionRuntimeStateStore'),
+      timelineRuntime: scope.resolve('sessionTimelineRuntime'),
+      snapshotService: scope.resolve('sessionSnapshotService'),
+      clock: scope.resolve<RuntimeClockPort>('runtime.clock'),
+      logger,
+      terminalDeliveryTrace: createMatchaTerminalDeliveryTraceLogger(logger),
+      agentRuntimeRegistry: scope.resolve('sessionAgentRuntimeRegistry'),
+    });
+  });
+  container.register('sessionGatewayIngressService', (scope) => {
+    const terminalDeliveryTrace = createMatchaTerminalDeliveryTraceLogger(scope.resolve<RuntimeHostLogger>('logger'));
+    return new SessionGatewayIngressService({
+      ingressWorkflow: scope.resolve<SessionGatewayIngressWorkflow>('sessionGatewayIngressWorkflow'),
+      emitSessionUpdate: (event) => {
+        emitSessionUpdateWithTerminalTrace(parentGatewayEvents, terminalDeliveryTrace, event);
+      },
+    });
+  });
   container.register('sessionHydrationJobAdapter', (scope): SessionHydrationJobPort => createSessionHydrationJobPort(
     scope.resolve<RuntimeLongTaskSubmissionPort>('runtime.tasks'),
   ));
@@ -271,6 +310,10 @@ export function registerSessionRuntimeModule(
     agentRuntimeRegistry: scope.resolve('sessionAgentRuntimeRegistry'),
     clock: scope.resolve<RuntimeClockPort>('runtime.clock'),
     idGenerator: scope.resolve<RuntimeIdGeneratorPort>('runtime.idGenerator'),
+    stopSessionEvents: (context) => {
+      const transport = scope.resolve('sessionAgentRuntimeRegistry').resolveTransport(context);
+      transport.stopSessionEvents?.(context);
+    },
   }));
   container.register('sessionCommandOperationsWorkflow', (scope) => new SessionCommandOperationsWorkflow({
     stateStore: scope.resolve('sessionRuntimeStateStore'),
@@ -282,18 +325,27 @@ export function registerSessionRuntimeModule(
   container.register('sessionCommandService', (scope) => new SessionCommandService({
     operationsWorkflow: scope.resolve('sessionCommandOperationsWorkflow'),
   }));
-  container.register('sessionRunWorkflow', (scope) => new SessionRunWorkflow({
-    stateStore: scope.resolve('sessionRuntimeStateStore'),
-    timelineRuntime: scope.resolve('sessionTimelineRuntime'),
-    snapshotService: scope.resolve('sessionSnapshotService'),
-    fileSystem: scope.resolve<RuntimeFileSystemPort>('runtime.fileSystem'),
-    clock: scope.resolve<RuntimeClockPort>('runtime.clock'),
-    agentRuntimeRegistry: scope.resolve('sessionAgentRuntimeRegistry'),
-    operationCoordinator: scope.resolve('sessionOperationCoordinator'),
-    emitSessionUpdate: (event) => {
-      void parentGatewayEvents?.emit('session:update', event).catch(() => undefined);
-    },
-  }));
+  container.register('sessionRunWorkflow', (scope) => {
+    const logger = scope.resolve<RuntimeHostLogger>('logger');
+    const terminalDeliveryTrace = createMatchaTerminalDeliveryTraceLogger(logger);
+    return new SessionRunWorkflow({
+      stateStore: scope.resolve('sessionRuntimeStateStore'),
+      timelineRuntime: scope.resolve('sessionTimelineRuntime'),
+      snapshotService: scope.resolve('sessionSnapshotService'),
+      fileSystem: scope.resolve<RuntimeFileSystemPort>('runtime.fileSystem'),
+      clock: scope.resolve<RuntimeClockPort>('runtime.clock'),
+      agentRuntimeRegistry: scope.resolve('sessionAgentRuntimeRegistry'),
+      operationCoordinator: scope.resolve('sessionOperationCoordinator'),
+      workspaceResolver: scope.resolve('openclaw.workspaceService'),
+      ingestEndpointConversationEvent: (endpoint, payload) => scope.resolve<SessionGatewayIngressService>('sessionGatewayIngressService')
+        .consumeEndpointConversationEvent(endpoint, payload),
+      logger,
+      terminalDeliveryTrace,
+      emitSessionUpdate: (event) => {
+        emitSessionUpdateWithTerminalTrace(parentGatewayEvents, terminalDeliveryTrace, event);
+      },
+    });
+  });
   container.register('sessionPromptService', (scope) => new SessionPromptService({
     idGenerator: scope.resolve<RuntimeIdGeneratorPort>('runtime.idGenerator'),
     sessionRunWorkflow: scope.resolve('sessionRunWorkflow'),

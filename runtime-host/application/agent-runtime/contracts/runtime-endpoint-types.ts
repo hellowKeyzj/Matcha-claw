@@ -54,6 +54,7 @@ export interface RuntimeInstanceProfile {
   location: RuntimeEndpointLocation;
   lifecycle: RuntimeEndpointLifecycle;
   agentIds: readonly string[];
+  defaultAgentId: string;
 }
 
 export interface RuntimeEndpointIdentity {
@@ -111,6 +112,27 @@ export interface RuntimeSessionKeyProfile {
   namespace: string;
 }
 
+export type RuntimeExternalSessionStatus = 'active' | 'completed' | 'archived' | 'deleted';
+
+export interface RuntimeExternalSessionCatalogItem {
+  endpointSessionId: string;
+  sessionKey?: string;
+  agentId?: string;
+  label?: string;
+  updatedAt?: number;
+  status?: RuntimeExternalSessionStatus;
+  runtimeModelRef?: string;
+}
+
+export interface RuntimeExternalSessionListRequest {
+  endpoint: RuntimeEndpointRef;
+  agentId?: string;
+}
+
+export interface RuntimeExternalSessionListResult {
+  sessions: RuntimeExternalSessionCatalogItem[];
+}
+
 export interface RuntimeEndpointProfile {
   id: RuntimeEndpointId;
   protocolId: RuntimeProtocolId;
@@ -119,11 +141,14 @@ export interface RuntimeEndpointProfile {
   runtimeInstanceId?: string;
   displayName: string;
   agentIds: readonly string[];
+  defaultAgentId: string;
   acceptsDynamicAgents?: boolean;
   capabilities: RuntimeEndpointCapabilities;
   launcher?: RuntimeLauncherConfig;
   storage?: RuntimeStorageProfile;
   keying?: RuntimeSessionKeyProfile;
+  externalSessionList?: boolean;
+  externalSessionTranscript?: boolean;
 }
 
 export interface RuntimePromptRequest {
@@ -137,6 +162,33 @@ export interface RuntimePromptResult {
   success: boolean;
   error?: string;
   payload?: unknown;
+}
+
+export interface RuntimeEnsureSessionRequest {
+  context: RuntimeSessionContext;
+  cwd: string;
+  title?: string;
+  model?: string;
+  permissionMode?: string;
+}
+
+export interface RuntimeEnsureSessionResult {
+  success: boolean;
+  error?: string;
+  payload?: unknown;
+}
+
+export interface RuntimeStartSessionEventsRequest {
+  context: RuntimeSessionContext;
+  consume: (eventEnvelope: unknown) => void | Promise<void>;
+}
+
+export interface RuntimeExternalSessionTranscriptRequest {
+  context: RuntimeSessionContext;
+}
+
+export interface RuntimeExternalSessionTranscriptResult {
+  transcript: RuntimeReplayTranscriptSource | null;
 }
 
 export interface RuntimeAbortRequest {
@@ -171,11 +223,17 @@ export interface RuntimeEndpointReadiness {
 export interface RuntimeEndpointDiscovery {
   displayName?: string;
   agentIds?: readonly string[];
+  defaultAgentId?: string;
   acceptsDynamicAgents?: boolean;
   capabilities?: RuntimeEndpointCapabilities;
 }
 
 export interface RuntimeSessionTransport {
+  ensureSession?(input: RuntimeEnsureSessionRequest): Promise<RuntimeEnsureSessionResult>;
+  startSessionEvents?(input: RuntimeStartSessionEventsRequest): Promise<void>;
+  stopSessionEvents?(context: RuntimeSessionContext): void;
+  listExternalSessions?(input: RuntimeExternalSessionListRequest): Promise<RuntimeExternalSessionListResult>;
+  readExternalSessionTranscript?(input: RuntimeExternalSessionTranscriptRequest): Promise<RuntimeExternalSessionTranscriptResult>;
   sendPrompt(input: RuntimePromptRequest): Promise<RuntimePromptResult>;
   abortSession(input: RuntimeAbortRequest): Promise<void>;
   resolveApproval(input: RuntimeResolveApprovalRequest): Promise<unknown>;

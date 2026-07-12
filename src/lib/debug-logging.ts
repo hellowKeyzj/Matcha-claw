@@ -14,3 +14,10 @@ export function logRendererDebug(stage: string, payload: unknown): void {
   }
   console.info(stage, payload);
 }
+
+export function logRendererMatchaTerminalDelivery(stage: string, payload: object): void {
+  if (!isRendererDebugLoggingEnabled()) {
+    return;
+  }
+  console.info(`[matcha-terminal-delivery] ${stage}`, payload);
+}

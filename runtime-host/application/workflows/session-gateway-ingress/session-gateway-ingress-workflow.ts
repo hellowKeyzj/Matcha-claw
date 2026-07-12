@@ -5,13 +5,17 @@ import {
   type SessionIdentity,
 } from '../../agent-runtime/contracts/runtime-address';
 import type { AgentRuntimeRegistry } from '../../agent-runtime/contracts/agent-runtime-registry';
+import { MATCHA_AGENT_RUNTIME_PROTOCOL_ID } from '../../adapters/matcha-agent/runtime/matcha-agent-runtime-identity';
 import type { RuntimeSessionContext } from '../../agent-runtime/contracts/runtime-endpoint-types';
 import type {
   SessionRenderItem,
   SessionUpdateEvent,
 } from '../../../shared/session-adapter-types';
 import type { CanonicalApprovalNotification } from '../../sessions/canonical/canonical-approval-events';
-import type { CanonicalSessionEvent } from '../../sessions/canonical/canonical-events';
+import type {
+  CanonicalLifecycleEvent,
+  CanonicalSessionEvent,
+} from '../../sessions/canonical/canonical-events';
 import { buildCanonicalMessageStateKey, buildCanonicalToolStateKey } from '../../sessions/canonical/canonical-reducer';
 import type { RuntimeClockPort } from '../../common/runtime-ports';
 import type { RuntimeHostLogger } from '../../../shared/logger';
@@ -25,6 +29,11 @@ import {
   containsTodoToolDebugSignal,
   logTodoToolDebug,
 } from '../../sessions/todo-tool-debug';
+import {
+  attachMatchaTerminalDeliveryTrace,
+  readMatchaTerminalDeliveryTraceContext,
+  type MatchaTerminalDeliveryTrace,
+} from '../../../shared/matcha-terminal-delivery-trace';
 
 export interface SessionGatewayIngressWorkflowDeps {
   stateStore: SessionRuntimeStateStore;
@@ -32,6 +41,7 @@ export interface SessionGatewayIngressWorkflowDeps {
   snapshotService: SessionSnapshotService;
   clock: RuntimeClockPort;
   logger?: Pick<RuntimeHostLogger, 'traceDebug'>;
+  terminalDeliveryTrace?: MatchaTerminalDeliveryTrace;
   agentRuntimeRegistry: AgentRuntimeRegistry;
 }
 
@@ -61,7 +71,13 @@ export class SessionGatewayIngressWorkflow {
     if (containsTodoToolDebugSignal(canonicalPayload) || containsTodoToolDebugSignal(canonicalEvents)) {
       logTodoToolDebug(this.deps.logger, 'runtime-host.ingress.canonical-events', canonicalEvents);
     }
-    return this.commitCanonicalEvents(canonicalEvents, context);
+    return this.commitCanonicalEvents(
+      canonicalEvents,
+      context,
+      protocol.protocolId === MATCHA_AGENT_RUNTIME_PROTOCOL_ID
+        ? readMatchaTerminalDeliveryTraceContext(payload)
+        : null,
+    );
   }
 
   private consumeEndpointNotificationByEndpoint(endpoint: RuntimeEndpointRef, notification: CanonicalApprovalNotification): SessionUpdateEvent[] {
@@ -94,7 +110,11 @@ export class SessionGatewayIngressWorkflow {
     return this.commitCanonicalEvents(canonicalEvents, context);
   }
 
-  private commitCanonicalEvents(canonicalEvents: CanonicalSessionEvent[], context?: RuntimeSessionContext): SessionUpdateEvent[] {
+  private commitCanonicalEvents(
+    canonicalEvents: CanonicalSessionEvent[],
+    context?: RuntimeSessionContext,
+    terminalTrace = null,
+  ): SessionUpdateEvent[] {
     if (canonicalEvents.length === 0) {
       return [];
     }
@@ -123,15 +143,24 @@ export class SessionGatewayIngressWorkflow {
       || lastEvent.type === 'artifact'
       || lastEvent.type === 'control'
     ) {
-      return [{
-        sessionUpdate: 'session_info_update',
+      const lifecycleEvent = this.resolveSessionInfoLifecycleEvent(canonicalEvents);
+      const update = {
+        sessionUpdate: 'session_info_update' as const,
         sessionKey: sessionId,
         runId: lastEvent.runId ?? null,
-        phase: lastEvent.type === 'lifecycle' ? lastEvent.phase : 'unknown',
+        phase: lifecycleEvent?.phase ?? 'unknown',
         snapshot,
-        error: lastEvent.type === 'lifecycle' ? lastEvent.error : null,
-        ...(lastEvent.type === 'lifecycle' && lastEvent.transportIssue !== undefined ? { transportIssue: lastEvent.transportIssue } : {}),
-      }];
+        error: lifecycleEvent?.error ?? null,
+        ...(lifecycleEvent?.transportIssue !== undefined ? { transportIssue: lifecycleEvent.transportIssue } : {}),
+      };
+      if (terminalTrace && lifecycleEvent?.phase === terminalTrace.terminalPhase) {
+        this.deps.terminalDeliveryTrace?.({
+          stage: 'canonical_terminal_applied',
+          ...terminalTrace,
+        });
+        return [attachMatchaTerminalDeliveryTrace(update, terminalTrace)];
+      }
+      return [update];
     }
     if (lastEvent.type === 'plan') {
       return [{
@@ -152,6 +181,16 @@ export class SessionGatewayIngressWorkflow {
       item: primaryItem,
       snapshot,
     }];
+  }
+
+  private resolveSessionInfoLifecycleEvent(events: ReadonlyArray<CanonicalSessionEvent>): CanonicalLifecycleEvent | null {
+    for (let index = events.length - 1; index >= 0; index -= 1) {
+      const event = events[index]!;
+      if (event.type === 'lifecycle') {
+        return event;
+      }
+    }
+    return null;
   }
 
   private resolvePrimaryCanonicalItem(state: SessionRuntimeTimelineState, events: ReadonlyArray<CanonicalSessionEvent>): SessionRenderItem | null {

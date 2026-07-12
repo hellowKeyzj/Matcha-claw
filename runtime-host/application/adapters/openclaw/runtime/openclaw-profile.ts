@@ -6,7 +6,8 @@ export const openClawRuntimeEndpointProfile: RuntimeEndpointProfile = {
   protocolId: OPENCLAW_RUNTIME_PROTOCOL_ID,
   runtimeInstanceId: OPENCLAW_RUNTIME_INSTANCE_ID,
   displayName: 'OpenClaw',
-  agentIds: ['default'],
+  agentIds: ['main'],
+  defaultAgentId: 'main',
   acceptsDynamicAgents: true,
   capabilities: {
     chat: true,

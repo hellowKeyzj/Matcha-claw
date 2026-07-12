@@ -7,6 +7,7 @@ export const claudeCodeAcpEndpointTemplate: RuntimeEndpointProfile = {
   connectorId: ACP_CLIENT_CONNECTOR_ID,
   displayName: 'Claude Code',
   agentIds: ['default'],
+  defaultAgentId: 'default',
   capabilities: {
     chat: true,
     streaming: true,
@@ -33,6 +34,7 @@ export const hermesAcpEndpointTemplate: RuntimeEndpointProfile = {
   connectorId: ACP_CLIENT_CONNECTOR_ID,
   displayName: 'Hermes',
   agentIds: ['default'],
+  defaultAgentId: 'default',
   capabilities: {
     chat: true,
     streaming: true,

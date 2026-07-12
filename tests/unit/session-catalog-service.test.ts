@@ -17,6 +17,12 @@ import { validateSessionIdentity, type SessionIdentity } from '../../runtime-hos
 import { OpenClawRuntimeAdapter } from '../../runtime-host/application/adapters/openclaw/runtime/openclaw-runtime-adapter';
 import type { SessionStorageDescriptor } from '../../runtime-host/application/sessions/session-storage-repository';
 import type { SessionRuntimeStateSnapshot } from '../../runtime-host/shared/session-adapter-types';
+import type {
+  RuntimeAdapter,
+  RuntimeEndpointProfile,
+  RuntimeSessionTransport,
+} from '../../runtime-host/application/agent-runtime/contracts/runtime-endpoint-types';
+import type { CanonicalSessionEvent } from '../../runtime-host/application/sessions/canonical/canonical-events';
 import { createOpenClawTestSessionIdentity } from './helpers/runtime-address-fixtures';
 
 function buildTranscriptLine(input: {
@@ -56,6 +62,59 @@ function createTestSessionStorageSessionIdentityResolver(): SessionStorageSessio
 
 function claudeCodeSessionIdentity(sessionKey: string): SessionIdentity {
   return createOpenClawTestSessionIdentity(sessionKey, 'claude-code');
+}
+
+function matchaSessionIdentity(sessionKey: string, agentId = 'matcha'): SessionIdentity {
+  return {
+    endpoint: {
+      kind: 'native-runtime',
+      runtimeAdapterId: 'matcha-agent-test',
+      runtimeInstanceId: 'local',
+    },
+    agentId,
+    sessionKey,
+  };
+}
+
+function createExternalSessionRuntimeAdapter(transport: RuntimeSessionTransport): RuntimeAdapter {
+  const endpoint: RuntimeEndpointProfile = {
+    id: 'matcha-agent-test-local',
+    protocolId: 'matcha-agent-test-protocol',
+    runtimeInstanceId: 'local',
+    displayName: 'Matcha Agent Test',
+    agentIds: ['matcha'],
+    defaultAgentId: 'matcha',
+    acceptsDynamicAgents: true,
+    capabilities: {
+      chat: true,
+      streaming: true,
+      tools: true,
+      approvals: true,
+      replay: true,
+      modelSelection: true,
+    },
+    keying: { namespace: 'matcha-agent' },
+    externalSessionList: true,
+  };
+  return {
+    runtimeAdapterId: 'matcha-agent-test',
+    protocol: {
+      protocolId: 'matcha-agent-test-protocol',
+      eventAdapter: {
+        canTranslate: () => false,
+        translate: () => [],
+      },
+      replayAdapter: {
+        replayTranscript: function* (): Iterable<CanonicalSessionEvent> {},
+      },
+      identityPolicy: {
+        buildMessageId: ({ identity, runId }) => `${identity.sessionKey}:${runId}`,
+      },
+    },
+    endpoints: [endpoint],
+    capabilities: [],
+    createTransport: () => transport,
+  };
 }
 
 function sessionListPayload(sessionIdentity: SessionIdentity) {
@@ -788,6 +847,91 @@ describe('session adapter service catalog', () => {
       }),
     ]);
     expect(response.sessions[0]?.key).not.toBe(materializedEndpointSessionId);
+  });
+
+  it('projects external runtime sessions and preserves registry bindings after restart', async () => {
+    const endpointSessionId = 'matcha-agent:matcha:session-1';
+    const boundEndpointSessionId = 'matcha-agent:matcha:session-bound';
+    const localBoundIdentity = matchaSessionIdentity('local-session-after-restart');
+    const listExternalSessions = vi.fn(async () => ({
+      sessions: [
+        {
+          endpointSessionId,
+          label: 'Persisted Matcha session',
+          updatedAt: Date.parse('2026-07-01T00:05:00.000Z'),
+          status: 'completed' as const,
+          runtimeModelRef: 'claude-opus',
+        },
+        {
+          endpointSessionId: boundEndpointSessionId,
+          label: 'Bound Matcha session',
+          updatedAt: Date.parse('2026-07-01T00:10:00.000Z'),
+          status: 'active' as const,
+        },
+      ],
+    }));
+    const transport: RuntimeSessionTransport = {
+      listExternalSessions,
+      sendPrompt: async () => ({ success: true }),
+      abortSession: async () => undefined,
+      resolveApproval: async () => undefined,
+    };
+    const agentRuntimeRegistry = new AgentRuntimeRegistry({
+      gateway: () => ({
+        chatSend: async () => ({ success: true }),
+        gatewayRpc: async () => ({}),
+      }),
+    });
+    agentRuntimeRegistry.register({ runtimeAdapters: [createExternalSessionRuntimeAdapter(transport)] });
+    agentRuntimeRegistry.rememberSessionIdentity(localBoundIdentity, boundEndpointSessionId);
+    const service = createTestSessionCatalogService({
+      workspace: { getConfigDir: () => '' },
+      agentRuntimeRegistry,
+      storageRepository: {
+        listStorageDescriptors: async () => [],
+        findStorageDescriptor: async () => null,
+        getTranscriptFingerprint: async () => null,
+        readTranscriptContent: async () => null,
+        readTranscriptDescriptorContent: async () => null,
+        readTranscriptLines: async function* () {},
+        readTranscriptDescriptorLines: async function* () {},
+        deleteSession: async () => false,
+        renameSession: async () => false,
+        updateSessionStatus: async () => false,
+        upsertSessionIdentity: async () => true,
+      },
+      metadataRepository: {
+        resolveSessionModel: async () => null,
+        readSessionMetadata: async () => null,
+        writeSessionMetadata: async () => undefined,
+      },
+    });
+
+    const response = await service.listSessions(sessionListPayload(matchaSessionIdentity('matcha-agent:matcha:main')));
+
+    expect(listExternalSessions).toHaveBeenCalledWith({
+      endpoint: matchaSessionIdentity('matcha-agent:matcha:main').endpoint,
+      agentId: 'matcha',
+    });
+    expect(response.sessions).toEqual([
+      expect.objectContaining({
+        key: localBoundIdentity.sessionKey,
+        endpointSessionId: boundEndpointSessionId,
+        sessionIdentity: localBoundIdentity,
+        label: 'Bound Matcha session',
+        status: 'active',
+        updatedAt: Date.parse('2026-07-01T00:10:00.000Z'),
+      }),
+      expect.objectContaining({
+        key: endpointSessionId,
+        endpointSessionId,
+        sessionIdentity: matchaSessionIdentity(endpointSessionId),
+        label: 'Persisted Matcha session',
+        model: 'claude-opus',
+        status: 'completed',
+        updatedAt: Date.parse('2026-07-01T00:05:00.000Z'),
+      }),
+    ]);
   });
 
   it('listSessions reads the cached catalog snapshot without rescanning transcripts', async () => {

@@ -9,6 +9,7 @@ import { buildSessionIdentityKey } from '../../runtime-host/shared/runtime-addre
 const hostApiFetchMock = vi.fn();
 const hostSessionAbortMock = vi.fn();
 const subscribeHostEventMock = vi.fn();
+const rendererTerminalDeliveryLogMock = vi.fn();
 
 vi.mock('@/lib/host-api', () => ({
   hostApiFetch: (...args: unknown[]) => hostApiFetchMock(...args),
@@ -18,6 +19,10 @@ vi.mock('@/lib/host-api', () => ({
 
 vi.mock('@/lib/host-events', () => ({
   subscribeHostEvent: (...args: unknown[]) => subscribeHostEventMock(...args),
+}));
+
+vi.mock('@/lib/debug-logging', () => ({
+  logRendererMatchaTerminalDelivery: (...args: unknown[]) => rendererTerminalDeliveryLogMock(...args),
 }));
 
 function createTestEndpoint() {
@@ -343,6 +348,7 @@ describe('gateway store event wiring', () => {
     vi.resetModules();
     vi.clearAllMocks();
     hostSessionAbortMock.mockReset();
+    rendererTerminalDeliveryLogMock.mockReset();
   });
 
   it('subscribes to host events through subscribeHostEvent on init', async () => {
@@ -758,6 +764,148 @@ describe('gateway store event wiring', () => {
     const runtime = useChatStore.getState().loadedSessions['agent:main:main']?.runtime;
     expect(runtime?.activeRunId).toBeNull();
     expect(runtime?.runPhase).toBe('done');
+  });
+
+  it('records terminal delivery receipt and target-session active-to-inactive application', async () => {
+    hostApiFetchMock.mockResolvedValueOnce(createRunningGatewayStatus());
+    const handlers = new Map<string, (payload: unknown) => void>();
+    subscribeHostEventMock.mockImplementation((eventName: string, handler: (payload: unknown) => void) => {
+      handlers.set(eventName, handler);
+      return () => {};
+    });
+
+    const { useChatStore } = await import('@/stores/chat');
+    useChatStore.setState({
+      currentSessionKey: 'agent:main:main',
+      sessionCatalogStatus: {
+        status: 'ready',
+        error: null,
+        hasLoadedOnce: true,
+        lastLoadedAt: 1,
+      },
+      loadedSessions: {
+        'agent:main:main': createSessionRecord({
+          runtime: { activeRunId: 'run-current', runPhase: 'streaming' },
+        }),
+        'agent:other:main': createSessionRecord({
+          runtime: { activeRunId: 'run-target', runPhase: 'streaming' },
+        }),
+      },
+    } as never);
+
+    const { useGatewayStore } = await import('@/stores/gateway');
+    await useGatewayStore.getState().init();
+
+    handlers.get('session:update')?.({
+      ...createSessionInfoUpdate({
+        phase: 'final',
+        runId: 'run-target',
+        sessionKey: 'agent:other:main',
+      }),
+      _meta: {
+        matchaTerminalDelivery: {
+          bridgeTraceId: 'matcha-bridge-1',
+          runTraceId: 'matcha-run-1',
+          eventClass: 'terminal' as const,
+          terminalPhase: 'final' as const,
+        },
+      },
+    });
+
+    expect(rendererTerminalDeliveryLogMock).toHaveBeenCalledWith('renderer_event_received', {
+      bridgeTraceId: 'matcha-bridge-1',
+      runTraceId: 'matcha-run-1',
+      eventClass: 'terminal',
+      terminalPhase: 'final',
+      snapshotActiveRunIdIsNull: true,
+    });
+    expect(rendererTerminalDeliveryLogMock).toHaveBeenCalledWith('renderer_event_applied', {
+      bridgeTraceId: 'matcha-bridge-1',
+      runTraceId: 'matcha-run-1',
+      eventClass: 'terminal',
+      terminalPhase: 'final',
+      runtimeActiveToInactive: true,
+      runtimeInactive: true,
+    });
+  });
+
+  it('records rejected terminal delivery when the renderer handler throws', async () => {
+    hostApiFetchMock.mockResolvedValueOnce(createRunningGatewayStatus());
+    const handlers = new Map<string, (payload: unknown) => void>();
+    subscribeHostEventMock.mockImplementation((eventName: string, handler: (payload: unknown) => void) => {
+      handlers.set(eventName, handler);
+      return () => {};
+    });
+
+    const { useChatStore } = await import('@/stores/chat');
+    useChatStore.setState({
+      currentSessionKey: 'agent:main:main',
+      loadedSessions: {
+        'agent:main:main': createSessionRecord({
+          runtime: { activeRunId: 'run-rejected', runPhase: 'streaming' },
+        }),
+      },
+      handleSessionUpdateEvent: () => {
+        throw new TypeError('renderer handler rejected terminal delivery');
+      },
+    } as never);
+
+    const { useGatewayStore } = await import('@/stores/gateway');
+    await useGatewayStore.getState().init();
+
+    handlers.get('session:update')?.({
+      ...createSessionInfoUpdate({
+        phase: 'error',
+        runId: 'run-rejected',
+        sessionKey: 'agent:main:main',
+      }),
+      _meta: {
+        matchaTerminalDelivery: {
+          bridgeTraceId: 'matcha-bridge-2',
+          runTraceId: 'matcha-run-2',
+          eventClass: 'terminal' as const,
+          terminalPhase: 'error' as const,
+        },
+      },
+    });
+
+    expect(rendererTerminalDeliveryLogMock).toHaveBeenCalledWith('renderer_event_rejected', {
+      bridgeTraceId: 'matcha-bridge-2',
+      runTraceId: 'matcha-run-2',
+      eventClass: 'terminal',
+      terminalPhase: 'error',
+      errorCategory: 'error',
+    });
+  });
+
+  it('records terminal trace shape rejection without exposing the malformed payload', async () => {
+    hostApiFetchMock.mockResolvedValueOnce(createRunningGatewayStatus());
+    const handlers = new Map<string, (payload: unknown) => void>();
+    subscribeHostEventMock.mockImplementation((eventName: string, handler: (payload: unknown) => void) => {
+      handlers.set(eventName, handler);
+      return () => {};
+    });
+
+    const { useGatewayStore } = await import('@/stores/gateway');
+    await useGatewayStore.getState().init();
+
+    handlers.get('session:update')?.({
+      _meta: {
+        matchaTerminalDelivery: {
+          bridgeTraceId: 'matcha-bridge-3',
+          runTraceId: 'matcha-run-3',
+          eventClass: 'terminal' as const,
+          terminalPhase: 'aborted' as const,
+        },
+      },
+    });
+
+    expect(rendererTerminalDeliveryLogMock).toHaveBeenCalledWith('renderer_event_rejected_shape', {
+      bridgeTraceId: 'matcha-bridge-3',
+      runTraceId: 'matcha-run-3',
+      eventClass: 'terminal',
+      terminalPhase: 'aborted',
+    });
   });
 
   it('run.phase error 事件应写入当前 session runtime.lastError', async () => {

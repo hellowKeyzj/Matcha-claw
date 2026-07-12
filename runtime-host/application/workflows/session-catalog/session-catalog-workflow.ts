@@ -1,6 +1,10 @@
 import { buildRuntimeEndpointKey, buildSessionIdentityKey, type RuntimeEndpointRef, type SessionIdentity } from '../../agent-runtime/contracts/runtime-address';
 import type { AgentRuntimeRegistry } from '../../agent-runtime/contracts/agent-runtime-registry';
 import type {
+  RuntimeEndpointProfile,
+  RuntimeExternalSessionCatalogItem,
+} from '../../agent-runtime/contracts/runtime-endpoint-types';
+import type {
   SessionCatalogItem,
   SessionCatalogKind,
   SessionListResult,
@@ -101,6 +105,8 @@ export class SessionCatalogWorkflow {
       sessionsByKey.set(identityKey, await this.buildOverlayCatalogItem(overlay, cached));
     }
 
+    await this.mergeExternalSessions(input.endpoint, sessionsByKey);
+
     const sessions = Array.from(sessionsByKey.values())
       .filter((session) => session.status !== 'archived' && session.status !== 'deleted');
     sortSessions(sessions);
@@ -153,7 +159,7 @@ export class SessionCatalogWorkflow {
   private resolveBoundSessionCatalogItem(session: SessionCatalogItem): SessionCatalogItem {
     const context = this.deps.agentRuntimeRegistry.resolveSessionContextByEndpointSessionId(
       session.sessionIdentity.endpoint,
-      session.key,
+      session.endpointSessionId ?? session.key,
     );
     if (!context || buildSessionIdentityKey(context.identity) === buildSessionIdentityKey(session.sessionIdentity)) {
       return session;
@@ -166,6 +172,71 @@ export class SessionCatalogWorkflow {
       kind: resolveSessionCatalogKind(context.localSessionId),
       preferred: false,
       displayName: session.displayName ?? context.localSessionId,
+    };
+  }
+
+  private async mergeExternalSessions(
+    endpointRef: RuntimeEndpointRef,
+    sessionsByKey: Map<string, SessionCatalogItem>,
+  ): Promise<void> {
+    const endpoint = this.deps.agentRuntimeRegistry.resolveEndpointForRef(endpointRef);
+    if (!endpoint.externalSessionList) {
+      return;
+    }
+    const transport = this.deps.agentRuntimeRegistry.resolveTransportForEndpoint(endpointRef, endpoint.defaultAgentId);
+    if (!transport.listExternalSessions) {
+      return;
+    }
+    const result = await transport.listExternalSessions({
+      endpoint: endpointRef,
+      agentId: endpoint.defaultAgentId,
+    });
+    for (const externalSession of result.sessions) {
+      const item = this.buildExternalSessionCatalogItem(endpointRef, endpoint, externalSession);
+      if (!item) {
+        continue;
+      }
+      const identityKey = buildSessionIdentityKey(item.sessionIdentity);
+      const cached = sessionsByKey.get(identityKey);
+      sessionsByKey.set(identityKey, mergeExternalSessionCatalogItem(item, cached));
+    }
+  }
+
+  private buildExternalSessionCatalogItem(
+    endpointRef: RuntimeEndpointRef,
+    endpoint: RuntimeEndpointProfile,
+    externalSession: RuntimeExternalSessionCatalogItem,
+  ): SessionCatalogItem | null {
+    const endpointSessionId = externalSession.endpointSessionId.trim();
+    if (!endpointSessionId) {
+      return null;
+    }
+    const agentId = externalSession.agentId?.trim() || endpoint.defaultAgentId;
+    const existingContext = this.deps.agentRuntimeRegistry.resolveSessionContextByEndpointSessionId(endpointRef, endpointSessionId);
+    const sessionKey = existingContext?.localSessionId
+      ?? externalSession.sessionKey?.trim()
+      ?? buildExternalSessionKey(endpoint, agentId, endpointSessionId);
+    if (!sessionKey) {
+      return null;
+    }
+    const identity = existingContext?.identity ?? { endpoint: endpointRef, agentId, sessionKey };
+    const context = existingContext ?? this.deps.agentRuntimeRegistry.rememberSessionIdentity(identity, endpointSessionId);
+    const label = normalizeOptionalString(externalSession.label);
+    const model = normalizeOptionalString(externalSession.runtimeModelRef);
+    return {
+      key: context.localSessionId,
+      agentId: context.agentId,
+      protocolId: endpoint.protocolId,
+      runtimeEndpointId: endpoint.id,
+      endpointSessionId: context.endpointSessionId,
+      sessionIdentity: context.identity,
+      kind: resolveSessionCatalogKind(context.localSessionId),
+      preferred: resolveSessionCatalogKind(context.localSessionId) === 'main',
+      status: externalSession.status ?? 'completed',
+      ...(label ? { label, titleSource: 'user' as const } : {}),
+      displayName: label ?? context.localSessionId,
+      ...(model ? { model } : {}),
+      ...(typeof externalSession.updatedAt === 'number' ? { updatedAt: externalSession.updatedAt } : {}),
     };
   }
 
@@ -203,6 +274,41 @@ export class SessionCatalogWorkflow {
       ...(typeof updatedAt === 'number' ? { updatedAt } : {}),
     };
   }
+}
+
+function normalizeOptionalString(value: string | undefined): string | null {
+  if (typeof value !== 'string') {
+    return null;
+  }
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
+function buildExternalSessionKey(endpoint: RuntimeEndpointProfile, agentId: string, endpointSessionId: string): string | null {
+  const namespace = endpoint.keying?.namespace.trim();
+  if (!namespace) {
+    return null;
+  }
+  return endpointSessionId.startsWith(`${namespace}:`)
+    ? endpointSessionId
+    : `${namespace}:${agentId}:${endpointSessionId}`;
+}
+
+function mergeExternalSessionCatalogItem(
+  externalSession: SessionCatalogItem,
+  cached: SessionCatalogItem | undefined,
+): SessionCatalogItem {
+  if (!cached) {
+    return externalSession;
+  }
+  return {
+    ...cached,
+    endpointSessionId: externalSession.endpointSessionId,
+    status: cached.status ?? externalSession.status,
+    ...(!cached.label && externalSession.label ? { label: externalSession.label, titleSource: externalSession.titleSource } : {}),
+    ...(externalSession.model ? { model: externalSession.model } : {}),
+    ...(typeof externalSession.updatedAt === 'number' ? { updatedAt: externalSession.updatedAt } : {}),
+  };
 }
 
 function readSessionKeySuffix(sessionKey: string): string {

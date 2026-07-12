@@ -71,6 +71,7 @@ export interface TestSessionRuntimeServiceDeps {
     gatewayRpc?: (method: string, params?: unknown, timeoutMs?: number) => Promise<unknown>;
   };
   agentRuntimeRegistry?: AgentRuntimeRegistry;
+  stopSessionEvents?: ConstructorParameters<typeof SessionLifecycleWorkflow>[0]['stopSessionEvents'];
 }
 
 export function createTestSessionCatalogService(input: {
@@ -272,6 +273,7 @@ export function createTestSessionRuntimeService(deps: TestSessionRuntimeServiceD
     agentRuntimeRegistry,
     clock,
     idGenerator,
+    stopSessionEvents: deps.stopSessionEvents,
   });
   const commandService = new SessionCommandService({
     operationsWorkflow: new SessionCommandOperationsWorkflow({
@@ -290,6 +292,7 @@ export function createTestSessionRuntimeService(deps: TestSessionRuntimeServiceD
     clock,
     agentRuntimeRegistry,
     operationCoordinator,
+    ingestEndpointConversationEvent: (endpoint, payload) => ingressService.consumeEndpointConversationEvent(endpoint, payload),
     emitSessionUpdate: deps.emitSessionUpdate,
   });
   const promptService = new SessionPromptService({

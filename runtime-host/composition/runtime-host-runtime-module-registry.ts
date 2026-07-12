@@ -43,6 +43,8 @@ import type { RuntimeHostInfrastructure } from './modules/runtime-infrastructure
 import { registerRuntimeHostInfrastructureLifecycle } from './modules/runtime-infrastructure-module';
 import { registerOpenClawInfrastructure } from './modules/openclaw-infrastructure-module';
 import { registerAcpConnectorModule } from './modules/acp-connector-module';
+import { createMatchaAgentRuntimeAdapterRegistrationFactory } from '../application/adapters/matcha-agent/runtime';
+import { createMatchaTerminalDeliveryTraceLogger } from '../shared/matcha-terminal-delivery-trace';
 import {
   ParentShellGatewayControl,
   type GatewayControlPort,
@@ -118,6 +120,7 @@ const openclawInfrastructureModule: RuntimeHostSystemModule = {
       'channels.deliveryProjection',
       'openclaw.infrastructure',
       'openclaw.providerSnapshotService',
+      'openclaw.workspaceService',
       'sessionConfigDirectory',
       'sessionExternalArtefactResolver',
       'sessionDefaultModelResolver',
@@ -146,6 +149,21 @@ const acpConnectorModule: RuntimeHostSystemModule = {
   },
   registerInfrastructure: (context) => {
     registerAcpConnectorModule(context.container);
+  },
+};
+
+const matchaAgentRuntimeModule: RuntimeHostSystemModule = {
+  name: 'matcha-agent-runtime',
+  manifest: {
+    id: 'matcha-agent-runtime',
+    registerProviders: true,
+  },
+  registerInfrastructure: (context) => {
+    context.container.contribute('runtime.adapterRegistrationFactories', (): RuntimeAdapterRegistrationFactory => (
+      createMatchaAgentRuntimeAdapterRegistrationFactory({
+        terminalDeliveryTrace: createMatchaTerminalDeliveryTraceLogger(context.infrastructure.logger),
+      })
+    ));
   },
 };
 
@@ -273,6 +291,7 @@ const sessionRuntimeModule: RuntimeHostSystemModule = {
     imports: [
       'agentRuntime.registry',
       'gateway.runtimeEndpointId',
+      'openclaw.workspaceService',
       'sessionConfigDirectory',
       'sessionExternalArtefactResolver',
       'sessionDefaultModelResolver',
@@ -302,6 +321,7 @@ const RUNTIME_HOST_SYSTEM_MODULES: readonly RuntimeHostSystemModule[] = [
   infrastructureModule,
   openclawInfrastructureModule,
   acpConnectorModule,
+  matchaAgentRuntimeModule,
   gatewayBridgeModule,
   platformRuntimeModule,
   pluginRuntimeModule,

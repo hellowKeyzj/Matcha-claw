@@ -6,11 +6,14 @@ import { create } from 'zustand';
 import { hostApiFetch } from '@/lib/host-api';
 import { subscribeHostEvent } from '@/lib/host-events';
 import type { SessionUpdateEvent, TaskSnapshotEvent } from '../../runtime-host/shared/session-adapter-types';
+import { buildSessionIdentityKey } from '../../runtime-host/shared/runtime-address';
 import type { GatewayStatus } from '../types/gateway';
 import { useChatStore } from './chat';
 import { useTaskSnapshotStore } from './chat/task-snapshot-store';
 import { useChannelsStore } from './channels';
 import { isGatewayOperational } from '@/lib/gateway-status';
+import { logRendererMatchaTerminalDelivery } from '@/lib/debug-logging';
+import { readMatchaTerminalDeliveryTraceContext } from '../../runtime-host/shared/matcha-terminal-delivery-trace';
 import type { GatewayTransportIssue } from '../../runtime-host/shared/gateway-error';
 
 let gatewayInitPromise: Promise<void> | null = null;
@@ -38,6 +41,7 @@ type RuntimeHostObservedStatus =
   | 'starting'
   | 'running'
   | 'restarting'
+  | 'stopping'
   | 'degraded'
   | 'error'
   | 'stopped';
@@ -95,14 +99,71 @@ function isSessionUpdateEvent(value: unknown): value is SessionUpdateEvent {
     || update === 'plan';
 }
 
+function resolveSessionUpdateTargetRecordKey(event: SessionUpdateEvent): string | null {
+  const eventSessionKey = typeof event.sessionKey === 'string' ? event.sessionKey.trim() : '';
+  const snapshotSessionKey = typeof event.snapshot.sessionKey === 'string' ? event.snapshot.sessionKey.trim() : '';
+  if (eventSessionKey && snapshotSessionKey && eventSessionKey !== snapshotSessionKey) {
+    return null;
+  }
+  const backendSessionKey = eventSessionKey || snapshotSessionKey;
+  if (!backendSessionKey) {
+    return null;
+  }
+  const state = useChatStore.getState();
+  if (Object.prototype.hasOwnProperty.call(state.loadedSessions, backendSessionKey)) {
+    return backendSessionKey;
+  }
+  const identity = event.snapshot.catalog.sessionIdentity;
+  if (!identity) {
+    return null;
+  }
+  return state.sessionRecordKeyByIdentityKey[buildSessionIdentityKey({
+    ...identity,
+    sessionKey: identity.sessionKey || backendSessionKey,
+  })] ?? null;
+}
+
 function handleSessionUpdateEvent(event: unknown): void {
+  const terminalTrace = readMatchaTerminalDeliveryTraceContext(event);
   if (!isSessionUpdateEvent(event)) {
+    if (terminalTrace) {
+      logRendererMatchaTerminalDelivery('renderer_event_rejected_shape', terminalTrace);
+    }
     return;
   }
+  if (!terminalTrace) {
+    try {
+      useChatStore.getState().handleSessionUpdateEvent(event);
+    } catch {
+      // ignore
+    }
+    return;
+  }
+  const targetSessionKey = resolveSessionUpdateTargetRecordKey(event);
+  const stateBefore = useChatStore.getState();
+  const activeRunIdBefore = targetSessionKey
+    ? stateBefore.loadedSessions[targetSessionKey]?.runtime.activeRunId ?? null
+    : null;
+  logRendererMatchaTerminalDelivery('renderer_event_received', {
+    ...terminalTrace,
+    snapshotActiveRunIdIsNull: event.snapshot.runtime.activeRunId === null,
+  });
   try {
-    useChatStore.getState().handleSessionUpdateEvent(event);
-  } catch {
-    // ignore
+    stateBefore.handleSessionUpdateEvent(event);
+    const stateAfter = useChatStore.getState();
+    const activeRunIdAfter = targetSessionKey
+      ? stateAfter.loadedSessions[targetSessionKey]?.runtime.activeRunId ?? null
+      : null;
+    logRendererMatchaTerminalDelivery('renderer_event_applied', {
+      ...terminalTrace,
+      runtimeActiveToInactive: activeRunIdBefore !== null && activeRunIdAfter === null,
+      runtimeInactive: activeRunIdAfter === null,
+    });
+  } catch (error) {
+    logRendererMatchaTerminalDelivery('renderer_event_rejected', {
+      ...terminalTrace,
+      errorCategory: error instanceof Error ? 'error' : 'non_error',
+    });
   }
 }
 
@@ -216,7 +277,7 @@ export const useGatewayStore = create<GatewayState>((set, get) => ({
                 pid: payload.pid,
                 activePluginCount: payload.activePluginCount,
                 enabledPluginIds: payload.enabledPluginIds ?? state.runtimeHost.enabledPluginIds,
-                error: payload.status === 'running' || payload.status === 'restarting' || payload.status === 'starting'
+                error: payload.status === 'running' || payload.status === 'restarting' || payload.status === 'starting' || payload.status === 'stopping'
                   ? undefined
                   : payload.error,
                 updatedAt: payload.updatedAt ?? Date.now(),

@@ -11,6 +11,12 @@ import { buildRenderItemsFromCanonicalState } from '../../runtime-host/applicati
 import type { SessionAssistantTurnSegment, SessionItemUpdateEvent, SessionRenderItem } from '../../runtime-host/shared/session-adapter-types';
 import { OPENCLAW_RUNTIME_PROTOCOL_ID, OPENCLAW_RUNTIME_ENDPOINT_ID } from '../../runtime-host/application/adapters/openclaw/runtime/openclaw-runtime-identity';
 import { AgentRuntimeRegistry } from '../../runtime-host/application/agent-runtime/contracts/agent-runtime-registry';
+import {
+  createMatchaAgentRuntimeAdapterRegistrationFactory,
+  MatchaAgentAppServerClient,
+  MATCHA_AGENT_RUNTIME_ADAPTER_ID,
+  MATCHA_AGENT_RUNTIME_INSTANCE_ID,
+} from '../../runtime-host/application/adapters/matcha-agent/runtime';
 import { createTestAcpClientConnector } from './helpers/acp-test-connector';
 
 function configDir(): string {
@@ -32,6 +38,8 @@ function createService(input: Partial<Parameters<typeof createTestSessionRuntime
     ...input,
   });
 }
+
+type CreateServiceInput = NonNullable<Parameters<typeof createService>[0]>;
 
 async function createServiceWithConnectedAcpEndpoint() {
   const agentRuntimeRegistry = new AgentRuntimeRegistry({
@@ -84,6 +92,87 @@ function createClaudeCodeSessionIdentity(sessionKey = 'claude-code:session:1') {
     },
     agentId: 'default',
     sessionKey,
+  };
+}
+
+function createMatchaAgentTestSessionIdentity(sessionKey = 'matcha-agent:matcha:session-1') {
+  return {
+    endpoint: {
+      kind: 'native-runtime' as const,
+      runtimeAdapterId: MATCHA_AGENT_RUNTIME_ADAPTER_ID,
+      runtimeInstanceId: MATCHA_AGENT_RUNTIME_INSTANCE_ID,
+    },
+    agentId: 'matcha',
+    sessionKey,
+  };
+}
+
+type RecordedAppServerRequest = {
+  method: string;
+  params: unknown;
+};
+
+type MatchaAgentRequestHandler = (
+  method: string,
+  params: unknown,
+) => Promise<unknown> | unknown;
+
+class RecordingMatchaAgentAppServerClient extends MatchaAgentAppServerClient {
+  readonly requests: RecordedAppServerRequest[] = [];
+
+  constructor(private readonly handleRequest: MatchaAgentRequestHandler = () => ({})) {
+    super({ url: 'http://127.0.0.1:3212' });
+  }
+
+  override async request(method: string, params?: unknown): Promise<unknown> {
+    this.requests.push({ method, params });
+    return await this.handleRequest(method, params);
+  }
+}
+
+function createServiceWithMatchaAgentRuntime(input: {
+  client?: MatchaAgentAppServerClient;
+  sessionStorage?: CreateServiceInput['sessionStorage'];
+} = {}) {
+  const agentRuntimeRegistry = new AgentRuntimeRegistry({
+    gateway: () => ({
+      chatSend: async () => ({ runId: 'run-sent' }),
+      gatewayRpc: async () => ({}),
+    }),
+  });
+  const [matchaAgentAdapter] = createMatchaAgentRuntimeAdapterRegistrationFactory({
+    env: {
+      MATCHACLAW_MATCHA_AGENT_APP_SERVER_ENABLED: '1',
+      MATCHACLAW_MATCHA_AGENT_APP_SERVER_URL: 'http://127.0.0.1:3212',
+    },
+    ...(input.client ? { createClient: () => input.client! } : {}),
+  }).create();
+  agentRuntimeRegistry.register({
+    runtimeAdapters: [new OpenClawRuntimeAdapter(), matchaAgentAdapter],
+    protocolConnectors: [createTestAcpClientConnector()],
+  });
+  return {
+    agentRuntimeRegistry,
+    service: createService({
+      agentRuntimeRegistry,
+      ...(input.sessionStorage ? { sessionStorage: input.sessionStorage } : {}),
+    }),
+  };
+}
+
+function matchaAgentAppServerEnvelope(input: {
+  seq: number;
+  sessionId: string;
+  runId: string;
+  event: Record<string, unknown> & { type: string };
+}) {
+  return {
+    eventId: `matcha-event-${input.seq}`,
+    sessionId: input.sessionId,
+    seq: input.seq,
+    createdAt: `2026-07-08T11:07:${String(input.seq).padStart(2, '0')}.000Z`,
+    runId: input.runId,
+    event: input.event,
   };
 }
 
@@ -1409,6 +1498,95 @@ describe('session runtime ACP adapter service', () => {
     ]));
   });
 
+  it('submits media prompts through the canonical user timeline before dispatching the gateway payload', async () => {
+    const chatSend = vi.fn(async (params: Record<string, unknown>) => ({
+      runId: params.idempotencyKey,
+      status: 'started',
+    }));
+    const service = createService({
+      openclawBridge: {
+        chatSend,
+        gatewayRpc: async () => ({}),
+      },
+    });
+
+    const response = await service.promptSession({
+      sessionKey: 'agent:main:main',
+      sessionIdentity: createOpenClawTestSessionIdentity('agent:main:main'),
+      message: '请检查附件',
+      idempotencyKey: 'client-run-media',
+      media: [{
+        filePath: 'C:\\tmp\\report.txt',
+        fileName: 'report.txt',
+        mimeType: 'text/plain',
+        fileSize: 42,
+        preview: null,
+      }],
+    });
+    await vi.waitFor(() => expect(chatSend).toHaveBeenCalledTimes(1));
+
+    expect(response.status).toBe(200);
+    if (!('snapshot' in response.data)) {
+      throw new Error('Expected media prompt snapshot');
+    }
+    expect(response.data).toMatchObject({
+      runId: 'client-run-media',
+      snapshot: {
+        runtime: {
+          activeRunId: 'client-run-media',
+          runPhase: 'submitted',
+        },
+        items: expect.arrayContaining([expect.objectContaining({
+          kind: 'user-message',
+          text: '请检查附件',
+          messageId: 'client-run-media',
+          runId: 'client-run-media',
+          attachedFiles: [expect.objectContaining({
+            fileName: 'report.txt',
+            mimeType: 'text/plain',
+            fileSize: 42,
+          })],
+        })]),
+      },
+    });
+    expect(chatSend).toHaveBeenCalledWith(expect.objectContaining({
+      sessionKey: 'agent:main:main',
+      idempotencyKey: 'client-run-media',
+      message: '请检查附件',
+    }));
+  });
+
+  it('does not resend the runtime prompt for a duplicate local runId retry', async () => {
+    const chatSend = vi.fn(async (params: Record<string, unknown>) => ({
+      runId: params.idempotencyKey,
+      status: 'started',
+    }));
+    const service = createService({
+      openclawBridge: {
+        chatSend,
+        gatewayRpc: async () => ({}),
+      },
+    });
+    const sessionIdentity = createOpenClawTestSessionIdentity('agent:main:main');
+
+    await service.promptSession({
+      sessionKey: 'agent:main:main',
+      sessionIdentity,
+      message: '第一次',
+      idempotencyKey: 'client-run-retry',
+    });
+    await vi.waitFor(() => expect(chatSend).toHaveBeenCalledTimes(1));
+
+    await service.promptSession({
+      sessionKey: 'agent:main:main',
+      sessionIdentity,
+      message: '重试',
+      idempotencyKey: 'client-run-retry',
+    });
+
+    expect(chatSend).toHaveBeenCalledTimes(1);
+  });
+
   it('uses displayMessage only for the local submitted user item while sending the full prompt to the runtime', async () => {
     const chatSend = vi.fn(async (params: Record<string, unknown>) => ({
       runId: params.idempotencyKey,
@@ -1834,6 +2012,33 @@ describe('session runtime ACP adapter service', () => {
           runId: 'client-run-fail',
         })]),
       }),
+    }));
+  });
+
+  it('stops runtime session events when deleting a session', async () => {
+    const stopSessionEvents = vi.fn();
+    const service = createService({
+      stopSessionEvents,
+      openclawBridge: {
+        chatSend: async () => ({ success: true }),
+        gatewayRpc: async () => ({}),
+      },
+    });
+    const sessionIdentity = createOpenClawTestSessionIdentity('agent:main:main');
+
+    await service.createSession({
+      sessionKey: sessionIdentity.sessionKey,
+      endpoint: sessionIdentity.endpoint,
+      agentId: sessionIdentity.agentId,
+    });
+    const response = await service.deleteSession({
+      sessionKey: sessionIdentity.sessionKey,
+      sessionIdentity,
+    });
+
+    expect(response.status).toBe(200);
+    expect(stopSessionEvents).toHaveBeenCalledWith(expect.objectContaining({
+      identity: sessionIdentity,
     }));
   });
 
@@ -2308,6 +2513,146 @@ describe('session runtime ACP adapter service', () => {
         },
       },
     });
+  });
+
+  it('projects matcha-agent app-server envelopes keyed by sessionId through the remembered endpoint session alias', async () => {
+    const { agentRuntimeRegistry, service } = createServiceWithMatchaAgentRuntime();
+    const sessionIdentity = createMatchaAgentTestSessionIdentity();
+    agentRuntimeRegistry.rememberSessionIdentity(sessionIdentity, sessionIdentity.sessionKey);
+
+    const [started] = await service.consumeEndpointConversationEvent(
+      sessionIdentity.endpoint,
+      matchaAgentAppServerEnvelope({
+        seq: 1,
+        sessionId: sessionIdentity.sessionKey,
+        runId: 'matcha-run-1',
+        event: { type: 'run.started', runId: 'matcha-run-1' },
+      }),
+    );
+    const [delta] = await service.consumeEndpointConversationEvent(
+      sessionIdentity.endpoint,
+      matchaAgentAppServerEnvelope({
+        seq: 2,
+        sessionId: sessionIdentity.sessionKey,
+        runId: 'matcha-run-1',
+        event: {
+          type: 'sdk.message',
+          sdkMessageVersion: 'claude-code-sdk-message-v1',
+          sdkMessage: {
+            type: 'stream_event',
+            event: {
+              type: 'content_block_delta',
+              index: 0,
+              delta: { type: 'text_delta', text: '你好' },
+            },
+          },
+          projectionHints: { messageId: 'assistant-message-1' },
+        },
+      }),
+    );
+    const [completed] = await service.consumeEndpointConversationEvent(
+      sessionIdentity.endpoint,
+      matchaAgentAppServerEnvelope({
+        seq: 3,
+        sessionId: sessionIdentity.sessionKey,
+        runId: 'matcha-run-1',
+        event: { type: 'run.completed', runId: 'matcha-run-1' },
+      }),
+    );
+
+    expect(started).toMatchObject({
+      sessionUpdate: 'session_info_update',
+      sessionKey: sessionIdentity.sessionKey,
+      runId: 'matcha-run-1',
+      phase: 'started',
+      snapshot: {
+        runtime: {
+          activeRunId: 'matcha-run-1',
+          runPhase: 'submitted',
+        },
+      },
+    });
+    expect(delta).toMatchObject({
+      sessionUpdate: 'session_item_chunk',
+      sessionKey: sessionIdentity.sessionKey,
+      runId: 'matcha-run-1',
+      item: {
+        kind: 'assistant-turn',
+        runId: 'matcha-run-1',
+        text: '你好',
+      },
+      snapshot: {
+        runtime: {
+          activeRunId: 'matcha-run-1',
+          runPhase: 'streaming',
+        },
+      },
+    });
+    expect(completed).toMatchObject({
+      sessionUpdate: 'session_info_update',
+      sessionKey: sessionIdentity.sessionKey,
+      runId: 'matcha-run-1',
+      phase: 'final',
+      snapshot: {
+        runtime: {
+          activeRunId: null,
+          runPhase: 'done',
+          pendingTurnKey: null,
+        },
+      },
+    });
+  });
+
+  it('hydrates matcha-agent external session history from JSONL transcript replay', async () => {
+    const endpointSessionId = 'matcha-agent:matcha:persisted-session-1';
+    const sessionIdentity = createMatchaAgentTestSessionIdentity('local-session-after-restart');
+    const transcript = [
+      JSON.stringify({ timestamp: 1, message: { role: 'user', content: '历史问题', id: 'matcha-user-history', metadata: { runId: 'matcha-run-history' } } }),
+      JSON.stringify({ timestamp: 2, message: { role: 'assistant', content: [{ type: 'text', text: '历史回答来自 JSONL transcript' }], id: 'matcha-assistant-history', metadata: { runId: 'matcha-run-history' } } }),
+    ];
+    const client = new RecordingMatchaAgentAppServerClient((method, params) => {
+      if (method === 'session.transcript') {
+        expect(params).toEqual({ sessionId: endpointSessionId });
+        return { lines: transcript };
+      }
+      return {};
+    });
+    const readTranscriptLines = vi.fn(async function* () {});
+    const readTranscriptDescriptorLines = vi.fn(async function* () {});
+    const { service } = createServiceWithMatchaAgentRuntime({
+      client,
+      sessionStorage: {
+        listStorageDescriptors: async () => [],
+        findStorageDescriptor: async () => null,
+        getTranscriptFingerprint: async () => null,
+        readTranscriptContent: async () => null,
+        readTranscriptDescriptorContent: async () => null,
+        readTranscriptLines,
+        readTranscriptDescriptorLines,
+        deleteSession: async () => false,
+        renameSession: async () => false,
+        updateSessionStatus: async () => false,
+        upsertSessionIdentity: async () => true,
+      },
+    });
+
+    const response = await service.executeSessionHydration({
+      sessionKey: sessionIdentity.sessionKey,
+      endpointSessionId,
+      sessionIdentity,
+      snapshot: { kind: 'latest' },
+    });
+
+    expect(response.snapshot.items).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: 'user-message', text: '历史问题' }),
+      expect.objectContaining({ kind: 'assistant-turn', text: '历史回答来自 JSONL transcript' }),
+    ]));
+    expect(response.snapshot.replayComplete).toBe(true);
+    expect(readTranscriptLines).not.toHaveBeenCalled();
+    expect(readTranscriptDescriptorLines).not.toHaveBeenCalled();
+    expect(client.requests).toEqual([
+      { method: 'session.transcript', params: { sessionId: endpointSessionId } },
+    ]);
   });
 
   it('loads transcript history through ACP replay projection', async () => {

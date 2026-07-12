@@ -29,6 +29,7 @@ export interface SessionLifecycleWorkflowDeps {
   agentRuntimeRegistry: AgentRuntimeRegistry;
   clock: RuntimeClockPort;
   idGenerator: RuntimeIdGeneratorPort;
+  stopSessionEvents?: (context: RuntimeSessionContext) => void;
 }
 
 export class SessionLifecycleWorkflow {
@@ -68,6 +69,7 @@ export class SessionLifecycleWorkflow {
     }
 
     const context = this.rememberSessionIdentityContext(input.identity);
+    this.deps.stopSessionEvents?.(context);
     await this.deps.sessionStorage.deleteSession(input.identity);
     this.deps.stateStore.deleteSessionState(input.identity.sessionKey, context);
     this.deps.stateStore.persistStore();
@@ -90,6 +92,7 @@ export class SessionLifecycleWorkflow {
     }
     if (input.status === 'deleted') {
       const context = this.rememberSessionIdentityContext(input.identity);
+      this.deps.stopSessionEvents?.(context);
       this.deps.stateStore.deleteSessionState(input.identity.sessionKey, context);
     }
     await this.refreshCatalogQuietly();
