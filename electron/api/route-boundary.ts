@@ -32,6 +32,10 @@ export const MAIN_OWNED_PREFIX_ROUTES = Object.freeze([
   '/internal/runtime-host/',
 ]);
 
+export const HOSTAPI_PROXY_WEBSOCKET_EXACT_ROUTES = Object.freeze([
+  '/api/remote-fleet/terminal/stream',
+]);
+
 export const HOSTAPI_PROXY_PUBLIC_READONLY_EXACT_ROUTES = Object.freeze([
   '/api/app/browser-relay-info',
   '/api/capability-routing',
@@ -68,6 +72,11 @@ export const HOSTAPI_PROXY_PUBLIC_READONLY_EXACT_ROUTES = Object.freeze([
   '/api/provider-accounts',
   '/api/provider-models',
   '/api/provider-models/selectable',
+  '/api/remote-fleet/list-audit-events',
+  '/api/remote-fleet/list-commands',
+  '/api/remote-fleet/metrics',
+  '/api/remote-fleet/snapshot',
+  '/api/remote-fleet/terminal/sessions',
   '/api/runtime-adapters/instances/list',
   '/api/runtime-adapters/list',
   '/api/runtime-connectors/list',
@@ -108,6 +117,23 @@ export const HOSTAPI_PROXY_PUBLIC_MUTATION_POST_EXACT_ROUTES = Object.freeze([
   '/api/external-connectors/session-status',
   '/api/external-connectors/upsert',
   '/api/external-connectors/remove',
+  '/api/remote-fleet/drain-endpoint',
+  '/api/remote-fleet/install-agent',
+  '/api/remote-fleet/probe',
+  '/api/remote-fleet/probe-connection',
+  '/api/remote-fleet/register-connection',
+  '/api/remote-fleet/delete-connection',
+  '/api/remote-fleet/register-environment',
+  '/api/remote-fleet/deploy-environment',
+  '/api/remote-fleet/delete-environment',
+  '/api/remote-fleet/register',
+  '/api/remote-fleet/write-credential',
+  '/api/remote-fleet/terminal/open',
+  '/api/remote-fleet/terminal/reconnect',
+  '/api/remote-fleet/terminal/close',
+  '/api/remote-fleet/remove-node',
+  '/api/remote-fleet/retire-endpoint',
+  '/api/remote-fleet/revoke-agent',
 ]);
 
 export const HOSTAPI_PROXY_PUBLIC_MUTATION_PUT_EXACT_ROUTES = Object.freeze([
@@ -119,6 +145,7 @@ export function getMainApiBoundarySnapshot() {
     allowedRouteFiles: [...MAIN_API_ALLOWED_ROUTE_FILES],
     mainOwnedExactRoutes: [...MAIN_OWNED_EXACT_ROUTES],
     mainOwnedPrefixRoutes: [...MAIN_OWNED_PREFIX_ROUTES],
+    hostapiProxyWebsocketExactRoutes: [...HOSTAPI_PROXY_WEBSOCKET_EXACT_ROUTES],
     hostapiProxyPublicReadonlyExactRoutes: [...HOSTAPI_PROXY_PUBLIC_READONLY_EXACT_ROUTES],
     hostapiProxyPublicReadonlyPrefixRoutes: [...HOSTAPI_PROXY_PUBLIC_READONLY_PREFIX_ROUTES],
     hostapiProxyPublicValidationPostExactRoutes: [...HOSTAPI_PROXY_PUBLIC_VALIDATION_POST_EXACT_ROUTES],
@@ -139,6 +166,10 @@ export function isRuntimeHostBusinessRoute(pathname: string): boolean {
     return false;
   }
   return !isMainOwnedRoute(pathname);
+}
+
+export function isHostApiProxyWebSocketRoute(pathname: string): boolean {
+  return HOSTAPI_PROXY_WEBSOCKET_EXACT_ROUTES.includes(pathname);
 }
 
 export function isHostApiProxyAllowedRoute(method: string, pathname: string): boolean {

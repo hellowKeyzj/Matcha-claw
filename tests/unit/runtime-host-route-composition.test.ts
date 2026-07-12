@@ -122,6 +122,7 @@ describe('runtime-host route composition', () => {
       'capabilityRouting',
       'capabilities',
       'providerModels',
+      'remote_fleet',
       'channel',
       'openclaw',
       'skills',

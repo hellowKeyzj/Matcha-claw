@@ -1,5 +1,6 @@
 import { randomBytes } from 'node:crypto';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
+import type { Duplex } from 'node:stream';
 import { PORTS, getPort } from '../utils/config';
 import { logger } from '../utils/logger';
 import type { HostApiContext } from './context';
@@ -11,7 +12,7 @@ import { handleLogRoutes } from './routes/logs';
 import { handleFileRoutes } from './routes/files';
 import { handleDiagnosticsRoutes } from './routes/diagnostics';
 import { handleRuntimeHostProxyRoutes } from './routes/runtime-host-proxy';
-import { isMainOwnedRoute } from './route-boundary';
+import { isHostApiProxyWebSocketRoute, isMainOwnedRoute } from './route-boundary';
 import { requireJsonContentType, sendJson, setCorsHeaders } from './route-utils';
 
 type RouteHandler = (
@@ -114,6 +115,15 @@ export function startHostApiServer(
   hostApiToken = randomBytes(32).toString('hex');
 
   const server = createServer(createHostApiRequestHandler(ctx, resolvedPort));
+
+  server.on('upgrade', (req: IncomingMessage, socket: Duplex, head: Buffer) => {
+    const requestUrl = new URL(req.url || '/', `http://127.0.0.1:${resolvedPort}`);
+    if (!isHostApiProxyWebSocketRoute(requestUrl.pathname)) {
+      socket.destroy();
+      return;
+    }
+    ctx.runtimeHost.proxyUpgrade(req, socket, head);
+  });
 
   server.on('error', (error: NodeJS.ErrnoException) => {
     if (error.code === 'EADDRINUSE' || error.code === 'EACCES') {

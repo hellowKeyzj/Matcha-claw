@@ -1,98 +1,951 @@
 {
-  "sidebar": {
-    "chat": "Чат",
-    "newChat": "Новый чат",
-    "cronTasks": "Расписание",
-    "skills": "Навыки",
-    "channels": "Каналы",
-    "subagents": "Субагенты",
-    "tasks": "Центр задач",
-    "teams": "Команды",
-    "plugins": "Центр плагинов",
-    "connectors": "Коннекторы",
-    "security": "Безопасность",
-    "agentSessions": "Сессии агентов",
-    "collapseAgentSessions": "Свернуть сессии агентов",
-    "expandAgentSessions": "Развернуть сессии агентов",
-    "untitledSession": "Без названия",
-    "defaultSession": "По умолчанию",
-    "newSession": "Новая сессия",
-    "subSession": "Дочерняя сессия",
-    "sessionBucketToday": "Сегодня",
-    "sessionBucketWithin7Days": "За последние 7 дней",
-    "sessionBucketWithin30Days": "За последние 30 дней",
-    "sessionBucketOlder": "Ранее",
-    "deleteSessionAria": "Удалить сессию {{title}}",
-    "renameSessionAria": "Переименовать сессию {{title}}",
-    "saveSessionRenameAria": "Сохранить название сессии {{title}}",
-    "cancelSessionRenameAria": "Отменить переименование сессии {{title}}",
-    "deleteSessionConfirm": "Удалить сессию \"{{title}}\"?",
-    "deleteSessionDialogTitle": "Удалить {{title}}",
-    "deleteSessionDialogDescription": "Эта сессия будет удалена из списка диалогов. Продолжить?",
-    "deleteSessionDialogConfirm": "Подтвердить удаление",
-    "deleteSessionDialogDeleting": "Удаление...",
-    "noSubagents": "Нет агентов",
-    "noAgentSessions": "Нет сессий",
-    "collapseMenu": "Свернуть боковую панель",
-    "expandMenu": "Развернуть боковую панель",
-    "dashboard": "Панель",
-    "settings": "Настройки",
-    "devConsole": "Консоль разработчика",
-    "pendingBlockers": "Блокировки сессии",
-    "pendingBlockersEmpty": "Нет ожидающих блокировок",
-    "pendingBlockerTask": "Задача {{taskId}}",
-    "pendingBlockerStage": "Stage {{stageId}}",
-    "pendingBlockerGeneral": "Общая блокировка",
-    "pendingBlockerFrom": "От {{from}}",
-    "pendingBlockerTypeApproval": "Блокировка подтверждения",
-    "pendingBlockerTypeInput": "Блокировка ввода",
-    "pendingBlockerSourceTask": "Центр задач",
-    "pendingBlockerTaskId": "ID задачи {{taskId}}",
-    "pendingBlockerSourceChat": "Чат",
-    "pendingBlockerApprovalId": "ID подтверждения {{id}}",
-    "pendingBlockerApprovalHint": "Вызов инструмента ждёт вашего подтверждения."
-  },
-  "actions": {
-    "save": "Сохранить",
-    "cancel": "Отмена",
-    "delete": "Удалить",
-    "edit": "Редактировать",
-    "refresh": "Обновить",
-    "close": "Закрыть",
-    "copy": "Копировать",
-    "search": "Поиск",
-    "confirm": "Подтвердить",
-    "dismiss": "Отклонить",
-    "load": "Загрузить",
-    "install": "Установить",
-    "uninstall": "Удалить",
-    "enable": "Включить",
-    "disable": "Выключить",
-    "back": "Назад",
-    "next": "Далее",
-    "skip": "Пропустить",
-    "restart": "Перезапустить",
-    "show": "Показать",
-    "hide": "Скрыть",
-    "clear": "Очистить"
-  },
-  "status": {
-    "running": "Запущен",
-    "stopped": "Остановлен",
-    "error": "Ошибка",
-    "connected": "Подключён",
-    "disconnected": "Отключён",
-    "enabled": "Включён",
-    "disabled": "Выключен",
-    "active": "Активен",
-    "paused": "Приостановлен",
-    "configured": "Настроен",
-    "loading": "Загрузка...",
-    "saving": "Сохранение..."
-  },
-  "gateway": {
-    "notRunning": "Шлюз не запущен",
-    "notRunningDesc": "Для использования этой функции требуется запущенный шлюз OpenClaw. Он запустится автоматически, или вы можете запустить его в Настройках.",
-    "warning": "Шлюз не запущен."
-  }
+    "sidebar": {
+        "chat": "Чат",
+        "newChat": "Новый чат",
+        "cronTasks": "Расписание",
+        "skills": "Навыки",
+        "channels": "Каналы",
+        "subagents": "Субагенты",
+        "tasks": "Центр задач",
+        "teams": "Команды",
+        "plugins": "Центр плагинов",
+        "connectors": "Коннекторы",
+        "security": "Безопасность",
+        "agentSessions": "Сессии агентов",
+        "collapseAgentSessions": "Свернуть сессии агентов",
+        "expandAgentSessions": "Развернуть сессии агентов",
+        "untitledSession": "Без названия",
+        "defaultSession": "По умолчанию",
+        "newSession": "Новая сессия",
+        "subSession": "Дочерняя сессия",
+        "sessionBucketToday": "Сегодня",
+        "sessionBucketWithin7Days": "За последние 7 дней",
+        "sessionBucketWithin30Days": "За последние 30 дней",
+        "sessionBucketOlder": "Ранее",
+        "deleteSessionAria": "Удалить сессию {{title}}",
+        "renameSessionAria": "Переименовать сессию {{title}}",
+        "saveSessionRenameAria": "Сохранить название сессии {{title}}",
+        "cancelSessionRenameAria": "Отменить переименование сессии {{title}}",
+        "deleteSessionConfirm": "Удалить сессию \"{{title}}\"?",
+        "deleteSessionDialogTitle": "Удалить {{title}}",
+        "deleteSessionDialogDescription": "Эта сессия будет удалена из списка диалогов. Продолжить?",
+        "deleteSessionDialogConfirm": "Подтвердить удаление",
+        "deleteSessionDialogDeleting": "Удаление...",
+        "noSubagents": "Нет агентов",
+        "noAgentSessions": "Нет сессий",
+        "collapseMenu": "Свернуть боковую панель",
+        "expandMenu": "Развернуть боковую панель",
+        "dashboard": "Панель",
+        "settings": "Настройки",
+        "devConsole": "Консоль разработчика",
+        "pendingBlockers": "Блокировки сессии",
+        "pendingBlockersEmpty": "Нет ожидающих блокировок",
+        "pendingBlockerTask": "Задача {{taskId}}",
+        "pendingBlockerStage": "Stage {{stageId}}",
+        "pendingBlockerGeneral": "Общая блокировка",
+        "pendingBlockerFrom": "От {{from}}",
+        "pendingBlockerTypeApproval": "Блокировка подтверждения",
+        "pendingBlockerTypeInput": "Блокировка ввода",
+        "pendingBlockerSourceTask": "Центр задач",
+        "pendingBlockerTaskId": "ID задачи {{taskId}}",
+        "pendingBlockerSourceChat": "Чат",
+        "pendingBlockerApprovalId": "ID подтверждения {{id}}",
+        "pendingBlockerApprovalHint": "Вызов инструмента ждёт вашего подтверждения.",
+        "remoteFleet": "Remote Fleet"
+    },
+    "actions": {
+        "save": "Сохранить",
+        "cancel": "Отмена",
+        "delete": "Удалить",
+        "edit": "Редактировать",
+        "refresh": "Обновить",
+        "close": "Закрыть",
+        "copy": "Копировать",
+        "search": "Поиск",
+        "confirm": "Подтвердить",
+        "dismiss": "Отклонить",
+        "load": "Загрузить",
+        "install": "Установить",
+        "uninstall": "Удалить",
+        "enable": "Включить",
+        "disable": "Выключить",
+        "back": "Назад",
+        "next": "Далее",
+        "skip": "Пропустить",
+        "restart": "Перезапустить",
+        "show": "Показать",
+        "hide": "Скрыть",
+        "clear": "Очистить"
+    },
+    "status": {
+        "running": "Запущен",
+        "stopped": "Остановлен",
+        "error": "Ошибка",
+        "connected": "Подключён",
+        "disconnected": "Отключён",
+        "enabled": "Включён",
+        "disabled": "Выключен",
+        "active": "Активен",
+        "paused": "Приостановлен",
+        "configured": "Настроен",
+        "loading": "Загрузка...",
+        "saving": "Сохранение..."
+    },
+    "gateway": {
+        "notRunning": "Шлюз не запущен",
+        "notRunningDesc": "Для использования этой функции требуется запущенный шлюз OpenClaw. Он запустится автоматически, или вы можете запустить его в Настройках.",
+        "warning": "Шлюз не запущен."
+    },
+    "remoteFleet": {
+        "common": {
+            "unknown": "Неизвестно"
+        },
+        "statuses": {
+            "unknown": "Неизвестно",
+            "online": "Онлайн",
+            "running": "Работает",
+            "connected": "Подключено",
+            "succeeded": "Успешно",
+            "available": "Доступно",
+            "ready": "Готов",
+            "active": "Активно",
+            "enrolled": "Зарегистрировано",
+            "installed": "Установлено",
+            "environment-ready": "Среда готова",
+            "offline": "Офлайн",
+            "stopped": "Остановлено",
+            "disabled": "Отключено",
+            "queued": "В очереди",
+            "draining": "Освобождается",
+            "retired": "Выведено",
+            "not-installed": "Не установлено",
+            "error": "Ошибка",
+            "failed": "Сбой",
+            "unhealthy": "Нездорово",
+            "revoked": "Отозвано",
+            "registered": "Зарегистрировано",
+            "deploying": "Развёртывается",
+            "deleting": "Удаляется",
+            "deleted": "Удалено",
+            "orphaned": "Без привязки",
+            "matcha-managed": "Управляется Matcha",
+            "unverified": "Не проверено",
+            "external": "Внешнее",
+            "observed": "Отслеживается",
+            "provisioning": "Подготавливается",
+            "conflict": "Конфликт",
+            "installing": "Устанавливается",
+            "discovered": "Обнаружено",
+            "starting": "Запускается",
+            "stopping": "Останавливается",
+            "degraded": "Работает с ограничениями",
+            "busy": "Занято",
+            "current": "Актуально",
+            "stale": "Устарело",
+            "pruned": "Очищено",
+            "cancelled": "Отменено",
+            "timed-out": "Время ожидания истекло",
+            "released": "Освобождено",
+            "expired": "Истекло",
+            "opening": "Открывается",
+            "closing": "Закрывается",
+            "closed": "Закрыто"
+        },
+        "modes": {
+            "label": "Режим Remote Fleet",
+            "resources": "Ресурсы",
+            "operations": "Операции"
+        },
+        "workspace": {
+            "syncedAt": "Синхронизировано {{time}}",
+            "resourceCount": "Всего ресурсов: {{count}}",
+            "addRemote": "Добавить удалённое подключение",
+            "emptyTitle": "Нет удалённых подключений",
+            "emptyDescription": "Добавьте подключение, чтобы управлять удалёнными ресурсами.",
+            "addConnection": "Добавить подключение",
+            "backToResources": "Назад к ресурсам"
+        },
+        "resourceBrowser": {
+            "types": "Типы ресурсов",
+            "groups": {
+                "infrastructure": "Инфраструктура",
+                "execution": "Выполнение"
+            },
+            "index": "Каталог ресурсов",
+            "resultCount": "Показано {{visible}} из {{total}}",
+            "searchPlaceholder": "Поиск ресурсов",
+            "search": "Поиск",
+            "statusFilter": "Статус",
+            "allStatuses": "Все статусы",
+            "kindFilter": "Тип",
+            "allKinds": "Все типы",
+            "environmentFilter": "Среда",
+            "allEnvironments": "Все среды",
+            "sort": "Сортировка",
+            "clearFilters": "Сбросить фильтры",
+            "emptyTitle": "Ресурсы не найдены",
+            "emptyFilteredDescription": "Измените запрос или сбросьте фильтры.",
+            "emptyTypeDescription": "Ресурсов этого типа пока нет."
+        },
+        "fields": {
+            "id": "ID",
+            "node": "Remote connection",
+            "agent": "Management agent",
+            "runtime": "Runtime service",
+            "endpoint": "Endpoint",
+            "url": "URL",
+            "labels": "Labels",
+            "lastSeen": "Last seen",
+            "lastProbe": "Last probe",
+            "reason": "Reason",
+            "model": "Model",
+            "capabilities": "Capabilities",
+            "operations": "Operations",
+            "owner": "Owner",
+            "ownerId": "Owner ID",
+            "expires": "Expires",
+            "message": "Message",
+            "started": "Started",
+            "connection": "Connection",
+            "environment": "Environment",
+            "kind": "Kind",
+            "provider": "Provider",
+            "cleanupPolicy": "Cleanup policy",
+            "created": "Создано",
+            "updated": "Обновлено",
+            "lastObserved": "Последнее наблюдение",
+            "protocol": "Протокол"
+        },
+        "header": {
+            "title": "Удалённые рантаймы",
+            "description": "Управляйте remote connections, management agents, runtime services и маршрутизируемыми endpoint из проекции runtime-host.",
+            "snapshotReady": "Снимок готов",
+            "snapshotLoading": "Снимок загружается",
+            "snapshotIdle": "Снимок не загружен",
+            "metricsLoaded": "Метрики загружены",
+            "metricsPending": "Метрики не загружены",
+            "action": "Action: {{action}}",
+            "loadMetrics": "Загрузить метрики",
+            "refreshSnapshot": "Обновить снимок",
+            "stats": {
+                "inventory": "Inventory",
+                "inventorySubtitle": "{{agents}} management agents · {{runtimes}} runtime services · {{endpoints}} endpoints",
+                "runtimes": "Runtime services",
+                "runtimesSubtitle": "Running / total",
+                "endpoints": "Endpoints",
+                "endpointsSubtitle": "Ready / total",
+                "attention": "Attention",
+                "attentionSubtitle": "{{failures}} failures · {{states}} state alerts · {{stale}} stale of {{capabilities}} capabilities"
+            }
+        },
+        "inventory": {
+            "title": "Инвентарь",
+            "description": "Выберите объект и откройте его детали.",
+            "consoleTitle": "Инвентарь Fleet",
+            "consoleDescription": "Выберите подключение, среду, ресурс, узел, агента, рантайм или конечную точку, затем откройте детали в рабочей области.",
+            "tabs": {
+                "connections": "Connections",
+                "environments": "Environments",
+                "managedResources": "Resources",
+                "nodes": "Узлы",
+                "agents": "Агенты",
+                "runtimes": "Рантаймы",
+                "endpoints": "Endpoints"
+            },
+            "emptyConnectionsTitle": "No connections yet",
+            "emptyConnectionsDescription": "Add a connection to create the first remote entry.",
+            "emptyEnvironmentsTitle": "No environments yet",
+            "emptyEnvironmentsDescription": "Registered environments will appear after a connection is created.",
+            "emptyManagedResourcesTitle": "No resources yet",
+            "emptyManagedResourcesDescription": "Managed resource projections will appear after deployment or discovery.",
+            "emptyNodesTitle": "No connections yet",
+            "emptyNodesDescription": "Add a connection to create the first remote entry.",
+            "emptyAgentsTitle": "Агентов пока нет",
+            "emptyAgentsDescription": "Проекции RuntimeAgent появятся здесь после установки.",
+            "emptyRuntimesTitle": "Рантаймов пока нет",
+            "emptyRuntimesDescription": "Проекции runtime-сервисов появятся после деплоя.",
+            "emptyEndpointsTitle": "Endpoint пока нет",
+            "emptyEndpointsDescription": "Готовые runtime endpoint появятся здесь.",
+            "empty": "Объектов пока нет. Зарегистрируйте узел или обновите снимок.",
+            "badges": {
+                "disabled": "Disabled"
+            },
+            "sections": {
+                "connections": "Connections",
+                "environments": "Environments",
+                "managedResources": "Resources",
+                "nodes": "Connections",
+                "agents": "Management agents",
+                "runtimes": "Runtime services",
+                "endpoints": "Endpoints"
+            },
+            "fields": {
+                "id": "ID",
+                "endpoint": "Endpoint",
+                "labels": "Labels",
+                "lastSeen": "Last seen",
+                "node": "Remote connection",
+                "runtime": "Runtime service",
+                "capabilities": "Capabilities",
+                "agent": "Management agent",
+                "started": "Started",
+                "url": "URL",
+                "lastProbe": "Last probe",
+                "connection": "Connection",
+                "environment": "Environment",
+                "resources": "Resources",
+                "lastObserved": "Last observed"
+            },
+            "actions": {
+                "probe": "Probe",
+                "issueToken": "Token",
+                "installAgent": "Install"
+            }
+        },
+        "detail": {
+            "backToIndex": "Назад к каталогу",
+            "relationshipPath": "Цепочка связей",
+            "moreActions": "Другие действия",
+            "attention": "Требует внимания",
+            "noAttentionReason": "Причина не указана",
+            "agentTerminalUnavailable": "Терминал нельзя открыть напрямую из агента. Выберите связанный рантайм в каталоге ресурсов, чтобы открыть его терминал.",
+            "customExternalRuntimeGuidance": "Пользовательские цели управляются внешним рантаймом, поэтому здесь недоступны проверка подключения и развёртывание среды. Выберите связанный рантайм или endpoint в каталоге ресурсов, чтобы проверить состояние и заявленные возможности.",
+            "factsDescription": "Идентификаторы и ключевые сведения",
+            "associations": "Связанные ресурсы",
+            "associationsDescription": "Связанные ресурсы и активные аренды",
+            "connectionTerminalUnavailable": "Для этого подключения нет терминальной цели узла. Выберите связанный узел, рантайм или конечную точку в каталоге ресурсов.",
+            "connectionTerminalNeedsNodeSelection": "С этим подключением связано несколько узлов. Выберите узел в каталоге ресурсов, затем откройте его терминал.",
+            "environmentTerminalUnavailable": "Для этой среды нет терминальной цели. Выберите связанный узел, рантайм или конечную точку в каталоге ресурсов.",
+            "managedResourceTerminalUnavailable": "Для этого ресурса нет терминальной цели. Выберите проецируемый узел, рантайм или конечную точку в каталоге ресурсов.",
+            "tabs": {
+                "overview": "Обзор",
+                "terminal": "Терминал",
+                "commands": "Команды",
+                "audit": "Аудит",
+                "capabilities": "Возможности"
+            },
+            "title": "Detail",
+            "loadingDescription": "Loading the snapshot before opening the selected object.",
+            "emptyDescription": "Choose an object from Inventory.",
+            "emptyTitle": "No object selected",
+            "emptyHint": "The detail pane stays focused on one connection, environment, resource, management agent, runtime service, or endpoint.",
+            "missingTitle": "{{kind}} not found",
+            "missingDescription": "The selected {{kind}} is no longer in the snapshot.",
+            "missingHint": "Inventory reflects the latest snapshot.",
+            "facts": "Facts",
+            "capabilitiesDescription": "Capability projections attached to this object.",
+            "commandsDescription": "Loaded command summaries for this object.",
+            "auditDescription": "Loaded audit summaries for this object.",
+            "leasesDescription": "Lease summaries attached to this object.",
+            "emptyCapabilities": "No capabilities are linked.",
+            "emptyCommands": "No loaded commands reference this object.",
+            "emptyAudit": "No loaded audit events reference this object.",
+            "emptyLeases": "No leases are projected.",
+            "emptyEnvironments": "No environments are associated with this connection.",
+            "kinds": {
+                "connection": "Connection",
+                "environment": "Environment",
+                "managedResource": "Resource",
+                "node": "Узел",
+                "agent": "Management agent",
+                "runtime": "Runtime service",
+                "endpoint": "Endpoint"
+            },
+            "descriptions": {
+                "connection": "Remote connection",
+                "environment": "Managed environment",
+                "managedResource": "Managed resource",
+                "node": "Remote connection",
+                "agent": "Идентичность агента",
+                "runtime": "Исполняемый сервис",
+                "endpoint": "Сервисный эндпоинт"
+            },
+            "metrics": {
+                "agents": "Management agents",
+                "runtimes": "Runtime services",
+                "endpoints": "Endpoints",
+                "capabilities": "Capabilities",
+                "leases": "Leases",
+                "commands": "Commands",
+                "audit": "Audit",
+                "environments": "Environments",
+                "resources": "Resources"
+            },
+            "actions": {
+                "probe": "Probe",
+                "probeConnection": "Проверить подключение",
+                "editConnection": "Изменить подключение",
+                "issueToken": "Issue token",
+                "installAgent": "Install agent",
+                "deployEnvironment": "Deploy environment",
+                "remove": "Remove",
+                "revoke": "Revoke",
+                "start": "Start",
+                "stop": "Stop",
+                "openTerminal": "Открыть терминал",
+                "syncCapabilities": "Sync capabilities",
+                "drain": "Drain",
+                "retire": "Retire",
+                "deleteEnvironment": "Delete environment",
+                "deleteConnection": "Удалить подключение"
+            },
+            "connectionDeleteBlocked": "Это подключение можно удалить только после удаления его сред и удаления напрямую связанных узлов и ресурсов.",
+            "confirmDeleteConnectionTitle": "Удалить подключение?",
+            "confirmDeleteConnectionMessage": "Будет удалена только локальная конфигурация подключения. Удалённые ресурсы не будут затронуты.",
+            "confirmDeleteConnectionLabel": "Удалить подключение",
+            "confirmDeleteEnvironmentTitle": "Удалить среду?",
+            "confirmDeleteEnvironmentMessage": "Удалить эту среду из MatchaClaw и удалить {{count}} управляемых удалённых ресурсов, выбранных для удаления.",
+            "confirmDeleteEnvironmentNoRemoteResourcesMessage": "Удалить эту среду из MatchaClaw. Удалённые ресурсы удалены не будут.",
+            "confirmDeleteEnvironmentUnchangedMessage": "Остальные {{count}} удалённых ресурсов останутся без изменений.",
+            "confirmDeleteEnvironmentLabel": "Удалить среду",
+            "noTimestamp": {
+                "command": "No command timestamp",
+                "event": "No event timestamp"
+            }
+        },
+        "leases": {
+            "title": "Leases",
+            "emptyTitle": "No leases",
+            "emptyDescription": "No endpoint lease is projected in the current snapshot."
+        },
+        "terminal": {
+            "badge": "Терминал",
+            "title": "Удалённый терминал",
+            "description": "Откройте интерактивный терминал.",
+            "terminalLabel": "Терминал Remote Fleet",
+            "unavailableTitle": "Терминал недоступен",
+            "sessionActive": "Сессия подключена",
+            "sessionPending": "Сессия ожидает подключения",
+            "exitMessage": "Терминал завершён. Код: {{code}} · Сигнал: {{signal}}",
+            "targetTitle": {
+                "node": "Терминал · {{name}}",
+                "runtime": "Терминал · {{name}}",
+                "endpoint": "Терминал · {{name}}"
+            },
+            "targetDescription": {
+                "node": "Открыть терминал на этом узле.",
+                "runtime": "Открыть терминал для этого runtime.",
+                "endpoint": "Открыть терминал через этот endpoint."
+            },
+            "status": {
+                "idle": "Ожидание",
+                "opening": "Открытие",
+                "connecting": "Подключение",
+                "ready": "Готов",
+                "closed": "Закрыт",
+                "exited": "Завершён",
+                "error": "Ошибка"
+            },
+            "actions": {
+                "reconnect": "Переподключить",
+                "minimize": "Свернуть",
+                "close": "Закрыть терминал"
+            },
+            "unavailable": {
+                "disabled": "Узел отключён.",
+                "customNeedsEndpoint": "Пользовательские цели открывают терминал через endpoint. Сначала выберите связанный endpoint.",
+                "customMissingCapability": "Этот пользовательский endpoint не объявил возможность подключения терминала.",
+                "endpointUnavailable": "Endpoint не активен."
+            },
+            "errors": {
+                "remoteError": "Удалённый терминал сообщил об ошибке. Закройте его или переподключитесь.",
+                "connectionFailed": "Не удалось подключиться к терминалу. Проверьте соединение и повторите попытку.",
+                "openFailed": "Не удалось открыть терминал. Убедитесь, что цель доступна и терминал для неё разрешён.",
+                "reconnectFailed": "Не удалось переподключиться. Проверьте соединение или закройте терминал и откройте новый."
+            }
+        },
+        "heartbeat": {
+            "title": "Manual heartbeat",
+            "description": "Отправьте сигнал активности агента вручную.",
+            "fields": {
+                "agentId": "Agent ID",
+                "version": "Version",
+                "capabilities": "Capabilities"
+            },
+            "submit": "Record heartbeat",
+            "toastSubmitted": "Heartbeat submitted",
+            "toastFailed": "Failed to record heartbeat"
+        },
+        "operations": {
+            "title": "Операции",
+            "load": "Load",
+            "summaryOnly": "Summary only",
+            "refresh": "Обновить",
+            "dataCoverage": "Охват данных",
+            "searchHistory": "Поиск в истории",
+            "statusFilter": "Статус",
+            "allStatuses": "Все статусы",
+            "eventFilter": "Фильтр событий",
+            "allEvents": "Все события",
+            "loadFailed": "Не удалось загрузить данные операций",
+            "retry": "Повторить",
+            "fleetWide": "Все ресурсы",
+            "advancedDescription": "Дополнительные инструменты для диагностики и ручных операций.",
+            "loading": "Загрузка...",
+            "notLoaded": "Не загружено",
+            "tabs": {
+                "overview": "Обзор",
+                "metrics": "Metrics",
+                "commands": "Commands",
+                "audit": "Audit",
+                "gaps": "Gaps",
+                "advanced": "Advanced operations",
+                "metricsLoaded": "Runtime service {{running}}/{{total}}",
+                "notLoaded": "Not loaded",
+                "loadedCount": "{{count}} loaded",
+                "gapsCount": "{{count}} known",
+                "manualTools": "Manual tools"
+            },
+            "overview": {
+                "description": "Сводка состояния и активности удалённых ресурсов."
+            },
+            "metrics": {
+                "loadingTitle": "Метрики загружаются",
+                "loadingDescription": "Подождите, пока загрузятся текущие показатели.",
+                "emptyTitle": "No metrics",
+                "emptyDescription": "Load runtime-host metrics when you need operational totals.",
+                "runtimeRunning": "Runtime running",
+                "endpointReady": "Endpoint ready",
+                "recentFailures": "Recent failures",
+                "nodeStatus": "Node status",
+                "targetKind": "Target kind",
+                "runtimeStatus": "Runtime status",
+                "runtimeKind": "Runtime kind",
+                "endpointStatus": "Endpoint status",
+                "commandAudit": "Command / audit",
+                "noNonZeroBuckets": "No non-zero buckets"
+            },
+            "commands": {
+                "description": "Краткие сведения о командах для удалённых ресурсов.",
+                "notLoadedDescription": "Загрузите сведения, чтобы просмотреть историю команд.",
+                "loadFailedDescription": "Повторите загрузку сводки команд.",
+                "emptyTitle": "No commands",
+                "emptyDescription": "Remote runtime commands will appear as summaries.",
+                "displayedCount": "Showing {{displayed}} of {{loaded}} loaded commands."
+            },
+            "audit": {
+                "description": "Сводка событий для удалённых ресурсов.",
+                "notLoadedDescription": "Загрузите сведения, чтобы просмотреть историю событий.",
+                "loadFailedDescription": "Повторите загрузку сводки аудита.",
+                "emptyTitle": "No audit events",
+                "emptyDescription": "Remote fleet events will appear as audit summaries.",
+                "displayedCount": "Showing {{displayed}} of {{loaded}} loaded audit events.",
+                "unknownTime": "Unknown time"
+            },
+            "gaps": {
+                "badge": "Gap",
+                "routingExplain": {
+                    "title": "Routing explain",
+                    "description": "Selection reasons are internal today. The renderer does not recompute routing."
+                },
+                "logRedaction": {
+                    "title": "Log redaction",
+                    "description": "Only redacted summaries are projected here. Raw logs stay out of the renderer."
+                }
+            },
+            "fields": {
+                "id": "ID",
+                "node": "Remote connection",
+                "agent": "Management agent",
+                "runtime": "Runtime service",
+                "endpoint": "Endpoint",
+                "created": "Created",
+                "updated": "Updated",
+                "message": "Message",
+                "command": "Command",
+                "draining": "Draining",
+                "retired": "Retired",
+                "activeLeases": "Active leases",
+                "staleCapabilities": "Stale capabilities",
+                "auditEvents": "Audit events"
+            }
+        },
+        "registration": {
+            "trigger": "Добавить подключение",
+            "title": "Добавить подключение",
+            "description": "Добавьте подключение и настройте его среду. Постоянный ID, метки и публичную конфигурацию можно указать в расширенных настройках.",
+            "toast": {
+                "submitted": "Подключение сохранено",
+                "failed": "Не удалось сохранить подключение",
+                "connectionSaved": "Подключение сохранено. Проверьте подключение, чтобы убедиться, что оно работает."
+            },
+            "advanced": {
+                "title": "Расширенные настройки подключения",
+                "description": "ID подключения, метки, ссылки на секреты, публичная конфигурация и состояние включения."
+            },
+            "secretRefBoundary": "Advanced use: KEY=existing-secret-ref. Do not paste secrets.",
+            "publicConfigWarning": "Do not put tokens, passwords, Authorization headers, API keys, secrets, or credentials in public config.",
+            "submit": "Сохранить подключение",
+            "fields": {
+                "id": "ID подключения",
+                "displayName": "Отображаемое имя",
+                "targetKind": "Тип цели",
+                "endpointUrl": "URL конечной точки",
+                "dockerEndpoint": "Конечная точка Docker",
+                "labels": "Метки",
+                "secretRefs": "Ссылки на секреты",
+                "publicConfig": "Публичная конфигурация JSON"
+            },
+            "placeholders": {
+                "id": "lab-linux-01",
+                "displayName": "Lab Linux 01",
+                "dockerEndpoint": "https://docker.example.com:2376",
+                "labels": "gpu, linux"
+            },
+            "fieldHelp": {
+                "id": "Необязательно. Если оставить пустым, ID будет создан автоматически.",
+                "labels": "Для фильтрации маршрутизации, через запятую."
+            },
+            "enabled": {
+                "label": "Включить подключение",
+                "description": "Отключённые подключения остаются в проекции ресурсов, но недоступны для операций."
+            },
+            "errors": {
+                "secretRefFormat": "Secret refs must use KEY=existing-secret-ref per line.",
+                "secretRefRequired": "Secret ref key and value are required.",
+                "publicConfigJson": "Public config must be valid JSON.",
+                "publicConfigObject": "Public config must be a JSON object.",
+                "publicConfigSecret": "Public config contains a sensitive key. Move it to secret refs.",
+                "containerImageSensitive": "Docker image fields must not contain credentials or Authorization material.",
+                "dockerLoopbackHttps2375": "Локальный Docker на порту 2375 должен использовать HTTP. Замените https:// на http:// и сохраните.",
+                "connectionIdMissing": "Connection registration did not return a connection ID.",
+                "environmentIdMissing": "Environment registration did not return an environment ID.",
+                "portNumber": "Порт должен быть целым числом от 1 до 65535.",
+                "k8sApiServerHttps": "Kubernetes API server URL must use https.",
+                "k8sApiServerOrigin": "Kubernetes API server URL must be an origin URL without credentials, path, query, or fragment data.",
+                "credentialWriterMissing": "Запись учётных данных недоступна в этой форме. Пароли, приватные ключи и токены не отправляются открытым текстом. Используйте существующие secret refs.",
+                "k8sKubeconfigPending": "Запись kubeconfig недоступна в этой форме. Kubeconfig не отправляется открытым текстом. Используйте ручные поля подключения или существующие secret refs."
+            },
+            "targetKinds": {
+                "ssh-host": "SSH host",
+                "container": "Container",
+                "k8s-pod": "Kubernetes pod",
+                "custom": "Custom",
+                "vm": "VM"
+            },
+            "helpers": {
+                "sshHost": {
+                    "summary": "SSH: host, port, username, and login method.",
+                    "endpointUrlPlaceholder": "ssh://lab-linux-01.internal:22",
+                    "publicConfigPlaceholder": "{\n  \"ssh\": {}\n}",
+                    "secretRefsPlaceholder": "sshPrivateKey=<existing-secret-ref>"
+                },
+                "container": {
+                    "summary": "Docker: endpoint, Debian environment image, and optional bearer token.",
+                    "endpointUrlPlaceholder": "https://docker.example.com:2376",
+                    "publicConfigPlaceholder": "{\n  \"docker\": {}\n}",
+                    "secretRefsPlaceholder": "dockerBearerToken=<existing-secret-ref>"
+                },
+                "k8sPod": {
+                    "summary": "Kubernetes: API server, namespace, pod target, and optional bearer token.",
+                    "endpointUrlPlaceholder": "https://k8s.example.test:6443",
+                    "publicConfigPlaceholder": "{\n  \"k8s\": {}\n}",
+                    "secretRefsPlaceholder": "kubeBearerToken=<existing-secret-ref>"
+                },
+                "custom": {
+                    "summary": "Custom: endpoint URL only.",
+                    "endpointUrlPlaceholder": "https://node.example.internal",
+                    "publicConfigPlaceholder": "{}",
+                    "secretRefsPlaceholder": "providerCredential=<existing-secret-ref>"
+                },
+                "vm": {
+                    "summary": "VM: host, SSH port, username, and login method.",
+                    "endpointUrlPlaceholder": "ssh://vm.example.internal:22",
+                    "publicConfigPlaceholder": "{\n  \"vm\": {}\n}",
+                    "secretRefsPlaceholder": "sshPrivateKey=<existing-secret-ref>"
+                }
+            },
+            "ssh": {
+                "fields": {
+                    "host": "Хост / IP",
+                    "port": "Порт",
+                    "username": "Имя пользователя"
+                },
+                "placeholders": {
+                    "host": "lab-linux-01.internal",
+                    "port": "22",
+                    "username": "matcha"
+                },
+                "title": "SSH connection",
+                "auth": {
+                    "label": "Login method",
+                    "methods": {
+                        "password": "Пароль",
+                        "private-key": "SSH private key",
+                        "ssh-agent": "SSH Agent",
+                        "existing-secret": "Существующий secret ref"
+                    },
+                    "fields": {
+                        "password": "Password",
+                        "privateKey": "SSH private key",
+                        "existingSecret": "Существующие secret refs"
+                    },
+                    "placeholders": {
+                        "password": "SSH password",
+                        "privateKey": "-----BEGIN OPENSSH PRIVATE KEY-----",
+                        "existingSecret": "sshPrivateKey=<существующий secret ref>\nsshPassword=<существующий secret ref>"
+                    },
+                    "help": {
+                        "credentialPending": "Пароли и приватные ключи не отправляются открытым текстом. Сначала запишите их в приватное хранилище секретов или используйте существующие secret refs в расширенных настройках.",
+                        "sshAgent": "Использует SSH Agent, доступный runtime host. Renderer не получает и не хранит приватные ключи.",
+                        "existingSecret": "Введите KEY=существующий secret ref по одной записи на строку, например sshPrivateKey=<существующий secret ref>."
+                    }
+                }
+            },
+            "k8s": {
+                "fields": {
+                    "apiServerUrl": "Kubernetes API server URL",
+                    "namespace": "Namespace",
+                    "podName": "Pod name",
+                    "containerName": "Container name",
+                    "labelSelector": "Label selector",
+                    "bearerToken": "Bearer token",
+                    "clientCertificate": "Клиентский сертификат",
+                    "kubeconfig": "Kubeconfig",
+                    "kubeconfigContext": "Kubeconfig context"
+                },
+                "placeholders": {
+                    "namespace": "matcha-runtime",
+                    "podName": "runtime-agent-pod-1",
+                    "containerName": "runtime-agent",
+                    "labelSelector": "app=matchaclaw-runtime-agent",
+                    "bearerToken": "Kubernetes bearer token",
+                    "clientCertificate": "-----BEGIN CERTIFICATE-----",
+                    "kubeconfig": "apiVersion: v1\nclusters: []",
+                    "kubeconfigContext": "matcha-runtime"
+                },
+                "help": {
+                    "podTarget": "Укажите Pod name или label selector. Если оба поля пустые, Matcha найдёт свой runtime-agent Pod.",
+                    "credentialPending": "Kubernetes tokens, certificates и kubeconfig не отправляются открытым текстом. Используйте существующие secret refs."
+                },
+                "connection": {
+                    "title": "Kubernetes connection",
+                    "modeLabel": "Режим подключения",
+                    "modes": {
+                        "manual": "Ручные поля",
+                        "kubeconfig": "Kubeconfig"
+                    }
+                }
+            },
+            "custom": {
+                "fields": {
+                    "endpointUrl": "Custom endpoint URL"
+                },
+                "placeholders": {},
+                "title": "Custom runtime connection",
+                "auth": {
+                    "label": "Аутентификация",
+                    "methods": {
+                        "none": "Нет",
+                        "api-token": "API token",
+                        "mtls": "mTLS bundle",
+                        "pairing-code": "Pairing code"
+                    },
+                    "pendingCredentialNotice": "Custom credentials не отправляются открытым текстом. Сначала запишите их в приватное хранилище секретов или используйте существующие secret refs в расширенных настройках."
+                },
+                "credentials": {
+                    "apiToken": "API token",
+                    "mtlsBundle": "mTLS bundle",
+                    "pairingCode": "Pairing code",
+                    "notSubmitted": "Это значение не отправляется открытым текстом. Используйте существующий secret ref."
+                }
+            },
+            "vm": {
+                "fields": {
+                    "endpointUrl": "VM connection URL",
+                    "host": "Host / IP",
+                    "port": "SSH port",
+                    "username": "Username",
+                    "loginMethod": "Login method"
+                },
+                "placeholders": {
+                    "host": "vm-01.example.internal",
+                    "port": "22",
+                    "username": "matcha"
+                },
+                "title": "VM connection",
+                "loginMethods": {
+                    "password": "Пароль",
+                    "private-key": "SSH private key",
+                    "agent-installed": "Агент установлен"
+                },
+                "credentials": {
+                    "password": "Password",
+                    "privateKey": "SSH private key"
+                },
+                "cloudDiscovery": {
+                    "title": "Discover VMs from a cloud account",
+                    "description": "Cloud discovery needs a secure credential flow. This form does not collect cloud tokens."
+                },
+                "help": {
+                    "credentialPending": "Пароли и приватные ключи не отправляются открытым текстом. Сначала запишите их в приватное хранилище секретов или используйте существующие secret refs в расширенных настройках.",
+                    "agentInstalled": "Используйте, если RuntimeAgent уже установлен на VM. Регистрация записывает только projection подключения."
+                }
+            },
+            "environmentRegistered": {
+                "title": "Среда зарегистрирована",
+                "description": "Среда зарегистрирована. Разверните рантайм сейчас или позже.",
+                "deployNow": "Развернуть сейчас",
+                "deployLater": "Развернуть позже",
+                "deploymentFailed": "Развертывание не удалось. Проверьте конфигурацию среды и повторите попытку."
+            },
+            "container": {
+                "title": "Docker connection",
+                "fields": {
+                    "authentication": "Authentication",
+                    "containerName": "Container name or ID",
+                    "image": "Образ",
+                    "imageCandidates": "Кандидаты для pull",
+                    "bearerToken": "Bearer token",
+                    "connectionSource": "Источник подключения",
+                    "contextName": "Имя Docker context",
+                    "tlsCertificate": "Материал TLS сертификата"
+                },
+                "authMethods": {
+                    "none": "Нет",
+                    "bearer-token": "Bearer token",
+                    "tls-certificate": "TLS certificate",
+                    "ssh-context": "SSH context"
+                },
+                "placeholders": {
+                    "containerName": "matchaclaw-debian-node-1",
+                    "image": "debian:bookworm-slim",
+                    "imageCandidates": "docker.m.daocloud.io/library/debian:bookworm-slim\ndebian:bookworm-slim",
+                    "bearerToken": "Docker bearer token",
+                    "contextName": "default",
+                    "tlsCertificate": "-----BEGIN CERTIFICATE-----"
+                },
+                "help": {
+                    "endpoint": "Use the Docker Engine HTTP API endpoint, not a local socket path.",
+                    "image": "Creates a general Debian environment container. Defaults to debian:bookworm-slim.",
+                    "imageCandidates": "If the image is not local, pull candidates in order. Leave empty to use the built-in China mirror candidates and the official image.",
+                    "containerName": "Leave empty to auto-generate a Matcha-managed Debian container name. Fill it to use or start a specific existing container.",
+                    "credentialPending": "Токены и сертификаты не отправляются открытым текстом. Сначала запишите их в приватное хранилище секретов или используйте существующие secret refs в расширенных настройках.",
+                    "sshContext": "Использует существующий Docker SSH context на host. Renderer не хранит SSH credentials."
+                },
+                "connectionSources": {
+                    "endpoint": "Docker endpoint",
+                    "context": "Docker context"
+                },
+                "environmentRegistered": {
+                    "title": "Среда зарегистрирована",
+                    "description": "Среда готова. Разверните рантайм сейчас или позже.",
+                    "deployNow": "Развернуть сейчас",
+                    "deployLater": "Развернуть позже",
+                    "deploymentFailed": "Развертывание не удалось. Проверьте конфигурацию среды и повторите попытку."
+                }
+            }
+        },
+        "targetPreview": {
+            "eyebrow": "Предпросмотр маршрута",
+            "title": "Предпросмотр цели",
+            "description": "Только предпросмотр. Планирование и lease-решения остаются в runtime-host.",
+            "metrics": {
+                "candidates": "Candidates",
+                "excluded": "Excluded",
+                "selector": "Selector",
+                "operations": "Operations",
+                "labels": "Labels",
+                "binding": "Binding"
+            },
+            "selectorSections": {
+                "endpointIds": "Endpoint IDs",
+                "nodeIds": "Node IDs",
+                "runtimeIds": "Runtime IDs",
+                "labels": "Labels",
+                "operations": "Operations"
+            },
+            "selectorSummary": {
+                "title": "Selector",
+                "unscoped": "Unscoped preview",
+                "single": "{{label}}: {{count}}",
+                "multiple": "{{count}} selector dimensions",
+                "all": "All",
+                "allEndpoints": "All endpoints",
+                "scopedPreview": "Scoped preview",
+                "allEndpointsDetail": "Every discovered endpoint remains visible before runtime-host scheduling.",
+                "dimensionCount": "{{label}} {{count}}"
+            },
+            "binding": {
+                "runtimeLinked": "Runtime linked",
+                "nodeLinked": "Node linked",
+                "direct": "Direct"
+            },
+            "meta": {
+                "node": "Node",
+                "runtime": "Runtime",
+                "url": "URL"
+            },
+            "chips": {
+                "operationsInScope": "Operations in scope",
+                "labels": "Labels"
+            },
+            "exclusion": {
+                "title": "Excluded by runtime state",
+                "description": "Status is {{status}}, so it is not an active candidate."
+            },
+            "empty": {
+                "noOperations": {
+                    "title": "No operations matched",
+                    "description": "The endpoint matches identity filters, but no selected operation is available."
+                },
+                "noSelector": {
+                    "title": "No selector",
+                    "description": "The preview currently includes all discovered endpoints."
+                },
+                "noCandidates": {
+                    "title": "No candidates",
+                    "description": "Widen the selector or sync capabilities."
+                },
+                "noExclusions": {
+                    "title": "No exclusions",
+                    "description": "No matching endpoint is draining or retired."
+                }
+            },
+            "candidates": {
+                "title": "Candidate endpoints",
+                "description": "Endpoints matching the current preview."
+            },
+            "excluded": {
+                "title": "Excluded endpoints",
+                "description": "Matching endpoints blocked by runtime state."
+            }
+        },
+        "toasts": {
+            "loadFailed": "Failed to load Remote Fleet",
+            "nodeRemoved": "Node removed",
+            "nodeRemoveFailed": "Failed to remove node",
+            "probeSubmitted": "Probe submitted",
+            "probeFailed": "Failed to probe node",
+            "connectionCheckCompleted": "Проверка подключения завершена",
+            "connectionCheckFailed": "Не удалось проверить подключение",
+            "tokenIssued": "Enrollment token issued",
+            "tokenFailed": "Failed to issue enrollment token",
+            "installSubmitted": "Install command submitted",
+            "environmentDeploySubmitted": "Environment deploy command submitted",
+            "environmentDeployFailed": "Failed to deploy environment",
+            "installFailed": "Failed to install RuntimeAgent",
+            "agentRevoked": "RuntimeAgent revoked",
+            "agentRevokeFailed": "Failed to revoke RuntimeAgent",
+            "startSubmitted": "Start command submitted",
+            "startFailed": "Failed to start remote runtime",
+            "stopSubmitted": "Stop command submitted",
+            "stopFailed": "Failed to stop remote runtime",
+            "drainSubmitted": "Drain submitted",
+            "drainFailed": "Failed to drain endpoint",
+            "retireSubmitted": "Retire submitted",
+            "retireFailed": "Failed to retire endpoint",
+            "syncSubmitted": "Capability sync submitted",
+            "syncFailed": "Failed to sync capabilities",
+            "metricsFailed": "Failed to load metrics",
+            "commandsFailed": "Failed to load commands",
+            "auditFailed": "Failed to load audit events",
+            "connectionDeleted": "Подключение удалено",
+            "connectionDeleteFailed": "Не удалось удалить подключение",
+            "environmentDeleted": "Среда удалена",
+            "environmentDeleteIncomplete": "Среда не была удалена, так как очистка удалённых ресурсов не завершилась. Среда сохранена.",
+            "environmentDeletedRemoteResourcesUnchanged": "Среда удалена. Некоторые удалённые ресурсы остались без изменений.",
+            "environmentDeleteFailed": "Не удалось удалить среду"
+        }
+    }
 }

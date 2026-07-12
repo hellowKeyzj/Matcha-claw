@@ -26,9 +26,11 @@ const RUNTIME_HOST_STORAGE_HOT_PATHS = [
 const RUNTIME_HOST_APPLICATION_ROOTS = [
   'runtime-host/application',
 ] as const;
-const TEAM_RUNTIME_WORKER_INFRASTRUCTURE_FILES = new Set([
+const RUNTIME_HOST_APPLICATION_INFRASTRUCTURE_FILES = new Set([
   'runtime-host/application/team-runtime/infrastructure/worker/local-sqlite/sqlite-team-command-ledger.ts',
   'runtime-host/application/team-runtime/infrastructure/worker/team-runtime-worker-entry.ts',
+  'runtime-host/application/remote-fleet/infrastructure/remote-fleet-file-state-store.ts',
+  'runtime-host/application/remote-fleet/infrastructure/remote-fleet-node-identity.ts',
 ]);
 const RUNTIME_HOST_OPENCLAW_CORE_BOUNDARY_ROOTS = [
   'runtime-host/application/providers',
@@ -363,7 +365,7 @@ describe('runtime-host implementation boundary', () => {
 
     for (const file of checkedFiles) {
       const relativeFile = path.relative(process.cwd(), file).replace(/\\/g, '/');
-      if (TEAM_RUNTIME_WORKER_INFRASTRUCTURE_FILES.has(relativeFile)) {
+      if (RUNTIME_HOST_APPLICATION_INFRASTRUCTURE_FILES.has(relativeFile)) {
         continue;
       }
       const source = await readFile(file, 'utf8');
@@ -631,7 +633,7 @@ describe('runtime-host implementation boundary', () => {
 
     for (const file of checkedFiles) {
       const relativeFile = path.relative(process.cwd(), file).replace(/\\/g, '/');
-      if (TEAM_RUNTIME_WORKER_INFRASTRUCTURE_FILES.has(relativeFile)) {
+      if (RUNTIME_HOST_APPLICATION_INFRASTRUCTURE_FILES.has(relativeFile)) {
         continue;
       }
       const source = await readFile(file, 'utf8');

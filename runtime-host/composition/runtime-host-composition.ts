@@ -13,9 +13,16 @@ import {
 } from './application-services';
 import type { RuntimeHostStatePort } from '../application/runtime-host/runtime-state';
 import type { TeamRuntimePort } from '../application/team-runtime/team-runtime-port';
+import type { RemoteFleetPort } from '../application/remote-fleet/remote-fleet-service';
+import type { RemoteFleetTerminalManager } from '../application/remote-fleet/remote-fleet-terminal-manager';
 import type { TeamRuntimeWebhookAuthService } from '../application/team-runtime/team-runtime-webhook-auth';
 import { RuntimeHostContainer } from './container';
-import { RUNTIME_DISPATCH_ROUTE_TOKEN, TEAM_RUNTIME_SERVICE_TOKEN, TEAM_RUNTIME_WEBHOOK_AUTH_TOKEN } from './runtime-host-tokens';
+import {
+  REMOTE_FLEET_SERVICE_TOKEN,
+  RUNTIME_DISPATCH_ROUTE_TOKEN,
+  TEAM_RUNTIME_SERVICE_TOKEN,
+  TEAM_RUNTIME_WEBHOOK_AUTH_TOKEN,
+} from './runtime-host-tokens';
 import {
   registerRuntimeHostInfrastructure,
   resolveRuntimeHostInfrastructure,
@@ -130,6 +137,8 @@ export function createRuntimeHostProcess(): RuntimeHostProcess {
   const dispatchRuntimeRoute = routeRegistry.dispatcher();
   const teamRuntimeService = applicationContext.facades.resolve<TeamRuntimePort>(TEAM_RUNTIME_SERVICE_TOKEN);
   const teamRuntimeWebhookAuth = applicationContext.facades.resolve<TeamRuntimeWebhookAuthService>(TEAM_RUNTIME_WEBHOOK_AUTH_TOKEN);
+  const remoteFleetService = applicationContext.facades.resolve<Pick<RemoteFleetPort, 'invoke'>>(REMOTE_FLEET_SERVICE_TOKEN);
+  const remoteFleetTerminalManager = container.resolve<RemoteFleetTerminalManager>('remoteFleet.terminalManager');
   container.registerValue(RUNTIME_DISPATCH_ROUTE_TOKEN, dispatchRuntimeRoute);
   registerRuntimeHostSystemModuleJobs(systemModuleContext, systemModules);
   registerRuntimeHostModuleJobs(container, {
@@ -162,7 +171,10 @@ export function createRuntimeHostProcess(): RuntimeHostProcess {
     logger,
     teamWebhookToken: () => teamRuntimeWebhookAuth.getToken(),
     teamRuntimeService,
+    remoteFleetService,
     nowMs: () => clock.nowMs(),
+    nowIso: () => new Date(clock.nowMs()).toISOString(),
+    terminalStream: remoteFleetTerminalManager,
     dispatchRuntimeRoute,
     shutdown: (exitCode) => runner.shutdown(exitCode),
   });

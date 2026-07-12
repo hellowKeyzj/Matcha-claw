@@ -53,7 +53,8 @@
         "pendingBlockerTaskId": "Task ID {{taskId}}",
         "pendingBlockerSourceChat": "Chat",
         "pendingBlockerApprovalId": "Approval ID {{id}}",
-        "pendingBlockerApprovalHint": "A tool call is waiting for your approval."
+        "pendingBlockerApprovalHint": "A tool call is waiting for your approval.",
+        "remoteFleet": "Remote Fleet"
     },
     "actions": {
         "save": "Save",
@@ -97,5 +98,857 @@
         "notRunning": "Gateway Not Running",
         "notRunningDesc": "The OpenClaw Gateway needs to be running to use this feature. It will start automatically, or you can start it from Settings.",
         "warning": "Gateway is not running."
+    },
+    "remoteFleet": {
+        "common": {
+            "unknown": "Unknown"
+        },
+        "statuses": {
+            "unknown": "Unknown",
+            "online": "Online",
+            "running": "Running",
+            "connected": "Connected",
+            "succeeded": "Succeeded",
+            "available": "Available",
+            "ready": "Ready",
+            "active": "Active",
+            "enrolled": "Enrolled",
+            "installed": "Installed",
+            "environment-ready": "Environment ready",
+            "offline": "Offline",
+            "stopped": "Stopped",
+            "disabled": "Disabled",
+            "queued": "Queued",
+            "draining": "Draining",
+            "retired": "Retired",
+            "not-installed": "Not installed",
+            "error": "Error",
+            "failed": "Failed",
+            "unhealthy": "Unhealthy",
+            "revoked": "Revoked",
+            "registered": "Registered",
+            "deploying": "Deploying",
+            "deleting": "Deleting",
+            "deleted": "Deleted",
+            "orphaned": "Orphaned",
+            "matcha-managed": "Matcha-managed",
+            "unverified": "Unverified",
+            "external": "External",
+            "observed": "Observed",
+            "provisioning": "Provisioning",
+            "conflict": "Conflict",
+            "installing": "Installing",
+            "discovered": "Discovered",
+            "starting": "Starting",
+            "stopping": "Stopping",
+            "degraded": "Degraded",
+            "busy": "Busy",
+            "current": "Current",
+            "stale": "Stale",
+            "pruned": "Pruned",
+            "cancelled": "Cancelled",
+            "timed-out": "Timed out",
+            "released": "Released",
+            "expired": "Expired",
+            "opening": "Opening",
+            "closing": "Closing",
+            "closed": "Closed"
+        },
+        "modes": {
+            "label": "Remote Fleet mode",
+            "resources": "Resources",
+            "operations": "Operations"
+        },
+        "fields": {
+            "id": "ID",
+            "node": "Remote connection",
+            "agent": "Management agent",
+            "runtime": "Runtime service",
+            "endpoint": "Endpoint",
+            "url": "URL",
+            "labels": "Labels",
+            "lastSeen": "Last seen",
+            "lastProbe": "Last probe",
+            "reason": "Reason",
+            "model": "Model",
+            "capabilities": "Capabilities",
+            "operations": "Operations",
+            "owner": "Owner",
+            "ownerId": "Owner ID",
+            "expires": "Expires",
+            "message": "Message",
+            "started": "Started",
+            "connection": "Connection",
+            "environment": "Environment",
+            "kind": "Kind",
+            "provider": "Provider",
+            "cleanupPolicy": "Cleanup policy",
+            "created": "Created",
+            "updated": "Updated",
+            "lastObserved": "Last observed",
+            "protocol": "Protocol"
+        },
+        "header": {
+            "title": "Remote runtimes",
+            "description": "Control remote connections, management agents, runtime services, and routable endpoints from the runtime-host projection.",
+            "snapshotReady": "Snapshot ready",
+            "snapshotLoading": "Loading snapshot",
+            "snapshotIdle": "Snapshot idle",
+            "metricsLoaded": "Metrics loaded",
+            "metricsPending": "Metrics pending",
+            "action": "Action: {{action}}",
+            "loadMetrics": "Load metrics",
+            "refreshSnapshot": "Refresh snapshot",
+            "stats": {
+                "inventory": "Inventory",
+                "inventorySubtitle": "{{agents}} management agents · {{runtimes}} runtime services · {{endpoints}} endpoints",
+                "runtimes": "Runtime services",
+                "runtimesSubtitle": "Running / total",
+                "endpoints": "Endpoints",
+                "endpointsSubtitle": "Ready / total",
+                "attention": "Attention",
+                "attentionSubtitle": "{{failures}} failures · {{states}} state alerts · {{stale}} stale of {{capabilities}} capabilities"
+            }
+        },
+        "workspace": {
+            "syncedAt": "Synced {{time}}",
+            "resourceCount": "{{count}} resources",
+            "addRemote": "Add remote",
+            "emptyTitle": "Connect your first remote environment",
+            "emptyDescription": "Add an SSH host, Docker daemon, Kubernetes cluster, or VM to start managing remote runtimes.",
+            "addConnection": "Add connection",
+            "backToResources": "Back to resources"
+        },
+        "resourceBrowser": {
+            "types": "Resource types",
+            "groups": {
+                "infrastructure": "Infrastructure",
+                "execution": "Execution"
+            },
+            "index": "Resource index",
+            "resultCount": "{{visible}} of {{total}}",
+            "searchPlaceholder": "Search name, ID, URL, or label",
+            "search": "Search resources",
+            "statusFilter": "Status filter",
+            "allStatuses": "All statuses",
+            "kindFilter": "Kind filter",
+            "allKinds": "All kinds",
+            "environmentFilter": "Environment filter",
+            "allEnvironments": "All environments",
+            "sort": "Sort resources",
+            "clearFilters": "Clear filters",
+            "emptyTitle": "No matching resources",
+            "emptyFilteredDescription": "Change or clear the filters to see more resources.",
+            "emptyTypeDescription": "Resources of this type will appear here."
+        },
+        "inventory": {
+            "title": "Inventory",
+            "description": "Select one object, then inspect its control plane detail.",
+            "consoleTitle": "Fleet inventory",
+            "consoleDescription": "Select a connection, environment, resource, node, agent, runtime, or endpoint, then inspect it in the workspace.",
+            "tabs": {
+                "connections": "Connections",
+                "environments": "Environments",
+                "managedResources": "Resources",
+                "nodes": "Nodes",
+                "agents": "Agents",
+                "runtimes": "Runtimes",
+                "endpoints": "Endpoints"
+            },
+            "emptyConnectionsTitle": "No connections yet",
+            "emptyConnectionsDescription": "Add a connection to create the first remote entry.",
+            "emptyEnvironmentsTitle": "No environments yet",
+            "emptyEnvironmentsDescription": "Registered environments will appear after a connection is created.",
+            "emptyManagedResourcesTitle": "No resources yet",
+            "emptyManagedResourcesDescription": "Managed resource projections will appear after deployment or discovery.",
+            "emptyNodesTitle": "No connections yet",
+            "emptyNodesDescription": "Add a connection to create the first remote entry.",
+            "emptyAgentsTitle": "No agents yet",
+            "emptyAgentsDescription": "Installed RuntimeAgent projections will appear here.",
+            "emptyRuntimesTitle": "No runtimes yet",
+            "emptyRuntimesDescription": "Runtime service projections will appear after deployment.",
+            "emptyEndpointsTitle": "No endpoints yet",
+            "emptyEndpointsDescription": "Ready runtime endpoints will appear here.",
+            "empty": "No fleet objects yet. Register a node or refresh the snapshot.",
+            "badges": {
+                "disabled": "Disabled"
+            },
+            "sections": {
+                "connections": "Connections",
+                "environments": "Environments",
+                "managedResources": "Resources",
+                "nodes": "Connections",
+                "agents": "Management agents",
+                "runtimes": "Runtime services",
+                "endpoints": "Endpoints"
+            },
+            "fields": {
+                "id": "ID",
+                "endpoint": "Endpoint",
+                "labels": "Labels",
+                "lastSeen": "Last seen",
+                "node": "Remote connection",
+                "runtime": "Runtime service",
+                "capabilities": "Capabilities",
+                "agent": "Management agent",
+                "started": "Started",
+                "url": "URL",
+                "lastProbe": "Last probe",
+                "connection": "Connection",
+                "environment": "Environment",
+                "resources": "Resources",
+                "lastObserved": "Last observed"
+            },
+            "actions": {
+                "probe": "Probe",
+                "issueToken": "Token",
+                "installAgent": "Install"
+            }
+        },
+        "detail": {
+            "backToIndex": "Back to resource index",
+            "relationshipPath": "Resource relationship path",
+            "moreActions": "More actions",
+            "attention": "Attention",
+            "noAttentionReason": "No attention reason is currently reported.",
+            "agentTerminalUnavailable": "Terminal access is not opened directly from an agent. Select the related runtime in Resource Index to use its terminal target.",
+            "customExternalRuntimeGuidance": "Custom targets are managed by an external runtime, so connection checks and environment deployment are unavailable here. Select a related runtime or endpoint in Resource Index to review status and advertised capabilities.",
+            "tabs": {
+                "overview": "Overview",
+                "terminal": "Terminal",
+                "commands": "Commands",
+                "audit": "Audit",
+                "capabilities": "Capabilities"
+            },
+            "title": "Detail",
+            "loadingDescription": "Loading the snapshot before opening the selected object.",
+            "emptyDescription": "Choose an object from Inventory.",
+            "emptyTitle": "No object selected",
+            "emptyHint": "The detail pane stays focused on one connection, environment, resource, management agent, runtime service, or endpoint.",
+            "missingTitle": "{{kind}} not found",
+            "missingDescription": "The selected {{kind}} is no longer in the snapshot.",
+            "missingHint": "Inventory reflects the latest snapshot.",
+            "facts": "Facts",
+            "factsDescription": "Identifiers and key metadata for this resource.",
+            "associations": "Associations",
+            "associationsDescription": "Related resources and active leases.",
+            "connectionTerminalUnavailable": "This connection has no node terminal target. Select a related node, runtime, or endpoint in Resource Index instead.",
+            "connectionTerminalNeedsNodeSelection": "This connection has multiple nodes. Select a node in Resource Index, then open its terminal.",
+            "environmentTerminalUnavailable": "This environment has no terminal target. Select a related node, runtime, or endpoint in Resource Index instead.",
+            "managedResourceTerminalUnavailable": "This resource has no terminal target. Select the projected node, runtime, or endpoint in Resource Index instead.",
+            "capabilitiesDescription": "Capability projections attached to this object.",
+            "commandsDescription": "Loaded command summaries for this object.",
+            "auditDescription": "Loaded audit summaries for this object.",
+            "leasesDescription": "Lease summaries attached to this object.",
+            "emptyCapabilities": "No capabilities are linked.",
+            "emptyCommands": "No loaded commands reference this object.",
+            "emptyAudit": "No loaded audit events reference this object.",
+            "emptyLeases": "No leases are projected.",
+            "emptyEnvironments": "No environments are associated with this connection.",
+            "kinds": {
+                "connection": "Connection",
+                "environment": "Environment",
+                "managedResource": "Resource",
+                "node": "Node",
+                "agent": "Management agent",
+                "runtime": "Runtime service",
+                "endpoint": "Endpoint"
+            },
+            "descriptions": {
+                "connection": "Remote connection",
+                "environment": "Managed environment",
+                "managedResource": "Managed resource",
+                "node": "Remote connection",
+                "agent": "Agent identity",
+                "runtime": "Runtime service",
+                "endpoint": "Service endpoint"
+            },
+            "metrics": {
+                "agents": "Management agents",
+                "runtimes": "Runtime services",
+                "endpoints": "Endpoints",
+                "capabilities": "Capabilities",
+                "leases": "Leases",
+                "commands": "Commands",
+                "audit": "Audit",
+                "environments": "Environments",
+                "resources": "Resources"
+            },
+            "actions": {
+                "probe": "Probe",
+                "probeConnection": "Check connection",
+                "editConnection": "Edit connection",
+                "issueToken": "Issue token",
+                "installAgent": "Install agent",
+                "deployEnvironment": "Deploy environment",
+                "remove": "Remove",
+                "revoke": "Revoke",
+                "start": "Start",
+                "stop": "Stop",
+                "openTerminal": "Open terminal",
+                "syncCapabilities": "Sync capabilities",
+                "drain": "Drain",
+                "retire": "Retire",
+                "deleteEnvironment": "Delete environment",
+                "deleteConnection": "Delete connection"
+            },
+            "connectionDeleteBlocked": "This connection can only be deleted after its Environments are deleted and its direct nodes and resources are removed.",
+            "confirmDeleteConnectionTitle": "Delete connection?",
+            "confirmDeleteConnectionMessage": "Only the local connection configuration will be deleted. Remote resources will not be affected.",
+            "confirmDeleteConnectionLabel": "Delete connection",
+            "confirmDeleteEnvironmentTitle": "Delete environment?",
+            "confirmDeleteEnvironmentMessage": "Remove this environment from MatchaClaw and delete {{count}} managed remote resources selected for deletion.",
+            "confirmDeleteEnvironmentNoRemoteResourcesMessage": "Remove this environment from MatchaClaw. No remote resources will be deleted.",
+            "confirmDeleteEnvironmentUnchangedMessage": "{{count}} other remote resources will be left unchanged.",
+            "confirmDeleteEnvironmentLabel": "Delete environment",
+            "noTimestamp": {
+                "command": "No command timestamp",
+                "event": "No event timestamp"
+            }
+        },
+        "leases": {
+            "title": "Leases",
+            "emptyTitle": "No leases",
+            "emptyDescription": "No endpoint lease is projected in the current snapshot."
+        },
+        "terminal": {
+            "badge": "Terminal",
+            "title": "Remote terminal",
+            "description": "Open an interactive terminal.",
+            "terminalLabel": "Remote Fleet terminal",
+            "unavailableTitle": "Terminal unavailable",
+            "sessionActive": "Session connected",
+            "sessionPending": "Session pending",
+            "exitMessage": "Terminal exited. Code: {{code}} · Signal: {{signal}}",
+            "targetTitle": {
+                "node": "Terminal · {{name}}",
+                "runtime": "Terminal · {{name}}",
+                "endpoint": "Terminal · {{name}}"
+            },
+            "targetDescription": {
+                "node": "Open a terminal on this node.",
+                "runtime": "Open a terminal for this runtime.",
+                "endpoint": "Open a terminal through this endpoint."
+            },
+            "status": {
+                "idle": "Idle",
+                "opening": "Opening",
+                "connecting": "Connecting",
+                "ready": "Ready",
+                "closed": "Closed",
+                "exited": "Exited",
+                "error": "Error"
+            },
+            "actions": {
+                "reconnect": "Reconnect",
+                "minimize": "Minimize",
+                "close": "Close terminal"
+            },
+            "unavailable": {
+                "disabled": "Node is disabled.",
+                "customNeedsEndpoint": "Custom targets open terminals through an endpoint. Select a related endpoint first.",
+                "customMissingCapability": "This custom endpoint has not advertised terminal attach capability.",
+                "endpointUnavailable": "Endpoint is not active."
+            },
+            "errors": {
+                "remoteError": "The remote terminal reported an error. Close the terminal or reconnect.",
+                "connectionFailed": "The terminal could not connect. Check the connection and reconnect.",
+                "openFailed": "The terminal could not be opened. Confirm the target is available and terminal access is enabled, then try again.",
+                "reconnectFailed": "The terminal could not reconnect. Check the connection, or close the terminal and open a new one."
+            }
+        },
+        "heartbeat": {
+            "title": "Manual heartbeat",
+            "description": "Record a runtime agent heartbeat for diagnostics.",
+            "fields": {
+                "agentId": "Agent ID",
+                "version": "Version",
+                "capabilities": "Capabilities"
+            },
+            "submit": "Record heartbeat",
+            "toastSubmitted": "Heartbeat submitted",
+            "toastFailed": "Failed to record heartbeat"
+        },
+        "operations": {
+            "title": "Operations",
+            "load": "Load",
+            "refresh": "Refresh",
+            "summaryOnly": "Summary only",
+            "dataCoverage": "Data coverage",
+            "searchHistory": "Search history",
+            "statusFilter": "Status filter",
+            "allStatuses": "All statuses",
+            "fleetWide": "Fleet-wide",
+            "advancedDescription": "Low-level fleet control and diagnostic operations.",
+            "loading": "Loading",
+            "notLoaded": "Not loaded yet",
+            "eventFilter": "Event filter",
+            "allEvents": "All events",
+            "loadFailed": "Operations could not be loaded.",
+            "retry": "Retry",
+            "tabs": {
+                "overview": "Overview",
+                "metrics": "Metrics",
+                "commands": "Commands",
+                "audit": "Audit",
+                "gaps": "Gaps",
+                "advanced": "Advanced operations",
+                "metricsLoaded": "Runtime service {{running}}/{{total}}",
+                "notLoaded": "Not loaded",
+                "loadedCount": "{{count}} loaded",
+                "gapsCount": "{{count}} known",
+                "manualTools": "Manual tools"
+            },
+            "overview": {
+                "description": "Fleet-wide runtime health, endpoint availability, and data coverage."
+            },
+            "metrics": {
+                "loadingTitle": "Loading fleet metrics",
+                "loadingDescription": "Reading the latest fleet-wide projection.",
+                "emptyTitle": "No metrics",
+                "emptyDescription": "Load runtime-host metrics when you need operational totals.",
+                "runtimeRunning": "Runtime running",
+                "endpointReady": "Endpoint ready",
+                "recentFailures": "Recent failures",
+                "nodeStatus": "Node status",
+                "targetKind": "Target kind",
+                "runtimeStatus": "Runtime status",
+                "runtimeKind": "Runtime kind",
+                "endpointStatus": "Endpoint status",
+                "commandAudit": "Command / audit",
+                "noNonZeroBuckets": "No non-zero buckets"
+            },
+            "commands": {
+                "description": "Fleet-wide command summaries. Output and terminal bytes are not included.",
+                "notLoadedDescription": "Open this view to load command summaries.",
+                "loadFailedDescription": "Retry loading command summaries.",
+                "emptyTitle": "No commands",
+                "emptyDescription": "Remote runtime commands will appear as summaries.",
+                "displayedCount": "Showing {{displayed}} of {{loaded}} loaded commands."
+            },
+            "audit": {
+                "description": "Fleet-wide audit summaries with safe projected messages.",
+                "notLoadedDescription": "Open this view to load audit summaries.",
+                "loadFailedDescription": "Retry loading audit summaries.",
+                "emptyTitle": "No audit events",
+                "emptyDescription": "Remote fleet events will appear as audit summaries.",
+                "displayedCount": "Showing {{displayed}} of {{loaded}} loaded audit events.",
+                "unknownTime": "Unknown time"
+            },
+            "gaps": {
+                "badge": "Gap",
+                "routingExplain": {
+                    "title": "Routing explain",
+                    "description": "Selection reasons are internal today. The renderer does not recompute routing."
+                },
+                "logRedaction": {
+                    "title": "Log redaction",
+                    "description": "Only redacted summaries are projected here. Raw logs stay out of the renderer."
+                }
+            },
+            "fields": {
+                "id": "ID",
+                "node": "Remote connection",
+                "agent": "Management agent",
+                "runtime": "Runtime service",
+                "endpoint": "Endpoint",
+                "created": "Created",
+                "updated": "Updated",
+                "message": "Message",
+                "command": "Command",
+                "draining": "Draining",
+                "retired": "Retired",
+                "activeLeases": "Active leases",
+                "staleCapabilities": "Stale capabilities",
+                "auditEvents": "Audit events"
+            }
+        },
+        "registration": {
+            "trigger": "Add connection",
+            "title": "Add connection",
+            "description": "Add a connection and configure its environment. Use Advanced settings for stable IDs, labels, and public configuration.",
+            "toast": {
+                "submitted": "Connection saved",
+                "failed": "Failed to save connection",
+                "connectionSaved": "Connection saved. Check the connection to verify it."
+            },
+            "advanced": {
+                "title": "Advanced connection settings",
+                "description": "Connection ID, labels, secret refs, public config, and enable state."
+            },
+            "secretRefBoundary": "Advanced use: KEY=existing-secret-ref. Do not paste secrets.",
+            "publicConfigWarning": "Do not put tokens, passwords, Authorization headers, API keys, secrets, or credentials in public config.",
+            "submit": "Save connection",
+            "fields": {
+                "id": "Connection ID",
+                "displayName": "Display name",
+                "targetKind": "Target kind",
+                "endpointUrl": "Endpoint URL",
+                "dockerEndpoint": "Docker endpoint",
+                "labels": "Labels",
+                "secretRefs": "Secret refs",
+                "publicConfig": "Public config JSON"
+            },
+            "placeholders": {
+                "id": "lab-linux-01",
+                "displayName": "Lab Linux 01",
+                "dockerEndpoint": "https://docker.example.com:2376",
+                "labels": "gpu, linux"
+            },
+            "fieldHelp": {
+                "id": "Optional. Auto-generated if empty.",
+                "labels": "For routing filters. Comma-separated."
+            },
+            "enabled": {
+                "label": "Enable connection",
+                "description": "Disabled connections remain in the resource projection but are unavailable for actions."
+            },
+            "errors": {
+                "secretRefFormat": "Secret refs must use KEY=existing-secret-ref per line.",
+                "secretRefRequired": "Secret ref key and value are required.",
+                "publicConfigJson": "Public config must be valid JSON.",
+                "publicConfigObject": "Public config must be a JSON object.",
+                "publicConfigSecret": "Public config contains a sensitive key. Move it to secret refs.",
+                "containerImageSensitive": "Docker image fields must not contain credentials or Authorization material.",
+                "dockerLoopbackHttps2375": "Local Docker on port 2375 must use HTTP. Change https:// to http://, then save.",
+                "connectionIdMissing": "Connection registration did not return a connection ID.",
+                "environmentIdMissing": "Environment registration did not return an environment ID.",
+                "portNumber": "Port must be an integer from 1 to 65535.",
+                "k8sApiServerHttps": "Kubernetes API server URL must use https.",
+                "k8sApiServerOrigin": "Kubernetes API server URL must be an origin URL without credentials, path, query, or fragment data.",
+                "credentialWriterMissing": "Credential writing is not available in this form. Passwords, private keys, and tokens are not submitted as plaintext. Use existing secret refs instead.",
+                "k8sKubeconfigPending": "Kubeconfig writing is not available in this form. Kubeconfig plaintext is not submitted. Use manual connection fields or existing secret refs."
+            },
+            "targetKinds": {
+                "ssh-host": "SSH host",
+                "container": "Container",
+                "k8s-pod": "Kubernetes pod",
+                "custom": "Custom",
+                "vm": "VM"
+            },
+            "helpers": {
+                "sshHost": {
+                    "summary": "SSH: host, port, username, and login method.",
+                    "endpointUrlPlaceholder": "ssh://lab-linux-01.internal:22",
+                    "publicConfigPlaceholder": "{\n  \"ssh\": {}\n}",
+                    "secretRefsPlaceholder": "sshPrivateKey=<existing-secret-ref>"
+                },
+                "container": {
+                    "summary": "Docker: endpoint, Debian environment image, and optional bearer token.",
+                    "endpointUrlPlaceholder": "https://docker.example.com:2376",
+                    "publicConfigPlaceholder": "{\n  \"docker\": {}\n}",
+                    "secretRefsPlaceholder": "dockerBearerToken=<existing-secret-ref>"
+                },
+                "k8sPod": {
+                    "summary": "Kubernetes: API server, namespace, pod target, and optional bearer token.",
+                    "endpointUrlPlaceholder": "https://k8s.example.test:6443",
+                    "publicConfigPlaceholder": "{\n  \"k8s\": {}\n}",
+                    "secretRefsPlaceholder": "kubeBearerToken=<existing-secret-ref>"
+                },
+                "custom": {
+                    "summary": "Custom: endpoint URL only.",
+                    "endpointUrlPlaceholder": "https://node.example.internal",
+                    "publicConfigPlaceholder": "{}",
+                    "secretRefsPlaceholder": "providerCredential=<existing-secret-ref>"
+                },
+                "vm": {
+                    "summary": "VM: host, SSH port, username, and login method.",
+                    "endpointUrlPlaceholder": "ssh://vm.example.internal:22",
+                    "publicConfigPlaceholder": "{\n  \"vm\": {}\n}",
+                    "secretRefsPlaceholder": "sshPrivateKey=<existing-secret-ref>"
+                }
+            },
+            "ssh": {
+                "fields": {
+                    "host": "Host / IP",
+                    "port": "Port",
+                    "username": "Username"
+                },
+                "placeholders": {
+                    "host": "lab-linux-01.internal",
+                    "port": "22",
+                    "username": "matcha"
+                },
+                "title": "SSH connection",
+                "auth": {
+                    "label": "Login method",
+                    "methods": {
+                        "password": "Password",
+                        "private-key": "SSH private key",
+                        "ssh-agent": "SSH Agent",
+                        "existing-secret": "Existing secret ref"
+                    },
+                    "fields": {
+                        "password": "Password",
+                        "privateKey": "SSH private key",
+                        "existingSecret": "Existing secret refs"
+                    },
+                    "placeholders": {
+                        "password": "SSH password",
+                        "privateKey": "-----BEGIN OPENSSH PRIVATE KEY-----",
+                        "existingSecret": "sshPrivateKey=<existing secret ref>\nsshPassword=<existing secret ref>"
+                    },
+                    "help": {
+                        "credentialPending": "Passwords and private keys are not submitted as plaintext. Write them to private secret storage first, or use existing secret refs in Advanced settings.",
+                        "sshAgent": "Use an SSH Agent available to the runtime host. The renderer never receives or stores private keys.",
+                        "existingSecret": "Enter KEY=existing secret ref per line, for example sshPrivateKey=<existing secret ref>."
+                    }
+                }
+            },
+            "k8s": {
+                "fields": {
+                    "apiServerUrl": "Kubernetes API server URL",
+                    "namespace": "Namespace",
+                    "podName": "Pod name",
+                    "containerName": "Container name",
+                    "labelSelector": "Label selector",
+                    "bearerToken": "Bearer token",
+                    "clientCertificate": "Client certificate",
+                    "kubeconfig": "Kubeconfig",
+                    "kubeconfigContext": "Kubeconfig context"
+                },
+                "placeholders": {
+                    "namespace": "matcha-runtime",
+                    "podName": "runtime-agent-pod-1",
+                    "containerName": "runtime-agent",
+                    "labelSelector": "app=matchaclaw-runtime-agent",
+                    "bearerToken": "Kubernetes bearer token",
+                    "clientCertificate": "-----BEGIN CERTIFICATE-----",
+                    "kubeconfig": "apiVersion: v1\nclusters: []",
+                    "kubeconfigContext": "matcha-runtime"
+                },
+                "help": {
+                    "podTarget": "Use either a pod name or label selector. If both are empty, Matcha looks for its managed runtime-agent pod.",
+                    "credentialPending": "Kubernetes tokens, certificates, and kubeconfig are not submitted as plaintext. Use existing secret refs instead."
+                },
+                "connection": {
+                    "title": "Kubernetes connection",
+                    "modeLabel": "Connection mode",
+                    "modes": {
+                        "manual": "Manual fields",
+                        "kubeconfig": "Kubeconfig"
+                    }
+                }
+            },
+            "custom": {
+                "fields": {
+                    "endpointUrl": "Custom endpoint URL"
+                },
+                "placeholders": {},
+                "title": "Custom runtime connection",
+                "auth": {
+                    "label": "Authentication",
+                    "methods": {
+                        "none": "None",
+                        "api-token": "API token",
+                        "mtls": "mTLS bundle",
+                        "pairing-code": "Pairing code"
+                    },
+                    "pendingCredentialNotice": "Custom credentials are not submitted as plaintext. Write them to private secret storage first, or use existing secret refs in Advanced settings."
+                },
+                "credentials": {
+                    "apiToken": "API token",
+                    "mtlsBundle": "mTLS bundle",
+                    "pairingCode": "Pairing code",
+                    "notSubmitted": "This value is not submitted as plaintext. Use an existing secret ref instead."
+                }
+            },
+            "vm": {
+                "fields": {
+                    "endpointUrl": "VM connection URL",
+                    "host": "Host / IP",
+                    "port": "SSH port",
+                    "username": "Username",
+                    "loginMethod": "Login method"
+                },
+                "placeholders": {
+                    "host": "vm-01.example.internal",
+                    "port": "22",
+                    "username": "matcha"
+                },
+                "title": "VM connection",
+                "loginMethods": {
+                    "password": "Password",
+                    "private-key": "SSH private key",
+                    "agent-installed": "Agent installed"
+                },
+                "credentials": {
+                    "password": "Password",
+                    "privateKey": "SSH private key"
+                },
+                "cloudDiscovery": {
+                    "title": "Discover VMs from a cloud account",
+                    "description": "Cloud discovery needs a secure credential flow. This form does not collect cloud tokens."
+                },
+                "help": {
+                    "credentialPending": "Passwords and private keys are not submitted as plaintext. Write them to private secret storage first, or use existing secret refs in Advanced settings.",
+                    "agentInstalled": "Use this when RuntimeAgent is already installed on the VM. Registration only records the connection projection."
+                }
+            },
+            "environmentRegistered": {
+                "title": "Environment registered",
+                "description": "The environment is registered. Deploy its runtime now or do it later.",
+                "deployNow": "Deploy now",
+                "deployLater": "Deploy later",
+                "deploymentFailed": "Deployment failed. Review the environment configuration and try again."
+            },
+            "container": {
+                "title": "Docker connection",
+                "fields": {
+                    "authentication": "Authentication",
+                    "containerName": "Container name or ID",
+                    "image": "Image",
+                    "imageCandidates": "Pull candidate images",
+                    "bearerToken": "Bearer token",
+                    "connectionSource": "Connection source",
+                    "contextName": "Docker context name",
+                    "tlsCertificate": "TLS certificate material"
+                },
+                "authMethods": {
+                    "none": "None",
+                    "bearer-token": "Bearer token",
+                    "tls-certificate": "TLS certificate",
+                    "ssh-context": "SSH context"
+                },
+                "placeholders": {
+                    "containerName": "matchaclaw-debian-node-1",
+                    "image": "debian:bookworm-slim",
+                    "imageCandidates": "docker.m.daocloud.io/library/debian:bookworm-slim\ndebian:bookworm-slim",
+                    "bearerToken": "Docker bearer token",
+                    "contextName": "default",
+                    "tlsCertificate": "-----BEGIN CERTIFICATE-----"
+                },
+                "help": {
+                    "endpoint": "Use the Docker Engine HTTP API endpoint, not a local socket path.",
+                    "image": "Creates a general Debian environment container. Defaults to debian:bookworm-slim.",
+                    "imageCandidates": "If the image is not local, pull candidates in order. Leave empty to use the built-in China mirror candidates and the official image.",
+                    "containerName": "Leave empty to auto-generate a Matcha-managed Debian container name. Fill it to use or start a specific existing container.",
+                    "credentialPending": "Tokens and certificates are not submitted as plaintext. Write them to private secret storage first, or use existing secret refs in Advanced settings.",
+                    "sshContext": "Use an existing Docker SSH context on the host. The renderer does not store SSH credentials."
+                },
+                "connectionSources": {
+                    "endpoint": "Docker endpoint",
+                    "context": "Docker context"
+                },
+                "environmentRegistered": {
+                    "title": "Container environment registered",
+                    "description": "Your container environment is ready. Deploy a runtime now or do it later.",
+                    "deployNow": "Deploy now",
+                    "deployLater": "Deploy later",
+                    "deploymentFailed": "Deployment failed. Review the environment configuration and try again."
+                }
+            }
+        },
+        "targetPreview": {
+            "eyebrow": "Routing preview",
+            "title": "Target preview",
+            "description": "Preview only. Runtime-host still owns scheduling and lease decisions.",
+            "metrics": {
+                "candidates": "Candidates",
+                "excluded": "Excluded",
+                "selector": "Selector",
+                "operations": "Operations",
+                "labels": "Labels",
+                "binding": "Binding"
+            },
+            "selectorSections": {
+                "endpointIds": "Endpoint IDs",
+                "nodeIds": "Node IDs",
+                "runtimeIds": "Runtime IDs",
+                "labels": "Labels",
+                "operations": "Operations"
+            },
+            "selectorSummary": {
+                "title": "Selector",
+                "unscoped": "Unscoped preview",
+                "single": "{{label}}: {{count}}",
+                "multiple": "{{count}} selector dimensions",
+                "all": "All",
+                "allEndpoints": "All endpoints",
+                "scopedPreview": "Scoped preview",
+                "allEndpointsDetail": "Every discovered endpoint remains visible before runtime-host scheduling.",
+                "dimensionCount": "{{label}} {{count}}"
+            },
+            "binding": {
+                "runtimeLinked": "Runtime linked",
+                "nodeLinked": "Node linked",
+                "direct": "Direct"
+            },
+            "meta": {
+                "node": "Node",
+                "runtime": "Runtime",
+                "url": "URL"
+            },
+            "chips": {
+                "operationsInScope": "Operations in scope",
+                "labels": "Labels"
+            },
+            "exclusion": {
+                "title": "Excluded by runtime state",
+                "description": "Status is {{status}}, so it is not an active candidate."
+            },
+            "empty": {
+                "noOperations": {
+                    "title": "No operations matched",
+                    "description": "The endpoint matches identity filters, but no selected operation is available."
+                },
+                "noSelector": {
+                    "title": "No selector",
+                    "description": "The preview currently includes all discovered endpoints."
+                },
+                "noCandidates": {
+                    "title": "No candidates",
+                    "description": "Widen the selector or sync capabilities."
+                },
+                "noExclusions": {
+                    "title": "No exclusions",
+                    "description": "No matching endpoint is draining or retired."
+                }
+            },
+            "candidates": {
+                "title": "Candidate endpoints",
+                "description": "Endpoints matching the current preview."
+            },
+            "excluded": {
+                "title": "Excluded endpoints",
+                "description": "Matching endpoints blocked by runtime state."
+            }
+        },
+        "toasts": {
+            "loadFailed": "Failed to load Remote Fleet",
+            "nodeRemoved": "Node removed",
+            "nodeRemoveFailed": "Failed to remove node",
+            "probeSubmitted": "Probe submitted",
+            "probeFailed": "Failed to probe node",
+            "connectionCheckCompleted": "Connection check completed",
+            "connectionCheckFailed": "Connection check failed",
+            "tokenIssued": "Enrollment token issued",
+            "tokenFailed": "Failed to issue enrollment token",
+            "installSubmitted": "Install command submitted",
+            "environmentDeploySubmitted": "Environment deploy command submitted",
+            "environmentDeployFailed": "Failed to deploy environment",
+            "installFailed": "Failed to install RuntimeAgent",
+            "agentRevoked": "RuntimeAgent revoked",
+            "agentRevokeFailed": "Failed to revoke RuntimeAgent",
+            "startSubmitted": "Start command submitted",
+            "startFailed": "Failed to start remote runtime",
+            "stopSubmitted": "Stop command submitted",
+            "stopFailed": "Failed to stop remote runtime",
+            "drainSubmitted": "Drain submitted",
+            "drainFailed": "Failed to drain endpoint",
+            "retireSubmitted": "Retire submitted",
+            "retireFailed": "Failed to retire endpoint",
+            "syncSubmitted": "Capability sync submitted",
+            "syncFailed": "Failed to sync capabilities",
+            "metricsFailed": "Failed to load metrics",
+            "commandsFailed": "Failed to load commands",
+            "auditFailed": "Failed to load audit events",
+            "connectionDeleted": "Connection deleted",
+            "connectionDeleteFailed": "Failed to delete connection",
+            "environmentDeleted": "Environment deleted",
+            "environmentDeleteIncomplete": "Environment was not deleted because remote resource cleanup did not complete. The environment was kept.",
+            "environmentDeletedRemoteResourcesUnchanged": "Environment deleted. Some remote resources were left unchanged.",
+            "environmentDeleteFailed": "Failed to delete environment"
+        }
     }
 }

@@ -786,6 +786,14 @@ export class AgentRuntimeRegistry {
     return this.capabilities.list();
   }
 
+  replaceForRuntimeEndpointScope(scope: RuntimeScope, descriptors: Iterable<CapabilityDescriptor>): void {
+    this.capabilities.replaceForRuntimeEndpointScope(scope, descriptors);
+  }
+
+  removeForRuntimeEndpointScope(scope: RuntimeScope): void {
+    this.capabilities.removeForRuntimeEndpointScope(scope);
+  }
+
   snapshotTopology(): RuntimeTopologySnapshot {
     const endpoints = this.listEndpoints();
     const endpointLifecycles = new Map(endpoints.map((endpoint) => [endpoint, this.resolveEndpointLifecycle(endpoint)] as const));

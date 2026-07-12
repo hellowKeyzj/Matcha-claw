@@ -57,6 +57,7 @@ const DEFAULT_READ_ONLY_BOUNDARY_FORBIDDEN_FIELDS = new Set<string>([
   'accessToken',
   'refreshToken',
   'token',
+  'idempotencyKey',
   'gatewayToken',
   'providerEnv',
   'headers',
@@ -80,7 +81,7 @@ const DEFAULT_READ_ONLY_BOUNDARY_FORBIDDEN_FIELD_PATTERNS = [
   /^apiKey$/i,
   /privateKey/i,
   /serviceAccountKey/i,
-  /(?:^|[A-Z_])(access|refresh|auth|gateway|bot|channel|channelAccess)?Token$/,
+  /(?:^|[A-Z_])(api|access|refresh|auth|gateway|bot|channel|channelAccess)?Token$/,
 ] as const;
 
 export function readRecord(value: unknown): Record<string, unknown> {

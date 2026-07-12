@@ -53,7 +53,8 @@
         "pendingBlockerTaskId": "任务ID {{taskId}}",
         "pendingBlockerSourceChat": "聊天会话",
         "pendingBlockerApprovalId": "审批ID {{id}}",
-        "pendingBlockerApprovalHint": "当前有工具调用等待审批。"
+        "pendingBlockerApprovalHint": "当前有工具调用等待审批。",
+        "remoteFleet": "远端运行时"
     },
     "actions": {
         "save": "保存",
@@ -97,5 +98,857 @@
         "notRunning": "网关未运行",
         "notRunningDesc": "OpenClaw 网关需要运行才能使用此功能。它将自动启动，或者您可以从设置中启动。",
         "warning": "网关未运行。"
+    },
+    "remoteFleet": {
+        "common": {
+            "unknown": "未知"
+        },
+        "statuses": {
+            "unknown": "未知",
+            "online": "在线",
+            "running": "运行中",
+            "connected": "已连接",
+            "succeeded": "已成功",
+            "available": "可用",
+            "ready": "就绪",
+            "active": "活跃",
+            "enrolled": "已注册",
+            "installed": "已安装",
+            "environment-ready": "环境就绪",
+            "offline": "离线",
+            "stopped": "已停止",
+            "disabled": "已禁用",
+            "queued": "排队中",
+            "draining": "排空中",
+            "retired": "已退役",
+            "not-installed": "未安装",
+            "error": "错误",
+            "failed": "失败",
+            "unhealthy": "不健康",
+            "revoked": "已撤销",
+            "registered": "已登记",
+            "deploying": "部署中",
+            "deleting": "删除中",
+            "deleted": "已删除",
+            "orphaned": "已脱管",
+            "matcha-managed": "由 Matcha 管理",
+            "unverified": "未验证",
+            "external": "外部",
+            "observed": "已观测",
+            "provisioning": "创建中",
+            "conflict": "冲突",
+            "installing": "安装中",
+            "discovered": "已发现",
+            "starting": "启动中",
+            "stopping": "停止中",
+            "degraded": "降级运行",
+            "busy": "忙碌",
+            "current": "最新",
+            "stale": "已过期",
+            "pruned": "已清理",
+            "cancelled": "已取消",
+            "timed-out": "已超时",
+            "released": "已释放",
+            "expired": "已失效",
+            "opening": "打开中",
+            "closing": "关闭中",
+            "closed": "已关闭"
+        },
+        "modes": {
+            "label": "Remote Fleet 模式",
+            "resources": "资源",
+            "operations": "运维"
+        },
+        "fields": {
+            "id": "ID",
+            "node": "远端连接",
+            "agent": "管理代理",
+            "runtime": "运行服务",
+            "endpoint": "端点",
+            "url": "URL",
+            "labels": "标签",
+            "lastSeen": "最后在线",
+            "lastProbe": "最后探测",
+            "reason": "原因",
+            "model": "模型",
+            "capabilities": "能力",
+            "operations": "操作",
+            "owner": "持有方",
+            "ownerId": "持有方 ID",
+            "expires": "过期时间",
+            "message": "消息",
+            "started": "启动时间",
+            "connection": "连接",
+            "environment": "环境",
+            "kind": "类型",
+            "provider": "Provider",
+            "cleanupPolicy": "清理策略",
+            "created": "创建时间",
+            "updated": "更新时间",
+            "lastObserved": "最后观测",
+            "protocol": "协议"
+        },
+        "header": {
+            "title": "远端运行服务",
+            "description": "从 runtime-host 投影管理远端连接、管理代理、运行服务和可调度端点。",
+            "snapshotReady": "快照就绪",
+            "snapshotLoading": "快照加载中",
+            "snapshotIdle": "快照未加载",
+            "metricsLoaded": "指标已加载",
+            "metricsPending": "指标未加载",
+            "action": "操作：{{action}}",
+            "loadMetrics": "加载指标",
+            "refreshSnapshot": "刷新快照",
+            "stats": {
+                "inventory": "资源",
+                "inventorySubtitle": "{{agents}} 个管理代理 · {{runtimes}} 个运行服务 · {{endpoints}} 个端点",
+                "runtimes": "运行服务",
+                "runtimesSubtitle": "运行中 / 总数",
+                "endpoints": "端点",
+                "endpointsSubtitle": "就绪 / 总数",
+                "attention": "需关注",
+                "attentionSubtitle": "{{failures}} 个失败 · {{states}} 个异常状态 · {{stale}} / {{capabilities}} 个能力过期"
+            }
+        },
+        "workspace": {
+            "syncedAt": "同步于 {{time}}",
+            "resourceCount": "{{count}} 个资源",
+            "addRemote": "添加远端",
+            "emptyTitle": "连接第一个远端环境",
+            "emptyDescription": "添加 SSH 主机、Docker、Kubernetes 集群或虚拟机，即可开始管理远端运行时。",
+            "addConnection": "添加连接",
+            "backToResources": "返回资源列表"
+        },
+        "resourceBrowser": {
+            "types": "资源类型",
+            "groups": {
+                "infrastructure": "基础设施",
+                "execution": "执行层"
+            },
+            "index": "资源索引",
+            "resultCount": "显示 {{visible}} / {{total}}",
+            "searchPlaceholder": "搜索名称、ID、URL 或标签",
+            "search": "搜索资源",
+            "statusFilter": "状态筛选",
+            "allStatuses": "全部状态",
+            "kindFilter": "类型筛选",
+            "allKinds": "全部类型",
+            "environmentFilter": "环境筛选",
+            "allEnvironments": "全部环境",
+            "sort": "资源排序",
+            "clearFilters": "清除筛选",
+            "emptyTitle": "没有匹配资源",
+            "emptyFilteredDescription": "调整或清除筛选条件后重试。",
+            "emptyTypeDescription": "此类型的资源会显示在这里。"
+        },
+        "inventory": {
+            "title": "资源",
+            "description": "先选对象，再查看控制面详情。",
+            "consoleTitle": "资源清单",
+            "consoleDescription": "选择连接、环境、资源、节点、代理、运行时或端点，再在右侧工作区查看详情。",
+            "tabs": {
+                "connections": "连接",
+                "environments": "环境",
+                "managedResources": "资源",
+                "nodes": "节点",
+                "agents": "代理",
+                "runtimes": "运行时",
+                "endpoints": "端点"
+            },
+            "emptyConnectionsTitle": "暂无连接",
+            "emptyConnectionsDescription": "添加连接后会创建第一个远端入口。",
+            "emptyEnvironmentsTitle": "暂无环境",
+            "emptyEnvironmentsDescription": "连接创建后，已注册环境会显示在这里。",
+            "emptyManagedResourcesTitle": "暂无资源",
+            "emptyManagedResourcesDescription": "部署或发现后，托管资源投影会显示在这里。",
+            "emptyNodesTitle": "暂无连接",
+            "emptyNodesDescription": "添加连接后会创建第一个远端入口。",
+            "emptyAgentsTitle": "暂无代理",
+            "emptyAgentsDescription": "安装 RuntimeAgent 后，这里会显示代理投影。",
+            "emptyRuntimesTitle": "暂无运行时",
+            "emptyRuntimesDescription": "部署完成后，这里会显示运行服务投影。",
+            "emptyEndpointsTitle": "暂无端点",
+            "emptyEndpointsDescription": "就绪的运行时端点会显示在这里。",
+            "empty": "暂无远端资源。注册节点或刷新快照。",
+            "badges": {
+                "disabled": "已禁用"
+            },
+            "sections": {
+                "connections": "连接",
+                "environments": "环境",
+                "managedResources": "资源",
+                "nodes": "连接",
+                "agents": "管理代理",
+                "runtimes": "运行服务",
+                "endpoints": "端点"
+            },
+            "fields": {
+                "id": "ID",
+                "endpoint": "端点",
+                "labels": "标签",
+                "lastSeen": "最后在线",
+                "node": "远端连接",
+                "runtime": "运行服务",
+                "capabilities": "能力",
+                "agent": "管理代理",
+                "started": "启动时间",
+                "url": "URL",
+                "lastProbe": "最后探测",
+                "connection": "连接",
+                "environment": "环境",
+                "resources": "资源",
+                "lastObserved": "最后观测"
+            },
+            "actions": {
+                "probe": "探测",
+                "issueToken": "令牌",
+                "installAgent": "安装"
+            }
+        },
+        "detail": {
+            "backToIndex": "返回资源索引",
+            "relationshipPath": "资源关系路径",
+            "moreActions": "更多操作",
+            "attention": "需关注",
+            "noAttentionReason": "当前没有上报需要关注的原因。",
+            "agentTerminalUnavailable": "代理不能直接打开终端，请在资源索引中选择关联运行时后打开终端。",
+            "customExternalRuntimeGuidance": "自定义目标由外部运行时管理，因此无法在这里检查连接或部署环境。请在资源索引中选择关联运行时或端点，查看状态和已声明的能力。",
+            "tabs": {
+                "overview": "概览",
+                "terminal": "终端",
+                "commands": "命令",
+                "audit": "审计",
+                "capabilities": "能力"
+            },
+            "title": "详情",
+            "loadingDescription": "正在加载快照，随后展示选中对象。",
+            "emptyDescription": "从资源列表选择一个对象。",
+            "emptyTitle": "未选择对象",
+            "emptyHint": "详情区只聚焦一个连接、环境、资源、管理代理、运行服务或端点。",
+            "missingTitle": "{{kind}} 不存在",
+            "missingDescription": "选中的 {{kind}} 已不在当前快照中。",
+            "missingHint": "资源列表会反映最新快照。",
+            "facts": "基础信息",
+            "capabilitiesDescription": "当前对象关联的能力投影。",
+            "commandsDescription": "当前对象关联的已加载命令摘要。",
+            "auditDescription": "当前对象关联的已加载审计摘要。",
+            "leasesDescription": "当前对象关联的租约摘要。",
+            "emptyCapabilities": "暂无关联能力。",
+            "emptyCommands": "暂无关联命令。",
+            "emptyAudit": "暂无关联审计事件。",
+            "emptyLeases": "暂无租约。",
+            "emptyEnvironments": "此连接未关联环境。",
+            "factsDescription": "该资源的标识符和关键信息。",
+            "associations": "关联资源",
+            "associationsDescription": "相关资源与活跃租约。",
+            "connectionTerminalUnavailable": "此连接没有节点终端目标，请在资源索引中选择关联节点、运行时或端点。",
+            "connectionTerminalNeedsNodeSelection": "此连接关联了多个节点，请先在资源索引中选择具体节点，再打开其终端。",
+            "environmentTerminalUnavailable": "此环境没有终端目标，请在资源索引中选择关联节点、运行时或端点。",
+            "managedResourceTerminalUnavailable": "此资源没有终端目标，请在资源索引中选择其投影节点、运行时或端点。",
+            "kinds": {
+                "connection": "连接",
+                "environment": "环境",
+                "managedResource": "资源",
+                "node": "节点",
+                "agent": "管理代理",
+                "runtime": "运行服务",
+                "endpoint": "端点"
+            },
+            "descriptions": {
+                "connection": "远端连接",
+                "environment": "托管环境",
+                "managedResource": "托管资源",
+                "node": "远端连接",
+                "agent": "代理身份",
+                "runtime": "运行服务",
+                "endpoint": "服务端点"
+            },
+            "metrics": {
+                "agents": "管理代理",
+                "runtimes": "运行服务",
+                "endpoints": "端点",
+                "capabilities": "能力",
+                "leases": "租约",
+                "commands": "命令",
+                "audit": "审计",
+                "environments": "环境",
+                "resources": "资源"
+            },
+            "actions": {
+                "probe": "探测",
+                "probeConnection": "检查连接",
+                "editConnection": "编辑连接",
+                "issueToken": "签发令牌",
+                "installAgent": "安装代理",
+                "deployEnvironment": "部署环境",
+                "remove": "移除",
+                "revoke": "撤销",
+                "start": "启动",
+                "stop": "停止",
+                "openTerminal": "打开终端",
+                "syncCapabilities": "同步能力",
+                "drain": "排空",
+                "retire": "退役",
+                "deleteEnvironment": "删除环境",
+                "deleteConnection": "删除连接"
+            },
+            "connectionDeleteBlocked": "必须先删除该连接下的环境，并移除直接关联的节点和资源，才能删除此连接。",
+            "confirmDeleteConnectionTitle": "删除连接？",
+            "confirmDeleteConnectionMessage": "这只会删除本地连接配置，不会影响远端资源。",
+            "confirmDeleteConnectionLabel": "删除连接",
+            "confirmDeleteEnvironmentTitle": "删除环境？",
+            "confirmDeleteEnvironmentMessage": "将从 MatchaClaw 中移除此环境，并删除已选定的 {{count}} 个受管远端资源。",
+            "confirmDeleteEnvironmentNoRemoteResourcesMessage": "将从 MatchaClaw 中移除此环境。不会删除任何远端资源。",
+            "confirmDeleteEnvironmentUnchangedMessage": "其余 {{count}} 个远端资源将保持不变。",
+            "confirmDeleteEnvironmentLabel": "删除环境",
+            "noTimestamp": {
+                "command": "无命令时间",
+                "event": "无事件时间"
+            }
+        },
+        "leases": {
+            "title": "租约",
+            "emptyTitle": "暂无租约",
+            "emptyDescription": "当前快照没有端点租约投影。"
+        },
+        "terminal": {
+            "badge": "终端",
+            "title": "远端终端",
+            "description": "打开交互式终端。",
+            "terminalLabel": "Remote Fleet 终端",
+            "unavailableTitle": "终端不可用",
+            "sessionActive": "会话已连接",
+            "sessionPending": "会话待连接",
+            "exitMessage": "终端已退出。代码：{{code}} · 信号：{{signal}}",
+            "targetTitle": {
+                "node": "终端 · {{name}}",
+                "runtime": "终端 · {{name}}",
+                "endpoint": "终端 · {{name}}"
+            },
+            "targetDescription": {
+                "node": "在此节点上打开终端。",
+                "runtime": "为此运行时打开终端。",
+                "endpoint": "通过此端点打开终端。"
+            },
+            "status": {
+                "idle": "空闲",
+                "opening": "打开中",
+                "connecting": "连接中",
+                "ready": "就绪",
+                "closed": "已关闭",
+                "exited": "已退出",
+                "error": "错误"
+            },
+            "actions": {
+                "reconnect": "重连",
+                "minimize": "收起",
+                "close": "关闭终端"
+            },
+            "errors": {
+                "remoteError": "远端终端出现错误，请关闭终端或重新连接。",
+                "connectionFailed": "连接失败，请检查网络后重新连接。",
+                "openFailed": "终端打开失败，请确认目标可用且已启用终端访问后重试。",
+                "reconnectFailed": "重新连接失败，请检查网络，或关闭终端后重新打开。"
+            },
+            "unavailable": {
+                "disabled": "节点已禁用。",
+                "customNeedsEndpoint": "自定义目标需要通过端点打开终端。请先选择关联端点。",
+                "customMissingCapability": "该自定义端点尚未声明终端接入能力。",
+                "endpointUnavailable": "端点未处于活跃状态。"
+            }
+        },
+        "heartbeat": {
+            "title": "手动心跳",
+            "description": "手动记录运行时代理心跳，用于诊断。",
+            "fields": {
+                "agentId": "代理 ID",
+                "version": "版本",
+                "capabilities": "能力"
+            },
+            "submit": "记录心跳",
+            "toastSubmitted": "心跳已提交",
+            "toastFailed": "记录心跳失败"
+        },
+        "operations": {
+            "title": "运维",
+            "load": "加载",
+            "refresh": "刷新",
+            "summaryOnly": "仅摘要",
+            "dataCoverage": "数据覆盖",
+            "searchHistory": "搜索历史",
+            "statusFilter": "状态筛选",
+            "allStatuses": "全部状态",
+            "eventFilter": "事件筛选",
+            "allEvents": "全部事件",
+            "loadFailed": "运维数据加载失败",
+            "retry": "重试",
+            "fleetWide": "全局运维",
+            "advancedDescription": "低层级资源控制与诊断操作。",
+            "loading": "加载中",
+            "notLoaded": "尚未加载",
+            "tabs": {
+                "overview": "概览",
+                "metrics": "指标",
+                "commands": "命令",
+                "audit": "审计",
+                "gaps": "缺口",
+                "advanced": "高级操作",
+                "metricsLoaded": "运行服务 {{running}}/{{total}}",
+                "notLoaded": "未加载",
+                "loadedCount": "已加载 {{count}} 条",
+                "gapsCount": "{{count}} 个已知",
+                "manualTools": "手动工具"
+            },
+            "overview": {
+                "description": "查看全局运行状态、端点可用性和数据覆盖。"
+            },
+            "metrics": {
+                "loadingTitle": "正在加载全局指标",
+                "loadingDescription": "正在读取最新的全局资源投影。",
+                "emptyTitle": "暂无指标",
+                "emptyDescription": "需要运维汇总时再加载 runtime-host 指标。",
+                "runtimeRunning": "运行中运行时",
+                "endpointReady": "就绪端点",
+                "recentFailures": "近期失败",
+                "nodeStatus": "节点状态",
+                "targetKind": "目标类型",
+                "runtimeStatus": "运行时状态",
+                "runtimeKind": "运行时类型",
+                "endpointStatus": "端点状态",
+                "commandAudit": "命令 / 审计",
+                "noNonZeroBuckets": "没有非零分组"
+            },
+            "commands": {
+                "description": "全局命令摘要，不包含命令输出或终端字节。",
+                "notLoadedDescription": "打开此视图时加载命令摘要。",
+                "loadFailedDescription": "重试加载命令摘要。",
+                "emptyTitle": "暂无命令",
+                "emptyDescription": "远端运行时命令会以摘要展示。",
+                "displayedCount": "显示 {{displayed}} / 已加载 {{loaded}} 条命令。"
+            },
+            "audit": {
+                "description": "全局审计摘要，仅展示安全投影后的消息。",
+                "notLoadedDescription": "打开此视图时加载审计摘要。",
+                "loadFailedDescription": "重试加载审计摘要。",
+                "emptyTitle": "暂无审计事件",
+                "emptyDescription": "远端运行时事件会以审计摘要展示。",
+                "displayedCount": "显示 {{displayed}} / 已加载 {{loaded}} 条审计事件。",
+                "unknownTime": "未知时间"
+            },
+            "gaps": {
+                "badge": "缺口",
+                "routingExplain": {
+                    "title": "路由解释",
+                    "description": "选择原因目前仍在内部，渲染层不复算路由。"
+                },
+                "logRedaction": {
+                    "title": "日志脱敏",
+                    "description": "这里只展示脱敏摘要，原始日志不进入渲染层。"
+                }
+            },
+            "fields": {
+                "id": "ID",
+                "node": "远端连接",
+                "agent": "管理代理",
+                "runtime": "运行服务",
+                "endpoint": "端点",
+                "created": "创建时间",
+                "updated": "更新时间",
+                "message": "消息",
+                "command": "命令",
+                "draining": "排空中",
+                "retired": "已退役",
+                "activeLeases": "活跃租约",
+                "staleCapabilities": "过期能力",
+                "auditEvents": "审计事件"
+            }
+        },
+        "registration": {
+            "trigger": "添加连接",
+            "title": "添加连接",
+            "description": "添加连接并配置其环境。稳定 ID、标签和公开配置请在高级设置中填写。",
+            "toast": {
+                "submitted": "连接已保存",
+                "failed": "保存连接失败",
+                "connectionSaved": "连接已保存。请检查连接以验证它。"
+            },
+            "advanced": {
+                "title": "高级连接设置",
+                "description": "连接 ID、标签、密钥引用、公开配置和启用状态。"
+            },
+            "secretRefBoundary": "高级用：KEY=已有密钥引用，不填明文。",
+            "publicConfigWarning": "公开配置不要填写令牌、密码、Authorization、API key、secret 或 credential。",
+            "submit": "保存连接",
+            "fields": {
+                "id": "连接 ID",
+                "displayName": "显示名",
+                "targetKind": "目标类型",
+                "endpointUrl": "端点 URL",
+                "dockerEndpoint": "Docker 端点",
+                "labels": "标签",
+                "secretRefs": "密钥引用",
+                "publicConfig": "公开配置 JSON"
+            },
+            "placeholders": {
+                "id": "lab-linux-01",
+                "displayName": "Lab Linux 01",
+                "dockerEndpoint": "https://docker.example.com:2376",
+                "labels": "gpu, linux"
+            },
+            "fieldHelp": {
+                "id": "可选固定 ID，给 API/脚本引用用",
+                "labels": "可选路由标签，用于筛选节点"
+            },
+            "enabled": {
+                "label": "启用连接",
+                "description": "禁用的连接仍保留在资源投影中，但无法执行操作。"
+            },
+            "errors": {
+                "secretRefFormat": "密钥引用每行必须是 KEY=已有密钥引用。",
+                "secretRefRequired": "密钥引用的 key 和值不能为空。",
+                "publicConfigJson": "公开配置必须是合法 JSON。",
+                "publicConfigObject": "公开配置必须是 JSON 对象。",
+                "publicConfigSecret": "公开配置包含敏感字段，请移到密钥引用。",
+                "containerImageSensitive": "Docker 镜像字段不能包含凭据或 Authorization 信息。",
+                "dockerLoopbackHttps2375": "本机 Docker 2375 必须使用 HTTP。请将 https:// 改为 http:// 后保存。",
+                "connectionIdMissing": "连接注册没有返回连接 ID。",
+                "environmentIdMissing": "环境注册没有返回环境 ID。",
+                "portNumber": "端口必须是 1 到 65535 的整数。",
+                "k8sApiServerHttps": "Kubernetes API server URL 必须使用 https。",
+                "k8sApiServerOrigin": "Kubernetes API server URL 只能是 origin，不能包含账号密码、path、query 或 fragment。",
+                "credentialWriterMissing": "凭据写入通道尚未接入，当前表单不会提交密码、私钥或令牌明文。请改用已有密钥引用。",
+                "k8sKubeconfigPending": "Kubeconfig 写入通道尚未接入，当前表单不会提交 kubeconfig 明文。请改用手动连接或已有密钥引用。"
+            },
+            "targetKinds": {
+                "ssh-host": "SSH 主机",
+                "container": "容器",
+                "k8s-pod": "Kubernetes Pod",
+                "custom": "自定义",
+                "vm": "虚拟机"
+            },
+            "helpers": {
+                "sshHost": {
+                    "summary": "SSH：主机、端口、用户名和登录方式。",
+                    "endpointUrlPlaceholder": "ssh://lab-linux-01.internal:22",
+                    "publicConfigPlaceholder": "{\n  \"ssh\": {}\n}",
+                    "secretRefsPlaceholder": "sshPrivateKey=<已有密钥引用>"
+                },
+                "container": {
+                    "summary": "Docker：端点、Debian 环境镜像和可选 Bearer token。",
+                    "endpointUrlPlaceholder": "https://docker.example.com:2376",
+                    "publicConfigPlaceholder": "{\n  \"docker\": {}\n}",
+                    "secretRefsPlaceholder": "dockerBearerToken=<已有密钥引用>"
+                },
+                "k8sPod": {
+                    "summary": "Kubernetes：API server、命名空间、Pod 目标和可选 Bearer token。",
+                    "endpointUrlPlaceholder": "https://k8s.example.test:6443",
+                    "publicConfigPlaceholder": "{\n  \"k8s\": {}\n}",
+                    "secretRefsPlaceholder": "kubeBearerToken=<已有密钥引用>"
+                },
+                "custom": {
+                    "summary": "自定义：仅填写端点 URL。",
+                    "endpointUrlPlaceholder": "https://node.example.internal",
+                    "publicConfigPlaceholder": "{}",
+                    "secretRefsPlaceholder": "providerCredential=<已有密钥引用>"
+                },
+                "vm": {
+                    "summary": "虚拟机：主机、SSH 端口、用户名和登录方式。",
+                    "endpointUrlPlaceholder": "ssh://vm.example.internal:22",
+                    "publicConfigPlaceholder": "{\n  \"vm\": {}\n}",
+                    "secretRefsPlaceholder": "sshPrivateKey=<已有密钥引用>"
+                }
+            },
+            "ssh": {
+                "fields": {
+                    "host": "主机 / IP",
+                    "port": "端口",
+                    "username": "用户名"
+                },
+                "placeholders": {
+                    "host": "lab-linux-01.internal",
+                    "port": "22",
+                    "username": "matcha"
+                },
+                "title": "SSH 连接",
+                "auth": {
+                    "label": "登录方式",
+                    "methods": {
+                        "password": "密码",
+                        "private-key": "SSH 私钥",
+                        "ssh-agent": "SSH Agent",
+                        "existing-secret": "已有密钥引用"
+                    },
+                    "fields": {
+                        "password": "密码",
+                        "privateKey": "SSH 私钥",
+                        "existingSecret": "已有密钥引用"
+                    },
+                    "placeholders": {
+                        "password": "SSH 密码",
+                        "privateKey": "-----BEGIN OPENSSH PRIVATE KEY-----",
+                        "existingSecret": "sshPrivateKey=<已有密钥引用>\nsshPassword=<已有密钥引用>"
+                    },
+                    "help": {
+                        "credentialPending": "密码或私钥不会作为明文提交。请先写入私有密钥存储，或在高级设置中填写已有密钥引用。",
+                        "sshAgent": "使用运行时宿主机可用的 SSH Agent；前端不会接收或保存私钥。",
+                        "existingSecret": "每行填写 KEY=已有密钥引用，例如 sshPrivateKey=<已有密钥引用>。"
+                    }
+                }
+            },
+            "k8s": {
+                "fields": {
+                    "apiServerUrl": "Kubernetes API server URL",
+                    "namespace": "命名空间",
+                    "podName": "Pod 名称",
+                    "containerName": "容器名称",
+                    "labelSelector": "标签选择器",
+                    "bearerToken": "Bearer token",
+                    "clientCertificate": "客户端证书",
+                    "kubeconfig": "Kubeconfig",
+                    "kubeconfigContext": "Kubeconfig context"
+                },
+                "placeholders": {
+                    "namespace": "matcha-runtime",
+                    "podName": "runtime-agent-pod-1",
+                    "containerName": "runtime-agent",
+                    "labelSelector": "app=matchaclaw-runtime-agent",
+                    "bearerToken": "Kubernetes bearer token",
+                    "clientCertificate": "-----BEGIN CERTIFICATE-----",
+                    "kubeconfig": "apiVersion: v1\nclusters: []",
+                    "kubeconfigContext": "matcha-runtime"
+                },
+                "help": {
+                    "podTarget": "填写 Pod 名称或标签选择器都可以。都不填时，Matcha 会查找自己安装的 runtime-agent Pod。",
+                    "credentialPending": "Kubernetes 令牌、证书或 kubeconfig 不会作为明文提交。请改用已有密钥引用。"
+                },
+                "connection": {
+                    "title": "Kubernetes 连接",
+                    "modeLabel": "连接方式",
+                    "modes": {
+                        "manual": "手动填写",
+                        "kubeconfig": "Kubeconfig"
+                    }
+                }
+            },
+            "custom": {
+                "fields": {
+                    "endpointUrl": "自定义端点 URL"
+                },
+                "placeholders": {},
+                "title": "自定义运行时连接",
+                "auth": {
+                    "label": "认证方式",
+                    "methods": {
+                        "none": "无",
+                        "api-token": "API 令牌",
+                        "mtls": "mTLS 证书包",
+                        "pairing-code": "配对码"
+                    },
+                    "pendingCredentialNotice": "自定义凭据不会作为明文提交。请先写入私有密钥存储，或在高级设置中填写已有密钥引用。"
+                },
+                "credentials": {
+                    "apiToken": "API 令牌",
+                    "mtlsBundle": "mTLS 证书包",
+                    "pairingCode": "配对码",
+                    "notSubmitted": "此字段不会作为明文提交；请改用已有密钥引用。"
+                }
+            },
+            "vm": {
+                "fields": {
+                    "endpointUrl": "VM 连接 URL",
+                    "host": "主机 / IP",
+                    "port": "SSH 端口",
+                    "username": "用户名",
+                    "loginMethod": "登录方式"
+                },
+                "placeholders": {
+                    "host": "vm-01.example.internal",
+                    "port": "22",
+                    "username": "matcha"
+                },
+                "title": "虚拟机连接",
+                "loginMethods": {
+                    "password": "密码",
+                    "private-key": "SSH 私钥",
+                    "agent-installed": "已安装代理"
+                },
+                "credentials": {
+                    "password": "密码",
+                    "privateKey": "SSH 私钥"
+                },
+                "cloudDiscovery": {
+                    "title": "从云账号发现虚拟机",
+                    "description": "云账号发现需要安全的凭证流程。此表单不收集云账号令牌。"
+                },
+                "help": {
+                    "credentialPending": "密码或私钥不会作为明文提交。请先写入私有密钥存储，或在高级设置中填写已有密钥引用。",
+                    "agentInstalled": "虚拟机上已安装 RuntimeAgent 时可选此项，注册只记录连接投影。"
+                }
+            },
+            "environmentRegistered": {
+                "title": "环境已登记",
+                "description": "环境已登记。现在部署运行时，或稍后再部署。",
+                "deployNow": "立即部署",
+                "deployLater": "稍后部署",
+                "deploymentFailed": "部署失败。请检查环境配置后重试。"
+            },
+            "container": {
+                "title": "Docker 连接",
+                "fields": {
+                    "authentication": "认证方式",
+                    "containerName": "容器名称或 ID",
+                    "image": "镜像",
+                    "imageCandidates": "拉取候选镜像",
+                    "bearerToken": "Bearer 令牌",
+                    "connectionSource": "连接来源",
+                    "contextName": "Docker context 名称",
+                    "tlsCertificate": "TLS 证书材料"
+                },
+                "authMethods": {
+                    "none": "无",
+                    "bearer-token": "Bearer 令牌",
+                    "tls-certificate": "TLS 证书",
+                    "ssh-context": "SSH context"
+                },
+                "placeholders": {
+                    "containerName": "matchaclaw-debian-node-1",
+                    "image": "debian:bookworm-slim",
+                    "imageCandidates": "docker.m.daocloud.io/library/debian:bookworm-slim\ndebian:bookworm-slim",
+                    "bearerToken": "Docker Bearer 令牌",
+                    "contextName": "default",
+                    "tlsCertificate": "-----BEGIN CERTIFICATE-----"
+                },
+                "help": {
+                    "endpoint": "填写 Docker Engine HTTP API 地址，不是本机 socket 路径。",
+                    "image": "用于创建通用 Debian 环境容器；默认 debian:bookworm-slim。",
+                    "imageCandidates": "本地没有镜像时按顺序拉取；留空使用内置国内候选和官方镜像。",
+                    "containerName": "留空自动生成 Matcha 管理的 Debian 容器名；填写则使用或启动指定的已有容器。",
+                    "credentialPending": "令牌或证书不会作为明文提交。请先写入私有密钥存储，或在高级设置中填写已有密钥引用。",
+                    "sshContext": "使用宿主机已有 Docker SSH context；前端不保存 SSH 凭据。"
+                },
+                "connectionSources": {
+                    "endpoint": "Docker 端点",
+                    "context": "Docker context"
+                },
+                "environmentRegistered": {
+                    "title": "容器环境已注册",
+                    "description": "容器环境已就绪。现在部署运行时，或稍后再部署。",
+                    "deployNow": "立即部署",
+                    "deployLater": "稍后部署",
+                    "deploymentFailed": "部署失败。请检查环境配置后重试。"
+                }
+            }
+        },
+        "targetPreview": {
+            "eyebrow": "路由预览",
+            "title": "目标预览",
+            "description": "仅预览。调度和租约决策仍由 runtime-host 持有。",
+            "metrics": {
+                "candidates": "候选",
+                "excluded": "排除",
+                "selector": "选择器",
+                "operations": "操作",
+                "labels": "标签",
+                "binding": "绑定"
+            },
+            "selectorSections": {
+                "endpointIds": "端点 ID",
+                "nodeIds": "节点 ID",
+                "runtimeIds": "运行时 ID",
+                "labels": "标签",
+                "operations": "操作"
+            },
+            "selectorSummary": {
+                "title": "选择器",
+                "unscoped": "未限定预览",
+                "single": "{{label}}：{{count}}",
+                "multiple": "{{count}} 个选择维度",
+                "all": "全部",
+                "allEndpoints": "全部端点",
+                "scopedPreview": "限定预览",
+                "allEndpointsDetail": "runtime-host 调度前，所有发现的端点都保留在预览中。",
+                "dimensionCount": "{{label}} {{count}}"
+            },
+            "binding": {
+                "runtimeLinked": "绑定运行时",
+                "nodeLinked": "绑定节点",
+                "direct": "直接"
+            },
+            "meta": {
+                "node": "节点",
+                "runtime": "运行时",
+                "url": "URL"
+            },
+            "chips": {
+                "operationsInScope": "范围内操作",
+                "labels": "标签"
+            },
+            "exclusion": {
+                "title": "被运行状态排除",
+                "description": "当前状态为 {{status}}，不会作为活跃候选。"
+            },
+            "empty": {
+                "noOperations": {
+                    "title": "没有匹配操作",
+                    "description": "端点通过了身份过滤，但当前操作不可用。"
+                },
+                "noSelector": {
+                    "title": "没有选择器",
+                    "description": "当前预览包含所有发现的端点。"
+                },
+                "noCandidates": {
+                    "title": "暂无候选",
+                    "description": "放宽选择器或同步能力。"
+                },
+                "noExclusions": {
+                    "title": "无排除项",
+                    "description": "没有匹配端点处于排空或退役状态。"
+                }
+            },
+            "candidates": {
+                "title": "候选端点",
+                "description": "符合当前预览条件的端点。"
+            },
+            "excluded": {
+                "title": "排除端点",
+                "description": "符合范围但被运行状态阻断的端点。"
+            }
+        },
+        "toasts": {
+            "loadFailed": "加载远端资源失败",
+            "nodeRemoved": "节点已移除",
+            "nodeRemoveFailed": "移除节点失败",
+            "probeSubmitted": "探测已提交",
+            "probeFailed": "探测节点失败",
+            "connectionCheckCompleted": "连接检查已完成",
+            "connectionCheckFailed": "连接检查失败",
+            "tokenIssued": "Enrollment token 已签发",
+            "tokenFailed": "签发 enrollment token 失败",
+            "installSubmitted": "安装命令已提交",
+            "environmentDeploySubmitted": "环境部署命令已提交",
+            "environmentDeployFailed": "部署环境失败",
+            "installFailed": "安装 RuntimeAgent 失败",
+            "agentRevoked": "RuntimeAgent 已撤销",
+            "agentRevokeFailed": "撤销 RuntimeAgent 失败",
+            "startSubmitted": "启动命令已提交",
+            "startFailed": "启动远端运行时失败",
+            "stopSubmitted": "停止命令已提交",
+            "stopFailed": "停止远端运行时失败",
+            "drainSubmitted": "排空已提交",
+            "drainFailed": "排空端点失败",
+            "retireSubmitted": "退役已提交",
+            "retireFailed": "退役端点失败",
+            "syncSubmitted": "能力同步已提交",
+            "syncFailed": "同步能力失败",
+            "metricsFailed": "加载指标失败",
+            "commandsFailed": "加载命令失败",
+            "auditFailed": "加载审计事件失败",
+            "connectionDeleted": "连接已删除",
+            "connectionDeleteFailed": "删除连接失败",
+            "environmentDeleted": "环境已删除",
+            "environmentDeleteIncomplete": "远端资源清理未完成，环境未删除并已保留。",
+            "environmentDeletedRemoteResourcesUnchanged": "环境已删除，部分远端资源保持不变。",
+            "environmentDeleteFailed": "删除环境失败"
+        }
     }
 }

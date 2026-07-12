@@ -368,6 +368,15 @@ export function getHostApiBase(): string {
   return HOST_API_BASE;
 }
 
+export async function resolveHostApiBase(): Promise<string> {
+  try {
+    const baseUrl = await invokeIpc<unknown>('hostapi:base-url');
+    return typeof baseUrl === 'string' && baseUrl.trim() ? baseUrl.trim() : HOST_API_BASE;
+  } catch {
+    return HOST_API_BASE;
+  }
+}
+
 export async function hostOpenClawGetStatus(): Promise<OpenClawStatusPayload> {
   return hostApiFetch('/api/openclaw/status');
 }

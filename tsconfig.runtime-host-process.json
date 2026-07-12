@@ -20,7 +20,8 @@
   "include": [
     "runtime-host/main.ts",
     "runtime-host/main-cli.ts",
-    "runtime-host/application/team-runtime/infrastructure/worker/team-runtime-worker-entry.ts"
+    "runtime-host/application/team-runtime/infrastructure/worker/team-runtime-worker-entry.ts",
+    "runtime-host/application/remote-fleet/infrastructure/worker/remote-fleet-worker-entry.ts"
   ],
   "exclude": ["runtime-host/build/**"]
 }

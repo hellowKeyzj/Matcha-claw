@@ -85,7 +85,12 @@
     "/api/skills/effective",
     "/api/skills/status",
     "/api/toolchain/uv/check",
-    "/api/workbench/bootstrap"
+    "/api/workbench/bootstrap",
+    "/api/remote-fleet/list-audit-events",
+    "/api/remote-fleet/list-commands",
+    "/api/remote-fleet/metrics",
+    "/api/remote-fleet/snapshot",
+    "/api/remote-fleet/terminal/sessions"
   ],
   "hostapiProxyPublicReadonlyPrefixRoutes": [
     "/api/channels/config/",
@@ -102,9 +107,29 @@
     "/api/external-connectors/probe",
     "/api/external-connectors/session-status",
     "/api/external-connectors/upsert",
-    "/api/external-connectors/remove"
+    "/api/external-connectors/remove",
+    "/api/remote-fleet/drain-endpoint",
+    "/api/remote-fleet/install-agent",
+    "/api/remote-fleet/probe",
+    "/api/remote-fleet/probe-connection",
+    "/api/remote-fleet/register-connection",
+    "/api/remote-fleet/delete-connection",
+    "/api/remote-fleet/register-environment",
+    "/api/remote-fleet/deploy-environment",
+    "/api/remote-fleet/delete-environment",
+    "/api/remote-fleet/register",
+    "/api/remote-fleet/write-credential",
+    "/api/remote-fleet/terminal/open",
+    "/api/remote-fleet/terminal/reconnect",
+    "/api/remote-fleet/terminal/close",
+    "/api/remote-fleet/remove-node",
+    "/api/remote-fleet/retire-endpoint",
+    "/api/remote-fleet/revoke-agent"
   ],
   "hostapiProxyPublicMutationPutExactRoutes": [
     "/api/openclaw/tool-permission-mode"
+  ],
+  "hostapiProxyWebsocketExactRoutes": [
+    "/api/remote-fleet/terminal/stream"
   ]
 }

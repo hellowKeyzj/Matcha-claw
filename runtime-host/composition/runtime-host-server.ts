@@ -1,6 +1,7 @@
 import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
 import { createServer } from 'node:http';
 import type { IncomingMessage, Server, ServerResponse } from 'node:http';
+import type { Duplex } from 'node:stream';
 import { handleDispatchRoute } from '../api/dispatch/dispatch-route-handler';
 import type { RuntimeRouteResponse } from '../api/dispatch/runtime-route-dispatcher-types';
 import { sendJson } from '../api/common/http';
@@ -9,6 +10,12 @@ import {
   TRANSPORT_VERSION,
 } from '../shared/runtime-host-constants';
 import type { RuntimeLifecycleState } from '../application/common/runtime-contracts';
+import type { RemoteFleetPort } from '../application/remote-fleet/remote-fleet-service';
+import {
+  createRuntimeAgentIngressRejectedResponse,
+  REMOTE_FLEET_RUNTIME_AGENT_INGRESS_PATH,
+} from '../application/remote-fleet/remote-fleet-agent-ingress';
+import { createRuntimeAgentIngressRouteHandler } from '../api/routes/remote-fleet-runtime-agent-ingress-route';
 import type { TeamRuntimePort } from '../application/team-runtime/team-runtime-port';
 import type { RuntimeHostLogger } from '../shared/logger';
 
@@ -30,7 +37,12 @@ export interface RuntimeHostHttpServerDeps {
   readonly logger?: RuntimeHostLogger;
   readonly teamWebhookToken: string | (() => string | Promise<string>);
   readonly teamRuntimeService: TeamRuntimePort;
+  readonly remoteFleetService: Pick<RemoteFleetPort, 'invoke'>;
   readonly nowMs: () => number;
+  readonly nowIso: () => string;
+  readonly terminalStream?: {
+    attachWebSocket(req: IncomingMessage, socket: Duplex, head: Buffer): Promise<boolean> | boolean;
+  };
   readonly dispatchRuntimeRoute: (
     method: string,
     route: string,
@@ -76,7 +88,11 @@ export function createRuntimeHostHttpServer(deps: RuntimeHostHttpServerDeps): Se
     createWebhookBodyHasher,
     createWebhookRequestId,
   });
-  return createServer((req: IncomingMessage, res: ServerResponse) => {
+  const handleRuntimeAgentIngress = createRuntimeAgentIngressRouteHandler({
+    remoteFleetService: deps.remoteFleetService,
+    nowIso: deps.nowIso,
+  });
+  const server = createServer((req: IncomingMessage, res: ServerResponse) => {
     const method = req.method || 'GET';
     const url = new URL(req.url || '/', `http://127.0.0.1:${deps.port}`);
 
@@ -105,6 +121,17 @@ export function createRuntimeHostHttpServer(deps: RuntimeHostHttpServerDeps): Se
       return;
     }
 
+    if (url.pathname === REMOTE_FLEET_RUNTIME_AGENT_INGRESS_PATH) {
+      void handleRuntimeAgentIngress(req, res).catch(() => {
+        sendJson(res, 503, createRuntimeAgentIngressRejectedResponse(
+          undefined,
+          'runtime-unavailable',
+          deps.nowIso(),
+        ));
+      });
+      return;
+    }
+
     if (method === 'POST' && url.pathname === '/dispatch') {
       handleDispatchRoute(req, res, {
         transportStats: deps.transportStats,
@@ -124,6 +151,26 @@ export function createRuntimeHostHttpServer(deps: RuntimeHostHttpServerDeps): Se
       },
     });
   });
+
+  server.on('upgrade', (req: IncomingMessage, socket: Duplex, head: Buffer) => {
+    const url = new URL(req.url || '/', `http://127.0.0.1:${deps.port}`);
+    if (!deps.terminalStream || !url.pathname.startsWith('/api/remote-fleet/terminal/')) {
+      socket.destroy();
+      return;
+    }
+    void Promise.resolve(deps.terminalStream.attachWebSocket(req, socket, head)).then((handled) => {
+      if (!handled && !socket.destroyed) {
+        socket.destroy();
+      }
+    }).catch((error) => {
+      deps.logger?.warn('[remote-fleet:terminal] upgrade failed', { error: error instanceof Error ? error.message : String(error) });
+      if (!socket.destroyed) {
+        socket.destroy();
+      }
+    });
+  });
+
+  return server;
 }
 
 export function closeRuntimeHostHttpServer(server: Server): Promise<void> {

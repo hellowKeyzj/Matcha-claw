@@ -24,6 +24,7 @@ import type { ToolchainUvService } from '../application/toolchain/uv-service';
 import type { TeamRuntimePort } from '../application/team-runtime/team-runtime-port';
 import type { TeamRuntimeWebhookAuthService } from '../application/team-runtime/team-runtime-webhook-auth';
 import type { ExternalConnectorService } from '../application/external-connectors/external-connector-service';
+import type { RemoteFleetPort } from '../application/remote-fleet';
 
 export type RuntimeHostToken<Value> = string & {
   readonly __runtimeHostTokenValue?: Value;
@@ -75,5 +76,6 @@ export const TEAM_RUNTIME_SERVICE_TOKEN = runtimeHostToken<TeamRuntimePort>('tea
 export const TEAM_RUNTIME_WEBHOOK_AUTH_TOKEN = runtimeHostToken<TeamRuntimeWebhookAuthService>('teamRuntime.webhookAuth');
 export const TOOLCHAIN_UV_SERVICE_TOKEN = runtimeHostToken<ToolchainUvService>('toolchainUv.service');
 export const EXTERNAL_CONNECTOR_SERVICE_TOKEN = runtimeHostToken<ExternalConnectorService>('externalConnectors.service');
+export const REMOTE_FLEET_SERVICE_TOKEN = runtimeHostToken<RemoteFleetPort>('remoteFleet.service');
 export const AGENT_RUNTIME_APPLICATION_TOKEN = runtimeHostToken<AgentRuntimeApplicationService>('agentRuntime.application');
 export const SESSION_RUNTIME_TOKEN = runtimeHostToken<SessionRuntimeService>('session.runtime');

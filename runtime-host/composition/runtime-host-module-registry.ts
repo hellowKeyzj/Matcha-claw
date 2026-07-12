@@ -25,11 +25,11 @@ import {
   SETTINGS_SERVICE_TOKEN,
   SKILLS_SERVICE_TOKEN,
   SUBAGENT_SERVICE_TOKEN,
-  TEAM_RUNTIME_SERVICE_TOKEN,
   TEAM_RUNTIME_WEBHOOK_AUTH_TOKEN,
   TOOLCHAIN_UV_SERVICE_TOKEN,
   WORKBENCH_SERVICE_TOKEN,
   EXTERNAL_CONNECTOR_SERVICE_TOKEN,
+  REMOTE_FLEET_SERVICE_TOKEN,
 } from './runtime-host-tokens';
 import type { GatewayConnectionPort } from '../application/gateway/gateway-runtime-port';
 import {
@@ -41,6 +41,11 @@ import {
   registerExternalConnectorApplicationServices,
   registerExternalConnectorRoutes,
 } from './modules/external-connectors-application-module';
+import {
+  registerRemoteFleetApplicationLifecycle,
+  registerRemoteFleetApplicationServices,
+  registerRemoteFleetRoutes,
+} from './modules/remote-fleet-application-module';
 import {
   connectOpenClawApplicationServices,
   registerOpenClawApplicationServices,
@@ -298,6 +303,31 @@ const externalConnectorModule: RuntimeHostApplicationModule = {
   }),
 };
 
+const remoteFleetModule: RuntimeHostApplicationModule = {
+  name: 'remote-fleet',
+  manifest: {
+    id: 'remote-fleet',
+    registerProviders: true,
+    registerLifecycle: true,
+    registerRoutes: true,
+    imports: [
+      'runtimeHost.runtimeDataRoot',
+      'runtime.httpClient',
+      'runtime.systemEnvironment',
+      'runtime.commandExecutor',
+      'runtime.timer',
+      'logger',
+      'agentRuntime.registry',
+    ],
+    exports: ['remoteFleet.service'],
+  },
+  registerServices: (context) => registerRemoteFleetApplicationServices(context.container, context.facades),
+  registerLifecycle: registerRemoteFleetApplicationLifecycle,
+  registerRoutes: (routes, context) => registerRemoteFleetRoutes(routes, {
+    remoteFleetService: context.facades.resolve(REMOTE_FLEET_SERVICE_TOKEN),
+  }),
+};
+
 const operationsModule: RuntimeHostApplicationModule = {
   name: 'operations',
   manifest: {
@@ -386,6 +416,7 @@ const sessionsModule: RuntimeHostApplicationModule = {
 export const RUNTIME_HOST_APPLICATION_MODULES: readonly RuntimeHostApplicationModule[] = [
   applicationFoundationModule,
   externalConnectorModule,
+  remoteFleetModule,
   openClawModule,
   licenseModule,
   runtimeModule,
@@ -399,6 +430,7 @@ const RUNTIME_HOST_ROUTE_MODULES: readonly RuntimeHostApplicationModule[] = [
   runtimeModule,
   operationsModule,
   externalConnectorModule,
+  remoteFleetModule,
   openClawModule,
   sessionsModule,
 ] as const;

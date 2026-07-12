@@ -32,6 +32,7 @@ import {
   TasksRoute,
   PluginsRoute,
   ExternalConnectorsRoute,
+  RemoteFleetRoute,
 } from './lib/route-preload';
 
 function RouteLoadingFallback() {
@@ -346,6 +347,14 @@ function App() {
               element={(
                 <Suspense fallback={<RouteLoadingFallback />}>
                   <ExternalConnectorsRoute />
+                </Suspense>
+              )}
+            />
+            <Route
+              path="/remote-fleet"
+              element={(
+                <Suspense fallback={<RouteLoadingFallback />}>
+                  <RemoteFleetRoute />
                 </Suspense>
               )}
             />

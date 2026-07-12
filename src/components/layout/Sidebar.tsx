@@ -19,6 +19,7 @@ import {
   Terminal,
   ExternalLink,
   Cable,
+  Network,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { useLayoutStore } from '@/stores/layout';
@@ -464,6 +465,7 @@ export function Sidebar({
     { to: '/skills', icon: <Puzzle className="h-5 w-5" />, label: t('sidebar.skills') },
     { to: '/plugins', icon: <Package className="h-5 w-5" />, label: t('sidebar.plugins') },
     { to: '/connectors', icon: <Cable className="h-5 w-5" />, label: t('sidebar.connectors') },
+    { to: '/remote-fleet', icon: <Network className="h-5 w-5" />, label: t('sidebar.remoteFleet') },
     { to: '/channels', icon: <Radio className="h-5 w-5" />, label: t('sidebar.channels') },
     { to: '/dashboard', icon: <Home className="h-5 w-5" />, label: t('sidebar.dashboard') },
     { to: '/security', icon: <ShieldCheck className="h-5 w-5" />, label: t('sidebar.security') },

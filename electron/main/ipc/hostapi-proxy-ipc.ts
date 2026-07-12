@@ -2,7 +2,7 @@ import { ipcMain } from 'electron';
 import { isHostApiProxyAllowedRoute } from '../../api/route-boundary';
 import { proxyAwareFetch } from '../../utils/proxy-fetch';
 import { getPort } from '../../utils/config';
-import { getHostApiToken } from '../../api/server';
+import { getHostApiBaseUrl, getHostApiToken } from '../../api/server';
 import { handleE2EHostApiFetch } from '../e2e-fixture-loader';
 
 type HostApiFetchRequest = {
@@ -38,6 +38,7 @@ export function registerHostApiProxyHandlers(): void {
   const inflightControllers = new Map<string, AbortController>();
 
   ipcMain.handle('hostapi:token', () => getHostApiToken());
+  ipcMain.handle('hostapi:base-url', () => getHostApiBaseUrl());
 
   ipcMain.handle('hostapi:abort', (_, request: HostApiAbortRequest) => {
     const requestId = typeof request?.requestId === 'string' ? request.requestId : '';
