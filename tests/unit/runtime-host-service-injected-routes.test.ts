@@ -249,7 +249,6 @@ describe('runtime-host service-injected routes', () => {
       transportStats: vi.fn(),
       prepareGatewayLaunch: vi.fn(),
       providerEnvMap: vi.fn(),
-      syncProviderAuthBootstrap: vi.fn(),
       runtimeJobs: vi.fn(() => ({ success: true, queue: { stopped: false }, registeredTypes: [], jobs: [] })),
       runtimeJob: vi.fn(),
       collectDiagnostics: vi.fn(),

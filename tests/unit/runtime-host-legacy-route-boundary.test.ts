@@ -169,7 +169,6 @@ describe('runtime-host legacy route boundary', () => {
     };
     const runtimeHostService = {
       prepareGatewayLaunch: vi.fn(),
-      syncProviderAuthBootstrap: vi.fn(),
       gatewayLifecycle: vi.fn(),
       collectDiagnostics: vi.fn(),
       runtimeJob: vi.fn(() => ({ status: 200, data: { success: true, job: { id: 'job-1' } } })),

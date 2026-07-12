@@ -120,10 +120,6 @@ export class GatewayPrelaunchWorkflow {
     };
   }
 
-  async executeProviderAuthBootstrap(): Promise<{ syncedApiKeyCount: number }> {
-    return await this.syncProviderStackToRuntime();
-  }
-
   async executeWorkspaceTemplateMigration() {
     await this.deps.workspace.ensureDefaultIdentity();
     const migration = await this.deps.workspace.migrateMainAgentTemplatesIfNeeded();

@@ -13,7 +13,6 @@ export interface RuntimeHostServiceDeps {
     | 'providerEnvMap'
     | 'hostBootstrapSettings'
     | 'gatewayLaunchPlan'
-    | 'syncProviderAuthBootstrap'
     | 'gatewayLifecycle'
     | 'collectDiagnostics'
     | 'runtimeJobs'
@@ -46,10 +45,6 @@ export class RuntimeHostService {
 
   async gatewayLaunchPlan() {
     return await this.deps.operationsWorkflow.gatewayLaunchPlan();
-  }
-
-  syncProviderAuthBootstrap() {
-    return this.deps.operationsWorkflow.syncProviderAuthBootstrap();
   }
 
   gatewayLifecycle(payload: unknown) {

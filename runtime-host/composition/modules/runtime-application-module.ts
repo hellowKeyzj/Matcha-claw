@@ -7,7 +7,6 @@ import { createRuntimeHostCapabilityOperationRoutes } from '../../application/ca
 import type { CapabilityOperationRoute } from '../../application/capabilities/contracts/capability-router';
 import {
   GATEWAY_PRELAUNCH_JOB,
-  PROVIDER_AUTH_BOOTSTRAP_JOB,
   WORKSPACE_TEMPLATE_MIGRATION_JOB,
   createRuntimeHostBootstrapJobPort,
   type RuntimeHostBootstrapJobPort,
@@ -229,12 +228,6 @@ function createRuntimeApplicationJobDefinitions(
       type: GATEWAY_PRELAUNCH_JOB,
       handler: async (payload) => {
         return await container.resolve<RuntimeHostBootstrapService>('runtimeHost.bootstrapService').executeGatewayPrelaunch(payload as never);
-      },
-    },
-    {
-      type: PROVIDER_AUTH_BOOTSTRAP_JOB,
-      handler: async () => {
-        return await container.resolve<RuntimeHostBootstrapService>('runtimeHost.bootstrapService').executeProviderAuthBootstrap();
       },
     },
     {

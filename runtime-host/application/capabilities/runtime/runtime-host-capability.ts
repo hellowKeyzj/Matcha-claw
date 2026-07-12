@@ -9,7 +9,6 @@ export const RUNTIME_HOST_CAPABILITY_ID = 'runtime.host';
 
 export const runtimeHostCapabilityOperations: readonly CapabilityOperationDescriptor[] = [
   { id: 'runtimeHost.prepareGatewayLaunch', title: 'Prepare gateway launch', targetKind: 'gateway-control' },
-  { id: 'runtimeHost.syncProviderAuthBootstrap', title: 'Sync provider auth bootstrap', targetKind: 'runtime-endpoint' },
   { id: 'runtimeHost.gatewayLifecycle', title: 'Handle gateway lifecycle', targetKind: 'gateway-control' },
   { id: 'runtimeHost.gatewayReady', title: 'Probe gateway control readiness', targetKind: 'gateway-control' },
   { id: 'runtimeHost.gatewayControlUiAutoApprove', title: 'Approve gateway control UI pairing', targetKind: 'gateway-control' },
@@ -20,7 +19,6 @@ export const runtimeHostCapabilityOperations: readonly CapabilityOperationDescri
 export function createRuntimeHostCapabilityOperationRoutes(deps: {
   runtimeHostService: Pick<RuntimeHostService,
     | 'prepareGatewayLaunch'
-    | 'syncProviderAuthBootstrap'
     | 'gatewayLifecycle'
     | 'collectDiagnostics'
     | 'runtimeJob'
@@ -32,11 +30,6 @@ export function createRuntimeHostCapabilityOperationRoutes(deps: {
       capabilityId: RUNTIME_HOST_CAPABILITY_ID,
       operationId: 'runtimeHost.prepareGatewayLaunch',
       handle: (context) => deps.runtimeHostService.prepareGatewayLaunch(context.domainInput),
-    },
-    {
-      capabilityId: RUNTIME_HOST_CAPABILITY_ID,
-      operationId: 'runtimeHost.syncProviderAuthBootstrap',
-      handle: () => deps.runtimeHostService.syncProviderAuthBootstrap(),
     },
     {
       capabilityId: RUNTIME_HOST_CAPABILITY_ID,

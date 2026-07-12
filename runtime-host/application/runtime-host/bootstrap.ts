@@ -39,7 +39,6 @@ export class RuntimeHostBootstrapService {
         | 'getHostBootstrapSettings'
         | 'buildGatewayLaunchPlan'
         | 'executeGatewayPrelaunch'
-        | 'executeProviderAuthBootstrap'
         | 'executeWorkspaceTemplateMigration'
       >;
       jobs: RuntimeHostBootstrapJobPort;
@@ -48,10 +47,6 @@ export class RuntimeHostBootstrapService {
 
   submitGatewayPrelaunch(input: GatewayPrelaunchInput) {
     return this.deps.jobs.submitGatewayPrelaunch(input);
-  }
-
-  submitProviderAuthBootstrap() {
-    return this.deps.jobs.submitProviderAuthBootstrap();
   }
 
   submitWorkspaceTemplateMigration() {
@@ -72,10 +67,6 @@ export class RuntimeHostBootstrapService {
 
   buildProviderEnvMap() {
     return buildProviderEnvMap();
-  }
-
-  async executeProviderAuthBootstrap(): Promise<{ syncedApiKeyCount: number }> {
-    return await this.deps.gatewayPrelaunchWorkflow.executeProviderAuthBootstrap();
   }
 
   async executeWorkspaceTemplateMigration() {

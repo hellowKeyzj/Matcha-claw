@@ -7,7 +7,6 @@ export interface RuntimeHostOperationsWorkflowDeps {
   readonly bootstrap: Pick<
     RuntimeHostBootstrapService,
     | 'submitGatewayPrelaunch'
-    | 'submitProviderAuthBootstrap'
     | 'buildProviderEnvMap'
     | 'getHostBootstrapSettings'
     | 'buildGatewayLaunchPlan'
@@ -49,10 +48,6 @@ export class RuntimeHostOperationsWorkflow {
       success: true,
       plan: await this.deps.bootstrap.buildGatewayLaunchPlan(),
     });
-  }
-
-  syncProviderAuthBootstrap(): ApplicationResponse {
-    return accepted(this.deps.bootstrap.submitProviderAuthBootstrap());
   }
 
   gatewayLifecycle(payload: unknown): ApplicationResponse {

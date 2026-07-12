@@ -359,7 +359,6 @@ describe('non-provider capability target-input binding', () => {
   it('binds runtimeHost.jobGet target jobId to input jobId before service call', async () => {
     const runtimeHostService = {
       prepareGatewayLaunch: vi.fn(),
-      syncProviderAuthBootstrap: vi.fn(),
       gatewayLifecycle: vi.fn(),
       collectDiagnostics: vi.fn(),
       runtimeJob: vi.fn(() => ({ status: 200, data: { success: true, job: { id: 'job-1' } } })),

@@ -70,13 +70,6 @@ function createService() {
   const operationsWorkflow = new RuntimeHostOperationsWorkflow({
     bootstrap: {
       submitGatewayPrelaunch,
-      submitProviderAuthBootstrap: vi.fn(() => ({
-        success: true,
-        job: {
-          id: 'job-provider-auth-1',
-          type: 'runtimeHost.providerAuthBootstrap',
-        },
-      })),
       buildProviderEnvMap: vi.fn(() => ({
         keyableProviderTypes: [],
         envVarByProviderType: {},
@@ -179,20 +172,5 @@ describe('runtime host service', () => {
       },
     });
     expect(submitDiagnosticsCollection).toHaveBeenCalledTimes(1);
-  });
-
-  it('syncProviderAuthBootstrap submits a provider bootstrap job', () => {
-    const { service } = createService();
-
-    expect(service.syncProviderAuthBootstrap()).toEqual({
-      status: 202,
-      data: {
-        success: true,
-        job: {
-          id: 'job-provider-auth-1',
-          type: 'runtimeHost.providerAuthBootstrap',
-        },
-      },
-    });
   });
 });

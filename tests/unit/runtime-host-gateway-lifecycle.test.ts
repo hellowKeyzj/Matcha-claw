@@ -7,12 +7,10 @@ function createBootstrapService() {
       getHostBootstrapSettings: vi.fn(),
       buildGatewayLaunchPlan: vi.fn(),
       executeGatewayPrelaunch: vi.fn(),
-      executeProviderAuthBootstrap: vi.fn(),
       executeWorkspaceTemplateMigration: vi.fn(),
     },
     jobs: {
       submitGatewayPrelaunch: vi.fn(),
-      submitProviderAuthBootstrap: vi.fn(),
       submitWorkspaceTemplateMigration: vi.fn(),
     },
   });

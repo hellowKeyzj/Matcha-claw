@@ -141,7 +141,6 @@ async function createBootstrapService(RuntimeHostBootstrapService: typeof import
     gatewayPrelaunchWorkflow,
     jobs: {
       submitGatewayPrelaunch: hoisted.submitLongTaskMock,
-      submitProviderAuthBootstrap: hoisted.submitLongTaskMock,
       submitWorkspaceTemplateMigration: hoisted.submitLongTaskMock,
     },
   });
@@ -201,15 +200,6 @@ describe('runtime-host bootstrap provider sync', () => {
     expect(result.job.id).toBe('job-1');
   });
 
-  it('RuntimeHostBootstrapService 会把 provider auth bootstrap 提交给任务系统', async () => {
-    const { RuntimeHostBootstrapService } = await import('../../runtime-host/application/runtime-host/bootstrap');
-    const service = await createBootstrapService(RuntimeHostBootstrapService);
-    const result = service.submitProviderAuthBootstrap();
-
-    expect(hoisted.submitLongTaskMock).toHaveBeenCalledWith();
-    expect(result.job.id).toBe('job-1');
-  });
-
   it('gateway prelaunch 任务会同时同步 runtime-host settings 与 openclaw.json 的 gateway token', async () => {
     hoisted.readProviderStoreMock.mockResolvedValue({
       accounts: {},
@@ -250,80 +240,4 @@ describe('runtime-host bootstrap provider sync', () => {
     }));
   });
 
-  it('Ollama 凭证只同步密钥和 provider 覆盖配置，不写默认模型', async () => {
-    hoisted.readProviderStoreMock.mockResolvedValue({
-      accounts: {
-        'ollama-main': {
-          id: 'ollama-main',
-          vendorId: 'ollama',
-          baseUrl: 'http://localhost:11434/v1',
-        },
-      },
-      apiKeys: {
-        'ollama-main': 'ollama-local',
-      },
-    });
-
-    const { RuntimeHostBootstrapService } = await import('../../runtime-host/application/runtime-host/bootstrap');
-    const service = await createBootstrapService(RuntimeHostBootstrapService);
-    await service.executeProviderAuthBootstrap();
-
-    expect(hoisted.saveProviderKeyMock).toHaveBeenCalledWith('ollama-ollama-main', 'ollama-local');
-    expect(hoisted.removeProviderKeyMock).not.toHaveBeenCalledWith('ollama-ollama-main');
-    expect(hoisted.upsertProviderInAgentModelsMock).toHaveBeenCalledWith({
-      agentIds: ['main'],
-      provider: 'ollama-ollama-main',
-      entry: expect.objectContaining({
-        baseUrl: 'http://localhost:11434/v1',
-        api: 'openai-completions',
-      }),
-    });
-    expect(hoisted.syncProviderConfigMock).toHaveBeenCalledWith(
-      'ollama-ollama-main',
-      expect.objectContaining({
-        baseUrl: 'http://localhost:11434/v1',
-        api: 'openai-completions',
-      }),
-    );
-    expect(hoisted.syncRuntimeModelProjectionMock).toHaveBeenCalledTimes(1);
-    expect(hoisted.syncRuntimeRoutingProjectionMock).toHaveBeenCalledTimes(1);
-  });
-
-  it('普通凭证同步 provider config 与 per-agent models.json provider，不写默认模型', async () => {
-    hoisted.readProviderStoreMock.mockResolvedValue({
-      accounts: {
-        'openai-main': {
-          id: 'openai-main',
-          vendorId: 'openai',
-        },
-      },
-      apiKeys: {
-        'openai-main': 'sk-openai',
-      },
-    });
-
-    const { RuntimeHostBootstrapService } = await import('../../runtime-host/application/runtime-host/bootstrap');
-    const service = await createBootstrapService(RuntimeHostBootstrapService);
-    await service.executeProviderAuthBootstrap();
-
-    expect(hoisted.saveProviderKeyMock).toHaveBeenCalledWith('openai-openai-main', 'sk-openai');
-    expect(hoisted.removeProviderKeyMock).not.toHaveBeenCalledWith('openai-openai-main');
-    expect(hoisted.upsertProviderInAgentModelsMock).toHaveBeenCalledWith({
-      agentIds: ['main'],
-      provider: 'openai-openai-main',
-      entry: expect.objectContaining({
-        baseUrl: 'https://api.openai.com/v1',
-        api: 'openai-responses',
-      }),
-    });
-    expect(hoisted.syncProviderConfigMock).toHaveBeenCalledWith(
-      'openai-openai-main',
-      expect.objectContaining({
-        baseUrl: 'https://api.openai.com/v1',
-        api: 'openai-responses',
-      }),
-    );
-    expect(hoisted.syncRuntimeModelProjectionMock).toHaveBeenCalledTimes(1);
-    expect(hoisted.syncRuntimeRoutingProjectionMock).toHaveBeenCalledTimes(1);
-  });
 });
