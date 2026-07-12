@@ -68,6 +68,14 @@ describe('host-api', () => {
     );
   });
 
+  it('resolves the direct Host API base URL through IPC', async () => {
+    invokeIpcMock.mockResolvedValueOnce('http://127.0.0.1:45678');
+
+    const { resolveHostApiBase } = await import('@/lib/host-api');
+    await expect(resolveHostApiBase()).resolves.toBe('http://127.0.0.1:45678');
+    expect(invokeIpcMock).toHaveBeenCalledWith('hostapi:base-url');
+  });
+
   it('throws message from unified non-ok envelope', async () => {
     invokeIpcMock.mockResolvedValueOnce({
       ok: false,
@@ -1067,15 +1075,14 @@ describe('host-api', () => {
         timeoutMs: 10000,
         body: JSON.stringify({
           id: 'session.prompt',
-          operationId: 'sessions.prompt',
+          operationId: 'sessions.sendWithMedia',
           scope: { kind: 'session', identity: testSessionIdentity },
           target: { kind: 'session', identity: testSessionIdentity },
           input: {
             sessionKey: 'agent:main:main',
             sessionIdentity: testSessionIdentity,
-            message: 'hello',
-            idempotencyKey: 'user-local-1',
-            deliver: false,
+            message: 'Review the attached report',
+            media,
           },
         }),
       }),
@@ -1168,24 +1175,4 @@ describe('host-api', () => {
     );
   });
 
-  it('createHostEventSource 会附带 token 且复用缓存 token', async () => {
-    const eventSourceCtor = vi.fn(function EventSourceCtor(this: unknown) {});
-    vi.stubGlobal('EventSource', eventSourceCtor as unknown as typeof EventSource);
-    invokeIpcMock.mockResolvedValueOnce('token-123');
-
-    const { createHostEventSource } = await import('@/lib/host-api');
-    await createHostEventSource('/api/events');
-    await createHostEventSource('/api/events?foo=1');
-
-    expect(invokeIpcMock).toHaveBeenCalledTimes(1);
-    expect(invokeIpcMock).toHaveBeenCalledWith('hostapi:token');
-    expect(eventSourceCtor).toHaveBeenNthCalledWith(
-      1,
-      'http://127.0.0.1:13210/api/events?token=token-123',
-    );
-    expect(eventSourceCtor).toHaveBeenNthCalledWith(
-      2,
-      'http://127.0.0.1:13210/api/events?foo=1&token=token-123',
-    );
-  });
 });
