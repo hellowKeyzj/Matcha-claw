@@ -33,8 +33,8 @@ describe('host event bridge runtime-host lifecycle', () => {
     let gatewayEventHandler: ((eventName: string, payload: unknown) => void) | null = null;
 
     let runtimeState = {
-      lifecycle: 'running' as const,
-      runtimeLifecycle: 'running' as const,
+      lifecycle: 'running' as 'running' | 'stopping',
+      runtimeLifecycle: 'running' as 'running' | 'stopping',
       pid: 1111,
       activePluginCount: 2,
     };
@@ -101,6 +101,24 @@ describe('host event bridge runtime-host lifecycle', () => {
 
     runtimeState = {
       ...runtimeState,
+      lifecycle: 'stopping',
+      runtimeLifecycle: 'stopping',
+    };
+    stateChangeHandler?.();
+    await vi.runOnlyPendingTimersAsync();
+
+    expect(eventBus.emit).toHaveBeenCalledWith(
+      'runtime-host:status',
+      expect.objectContaining({
+        status: 'stopping',
+        hostLifecycle: 'stopping',
+        runtimeLifecycle: 'stopping',
+      }),
+    );
+    runtimeState = {
+      ...runtimeState,
+      lifecycle: 'running',
+      runtimeLifecycle: 'running',
       pid: 2222,
     };
     stateChangeHandler?.();
@@ -239,6 +257,60 @@ describe('host event bridge runtime-host lifecycle', () => {
     expect(emitGatewayEvent).not.toHaveBeenCalled();
   });
 
+  it('process stop failure error takes precedence over the facade stopping projection', async () => {
+    const gatewayManager = new FakeGatewayManager();
+    const runtimeHostManager = {
+      getState: vi.fn(() => ({
+        lifecycle: 'stopping',
+        runtimeLifecycle: 'error',
+        pid: 1111,
+        activePluginCount: 0,
+        lastError: 'runtime-host process termination failed',
+      })),
+      checkHealth: vi.fn(async () => ({
+        ok: false,
+        lifecycle: 'error',
+        activePluginCount: 0,
+        degradedPlugins: [],
+        error: 'Runtime-host transport health failed: fetch failed',
+      })),
+      readGatewayStatus: vi.fn(async () => null),
+      emitGatewayEvent: vi.fn(),
+      onGatewayEvent: vi.fn(() => () => {}),
+      emitRuntimeJobEvent: vi.fn(),
+      onRuntimeJobEvent: vi.fn(() => () => {}),
+      onStateChange: vi.fn(() => () => {}),
+    };
+    const eventBus = { emit: vi.fn() };
+
+    const { registerHostEventBridge } = await import('../../electron/main/host-event-bridge');
+    registerHostEventBridge({
+      gatewayManager: gatewayManager as never,
+      runtimeHostManager: runtimeHostManager as never,
+      hostEventBus: eventBus as never,
+      getMainWindow: () => null,
+    });
+
+    await vi.runOnlyPendingTimersAsync();
+
+    expect(eventBus.emit).toHaveBeenCalledWith(
+      'runtime-host:status',
+      expect.objectContaining({
+        status: 'error',
+        hostLifecycle: 'stopping',
+        runtimeLifecycle: 'error',
+        error: 'runtime-host process termination failed',
+      }),
+    );
+    expect(eventBus.emit).toHaveBeenCalledWith(
+      'runtime-host:error',
+      expect.objectContaining({
+        status: 'error',
+        message: 'runtime-host process termination failed',
+      }),
+    );
+  });
+
   it('runtime-host 重启期间不会把临时 transport health 失败发成错误事件', async () => {
     const gatewayManager = new FakeGatewayManager();
     let runtimeState = {
@@ -309,6 +381,106 @@ describe('host event bridge runtime-host lifecycle', () => {
     stateChangeHandler?.();
     await vi.runOnlyPendingTimersAsync();
 
+    expect(eventBus.emit).toHaveBeenCalledWith(
+      'runtime-host:restart',
+      expect.objectContaining({
+        previousPid: 1111,
+        pid: 2222,
+        status: 'running',
+      }),
+    );
+  });
+
+  it('runtime-host 状态发布进行中又发生变化时会补发最新 running 状态', async () => {
+    const gatewayManager = new FakeGatewayManager();
+    let runtimeState = {
+      lifecycle: 'restarting' as const,
+      runtimeLifecycle: 'restarting' as const,
+      pid: 1111,
+      activePluginCount: 2,
+    };
+    let runtimeHealth = {
+      ok: false,
+      lifecycle: 'error' as const,
+      activePluginCount: 0,
+      degradedPlugins: [] as string[],
+      error: 'Runtime-host transport health failed: fetch failed',
+    };
+    let resolveFirstHealth: ((health: typeof runtimeHealth) => void) | null = null;
+    const firstHealth = new Promise<typeof runtimeHealth>((resolve) => {
+      resolveFirstHealth = resolve;
+    });
+    let stateChangeHandler: (() => void) | null = null;
+    let checkHealthCallCount = 0;
+    const runtimeHostManager = {
+      getState: vi.fn(() => runtimeState),
+      checkHealth: vi.fn(() => {
+        checkHealthCallCount += 1;
+        return checkHealthCallCount === 1
+          ? firstHealth
+          : Promise.resolve(runtimeHealth);
+      }),
+      readGatewayStatus: vi.fn(async () => null),
+      emitGatewayEvent: vi.fn(),
+      onGatewayEvent: vi.fn(() => () => {}),
+      emitRuntimeJobEvent: vi.fn(),
+      onRuntimeJobEvent: vi.fn(() => () => {}),
+      onStateChange: vi.fn((handler: () => void) => {
+        stateChangeHandler = handler;
+        return () => {
+          stateChangeHandler = null;
+        };
+      }),
+    };
+    const eventBus = { emit: vi.fn() };
+
+    const { registerHostEventBridge } = await import('../../electron/main/host-event-bridge');
+    registerHostEventBridge({
+      gatewayManager: gatewayManager as never,
+      runtimeHostManager: runtimeHostManager as never,
+      hostEventBus: eventBus as never,
+      getMainWindow: () => null,
+    });
+
+    runtimeState = {
+      lifecycle: 'running',
+      runtimeLifecycle: 'running',
+      pid: 2222,
+      activePluginCount: 2,
+    };
+    runtimeHealth = {
+      ok: true,
+      lifecycle: 'running',
+      activePluginCount: 2,
+      degradedPlugins: [],
+    };
+    stateChangeHandler?.();
+    resolveFirstHealth?.({
+      ok: false,
+      lifecycle: 'error',
+      activePluginCount: 0,
+      degradedPlugins: [],
+      error: 'Runtime-host transport health failed: fetch failed',
+    });
+
+    for (let index = 0; index < 6; index += 1) {
+      await Promise.resolve();
+    }
+
+    expect(eventBus.emit).toHaveBeenCalledWith(
+      'runtime-host:status',
+      expect.objectContaining({
+        status: 'restarting',
+        pid: 1111,
+      }),
+    );
+    expect(eventBus.emit).toHaveBeenCalledWith(
+      'runtime-host:status',
+      expect.objectContaining({
+        status: 'running',
+        pid: 2222,
+      }),
+    );
     expect(eventBus.emit).toHaveBeenCalledWith(
       'runtime-host:restart',
       expect.objectContaining({
