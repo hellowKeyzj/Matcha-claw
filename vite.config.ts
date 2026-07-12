@@ -141,7 +141,7 @@ function resolveManualChunk(id: string): string | undefined {
 }
 
 // https://vitejs.dev/config/
-export default defineConfig(({ mode }) => ({
+export default defineConfig(({ command, mode }) => ({
   // Required for Electron: all asset URLs must be relative because the renderer
   // loads via file:// in production. vite-plugin-electron-renderer sets this
   // automatically, but we declare it explicitly so the intent is clear and the
@@ -170,9 +170,7 @@ export default defineConfig(({ mode }) => ({
           },
           build: {
             outDir: 'dist-electron/main',
-            watch: {
-              ignored: ignoredWorkspaceDirs,
-            },
+            watch: command === 'serve' ? { ignored: ignoredWorkspaceDirs } : undefined,
             rollupOptions: {
               external: [
                 'electron-store',
@@ -194,9 +192,7 @@ export default defineConfig(({ mode }) => ({
         vite: {
           build: {
             outDir: 'dist-electron/preload',
-            watch: {
-              ignored: ignoredWorkspaceDirs,
-            },
+            watch: command === 'serve' ? { ignored: ignoredWorkspaceDirs } : undefined,
             rollupOptions: {
               external: ['electron'],
             },
