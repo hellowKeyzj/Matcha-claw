@@ -256,22 +256,6 @@ function requireCapabilityExecutePayload(
   };
 }
 
-function sessionKeyFromIdentityPayload(payload: Record<string, unknown>): string | null {
-  return isRecord(payload.sessionIdentity) && typeof payload.sessionIdentity.sessionKey === 'string'
-    ? payload.sessionIdentity.sessionKey
-    : null;
-}
-
-function buildSessionOperationPayload(payload: Record<string, unknown>, fallbackSessionKey = state.mainSessionKey): { sessionKey: string; sessionIdentity: SessionIdentity } {
-  const sessionKey = typeof payload.sessionKey === 'string'
-    ? payload.sessionKey
-    : (sessionKeyFromIdentityPayload(payload) ?? fallbackSessionKey);
-  return {
-    sessionKey,
-    sessionIdentity: sessionIdentityForSession(sessionKey),
-  };
-}
-
 function buildCapabilitySummary(
   id: string,
   scope: RuntimeScope,
@@ -2610,7 +2594,6 @@ export function getE2EDialogOpenResult(): { canceled: boolean; filePaths: string
     filePaths: ['C:\\mock\\notes.txt'],
   };
 }
-
 
 export function getE2EDialogStagedAttachments(): Array<{
   id: string;
