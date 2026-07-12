@@ -1,7 +1,3 @@
-import { createHostEventSource } from './host-api';
-
-let eventSource: EventSource | null = null;
-let eventSourcePromise: Promise<EventSource> | null = null;
 const HOST_EVENT_HUB_KEY = '__MATCHACLAW_HOST_EVENT_HUB__';
 
 type HostEventEnvelope<T = unknown> = {
@@ -80,39 +76,6 @@ function ensureIpcBridge(hub: HostEventHub, ipc: IpcRendererLike): void {
   };
 }
 
-async function getEventSource(): Promise<EventSource> {
-  if (eventSource) {
-    return eventSource;
-  }
-
-  if (!eventSourcePromise) {
-    eventSourcePromise = createHostEventSource()
-      .then((source) => {
-        eventSource = source;
-        return source;
-      })
-      .catch((error) => {
-        eventSourcePromise = null;
-        throw error;
-      });
-  }
-
-  return await eventSourcePromise;
-}
-
-function allowSseFallback(): boolean {
-  try {
-    return window.localStorage.getItem('matchaclaw:allow-sse-fallback') === '1';
-  } catch {
-    return false;
-  }
-}
-
-function canResolveHostApiTokenForSse(): boolean {
-  const ipc = getIpcRendererLike();
-  return typeof ipc?.invoke === 'function';
-}
-
 export function subscribeHostEvent<T = unknown>(
   eventName: string,
   handler: (payload: T) => void,
@@ -148,41 +111,6 @@ export function subscribeHostEvent<T = unknown>(
     };
   }
 
-  if (!allowSseFallback()) {
-    console.warn(`[host-events] host:event unavailable, SSE fallback disabled for "${eventName}"`);
-    return () => {};
-  }
-
-  if (!canResolveHostApiTokenForSse()) {
-    console.warn(`[host-events] SSE fallback requires hostapi:token IPC for "${eventName}"`);
-    return () => {};
-  }
-
-  let disposed = false;
-  let source: EventSource | null = null;
-  let listener: ((event: Event) => void) | null = null;
-
-  void (async () => {
-    try {
-      source = await getEventSource();
-      if (disposed) {
-        return;
-      }
-
-      listener = (event: Event) => {
-        const payload = JSON.parse((event as MessageEvent).data) as T;
-        handler(payload);
-      };
-      source.addEventListener(eventName, listener);
-    } catch (error) {
-      console.warn(`[host-events] SSE fallback failed for "${eventName}"`, error);
-    }
-  })();
-
-  return () => {
-    disposed = true;
-    if (source && listener) {
-      source.removeEventListener(eventName, listener);
-    }
-  };
+  console.warn(`[host-events] host:event unavailable, event subscription disabled for "${eventName}"`);
+  return () => {};
 }

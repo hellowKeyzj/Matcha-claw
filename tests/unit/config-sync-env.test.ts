@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { stripSystemdSupervisorEnv } from '../../electron/gateway/config-sync-env';
+import { stripSystemdSupervisorEnv } from '../../electron/main/process-runtime/openclaw-gateway/config-sync-env';
 
 describe('stripSystemdSupervisorEnv', () => {
   it('移除 systemd 监督环境变量', () => {

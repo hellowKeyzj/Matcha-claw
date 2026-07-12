@@ -11,8 +11,9 @@ import { handleRuntimeHostProcessRoutes } from './routes/runtime-host-process';
 import { handleLogRoutes } from './routes/logs';
 import { handleFileRoutes } from './routes/files';
 import { handleDiagnosticsRoutes } from './routes/diagnostics';
+import { handleMatchaAgentAppServerRoutes } from './routes/matcha-agent-app-server';
 import { handleRuntimeHostProxyRoutes } from './routes/runtime-host-proxy';
-import { isHostApiProxyWebSocketRoute, isMainOwnedRoute } from './route-boundary';
+import { isHostApiProxyWebSocketRoute, isHostApiQueryTokenAllowedRoute, isMainOwnedRoute } from './route-boundary';
 import { requireJsonContentType, sendJson, setCorsHeaders } from './route-utils';
 
 type RouteHandler = (
@@ -30,6 +31,7 @@ const mainOwnedHandlers: RouteHandler[] = [
   handleFileRoutes,
   handleDiagnosticsRoutes,
   handleLogRoutes,
+  handleMatchaAgentAppServerRoutes,
 ];
 
 const routeHandlers: RouteHandler[] = [
@@ -42,10 +44,15 @@ if (routeHandlers[routeHandlers.length - 1] !== handleRuntimeHostProxyRoutes) {
 }
 
 let hostApiToken = '';
+let hostApiBaseUrl = '';
 const RUNTIME_HOST_INTERNAL_PREFIX = '/internal/runtime-host/';
 
 export function getHostApiToken(): string {
   return hostApiToken;
+}
+
+export function getHostApiBaseUrl(): string {
+  return hostApiBaseUrl;
 }
 
 export function shouldBypassHostApiBearerAuth(pathname: string, _method: string | undefined): boolean {
@@ -72,7 +79,9 @@ export function createHostApiRequestHandler(ctx: HostApiContext, port: number) {
         const bearerToken = authHeader.startsWith('Bearer ')
           ? authHeader.slice(7)
           : '';
-        const queryToken = requestUrl.searchParams.get('token') || '';
+        const queryToken = isHostApiQueryTokenAllowedRoute(req.method, requestUrl.pathname)
+          ? requestUrl.searchParams.get('token') || ''
+          : '';
         const presentedToken = bearerToken || queryToken;
         if (!presentedToken || presentedToken !== hostApiToken) {
           sendJson(res, 401, { success: false, error: 'Unauthorized' });
@@ -113,6 +122,7 @@ export function startHostApiServer(
     ? Number(port)
     : getPort('MATCHACLAW_HOST_API');
   hostApiToken = randomBytes(32).toString('hex');
+  hostApiBaseUrl = `http://127.0.0.1:${resolvedPort}`;
 
   const server = createServer(createHostApiRequestHandler(ctx, resolvedPort));
 

@@ -1,105 +1,132 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+import { GatewayManager, type GatewayProcessController } from '../../electron/main/process-runtime/openclaw-gateway/manager';
 
-vi.mock('electron', () => ({
-  app: {
-    getPath: () => '/tmp',
-    isPackaged: false,
-  },
-  utilityProcess: {
-    fork: vi.fn(),
-  },
-}));
+function createProcessController(overrides: Partial<GatewayProcessController> = {}): GatewayProcessController {
+  return {
+    start: vi.fn(async () => undefined),
+    stop: vi.fn(async () => undefined),
+    restart: vi.fn(async () => undefined),
+    ...overrides,
+  };
+}
 
-vi.mock('../../electron/utils/logger', () => ({
-  logger: {
-    info: vi.fn(),
-    warn: vi.fn(),
-    error: vi.fn(),
-    debug: vi.fn(),
-  },
-}));
+describe('GatewayManager restart facade', () => {
+  it('surfaces process-controller restart failures to the caller', async () => {
+    const restartError = new Error('Gateway control ready check failed: Gateway socket closed before connect');
+    const manager = new GatewayManager();
+    const controller = createProcessController({
+      restart: vi.fn(async () => {
+        throw restartError;
+      }),
+    });
+    manager.setProcessController(controller);
 
-describe('GatewayManager restart recovery', () => {
-  beforeEach(() => {
-    vi.resetModules();
-    vi.clearAllMocks();
+    await expect(manager.restart()).rejects.toThrow(restartError.message);
+
+    expect(controller.restart).toHaveBeenCalledTimes(1);
+    expect(controller.start).not.toHaveBeenCalled();
+    expect(controller.stop).not.toHaveBeenCalled();
   });
 
-  it('restart 期间 start 失败后会安排自动重连自愈', async () => {
-    const { GatewayManager } = await import('../../electron/gateway/manager');
+  it('defers restart while startup is in flight and executes it after running', async () => {
     const manager = new GatewayManager();
+    const controller = createProcessController();
+    manager.setProcessController(controller);
 
-    const internals = manager as unknown as {
-      shouldReconnect: boolean;
-      status: { processState: string; port: number };
-      startLock: boolean;
-      reconnectTimer: NodeJS.Timeout | null;
-      restartInFlight: Promise<void> | null;
-      scheduleReconnect: () => void;
-    };
+    manager.markStarting();
+    await expect(manager.restart()).resolves.toEqual({ status: 'deferred' });
+    expect(controller.restart).not.toHaveBeenCalled();
 
-    internals.status = { processState: 'running', port: 18789 };
-    internals.startLock = false;
-    internals.shouldReconnect = true;
+    manager.markRunning();
+    await Promise.resolve();
 
-    vi.spyOn(manager, 'stop').mockImplementation(async () => {
-      internals.shouldReconnect = false;
-      internals.status = { processState: 'stopped', port: 18789 };
-    });
-
-    vi.spyOn(manager, 'start').mockImplementation(async () => {
-      internals.shouldReconnect = true;
-      internals.status = { processState: 'error', port: 18789 };
-      throw new Error('Gateway control ready check failed: Gateway socket closed before connect');
-    });
-
-    const scheduleReconnectSpy = vi.spyOn(
-      internals as unknown as { scheduleReconnect: () => void },
-      'scheduleReconnect',
-    );
-
-    await expect(manager.restart()).rejects.toThrow(
-      'Gateway control ready check failed: Gateway socket closed before connect',
-    );
-
-    expect(internals.shouldReconnect).toBe(true);
-    expect(scheduleReconnectSpy).toHaveBeenCalledTimes(1);
+    expect(controller.restart).toHaveBeenCalledTimes(1);
   });
 
-  it('restart 成功时不会额外安排自动重连', async () => {
-    const { GatewayManager } = await import('../../electron/gateway/manager');
+  it('drops deferred restart when the gateway stops before startup settles', async () => {
     const manager = new GatewayManager();
+    const controller = createProcessController();
+    manager.setProcessController(controller);
 
-    const internals = manager as unknown as {
-      shouldReconnect: boolean;
-      status: { processState: string; port: number };
-      startLock: boolean;
-      reconnectTimer: NodeJS.Timeout | null;
-      restartInFlight: Promise<void> | null;
-      scheduleReconnect: () => void;
-    };
+    manager.markStarting();
+    await expect(manager.restart()).resolves.toEqual({ status: 'deferred' });
+    manager.markStopped();
+    await Promise.resolve();
 
-    internals.status = { processState: 'running', port: 18789 };
-    internals.startLock = false;
-    internals.shouldReconnect = true;
+    expect(controller.restart).not.toHaveBeenCalled();
+  });
 
-    vi.spyOn(manager, 'stop').mockImplementation(async () => {
-      internals.shouldReconnect = false;
-      internals.status = { processState: 'stopped', port: 18789 };
-    });
+  it('clears pending debounced restart when stopping', async () => {
+    vi.useFakeTimers();
+    try {
+      const manager = new GatewayManager();
+      const controller = createProcessController();
+      manager.setProcessController(controller);
 
-    vi.spyOn(manager, 'start').mockImplementation(async () => {
-      internals.shouldReconnect = true;
-      internals.status = { processState: 'running', port: 18789 };
-    });
+      manager.debouncedRestart(1000);
+      await manager.stop();
+      await vi.advanceTimersByTimeAsync(1000);
 
-    const scheduleReconnectSpy = vi.spyOn(
-      internals as unknown as { scheduleReconnect: () => void },
-      'scheduleReconnect',
-    );
+      expect(controller.stop).toHaveBeenCalledTimes(1);
+      expect(controller.restart).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 
-    await expect(manager.restart()).resolves.toBeUndefined();
+  it('clears pending debounced reload when stopping', async () => {
+    vi.useFakeTimers();
+    try {
+      const manager = new GatewayManager();
+      const controller = createProcessController();
+      manager.setProcessController(controller);
 
-    expect(scheduleReconnectSpy).not.toHaveBeenCalled();
+      manager.markLaunched(1234);
+      manager.markRunning();
+      manager.debouncedReload(1000);
+      await manager.stop();
+      await vi.advanceTimersByTimeAsync(1000);
+
+      expect(controller.stop).toHaveBeenCalledTimes(1);
+      expect(controller.restart).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('clears pending debounced restart when marked stopped', async () => {
+    vi.useFakeTimers();
+    try {
+      const manager = new GatewayManager();
+      const controller = createProcessController();
+      manager.setProcessController(controller);
+
+      manager.debouncedRestart(1000);
+      manager.markStopped();
+      await vi.advanceTimersByTimeAsync(1000);
+
+      expect(controller.restart).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('clears pending debounced reload when marked stopped', async () => {
+    vi.useFakeTimers();
+    try {
+      const manager = new GatewayManager();
+      const controller = createProcessController();
+      manager.setProcessController(controller);
+
+      manager.markLaunched(1234);
+      manager.markRunning();
+      manager.debouncedReload(1000);
+      manager.markStopped();
+      await vi.advanceTimersByTimeAsync(1000);
+
+      expect(controller.restart).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

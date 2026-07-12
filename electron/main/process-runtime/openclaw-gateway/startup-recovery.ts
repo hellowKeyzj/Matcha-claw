@@ -14,16 +14,13 @@ const INVALID_CONFIG_PATTERNS: RegExp[] = [
 
 const TRANSIENT_START_ERROR_PATTERNS: RegExp[] = [
   /ECONNREFUSED/i,
+  /Gateway socket closed before connect/i,
   /Gateway process exited before becoming ready/i,
   /Gateway failed to start after \d+ retries/i,
   /Port \d+ still occupied after \d+ms/i,
-  /Gateway control ready check failed/i,
   /Timed out waiting for connect\.challenge/i,
   /Connect handshake timeout/i,
-  /gateway starting/i,
 ];
-
-export const GATEWAY_CONTROL_STARTUP_RETRY_DELAYS_MS = [500, 1_000, 2_000, 4_000, 8_000, 8_000] as const;
 
 function normalizeLogLine(value: string): string {
   return value.trim();
@@ -78,51 +75,10 @@ export function isTransientGatewayStartError(error: unknown): boolean {
   return TRANSIENT_START_ERROR_PATTERNS.some((pattern) => pattern.test(errorText));
 }
 
-export function isGatewayStillStartingError(error: unknown): boolean {
-  const errorText = error instanceof Error
-    ? error.message
-    : String(error ?? '');
-  return /gateway starting/i.test(errorText);
-}
-
-export async function waitForGatewayControlReadyWithStartupRetry(options: {
-  waitForControlReady: (port: number, externalToken?: string) => Promise<void>;
-  port: number;
-  externalToken?: string;
-  delay: (ms: number) => Promise<void>;
-  retryDelaysMs?: readonly number[];
-  beforeAttempt?: () => void;
-  logWarn?: (message: string) => void;
-  logInfo?: (message: string) => void;
-}): Promise<void> {
-  const retryDelaysMs = options.retryDelaysMs ?? GATEWAY_CONTROL_STARTUP_RETRY_DELAYS_MS;
-  let lastError: unknown;
-
-  for (let attempt = 0; attempt <= retryDelaysMs.length; attempt += 1) {
-    options.beforeAttempt?.();
-    try {
-      await options.waitForControlReady(options.port, options.externalToken);
-      if (attempt > 0) {
-        options.logInfo?.(`Gateway control ready succeeded after ${attempt + 1} attempt(s)`);
-      }
-      return;
-    } catch (error) {
-      lastError = error;
-      if (!isGatewayStillStartingError(error) || attempt >= retryDelaysMs.length) {
-        throw error;
-      }
-      const delayMs = retryDelaysMs[attempt] ?? retryDelaysMs[retryDelaysMs.length - 1]!;
-      options.logWarn?.(
-        `Gateway control ready rejected while still starting (${String(error)}); retrying in ${delayMs}ms (${attempt + 1}/${retryDelaysMs.length})`,
-      );
-      await options.delay(delayMs);
-    }
-  }
-
-  throw lastError instanceof Error ? lastError : new Error(String(lastError ?? 'Gateway control ready failed'));
-}
-
-export type GatewayStartupRecoveryAction = 'repair' | 'retry' | 'fail';
+export type GatewayStartupRecoveryAction =
+  | { readonly action: 'repair' }
+  | { readonly action: 'retry'; readonly cleanup: 'keep-current' }
+  | { readonly action: 'fail'; readonly cleanup: 'keep-current' };
 
 export function getGatewayStartupRecoveryAction(options: {
   startupError: unknown;
@@ -136,12 +92,13 @@ export function getGatewayStartupRecoveryAction(options: {
     options.startupStderrLines,
     options.configRepairAttempted,
   )) {
-    return 'repair';
+    return { action: 'repair' };
   }
 
-  if (options.attempt < options.maxAttempts && isTransientGatewayStartError(options.startupError)) {
-    return 'retry';
+  const shouldRetry = isTransientGatewayStartError(options.startupError);
+  if (shouldRetry && options.attempt < options.maxAttempts) {
+    return { action: 'retry', cleanup: 'keep-current' };
   }
 
-  return 'fail';
+  return { action: 'fail', cleanup: 'keep-current' };
 }

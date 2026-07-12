@@ -1,5 +1,5 @@
-import { PORTS } from '../utils/config';
-import { logger } from '../utils/logger';
+import { PORTS } from '../../../utils/config';
+import { logger } from '../../../utils/logger';
 import type { GatewayStatus } from './manager';
 
 type GatewayStateHooks = {

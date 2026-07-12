@@ -4,6 +4,7 @@ export const MAIN_API_ALLOWED_ROUTE_FILES = Object.freeze([
   'files.ts',
   'gateway.ts',
   'logs.ts',
+  'matcha-agent-app-server.ts',
   'runtime-host-internal.ts',
   'runtime-host-process.ts',
   'runtime-host-proxy.ts',
@@ -18,12 +19,16 @@ export const MAIN_OWNED_EXACT_ROUTES = Object.freeze([
   '/api/gateway/stop',
   '/api/gateway/restart',
   '/api/gateway/control-ui',
+  '/api/matcha-agent/app-server/status',
+  '/api/matcha-agent/app-server/restart',
   '/api/files/save-image',
   '/api/diagnostics/memory',
   '/api/diagnostics/gateway-snapshot',
   '/api/logs',
   '/api/logs/dir',
   '/api/logs/files',
+  '/api/openclaw/logs',
+  '/api/openclaw/logs/dir',
   '/api/runtime-host/restart',
   '/internal/runtime-host/shell-actions',
 ]);
@@ -55,9 +60,12 @@ export const HOSTAPI_PROXY_PUBLIC_READONLY_EXACT_ROUTES = Object.freeze([
   '/api/logs',
   '/api/logs/dir',
   '/api/logs/files',
+  '/api/matcha-agent/app-server/status',
   '/api/openclaw/cli-command',
   '/api/openclaw/config-dir',
   '/api/openclaw/dir',
+  '/api/openclaw/logs',
+  '/api/openclaw/logs/dir',
   '/api/openclaw/ready',
   '/api/openclaw/skills-dir',
   '/api/openclaw/status',
@@ -112,6 +120,9 @@ export const HOSTAPI_PROXY_PUBLIC_VALIDATION_POST_EXACT_ROUTES = Object.freeze([
 ]);
 
 export const HOSTAPI_PROXY_PUBLIC_MUTATION_POST_EXACT_ROUTES = Object.freeze([
+  '/api/gateway/restart',
+  '/api/matcha-agent/app-server/restart',
+  '/api/runtime-host/restart',
   '/api/external-connectors/get',
   '/api/external-connectors/probe',
   '/api/external-connectors/session-status',
@@ -166,6 +177,10 @@ export function isRuntimeHostBusinessRoute(pathname: string): boolean {
     return false;
   }
   return !isMainOwnedRoute(pathname);
+}
+
+export function isHostApiQueryTokenAllowedRoute(method: string | undefined, pathname: string): boolean {
+  return method?.toUpperCase() === 'GET' && pathname === '/api/events';
 }
 
 export function isHostApiProxyWebSocketRoute(pathname: string): boolean {

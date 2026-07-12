@@ -55,7 +55,7 @@ vi.mock('../../electron/main/runtime-host-client', () => ({
   })),
 }));
 
-vi.mock('../../electron/gateway/config-sync-env', () => ({
+vi.mock('../../electron/main/process-runtime/openclaw-gateway/config-sync-env', () => ({
   stripSystemdSupervisorEnv: vi.fn((env: Record<string, string | undefined>) => env),
 }));
 
@@ -188,7 +188,7 @@ describe('gateway config sync', () => {
   });
 
   it('gateway 启动前会通过 runtime-host 执行单一路径准备', async () => {
-    const { prepareGatewayRuntimeBeforeLaunch } = await import('../../electron/gateway/config-sync');
+    const { prepareGatewayRuntimeBeforeLaunch } = await import('../../electron/main/process-runtime/openclaw-gateway/config-sync');
     const runtimeHost = createFakeRuntimeHostManager();
     await prepareGatewayRuntimeBeforeLaunch(runtimeHost as never, {
       gatewayToken: 'matchaclaw-token-1',
@@ -232,7 +232,7 @@ describe('gateway config sync', () => {
   it('runtime-host 准备失败时不再执行本地 fallback', async () => {
     hoisted.runtimeHostRequestMock.mockRejectedValueOnce(new Error('runtime-host offline'));
 
-    const { prepareGatewayRuntimeBeforeLaunch } = await import('../../electron/gateway/config-sync');
+    const { prepareGatewayRuntimeBeforeLaunch } = await import('../../electron/main/process-runtime/openclaw-gateway/config-sync');
     const runtimeHost = createFakeRuntimeHostManager();
     await expect(prepareGatewayRuntimeBeforeLaunch(runtimeHost as never, {
       gatewayToken: 'matchaclaw-token-1',
@@ -256,7 +256,7 @@ describe('gateway config sync', () => {
     const staleDir = path.join(process.cwd(), '.tmp', 'gateway-config-sync-fake-openclaw', 'extensions', 'discord');
     mkdirSync(staleDir, { recursive: true });
 
-    const { prepareGatewayRuntimeBeforeLaunch } = await import('../../electron/gateway/config-sync');
+    const { prepareGatewayRuntimeBeforeLaunch } = await import('../../electron/main/process-runtime/openclaw-gateway/config-sync');
     const runtimeHost = createFakeRuntimeHostManager();
     await prepareGatewayRuntimeBeforeLaunch(runtimeHost as never, {
       gatewayToken: 'matchaclaw-token-1',
@@ -269,11 +269,25 @@ describe('gateway config sync', () => {
     rmSync(staleDir, { recursive: true, force: true });
   });
 
-  it('Gateway 启动上下文只消费 runtime-host 输出的宿主设置和启动计划', async () => {
-    const { prepareGatewayLaunchContext } = await import('../../electron/gateway/config-sync');
-    const runtimeHost = createFakeRuntimeHostManager();
+  it('Gateway 启动上下文只消费预先计算的宿主设置和启动计划', async () => {
+    const { createGatewayLaunchContext } = await import('../../electron/main/process-runtime/openclaw-gateway/config-sync');
+    const precomputedLaunchPlan = {
+      gatewayToken: 'matchaclaw-token-1',
+      providerEnv: {},
+      loadedProviderKeyCount: 0,
+      skipChannels: true,
+      channelStartupSummary: 'skipped(no configured channels)',
+    };
+    const hostBootstrapSettings = {
+      gatewayToken: 'matchaclaw-token-1',
+      proxyEnabled: true,
+      proxyServer: 'http://127.0.0.1:7890',
+      proxyBypassRules: '<local>',
+      gatewayAutoStart: true,
+      launchAtStartup: false,
+    };
 
-    const context = await prepareGatewayLaunchContext(18789, runtimeHost as never);
+    const context = await createGatewayLaunchContext(18789, precomputedLaunchPlan, hostBootstrapSettings);
 
     expect(context.gatewayArgs).toEqual([
       'gateway',
@@ -284,17 +298,13 @@ describe('gateway config sync', () => {
       '--allow-unconfigured',
     ]);
     expect(context.channelStartupSummary).toBe('skipped(no configured channels)');
+    expect(context.loadedProviderKeyCount).toBe(0);
     expect(context.forkEnv.OPENCLAW_GATEWAY_PORT).toBe('18789');
     expect(context.forkEnv.OPENCLAW_GATEWAY_TOKEN).toBe('matchaclaw-token-1');
     expect(context.forkEnv.MATCHACLAW_RUNTIME_HOST_GATEWAY_PORT).toBe('18789');
     expect(context.forkEnv.MATCHACLAW_RUNTIME_HOST_GATEWAY_TOKEN).toBe('matchaclaw-token-1');
-    expect(hoisted.runtimeHostRequestMock).toHaveBeenCalledWith(
-      'GET',
-      '/api/runtime-host/host-bootstrap-settings',
-    );
-    expect(hoisted.runtimeHostRequestMock).not.toHaveBeenCalledWith(
-      'GET',
-      '/api/runtime-host/gateway-launch-plan',
-    );
+    expect(context.forkEnv.OPENCLAW_SKIP_CHANNELS).toBe('1');
+    expect(context.forkEnv.CLAWDBOT_SKIP_CHANNELS).toBe('1');
+    expect(hoisted.runtimeHostRequestMock).not.toHaveBeenCalled();
   });
 });

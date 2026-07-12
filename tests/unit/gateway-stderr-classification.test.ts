@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   classifyGatewayStderrMessage,
   shouldSuppressGatewayStderrRepeat,
-} from '@electron/gateway/startup-stderr';
+} from '@electron/main/process-runtime/openclaw-gateway/startup-stderr';
 
 describe('gateway stderr classification', () => {
   it('将 skills 越界路径告警降级为 debug，保留可观测性', () => {

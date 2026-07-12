@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { GatewayRestartController } from '../../electron/gateway/restart-controller';
+import { GatewayRestartController } from '../../electron/main/process-runtime/openclaw-gateway/restart-controller';
 
 describe('gateway restart controller', () => {
   beforeEach(() => {
@@ -15,10 +15,10 @@ describe('gateway restart controller', () => {
     const controller = new GatewayRestartController();
     const executeRestart = vi.fn();
 
-    controller.markDeferredRestart('reload', { processState: 'starting', startLock: true });
+    controller.markDeferredRestart('reload', { processState: 'starting' });
     controller.flushDeferredRestart(
       'status:starting->running',
-      { processState: 'running', startLock: false, shouldReconnect: true },
+      { processState: 'running' },
       executeRestart,
     );
 
@@ -29,13 +29,13 @@ describe('gateway restart controller', () => {
     const controller = new GatewayRestartController();
     const executeRestart = vi.fn();
 
-    controller.markDeferredRestart('restart', { processState: 'starting', startLock: true });
+    controller.markDeferredRestart('restart', { processState: 'starting' });
     vi.setSystemTime(new Date('2026-04-09T12:00:05.000Z'));
     controller.recordRestartCompleted();
 
     controller.flushDeferredRestart(
       'start:finally',
-      { processState: 'running', startLock: false, shouldReconnect: true },
+      { processState: 'running' },
       executeRestart,
     );
 

@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { IncomingMessage, ServerResponse } from 'node:http';
+import { Duplex } from 'node:stream';
 
 const hoisted = vi.hoisted(() => ({
   handleAppRoutesMock: vi.fn(async () => false),
@@ -177,5 +178,52 @@ describe('host api server boundary guard', () => {
       expect.objectContaining({ success: false, error: 'Unauthorized' }),
     );
     expect(hoisted.handleAppRoutesMock).not.toHaveBeenCalled();
+  });
+
+  it('非 /api/events 路由不接受 query token', async () => {
+    const token = await issueHostApiToken();
+
+    const { createHostApiRequestHandler } = await import('../../electron/api/server');
+    const handler = createHostApiRequestHandler({} as never, 3210);
+
+    await handler(
+      { method: 'GET', url: `/api/gateway/status?token=${token}`, headers: {} } as IncomingMessage,
+      {} as ServerResponse,
+    );
+
+    expect(hoisted.sendJsonMock).toHaveBeenCalledWith(
+      expect.anything(),
+      401,
+      expect.objectContaining({ success: false, error: 'Unauthorized' }),
+    );
+    expect(hoisted.handleGatewayRoutesMock).not.toHaveBeenCalled();
+  });
+
+  it('仅代理 Remote Fleet terminal WebSocket upgrade 到 runtime-host', async () => {
+    const { startHostApiServer } = await import('../../electron/api/server');
+    const proxyUpgrade = vi.fn();
+    const ctx = { runtimeHost: { proxyUpgrade } } as never;
+    const server = startHostApiServer(ctx, 0);
+    const terminalSocket = new Duplex({ read() {}, write(_chunk, _encoding, callback) { callback(); } });
+    const rejectedSocket = new Duplex({ read() {}, write(_chunk, _encoding, callback) { callback(); } });
+    const rejectedDestroy = vi.spyOn(rejectedSocket, 'destroy');
+
+    server.emit('upgrade', {
+      method: 'GET',
+      url: '/api/remote-fleet/terminal/stream?sessionId=s1&ticket=t1',
+      headers: {},
+      httpVersion: '1.1',
+    } as IncomingMessage, terminalSocket, Buffer.alloc(0));
+    server.emit('upgrade', {
+      method: 'GET',
+      url: '/api/runtime-host/health',
+      headers: {},
+      httpVersion: '1.1',
+    } as IncomingMessage, rejectedSocket, Buffer.alloc(0));
+
+    expect(proxyUpgrade).toHaveBeenCalledTimes(1);
+    expect(proxyUpgrade).toHaveBeenCalledWith(expect.objectContaining({ url: expect.stringContaining('/api/remote-fleet/terminal/stream') }), terminalSocket, Buffer.alloc(0));
+    expect(rejectedDestroy).toHaveBeenCalledTimes(1);
+    server.close();
   });
 });

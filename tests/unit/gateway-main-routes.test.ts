@@ -10,7 +10,7 @@ vi.mock('../../electron/api/route-utils', () => ({
   sendJson: (...args: unknown[]) => sendJsonMock(...args),
 }));
 
-vi.mock('../../electron/gateway/config-sync', () => ({
+vi.mock('../../electron/main/process-runtime/openclaw-gateway/config-sync', () => ({
   loadHostBootstrapSettings: (...args: unknown[]) => loadHostBootstrapSettingsMock(...args),
 }));
 
@@ -21,7 +21,7 @@ function createContext() {
       checkHealth: vi.fn(async () => ({ ok: true })),
       start: vi.fn(async () => undefined),
       stop: vi.fn(async () => undefined),
-      restart: vi.fn(async () => undefined),
+      restart: vi.fn(async () => ({ status: 'restarted' as const })),
       rpc: vi.fn(async () => ({ legacy: true })),
     },
     runtimeHost: {
@@ -86,6 +86,58 @@ describe('main gateway routes', () => {
     });
   });
 
+  it('/api/gateway/status 返回 public gateway status projection', async () => {
+    const ctx = createContext();
+    const { handleGatewayRoutes } = await import('../../electron/api/routes/gateway');
+
+    const handled = await handleGatewayRoutes(
+      { method: 'GET' } as IncomingMessage,
+      {} as ServerResponse,
+      new URL('http://127.0.0.1:3210/api/gateway/status'),
+      ctx as never,
+    );
+
+    expect(handled).toBe(true);
+    expect(ctx.gatewayManager.getStatus).toHaveBeenCalledTimes(1);
+    expect(ctx.runtimeHost.readGatewayStatus).toHaveBeenCalledTimes(1);
+    expect(sendJsonMock).toHaveBeenCalledWith(
+      expect.anything(),
+      200,
+      {
+        processState: 'running',
+        port: 18789,
+        gatewayReady: false,
+        healthSummary: 'degraded',
+        transportState: 'reconnecting',
+        portReachable: true,
+        lastAliveAt: 1200,
+        lastError: 'connect timeout',
+        diagnostics: {
+          lastAliveAt: 1200,
+          consecutiveHeartbeatMisses: 1,
+          consecutiveRpcFailures: 0,
+        },
+        updatedAt: 1234,
+      },
+    );
+  });
+
+  it('/api/gateway/start 通过 GatewayManager facade 启动', async () => {
+    const ctx = createContext();
+    const { handleGatewayRoutes } = await import('../../electron/api/routes/gateway');
+
+    const handled = await handleGatewayRoutes(
+      { method: 'POST' } as IncomingMessage,
+      {} as ServerResponse,
+      new URL('http://127.0.0.1:3210/api/gateway/start'),
+      ctx as never,
+    );
+
+    expect(handled).toBe(true);
+    expect(ctx.gatewayManager.start).toHaveBeenCalledTimes(1);
+    expect(sendJsonMock).toHaveBeenCalledWith(expect.anything(), 200, { success: true });
+  });
+
   it('/api/gateway/rpc 不再由 Main 作为通用 Gateway 后门处理', async () => {
     const ctx = createContext();
     const { handleGatewayRoutes } = await import('../../electron/api/routes/gateway');
@@ -103,46 +155,40 @@ describe('main gateway routes', () => {
     expect(sendJsonMock).not.toHaveBeenCalled();
   });
 
-  it('/api/gateway/control-ui 不返回 gateway token，并触发 Control UI 配对自动批准', async () => {
+  it('/api/gateway/control-ui GET 只返回控制台入口，不触发配对自动批准副作用', async () => {
     vi.useFakeTimers();
-    const ctx = createContext();
-    const { handleGatewayRoutes } = await import('../../electron/api/routes/gateway');
+    try {
+      const ctx = createContext();
+      const { handleGatewayRoutes } = await import('../../electron/api/routes/gateway');
 
-    const handled = await handleGatewayRoutes(
-      { method: 'GET' } as IncomingMessage,
-      {} as ServerResponse,
-      new URL('http://127.0.0.1:3210/api/gateway/control-ui'),
-      ctx as never,
-    );
+      const handled = await handleGatewayRoutes(
+        { method: 'GET' } as IncomingMessage,
+        {} as ServerResponse,
+        new URL('http://127.0.0.1:3210/api/gateway/control-ui'),
+        ctx as never,
+      );
 
-    for (let index = 0; index < 10; index += 1) {
-      await Promise.resolve();
+      for (let index = 0; index < 10; index += 1) {
+        await Promise.resolve();
+      }
+
+      expect(handled).toBe(true);
+      expect(ctx.runtimeHost.request).not.toHaveBeenCalled();
+      expect(vi.getTimerCount()).toBe(0);
+      expect(sendJsonMock).toHaveBeenCalledWith(
+        expect.anything(),
+        200,
+        expect.objectContaining({
+          success: true,
+          url: 'http://127.0.0.1:18789/',
+          port: 18789,
+        }),
+      );
+      expect(JSON.stringify(sendJsonMock.mock.calls)).not.toContain('token-test');
+    } finally {
+      vi.clearAllTimers();
+      vi.useRealTimers();
     }
-    vi.clearAllTimers();
-    vi.useRealTimers();
-
-    expect(handled).toBe(true);
-    expect(ctx.runtimeHost.request).toHaveBeenCalledWith(
-      'POST',
-      '/api/capabilities/execute',
-      expect.objectContaining({
-        id: 'runtime.host',
-        operationId: 'runtimeHost.gatewayControlUiAutoApprove',
-        target: { kind: 'gateway-control' },
-        input: {},
-      }),
-      { timeoutMs: 20000 },
-    );
-    expect(sendJsonMock).toHaveBeenCalledWith(
-      expect.anything(),
-      200,
-      expect.objectContaining({
-        success: true,
-        url: 'http://127.0.0.1:18789/',
-        port: 18789,
-      }),
-    );
-    expect(JSON.stringify(sendJsonMock.mock.calls)).not.toContain('token-test');
   });
 
   it('/api/gateway/restart 会在后端重启后重建 runtime-host 控制通道', async () => {
@@ -165,6 +211,27 @@ describe('main gateway routes', () => {
       { timeoutMs: 20000 },
     );
     expect(sendJsonMock).toHaveBeenCalledWith(expect.anything(), 200, { success: true });
+  });
+
+  it('/api/gateway/restart 被延迟时不提前重建 runtime-host 控制通道', async () => {
+    const ctx = createContext();
+    ctx.gatewayManager.restart.mockResolvedValueOnce({ status: 'deferred' });
+    const { handleGatewayRoutes } = await import('../../electron/api/routes/gateway');
+
+    const handled = await handleGatewayRoutes(
+      { method: 'POST' } as IncomingMessage,
+      {} as ServerResponse,
+      new URL('http://127.0.0.1:3210/api/gateway/restart'),
+      ctx as never,
+    );
+
+    expect(handled).toBe(true);
+    expect(ctx.gatewayManager.restart).toHaveBeenCalledTimes(1);
+    expect(ctx.runtimeHost.request).not.toHaveBeenCalled();
+    expect(sendJsonMock).toHaveBeenCalledWith(expect.anything(), 200, {
+      success: true,
+      deferred: true,
+    });
   });
 
   it('/api/gateway/health 直接透传 runtime health 的端口态和连接态', async () => {

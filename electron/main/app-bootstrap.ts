@@ -1,6 +1,6 @@
 import { app, session, type BrowserWindow } from 'electron';
 import type { Server } from 'node:http';
-import type { GatewayManager } from '../gateway/manager';
+import type { GatewayManager } from './process-runtime/openclaw-gateway/manager';
 import { registerIpcHandlers } from './ipc-handlers';
 import { createTray } from './tray';
 import { createMenu } from './menu';
@@ -10,15 +10,14 @@ import { warmupNetworkOptimization } from '../utils/uv-env';
 import { autoInstallCliIfNeeded, generateCompletionCache, installCompletionToProfile } from '../services/openclaw/openclaw-cli-service';
 import { applyProxySettings } from './proxy';
 import { applyLaunchAtStartupSetting } from './launch-at-startup';
-import { loadHostBootstrapSettings } from '../gateway/config-sync';
+import { loadHostBootstrapSettings } from './process-runtime/openclaw-gateway/config-sync';
 import { startHostApiServer, waitForHostApiServerListening } from '../api/server';
 import type { HostEventBus } from '../api/event-bus';
 import type { RuntimeHostManager } from './runtime-host-manager';
+import type { MatchaAgentAppServerProcessManager } from './process-runtime/matcha-agent-app-server-process-manager';
 import { emitHostEvent, registerHostEventBridge } from './host-event-bridge';
 import { createMainWindow, loadMainWindowContent } from './main-window';
 import { isQuitting } from './app-state';
-import { waitForRuntimeHostJob, type RuntimeHostJobSnapshot } from './runtime-host-jobs';
-import { createRuntimeHostCapabilityPayload, resolveRuntimeHostEndpoint } from './runtime-host-capabilities';
 
 const isE2EMode = process.env.MATCHACLAW_E2E === '1';
 
@@ -83,10 +82,24 @@ function startNonBlockingBootstrapTasks(deps: {
   });
 }
 
+async function startMatchaAgentAppServerIfAvailable(
+  manager: MatchaAgentAppServerProcessManager,
+): Promise<void> {
+  if (isE2EMode) {
+    logger.info('E2E mode: skip matcha-agent app-server start');
+    return;
+  }
+
+  try {
+    await manager.start();
+  } catch (error) {
+    logger.warn('matcha-agent app-server start failed; continuing without local matcha-agent runtime:', error);
+  }
+}
+
 async function autoStartGatewayIfEnabled(deps: {
   mainWindow: BrowserWindow;
   gatewayManager: GatewayManager;
-  runtimeHostManager: RuntimeHostManager;
   hostEventBus: HostEventBus;
   settings: Pick<HostBootstrapSettings, 'gatewayAutoStart'>;
 }): Promise<void> {
@@ -96,22 +109,6 @@ async function autoStartGatewayIfEnabled(deps: {
   }
 
   try {
-    const endpoint = await resolveRuntimeHostEndpoint(deps.runtimeHostManager);
-    const response = await deps.runtimeHostManager.request<{
-      success?: boolean;
-      job?: RuntimeHostJobSnapshot;
-    }>(
-      'POST',
-      '/api/capabilities/execute',
-      await createRuntimeHostCapabilityPayload(deps.runtimeHostManager, 'runtimeHost.syncProviderAuthBootstrap', {}, { endpoint }),
-    );
-    const job = response.data?.job;
-    if (!job?.id) {
-      throw new Error('Runtime Host did not return a provider auth bootstrap job');
-    }
-    await waitForRuntimeHostJob(deps.runtimeHostManager, job.id, {
-      timeoutMs: 120_000,
-    });
     logger.debug('Auto-starting Gateway...');
     await deps.gatewayManager.start();
     logger.info('Gateway auto-start succeeded');
@@ -123,6 +120,7 @@ async function autoStartGatewayIfEnabled(deps: {
 
 export async function bootstrapMainApplication(deps: {
   gatewayManager: GatewayManager;
+  matchaAgentAppServerManager: MatchaAgentAppServerProcessManager;
   runtimeHostManager: RuntimeHostManager;
   hostEventBus: HostEventBus;
   setMainWindow: (window: BrowserWindow | null) => void;
@@ -150,14 +148,6 @@ export async function bootstrapMainApplication(deps: {
     });
   }
 
-  await deps.runtimeHostManager.start();
-
-  const hostBootstrapSettings = await loadHostBootstrapSettings();
-  await applyProxySettings(hostBootstrapSettings);
-  if (!isE2EMode) {
-    await applyLaunchAtStartupSetting(hostBootstrapSettings.launchAtStartup);
-  }
-
   registerGatewayControlUiSecurityHeaders();
 
   registerIpcHandlers(
@@ -165,12 +155,26 @@ export async function bootstrapMainApplication(deps: {
     deps.getMainWindow,
     deps.runtimeHostManager,
   );
-  const hostApiServer = await waitForHostApiServerListening(startHostApiServer({
+  const hostApiServerPromise = waitForHostApiServerListening(startHostApiServer({
     gatewayManager: deps.gatewayManager,
     eventBus: deps.hostEventBus,
     mainWindow,
     runtimeHost: deps.runtimeHostManager,
+    matchaAgentAppServerManager: deps.matchaAgentAppServerManager,
   }));
+
+  await startMatchaAgentAppServerIfAvailable(deps.matchaAgentAppServerManager);
+  await deps.runtimeHostManager.start();
+
+  const [hostBootstrapSettings, hostApiServer] = await Promise.all([
+    loadHostBootstrapSettings(),
+    hostApiServerPromise,
+  ]);
+
+  await applyProxySettings(hostBootstrapSettings);
+  if (!isE2EMode) {
+    await applyLaunchAtStartupSetting(hostBootstrapSettings.launchAtStartup);
+  }
 
   loadMainWindowContent(mainWindow);
 
@@ -200,7 +204,6 @@ export async function bootstrapMainApplication(deps: {
     await autoStartGatewayIfEnabled({
       mainWindow,
       gatewayManager: deps.gatewayManager,
-      runtimeHostManager: deps.runtimeHostManager,
       hostEventBus: deps.hostEventBus,
       settings: hostBootstrapSettings,
     });

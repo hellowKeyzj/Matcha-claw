@@ -1,11 +1,11 @@
 import { join } from 'node:path';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { rm } from 'node:fs/promises';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { tmpdir } from 'node:os';
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { WebSocketServer } from 'ws';
-import { createRuntimeHostProcessManager } from '../../electron/main/runtime-host-process-manager';
+import { createRuntimeHostProcessManager } from '../../electron/main/process-runtime/runtime-host-process-manager';
 import { buildLicenseKey } from '../../runtime-host/application/license/service';
 import { OPENCLAW_RUNTIME_ADAPTER_ID, OPENCLAW_RUNTIME_INSTANCE_ID } from '../../runtime-host/application/adapters/openclaw/runtime/openclaw-runtime-identity';
 import type { CapabilityTarget, RuntimeEndpointRef, RuntimeScope, SessionIdentity } from '../../runtime-host/application/agent-runtime/contracts/runtime-address';

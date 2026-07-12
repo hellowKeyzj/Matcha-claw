@@ -19,6 +19,9 @@ export const PORTS = {
   /** Runtime host process port */
   MATCHACLAW_RUNTIME_HOST: 3211,
 
+  /** matcha-agent app-server port */
+  MATCHA_AGENT_APP_SERVER: 3212,
+
   /** OpenClaw Gateway port */
   OPENCLAW_GATEWAY: 18789,
 
@@ -33,6 +36,7 @@ type CanonicalPortKey =
   | 'MATCHACLAW_GUI'
   | 'MATCHACLAW_HOST_API'
   | 'MATCHACLAW_RUNTIME_HOST'
+  | 'MATCHA_AGENT_APP_SERVER'
   | 'OPENCLAW_GATEWAY';
 
 function toCanonicalPortKey(key: PortKey): CanonicalPortKey {
@@ -68,6 +72,10 @@ export function getPort(key: PortKey): number {
   if (canonical === 'MATCHACLAW_RUNTIME_HOST') {
     envKeys.clear();
     envKeys.add('MATCHACLAW_RUNTIME_HOST_PORT');
+  }
+  if (canonical === 'MATCHA_AGENT_APP_SERVER') {
+    envKeys.clear();
+    envKeys.add('MATCHACLAW_MATCHA_AGENT_APP_SERVER_PORT');
   }
 
   for (const envKey of envKeys) {

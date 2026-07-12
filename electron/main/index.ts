@@ -3,11 +3,18 @@
  */
 import { app, BrowserWindow } from 'electron';
 import type { Server } from 'node:http';
-import { GatewayManager } from '../gateway/manager';
+import { GatewayManager } from './process-runtime/openclaw-gateway/manager';
 import { logger } from '../utils/logger';
 import { setQuitting } from './app-state';
 import { HostEventBus } from '../api/event-bus';
 import { createRuntimeHostManager, type RuntimeHostManager } from './runtime-host-manager';
+import {
+  createMatchaAgentAppServerProcessManager,
+  type MatchaAgentAppServerProcessManager,
+} from './process-runtime/matcha-agent-app-server-process-manager';
+import { createOpenClawGatewayProcessManager } from './process-runtime/openclaw-gateway-process-manager';
+import type { LocalProcessReadiness } from './process-runtime/contracts';
+import { LocalProcessRegistry } from './process-runtime/process-registry';
 import { bootstrapMainApplication } from './app-bootstrap';
 import { createMainWindow, loadMainWindowContent } from './main-window';
 import {
@@ -28,6 +35,18 @@ import { waitForGatewayControlReady } from './gateway-control-ready-probe';
 const WINDOWS_APP_USER_MODEL_ID = 'app.matchaclaw.desktop';
 const isE2EMode = process.env.MATCHACLAW_E2E === '1';
 const requestedUserDataDir = process.env.MATCHACLAW_E2E_USER_DATA_DIR?.trim();
+const localProcessRegistry = new LocalProcessRegistry();
+
+async function checkRuntimeHostReadiness(manager: RuntimeHostManager): Promise<LocalProcessReadiness> {
+  const health = await manager.checkHealth();
+  if (health.ok) {
+    return { status: 'ready', detail: health.lifecycle };
+  }
+  if (health.lifecycle === 'starting' || health.lifecycle === 'restarting') {
+    return { status: 'not-ready', detail: health.lifecycle };
+  }
+  return { status: 'error', error: health.error ?? `Runtime Host state is ${health.lifecycle}` };
+}
 
 // Disable GPU hardware acceleration globally for maximum stability across
 // all GPU configurations (no GPU, integrated, discrete).
@@ -97,10 +116,38 @@ const gotTheLock = gotElectronLock && gotFileLock;
 let mainWindow: BrowserWindow | null = null;
 let gatewayManager!: GatewayManager;
 let hostEventBus!: HostEventBus;
+let matchaAgentAppServerManager!: MatchaAgentAppServerProcessManager;
 let runtimeHostManager!: RuntimeHostManager;
 let hostApiServer: Server | null = null;
 const mainWindowFocusState = createMainWindowFocusState();
 const quitLifecycleState = createQuitLifecycleState();
+
+function isQuitCleanupStarted(): boolean {
+  return quitLifecycleState.cleanupStarted;
+}
+
+function guardProcessStartDuringQuit<TManager extends {
+  readonly start: () => Promise<void>;
+  readonly restart: () => Promise<void>;
+}>(displayName: string, manager: TManager): TManager {
+  return {
+    ...manager,
+    async start() {
+      if (isQuitCleanupStarted()) {
+        logger.debug(`[quit] Skip ${displayName} start because quit cleanup is in progress`);
+        return;
+      }
+      await manager.start();
+    },
+    async restart() {
+      if (isQuitCleanupStarted()) {
+        logger.debug(`[quit] Skip ${displayName} restart because quit cleanup is in progress`);
+        return;
+      }
+      await manager.restart();
+    },
+  };
+}
 
 function focusWindow(window: BrowserWindow): void {
   if (window.isDestroyed()) {
@@ -173,24 +220,71 @@ if (gotTheLock) {
 
   gatewayManager = new GatewayManager();
   hostEventBus = new HostEventBus();
-  runtimeHostManager = createRuntimeHostManager({
+  const rawGatewayProcessRunner = createOpenClawGatewayProcessManager({
     gatewayManager,
+    logger,
+  });
+  const gatewayProcessController = guardProcessStartDuringQuit(
+    'OpenClaw gateway',
+    rawGatewayProcessRunner,
+  );
+  gatewayManager.setProcessController(gatewayProcessController);
+  const rawMatchaAgentAppServerManager = createMatchaAgentAppServerProcessManager({
+    logger,
+  });
+  matchaAgentAppServerManager = guardProcessStartDuringQuit('matcha-agent app-server', rawMatchaAgentAppServerManager);
+  const rawRuntimeHostManager = createRuntimeHostManager({
+    gatewayManager,
+    matchaAgentAppServerManager,
+  });
+  runtimeHostManager = guardProcessStartDuringQuit('runtime-host', rawRuntimeHostManager);
+  localProcessRegistry.registerRunnerLike({
+    id: 'runtime-host',
+    displayName: 'runtime-host',
+    runner: {
+      start: () => runtimeHostManager.start(),
+      stop: () => runtimeHostManager.stop(),
+      restart: () => runtimeHostManager.restart(),
+      forceTerminate: () => runtimeHostManager.forceTerminate(),
+      checkReadiness: () => checkRuntimeHostReadiness(runtimeHostManager),
+      getState: () => runtimeHostManager.getState(),
+      onStateChange: (handler) => runtimeHostManager.onStateChange(handler),
+    },
+  });
+  localProcessRegistry.registerRunnerLike({
+    id: 'openclaw-gateway',
+    displayName: 'OpenClaw gateway',
+    runner: {
+      start: () => gatewayManager.start(),
+      stop: () => gatewayManager.stop(),
+      restart: () => gatewayManager.restart().then(() => undefined),
+      forceTerminate: () => rawGatewayProcessRunner.forceTerminate(),
+      checkReadiness: () => rawGatewayProcessRunner.checkReadiness(),
+      getState: () => rawGatewayProcessRunner.getState(),
+      onStateChange: (handler) => rawGatewayProcessRunner.onStateChange(handler),
+    },
+  });
+  localProcessRegistry.registerRunnerLike({
+    id: 'matcha-agent-app-server',
+    displayName: 'matcha-agent app-server',
+    runner: matchaAgentAppServerManager,
   });
   gatewayManager.setRuntimeHostManager(runtimeHostManager);
-  gatewayManager.setControlReadyProbe(async (timeoutMs) => {
+  gatewayManager.setControlReadyProbe(async (timeoutMs, port, externalToken) => {
     await waitForGatewayControlReady({
       runtimeHostManager,
       nowMs: () => Date.now(),
       delay: async (ms) => {
         await new Promise((resolve) => setTimeout(resolve, ms));
       },
-    }, timeoutMs);
+    }, timeoutMs, port, externalToken);
   });
 
   // Application lifecycle
   app.whenReady().then(() => {
     void bootstrapMainApplication({
       gatewayManager,
+      matchaAgentAppServerManager,
       runtimeHostManager,
       hostEventBus,
       setMainWindow: (window) => {
@@ -248,31 +342,37 @@ if (gotTheLock) {
     hostEventBus.closeAll();
     hostApiServer?.close();
 
-    const stopPromise = Promise.allSettled([
-      runtimeHostManager.stop().catch((err) => {
-        logger.warn('runtimeHostManager.stop() error during quit:', err);
-      }),
-      gatewayManager.stop().catch((err) => {
-        logger.warn('gatewayManager.stop() error during quit:', err);
-      }),
-    ]).then(() => undefined);
+    const stopPromise = localProcessRegistry.stopAll()
+      .then(() => 'stopped' as const)
+      .catch((error) => {
+        logger.warn('Failed to stop one or more owned processes during quit:', error);
+        return 'stop-failed' as const;
+      });
 
+    let quitCleanupTimeout: ReturnType<typeof setTimeout> | undefined;
     const timeoutPromise = new Promise<'timeout'>((resolve) => {
-      setTimeout(() => resolve('timeout'), 5000);
+      quitCleanupTimeout = setTimeout(() => resolve('timeout'), 5000);
+      quitCleanupTimeout.unref?.();
     });
 
-    void Promise.race([stopPromise.then(() => 'stopped' as const), timeoutPromise]).then((result) => {
-      const finishQuit = () => {
-        markQuitCleanupCompleted(quitLifecycleState);
-        app.quit();
-      };
-      if (result !== 'timeout') {
-        finishQuit();
-        return;
+    void Promise.race([stopPromise, timeoutPromise]).then(async (result) => {
+      if (quitCleanupTimeout) {
+        clearTimeout(quitCleanupTimeout);
       }
-      void gatewayManager.forceTerminateOwnedProcessForQuit().catch((err) => {
-        logger.warn('gatewayManager.forceTerminateOwnedProcessForQuit() failed during quit:', err);
-      }).finally(finishQuit);
+      if (result !== 'stopped') {
+        logger.warn(
+          result === 'timeout'
+            ? 'Quit cleanup timed out; force-terminating all registered owned processes'
+            : 'Quit cleanup failed; force-terminating all registered owned processes',
+        );
+        try {
+          await localProcessRegistry.forceTerminateAll();
+        } catch (error) {
+          logger.warn('Failed to force-terminate one or more owned processes during quit:', error);
+        }
+      }
+      markQuitCleanupCompleted(quitLifecycleState);
+      app.quit();
     });
   });
 }

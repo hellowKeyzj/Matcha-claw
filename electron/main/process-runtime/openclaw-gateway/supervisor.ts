@@ -1,11 +1,11 @@
 import { app, utilityProcess } from 'electron';
 import path from 'path';
 import { existsSync } from 'fs';
-import { getOpenClawDir, getOpenClawEntryPath } from '../utils/paths';
-import { getUvMirrorEnv } from '../utils/uv-env';
-import { isPythonReady, setupManagedPython } from '../utils/uv-setup';
-import { logger } from '../utils/logger';
-import { prependPathEntry } from '../utils/env-path';
+import { getOpenClawDir, getOpenClawEntryPath } from '../../../utils/paths';
+import { getUvMirrorEnv } from '../../../utils/uv-env';
+import { isPythonReady, setupManagedPython } from '../../../utils/uv-setup';
+import { logger } from '../../../utils/logger';
+import { prependPathEntry } from '../../../utils/env-path';
 
 const ANSI_ESCAPE_RE = /\u001B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])/g;
 
@@ -47,61 +47,6 @@ export function warmupManagedPythonReadiness(): void {
     }
   }).catch((err) => {
     logger.error('Failed to check Python environment:', err);
-  });
-}
-
-export async function terminateOwnedGatewayProcess(child: Electron.UtilityProcess): Promise<void> {
-  let exited = false;
-
-  await new Promise<void>((resolve) => {
-    const terminateWindowsProcessTree = (pid: number) => {
-      import('child_process').then((cp) => {
-        cp.exec(`taskkill /F /PID ${pid} /T`, { timeout: 5000, windowsHide: true }, () => {
-          // 忽略 taskkill 错误，统一交给超时兜底
-        });
-      }).catch(() => {
-        // ignore
-      });
-    };
-
-    child.once('exit', () => {
-      exited = true;
-      resolve();
-    });
-
-    const pid = child.pid;
-    logger.info(`Sending kill to Gateway process (pid=${pid ?? 'unknown'})`);
-    if (process.platform === 'win32' && typeof pid === 'number' && Number.isFinite(pid) && pid > 0) {
-      terminateWindowsProcessTree(pid);
-    } else {
-      try {
-        child.kill();
-      } catch {
-        // ignore if already exited
-      }
-    }
-
-    const timeout = setTimeout(() => {
-      if (!exited) {
-        logger.warn(`Gateway did not exit in time, force-killing (pid=${pid ?? 'unknown'})`);
-        if (typeof pid === 'number' && Number.isFinite(pid) && pid > 0) {
-          if (process.platform === 'win32') {
-            terminateWindowsProcessTree(pid);
-          } else {
-            try {
-              process.kill(pid, 'SIGKILL');
-            } catch {
-              // ignore
-            }
-          }
-        }
-      }
-      resolve();
-    }, 5000);
-
-    child.once('exit', () => {
-      clearTimeout(timeout);
-    });
   });
 }
 
@@ -222,71 +167,224 @@ async function getListeningProcessIds(port: number): Promise<string[]> {
   return [...new Set(stdout.trim().split(/\r?\n/).map((value) => value.trim()).filter(Boolean))];
 }
 
-async function terminateOrphanedProcessIds(port: number, pids: string[]): Promise<void> {
-  logger.info(`Found orphaned process listening on port ${port} (PIDs: ${pids.join(', ')}), attempting to kill...`);
+const PROCESS_EXIT_POLL_INTERVAL_MS = 100;
+const WINDOWS_PROCESS_EXIT_TIMEOUT_MS = 2000;
+const GRACEFUL_PROCESS_EXIT_TIMEOUT_MS = 3000;
+const FORCE_PROCESS_EXIT_TIMEOUT_MS = 1000;
+
+function isNoSuchProcessError(error: unknown): boolean {
+  return error instanceof Error
+    && 'code' in error
+    && error.code === 'ESRCH';
+}
+
+function isProcessAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    if (isNoSuchProcessError(error)) {
+      return false;
+    }
+    if (error instanceof Error && 'code' in error && error.code === 'EPERM') {
+      return true;
+    }
+    throw error;
+  }
+}
+
+async function waitForProcessExit(pid: number, timeoutMs: number): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (isProcessAlive(pid)) {
+    const remainingMs = deadline - Date.now();
+    if (remainingMs <= 0) {
+      return false;
+    }
+    await new Promise((resolve) => setTimeout(
+      resolve,
+      Math.min(PROCESS_EXIT_POLL_INTERVAL_MS, remainingMs),
+    ));
+  }
+  return true;
+}
+
+function gatewayTerminationError(options: {
+  port: number;
+  pid: number;
+  reason: string;
+  detail: string;
+  cause?: unknown;
+}): Error {
+  const { port, pid, reason, detail, cause } = options;
+  return new Error(
+    `Failed to terminate ${reason} process ${pid} on port ${port}: ${detail}`,
+    cause === undefined ? undefined : { cause },
+  );
+}
+
+async function terminateWindowsGatewayProcess(options: {
+  port: number;
+  pid: number;
+  reason: string;
+}): Promise<void> {
+  const { port, pid, reason } = options;
+  const cp = await import('child_process');
+
+  try {
+    await new Promise<void>((resolve, reject) => {
+      cp.exec(
+        `taskkill /F /PID ${pid} /T`,
+        { timeout: 5000, windowsHide: true },
+        (error) => {
+          if (error) {
+            reject(error);
+            return;
+          }
+          resolve();
+        },
+      );
+    });
+  } catch (error) {
+    if (!isProcessAlive(pid)) {
+      return;
+    }
+    throw gatewayTerminationError({
+      port,
+      pid,
+      reason,
+      detail: 'taskkill failed while the process was still running',
+      cause: error,
+    });
+  }
+
+  if (await waitForProcessExit(pid, WINDOWS_PROCESS_EXIT_TIMEOUT_MS)) {
+    return;
+  }
+  throw gatewayTerminationError({
+    port,
+    pid,
+    reason,
+    detail: `process was still running ${WINDOWS_PROCESS_EXIT_TIMEOUT_MS}ms after taskkill`,
+  });
+}
+
+async function terminatePosixGatewayProcess(options: {
+  port: number;
+  pid: number;
+  reason: string;
+}): Promise<void> {
+  const { port, pid, reason } = options;
+
+  try {
+    process.kill(pid, 'SIGTERM');
+  } catch (error) {
+    if (!isProcessAlive(pid)) {
+      return;
+    }
+    throw gatewayTerminationError({
+      port,
+      pid,
+      reason,
+      detail: 'SIGTERM failed while the process was still running',
+      cause: error,
+    });
+  }
+
+  if (await waitForProcessExit(pid, GRACEFUL_PROCESS_EXIT_TIMEOUT_MS)) {
+    return;
+  }
+
+  try {
+    process.kill(pid, 'SIGKILL');
+  } catch (error) {
+    if (!isProcessAlive(pid)) {
+      return;
+    }
+    throw gatewayTerminationError({
+      port,
+      pid,
+      reason,
+      detail: 'SIGKILL failed while the process was still running',
+      cause: error,
+    });
+  }
+
+  if (await waitForProcessExit(pid, FORCE_PROCESS_EXIT_TIMEOUT_MS)) {
+    return;
+  }
+  throw gatewayTerminationError({
+    port,
+    pid,
+    reason,
+    detail: `process was still running ${FORCE_PROCESS_EXIT_TIMEOUT_MS}ms after SIGKILL`,
+  });
+}
+
+export async function terminateGatewayProcessIds(options: {
+  port: number;
+  pids: readonly string[];
+  reason: string;
+}): Promise<void> {
+  const { port, pids, reason } = options;
+  logger.info(`Terminating ${reason} process listening on port ${port} (PIDs: ${pids.join(', ')})`);
 
   if (process.platform === 'darwin') {
     await unloadLaunchctlGatewayService();
   }
 
-  for (const pid of pids) {
-    try {
-      if (process.platform === 'win32') {
-        const cp = await import('child_process');
-        await new Promise<void>((resolve) => {
-          cp.exec(
-            `taskkill /F /PID ${pid} /T`,
-            { timeout: 5000, windowsHide: true },
-            () => resolve(),
-          );
-        });
-      } else {
-        process.kill(parseInt(pid, 10), 'SIGTERM');
-      }
-    } catch {
-      // Ignore processes that have already exited.
+  const terminationResults = await Promise.allSettled(pids.map(async (pidValue) => {
+    const pid = parseInt(pidValue, 10);
+    const terminationOptions = { port, pid, reason };
+    if (process.platform === 'win32') {
+      await terminateWindowsGatewayProcess(terminationOptions);
+    } else {
+      await terminatePosixGatewayProcess(terminationOptions);
     }
+  }));
+  const failures = terminationResults.filter(
+    (result): result is PromiseRejectedResult => result.status === 'rejected',
+  );
+  if (failures.length === 1) {
+    throw failures[0].reason;
   }
-
-  await new Promise((resolve) => setTimeout(resolve, process.platform === 'win32' ? 2000 : 3000));
-
-  if (process.platform !== 'win32') {
-    for (const pid of pids) {
-      try {
-        process.kill(parseInt(pid, 10), 0);
-        process.kill(parseInt(pid, 10), 'SIGKILL');
-      } catch {
-        // Already exited.
-      }
-    }
-    await new Promise((resolve) => setTimeout(resolve, 1000));
+  if (failures.length > 1) {
+    throw new AggregateError(
+      failures.map((failure) => failure.reason),
+      `Failed to terminate ${failures.length} ${reason} processes on port ${port}`,
+    );
   }
+}
+
+async function terminateOrphanedProcessIds(port: number, pids: string[]): Promise<void> {
+  await terminateGatewayProcessIds({ port, pids, reason: 'orphaned gateway' });
 }
 
 export async function findExistingGatewayProcess(options: {
   port: number;
   ownedPid?: number;
+  signal?: AbortSignal;
+  assertActive?: () => void;
 }): Promise<{ port: number; externalToken?: string } | null> {
-  const { port, ownedPid } = options;
-
-  try {
-    const pids = await getListeningProcessIds(port);
-    if (pids.length === 0) {
-      return null;
-    }
-
-    const ownedPidValue = typeof ownedPid === 'number' ? String(ownedPid) : '';
-    if (ownedPidValue && pids.includes(ownedPidValue)) {
-      return { port };
-    }
-
-    await terminateOrphanedProcessIds(port, pids);
-    await waitForPortFree(port, 10000);
-    return null;
-  } catch (err) {
-    logger.warn('Error checking for existing process on port:', err);
+  const { port, ownedPid, signal, assertActive } = options;
+  const pids = await getListeningProcessIds(port);
+  assertActive?.();
+  if (signal?.aborted) {
+    throw signal.reason instanceof Error ? signal.reason : new Error('Gateway startup aborted');
+  }
+  if (pids.length === 0) {
     return null;
   }
+
+  const ownedPidValue = typeof ownedPid === 'number' ? String(ownedPid) : '';
+  if (ownedPidValue && pids.includes(ownedPidValue)) {
+    return { port };
+  }
+
+  assertActive?.();
+  await terminateOrphanedProcessIds(port, pids);
+  assertActive?.();
+  await waitForPortFree(port, 10000);
+  return null;
 }
 
 export async function runOpenClawDoctorRepair(): Promise<boolean> {

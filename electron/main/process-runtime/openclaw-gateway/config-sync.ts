@@ -1,15 +1,15 @@
 import { app } from 'electron';
 import path from 'path';
 import { existsSync } from 'fs';
-import { getOpenClawDir, getOpenClawEntryPath, isOpenClawPresent } from '../utils/paths';
-import { getUvMirrorEnv } from '../utils/uv-env';
-import { buildProxyEnv, resolveProxySettings } from '../utils/proxy';
-import { prependPathEntry } from '../utils/env-path';
-import { createDefaultRuntimeHostHttpClient } from '../main/runtime-host-client';
+import { getOpenClawDir, getOpenClawEntryPath, isOpenClawPresent } from '../../../utils/paths';
+import { getUvMirrorEnv } from '../../../utils/uv-env';
+import { buildProxyEnv, resolveProxySettings } from '../../../utils/proxy';
+import { prependPathEntry } from '../../../utils/env-path';
+import { createDefaultRuntimeHostHttpClient } from '../../runtime-host-client';
 import { stripSystemdSupervisorEnv } from './config-sync-env';
-import { waitForRuntimeHostJob, type RuntimeHostJobSnapshot } from '../main/runtime-host-jobs';
-import type { RuntimeHostManager } from '../main/runtime-host-manager';
-import { createRuntimeHostCapabilityPayload, resolveRuntimeHostEndpoint } from '../main/runtime-host-capabilities';
+import { waitForRuntimeHostJob, type RuntimeHostJobSnapshot } from '../../runtime-host-jobs';
+import type { RuntimeHostManager } from '../../runtime-host-manager';
+import { createRuntimeHostCapabilityPayload, resolveRuntimeHostEndpoint } from '../../runtime-host-capabilities';
 
 function createGatewayConfigRuntimeHostClient() {
   return createDefaultRuntimeHostHttpClient({
@@ -29,14 +29,14 @@ export interface GatewayLaunchContext {
   channelStartupSummary: string;
 }
 
-type GatewayLaunchSettings = {
+export type GatewayLaunchSettings = {
   gatewayToken: string;
   proxyEnabled: boolean;
   proxyServer: string;
   proxyBypassRules: string;
 };
 
-type GatewayLaunchPlan = {
+export type GatewayLaunchPlan = {
   gatewayToken: string;
   providerEnv: Record<string, string>;
   loadedProviderKeyCount: number;
@@ -114,9 +114,10 @@ export async function loadHostBootstrapSettings(): Promise<HostBootstrapSettings
   };
 }
 
-export async function prepareGatewayLaunchContext(
+export async function createGatewayLaunchContext(
   port: number,
-  runtimeHost: RuntimeHostManager,
+  launchPlan: GatewayLaunchPlan,
+  appSettings: GatewayLaunchSettings,
 ): Promise<GatewayLaunchContext> {
   const openclawDir = getOpenClawDir();
   const entryScript = getOpenClawEntryPath();
@@ -124,9 +125,6 @@ export async function prepareGatewayLaunchContext(
   if (!isOpenClawPresent()) {
     throw new Error(`OpenClaw package not found at: ${openclawDir}`);
   }
-
-  const appSettings = await loadHostBootstrapSettings();
-  const launchPlan = await prepareGatewayRuntimeBeforeLaunch(runtimeHost, appSettings);
 
   if (!existsSync(entryScript)) {
     throw new Error(`OpenClaw entry script not found at: ${entryScript}`);

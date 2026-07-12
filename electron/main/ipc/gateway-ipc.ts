@@ -1,8 +1,8 @@
 import { ipcMain } from 'electron';
-import { GatewayManager } from '../../gateway/manager';
-import { buildPublicGatewayStatus } from '../../gateway/public-status';
+import type { GatewayManager } from '../process-runtime/openclaw-gateway/manager';
+import { buildPublicGatewayStatus } from '../process-runtime/openclaw-gateway/public-status';
 import type { RuntimeHostManager } from '../runtime-host-manager';
-import { getE2EGatewayStatus } from '../e2e-fixture-loader';
+import { getE2EGatewayStatus } from '@electron/e2e-fixture-loader';
 
 export function registerGatewayHandlers(
   gatewayManager: GatewayManager,

@@ -28,6 +28,7 @@ describe('ipc contract', () => {
 
   it('保留 IPC invoke 清单覆盖当前仍应保留的壳层/基础设施通道', () => {
     expect(INFRASTRUCTURE_TRANSPORT_INVOKE_CHANNELS).toContain('hostapi:fetch');
+    expect(INFRASTRUCTURE_TRANSPORT_INVOKE_CHANNELS).toContain('hostapi:base-url');
     expect(INFRASTRUCTURE_TRANSPORT_INVOKE_CHANNELS).not.toContain('gateway:rpc');
     expect(SHELL_INVOKE_CHANNELS).toContain('dialog:open');
     expect(SHELL_INVOKE_CHANNELS).toContain('dialog:readSelectedTextFile');

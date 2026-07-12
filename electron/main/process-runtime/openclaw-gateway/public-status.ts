@@ -1,9 +1,19 @@
-import type { GatewayStatus as GatewayProcessStatus } from './manager';
-import type { RuntimeHostGatewayStatusSnapshot } from '../main/runtime-host-manager';
-import type { GatewayTransportIssue } from '../../runtime-host/shared/gateway-error';
+import type { RuntimeHostGatewayStatusSnapshot } from '../../runtime-host-manager';
+import type { GatewayTransportIssue } from '../../../../runtime-host/shared/gateway-error';
+
+type GatewayProcessStatus = {
+  readonly processState: 'stopped' | 'starting' | 'control_connecting' | 'running' | 'error' | 'reconnecting';
+  readonly port: number;
+  readonly pid?: number;
+  readonly uptime?: number;
+  readonly error?: string;
+  readonly connectedAt?: number;
+  readonly version?: string;
+  readonly reconnectAttempts?: number;
+};
 
 export interface PublicGatewayStatus {
-  processState: GatewayProcessStatus['state'];
+  processState: GatewayProcessStatus['processState'];
   port: number;
   pid?: number;
   uptime?: number;
@@ -22,7 +32,7 @@ export interface PublicGatewayStatus {
   updatedAt: number;
 }
 
-function isActiveProcessState(state: GatewayProcessStatus['state']): boolean {
+function isActiveProcessState(state: GatewayProcessStatus['processState']): boolean {
   return state === 'starting'
     || state === 'control_connecting'
     || state === 'running'
@@ -30,13 +40,13 @@ function isActiveProcessState(state: GatewayProcessStatus['state']): boolean {
 }
 
 function deriveFallbackHealthSummary(
-  processState: GatewayProcessStatus['state'],
+  processState: GatewayProcessStatus['processState'],
 ): PublicGatewayStatus['healthSummary'] {
   return isActiveProcessState(processState) ? 'degraded' : 'unresponsive';
 }
 
 function deriveFallbackTransportState(
-  processState: GatewayProcessStatus['state'],
+  processState: GatewayProcessStatus['processState'],
 ): PublicGatewayStatus['transportState'] {
   return isActiveProcessState(processState) ? 'reconnecting' : 'disconnected';
 }

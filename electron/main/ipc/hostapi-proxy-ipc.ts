@@ -3,7 +3,7 @@ import { isHostApiProxyAllowedRoute } from '../../api/route-boundary';
 import { proxyAwareFetch } from '../../utils/proxy-fetch';
 import { getPort } from '../../utils/config';
 import { getHostApiBaseUrl, getHostApiToken } from '../../api/server';
-import { handleE2EHostApiFetch } from '../e2e-fixture-loader';
+import { handleE2EHostApiFetch } from '@electron/e2e-fixture-loader';
 
 type HostApiFetchRequest = {
   requestId?: string;
@@ -37,9 +37,6 @@ export function registerHostApiProxyHandlers(): void {
   // 避免页面切换后还白白等几秒再丢弃响应。
   const inflightControllers = new Map<string, AbortController>();
 
-  ipcMain.handle('hostapi:token', () => getHostApiToken());
-  ipcMain.handle('hostapi:base-url', () => getHostApiBaseUrl());
-
   ipcMain.handle('hostapi:abort', (_, request: HostApiAbortRequest) => {
     const requestId = typeof request?.requestId === 'string' ? request.requestId : '';
     if (!requestId) {
@@ -52,6 +49,8 @@ export function registerHostApiProxyHandlers(): void {
     controller.abort();
     return { ok: true };
   });
+
+  ipcMain.handle('hostapi:base-url', () => getHostApiBaseUrl());
 
   ipcMain.handle('hostapi:fetch', async (_, request: HostApiFetchRequest) => {
     const e2eMock = await handleE2EHostApiFetch(request);

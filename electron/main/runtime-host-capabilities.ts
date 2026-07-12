@@ -148,11 +148,20 @@ function runtimeEndpointFromSummary(endpoint: RuntimeEndpointSummaryLike): Runti
 
 export async function resolveRuntimeHostEndpoint(
   client: RuntimeHostManager | RuntimeHostHttpClient,
+  options?: { timeoutMs?: number },
 ): Promise<RuntimeEndpointRef> {
-  const response = await (client as RuntimeHostCapabilityClient).request<{ endpoints?: RuntimeEndpointSummaryLike[] }>(
-    'GET',
-    '/api/runtime-endpoints/list',
-  );
+  const runtimeHostClient = client as RuntimeHostCapabilityClient;
+  const response = options
+    ? await runtimeHostClient.request<{ endpoints?: RuntimeEndpointSummaryLike[] }>(
+      'GET',
+      '/api/runtime-endpoints/list',
+      undefined,
+      options,
+    )
+    : await runtimeHostClient.request<{ endpoints?: RuntimeEndpointSummaryLike[] }>(
+      'GET',
+      '/api/runtime-endpoints/list',
+    );
   const endpoints = Array.isArray(response.data?.endpoints) ? response.data.endpoints : [];
   const candidates = endpoints
     .filter((endpoint) => endpoint.capabilitySummaries?.some((capability) => (

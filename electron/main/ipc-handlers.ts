@@ -3,7 +3,7 @@
  * Registers all IPC handlers for main-renderer communication
  */
 import type { BrowserWindow } from 'electron';
-import { GatewayManager } from '../gateway/manager';
+import type { GatewayManager } from './process-runtime/openclaw-gateway/manager';
 import type { RuntimeHostManager } from './runtime-host-manager';
 import { registerHostApiProxyHandlers } from './ipc/hostapi-proxy-ipc';
 import { registerShellHandlers } from './ipc/shell-ipc';

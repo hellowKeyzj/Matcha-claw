@@ -1,11 +1,11 @@
-import { open } from 'node:fs/promises';
 import { join } from 'node:path';
 import { app } from 'electron';
 import type { IncomingMessage, ServerResponse } from 'http';
-import { buildPublicGatewayStatus } from '../../gateway/public-status';
+import { buildPublicGatewayStatus } from '../../main/process-runtime/openclaw-gateway/public-status';
 import { getOpenClawConfigDir } from '../../utils/paths';
 import { logger } from '../../utils/logger';
 import type { DiagnosticsApiContext } from '../context';
+import { readTail } from '../log-tail';
 import { sendJson } from '../route-utils';
 
 const DEFAULT_TAIL_LINES = 200;
@@ -69,40 +69,6 @@ function readElectronProcessMetrics() {
   };
 }
 
-async function readTail(filePath: string, tailLines = DEFAULT_TAIL_LINES): Promise<string> {
-  const safeTailLines = Math.max(1, Math.floor(tailLines));
-  try {
-    const file = await open(filePath, 'r');
-    try {
-      const stat = await file.stat();
-      if (stat.size === 0) {
-        return '';
-      }
-
-      const chunkSize = 64 * 1024;
-      let position = stat.size;
-      let content = '';
-      let lineCount = 0;
-
-      while (position > 0 && lineCount <= safeTailLines) {
-        const bytesToRead = Math.min(chunkSize, position);
-        position -= bytesToRead;
-        const buffer = Buffer.allocUnsafe(bytesToRead);
-        const { bytesRead } = await file.read(buffer, 0, bytesToRead, position);
-        content = `${buffer.subarray(0, bytesRead).toString('utf8')}${content}`;
-        lineCount = content.split('\n').length - 1;
-      }
-
-      const lines = content.split('\n');
-      return lines.length <= safeTailLines ? content : lines.slice(-safeTailLines).join('\n');
-    } finally {
-      await file.close();
-    }
-  } catch {
-    return '';
-  }
-}
-
 export async function handleDiagnosticsRoutes(
   req: IncomingMessage,
   res: ServerResponse,
@@ -120,8 +86,8 @@ export async function handleDiagnosticsRoutes(
       capturedAt: Date.now(),
       gateway,
       matchaclawLogTail: await logger.readLogFile(DEFAULT_TAIL_LINES),
-      gatewayLogTail: await readTail(join(openClawConfigDir, 'logs', 'gateway.log')),
-      gatewayErrLogTail: await readTail(join(openClawConfigDir, 'logs', 'gateway.err.log')),
+      gatewayLogTail: await readTail(join(openClawConfigDir, 'logs', 'gateway.log'), DEFAULT_TAIL_LINES),
+      gatewayErrLogTail: await readTail(join(openClawConfigDir, 'logs', 'gateway.err.log'), DEFAULT_TAIL_LINES),
     });
     return true;
   }

@@ -30,8 +30,8 @@ import type {
   SessionWindowResult,
 } from '../../runtime-host/shared/session-adapter-types';
 
-const HOST_API_PORT = 13210;
-const HOST_API_BASE = `http://127.0.0.1:${HOST_API_PORT}`;
+const DEFAULT_HOST_API_PORT = 13210;
+const DEFAULT_HOST_API_BASE = `http://127.0.0.1:${DEFAULT_HOST_API_PORT}`;
 const SESSION_ABORT_TIMEOUT_MS = 5_000;
 const SESSION_PROMPT_TIMEOUT_MS = 10_000;
 const SESSION_PATCH_TIMEOUT_MS = 15_000;
@@ -45,7 +45,6 @@ const RUNTIME_JOB_INITIAL_POLL_MS = 500;
 const RUNTIME_JOB_MAX_POLL_MS = 5_000;
 const RUNTIME_JOB_NOT_FOUND_GRACE_MS = 2_000;
 const CAPABILITY_SCOPE_CACHE_TTL_MS = 5_000;
-let cachedHostApiToken: string | null = null;
 const capabilityScopeCache = new Map<string, { scope: RuntimeScope; expiresAt: number }>();
 const capabilityScopeInflight = new Map<string, Promise<RuntimeScope>>();
 
@@ -272,20 +271,6 @@ function parseUnifiedProxyResponse<T>(
   return unwrapHostApiProxyEnvelope<T>(envelope, { method, path }).data;
 }
 
-async function getHostApiToken(): Promise<string> {
-  if (cachedHostApiToken && cachedHostApiToken.trim()) {
-    return cachedHostApiToken;
-  }
-
-  const token = await invokeIpc<unknown>('hostapi:token');
-  if (typeof token !== 'string' || !token.trim()) {
-    throw new Error('Host API token unavailable');
-  }
-
-  cachedHostApiToken = token;
-  return token;
-}
-
 export async function hostApiFetch<T>(path: string, init?: HostApiRequestInit): Promise<T> {
   const startedAt = Date.now();
   const method = init?.method || 'GET';
@@ -357,23 +342,16 @@ export async function hostApiFetchDecoded<T>(
   return decode(payload);
 }
 
-export async function createHostEventSource(path = '/api/events'): Promise<EventSource> {
-  const token = await getHostApiToken();
-  const url = new URL(path, HOST_API_BASE);
-  url.searchParams.set('token', token);
-  return new EventSource(url.toString());
-}
-
 export function getHostApiBase(): string {
-  return HOST_API_BASE;
+  return DEFAULT_HOST_API_BASE;
 }
 
 export async function resolveHostApiBase(): Promise<string> {
   try {
     const baseUrl = await invokeIpc<unknown>('hostapi:base-url');
-    return typeof baseUrl === 'string' && baseUrl.trim() ? baseUrl.trim() : HOST_API_BASE;
+    return typeof baseUrl === 'string' && baseUrl.trim() ? baseUrl.trim() : DEFAULT_HOST_API_BASE;
   } catch {
-    return HOST_API_BASE;
+    return DEFAULT_HOST_API_BASE;
   }
 }
 
@@ -698,10 +676,6 @@ export async function hostRuntimePrepareGatewayLaunch(payload: {
   proxyBypassRules?: string;
 }, endpoint: RuntimeEndpointRef): Promise<RuntimeJobSubmission> {
   return await runtimeHostCapabilityExecute<RuntimeJobSubmission>('runtimeHost.prepareGatewayLaunch', endpoint, payload);
-}
-
-export async function hostRuntimeSyncProviderAuthBootstrap(endpoint: RuntimeEndpointRef): Promise<RuntimeJobSubmission> {
-  return await runtimeHostCapabilityExecute<RuntimeJobSubmission>('runtimeHost.syncProviderAuthBootstrap', endpoint);
 }
 
 export async function hostRuntimeGatewayLifecycle(payload: Record<string, unknown>, endpoint: RuntimeEndpointRef): Promise<{ success: boolean; job?: RuntimeJobSnapshot }> {

@@ -1,9 +1,7 @@
 import type { IncomingMessage, ServerResponse } from 'http';
 import { PORTS } from '../../utils/config';
 import { buildOpenClawControlUiUrl } from '../../utils/openclaw-control-ui';
-import { buildPublicGatewayStatus } from '../../gateway/public-status';
-import { createRuntimeHostCapabilityPayload, resolveRuntimeHostEndpoint } from '../../main/runtime-host-capabilities';
-import { logger } from '../../utils/logger';
+import { buildPublicGatewayStatus } from '../../main/process-runtime/openclaw-gateway/public-status';
 import type { GatewayApiContext } from '../context';
 import { sendJson } from '../route-utils';
 
@@ -43,38 +41,6 @@ async function readPlatformHealth(ctx: GatewayApiContext): Promise<{
   } catch {
     return null;
   }
-}
-
-let activeControlUiAutoApproveTimer: NodeJS.Timeout | null = null;
-
-function scheduleControlUiDeviceAutoApproval(ctx: GatewayApiContext): void {
-  if (activeControlUiAutoApproveTimer) {
-    clearTimeout(activeControlUiAutoApproveTimer);
-  }
-
-  const startedAt = Date.now();
-  const tick = async () => {
-    try {
-      const endpoint = await resolveRuntimeHostEndpoint(ctx.runtimeHost);
-      await ctx.runtimeHost.request(
-        'POST',
-        '/api/capabilities/execute',
-        await createRuntimeHostCapabilityPayload(ctx.runtimeHost, 'runtimeHost.gatewayControlUiAutoApprove', {}, { endpoint }),
-        { timeoutMs: 20_000 },
-      );
-    } catch (error) {
-      logger.debug(`[control-ui] Auto-approve pairing check failed: ${String(error)}`);
-    }
-    if (Date.now() - startedAt >= 90_000) {
-      activeControlUiAutoApproveTimer = null;
-      return;
-    }
-    activeControlUiAutoApproveTimer = setTimeout(() => {
-      void tick();
-    }, 800);
-  };
-
-  void tick();
 }
 
 export async function handleGatewayRoutes(
@@ -129,9 +95,13 @@ export async function handleGatewayRoutes(
 
   if (url.pathname === '/api/gateway/restart' && req.method === 'POST') {
     try {
-      await ctx.gatewayManager.restart();
-      await recoverRuntimeHostGatewayConnection(ctx);
-      sendJson(res, 200, { success: true });
+      const restart = await ctx.gatewayManager.restart();
+      if (restart.status === 'restarted') {
+        await recoverRuntimeHostGatewayConnection(ctx);
+      }
+      sendJson(res, 200, restart.status === 'deferred'
+        ? { success: true, deferred: true }
+        : { success: true });
     } catch (error) {
       sendJson(res, 500, { success: false, error: String(error) });
     }
@@ -143,7 +113,6 @@ export async function handleGatewayRoutes(
       const status = ctx.gatewayManager.getStatus();
       const port = status.port || PORTS.OPENCLAW_GATEWAY;
       const urlValue = buildOpenClawControlUiUrl(port, '');
-      scheduleControlUiDeviceAutoApproval(ctx);
       sendJson(res, 200, { success: true, url: urlValue, port });
     } catch (error) {
       sendJson(res, 500, { success: false, error: String(error) });

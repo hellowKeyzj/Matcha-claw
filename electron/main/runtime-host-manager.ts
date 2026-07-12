@@ -1,10 +1,15 @@
 import type { RuntimeHostRouteResult } from './runtime-host-contract';
-import type { GatewayManager } from '../gateway/manager';
+import type { IncomingMessage } from 'node:http';
+import type { Duplex } from 'node:stream';
+import { connect } from 'node:net';
+import type { GatewayManager } from './process-runtime/openclaw-gateway/manager';
+import type { MatchaAgentAppServerProcessManager } from './process-runtime/matcha-agent-app-server-process-manager';
+import type { LocalProcessLifecycle } from './process-runtime/contracts';
 import { logger } from '../utils/logger';
 import { EventEmitter } from 'node:events';
 import { browserOAuthManager, type BrowserOAuthProviderType } from '../services/providers/oauth/browser-oauth-manager';
 import { deviceOAuthManager, type OAuthProviderType } from '../services/providers/oauth/device-oauth-manager';
-import { createRuntimeHostProcessManager } from './runtime-host-process-manager';
+import { createRuntimeHostProcessManager } from './process-runtime/runtime-host-process-manager';
 import {
   createRuntimeHostHttpClient,
 } from './runtime-host-client';
@@ -81,6 +86,7 @@ export interface RuntimeHostManager {
   readonly start: () => Promise<void>;
   readonly stop: () => Promise<void>;
   readonly restart: () => Promise<void>;
+  readonly forceTerminate: () => Promise<void>;
   readonly checkHealth: () => Promise<RuntimeHostManagerHealth>;
   readonly readGatewayStatus: () => Promise<RuntimeHostGatewayStatusSnapshot | null>;
   readonly getState: () => RuntimeHostManagerState;
@@ -92,6 +98,7 @@ export interface RuntimeHostManager {
       timeoutMs?: number;
     },
   ) => Promise<RuntimeHostRouteResult<TResponse>>;
+  readonly proxyUpgrade: (req: IncomingMessage, socket: Duplex, head: Buffer) => void;
   readonly executeShellAction: (
     action: RuntimeHostShellAction,
     payload?: unknown,
@@ -116,6 +123,7 @@ export interface RuntimeHostManager {
 
 export interface RuntimeHostManagerDeps {
   readonly gatewayManager: GatewayManager;
+  readonly matchaAgentAppServerManager?: MatchaAgentAppServerProcessManager;
 }
 
 type RuntimeHostProviderOAuthInput = {
@@ -158,6 +166,29 @@ function buildRuntimeHostChildEnv(baseEnv: RuntimeHostChildEnv): RuntimeHostChil
     ...prependPathEntry(process.env, getBundledBinDir()).env,
     ...baseEnv,
   } as RuntimeHostChildEnv;
+}
+
+function buildUpgradeRequestHead(req: IncomingMessage): string {
+  const requestLine = `${req.method ?? 'GET'} ${req.url ?? '/'} HTTP/${req.httpVersion}\r\n`;
+  const headerLines = Object.entries(req.headers).flatMap(([name, value]) => {
+    if (Array.isArray(value)) {
+      return value.map((entry) => `${name}: ${entry}\r\n`);
+    }
+    return value === undefined ? [] : [`${name}: ${value}\r\n`];
+  });
+  return `${requestLine}${headerLines.join('')}\r\n`;
+}
+
+function buildMatchaAgentAppServerEndpointEnv(
+  manager: MatchaAgentAppServerProcessManager | undefined,
+): RuntimeHostChildEnv {
+  const endpoint = manager?.getEndpointSnapshot();
+  if (!endpoint) return {};
+  return {
+    MATCHACLAW_MATCHA_AGENT_APP_SERVER_ENABLED: '1',
+    MATCHACLAW_MATCHA_AGENT_APP_SERVER_URL: endpoint.url,
+    MATCHACLAW_MATCHA_AGENT_APP_SERVER_TOKEN: endpoint.token,
+  };
 }
 
 export function createRuntimeHostManager(
@@ -204,6 +235,7 @@ export function createRuntimeHostManager(
   }
 
   let lifecycle: RuntimeHostLifecycle = 'idle';
+  let lifecycleEpoch = 0;
   let lastError: string | undefined;
   let activePluginCount = 0;
   let childGatewayBridgeSnapshot: { port: number; token: string } = {
@@ -225,6 +257,7 @@ export function createRuntimeHostManager(
       MATCHACLAW_APP_PACKAGED: app.isPackaged ? '1' : '0',
       MATCHACLAW_APP_VERSION: app.getVersion(),
       MATCHACLAW_APP_USER_DATA_DIR: app.getPath('userData'),
+      ...buildMatchaAgentAppServerEndpointEnv(deps.matchaAgentAppServerManager),
     }),
     logger,
   });
@@ -278,6 +311,30 @@ export function createRuntimeHostManager(
       submitManualOAuthCode: (input) => browserOAuthManager.submitManualCode(input),
     },
   };
+
+  function proxyUpgradeInternal(req: IncomingMessage, socket: Duplex, head: Buffer): void {
+    const upstream = connect(runtimeHostProcess.getState().port, '127.0.0.1');
+    const closeBoth = () => {
+      if (!socket.destroyed) socket.destroy();
+      if (!upstream.destroyed) upstream.destroy();
+    };
+    upstream.once('connect', () => {
+      upstream.write(buildUpgradeRequestHead(req));
+      if (head.byteLength > 0) {
+        upstream.write(head);
+      }
+      upstream.pipe(socket);
+      socket.pipe(upstream);
+    });
+    upstream.once('error', closeBoth);
+    socket.once('error', closeBoth);
+    socket.once('close', () => {
+      if (!upstream.destroyed) upstream.destroy();
+    });
+    upstream.once('close', () => {
+      if (!socket.destroyed) socket.destroy();
+    });
+  }
 
   async function executeShellActionInternal(
     action: RuntimeHostShellAction,
@@ -369,16 +426,17 @@ export function createRuntimeHostManager(
   }
 
   function mapProcessLifecycleToRuntimeLifecycle(
-    processLifecycle: 'idle' | 'starting' | 'running' | 'stopped' | 'error',
+    processLifecycle: LocalProcessLifecycle,
   ): RuntimeHealthLifecycle {
-    if (lifecycle === 'restarting') {
-      return 'restarting';
-    }
     switch (processLifecycle) {
       case 'starting':
         return 'starting';
       case 'running':
         return 'running';
+      case 'restarting':
+        return 'restarting';
+      case 'stopping':
+        return 'stopping';
       case 'stopped':
         return 'stopped';
       case 'error':
@@ -475,21 +533,29 @@ export function createRuntimeHostManager(
       if (lifecycle === 'starting' || lifecycle === 'running') {
         return;
       }
+      const operationEpoch = lifecycleEpoch + 1;
+      lifecycleEpoch = operationEpoch;
       lifecycle = 'starting';
       lastError = undefined;
       emitStateChangeInternal();
       try {
         await hydrateExecutionStateFromSources();
         await infrastructure.processManager.start();
-        lifecycle = 'running';
-        logger.info('Runtime Host started');
+        if (lifecycleEpoch === operationEpoch) {
+          lifecycle = 'running';
+          logger.info('Runtime Host started');
+        }
       } catch (error) {
-        lifecycle = 'error';
-        lastError = error instanceof Error ? error.message : String(error);
-        logger.error('Runtime Host start failed:', error);
+        if (lifecycleEpoch === operationEpoch) {
+          lifecycle = 'error';
+          lastError = error instanceof Error ? error.message : String(error);
+          logger.error('Runtime Host start failed:', error);
+        }
         throw error;
       } finally {
-        emitStateChangeInternal();
+        if (lifecycleEpoch === operationEpoch) {
+          emitStateChangeInternal();
+        }
       }
     },
 
@@ -497,31 +563,58 @@ export function createRuntimeHostManager(
       if (lifecycle === 'stopped' || lifecycle === 'idle') {
         return;
       }
+      const operationEpoch = lifecycleEpoch + 1;
+      lifecycleEpoch = operationEpoch;
       lifecycle = 'stopping';
       emitStateChangeInternal();
-      await infrastructure.processManager.stop();
-      lifecycle = 'stopped';
-      logger.info('Runtime Host stopped');
-      emitStateChangeInternal();
+      try {
+        await infrastructure.processManager.stop();
+        if (lifecycleEpoch === operationEpoch) {
+          lifecycle = 'stopped';
+          logger.info('Runtime Host stopped');
+        }
+      } catch (error) {
+        if (lifecycleEpoch === operationEpoch) {
+          lifecycle = 'error';
+          logger.error('Runtime Host stop failed:', error);
+        }
+        throw error;
+      } finally {
+        if (lifecycleEpoch === operationEpoch) {
+          emitStateChangeInternal();
+        }
+      }
     },
 
     async restart() {
+      const operationEpoch = lifecycleEpoch + 1;
+      lifecycleEpoch = operationEpoch;
       lifecycle = 'restarting';
       lastError = undefined;
       emitStateChangeInternal();
       try {
         await hydrateExecutionStateFromSources();
         await infrastructure.processManager.restart();
-        lifecycle = 'running';
-        logger.info('Runtime Host restarted');
+        if (lifecycleEpoch === operationEpoch) {
+          lifecycle = 'running';
+          logger.info('Runtime Host restarted');
+        }
       } catch (error) {
-        lifecycle = 'error';
-        lastError = error instanceof Error ? error.message : String(error);
-        logger.error('Runtime Host restart failed:', error);
+        if (lifecycleEpoch === operationEpoch) {
+          lifecycle = 'error';
+          lastError = error instanceof Error ? error.message : String(error);
+          logger.error('Runtime Host restart failed:', error);
+        }
         throw error;
       } finally {
-        emitStateChangeInternal();
+        if (lifecycleEpoch === operationEpoch) {
+          emitStateChangeInternal();
+        }
       }
+    },
+
+    async forceTerminate() {
+      await infrastructure.processManager.forceTerminate();
     },
 
     async checkHealth() {
@@ -583,6 +676,10 @@ export function createRuntimeHostManager(
       },
     ) {
       return await infrastructure.httpClient.request<TResponse>(method, route, payload, options);
+    },
+
+    proxyUpgrade(req, socket, head) {
+      proxyUpgradeInternal(req, socket, head);
     },
 
     async executeShellAction(action, payload) {

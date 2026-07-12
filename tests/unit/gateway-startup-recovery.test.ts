@@ -1,12 +1,11 @@
-import { describe, expect, it, vi } from 'vitest';
+import { describe, expect, it } from 'vitest';
 import {
   getGatewayStartupRecoveryAction,
   hasInvalidConfigFailureSignal,
-  isGatewayStillStartingError,
   isInvalidConfigSignal,
+  isTransientGatewayStartError,
   shouldAttemptConfigAutoRepair,
-  waitForGatewayControlReadyWithStartupRetry,
-} from '@electron/gateway/startup-recovery';
+} from '@electron/main/process-runtime/openclaw-gateway/startup-recovery';
 
 describe('gateway startup recovery heuristics', () => {
   it('detects invalid-config signal from stderr lines', () => {
@@ -52,36 +51,25 @@ describe('gateway startup recovery heuristics', () => {
     expect(isInvalidConfigSignal('Gateway ready after 3 attempts')).toBe(false);
   });
 
-  it('端口仍被占用属于可重试的瞬态启动错误', () => {
-    const action = getGatewayStartupRecoveryAction({
-      startupError: new Error('Port 18789 still occupied after 30000ms'),
-      startupStderrLines: [],
-      configRepairAttempted: false,
-      attempt: 1,
-      maxAttempts: 3,
-    });
-    expect(action).toBe('retry');
-  });
+  it('retries transient startup failures without stopping the current Gateway', () => {
+    const transientStartErrors = [
+      new Error('Gateway process exited before becoming ready (code=1)'),
+      new Error('connect ECONNREFUSED 127.0.0.1:18789'),
+      new Error('Port 18789 still occupied after 60000ms'),
+    ];
 
-  it('识别 OpenClaw 启动中拒绝控制面连接的错误', () => {
-    expect(isGatewayStillStartingError(new Error('gateway starting; retry shortly'))).toBe(true);
-    expect(isGatewayStillStartingError(new Error('Gateway control ready check failed'))).toBe(false);
-  });
-
-  it('控制面仍在启动时会原地重试到成功', async () => {
-    const waitForControlReady = vi.fn()
-      .mockRejectedValueOnce(new Error('gateway starting; retry shortly'))
-      .mockResolvedValueOnce(undefined);
-    const delay = vi.fn().mockResolvedValue(undefined);
-
-    await waitForGatewayControlReadyWithStartupRetry({
-      waitForControlReady,
-      port: 18789,
-      delay,
-      retryDelaysMs: [5],
-    });
-
-    expect(waitForControlReady).toHaveBeenCalledTimes(2);
-    expect(delay).toHaveBeenCalledWith(5);
+    for (const startupError of transientStartErrors) {
+      expect(isTransientGatewayStartError(startupError)).toBe(true);
+      expect(getGatewayStartupRecoveryAction({
+        startupError,
+        startupStderrLines: [],
+        configRepairAttempted: false,
+        attempt: 1,
+        maxAttempts: 3,
+      })).toEqual({
+        action: 'retry',
+        cleanup: 'keep-current',
+      });
+    }
   });
 });

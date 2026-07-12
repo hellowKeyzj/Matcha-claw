@@ -1,7 +1,6 @@
 export const INFRASTRUCTURE_TRANSPORT_INVOKE_CHANNELS = [
   'hostapi:fetch',
   'hostapi:abort',
-  'hostapi:token',
   'hostapi:base-url',
   'gateway:status',
 ] as const;

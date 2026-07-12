@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import type { AppApiContext } from '../context';
 import { getResourcesDir } from '../../utils/paths';
 import { sendJson } from '../route-utils';
-import { buildPublicGatewayStatus } from '../../gateway/public-status';
+import { buildPublicGatewayStatus } from '../../main/process-runtime/openclaw-gateway/public-status';
 
 export async function handleAppRoutes(
   req: IncomingMessage,

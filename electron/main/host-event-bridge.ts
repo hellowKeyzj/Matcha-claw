@@ -1,15 +1,15 @@
 import type { BrowserWindow } from 'electron';
-import type { GatewayManager } from '../gateway/manager';
+import type { GatewayManager } from './process-runtime/openclaw-gateway/manager';
 import type { HostEventBus } from '../api/event-bus';
 import type {
   RuntimeHostManager,
   RuntimeHostManagerHealth,
   RuntimeHostManagerState,
 } from './runtime-host-manager';
-import { buildPublicGatewayStatus } from '../gateway/public-status';
+import { buildPublicGatewayStatus } from './process-runtime/openclaw-gateway/public-status';
 import { browserOAuthManager } from '../services/providers/oauth/browser-oauth-manager';
 import { deviceOAuthManager } from '../services/providers/oauth/device-oauth-manager';
-import { getE2EGatewayStatus } from './e2e-fixture-loader';
+import { getE2EGatewayStatus } from '@electron/e2e-fixture-loader';
 
 type HostEventName =
   | 'gateway:status'
@@ -38,6 +38,7 @@ type RuntimeHostLifecycleStatus =
   | 'starting'
   | 'running'
   | 'restarting'
+  | 'stopping'
   | 'degraded'
   | 'error'
   | 'stopped';
@@ -56,29 +57,34 @@ function asRuntimeHostStatus(
   state: RuntimeHostManagerState,
   health: RuntimeHostManagerHealth,
 ): RuntimeHostStatusPayload {
+  const stopping = state.lifecycle === 'stopping' || state.runtimeLifecycle === 'stopping';
   const stopped = state.lifecycle === 'stopped' || state.runtimeLifecycle === 'stopped';
   const restarting = state.lifecycle === 'restarting' || state.runtimeLifecycle === 'restarting';
   const starting = state.lifecycle === 'starting' || state.runtimeLifecycle === 'starting';
   const hardError = state.lifecycle === 'error' || state.runtimeLifecycle === 'error';
   const running = state.lifecycle === 'running' && state.runtimeLifecycle === 'running' && health.ok;
-  const degraded = !restarting && state.runtimeLifecycle === 'running' && !health.ok;
+  const degraded = !restarting && !stopping && state.runtimeLifecycle === 'running' && !health.ok;
 
-  let status: RuntimeHostLifecycleStatus = 'starting';
-  if (restarting) {
+  let status: RuntimeHostLifecycleStatus;
+  if (hardError) {
+    status = 'error';
+  } else if (stopping) {
+    status = 'stopping';
+  } else if (restarting) {
     status = 'restarting';
   } else if (stopped) {
     status = 'stopped';
-  } else if (hardError) {
-    status = 'error';
   } else if (running) {
     status = 'running';
   } else if (degraded) {
     status = 'degraded';
   } else if (starting) {
     status = 'starting';
+  } else {
+    status = 'error';
   }
 
-  const mergedError = status === 'restarting' || status === 'starting'
+  const mergedError = status === 'restarting' || status === 'starting' || status === 'stopping'
     ? undefined
     : (state.lastError || health.error);
   return {
@@ -116,6 +122,7 @@ export function registerHostEventBridge(deps: {
   let previousRuntimeHostPid: number | undefined;
   let previousRuntimeHostError: string | undefined;
   let runtimeHostPublishInflight: Promise<void> | null = null;
+  let runtimeHostPublishPending = false;
 
   const publishGatewaySnapshot = async () => {
     const e2eStatus = await getE2EGatewayStatus<ReturnType<typeof buildPublicGatewayStatus>>();
@@ -128,63 +135,70 @@ export function registerHostEventBridge(deps: {
     emit('gateway:status', buildPublicGatewayStatus(baseStatus, runtimeGatewayStatus));
   };
 
+  const publishRuntimeHostSnapshotOnce = async () => {
+    const state = deps.runtimeHostManager.getState();
+    const health = await deps.runtimeHostManager.checkHealth();
+    const payload = asRuntimeHostStatus(state, health);
+    const statusChanged = previousRuntimeHostStatus !== payload.status;
+    const pidChanged = previousRuntimeHostPid !== payload.pid;
+    const errorChanged = previousRuntimeHostError !== payload.error;
+    const shouldEmitStatus = statusChanged || pidChanged || errorChanged;
+
+    if (shouldEmitStatus) {
+      emit('runtime-host:status', payload);
+    }
+
+    if (
+      previousRuntimeHostPid
+      && payload.pid
+      && previousRuntimeHostPid !== payload.pid
+      && payload.status === 'running'
+    ) {
+      emit('runtime-host:restart', {
+        previousPid: previousRuntimeHostPid,
+        pid: payload.pid,
+        status: payload.status,
+        recoveredAt: payload.updatedAt,
+      });
+    }
+
+    if (
+      (payload.status === 'degraded' || payload.status === 'error')
+      && payload.error
+      && (errorChanged || statusChanged)
+    ) {
+      emit('runtime-host:error', {
+        status: payload.status,
+        message: payload.error,
+        pid: payload.pid,
+        updatedAt: payload.updatedAt,
+      });
+    }
+
+    previousRuntimeHostStatus = payload.status;
+    previousRuntimeHostPid = payload.pid;
+    previousRuntimeHostError = payload.error;
+  };
+
   const publishRuntimeHostSnapshot = async () => {
     if (runtimeHostPublishInflight) {
+      runtimeHostPublishPending = true;
       await runtimeHostPublishInflight;
       return;
     }
-    const work = (async () => {
-      const state = deps.runtimeHostManager.getState();
-      const health = await deps.runtimeHostManager.checkHealth();
-      const payload = asRuntimeHostStatus(state, health);
-      const statusChanged = previousRuntimeHostStatus !== payload.status;
-      const pidChanged = previousRuntimeHostPid !== payload.pid;
-      const errorChanged = previousRuntimeHostError !== payload.error;
-      const shouldEmitStatus = statusChanged || pidChanged || errorChanged;
 
-      if (shouldEmitStatus) {
-        emit('runtime-host:status', payload);
+    do {
+      runtimeHostPublishPending = false;
+      const work = publishRuntimeHostSnapshotOnce();
+      runtimeHostPublishInflight = work;
+      try {
+        await work;
+      } finally {
+        if (runtimeHostPublishInflight === work) {
+          runtimeHostPublishInflight = null;
+        }
       }
-
-      if (
-        previousRuntimeHostPid
-        && payload.pid
-        && previousRuntimeHostPid !== payload.pid
-        && payload.status === 'running'
-      ) {
-        emit('runtime-host:restart', {
-          previousPid: previousRuntimeHostPid,
-          pid: payload.pid,
-          status: payload.status,
-          recoveredAt: payload.updatedAt,
-        });
-      }
-
-      if (
-        (payload.status === 'degraded' || payload.status === 'error')
-        && payload.error
-        && (errorChanged || statusChanged)
-      ) {
-        emit('runtime-host:error', {
-          status: payload.status,
-          message: payload.error,
-          pid: payload.pid,
-          updatedAt: payload.updatedAt,
-        });
-      }
-
-      previousRuntimeHostStatus = payload.status;
-      previousRuntimeHostPid = payload.pid;
-      previousRuntimeHostError = payload.error;
-    })();
-    runtimeHostPublishInflight = work;
-    try {
-      await work;
-    } finally {
-      if (runtimeHostPublishInflight === work) {
-        runtimeHostPublishInflight = null;
-      }
-    }
+    } while (runtimeHostPublishPending);
   };
 
   deps.gatewayManager.on('status', () => {
