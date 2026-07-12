@@ -630,18 +630,18 @@ exports.default = async function afterPack(context) {
   const nodeModulesRoot = join(__dirname, '..', 'node_modules');
   const pluginsDestRoot = join(resourcesDir, 'openclaw-plugins');
 
-  if (process.env.BUILD_MATCHA_AGENT === '1') {
+  if (process.env.SKIP_MATCHA_AGENT_BUILD !== '1') {
     const matchaAgentDist = join(__dirname, '..', 'matcha-agent', 'dist');
     const matchaAgentDest = join(resourcesDir, 'matcha-agent', 'dist');
     if (!existsSync(matchaAgentDist)) {
-      throw new Error('BUILD_MATCHA_AGENT=1 set but matcha-agent/dist was not found. Run build:matcha-agent before packaging.');
+      throw new Error('matcha-agent/dist was not found. Run build:matcha-agent before packaging.');
     }
     rmSync(matchaAgentDest, { recursive: true, force: true });
     mkdirSync(dirname(matchaAgentDest), { recursive: true });
     cpSync(matchaAgentDist, matchaAgentDest, { recursive: true });
     console.log('[after-pack] ✅ matcha-agent dist copied.');
   } else {
-    console.log('[after-pack] BUILD_MATCHA_AGENT=1 not set; skipping matcha-agent resource copy.');
+    console.log('[after-pack] SKIP_MATCHA_AGENT_BUILD=1 set; skipping matcha-agent resource copy.');
   }
 
   if (!existsSync(src)) {

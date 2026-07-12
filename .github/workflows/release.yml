@@ -23,8 +23,8 @@ on:
           - mac
           - linux
           - all
-      build_matcha_agent:
-        description: 'Build and package matcha-agent'
+      skip_matcha_agent:
+        description: 'Skip building and packaging matcha-agent'
         required: false
         default: false
         type: boolean
@@ -72,7 +72,7 @@ jobs:
 
     runs-on: ${{ matrix.os }}
     env:
-      BUILD_MATCHA_AGENT: ${{ github.event.inputs.build_matcha_agent == 'true' && '1' || '' }}
+      SKIP_MATCHA_AGENT_BUILD: ${{ github.event.inputs.skip_matcha_agent == 'true' && '1' || '' }}
 
     steps:
       - name: Checkout code
@@ -92,7 +92,7 @@ jobs:
           cache: 'pnpm'
 
       - name: Setup Bun
-        if: env.BUILD_MATCHA_AGENT == '1'
+        if: env.SKIP_MATCHA_AGENT_BUILD != '1'
         uses: oven-sh/setup-bun@v2
         with:
           bun-version: 1.3.5

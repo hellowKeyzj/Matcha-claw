@@ -1,4 +1,5 @@
-import { defineConfig } from 'vite';
+import { rmSync } from 'node:fs';
+import { defineConfig, type Plugin } from 'vite';
 import react from '@vitejs/plugin-react';
 import electron from 'vite-plugin-electron';
 import renderer from 'vite-plugin-electron-renderer';
@@ -25,6 +26,23 @@ function clearElectronRunAsNodeForDev(): void {
 }
 
 clearElectronRunAsNodeForDev();
+
+function cleanDistElectronBeforeBuild(): Plugin {
+  let hasCleanedDistElectron = false;
+
+  return {
+    name: 'matchaclaw-clean-dist-electron',
+    apply: 'build',
+    buildStart() {
+      if (hasCleanedDistElectron) {
+        return;
+      }
+
+      hasCleanedDistElectron = true;
+      rmSync(resolve(__dirname, 'dist-electron'), { recursive: true, force: true });
+    },
+  };
+}
 
 function getNodeModulePackageName(id: string): string | null {
   const normalizedId = id.replace(/\\/g, '/');
@@ -130,6 +148,7 @@ export default defineConfig(({ mode }) => ({
   // build remains correct even if plugin order ever changes.
   base: './',
   plugins: [
+    cleanDistElectronBeforeBuild(),
     react(),
     electron([
       {
@@ -149,13 +168,11 @@ export default defineConfig(({ mode }) => ({
               ),
             },
           },
-          server: {
+          build: {
+            outDir: 'dist-electron/main',
             watch: {
               ignored: ignoredWorkspaceDirs,
             },
-          },
-          build: {
-            outDir: 'dist-electron/main',
             rollupOptions: {
               external: [
                 'electron-store',
@@ -175,13 +192,11 @@ export default defineConfig(({ mode }) => ({
           options.reload();
         },
         vite: {
-          server: {
+          build: {
+            outDir: 'dist-electron/preload',
             watch: {
               ignored: ignoredWorkspaceDirs,
             },
-          },
-          build: {
-            outDir: 'dist-electron/preload',
             rollupOptions: {
               external: ['electron'],
             },

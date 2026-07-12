@@ -10,7 +10,10 @@ directories:
 
 files:
   - dist
-  - dist-electron
+  # package.json main points at dist-electron/main/index.js; keep this list
+  # explicit so stale dist-electron/electron/** bundles cannot ship.
+  - dist-electron/main/**
+  - dist-electron/preload/**
   - runtime-host/build/**
   - runtime-host/host-process.cjs
   - package.json

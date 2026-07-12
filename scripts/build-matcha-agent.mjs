@@ -21,8 +21,8 @@ const usesBundledBun = existsSync(bundledBunPath);
 const bunCommand = usesBundledBun ? bundledBunPath : 'bun';
 const bunPathPrefix = usesBundledBun ? dirname(bundledBunPath) : '';
 
-if (process.env.BUILD_MATCHA_AGENT !== '1') {
-  console.log('[build-matcha-agent] BUILD_MATCHA_AGENT=1 not set, skipping matcha-agent build.');
+if (process.env.SKIP_MATCHA_AGENT_BUILD === '1') {
+  console.log('[build-matcha-agent] SKIP_MATCHA_AGENT_BUILD=1 set; skipping matcha-agent build.');
   process.exit(0);
 }
 
