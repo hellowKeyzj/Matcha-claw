@@ -40,7 +40,6 @@ export class OpenClawTeamRoleSessionMaterializationAdapter implements TeamRoleEn
     }
     await this.deps.gateway.gatewayRpc(OPENCLAW_SESSION_DELETE_METHOD, {
       key: this.resolveEndpointSessionId(binding),
-      agentId: binding.agentId,
     }, OPENCLAW_SESSION_DELETE_TIMEOUT_MS);
   }
 }

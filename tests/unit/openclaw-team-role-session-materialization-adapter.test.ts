@@ -46,7 +46,6 @@ describe('OpenClawTeamRoleSessionMaterializationAdapter', () => {
 
     expect(gatewayRpc).toHaveBeenCalledWith('sessions.delete', {
       key: 'agent:mct-team:team-endpoint-session-run-1-reviewer',
-      agentId: 'mct-team',
     }, 10_000);
   });
 
