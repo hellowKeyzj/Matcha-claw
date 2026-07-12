@@ -180,6 +180,9 @@ export class SkillRuntimeWorkflow {
 
   private async buildCanonicalSkillKeyByIdentity(): Promise<Map<string, string>> {
     const canonicalKeyByIdentity = new Map<string, string>();
+    for (const skillKey of Object.keys(await this.deps.repository.getAllConfigs())) {
+      this.addCanonicalSkillIdentity(canonicalKeyByIdentity, skillKey);
+    }
     for (const entry of await this.listInstalledSkillInventory()) {
       this.addCanonicalSkillIdentity(canonicalKeyByIdentity, entry.skillKey, entry.name);
     }
