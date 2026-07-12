@@ -5,7 +5,9 @@ import { GatewayReadinessWorkflow } from '../../runtime-host/application/workflo
 import { createAgentRunCapabilityOperationRoutes } from '../../runtime-host/application/capabilities/agent/agent-run-capability';
 import { dispatchRuntimeRouteDefinition } from './helpers/runtime-route';
 
-function createDeps() {
+function createDeps(options: {
+  readonly recoverGatewayConnection?: (reason: string, timeoutMs?: number) => Promise<unknown>;
+} = {}) {
   const openclawBridge = {
     gatewayRpc: vi.fn(async () => ({ ok: true })),
     inspectGatewayControlReadiness: vi.fn(async (methods: readonly string[]) => ({
@@ -26,7 +28,7 @@ function createDeps() {
       },
       updatedAt: 1,
     })),
-    recoverGatewayConnection: vi.fn(async () => ({
+    recoverGatewayConnection: vi.fn(options.recoverGatewayConnection ?? (async () => ({
       state: 'connected',
       portReachable: true,
       gatewayReady: true,
@@ -36,7 +38,7 @@ function createDeps() {
         consecutiveRpcFailures: 0,
       },
       updatedAt: 2,
-    })),
+    }))),
     chatSend: vi.fn(async () => ({ id: 'msg-1' })),
   };
   return {
@@ -186,6 +188,56 @@ describe('runtime-host process gateway routes', () => {
           },
           updatedAt: 2,
         },
+      },
+    });
+  });
+
+  it('POST /api/gateway/recover 将恢复失败映射为 route server error', async () => {
+    const deps = createDeps({
+      recoverGatewayConnection: async () => {
+        throw new Error('Gateway recovery failed');
+      },
+    });
+
+    const result = await dispatchRuntimeRouteDefinition(
+      gatewayRoutes,
+      'POST',
+      '/api/gateway/recover',
+      { reason: 'manual-retry', timeoutMs: 12000 },
+      deps,
+    );
+
+    expect(deps.openclawBridge.recoverGatewayConnection).toHaveBeenCalledWith('manual-retry', 12000);
+    expect(result).toEqual({
+      status: 500,
+      data: {
+        success: false,
+        error: 'Error: Gateway recovery failed',
+      },
+    });
+  });
+
+  it('POST /api/gateway/recover 将恢复 timeout 映射为 route server error', async () => {
+    const deps = createDeps({
+      recoverGatewayConnection: async () => {
+        throw new Error('Gateway connect timeout');
+      },
+    });
+
+    const result = await dispatchRuntimeRouteDefinition(
+      gatewayRoutes,
+      'POST',
+      '/api/gateway/recover',
+      { reason: 'gateway-timeout', timeoutMs: 5000 },
+      deps,
+    );
+
+    expect(deps.openclawBridge.recoverGatewayConnection).toHaveBeenCalledWith('gateway-timeout', 5000);
+    expect(result).toEqual({
+      status: 500,
+      data: {
+        success: false,
+        error: 'Error: Gateway connect timeout',
       },
     });
   });
