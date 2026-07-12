@@ -71,6 +71,8 @@
 
 用户或系统看到某个具体失败现象：能力不可用、状态未知、等待中、调用失败、超时、返回空结果、结果被投影成失败，或无法证明下游连通；且该能力背后依赖 runtime、connector、provider、gateway、子进程或外部协议。
 
+上游 runtime、worker、app-server 或 gateway 已经产出 completed / delivered / success，但产品层仍显示等待中、pending、streaming 或没有最终结果，也命中本 pattern。上游完成只是中间信号，不是产品闭环完成。
+
 如果用户已经指定症状修法，例如去重、过滤、fallback、吞错、延长 timeout、替换 status 或 UI 掩盖，也仍然命中本 pattern。用户给出的修法只能作为假设，不能绕过归因。
 
 #### First principle
@@ -87,6 +89,8 @@ bugfix 先归因，不修表象。先验证真实下游闭环，不先相信 UI/
 
 其中 X 必须是真实入口或生产同款调用方，不是方便手写的 probe；Y 必须是实际协议、transport、SDK 或 IPC 边界；Z 必须是真实服务、runtime、connector、provider、gateway 或 owning workflow；R 必须是业务结果，不是 UI 文案、status 字符串或 projection 形状。
 
+如果问题跨越 runtime / adapter / projection / renderer，R 必须写到最终产品状态，而不能停在上游完成信号。例如：`app-server run.completed` 只证明 app-server 完成；只有 `renderer pending cleared + assistant item visible + runtime activeRunId=null/runPhase=done` 才证明 chat turn 闭环完成。
+
 如果写不出来，说明还没准备好讨论修法，更没准备好改代码。
 
 #### First-round probes
@@ -97,9 +101,10 @@ bugfix 先归因，不修表象。先验证真实下游闭环，不先相信 UI/
 2. 如果真实调用方到服务之间有协议边界，读取并验证双方实现：client serialize/send/timeout 与 server parse/handle/response。
 3. 验证子进程或外部 runtime 是否按同一 command/env/identity 启动。
 4. 验证协议握手、请求 payload、响应 payload 和错误映射是否与真实调用方一致。
-5. 验证业务结果 R 是否正确返回给真实调用方。
-6. 如果问题涉及队列、串行资源、agent session、worker job 或跨 runtime turn，分别写清 owning workflow 生命周期和下游 runtime/session 生命周期，并找出真正释放同一资源的 terminal signal。
-7. 只有完成上述归属后，才回头解释 UI/API/status/projection 为什么表现为失败。
+5. 如果事件跨越 runtime / adapter / projection，先冻结字段映射：外部 runtime session id → endpointSessionId → canonical sessionKey → renderer sessionKey；再验证每一跳实际 envelope 使用的字段名。
+6. 验证业务结果 R 是否正确返回给真实调用方；跨到 renderer 的闭环必须验证最终产品状态，而不是只验证上游 completed。
+7. 如果问题涉及队列、串行资源、agent session、worker job 或跨 runtime turn，分别写清 owning workflow 生命周期和下游 runtime/session 生命周期，并找出真正释放同一资源的 terminal signal。
+8. 只有完成上述归属后，才回头解释 UI/API/status/projection 为什么表现为失败。
 
 #### Attribution rule
 
@@ -117,7 +122,7 @@ bugfix 先归因，不修表象。先验证真实下游闭环，不先相信 UI/
 - 协议不匹配：修 protocol boundary。
 - 进程启动错误：修 command/env/runtime resolver。
 - config 陈旧：修 config projection / invalidation。
-- identity 错配：修 identity mapping。
+- identity 错配：修 identity mapping；跨 runtime 事件要修外部 session id / endpointSessionId / canonical sessionKey 的映射 owner，不要在 renderer 或 UI 文案层猜。
 - 生命周期边界错配：修拥有调度、队列或资源占用事实的 workflow；不要把 tool call complete、submitted、delivered 当成下游 runtime/session turn 的 final/error/aborted。
 - 服务侧业务结果错误：修 owning workflow/capability。
 - 响应解析或返回映射错误：修 adapter/client mapping。
@@ -131,6 +136,8 @@ bugfix 先归因，不修表象。先验证真实下游闭环，不先相信 UI/
 
 验证必须证明真实闭环恢复：真实调用方 X 通过协议 Y 调用服务 Z，并拿到业务结果 R。只证明 UI 不再报错、status 变了、projection 字段存在、warning 消失或 timeout 变长，都不能作为 bugfix 完成证据。
 
+对 runtime chat / session turn 接入，完成证据必须覆盖终端产品状态：上游 terminal event 已被 ingestion 接收，canonical lifecycle 投影为 final/error/aborted，runtime active state 被清空，renderer pending / streaming 状态结束，assistant result 可见。只证明 worker ready、app-server run.completed 或 gateway delivered 不足以宣告完成。
+
 如果修复涉及串行资源、队列调度、agent session、worker job 或跨 runtime turn，验证必须覆盖同一资源连续排队和不同资源可并发两个方向：上游业务事件 complete/submitted/delivered 不应释放同一资源；只有下游 terminal signal 才能释放。
 
 #### Common wrong paths
@@ -141,6 +148,8 @@ bugfix 先归因，不修表象。先验证真实下游闭环，不先相信 UI/
 - 先加大量 UI/route 日志，却不验证最接近失败边界的一跳。
 - 只测试我方 server 已知支持的 happy path。
 - 只证明 status/projection/UI 变化，没有证明真实调用方拿到业务结果。
+- 只证明上游 worker/app-server/gateway completed，没有证明 downstream ingestion、canonical lifecycle 和 renderer terminal state。
+- 没有先冻结跨进程字段映射，把 `sessionId`、`endpointSessionId`、`sessionKey`、`sessionIdentity` 当成可互换字段。
 - 把第一个真实问题当成最终根因。
 - 把 owning workflow 的 complete/submitted/delivered 当成下游 runtime/session turn 的结束信号。
 - 没读真实 SDK/runtime 的 serialize、spawn、timeout、parse 或 response mapping 实现。
@@ -160,6 +169,7 @@ runtime integration、connector status、provider SDK、gateway RPC、MCP/stdin-
 ### Promoted case index
 
 - [OpenClaw MCP status timeout](./debugging-case-archive.md#case-openclaw-mcp-status-timeout) — DP-001 来源案例；关键教训是集成类状态失败先验证真实协议闭环，手写 probe 必须模拟真实调用方 SDK。
+- [Matcha-agent app-server completed but UI pending](./debugging-case-archive.md#case-matcha-agent-app-server-completed-but-ui-pending) — DP-001 补充案例；关键教训是 runtime 接入完成证据必须到 renderer terminal state，不能停在上游 `run.completed`。
 
 ## 5. 新增 Diagnostic Pattern 模板
 
