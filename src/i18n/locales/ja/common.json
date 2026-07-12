@@ -10,8 +10,10 @@
         "teams": "チーム",
         "plugins": "プラグインセンター",
         "connectors": "コネクタ",
+        "remoteFleet": "リモートFleet",
         "security": "セキュリティ",
         "agentSessions": "Agentセッション",
+        "selectSessionRuntime": "セッションRuntimeを選択",
         "collapseAgentSessions": "Agentセッションを折りたたむ",
         "expandAgentSessions": "Agentセッションを展開",
         "untitledSession": "無題セッション",
@@ -50,8 +52,7 @@
         "pendingBlockerTaskId": "タスクID {{taskId}}",
         "pendingBlockerSourceChat": "チャット",
         "pendingBlockerApprovalId": "承認ID {{id}}",
-        "pendingBlockerApprovalHint": "ツール呼び出しが承認待ちです。",
-        "remoteFleet": "リモートFleet"
+        "pendingBlockerApprovalHint": "ツール呼び出しが承認待ちです。"
     },
     "actions": {
         "save": "保存",

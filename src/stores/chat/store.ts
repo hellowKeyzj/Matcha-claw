@@ -25,6 +25,7 @@ import {
   executeLoadOlderViewportItems,
   executeLoadSessions,
   executeNewSession,
+  executeNewSessionForScope,
   executeOpenAgentConversation,
   executeOpenSessionIdentity,
   executeRenameSession,
@@ -57,9 +58,26 @@ function readSessionPromptScopes(endpoint: RuntimeEndpointSummary): AgentScope[]
     .map((capability) => capability.scope as AgentScope);
 }
 
+function buildDefaultSessionPromptScope(endpoint: RuntimeEndpointSummary): AgentScope | null {
+  const agentId = endpoint.defaultAgentId.trim();
+  if (!agentId) {
+    return null;
+  }
+  return {
+    kind: 'agent',
+    endpoint: endpoint.endpointRef,
+    agentId,
+  };
+}
+
+function isEndpointTerminallyUnavailable(endpoint: RuntimeEndpointSummary): boolean {
+  return endpoint.controlState.readiness?.phase === 'unavailable';
+}
+
 function isReadySessionEndpoint(endpoint: RuntimeEndpointSummary): boolean {
-  return readSessionPromptScopes(endpoint).length > 0
-    && endpoint.controlState.readiness?.ready !== false;
+  return endpoint.capabilities.chat
+    && buildDefaultSessionPromptScope(endpoint) != null
+    && !isEndpointTerminallyUnavailable(endpoint);
 }
 
 function compareRuntimeEndpointTarget(left: ChatSessionRuntimeEndpointTarget, right: ChatSessionRuntimeEndpointTarget): number {
@@ -74,8 +92,6 @@ function buildSessionRuntimeEndpointTargets(endpoints: RuntimeEndpointSummary[])
     .map((endpoint) => {
       const sessionPromptScopes = readSessionPromptScopes(endpoint)
         .sort((left, right) => left.agentId.localeCompare(right.agentId) || JSON.stringify(left).localeCompare(JSON.stringify(right)));
-      const defaultSessionPromptScope = sessionPromptScopes.find((scope) => scope.agentId === 'main' || scope.agentId === 'default')
-        ?? sessionPromptScopes[0]!;
       return {
         endpointId: endpoint.id,
         protocolId: endpoint.protocolId,
@@ -87,7 +103,7 @@ function buildSessionRuntimeEndpointTargets(endpoints: RuntimeEndpointSummary[])
         agentIds: [...endpoint.agentIds],
         acceptsDynamicAgents: endpoint.acceptsDynamicAgents,
         sessionPromptScopes,
-        defaultSessionPromptScope,
+        defaultSessionPromptScope: buildDefaultSessionPromptScope(endpoint)!,
       };
     })
     .sort(compareRuntimeEndpointTarget);
@@ -109,13 +125,13 @@ function selectDefaultSessionPromptScope(
     return null;
   }
   return targets.find((target) => matchesCurrentSessionRuntime(target, state))?.defaultSessionPromptScope
-    ?? targets.find((target) => target.defaultSessionPromptScope.agentId === 'main' || target.defaultSessionPromptScope.agentId === 'default')?.defaultSessionPromptScope
     ?? targets[0]!.defaultSessionPromptScope;
 }
 
 export const useChatStore = create<ChatStoreState>((set, get) => {
   const runtimeKernel = createChatStoreKernel(set);
   const { beginMutating, finishMutating, historyRuntime, sessionRunCache } = runtimeKernel;
+  let sessionRuntimeBootstrapSequence = 0;
   const sessionInput = {
     set,
     get,
@@ -143,6 +159,8 @@ export const useChatStore = create<ChatStoreState>((set, get) => {
     error: null,
     showThinking: true,
     bootstrapSessionRuntime: async () => {
+      const requestSequence = sessionRuntimeBootstrapSequence + 1;
+      sessionRuntimeBootstrapSequence = requestSequence;
       set((state) => ({
         sessionRuntimeCatalog: {
           ...state.sessionRuntimeCatalog,
@@ -152,10 +170,27 @@ export const useChatStore = create<ChatStoreState>((set, get) => {
       }));
       try {
         const { endpoints } = await hostRuntimeEndpointsList();
+        if (sessionRuntimeBootstrapSequence !== requestSequence) {
+          return;
+        }
         const targets = buildSessionRuntimeEndpointTargets(endpoints);
         const defaultSessionPromptScope = selectDefaultSessionPromptScope(targets, get());
         if (!defaultSessionPromptScope) {
-          throw new Error('No session runtime endpoint is available');
+          const message = 'No session runtime endpoint is available';
+          set({
+            sessionRuntimeCatalog: {
+              status: 'error',
+              error: message,
+              endpoints: targets,
+              defaultSessionPromptScope: null,
+            },
+            sessionCatalogStatus: createIdleResourceStatusState(),
+            error: message,
+          });
+          return;
+        }
+        if (sessionRuntimeBootstrapSequence !== requestSequence) {
+          return;
         }
         set({
           sessionRuntimeCatalog: {
@@ -166,14 +201,15 @@ export const useChatStore = create<ChatStoreState>((set, get) => {
           },
         });
       } catch (error) {
+        if (sessionRuntimeBootstrapSequence !== requestSequence) {
+          return;
+        }
         const message = error instanceof Error ? error.message : String(error);
         set((state) => ({
           sessionRuntimeCatalog: {
             ...state.sessionRuntimeCatalog,
             status: 'error',
             error: message,
-            endpoints: [],
-            defaultSessionPromptScope: null,
           },
           sessionCatalogStatus: createIdleResourceStatusState(),
           error: message,
@@ -192,6 +228,9 @@ export const useChatStore = create<ChatStoreState>((set, get) => {
     },
     newSession: async (agentId) => {
       await executeNewSession(sessionInput, agentId);
+    },
+    newSessionForScope: async (scope) => {
+      await executeNewSessionForScope(sessionInput, scope);
     },
     deleteSession: (key) => executeDeleteSession(sessionInput, key),
     renameSession: (key, label) => executeRenameSession({

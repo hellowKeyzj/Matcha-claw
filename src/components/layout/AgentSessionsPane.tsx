@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useState } from 'react';
+import { memo, useCallback, useEffect, useMemo, useState } from 'react';
 import { Check, ChevronDown, ChevronLeft, ChevronRight, Pencil, Plus, Trash2, X } from 'lucide-react';
 import { AgentAvatar } from '@/components/common/AgentAvatar';
 import type { AgentAvatarStyle } from '@/lib/agent-avatar';
@@ -11,7 +11,10 @@ import {
   useTeamsStore,
 } from '@/stores/teams';
 import { useChatStore, type ChatSession } from '@/stores/chat';
+import { buildRuntimeScopeKey, sameRuntimeEndpointScope } from '@/stores/chat/session-identity';
 import { selectAgentSessionsPaneState } from '@/stores/chat/selectors';
+import type { ChatSessionRuntimeEndpointTarget } from '@/stores/chat/types';
+import type { AgentScope, RuntimeEndpointRef } from '../../../runtime-host/shared/runtime-address';
 import { useTranslation } from 'react-i18next';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -19,6 +22,7 @@ import { useShallow } from 'zustand/react/shallow';
 import {
   inferUntitledSessionLabel,
   readSessionSuffix,
+  resolveAgentScopeForRuntimeEndpoint,
   type AgentSessionNode,
   type SessionBucketId,
   type SessionBucketNode,
@@ -37,6 +41,53 @@ interface AgentSessionsPaneProps {
 const SESSION_BUCKET_COLLAPSE_STORAGE_KEY = 'layout:session-time-bucket-collapsed';
 
 type SessionPaneTab = 'agent' | 'team';
+
+function endpointKey(endpoint: RuntimeEndpointRef): string {
+  return buildRuntimeScopeKey(endpoint);
+}
+
+function findRuntimeEndpointByScope(
+  endpoints: readonly ChatSessionRuntimeEndpointTarget[],
+  scope: AgentScope | null,
+): ChatSessionRuntimeEndpointTarget | null {
+  if (!scope) {
+    return null;
+  }
+  return endpoints.find((endpoint) => sameRuntimeEndpointScope(endpoint.endpoint, scope.endpoint)) ?? null;
+}
+
+function findRuntimeEndpointByRef(
+  endpoints: readonly ChatSessionRuntimeEndpointTarget[],
+  endpointRef: RuntimeEndpointRef | null,
+): ChatSessionRuntimeEndpointTarget | null {
+  if (!endpointRef) {
+    return null;
+  }
+  return endpoints.find((endpoint) => sameRuntimeEndpointScope(endpoint.endpoint, endpointRef)) ?? null;
+}
+
+function resolveDefaultRuntimeEndpoint(input: {
+  endpoints: readonly ChatSessionRuntimeEndpointTarget[];
+  currentSessionEndpoint: RuntimeEndpointRef | null;
+  defaultScope: AgentScope | null;
+}): ChatSessionRuntimeEndpointTarget | null {
+  const currentEndpoint = findRuntimeEndpointByRef(input.endpoints, input.currentSessionEndpoint);
+  if (currentEndpoint) {
+    return currentEndpoint;
+  }
+  return findRuntimeEndpointByScope(input.endpoints, input.defaultScope)
+    ?? input.endpoints[0]
+    ?? null;
+}
+
+function resolveAgentNodeSessionKey(node: AgentSessionNode | undefined): string | null {
+  if (!node) {
+    return null;
+  }
+  return node.sessions.find((session) => session.preferred || session.kind === 'main')?.key
+    ?? node.sessions[0]?.key
+    ?? null;
+}
 
 function createSessionBucketStateKey(bucketId: SessionBucketId): string {
   return bucketId;
@@ -682,10 +733,16 @@ export const AgentSessionsPane = memo(function AgentSessionsPane({
     switchSession,
     openAgentConversation,
     openSessionIdentity,
-    newSession,
+    newSessionForScope,
     deleteSession,
     renameSession,
-  } = useChatStore(useShallow(selectAgentSessionsPaneState));
+    sessionRuntimeCatalog,
+    currentSessionEndpoint,
+  } = useChatStore(useShallow((state) => ({
+    ...selectAgentSessionsPaneState(state),
+    sessionRuntimeCatalog: state.sessionRuntimeCatalog,
+    currentSessionEndpoint: state.loadedSessions[state.currentSessionKey]?.meta.sessionIdentity?.endpoint ?? null,
+  })));
   const teams = useTeamsStore((state) => state.teams);
   const runListByTeamId = useTeamsStore((state) => state.runListByTeamId);
   const teamRoleChatTargetIndex = useTeamsStore(selectTeamRoleChatTargetIndex);
@@ -694,6 +751,7 @@ export const AgentSessionsPane = memo(function AgentSessionsPane({
   const syncRunList = useTeamsStore((state) => state.syncRunList);
   const refreshSnapshot = useTeamsStore((state) => state.refreshSnapshot);
   const [activeTab, setActiveTab] = useState<SessionPaneTab>('agent');
+  const [selectedRuntimeEndpointKey, setSelectedRuntimeEndpointKey] = useState<string | null>(null);
   const [expandedTeamIds, setExpandedTeamIds] = useState<Record<string, boolean>>({});
   const [expandedTeamRunIds, setExpandedTeamRunIds] = useState<Record<string, boolean>>({});
   const [collapsedSessionBuckets, setCollapsedSessionBuckets] = useState<Record<string, boolean>>(
@@ -706,6 +764,35 @@ export const AgentSessionsPane = memo(function AgentSessionsPane({
     key: string;
     title: string;
   } | null>(null);
+
+  const runtimeEndpoints = sessionRuntimeCatalog.status === 'ready'
+    ? sessionRuntimeCatalog.endpoints
+    : [];
+  const defaultRuntimeEndpoint = useMemo(
+    () => resolveDefaultRuntimeEndpoint({
+      endpoints: runtimeEndpoints,
+      currentSessionEndpoint,
+      defaultScope: sessionRuntimeCatalog.defaultSessionPromptScope,
+    }),
+    [currentSessionEndpoint, runtimeEndpoints, sessionRuntimeCatalog.defaultSessionPromptScope],
+  );
+  const selectedRuntimeEndpoint = useMemo(() => {
+    if (!selectedRuntimeEndpointKey) {
+      return defaultRuntimeEndpoint;
+    }
+    return runtimeEndpoints.find((endpoint) => endpointKey(endpoint.endpoint) === selectedRuntimeEndpointKey)
+      ?? defaultRuntimeEndpoint;
+  }, [defaultRuntimeEndpoint, runtimeEndpoints, selectedRuntimeEndpointKey]);
+
+  useEffect(() => {
+    if (!selectedRuntimeEndpointKey) {
+      return;
+    }
+    if (runtimeEndpoints.some((endpoint) => endpointKey(endpoint.endpoint) === selectedRuntimeEndpointKey)) {
+      return;
+    }
+    setSelectedRuntimeEndpointKey(null);
+  }, [runtimeEndpoints, selectedRuntimeEndpointKey]);
 
   const agentPaneSessionEntries = sessionEntries.filter((entry) => !isKnownTeamRoleSession(teamRoleChatTargetIndex, {
     sessionIdentity: entry.session.sessionIdentity,
@@ -721,6 +808,8 @@ export const AgentSessionsPane = memo(function AgentSessionsPane({
     sessionsLoadedOnce,
     sessionsError,
     currentAgentId,
+    currentSessionEndpoint,
+    selectedRuntimeEndpoint,
     locale: i18n.language,
     t,
   });
@@ -778,15 +867,38 @@ export const AgentSessionsPane = memo(function AgentSessionsPane({
   }, [switchSession]);
 
   const handleOpenAgent = useCallback((agentId: string) => {
-    openAgentConversation(agentId);
-  }, [openAgentConversation]);
-
-  const handleCreateSessionForAgent = useCallback((agentId: string) => {
-    if (!agentId.trim()) {
+    const sessionKey = resolveAgentNodeSessionKey(paneViewModel.agentNodes.find((node) => node.agentId === agentId));
+    if (sessionKey) {
+      switchSession(sessionKey);
       return;
     }
-    newSession(agentId);
-  }, [newSession]);
+    if (selectedRuntimeEndpoint) {
+      const scope = resolveAgentScopeForRuntimeEndpoint(selectedRuntimeEndpoint, agentId);
+      if (scope) {
+        void newSessionForScope(scope);
+        return;
+      }
+    }
+    openAgentConversation(agentId);
+  }, [newSessionForScope, openAgentConversation, paneViewModel.agentNodes, selectedRuntimeEndpoint, switchSession]);
+
+  const handleCreateSessionForDefaultScope = useCallback(() => {
+    if (!selectedRuntimeEndpoint) {
+      return;
+    }
+    void newSessionForScope(selectedRuntimeEndpoint.defaultSessionPromptScope);
+  }, [newSessionForScope, selectedRuntimeEndpoint]);
+
+  const handleCreateSessionForAgent = useCallback((agentId: string) => {
+    if (!selectedRuntimeEndpoint) {
+      return;
+    }
+    const scope = resolveAgentScopeForRuntimeEndpoint(selectedRuntimeEndpoint, agentId);
+    if (!scope) {
+      return;
+    }
+    void newSessionForScope(scope);
+  }, [newSessionForScope, selectedRuntimeEndpoint]);
 
   const selectTeamRole = useCallback((teamId: string, runId: string, role: TeamRoleSessionNode) => {
     setActiveRun(teamId, runId);
@@ -937,7 +1049,13 @@ export const AgentSessionsPane = memo(function AgentSessionsPane({
               type="button"
               data-testid="agent-sessions-collapsed-new-session"
               className="flex min-h-[70px] w-10 flex-col items-center justify-start gap-1.5 border-t border-border/65 bg-[linear-gradient(180deg,rgba(255,255,255,0),rgba(226,232,240,0.58))] px-1 pt-2 text-muted-foreground transition-colors hover:bg-[linear-gradient(180deg,rgba(255,255,255,0.08),rgba(226,232,240,0.82))] hover:text-foreground dark:bg-[linear-gradient(180deg,rgba(255,255,255,0),rgba(63,63,70,0.64))] dark:hover:bg-[linear-gradient(180deg,rgba(255,255,255,0.04),rgba(82,82,91,0.82))]"
-              onClick={() => handleCreateSessionForAgent(paneViewModel.activeAgentId)}
+              onClick={() => {
+                if (paneViewModel.activeAgentId) {
+                  handleCreateSessionForAgent(paneViewModel.activeAgentId);
+                  return;
+                }
+                handleCreateSessionForDefaultScope();
+              }}
               aria-label={t('sidebar.newSession')}
               title={t('sidebar.newSession')}
             >
@@ -952,16 +1070,33 @@ export const AgentSessionsPane = memo(function AgentSessionsPane({
         </div>
       ) : (
         <>
-          <div className="flex items-center justify-between gap-2 border-b border-border/70 px-4 py-3">
-            <p className="text-[11px] font-semibold uppercase tracking-[0.08em] text-muted-foreground">
-              {t('sidebar.agentSessions')}
-            </p>
-            <div className="flex items-center gap-1">
+          <div className="flex items-center justify-between gap-2 border-b border-border/70 px-3 py-2.5">
+            <div className="relative min-w-0 flex-1">
+              <label htmlFor="agent-session-runtime-selector" className="sr-only">
+                {t('sidebar.selectSessionRuntime')}
+              </label>
+              <select
+                id="agent-session-runtime-selector"
+                data-testid="agent-session-runtime-selector"
+                className="h-8 max-w-full appearance-none border-0 bg-transparent py-1 pl-2 pr-2 text-sm font-semibold text-foreground shadow-none outline-none ring-0 transition-colors hover:text-foreground focus:outline-none focus:ring-0 focus-visible:outline-none focus-visible:ring-0 disabled:opacity-100"
+                value={selectedRuntimeEndpoint ? endpointKey(selectedRuntimeEndpoint.endpoint) : ''}
+                aria-label={t('sidebar.selectSessionRuntime')}
+                disabled={runtimeEndpoints.length <= 1}
+                onChange={(event) => setSelectedRuntimeEndpointKey(event.target.value || null)}
+              >
+                {runtimeEndpoints.map((endpoint) => (
+                  <option key={endpointKey(endpoint.endpoint)} value={endpointKey(endpoint.endpoint)}>
+                    {endpoint.displayName}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div className="flex shrink-0 items-center gap-0.5">
               <Button
                 variant="ghost"
                 size="icon"
-                className="h-8 w-8 shrink-0"
-                onClick={() => handleCreateSessionForAgent(paneViewModel.activeAgentId)}
+                className="h-8 w-8 shrink-0 rounded-[calc(var(--radius-interactive)+2px)]"
+                onClick={handleCreateSessionForDefaultScope}
                 aria-label={t('sidebar.newSession')}
                 title={t('sidebar.newSession')}
               >
@@ -971,7 +1106,7 @@ export const AgentSessionsPane = memo(function AgentSessionsPane({
                 variant="ghost"
                 size="icon"
                 data-testid="agent-sessions-collapse-trigger"
-                className="h-8 w-8 shrink-0"
+                className="h-8 w-8 shrink-0 rounded-[calc(var(--radius-interactive)+2px)]"
                 onClick={onToggleCollapse}
                 aria-label={t('sidebar.collapseAgentSessions')}
                 title={t('sidebar.collapseAgentSessions')}
@@ -1034,10 +1169,7 @@ export const AgentSessionsPane = memo(function AgentSessionsPane({
               </div>
             </section>
 
-            <section className="flex min-h-0 flex-1 flex-col space-y-1 border-t border-border/70 pt-4">
-              <p className="px-2 text-[11px] font-medium uppercase tracking-[0.08em] text-muted-foreground">
-                {t('sidebar.agentSessions')}
-              </p>
+            <section className="flex min-h-0 flex-1 flex-col border-t border-border/70 pt-3">
               <div
                 data-testid="session-list-scroll-area"
                 className="min-h-0 flex-1 overflow-y-auto pr-1"

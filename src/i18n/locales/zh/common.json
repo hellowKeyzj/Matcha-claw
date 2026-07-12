@@ -10,8 +10,10 @@
         "teams": "Agents协作",
         "plugins": "插件",
         "connectors": "连接器",
+        "remoteFleet": "远端运行时",
         "security": "安全",
         "agentSessions": "智能体会话",
+        "selectSessionRuntime": "选择会话运行时",
         "collapseAgentSessions": "收起智能体会话",
         "expandAgentSessions": "展开智能体会话",
         "untitledSession": "未命名会话",
@@ -53,8 +55,7 @@
         "pendingBlockerTaskId": "任务ID {{taskId}}",
         "pendingBlockerSourceChat": "聊天会话",
         "pendingBlockerApprovalId": "审批ID {{id}}",
-        "pendingBlockerApprovalHint": "当前有工具调用等待审批。",
-        "remoteFleet": "远端运行时"
+        "pendingBlockerApprovalHint": "当前有工具调用等待审批。"
     },
     "actions": {
         "save": "保存",

@@ -1,7 +1,6 @@
 import { createRuntimeSessionContext } from './runtime-session-context';
 import { buildRuntimeEndpointCapabilityDescriptors } from './runtime-capability-descriptors';
 import {
-  agentScope,
   buildRuntimeEndpointKey,
   buildSessionIdentityKey,
   connectorRuntimeEndpoint,
@@ -14,7 +13,7 @@ import {
 } from './runtime-address';
 import { CapabilityRegistry } from '../../capabilities/contracts/capability-registry';
 import type { CapabilityDescriptor } from '../../capabilities/contracts/capability-descriptor';
-import type { GatewayCapabilitiesSnapshot, GatewayConnectionStatePayload, GatewayControlReadiness } from '../../gateway/gateway-runtime-port';
+import type { GatewayCapabilitiesSnapshot, GatewayChatPort, GatewayConnectionStatePayload, GatewayControlReadiness, GatewayRpcPort } from '../../gateway/gateway-runtime-port';
 import type {
   RuntimeAdapterInstanceSummary,
   RuntimeAdapterSummary,
@@ -280,6 +279,7 @@ function applyEndpointDiscovery(
     ...endpoint,
     ...(discovery.displayName ? { displayName: discovery.displayName } : {}),
     ...(discovery.agentIds ? { agentIds: [...discovery.agentIds] } : {}),
+    ...(discovery.defaultAgentId ? { defaultAgentId: discovery.defaultAgentId } : {}),
     ...(discovery.acceptsDynamicAgents !== undefined ? { acceptsDynamicAgents: discovery.acceptsDynamicAgents } : {}),
     ...(discovery.capabilities ? { capabilities: { ...discovery.capabilities } } : {}),
   };
@@ -365,14 +365,17 @@ function errorMessage(error: unknown): string {
 }
 
 function runtimeEndpointLifecycleFromControlState(controlState: RuntimeEndpointControlStateSummary): RuntimeEndpointLifecycle | null {
-  if (controlState.readiness?.ready === false) {
-    return unavailableRuntimeEndpointLifecycle(controlState.readiness.error, controlState.updatedAt);
-  }
   if (controlState.connection?.state === 'disconnected') {
     return {
       ...disconnectedRuntimeEndpointLifecycle(controlState.updatedAt ?? controlState.connection.updatedAt),
       ...(controlState.connection.lastError ? { error: controlState.connection.lastError } : {}),
     };
+  }
+  if (controlState.readiness?.phase === 'starting' && controlState.readiness.retryable) {
+    return connectingRuntimeEndpointLifecycle(controlState.updatedAt);
+  }
+  if (controlState.readiness?.phase === 'unavailable') {
+    return unavailableRuntimeEndpointLifecycle(controlState.readiness.error, controlState.updatedAt);
   }
   if (controlState.readiness?.ready || controlState.connection?.state === 'connected') {
     return readyRuntimeEndpointLifecycle(controlState.updatedAt);
@@ -494,6 +497,7 @@ function summarizeRuntimeEndpointProfile(
     lifecycle: summarizeRuntimeEndpointLifecycle(lifecycle),
     displayName: endpoint.displayName,
     agentIds: [...endpoint.agentIds],
+    defaultAgentId: endpoint.defaultAgentId,
     agents: summarizeRuntimeAgents(endpoint, agentSource),
     acceptsDynamicAgents: endpoint.acceptsDynamicAgents === true,
     capabilities: { ...endpoint.capabilities },
@@ -512,6 +516,7 @@ function summarizeRuntimeInstance(
     lifecycle: summarizeRuntimeEndpointLifecycle(lifecycle),
     endpointId: endpoint.id,
     agentIds: [...endpoint.agentIds],
+    defaultAgentId: endpoint.defaultAgentId,
   };
 }
 
@@ -829,6 +834,7 @@ export class AgentRuntimeRegistry {
             location: summarizeRuntimeEndpointLocation(localRuntimeEndpointLocation()),
             lifecycle: summarizeRuntimeEndpointLifecycle(lifecycle),
             agentIds: [...endpoint.agentIds],
+            defaultAgentId: endpoint.defaultAgentId,
           };
         }),
       runtimeInstances,

@@ -45,6 +45,7 @@ function createConnector(connectorId: string, transport: RuntimeSessionTransport
       protocolId: 'test-protocol',
       displayName: connectorId,
       agentIds: ['default'],
+      defaultAgentId: 'default',
       capabilities: {
         chat: true,
         streaming: false,
@@ -86,7 +87,7 @@ describe('runtime adapter and connector registry', () => {
     registry.register({ runtimeAdapters: [adapter] });
 
     const createTransport = vi.spyOn(adapter, 'createTransport');
-    const transport = registry.resolveTransportForEndpoint(openClawEndpointRef(), 'default');
+    const transport = registry.resolveTransportForEndpoint(openClawEndpointRef(), 'main');
 
     expect(transport).toBeTruthy();
     expect(createTransport).toHaveBeenCalledWith(expect.objectContaining({
@@ -439,6 +440,60 @@ describe('runtime adapter and connector registry', () => {
     });
   });
 
+  it('projects OpenClaw starting readiness as connecting and terminal readiness failure as unavailable', () => {
+    const registry = new AgentRuntimeRegistry();
+    registry.register({ runtimeAdapters: [new OpenClawRuntimeAdapter()] });
+    const endpoint = openClawEndpointRef();
+    const connection = {
+      state: 'connected' as const,
+      portReachable: true,
+      gatewayReady: false,
+      transportEpoch: 7,
+      diagnostics: {
+        consecutiveHeartbeatMisses: 0,
+        consecutiveRpcFailures: 0,
+      },
+      updatedAt: 1,
+    };
+
+    registry.updateRuntimeEndpointControlState({
+      endpoint,
+      connection,
+      readiness: {
+        ready: false,
+        phase: 'starting',
+        requiredMethods: ['status'],
+        missingMethods: [],
+        retryable: true,
+      },
+      updatedAt: 1,
+    });
+    expect(registry.snapshotTopology().endpoints.find((candidate) => candidate.id === 'openclaw-local')?.lifecycle).toMatchObject({
+      phase: 'connecting',
+      connected: false,
+      ready: false,
+    });
+
+    registry.updateRuntimeEndpointControlState({
+      endpoint,
+      readiness: {
+        ready: false,
+        phase: 'unavailable',
+        requiredMethods: ['status'],
+        missingMethods: [],
+        retryable: false,
+        error: 'Gateway control plane unavailable',
+      },
+      updatedAt: 2,
+    });
+    expect(registry.snapshotTopology().endpoints.find((candidate) => candidate.id === 'openclaw-local')?.lifecycle).toMatchObject({
+      phase: 'unavailable',
+      connected: false,
+      ready: false,
+      error: 'Gateway control plane unavailable',
+    });
+  });
+
   it('projects runtime directory endpoint profiles and runtime instances across ACP connector lifecycle', async () => {
     const registry = new AgentRuntimeRegistry();
     const acpTransport = {
@@ -507,7 +562,9 @@ describe('runtime adapter and connector registry', () => {
         source: openClawSource,
         location: localLocation,
         lifecycle: { ...readyLifecycle, updatedAt: null },
-        agents: [expect.objectContaining({ agentId: 'default', source: 'discovered' })],
+        agentIds: ['main'],
+        defaultAgentId: 'main',
+        agents: [expect.objectContaining({ agentId: 'main', source: 'discovered' })],
       }),
       expect.objectContaining({
         id: 'claude-code',
@@ -533,7 +590,9 @@ describe('runtime adapter and connector registry', () => {
         source: openClawSource,
         location: localLocation,
         lifecycle: { ...readyLifecycle, updatedAt: null },
-        agents: [expect.objectContaining({ agentId: 'default', source: 'discovered' })],
+        agentIds: ['main'],
+        defaultAgentId: 'main',
+        agents: [expect.objectContaining({ agentId: 'main', source: 'discovered' })],
       }),
     ]);
     expect(declaredTopology.adapterInstances).toEqual([
@@ -554,10 +613,12 @@ describe('runtime adapter and connector registry', () => {
         source: openClawSource,
         location: localLocation,
         lifecycle: { ...readyLifecycle, updatedAt: null },
-        agentIds: ['default'],
+        agentIds: ['main'],
+        defaultAgentId: 'main',
       }),
     ]);
     expect(declaredTopology.directory.runtimeInstances).toEqual(declaredTopology.runtimeInstances);
+    expect(declaredTopology.endpoints.find((endpoint) => endpoint.id === 'openclaw-local')?.agents.map((agent) => agent.agentId)).not.toContain('default');
 
     await connectAcpEndpoint(registry, 'claude-code');
 
@@ -567,6 +628,12 @@ describe('runtime adapter and connector registry', () => {
       'claude-code',
       'openclaw-local',
     ]);
+    expect(connectedTopology.endpoints.find((endpoint) => endpoint.id === 'openclaw-local')).toMatchObject({
+      agentIds: ['main'],
+      defaultAgentId: 'main',
+      agents: [expect.objectContaining({ agentId: 'main', source: 'discovered' })],
+    });
+    expect(connectedTopology.endpoints.find((endpoint) => endpoint.id === 'openclaw-local')?.agents.map((agent) => agent.agentId)).not.toContain('default');
     expect(connectedTopology.endpoints.find((endpoint) => endpoint.id === 'claude-code')).toMatchObject({
       id: 'claude-code',
       endpointRef: claudeCodeRef,
@@ -584,6 +651,16 @@ describe('runtime adapter and connector registry', () => {
       'openclaw-local',
     ]);
     expect(connectedTopology.directory.endpointProfiles).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        id: 'openclaw-local',
+        endpointRef: openClawRef,
+        source: openClawSource,
+        location: localLocation,
+        lifecycle: { ...readyLifecycle, updatedAt: null },
+        agentIds: ['main'],
+        defaultAgentId: 'main',
+        agents: [expect.objectContaining({ agentId: 'main', source: 'discovered' })],
+      }),
       expect.objectContaining({
         id: 'claude-code',
         endpointRef: claudeCodeRef,

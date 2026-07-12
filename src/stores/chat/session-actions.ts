@@ -62,7 +62,8 @@ import type { SessionLoadResult } from '../../../runtime-host/shared/session-ada
 const SESSION_CATALOG_NOT_READY_RETRY_MS = 1200;
 
 let sessionCatalogRetryTimer: ReturnType<typeof setTimeout> | null = null;
-let inflightSessionCatalogLoad: Promise<void> | null = null;
+let sessionCatalogLoadSequence = 0;
+let newSessionRequestSequence = 0;
 
 function clearSessionCatalogRetry(): void {
   if (!sessionCatalogRetryTimer) {
@@ -334,33 +335,30 @@ function shouldMarkSessionLoadingOnSwitch(
 }
 
 export async function executeLoadSessions(input: CreateStoreSessionActionsInput): Promise<void> {
-  if (inflightSessionCatalogLoad) {
-    await inflightSessionCatalogLoad;
-    return;
-  }
-  const task = executeLoadSessionsNow(input);
-  inflightSessionCatalogLoad = task;
-  try {
-    await task;
-  } finally {
-    if (inflightSessionCatalogLoad === task) {
-      inflightSessionCatalogLoad = null;
-    }
-  }
+  const requestSequence = sessionCatalogLoadSequence + 1;
+  sessionCatalogLoadSequence = requestSequence;
+  await executeLoadSessionsNow(input, requestSequence);
 }
 
-async function executeLoadSessionsNow(input: CreateStoreSessionActionsInput): Promise<void> {
+async function executeLoadSessionsNow(
+  input: CreateStoreSessionActionsInput,
+  requestSequence: number,
+): Promise<void> {
   const {
     set,
     get,
   } = input;
   const stateBeforeLoad = get();
   const previousResource = stateBeforeLoad.sessionCatalogStatus;
+  const currentSessionKeyBeforeLoad = stateBeforeLoad.currentSessionKey;
   set({
     sessionCatalogStatus: createLoadingResourceStatusState(previousResource),
   });
   const targets = readSessionRuntimeTargets(stateBeforeLoad);
   if (targets.length === 0) {
+    if (sessionCatalogLoadSequence !== requestSequence) {
+      return;
+    }
     set({
       sessionCatalogStatus: createErrorResourceStatusState(previousResource, 'Session runtime is not ready'),
     });
@@ -372,6 +370,9 @@ async function executeLoadSessionsNow(input: CreateStoreSessionActionsInput): Pr
     SESSION_CATALOG_LIST_CONCURRENCY,
     loadEndpointSessionCatalog,
   );
+  if (sessionCatalogLoadSequence !== requestSequence) {
+    return;
+  }
   const readyResults = results.filter((result) => result.ready);
   const mergedSessions = new Map<string, ChatSession>();
   for (const result of results) {
@@ -383,21 +384,35 @@ async function executeLoadSessionsNow(input: CreateStoreSessionActionsInput): Pr
   const errors = results.flatMap((result) => result.error ? [result.error] : []);
 
   if (readyResults.length === 0 && sessions.length === 0) {
+    if (sessionCatalogLoadSequence !== requestSequence) {
+      return;
+    }
     clearSessionCatalogRetry();
     const message = errors[0] ?? 'Failed to load sessions';
-    set((state) => ({
-      sessionCatalogStatus: createErrorResourceStatusState(state.sessionCatalogStatus, message),
-      error: message,
-    }));
+    set((state) => {
+      if (sessionCatalogLoadSequence !== requestSequence) {
+        return state;
+      }
+      return {
+        sessionCatalogStatus: createErrorResourceStatusState(state.sessionCatalogStatus, message),
+        error: message,
+      };
+    });
     return;
   }
 
+  if (sessionCatalogLoadSequence !== requestSequence) {
+    return;
+  }
   if (results.some((result) => !result.ready)) {
     scheduleSessionCatalogRetry(() => executeLoadSessions(input));
   } else {
     clearSessionCatalogRetry();
   }
 
+  if (sessionCatalogLoadSequence !== requestSequence) {
+    return;
+  }
   const stateSnapshot = get();
   const { currentSessionKey } = stateSnapshot;
   const hasSessionInBackend = (sessionKey: string): boolean => Boolean(sessionKey) && mergedSessions.has(sessionKey);
@@ -425,6 +440,11 @@ async function executeLoadSessionsNow(input: CreateStoreSessionActionsInput): Pr
     readyResults.map((result) => buildRuntimeScopeKey(result.target.defaultSessionPromptScope.endpoint)),
   );
   set((state) => {
+    if (sessionCatalogLoadSequence !== requestSequence) {
+      return state;
+    }
+    const ownsCurrentSessionSelection = state.currentSessionKey === currentSessionKeyBeforeLoad;
+    const ownedNextSessionKey = ownsCurrentSessionSelection ? nextSessionKey : state.currentSessionKey;
     const backendSessionKeys = new Set(sessions.map((session) => session.key));
     let loadedSessions = Object.fromEntries(
       Object.entries(state.loadedSessions).filter(([sessionKey, record]) => {
@@ -436,7 +456,7 @@ async function executeLoadSessionsNow(input: CreateStoreSessionActionsInput): Pr
           return true;
         }
         return shouldRetainLocalSessionRecord(sessionKey, {
-          currentSessionKey: nextSessionKey,
+          currentSessionKey: ownedNextSessionKey,
           loadedSessions: state.loadedSessions,
           pendingApprovalsBySession: state.pendingApprovalsBySession,
         });
@@ -471,7 +491,7 @@ async function executeLoadSessionsNow(input: CreateStoreSessionActionsInput): Pr
       });
     }
 
-    if (shouldMarkCurrentAsReadyEmpty) {
+    if (ownsCurrentSessionSelection && shouldMarkCurrentAsReadyEmpty) {
       loadedSessions = ensureSessionRecordMap(loadedSessions, nextSessionKey);
       loadedSessions = patchSessionMeta({ loadedSessions }, nextSessionKey, { historyStatus: 'ready' });
     }
@@ -479,7 +499,7 @@ async function executeLoadSessionsNow(input: CreateStoreSessionActionsInput): Pr
     const retainedSessionKeys = new Set(Object.keys(loadedSessions));
     return {
       sessionCatalogStatus: createReadyResourceStatusState(loadedAt),
-      currentSessionKey: nextSessionKey,
+      currentSessionKey: ownedNextSessionKey,
       loadedSessions,
       sessionRecordKeyByIdentityKey: buildSessionIdentityRecordIndex(loadedSessions),
       pendingApprovalsBySession: Object.fromEntries(
@@ -776,7 +796,16 @@ export async function executeRenameSession(
   }
 }
 
-export async function executeNewSession(input: CreateStoreSessionActionsInput, agentId?: string): Promise<void> {
+type NewSessionAgentScopeResolver = (state: ChatStoreState) => AgentScope;
+
+function isLatestNewSessionRequest(requestSequence: number): boolean {
+  return newSessionRequestSequence === requestSequence;
+}
+
+async function executeNewSessionWithScopeResolver(
+  input: CreateStoreSessionActionsInput,
+  resolveAgentScope: NewSessionAgentScopeResolver,
+): Promise<void> {
   const {
     set,
     get,
@@ -784,6 +813,8 @@ export async function executeNewSession(input: CreateStoreSessionActionsInput, a
     finishMutating,
     historyRuntime,
   } = input;
+  const requestSequence = newSessionRequestSequence + 1;
+  newSessionRequestSequence = requestSequence;
   beginMutating();
   try {
     clearHistoryPoll();
@@ -794,7 +825,7 @@ export async function executeNewSession(input: CreateStoreSessionActionsInput, a
     if (leavingEmpty) {
       clearSessionHistoryFingerprints(historyRuntime, currentSessionKey);
     }
-    const agentScope = resolveNewSessionAgentScope(state, agentId);
+    const agentScope = resolveAgentScope(state);
     const created = await hostSessionNew({
       endpoint: agentScope.endpoint,
       agentId: agentScope.agentId,
@@ -802,7 +833,8 @@ export async function executeNewSession(input: CreateStoreSessionActionsInput, a
     const newKey = buildSessionRecordKey(created.snapshot.catalog.sessionIdentity);
     useTaskSnapshotStore.getState().reportSessionSnapshot(created.snapshot, 'replay');
     set((stateValue) => {
-      const baseLoadedSessions = leavingEmpty
+      const ownsSelection = isLatestNewSessionRequest(requestSequence);
+      const baseLoadedSessions = ownsSelection && leavingEmpty
         ? removeSessionRecord(stateValue, currentSessionKey)
         : stateValue.loadedSessions;
       const loadedSessions = patchSessionMeta(
@@ -822,22 +854,35 @@ export async function executeNewSession(input: CreateStoreSessionActionsInput, a
         loadedSessions,
         sessionRecordKeyByIdentityKey: buildSessionIdentityRecordIndex(loadedSessions),
         sessionCatalogStatus: stateValue.sessionCatalogStatus,
-        currentSessionKey: newKey,
-        pendingApprovalsBySession: leavingEmpty
+        currentSessionKey: ownsSelection ? newKey : stateValue.currentSessionKey,
+        pendingApprovalsBySession: ownsSelection && leavingEmpty
           ? Object.fromEntries(
               Object.entries(stateValue.pendingApprovalsBySession).filter(([sessionKey]) => sessionKey !== currentSessionKey),
             )
           : stateValue.pendingApprovalsBySession,
-        error: null,
+        error: ownsSelection ? null : stateValue.error,
       };
     });
   } catch (error) {
-    set({
-      error: error instanceof Error ? error.message : String(error),
-    });
+    if (isLatestNewSessionRequest(requestSequence)) {
+      set({
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
   } finally {
     finishMutating();
   }
+}
+
+export async function executeNewSession(input: CreateStoreSessionActionsInput, agentId?: string): Promise<void> {
+  await executeNewSessionWithScopeResolver(input, (state) => resolveNewSessionAgentScope(state, agentId));
+}
+
+export async function executeNewSessionForScope(
+  input: CreateStoreSessionActionsInput,
+  scope: AgentScope,
+): Promise<void> {
+  await executeNewSessionWithScopeResolver(input, () => scope);
 }
 
 export function executeCleanupEmptySession(input: CreateStoreSessionActionsInput): void {

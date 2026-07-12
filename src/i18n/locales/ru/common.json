@@ -10,8 +10,10 @@
         "teams": "Команды",
         "plugins": "Центр плагинов",
         "connectors": "Коннекторы",
+        "remoteFleet": "Remote Fleet",
         "security": "Безопасность",
         "agentSessions": "Сессии агентов",
+        "selectSessionRuntime": "Выбрать runtime сессии",
         "collapseAgentSessions": "Свернуть сессии агентов",
         "expandAgentSessions": "Развернуть сессии агентов",
         "untitledSession": "Без названия",
@@ -50,8 +52,7 @@
         "pendingBlockerTaskId": "ID задачи {{taskId}}",
         "pendingBlockerSourceChat": "Чат",
         "pendingBlockerApprovalId": "ID подтверждения {{id}}",
-        "pendingBlockerApprovalHint": "Вызов инструмента ждёт вашего подтверждения.",
-        "remoteFleet": "Remote Fleet"
+        "pendingBlockerApprovalHint": "Вызов инструмента ждёт вашего подтверждения."
     },
     "actions": {
         "save": "Сохранить",

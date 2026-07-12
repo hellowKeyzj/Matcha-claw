@@ -2,8 +2,11 @@ import { useDeferredValue, useMemo, useRef } from 'react';
 import type { AgentAvatarStyle } from '@/lib/agent-avatar';
 import type { ResourceStateMeta } from '@/lib/resource-state';
 import type { ChatSession } from '@/stores/chat';
-import type { AgentSessionsPaneSessionEntry } from '@/stores/chat/selectors';
+import { findAgentScope, sameRuntimeEndpointScope } from '@/stores/chat/session-identity';
 import { parseSessionCreatedAtMs } from '@/stores/chat/session-helpers';
+import type { AgentSessionsPaneSessionEntry } from '@/stores/chat/selectors';
+import type { ChatSessionRuntimeEndpointTarget } from '@/stores/chat/types';
+import type { AgentScope, RuntimeEndpointRef } from '../../../runtime-host/shared/runtime-address';
 
 const SESSION_TITLE_MAX_LENGTH = 48;
 
@@ -42,6 +45,88 @@ interface SidebarAgentSummary {
   name?: string;
   avatarSeed?: string;
   avatarStyle?: AgentAvatarStyle;
+}
+
+function addNonEmptyAgentId(agentIds: Set<string>, agentId: string | null | undefined): void {
+  const normalizedAgentId = agentId?.trim();
+  if (normalizedAgentId) {
+    agentIds.add(normalizedAgentId);
+  }
+}
+
+function shouldUseSidebarAgentCatalog(endpoint: ChatSessionRuntimeEndpointTarget): boolean {
+  return endpoint.runtimeAdapterId === 'openclaw' || endpoint.protocolId === 'openclaw';
+}
+
+function buildRuntimeEndpointAgentIds(
+  endpoint: ChatSessionRuntimeEndpointTarget,
+  agents: SidebarAgentSummary[],
+): string[] {
+  const agentIds = new Set<string>();
+  for (const agentId of endpoint.agentIds) {
+    addNonEmptyAgentId(agentIds, agentId);
+  }
+  if (endpoint.acceptsDynamicAgents && shouldUseSidebarAgentCatalog(endpoint)) {
+    for (const agent of agents) {
+      addNonEmptyAgentId(agentIds, agent.id);
+    }
+  }
+  return Array.from(agentIds);
+}
+
+function buildRuntimeEndpointAgentSummaries(
+  endpoint: ChatSessionRuntimeEndpointTarget,
+  agents: SidebarAgentSummary[],
+): SidebarAgentSummary[] {
+  const agentMetadataById = new Map(agents.map((agent) => [agent.id, agent] as const));
+  return buildRuntimeEndpointAgentIds(endpoint, agents).map((agentId) => {
+    const metadata = agentMetadataById.get(agentId);
+    return {
+      id: agentId,
+      name: metadata?.name?.trim() || agentId,
+      avatarSeed: metadata?.avatarSeed,
+      avatarStyle: metadata?.avatarStyle,
+    };
+  });
+}
+
+function filterSessionEntriesByRuntimeEndpoint(
+  sessionEntries: AgentSessionsPaneSessionEntry[],
+  endpoint: ChatSessionRuntimeEndpointTarget | null,
+): AgentSessionsPaneSessionEntry[] {
+  if (!endpoint) {
+    return sessionEntries;
+  }
+  return sessionEntries.filter((entry) => sameRuntimeEndpointScope(entry.session.sessionIdentity.endpoint, endpoint.endpoint));
+}
+
+function isCurrentSessionInRuntimeEndpoint(
+  currentSessionEndpoint: RuntimeEndpointRef | null,
+  endpoint: ChatSessionRuntimeEndpointTarget | null,
+): boolean {
+  return currentSessionEndpoint != null && endpoint != null
+    && sameRuntimeEndpointScope(currentSessionEndpoint, endpoint.endpoint);
+}
+
+export function resolveAgentScopeForRuntimeEndpoint(
+  endpoint: ChatSessionRuntimeEndpointTarget,
+  agentId: string,
+): AgentScope | null {
+  const normalizedAgentId = agentId.trim();
+  if (!normalizedAgentId) {
+    return null;
+  }
+  const existingScope = findAgentScope(endpoint.sessionPromptScopes, normalizedAgentId);
+  if (existingScope) {
+    return existingScope;
+  }
+  if (!endpoint.acceptsDynamicAgents) {
+    return null;
+  }
+  return {
+    ...endpoint.defaultSessionPromptScope,
+    agentId: normalizedAgentId,
+  };
 }
 
 export interface AgentSessionNode {
@@ -345,6 +430,8 @@ interface UseAgentSessionsPaneViewModelInput {
   sessionsLoadedOnce: boolean;
   sessionsError: string | null;
   currentAgentId: string;
+  currentSessionEndpoint: RuntimeEndpointRef | null;
+  selectedRuntimeEndpoint: ChatSessionRuntimeEndpointTarget | null;
   locale: string;
   t: (key: string, options?: Record<string, unknown>) => string;
 }
@@ -352,7 +439,17 @@ interface UseAgentSessionsPaneViewModelInput {
 export function useAgentSessionsPaneViewModel(
   input: UseAgentSessionsPaneViewModelInput,
 ): AgentSessionsPaneViewModel {
-  const deferredSessionEntries = useDeferredValue(input.sessionEntries);
+  const runtimeAgentSummaries = useMemo(
+    () => input.selectedRuntimeEndpoint
+      ? buildRuntimeEndpointAgentSummaries(input.selectedRuntimeEndpoint, input.agents)
+      : input.agents,
+    [input.agents, input.selectedRuntimeEndpoint],
+  );
+  const runtimeSessionEntries = useMemo(
+    () => filterSessionEntriesByRuntimeEndpoint(input.sessionEntries, input.selectedRuntimeEndpoint),
+    [input.sessionEntries, input.selectedRuntimeEndpoint],
+  );
+  const deferredSessionEntries = useDeferredValue(runtimeSessionEntries);
   const sessionActivityIndexRef = useRef<SessionActivityIndex>({
     entriesByKey: new Map<string, SessionSortEntry>(),
     sortedKeys: [],
@@ -369,14 +466,14 @@ export function useAgentSessionsPaneViewModel(
 
   const agentNodes = useMemo<AgentSessionNode[]>(() => {
     const sessionsByAgent = sessionAggregation.sessionsByAgent;
-    return input.agents.map((agent) => ({
+    return runtimeAgentSummaries.map((agent) => ({
       agentId: agent.id,
       agentName: agent.name?.trim() || agent.id,
       avatarSeed: agent.avatarSeed,
       avatarStyle: agent.avatarStyle,
       sessions: sessionsByAgent.get(agent.id) ?? [],
     }));
-  }, [input.agents, sessionAggregation]);
+  }, [runtimeAgentSummaries, sessionAggregation]);
 
   const preferredSessionKeyByAgent = useMemo(() => {
     return new Map(
@@ -391,8 +488,10 @@ export function useAgentSessionsPaneViewModel(
   }, [agentNodes]);
 
   const activeAgentId = useMemo(() => {
-    return input.currentAgentId;
-  }, [input.currentAgentId]);
+    return isCurrentSessionInRuntimeEndpoint(input.currentSessionEndpoint, input.selectedRuntimeEndpoint)
+      ? input.currentAgentId
+      : '';
+  }, [input.currentAgentId, input.currentSessionEndpoint, input.selectedRuntimeEndpoint]);
 
   const globalSessionNodes = useMemo<SessionListNode[]>(() => {
     const nodes: SessionListNode[] = [];

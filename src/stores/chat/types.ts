@@ -262,6 +262,7 @@ export interface ChatStoreActions {
   openSessionIdentity: (target: { sessionIdentity: SessionIdentity; endpointSessionId?: string | null }) => void;
   switchSession: (key: string) => void;
   newSession: (agentId?: string) => Promise<void>;
+  newSessionForScope: (scope: AgentScope) => Promise<void>;
   deleteSession: (key: string) => Promise<void>;
   renameSession: (key: string, label: string) => Promise<void>;
   cleanupEmptySession: () => void;

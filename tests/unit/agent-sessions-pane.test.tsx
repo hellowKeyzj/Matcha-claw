@@ -11,9 +11,19 @@ import { createEmptySessionRecord } from '@/stores/chat/store-state-helpers';
 import { buildRenderItemsFromMessages } from './helpers/timeline-fixtures';
 import type { RawMessage } from './helpers/timeline-fixtures';
 import { createViewportWindowState } from '@/stores/chat/viewport-state';
-import { buildRuntimeEndpointKey, buildSessionIdentityKey, type SessionIdentity } from '../../runtime-host/shared/runtime-address';
+import {
+  buildRuntimeEndpointKey,
+  buildSessionIdentityKey,
+  type AgentScope,
+  type RuntimeEndpointRef,
+  type SessionIdentity,
+} from '../../runtime-host/shared/runtime-address';
 import type { TeamRoleBindingRecord } from '@/services/openclaw/team-runtime-client';
-import { createOpenClawTestSessionIdentity } from './helpers/runtime-address-fixtures';
+import {
+  createOpenClawTestSessionIdentity,
+  openClawTestRuntimeEndpoint,
+  openClawTestRuntimeIdentity,
+} from './helpers/runtime-address-fixtures';
 
 const readyResource = {
   status: 'ready' as const,
@@ -21,6 +31,59 @@ const readyResource = {
   hasLoadedOnce: true,
   lastLoadedAt: 1,
 };
+
+const matchaAgentTestRuntimeEndpoint: RuntimeEndpointRef = {
+  kind: 'native-runtime',
+  runtimeAdapterId: 'matcha-agent',
+  runtimeInstanceId: 'default',
+};
+
+function createAgentScope(endpoint: RuntimeEndpointRef, agentId: string): AgentScope {
+  return {
+    kind: 'agent',
+    endpoint,
+    agentId,
+  };
+}
+
+const openClawMainScope = createAgentScope(openClawTestRuntimeEndpoint, 'main');
+const openClawDefaultScope = createAgentScope(openClawTestRuntimeEndpoint, 'default');
+const openClawTestScope = createAgentScope(openClawTestRuntimeEndpoint, 'test');
+const matchaAgentMatchaScope = createAgentScope(matchaAgentTestRuntimeEndpoint, 'matcha');
+
+function buildReadySessionRuntimeCatalog() {
+  return {
+    status: 'ready' as const,
+    error: null,
+    endpoints: [
+      {
+        endpointId: openClawTestRuntimeIdentity.runtimeEndpointId,
+        protocolId: openClawTestRuntimeIdentity.protocolId,
+        endpoint: openClawTestRuntimeEndpoint,
+        runtimeAdapterId: openClawTestRuntimeEndpoint.kind === 'native-runtime' ? openClawTestRuntimeEndpoint.runtimeAdapterId : undefined,
+        runtimeInstanceId: openClawTestRuntimeEndpoint.kind === 'native-runtime' ? openClawTestRuntimeEndpoint.runtimeInstanceId : undefined,
+        displayName: 'OpenClaw',
+        agentIds: ['main', 'test'],
+        acceptsDynamicAgents: true,
+        sessionPromptScopes: [openClawMainScope, openClawTestScope],
+        defaultSessionPromptScope: openClawMainScope,
+      },
+      {
+        endpointId: 'matcha-agent-default',
+        protocolId: 'matcha-agent',
+        endpoint: matchaAgentTestRuntimeEndpoint,
+        runtimeAdapterId: matchaAgentTestRuntimeEndpoint.kind === 'native-runtime' ? matchaAgentTestRuntimeEndpoint.runtimeAdapterId : undefined,
+        runtimeInstanceId: matchaAgentTestRuntimeEndpoint.kind === 'native-runtime' ? matchaAgentTestRuntimeEndpoint.runtimeInstanceId : undefined,
+        displayName: 'Matcha Agent',
+        agentIds: ['matcha'],
+        acceptsDynamicAgents: false,
+        sessionPromptScopes: [matchaAgentMatchaScope],
+        defaultSessionPromptScope: matchaAgentMatchaScope,
+      },
+    ],
+    defaultSessionPromptScope: openClawMainScope,
+  };
+}
 
 function buildReadySessionCatalogStatus(_sessions: Array<{ key: string; displayName: string }>) {
   return {
@@ -144,6 +207,7 @@ function setupBaseState() {
   } as never);
   useChatStore.setState({
     sessionCatalogStatus: readyResource,
+    sessionRuntimeCatalog: buildReadySessionRuntimeCatalog(),
   } as never);
 }
 
@@ -436,9 +500,9 @@ describe('agent sessions pane', () => {
     expect(screen.getByText('普通 Leader Agent 历史')).toBeInTheDocument();
   });
 
-  it('收缩态头像区应负责展开，下半部应给当前 agent 新建会话', () => {
+  it('收缩态头像区应负责展开，下半部应按当前 runtime 和当前 agent scope 新建会话', () => {
     const onToggleCollapse = vi.fn();
-    const newSession = vi.fn();
+    const newSessionForScope = vi.fn().mockResolvedValue(undefined);
     useChatStore.setState({
       currentSessionKey: recordKeyForSession('agent:test:main'),
       sessionCatalogStatus: buildReadySessionCatalogStatus([
@@ -450,7 +514,8 @@ describe('agent sessions pane', () => {
         [recordKeyForSession('agent:test:main')]: createSessionRecord({ sessionKey: 'agent:test:main', historyStatus: 'ready' }),
       },
       switchSession: vi.fn(),
-      newSession,
+      newSession: vi.fn(),
+      newSessionForScope,
       deleteSession: vi.fn().mockResolvedValue(undefined),
       loadSessions: vi.fn().mockResolvedValue(undefined),
     } as never);
@@ -469,11 +534,11 @@ describe('agent sessions pane', () => {
     expect(onToggleCollapse).toHaveBeenCalledTimes(1);
 
     fireEvent.click(screen.getByTestId('agent-sessions-collapsed-new-session'));
-    expect(newSession).toHaveBeenCalledWith('test');
+    expect(newSessionForScope).toHaveBeenCalledWith(openClawTestScope);
   });
 
-  it('点击某个 agent 的新会话按钮，应按对应 agent 创建', async () => {
-    const newSession = vi.fn();
+  it('点击某个 agent 的新会话按钮，应按选中 runtime 中对应 agent scope 创建', async () => {
+    const newSessionForScope = vi.fn().mockResolvedValue(undefined);
     const sessions = [
       { key: 'agent:main:main', displayName: 'agent:main:main' },
       { key: 'agent:test:main', displayName: 'agent:test:main' },
@@ -486,7 +551,8 @@ describe('agent sessions pane', () => {
         [recordKeyForSession('agent:test:main')]: createSessionRecord({ sessionKey: 'agent:test:main', historyStatus: 'ready' }),
       },
       switchSession: vi.fn(),
-      newSession,
+      newSession: vi.fn(),
+      newSessionForScope,
       deleteSession: vi.fn().mockResolvedValue(undefined),
       loadSessions: vi.fn().mockResolvedValue(undefined),
     } as never);
@@ -494,7 +560,53 @@ describe('agent sessions pane', () => {
     renderPane();
 
     fireEvent.click(screen.getByTestId('agent-new-session-test'));
-    expect(newSession).toHaveBeenCalledWith('test');
+    expect(newSessionForScope).toHaveBeenCalledWith(openClawTestScope);
+  });
+
+  it('runtime selector 切到 Matcha Agent 后只显示 matcha endpoint agent，并用 matcha scope 新建会话', () => {
+    const newSessionForScope = vi.fn().mockResolvedValue(undefined);
+    useChatStore.setState({
+      currentSessionKey: recordKeyForSession('agent:main:main'),
+      sessionCatalogStatus: buildReadySessionCatalogStatus([
+        { key: 'agent:main:main', displayName: 'agent:main:main' },
+      ]),
+      loadedSessions: {
+        [recordKeyForSession('agent:main:main')]: createSessionRecord({ sessionKey: 'agent:main:main', historyStatus: 'ready' }),
+      },
+      switchSession: vi.fn(),
+      newSession: vi.fn(),
+      newSessionForScope,
+      deleteSession: vi.fn().mockResolvedValue(undefined),
+      loadSessions: vi.fn().mockResolvedValue(undefined),
+    } as never);
+
+    renderPane();
+
+    const runtimeSelector = screen.getByTestId('agent-session-runtime-selector') as HTMLSelectElement;
+    expect(runtimeSelector.value).toBe(buildRuntimeEndpointKey(openClawTestRuntimeEndpoint));
+    expect(screen.getByRole('option', { name: 'OpenClaw' })).toBeTruthy();
+    expect(screen.getByRole('option', { name: 'Matcha Agent' })).toBeTruthy();
+    expect(screen.getByTestId('agent-item-main')).toBeTruthy();
+    expect(screen.getByTestId('agent-item-test')).toBeTruthy();
+    expect(screen.queryByTestId('agent-item-default')).toBeNull();
+
+    fireEvent.click(screen.getByRole('button', { name: 'New session' }));
+    expect(newSessionForScope).toHaveBeenCalledTimes(1);
+    expect(newSessionForScope).toHaveBeenCalledWith(openClawMainScope);
+    expect(newSessionForScope).not.toHaveBeenCalledWith(openClawDefaultScope);
+    newSessionForScope.mockClear();
+
+    fireEvent.change(runtimeSelector, { target: { value: buildRuntimeEndpointKey(matchaAgentTestRuntimeEndpoint) } });
+
+    expect(screen.getByTestId('agent-item-matcha')).toBeTruthy();
+    expect(screen.queryByTestId('agent-item-default')).toBeNull();
+    expect(screen.queryByTestId('agent-item-main')).toBeNull();
+    expect(screen.queryByTestId('agent-item-test')).toBeNull();
+
+    fireEvent.click(screen.getByRole('button', { name: 'New session' }));
+    expect(newSessionForScope).toHaveBeenCalledTimes(1);
+    expect(newSessionForScope).toHaveBeenCalledWith(matchaAgentMatchaScope);
+    expect(newSessionForScope).not.toHaveBeenCalledWith(openClawMainScope);
   });
 
   it('优先使用 catalog displayName 展示未 hydrate 历史会话标题', () => {
@@ -607,9 +719,10 @@ describe('agent sessions pane', () => {
     expect(screen.getByTestId(`session-avatar-${recordKeyForSession('agent:test:session-2')}`)).toBeTruthy();
   });
 
-  it('点击无历史会话的 agent 行，应走 agent 打开动作而不是切到伪 main 会话', () => {
+  it('点击无历史会话的 agent 行，应按选中 runtime 中对应 agent scope 新建', () => {
     const switchSession = vi.fn();
     const openAgentConversation = vi.fn();
+    const newSessionForScope = vi.fn().mockResolvedValue(undefined);
     const sessions = [
       { key: 'agent:main:main', displayName: 'agent:main:main' },
     ];
@@ -621,6 +734,7 @@ describe('agent sessions pane', () => {
       },
       switchSession,
       newSession: vi.fn(),
+      newSessionForScope,
       openAgentConversation,
       deleteSession: vi.fn().mockResolvedValue(undefined),
       loadSessions: vi.fn().mockResolvedValue(undefined),
@@ -629,7 +743,8 @@ describe('agent sessions pane', () => {
     renderPane();
     fireEvent.click(screen.getByTestId('agent-item-test'));
 
-    expect(openAgentConversation).toHaveBeenCalledWith('test');
+    expect(newSessionForScope).toHaveBeenCalledWith(openClawTestScope);
+    expect(openAgentConversation).not.toHaveBeenCalled();
     expect(switchSession).not.toHaveBeenCalled();
   });
 

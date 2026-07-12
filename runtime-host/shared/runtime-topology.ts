@@ -62,6 +62,7 @@ export interface RuntimeAdapterInstanceSummary {
   location: RuntimeEndpointLocationSummary;
   lifecycle: RuntimeEndpointLifecycleSummary;
   agentIds: string[];
+  defaultAgentId: string;
 }
 
 export interface RuntimeEndpointControlStateSummary {
@@ -98,6 +99,7 @@ export interface RuntimeEndpointSummary {
   lifecycle: RuntimeEndpointLifecycleSummary;
   displayName: string;
   agentIds: string[];
+  defaultAgentId: string;
   agents: RuntimeAgentProfileSummary[];
   acceptsDynamicAgents: boolean;
   capabilities: {
@@ -124,6 +126,7 @@ export interface RuntimeEndpointProfileSummary {
   lifecycle: RuntimeEndpointLifecycleSummary;
   displayName: string;
   agentIds: string[];
+  defaultAgentId: string;
   agents: RuntimeAgentProfileSummary[];
   acceptsDynamicAgents: boolean;
   capabilities: RuntimeEndpointSummary['capabilities'];
@@ -136,6 +139,7 @@ export interface RuntimeInstanceSummary {
   lifecycle: RuntimeEndpointLifecycleSummary;
   endpointId: string;
   agentIds: string[];
+  defaultAgentId: string;
 }
 
 export interface RuntimeDirectorySnapshot {

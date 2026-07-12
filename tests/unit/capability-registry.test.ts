@@ -12,7 +12,7 @@ import type { RuntimeEndpointProfile } from '../../runtime-host/application/agen
 import { createTestAcpClientConnector } from './helpers/acp-test-connector';
 import { OpenClawRuntimeAdapter } from '../../runtime-host/application/adapters/openclaw/runtime/openclaw-runtime-adapter';
 import { CapabilityRegistry } from '../../runtime-host/application/capabilities/contracts/capability-registry';
-import type { CapabilityOperationRoute } from '../../runtime-host/application/capabilities/contracts/capability-router';
+import { CapabilityRouter, type CapabilityOperationRoute } from '../../runtime-host/application/capabilities/contracts/capability-router';
 import type { CapabilityDescriptor, CapabilityOperationDescriptor } from '../../runtime-host/application/capabilities/contracts/capability-descriptor';
 import { createAgentRunCapabilityOperationRoutes } from '../../runtime-host/application/capabilities/agent/agent-run-capability';
 import { createAgentSkillConfigCapabilityOperationRoutes } from '../../runtime-host/application/capabilities/agent/agent-skill-config-capability';
@@ -31,7 +31,10 @@ import { createCronSchedulerCapabilityOperationRoutes } from '../../runtime-host
 import { createSecurityRuntimeCapabilityOperationRoutes } from '../../runtime-host/application/capabilities/security/security-runtime-capability';
 import { createSettingsRuntimeCapabilityOperationRoutes } from '../../runtime-host/application/capabilities/settings/settings-runtime-capability';
 import { createSessionManagementCapabilityOperationRoutes } from '../../runtime-host/application/capabilities/session/session-management-capability';
-import { createSessionPromptCapabilityOperationRoutes } from '../../runtime-host/application/capabilities/session/session-prompt-capability';
+import {
+  createSessionPromptCapabilityOperationRoutes,
+  sessionPromptCapabilityOperations,
+} from '../../runtime-host/application/capabilities/session/session-prompt-capability';
 import { createSkillManagementCapabilityOperationRoutes } from '../../runtime-host/application/capabilities/skill/skill-management-capability';
 import { createTaskControlCapabilityOperationRoutes } from '../../runtime-host/application/capabilities/task/task-control-capability';
 import { createTeamRuntimeCapabilityOperationRoutes } from '../../runtime-host/application/capabilities/team/team-runtime-capability';
@@ -59,7 +62,7 @@ const hermesEndpoint: RuntimeEndpointRef = {
 const nativeAgentScope: RuntimeScope = {
   kind: 'agent',
   endpoint: nativeEndpoint,
-  agentId: 'default',
+  agentId: 'main',
 };
 
 const connectorAgentScope: RuntimeScope = {
@@ -74,6 +77,7 @@ const endpoint: RuntimeEndpointProfile = {
   connectorId: 'acp',
   displayName: 'Claude Code',
   agentIds: ['default'],
+  defaultAgentId: 'default',
   capabilities: {
     chat: true,
     streaming: false,
@@ -183,8 +187,8 @@ function context(target: any, domainInput: Record<string, unknown>) {
 
 const sessionIdentity: SessionIdentity = {
   endpoint: nativeEndpoint,
-  agentId: 'default',
-  sessionKey: 'agent:default:main',
+  agentId: 'main',
+  sessionKey: 'agent:main:main',
 };
 
 const otherSessionIdentity: SessionIdentity = {
@@ -237,8 +241,6 @@ function createOperationRoutes(): readonly CapabilityOperationRoute[] {
     ...createSessionPromptCapabilityOperationRoutes({
       commandService: empty,
       promptService: empty,
-      fileSystem: empty,
-      gateway: empty,
     }),
     ...createSessionApprovalCapabilityOperationRoutes({ commandService: empty }),
     ...createSessionManagementCapabilityOperationRoutes({ commandService: empty }),
@@ -401,12 +403,12 @@ describe('capability registry', () => {
         scope: expect.objectContaining({
           kind: 'agent',
           endpoint: nativeEndpoint,
-          agentId: 'default',
+          agentId: 'main',
         }),
         supportLevel: 'native',
         runtimeAdapterId: 'openclaw',
         runtimeInstanceId: 'local',
-        targetAgentIds: ['default'],
+        targetAgentIds: ['main'],
       }),
     ]));
     expect(registry.listCapabilities().some((descriptor) => descriptor.scope.kind !== 'app' && 'endpoint' in descriptor.scope && descriptor.scope.endpoint.kind === 'protocol-connector')).toBe(false);
@@ -541,6 +543,84 @@ describe('capability registry', () => {
       sessionKey: sessionIdentity.sessionKey,
       sessionIdentity,
     });
+  });
+
+  it('routes accepted media prompts through the registry with the target identity and service snapshot', async () => {
+    const { routes, services } = createSessionCapabilityRouteHarness();
+    const registry = new CapabilityRegistry();
+    registry.register({
+      ...createDescriptor(nativeAgentScope),
+      operations: sessionPromptCapabilityOperations,
+      targetKinds: ['agent', 'session'],
+    });
+    const router = new CapabilityRouter({
+      getCapability: (descriptor) => registry.get(descriptor),
+      operations: routes,
+    });
+    const snapshot = { items: [{ key: 'user-message-media' }] };
+    const promptResponse = { status: 200, data: { success: true, snapshot } };
+    const input = {
+      message: 'Please inspect the attachment',
+      idempotencyKey: 'run-with-media',
+      media: [{
+        filePath: 'C:\\tmp\\receipt.png',
+        mimeType: 'image/png',
+        fileName: 'receipt.png',
+        fileSize: 42,
+        preview: 'data:image/png;base64,AA==',
+      }],
+    };
+    services.promptService.promptSession.mockResolvedValue(promptResponse);
+
+    const response = await router.execute({
+      id: 'session.prompt',
+      operationId: 'sessions.sendWithMedia',
+      scope: nativeAgentScope,
+      target: sessionTarget,
+      input,
+    });
+
+    expect(services.promptService.promptSession).toHaveBeenCalledWith({
+      ...input,
+      sessionKey: sessionIdentity.sessionKey,
+      sessionIdentity,
+    });
+    expect(response).toBe(promptResponse);
+    expect(response.data).toMatchObject({ snapshot });
+  });
+
+  it('rejects media prompts with mismatched input SessionIdentity before registry dispatch reaches the service', async () => {
+    const { routes, services } = createSessionCapabilityRouteHarness();
+    const registry = new CapabilityRegistry();
+    registry.register({
+      ...createDescriptor(nativeAgentScope),
+      operations: sessionPromptCapabilityOperations,
+      targetKinds: ['agent', 'session'],
+    });
+    const router = new CapabilityRouter({
+      getCapability: (descriptor) => registry.get(descriptor),
+      operations: routes,
+    });
+
+    const response = await router.execute({
+      id: 'session.prompt',
+      operationId: 'sessions.sendWithMedia',
+      scope: nativeAgentScope,
+      target: sessionTarget,
+      input: {
+        message: 'Please inspect the attachment',
+        idempotencyKey: 'run-with-media',
+        media: [{
+          filePath: 'C:\\tmp\\receipt.png',
+          mimeType: 'image/png',
+          fileName: 'receipt.png',
+        }],
+        sessionIdentity: otherSessionIdentity,
+      },
+    });
+
+    expect(response.status).toBe(400);
+    expect(services.promptService.promptSession).not.toHaveBeenCalled();
   });
 
   it('rejects mismatched model provider target bindings before invoking services', async () => {

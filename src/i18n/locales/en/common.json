@@ -10,8 +10,10 @@
         "teams": "Teams",
         "plugins": "Plugin Center",
         "connectors": "Connectors",
+        "remoteFleet": "Remote Fleet",
         "security": "Security",
         "agentSessions": "Agent Sessions",
+        "selectSessionRuntime": "Select session runtime",
         "collapseAgentSessions": "Collapse agent sessions",
         "expandAgentSessions": "Expand agent sessions",
         "untitledSession": "Untitled session",
@@ -53,8 +55,7 @@
         "pendingBlockerTaskId": "Task ID {{taskId}}",
         "pendingBlockerSourceChat": "Chat",
         "pendingBlockerApprovalId": "Approval ID {{id}}",
-        "pendingBlockerApprovalHint": "A tool call is waiting for your approval.",
-        "remoteFleet": "Remote Fleet"
+        "pendingBlockerApprovalHint": "A tool call is waiting for your approval."
     },
     "actions": {
         "save": "Save",

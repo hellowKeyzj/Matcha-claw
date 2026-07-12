@@ -109,6 +109,7 @@ function buildAgentSessionsPaneState(state: ChatStoreState, sessionEntries: Agen
     openAgentConversation: state.openAgentConversation,
     openSessionIdentity: state.openSessionIdentity,
     newSession: state.newSession,
+    newSessionForScope: state.newSessionForScope,
     deleteSession: state.deleteSession,
     renameSession: state.renameSession,
   };
@@ -171,6 +172,7 @@ export function selectAgentSessionsPaneState(state: ChatStoreState) {
     && cachedAgentSessionsPaneState.openAgentConversation === state.openAgentConversation
     && cachedAgentSessionsPaneState.openSessionIdentity === state.openSessionIdentity
     && cachedAgentSessionsPaneState.newSession === state.newSession
+    && cachedAgentSessionsPaneState.newSessionForScope === state.newSessionForScope
     && cachedAgentSessionsPaneState.deleteSession === state.deleteSession
     && cachedAgentSessionsPaneState.renameSession === state.renameSession
   ) {
