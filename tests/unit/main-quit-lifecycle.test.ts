@@ -5,6 +5,21 @@ import {
   requestQuitLifecycleAction,
 } from '@electron/main/quit-lifecycle';
 
+const originalPlatformDescriptor = Object.getOwnPropertyDescriptor(process, 'platform');
+
+function setPlatform(platform: NodeJS.Platform): void {
+  Object.defineProperty(process, 'platform', {
+    ...originalPlatformDescriptor,
+    value: platform,
+  });
+}
+
+function restorePlatform(): void {
+  if (originalPlatformDescriptor) {
+    Object.defineProperty(process, 'platform', originalPlatformDescriptor);
+  }
+}
+
 const hoisted = vi.hoisted(() => {
   const appHandlers = new Map<string, Array<(...args: unknown[]) => void>>();
   const mainWindowMock = {
@@ -231,6 +246,7 @@ describe('main quit lifecycle coordination', () => {
     hoisted.appHandlers.clear();
     hoisted.hostEventBusInstances.length = 0;
     hoisted.gatewayManagerInstances.length = 0;
+    hoisted.electronAppMock.isPackaged = false;
     hoisted.electronAppMock.whenReady.mockReturnValue(Promise.resolve());
     hoisted.runtimeHostManagerMock.stop.mockResolvedValue(undefined);
     hoisted.runtimeHostManagerMock.forceTerminate.mockResolvedValue(undefined);
@@ -245,7 +261,23 @@ describe('main quit lifecycle coordination', () => {
       restoreProcessListeners(processListeners);
       processListeners = undefined;
     }
+    restorePlatform();
     vi.useRealTimers();
+  });
+
+  it('does not claim the installed Windows identity in development', async () => {
+    setPlatform('win32');
+    processListeners = await importMainIndex();
+
+    expect(hoisted.electronAppMock.setAppUserModelId).not.toHaveBeenCalled();
+  });
+
+  it('uses the installer identity in packaged builds', async () => {
+    setPlatform('win32');
+    hoisted.electronAppMock.isPackaged = true;
+    processListeners = await importMainIndex();
+
+    expect(hoisted.electronAppMock.setAppUserModelId).toHaveBeenCalledWith('app.matchaclaw.desktop');
   });
 
   it('starts cleanup only once', () => {

@@ -214,7 +214,7 @@ if (gotTheLock) {
     releaseProcessInstanceFileLock();
   });
 
-  if (process.platform === 'win32') {
+  if (process.platform === 'win32' && app.isPackaged) {
     app.setAppUserModelId(WINDOWS_APP_USER_MODEL_ID);
   }
 

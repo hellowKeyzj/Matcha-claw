@@ -97,3 +97,7 @@ third_party/
 .claude/
 matcha-agent/.matcha-agent-app-server/
 resources/skills/plugin-companion-skills/browser-flow-create/runtime/__pycache__/
+0001-refactor-runtimehost.patch
+tests/e2e/
+graphify-out/
+runtime-host/graphify-out/
